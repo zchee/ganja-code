@@ -118,20 +118,22 @@ use crate::teammate::{
 /// if fifteen minutes was the wrong number.
 pub const TIMEOUT_KEY: &str = "teammates.shim_turn_timeout";
 
-/// `agy`'s per-turn deadline — derived rather than probed, and **unreached**.
+/// `agy`'s per-turn deadline — **derived** from a vendor constraint, and now
+/// measured against real turns as well.
 ///
-/// The derivation stands and is worth keeping: agy's own `--print-timeout`
-/// defaults to `5m0s`, so a shim deadline equal to it would let both fire
-/// together and wedge a turn; 4m is the largest round value that keeps the
-/// shim strictly first, and a composed `--print-timeout` at *deadline + 1m*
-/// would have kept that ordering under a config override.
+/// The derivation is what fixes the number, and it is an ordering rather than a
+/// budget: agy's own `--print-timeout` defaults to `5m0s`, and two timeouts
+/// bounding one turn wedge it unless this side's fires first — a shim deadline
+/// equal to that default could let both fire together. 4m is the largest round
+/// value that keeps the shim strictly first. The composed flag is then derived
+/// back from *this* number at `deadline + 1m` ([`crate::teammate::agy`]), which
+/// is what preserves the ordering when [`TIMEOUT_KEY`] moves the deadline.
 ///
-/// No turn reaches it. W4's ship test measured `--sandbox` as a bound on agy's
-/// terminal and not on its filesystem, so [`crate::teammate::agy::Agy`]
-/// refuses every spawn and no agy child is ever started. The constant stays
-/// because [`default_turn_timeout`]'s match over [`ShimCli`] is total, and a
-/// number that was derived from a vendor constraint is better kept with its
-/// derivation than deleted and re-guessed by whichever wave revives this CLI.
+/// Unlike codex's and grok's, it is therefore **not** the larger of fifteen
+/// minutes and twice the longest probe turn — that rule has no ordering to
+/// respect. Dv-7's ship probe recorded turns of **54.0s** and **20.8s** on the
+/// shipped launch line, so twice the longest is 108s and this deadline sits
+/// comfortably above a real turn while staying below the vendor's own.
 pub const AGY_TURN_TIMEOUT: Duration = Duration::from_secs(4 * 60);
 
 /// `codex`'s per-turn deadline, **derived** from W3's own gating probe.
@@ -230,16 +232,17 @@ pub enum Shape {
     /// One child for the member's whole life; one turn is one line on its
     /// stdin.
     ///
-    /// # No shipping backend drives this shape, and it stays anyway
+    /// [`crate::teammate::agy::Agy`] is its consumer, and the vendor's own
+    /// flag is what makes this shape the right one rather than a preference:
+    /// `--input-format stream-json` *"reads one NDJSON message per line from
+    /// stdin and runs a turn for each"*. The child therefore holds the
+    /// conversation, and this side holds a pipe into it.
     ///
-    /// agy was to be its consumer, and W4's ship test refused agy on a
-    /// measurement (see [`crate::teammate::agy`]), so the resident spawn ring
-    /// is exercised by the fake-CLI suite and by no production wire. It is
-    /// kept rather than deleted because it is the shape a CLI with a resident
-    /// non-interactive door needs, and agy's own revival is a named follow-up
-    /// whose recorded design assumes it. A reader meeting this variant while
-    /// chasing a live teammate is in the wrong arm: everything that ships
-    /// today is [`Shape::PerMessage`].
+    /// What that buys, and what it costs, are the same fact: context survives
+    /// between turns without a resume flag, and a wedged child takes the
+    /// member's whole conversation with it — which is why this shape is the
+    /// only one with a respawn, and the only one
+    /// whose driver has to compose a vendor timeout of its own.
     Resident,
     /// One child per inbox message.
     PerMessage,
@@ -377,6 +380,20 @@ pub struct Turn<'a> {
     pub prompt: Option<&'a Path>,
     /// The CLI's own conversation id, when a previous turn revealed one.
     pub session: Option<&'a str>,
+    /// How long this turn may run before its process group is ended.
+    ///
+    /// Carried because one driver has to **compose** it rather than only obey
+    /// it: agy takes a `--print-timeout` of its own, and two timeouts bounding
+    /// one turn wedge it unless this side's fires first. So the vendor's flag
+    /// is derived from this number, which is what makes
+    /// [`TIMEOUT_KEY`] move both together.
+    ///
+    /// A field here rather than a second resolver in the driver, because the
+    /// trait's own rule is that a driver needing something else from this
+    /// module needs another field on [`Turn`] — and because two answers to
+    /// "how long may this run" is exactly the disagreement that ordering
+    /// constraint exists to prevent.
+    pub deadline: Duration,
 }
 
 /// What one CLI turn produced.
@@ -1034,38 +1051,60 @@ pub fn start_resident(
         backend: driver.backend(),
         reason,
     };
+    let (started, pid) = open_resident(&launch, argv, driver.binary()).map_err(cannot)?;
+
+    Ok(Handle::Child(Arc::new(Child::resident(
+        driver, launch,
+        // Spawned with `process_group(0)`, so the child leads its own group and
+        // the group id is its pid.
+        pid, started,
+    ))))
+}
+
+/// One resident child, started, with its three pipes taken.
+///
+/// Split out of [`start_resident`] because a **respawn** needs exactly this and
+/// not the handle around it: a wedged member is replaced in place, keeping the
+/// `Child` it is already reachable through. Two spellings of this would be two
+/// chances to forget `process_group(0)`, which is the difference between
+/// killing a CLI's tool subprocesses and orphaning them.
+///
+/// # Errors
+///
+/// One sentence naming the binary, for a child that could not be started or
+/// that was reaped before its pid could be read.
+fn open_resident(
+    launch: &Launch,
+    argv: &[OsString],
+    binary: &str,
+) -> Result<(Started, i32), String> {
     let mut child = launch
         .command(argv)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|error| cannot(format!("{} could not be started: {error}", driver.binary())))?;
-    let started = child
+        .map_err(|error| format!("{binary} could not be started: {error}"))?;
+    let taken = child
         .stdin
         .take()
         .zip(child.stdout.take())
         .zip(child.stderr.take());
-    let (Some(((stdin, stdout), stderr)), Some(pid)) = (started, child.id()) else {
-        return Err(cannot(format!(
-            "{} was reaped before this side could speak to it",
-            driver.binary()
-        )));
+    let (Some(((stdin, stdout), stderr)), Some(pid)) = (taken, child.id()) else {
+        return Err(format!(
+            "{binary} was reaped before this side could speak to it"
+        ));
     };
 
-    Ok(Handle::Child(Arc::new(Child::resident(
-        driver,
-        launch,
-        // Spawned with `process_group(0)`, so the child leads its own group and
-        // the group id is its pid.
-        i32::try_from(pid).unwrap_or_default(),
+    Ok((
         Started {
             child,
             stdin,
             stdout,
             stderr,
         },
-    ))))
+        i32::try_from(pid).unwrap_or_default(),
+    ))
 }
 
 /// A [`Shape::PerMessage`] member's handle: nothing is running yet, and the
@@ -1091,6 +1130,15 @@ pub struct ShimBackend {
     /// a test points a child at a fake CLI without mutating the process it
     /// runs in.
     path: Option<OsString>,
+    /// The deadline a turn on this backend runs under, for the one thing a
+    /// spawn needs it for: composing a [`Shape::Resident`] launch line.
+    ///
+    /// [`None`] means [`default_turn_timeout`], which is right for every
+    /// caller that has no config to consult. The production caller passes the
+    /// registry's **own** resolved answer rather than re-reading the config,
+    /// so the number in the launch line and the number the runner enforces
+    /// cannot come from two places and disagree.
+    deadline: Option<Duration>,
 }
 
 impl std::fmt::Debug for ShimBackend {
@@ -1107,7 +1155,11 @@ impl ShimBackend {
     /// `PATH`.
     #[must_use]
     pub fn new(driver: Arc<dyn Driver>) -> Self {
-        Self { driver, path: None }
+        Self {
+            driver,
+            path: None,
+            deadline: None,
+        }
     }
 
     /// The same backend against an explicit search path.
@@ -1116,6 +1168,24 @@ impl ShimBackend {
         self.path = Some(path);
 
         self
+    }
+
+    /// The same backend composing its launch line for `deadline`.
+    ///
+    /// Only a [`Shape::Resident`] driver reads it — a per-message one composes
+    /// a fresh argv per turn, where the runner's own deadline is already in
+    /// hand — so the two backends that never call this lose nothing by it.
+    #[must_use]
+    pub fn with_deadline(mut self, deadline: Duration) -> Self {
+        self.deadline = Some(deadline);
+
+        self
+    }
+
+    /// The deadline this backend composes a launch line for.
+    fn deadline(&self) -> Duration {
+        self.deadline
+            .unwrap_or_else(|| default_turn_timeout(self.driver.cli()))
     }
 }
 
@@ -1146,6 +1216,7 @@ impl crate::teammate::TeammateBackend for ShimBackend {
                     text: "",
                     prompt: None,
                     session: None,
+                    deadline: self.deadline(),
                 });
                 start_resident(Arc::clone(&self.driver), launch, &argv)
             }
@@ -1390,6 +1461,9 @@ impl ShimRunner {
                     if let Err(failure) = self.take_turn(&message.from, &message.text).await {
                         tick.failed += 1;
                         self.report(&failure).await;
+                        // After the report, and only for the shape that can
+                        // lose a child mid-conversation.
+                        self.replace_lost_child().await;
                     }
                 }
                 Tagged::Reserved(kind) => {
@@ -1641,6 +1715,7 @@ impl ShimRunner {
             text: prompt,
             prompt: held.as_ref().map(Prompt::path),
             session: session.as_deref(),
+            deadline: self.deadline,
         };
         let argv = self.driver().argv(&turn);
         let mut child = self
@@ -1764,6 +1839,7 @@ impl ShimRunner {
             text: prompt,
             prompt: None,
             session: session.as_deref(),
+            deadline: self.deadline,
         };
         let line = self.driver().line(&turn).map_err(Failure::Local)?;
         let mut held = self
@@ -1775,9 +1851,11 @@ impl ShimRunner {
 
         let outcome = self.drive_resident(&mut held, &line).await;
         // A wedged or broken child is ended rather than left holding the
-        // member: whether a respawn follows is the per-CLI module's (W4), and
-        // what is this side's is that a dead pipe never silently becomes a
-        // member that answers nothing.
+        // member, and then **replaced** (**AC-7**): a dead pipe never silently
+        // becomes a member that answers nothing, and a member retired over one
+        // bad turn would make every transient failure permanent — which is the
+        // rule `report` already states for the per-message shape and which a
+        // resident one has to spend a process to keep.
         if matches!(
             outcome,
             Err(Failure::Deadline { .. } | Failure::Local(_) | Failure::Unreadable { .. })
@@ -1795,7 +1873,12 @@ impl ShimRunner {
             if let Some(pid) = pid {
                 self.forget(pid);
             }
-            self.handle.ended();
+            drop(held);
+            // Idle rather than ended: this member is between children, and the
+            // replacement is started after the failure has been reported so
+            // that the two mails arrive in the order a person reads them —
+            // what went wrong, then what was done about it.
+            self.handle.left();
         } else {
             *self
                 .resident
@@ -1804,6 +1887,125 @@ impl ShimRunner {
         }
 
         outcome
+    }
+
+    /// Starts a replacement child where this member has lost one (**AC-7**).
+    ///
+    /// Derived from state rather than from a flag somebody has to remember to
+    /// set: a resident member with no pipes and no verdict is a member between
+    /// children, and there is exactly one thing to do about it. A per-message
+    /// member is never in that state — it holds no child between turns — and a
+    /// member that has ended stays ended.
+    async fn replace_lost_child(&self) {
+        let lost = self.driver().shape() == Shape::Resident
+            && self.handle.running() != Running::Ended
+            && self
+                .resident
+                .lock()
+                .expect("the resident pipes are never poisoned")
+                .is_none();
+        if lost {
+            self.respawn().await;
+        }
+    }
+
+    /// Replaces a resident child that will not answer again (**AC-7**).
+    ///
+    /// Called only after the wedged one's group has been ended and its record
+    /// taken back, so this side is never running two children for one member.
+    ///
+    /// # What the new child resumes, and what it does not
+    ///
+    /// The argv is composed through [`Driver::argv`] with **whatever
+    /// conversation id this member has observed**, which is the whole of the
+    /// resume rule: a CLI that told this side its conversation id gets asked
+    /// for that conversation again, and one that never did gets a fresh
+    /// process with no resume flag at all. Composing a resume off anything
+    /// else — a "most recent conversation" door, say — would hand this member
+    /// somebody else's transcript, which is why the per-CLI modules ban those
+    /// flags by name rather than merely not composing them.
+    ///
+    /// Both outcomes are **mail**, never silence: a lead that has just been
+    /// told a turn failed needs the next sentence to say whether the teammate
+    /// it was talking to still exists, and — where the context is gone — that
+    /// the next message starts a conversation rather than continuing one. This
+    /// is the one place a *shim* member reports the thing D-3's post-restart
+    /// case cannot, and the difference is that here the member is live and its
+    /// identity is not in question.
+    async fn respawn(&self) {
+        let session = self.session();
+        let argv = self.driver().argv(&Turn {
+            spec: &self.spec,
+            text: "",
+            prompt: None,
+            session: session.as_deref(),
+            deadline: self.deadline,
+        });
+        let cli = backend_name(self.driver().backend());
+        let started = open_resident(self.launch(), &argv, self.driver().binary());
+        let (started, pid) = match started {
+            Ok(started) => started,
+            Err(reason) => {
+                // Nothing left to run this member on. It ends here rather than
+                // lingering as a row that answers every message with the same
+                // failure.
+                self.remember(format!("{cli} could not be restarted · {reason}"));
+                self.handle.ended();
+                self.mail(
+                    self.lead_inbox.clone(),
+                    format!(
+                        "{name} could not be restarted after that failure: {reason}. The \
+                         teammate is finished; spawn another to carry on its work.",
+                        name = self.spec.name.as_str()
+                    ),
+                )
+                .await;
+
+                return;
+            }
+        };
+        // The old child's first complaint belongs to the old child. Cleared
+        // before the new one's stderr is drained, or a later failure would be
+        // reported with a sentence a dead process said.
+        *self
+            .complaint
+            .lock()
+            .expect("the complaint is never poisoned") = None;
+        self.drain_stderr(started.stderr);
+        *self
+            .resident
+            .lock()
+            .expect("the resident pipes are never poisoned") = Some(Resident {
+            child: started.child,
+            stdin: started.stdin,
+            stdout: BufReader::new(started.stdout).lines(),
+        });
+        self.entered(pid);
+
+        let (line, told) = match session {
+            Some(id) => (
+                format!("{cli} restarted · resumed {id}"),
+                format!(
+                    "{name} has been restarted on a fresh {cli} process, resuming \
+                     conversation {id}. The next message it is sent starts a turn \
+                     there.",
+                    name = self.spec.name.as_str()
+                ),
+            ),
+            None => (
+                format!("{cli} restarted · context lost, fresh session"),
+                format!(
+                    "{name} has been restarted on a fresh {cli} process. That CLI \
+                     had not yet named a conversation, so there was nothing to \
+                     resume: context lost, fresh session — the next message it is \
+                     sent begins a new conversation, and anything said before it \
+                     is gone.",
+                    name = self.spec.name.as_str()
+                ),
+            ),
+        };
+        self.remember(line);
+        self.mail(self.lead_inbox.clone(), told).await;
     }
 
     /// Writes one line and reads until the driver says the turn is over.

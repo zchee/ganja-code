@@ -143,19 +143,21 @@ async fn each_backend_says_what_it_can_promise_about_a_delivery() {
     // precisely because a foreign process reads at its own pace and marks a
     // message read when it reads it, not when a turn takes it on.
     //
-    // Asserted over the three **real** backends as of W5, which is what the
+    // Asserted over the three **real** backends as of Dv-7, which is what the
     // waves were for: the answer this table pins was settled at W1 against
     // stubs precisely so that filling in the children could not change what
     // the lead's queue strip does, and here is the same answer from the
-    // children themselves. agy is among them though it never spawns — its
-    // `delivery()` is the trait's answer rather than the child's, so a
-    // backend that refuses still owes it.
+    // children themselves. All three are one `ShimBackend` over one driver
+    // now — agy's slot stopped being the exception when it stopped refusing.
     let shims: [(MemberBackend, Arc<dyn TeammateBackend>); 3] = [
         (
             MemberBackend::Codex,
             Arc::new(ShimBackend::new(Arc::new(Codex::new()))),
         ),
-        (MemberBackend::Agy, Arc::new(Agy::new())),
+        (
+            MemberBackend::Agy,
+            Arc::new(ShimBackend::new(Arc::new(Agy::new()))),
+        ),
         (
             MemberBackend::Grok,
             Arc::new(ShimBackend::new(Arc::new(Grok::new()))),
@@ -189,9 +191,13 @@ async fn every_shim_backend_refuses_with_something_it_measured() {
     let (root, team, registry, door) = team(home.path());
     let caller = caller(home.path());
 
-    // The two that search a `PATH`: refused by naming the binary, because this
-    // fixture's lead is production on a machine with neither installed.
-    for cli in ["codex", "grok"] {
+    // All three search a `PATH`, and all three are refused by naming the
+    // binary, because this fixture's lead is production on a machine with none
+    // of them installed. agy joined the loop with Dv-7: its own refusal was a
+    // measured sentence about a sandbox until that amendment shipped the
+    // backend, and now the only thing standing between it and a child is the
+    // same missing binary as the other two.
+    for cli in ["codex", "agy", "grok"] {
         let refused = door
             .start(spawn("w1", Some(cli)), &caller, &AllowSpawn)
             .await
@@ -221,23 +227,6 @@ async fn every_shim_backend_refuses_with_something_it_measured() {
         );
     }
 
-    // agy is refused by its **own measured sentence** rather than by anything
-    // about a PATH: W4's ship test found `--sandbox` bounds agy's terminal and
-    // not its filesystem, so the backend is real and refuses before it looks at
-    // anything.
-    let refused = door
-        .start(spawn("w1", Some("agy")), &caller, &AllowSpawn)
-        .await
-        .expect_err("agy does not ship in v1");
-
-    assert!(
-        refused
-            .reason
-            .contains(ganja_core::teammate::agy::REFUSED_NO_FILESYSTEM_BOUND),
-        "it refuses with what its probe measured: {}",
-        refused.reason
-    );
-
     // A refused spawn leaves nothing behind: no member on disk and nothing the
     // registry would have to shut down.
     assert!(
@@ -256,11 +245,11 @@ async fn every_shim_backend_refuses_with_something_it_measured() {
 /// to say something a ring line does not. A wording change is a change to what
 /// was consented to, so it belongs in a diff somebody reads.
 ///
-/// [`MemberBackend::Agy`] has no sentence at all, which is W4's answer rather
-/// than a gap in this table: its ship test measured `--sandbox` as a bound on
-/// agy's terminal and not on its filesystem, so that backend refuses every
-/// spawn and there is no running teammate for a row to describe. Pinned as
-/// `None` below, beside the three that answer `None` for the opposite reason.
+/// [`MemberBackend::Agy`]'s sentence is the one that describes an **absence**.
+/// W4 measured `--sandbox` as a bound on agy's terminal and not on its
+/// filesystem, and Dv-7's user directive shipped the backend anyway at that
+/// honest posture rather than building a write tier for it — so the row says
+/// there is no filesystem bound, in the words that amendment settled on.
 #[test]
 fn each_backend_discloses_the_posture_it_pins_or_says_it_pins_none() {
     // The P25 surfaces answer nothing, and the absence is the honest answer:
@@ -286,6 +275,21 @@ fn each_backend_discloses_the_posture_it_pins_or_says_it_pins_none() {
              file you can, including credentials, but has no network to send them over"
         )
     );
+    // agy's is **measured** as of W4 and *shipped* as of Dv-7, and it is the
+    // only row in this table that describes the absence of a bound rather than
+    // a bound. The comparison against its own recording is in
+    // `teammate_shim_agy.rs`; this is the regression pin, and it is the one
+    // most worth having: a wording change here is a change to what somebody
+    // consented to when they approved a teammate that can write anywhere they
+    // can.
+    assert_eq!(
+        posture_line(MemberBackend::Agy),
+        Some(
+            "sandbox: terminal bounded, no enforced filesystem bound — may read any file you \
+             can, including credentials, and write anywhere you can; those writes are outside \
+             the snapshot chain /undo walks"
+        )
+    );
     // grok's is **measured** as of W5, last clause included: its gating probe
     // completed a pure-read turn and cancelled a write and a shell turn on the
     // same conversation. The comparison against the recording itself is in
@@ -307,17 +311,13 @@ fn each_backend_discloses_the_posture_it_pins_or_says_it_pins_none() {
     // sentence.
     for name in BACKENDS {
         let backend = parse_backend(name).expect("a listed value parses");
-        // `Agy` is on neither side of this equivalence, and that is the point
-        // rather than an omission: it neither keeps asking (it is a shim) nor
-        // asks nobody after spawn (it never spawns). W4 measured its floor and
-        // it does not hold, so it discloses nothing because there is nobody to
-        // describe — asserted directly, just below.
-        let discloses = matches!(backend, MemberBackend::Codex | MemberBackend::Grok);
+        let discloses = matches!(
+            backend,
+            MemberBackend::Codex | MemberBackend::Agy | MemberBackend::Grok
+        );
 
         assert_eq!(posture_line(backend).is_some(), discloses, "{name}");
     }
-
-    assert_eq!(posture_line(MemberBackend::Agy), None);
 }
 
 /// **Two spawns of one name at once are two teammates, not one and a ghost.**

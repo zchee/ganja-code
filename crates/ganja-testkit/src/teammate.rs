@@ -156,11 +156,16 @@ fn backends_with(
             ))
             .searching(std::ffi::OsString::new()),
         ),
-        // agy searches nothing and spawns nothing: W4 measured its floor and
-        // it does not hold, so the real backend refuses every spawn. It is
-        // already harmless, and giving it an empty `PATH` would suggest the
-        // `PATH` was what made it so.
-        agy: Arc::new(ganja_core::teammate::agy::Agy::new()),
+        // agy searches too, as of Dv-7 — its backend ships and spawns a real
+        // resident child — so it gets the same empty search path and refuses
+        // by naming the binary. The clause that used to stand here, that agy
+        // was harmless by construction, retired with the no-ship arm.
+        agy: Arc::new(
+            ganja_core::teammate::shim::ShimBackend::new(Arc::new(
+                ganja_core::teammate::agy::Agy::new(),
+            ))
+            .searching(std::ffi::OsString::new()),
+        ),
         // grok searches, exactly as codex does, so it gets the same empty
         // search path and refuses by naming the binary.
         grok: Arc::new(

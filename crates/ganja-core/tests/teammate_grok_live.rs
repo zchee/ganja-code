@@ -229,6 +229,7 @@ async fn run(cwd: &std::path::Path, text: &str, session: Option<&str>) -> Ran {
         text,
         prompt: Some(prompt.path()),
         session,
+        deadline: TURN,
     });
     let started = std::time::Instant::now();
     let output = tokio::time::timeout(TURN, launch.command(&argv).output())

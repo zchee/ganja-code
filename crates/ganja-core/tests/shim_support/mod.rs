@@ -442,8 +442,19 @@ pub fn lead_with_timeout(
             .with_shim_directory(home.join("shims")),
     );
     let backend = driver.backend();
-    let fake: Arc<dyn ganja_core::teammate::TeammateBackend> =
-        Arc::new(ShimBackend::new(driver).searching(path));
+    // The deadline goes to the backend as well as to the registry, and from
+    // the same value, because a resident driver composes a vendor timeout of
+    // its own on the launch line and the two numbers have to be one number.
+    // Production wires this in `Engine::with_teammates`, off the registry's
+    // own resolved answer; a fixture that skipped it would be testing a launch
+    // line the real one never composes.
+    let deadline =
+        timeout.unwrap_or_else(|| ganja_core::teammate::shim::default_turn_timeout(driver.cli()));
+    let fake: Arc<dyn ganja_core::teammate::TeammateBackend> = Arc::new(
+        ShimBackend::new(driver)
+            .searching(path)
+            .with_deadline(deadline),
+    );
     let storage = Storage::open(project.join("storage"));
     let mut backends = Backends {
         in_process: Arc::new(ganja_core::teammate::InProcess::new(
@@ -457,17 +468,20 @@ pub fn lead_with_timeout(
         )),
         pane: Arc::new(GanjaPane),
         claude: Arc::new(ClaudePane),
-        // The two slots this lead is *not* pointing at its fake hold the real
-        // backends made harmless the way `ganja_testkit::backends` makes them
-        // harmless, and for the same reason: no stub is truthful any more, and
-        // a real backend on this process's own `PATH` would spawn the
-        // developer's own CLI. The two that search get an empty search path;
-        // agy searches nothing and refuses every spawn already.
+        // The two slots this lead is *not* pointing at its fake hold the
+        // real backends made harmless the way `ganja_testkit::backends` makes
+        // them harmless, and for the same reason: no stub is truthful any
+        // more, and a real backend on this process's own `PATH` would spawn
+        // the developer's own CLI. As of Dv-7 all three of them search, so all
+        // three get an empty search path and refuse by naming the binary.
         codex: Arc::new(
             ShimBackend::new(Arc::new(ganja_core::teammate::codex::Codex::new()))
                 .searching(OsString::new()),
         ),
-        agy: Arc::new(ganja_core::teammate::agy::Agy::new()),
+        agy: Arc::new(
+            ShimBackend::new(Arc::new(ganja_core::teammate::agy::Agy::new()))
+                .searching(OsString::new()),
+        ),
         grok: Arc::new(
             ShimBackend::new(Arc::new(ganja_core::teammate::grok::Grok::new()))
                 .searching(OsString::new()),
@@ -618,6 +632,81 @@ impl FakeGrok {
             carried.then(|| session_of(argv))
         })
     }
+}
+
+/// A fake `agy`, shaped like the real one (**Dv-7**).
+///
+/// [`FakeGrok`]'s shape and for its reason — driven by the **real**
+/// [`ganja_core::teammate::agy::Agy`] driver, so the argv is that vendor's and
+/// the log path is baked in — differing in the one way that matters: it is the
+/// only [`Shape::Resident`] fake driven by a production driver. One child reads
+/// NDJSON lines off its stdin until end of file and prints one `result` per
+/// line, which is what the vendor's own `--input-format stream-json` promises.
+///
+/// It mints a conversation id from its own pid unless it was told one with
+/// `--conversation`, and **logs it** — that is what lets a test say two members
+/// hold two conversations (**AC-19**) without reading anybody's stdout.
+#[derive(Debug)]
+pub struct FakeAgy(Fake);
+
+impl FakeAgy {
+    /// A fake that behaves as `mode` says.
+    pub fn install(mode: Mode) -> Self {
+        Self(Fake::install(&[("agy", AGY)], mode.word()))
+    }
+
+    /// A fake whose **second** turn never answers, and whose replacement does.
+    ///
+    /// The wedge arm of **AC-7**, and the second turn rather than the first on
+    /// purpose: a conversation id has been observed by then, so the respawn is
+    /// the resuming one. A child started with `--conversation` never wedges,
+    /// which is how one script serves both the failure and its recovery.
+    ///
+    /// A mode word that is not a [`Mode`], for [`FakeGrok::cancelling`]'s
+    /// reason: it is a shape of *member* rather than a shape of turn.
+    pub fn wedging() -> Self {
+        Self(Fake::install(&[("agy", AGY)], "wedge"))
+    }
+
+    /// The same, wedging on the **first** turn — before any id was observed.
+    ///
+    /// The other half of AC-7: with nothing to resume, the replacement is a
+    /// fresh conversation and the lead is told the context is gone.
+    pub fn wedging_first() -> Self {
+        Self(Fake::install(&[("agy", AGY)], "wedgefirst"))
+    }
+
+    /// The conversation id each child announced, in start order.
+    pub fn conversations(&self) -> Vec<String> {
+        self.records("id")
+    }
+
+    /// The `--conversation` value on each composed line, empty where a launch
+    /// named none.
+    pub fn resumed(&self) -> Vec<String> {
+        self.records("argv")
+            .iter()
+            .map(|argv| conversation_of(argv))
+            .collect()
+    }
+}
+
+impl std::ops::Deref for FakeAgy {
+    type Target = Fake;
+
+    fn deref(&self) -> &Fake {
+        &self.0
+    }
+}
+
+/// The value after `--conversation` on one composed line, or the empty string.
+fn conversation_of(argv: &str) -> String {
+    let tokens: Vec<&str> = argv.split(' ').collect();
+    tokens
+        .iter()
+        .position(|token| *token == "--conversation")
+        .and_then(|at| tokens.get(at + 1))
+        .map_or_else(String::new, |id| (*id).to_owned())
 }
 
 /// The value after `--resume` or `--session-id` on one composed line.
@@ -778,6 +867,68 @@ esac
 printf '{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"answered"}}}\n'
 printf '{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"thinking is not mail","signature":"x"},{"type":"text","text":"answered"}],"stop_reason":"end_turn"}}\n'
 printf '{"type":"result","subtype":"success","is_error":false,"duration_ms":12,"num_turns":1,"result":"answered","stop_reason":"end_turn"}\n'
+"#;
+
+/// The fake `agy`.
+///
+/// Prints the stream-json a probed `agy 1.1.15` actually printed: one `init`
+/// carrying the `conversation_id`, `step_update` records that carry **no text
+/// at all**, and one terminal `result` per turn whose `response` is the whole
+/// of what the agent said. Not a shape invented here, which is what makes the
+/// parser's unit tests and this fixture agree about the same vendor — including
+/// the detail that both directions are keyed on `event` rather than on `type`.
+///
+/// Its `refuse` mode exits before reading a single line, which is the order a
+/// startup refusal really happens in; its `fail` mode answers with a `result`
+/// whose `status` is `ERROR`, because that is how this CLI reports a turn it
+/// could not run rather than by exiting non-zero mid-conversation.
+const AGY: &str = r#"#!/bin/sh
+log='@LOG@'
+mode='@MODE@'
+args="$*"
+printf 'argv:%s\n' "$args" >> "$log"
+printf 'env:%s\n' "$(env | cut -d= -f1 | sort | tr '\n' ' ')" >> "$log"
+
+conversation=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --conversation) conversation="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+if [ "$mode" = "refuse" ]; then
+  printf 'error: this fake agy is not signed in\n' >&2
+  exit 1
+fi
+
+id="$conversation"
+if [ -z "$id" ]; then id="fake-agy-$$"; fi
+printf 'id:%s\n' "$id" >> "$log"
+printf '{"event":"init","conversation_id":"%s","init":{"cwd":"%s","tools":["view_file","write_to_file","run_command"],"permission_mode":"always-proceed"}}\n' "$id" "$(pwd)"
+
+turns=0
+while IFS= read -r line; do
+  turns=$((turns + 1))
+  printf 'line:%s\n' "$line" >> "$log"
+
+  if [ -z "$conversation" ]; then
+    if [ "$mode" = "wedgefirst" ] && [ "$turns" -ge 1 ]; then sleep 300; fi
+    if [ "$mode" = "wedge" ] && [ "$turns" -ge 2 ]; then sleep 300; fi
+  fi
+
+  case "$mode" in
+    hang) sleep 300 ;;
+    garbage)
+      printf '{"event":"result"}\n' ;;
+    fail)
+      printf '{"event":"result","result":{"conversation_id":"%s","status":"ERROR","response":"","error":"the fake agy could not run that turn"}}\n' "$id" ;;
+    *)
+      printf '{"event":"step_update","step_update":{"conversation_id":"%s","step_index":0,"state":"DONE","step_type":"user_input"}}\n' "$id"
+      printf '{"event":"step_update","step_update":{"conversation_id":"%s","step_index":1,"state":"DONE","step_type":"agent_response","duration_seconds":0.5,"usage":{"input_tokens":1,"output_tokens":1}}}\n' "$id"
+      printf '{"event":"result","result":{"conversation_id":"%s","status":"SUCCESS","response":"answered","duration_seconds":0.6,"num_turns":%s,"usage":{"input_tokens":1,"output_tokens":1}}}\n' "$id" "$turns" ;;
+  esac
+done
 "#;
 
 /// The per-message fake.

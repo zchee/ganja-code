@@ -1,5 +1,5 @@
-//! The teammate that **is not built**, and the measurement that decided it
-//! (**D508(a)**, W4's ship test).
+//! The teammate that **ships write-capable, and says so** (**Dv-7**, amending
+//! **D508(a)**).
 //!
 //! Spec: none. Upstream opencode has no teammates and Claude Code does not run
 //! another vendor's agent as one, so every sentence here is ganja's own, and
@@ -7,127 +7,247 @@
 //! (the Antigravity CLI), probed on this machine rather than read out of a
 //! checkout that may not match what a person has installed.
 //!
-//! This module is deliberately not a [`crate::teammate::shim::Driver`]. The
-//! other two CLIs contribute words to a shared runner; agy contributes a
-//! refusal, because its floor was measured and there is nothing under it.
+//! # What changed, and what did not
 //!
-//! # The ship test, and why it was one probe rather than a wording exercise
+//! W4 measured this CLI's floor and refused to ship it: `--sandbox` bounds
+//! agy's *terminal* and not its filesystem, so an agy teammate is a foreign
+//! agent holding its own tools with no enforced filesystem bound, one consent
+//! at spawn and no permission channel. **That measurement is not disputed and
+//! is not repealed** — the W4 recording still stands, and this build reproduced
+//! its consequence directly: under the shipped launch line a turn asked for a
+//! file inside its working directory and got one.
 //!
-//! D508(a) pins `--sandbox` **and** `--mode plan` as agy's floor. But
-//! `--sandbox`'s own help claims *"Run in a sandbox with terminal restrictions
-//! enabled"*, which is a claim about a terminal and not about a filesystem —
-//! and a mode is the vendor agent's own self-restraint, not a bound under it.
-//! So the plan made the measurement decide whether agy ships at all rather
-//! than only what its column says: if `--sandbox` is not a filesystem bound,
-//! an agy teammate would be a foreign agent holding its own tools with no
-//! enforced filesystem bound, one consent at spawn and no permission channel —
-//! which contradicts the ADR's *"scoped in v1 to read-only foreign agents"* in
-//! terms.
+//! What changed is the *decision*, on a user directive recorded as Dv-7: v1's
+//! "grant read, not write" cut is extended for this one CLI, deliberately and
+//! on the record, and the consent surface says exactly what that means rather
+//! than implying a bound agy does not have. So the sentence in
+//! [`posture_line`] is not a description of a
+//! sandbox — it is a description of **its absence**, which is the honest thing
+//! to put in front of somebody being asked to approve one.
 //!
-//! # What was measured
+//! `--sandbox` is composed anyway. Not as a filesystem bound, which it is not,
+//! but because it is a real bound on the child's *terminal* and defence in
+//! depth costs nothing here. `--mode plan` is **not** composed: it would neuter
+//! the writes that shipping this backend exists to enable.
 //!
-//! The full recording is `tests/fixtures/agy-posture-probe.txt`, which is what
-//! [`REFUSED_NO_FILESYSTEM_BOUND`](crate::teammate::agy::REFUSED_NO_FILESYSTEM_BOUND) is
-//! asserted against rather than against a
-//! second copy of itself. In short, over one byte-identical prompt run under
-//! four flag sets:
+//! # The wire
 //!
-//! - **The terminal is bounded, and genuinely.** Under `--sandbox` a shell
-//!   write and a shell read one directory outside the cwd both failed with
-//!   `Operation not permitted`, where the unsandboxed control performed both,
-//!   and the shell's network came back intercepted by agy's own proxy. That is
-//!   the responsiveness control doing its job: the instrument is not refusing
-//!   everything.
-//! - **The filesystem is not.** In the same runs, agy's own `write_to_file`
-//!   tool created a file at an absolute path in the very directory the shell
-//!   had just been refused — in **2 of 2** runs of that flag set. It is not
-//!   the shell under another name, because the shell was denied that exact
-//!   directory in the same turn.
+//! The only [`Shape::Resident`](crate::teammate::shim::Shape::Resident) driver this build ships, and the vendor's own
+//! flag is what makes it one: *"stream-json reads one NDJSON message per line
+//! from stdin and runs a turn for each; it requires `--output-format
+//! stream-json`"*. One child for the member's whole life, one line per turn.
 //!
-//! A probe that had exercised only the shell would have measured a real
-//! denial and shipped a false posture. That is the trap this file exists to
-//! record.
+//! Both directions are keyed on **`event`** rather than on `type`, which is
+//! worth stating because every other NDJSON wire in this tree is keyed on the
+//! other word. Inbound is `{"event":"user","message":{"content":"…"}}` —
+//! measured against the vendor's own decoder, which names the field it wants in
+//! each of its three refusals (a missing `event`, a missing `message`, a
+//! `content` that is *"a string or a list of content blocks"*).
 //!
-//! Two rows refused the write instead, and they are not a bound either: the
-//! refusal came from agy's own argument validator ("is not a valid artifact
-//! path"), before execution, and the two runs that wrote are what that
-//! validator is worth. Self-restraint that does not always hold is not a
-//! floor — and this one cannot be credited to the composed flags in any case,
-//! since the control row, which composes neither of them, met the same
-//! validator.
+//! Outbound is three kinds: one `init` for the whole child, carrying the
+//! `conversation_id`; a stream of `step_update`s; and one `result` per turn.
+//! **A turn ends at `result` and nowhere else**, which is what makes this shape
+//! drivable at all.
 //!
-//! # The verdict
+//! ## Why one mail per turn, off `result.response`
 //!
-//! `--sandbox` is terminal-only, so under D508(a)'s ship test and Principle 6
-//! clause 3 **agy does not ship in v1**. [`MemberBackend::Agy`] stays in the
-//! enum and stays parseable — D501's grammar is "named and refused", and a
-//! name that refuses with a reason tells a person more than a missing name
-//! does — but [`Agy`](crate::teammate::agy::Agy)'s `spawn` refuses every one, no
-//! child is ever created,
-//! and [`crate::teammate::posture_line`] answers [`None`] for it, because a
-//! posture row is a description of a running teammate and there is none.
+//! Because it is the only text there is. A `step_update` carries `step_index`,
+//! `state`, `step_type`, timings and token usage — and no words at all, not
+//! even on the `agent_response` kind whose name promises them. The whole of
+//! what the agent said arrives once, in `result.response`. So this driver has
+//! no forwarding choice to make, unlike codex's, which mails every
+//! `AgentMessage` because that vendor writes no final field.
 //!
-//! `--mode plan` cannot rescue it, and that was settled in advance rather than
-//! after the fact: the ship test is about the sandbox, and a mode is the
-//! vendor agent's self-restraint. It was measured anyway (the third row of the
-//! ladder) and the answer changed nothing.
+//! The consequence is worth naming rather than discovering: a lead hears from
+//! an agy teammate **once per turn**, at the end. Its intermediate narration is
+//! not withheld, it is not on the wire.
 //!
-//! # What a later wave must not compose
+//! ## Anything that is not a `result` is ignored
 //!
-//! Recorded as prose rather than as a constant, because nothing here composes
-//! a command line and a list no code reads is a list that rots. From agy's own
-//! `--help`: `--dangerously-skip-permissions`, `--mode accept-edits`,
-//! `--add-dir`, and `--continue` **in both spellings** — the short alias is
-//! `-c`, which a literal `--continue` grep would miss — since it resumes the
-//! machine's most recent conversation, which may be another teammate's or the
-//! person's own. `--conversation <id>` is the resume door that names what it
-//! resumes.
+//! Including a line this build cannot parse. The forward-compatibility posture
+//! is codex's and grok's — a vendor printing one more kind, or one more field,
+//! must not cost a turn that otherwise succeeded — and here it is load-bearing
+//! twice over, since the vendor also prints ordinary warnings on this stream.
 //!
-//! Two findings that would have cost a later wave a debugging session:
+//! ## One vendor quirk this driver reports rather than hides
 //!
-//! - **`-p`/`--print` takes the prompt as its flag value** (agy parses with
-//!   Go's `flag` package), so the plan's `agy -p --input-format stream-json …`
-//!   would parse `--input-format` *as the prompt*. Any launch line must put
-//!   `-p` last. This was found by a control run that answered a question about
-//!   `--print-timeout` instead of the prompt it was given.
+//! `result.status` and `result.error` are **sticky across turns of one
+//! conversation**: the ship probe's second turn answered correctly and its own
+//! result still carried `ERROR` and the first turn's sentence, about a tool it
+//! never asked for. So from the first errored turn onwards, every turn on that
+//! conversation reaches the lead as words **plus** a failure.
+//!
+//! Reported faithfully anyway, and the choice is deliberate: suppressing a
+//! status the vendor set is a policy decision rather than a parsing one, and
+//! the direction of that error matters — a build that learned to ignore an
+//! `ERROR` because it *might* be stale is a build that will one day ignore a
+//! real one. Recorded in `tests/fixtures/agy-posture-probe.txt` and carried as
+//! a follow-up.
+//!
+//! # The two traps this file was written around
+//!
+//! Both are W4's findings (**Dv-6**), and both would have cost a debugging
+//! session:
+//!
+//! - **`-p`/`--print` takes the prompt as its flag value.** agy parses with
+//!   Go's `flag` package, so `agy -p --input-format stream-json …` parses
+//!   `--input-format` *as the prompt*. [`Driver::argv`](crate::teammate::shim::Driver::argv) therefore puts `-p` last
+//!   and gives it an explicit empty value. A test pins the position, because
+//!   the failure it prevents is a turn that answers a question nobody asked.
 //! - **agy runs shell commands with cwd = its own scratch directory**, not the
-//!   directory it was launched from, so `SpawnSpec.cwd` would not have been the
-//!   child's shell cwd.
+//!   directory it was launched from. The child is still launched in
+//!   `SpawnSpec.cwd` and its *file* tools honour it — this build's own ship
+//!   probe wrote a file there and read one back — but a `run_command` step is
+//!   somewhere else, and anybody reading a shell step's output should know it.
+//!
+//! # `--print-timeout` is ordered against the shim's own deadline
+//!
+//! Two timeouts bound one turn, and the wrong order wedges it: if agy's own
+//! `--print-timeout` fires first, this side is left reading a pipe that will
+//! never carry a `result`. So the flag is **derived** from the effective
+//! deadline rather than fixed — [`print_timeout`](crate::teammate::agy::print_timeout) renders `deadline + 1m` as
+//! the Go duration that flag parses — which is what makes
+//! [`TIMEOUT_KEY`](crate::teammate::shim::TIMEOUT_KEY) move both numbers
+//! together instead of only one of them.
+//!
+//! Rendered with a unit on purpose: `time.ParseDuration` refuses a bare
+//! integer, so `300` is a child that will not start where `300s` is one that
+//! will.
 //!
 //! # No auth pre-check
 //!
 //! There is none to write, and no `ready` beyond the trait's default: agy
-//! offers no `login status` equivalent, so a first-turn failure would have been
-//! the auth surface. Moot while `spawn` refuses, and recorded because the
-//! wave that builds this backend will look here for it.
+//! offers no `login status` equivalent, so a first-turn failure is the auth
+//! surface. Recorded rather than left as an omission, because the shape of
+//! that failure is known — a child that cannot authenticate still prints a
+//! `result` whose `status` is not `SUCCESS`, which this driver reports as the
+//! vendor's own sentence rather than as silence.
+
+use std::{ffi::OsString, time::Duration};
 
 use async_trait::async_trait;
 use ganja_protocol::team::MemberBackend;
+use ganja_team::ShimCli;
+use serde::Deserialize;
 
-use crate::teammate::{Delivery, Handle, SpawnSpec, TeammateBackend, Unsupported, backend_name};
+use crate::teammate::shim::{Door, Driver, Read, Reply, Shape, Turn};
 
-/// Why a spawn on this CLI is refused, measured (**AC-28**'s no-ship arm).
-///
-/// Asserted equal to the `refusal:` line of
-/// `tests/fixtures/agy-posture-probe.txt`, so the sentence a person reads is
-/// checked against the measurement rather than against a second literal.
-///
-/// It ends where [`crate::teammate::shim::REFUSED_BYPASS`] ends, and on
-/// purpose: both are the same answer to the same question — this build grants
-/// read and not write, and the door that would carry more is the permission
-/// channel. Naming the follow-up rather than the wave, because which version
-/// carries it is the plan's to say.
-pub const REFUSED_NO_FILESYSTEM_BOUND: &str = "--sandbox bounds the terminal only: under it a shell read or write outside agy's own \
-     scratch directory is denied, while agy's own write_to_file tool wrote to an absolute path \
-     outside the working directory in 2 of 2 runs of that flag set — so an agy teammate has no \
-     enforced filesystem bound; v1 grants read and not write, and what agy would need is recorded in D508(b) and \
-     lands with the permission channel that can carry it";
+/// The executable a spawn looks for on `PATH`.
+pub const BINARY: &str = "agy";
 
-/// The `agy` backend: a name that parses and a spawn that refuses.
+/// The one value both format flags take, and they must agree.
 ///
-/// A unit struct for [`crate::teammate::codex::Codex`]'s reason — a backend
-/// holds no per-member state, so one value serves every member — and here the
-/// point is sharper still, since it holds nothing at all.
+/// A single constant rather than two, because the vendor refuses the pair
+/// outright — *"`--input-format stream-json` requires `--output-format
+/// stream-json`"* — so a build that spelled them apart would be a build that
+/// never starts.
+pub const STREAM_JSON: &str = "stream-json";
+
+/// What this side adds to the effective deadline to get `--print-timeout`.
+///
+/// One minute, which is W4's derivation kept intact: the requirement is only
+/// that agy's own timeout fires **strictly after** this build's, and a minute
+/// is enough headroom to be sure of it without leaving a wedged child running
+/// noticeably long past the mail that reported it.
+pub const PRINT_TIMEOUT_HEADROOM: Duration = Duration::from_secs(60);
+
+/// Everything this CLI's argv may **never** carry, in every spelling that
+/// binary has.
+///
+/// The single source for the test that asserts it rather than a list the test
+/// repeats. Read off `agy --help` at 1.1.15 rather than guessed, which is what
+/// caught the third and fourth entries: `--continue` resumes *the machine's
+/// most recent conversation* — which may be another teammate's, or the
+/// person's own — and its short alias is `-c`, which a `--continue` grep walks
+/// straight past. [`CONVERSATION`] is the resume door that names what it
+/// resumes, and it is the only one this file composes.
+///
+/// **`-c` is why the test that asserts this list compares whole argv tokens
+/// rather than substrings**: `"--conversation".contains("-c")` is true, so a
+/// substring check would report the flag this driver *must* compose as the one
+/// it must never.
+///
+/// The last entry is a **value** rather than a flag, for the reason grok's list
+/// carries six: a posture is escaped as easily by a value as by a flag.
+/// `--mode accept-edits` stays banned because this build's probe settled that
+/// nothing needs it — a headless turn ran a write tool with no approval prompt
+/// and no escalation flag — so composing it would widen a grant in exchange for
+/// nothing. `--mode plan`'s absence is not a ban and is not here: it is a mode
+/// this driver declines to compose, recorded in the module header.
+pub const NEVER_COMPOSED: [&str; 5] = [
+    "--dangerously-skip-permissions",
+    "--add-dir",
+    "--continue",
+    "-c",
+    "accept-edits",
+];
+
+/// The resume door, which names the conversation it resumes.
+pub const CONVERSATION: &str = "--conversation";
+
+/// The outbound record that opens a child and names its conversation.
+const INIT: &str = "init";
+
+/// The outbound record that ends a turn.
+const RESULT: &str = "result";
+
+/// The one `status` that means the turn answered.
+const SUCCESS: &str = "SUCCESS";
+
+/// One outbound NDJSON record, in the minimum shape this side reads.
+///
+/// Every field is optional and unknown fields are ignored — the same
+/// forward-compatibility posture codex's and grok's parsers take.
+#[derive(Debug, Default, Deserialize)]
+struct Record {
+    /// `init`, `step_update` or `result`.
+    #[serde(default)]
+    event: String,
+    /// Carried on `init`, beside the payload rather than inside it.
+    #[serde(default)]
+    conversation_id: Option<String>,
+    /// Carried on `result`.
+    #[serde(default)]
+    result: Option<Ended>,
+}
+
+/// What one finished turn said.
+#[derive(Debug, Default, Deserialize)]
+struct Ended {
+    /// The conversation this turn ran in — the same id `init` announced, and
+    /// present on a failed turn too, which is why the session is read from
+    /// here rather than only from `init`.
+    #[serde(default)]
+    conversation_id: Option<String>,
+    /// `SUCCESS`, or one of the vendor's several ways of not succeeding.
+    #[serde(default)]
+    status: String,
+    /// The whole of what the agent said this turn.
+    #[serde(default)]
+    response: String,
+    /// Why it did not succeed, in the vendor's own words.
+    #[serde(default)]
+    error: String,
+}
+
+/// `--print-timeout`'s value for a member running under `deadline`.
+///
+/// Seconds with the unit spelled, because Go's `time.ParseDuration` — which is
+/// what reads this flag — refuses a bare integer.
+#[must_use]
+pub fn print_timeout(deadline: Duration) -> String {
+    format!(
+        "{}s",
+        deadline.saturating_add(PRINT_TIMEOUT_HEADROOM).as_secs()
+    )
+}
+
+/// A teammate driven through a resident headless `agy`.
+///
+/// Stateless: the conversation id lives in the shim runner, which is what lets
+/// one driver serve every member on this CLI — two agy teammates hold two
+/// conversations because the runner holds two ids, not because there are two
+/// of these.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Agy;
 
@@ -140,39 +260,170 @@ impl Agy {
 }
 
 #[async_trait]
-impl TeammateBackend for Agy {
+impl Driver for Agy {
+    fn cli(&self) -> ShimCli {
+        ShimCli::Agy
+    }
+
     fn backend(&self) -> MemberBackend {
         MemberBackend::Agy
     }
 
-    async fn spawn(&self, _spec: &SpawnSpec) -> Result<Handle, Unsupported> {
-        // Unconditional, and before any look at the spec: a `bypass` spawn is
-        // refused by this same sentence rather than by the shim's bypass one,
-        // which is the honest order. Whoever asked cannot have the surface at
-        // all, so telling them their *flag* was the problem would send them to
-        // fix the wrong thing.
-        Err(Unsupported {
-            backend: MemberBackend::Agy,
-            reason: REFUSED_NO_FILESYSTEM_BOUND.to_owned(),
+    fn binary(&self) -> &str {
+        BINARY
+    }
+
+    fn shape(&self) -> Shape {
+        Shape::Resident
+    }
+
+    fn door(&self) -> Door {
+        // One NDJSON line per turn, on the stdin of a child that outlives the
+        // turn — so this is `Stdin` in a sense the per-message drivers' is not:
+        // the pipe is not closed after it.
+        Door::Stdin
+    }
+
+    fn additions(&self) -> &[&str] {
+        // Nothing. agy keeps its things under `~/.gemini`, and `HOME` is
+        // already carried, so there is no home variable to add — the
+        // `CODEX_HOME` case has no counterpart here.
+        //
+        // `GEMINI_API_KEY` is deliberately **not** here. It is a credential,
+        // and the enumeration exists precisely so that a foreign child is
+        // handed what it needs to be itself and nothing else; a key that
+        // reaches it through the vendor's own stored login is a key this build
+        // never touched.
+        &[]
+    }
+
+    fn argv(&self, turn: &Turn<'_>) -> Vec<OsString> {
+        let mut argv = Vec::with_capacity(12);
+        argv.push(OsString::from("--input-format"));
+        argv.push(OsString::from(STREAM_JSON));
+        argv.push(OsString::from("--output-format"));
+        argv.push(OsString::from(STREAM_JSON));
+        // Composed as a bound on the child's terminal, which it is, and not as
+        // a filesystem bound, which it is not. See the module header.
+        argv.push(OsString::from("--sandbox"));
+        // A teammate's prompt is a peer's words. A leading `/` in them is not a
+        // command anybody typed, and this vendor would otherwise expand one.
+        argv.push(OsString::from("--disable-slash-commands"));
+        argv.push(OsString::from("--print-timeout"));
+        argv.push(OsString::from(print_timeout(turn.deadline)));
+        // Only when a previous child of this member's revealed one. A first
+        // launch names no conversation, and `--continue` is never the door
+        // taken instead: it would resume whatever this machine touched last,
+        // which may be another teammate's conversation or the person's own.
+        if let Some(session) = turn.session {
+            argv.push(OsString::from(CONVERSATION));
+            argv.push(OsString::from(session));
+        }
+        // **Last, and with an explicit empty value.** `-p` takes the next word
+        // as the prompt, so anything after it is eaten; the empty value is what
+        // says "print mode, and the prompts arrive on stdin".
+        argv.push(OsString::from("-p"));
+        argv.push(OsString::new());
+
+        argv
+    }
+
+    fn line(&self, turn: &Turn<'_>) -> Result<String, String> {
+        serde_json::to_string(&serde_json::json!({
+            "event": "user",
+            "message": { "content": turn.text },
+        }))
+        .map_err(|error| format!("this turn could not be encoded as agy stream-json: {error}"))
+    }
+
+    fn reply(&self, _stdout: &str) -> Result<Reply, String> {
+        // Unreachable through the runner, which asks a resident driver for
+        // `read` and never for this. Named rather than left to a default,
+        // because the mirror of it — `line`'s default refusing a driver that
+        // forgot to override it — is what catches the opposite mistake.
+        Err(
+            "agy is driven as a resident child, one line at a time, and never read in one piece"
+                .to_owned(),
+        )
+    }
+
+    fn read(&self, line: &str) -> Read {
+        let Ok(record) = serde_json::from_str::<Record>(line) else {
+            // Not this turn's answer, and not this build's business: the
+            // vendor prints warnings on this stream too.
+            return Read::Ignored;
+        };
+        if record.event != RESULT {
+            // `init` is where the conversation id is first announced, and it
+            // is deliberately *not* captured here: `Read` carries a session
+            // only on `Done`, and every `result` carries the same id anyway —
+            // including a failed one. One place to read it is one place for it
+            // to be wrong.
+            if record.event == INIT && record.conversation_id.is_none() {
+                // Logged rather than asserted, because this module's own rule
+                // is that a vendor printing one more kind — or one fewer
+                // field — must not cost a turn that otherwise succeeds. A
+                // `debug_assert` here would panic the runner task on a dev
+                // build the day agy emits an `init` without an id, and a
+                // panicked runner is a teammate that goes silent: the one
+                // outcome the whole failure channel exists to rule out.
+                tracing::debug!("an agy init record named no conversation");
+            }
+
+            return Read::Ignored;
+        }
+        let Some(ended) = record.result else {
+            return Read::Refused(
+                "agy ended a turn with a result record carrying no result.".to_owned(),
+            );
+        };
+
+        // Whatever it managed to say is owed to the lead even when the turn
+        // then failed, so the words and the reason travel together rather than
+        // one replacing the other.
+        let said = ended.response.trim();
+        let messages: Vec<String> = if said.is_empty() {
+            Vec::new()
+        } else {
+            vec![said.to_owned()]
+        };
+        let refused = if ended.status == SUCCESS {
+            if messages.is_empty() {
+                // The turn succeeded and said nothing. Reported rather than
+                // passed off as an empty answer: a teammate that goes quiet is
+                // the one outcome Principle 4 exists to rule out.
+                Some(
+                    "agy ended the turn successfully and said nothing at all, so there is no \
+                     answer to pass on."
+                        .to_owned(),
+                )
+            } else {
+                None
+            }
+        } else {
+            // Total over the vendor's several ways of not succeeding — this
+            // build has seen `ERROR`, and that binary also carries `CANCELLED`
+            // and `TIMEOUT` — rather than a match that would read a fourth one
+            // as success.
+            let why = if ended.error.trim().is_empty() {
+                "and named no reason".to_owned()
+            } else {
+                format!("and said: {}", ended.error.trim())
+            };
+
+            Some(format!(
+                "agy ended the turn {status} {why}.",
+                status = ended.status.trim(),
+            ))
+        };
+
+        Read::Done(Reply {
+            messages,
+            // From the result rather than from `init`, and on the failing arm
+            // too: a failed turn is still a live conversation this member
+            // should resume rather than replace.
+            session: ended.conversation_id.filter(|id| !id.is_empty()),
+            refused,
         })
-    }
-
-    async fn kill(&self, handle: &Handle) {
-        // Nothing this backend made can be here to end: its `spawn` has never
-        // returned a handle. Named rather than ignored, because a handle
-        // arriving here would mean a registry had crossed two backends.
-        tracing::warn!(
-            ?handle,
-            backend = backend_name(MemberBackend::Agy),
-            "a backend that never spawns was asked to end something it did not start"
-        );
-    }
-
-    fn delivery(&self) -> Delivery {
-        // The answer the shim would have given, kept so the lead's queue strip
-        // behaves identically either side of a wave that changes nothing about
-        // delivery — and so **AC-2**'s table has one rule for all three CLIs
-        // rather than an exception whose reason is "this one refuses".
-        Delivery::Acknowledged
     }
 }

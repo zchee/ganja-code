@@ -430,7 +430,7 @@ mod tests {
     use ganja_team::{MemberName, TeamName, TeamsRoot};
 
     use super::*;
-    use crate::teammate::SpawnSpec;
+    use crate::teammate::{SpawnSpec, shim};
 
     /// A spawn to compose against. Nothing in an argv reads any of it — which
     /// is itself the point of **AC-21**, and is why this can be one value.
@@ -461,6 +461,7 @@ mod tests {
                 text: "a teammate's words, which never reach a command line",
                 prompt: None,
                 session,
+                deadline: shim::CODEX_TURN_TIMEOUT,
             })
             .iter()
             .map(|token| token.to_string_lossy().into_owned())
@@ -580,6 +581,7 @@ mod tests {
             text: secret,
             prompt: None,
             session: None,
+            deadline: shim::CODEX_TURN_TIMEOUT,
         });
         assert!(
             !argv

@@ -1816,6 +1816,10 @@ impl Engine {
             None => Arc::new(Storeless),
         };
 
+        // Read before the registry is handed on, because it is the registry's
+        // own answer that a resident launch line has to be composed from.
+        let agy_deadline = registry.shim_turn_timeout(ganja_team::ShimCli::Agy);
+
         let (dialogs, waiting) = mpsc::channel(TEAMMATE_DIALOGS);
         registry.forward_dialogs_to(dialogs);
         *self
@@ -1842,15 +1846,17 @@ impl Engine {
                 codex: Arc::new(teammate::shim::ShimBackend::new(Arc::new(
                     teammate::codex::Codex::new(),
                 ))),
-                // Real, and it refuses: W4's ship test measured `--sandbox`
-                // as a bound on agy's terminal and not on its filesystem, so
-                // this backend never spawns a child. It is wired here anyway
-                // because "named and refused" is the grammar — a name that
-                // says why beats a name that is missing (**D508(a)**).
-                //
-                // Nothing about this slot searches a `PATH`, which is why it
-                // carries none of the hazard the codex slot above does.
-                agy: Arc::new(teammate::agy::Agy::new()),
+                // Real as of Dv-7, and carrying the codex slot's hazard for
+                // the same reason. It is also the one slot that is handed a
+                // deadline: agy composes a `--print-timeout` of its own on the
+                // launch line, and the number it is derived from has to be the
+                // one the runner will actually enforce. Taken from the
+                // registry rather than re-read from the config, so the two
+                // cannot disagree (**D509**).
+                agy: Arc::new(
+                    teammate::shim::ShimBackend::new(Arc::new(teammate::agy::Agy::new()))
+                        .with_deadline(agy_deadline),
+                ),
                 // Real as of W5, and carrying the codex slot's hazard for the
                 // same reason: it searches the real `PATH`, so a test that
                 // reached it would spawn the developer's own `grok`. The two

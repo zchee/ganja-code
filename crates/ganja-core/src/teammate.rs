@@ -480,10 +480,6 @@ pub const fn backend_name(backend: MemberBackend) -> &'static str {
 /// spawn — a headless CLI child has no channel to ask through — so the spawn
 /// is the last moment anybody can be told, and this is what they are told.
 ///
-/// [`None`] for `agy` too, and for a third reason that is neither of those:
-/// W4 measured its floor and it does not hold, so that backend refuses every
-/// spawn (see [`crate::teammate::agy`]). There is no running teammate to
-/// describe, and a sentence describing nobody is worse than silence.
 ///
 /// One table with two readers, so a dialog and a ring line cannot come to
 /// describe one grant differently: the spawn dialog's `args` carry it under
@@ -504,19 +500,50 @@ pub const fn backend_name(backend: MemberBackend) -> &'static str {
 pub const fn posture_line(backend: MemberBackend) -> Option<&'static str> {
     match backend {
         MemberBackend::InProcess | MemberBackend::Ganja | MemberBackend::Claude => None,
-        // agy answers `None` for a different reason than the three above, and
-        // the difference is the whole of W4: they disclose nothing because
-        // they keep asking, and agy discloses nothing because it never runs.
-        // W4's ship test measured `--sandbox` as a bound on the terminal and
-        // not on the filesystem, so `agy::Agy::spawn` refuses every spawn and
-        // there is no running teammate for a posture row to describe. A
-        // sentence here would be a description of nobody, shown in a dialog
-        // that never opens.
-        MemberBackend::Agy => None,
+        MemberBackend::Agy => Some(POSTURE_AGY),
         MemberBackend::Codex => Some(POSTURE_CODEX),
         MemberBackend::Grok => Some(POSTURE_GROK),
     }
 }
+
+/// agy's pinned posture, **measured** — and the only one of the three that
+/// describes the *absence* of a bound (**Dv-7**, amending **D508(a)**).
+///
+/// Every other sentence in this table names what a sandbox denies. This one
+/// names what nothing denies, and it is written that way on purpose: W4
+/// measured `--sandbox` as a bound on agy's terminal and not on its
+/// filesystem — agy's own `write_to_file` wrote to an absolute path outside
+/// the working directory in 2 of 2 runs of that flag set — and Dv-7's user
+/// directive was to ship the backend anyway, at the honest posture, rather
+/// than to build a write tier or a ganja-side sandbox for it. So the consent
+/// surface has to say that plainly. A person approving this spawn is
+/// approving a foreign agent that can write anywhere they can, and a sentence
+/// that opened with "sandbox=" and then qualified itself would be read as a
+/// bound by everybody who skims.
+///
+/// The read clause carries its consequence for the reason codex's and grok's
+/// do — whole-disk read is the ability to read a credential, and a bound
+/// stated without what it enables is a bound nobody can price. The write
+/// clause carries the consequence a reader would otherwise have to know this
+/// codebase to work out: these writes are **not** in the snapshot chain
+/// `/undo` walks, because that chain is built from this build's own tool
+/// calls and a foreign CLI's writes never pass through them. Somebody who
+/// believes an agy teammate's edits are revertable the way a ganja
+/// teammate's are has consented under a wrong description.
+///
+/// What the sentence deliberately does **not** claim is a network bound. It
+/// is unmeasured here, and under a floor this open it would change nothing a
+/// reader could act on.
+///
+/// The opening clause and the two after the dash are **Dv-7's own words**,
+/// kept rather than improved: the amendment is a user directive about what a
+/// person is told, so the sentence they approved is the sentence that ships.
+/// Only the `/undo` rider is this file's, and that clause is Dv-7's
+/// requirement too — recorded there as "the dialog says so", which this table
+/// is the one source of.
+const POSTURE_AGY: &str = "sandbox: terminal bounded, no enforced filesystem bound — may read any file you \
+     can, including credentials, and write anywhere you can; those writes are outside the \
+     snapshot chain /undo walks";
 
 /// codex's pinned posture, **measured** — the strongest floor of the three.
 ///

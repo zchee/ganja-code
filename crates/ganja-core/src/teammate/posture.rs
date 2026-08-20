@@ -933,35 +933,31 @@ mod tests {
         );
     }
 
-    /// The other half of AC-16's clause: agy raises **no** foreign gate,
-    /// because there is no spawn to gate.
+    /// **Dv-7's reversal**, asserted rather than left to the loop above: agy
+    /// raises the foreign gate, and every agy spawn asks.
     ///
-    /// It is absent from that test's `shims` array — which is
-    /// `[MemberBackend::Codex, MemberBackend::Grok]` — and the absence is W4's
-    /// answer rather than a hole in AC-16. That clause gates a spawn which is
-    /// going to happen; agy's never does, because its ship test measured
-    /// `--sandbox` as a bound on that CLI's terminal and not on its
-    /// filesystem, so [`crate::teammate::agy::Agy`] refuses unconditionally.
-    /// Raising the gate would mean opening a consent dialog for a surface
-    /// nobody can be given. `posture_line` answering [`None`] for it is what
-    /// keeps that clause and this refusal from both firing.
+    /// W4 shipped the opposite of this test. Its measurement — `--sandbox`
+    /// bounds agy's terminal and not its filesystem — refused every agy spawn,
+    /// so `posture_line` answered [`None`] for it and this clause never fired;
+    /// asking a person to consent to a spawn that will certainly refuse is a
+    /// consent question about nothing. Dv-7's user directive ships that
+    /// backend anyway, at the honest posture, which puts the consent question
+    /// back where it belongs: a foreign agent with **no enforced filesystem
+    /// bound** is precisely the spawn nobody should get without being asked.
     ///
-    /// **"The refusal comes first" is true of this clause and of no other.**
-    /// `bypass` and `external_directory` are decided without reference to the
-    /// backend, so an agy spawn that asks for a bypass — or that names a
-    /// directory the project does not reach — still raises its dialog, and is
-    /// answered, before the backend is ever called. That is fails-closed and
-    /// intended rather than an oversight: those two clauses are about what the
-    /// *caller* asked for and not about which surface would have answered, and
-    /// being asked about something that then turns out to be unavailable is
-    /// the cheap failure. The expensive one is the reverse.
+    /// Kept as a test of its own after the reversal, and not folded into the
+    /// loop, because the reason it exists is historical rather than
+    /// structural: whichever way the ship test had gone, this file had to say
+    /// so explicitly, so that a build which quietly stopped asking about agy
+    /// would fail here instead of shipping.
     ///
-    /// Asserted rather than left as an absence, so that a later wave which
-    /// gives agy a posture sentence — the day a permission channel makes one
-    /// truthful — has to come here and say so, instead of the dialog quietly
-    /// reappearing.
+    /// **The two clauses that were never agy's to take away** stay true and
+    /// are why the W4-era sentence "the refusal comes first" was only ever
+    /// about the foreign clause: `bypass` and `external_directory` are decided
+    /// without reference to the backend, so they raise their dialogs for every
+    /// surface, agy included, and did so even while its spawn refused.
     #[test]
-    fn agy_raises_no_foreign_gate_because_it_never_spawns() {
+    fn agy_raises_the_foreign_gate_because_it_now_spawns() {
         let directory = tempfile::tempdir().expect("a temporary directory");
 
         let gate = spawn_gate(
@@ -973,11 +969,12 @@ mod tests {
             MemberBackend::Agy,
         );
 
-        assert_eq!(gate.foreign, None);
-        assert_eq!(
-            gate.refusal(),
-            None,
-            "the refusal is the backend's, not the gate's"
+        assert_eq!(gate.foreign, Some((MemberBackend::Agy, Decision::Ask)));
+        assert_eq!(gate.action(), Decision::Ask);
+        assert_eq!(gate.refusal(), None, "asking is not refusing");
+        assert!(
+            crate::teammate::posture_line(MemberBackend::Agy).is_some(),
+            "and the gate fires because there is a posture to disclose"
         );
     }
 
@@ -1000,7 +997,11 @@ mod tests {
     #[test]
     fn a_spawn_onto_a_foreign_cli_always_asks_and_only_a_deny_can_change_that() {
         let directory = tempfile::tempdir().expect("a temporary directory");
-        let shims = [MemberBackend::Codex, MemberBackend::Grok];
+        let shims = [
+            MemberBackend::Codex,
+            MemberBackend::Agy,
+            MemberBackend::Grok,
+        ];
 
         for backend in shims {
             let name = backend_name(backend);

@@ -741,6 +741,9 @@ async fn a_resident_turn_past_its_deadline_is_ended_and_the_mail_names_the_key_t
         "the turn was written to the resident child: {:?}",
         cli.received()
     );
+    // The pid of the child that is about to wedge, read before it does.
+    let wedged = pids(&registry);
+    assert_eq!(wedged.len(), 1, "one child so far: {wedged:?}");
     assert!(
         until(ANSWERS, || lead_mail(&root, &team)
             .iter()
@@ -757,16 +760,24 @@ async fn a_resident_turn_past_its_deadline_is_ended_and_the_mail_names_the_key_t
 
     // The child's whole process group is ended — the `sleep` the fake is
     // parked in is a second process, and a kill that reached only the shell
-    // would leave it behind.
-    let recorded = registry
-        .shims()
-        .lock()
-        .expect("the records are never poisoned")
-        .children()
-        .len();
-    assert_eq!(
-        recorded, 0,
-        "the wedged child was forgotten as well as ended"
+    // would leave it behind — and then the member is **replaced** (**AC-7**).
+    // So what the records hold afterwards is not nothing: it is one child, and
+    // a different one. A resident member that lost its child gets another
+    // rather than going quiet, which is the same rule the per-message arm gets
+    // for free by starting a process per message.
+    assert!(
+        until(ANSWERS, || {
+            let now = pids(&registry);
+
+            now.len() == 1 && now != wedged
+        })
+        .await,
+        "the wedged child is forgotten and its replacement recorded: {:?}",
+        pids(&registry)
+    );
+    assert!(
+        !shim_support::alive(wedged[0]),
+        "and the wedged one is really gone"
     );
 
     registry.shutdown().await;
@@ -1340,6 +1351,18 @@ async fn a_registry_shutdown_ends_every_shim_child_and_waits_for_the_reap() {
             .is_empty(),
         "and its record went with it"
     );
+}
+
+/// The pids of the children this session's shim records currently hold.
+fn pids(registry: &ganja_core::teammate::TeammateRegistry) -> Vec<i32> {
+    registry
+        .shims()
+        .lock()
+        .expect("the records are never poisoned")
+        .children()
+        .iter()
+        .map(|child| child.process.pid)
+        .collect()
 }
 
 /// The individual-kill path, which never touches the registry's task list: a
