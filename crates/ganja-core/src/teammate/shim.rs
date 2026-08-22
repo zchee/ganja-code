@@ -205,6 +205,50 @@ pub const POLL: Duration = runner::POLL;
 /// is a one-line edit.
 pub const CARRIED: [&str; 3] = ["HOME", "PATH", "TMPDIR"];
 
+/// What a headless shim teammate is told before its task (**D514**): the
+/// headless channel of [`crate::teammate::preamble::frame`].
+///
+/// A headless child has no tool to answer with and needs none: what it prints
+/// is carried to the lead as mail by the core's own loop. **How much** of it
+/// is per CLI, and the paragraph says exactly what each driver does rather
+/// than one sentence for all three — codex's driver mails every
+/// `agent_message` item in arrival order, where grok's mails the last whole
+/// answer of the turn and agy's only the terminal `result` — so an agent that
+/// narrates across several messages is told, ahead of time, whether the lead
+/// will read all of them or only the last. Bare `who`/`prompt`, as the pane
+/// channel takes them, so a test can compute the exact first prompt a child
+/// reads.
+#[must_use]
+pub fn preamble(
+    who: crate::teammate::preamble::Names<'_>,
+    backend: MemberBackend,
+    prompt: &str,
+) -> String {
+    let answers = match backend {
+        MemberBackend::Codex => {
+            "every message you print in answer is delivered to the lead as mail, in order"
+        }
+        // grok and agy forward one answer per turn; a surface this function is
+        // never asked about gets the conservative sentence, since "only the
+        // last" is the one that cannot lose a teammate's work by being wrong.
+        _ => {
+            "only your final answer for the turn reaches the lead, as one mail — so put the whole \
+             of it in your last message"
+        }
+    };
+
+    crate::teammate::preamble::frame(
+        who,
+        &format!(
+            "You are running as a headless {cli} process your lead started. Each message from the \
+             lead is one turn of yours, opening with who sent it — this one did — and {answers}; \
+             there is nobody else you can address, and nothing else you need to do to report.",
+            cli = backend_name(backend),
+        ),
+        prompt,
+    )
+}
+
 /// Why a spawn refuses when the CLI is not on this session's `PATH`.
 ///
 /// The binary's own name is appended by [`prepare`], because "codex is not on
@@ -1189,6 +1233,15 @@ impl ShimBackend {
 impl crate::teammate::TeammateBackend for ShimBackend {
     fn backend(&self) -> MemberBackend {
         self.driver.backend()
+    }
+
+    /// The headless channel, in this CLI's name: answers are mail.
+    fn preamble(&self, spec: &SpawnSpec) -> String {
+        preamble(
+            crate::teammate::preamble::Names::of(spec),
+            self.driver.backend(),
+            &spec.prompt,
+        )
     }
 
     async fn spawn(&self, spec: &SpawnSpec) -> Result<Handle, Unsupported> {
@@ -2353,9 +2406,55 @@ mod tests {
 
     use super::{
         AGY_TURN_TIMEOUT, CARRIED, CODEX_TURN_TIMEOUT, Failure, GROK_MODE_LINE, GROK_TURN_TIMEOUT,
-        TIMEOUT_KEY, admits, default_turn_timeout, environment, first_line, resolve, spawn_lines,
+        TIMEOUT_KEY, admits, default_turn_timeout, environment, first_line, preamble, resolve,
+        spawn_lines,
     };
-    use crate::teammate::posture_line;
+    use crate::teammate::{posture_line, preamble::Names};
+
+    /// The headless channel says that answers are mail and that there is no
+    /// door to go looking for, in the CLI's own name — and says **how much**
+    /// is mailed per CLI, since codex's driver forwards every message where
+    /// grok's and agy's forward one answer per turn — and the task is what the
+    /// message ends with (**D514**).
+    #[test]
+    fn the_headless_preamble_says_how_much_of_an_answer_is_mail_and_ends_with_the_task() {
+        let who = Names {
+            name: "w1",
+            team: "session-abcd1234",
+            lead: "team-lead",
+        };
+        for (backend, cli, answers) in [
+            (
+                MemberBackend::Codex,
+                "codex",
+                "every message you print in answer is delivered to the lead as mail, in order",
+            ),
+            (
+                MemberBackend::Agy,
+                "agy",
+                "only your final answer for the turn reaches the lead",
+            ),
+            (
+                MemberBackend::Grok,
+                "grok",
+                "only your final answer for the turn reaches the lead",
+            ),
+        ] {
+            let text = preamble(who, backend, "hold the fort");
+            assert!(
+                text.contains(&format!("headless {cli} process")),
+                "{cli}: the channel is in the CLI's name: {text}"
+            );
+            assert!(
+                text.contains(answers),
+                "{cli}: the answer road is said as the driver walks it: {text}"
+            );
+            assert!(
+                text.ends_with("Your task:\n\nhold the fort"),
+                "{cli}: {text}"
+            );
+        }
+    }
 
     #[test]
     fn every_cli_carries_the_deadline_this_plan_derived_for_it() {

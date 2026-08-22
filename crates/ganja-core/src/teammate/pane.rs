@@ -370,6 +370,13 @@ impl TeammateBackend for GanjaPane {
         MemberBackend::Ganja
     }
 
+    /// The native channel: a `ganja` pane is a `ganja` session that speaks
+    /// through its member postbox, so it holds the same `send_message` the
+    /// in-process teammate does.
+    fn preamble(&self, spec: &SpawnSpec) -> String {
+        crate::teammate::preamble::native(crate::teammate::preamble::Names::of(spec), &spec.prompt)
+    }
+
     async fn spawn(&self, spec: &SpawnSpec) -> Result<Handle, Unsupported> {
         // D501's capability check, at the moment of asking rather than at
         // install: whether there is a server to put a pane in.

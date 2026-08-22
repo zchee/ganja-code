@@ -42,11 +42,15 @@
 //!   session store, and this process has no `claude` build to be consistent
 //!   with. It is resolved **before** the pane is split, so a machine without
 //!   the binary gets one sentence instead of a window that closes.
-//! - **the preamble**. §5.5.1: `"main"` names *the sender's own parent
-//!   conversation*, and a pane-backed teammate is the main conversation of its
-//!   own session — so it has no parent and a send to `main` fails. The seeded
-//!   message therefore names the lead, in ganja's own words (**D497**: no
-//!   Claude Code prose is copied here).
+//! - **the preamble's channel**. §5.5.1: `"main"` names *the sender's own
+//!   parent conversation*, and a pane-backed teammate is the main conversation
+//!   of its own session — so it has no parent and a send to `main` fails. The
+//!   seeded message therefore names the lead, in ganja's own words (**D497**:
+//!   no Claude Code prose is copied here). Since **D514** every backend seeds
+//!   a preamble in [`crate::teammate::preamble`]'s shared frame; what stays
+//!   this backend's own is the paragraph naming a real `claude`'s
+//!   `SendMessage`, and the fact that it seeds the message itself, under
+//!   claude's root.
 //!
 //! # The shared inbox, and the three things that follow from two roots
 //!
@@ -264,19 +268,25 @@ pub fn carried_env() -> Vec<&'static str> {
 /// therefore named, and `main` is named as the thing that will not work, since
 /// a teammate that has read the habit somewhere else needs to be told it is
 /// wrong rather than merely not told it is right.
+///
+/// Since **D514** every backend seeds a preamble and this is the `claude`
+/// channel of [`crate::teammate::preamble::frame`]: the shape is shared, the
+/// paragraph about answering is this backend's own, and the message is byte
+/// for byte what it was before the frame existed.
 #[must_use]
 pub fn preamble(spec: &SpawnSpec) -> String {
-    format!(
-        "You are {name}, a teammate on the team {team}. Your lead is {lead}.\n\n\
-         Address the lead by that name — `SendMessage(to: \"{lead}\")`. Do **not** address \
-         \"main\": you are the main conversation of your own session, so it has no parent for \
-         \"main\" to name and the send fails. Everything after this arrives the same way this \
-         did, through your inbox.\n\n\
-         Your task:\n\n{prompt}",
-        name = spec.name.as_str(),
-        team = spec.team.as_str(),
-        lead = spec.lead.as_str(),
-        prompt = spec.prompt,
+    let who = crate::teammate::preamble::Names::of(spec);
+
+    crate::teammate::preamble::frame(
+        who,
+        &format!(
+            "Address the lead by that name — `SendMessage(to: \"{lead}\")`. Do **not** address \
+             \"main\": you are the main conversation of your own session, so it has no parent for \
+             \"main\" to name and the send fails. Everything after this arrives the same way this \
+             did, through your inbox.",
+            lead = who.lead,
+        ),
+        &spec.prompt,
     )
 }
 
@@ -382,6 +392,14 @@ impl TeammateBackend for ClaudePane {
     /// not write one of its own — see the module doc's "the shared inbox".
     fn owns_inbox(&self) -> bool {
         true
+    }
+
+    /// The `claude` channel: a real `claude`'s `SendMessage`, and `main`
+    /// named as the address that fails (§5.5.1). Seeded by this backend's own
+    /// `ClaudePane::seed` rather than by the registry, because the inbox is
+    /// under claude's root — the same function, so the two cannot drift.
+    fn preamble(&self, spec: &SpawnSpec) -> String {
+        preamble(spec)
     }
 
     async fn spawn(&self, spec: &SpawnSpec) -> Result<Handle, Unsupported> {
@@ -645,6 +663,29 @@ mod tests {
         assert!(
             seeded.ends_with("sk-ant-CANARY-a-prompt-is-not-argv"),
             "the task is what the message ends with: {seeded}"
+        );
+    }
+
+    /// The one place the repo's "two literals agreeing proves nothing" rule
+    /// inverts: **D514** moved this message onto the shared frame, and what
+    /// that migration must not have done is change a byte a real `claude` has
+    /// been reading since P25. So the pre-refactor text is pinned as a literal,
+    /// deliberately, and may go once D514 is old.
+    #[test]
+    fn the_preamble_is_byte_for_byte_what_it_was_before_the_shared_frame() {
+        let spec = spec();
+
+        assert_eq!(
+            preamble(&spec),
+            format!(
+                "You are worker, a teammate on the team session-abcd1234. Your lead is team-lead.\n\n\
+                 Address the lead by that name — `SendMessage(to: \"team-lead\")`. Do **not** address \
+                 \"main\": you are the main conversation of your own session, so it has no parent for \
+                 \"main\" to name and the send fails. Everything after this arrives the same way this \
+                 did, through your inbox.\n\n\
+                 Your task:\n\n{}",
+                spec.prompt
+            )
         );
     }
 

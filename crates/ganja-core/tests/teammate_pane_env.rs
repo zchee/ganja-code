@@ -132,17 +132,26 @@ async fn a_pane_joins_the_team_when_the_tmux_server_predates_the_config_home_exp
         !line.contains(config_home.path().to_str().expect("utf-8")),
         "the environment rode tmux's own door, not the command line: {line}"
     );
-    // Where the prompt did go, verbatim: the record (D-7) and the inbox —
-    // which the registry seeded, since a `ganja` pane does not own its own.
+    // Where the prompt did go, verbatim: the record (D-7), and the inbox —
+    // which the registry seeded, since a `ganja` pane does not own its own —
+    // inside the pane's preamble, which ends with it (**D514**).
     assert_eq!(spawned.member.prompt.as_deref(), Some(prompt.as_str()));
     let worker = MemberName::parse("worker").expect("a member name");
+    let seeded = ganja_core::teammate::preamble::native(
+        ganja_core::teammate::preamble::Names {
+            name: "worker",
+            team: spawned.team.as_str(),
+            lead: "team-lead",
+        },
+        &prompt,
+    );
     assert!(
         mailbox::read(&spawned.root.inbox_path(&spawned.team, &worker))
             .expect("the worker's inbox reads")
             .valid
             .iter()
-            .any(|message| message.text == prompt),
-        "the prompt reached the pane's inbox verbatim"
+            .any(|message| message.text == seeded && message.text.ends_with(prompt.as_str())),
+        "the prompt reached the pane's inbox verbatim, behind the pane's preamble"
     );
 
     // The way out through the registry: shutdown kills the pane it made.

@@ -32,9 +32,10 @@ use ganja_core::{
         codex::{APPROVAL_OVERRIDE, Codex, READY_MARKER, SANDBOX_OVERRIDE},
         lead_inbox::LeadInbox,
         pane::GanjaPane,
+        preamble::Names,
         reaper::Pane,
         shim_tui::{
-            LIVENESS_POLL, PaneFate, REFUSED_DIED, RING_DELIVERED, RING_DELIVERY_FAILED,
+            self, LIVENESS_POLL, PaneFate, REFUSED_DIED, RING_DELIVERED, RING_DELIVERY_FAILED,
             RING_NOT_READY, RING_PASTED_UNSUBMITTED, RING_READY, Readiness, ShimTui, TuiPane,
         },
         tmux::Server,
@@ -113,11 +114,11 @@ case "$MODE" in
   quits)
     printf '%s\n' '{marker}'
     printf '\033[?2004h'
-    # One submitted body is three canonical lines: the envelope header, then
-    # TASK's two, the last carrying the paste's close bracket and ended by
-    # the Enter. A TASK of another length moves this count with it, or the
-    # stub waits out LANDS.
-    head -n 3 >> "$LOG.received"
+    # One submitted body is its canonical lines: the envelope header, then
+    # the preamble's around TASK's two, the last carrying the paste's close
+    # bracket and ended by the Enter. The count is derived from the real
+    # first message at install (D514), or the stub waits out LANDS.
+    head -n {submitted_lines} >> "$LOG.received"
     printf 'bye from the stub\n'
     exit 0
     ;;
@@ -134,6 +135,11 @@ esac
         // Baked into a single-quoted shell word, so the sentence's own
         // quotes are spelled the POSIX way rather than ending the word.
         refusal = VENDOR_REFUSAL.replace('\'', "'\\''"),
+        // The envelope header plus every line of the seeded message. The
+        // team's name never adds a line, so any well-formed one serves.
+        submitted_lines = 1 + seeded(&TeamName::parse("session-abcd1234").expect("a team name"))
+            .lines()
+            .count(),
     )
 }
 
@@ -204,6 +210,25 @@ fn received(stub: &Fake) -> Vec<u8> {
 /// open bracket, the envelope the runner composes, and the close bracket.
 fn pasted(from: &str, text: &str) -> Vec<u8> {
     format!("\x1b[200~A message from {from}:\n{text}\x1b[201~").into_bytes()
+}
+
+/// The first message the codex pane is handed — the pane channel's preamble
+/// around [`TASK`] (**D514**) — computed by the function that seeds it, never
+/// spelled here, so this suite cannot pass on two literals agreeing. Fixed to
+/// `w1` on codex because every spawn in this binary is exactly that, and the
+/// stub's `head -n` is derived from it: a test that spawned another name or
+/// CLI would have to compute its own, or time out on `LANDS` rather than fail
+/// legibly.
+fn seeded(team: &TeamName) -> String {
+    shim_tui::preamble(
+        Names {
+            name: "w1",
+            team: team.as_str(),
+            lead: "team-lead",
+        },
+        MemberBackend::Codex,
+        TASK,
+    )
 }
 
 /// The same body **submitted**, which is what the stub sees when the composer
@@ -332,7 +357,7 @@ async fn a_codex_tui_spawn_opens_a_pane_records_its_id_and_pastes_each_message_a
     );
 
     // AC-2: the spawn prompt, as one bracketed body and one Enter.
-    let first = framed("team-lead", TASK);
+    let first = framed("team-lead", &seeded(&team));
     assert!(
         until(LANDS, || received(&stub) == first).await,
         "the prompt reached the composer as one bracketed body; got {:?}",
@@ -397,7 +422,7 @@ async fn queued_messages_arrive_as_whole_bodies_in_order_never_interleaved() {
     send(&root, &team, "w1", "second\nbody");
     send(&root, &team, "w1", "third body");
 
-    let mut expected = framed("team-lead", TASK);
+    let mut expected = framed("team-lead", &seeded(&team));
     expected.extend(framed("team-lead", "second\nbody"));
     expected.extend(framed("team-lead", "third body"));
     assert!(
@@ -435,13 +460,15 @@ async fn a_peer_message_carrying_a_paste_terminator_still_arrives_as_one_body_an
     .await
     .expect("the stub TUI spawns in a pane");
     assert!(
-        until(LANDS, || received(&stub) == framed("team-lead", TASK)).await,
+        until(LANDS, || received(&stub)
+            == framed("team-lead", &seeded(&team)))
+        .await,
         "the ordinary prompt landed first; got {:?}",
         String::from_utf8_lossy(&received(&stub))
     );
 
     send(&root, &team, "w1", HOSTILE);
-    let mut expected = framed("team-lead", TASK);
+    let mut expected = framed("team-lead", &seeded(&team));
     expected.extend(framed("team-lead", DEFANGED));
     assert!(
         until(LANDS, || received(&stub) == expected).await,
@@ -559,7 +586,9 @@ async fn a_delivery_that_fails_tells_the_sender_and_is_never_pasted_again() {
     .await
     .expect("the stub TUI spawns in a pane");
     assert!(
-        until(LANDS, || received(&stub) == framed("team-lead", TASK)).await,
+        until(LANDS, || received(&stub)
+            == framed("team-lead", &seeded(&team)))
+        .await,
         "the prompt landed while there was still a pane to land in"
     );
     let pane_id = ganja_testkit::team_file(&root, &team)
@@ -650,7 +679,9 @@ async fn a_tui_that_exits_after_readiness_is_retired_and_its_pane_closed_unasked
     // The prompt lands; the stub reads it and quits. `remain-on-exit` keeps
     // the corpse on screen, which is what the loop's liveness poll sees.
     assert!(
-        until(LANDS, || received(&stub) == framed("team-lead", TASK)).await,
+        until(LANDS, || received(&stub)
+            == framed("team-lead", &seeded(&team)))
+        .await,
         "the prompt reached the composer before it quit; got {:?}",
         String::from_utf8_lossy(&received(&stub))
     );
@@ -832,7 +863,9 @@ async fn shutdown_ends_a_tui_that_ignores_sighup_by_terming_its_group_while_the_
     // The prompt landed, so the stub is past its setup and its traps are
     // armed before anything is signalled.
     assert!(
-        until(LANDS, || received(&stub) == framed("team-lead", TASK)).await,
+        until(LANDS, || received(&stub)
+            == framed("team-lead", &seeded(&team)))
+        .await,
         "the prompt reached the composer first"
     );
 
@@ -897,7 +930,9 @@ async fn a_composer_that_never_shows_its_marker_is_pasted_into_but_never_submitt
         "the member was recorded"
     );
     assert!(
-        until(LANDS, || received(&stub) == unsubmitted("team-lead", TASK)).await,
+        until(LANDS, || received(&stub)
+            == unsubmitted("team-lead", &seeded(&team)))
+        .await,
         "the prompt was pasted anyway; got {:?}",
         String::from_utf8_lossy(&received(&stub))
     );
@@ -908,7 +943,7 @@ async fn a_composer_that_never_shows_its_marker_is_pasted_into_but_never_submitt
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(
         received(&stub),
-        unsubmitted("team-lead", TASK),
+        unsubmitted("team-lead", &seeded(&team)),
         "no Enter was pressed into a pane that may be holding a dialog; got {:?}",
         String::from_utf8_lossy(&received(&stub))
     );

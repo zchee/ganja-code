@@ -168,6 +168,10 @@ pub mod pane;
 pub(crate) mod postbox;
 /// What a teammate may do, and who answers when it asks (**D-5**).
 pub mod posture;
+/// What a teammate is told before its task (**D514**): the frame every
+/// backend's preamble shares, and the `send_message` one the two native
+/// surfaces seed.
+pub mod preamble;
 /// Killing panes the lead left behind when it died (P25b).
 pub mod reaper;
 /// The §6.1 loop that drives one in-process teammate.
@@ -930,6 +934,21 @@ pub trait TeammateBackend: fmt::Debug + Send + Sync {
         false
     }
 
+    /// What this backend's teammate is told before its task (**D514**): the
+    /// **first** message in its inbox, ahead of everything the lead will ever
+    /// write — seeded by the registry right here in `TeammateRegistry::spawn`,
+    /// or by the backend itself where it [owns the inbox](TeammateBackend::owns_inbox).
+    ///
+    /// Required rather than defaulted, and that is the point: the one
+    /// paragraph that differs per backend is how — or whether — its teammate
+    /// answers (ganja's `send_message`, a real `claude`'s `SendMessage`, a
+    /// pane that cannot answer at all, a headless child whose answers are
+    /// mail), and a backend that could be spawned without saying so would be
+    /// a teammate reading a task with nobody to report to. The shared frame
+    /// and the native channel are [`crate::teammate::preamble`]'s; each
+    /// backend supplies its own sentence, in ganja's own words (**D497**).
+    fn preamble(&self, spec: &SpawnSpec) -> String;
+
     /// Ends what [`TeammateBackend::spawn`] produced. Idempotent: a handle
     /// whose teammate has already gone is nothing to end.
     async fn kill(&self, handle: &Handle);
@@ -1052,6 +1071,12 @@ impl InProcess {
 impl TeammateBackend for InProcess {
     fn backend(&self) -> MemberBackend {
         MemberBackend::InProcess
+    }
+
+    /// The native channel: this teammate's engine holds ganja's own
+    /// `send_message`, installed as its postbox the moment it is registered.
+    fn preamble(&self, spec: &SpawnSpec) -> String {
+        preamble::native(preamble::Names::of(spec), &spec.prompt)
     }
 
     async fn spawn(&self, spec: &SpawnSpec) -> Result<Handle, Unsupported> {
@@ -1810,10 +1835,13 @@ impl TeammateRegistry {
         let seeded = if backend.owns_inbox() {
             None
         } else {
+            // The backend's preamble around the prompt, not the bare prompt
+            // (**D514**): the first thing a teammate reads says who it is and
+            // how it answers, and the record below keeps the prompt as typed.
             match seed_inbox(
                 spec.inbox(),
                 spec.lead.as_str().to_owned(),
-                spec.prompt.clone(),
+                backend.preamble(&spec),
             )
             .await
             {
@@ -2491,6 +2519,15 @@ pub(crate) mod tests {
             })
         }
 
+        // Never seeded, since nothing is ever spawned; the native words, so a
+        // test that reads them reads a real preamble and not a placeholder.
+        fn preamble(&self, spec: &SpawnSpec) -> String {
+            crate::teammate::preamble::native(
+                crate::teammate::preamble::Names::of(spec),
+                &spec.prompt,
+            )
+        }
+
         async fn kill(&self, _handle: &Handle) {}
 
         fn delivery(&self) -> Delivery {
@@ -2964,6 +3001,15 @@ pub(crate) mod tests {
             MemberBackend::Ganja
         }
 
+        // What a `ganja` pane would seed, so the inbox a test reads back holds
+        // the real native preamble around the prompt.
+        fn preamble(&self, spec: &SpawnSpec) -> String {
+            crate::teammate::preamble::native(
+                crate::teammate::preamble::Names::of(spec),
+                &spec.prompt,
+            )
+        }
+
         async fn spawn(&self, _spec: &SpawnSpec) -> Result<Handle, Unsupported> {
             Ok(Handle::Pane(crate::teammate::reaper::Pane {
                 id: "%7".to_owned(),
@@ -3005,6 +3051,57 @@ pub(crate) mod tests {
         fn delivery(&self) -> Delivery {
             Delivery::Acknowledged
         }
+    }
+
+    /// **D514.** The first message in a teammate's inbox is its backend's
+    /// preamble around the task — the registry seeds what the backend says,
+    /// never the bare prompt — and the member record keeps the prompt as
+    /// typed. Pinned over a backend that runs nothing, so the seed is still
+    /// there to read.
+    #[tokio::test]
+    async fn the_registry_seeds_the_backends_preamble_as_the_first_message() {
+        let home = tempfile::tempdir().expect("a temporary home");
+        let registry = registry(home.path());
+        let backend = Arc::new(Recording::default());
+        let spawned = registry
+            .spawn(
+                Arc::clone(&backend) as Arc<dyn TeammateBackend>,
+                request("w1", MemberBackend::Ganja, home.path()),
+            )
+            .await
+            .expect("the recording backend spawns");
+
+        let inbox = registry.root().inbox_path(registry.team(), &spawned.name);
+        let held = mailbox::read(&inbox).expect("the inbox reads").valid;
+        assert_eq!(held.len(), 1, "one seed, one message: {held:?}");
+        assert_eq!(held[0].from, MemberName::lead().as_str());
+        assert_eq!(
+            held[0].text,
+            crate::teammate::preamble::native(
+                crate::teammate::preamble::Names {
+                    name: "w1",
+                    team: registry.team().as_str(),
+                    lead: MemberName::lead().as_str(),
+                },
+                "hold the fort",
+            ),
+            "the first message is the backend's preamble around the task"
+        );
+        assert!(
+            held[0].text.ends_with("hold the fort"),
+            "and the task is what it ends with: {}",
+            held[0].text
+        );
+        let recorded = ganja_testkit::team_file(registry.root(), registry.team())
+            .and_then(|file| file.member("w1").cloned())
+            .expect("w1 is recorded");
+        assert_eq!(
+            recorded.prompt.as_deref(),
+            Some("hold the fort"),
+            "the record keeps the prompt as typed, not the preamble"
+        );
+
+        registry.shutdown().await;
     }
 
     /// §6.2's other half: reading a `shutdown_approved` ends the surface the

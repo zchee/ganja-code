@@ -4944,6 +4944,12 @@ impl teammate::TeammateBackend for Storeless {
     fn delivery(&self) -> teammate::Delivery {
         teammate::Delivery::Acknowledged
     }
+
+    // Never seeded, since every spawn is refused above; the native words, for
+    // the surface this stands in for.
+    fn preamble(&self, spec: &teammate::SpawnSpec) -> String {
+        teammate::preamble::native(teammate::preamble::Names::of(spec), &spec.prompt)
+    }
 }
 
 fn reminders(

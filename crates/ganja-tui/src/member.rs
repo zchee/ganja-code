@@ -16,8 +16,8 @@
 //!    is: `shutdown_request` first, then the frames, then the plain messages
 //!    handed back for the lane that already exists — a peer batch that steers
 //!    a running turn at its next step boundary or prompts an idle one (D-3).
-//! 2. **The seeded task** — the prompt the lead wrote into this inbox before
-//!    launching the pane is simply the first message the first pass finds, and
+//! 2. **The seeded task** — the preamble the lead wrote into this inbox, around the task, before
+//!    launching the pane is simply the first message the first pass finds (D514), and
 //!    it becomes the first turn through the same lane; no dedicated mechanism.
 //! 3. **`idle_notification`** — [`Inbox::report_idle`] writes the frame to the
 //!    lead when a turn ends, mapping the finish reason the engine already
@@ -916,7 +916,7 @@ mod tests {
         );
     }
 
-    /// The seeded prompt is the first message the first pass finds, and it is
+    /// The seeded message — the preamble around the task — is the first message the first pass finds, and it is
     /// still owed until the app says it landed (§10.3-2).
     #[tokio::test]
     async fn the_seeded_prompt_is_a_plain_message_that_stays_until_delivered() {

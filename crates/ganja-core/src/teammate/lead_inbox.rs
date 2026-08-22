@@ -1301,6 +1301,11 @@ mod tests {
             true
         }
 
+        // The real claude words, since this stands in for that backend.
+        fn preamble(&self, spec: &SpawnSpec) -> String {
+            crate::teammate::claude::preamble(spec)
+        }
+
         async fn spawn(&self, _spec: &SpawnSpec) -> Result<Handle, Unsupported> {
             Ok(Handle::Pane(crate::teammate::reaper::Pane {
                 id: "%17".to_owned(),

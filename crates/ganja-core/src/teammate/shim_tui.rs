@@ -275,6 +275,38 @@ const PANE_IS_DEAD: &str = "Pane is dead";
 /// and asserts this clause is on screen for all three.
 pub const SEND_ONLY: &str = "send-only: the lead hears nothing back";
 
+/// What a shim teammate in its CLI's native TUI is told before its task
+/// (**D514**): the pane channel of [`crate::teammate::preamble::frame`].
+///
+/// The paragraph says the one thing a foreign agent in a pane cannot work out
+/// for itself — that it has **no way to answer** (v1 is send-only, **D512**),
+/// so its words are read on this screen by the person watching the pane and
+/// nowhere else — and it says so in the CLI's own name, because the preamble
+/// is pasted into that CLI's composer as the first of the lead's messages,
+/// opening on `runner::envelope`'s "A message from" line
+/// like every message after it. `who` and `prompt` are bare so a test can
+/// compute the exact first paste from three names and a task.
+#[must_use]
+pub fn preamble(
+    who: crate::teammate::preamble::Names<'_>,
+    backend: MemberBackend,
+    prompt: &str,
+) -> String {
+    crate::teammate::preamble::frame(
+        who,
+        &format!(
+            "You are running in your own {cli} session, in a tmux pane beside your lead's. \
+             Messages from the lead arrive pasted into this composer, each opening with who sent \
+             it — this one did. You have no way to message back: nothing you write reaches the \
+             lead's conversation, and your answers are read here, on this screen, by the person \
+             watching your pane — so put the whole of your answer on screen rather than promising \
+             to report back.",
+            cli = backend_name(backend),
+        ),
+        prompt,
+    )
+}
+
 /// What a codex pane adds after [`SEND_ONLY`], **measured**
 /// (`tests/fixtures/codex-tui-probe.txt`).
 ///
@@ -968,6 +1000,15 @@ impl ShimTui {
 impl TeammateBackend for ShimTui {
     fn backend(&self) -> MemberBackend {
         self.driver.backend()
+    }
+
+    /// The pane channel, in this CLI's name: send-only, read on screen.
+    fn preamble(&self, spec: &SpawnSpec) -> String {
+        preamble(
+            crate::teammate::preamble::Names::of(spec),
+            self.driver.backend(),
+            &spec.prompt,
+        )
     }
 
     async fn spawn(&self, spec: &SpawnSpec) -> Result<Handle, Unsupported> {
@@ -1759,7 +1800,7 @@ mod tests {
 
     use super::{
         SEND_ONLY, ShimTui, TuiDriver, environment_names, last_words, launch_line, pane_line,
-        paste_body, spawn_lines,
+        paste_body, preamble, spawn_lines,
     };
     use crate::teammate::{
         TeammateBackend as _,
@@ -1767,8 +1808,46 @@ mod tests {
         codex::{self, Codex},
         grok::{self, Grok},
         pane::CARRIED_ENV,
+        preamble::Names,
         shim::{self, Driver as _},
     };
+
+    /// The pane channel says the one thing a foreign agent in a pane cannot
+    /// work out for itself — that nothing it writes reaches the lead — in the
+    /// CLI's own name, and the task is what the message ends with (**D514**).
+    #[test]
+    fn the_pane_preamble_says_the_cli_cannot_answer_and_ends_with_the_task() {
+        let who = Names {
+            name: "w1",
+            team: "session-abcd1234",
+            lead: "team-lead",
+        };
+        for (backend, cli) in [
+            (MemberBackend::Codex, "codex"),
+            (MemberBackend::Agy, "agy"),
+            (MemberBackend::Grok, "grok"),
+        ] {
+            let text = preamble(who, backend, "hold the fort");
+            assert!(
+                text.starts_with(
+                    "You are w1, a teammate on the team session-abcd1234. Your lead is team-lead."
+                ),
+                "{cli}: {text}"
+            );
+            assert!(
+                text.contains(&format!("your own {cli} session")),
+                "{cli}: the channel is in the CLI's name: {text}"
+            );
+            assert!(
+                text.contains("You have no way to message back"),
+                "{cli}: send-only is said, not implied: {text}"
+            );
+            assert!(
+                text.ends_with("Your task:\n\nhold the fort"),
+                "{cli}: {text}"
+            );
+        }
+    }
 
     /// The companion trait says exactly what the inherent items say — it is
     /// a dispatch seam, not a second spelling (ruling 3).

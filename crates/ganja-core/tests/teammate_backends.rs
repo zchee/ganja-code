@@ -36,13 +36,13 @@ use ganja_core::{
     protocol::team::MemberBackend,
     provider::FakeProvider,
     teammate::{
-        BACKENDS, DEFAULT_BACKEND, Delivery, InProcess, TeammateBackend, agy::Agy, backend_name,
-        claude::ClaudePane, codex::Codex, grok::Grok, pane::GanjaPane, parse_backend, posture_line,
-        shim::ShimBackend,
+        BACKENDS, DEFAULT_BACKEND, Delivery, InProcess, SpawnSpec, TeammateBackend, agy::Agy,
+        backend_name, claude::ClaudePane, codex::Codex, grok::Grok, pane::GanjaPane, parse_backend,
+        posture_line, shim::ShimBackend, shim_tui::ShimTui,
     },
     tool::Registry,
 };
-use ganja_team::MemberName;
+use ganja_team::{MemberName, TeamName, TeamsRoot};
 use ganja_testkit::{AllowSpawn, caller, spawn, team, teammates_recorded};
 
 /// P25's **AC-27**, and P27's **AC-1**. A value outside the six is refused *by
@@ -170,6 +170,95 @@ async fn each_backend_says_what_it_can_promise_about_a_delivery() {
             Delivery::Acknowledged,
             "{} reads its own inbox, so its read is the acknowledgement",
             backend_name(backend)
+        );
+    }
+}
+
+/// **D514.** Every backend tells its teammate how — or whether — it answers,
+/// before the task, in one frame: the two native surfaces name ganja's
+/// `send_message`, a real `claude` its `SendMessage`, a CLI's native TUI in a
+/// pane that it has no way to message back, a headless child that its answers
+/// are mail — all of them for codex, the last one for grok and agy, as each
+/// driver really forwards. Pinned per backend over the trait method the registry seeds
+/// from, so a backend whose words drifted onto another's channel fails here.
+#[test]
+fn each_backend_tells_its_teammate_how_it_answers_before_the_task() {
+    let home = ganja_testkit::temp_dir();
+    let spec = SpawnSpec {
+        name: MemberName::parse("worker").expect("a member name"),
+        team: TeamName::parse("session-abcd1234").expect("a team name"),
+        lead: MemberName::lead(),
+        root: TeamsRoot::new(home.path().join("teams")),
+        backend: MemberBackend::InProcess,
+        agent_type: "general".to_owned(),
+        model: "recorder-model".to_owned(),
+        color: "blue".to_owned(),
+        prompt: "have a look at the parser".to_owned(),
+        cwd: home.path().to_path_buf(),
+        plan_mode_required: false,
+        parent_session_id: "01998ad0-0000-7000-8000-000000000000".to_owned(),
+    };
+    let in_process = InProcess::new(
+        Arc::new(FakeProvider::new("on it", Duration::ZERO)),
+        Arc::new(Registry::new(Vec::new())),
+        Storage::open(home.path().join("storage")),
+        |_| Permissions::default(),
+    );
+    let channels: Vec<(&str, Arc<dyn TeammateBackend>, &str)> = vec![
+        ("in-process", Arc::new(in_process), "`send_message`"),
+        ("ganja", Arc::new(GanjaPane), "`send_message`"),
+        (
+            "claude",
+            Arc::new(ClaudePane),
+            "`SendMessage(to: \"team-lead\")`",
+        ),
+        (
+            "codex (pane)",
+            Arc::new(ShimTui::new(Arc::new(Codex::new()))),
+            "no way to message back",
+        ),
+        (
+            "agy (pane)",
+            Arc::new(ShimTui::new(Arc::new(Agy::new()))),
+            "no way to message back",
+        ),
+        (
+            "grok (pane)",
+            Arc::new(ShimTui::new(Arc::new(Grok::new()))),
+            "no way to message back",
+        ),
+        (
+            "codex (headless)",
+            Arc::new(ShimBackend::new(Arc::new(Codex::new()))),
+            "every message you print in answer is delivered to the lead as mail, in order",
+        ),
+        (
+            "agy (headless)",
+            Arc::new(ShimBackend::new(Arc::new(Agy::new()))),
+            "only your final answer for the turn reaches the lead",
+        ),
+        (
+            "grok (headless)",
+            Arc::new(ShimBackend::new(Arc::new(Grok::new()))),
+            "only your final answer for the turn reaches the lead",
+        ),
+    ];
+
+    for (which, backend, channel) in channels {
+        let text = backend.preamble(&spec);
+        assert!(
+            text.starts_with(
+                "You are worker, a teammate on the team session-abcd1234. Your lead is team-lead."
+            ),
+            "{which}: every preamble opens on who and whose: {text}"
+        );
+        assert!(
+            text.contains(channel),
+            "{which}: the answering channel is this backend's own: {text}"
+        );
+        assert!(
+            text.ends_with("Your task:\n\nhave a look at the parser"),
+            "{which}: the task is what the message ends with: {text}"
         );
     }
 }
