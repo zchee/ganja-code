@@ -46,8 +46,8 @@ pub const TEAM: &str = "session-abcd1234";
 pub const TASK: &str = "have a look at the parser";
 
 /// Says yes to everything, and is asked nothing: a fixture spawn works
-/// inside its own project and asks for no bypass, so the gate answers
-/// `Allow` on its own. It exists because the door requires one, and saying
+/// inside its own project, so the gate answers `Allow` on its own. It
+/// exists because the door requires one, and saying
 /// yes is the answer that cannot mask a failure — a test that passed only
 /// because somebody refused would be testing the refusal.
 #[derive(Debug)]
@@ -63,9 +63,9 @@ impl SpawnAsker for AllowSpawn {
 /// A person who says yes, and a record of every time they were asked.
 ///
 /// Recorded rather than only answered: what a suite wants from the gate is
-/// usually its **silence** — a teammate working inside the project with no
-/// bypass has nothing anybody needs to approve — and an asker that only said
-/// yes would let that silence break without a test noticing.
+/// usually its **silence** — a teammate working inside the project has
+/// nothing anybody needs to approve — and an asker that only said yes would
+/// let that silence break without a test noticing.
 #[derive(Debug, Default)]
 pub struct RecordedSpawns {
     asked: Mutex<Vec<SpawnAsk>>,

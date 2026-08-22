@@ -95,7 +95,7 @@ fn a_secret_the_lead_holds_never_reaches_a_panes_command_line() {
     }
     assert!(
         !argv.contains("--auto"),
-        "a spawn that asked for no bypass carries none: {argv}"
+        "a lead never puts the bypass trio on a pane's line (D513): {argv}"
     );
     assert!(
         !lead.global_has("ANTHROPIC_API_KEY"),

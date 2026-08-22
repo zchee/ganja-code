@@ -136,8 +136,8 @@ async fn a_teammate_cannot_do_what_the_leads_rules_deny() {
     registry.forward_dialogs_to(dialogs);
     // A third place a question could have gone, so "nobody was asked" is read
     // off every surface that could have carried one rather than off one of
-    // them. The teammate works inside the project and asks for no bypass, so
-    // the spawn gate has nothing to raise either.
+    // them. The teammate works inside the project, so the spawn gate has
+    // nothing to raise either.
     let spawn_asks = RecordedSpawns::default();
 
     door.start(

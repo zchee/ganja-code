@@ -87,7 +87,6 @@ fn spec(cwd: &std::path::Path) -> SpawnSpec {
         prompt: String::new(),
         cwd: cwd.to_path_buf(),
         plan_mode_required: false,
-        bypass: false,
         parent_session_id: "live-probe".to_owned(),
     }
 }

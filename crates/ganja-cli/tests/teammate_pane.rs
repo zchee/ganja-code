@@ -563,7 +563,7 @@ const GUARD_TEAM: &str = "session-abcd1234";
 const GUARD_SESSION: &str = "01998ad0-0000-7000-8000-000000000000";
 
 /// The spawn `pane.rs` would compose the launch line from, over `root`.
-fn guard_spec(root: &TeamsRoot, cwd: &Path, bypass: bool) -> SpawnSpec {
+fn guard_spec(root: &TeamsRoot, cwd: &Path) -> SpawnSpec {
     SpawnSpec {
         name: MemberName::parse(MEMBER).expect("a member name"),
         team: TeamName::parse(GUARD_TEAM).expect("a team name"),
@@ -576,7 +576,6 @@ fn guard_spec(root: &TeamsRoot, cwd: &Path, bypass: bool) -> SpawnSpec {
         prompt: String::new(),
         cwd: cwd.to_path_buf(),
         plan_mode_required: false,
-        bypass,
         parent_session_id: GUARD_SESSION.to_owned(),
     }
 }
@@ -690,54 +689,52 @@ fn the_launch_line_pane_composes_is_the_line_the_binary_parses() {
     let data = TempDir::new().expect("a temporary directory is creatable");
     let config_home = data.path().join("config").join("ganja");
     let root = TeamsRoot::new(config_home.join("teams"));
-    for bypass in [false, true] {
-        let spec = guard_spec(&root, data.path(), bypass);
-        seed_record(&spec);
-        let argv = pane::arguments(&spec);
-        let output = Command::new(env!("CARGO_BIN_EXE_ganja"))
-            .args(&argv)
-            .current_dir(data.path())
-            .stdin(std::process::Stdio::null())
-            .env("HOME", data.path())
-            .env("XDG_DATA_HOME", data.path().join("data"))
-            .env("XDG_CONFIG_HOME", data.path().join("config"))
-            .env("GANJA_CONFIG_HOME", &config_home)
-            .env("GANJA_PROVIDER", "fake")
-            .env("GANJA_DISABLE_MODELS_FETCH", "1")
-            .env_remove("TMUX")
-            .env_remove("TMUX_PANE")
-            .env_remove("GANJA_CONFIG")
-            .env_remove("GANJA_MODEL")
-            .output()
-            .expect("the binary runs");
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let line = argv
-            .iter()
-            .map(|word| word.to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join(" ");
+    let spec = guard_spec(&root, data.path());
+    seed_record(&spec);
+    let argv = pane::arguments(&spec);
+    let output = Command::new(env!("CARGO_BIN_EXE_ganja"))
+        .args(&argv)
+        .current_dir(data.path())
+        .stdin(std::process::Stdio::null())
+        .env("HOME", data.path())
+        .env("XDG_DATA_HOME", data.path().join("data"))
+        .env("XDG_CONFIG_HOME", data.path().join("config"))
+        .env("GANJA_CONFIG_HOME", &config_home)
+        .env("GANJA_PROVIDER", "fake")
+        .env("GANJA_DISABLE_MODELS_FETCH", "1")
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .env_remove("GANJA_CONFIG")
+        .env_remove("GANJA_MODEL")
+        .output()
+        .expect("the binary runs");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let line = argv
+        .iter()
+        .map(|word| word.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(" ");
 
-        assert_ne!(
-            output.status.code(),
-            Some(2),
-            "clap refused the launch line `{line}`:\n{stderr}"
-        );
-        for refusal in [
-            "unexpected argument",
-            "unrecognized",
-            "is refused",
-            "does not name",
-            "no lead wrote a record",
-        ] {
-            assert!(
-                !stderr.contains(refusal),
-                "the launch line `{line}` was refused ({refusal}):\n{stderr}"
-            );
-        }
+    assert_ne!(
+        output.status.code(),
+        Some(2),
+        "clap refused the launch line `{line}`:\n{stderr}"
+    );
+    for refusal in [
+        "unexpected argument",
+        "unrecognized",
+        "is refused",
+        "does not name",
+        "no lead wrote a record",
+    ] {
         assert!(
-            stderr.contains("terminal"),
-            "the launch line `{line}` should have parsed and resolved and then wanted a \
-             terminal; instead:\n{stderr}"
+            !stderr.contains(refusal),
+            "the launch line `{line}` was refused ({refusal}):\n{stderr}"
         );
     }
+    assert!(
+        stderr.contains("terminal"),
+        "the launch line `{line}` should have parsed and resolved and then wanted a \
+         terminal; instead:\n{stderr}"
+    );
 }

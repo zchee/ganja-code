@@ -94,12 +94,15 @@
 //!
 //! # What rides the launch line, and what does not
 //!
-//! §4.1's own flags: the five that identify the teammate, `--plan-mode-required`
-//! when the spawn asked for plan mode, and `--permission-mode bypassPermissions`
-//! when it asked for bypass — the spelling the reference records twice, once as
-//! the `permissionMode: "bypassPermissions"` a real pane's transcript opens
-//! with (§4.1) and once as the flag a Claude-compatible CLI advertises
-//! (§10.7). What is deliberately absent is §4.1's other two optionals:
+//! §4.1's own flags: the five that identify the teammate, and
+//! `--plan-mode-required` when the spawn asked for plan mode. Until 2026-08-22
+//! the line also carried `--permission-mode bypassPermissions` when the spawn
+//! had asked for bypass — the spelling the reference records twice, once as the
+//! `permissionMode: "bypassPermissions"` a real pane's transcript opens with
+//! (§4.1) and once as the flag a Claude-compatible CLI advertises (§10.7) —
+//! and **D513** retired that axis with the `--bypass` that fed it, so no
+//! permission mode is composed here at all. What is deliberately absent is
+//! §4.1's other two optionals:
 //!
 //! - **not `--model`.** A [`SpawnSpec`]'s model is the id ganja's own catalog
 //!   names for whichever provider *this* session selected — `gpt-5`, a
@@ -193,13 +196,6 @@ pub const BINARY: &str = "claude";
 /// §4.1's optional flag for a teammate that must start in plan mode.
 pub const PLAN_MODE_REQUIRED: &str = "--plan-mode-required";
 
-/// §4.1's permission-mode flag.
-pub const PERMISSION_MODE: &str = "--permission-mode";
-
-/// The permission mode a bypassing spawn asks for — the value a real pane's own
-/// transcript opens with (§4.1 `[OBS]`).
-pub const BYPASS_PERMISSIONS: &str = "bypassPermissions";
-
 /// What a claude spawn says when the binary is not on `PATH`.
 ///
 /// Names the binary and the variable, because between them they are the whole
@@ -286,19 +282,16 @@ pub fn preamble(spec: &SpawnSpec) -> String {
 
 /// The arguments a `claude` pane is launched with, after the binary.
 ///
-/// §4.1's five identifying flags in its own order, then its two postures —
-/// plan mode and bypass — each only when this spawn asked for it. What is
+/// §4.1's five identifying flags in its own order — [`pane::arguments`]'s
+/// composition, so the reaper's witness reads one prefix wherever a pane came
+/// from — then plan mode, only when this spawn asked for it. What is
 /// deliberately absent is in the module doc. Pure, so the composed line is a
 /// thing a test can hold in its hand.
 #[must_use]
 pub fn arguments(spec: &SpawnSpec) -> Vec<OsString> {
-    let mut argv = pane::identity_flags(spec);
+    let mut argv = pane::arguments(spec);
     if spec.plan_mode_required {
         argv.push(OsString::from(PLAN_MODE_REQUIRED));
-    }
-    if spec.bypass {
-        argv.push(OsString::from(PERMISSION_MODE));
-        argv.push(OsString::from(BYPASS_PERMISSIONS));
     }
 
     argv
@@ -486,8 +479,8 @@ mod tests {
     use ganja_team::{MemberName, TeamName, TeamsRoot, mailbox};
 
     use super::{
-        BINARY, BYPASS_PERMISSIONS, ClaudePane, PERMISSION_MODE, PLAN_MODE_REQUIRED,
-        TEAMS_DIRECTORY, arguments, carried_env, preamble, root_under,
+        BINARY, ClaudePane, PLAN_MODE_REQUIRED, TEAMS_DIRECTORY, arguments, carried_env, preamble,
+        root_under,
     };
     // `shim::resolve` is the hoisted walk. These tests stayed here because what
     // they pin is what *this* backend's binary resolution must refuse — a
@@ -515,7 +508,6 @@ mod tests {
             prompt: "sk-ant-CANARY-a-prompt-is-not-argv".to_owned(),
             cwd: PathBuf::from("/nowhere/project"),
             plan_mode_required: false,
-            bypass: false,
             parent_session_id: "01998ad0-0000-7000-8000-000000000000".to_owned(),
         }
     }
@@ -526,11 +518,11 @@ mod tests {
             .collect()
     }
 
-    /// §4.1's five, then the two postures only when the spawn asked for them —
-    /// and never the prompt, the model or the agent type, for the reasons in
-    /// the module doc.
+    /// §4.1's five, then plan mode only when the spawn asked for it — and
+    /// never the prompt, the model, the agent type or a permission mode, for
+    /// the reasons in the module doc.
     #[test]
-    fn the_launch_line_is_the_spawn_flags_and_the_postures_that_were_asked_for() {
+    fn the_launch_line_is_the_spawn_flags_and_plan_mode_when_it_was_asked_for() {
         let five = [
             "--agent-id",
             "worker@session-abcd1234",
@@ -548,14 +540,10 @@ mod tests {
 
         let posturing = strings(arguments(&SpawnSpec {
             plan_mode_required: true,
-            bypass: true,
             ..spec()
         }));
         assert_eq!(posturing[..five.len()], five);
-        assert_eq!(
-            posturing[five.len()..],
-            [PLAN_MODE_REQUIRED, PERMISSION_MODE, BYPASS_PERMISSIONS]
-        );
+        assert_eq!(posturing[five.len()..], [PLAN_MODE_REQUIRED]);
 
         let line = posturing.join(" ");
         assert!(
@@ -564,6 +552,10 @@ mod tests {
         );
         assert!(!line.contains("recorder-model"), "no model guess: {line}");
         assert!(!line.contains("general"), "no agent-type guess: {line}");
+        assert!(
+            !line.contains("--permission-mode"),
+            "no permission mode is composed (D513): {line}"
+        );
     }
 
     /// The composed line, as tmux is handed it: `exec`, the binary — bare,

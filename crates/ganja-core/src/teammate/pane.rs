@@ -74,13 +74,12 @@
 //!
 //! The five spawn flags — `--agent-id`, `--agent-name`, `--team-name`,
 //! `--agent-color`, `--parent-session-id` — beside what tmux is told (`-c`,
-//! `-e`), and **`--auto` when, and only when, the spawn asked for bypass**:
-//! the lead's spawn ask has already gated that request (§10.11-10, D-5), so
-//! what reaches the line is a decision a person made, and the pane starts
-//! answering its own dialogs the way an interactive `ganja --auto` does. So the
-//! posture splits: `plan_mode_required` from the member record the pane finds
-//! by its own name and team, bypass from the line, and forward-to-lead the
-//! default when neither says otherwise. Not `--model`: a [`SpawnSpec`] holds
+//! `-e`), and nothing about posture at all: `plan_mode_required` reaches the
+//! pane through the member record it finds by its own name and team, and its
+//! asks forward to the lead, the one posture a spawn has. Until 2026-08-22 the
+//! line also carried `--auto` when the spawn had asked for bypass; **D513**
+//! retired that axis, so a pane's own `--auto` is now only ever a person's to
+//! type (**D479**) and never a lead's to compose. Not `--model`: a [`SpawnSpec`] holds
 //! the bare model id the lead's turn is asking, and the flag wants
 //! `provider/model`, so a line composed here would be a guess about the
 //! provider. Not `--agent`: the agent types a `task` call names (`general`,
@@ -131,9 +130,6 @@ pub const TEAM_NAME: &str = "--team-name";
 pub const AGENT_COLOR: &str = "--agent-color";
 /// The flag carrying the lead's session id.
 pub const PARENT_SESSION_ID: &str = "--parent-session-id";
-/// The bypass flag, in the spelling `ganja` itself takes — appended only when
-/// the spawn asked for it and the lead's gate let it through.
-const AUTO: &str = "--auto";
 
 /// The shell a fresh pane holds until its launch line arrives, as the argv
 /// tmux is given.
@@ -191,26 +187,15 @@ const RECORD_POLL: Duration = Duration::from_millis(20);
 
 /// The arguments a `ganja` pane is launched with, after the binary.
 ///
-/// The five spawn flags in §4.1's own order, each with its value from `spec`,
-/// then `--auto` iff `spec.bypass` — and nothing else; what is deliberately
-/// absent is in the module doc. Pure, so the composed line is a thing a test
-/// can hold in its hand: the argv-secrets pin reads it, and the pane's own side
-/// parses exactly these spellings.
+/// The five identifying flags in §4.1's own order, each with its value from
+/// `spec` — and nothing else; what is deliberately absent is in the module
+/// doc. They are the whole of a `ganja` pane's argv and the prefix a `claude`
+/// pane's opens with ([`crate::teammate::claude::arguments`]), so the reaper's
+/// witness reads one composition wherever a pane came from. Pure, so the
+/// composed line is a thing a test can hold in its hand: the argv-secrets pin
+/// reads it, and the pane's own side parses exactly these spellings.
 #[must_use]
 pub fn arguments(spec: &SpawnSpec) -> Vec<OsString> {
-    let mut argv = identity_flags(spec);
-    if spec.bypass {
-        argv.push(OsString::from(AUTO));
-    }
-
-    argv
-}
-
-/// The five identifying flags in §4.1's own order, each with its value from
-/// `spec` — the prefix both pane backends' argv open with, so the reaper's
-/// witness reads one composition wherever a pane came from.
-#[must_use]
-pub fn identity_flags(spec: &SpawnSpec) -> Vec<OsString> {
     [
         (AGENT_ID, spec.agent_id()),
         (AGENT_NAME, spec.name.as_str().to_owned()),
@@ -499,17 +484,17 @@ mod tests {
             prompt: "sk-ant-CANARY-a-prompt-is-not-argv".to_owned(),
             cwd: PathBuf::from("/nowhere/project"),
             plan_mode_required: true,
-            bypass: true,
             parent_session_id: "01998ad0-0000-7000-8000-000000000000".to_owned(),
         }
     }
 
     /// The five flags, in §4.1's order, each with its value — and **only**
     /// those: the prompt is not on the line, and neither are the model, the
-    /// agent type or the plan posture, for the reasons in the module doc.
-    /// Bypass is the one posture that rides the line, and only when asked.
+    /// agent type or the plan posture, for the reasons in the module doc. No
+    /// posture rides the line at all (**D513**): `--auto` in particular is
+    /// not a word a lead ever composes.
     #[test]
-    fn the_launch_line_is_the_five_spawn_flags_and_auto_only_when_bypass_was_asked() {
+    fn the_launch_line_is_the_five_spawn_flags_and_nothing_else() {
         let five = [
             "--agent-id",
             "worker@session-abcd1234",
@@ -528,17 +513,10 @@ mod tests {
                 .collect()
         };
 
-        let plain = SpawnSpec {
-            bypass: false,
-            ..spec()
-        };
-        assert_eq!(strings(arguments(&plain)), five);
+        let argv = strings(arguments(&spec()));
+        assert_eq!(argv, five);
 
-        let bypassing = strings(arguments(&spec()));
-        assert_eq!(bypassing[..five.len()], five);
-        assert_eq!(bypassing[five.len()..], ["--auto"]);
-
-        let line = bypassing.join(" ");
+        let line = argv.join(" ");
         assert!(
             !line.contains("CANARY"),
             "the prompt rides the mailbox: {line}"
@@ -546,6 +524,7 @@ mod tests {
         assert!(!line.contains("recorder-model"), "no model guess: {line}");
         assert!(!line.contains("general"), "no agent flag: {line}");
         assert!(!line.contains("plan"), "no plan-mode flag: {line}");
+        assert!(!line.contains("--auto"), "no posture on the line: {line}");
     }
 
     /// The D502 re-import hazard's own guard: tmux hands a **one**-word

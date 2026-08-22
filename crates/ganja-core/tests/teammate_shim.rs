@@ -237,53 +237,6 @@ async fn a_shim_child_gets_exactly_the_enumerated_environment() {
     registry.shutdown().await;
 }
 
-/// D508(a): there is no escalation door, and a spawn that asked for one is
-/// refused by name rather than quietly served at the conservative posture —
-/// answering "yes" while doing "no" is the one outcome whoever typed `--bypass`
-/// cannot have wanted.
-#[tokio::test]
-async fn a_spawn_carrying_bypass_is_refused_by_name_and_starts_no_child() {
-    let home = ganja_testkit::temp_dir();
-    let cli = FakeCli::install();
-    let (registry, door) = shim_support::lead(
-        home.path(),
-        home.path(),
-        Arc::new(PerMessage::new(&cli.log, Mode::Answer)),
-        cli.path(),
-    );
-
-    let refusal = door
-        .start_with_bypass(
-            ganja_testkit::spawn_with_prompt("w1", Some("codex"), TASK),
-            true,
-            &ganja_testkit::caller(home.path()),
-            &AllowSpawn,
-        )
-        .await
-        .expect_err("a shim spawn has no dialogs to bypass");
-
-    assert!(
-        refusal.reason.contains("pinned posture"),
-        "the refusal says why rather than only that: {refusal:?}"
-    );
-    assert!(
-        refusal.reason.contains("D508(b)"),
-        "and names where the escalation that is not built is recorded: {refusal:?}"
-    );
-    assert_eq!(
-        registry.running(),
-        0,
-        "a refused spawn leaves no member behind"
-    );
-    assert!(
-        cli.received().is_empty(),
-        "and no child at all was started: {:?}",
-        cli.received()
-    );
-
-    registry.shutdown().await;
-}
-
 /// The frame table's first row: `shutdown_request` goes ahead of everything
 /// else in the inbox, **from any sender** — matching the in-process runner,
 /// which matches it with no `from` check at all — and never reaches the CLI.
@@ -1074,7 +1027,6 @@ async fn one_pass_sorts_its_inbox_into_turns_and_drops() {
         prompt: String::new(),
         cwd: home.path().to_path_buf(),
         plan_mode_required: false,
-        bypass: false,
         parent_session_id: shim_support::SESSION_ID.to_owned(),
     };
     let backend =

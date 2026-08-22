@@ -118,13 +118,13 @@ pub async fn run(
     // the same registry a lead builds, so both sides read one directory — and
     // a launch line with no config home has nowhere to read from at all.
     //
-    // The bypass trio is the pane's bypass posture (`BypassAtSpawn` when
-    // carried, `ForwardToLead` otherwise): the record carries no such field —
-    // Claude's shape holds `planModeRequired` and nothing else about it — and
-    // the spawn's own approved answer is the one fact a lead can put on the
-    // line without putting a secret there. The record itself — the model this
-    // teammate was spawned to run, and whether it must start in plan mode —
-    // is read off the team file with a bounded wait
+    // The posture is the lead's dialog, full stop: the record carries no such
+    // field — Claude's shape holds `planModeRequired` and nothing else about
+    // it — and since **D513** a lead composes no posture onto the line either,
+    // so `yolo` here is a person's own `--auto` about this session (D479) and
+    // is not read as a posture. The record itself — the model this teammate
+    // was spawned to run, and whether it must start in plan mode — is read
+    // off the team file with a bounded wait
     // (`member::Membership::await_record`): the lead writes it before it types
     // this launch line, so the wait covers a lead that died in between, not
     // the ordinary path. Before the config loads, because plan mode is an
@@ -135,7 +135,7 @@ pub async fn run(
             let home = ganja_core::config::config_home()
                 .context("a pane teammate needs a config home to find its team in")?;
             let pane = std::env::var(member::TMUX_PANE).ok();
-            let membership = member::Membership::resolve(flags, &home, &cwd, pane, yolo)?;
+            let membership = member::Membership::resolve(flags, &home, &cwd, pane)?;
             let record = membership
                 .await_record(member::RECORD_WAIT)
                 .await

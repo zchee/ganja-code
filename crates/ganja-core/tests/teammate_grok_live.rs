@@ -119,7 +119,6 @@ fn spec(cwd: &std::path::Path) -> SpawnSpec {
         prompt: String::new(),
         cwd: cwd.to_path_buf(),
         plan_mode_required: false,
-        bypass: false,
         parent_session_id: "01998ad0-0000-7000-8000-000000000000".to_owned(),
     }
 }

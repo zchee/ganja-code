@@ -685,11 +685,6 @@ pub struct SpawnSpec {
     pub cwd: PathBuf,
     /// Whether it must start in plan mode.
     pub plan_mode_required: bool,
-    /// Whether the spawn asked for permission dialogs to be bypassed. Answered
-    /// through the permission engine rather than honoured on sight —
-    /// [`crate::teammate::posture`] owns what it costs; what it is is a fact
-    /// about this spawn.
-    pub bypass: bool,
     /// The lead's session, which §4.1 passes a pane as `--parent-session-id`.
     pub parent_session_id: String,
 }
@@ -713,7 +708,6 @@ impl fmt::Debug for SpawnSpec {
             .field("prompt", &format_args!("<{} bytes>", self.prompt.len()))
             .field("cwd", &self.cwd)
             .field("plan_mode_required", &self.plan_mode_required)
-            .field("bypass", &self.bypass)
             .field("parent_session_id", &self.parent_session_id)
             .finish()
     }
@@ -1120,8 +1114,6 @@ pub struct SpawnRequest {
     pub cwd: PathBuf,
     /// Whether it starts in plan mode.
     pub plan_mode_required: bool,
-    /// Whether the spawn asked for permission dialogs to be bypassed.
-    pub bypass: bool,
 }
 
 impl fmt::Debug for SpawnRequest {
@@ -1136,7 +1128,6 @@ impl fmt::Debug for SpawnRequest {
             .field("prompt", &format_args!("<{} bytes>", self.prompt.len()))
             .field("cwd", &self.cwd)
             .field("plan_mode_required", &self.plan_mode_required)
-            .field("bypass", &self.bypass)
             .finish()
     }
 }
@@ -1809,7 +1800,6 @@ impl TeammateRegistry {
             prompt: request.prompt,
             cwd: request.cwd,
             plan_mode_required: request.plan_mode_required,
-            bypass: request.bypass,
             parent_session_id: self.lead_session_id.clone(),
         };
 
@@ -2196,7 +2186,6 @@ impl TeammateRegistry {
             // (**D-5**).
             let forwarding = posture::Forwarding::new(
                 Arc::clone(teammate),
-                posture::Posture::for_spawn(spec),
                 self.dialogs
                     .lock()
                     .expect("the dialog surface is never poisoned")
@@ -2540,7 +2529,6 @@ pub(crate) mod tests {
             prompt: "hold the fort".to_owned(),
             cwd: home.to_path_buf(),
             plan_mode_required: false,
-            bypass: false,
         }
     }
 

@@ -316,7 +316,6 @@ mod tests {
                     "backend": name,
                     "agent_type": "build",
                     "cwd": "/Users/somebody/src/github.com/somebody/a-project-name",
-                    "bypass": false,
                     "posture": posture_line(backend).expect("a shim discloses a posture"),
                     "surface": surface,
                 }),

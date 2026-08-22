@@ -978,10 +978,10 @@ impl TeammateBackend for ShimTui {
         // it is the refusal a session outside tmux earns whatever else is
         // true of it.
         let server = self.server()?;
-        // The two refusals every shim shares — bypass, and a binary that is
-        // not there — and the binary resolved *now*, before any pane exists
-        // that would then have to be unmade. The `Launch`'s environment is the
-        // headless child's and goes unused: a pane's is composed below.
+        // The refusal every shim shares — a binary that is not there — and
+        // the binary resolved *now*, before any pane exists that would then
+        // have to be unmade. The `Launch`'s environment is the headless
+        // child's and goes unused: a pane's is composed below.
         let launch = shim::prepare(&*self.driver, spec, self.path.as_deref())?;
         // The launch line under the same rule: its one refusal — a word no
         // shell quoting can carry — makes no pane either.

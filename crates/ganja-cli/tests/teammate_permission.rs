@@ -53,8 +53,8 @@ fn a_panes_ask_reaches_the_leads_dialog_and_the_leads_answer_lets_the_call_run()
     let lead = Lead::start(&homes, &script, &[], &[]);
 
     // The person's door, exactly as AC-11 spells it, plus the task. Nothing
-    // is asked at spawn: the pane works inside the project and asks for no
-    // bypass, so the spawn gate has nothing to raise.
+    // is asked at spawn: the pane works inside the project, so the spawn gate
+    // has nothing to raise.
     lead.type_line(&format!(
         "/team spawn {TEAMMATE} --backend ganja write the marker"
     ));

@@ -1580,8 +1580,10 @@ impl App {
     /// Whether an ask this engine raises goes to the lead rather than onto
     /// this screen (D-5): a pane teammate under [`Posture::ForwardToLead`].
     ///
-    /// The bypass is checked first by the caller, as it is for every other
-    /// dialog: a spawn that was itself the answer forwards nothing.
+    /// The session's own bypass (**D479**, `--auto` typed by a person) is
+    /// checked first by the caller, as it is for every other dialog; a lead
+    /// never composes that flag for a pane (**D513**), so for a teammate this
+    /// is the ordinary road.
     fn forwards_asks_to_lead(&self) -> bool {
         self.member
             .as_ref()
@@ -1862,7 +1864,7 @@ impl App {
             // this session leads no team.
             command::Team::List => self.open_team(),
             command::Team::Spawn(spawn) => {
-                self.spawn_teammate(team::SpawnRequest::new(&spawn));
+                self.spawn_teammate(team::spawn_request(&spawn));
             }
             // No name is the whole team, fanned out here rather than in the
             // grammar: which members there are is the registry's answer, and a
@@ -1949,12 +1951,11 @@ impl App {
     /// Starts a teammate through the door a `task` call reaches (AC-14).
     ///
     /// The very same [`ganja_tool::task::TeammateSpawn`] a tool call hands over,
-    /// through [`ganja_core::Teammates::start_with_bypass`] — the one entry the
-    /// other door has not got, because `--bypass` is a thing a person may ask
-    /// for and a model may not (**D-5**). Everything else about the spawn is the
-    /// team's to decide, which is what makes the two doors one sequence rather
-    /// than two.
-    fn spawn_teammate(&mut self, request: team::SpawnRequest) {
+    /// through the very same [`ganja_core::Teammates::start`] — one entry for
+    /// both doors since **D513** retired the `--bypass` that once told them
+    /// apart. Everything else about the spawn is the team's to decide, which is
+    /// what makes the two doors one sequence rather than two.
+    fn spawn_teammate(&mut self, spawn: ganja_tool::task::TeammateSpawn) {
         if self.team_spawn.is_some() {
             // The dialog refuses its own input step while one runs; this
             // catches an arg-door line typed at the composer meanwhile.
@@ -1981,11 +1982,9 @@ impl App {
         let asker = DialogAsker {
             asks: self.spawn_asker.clone(),
         };
-        let bypass = request.bypass;
-        let spawn = request.spawn;
         self.team_spawn = Some(tokio::spawn(async move {
             teammates
-                .start_with_bypass(spawn, bypass, &caller, &asker)
+                .start(spawn, &caller, &asker)
                 .await
                 .map(|started| started.name)
                 .map_err(|refusal| refusal.reason)
@@ -16617,7 +16616,7 @@ mod tests {
         };
 
         app.run_team_effect(component::team::Effect::Spawn {
-            request: component::team::SpawnRequest::new(&line),
+            request: component::team::spawn_request(&line),
             typed: "w2 --backend in-process hold the fort".to_owned(),
         })
         .await;
@@ -17020,7 +17019,7 @@ mod tests {
     /// member of the one that launched it — so what this app has is exactly a
     /// bare engine plus the member's inbox.
     async fn membered(directory: &TempDir) -> (App, BoxStream<'static, CoreEvent>) {
-        let membership = crate::member::membership(directory.path(), Some("%5"), false);
+        let membership = crate::member::membership(directory.path(), Some("%5"));
         let engine = Engine::persistent(
             Arc::new(FakeProvider::default()),
             fake::MODEL,
@@ -17266,7 +17265,7 @@ mod tests {
     /// the lead's, and a session that is nobody's teammate wakes for neither.
     #[test]
     fn a_member_wakes_at_the_teammates_cadence() {
-        let membership = crate::member::membership(std::path::Path::new("/nowhere"), None, false);
+        let membership = crate::member::membership(std::path::Path::new("/nowhere"), None);
         let mut member = app().with_member(crate::member::Inbox::new(membership));
         // A fresh app wants its first frame; what is under test is the clock
         // an idle member falls back to once nothing is left to draw.
@@ -17318,7 +17317,7 @@ mod tests {
             ),
         )
         .expect("the fake-provider script writes");
-        let membership = crate::member::membership(directory.path(), None, false);
+        let membership = crate::member::membership(directory.path(), None);
         let engine = Engine::new(
             Arc::new(FakeProvider::new("", Duration::ZERO).with_script(&script)),
             fake::MODEL,

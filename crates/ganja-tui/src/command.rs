@@ -505,11 +505,8 @@ pub struct TeamSpawn {
     /// rather than a value chosen here, exactly as it is on the `task` door.
     pub backend: Option<String>,
     /// What `--agent` named. [`None`] means the kind
-    /// [`crate::component::team::SpawnRequest`] fills in.
+    /// [`crate::component::team::spawn_request`] fills in.
     pub agent_type: Option<String>,
-    /// Whether `--bypass` was given: the one thing a person may ask for that
-    /// a model may not (D-5), which is why it is not a `task` argument.
-    pub bypass: bool,
     /// What the teammate is being asked to do, verbatim from the first word
     /// that is not a flag. Empty is allowed — AC-11's own spelling
     /// (`/team spawn w1 --backend ganja`) carries no prompt, and a teammate
@@ -520,8 +517,7 @@ pub struct TeamSpawn {
 /// `/team spawn`'s grammar, spelled once: the refusal a nameless spawn reads
 /// names it, and the `/team` dialog's own input step shows it, because
 /// [`team_spawn`] is the one parser both doors feed.
-pub const SPAWN_GRAMMAR: &str =
-    "<name> [--backend <surface>] [--agent <kind>] [--bypass] [what it should do]";
+pub const SPAWN_GRAMMAR: &str = "<name> [--backend <surface>] [--agent <kind>] [what it should do]";
 
 /// What `--backend` reads when the line ends before its value. Which surfaces
 /// there are is not repeated here on purpose: the far side refuses an unknown
@@ -594,10 +590,12 @@ pub fn team(text: &str) -> Option<Team> {
 /// Flags come before the prompt, and the first word that is not a flag begins
 /// it: from there the rest of the line is the prompt verbatim, dashes
 /// included, because a prompt is prose and prose has dashes in it. A word
-/// starting with `--` *before* that point and outside the three this grammar
+/// starting with `--` *before* that point and outside the two this grammar
 /// has is refused by name rather than swallowed, on the same reasoning the
 /// `task` tool refuses a `backend` with no `name`: the likeliest way to send
-/// one is a flag that was meant to work.
+/// one is a flag that was meant to work. (`--bypass` was the third until
+/// 2026-08-22 — **D513** retired it with the axis beneath it, so the grammar
+/// now asks for exactly what the `task` door's arguments ask for.)
 ///
 /// # Errors
 ///
@@ -615,7 +613,6 @@ pub fn team_spawn(text: &str) -> Result<TeamSpawn, String> {
         name: name.to_owned(),
         backend: None,
         agent_type: None,
-        bypass: false,
         prompt: String::new(),
     };
     loop {
@@ -638,13 +635,9 @@ pub fn team_spawn(text: &str) -> Result<TeamSpawn, String> {
                 }
                 rest = tail;
             }
-            "--bypass" => {
-                spawn.bypass = true;
-                rest = after;
-            }
             unknown if unknown.starts_with("--") => {
                 return Err(format!(
-                    "`/team spawn` has no {unknown:?} flag: it takes `--backend`, `--agent` and `--bypass`"
+                    "`/team spawn` has no {unknown:?} flag: it takes `--backend` and `--agent`"
                 ));
             }
             // Not a flag, so the prompt starts here and runs to the end.
@@ -1249,7 +1242,6 @@ mod tests {
                     name: "w1".to_owned(),
                     backend: Some("ganja".to_owned()),
                     agent_type: None,
-                    bypass: false,
                     prompt: String::new(),
                 },
             ),
@@ -1259,17 +1251,15 @@ mod tests {
                     name: "w1".to_owned(),
                     backend: None,
                     agent_type: None,
-                    bypass: false,
                     prompt: String::new(),
                 },
             ),
             (
-                "/team spawn w1 --bypass --agent explore --backend claude read the tree --carefully",
+                "/team spawn w1 --agent explore --backend claude read the tree --carefully",
                 TeamSpawn {
                     name: "w1".to_owned(),
                     backend: Some("claude".to_owned()),
                     agent_type: Some("explore".to_owned()),
-                    bypass: true,
                     prompt: "read the tree --carefully".to_owned(),
                 },
             ),
@@ -1292,6 +1282,9 @@ mod tests {
             ("/team spawn w1 --backend", "--backend"),
             ("/team spawn w1 --agent", "--agent"),
             ("/team spawn w1 --nonesuch go", "--nonesuch"),
+            // The flag P25 had and D513 retired is refused like any other
+            // word this grammar has not got, not quietly swallowed.
+            ("/team spawn w1 --bypass go", "--bypass"),
             ("/team list w1", "w1"),
             ("/team shutdown w1 w2", "w2"),
         ];
@@ -1346,8 +1339,7 @@ mod tests {
             "w1",
             "w1 --backend ganja",
             "w1 --agent explore",
-            "w1 --bypass",
-            "w1 --bypass --agent explore --backend claude read the tree --carefully",
+            "w1 --agent explore --backend claude read the tree --carefully",
             "w1 --backend codex explain  this  crate, twice-spaced and dashed-for-good",
             "  w1 --backend grok hold the fort  ",
         ] {

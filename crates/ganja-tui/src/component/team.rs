@@ -138,49 +138,32 @@ pub fn rows(view: &TeamView) -> Vec<Row> {
 
 /// A spawn as this dialog asks for it.
 ///
-/// Two fields rather than one, and the split is the point. [`TeammateSpawn`]
-/// is the **`task` tool's own request value** — the very type its teammate
-/// door hands to the engine — so a spawn typed here and a spawn a model asked
-/// for are the same value and cannot drift apart (AC-14, **D504**). `bypass`
-/// sits beside it rather than inside it because it is not a thing a model may
-/// ask for: `Teammates::start` spawns with `bypass: false` unconditionally,
-/// and its own comment says why — a teammate that wants its dialogs skipped is
-/// asked for by a person at `/team spawn`, never by a tool call (D-5).
+/// What comes back is [`TeammateSpawn`] itself — the **`task` tool's own
+/// request value**, the very type its teammate door hands to the engine — so a
+/// spawn typed here and a spawn a model asked for are the same value and cannot
+/// drift apart (AC-14, **D504**). Until 2026-08-22 this door wrapped that value
+/// beside a `bypass` the `task` door had no argument for (D-5); **D513**
+/// retired the flag and the axis beneath it, and with it the wrapper — there is
+/// one request on both doors and nothing left for them to differ on.
 ///
-/// `backend` inside it is **as typed**, unparsed: which surfaces exist is the
-/// engine's to answer, and a second list here would be a second place for them
-/// to drift.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SpawnRequest {
-    /// Exactly what the `task` door builds for the same name, surface, agent
-    /// kind and prompt.
-    pub spawn: TeammateSpawn,
-    /// Whether `--bypass` was given.
-    pub bypass: bool,
-}
-
-impl SpawnRequest {
-    /// The request a parsed `/team spawn` line asks for.
-    ///
-    /// The agent kind is the one place this door fills in what the other one
-    /// is always told: `subagent_type` is a required `task` argument, and a
-    /// person who did not name a kind means the roster's general-purpose one.
-    /// Named from `ganja_core` rather than spelled here, so the default is the
-    /// same string the engine's own roster registers.
-    #[must_use]
-    pub fn new(line: &TeamSpawn) -> Self {
-        Self {
-            spawn: TeammateSpawn {
-                name: line.name.clone(),
-                backend: line.backend.clone(),
-                agent_type: line
-                    .agent_type
-                    .clone()
-                    .unwrap_or_else(|| ganja_core::agent::GENERAL.to_owned()),
-                prompt: line.prompt.clone(),
-            },
-            bypass: line.bypass,
-        }
+/// The agent kind is the one place this door fills in what the other one is
+/// always told: `subagent_type` is a required `task` argument, and a person who
+/// did not name a kind means the roster's general-purpose one. Named from
+/// `ganja_core` rather than spelled here, so the default is the same string the
+/// engine's own roster registers.
+///
+/// `backend` is **as typed**, unparsed: which surfaces exist is the engine's to
+/// answer, and a second list here would be a second place for them to drift.
+#[must_use]
+pub fn spawn_request(line: &TeamSpawn) -> TeammateSpawn {
+    TeammateSpawn {
+        name: line.name.clone(),
+        backend: line.backend.clone(),
+        agent_type: line
+            .agent_type
+            .clone()
+            .unwrap_or_else(|| ganja_core::agent::GENERAL.to_owned()),
+        prompt: line.prompt.clone(),
     }
 }
 
@@ -225,8 +208,8 @@ impl Spawned {
 pub enum Effect {
     /// Start a teammate, through the same door a `task` call reaches.
     Spawn {
-        /// The spawn, parsed.
-        request: SpawnRequest,
+        /// The spawn, parsed — the `task` door's own value ([`spawn_request`]).
+        request: TeammateSpawn,
         /// The words as typed into the step — [`crate::command::SPAWN_GRAMMAR`]'s
         /// shape, without the `/team spawn` a composer line carries — so the
         /// app can remember the spawn in the prompt history as the line it
@@ -580,7 +563,7 @@ impl Team {
                     Asking::Spawn => match crate::command::team_spawn(&typed) {
                         Ok(line) => {
                             let effect = Effect::Spawn {
-                                request: SpawnRequest::new(&line),
+                                request: spawn_request(&line),
                                 typed,
                             };
                             self.step = Step::Members;
@@ -884,7 +867,7 @@ mod tests {
     };
     use ratatui::{buffer::Buffer, layout::Rect};
 
-    use super::{BUSY, Effect, Row, SpawnRequest, Spawned, Team, rows};
+    use super::{BUSY, Effect, Row, Spawned, Team, rows, spawn_request};
     use crate::{command, theme::Theme};
 
     const AREA: Rect = Rect {
@@ -949,7 +932,7 @@ mod tests {
 
     /// Drives the dialog's spawn flow for `line` and answers with the request
     /// it built.
-    fn spawn_through_the_dialog(line: &str) -> SpawnRequest {
+    fn spawn_through_the_dialog(line: &str) -> TeammateSpawn {
         let mut dialog = dialog();
         // Past the three members, onto the Spawn row.
         dialog.move_selection(9);
@@ -998,11 +981,10 @@ mod tests {
     /// because they build one request. The `task` door's value is taken from
     /// the door itself, so this cannot pass by both sides sharing a mistake.
     ///
-    /// What is compared is [`SpawnRequest::spawn`] — the `ganja-tool` type
-    /// both doors really hand the engine — and not the whole
-    /// [`SpawnRequest`]: its other field is `bypass`, which the `task` door
-    /// has no argument for by design (D-5), so comparing it would be asserting
-    /// that a model can ask for something it must not.
+    /// What is compared is the whole value — the `ganja-tool` type both doors
+    /// really hand the engine. Until **D513** the typed door wrapped it beside
+    /// a `bypass` the `task` door had no argument for, and only the inner
+    /// value could be compared; now there is nothing the two could differ on.
     #[tokio::test]
     async fn the_dialog_builds_the_same_spawn_request_the_task_door_does() {
         let cases = [
@@ -1053,26 +1035,11 @@ mod tests {
 
         for (line, args) in cases {
             assert_eq!(
-                spawn_through_the_dialog(line).spawn,
+                spawn_through_the_dialog(line),
                 spawn_through_the_task_door(args).await,
                 "the dialog and the task door disagree about {line:?}"
             );
         }
-    }
-
-    /// The one field the human door has that the model's does not, and the
-    /// reason it is not a `TeammateSpawn` field: a model may not ask for its
-    /// teammate's dialogs to be skipped.
-    #[test]
-    fn only_the_typed_door_can_ask_for_a_bypass() {
-        assert!(!spawn_through_the_dialog("w3 do the thing").bypass);
-
-        let bypassed = spawn_through_the_dialog("w3 --bypass do the thing");
-        assert!(bypassed.bypass);
-        assert_eq!(
-            bypassed.spawn.prompt, "do the thing",
-            "the flag is consumed rather than left in the prompt"
-        );
     }
 
     /// Resolution 4: nothing stands in front of a spawn, so the one thing a
@@ -1420,13 +1387,15 @@ mod tests {
     /// dialog's own step cannot mean two different things.
     #[test]
     fn a_typed_team_line_and_the_dialogs_step_build_the_same_request() {
-        let Some(command::Team::Spawn(line)) = command::team("/team spawn w3 --bypass go") else {
+        let Some(command::Team::Spawn(line)) =
+            command::team("/team spawn w3 --agent explore --backend claude go")
+        else {
             panic!("`/team spawn` should parse");
         };
 
         assert_eq!(
-            SpawnRequest::new(&line),
-            spawn_through_the_dialog("w3 --bypass go")
+            spawn_request(&line),
+            spawn_through_the_dialog("w3 --agent explore --backend claude go")
         );
     }
 

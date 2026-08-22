@@ -3,11 +3,15 @@
 //! Upstream opencode has no counterpart at all: it has no teammates, so it has
 //! no second conversation whose dialogs somebody has to own. What is ported is
 //! Claude Code's §10.3 posture question — presented there as three unresolved
-//! options — together with the two guards §10.11 states around it: §10.11-10,
-//! where a spawn that asks to skip dialogs is itself something to be asked
-//! about, and §10.11-11, where a teammate's directory passes the same external
-//! directory gate any other work outside the project does. The plan is
-//! `.omc/plans/2026-08-17-teammates-first-landing.md`.
+//! options — together with the guard §10.11-11 states around it, where a
+//! teammate's directory passes the same external directory gate any other work
+//! outside the project does. The plan is
+//! `.omc/plans/2026-08-17-teammates-first-landing.md`. Its other guard,
+//! §10.11-10 — a spawn that asks to skip dialogs is itself something to be
+//! asked about — was built as P25's `/team spawn --bypass` and **retired on
+//! 2026-08-22** (**D513**, user directive): there is one spawn request on both
+//! doors, a `task` call's and a person's, and nothing on it about dialogs, so
+//! there is no such spawn left to gate.
 //!
 //! # The rules are the lead's, and that is the whole of the posture
 //!
@@ -26,19 +30,19 @@
 //! dialog**: a deny is not a question, and asking one would be inventing an
 //! answer the person already gave.
 //!
-//! # Three postures, and only one of them is a rule
+//! # Two postures, and neither of them is a rule
 //!
 //! | Posture | Who answers a dialog | Chosen by |
 //! |---|---|---|
-//! | [`BypassAtSpawn`] | nobody, afterwards — the spawn *was* the answer | a spawn carrying `bypass`, once the door approved it |
-//! | [`ForwardToLead`] | the person sitting at the lead's dialog | **the default** |
-//! | [`HumanAttended`] | the person sitting at the teammate's own terminal | a pane whose frontend forwards nothing |
+//! | [`ForwardToLead`] | the person sitting at the lead's dialog | **the default**, and today the only one selected |
+//! | [`HumanAttended`] | the person sitting at the teammate's own terminal | a pane whose frontend forwards nothing — none does yet |
 //!
-//! None of the three changes a single rule, which is why the posture is not an
-//! argument of [`permissions_for`]: what it decides is where an *ask* is
-//! carried, and an ask only ever happens where the rules already said "ask".
-//! A bypassing teammate is refused exactly what a forwarding one is
-//! (**D479**'s own rule, kept unchanged) — it is only spared the round trip.
+//! Neither changes a single rule, which is why the posture is not an argument
+//! of [`permissions_for`]: what it decides is where an *ask* is carried, and an
+//! ask only ever happens where the rules already said "ask". The reference's
+//! third option — nobody answers afterwards, because the spawn *was* the
+//! answer — is the one **D513** retired: every ask a teammate's rules raise is
+//! carried to a person, and no spawn can buy its way past that.
 //!
 //! [`ForwardToLead`] has two carriers, one per kind of teammate, and this
 //! module holds the in-process one: [`Forwarding`] rides the dialog channel
@@ -47,25 +51,25 @@
 //! through the mailbox instead — [`crate::teammate::member::Asks`] on the
 //! pane's side, [`crate::teammate::lead_inbox`] on the lead's — landing on
 //! the very same channel from the file, so the person answering cannot tell
-//! which kind of teammate asked. A pane runs [`HumanAttended`] only when its
-//! frontend forwards nothing at all.
+//! which kind of teammate asked. A pane would run [`HumanAttended`] only if its
+//! frontend forwarded nothing at all — and no frontend in this build does:
+//! `ganja-tui`'s member side resolves every pane to [`ForwardToLead`], so the
+//! second row is the reference's option kept as a value, selected by nothing
+//! yet.
 //!
 //! [`HumanAttended`] has no meaning in this process: an in-process teammate has
-//! no terminal of its own to put a dialog on, so [`for_spawn`] never chooses it
-//! and [`Forwarding`] treats it as [`ForwardToLead`]. Degrading rather than
-//! refusing is safe here precisely because the rules are identical either way —
-//! the only difference is which screen the question lands on, and in this
-//! process there is one.
+//! no terminal of its own to put a dialog on, so [`Forwarding`] takes no
+//! posture at all and carries every ask to the lead. That is safe precisely
+//! because the rules are identical either way — the only difference is which
+//! screen the question lands on, and in this process there is one.
 //!
 //! Every link above is spelled out, because a module carrying both an outer doc
 //! and this inner one has the merged text resolved in `teammate.rs`'s scope,
 //! where none of these names exist. The house workaround, as `hook.rs` uses it.
 //!
 //! [`permissions_for`]: crate::teammate::posture::permissions_for
-//! [`BypassAtSpawn`]: crate::teammate::posture::Posture::BypassAtSpawn
 //! [`ForwardToLead`]: crate::teammate::posture::Posture::ForwardToLead
 //! [`HumanAttended`]: crate::teammate::posture::Posture::HumanAttended
-//! [`for_spawn`]: crate::teammate::posture::Posture::for_spawn
 //! [`Forwarding`]: crate::teammate::posture::Forwarding
 
 use std::{
@@ -81,24 +85,16 @@ use crate::{
     engine::Evicted,
     permission::{Decision, EXTERNAL_DIRECTORY, Permissions, Rule, matches, resolve},
     protocol::{Command, Event, PermissionId, PermissionReply, team::MemberBackend},
-    teammate::{SpawnSpec, Teammate, backend_name, posture_line},
+    teammate::{Teammate, backend_name, posture_line},
 };
-
-/// The permission a spawn asking to skip dialogs is judged under (§10.11-10).
-///
-/// Minted here rather than taken from `ganja-permission`'s own list because
-/// nothing below the engine knows teammates exist. It is spelled like the
-/// names that travel in a stored file, so a config may write
-/// `"teammate_bypass": {"reviewer": "deny"}` and have it mean what it looks
-/// like — judged against the teammate's `agentType`, the way `task` is judged
-/// against its `subagent_type`.
-pub const BYPASS: &str = "teammate_bypass";
 
 /// The permission a spawn onto a foreign CLI is judged under (**D508(c)**).
 ///
-/// Spelled like [`BYPASS`] and for the same reason — a config may write
+/// Minted here rather than taken from `ganja-permission`'s own list because
+/// nothing below the engine knows teammates exist. It is spelled like the
+/// names that travel in a stored file — a config may write
 /// `"teammate_foreign": {"grok": "deny"}` and have it mean what it looks like
-/// — but judged against the **backend name**, not the `agentType`: what a
+/// — and judged against the **backend name**, not the `agentType`: what a
 /// person is being asked to consent to here is which vendor's binary runs, and
 /// two teammates of one agent type on two different CLIs are two different
 /// grants.
@@ -119,8 +115,8 @@ pub const BYPASS: &str = "teammate_bypass";
 /// stronger than it first reads — a vendor's trust gate that cannot be
 /// permanently pre-cleared is a gate that is never cleared silently — and it
 /// is proportionate only because of what it gates: v1 composes each CLI's
-/// most restrictive working posture and refuses `bypass` by name, so the
-/// question a person is answering repeatedly is about a read-only agent.
+/// most restrictive working posture, so the question a person is answering
+/// repeatedly is about a read-only agent.
 ///
 /// A stored **deny** does pass that filter, and refuses.
 pub const FOREIGN: &str = "teammate_foreign";
@@ -130,21 +126,14 @@ const ANY: &str = "*";
 
 /// Who answers when a teammate's turn asks for permission (**D-5**).
 ///
-/// Three values because the reference presents three, and all three are
-/// implemented rather than one being chosen: what varies between a pane with a
-/// person watching it, a pane nobody is watching and a teammate inside the
-/// lead's own process is exactly *where the question goes*, and a type is the
-/// honest place to say so.
+/// Two of the reference's three: what varies between a pane with a person
+/// watching it and a teammate whose asks travel to the lead is exactly *where
+/// the question goes*, and a type is the honest place to say so. The third —
+/// nobody, because the spawn itself was the answer — was P25's `--bypass` and
+/// retired with it (**D513**): a posture in which a person is asked nothing
+/// is not one a spawn can choose any more, and so it is not a value either.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Posture {
-    /// The spawn itself was the answer: dialogs this teammate's rules raise
-    /// are answered "allow once" without anybody being asked again.
-    ///
-    /// The member record's `planModeRequired` analog — a fact about the spawn,
-    /// recorded with it — and, like it, one the spawn had to be approved for
-    /// ([`spawn_gate`]). **D479**'s rule holds unchanged: this answers the
-    /// dialogs the rules raise, and a denial raises none.
-    BypassAtSpawn,
     /// The question travels to the lead's own dialog, and the answer travels
     /// back. The default, because a teammate nobody approved anything for is a
     /// teammate whose asks are the lead's to answer.
@@ -153,34 +142,6 @@ pub enum Posture {
     /// The teammate's own engine asks, on the terminal a person is watching it
     /// on. A pane's posture; see the module doc for what it means here.
     HumanAttended,
-}
-
-impl Posture {
-    /// The posture an in-process spawn runs under.
-    ///
-    /// Two values, never three: [`Posture::HumanAttended`] describes a person
-    /// at the teammate's *own* terminal, and an in-process teammate has none.
-    #[must_use]
-    pub const fn for_spawn(spec: &SpawnSpec) -> Self {
-        if spec.bypass {
-            Self::BypassAtSpawn
-        } else {
-            Self::ForwardToLead
-        }
-    }
-
-    /// What answers a dialog without anybody seeing it, when anything does.
-    ///
-    /// [`PermissionReply::Once`] rather than [`PermissionReply::Always`], for
-    /// **D479**'s reason: nothing is remembered, so the approval lasts exactly
-    /// as long as the teammate the person approved and reaches no stored rule.
-    #[must_use]
-    pub const fn auto_reply(self) -> Option<PermissionReply> {
-        match self {
-            Self::BypassAtSpawn => Some(PermissionReply::Once),
-            Self::ForwardToLead | Self::HumanAttended => None,
-        }
-    }
 }
 
 /// The ruleset a teammate's engine runs under: the lead's, with `agent_rules`
@@ -217,14 +178,11 @@ pub fn permissions_for(lead: &Permissions, agent_rules: Vec<Rule>) -> Permission
 /// Two questions, both asked on the **lead's** side and both answered out of
 /// the lead's ruleset, because a teammate cannot be trusted to gate its own
 /// creation. Neither is a question the permission engine knows how to derive
-/// from a call — one is about a flag and the other about a directory nothing
-/// has run in yet — so they are read here and handed to whichever door is
-/// spawning, which is where the dialog belongs.
+/// from a call — one is about a directory nothing has run in yet and the other
+/// about which vendor's binary would run — so they are read here and handed to
+/// the one door that spawns, which is where the dialog belongs.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SpawnGate {
-    /// What the rules say about letting this teammate skip its dialogs.
-    /// [`None`] when the spawn asked for no bypass, which is most of them.
-    pub bypass: Option<Decision>,
     /// The teammate's own directory and what the rules say about working
     /// there. [`None`] when it is inside the project, which asks nothing.
     pub directory: Option<(PathBuf, Decision)>,
@@ -245,9 +203,10 @@ impl SpawnGate {
     /// refuses the spawn, one unfamiliar part puts it in front of somebody.
     #[must_use]
     pub fn action(&self) -> Decision {
-        self.bypass
+        self.directory
+            .as_ref()
+            .map(|(_, decision)| *decision)
             .into_iter()
-            .chain(self.directory.as_ref().map(|(_, decision)| *decision))
             .chain(self.foreign.map(|(_, decision)| decision))
             .max()
             .unwrap_or(Decision::Allow)
@@ -273,12 +232,6 @@ impl SpawnGate {
     #[must_use]
     pub fn refusal(&self) -> Option<String> {
         let mut refused = Vec::new();
-        if self.bypass == Some(Decision::Deny) {
-            refused.push(
-                "a rule refuses teammates that skip permission dialogs; spawn it without bypass"
-                    .to_owned(),
-            );
-        }
         if let Some((directory, Decision::Deny)) = &self.directory {
             refused.push(format!(
                 "a rule refuses work in {}; spawn it inside the project",
@@ -296,7 +249,8 @@ impl SpawnGate {
     }
 }
 
-/// Reads the lead's rules for the two things a spawn decides (§10.11-10/-11).
+/// Reads the lead's rules for the two things a spawn decides (§10.11-11, and
+/// **D508(c)**).
 ///
 /// `project_root` is the lead's own project root — what `Permissions::load`
 /// resolved for the session doing the spawning, and emphatically not the
@@ -311,8 +265,8 @@ impl SpawnGate {
 /// directory is still asked about: the error is towards asking, which is the
 /// direction the permission layer errs in everywhere else.
 ///
-/// That filter is not merely a safety margin for the third clause — it **is**
-/// the third clause's mechanism. A stored `teammate_foreign: allow` is dropped
+/// That filter is not merely a safety margin for the foreign clause — it **is**
+/// that clause's mechanism. A stored `teammate_foreign: allow` is dropped
 /// before `decide` sees it, so [`FOREIGN`] answers [`Decision::Ask`]
 /// whatever a config says, and a stored deny passes the filter and refuses.
 /// The invariant that falls out is the one **D508(c)** wanted: every spawn
@@ -322,13 +276,11 @@ impl SpawnGate {
 pub fn spawn_gate(
     lead: &Permissions,
     project_root: &Path,
-    bypass: bool,
-    agent_type: &str,
     cwd: &Path,
     backend: MemberBackend,
 ) -> SpawnGate {
-    // The four arguments are the four facts a spawn decides that the rules
-    // have an opinion about — handed in bare rather than behind a
+    // The two arguments after the root are the two facts a spawn decides that
+    // the rules have an opinion about — handed in bare rather than behind a
     // [`SpawnSpec`], because the real spec is built by the registry after
     // this gate answers and a placeholder-stuffed one here would be a value a
     // later reader might trust.
@@ -337,12 +289,6 @@ pub fn spawn_gate(
     // whatever it says — the same set a teammate's own engine is bound by, so
     // the gate and what it gates cannot disagree.
     let rules = lead.inherited_by_subagent();
-    let bypass = bypass
-        // Never below `Ask`, whatever a rule says. A stored "always" is how a
-        // person stops being asked about routine work, and handing a teammate
-        // the keys is the one thing that is never routine — so an allow here
-        // is read as an ask, and only a deny is stronger than the default.
-        .then(|| decide(&rules, BYPASS, agent_type).max(Decision::Ask));
     let directory = outside(project_root, cwd).map(|directory| {
         let pattern = covering(&directory);
 
@@ -370,11 +316,7 @@ pub fn spawn_gate(
         )
     });
 
-    SpawnGate {
-        bypass,
-        directory,
-        foreign,
-    }
+    SpawnGate { directory, foreign }
 }
 
 /// The teammate's directory, when the project does not reach it.
@@ -404,7 +346,7 @@ fn covering(directory: &Path) -> String {
 /// The rules arrive already filtered to what a teammate inherits, so this is
 /// last-match-wins over that set. Ask is the default because both permissions
 /// read here are things a person should see once: `external_directory` asks by
-/// default in the permission engine itself, and [`BYPASS`] would be a name
+/// default in the permission engine itself, and [`FOREIGN`] would be a name
 /// nothing has an opinion about, which the engine's own default would read as
 /// allow.
 fn decide(rules: &[Rule], permission: &str, pattern: &str) -> Decision {
@@ -438,7 +380,8 @@ pub struct Forwarded {
     pub reply: oneshot::Sender<PermissionReply>,
 }
 
-/// Carries one teammate's dialogs wherever its posture says they go.
+/// Carries one teammate's dialogs to the lead — [`Posture::ForwardToLead`]'s
+/// in-process carrier, and the only carrier an in-process teammate has.
 ///
 /// The answer travels back as a [`Command::ReplyPermission`] naming the
 /// request's **own id**, which is the whole of the routing: the teammate
@@ -462,7 +405,6 @@ pub struct Forwarded {
 /// its receiver at all — costs the teammate a refusal and never its turn.
 pub struct Forwarding {
     teammate: Arc<Teammate>,
-    posture: Posture,
     lead: Option<mpsc::Sender<Forwarded>>,
     events: futures::stream::BoxStream<'static, Result<Event, Evicted>>,
 }
@@ -474,7 +416,6 @@ impl std::fmt::Debug for Forwarding {
         formatter
             .debug_struct("Forwarding")
             .field("teammate", &self.teammate.name())
-            .field("posture", &self.posture)
             .field("attached", &self.lead.is_some())
             .finish_non_exhaustive()
     }
@@ -491,16 +432,11 @@ impl Forwarding {
     /// reason (`hand_over`); the two arms differ only in whether the surface
     /// was ever there.
     #[must_use]
-    pub fn new(
-        teammate: Arc<Teammate>,
-        posture: Posture,
-        lead: Option<mpsc::Sender<Forwarded>>,
-    ) -> Self {
+    pub fn new(teammate: Arc<Teammate>, lead: Option<mpsc::Sender<Forwarded>>) -> Self {
         let events = teammate.engine().subscribe_droppable();
 
         Self {
             teammate,
-            posture,
             lead,
             events,
         }
@@ -514,7 +450,6 @@ impl Forwarding {
     pub async fn run(self, cancel: CancellationToken) {
         let Self {
             teammate,
-            posture,
             lead,
             mut events,
         } = self;
@@ -542,10 +477,6 @@ impl Forwarding {
             };
             let request = id.clone();
 
-            if let Some(reply) = posture.auto_reply() {
-                answer(&teammate, request, reply).await;
-                continue;
-            }
             let Some(lead) = lead.clone() else {
                 answer(&teammate, request, PermissionReply::Reject).await;
                 continue;
@@ -636,14 +567,13 @@ async fn answer(teammate: &Teammate, id: PermissionId, reply: PermissionReply) {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, time::Duration};
+    use std::path::PathBuf;
 
     use ganja_protocol::team::MemberBackend;
-    use ganja_team::{MemberName, TeamName, TeamsRoot};
 
     use super::{
-        ANY, Arc, BYPASS, CancellationToken, Event, FOREIGN, Forwarded, Forwarding, Posture,
-        SpawnGate, SpawnSpec, Teammate, backend_name, mpsc, oneshot, permissions_for, spawn_gate,
+        ANY, Arc, CancellationToken, Event, FOREIGN, Forwarded, Forwarding, Posture, SpawnGate,
+        Teammate, backend_name, mpsc, oneshot, permissions_for, spawn_gate,
     };
     use crate::{
         Storage,
@@ -652,11 +582,6 @@ mod tests {
         provider::Provider,
         tool::Registry,
     };
-
-    /// How long the lead side is given to be asked something it must never be
-    /// asked. Short on purpose: the turn it would have come from has already
-    /// finished by the time it is read.
-    const NOTHING_ARRIVES: Duration = Duration::from_millis(200);
 
     fn rule(permission: &str, pattern: &str, action: Action) -> Rule {
         Rule {
@@ -674,25 +599,6 @@ mod tests {
         permissions.set_baseline(rules);
 
         permissions
-    }
-
-    /// A spawn of `name` into `cwd`, with everything else at its dullest.
-    fn spec(cwd: &std::path::Path, bypass: bool) -> SpawnSpec {
-        SpawnSpec {
-            name: MemberName::parse("worker").expect("a member name"),
-            team: TeamName::parse("session-abcd1234").expect("a team name"),
-            lead: MemberName::lead(),
-            root: TeamsRoot::new(cwd.join("teams")),
-            backend: MemberBackend::InProcess,
-            agent_type: "general".to_owned(),
-            model: "recorder-model".to_owned(),
-            color: "blue".to_owned(),
-            prompt: "have a look at the parser".to_owned(),
-            cwd: cwd.to_path_buf(),
-            plan_mode_required: false,
-            bypass,
-            parent_session_id: "01998ad0-0000-7000-8000-000000000000".to_owned(),
-        }
     }
 
     /// A teammate over its own temporary store, holding `tools`.
@@ -767,98 +673,13 @@ mod tests {
         );
     }
 
-    /// An in-process teammate has no terminal of its own, so the attended
-    /// posture is not one a spawn here can choose.
+    /// The posture nothing chose is the lead's dialog: a teammate nobody
+    /// approved anything for is a teammate whose asks are the lead's to
+    /// answer — and since **D513** there is no spawn that could choose
+    /// otherwise.
     #[test]
-    fn an_in_process_spawn_chooses_between_two_postures_and_never_the_third() {
-        let directory = tempfile::tempdir().expect("a temporary directory");
-
-        assert_eq!(
-            Posture::for_spawn(&spec(directory.path(), false)),
-            Posture::ForwardToLead,
-            "the default is the lead's dialog"
-        );
-        assert_eq!(
-            Posture::for_spawn(&spec(directory.path(), true)),
-            Posture::BypassAtSpawn,
-        );
+    fn the_default_posture_is_the_leads_dialog() {
         assert_eq!(Posture::default(), Posture::ForwardToLead);
-        assert_eq!(
-            Posture::BypassAtSpawn.auto_reply(),
-            Some(PermissionReply::Once),
-            "nothing is remembered, so the answer lasts as long as the teammate"
-        );
-        for posture in [Posture::ForwardToLead, Posture::HumanAttended] {
-            assert_eq!(
-                posture.auto_reply(),
-                None,
-                "{posture:?} answers nothing on its own"
-            );
-        }
-    }
-
-    /// §10.11-10: asking to skip dialogs is itself something to be asked about,
-    /// and no stored allow makes it routine. A rule that *denies* it still
-    /// denies — the one direction a rule may move it.
-    #[test]
-    fn a_spawn_that_skips_dialogs_is_asked_about_and_can_be_refused() {
-        let directory = tempfile::tempdir().expect("a temporary directory");
-        let asked = spawn_gate(
-            &lead(Vec::new()),
-            directory.path(),
-            true,
-            "general",
-            directory.path(),
-            MemberBackend::InProcess,
-        );
-        assert_eq!(asked.bypass, Some(Decision::Ask));
-        assert_eq!(asked.action(), Decision::Ask);
-        assert_eq!(asked.refusal(), None, "asking is not refusing");
-
-        let allowed = spawn_gate(
-            &lead(vec![rule(BYPASS, ANY, Action::Allow)]),
-            directory.path(),
-            true,
-            "general",
-            directory.path(),
-            MemberBackend::InProcess,
-        );
-        assert_eq!(
-            allowed.bypass,
-            Some(Decision::Ask),
-            "handing over the keys is never routine, whatever a rule says"
-        );
-
-        let denied = spawn_gate(
-            &lead(vec![rule(BYPASS, "general", Action::Deny)]),
-            directory.path(),
-            true,
-            "general",
-            directory.path(),
-            MemberBackend::InProcess,
-        );
-        assert_eq!(denied.action(), Decision::Deny);
-        assert!(
-            denied
-                .refusal()
-                .is_some_and(|why| why.contains("skip permission dialogs")),
-            "a refused spawn says why: {:?}",
-            denied.refusal()
-        );
-
-        let ordinary = spawn_gate(
-            &lead(vec![rule(BYPASS, ANY, Action::Deny)]),
-            directory.path(),
-            false,
-            "general",
-            directory.path(),
-            MemberBackend::InProcess,
-        );
-        assert_eq!(
-            ordinary.bypass, None,
-            "a spawn that asked for nothing is asked nothing"
-        );
-        assert_eq!(ordinary.action(), Decision::Allow);
     }
 
     /// §10.11-11: a teammate's directory passes the same gate any other work
@@ -872,8 +693,6 @@ mod tests {
         let inside = spawn_gate(
             &lead(Vec::new()),
             project.path(),
-            false,
-            "general",
             &project.path().join("crates"),
             MemberBackend::InProcess,
         );
@@ -886,8 +705,6 @@ mod tests {
         let outside = spawn_gate(
             &lead(Vec::new()),
             project.path(),
-            false,
-            "general",
             elsewhere.path(),
             MemberBackend::InProcess,
         );
@@ -907,8 +724,6 @@ mod tests {
                 Action::Allow,
             )]),
             project.path(),
-            false,
-            "general",
             elsewhere.path(),
             MemberBackend::InProcess,
         );
@@ -921,8 +736,6 @@ mod tests {
         let refused = spawn_gate(
             &lead(vec![rule(EXTERNAL_DIRECTORY, ANY, Action::Deny)]),
             project.path(),
-            false,
-            "general",
             elsewhere.path(),
             MemberBackend::InProcess,
         );
@@ -954,11 +767,11 @@ mod tests {
     /// so explicitly, so that a build which quietly stopped asking about agy
     /// would fail here instead of shipping.
     ///
-    /// **The two clauses that were never agy's to take away** stay true and
-    /// are why the W4-era sentence "the refusal comes first" was only ever
-    /// about the foreign clause: `bypass` and `external_directory` are decided
-    /// without reference to the backend, so they raise their dialogs for every
-    /// surface, agy included, and did so even while its spawn refused.
+    /// **The clause that was never agy's to take away** stays true and is why
+    /// the W4-era sentence "the refusal comes first" was only ever about the
+    /// foreign clause: `external_directory` is decided without reference to
+    /// the backend, so it raises its dialog for every surface, agy included,
+    /// and did so even while its spawn refused.
     #[test]
     fn agy_raises_the_foreign_gate_because_it_now_spawns() {
         let directory = tempfile::tempdir().expect("a temporary directory");
@@ -966,8 +779,6 @@ mod tests {
         let gate = spawn_gate(
             &lead(Vec::new()),
             directory.path(),
-            false,
-            "general",
             directory.path(),
             MemberBackend::Agy,
         );
@@ -1014,8 +825,6 @@ mod tests {
             let asked = spawn_gate(
                 &lead(Vec::new()),
                 directory.path(),
-                false,
-                "general",
                 directory.path(),
                 backend,
             );
@@ -1027,8 +836,6 @@ mod tests {
             let allowed = spawn_gate(
                 &lead(vec![rule(FOREIGN, ANY, Action::Allow)]),
                 directory.path(),
-                false,
-                "general",
                 directory.path(),
                 backend,
             );
@@ -1044,8 +851,6 @@ mod tests {
             let denied = spawn_gate(
                 &lead(vec![rule(FOREIGN, name, Action::Deny)]),
                 directory.path(),
-                false,
-                "general",
                 directory.path(),
                 backend,
             );
@@ -1061,8 +866,6 @@ mod tests {
             let other = spawn_gate(
                 &lead(vec![rule(FOREIGN, "codex", Action::Deny)]),
                 directory.path(),
-                false,
-                "general",
                 directory.path(),
                 backend,
             );
@@ -1075,9 +878,8 @@ mod tests {
         }
 
         // P25's three surfaces are untouched by any of it: an in-project
-        // spawn asking for no bypass still raises nothing at all, which is
-        // `posture.rs`'s own `Allow` default and the thing this clause must
-        // not have moved.
+        // spawn still raises nothing at all, which is `posture.rs`'s own
+        // `Allow` default and the thing this clause must not have moved.
         for backend in [
             MemberBackend::InProcess,
             MemberBackend::Ganja,
@@ -1088,8 +890,6 @@ mod tests {
                 // the clause is not read for these surfaces at all.
                 &lead(vec![rule(FOREIGN, ANY, Action::Deny)]),
                 directory.path(),
-                false,
-                "general",
                 directory.path(),
                 backend,
             );
@@ -1121,8 +921,7 @@ mod tests {
         );
 
         let (sender, mut inbox) = mpsc::channel(4);
-        let forwarding =
-            Forwarding::new(Arc::clone(&teammate), Posture::ForwardToLead, Some(sender));
+        let forwarding = Forwarding::new(Arc::clone(&teammate), Some(sender));
         let cancel = CancellationToken::new();
         let carrying = tokio::spawn(forwarding.run(cancel.clone()));
         let mut events = teammate
@@ -1169,103 +968,6 @@ mod tests {
         carrying.await.expect("the forwarding ends with its token");
     }
 
-    /// **BypassAtSpawn.** The spawn was the answer, so nothing reaches the lead
-    /// — and a rule that denies still denies, which is the half a bypass never
-    /// gets to touch (**D479**).
-    #[tokio::test]
-    async fn a_bypassing_teammate_asks_nobody_and_is_still_refused_what_a_rule_denies() {
-        let (tool, calls) = ganja_testkit::RecorderTool::new("write", "wrote", "written");
-        let (provider, _) = ganja_testkit::ScriptedProvider::named("fake", writes());
-        let (_allowed, allowed) = teammate(
-            provider,
-            Arc::new(Registry::new(vec![tool])),
-            permissions_for(&lead(Vec::new()), Vec::new()),
-        );
-
-        let (sender, mut inbox) = mpsc::channel(4);
-        let cancel = CancellationToken::new();
-        let carrying = tokio::spawn(
-            Forwarding::new(
-                Arc::clone(&allowed),
-                Posture::BypassAtSpawn,
-                Some(sender.clone()),
-            )
-            .run(cancel.clone()),
-        );
-        let mut events = allowed
-            .engine()
-            .subscribe()
-            .await
-            .expect("the first subscriber wins");
-        allowed
-            .engine()
-            .send(Command::SendPrompt {
-                text: "write the note".to_owned(),
-                mentions: Vec::new(),
-                skills: Vec::new(),
-                peers: Vec::new(),
-            })
-            .await
-            .expect("an idle engine accepts a prompt");
-        ganja_testkit::drain(&mut events).await;
-
-        assert_eq!(
-            calls.lock().expect("the call log is never poisoned").len(),
-            1,
-            "the bypass answered the dialog the rules raised"
-        );
-
-        // The same shape of teammate, under a rule that refuses the call
-        // outright. Its own recorder, so "never ran" is read off an empty log
-        // rather than off a count that did not move.
-        let (refused_tool, refused_calls) =
-            ganja_testkit::RecorderTool::new("write", "wrote", "written");
-        let (provider, _) = ganja_testkit::ScriptedProvider::named("fake", writes());
-        let (_denied, denied) = teammate(
-            provider,
-            Arc::new(Registry::new(vec![refused_tool])),
-            permissions_for(&lead(vec![rule("write", ANY, Action::Deny)]), Vec::new()),
-        );
-        let refusing = tokio::spawn(
-            Forwarding::new(Arc::clone(&denied), Posture::BypassAtSpawn, Some(sender))
-                .run(cancel.clone()),
-        );
-        let mut events = denied
-            .engine()
-            .subscribe()
-            .await
-            .expect("the first subscriber wins");
-        denied
-            .engine()
-            .send(Command::SendPrompt {
-                text: "write the note".to_owned(),
-                mentions: Vec::new(),
-                skills: Vec::new(),
-                peers: Vec::new(),
-            })
-            .await
-            .expect("an idle engine accepts a prompt");
-        ganja_testkit::drain(&mut events).await;
-
-        assert!(
-            refused_calls
-                .lock()
-                .expect("the call log is never poisoned")
-                .is_empty(),
-            "a bypass answers dialogs and never overturns a deny"
-        );
-        assert!(
-            tokio::time::timeout(NOTHING_ARRIVES, inbox.recv())
-                .await
-                .is_err(),
-            "neither the bypass nor the deny puts a question in front of anybody"
-        );
-
-        cancel.cancel();
-        carrying.await.expect("the forwarding ends with its token");
-        refusing.await.expect("the forwarding ends with its token");
-    }
-
     /// A teammate whose lead has no dialog surface is refused rather than left
     /// waiting for an answer nobody can give.
     #[tokio::test]
@@ -1279,10 +981,8 @@ mod tests {
         );
 
         let cancel = CancellationToken::new();
-        let carrying = tokio::spawn(
-            Forwarding::new(Arc::clone(&teammate), Posture::ForwardToLead, None)
-                .run(cancel.clone()),
-        );
+        let carrying =
+            tokio::spawn(Forwarding::new(Arc::clone(&teammate), None).run(cancel.clone()));
         let mut events = teammate
             .engine()
             .subscribe()
@@ -1359,10 +1059,8 @@ mod tests {
         sender.try_send(occupying()).expect("the one slot was free");
 
         let cancel = CancellationToken::new();
-        let carrying = tokio::spawn(
-            Forwarding::new(Arc::clone(&teammate), Posture::ForwardToLead, Some(sender))
-                .run(cancel.clone()),
-        );
+        let carrying =
+            tokio::spawn(Forwarding::new(Arc::clone(&teammate), Some(sender)).run(cancel.clone()));
         let mut events = teammate
             .engine()
             .subscribe()

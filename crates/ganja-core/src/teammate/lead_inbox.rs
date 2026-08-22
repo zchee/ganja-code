@@ -1245,7 +1245,6 @@ mod tests {
                     prompt: "hold the fort".to_owned(),
                     cwd: home.path().to_path_buf(),
                     plan_mode_required: false,
-                    bypass: false,
                 },
             )
             .await
@@ -1330,7 +1329,6 @@ mod tests {
                     prompt: "hold the fort".to_owned(),
                     cwd: cwd.to_path_buf(),
                     plan_mode_required: false,
-                    bypass: false,
                 },
             )
             .await

@@ -366,35 +366,6 @@ async fn a_spawn_refuses_by_name_when_no_codex_is_on_this_path() {
     registry.shutdown().await;
 }
 
-/// **AC-22.** The escalation door is not built, and a silent downgrade would be
-/// a worse lie than a refusal: somebody who typed `--bypass` asked for
-/// something, and answering "yes" while doing "no" is what they cannot have
-/// wanted. No child is started at all.
-#[tokio::test]
-async fn a_codex_spawn_asking_to_bypass_is_refused_and_starts_nothing() {
-    let home = ganja_testkit::temp_dir();
-    let cli = FakeCodex::install(Mode::Answer);
-    let (registry, door, ..) = lead(home.path(), &cli);
-
-    let refusal = door
-        .start_with_bypass(
-            ganja_testkit::spawn_with_prompt("w1", Some("codex"), TASK),
-            true,
-            &ganja_testkit::caller(home.path()),
-            &AllowSpawn,
-        )
-        .await
-        .expect_err("a bypass spawn on a shim backend is refused");
-    assert!(refusal.reason.contains("no escalation door"), "{refusal:?}");
-    assert!(
-        cli.received().is_empty(),
-        "not even the pre-check runs: {:?}",
-        cli.received()
-    );
-
-    registry.shutdown().await;
-}
-
 /// **AC-8**, on codex's own shapes rather than the fixture driver's, for the
 /// three arms a running child can take: a non-zero exit, a clean exit with
 /// unreadable output, and the vendor's own startup refusal. Each becomes

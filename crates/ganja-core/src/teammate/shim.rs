@@ -46,12 +46,12 @@
 //! # What is never composed
 //!
 //! The posture each CLI launches under is D508(a)'s, pinned on **every** turn
-//! rather than only the first, and the escalation door is not built:
-//! [`refuse_bypass`](crate::teammate::shim::refuse_bypass) refuses a [`SpawnSpec`] carrying `bypass` by name for
-//! every shim backend. A silent downgrade to the conservative posture would be
-//! a worse lie than a refusal — somebody who typed `--bypass` asked for
-//! something, and answering "yes" while doing "no" is the one outcome they
-//! cannot have wanted.
+//! rather than only the first, and the escalation door is not built. Until
+//! 2026-08-22 a `refuse_bypass` stood here refusing a [`SpawnSpec`] carrying
+//! `bypass` by name for every shim backend, because a silent downgrade to the
+//! conservative posture would have been a worse lie than a refusal; **D513**
+//! retired the bypass axis itself, so there is no such spec left to refuse and
+//! the pinned posture is the only one a spawn can ask for.
 //!
 //! The child's environment is **enumerated** rather than inherited
 //! ([`environment`](crate::teammate::shim::environment)), and one clause of that enumeration is a class rule
@@ -204,15 +204,6 @@ pub const POLL: Duration = runner::POLL;
 /// prompt file. Everything else is per CLI, and the list is data so growing it
 /// is a one-line edit.
 pub const CARRIED: [&str; 3] = ["HOME", "PATH", "TMPDIR"];
-
-/// Why a shim backend refuses a spawn that asked to bypass its dialogs.
-///
-/// Names the follow-up rather than the wave, because which version carries the
-/// permission channel is the plan's to say and a constant naming a wave would
-/// be a second place to keep that right.
-pub const REFUSED_BYPASS: &str = "a teammate on another vendor's CLI runs at one pinned posture and asks nobody, so there is \
-     no dialog for --bypass to skip and no escalation door to open; what bypass would map to is \
-     recorded in D508(b) and lands with the permission channel that can carry it";
 
 /// Why a spawn refuses when the CLI is not on this session's `PATH`.
 ///
@@ -498,26 +489,6 @@ pub fn resolve(path: &OsStr, binary: &str) -> Option<PathBuf> {
     which::which_in_global(binary, Some(search_path))
         .ok()?
         .next()
-}
-
-/// D508(a)'s refusal: a shim spawn that asked to bypass its dialogs.
-///
-/// One helper for all three backends, because what is being promised is that
-/// the three refuse *identically* — an escalation door that existed on one of
-/// them would be an escalation door.
-///
-/// # Errors
-///
-/// [`Unsupported`] carrying [`REFUSED_BYPASS`] when `spec.bypass` is set.
-pub fn refuse_bypass(spec: &SpawnSpec, backend: MemberBackend) -> Result<(), Unsupported> {
-    if spec.bypass {
-        return Err(Unsupported {
-            backend,
-            reason: REFUSED_BYPASS.to_owned(),
-        });
-    }
-
-    Ok(())
 }
 
 /// The environment one shim child gets: [`CARRIED`], plus this CLI's own
@@ -1003,10 +974,11 @@ impl Launch {
 
 /// What every shim backend does before it spawns anything, in one place.
 ///
-/// The three checks are the same three for every CLI, and answering them in
-/// three modules would be three places for one of them to go missing: the
-/// escalation door is refused, the binary is resolved, and the environment is
-/// enumerated.
+/// The two checks are the same two for every CLI, and answering them in three
+/// modules would be three places for one of them to go missing: the binary is
+/// resolved, and the environment is enumerated. (A third, refusing the
+/// escalation door, stood here until **D513** retired the bypass axis that
+/// could have asked for one.)
 ///
 /// `path` overrides where the binary is looked for and what the child's `PATH`
 /// is set to — one value for both, because a build that resolved a fake CLI and
@@ -1020,7 +992,6 @@ pub fn prepare(
     spec: &SpawnSpec,
     path: Option<&OsStr>,
 ) -> Result<Launch, Unsupported> {
-    refuse_bypass(spec, driver.backend())?;
     // Loud where a driver's own list is first consulted, silent where the
     // environment is built: [`environment`] drops such a name whatever
     // happens, so a release build is safe, and this is what makes a developer

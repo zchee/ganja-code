@@ -235,17 +235,19 @@ impl BypassArgs {
 ///       [--agent-color <color>] --parent-session-id <lead session id>
 /// ```
 ///
-/// The first line's `[--model P/M] [--agent NAME]` are `SelectArgs`' own — they
-/// are shown because clap accepts them on *any* invocation, including one wearing
-/// these flags, and **not** because a lead ever composes them: a spawn's model
-/// travels in the member record (see below) and its agent is that record's
-/// `planModeRequired`. The bracketed pair is what a person could type, not part
-/// of the contract the launch line is composed against. The bypass trio
-/// is the pane's posture (D-5): carried, the teammate answers its own dialogs
-/// (D479); absent, it forwards every ask to the lead as a §5 frame. The pane
-/// id is not on the line — the pane reads `TMUX_PANE` from the environment
-/// tmux gives it — and neither is the model, which the pane takes from the
-/// member record its lead writes.
+/// The first line — `[--model P/M] [--agent NAME]`, `SelectArgs`' own, and the
+/// bypass trio, `BypassArgs`' — is shown because clap accepts those on *any*
+/// invocation, including one wearing these flags, and **not** because a lead
+/// ever composes them: a spawn's model travels in the member record (see
+/// below), its agent is that record's `planModeRequired`, and its posture is
+/// the one every pane has — every ask forwarded to the lead as a §5 frame
+/// (D-5). The bracketed words are what a person could type, not part of the
+/// contract the launch line is composed against; until 2026-08-22 a lead did
+/// compose `--auto` for a spawn that had asked for bypass, and **D513**
+/// retired that axis, so a pane's own `--auto` is now a person's word alone
+/// (D479). The pane id is not on the line — the pane reads `TMUX_PANE` from
+/// the environment tmux gives it — and neither is the model, which the pane
+/// takes from the member record its lead writes.
 #[derive(Debug, Args)]
 struct MemberArgs {
     #[arg(

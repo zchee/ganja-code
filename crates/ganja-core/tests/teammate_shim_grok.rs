@@ -597,61 +597,42 @@ async fn the_prompt_reaches_grok_in_a_file_and_never_in_its_argv() {
     registry.shutdown().await;
 }
 
-/// **AC-22.** The escalation door is not built, and a silent downgrade would be
-/// a worse lie than a refusal. No child is started at all.
+/// **AC-17's three-reader tie.** The spawn dialog is the third reader of
+/// D508(c)'s table, beside the `/team` ring line and the honest-strength
+/// column, and it is the sentence a person actually consents against — so it
+/// is compared against the other two readers rather than against a literal,
+/// and the three cannot come to describe one grant differently. The dialog
+/// fires on the foreign clause alone (since **D513** there is no bypass clause
+/// for it to ride on), which is the honest reason it fires at all: every shim
+/// spawn asks, and no rule can silence it.
 ///
-/// It also pins the **order**, which W4's review found and could only describe
-/// in a comment for want of a positive accessor: `spawn_gate`'s bypass clause
-/// is backend-independent, so a person is asked *before* the backend is ever
-/// reached and refuses. That is fail-closed and intended — the dialog is not
-/// skipped on the strength of a refusal nobody has issued yet — and asserting
-/// it means a future change that moved the refusal earlier would be a failing
-/// test rather than a quietly skipped question.
+/// The `surface` key is pinned **absent** on this door: the headless shim core
+/// answers no `surface_line`, and only a CLI's native TUI pane (D512) adds one.
 #[tokio::test]
-async fn a_grok_spawn_asking_to_bypass_is_asked_about_and_then_refused() {
+async fn a_grok_spawn_dialog_carries_the_posture_the_ring_and_the_table_carry() {
     let home = ganja_testkit::temp_dir();
     let cli = FakeGrok::install(Mode::Answer);
     let (registry, door, ..) = lead(home.path(), &cli);
     let spawn_asks = ganja_testkit::RecordedSpawns::default();
 
-    let refusal = door
-        .start_with_bypass(
-            ganja_testkit::spawn_with_prompt("w1", Some("grok"), TASK),
-            true,
-            &ganja_testkit::caller(home.path()),
-            &spawn_asks,
-        )
-        .await
-        .expect_err("a bypass spawn on a shim backend is refused");
+    door.start(
+        ganja_testkit::spawn_with_prompt("w1", Some("grok"), TASK),
+        &ganja_testkit::caller(home.path()),
+        &spawn_asks,
+    )
+    .await
+    .expect("a shim spawn the person approved starts");
 
-    assert!(refusal.reason.contains("no escalation door"), "{refusal:?}");
-    assert!(
-        cli.received().is_empty(),
-        "nothing is started at all: {:?}",
-        cli.received()
-    );
     let asked = spawn_asks.asked();
-    assert_eq!(
-        asked.len(),
-        1,
-        "the bypass clause raises its dialog: {asked:?}"
-    );
+    assert_eq!(asked.len(), 1, "one spawn, one dialog: {asked:?}");
     assert_eq!(
         asked[0]
             .args
             .get("backend")
             .and_then(|value| value.as_str()),
         Some("grok"),
-        "and it names the surface the person is being asked about: {asked:?}"
+        "it names the surface the person is being asked about: {asked:?}"
     );
-
-    // **AC-17's three-reader tie, closed here.** The dialog is the third reader
-    // of D508(c)'s table, beside the ring line and the honest-strength column,
-    // and it is the one no test had ever compared: `spawn_lines` was tied to
-    // `posture_line` and `posture_line` to the recording, leaving the sentence
-    // a person actually consents against asserted by nobody. Compared against
-    // the other two readers rather than against a literal, so the three cannot
-    // come to describe one grant differently.
     let table = ganja_core::teammate::posture_line(ganja_protocol::team::MemberBackend::Grok)
         .expect("grok states its posture");
     assert_eq!(
@@ -665,6 +646,10 @@ async fn a_grok_spawn_asking_to_bypass_is_asked_about_and_then_refused() {
     assert!(
         shim::spawn_lines(ganja_protocol::team::MemberBackend::Grok)[0].ends_with(table),
         "and the ring line ends in the same sentence"
+    );
+    assert!(
+        asked[0].args.get("surface").is_none(),
+        "the headless door discloses no surface; only a pane does (D512): {asked:?}"
     );
 
     registry.shutdown().await;

@@ -64,11 +64,13 @@
 //! through this inbox, resolved by the type that refuses a peer's
 //! ([`Asks::resolve`] takes a [`LeadFrame`]) into the `ReplyPermission` the
 //! app sends — once, always or reject, exactly as the person at the lead's
-//! dialog answered *this member's own* open ask. [`Posture::BypassAtSpawn`]
-//! is the launch line's bypass trio (D479), which a lead composes exactly when
-//! the spawn it approved asked to skip dialogs, and which this app answers with
-//! the allow-once it already answers its own dialogs with; nothing selects
-//! [`Posture::HumanAttended`] yet, and the plan selects it by nothing either.
+//! dialog answered *this member's own* open ask. Nothing on the launch line
+//! says otherwise: until 2026-08-22 a lead composed the bypass trio (D479)
+//! onto it for a spawn that had asked to skip dialogs, and **D513** retired
+//! that axis, so a pane's `--auto` is now only ever a person's word about
+//! their own session and never a posture the lead chose for it; nothing
+//! selects [`Posture::HumanAttended`] yet, and the plan selects it by nothing
+//! either.
 //!
 //! The member record — the model this teammate was spawned to run, and
 //! whether it must start in plan mode — is read off the team file **after a
@@ -209,11 +211,11 @@ impl Membership {
     /// pane to kill; a process launched with these flags outside tmux reports
     /// no pane, which is the truth about it.
     ///
-    /// `bypass` is the launch line's bypass trio: [`Posture::BypassAtSpawn`]
-    /// when set, [`Posture::ForwardToLead`] otherwise — the record carries no
-    /// posture of its own (Claude's shape holds `planModeRequired` and nothing
-    /// else about it), and the spawn's own answer is the one fact the lead can
-    /// put on the line without putting a secret there.
+    /// The posture is [`Posture::ForwardToLead`], and nothing on the line can
+    /// say otherwise: the record carries no posture of its own (Claude's shape
+    /// holds `planModeRequired` and nothing else about it), and since **D513**
+    /// a lead composes no posture onto the launch line either — the bypass trio
+    /// that once rode it was the retired `--bypass`'s only carrier.
     ///
     /// # Errors
     ///
@@ -224,7 +226,6 @@ impl Membership {
         config_home: &Path,
         cwd: &Path,
         pane: Option<String>,
-        bypass: bool,
     ) -> Result<Self> {
         let name = MemberName::parse(&flags.name)
             .with_context(|| format!("--agent-name {:?} is refused", flags.name))?;
@@ -255,11 +256,7 @@ impl Membership {
             color: flags.color,
             parent_session_id: flags.parent_session_id,
             surface,
-            posture: if bypass {
-                Posture::BypassAtSpawn
-            } else {
-                Posture::ForwardToLead
-            },
+            posture: Posture::ForwardToLead,
         })
     }
 
@@ -805,8 +802,8 @@ fn flags(name: &str) -> Flags {
 /// Teammate `w1` of §2.1's example team, resolved under `root` — the one
 /// membership fixture this crate's tests share.
 #[cfg(test)]
-pub(crate) fn membership(root: &Path, pane: Option<&str>, bypass: bool) -> Membership {
-    Membership::resolve(flags("w1"), root, root, pane.map(str::to_owned), bypass)
+pub(crate) fn membership(root: &Path, pane: Option<&str>) -> Membership {
+    Membership::resolve(flags("w1"), root, root, pane.map(str::to_owned))
         .expect("the flags resolve")
 }
 
@@ -858,7 +855,7 @@ mod tests {
 
     /// The `w1` fixture, under a temporary home.
     fn member(home: &TempDir, pane: Option<&str>) -> Membership {
-        membership(home.path(), pane, false)
+        membership(home.path(), pane)
     }
 
     /// The root the flags resolve to is the one a lead of the same session
@@ -897,7 +894,7 @@ mod tests {
         let mut wrong = flags("w1");
         wrong.agent_id = "w2@session-224cbeab".to_owned();
 
-        let refused = Membership::resolve(wrong, home.path(), home.path(), None, false)
+        let refused = Membership::resolve(wrong, home.path(), home.path(), None)
             .expect_err("a mismatched id is refused");
 
         assert!(
@@ -913,7 +910,6 @@ mod tests {
                 home.path(),
                 home.path(),
                 None,
-                false,
             )
             .is_err(),
             "and the reserved name is refused by the grammar"
@@ -1172,16 +1168,17 @@ mod tests {
         assert!(held(&inbox.inbox).is_empty());
     }
 
-    /// The launch line's bypass trio is the one posture fact the lead can put
-    /// on the line, and the default is the lead's own dialog (D-5).
+    /// A pane's asks go to the lead's own dialog (D-5), and since **D513** the
+    /// launch line carries nothing that could say otherwise.
     #[test]
-    fn a_pane_forwards_to_its_lead_unless_the_line_carried_the_bypass() {
+    fn a_pane_forwards_its_asks_to_its_lead() {
         let home = tempfile::tempdir().expect("a temporary home");
 
         assert_eq!(member(&home, None).posture(), Posture::ForwardToLead);
         assert_eq!(
-            membership(home.path(), None, true).posture(),
-            Posture::BypassAtSpawn
+            membership(home.path(), Some("%5")).posture(),
+            Posture::ForwardToLead,
+            "a pane id changes the surface, never the posture"
         );
     }
 
