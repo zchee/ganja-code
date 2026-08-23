@@ -28,11 +28,14 @@
 //! is a thing a person can look at. `teammates.shim_turn_timeout` keeps
 //! governing the headless machinery only, and nothing here reads it.
 //!
-//! What also does not change is **v1 is send-only**: the lead's words reach
-//! the composer, and the lead hears nothing back. The CLI's replies render in
-//! the pane for a person; no transcript is read back into the mailbox. The
-//! spawn dialog and the `/team` ring say so rather than implying a
-//! conversation: [`pane_line`](crate::teammate::shim_tui::pane_line) is that
+//! What changed on 2026-08-24 is the half **D512** deliberately left out: a
+//! pane is no longer send-only. The lead's words reach the composer, and what
+//! the CLI answers is carried back out of its own transcript
+//! ([`crate::teammate::readback`], **D515**) as ordinary mail from this
+//! member — the pane still renders them for the person watching it, and the
+//! mailbox now carries them too. The spawn dialog and the `/team` ring say
+//! so, in the sentence that used to say the opposite:
+//! [`pane_line`](crate::teammate::shim_tui::pane_line) is that
 //! sentence, per CLI, read by both through [`TeammateBackend::surface_line`]
 //! and [`spawn_lines`](crate::teammate::shim_tui::spawn_lines) — beside
 //! [`posture_line`]'s bound, which a pane does not move and which stays
@@ -139,7 +142,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use async_trait::async_trait;
@@ -153,7 +156,7 @@ use crate::teammate::{
     backend_name,
     codex::Codex,
     grok::Grok,
-    pane,
+    pane, readback,
     reaper::Pane,
     runner,
     shim::{self, Driver},
@@ -235,6 +238,39 @@ pub const RING_PASTED_UNSUBMITTED: &str = "pasted into the pane, unsubmitted —
 /// by the pane's own last line where it showed one.
 pub const RING_EXITED: &str = "exited in the pane";
 
+/// What a member's ring says once its CLI's own transcript has been found
+/// and its answers are being carried to the lead (**D515**).
+pub const RING_READING: &str = "reading the pane's own transcript";
+
+/// What a member's ring says for each **poll** that carried something back to
+/// the lead, with the byte count and — where a poll found more than one
+/// message and joined them — how many it joined.
+pub const RING_RELAYED: &str = "answer carried to the lead";
+
+/// What a member's ring says when its CLI wrote no session this side could
+/// find within [`READBACK_WAIT`]: the pane still works, and nothing said in
+/// it will reach the lead.
+pub const RING_NO_TRANSCRIPT: &str =
+    "no transcript found for this pane; the lead will not hear its answers";
+
+/// How often a member looks at its CLI's own transcript for new answers
+/// (**D515**).
+///
+/// [`LIVENESS_POLL`]'s cadence, and for a related reason: a person watching
+/// the pane sees an answer as it is drawn, so what this decides is how long
+/// the **lead** waits — a couple of seconds behind the screen, well inside
+/// the time its own model takes to read anything.
+pub const READBACK_POLL: Duration = Duration::from_secs(2);
+
+/// How long a member looks for a session its CLI has not written yet before
+/// saying, once, that it found none.
+///
+/// A ceiling on the *complaint*, never on the looking: a CLI that writes its
+/// first record late — a trust dialog answered after a minute, a login — is
+/// still read from the moment it does. What this bounds is how long a ring
+/// stays silent about a pane whose answers nobody will hear.
+pub const READBACK_WAIT: Duration = Duration::from_secs(90);
+
 /// How often a member's loop asks whether its pane is still running.
 ///
 /// A question a delivery cannot be the only thing to ask: under
@@ -260,11 +296,11 @@ const PANE_IS_DEAD: &str = "Pane is dead";
 /// The clause every pane sentence **opens** on: what v1 does not do.
 ///
 /// One spelling rather than three, because it is the one fact a person
-/// consenting to any shim pane must not miss and the one a reader would most
-/// readily assume the other way: a teammate that is spoken to is presumed to
-/// answer. Here it does not — the lead pastes, the CLI replies on screen, and
-/// nothing carries the reply back into the mailbox (read-back is bead
-/// `ganja-code-9u1`).
+/// consenting to any shim pane must not miss: whether the teammate they are
+/// starting will be heard from. Until 2026-08-24 this clause said the
+/// opposite — `send-only: the lead hears nothing back` — because it was true
+/// (**D512**); **D515** made the pane answer, and the sentence moved with the
+/// behaviour rather than growing a footnote.
 ///
 /// First, and short, because of where the sentence is read: the spawn dialog
 /// is the generic permission modal, whose clamp leaves a seventh argument
@@ -273,15 +309,18 @@ const PANE_IS_DEAD: &str = "Pane is dead";
 /// forty characters, and the per-CLI clause after it is the part that may be
 /// cut. `ganja-tui`'s permission test renders the real sentences at 80x24
 /// and asserts this clause is on screen for all three.
-pub const SEND_ONLY: &str = "send-only: the lead hears nothing back";
+pub const HEARD_BACK: &str = "its answers are mailed back to you";
 
 /// What a shim teammate in its CLI's native TUI is told before its task
 /// (**D514**): the pane channel of [`crate::teammate::preamble::frame`].
 ///
-/// The paragraph says the one thing a foreign agent in a pane cannot work out
-/// for itself — that it has **no way to answer** (v1 is send-only, **D512**),
-/// so its words are read on this screen by the person watching the pane and
-/// nowhere else — and it says so in the CLI's own name, because the preamble
+/// The paragraph says the two things a foreign agent in a pane cannot work
+/// out for itself: that what it says on this screen **is** carried to its lead
+/// as mail — read out of this CLI's own transcript (**D515**) — and how much
+/// of it is, which is [`readback::answers_clause`]'s one spelling and
+/// therefore the same sentence the headless door tells the same CLI. Until
+/// 2026-08-24 it said the opposite, because the pane was send-only (**D512**).
+/// It says it in the CLI's own name, because the preamble
 /// is pasted into that CLI's composer as the first of the lead's messages,
 /// opening on `runner::envelope`'s "A message from" line
 /// like every message after it. `who` and `prompt` are bare so a test can
@@ -297,17 +336,19 @@ pub fn preamble(
         &format!(
             "You are running in your own {cli} session, in a tmux pane beside your lead's. \
              Messages from the lead arrive pasted into this composer, each opening with who sent \
-             it — this one did. You have no way to message back: nothing you write reaches the \
-             lead's conversation, and your answers are read here, on this screen, by the person \
-             watching your pane — so put the whole of your answer on screen rather than promising \
-             to report back.",
+             it — this one did. Your answers are read here, on this screen, by the person \
+             watching your pane, and {answers} — so put the whole of your answer on screen \
+             rather than promising to report back; there is no tool to send with and none is \
+             needed.",
             cli = backend_name(backend),
+            answers = readback::answers_clause(backend, readback::Road::Pane)
+                .unwrap_or("nothing you say is carried any further"),
         ),
         prompt,
     )
 }
 
-/// What a codex pane adds after [`SEND_ONLY`], **measured**
+/// What a codex pane adds after [`HEARD_BACK`], **measured**
 /// (`tests/fixtures/codex-tui-probe.txt`).
 ///
 /// The floors are the same two `-c` keys the headless door pins, and the
@@ -320,7 +361,7 @@ pub fn preamble(
 const PANE_CODEX: &str = "codex's own TUI in a tmux pane beside you; approval_policy=never asks no \
      approval, a denied tool is denied";
 
-/// What an agy pane adds after [`SEND_ONLY`], **measured**
+/// What an agy pane adds after [`HEARD_BACK`], **measured**
 /// (`tests/fixtures/agy-tui-probe.txt`).
 ///
 /// The one flag that carries over, `--sandbox`, bounds the terminal only
@@ -333,7 +374,7 @@ const PANE_CODEX: &str = "codex's own TUI in a tmux pane beside you; approval_po
 const PANE_AGY: &str = "agy's own TUI in a tmux pane beside you, opening in accept-edits mode: \
      file edits auto-approved";
 
-/// What a grok pane adds after [`SEND_ONLY`], **measured**
+/// What a grok pane adds after [`HEARD_BACK`], **measured**
 /// (`tests/fixtures/grok-tui-probe.txt`, the 1.0.7 recording) — and the one
 /// row that has to *contradict* its own bound sentence on purpose.
 ///
@@ -355,7 +396,7 @@ const PANE_AGY: &str = "agy's own TUI in a tmux pane beside you, opening in acce
 /// pushed behind the facts, the flag's name last — because of where it is
 /// read: the spawn dialog is 76 columns at its widest, its argument preview
 /// is clamped, and grok's four-row bound sentence leaves this row exactly
-/// one line there, about twenty characters past [`SEND_ONLY`]; the `/team`
+/// one line there, about twenty characters past [`HEARD_BACK`]; the `/team`
 /// ring cuts at the same width. Codex's and agy's per-CLI clauses are the
 /// kind that may fall off that edge (ruling 15's HIGH-2); grok's ask is the
 /// fact a person has to act on — a pane that is waiting for them — so it is
@@ -374,7 +415,7 @@ const PANE_GROK: &str = "grok asks you in the pane before a tool that needs appr
 /// [`posture_line`](crate::teammate::posture_line)'s reason and as an
 /// exhaustive match for its reason too: a seventh backend that forgets to
 /// answer is a build failure rather than a pane spawning with half its
-/// sentence. Each row is [`SEND_ONLY`] followed by its CLI's own clause,
+/// sentence. Each row is [`HEARD_BACK`] followed by its CLI's own clause,
 /// joined here so the shared clause has one spelling, one position, and
 /// cannot be dropped by a per-CLI row.
 ///
@@ -391,7 +432,7 @@ pub fn pane_line(backend: MemberBackend) -> Option<String> {
         MemberBackend::Grok => PANE_GROK,
     };
 
-    Some(format!("{SEND_ONLY}; {own}"))
+    Some(format!("{HEARD_BACK}; {own}"))
 }
 
 /// The ring lines a pane-mode shim spawn writes: [`shim::posture_lines`]'
@@ -1002,7 +1043,7 @@ impl TeammateBackend for ShimTui {
         self.driver.backend()
     }
 
-    /// The pane channel, in this CLI's name: send-only, read on screen.
+    /// The pane channel, in this CLI's name: read on screen, and mailed back.
     fn preamble(&self, spec: &SpawnSpec) -> String {
         preamble(
             crate::teammate::preamble::Names::of(spec),
@@ -1266,6 +1307,37 @@ pub struct TuiRunner {
     registry: CancellationToken,
     poll: Duration,
     liveness: Duration,
+    readback: Duration,
+    /// Where this member's own answers are read from, and how far (**D515**).
+    ///
+    /// Behind a lock rather than owned by `run`, because the pass that reads
+    /// it takes `&self` like every other pass here; uncontended in practice,
+    /// since the one caller is this loop's own `select!`.
+    reading: Mutex<Reading>,
+}
+
+/// What a member's read-back has got to: the session it found, how far into
+/// it, and when it started looking (**D515**).
+#[derive(Debug)]
+struct Reading {
+    /// The CLI's own transcript for this member, once the fingerprint has
+    /// matched one. [`None`] means the CLI has written nothing yet — or that
+    /// the file this member was reading went away, which returns it here.
+    transcript: Option<PathBuf>,
+    /// How far the reader has carried, in whichever of its two shapes.
+    cursor: readback::Cursor,
+    /// The wall-clock this member was spawned at, which every search is
+    /// bounded by: a conversation older than the member cannot hold a message
+    /// the member sent.
+    spawned: SystemTime,
+    /// When the **looking** began, for [`READBACK_WAIT`]'s one complaint.
+    ///
+    /// Stamped at the first look rather than at construction, so a spawn that
+    /// spent the whole readiness ceiling waiting for a composer still gets
+    /// the full window before anybody is told there is nothing to read.
+    since: Option<tokio::time::Instant>,
+    /// Whether that complaint has been made, so it is made once.
+    complained: bool,
 }
 
 impl std::fmt::Debug for TuiRunner {
@@ -1293,6 +1365,14 @@ impl TuiRunner {
             registry: lent.cancel,
             poll: shim::POLL,
             liveness: LIVENESS_POLL,
+            readback: READBACK_POLL,
+            reading: Mutex::new(Reading {
+                transcript: None,
+                cursor: readback::Cursor::default(),
+                spawned: SystemTime::now(),
+                since: None,
+                complained: false,
+            }),
         }
     }
 
@@ -1320,6 +1400,12 @@ impl TuiRunner {
         let mut liveness =
             tokio::time::interval_at(tokio::time::Instant::now() + self.liveness, self.liveness);
         liveness.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // The same one-period offset, for a plainer reason: a CLI that has
+        // just been exec'd has written nothing, so an immediate first look
+        // would be one directory walk that can only answer "not yet".
+        let mut readback =
+            tokio::time::interval_at(tokio::time::Instant::now() + self.readback, self.readback);
+        readback.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             tokio::select! {
@@ -1335,8 +1421,19 @@ impl TuiRunner {
                         break;
                     }
                 }
+                _ = readback.tick() => self.relay().await,
             }
         }
+
+        // One last look before this member stops reading (**D515**): every
+        // arm above breaks straight out, so whatever the CLI wrote in the two
+        // seconds since the last poll — which on a `shutdown_request` is
+        // exactly the answer the lead asked for and then retired the member
+        // over — would otherwise be written to a file nobody reads again.
+        // Safe on every path: a pane already closed leaves its transcript
+        // where it is, and a cursor that has carried everything carries
+        // nothing twice.
+        self.relay().await;
 
         // The pane itself is ended by whoever cancelled — the backend's kill,
         // this loop's own shutdown teardown, or its own exit path, which
@@ -1573,6 +1670,142 @@ impl TuiRunner {
         tick
     }
 
+    /// One look at this CLI's own transcript, and one mail per answer found
+    /// (**D515**).
+    ///
+    /// Two states, and the split is what keeps a two-second poll cheap: until
+    /// the fingerprint matches a file there is a directory walk that reads the
+    /// head of each candidate; after it there is one read of one file, from
+    /// where the last look stopped. A CLI that never writes a session — a
+    /// vendor that keeps its conversation only in memory, a home this side
+    /// cannot see — is said once on the ring past [`READBACK_WAIT`] and then
+    /// left alone, because a pane whose answers nobody will hear is worth
+    /// knowing about and not worth repeating.
+    ///
+    /// Every answer is mailed **as this member**, so it reaches the lead as
+    /// the `PartBody::Peer` a teammate's words always arrive as — the lead's
+    /// side learned nothing new for this, which is the point of relaying into
+    /// the mailbox rather than inventing a channel.
+    async fn relay(&self) {
+        let cli = backend_name(self.handle.backend);
+        let reader = readback::of(self.handle.cli());
+        let (transcript, mut cursor, spawned) = {
+            let mut reading = self
+                .reading
+                .lock()
+                .expect("the reading state is never poisoned");
+            reading.since.get_or_insert_with(tokio::time::Instant::now);
+            // A transcript that is no longer there is a transcript to look
+            // for again: a CLI that rotated or replaced its own file would
+            // otherwise leave this member reading nothing, for ever, in
+            // silence — the one failure the complaint below cannot reach.
+            if reading
+                .transcript
+                .as_ref()
+                .is_some_and(|path| !path.exists())
+            {
+                tracing::info!(
+                    teammate = self.spec.name.as_str(),
+                    cli,
+                    "a TUI teammate's transcript went away; looking for it again"
+                );
+                reading.transcript = None;
+                reading.cursor = readback::Cursor::default();
+            }
+            (reading.transcript.clone(), reading.cursor, reading.spawned)
+        };
+
+        let Some(path) = transcript else {
+            let mark = crate::teammate::preamble::opening(crate::teammate::preamble::Names::of(
+                &self.spec,
+            ));
+            let cwd = self.spec.cwd.clone();
+            let found = crate::teammate::blocking_io(move || {
+                Ok::<_, String>(reader.find(&mark, &cwd, spawned))
+            })
+            .await
+            .unwrap_or_default();
+            match found {
+                Some(path) => {
+                    tracing::info!(
+                        teammate = self.spec.name.as_str(),
+                        cli,
+                        transcript = %path.display(),
+                        "a TUI teammate's own transcript was found; its answers are being carried"
+                    );
+                    self.remember(RING_READING.to_owned());
+                    self.reading
+                        .lock()
+                        .expect("the reading state is never poisoned")
+                        .transcript = Some(path);
+                }
+                None => self.wait_for_transcript(cli),
+            }
+
+            return;
+        };
+
+        let read = path.clone();
+        let Ok(answers) = crate::teammate::blocking_io(move || {
+            Ok::<_, String>(reader.answers(&read, &mut cursor))
+        })
+        .await
+        else {
+            return;
+        };
+        // Written back whatever was found, since the cursor moved past what
+        // was read even where nothing in it was an answer.
+        self.reading
+            .lock()
+            .expect("the reading state is never poisoned")
+            .cursor = cursor;
+        if answers.is_empty() {
+            return;
+        }
+        // One mail per poll, not one per record, and the difference is what
+        // it lands in: a peer message rides the lead's steer lane into a
+        // **running** turn (**D450**), so a codex turn's narration — seven
+        // assistant messages in one measured turn — would be seven
+        // interruptions where the pane showed one answer taking shape. The
+        // order is kept and nothing is dropped, which is what
+        // [`readback::answers_clause`] promises; only the envelope is shared.
+        let carried = answers.join("\n\n");
+        self.remember(format!(
+            "{RING_RELAYED} · {} bytes{}",
+            carried.len(),
+            if answers.len() > 1 {
+                format!(" · {} messages", answers.len())
+            } else {
+                String::new()
+            }
+        ));
+        self.mail(self.lead_inbox.clone(), carried).await;
+    }
+
+    /// The one complaint a member makes about a CLI that has written no
+    /// session this side can find, once [`READBACK_WAIT`] has passed.
+    fn wait_for_transcript(&self, cli: &str) {
+        let mut reading = self
+            .reading
+            .lock()
+            .expect("the reading state is never poisoned");
+        let waited = reading
+            .since
+            .map(|since| since.elapsed())
+            .unwrap_or_default();
+        if reading.complained || waited < READBACK_WAIT {
+            return;
+        }
+        reading.complained = true;
+        drop(reading);
+        tracing::warn!(
+            teammate = self.spec.name.as_str(),
+            cli,
+            "no transcript was found for a TUI teammate; the lead will not hear its answers"
+        );
+        self.remember(RING_NO_TRANSCRIPT.to_owned());
+    }
+
     /// This member's own inbox.
     fn inbox(&self) -> PathBuf {
         self.spec.inbox()
@@ -1799,7 +2032,7 @@ mod tests {
     use ganja_protocol::team::MemberBackend;
 
     use super::{
-        SEND_ONLY, ShimTui, TuiDriver, environment_names, last_words, launch_line, pane_line,
+        HEARD_BACK, ShimTui, TuiDriver, environment_names, last_words, launch_line, pane_line,
         paste_body, preamble, spawn_lines,
     };
     use crate::teammate::{
@@ -1809,6 +2042,7 @@ mod tests {
         grok::{self, Grok},
         pane::CARRIED_ENV,
         preamble::Names,
+        readback,
         shim::{self, Driver as _},
     };
 
@@ -1839,8 +2073,15 @@ mod tests {
                 "{cli}: the channel is in the CLI's name: {text}"
             );
             assert!(
-                text.contains("You have no way to message back"),
-                "{cli}: send-only is said, not implied: {text}"
+                text.contains("carried to the lead"),
+                "{cli}: the answer road is said, not implied: {text}"
+            );
+            assert!(
+                text.contains(
+                    readback::answers_clause(backend, readback::Road::Pane)
+                        .expect("a shim states its answer contract")
+                ),
+                "{cli}: and it is the one clause the headless door uses too: {text}"
             );
             assert!(
                 text.ends_with("Your task:\n\nhold the fort"),
@@ -2063,7 +2304,7 @@ Pane is dead (status 1, Thu Aug 20 15:28:47 2026)
     const CODEX_TUI_PROBE: &str = include_str!("../../tests/fixtures/codex-tui-probe.txt");
     const GROK_TUI_PROBE: &str = include_str!("../../tests/fixtures/grok-tui-probe.txt");
 
-    /// Every pane sentence opens on the one send-only clause, every shim has
+    /// Every pane sentence opens on the one read-back clause, every shim has
     /// one, and no other surface does (**D512**).
     #[test]
     fn every_shim_pane_sentence_opens_on_the_send_only_clause_and_nothing_else_has_one() {
@@ -2074,7 +2315,7 @@ Pane is dead (status 1, Thu Aug 20 15:28:47 2026)
         ] {
             let line = pane_line(backend).expect("a shim pane states what the pane adds");
             // Opens on it — the dialog and the ring both cut from the right.
-            assert!(line.starts_with(SEND_ONLY), "{line}");
+            assert!(line.starts_with(HEARD_BACK), "{line}");
             assert!(line.contains("tmux pane"), "{line}");
             // The bound is not restated here — it is `posture_line`'s and
             // pinned elsewhere; a second copy would be a second thing to drift.
@@ -2090,7 +2331,7 @@ Pane is dead (status 1, Thu Aug 20 15:28:47 2026)
         ] {
             assert_eq!(pane_line(backend), None);
         }
-        assert!(SEND_ONLY.contains("hears nothing back"));
+        assert!(HEARD_BACK.contains("mailed back to you"));
     }
 
     /// The two pane-mode facts that widen what a person might assume are the

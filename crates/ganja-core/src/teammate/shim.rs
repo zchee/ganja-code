@@ -210,33 +210,21 @@ pub const CARRIED: [&str; 3] = ["HOME", "PATH", "TMPDIR"];
 ///
 /// A headless child has no tool to answer with and needs none: what it prints
 /// is carried to the lead as mail by the core's own loop. **How much** of it
-/// is per CLI, and the paragraph says exactly what each driver does rather
-/// than one sentence for all three — codex's driver mails every
-/// `agent_message` item in arrival order, where grok's mails the last whole
-/// answer of the turn and agy's only the terminal `result` — so an agent that
-/// narrates across several messages is told, ahead of time, whether the lead
-/// will read all of them or only the last. Bare `who`/`prompt`, as the pane
-/// channel takes them, so a test can compute the exact first prompt a child
-/// reads.
+/// is per CLI, and the sentence comes from
+/// [`crate::teammate::readback::answers_clause`] — the same one a **pane**
+/// teammate of that CLI is told (**D515**), because the two doors read the
+/// same records by two roads: a child's stdout through this driver, a pane's
+/// transcript through that CLI's reader. So an agent that narrates across
+/// several messages is told, ahead of time and identically on either door,
+/// whether the lead will read all of them or only the last. Bare
+/// `who`/`prompt`, as the pane channel takes them, so a test can compute the
+/// exact first prompt a child reads.
 #[must_use]
 pub fn preamble(
     who: crate::teammate::preamble::Names<'_>,
     backend: MemberBackend,
     prompt: &str,
 ) -> String {
-    let answers = match backend {
-        MemberBackend::Codex => {
-            "every message you print in answer is delivered to the lead as mail, in order"
-        }
-        // grok and agy forward one answer per turn; a surface this function is
-        // never asked about gets the conservative sentence, since "only the
-        // last" is the one that cannot lose a teammate's work by being wrong.
-        _ => {
-            "only your final answer for the turn reaches the lead, as one mail — so put the whole \
-             of it in your last message"
-        }
-    };
-
     crate::teammate::preamble::frame(
         who,
         &format!(
@@ -244,6 +232,11 @@ pub fn preamble(
              lead is one turn of yours, opening with who sent it — this one did — and {answers}; \
              there is nobody else you can address, and nothing else you need to do to report.",
             cli = backend_name(backend),
+            answers = crate::teammate::readback::answers_clause(
+                backend,
+                crate::teammate::readback::Road::Headless,
+            )
+            .unwrap_or("what you print is carried to the lead as mail"),
         ),
         prompt,
     )
@@ -2423,23 +2416,19 @@ mod tests {
             team: "session-abcd1234",
             lead: "team-lead",
         };
-        for (backend, cli, answers) in [
-            (
-                MemberBackend::Codex,
-                "codex",
-                "every message you print in answer is delivered to the lead as mail, in order",
-            ),
-            (
-                MemberBackend::Agy,
-                "agy",
-                "only your final answer for the turn reaches the lead",
-            ),
-            (
-                MemberBackend::Grok,
-                "grok",
-                "only your final answer for the turn reaches the lead",
-            ),
+        for (backend, cli) in [
+            (MemberBackend::Codex, "codex"),
+            (MemberBackend::Agy, "agy"),
+            (MemberBackend::Grok, "grok"),
         ] {
+            // The clause this door really walks, from the one place that
+            // says it — never a second literal, which is how the two doors
+            // would come to promise a teammate different things.
+            let answers = crate::teammate::readback::answers_clause(
+                backend,
+                crate::teammate::readback::Road::Headless,
+            )
+            .expect("a shim states its answer contract");
             let text = preamble(who, backend, "hold the fort");
             assert!(
                 text.contains(&format!("headless {cli} process")),
@@ -2448,6 +2437,10 @@ mod tests {
             assert!(
                 text.contains(answers),
                 "{cli}: the answer road is said as the driver walks it: {text}"
+            );
+            assert!(
+                text.contains("carried to the lead"),
+                "{cli}: and it is said in words, not implied: {text}"
             );
             assert!(
                 text.ends_with("Your task:\n\nhold the fort"),

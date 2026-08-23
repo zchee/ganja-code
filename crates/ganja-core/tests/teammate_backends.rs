@@ -177,9 +177,9 @@ async fn each_backend_says_what_it_can_promise_about_a_delivery() {
 /// **D514.** Every backend tells its teammate how — or whether — it answers,
 /// before the task, in one frame: the two native surfaces name ganja's
 /// `send_message`, a real `claude` its `SendMessage`, a CLI's native TUI in a
-/// pane that it has no way to message back, a headless child that its answers
-/// are mail — all of them for codex, the last one for grok and agy, as each
-/// driver really forwards. Pinned per backend over the trait method the registry seeds
+/// pane and a headless child alike that their answers are carried to the lead
+/// as mail — all of them for codex, the last one per turn for grok and agy, as
+/// each driver and each transcript reader really forwards (**D515**). Pinned per backend over the trait method the registry seeds
 /// from, so a backend whose words drifted onto another's channel fails here.
 #[test]
 fn each_backend_tells_its_teammate_how_it_answers_before_the_task() {
@@ -215,32 +215,32 @@ fn each_backend_tells_its_teammate_how_it_answers_before_the_task() {
         (
             "codex (pane)",
             Arc::new(ShimTui::new(Arc::new(Codex::new()))),
-            "no way to message back",
+            "every message you print in answer is carried to the lead as mail, in order",
         ),
         (
             "agy (pane)",
             Arc::new(ShimTui::new(Arc::new(Agy::new()))),
-            "no way to message back",
+            "every message you print in answer is carried to the lead as mail, in order",
         ),
         (
             "grok (pane)",
             Arc::new(ShimTui::new(Arc::new(Grok::new()))),
-            "no way to message back",
+            "only your final answer for the turn is carried to the lead",
         ),
         (
             "codex (headless)",
             Arc::new(ShimBackend::new(Arc::new(Codex::new()))),
-            "every message you print in answer is delivered to the lead as mail, in order",
+            "every message you print in answer is carried to the lead as mail, in order",
         ),
         (
             "agy (headless)",
             Arc::new(ShimBackend::new(Arc::new(Agy::new()))),
-            "only your final answer for the turn reaches the lead",
+            "only your final answer for the turn is carried to the lead",
         ),
         (
             "grok (headless)",
             Arc::new(ShimBackend::new(Arc::new(Grok::new()))),
-            "only your final answer for the turn reaches the lead",
+            "only your final answer for the turn is carried to the lead",
         ),
     ];
 

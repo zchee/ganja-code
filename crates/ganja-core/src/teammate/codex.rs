@@ -105,13 +105,21 @@
 //! profile the rollout above records. Enumeration is what closes it, the same
 //! way it closes grok's three.
 
-use std::{ffi::OsString, process::Stdio, time::Duration};
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+    process::Stdio,
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use ganja_protocol::team::MemberBackend;
 use ganja_team::ShimCli;
 
-use crate::teammate::shim::{Door, Driver, Launch, Reply, Shape, Turn};
+use crate::teammate::{
+    readback,
+    shim::{Door, Driver, Launch, Reply, Shape, Turn},
+};
 
 /// The executable a spawn looks for on `PATH`.
 pub const BINARY: &str = "codex";
@@ -251,8 +259,15 @@ pub const NEVER_COMPOSED: [&str; 20] = [
     "--model",
 ];
 
+/// Where this CLI keeps its config, its credentials and its sessions.
+///
+/// One name, two readers: [`ADDITIONS`] carries it into a child's enumerated
+/// environment, and [`Transcript`] looks under it for the conversation a pane
+/// wrote — so the CLI and the reader cannot end up pointed at two homes.
+const HOME_ENV: &str = "CODEX_HOME";
+
 /// What this CLI needs beyond [`crate::teammate::shim::CARRIED`].
-const ADDITIONS: [&str; 1] = ["CODEX_HOME"];
+const ADDITIONS: [&str; 1] = [HOME_ENV];
 
 /// The JSONL event that names the conversation.
 const THREAD_STARTED: &str = "thread.started";
@@ -464,6 +479,104 @@ impl Driver for Codex {
             // nor a reason, so nothing reaches for the third field.
             refused: None,
         })
+    }
+}
+
+/// codex's own record of a conversation, as this side reads it (**D515**).
+///
+/// `~/.codex/sessions/<yyyy>/<mm>/<dd>/rollout-*.jsonl`, or the same tree
+/// under `CODEX_HOME` — the variable this backend already carries into the
+/// pane, so the child and the reader look in one place by construction. The
+/// day directories are searched newest-first and only until a fingerprint
+/// matches; a turn that crosses midnight leaves its records in the file it
+/// opened, which is why the *match* is what decides and not the date.
+///
+/// Append-only, so this advances [`readback::Cursor::bytes`]: a rollout of a
+/// long conversation is megabytes, and re-reading it every two seconds to
+/// find nothing would be the poll doing the work of a `tail`.
+///
+/// **Every** assistant message, in arrival order — codex's own headless
+/// driver mails each `AgentMessage` the same way, and
+/// [`readback::answers_clause`] is the sentence both are told by.
+#[derive(Debug)]
+pub struct Transcript;
+
+/// The reader [`crate::teammate::readback::of`] hands out for this CLI.
+pub static TRANSCRIPT: Transcript = Transcript;
+
+impl Transcript {
+    /// Where this CLI keeps its sessions: `CODEX_HOME`, else `~/.codex`.
+    fn sessions() -> Option<PathBuf> {
+        let home = match std::env::var_os(HOME_ENV) {
+            Some(home) if !home.is_empty() => PathBuf::from(home),
+            _ => PathBuf::from(std::env::var_os("HOME")?).join(".codex"),
+        };
+
+        Some(home.join("sessions"))
+    }
+
+    /// Every rollout under the year/month/day tree, newest day first.
+    fn rollouts(root: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut level = vec![root.to_path_buf()];
+        // Three levels of date directories, walked breadth-first rather than
+        // recursively: the depth is this vendor's own layout and a walk that
+        // followed anything deeper would be reading whatever else lives here.
+        for _ in 0..3 {
+            level = level
+                .iter()
+                .flat_map(|directory| readback::listing(directory, |path| path.is_dir()))
+                .collect();
+        }
+        for directory in level {
+            found.extend(readback::listing(&directory, |path| {
+                path.extension().is_some_and(|kind| kind == "jsonl")
+            }));
+        }
+
+        found
+    }
+}
+
+impl readback::Transcript for Transcript {
+    fn find(&self, mark: &str, _cwd: &Path, since: std::time::SystemTime) -> Option<PathBuf> {
+        // The cwd is deliberately unused: codex shards its sessions by date
+        // rather than by directory, and a rollout records its own `cwd` in a
+        // field this does not need to read — the fingerprint and the spawn
+        // time already name one member's one conversation.
+        readback::matching(Self::rollouts(&Self::sessions()?), mark, self, since)
+    }
+
+    fn user_said(&self, record: &serde_json::Value, mark: &str) -> bool {
+        let payload = &record["payload"];
+        record["type"] == "response_item"
+            && payload["type"] == "message"
+            && payload["role"] == "user"
+            && payload["content"].as_array().is_some_and(|parts| {
+                parts
+                    .iter()
+                    .filter_map(|part| part["text"].as_str())
+                    .any(|text| text.contains(mark))
+            })
+    }
+
+    fn answers(&self, path: &Path, cursor: &mut readback::Cursor) -> Vec<String> {
+        readback::appended(path, cursor)
+            .iter()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|record| record["type"] == "response_item")
+            .map(|record| record["payload"].clone())
+            .filter(|payload| payload["type"] == "message" && payload["role"] == "assistant")
+            .filter_map(|payload| {
+                let text = payload["content"]
+                    .as_array()?
+                    .iter()
+                    .filter_map(|part| part["text"].as_str())
+                    .collect::<Vec<_>>()
+                    .join("");
+                (!text.trim().is_empty()).then_some(text)
+            })
+            .collect()
     }
 }
 

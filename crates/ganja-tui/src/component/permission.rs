@@ -295,7 +295,7 @@ mod tests {
     /// `subagent.rs` puts beside them, so a longer posture row or a reordered
     /// key shows up here as the cut it would be on a terminal.
     #[test]
-    fn a_shim_spawn_dialog_keeps_the_send_only_clause_on_screen() {
+    fn a_shim_spawn_dialog_keeps_the_read_back_clause_on_screen() {
         use ganja_core::teammate::{posture_line, shim_tui::pane_line};
         use ganja_protocol::team::MemberBackend;
 
@@ -331,8 +331,8 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("");
             assert!(
-                screen.contains("hears nothing back"),
-                "{name}: the send-only clause fell off the dialog:\n{screen}"
+                screen.contains("mailed back to you"),
+                "{name}: the read-back clause fell off the dialog:\n{screen}"
             );
             assert!(
                 screen.contains("\"surface\""),

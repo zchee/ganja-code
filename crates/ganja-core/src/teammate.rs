@@ -172,6 +172,9 @@ pub mod posture;
 /// backend's preamble shares, and the `send_message` one the two native
 /// surfaces seed.
 pub mod preamble;
+/// Carrying a shim pane teammate's answers back to its lead (**D515**): the
+/// per-CLI transcript readers, and the one clause that says what each carries.
+pub mod readback;
 /// Killing panes the lead left behind when it died (P25b).
 pub mod reaper;
 /// The §6.1 loop that drives one in-process teammate.

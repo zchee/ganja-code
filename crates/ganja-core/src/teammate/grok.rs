@@ -163,14 +163,20 @@
 //! a `result` record carrying `is_error` and the vendor's own 401 text, which
 //! this file's parser turns into exactly that mail.
 
-use std::ffi::OsString;
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+};
 
 use async_trait::async_trait;
 use ganja_protocol::team::MemberBackend;
 use ganja_team::ShimCli;
 use serde::Deserialize;
 
-use crate::teammate::shim::{Door, Driver, Reply, Shape, Turn};
+use crate::teammate::{
+    readback,
+    shim::{Door, Driver, Reply, Shape, Turn},
+};
 
 /// The executable a spawn looks for on `PATH`.
 pub const BINARY: &str = "grok";
@@ -804,6 +810,144 @@ fn remember(tools: &mut Vec<String>, tool: String) {
         return;
     }
     tools.push(tool);
+}
+
+/// Where this CLI keeps its sessions, as **this** process reads it.
+///
+/// Not a contradiction of the class rule that bans every `GROK_*` name from a
+/// child's environment (**D508**): that rule is about what ganja *hands* the
+/// CLI, because a `GROK_SANDBOX` travelling in would move the posture a
+/// person consented to. Reading this one here moves nothing — it only says
+/// where to look for what the pane already wrote. A tmux server started with
+/// a different `GROK_HOME` than the lead's own is the case this cannot see,
+/// and it shows up as a session that is never found rather than as somebody
+/// else's conversation.
+const HOME_ENV: &str = "GROK_HOME";
+
+/// grok's own record of a conversation, as this side reads it (**D515**).
+///
+/// `<grok home>/sessions/<percent-encoded cwd>/<session id>/updates.jsonl`,
+/// which is why this reader is the one that uses the pane's directory: the
+/// vendor shards by it, and encoding the same path this side opened the pane
+/// in narrows the search to one directory before a byte is read.
+///
+/// Re-read whole and counted, [`readback::Cursor::answers`]: an answer here
+/// is *the last message of a finished turn*, so a scan that began in the
+/// middle of one would have to carry the turn's own state between polls —
+/// and these files are tens of kilobytes, where codex's are megabytes.
+///
+/// One answer per `turn_completed`, which is what grok's headless driver
+/// mails too: that vendor narrates as it works, and its own module says why
+/// mailing each line would flood a lead with commentary.
+#[derive(Debug)]
+pub struct Transcript;
+
+/// The reader [`crate::teammate::readback::of`] hands out for this CLI.
+pub static TRANSCRIPT: Transcript = Transcript;
+
+impl Transcript {
+    /// Where this CLI keeps its sessions: `GROK_HOME`, else `~/.grok`.
+    fn sessions() -> Option<PathBuf> {
+        let home = match std::env::var_os(HOME_ENV) {
+            Some(home) if !home.is_empty() => PathBuf::from(home),
+            _ => PathBuf::from(std::env::var_os("HOME")?).join(".grok"),
+        };
+
+        Some(home.join("sessions"))
+    }
+
+    /// The vendor's own spelling of a directory as one path segment: every
+    /// byte outside the unreserved set percent-encoded, uppercase hex.
+    ///
+    /// Hand-written rather than taken from a crate because it is three lines
+    /// and because what has to match is *this vendor's* encoding of one path
+    /// — a general-purpose escaper with a different unreserved set would
+    /// name a directory that exists on nobody's disk.
+    fn encoded(cwd: &Path) -> String {
+        // **Resolved first.** grok records the path it resolved, not the one
+        // it was handed: on a machine where `/tmp` is a symlink for
+        // `/private/tmp`, every session of a pane opened under `/tmp` lands
+        // in a `%2Fprivate%2Ftmp…` directory (measured: 20 such directories
+        // on this machine, and none under `%2Ftmp`). Encoding what this side
+        // was handed would look in a directory that exists on nobody's disk,
+        // and the pane would silently never be heard from.
+        std::fs::canonicalize(cwd)
+            .unwrap_or_else(|_| cwd.to_path_buf())
+            .to_string_lossy()
+            .bytes()
+            .map(|byte| match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    (byte as char).to_string()
+                }
+                other => format!("%{other:02X}"),
+            })
+            .collect()
+    }
+}
+
+impl readback::Transcript for Transcript {
+    fn find(&self, mark: &str, cwd: &Path, since: std::time::SystemTime) -> Option<PathBuf> {
+        let sessions = Self::sessions()?;
+        let directory = sessions.join(Self::encoded(cwd));
+        // The encoded directory first, and every directory under `sessions`
+        // as the fallback: the encoding is this vendor's own and a version
+        // that changed it would otherwise take the pane's voice away
+        // silently. The fingerprint and the spawn time are what decide in
+        // either case, so the wider search costs candidates and not
+        // correctness.
+        let mut roots = vec![directory.clone()];
+        if !directory.is_dir() {
+            roots = readback::listing(&sessions, |path| path.is_dir());
+        }
+        let candidates = roots
+            .iter()
+            .flat_map(|root| readback::listing(root, |path| path.is_dir()))
+            .map(|session| session.join("updates.jsonl"))
+            .filter(|path| path.is_file())
+            .collect();
+
+        readback::matching(candidates, mark, self, since)
+    }
+
+    fn user_said(&self, record: &serde_json::Value, mark: &str) -> bool {
+        let update = &record["params"]["update"];
+        update["sessionUpdate"] == "user_message_chunk"
+            && update["content"]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains(mark))
+    }
+
+    fn answers(&self, path: &Path, cursor: &mut readback::Cursor) -> Vec<String> {
+        let mut finished = Vec::new();
+        let mut latest: Option<String> = None;
+        for line in readback::whole(path) {
+            let Ok(record) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            let update = &record["params"]["update"];
+            match update["sessionUpdate"].as_str() {
+                // A new turn began: whatever the last one said, said or not,
+                // is not this turn's answer. Without this an interrupted turn
+                // — one that never reached `turn_completed`, which this
+                // machine has recordings of — would have its last message
+                // carried later, attributed to the turn after it.
+                Some("user_message_chunk") => latest = None,
+                Some("agent_message_chunk") => {
+                    if let Some(text) = update["content"]["text"].as_str()
+                        && !text.trim().is_empty()
+                    {
+                        latest = Some(text.to_owned());
+                    }
+                }
+                // The turn ended: whatever it last said is its answer, and
+                // anything it said before that was narration on the way.
+                Some("turn_completed") => finished.extend(latest.take()),
+                _ => {}
+            }
+        }
+
+        readback::beyond(finished, cursor)
+    }
 }
 
 #[cfg(test)]

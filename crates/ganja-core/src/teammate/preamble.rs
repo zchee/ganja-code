@@ -20,7 +20,8 @@
 //! `send_message` tool (the in-process teammate and the `ganja` pane);
 //! [`crate::teammate::claude::preamble`] for a real `claude`'s `SendMessage`;
 //! [`crate::teammate::shim_tui::preamble`] for a CLI's native TUI in a pane,
-//! which cannot answer at all (**D512**, send-only); and
+//! whose answers are read back out of that CLI's own transcript (**D515**,
+//! which retired D512's send-only pane); and
 //! [`crate::teammate::shim::preamble`] for a headless child, whose answers are
 //! mail. The words are ganja's own throughout.
 //!
@@ -57,6 +58,29 @@ impl<'a> Names<'a> {
     }
 }
 
+/// The sentence every preamble opens on, and the **fingerprint** a foreign
+/// CLI's own transcript is found by (**D515**).
+///
+/// Two readers, one spelling. A pane teammate's answers are read back out of
+/// the transcript its CLI writes for itself
+/// ([`crate::teammate::readback`]), and the only honest way to know which of
+/// that CLI's sessions is *this member's* is that the session opens with the
+/// message this side pasted: name and team together are unique to one member
+/// of one team, and a CLI records what it was handed verbatim. Composing that
+/// sentence here rather than at each reader is what keeps the fingerprint and
+/// the preamble incapable of drifting apart — a preamble that reworded its
+/// opening would otherwise leave every reader looking for a sentence nobody
+/// sends any more.
+#[must_use]
+pub fn opening(who: Names<'_>) -> String {
+    format!(
+        "You are {name}, a teammate on the team {team}. Your lead is {lead}.",
+        name = who.name,
+        team = who.team,
+        lead = who.lead,
+    )
+}
+
 /// The shape every preamble has: who, one paragraph on answering, the task.
 ///
 /// The task comes **last** and ends the message, so a teammate that reads only
@@ -65,12 +89,8 @@ impl<'a> Names<'a> {
 #[must_use]
 pub fn frame(who: Names<'_>, channel: &str, prompt: &str) -> String {
     format!(
-        "You are {name}, a teammate on the team {team}. Your lead is {lead}.\n\n\
-         {channel}\n\n\
-         Your task:\n\n{prompt}",
-        name = who.name,
-        team = who.team,
-        lead = who.lead,
+        "{opening}\n\n{channel}\n\nYour task:\n\n{prompt}",
+        opening = opening(who),
     )
 }
 

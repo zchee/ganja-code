@@ -1,0 +1,12 @@
+{"timestamp": "2026-08-23T11:25:51.217Z", "type": "session_meta", "payload": {"id": "01a02e5e-0000-7000-8000-000000000000", "timestamp": "2026-08-23T11:25:51.217Z", "cwd": "/tmp/ganja-readback-fixture", "originator": "codex-tui", "cli_version": "0.149.0-alpha.1", "source": "cli"}}
+{"type": "event_msg", "payload": {"type": "task_started"}}
+{"type": "response_item", "payload": {"type": "message", "id": "msg_01a02e5e-c443-7bd1-b1a5-bccd57f9ca83", "role": "user", "content": [{"type": "input_text", "text": "A message from team-lead:\nYou are w1, a teammate on the team session-abcd1234. Your lead is team-lead.\n\nYou are running in your own codex session, in a tmux pane beside your lead's. Messages from the lead arrive pasted into this composer, each opening with who sent it — this one did. Your answers are read here, on this screen, by the person watching your pane, and every message you print in answer is carried to the lead as mail, in order — so put the whole of your answer on screen rather than promising to report back; there is no tool to send with and none is needed.\n\nYour task:\n\nExplain this codebase"}], "internal_chat_message_metadata_passthrough": {"turn_id": "01a02e5e-b4f9-74f1-9ed9-45a4bdbcbe15", "create_time": 1787484357.699068}}}
+{"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "I'll map the crates first, then trace one prompt through the engine."}]}}
+{"type": "event_msg", "payload": {"type": "token_count"}}
+{"type": "event_msg", "payload": {"type": "token_count"}}
+{"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "The workspace is twelve members; the engine carries no terminal dependency."}]}}
+{"type": "event_msg", "payload": {"type": "token_count"}}
+{"type": "event_msg", "payload": {"type": "token_count"}}
+{"type": "event_msg", "payload": {"type": "token_count"}}
+{"type": "event_msg", "payload": {"type": "token_count"}}
+{"type": "event_msg", "payload": {"type": "token_count"}}

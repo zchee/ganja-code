@@ -123,14 +123,21 @@
 //! `result` whose `status` is not `SUCCESS`, which this driver reports as the
 //! vendor's own sentence rather than as silence.
 
-use std::{ffi::OsString, time::Duration};
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use ganja_protocol::team::MemberBackend;
 use ganja_team::ShimCli;
 use serde::Deserialize;
 
-use crate::teammate::shim::{Door, Driver, Read, Reply, Shape, Turn};
+use crate::teammate::{
+    readback,
+    shim::{Door, Driver, Read, Reply, Shape, Turn},
+};
 
 /// The executable a spawn looks for on `PATH`.
 pub const BINARY: &str = "agy";
@@ -469,6 +476,96 @@ impl Driver for Agy {
             session: ended.conversation_id.filter(|id| !id.is_empty()),
             refused,
         })
+    }
+}
+
+/// agy's own record of a conversation, as this side reads it (**D515**).
+///
+/// `~/.gemini/antigravity-cli/brain/<conversation>/.system_generated/logs/
+/// transcript.jsonl`, under the fixed home that CLI keeps its things in —
+/// this driver admits no home variable, so there is one place to look and no
+/// door to get it wrong through.
+///
+/// Re-read whole and counted, [`readback::Cursor::answers`]: this vendor
+/// writes its transcript in chunks and re-emits them, and its records do not
+/// arrive in `step_index` order — a byte cursor over a file its writer may
+/// rewrite would carry half a record or repeat one.
+///
+/// One answer per finished turn: a `PLANNER_RESPONSE` carrying `content` is
+/// what that CLI recorded as something it said, and the ones carrying only
+/// `thinking` or `tool_calls` are the work on the way to it. agy's headless
+/// driver mails the terminal `result` for the same reason.
+#[derive(Debug)]
+pub struct Transcript;
+
+/// The reader [`crate::teammate::readback::of`] hands out for this CLI.
+pub static TRANSCRIPT: Transcript = Transcript;
+
+/// Where this CLI keeps a conversation's own records, under its home.
+const BRAIN: &str = "brain";
+
+/// The path from one conversation's directory to its transcript.
+const TRANSCRIPT_PATH: [&str; 3] = [".system_generated", "logs", "transcript.jsonl"];
+
+impl Transcript {
+    /// Where this CLI keeps its conversations. No variable: see the type doc.
+    fn brains() -> Option<PathBuf> {
+        Some(
+            PathBuf::from(std::env::var_os("HOME")?)
+                .join(".gemini")
+                .join("antigravity-cli")
+                .join(BRAIN),
+        )
+    }
+}
+
+impl readback::Transcript for Transcript {
+    fn find(&self, mark: &str, _cwd: &Path, since: std::time::SystemTime) -> Option<PathBuf> {
+        // The cwd is unused for the same reason it is unused for codex: this
+        // vendor names a conversation by an id of its own, and the
+        // fingerprint is what says which conversation is this member's.
+        let candidates = readback::listing(&Self::brains()?, |path| path.is_dir())
+            .into_iter()
+            .map(|conversation| {
+                TRANSCRIPT_PATH
+                    .iter()
+                    .fold(conversation, |path, step| path.join(step))
+            })
+            .filter(|path| path.is_file())
+            .collect();
+
+        readback::matching(candidates, mark, self, since)
+    }
+
+    fn user_said(&self, record: &serde_json::Value, mark: &str) -> bool {
+        record["type"] == "USER_INPUT"
+            && record["content"]
+                .as_str()
+                .is_some_and(|text| text.contains(mark))
+    }
+
+    fn answers(&self, path: &Path, cursor: &mut readback::Cursor) -> Vec<String> {
+        // **Every** record this CLI wrote as something it said, in order —
+        // not "the last one of each turn", which was tried and is the wrong
+        // shape here. This vendor writes no end-of-turn marker, so a
+        // per-turn rule can only carry a turn's answer once the *next* turn
+        // begins: a teammate asked one question would then be heard from
+        // never. Carrying each record instead means a build whose narration
+        // also carries `content` — transcripts on this machine from an
+        // earlier one have thirty-four such steps across three turns — is
+        // heard in full rather than misreported, and
+        // [`readback::answers_clause`] tells an agy teammate exactly that.
+        let found = readback::whole(path)
+            .iter()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|record| record["type"] == "PLANNER_RESPONSE")
+            .filter_map(|record| {
+                let text = record["content"].as_str()?.to_owned();
+                (!text.trim().is_empty()).then_some(text)
+            })
+            .collect();
+
+        readback::beyond(found, cursor)
     }
 }
 

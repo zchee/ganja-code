@@ -44,6 +44,8 @@ The same attribution reaches past the fixtures, and the rule is stated here rath
 
 They are quoted rather than paraphrased on purpose: the claim being made is *what the program did*, and a paraphrase of the evidence is not the evidence.
 
+**Transcript shapes (D515).** `crates/ganja-core/tests/fixtures/readback/{codex-rollout,grok-updates,agy-transcript}.jsonl` are **excerpts of the session files those three CLIs wrote for themselves** while running as pane teammates on 2026-08-23, kept because the readers that carry a teammate's answers back to its lead parse exactly these shapes and a hand-invented fixture would prove only that the reader parses what a test imagined. What is theirs in them is the record vocabulary — codex's `session_meta`/`response_item`/`event_msg` envelope, grok's ACP-shaped `session/update` records, agy's `USER_INPUT`/`PLANNER_RESPONSE`/`GENERIC` steps. Everything a model or a person said was **replaced**: every assistant text is one short sentence written for the fixture, the pasted message is ganja's own preamble as this build composes it, absolute paths are rewritten to `/tmp/ganja-readback-fixture`, session ids are zeroed and the member is renamed `w1`. So no vendor conversation is committed — only the frame one arrives in.
+
 No vendor conversation log, transcript or credential is committed. Where a probe left records inside a vendor's own home directory they were left there as that vendor's and that user's data, and the plan's per-wave probe records say exactly what remained.
 
 ---
