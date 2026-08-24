@@ -25,7 +25,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr as _;
 
 use crate::{
-    command::{self, Choice, EngineCommand},
+    command::{self, Choice, EngineCommand, Slot},
     component::{chat::clip, clamped, first_visible},
     theme::Theme,
 };
@@ -38,6 +38,12 @@ const MAX_ROWS: usize = 10;
 
 /// What is shown when the fragment matches nothing.
 const EMPTY: &str = "no matching commands";
+
+/// What a value menu shows when the partial word matches nothing.
+const EMPTY_VALUES: &str = "nothing matches";
+
+/// The command menu's title.
+const TITLE: &str = " commands ";
 
 /// Gap between a command and its description.
 const GAP: usize = 2;
@@ -75,6 +81,10 @@ pub struct Dropdown {
     /// Index into [`Dropdown::matched`]; always in range while it is
     /// non-empty.
     selected: usize,
+    /// What the box is titled, and what it says when nothing matches: the
+    /// command menu's words, or a value slot's (**D519**).
+    title: &'static str,
+    empty: &'static str,
 }
 
 impl Dropdown {
@@ -86,10 +96,27 @@ impl Dropdown {
             engine,
             matched: Vec::new(),
             selected: 0,
+            title: TITLE,
+            empty: EMPTY,
         };
         dropdown.refresh(text);
 
         dropdown
+    }
+
+    /// Opens the menu over a `/team` argument slot (**D519**): the same box,
+    /// titled after the slot, holding what could fill it narrowed by the
+    /// partial word. Rebuilt by the app on every keystroke rather than
+    /// refreshed, since the slot itself may have changed.
+    #[must_use]
+    pub fn values(slot: &Slot) -> Self {
+        Self {
+            engine: Vec::new(),
+            matched: command::value_matches(&slot.partial, &slot.candidates),
+            selected: 0,
+            title: slot.title,
+            empty: EMPTY_VALUES,
+        }
     }
 
     /// Re-narrows the menu after a keystroke reached the editor.
@@ -142,7 +169,7 @@ impl Dropdown {
         let visible = usize::from(area.height).saturating_sub(2);
 
         Paragraph::new(Text::from(self.lines(inner_width, visible, theme)))
-            .block(Block::bordered().title(" commands "))
+            .block(Block::bordered().title(self.title))
             .style(theme.fg.patch(theme.background_panel))
             .render(area, buffer);
     }
@@ -150,7 +177,7 @@ impl Dropdown {
     /// The visible slice of the menu.
     fn lines(&self, width: usize, rows: usize, theme: &Theme) -> Vec<Line<'static>> {
         if self.matched.is_empty() {
-            return vec![Line::styled(clip(EMPTY, width), theme.dim)];
+            return vec![Line::styled(clip(self.empty, width), theme.dim)];
         }
 
         let names: Vec<String> = self.matched.iter().map(Choice::slash).collect();
@@ -245,7 +272,7 @@ mod tests {
 
     use super::{Dropdown, triggered};
     use crate::{
-        command::{Choice, EngineCommand},
+        command::{Choice, Completion, EngineCommand, Slot},
         theme::Theme,
     };
 
@@ -253,6 +280,55 @@ mod tests {
     /// without a command registry offers.
     fn menu(text: &str) -> Dropdown {
         Dropdown::new(text, Vec::new())
+    }
+
+    /// **D519.** A values menu is the same box titled after its slot, and it
+    /// says so in its own words when nothing matches.
+    #[test]
+    fn a_values_menu_is_titled_after_its_slot() {
+        let candidates = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| Completion {
+                    text: (*name).to_owned(),
+                    detail: "a surface".to_owned(),
+                })
+                .collect::<Vec<_>>()
+        };
+        let render = |slot: &Slot| {
+            let dropdown = Dropdown::values(slot);
+            let area = Rect::new(0, 0, 40, 8);
+            let mut buffer = Buffer::empty(area);
+            dropdown.render(Rect::new(0, 6, 40, 2), &mut buffer, &Theme::default());
+            (0..area.height)
+                .map(|row| {
+                    (0..area.width)
+                        .map(|column| buffer[(column, row)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let full = render(&Slot {
+            title: " backends ",
+            start: 0,
+            partial: "g".to_owned(),
+            candidates: candidates(&["ganja", "grok", "claude"]),
+        });
+        assert!(full.contains(" backends "), "{full}");
+        assert!(
+            full.contains("> ganja") && full.contains("grok") && !full.contains("claude"),
+            "{full}"
+        );
+
+        let empty = render(&Slot {
+            title: " backends ",
+            start: 0,
+            partial: "zzz".to_owned(),
+            candidates: candidates(&["ganja"]),
+        });
+        assert!(empty.contains("nothing matches"), "{empty}");
     }
 
     /// The engine roster a configured session carries.

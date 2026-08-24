@@ -23,6 +23,7 @@
 //! is total and deterministic: ties break on the command's own name, so a
 //! fragment always produces the same list.
 
+use ganja_core::teammate::{BACKENDS, DEFAULT_BACKEND, backend_name};
 use nucleo_matcher::{
     Config, Matcher, Utf32Str,
     pattern::{Atom, AtomKind, CaseMatching, Normalization},
@@ -884,15 +885,20 @@ pub enum Choice {
     Ui(&'static Entry),
     /// An engine command, which is inserted as `/name ` and runs on Enter.
     Engine(EngineCommand),
+    /// A value for a `/team` argument slot, which replaces the partial word
+    /// under the cursor (**D519**).
+    Value(Completion),
 }
 
 impl Choice {
-    /// How the row is spelled, the leading slash included.
+    /// How the row is spelled — the leading slash included for a command,
+    /// and the bare value for a slot.
     #[must_use]
     pub fn slash(&self) -> String {
         match self {
             Self::Ui(entry) => entry.slash(),
             Self::Engine(command) => format!("/{}", command.name),
+            Self::Value(completion) => completion.text.clone(),
         }
     }
 
@@ -902,6 +908,7 @@ impl Choice {
         match self {
             Self::Ui(entry) => entry.description,
             Self::Engine(command) => command.description.as_deref().unwrap_or_default(),
+            Self::Value(completion) => &completion.detail,
         }
     }
 
@@ -910,8 +917,172 @@ impl Choice {
         match self {
             Self::Ui(entry) => entry.name,
             Self::Engine(command) => &command.name,
+            Self::Value(completion) => &completion.text,
         }
     }
+}
+
+/// One value a `/team` argument slot completes to (**D519**).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Completion {
+    /// What replaces the partial word under the cursor.
+    pub text: String,
+    /// The line shown beside it.
+    pub detail: String,
+}
+
+/// A `/team` slot the cursor is standing in, and what could fill it
+/// (**D519**).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Slot {
+    /// What the menu is titled.
+    pub title: &'static str,
+    /// Where the partial word starts on the first line, in characters.
+    pub start: usize,
+    /// The partial word so far — what a chosen value replaces.
+    pub partial: String,
+    /// Everything that could stand there, in roster order.
+    pub candidates: Vec<Completion>,
+}
+
+/// The `/team` slot the cursor is in, if it is in one the composer can fill
+/// (**D519**): a subcommand after `/team`, a flag after `spawn`, the surface
+/// after `--backend`, the kind after `--agent`.
+///
+/// The surfaces are [`BACKENDS`] — the one spelling the spawn door's refusal
+/// lists, imported rather than repeated, so a seventh surface reaches this
+/// menu the day it reaches the parser. The agent kinds are `agents`, which
+/// the app reads off the engine's registry for the same reason. Nothing here
+/// validates: a value typed past the menu is still the far side's to refuse
+/// by name, exactly as before.
+///
+/// The word under the cursor runs from the last whitespace before it to the
+/// cursor; text after the cursor is left alone, so completing mid-line
+/// replaces only the word being typed. A word that already **is** one of the
+/// candidates raises nothing: there is nothing left to complete, and a menu
+/// still up there would take the Enter that means "send this line" — which
+/// is exactly what `/team spawn w1 --backend ganja` + Enter means, and what
+/// the pane drills type.
+#[must_use]
+pub fn team_completion(text: &str, cursor: (usize, usize), agents: &[Completion]) -> Option<Slot> {
+    let (row, column) = cursor;
+    if row != 0 {
+        return None;
+    }
+    let line: Vec<char> = text.lines().next().unwrap_or_default().chars().collect();
+    let column = column.min(line.len());
+    let start = line[..column]
+        .iter()
+        .rposition(|character| character.is_whitespace())
+        .map_or(0, |index| index + 1);
+    let partial: String = line[start..column].iter().collect();
+    let before: String = line[..start].iter().collect();
+    let mut words = before.split_whitespace();
+    if words.next() != Some("/team") {
+        return None;
+    }
+    let words: Vec<&str> = words.collect();
+
+    let slot = |title, candidates: Vec<Completion>| {
+        if candidates.iter().any(|candidate| candidate.text == partial) {
+            return None;
+        }
+        Some(Slot {
+            title,
+            start,
+            partial: partial.clone(),
+            candidates,
+        })
+    };
+    match words.as_slice() {
+        [] => slot(" team ", subcommands()),
+        ["spawn", rest @ ..] => match rest.last() {
+            Some(&"--backend") => slot(" backends ", backends()),
+            Some(&"--agent") => slot(" agents ", agents.to_vec()),
+            _ if partial.starts_with('-') => slot(" flags ", flags(rest)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// What follows `/team`, in the order [`team`] reads them.
+fn subcommands() -> Vec<Completion> {
+    [
+        ("spawn", "start a teammate"),
+        (
+            "shutdown",
+            "ask a member — or, unnamed, every member — to shut down",
+        ),
+        ("list", "show the roster"),
+    ]
+    .into_iter()
+    .map(|(text, detail)| Completion {
+        text: text.to_owned(),
+        detail: detail.to_owned(),
+    })
+    .collect()
+}
+
+/// The six surfaces, the default marked as such.
+fn backends() -> Vec<Completion> {
+    BACKENDS
+        .iter()
+        .map(|name| Completion {
+            text: (*name).to_owned(),
+            detail: if *name == backend_name(DEFAULT_BACKEND) {
+                "the default when none is named".to_owned()
+            } else {
+                String::new()
+            },
+        })
+        .collect()
+}
+
+/// `spawn`'s flags, minus the ones the line already carries.
+fn flags(given: &[&str]) -> Vec<Completion> {
+    [
+        ("--backend", "the surface the teammate runs on"),
+        ("--agent", "the kind of agent it runs as"),
+    ]
+    .into_iter()
+    .filter(|(flag, _)| !given.contains(flag))
+    .map(|(text, detail)| Completion {
+        text: text.to_owned(),
+        detail: detail.to_owned(),
+    })
+    .collect()
+}
+
+/// The rows `partial` narrows `candidates` to, best match first — every row in
+/// roster order when nothing has been typed yet.
+#[must_use]
+pub fn value_matches(partial: &str, candidates: &[Completion]) -> Vec<Choice> {
+    if partial.is_empty() {
+        return candidates.iter().cloned().map(Choice::Value).collect();
+    }
+
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let atom = fragment(partial);
+    let mut buffer = Vec::new();
+    let mut scored: Vec<(u32, Completion)> = candidates
+        .iter()
+        .filter_map(|candidate| {
+            atom.score(Utf32Str::new(&candidate.text, &mut buffer), &mut matcher)
+                .map(|score| (u32::from(score), candidate.clone()))
+        })
+        .collect();
+    scored.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| left.1.text.cmp(&right.1.text))
+    });
+
+    scored
+        .into_iter()
+        .map(|(_, choice)| Choice::Value(choice))
+        .collect()
 }
 
 /// The rows `query` narrows to across both populations, best match first.
@@ -1066,8 +1237,9 @@ fn score(atom: &Atom, matcher: &mut Matcher, entry: &Entry, surface: Surface) ->
 #[cfg(test)]
 mod tests {
     use super::{
-        Action, COMMANDS, Category, Choice, EngineCommand, SPAWN_GRAMMAR, Surface, Team, TeamSpawn,
-        dropdown_matches, inline_hint, is_bare_exit, lookup, matches, submitted, team,
+        Action, BACKENDS, COMMANDS, Category, Choice, Completion, EngineCommand, SPAWN_GRAMMAR,
+        Surface, Team, TeamSpawn, dropdown_matches, inline_hint, is_bare_exit, lookup, matches,
+        submitted, team, team_completion, value_matches,
     };
 
     /// The commands the engine offers a session that loaded no config: one,
@@ -1179,6 +1351,122 @@ mod tests {
     #[test]
     fn a_multiline_buffer_hints_nothing() {
         assert_eq!(inline_hint("/team\nmore", &[]), None);
+    }
+
+    fn kinds() -> Vec<Completion> {
+        ["general", "explore"]
+            .into_iter()
+            .map(|name| Completion {
+                text: name.to_owned(),
+                detail: String::new(),
+            })
+            .collect()
+    }
+
+    fn texts(choices: &[Choice]) -> Vec<String> {
+        choices.iter().map(Choice::slash).collect()
+    }
+
+    /// **D519.** The surfaces after `--backend` are the parser's own list,
+    /// narrowed by what has been typed, with the default saying so.
+    #[test]
+    fn the_backend_slot_offers_the_parsers_own_six() {
+        let text = "/team spawn foo --backend g";
+        let slot = team_completion(text, (0, text.len()), &kinds()).expect("a backend slot");
+        assert_eq!(slot.title, " backends ");
+        assert_eq!(slot.partial, "g");
+        assert_eq!(slot.start, text.len() - 1);
+        assert_eq!(
+            slot.candidates
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>(),
+            BACKENDS.to_vec()
+        );
+        assert!(
+            slot.candidates
+                .iter()
+                .any(|c| c.text == "ganja" && c.detail.contains("default")),
+            "the default surface says so"
+        );
+
+        let narrowed = texts(&value_matches(&slot.partial, &slot.candidates));
+        assert!(narrowed.contains(&"ganja".to_owned()) && narrowed.contains(&"grok".to_owned()));
+        assert!(!narrowed.contains(&"claude".to_owned()));
+    }
+
+    /// **D519.** Every slot the grammar has: subcommand, flags, agent kinds —
+    /// and none where a name or a prompt word goes.
+    #[test]
+    fn every_team_slot_completes_and_free_words_do_not() {
+        let at_end = |text: &str| team_completion(text, (0, text.len()), &kinds());
+
+        assert_eq!(
+            at_end("/team sp").map(|s| (s.title, s.partial)),
+            Some((" team ", "sp".to_owned()))
+        );
+        assert_eq!(
+            at_end("/team spawn foo --").map(|s| s.title),
+            Some(" flags ")
+        );
+        assert_eq!(
+            at_end("/team spawn foo --agent ex").map(|s| s.title),
+            Some(" agents ")
+        );
+        assert_eq!(at_end("/team spawn fo"), None, "a name is anyone's");
+        assert_eq!(
+            at_end("/team spawn foo fix it"),
+            None,
+            "prompt words are prose"
+        );
+        assert_eq!(
+            at_end("/team spawn foo --backend ganja "),
+            None,
+            "a filled slot is done"
+        );
+        assert_eq!(at_end("/skills sp"), None);
+        assert_eq!(
+            at_end("team spawn --backend "),
+            None,
+            "no slash, no command"
+        );
+    }
+
+    /// **D519.** A word that already is a candidate raises no menu, so the
+    /// Enter after a fully typed value sends the line instead of feeding the
+    /// menu — the pane drills' own `/team spawn w1 --backend ganja` + Enter.
+    #[test]
+    fn a_fully_typed_value_leaves_enter_to_the_line() {
+        let at_end = |text: &str| team_completion(text, (0, text.len()), &kinds());
+        assert_eq!(at_end("/team spawn w1 --backend ganja"), None);
+        assert_eq!(at_end("/team spawn"), None);
+        assert_eq!(at_end("/team spawn w1 --agent explore"), None);
+        assert!(at_end("/team spawn w1 --backend ganj").is_some());
+    }
+
+    /// **D519.** A flag the line already carries is not offered twice.
+    #[test]
+    fn a_flag_already_given_is_not_offered_again() {
+        let text = "/team spawn foo --backend ganja --";
+        let slot = team_completion(text, (0, text.len()), &kinds()).expect("a flag slot");
+        assert_eq!(
+            slot.candidates
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["--agent"]
+        );
+    }
+
+    /// **D519.** Completing mid-line replaces the word under the cursor and
+    /// nothing after it: the span is measured to the cursor, not to the end.
+    #[test]
+    fn the_slot_spans_only_the_word_under_the_cursor() {
+        let text = "/team spawn foo --backend gr fix it";
+        let cursor = "/team spawn foo --backend gr".len();
+        let slot = team_completion(text, (0, cursor), &kinds()).expect("a backend slot");
+        assert_eq!(slot.partial, "gr");
+        assert_eq!(slot.start, cursor - 2);
     }
 
     /// The spellings and aliases are the command surface's contract, including

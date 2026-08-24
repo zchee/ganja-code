@@ -520,8 +520,15 @@ pub struct App {
     /// splits ride along untouched, where `App::record`'s own running totals
     /// collapse them.
     turn_usages: VecDeque<TurnUsage>,
-    /// The inline command menu, while the buffer is a command being typed.
+    /// The inline command menu, while the buffer is a command being typed —
+    /// or, in values mode, a `/team` slot being filled (**D519**).
     dropdown: Option<Dropdown>,
+    /// The `/team` slot the values menu is over, for the span a chosen value
+    /// replaces; [`None`] whenever the menu is the command menu or closed.
+    completion: Option<command::Slot>,
+    /// The agent kinds `--agent` may name, read off the engine's registry
+    /// once: what the `task` door may spawn is what this menu offers.
+    agent_kinds: Vec<command::Completion>,
     /// The inline file menu, while the buffer is mentioning a file.
     files: Option<Files>,
     /// The inline skill menu, while the buffer is invoking one with `$`
@@ -828,6 +835,20 @@ impl App {
         let agent = engine.agent();
         let model = engine.model();
         let engine_commands = command::EngineCommand::roster(engine.commands());
+        let agent_kinds: Vec<command::Completion> = engine
+            .agents()
+            .map(|registry| {
+                registry
+                    .agents()
+                    .iter()
+                    .filter(|agent| agent.spawnable())
+                    .map(|agent| command::Completion {
+                        text: agent.name.clone(),
+                        detail: agent.description.clone().unwrap_or_default(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut status = Status::new(notice);
         status.set_agent(agent.clone());
         status.set_model(Some(model.clone()));
@@ -884,6 +905,8 @@ impl App {
             event_log: VecDeque::new(),
             turn_usages: VecDeque::new(),
             dropdown: None,
+            completion: None,
+            agent_kinds,
             files: None,
             skill_menu: None,
             engine_commands,
@@ -3929,6 +3952,7 @@ impl App {
             // autocomplete that nobody would ask for (**D11**).
             KeyCode::Esc => {
                 self.dropdown = None;
+                self.completion = None;
 
                 true
             }
@@ -3964,6 +3988,12 @@ impl App {
                     Some(command::Choice::Engine(command)) => {
                         self.editor.set_text(&format!("/{} ", command.name));
                     }
+                    // A slot value replaces the word under the cursor and
+                    // waits, like an engine command's name: the line is
+                    // still being composed (**D519**).
+                    Some(command::Choice::Value(completion)) => {
+                        self.complete_value(&completion.text);
+                    }
                     None => {}
                 }
 
@@ -3982,14 +4012,30 @@ impl App {
                 let choice = self.dropdown.as_ref().and_then(Dropdown::selected);
                 self.dropdown = None;
 
-                if let Some(choice) = choice {
-                    self.editor.set_text(&format!("{} ", choice.slash()));
+                match choice {
+                    Some(command::Choice::Value(completion)) => {
+                        self.complete_value(&completion.text);
+                    }
+                    Some(choice) => self.editor.set_text(&format!("{} ", choice.slash())),
+                    None => {}
                 }
 
                 true
             }
             _ => false,
         }
+    }
+
+    /// Puts `value` where the partial word of the current `/team` slot was,
+    /// followed by the space that ends the slot (**D519**): only the word
+    /// under the cursor goes, so a line completed mid-sentence keeps its tail.
+    fn complete_value(&mut self, value: &str) {
+        let Some(slot) = self.completion.take() else {
+            return;
+        };
+        self.editor
+            .delete_span(0, slot.start, slot.partial.chars().count());
+        self.editor.insert(&format!("{value} "));
     }
 
     /// One keypress while the file menu is up, and whether it was one of the
@@ -4264,8 +4310,21 @@ impl App {
                     self.dropdown = Some(Dropdown::new(&text, self.engine_commands.clone()));
                 }
             }
+            self.completion = None;
             return;
         }
+        // A `/team` argument slot raises the same box over what could fill
+        // it (**D519**), rebuilt per keystroke because the slot itself moves
+        // with the cursor.
+        if let Some(slot) = command::team_completion(&text, cursor, &self.agent_kinds) {
+            self.files = None;
+            self.skill_menu = None;
+            self.cancel_file_walk();
+            self.dropdown = Some(Dropdown::values(&slot));
+            self.completion = Some(slot);
+            return;
+        }
+        self.completion = None;
         self.dropdown = None;
 
         let Some(fragment) = mention::trigger(&text, cursor) else {
@@ -9991,6 +10050,92 @@ mod tests {
 
             assert!(opened(&app), "/{typed} should have done something");
         }
+    }
+
+    /// **D519.** A `--backend` slot raises the values menu over the parser's
+    /// own surfaces, and Tab puts the chosen one in place of the partial word
+    /// with the space that ends the slot — the line waits, nothing runs.
+    #[tokio::test]
+    async fn tab_completes_a_backend_from_the_parsers_own_list() {
+        let mut app = app();
+        for event in typing("/team spawn foo --backend g") {
+            app.handle(event).await.expect("typing is handled");
+        }
+        assert!(
+            app.dropdown.is_some(),
+            "the backend slot should raise the menu"
+        );
+        assert!(app.completion.is_some());
+
+        app.handle(key(KeyCode::Tab, KeyModifiers::NONE))
+            .await
+            .expect("tab is handled");
+
+        assert_eq!(app.editor.text(), "/team spawn foo --backend ganja ");
+        assert!(app.dropdown.is_none(), "choosing closes the menu");
+        assert!(app.completion.is_none());
+    }
+
+    /// **D519.** Once the value is fully typed the menu is gone, so the
+    /// Enter that follows reaches the line — the spawn drills depend on it.
+    #[tokio::test]
+    async fn a_fully_typed_backend_closes_the_menu_before_enter() {
+        let mut app = app();
+        for event in typing("/team spawn w1 --backend ganj") {
+            app.handle(event).await.expect("typing is handled");
+        }
+        assert!(app.dropdown.is_some());
+        for event in typing("a") {
+            app.handle(event).await.expect("typing is handled");
+        }
+        assert!(app.dropdown.is_none(), "nothing left to complete");
+        assert_eq!(app.editor.text(), "/team spawn w1 --backend ganja");
+    }
+
+    /// **D519.** The slot after `/team` is the subcommand, and Enter fills it
+    /// the way Tab does — a subcommand is not a thing to run by itself.
+    #[tokio::test]
+    async fn enter_fills_a_team_subcommand_without_submitting() {
+        let mut app = app();
+        for event in typing("/team sh") {
+            app.handle(event).await.expect("typing is handled");
+        }
+        assert!(app.dropdown.is_some());
+
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        assert_eq!(app.editor.text(), "/team shutdown ");
+        assert!(app.dropdown.is_none());
+    }
+
+    /// **D519.** Where the grammar has no slot — a name, a prompt word — no
+    /// menu opens, and Esc on an open one keeps what was typed (**D11**).
+    #[tokio::test]
+    async fn free_words_raise_no_values_menu_and_esc_keeps_the_text() {
+        let mut app = app();
+        for event in typing("/team spawn fo") {
+            app.handle(event).await.expect("typing is handled");
+        }
+        assert!(
+            app.dropdown.is_none(),
+            "a member name is anyone's to choose"
+        );
+
+        for event in typing(" --agent ") {
+            app.handle(event).await.expect("typing is handled");
+        }
+        assert!(
+            app.dropdown.is_some(),
+            "the agent slot should raise the menu"
+        );
+
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
+            .await
+            .expect("esc is handled");
+        assert!(app.dropdown.is_none());
+        assert_eq!(app.editor.text(), "/team spawn fo --agent ");
     }
 
     /// The trigger, at the level the user meets it: a slash that starts the
