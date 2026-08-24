@@ -73,7 +73,10 @@ const CHROME: usize = 3;
 /// restraint the popup-era `HINTS` already used: the header's own tab strip
 /// already spells out the digit shortcuts, and a footer trying to fit both
 /// halves of Claude Code's pattern on an 80-column terminal has no room left
-/// for a chord the toggle that opened the overlay already taught.
+/// for a chord the toggle that opened the overlay already taught. The vim
+/// keys the overlay also answers — `j`/`k`, and the `Ctrl+U`/`Ctrl+D`
+/// half-page pair (2026-08-25) — go unlisted for the same reason: a person
+/// who reaches for them knows them, and the row has no room to teach them.
 const HINTS: &str = "q/esc close \u{b7} up/down/pgup/pgdn scroll";
 
 /// Everything [`Inspector::render`] reads fresh every frame, bundled so the
@@ -243,6 +246,18 @@ impl Inspector {
     /// Moves the active tab's viewport to its first row.
     pub fn scroll_to_top(&mut self) {
         self.offset = Some(0);
+    }
+
+    /// Moves the active tab's viewport by half of what the last render had
+    /// room for, `direction` negative towards the top — vim's `Ctrl+U`/
+    /// `Ctrl+D` pair, whose `scroll` option defaults to half the window. The
+    /// screen's own step rather than the fixed one the Page keys ride, which
+    /// is what makes two presses a page whatever the terminal's height; never
+    /// less than one row, so the pair moves before a first render has
+    /// measured anything.
+    pub fn scroll_half_page(&mut self, direction: isize) {
+        let half = isize::try_from((self.rows / 2).max(1)).unwrap_or(isize::MAX);
+        self.scroll(if direction < 0 { -half } else { half });
     }
 
     /// Draws the overlay over the whole of `area`.
@@ -853,6 +868,52 @@ mod tests {
         assert!(
             repinned.contains("prt_30"),
             "End re-pins the viewport to the tail:\n{repinned}"
+        );
+    }
+
+    /// vim's half-page pair: `Ctrl+U` moves the viewport up by half of what
+    /// the last render had room for and `Ctrl+D` back down by the same — the
+    /// screen's own step, asserted against the row arithmetic rather than a
+    /// second screen — and reaching the tail again re-pins, like every other
+    /// way down.
+    #[test]
+    fn the_half_page_pair_moves_by_half_of_what_the_last_render_showed() {
+        let delta = |index: usize| CoreEvent::PartDelta {
+            session_id: SessionId::from("ses_1".to_owned()),
+            message_id: MessageId::from("msg_1".to_owned()),
+            part_id: PartId::from(format!("prt_{index}")),
+            delta: format!("delta {index}"),
+        };
+        let events: VecDeque<CoreEvent> = (0..30).map(delta).collect();
+        let usages = VecDeque::new();
+        let fed = feed(None, &[], &events, &usages);
+        // Eight rows less the chrome is five of content: a half page is two.
+        let area = Rect::new(0, 0, 120, 8);
+        let mut by_pair = Inspector::new();
+        by_pair.select_index(1);
+        let mut by_rows = Inspector::new();
+        by_rows.select_index(1);
+        let pinned = render_in(&mut by_pair, area, &fed);
+        render_in(&mut by_rows, area, &fed);
+
+        by_pair.scroll_half_page(-1);
+        by_rows.scroll(-2);
+        let up = render_in(&mut by_pair, area, &fed);
+        assert_eq!(up, render_in(&mut by_rows, area, &fed));
+        assert!(
+            !up.contains("prt_29"),
+            "half a page up, the tail is off screen:\n{up}"
+        );
+        assert!(
+            up.contains("prt_27"),
+            "and the row two above it is the last shown:\n{up}"
+        );
+
+        by_pair.scroll_half_page(1);
+        let down = render_in(&mut by_pair, area, &fed);
+        assert_eq!(
+            down, pinned,
+            "half a page down from there is the tail again, re-pinned:\n{down}"
         );
     }
 

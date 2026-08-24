@@ -37,7 +37,7 @@ Codex のピンは存在しない — upstream の変化とともに行は古く
 
 | 機能 | 補足 | ganja |
 |---|---|---|
-| [トランスクリプトオーバーレイ](https://developers.openai.com/codex/cli) | Ctrl+T | ✅ 同じキー、3タブ(完全な tool/MCP 入出力を含む展開トランスクリプト・生イベントログ・ターン毎トークン表);フルターミナル占有とバナーはこのオーバーレイ独自の表現、フッター文言は Claude Code の Ctrl+O から — 2026-08-15 以降は塗りも Codex 自身のモノクロ(どのテーマでも文字色 on 端末背景)で、各タブは末尾固定で開きストリームに追従する |
+| [トランスクリプトオーバーレイ](https://developers.openai.com/codex/cli) | Ctrl+T | ✅ 同じキー、3タブ(完全な tool/MCP 入出力を含む展開トランスクリプト・生イベントログ・ターン毎トークン表);フルターミナル占有とバナーはこのオーバーレイ独自の表現、フッター文言は Claude Code の Ctrl+O から — 2026-08-15 以降は塗りも Codex 自身のモノクロ(どのテーマでも文字色 on 端末背景)で、各タブは末尾固定で開きストリームに追従する;スクロールは矢印・j/k・Page キーに加え vim の Ctrl+U/Ctrl+D 半ページ対(2026-08-25) |
 | [ステータスライン構成](https://github.com/openai/codex/blob/main/docs/config.md) | `[tui] status_line = […]` | ✅ `tui.statusline` の要素ロースター(D469): ユーザー順の名前付き要素、幅対応、OMC HUD の描画形(メーター・git 行・任意の詳細行);要素語彙は Codex の id リストではなく ganja 自身のもので、未知の名前はロード時に拒否 |
 | [オンボーディングフロー](https://developers.openai.com/codex/cli) | 初回起動時の認証選択(ChatGPT OAuth / API キー)・config 初期化 | ❌ ganja はステータスバー通知付きで fake プロバイダ起動;`auth login` は別の CLI 手順 |
 | [承認ダイアログ](https://github.com/openai/codex/blob/main/docs/getting-started.md) | 実行前のコマンド/パッチのプレビュー;承認・セッション内承認・フィードバック付き拒否 | ⚠️ ganja の permission ダイアログ(allow / always / deny)— "always" はセッションと共に消えず、プロジェクト毎ストアに永続化 |

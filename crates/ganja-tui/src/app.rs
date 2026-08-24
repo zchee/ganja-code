@@ -365,6 +365,18 @@ fn edits(key: KeyEvent) -> bool {
     key.code == KeyCode::Char('d') && key.modifiers == KeyModifiers::CONTROL
 }
 
+/// Which of vim's half-page pair `key` is — `-1` for Ctrl+U, `1` for Ctrl+D
+/// — or [`None`]: the inspector's own scroll step, and the one exit chord the
+/// overlay takes for itself while it is open ([`App::exits`]).
+fn half_page(key: KeyEvent) -> Option<isize> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Char('u') if ctrl => Some(-1),
+        KeyCode::Char('d') if ctrl => Some(1),
+        _ => None,
+    }
+}
+
 /// The reply a key sends while the permission dialog is open, or [`None`]
 /// for a key the dialog swallows without acting on it. Pulled out of
 /// [`App::handle_key`] so the mapping can be asserted on its own.
@@ -3348,6 +3360,14 @@ impl App {
                 self.inspector = None;
                 return Ok(());
             }
+            // vim's half-page pair beside its `j`/`k` (2026-08-25): the
+            // overlay's own measured rows, not `HELP_PAGE`'s fixed step.
+            // Ctrl+D is also an exit chord, which `exits` yields to this
+            // overlay while it is open.
+            if let Some(direction) = half_page(key) {
+                inspector.scroll_half_page(direction);
+                return Ok(());
+            }
             match key.code {
                 KeyCode::Left => inspector.previous_tab(),
                 KeyCode::Right => inspector.next_tab(),
@@ -3678,9 +3698,13 @@ impl App {
     ///
     /// A bound key the editor also uses only quits on an empty buffer, so
     /// Ctrl-D deletes forward while there is something to delete and leaves
-    /// once there is not.
+    /// once there is not; and inside the inspector the same key is vim's
+    /// half page ([`half_page`]), so it scrolls while the overlay is open and
+    /// leaves once it is closed. Ctrl-C and Ctrl-Q quit from anywhere.
     fn exits(&self, key: KeyEvent) -> bool {
-        self.keys.binds(keybind::Action::AppExit, key) && (!edits(key) || self.editor.is_empty())
+        self.keys.binds(keybind::Action::AppExit, key)
+            && (!edits(key) || self.editor.is_empty())
+            && !(self.inspector.is_some() && half_page(key).is_some())
     }
 
     /// Whether a modal is claiming the keys and the wheel.
@@ -11042,6 +11066,76 @@ mod tests {
     /// `q` closes the overlay too — Codex's own binding for its transcript
     /// overlay, screenshot-sourced (see `component/inspector.rs`'s module
     /// doc) — beside Esc and Ctrl+T rather than instead of them.
+    /// vim's half-page pair reaches the overlay: with the log tab holding
+    /// more than a screen, Ctrl+U scrolls it up by half the rows the last
+    /// frame showed and Ctrl+D brings the tail back.
+    #[tokio::test]
+    async fn ctrl_u_and_ctrl_d_scroll_the_inspector_by_half_a_page() {
+        let mut app = app();
+        let reply = Message::assistant("canned");
+        let part = Part::text("");
+        app.handle(AppEvent::core(CoreEvent::MessageStarted {
+            session_id: session(),
+            message: reply.clone(),
+        }))
+        .await
+        .expect("a message start is handled");
+        app.handle(AppEvent::core(CoreEvent::PartStarted {
+            session_id: session(),
+            message_id: reply.id.clone(),
+            part: part.clone(),
+        }))
+        .await
+        .expect("a part start is handled");
+        for index in 0..30 {
+            app.handle(AppEvent::core(CoreEvent::PartDelta {
+                session_id: session(),
+                message_id: reply.id.clone(),
+                part_id: part.id.clone(),
+                delta: format!("fragment {index}\n"),
+            }))
+            .await
+            .expect("a fragment is handled");
+        }
+
+        app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
+            .await
+            .expect("ctrl+t is handled");
+        app.handle(key(KeyCode::Char('2'), KeyModifiers::NONE))
+            .await
+            .expect("the log tab is selected");
+        // Wide enough that a `PartDelta`'s `{event:?}` line reaches its
+        // `delta` before the clip; eight rows less the chrome is five of
+        // content, so a half page is two.
+        let mut terminal = terminal(220, 8);
+        app.draw(&mut terminal).expect("a frame draws");
+        let pinned = screen(&terminal);
+        assert!(
+            pinned.contains("fragment 29"),
+            "the log tab opens on its tail:\n{pinned}"
+        );
+
+        app.handle(key(KeyCode::Char('u'), KeyModifiers::CONTROL))
+            .await
+            .expect("ctrl+u is handled");
+        app.draw(&mut terminal).expect("a frame draws");
+        let up = screen(&terminal);
+        assert!(
+            !up.contains("fragment 29") && up.contains("fragment 27"),
+            "ctrl+u moved half of the five content rows up:\n{up}"
+        );
+
+        app.handle(key(KeyCode::Char('d'), KeyModifiers::CONTROL))
+            .await
+            .expect("ctrl+d is handled");
+        app.draw(&mut terminal).expect("a frame draws");
+        assert_eq!(screen(&terminal), pinned, "ctrl+d brought the tail back");
+        assert!(
+            !app.quit,
+            "inside the overlay ctrl+d is vim's, not the exit chord it is elsewhere"
+        );
+    }
+
     #[tokio::test]
     async fn q_closes_the_inspector_too() {
         let mut app = app();
