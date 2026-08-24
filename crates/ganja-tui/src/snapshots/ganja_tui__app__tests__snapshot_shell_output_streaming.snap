@@ -2,7 +2,7 @@
 source: crates/ganja-tui/src/app.rs
 expression: screen(&terminal)
 ---
-• Bash(command: "cargo nextest run")                                            
+● Bash(command: "cargo nextest run")                                            
   ⎿ … +2 lines (ctrl+t to expand)                                               
     PASS [ 0.006s] ganja-core storage                                           
     PASS [ 0.011s] ganja-tui app                                                

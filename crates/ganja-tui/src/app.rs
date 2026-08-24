@@ -8442,7 +8442,7 @@ mod tests {
         let mut terminal = terminal(80, 24);
         app.draw(&mut terminal).expect("a frame draws");
         assert!(
-            screen(&terminal).contains("\u{2022} Shell"),
+            screen(&terminal).contains("\u{25cf} Shell"),
             "got:\n{}",
             screen(&terminal)
         );
@@ -12634,7 +12634,7 @@ mod tests {
         let screen = screen(&terminal);
 
         assert!(
-            screen.contains("\u{2022} Task(agent: \"explore\""),
+            screen.contains("\u{25cf} Task(agent: \"explore\""),
             "got:\n{screen}"
         );
         assert!(screen.contains("find the parser"), "got:\n{screen}");

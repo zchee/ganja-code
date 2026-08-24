@@ -23,8 +23,8 @@
 //! What the transcript looks like is Claude Code's own grammar, taken from a
 //! screenshot rather than ported: a `\u{25cf}` bullet leads every block a reply
 //! is made of and every settled tool call it makes — a call still in flight
-//! leads with a pulsing `\u{2022}` point instead (2026-08-25) — a `\u{23bf}`
-//! marker introduces what
+//! instead wears a dot that breathes, `\u{b7}` up through `\u{25cf}` and
+//! back (2026-08-25) — a `\u{23bf}` marker introduces what
 //! a call answered and hangs its preview under itself, and a `>` caret marks
 //! what a person said. Upstream opencode's pane renders none of that — it heads
 //! each message with its author's name and brackets a call's state into the
@@ -102,11 +102,26 @@ fn title(entry: &Entry) -> String {
 /// made (**D487**).
 const BULLET: &str = "\u{25cf} ";
 
-/// What leads a tool call still in flight: Claude Code's own smaller point,
-/// pulsing while the call runs (user directive, 2026-08-25, two reference
-/// screenshot pairs) — the icon moves, the words hold still. A settled call
-/// takes `BULLET`, whose color answers the verdict.
-const POINT: &str = "\u{2022} ";
+/// What leads a tool call still in flight, one rung per wink height: the
+/// reference dot breathes size as well as brightness — its lit area more
+/// than triples from trough to crest in the recording — so each height wears
+/// the next dot the font already holds, the full bullet at the crest (user
+/// directive, 2026-08-25: the maximum a size up from the small point). Every
+/// rung is one column wide, so the words after it never move; a settled call
+/// keeps `BULLET`, whose color answers the verdict — told from the crest's
+/// identical glyph by standing still.
+const POINT_GLYPHS: [&str; 5] = [
+    "\u{b7} ",
+    "\u{2219} ",
+    "\u{2022} ",
+    "\u{2022} ",
+    "\u{25cf} ",
+];
+
+/// The rung `level` wears, clamped to the crest.
+fn point_glyph(level: u8) -> &'static str {
+    POINT_GLYPHS[usize::from(level.min(POINT_BRIGHT))]
+}
 
 /// The top of the point's wink, in quarters above the chrome's dim: the
 /// height `point_level` counts in and `point_style` paints from.
@@ -2060,8 +2075,9 @@ fn diff_line_style(line: &str, theme: &Theme) -> Style {
 /// the color it is painted, and in what hangs under it: a running call's newest output, a
 /// finished call's summary and preview, a failed call's first line of why
 /// (**D487**). `StepStart`/`StepFinish` never reach here — and a call still
-/// in flight leads with the winking `POINT` at `blink`'s height rather than
-/// the bullet, the words unmoved (2026-08-25).
+/// in flight leads with the winking point at `blink`'s height — sized and
+/// painted by its rung, biggest at the crest — the words unmoved
+/// (2026-08-25).
 fn tool_lines(tool: &str, state: &ToolState, theme: &Theme, blink: u8) -> Vec<Row> {
     // A delegated turn is one row, never a transcript of its own: everything
     // the child said reaches the model inside the tool result, and repeating
@@ -2076,7 +2092,7 @@ fn tool_lines(tool: &str, state: &ToolState, theme: &Theme, blink: u8) -> Vec<Ro
         // arguments ride the pending state, and a bare name means they are
         // still streaming.
         ToolState::Pending { input } => vec![Row::led(
-            POINT,
+            point_glyph(blink),
             point_style(theme, blink),
             tool_heading(tool, input.as_ref()),
             theme.dim,
@@ -2085,7 +2101,7 @@ fn tool_lines(tool: &str, state: &ToolState, theme: &Theme, blink: u8) -> Vec<Ro
             input, metadata, ..
         } => {
             let mut rows = vec![Row::led(
-                POINT,
+                point_glyph(blink),
                 point_style(theme, blink),
                 tool_heading(tool, Some(input)),
                 theme.dim,
@@ -2223,7 +2239,7 @@ fn task_lines(state: &ToolState, theme: &Theme, blink: u8) -> Vec<Row> {
             );
 
             vec![Row::led(
-                POINT,
+                point_glyph(blink),
                 point_style(theme, blink),
                 heading,
                 theme.dim,
@@ -2234,7 +2250,7 @@ fn task_lines(state: &ToolState, theme: &Theme, blink: u8) -> Vec<Row> {
         } => {
             let agent = field(input, "subagent_type");
             let mut rows = vec![Row::led(
-                POINT,
+                point_glyph(blink),
                 point_style(theme, blink),
                 task_heading(agent, field(input, "description")),
                 theme.dim,
@@ -3023,7 +3039,7 @@ mod tests {
         let lines = rendered(&mut chat, Rect::new(0, 0, 60, 20));
 
         assert!(
-            lines.iter().any(|line| line == "\u{2022} Shell"),
+            lines.iter().any(|line| line == "\u{25cf} Shell"),
             "a call whose arguments have not arrived names the tool alone, got {lines:?}"
         );
     }
@@ -3051,14 +3067,15 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line == "\u{2022} Shell(command: \"cargo test\")"),
+                .any(|line| line == "\u{25cf} Shell(command: \"cargo test\")"),
             "got {lines:?}"
         );
     }
 
-    /// An in-flight call's point winks — bright through the hold, down to
-    /// the chrome's own dim at the bottom — while its words hold still (user
-    /// directive, 2026-08-25): the two frames differ in paint alone.
+    /// An in-flight call's point winks — the full bullet bright through the
+    /// hold, shrinking and dimming to the small dot at the bottom — while
+    /// its words hold still (user directive, 2026-08-25): past the lead, the
+    /// two frames are the same text.
     #[test]
     fn an_in_flight_calls_point_winks_and_its_words_hold_still() {
         let area = Rect::new(0, 0, 60, 4);
@@ -3096,15 +3113,24 @@ mod tests {
         chat.blink_epoch = Some(Instant::now());
         let (bright, lead) = frame(&mut chat);
         assert_eq!(
-            bright[0], "\u{2022} Shell(command: \"cargo test\")",
-            "the point leads a call still in flight"
+            bright[0], "\u{25cf} Shell(command: \"cargo test\")",
+            "the crest wears the full bullet"
         );
         assert_eq!(lead, Theme::default().fg.fg, "bright through the hold");
 
         // 1600 ms into the wink: past the drop, flat at the bottom.
         chat.blink_epoch = Instant::now().checked_sub(Duration::from_millis(1_600));
         let (dim, lead) = frame(&mut chat);
-        assert_eq!(bright, dim, "the words hold still; only the paint moves");
+        assert_eq!(
+            dim[0], "\u{b7} Shell(command: \"cargo test\")",
+            "the trough wears the small dot"
+        );
+        assert_eq!(
+            bright[0].chars().skip(2).collect::<String>(),
+            dim[0].chars().skip(2).collect::<String>(),
+            "past the lead the words hold still"
+        );
+        assert_eq!(bright[1..], dim[1..], "and every other row holds still");
         assert_eq!(
             lead,
             Theme::default().dim.fg,
@@ -3129,6 +3155,16 @@ mod tests {
         assert_eq!(at(1_600), 0, "flat at the bottom");
         assert_eq!(at(1_850), 2, "easing back");
         assert_eq!(at(2_000), at(0), "one wink in, it starts over");
+
+        let glyph = super::point_glyph;
+        assert_eq!(
+            glyph(super::POINT_BRIGHT),
+            "\u{25cf} ",
+            "biggest at the crest"
+        );
+        assert_eq!(glyph(2), "\u{2022} ");
+        assert_eq!(glyph(1), "\u{2219} ");
+        assert_eq!(glyph(0), "\u{b7} ", "smallest at the trough");
     }
 
     /// Between its two ends the point actually fades — where the theme gives
@@ -3298,7 +3334,7 @@ mod tests {
         };
         assert_eq!(
             header(&running),
-            "\u{2022} Read(/repo/src/lib.rs \u{b7} lines 1158-1217)"
+            "\u{25cf} Read(/repo/src/lib.rs \u{b7} lines 1158-1217)"
         );
         assert_eq!(
             header(&settled),
@@ -3330,7 +3366,7 @@ mod tests {
         );
 
         assert!(
-            lines.iter().any(|line| line == "\u{2022} Read(/repo/a.rs)"),
+            lines.iter().any(|line| line == "\u{25cf} Read(/repo/a.rs)"),
             "got {lines:?}"
         );
     }
@@ -3715,9 +3751,10 @@ mod tests {
     }
 
     /// **AC2.** A call that is running and the same call once it has settled
-    /// are announced by the same words: what changed is the lead it wears —
-    /// the pulsing point in flight, the verdict bullet after (2026-08-25) —
-    /// and the color it is painted in, not a word in the text.
+    /// are announced by the same words — at the wink's crest, by the very
+    /// same line: what tells them apart there is that the running lead
+    /// breathes while the settled one stands in its verdict color, not a
+    /// word in the text (2026-08-25).
     #[test]
     fn a_running_call_and_its_settled_self_share_their_header_words() {
         let input = serde_json::json!({"command": "cargo test"});
@@ -3757,17 +3794,9 @@ mod tests {
                 .cloned()
                 .unwrap_or_default()
         };
-        assert_eq!(header(&running), "\u{2022} Shell(command: \"cargo test\")");
-        assert_eq!(
-            header(&completed),
-            "\u{25cf} Shell(command: \"cargo test\")"
-        );
+        assert_eq!(header(&running), "\u{25cf} Shell(command: \"cargo test\")");
+        assert_eq!(header(&running), header(&completed));
         assert_eq!(header(&completed), header(&failed));
-        assert_eq!(
-            header(&running).strip_prefix('\u{2022}'),
-            header(&completed).strip_prefix('\u{25cf}'),
-            "past the lead, not a word moves when the call settles"
-        );
     }
 
     /// A header is one line, so the arguments on it are capped — and the cut
@@ -3791,7 +3820,7 @@ mod tests {
 
         assert!(
             lines.iter().any(|line| line
-                == "\u{2022} Grep(path: \"src\", pattern: \"fn main\", include: \"*.rs\", \u{2026})"),
+                == "\u{25cf} Grep(path: \"src\", pattern: \"fn main\", include: \"*.rs\", \u{2026})"),
             "the recognizable fields come first and the cut is named, got {lines:?}"
         );
     }
@@ -3815,7 +3844,7 @@ mod tests {
 
         assert!(
             lines.iter().any(|line| line
-                == "\u{2022} Write(filePath: \"a.rs\", content: \"fn main() {\u{2026}\")"),
+                == "\u{25cf} Write(filePath: \"a.rs\", content: \"fn main() {\u{2026}\")"),
             "got {lines:?}"
         );
     }
@@ -3837,7 +3866,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line == "\u{2022} Todowrite(todos: [\u{2026}])"),
+                .any(|line| line == "\u{25cf} Todowrite(todos: [\u{2026}])"),
             "got {lines:?}"
         );
     }
@@ -4055,11 +4084,11 @@ mod tests {
             "the known id should be replaced in place, got {lines:?}"
         );
         assert!(
-            lines.iter().any(|line| line == "\u{2022} Read"),
+            lines.iter().any(|line| line == "\u{25cf} Read"),
             "an update for an id never started should still append, got {lines:?}"
         );
         assert!(
-            !lines.iter().any(|line| line == "\u{2022} Shell"),
+            !lines.iter().any(|line| line == "\u{25cf} Shell"),
             "the pending block should have been replaced, not kept alongside, got {lines:?}"
         );
     }
@@ -4228,7 +4257,7 @@ mod tests {
 
         assert_eq!(
             drawn,
-            vec![&"\u{2022} Read(a.rs)".to_owned()],
+            vec![&"\u{25cf} Read(a.rs)".to_owned()],
             "got {lines:?}"
         );
     }
@@ -4247,13 +4276,13 @@ mod tests {
         assert!(
             named
                 .iter()
-                .any(|line| line == "\u{2022} Shell(command: \"cargo test\")"),
+                .any(|line| line == "\u{25cf} Shell(command: \"cargo test\")"),
             "got {named:?}"
         );
 
         let streaming = tool_call("shell", ToolState::Pending { input: None });
         assert!(
-            streaming.iter().any(|line| line == "\u{2022} Shell"),
+            streaming.iter().any(|line| line == "\u{25cf} Shell"),
             "got {streaming:?}"
         );
     }
@@ -4276,7 +4305,7 @@ mod tests {
 
         assert!(
             lines.iter().any(|line| line
-                == "\u{2022} Task(agent: \"explore\", description: \"find the parser\")"),
+                == "\u{25cf} Task(agent: \"explore\", description: \"find the parser\")"),
             "got {lines:?}"
         );
         assert!(
@@ -4305,7 +4334,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line == "\u{2022} Task(description: \"find the parser\")"),
+                .any(|line| line == "\u{25cf} Task(description: \"find the parser\")"),
             "an agent nobody named is left off rather than invented, got {lines:?}"
         );
     }

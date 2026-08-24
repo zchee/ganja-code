@@ -2,7 +2,7 @@
 source: crates/ganja-tui/src/app.rs
 expression: screen(&terminal)
 ---
-• Shell                                                                         
+● Shell                                                                         
                                                                                 
                                                                                 
                                                                                 
