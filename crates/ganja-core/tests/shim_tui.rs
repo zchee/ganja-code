@@ -54,6 +54,11 @@ const TASK: &str = "hold the fort\nand report back";
 /// reach its input; and how long a shutdown gets to be seen through.
 const LANDS: Duration = Duration::from_secs(20);
 
+/// How long the `late` stub takes to draw its composer: past the settle a
+/// sighting is held for, so a spawn that took a prompt for the composer has
+/// already pasted by the time the real one shows.
+const LATE: Duration = Duration::from_secs(2);
+
 /// The sentence grok's TUI prints on this machine before exiting 1 — what
 /// the refusing stub prints, so the refusal path is walked with the vendor's
 /// own words (the plan's fact 3).
@@ -101,6 +106,14 @@ case "$MODE" in
     printf '\033[?2004h'
     exec cat >> "$LOG.received"
     ;;
+  late)
+    # A composer that takes its time, and turns bracketed paste on only
+    # once it has drawn — so a paste that arrived early reaches it unframed.
+    sleep {late_secs}
+    printf '%s\n' '{marker}'
+    printf '\033[?2004h'
+    exec cat >> "$LOG.received"
+    ;;
   refuse)
     printf 'warning: the sandbox profile could not be applied\n'
     printf '%s\n' '{refusal}'
@@ -137,6 +150,7 @@ esac
         refusal = VENDOR_REFUSAL.replace('\'', "'\\''"),
         // The envelope header plus every line of the seeded message. The
         // team's name never adds a line, so any well-formed one serves.
+        late_secs = LATE.as_secs(),
         submitted_lines = 1 + seeded(&TeamName::parse("session-abcd1234").expect("a team name"))
             .lines()
             .count(),
@@ -1033,4 +1047,127 @@ async fn ending_a_tui_pane_is_identity_checked_against_the_recorded_pair() {
         server.panes()
     );
     ours.end().await;
+}
+
+/// The pane's shell is the person's own (**D520**), and a prompt that draws
+/// the composer's own words is an ordinary one — `❯` is grok's marker and the
+/// glyph of every popular zsh prompt, the reporter's included (2026-08-25).
+/// A marker the **shell** drew must not pass for the composer: the paste that
+/// followed one landed in a CLI still drawing, which dropped the Enter and
+/// left the preamble sitting unsubmitted. So here the prompt *is* the marker,
+/// the stub takes [`LATE`] to draw its own, and the spawn waits for the
+/// stub's — proven by the clock, and by the bytes: the stub turns bracketed
+/// paste on only with its marker, so a paste that came on the prompt's would
+/// have reached it unframed.
+#[tokio::test]
+async fn a_prompt_that_draws_the_composers_marker_is_the_shells_and_never_the_composer() {
+    let home = ganja_testkit::temp_dir();
+    let prompt = format!("{READY_MARKER} ");
+    let server = PrivateServer::start(&["sleep", "3600"], &[], &[("PS1", prompt.as_str())]);
+    let stub = stub("late");
+    let (registry, door, root, team) = lead(home.path(), &server, stub.path());
+
+    let started = std::time::Instant::now();
+    door.start(
+        ganja_testkit::spawn_with_prompt("w1", Some("codex"), TASK),
+        &ganja_testkit::caller(home.path()),
+        &AllowSpawn,
+    )
+    .await
+    .expect("a composer that takes its time is still a teammate");
+    assert!(
+        started.elapsed() >= LATE,
+        "readiness waited for the stub's own marker, not the prompt's: {:?}",
+        started.elapsed()
+    );
+
+    // The premise, read off the screen rather than assumed: the shell drew
+    // the marker on the launch line's own row, and it is still there.
+    let file = ganja_testkit::team_file(&root, &team).expect("the team file is written");
+    let pane_id = file
+        .member("w1")
+        .expect("w1 joined the team")
+        .tmux_pane_id
+        .clone();
+    let screen = server.run(&["capture-pane", "-p", "-J", "-t", &pane_id]);
+    assert!(
+        screen
+            .lines()
+            .any(|row| row.contains(READY_MARKER) && row.contains("exec ")),
+        "the pane's shell drew the marker on the launch row: {screen:?}"
+    );
+
+    // The prompt reached the composer framed and submitted — after the stub's
+    // marker, which is when the stub started taking a paste as one.
+    let first = framed("team-lead", &seeded(&team));
+    assert!(
+        until(LANDS, || received(&stub) == first).await,
+        "the prompt reached the composer as one bracketed body; got {:?}",
+        String::from_utf8_lossy(&received(&stub))
+    );
+    let lines = ring(&registry, "w1");
+    assert!(
+        lines.iter().any(|line| line == RING_READY),
+        "the ring says the composer was ready: {lines:?}"
+    );
+
+    registry.shutdown().await;
+}
+
+/// `exec` failing is the one way a launch line gives the pane back to its
+/// shell — and a shell that prompted again under the readiness poll would
+/// draw exactly the kind of row the test above says must not count, then
+/// take the paste as a command line. So the launch line closes on `|| exit`:
+/// the shell reports the failed exec and leaves, and the spawn is refused by
+/// what it said with the pane closed — the road a CLI that refuses to start
+/// takes. A binary whose interpreter does not exist is the failure that
+/// passes every check before the exec.
+#[tokio::test]
+async fn a_launch_line_the_shell_cannot_exec_ends_the_shell_and_is_refused_by_its_last_words() {
+    let home = ganja_testkit::temp_dir();
+    let server = PrivateServer::start(&["sleep", "3600"], &[], &[]);
+    let stub = Fake::install(&[("codex", "#!/nonexistent/interpreter\n")], "tui");
+    let (registry, door, root, team) = lead(home.path(), &server, stub.path());
+    let before = server.panes();
+
+    let refused = door
+        .start(
+            ganja_testkit::spawn_with_prompt("w1", Some("codex"), TASK),
+            &ganja_testkit::caller(home.path()),
+            &AllowSpawn,
+        )
+        .await
+        .expect_err("a CLI the shell cannot exec is not a teammate");
+
+    assert!(
+        refused.reason.contains(REFUSED_DIED) && refused.reason.contains("codex"),
+        "it says which CLI, and what happened: {}",
+        refused.reason
+    );
+    // The shell's own report of the failed exec names the file it could not
+    // run — the vendor's-own-words rule, with the shell as the vendor.
+    let binary = stub.directory().join("codex").display().to_string();
+    assert!(
+        refused.reason.contains(&binary),
+        "the shell's own words are in the refusal: {}",
+        refused.reason
+    );
+    assert_eq!(
+        server.panes(),
+        before,
+        "the dead pane was closed, not left prompting"
+    );
+    assert!(
+        stub.records("argv").is_empty(),
+        "the stub never ran: {:?}",
+        stub.received()
+    );
+    assert!(
+        ganja_testkit::team_file(&root, &team)
+            .map(|file| file.member("w1").is_none())
+            .unwrap_or(true),
+        "no member record survived the refusal"
+    );
+
+    registry.shutdown().await;
 }

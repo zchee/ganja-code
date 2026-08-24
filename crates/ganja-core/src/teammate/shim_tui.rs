@@ -74,7 +74,20 @@
 //! [`READY_WAIT`](crate::teammate::shim_tui::READY_WAIT), looking for the driver's own composer marker. Seeing it is
 //! the ordinary case — held for [`READY_SETTLE`](crate::teammate::shim_tui::READY_SETTLE) before the first paste, because
 //! a composer that has just drawn drops an Enter (codex, measured in the W5
-//! walkthrough). **Not** seeing it is a ring note and a proceed, never a
+//! walkthrough). The marker counted is the **composer's** and never the pane
+//! shell's: since **D520** the shell in the pane is the person's own, and a
+//! person's prompt may draw the very glyph — grok's `❯` is every popular zsh
+//! theme's, and on 2026-08-25 a marker the shell drew passed for the
+//! composer, so the paste that followed landed in a grok still drawing,
+//! which dropped the Enter and left the preamble sitting in its composer. So
+//! a marker counts only on a row **below** the launch line's own, or, on a
+//! screen that row is gone from, only once `#{pane_current_command}` no
+//! longer answers what it did before the line was typed
+//! ([`composer_shown`](crate::teammate::shim_tui::composer_shown)); and the
+//! one way a launch line hands the pane back to a shell that would prompt
+//! again, a failed `exec`, is closed by the line's own `|| exit`
+//! ([`LAUNCH_TAIL`](crate::teammate::shim_tui::LAUNCH_TAIL)), which turns it
+//! into the death below. **Not** seeing it is a ring note and a proceed, never a
 //! spawn failure: a first spawn in an untrusted directory shows a trust
 //! dialog before the composer, a logged-out CLI shows a login screen, and a
 //! person answers both in the pane. What the timeout changes is not whether a
@@ -518,19 +531,27 @@ pub fn environment_names<'a>(additions: &'a [&'a str]) -> Vec<&'a str> {
         .collect()
 }
 
+/// What an interactive bash prints on its way out — its `exit` builtin's
+/// own farewell, and nothing any program said.
+///
+/// macOS's `/bin/sh` is bash, so a pane whose launch line's [`LAUNCH_TAIL`]
+/// ran shows this line **under** the shell's report of the failed exec —
+/// the line a refusal wants. zsh, dash and fish leave without a word.
+const BASH_FAREWELL: &str = "exit";
+
 /// The last thing a pane showed that was the program's own — the line a
 /// refusal quotes.
 ///
-/// The last non-empty line of a capture, leaving out tmux's own
-/// `remain-on-exit` notice under it, since that is tmux talking and not the
-/// CLI. [`None`] when the pane showed nothing at all.
+/// The last non-empty line of a capture, leaving out what is not the program
+/// talking: tmux's own `remain-on-exit` notice under it, and a bare
+/// `exit` (`BASH_FAREWELL`). [`None`] when the pane showed nothing at all.
 #[must_use]
 pub fn last_words(captured: &str) -> Option<String> {
     captured
         .lines()
         .map(str::trim_end)
         .filter(|line| !line.trim().is_empty())
-        .rfind(|line| !line.starts_with(PANE_IS_DEAD))
+        .rfind(|line| !line.starts_with(PANE_IS_DEAD) && line.trim() != BASH_FAREWELL)
         .map(str::to_owned)
 }
 
@@ -573,6 +594,17 @@ enum Ready {
     /// The pane id now wears a different birth: not ours any more, and not
     /// ours to touch.
     Lost,
+}
+
+/// What the readiness poll holds a capture against, fixed before the launch
+/// line is typed — the two facts [`composer_shown`] asks its caller for.
+struct Watch {
+    /// `exec <binary>` as the shell echoes it: the launch line's own row.
+    needle: String,
+    /// What the pane's foreground was called while the shell was the only
+    /// thing in it — the name that has to change before a marker on a screen
+    /// the launch row is gone from may count.
+    shell: String,
 }
 
 /// What a spawn's readiness poll concluded, carried on the handle so the
@@ -942,6 +974,11 @@ impl ShimTui {
     /// Polls the pane for the composer marker, or for its death, until one
     /// shows or [`READY_WAIT`] passes.
     ///
+    /// A marker counts on [`composer_shown`]'s terms, never on the bare
+    /// capture: under the launch line's row, or — once the shell's name has
+    /// changed — anywhere on a screen that row is gone from. The pane's
+    /// shell is somebody's own, and its prompt may draw the very marker.
+    ///
     /// Liveness is asked twice against the marker, because a dead pane's
     /// capture still succeeds under `remain-on-exit` and a marker on a corpse
     /// is not a composer. It is asked *before* the marker on every pass — a
@@ -949,7 +986,7 @@ impl ShimTui {
     /// and *again* the instant the marker is found, to catch a pane that
     /// printed its marker and then died between the two calls: only a pane the
     /// second listing still shows live answers [`Ready::Seen`].
-    async fn wait_ready(&self, server: &Server, pane: &Pane) -> Ready {
+    async fn wait_ready(&self, server: &Server, pane: &Pane, watch: &Watch) -> Ready {
         let marker = self.driver.ready_marker();
         let deadline = tokio::time::Instant::now() + READY_WAIT;
         loop {
@@ -973,8 +1010,21 @@ impl ShimTui {
                     tracing::debug!(pane = pane.id, %error, "a liveness listing failed during readiness");
                 }
             }
+            // Whether the shell has handed the pane over yet: the name it
+            // gave before the launch line, against the name now. Read before
+            // the capture, so a screen the launch row is gone from is judged
+            // with the fact that says why (`composer_shown`). A read that
+            // fails says nothing, and nothing is the answer that never passes
+            // for ready.
+            let launched = match server.current_command(&pane.id).await {
+                Ok(name) => name != watch.shell,
+                Err(error) => {
+                    tracing::debug!(pane = pane.id, %error, "a foreground read failed during readiness");
+                    false
+                }
+            };
             match server.capture(&pane.id).await {
-                Ok(shown) if shown.contains(marker) => {
+                Ok(shown) if composer_shown(&shown, &watch.needle, marker, launched) => {
                     // A composer that has just drawn is not yet one that
                     // submits: codex drops an Enter that lands inside its
                     // first moments (`READY_SETTLE` owns the measurement), so
@@ -1069,6 +1119,10 @@ impl TeammateBackend for ShimTui {
         // shell quoting can carry — makes no pane either.
         let line = launch_line(launch.binary.as_os_str(), &*self.driver)
             .map_err(|error| self.refused(&error))?;
+        // The row the readiness poll draws its line under: the launch line's
+        // opening, as the shell will echo it.
+        let needle =
+            launch_needle(launch.binary.as_os_str()).map_err(|error| self.refused(&error))?;
 
         let environment = tmux::environment(environment_names(self.driver.additions()));
         let pane =
@@ -1081,6 +1135,18 @@ impl TeammateBackend for ShimTui {
             self.unmake(&server, &pane).await;
             return Err(self.refused(&error));
         }
+        // The shell's own name, read while the shell is still the only thing
+        // in the pane: the readiness poll's second witness is that this name
+        // has changed (`composer_shown`), and it can only be read before the
+        // line is typed.
+        let shell = match server.current_command(&pane.id).await {
+            Ok(shell) => shell,
+            Err(error) => {
+                self.unmake(&server, &pane).await;
+                return Err(self.refused(&error));
+            }
+        };
+        let watch = Watch { needle, shell };
         if let Err(error) = server.type_line(&pane.id, &line).await {
             self.unmake(&server, &pane).await;
             return Err(self.refused(&error));
@@ -1088,11 +1154,12 @@ impl TeammateBackend for ShimTui {
         tracing::info!(
             teammate = spec.name.as_str(),
             pane = pane.id,
+            shell = watch.shell.as_str(),
             cli,
             "a TUI pane was launched"
         );
 
-        let readiness = match self.wait_ready(&server, &pane).await {
+        let readiness = match self.wait_ready(&server, &pane, &watch).await {
             Ready::Seen => Readiness::Seen,
             Ready::TimedOut => {
                 tracing::warn!(
@@ -2005,16 +2072,88 @@ impl TuiRunner {
     }
 }
 
+/// What the launch line closes on: `|| exit`, so a shell whose `exec` came
+/// back leaves rather than prompting again.
+///
+/// A successful `exec` never returns and the tail never runs; the one way a
+/// launch line hands the pane back to the shell is the exec failing — an
+/// interpreter that is not there, a library that will not load — and an
+/// interactive shell then reports it and **prompts again**, under a readiness
+/// poll that is looking for a composer. A prompt can be anything, including
+/// the composer's own marker (the reason [`composer_shown`] exists), so a
+/// shell left prompting would be a shell the preamble was pasted into and
+/// submitted to as a command line. With the tail the shell reports and exits,
+/// the pane dies under `remain-on-exit`, and the spawn is refused by the
+/// shell's own words on the road a CLI that refuses to start takes
+/// (`Ready::Died`). Spelled the same in `sh`, `bash`, `zsh` and `fish`.
+pub const LAUNCH_TAIL: &str = " || exit";
+
 /// The line typed into the pane's idle shell: `exec` the binary with the
 /// driver's TUI words, each shell-quoted — [`tmux::launch_line`] over
 /// [`TuiDriver::tui_argv`], spelled once so the spawn and the tests that pin
-/// the quoting read the same composition.
+/// the quoting read the same composition — closing on [`LAUNCH_TAIL`].
 ///
 /// # Errors
 ///
 /// [`TmuxError::Unquotable`] for a word no shell quoting can carry.
 pub fn launch_line(binary: &OsStr, driver: &dyn TuiDriver) -> Result<OsString, TmuxError> {
-    tmux::launch_line(std::path::Path::new(binary), &driver.tui_argv())
+    let mut line = tmux::launch_line(std::path::Path::new(binary), &driver.tui_argv())?;
+    line.push(LAUNCH_TAIL);
+
+    Ok(line)
+}
+
+/// The launch line's own opening — `exec <binary>`, quoted as the line is —
+/// which is how the readiness poll finds the row the line was typed on: the
+/// shell echoes it there, and a prompt's glyph sits on that row or above it
+/// while the composer's is drawn below ([`composer_shown`]).
+///
+/// The opening rather than the whole line, so a pane narrower than the line
+/// still shows it on one row (`capture-pane -J` joins what tmux wrapped;
+/// what a line editor broke by hand it cannot).
+///
+/// # Errors
+///
+/// [`TmuxError::Unquotable`], as [`launch_line`] — never in practice, since
+/// the line itself is composed first.
+pub fn launch_needle(binary: &OsStr) -> Result<String, TmuxError> {
+    tmux::launch_line(std::path::Path::new(binary), &[])
+        .map(|opening| opening.to_string_lossy().into_owned())
+}
+
+/// Whether `shown` — a pane's screen — is showing the composer's `marker`,
+/// as opposed to the pane shell's own prompt drawing the same text.
+///
+/// The pane's shell is the person's own (**D520**), and a person's prompt
+/// may draw the very glyph a composer is known by: grok's `❯` is every
+/// popular zsh theme's. On 2026-08-25 a marker the shell drew passed for the
+/// composer, and the paste that followed it landed in a grok still drawing,
+/// which dropped the Enter and left the preamble sitting in its composer.
+/// Two facts tell the two apart, and both are the caller's to read:
+///
+/// - **Where the launch line is.** The shell echoes it on the row it was
+///   typed on, which is the prompt's row; a prompt's glyph is on that row or
+///   above it, and everything the CLI draws is below it. So when a row holds
+///   `needle` (`exec <binary>`, [`launch_needle`]), only the rows **under**
+///   it count.
+/// - **Whether the shell is still there.** A screen with no launch row on
+///   it is one the CLI cleared or scrolled — nothing of the shell's remains,
+///   and the marker may be anywhere — *or* one the shell has not echoed the
+///   line onto yet, where the prompt still stands alone. `launched` — the
+///   pane's foreground name no longer the one it gave before the line was
+///   typed ([`Server::current_command`]) — is what separates them, and
+///   without it nothing on such a screen counts.
+///
+/// A CLI that is a shell script under a same-named pane shell never reads as
+/// `launched`, and loses only the second door: it draws under the launch row
+/// like any inline TUI, and the first door is the one it takes.
+#[must_use]
+pub fn composer_shown(shown: &str, needle: &str, marker: &str, launched: bool) -> bool {
+    let rows: Vec<&str> = shown.lines().collect();
+    match rows.iter().rposition(|row| row.contains(needle)) {
+        Some(typed) => rows[typed + 1..].iter().any(|row| row.contains(marker)),
+        None => launched && rows.iter().any(|row| row.contains(marker)),
+    }
 }
 
 /// What `reader` has said in `path` past `cursor`, and where the next poll
@@ -2050,8 +2189,8 @@ mod tests {
     use ganja_protocol::team::MemberBackend;
 
     use super::{
-        HEARD_BACK, ShimTui, TuiDriver, environment_names, last_words, launch_line, pane_line,
-        paste_body, preamble, spawn_lines,
+        HEARD_BACK, LAUNCH_TAIL, ShimTui, TuiDriver, composer_shown, environment_names, last_words,
+        launch_line, launch_needle, pane_line, paste_body, preamble, spawn_lines,
     };
     use crate::teammate::{
         TeammateBackend as _,
@@ -2193,10 +2332,13 @@ mod tests {
             .expect("ascii");
         assert_eq!(
             line,
-            "exec codex -c 'sandbox_mode=\"read-only\"' -c 'approval_policy=\"never\"'"
+            "exec codex -c 'sandbox_mode=\"read-only\"' -c 'approval_policy=\"never\"' || exit"
         );
 
-        let words = shlex::split(&line).expect("the line is a shell line");
+        let exec = line
+            .strip_suffix(LAUNCH_TAIL)
+            .expect("the line closes on the tail");
+        let words = shlex::split(exec).expect("the line is a shell line");
         let mut expected = vec!["exec".to_owned(), "codex".to_owned()];
         expected.extend(
             Codex::new()
@@ -2207,8 +2349,9 @@ mod tests {
         assert_eq!(words, expected);
     }
 
-    /// Every driver's line opens with `exec` and the binary and carries only
-    /// that driver's own words after — no prompt, no identity flag.
+    /// Every driver's line opens with `exec` and the binary, closes on the
+    /// tail that ends a shell whose exec came back, and carries only that
+    /// driver's own words between — no prompt, no identity flag.
     #[test]
     fn every_drivers_launch_line_is_exec_the_binary_and_its_floors() {
         let drivers: [(&dyn TuiDriver, &str); 3] = [
@@ -2222,6 +2365,7 @@ mod tests {
                 .into_string()
                 .expect("ascii");
             assert!(line.starts_with(&format!("exec {binary} ")), "{line}");
+            assert!(line.ends_with(LAUNCH_TAIL), "{line}");
             for forbidden in [
                 "--agent-id",
                 "--parent-session-id",
@@ -2231,6 +2375,74 @@ mod tests {
                 assert!(!line.contains(forbidden), "{line} carries {forbidden}");
             }
         }
+    }
+
+    /// The marker counted is the composer's, never the shell's: a prompt that
+    /// draws the glyph sits on the launch line's own row (or above it), and
+    /// only a row **below** that one is the CLI's — whatever the foreground
+    /// is called, since a script CLI under a same-named shell never changes
+    /// it.
+    #[test]
+    fn a_marker_on_or_above_the_launch_row_is_the_shells_and_only_one_below_it_counts() {
+        let needle = "exec /opt/homebrew/bin/grok";
+        let launch_row =
+            "❯ exec /opt/homebrew/bin/grok --sandbox read-only --permission-mode dontAsk || exit";
+        // The reporter's zsh prompt: a directory row, then the glyph row the
+        // line was typed on.
+        let typed = format!("~\n{launch_row}\n");
+        assert!(!composer_shown(&typed, needle, "❯", false));
+        assert!(!composer_shown(&typed, needle, "❯", true));
+        // A glyph on a row above the launch row — a taller prompt — is the
+        // shell's too.
+        let above = format!(
+            "❯ ~\n$ {}\n",
+            launch_row
+                .strip_prefix("❯ ")
+                .expect("the row opens on the glyph")
+        );
+        assert!(!composer_shown(&above, needle, "❯", true));
+        // The CLI drawing under the launch row is the composer.
+        let drawn = format!("{typed}\n  main sandbox:read-only ~/rust\n\n❯ \n");
+        assert!(composer_shown(&drawn, needle, "❯", true));
+        assert!(composer_shown(&drawn, needle, "❯", false));
+        // And a marker nowhere is no composer.
+        assert!(!composer_shown(
+            &format!("{typed}\n  starting\n"),
+            needle,
+            "❯",
+            true
+        ));
+    }
+
+    /// A screen with no launch row on it is the CLI's cleared screen or the
+    /// shell's idle prompt before the echo, and only the foreground's name
+    /// having changed tells which: a marker on it counts once the shell is
+    /// gone and never while it is still reading.
+    #[test]
+    fn a_screen_without_the_launch_row_counts_a_marker_only_once_the_shell_is_gone() {
+        let needle = "exec /opt/homebrew/bin/grok";
+        // The idle prompt alone, the line not yet echoed.
+        assert!(!composer_shown("~\n❯ \n", needle, "❯", false));
+        // The CLI cleared the screen and drew: nothing of the shell's remains.
+        let cleared = "  main sandbox:read-only ~/rust\n\n❯ \n";
+        assert!(composer_shown(cleared, needle, "❯", true));
+        assert!(!composer_shown(cleared, needle, "❯", false));
+        // No marker at all is no composer, whatever the shell did.
+        assert!(!composer_shown("  starting\n", needle, "❯", true));
+    }
+
+    /// The needle is the line's own opening, so the row the shell echoes it
+    /// on is the row it finds — quoting included, since the shell echoes
+    /// what was typed and not what it made of it.
+    #[test]
+    fn the_needle_is_the_launch_lines_own_opening() {
+        let line = launch_line(OsStr::new("/opt/my tools/codex"), &Codex::new())
+            .expect("no NUL")
+            .into_string()
+            .expect("ascii");
+        let needle = launch_needle(OsStr::new("/opt/my tools/codex")).expect("no NUL");
+        assert_eq!(needle, "exec '/opt/my tools/codex'");
+        assert!(line.starts_with(&needle), "{line}");
     }
 
     /// The pane's names are the `ganja` pane's closed list, then the driver's
@@ -2278,6 +2490,20 @@ Pane is dead (status 1, Thu Aug 20 15:28:47 2026)
         assert_eq!(last_words("\n\nPane is dead (signal term, now)\n"), None);
         assert_eq!(last_words(""), None);
         assert_eq!(last_words("one line   \n"), Some("one line".to_owned()));
+        // An interactive bash says `exit` on its way out — under the report
+        // a refusal wants, when the launch line's tail ended it.
+        let bash = "\
+$ exec /x/codex -c 'sandbox_mode=\"read-only\"' || exit
+sh: /x/codex: /nope/interpreter: bad interpreter: No such file or directory
+exit
+
+Pane is dead (status 126, Tue Aug 25 00:40:00 2026)
+";
+        assert_eq!(
+            last_words(bash).as_deref(),
+            Some("sh: /x/codex: /nope/interpreter: bad interpreter: No such file or directory")
+        );
+        assert_eq!(last_words("exit\n"), None);
     }
 
     /// **HIGH-1.** A peer's own words cannot forge the bracketed-paste framing

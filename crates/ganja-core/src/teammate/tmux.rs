@@ -764,6 +764,37 @@ impl Server {
         run("capture-pane", command).await
     }
 
+    /// What `pane_id`'s foreground process is called — tmux's own
+    /// `#{pane_current_command}`, the name of the process its tty has in the
+    /// foreground, read fresh on every call.
+    ///
+    /// One reader, and the question it asks is not "which program" but
+    /// "**still the shell?**": the shim readiness poll
+    /// ([`crate::teammate::shim_tui`]) reads it once before the launch line
+    /// and again on every pass, and only a name that *changed* says the
+    /// shell handed the pane to the CLI. A name is all tmux offers — the pid
+    /// it lists is the pane's first process, which `exec` keeps — and a name
+    /// is enough, because the comparison is against what the same pane said
+    /// a moment ago rather than against any spelling of any shell: a CLI
+    /// that is a `#!/bin/sh` script under a `/bin/sh` pane reads as
+    /// unchanged, which the poll takes for "not yet" and never for "ready".
+    ///
+    /// # Errors
+    ///
+    /// The client failing to start or tmux refusing — a pane that is gone.
+    pub async fn current_command(&self, pane_id: &str) -> Result<String, TmuxError> {
+        let mut command = self.command();
+        command
+            .arg("display-message")
+            .arg("-p")
+            .arg("-t")
+            .arg(pane_id)
+            .arg("#{pane_current_command}");
+        run("display-message", command)
+            .await
+            .map(|name| name.trim().to_owned())
+    }
+
     /// Lands `text` in `pane_id`'s composer as **one unsubmitted message** —
     /// into a tmux buffer through the client's stdin and pasted bracketed, one
     /// client invocation for both — and presses **no** Enter.
