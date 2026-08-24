@@ -1689,7 +1689,7 @@ impl TuiRunner {
     async fn relay(&self) {
         let cli = backend_name(self.handle.backend);
         let reader = readback::of(self.handle.cli());
-        let (transcript, mut cursor, spawned) = {
+        let (transcript, cursor, spawned) = {
             let mut reading = self
                 .reading
                 .lock()
@@ -1745,12 +1745,7 @@ impl TuiRunner {
             return;
         };
 
-        let read = path.clone();
-        let Ok(answers) = crate::teammate::blocking_io(move || {
-            Ok::<_, String>(reader.answers(&read, &mut cursor))
-        })
-        .await
-        else {
+        let Some((answers, cursor)) = carried(reader, path.clone(), cursor).await else {
             return;
         };
         // Written back whatever was found, since the cursor moved past what
@@ -2022,6 +2017,29 @@ pub fn launch_line(binary: &OsStr, driver: &dyn TuiDriver) -> Result<OsString, T
     tmux::launch_line(std::path::Path::new(binary), &driver.tui_argv())
 }
 
+/// What `reader` has said in `path` past `cursor`, and where the next poll
+/// starts — the advanced cursor handed back **out**, never mutated in place.
+///
+/// The shape is the contract (**D515**): [`readback::Cursor`] is `Copy`, so a
+/// `move` closure that took `&mut cursor` would advance a copy the caller
+/// never sees — which is exactly what [`Member::relay`] did until 2026-08-24,
+/// mailing the whole transcript again as one identical block every poll.
+/// Returning the cursor beside the answers makes that mistake unwritable: the
+/// answers cannot be had without the place they ended.
+async fn carried(
+    reader: &'static dyn readback::Transcript,
+    path: std::path::PathBuf,
+    cursor: readback::Cursor,
+) -> Option<(Vec<String>, readback::Cursor)> {
+    crate::teammate::blocking_io(move || {
+        let mut cursor = cursor;
+        let answers = reader.answers(&path, &mut cursor);
+        Ok::<_, String>((answers, cursor))
+    })
+    .await
+    .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -2045,6 +2063,62 @@ mod tests {
         readback,
         shim::{self, Driver as _},
     };
+
+    /// **D515.** The cursor a poll advances is the cursor the next poll
+    /// starts from: what was carried once is never carried again, and what a
+    /// CLI writes later is carried alone (the 2026-08-24 duplication, where
+    /// the advanced cursor died inside the poll's own closure and every poll
+    /// re-mailed the whole transcript).
+    #[tokio::test]
+    async fn a_poll_starts_where_the_last_one_ended_instead_of_repeating_it() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let path = dir.path().join("rollout.jsonl");
+        let record = |text: &str| {
+            format!(
+                concat!(
+                    r#"{{"type":"response_item","payload":{{"type":"message","#,
+                    r#""role":"assistant","content":[{{"text":"{}"}}]}}}}"#,
+                    "\n"
+                ),
+                text
+            )
+        };
+        std::fs::write(
+            &path,
+            format!(
+                "{}{}",
+                record("mapping the workspace"),
+                record("probes failed")
+            ),
+        )
+        .expect("the rollout is writable");
+
+        let reader = readback::of(ganja_team::ShimCli::Codex);
+        let (first, cursor) = super::carried(reader, path.clone(), readback::Cursor::default())
+            .await
+            .expect("the first poll reads");
+        assert_eq!(first, vec!["mapping the workspace", "probes failed"]);
+
+        let (second, cursor) = super::carried(reader, path.clone(), cursor)
+            .await
+            .expect("the second poll reads");
+        assert_eq!(
+            second,
+            Vec::<String>::new(),
+            "nothing new means nothing carried"
+        );
+
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("the rollout reopens");
+        std::io::Write::write_all(&mut file, record("the grounded report").as_bytes())
+            .expect("the rollout appends");
+        let (third, _) = super::carried(reader, path.clone(), cursor)
+            .await
+            .expect("the third poll reads");
+        assert_eq!(third, vec!["the grounded report"]);
+    }
 
     /// The pane channel says the one thing a foreign agent in a pane cannot
     /// work out for itself — that nothing it writes reaches the lead — in the
