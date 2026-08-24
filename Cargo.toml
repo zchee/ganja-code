@@ -84,6 +84,17 @@ arboard = { version = "3.6.1", default-features = false, features = [
     # Linux build into speaking wl-clipboard directly.
     "wayland-data-control",
 ] }
+# `async fn` on the nine traits that are dispatched as trait objects — `Tool`,
+# `Provider`, `TeammateBackend`, `Subagents`, the shim `Driver`, `Jobs`,
+# `Postbox`, `Asker`, `SpawnAsker` — every one held as an `Arc<dyn …>` (or
+# passed as `&dyn …`) because which implementation runs is decided at runtime
+# by config and environment, the way a provider or a teammate backend is. Native
+# `async fn` in traits is not dyn-compatible, and the macro's boxed `Send`
+# future is what a vtable can carry. Not a stopgap for a language feature that
+# is nearly there: on the 2026-08-23 nightly, `async_fn_in_dyn_trait` still
+# refuses `dyn` for an `async fn` in every spelling and is labelled incomplete,
+# and return-type notation on `dyn` types (what a `Send` bound would need) is
+# unimplemented — re-evaluate when rust-lang/rust#133119 and #109417 close.
 async-trait = "0.1.92"
 # The HTTP server the serve layer stands on. Chosen over a hand-rolled hyper
 # service because upstream's surface is a routed REST-plus-SSE app, and axum's
