@@ -9,6 +9,7 @@ pub mod binder;
 pub mod clipboard;
 pub mod command;
 pub mod component;
+pub mod escrepair;
 pub mod event;
 pub mod external;
 pub mod graphics;
