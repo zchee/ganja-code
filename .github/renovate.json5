@@ -1,0 +1,58 @@
+// Renovate is the one dependency updater here; Dependabot runs alerts-only
+// (no dependabot.yml, automated security fixes disabled), so every update PR
+// has a single author and a single cadence. https://docs.renovatebot.com/rust/
+{
+  $schema: 'https://docs.renovatebot.com/renovate-schema.json',
+  extends: ['config:recommended'],
+  timezone: 'Asia/Tokyo',
+  labels: ['deps'],
+
+  // Only the two surfaces this repository actually has. Everything else —
+  // including the rust-toolchain manager — stays off: the toolchain pins the
+  // non-dated `nightly` channel on purpose, and there is nothing there to
+  // bump (rust-toolchain.toml's own comment is the authority).
+  enabledManagers: ['cargo', 'github-actions'],
+
+  // One batch a week, not a PR per crate: every version lives in the root
+  // manifest with a rationale comment, and reviewing the week's movement in
+  // one sitting is what that convention is for.
+  schedule: ['before 9am on monday'],
+
+  // The root manifest is the source of truth, so an update rewrites the
+  // requirement there rather than drifting the lockfile away from it.
+  rangeStrategy: 'bump',
+
+  // The publish-then-poison window: a malicious release is usually caught
+  // (yanked, RustSec-advised) within days of landing, so nothing is taken
+  // the week it appears. Vulnerability fixes bypass this, below.
+  minimumReleaseAge: '5 days',
+
+  // A weekly `cargo update` for the transitive tree the manifest does not
+  // name — the half of the graph `rangeStrategy: bump` never touches.
+  lockFileMaintenance: {
+    enabled: true,
+    schedule: ['before 9am on monday'],
+  },
+
+  // OSV-fed fix PRs replace the Dependabot security updates this repo turned
+  // off; a vulnerability fix skips both the schedule and the release-age
+  // gate, because waiting is the wrong default only there.
+  osvVulnerabilityAlerts: true,
+  vulnerabilityAlerts: {
+    labels: ['deps', 'security'],
+  },
+
+  // The repository's commit convention is `scope: intent`.
+  commitMessagePrefix: 'deps:',
+
+  packageRules: [
+    {
+      matchManagers: ['cargo'],
+      groupName: 'cargo dependencies',
+    },
+    {
+      matchManagers: ['github-actions'],
+      groupName: 'github actions',
+    },
+  ],
+}
