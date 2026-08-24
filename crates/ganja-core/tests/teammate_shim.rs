@@ -1028,6 +1028,7 @@ async fn one_pass_sorts_its_inbox_into_turns_and_drops() {
         cwd: home.path().to_path_buf(),
         plan_mode_required: false,
         parent_session_id: shim_support::SESSION_ID.to_owned(),
+        shell: ganja_core::teammate::pane::PaneShell::default(),
     };
     let backend =
         ShimBackend::new(Arc::new(PerMessage::new(&cli.log, Mode::Answer))).searching(cli.path());

@@ -33,7 +33,7 @@ use ganja_core::{
     AgentRegistry, Engine, SessionId, Storage, catalog,
     config::{Config, Overrides, ThemeMode},
     instruction, provider,
-    teammate::TeammateRegistry,
+    teammate::{TeammateRegistry, pane::PaneShell},
 };
 use ganja_permission::Project;
 use ganja_protocol::Message;
@@ -347,7 +347,16 @@ pub async fn run(
                         // (**D509**): the deadline is a property of the
                         // runtime, not of one spawn, and `shim.rs` therefore
                         // names no config type at all.
-                        .with_shim_turn_timeout(config.teammates.shim_turn_timeout()),
+                        .with_shim_turn_timeout(config.teammates.shim_turn_timeout())
+                        // The idle shell every pane teammate is spawned
+                        // into (**D520**), resolved here for the same reason.
+                        .with_pane_shell(
+                            config
+                                .teammates
+                                .pane_shell()
+                                .map(PaneShell::configured)
+                                .unwrap_or_default(),
+                        ),
                 );
                 // **D506**: panes a previous lead of this team left running,
                 // before this one spawns anything of its own. Best-effort by

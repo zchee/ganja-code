@@ -147,7 +147,57 @@ pub const PARENT_SESSION_ID: &str = "--parent-session-id";
 /// words is exec'd directly (`tmux(1)`, "executed directly (without `sh -c`)"),
 /// so `-s` — read commands from standard input, which for a tty is what `sh`
 /// does anyway — is here to make the argv two words long.
+///
+/// The **default**: `teammates.shell` names another (**D520**), and
+/// [`PaneShell`] is what carries whichever one a spawn got.
 pub const SHELL: [&str; 2] = ["/bin/sh", "-s"];
+
+/// The shell a spawn's fresh pane holds until its launch line arrives
+/// (**D520**): [`SHELL`] unless `teammates.shell` named one.
+///
+/// A configured shell keeps [`SHELL`]'s one structural rule — the argv is two
+/// words or more, so tmux execs it directly instead of handing one word to
+/// the login shell — by appending `-s` to a lone program, the same flag the
+/// default carries for the same reason. What it does **not** keep is the
+/// default's other property: a shell somebody named runs its own startup
+/// files, and what those export enters the pane past the enumerated
+/// environment (**D502**). That is the person's choice, made in the config
+/// key whose doc says so, and not a thing this type can prevent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PaneShell(Vec<String>);
+
+impl Default for PaneShell {
+    fn default() -> Self {
+        Self(SHELL.iter().map(|word| (*word).to_owned()).collect())
+    }
+}
+
+impl PaneShell {
+    /// The shell `teammates.shell` named, as its words — a lone program made
+    /// two words by `-s`, and a longer line taken as it was written.
+    #[must_use]
+    pub fn configured(mut words: Vec<String>) -> Self {
+        if words.is_empty() {
+            return Self::default();
+        }
+        if words.len() == 1 {
+            words.push(SHELL[1].to_owned());
+        }
+        Self(words)
+    }
+
+    /// The words, for a launch and for a test to read back.
+    #[must_use]
+    pub fn words(&self) -> &[String] {
+        &self.0
+    }
+
+    /// The argv tmux is given.
+    #[must_use]
+    pub fn argv(&self) -> Vec<OsString> {
+        self.0.iter().map(OsString::from).collect()
+    }
+}
 
 /// How long a pane's shell waits for its member record before the pane is
 /// ended: the record is written by the same process a few milliseconds after
@@ -226,7 +276,7 @@ pub(super) async fn split_idle_shell(
     refused_as: MemberBackend,
     whose: &'static str,
 ) -> Result<Pane, Unsupported> {
-    let shell: Vec<OsString> = SHELL.iter().map(OsString::from).collect();
+    let shell = spec.shell.argv();
     // Where it goes is read off the screen, not remembered: the first
     // teammate opens a column beside the lead and every later one stacks
     // under that column's bottom. A listing that fails is not a spawn that
@@ -474,7 +524,7 @@ mod tests {
     use ganja_protocol::team::MemberBackend;
     use ganja_team::{MemberName, TeamName, TeamsRoot};
 
-    use super::{CARRIED_ENV, SHELL, arguments};
+    use super::{CARRIED_ENV, PaneShell, SHELL, arguments};
     use crate::teammate::SpawnSpec;
 
     /// A spawn with every field a launch could be tempted to put on the line.
@@ -492,6 +542,7 @@ mod tests {
             cwd: PathBuf::from("/nowhere/project"),
             plan_mode_required: true,
             parent_session_id: "01998ad0-0000-7000-8000-000000000000".to_owned(),
+            shell: crate::teammate::pane::PaneShell::default(),
         }
     }
 
@@ -543,6 +594,31 @@ mod tests {
     #[test]
     fn the_idle_shell_is_two_words_so_no_login_shell_rereads_it() {
         assert!(SHELL.len() >= 2, "{SHELL:?}");
+        assert!(PaneShell::default().argv().len() >= 2);
+        assert!(
+            PaneShell::configured(vec!["/bin/zsh".to_owned()])
+                .argv()
+                .len()
+                >= 2,
+            "a lone program is made two words"
+        );
+    }
+
+    /// **D520.** A configured shell is the words the config gave, `-s`
+    /// appended only when it gave one; nothing given is the default.
+    #[test]
+    fn a_configured_shell_keeps_its_words_and_a_lone_program_gains_dash_s() {
+        assert_eq!(PaneShell::default().words(), &SHELL[..]);
+        assert_eq!(
+            PaneShell::configured(vec!["/bin/zsh".to_owned()]).words(),
+            ["/bin/zsh", "-s"]
+        );
+        assert_eq!(
+            PaneShell::configured(vec!["/bin/zsh".to_owned(), "-f".to_owned()]).words(),
+            ["/bin/zsh", "-f"],
+            "two words are left exactly as written"
+        );
+        assert_eq!(PaneShell::configured(Vec::new()), PaneShell::default());
     }
 
     /// The closed list holds directory names and never a credential's.

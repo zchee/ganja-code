@@ -391,6 +391,48 @@ impl Drop for Held {
     }
 }
 
+/// **D520.** `teammates.shell` names the idle shell a pane holds until its
+/// launch line arrives. With bash named in the lead's own config, the typed
+/// line is still read and exec'd — the pane's process becomes this binary
+/// exactly as it does under the default `/bin/sh -s`.
+#[test]
+fn a_configured_pane_shell_still_execs_the_launch_line() {
+    require_tmux();
+    let fixture = Fixture::new();
+    fs::create_dir_all(fixture.config_home()).expect("the config home is creatable");
+    fs::write(
+        fixture.config_home().join("ganja.jsonc"),
+        r#"{ "teammates": { "shell": "/bin/bash" } }"#,
+    )
+    .expect("the config is writable");
+    let tmux = Tmux::start(&fixture.server_env(), WITHHELD);
+
+    let lead = tmux.split(
+        fixture.homes.project(),
+        &fixture.lead_env(),
+        &["/usr/bin/env", env!("CARGO_BIN_EXE_ganja")],
+    );
+    wait_for("the lead to draw its composer", &tmux, &lead, || {
+        tmux.screen(&lead).contains(COMPOSER).then_some(())
+    });
+
+    tmux.type_line(&lead, &format!("/team spawn {MEMBER} --backend ganja"));
+    let member = wait_for("the member record", &tmux, &lead, || {
+        fixture
+            .team_file()?
+            .member(MEMBER)
+            .cloned()
+            .filter(|member| member.tmux_pane_id.starts_with('%'))
+    });
+    let pane = member.tmux_pane_id.clone();
+    wait_for(
+        "the launch line to reach the pane through bash",
+        &tmux,
+        &lead,
+        || (tmux.current_command(&pane) == "ganja").then_some(()),
+    );
+}
+
 /// **AC-11.** `/team spawn w1 --backend ganja` in a real lead makes a real pane
 /// teammate on a private tmux server; the member runs its seeded task and
 /// reports; `/team shutdown w1` ends in the lead reading the approval and the
@@ -577,6 +619,7 @@ fn guard_spec(root: &TeamsRoot, cwd: &Path) -> SpawnSpec {
         cwd: cwd.to_path_buf(),
         plan_mode_required: false,
         parent_session_id: GUARD_SESSION.to_owned(),
+        shell: ganja_core::teammate::pane::PaneShell::default(),
     }
 }
 

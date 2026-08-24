@@ -694,6 +694,9 @@ pub struct SpawnSpec {
     pub plan_mode_required: bool,
     /// The lead's session, which §4.1 passes a pane as `--parent-session-id`.
     pub parent_session_id: String,
+    /// The shell a pane backend splits, until its launch line arrives
+    /// (**D520**): the registry's, resolved once from `teammates.shell`.
+    pub shell: pane::PaneShell,
 }
 
 /// Renders everything except the prompt, which is rendered as a size — the
@@ -716,6 +719,7 @@ impl fmt::Debug for SpawnSpec {
             .field("cwd", &self.cwd)
             .field("plan_mode_required", &self.plan_mode_required)
             .field("parent_session_id", &self.parent_session_id)
+            .field("shell", &self.shell)
             .finish()
     }
 }
@@ -1321,6 +1325,9 @@ pub struct TeammateRegistry {
     /// the real numbers live — this type has no business knowing that `agy` is
     /// four minutes.
     shim_turn_timeout: Option<Duration>,
+    /// The shell every pane teammate is spawned into (**D520**), resolved
+    /// once from `teammates.shell` the way the deadline above is.
+    pane_shell: pane::PaneShell,
     /// Where a teammate's permission dialogs are handed to the lead (**D-5**).
     ///
     /// [`None`] until a frontend attaches one, and a registry that never gets
@@ -1397,6 +1404,7 @@ impl TeammateRegistry {
             shims,
             exited: Arc::default(),
             shim_turn_timeout: None,
+            pane_shell: pane::PaneShell::default(),
             dialogs: Mutex::new(None),
         }
     }
@@ -1429,6 +1437,22 @@ impl TeammateRegistry {
         self.shim_turn_timeout = timeout;
 
         self
+    }
+
+    /// Names the shell every pane teammate of this session is spawned into
+    /// (**D520**), on the same consuming builder as the deadline: a property
+    /// of the runtime, resolved once, so no backend names a config type.
+    #[must_use]
+    pub fn with_pane_shell(mut self, shell: pane::PaneShell) -> Self {
+        self.pane_shell = shell;
+
+        self
+    }
+
+    /// The shell a pane teammate of this session is spawned into.
+    #[must_use]
+    pub fn pane_shell(&self) -> &pane::PaneShell {
+        &self.pane_shell
     }
 
     /// How long one `cli` turn may run in this session.
@@ -1829,6 +1853,7 @@ impl TeammateRegistry {
             cwd: request.cwd,
             plan_mode_required: request.plan_mode_required,
             parent_session_id: self.lead_session_id.clone(),
+            shell: self.pane_shell.clone(),
         };
 
         // Skipped outright for a backend that seeds its own — see

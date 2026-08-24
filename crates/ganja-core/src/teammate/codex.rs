@@ -605,6 +605,7 @@ mod tests {
             cwd: PathBuf::from("/nonexistent/work"),
             plan_mode_required: false,
             parent_session_id: "01998ad0-0000-7000-8000-000000000000".to_owned(),
+            shell: crate::teammate::pane::PaneShell::default(),
         }
     }
 

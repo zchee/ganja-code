@@ -984,9 +984,36 @@ pub struct TeammateConfig {
     /// away rather than inheriting it: the CLI's own TUI is a thing a person
     /// can look at. [`crate::teammate::shim_tui`]'s module doc owns that half.
     pub shim_turn_timeout: Option<u64>,
+    /// The shell a fresh teammate pane holds until its launch line is typed
+    /// into it (**D520**), as a command line: `"/bin/zsh -f"`, or just
+    /// `"/bin/bash"`. Absent is `/bin/sh -s`.
+    ///
+    /// Split into words the way a shell would (`shlex`), and kept at two
+    /// words or more by the pane door — `-s` is appended to a lone program —
+    /// because tmux runs a one-word command through the person's login
+    /// shell, whose startup files re-import exactly what the enumerated
+    /// environment withheld (measured 2026-08-17; `pane::SHELL`'s own doc
+    /// carries the story). **A shell named here runs its own startup files
+    /// too**, and what they export enters the pane: that is the person's
+    /// choice, made in this key, and `-f` (zsh) or `--norc` (bash) is how a
+    /// shell is told not to. The launch line is typed as a POSIX shell reads
+    /// it, so the shell named has to be one. Refused at load when it is
+    /// empty or cannot be split into words.
+    pub shell: Option<String>,
 }
 
 impl TeammateConfig {
+    /// The pane shell's words, when the config names one — the command line
+    /// split as a shell would split it. [`None`] leaves the pane door's own
+    /// default alone.
+    #[must_use]
+    pub fn pane_shell(&self) -> Option<Vec<String>> {
+        self.shell
+            .as_deref()
+            .and_then(shlex::split)
+            .filter(|words| !words.is_empty())
+    }
+
     /// The per-turn deadline this config asks for, if it asks for one.
     ///
     /// [`None`] leaves the per-CLI default alone, which is where the real
@@ -1448,6 +1475,7 @@ impl Config {
             &mut self.teammates.shim_turn_timeout,
             other.teammates.shim_turn_timeout,
         );
+        overlay(&mut self.teammates.shell, other.teammates.shell);
         overlay(&mut self.tui.notifications, other.tui.notifications);
         overlay(
             &mut self.tui.notification_method,
@@ -2075,6 +2103,14 @@ fn check_agents(agents: &AgentsConfig) -> Result<(), String> {
 /// the headless machinery next. The sentence says which turns it would kill
 /// so nobody reads the refusal as a claim about their pane-mode teammates.
 fn check_teammates(teammates: &TeammateConfig) -> Result<(), String> {
+    if let Some(shell) = &teammates.shell
+        && !shlex::split(shell).is_some_and(|words| !words.is_empty())
+    {
+        return Err(format!(
+            "teammates.shell must name a shell as a command line, like \"/bin/zsh -f\"; \
+             {shell:?} is empty or cannot be split into words"
+        ));
+    }
     if teammates.shim_turn_timeout == Some(0) {
         return Err(
             "teammates.shim_turn_timeout must be at least 1 second; a deadline of 0 would kill \
@@ -2467,6 +2503,46 @@ mod tests {
             panic!("expected a parse failure, got {error:?}");
         };
         assert!(message.contains("shim_turn_timout"), "{message}");
+    }
+
+    /// **D520.** `teammates.shell` is a command line split as a shell would
+    /// split it; absent leaves the pane door's `/bin/sh -s` alone, and a
+    /// value that is nothing is refused rather than spawning into nothing.
+    #[test]
+    fn teammates_shell_is_a_command_line_and_nothing_is_refused() {
+        let config = parse(r#"{"model": "anthropic/claude-sonnet-5"}"#).expect("it parses");
+        assert_eq!(config.teammates.pane_shell(), None);
+
+        let config = parse(r#"{"teammates": {"shell": "/bin/zsh -f"}}"#).expect("it parses");
+        assert_eq!(
+            config.teammates.pane_shell(),
+            Some(vec!["/bin/zsh".to_owned(), "-f".to_owned()])
+        );
+
+        let config =
+            parse(r#"{"teammates": {"shell": "'/opt/my shell/zsh'"}}"#).expect("it parses");
+        assert_eq!(
+            config.teammates.pane_shell(),
+            Some(vec!["/opt/my shell/zsh".to_owned()]),
+            "quoting is a shell's own"
+        );
+
+        for empty in [
+            r#"{"teammates": {"shell": ""}}"#,
+            r#"{"teammates": {"shell": "   "}}"#,
+        ] {
+            let error = parse(empty).expect_err("a shell of nothing is refused");
+            let ConfigError::Parse { message, .. } = &error else {
+                panic!("expected a parse failure, got {error:?}");
+            };
+            assert!(message.contains("teammates.shell"), "{message}");
+        }
+        let error = parse(r#"{"teammates": {"shell": "/bin/zsh '"}}"#)
+            .expect_err("an unbalanced quote cannot be split");
+        let ConfigError::Parse { message, .. } = &error else {
+            panic!("expected a parse failure, got {error:?}");
+        };
+        assert!(message.contains("teammates.shell"), "{message}");
     }
 
     /// `true` is both moments and `false` is none — the same answer absent

@@ -246,7 +246,7 @@
     },
     "TeammateConfig": {
       "title": "Teammate execution settings",
-      "description": "How this session runs the teammates it spawns, rather than what they are. Not a key upstream has, and not one Claude Code has either: only a headless foreign-CLI teammate had a turn ganja could not observe, so only that shape ever had anything to bound (D509). Since D512 every codex/agy/grok spawn opens the CLI's own native TUI in a tmux pane instead, and a pane is a thing a person can look at — so the one key here now governs the headless machinery alone, and is kept curated so a config file that already carries it still loads.",
+      "description": "How this session runs the teammates it spawns, rather than what they are. Not a key upstream has, and not one Claude Code has either: only a headless foreign-CLI teammate had a turn ganja could not observe, so only that shape ever had anything to bound (D509). Since D512 every codex/agy/grok spawn opens the CLI's own native TUI in a tmux pane instead, and a pane is a thing a person can look at — so that key now governs the headless machinery alone, and is kept curated so a config file that already carries it still loads. The other key, `shell`, names the idle shell every pane teammate is spawned into (D520).",
       "$comment": "crates/ganja-core/src/config.rs (TeammateConfig, deny_unknown_fields); the per-CLI defaults live in crates/ganja-core/src/teammate/shim.rs; the pane-mode shape that reads none of this is crates/ganja-core/src/teammate/shim_tui.rs; refusal of zero in check_teammates.",
       "type": "object",
       "additionalProperties": false,
@@ -255,6 +255,11 @@
           "type": "integer",
           "description": "How long one headless foreign-CLI teammate's turn may run, in seconds, before the shim ends its process group and mails the lead. Absent is the per-CLI default the shim derives; a value here overrides all three. Since D512 no spawn door in this build reaches that headless machinery — pane-mode shim teammates run no per-turn deadline and never read this key — so what a value here moves is the machinery the testkit still drives. Refused at load when it is zero — a deadline of nothing kills every headless turn before the child has written a byte.",
           "minimum": 1
+        },
+        "shell": {
+          "type": "string",
+          "description": "The shell a fresh teammate pane holds until its launch line is typed into it (D520), as a command line: \"/bin/zsh -f\", or just \"/bin/bash\". Absent is /bin/sh -s. Split into words as a shell would, and kept at two words or more by the pane door (-s is appended to a lone program), because tmux runs a one-word command through the login shell, whose startup files re-import what the enumerated environment withheld. A shell named here runs its own startup files too — the person's choice; -f (zsh) or --norc (bash) is how a shell is told not to. Must be a POSIX shell, since the launch line is typed as one reads it. Refused at load when empty or unsplittable.",
+          "minLength": 1
         }
       }
     },

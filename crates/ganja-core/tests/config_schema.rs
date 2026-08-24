@@ -106,7 +106,7 @@ const KITCHEN_SINK: &str = r#"{
     "plan": { "description": "plans", "mode": "primary" }
   },
   "agents": { "concurrency": 2 },
-  "teammates": { "shim_turn_timeout": 900 },
+  "teammates": { "shim_turn_timeout": 900, "shell": "/bin/zsh -f" },
   "permission": { "bash": "ask" },
   "instructions": ["AGENTS.md"],
   "theme": "dracula",
