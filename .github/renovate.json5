@@ -5,6 +5,16 @@
   $schema: 'https://docs.renovatebot.com/renovate-schema.json',
   extends: ['config:recommended'],
   timezone: 'Asia/Tokyo',
+
+  // The toolchain Renovate's own cargo runs under — the Cargo.lock refresh
+  // behind the `renovate/artifacts` status. Mend's container cannot follow
+  // rust-toolchain.toml's floating `nightly`, and PR #12 shipped a manifest
+  // bump whose lock entry that step failed to write; a pinned real stable
+  // makes the artifact step deterministic. Bump by hand when a dependency's
+  // MSRV outgrows it.
+  constraints: {
+    rust: '1.98.0',
+  },
   labels: ['deps'],
 
   // Only the two surfaces this repository actually has. Everything else —
