@@ -37,3 +37,15 @@ final-status-level = "slow"
 # than a lane that reddens under load it did not cause.
 filter = 'package(tmux) and binary(live)'
 threads-required = "num-cpus"
+
+[[profile.ci.overrides]]
+# The two D516 split-escape drills assert a race: the app must read the tail
+# of a deliberately split arrow key within the 25ms hold-off of reading its
+# bare ESC. On the three-core macOS runner, beside three and a half thousand
+# other tests, the app was descheduled past that window after the ESC, the
+# honest expiry path ran (literal `[D` in the composer) and the repaired-state
+# expect timed out — first seen on the lockfile-maintenance PR #13, whose
+# Cargo.lock-only diff could not have caused it. Reserving the runner makes
+# the window physically achievable rather than hoping the scheduler is kind.
+filter = 'binary(pty_smoke) and (test(a_split_arrow_key_edits_instead_of_pasting_garbage) or test(a_late_continuation_stays_literal_text))'
+threads-required = "num-cpus"
