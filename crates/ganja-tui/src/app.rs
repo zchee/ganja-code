@@ -2866,11 +2866,20 @@ impl App {
             // What the notifier's gate reads (**D468**): a terminal being
             // looked at needs no announcement, and these two events are the
             // only way this side ever learns which it is.
+            // And what the composer's cursor follows: the widget paints it
+            // as a cell, so an unfocused pane would keep a bar nobody's
+            // typing behind unless told to stop (2026-08-25).
             TermEvent::FocusGained => {
                 self.focused = true;
+                self.editor.set_focused(true);
+                self.dirty = true;
                 self.hint_clipboard_image();
             }
-            TermEvent::FocusLost => self.focused = false,
+            TermEvent::FocusLost => {
+                self.focused = false;
+                self.editor.set_focused(false);
+                self.dirty = true;
+            }
             _ => {}
         }
 
@@ -13659,6 +13668,48 @@ mod tests {
     /// Every byte the notifier has written so far.
     fn notified(log: &std::sync::Arc<std::sync::Mutex<Vec<u8>>>) -> Vec<u8> {
         log.lock().expect("the capture lock holds").clone()
+    }
+
+    /// The composer's cursor is a painted cell, so it goes with the focus:
+    /// reverse video at the cursor while the terminal is looked at, none once
+    /// the focus went, back again when it returns.
+    #[tokio::test]
+    async fn the_composer_cursor_goes_with_the_focus() {
+        let mut app = app();
+        let mut terminal = terminal(80, 24);
+        let cursor_modifier = |terminal: &Terminal<TestBackend>| {
+            let text = screen(terminal);
+            let row = text
+                .lines()
+                .position(|line| line.contains("Ask ganja something"))
+                .expect("the composer is on screen");
+            let row = u16::try_from(row).expect("a row fits");
+            terminal.backend().buffer()[(1, row)].modifier
+        };
+
+        app.draw(&mut terminal).expect("a frame draws");
+        assert!(
+            cursor_modifier(&terminal).contains(ratatui::style::Modifier::REVERSED),
+            "focused by default, the cursor is painted"
+        );
+
+        app.handle(AppEvent::Term(TermEvent::FocusLost))
+            .await
+            .expect("focus lost is handled");
+        app.draw(&mut terminal).expect("a frame draws");
+        assert!(
+            !cursor_modifier(&terminal).contains(ratatui::style::Modifier::REVERSED),
+            "an unfocused pane paints no cursor bar"
+        );
+
+        app.handle(AppEvent::Term(TermEvent::FocusGained))
+            .await
+            .expect("focus gained is handled");
+        app.draw(&mut terminal).expect("a frame draws");
+        assert!(
+            cursor_modifier(&terminal).contains(ratatui::style::Modifier::REVERSED),
+            "and it is back with the focus"
+        );
     }
 
     #[tokio::test]

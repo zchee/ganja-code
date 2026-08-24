@@ -108,6 +108,23 @@ impl Editor {
         self.area.set_placeholder_text(self.mode.placeholder());
     }
 
+    /// Shows or hides the cursor with the terminal's focus.
+    ///
+    /// The widget draws its cursor as a **cell** of its own — reverse video,
+    /// its default — rather than asking the terminal for one, so a pane nobody
+    /// is looking at keeps a bar in its composer: tmux hides the real cursor
+    /// of an inactive pane, but a cell is content and stays (two ganjas side
+    /// by side, user report 2026-08-25). An empty style is the widget's own
+    /// way of drawing no cursor at all, and the focus events `App` already
+    /// reads for its notifications (**D468**) say when to use it.
+    pub fn set_focused(&mut self, focused: bool) {
+        self.area.set_cursor_style(if focused {
+            Style::default().add_modifier(Modifier::REVERSED)
+        } else {
+            Style::default()
+        });
+    }
+
     /// Switches what the next Enter does, and says so on the box.
     pub fn set_mode(&mut self, mode: Mode) {
         self.mode = mode;
@@ -592,6 +609,40 @@ mod tests {
 
         editor.set_mode(Mode::Prompt);
         assert_eq!(editor.prompt().as_deref(), Some("ls -la"));
+    }
+
+    /// The cursor is a cell the widget paints, so losing focus has to unpaint
+    /// it: reverse video on the cursor cell while focused, plain once the
+    /// focus went, reverse video again when it comes back.
+    #[test]
+    fn the_cursor_cell_is_painted_only_while_focused() {
+        const AREA: Rect = Rect {
+            x: 0,
+            y: 0,
+            width: 40,
+            height: 5,
+        };
+        let cursor_cell = |editor: &Editor| {
+            let mut buffer = Buffer::empty(AREA);
+            editor.render(AREA, &mut buffer);
+            // Inside the border: the first cell of the first line.
+            buffer[(1, 1)].modifier
+        };
+        let mut editor = Editor::new(&Theme::default());
+        assert!(
+            cursor_cell(&editor).contains(ratatui::style::Modifier::REVERSED),
+            "a focused composer paints its cursor"
+        );
+        editor.set_focused(false);
+        assert!(
+            !cursor_cell(&editor).contains(ratatui::style::Modifier::REVERSED),
+            "an unfocused one paints none"
+        );
+        editor.set_focused(true);
+        assert!(
+            cursor_cell(&editor).contains(ratatui::style::Modifier::REVERSED),
+            "and focus regained paints it again"
+        );
     }
 
     #[test]
