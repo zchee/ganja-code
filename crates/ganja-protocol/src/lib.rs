@@ -1795,6 +1795,33 @@ pub enum Event {
         /// The posture the next turn runs under.
         mode: PermissionMode,
     },
+    /// A compaction is summarizing the window, and this is how far along it
+    /// is: the summary streamed so far, estimated in tokens, against the
+    /// output budget the engine's fit guard reserves for one.
+    ///
+    /// Emitted when the summarize request is about to stream (`tokens: 0`)
+    /// and again whenever the estimate grows, for both triggers — the
+    /// automatic one at a turn's start and the `/compact` a person typed.
+    /// The [`Event::MessageStarted`] carrying the finished summary is what
+    /// ends the run; there is no closing progress event, because that
+    /// announcement already says everything one would.
+    ///
+    /// No upstream counterpart: opencode compacts silently and its frontend
+    /// learns only from the summary's own announcement (user directive,
+    /// 2026-08-25). The estimate is the engine's four-characters-per-token
+    /// convention, so a consumer should read it as a gauge, never an
+    /// invoice — the provider's own accounting arrives on the summary
+    /// message, like every other request's.
+    CompactionProgress {
+        /// Session this happened in.
+        session_id: SessionId,
+        /// Estimated tokens of summary streamed so far.
+        tokens: u64,
+        /// The output budget a summary is expected to fit, carried so a
+        /// frontend draws the fraction without hard-coding the engine's
+        /// constant.
+        budget: u64,
+    },
     /// The turn ended and the engine is idle again. It is the last event of a
     /// turn, whatever went wrong during it, save for the one
     /// [`Event::AgentChanged`] a plan approval may announce immediately after
@@ -1843,6 +1870,7 @@ impl Event {
             | Event::AgentChanged { session_id, .. }
             | Event::EffortChanged { session_id, .. }
             | Event::PermissionModeChanged { session_id, .. }
+            | Event::CompactionProgress { session_id, .. }
             | Event::MessageFinished { session_id, .. } => session_id,
         }
     }
@@ -2428,6 +2456,14 @@ mod tests {
                     id: "steer-1".to_owned(),
                 }),
                 r#"{"type":"steer_consumed","session_id":"ses_1","id":"steer-1"}"#,
+            ),
+            (
+                serde_json::to_string(&Event::CompactionProgress {
+                    session_id: pinned_session(),
+                    tokens: 2_500,
+                    budget: 4_096,
+                }),
+                r#"{"type":"compaction_progress","session_id":"ses_1","tokens":2500,"budget":4096}"#,
             ),
             (
                 serde_json::to_string(&Command::CancelTurn),

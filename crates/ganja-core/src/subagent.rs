@@ -2063,10 +2063,14 @@ async fn watch(mut receiver: mpsc::Receiver<Event>, watched: Watched) -> Outcome
             // change, which only the engine's command paths announce. A steer
             // cannot reach a child either: no handle of a child's ever enters
             // the engine's slot, so its mailbox has no route in.
+            // And a child never compacts: the fill-level guard reads the
+            // parent's live record and walks away when the ids differ, so a
+            // progress gauge is the root turn's alone.
             Event::RevertChanged { .. }
             | Event::AgentChanged { .. }
             | Event::SteerConsumed { .. }
             | Event::PermissionModeChanged { .. }
+            | Event::CompactionProgress { .. }
             | Event::EffortChanged { .. } => {}
         }
     }

@@ -293,15 +293,35 @@ pub struct Working {
     /// that has spent nothing draws no segment at all rather than claiming a
     /// zero the screen would contradict.
     pub output_tokens: u64,
+    /// The compaction this turn is running, while it is running one: what
+    /// the engine's `compaction_progress` events said last. Set, the strip
+    /// wears the compacting dress instead of the verb and the shimmer (the
+    /// 2026-08-25 reference screenshots).
+    pub compaction: Option<Compaction>,
+}
+
+/// How far a compaction has streamed, as its progress event reports it.
+#[derive(Clone, Copy, Debug)]
+pub struct Compaction {
+    /// Estimated tokens of summary streamed so far.
+    pub tokens: u64,
+    /// The output budget a summary is expected to fit, the denominator the
+    /// gauge's percentage is drawn from.
+    pub budget: u64,
 }
 
 impl Working {
-    /// The one line this draws to, in the strip's own paint.
-    fn line(&self) -> Line<'static> {
+    /// The one line this draws to, in the strip's own paint — or, while a
+    /// compaction runs, in the compacting dress's.
+    fn line(&self, theme: &Theme) -> Line<'static> {
+        // One reading of the clock for the glyph, the figure, the band and
+        // the pulse.
+        let elapsed = self.started.elapsed();
+        if let Some(compaction) = self.compaction {
+            return compacting_line(elapsed, compaction, theme);
+        }
         let verbs = u64::try_from(WORKING_VERBS.len()).unwrap_or(1);
         let verb = WORKING_VERBS[usize::try_from(self.turn % verbs).unwrap_or(0)];
-        // One reading of the clock for the glyph, the figure and the band.
-        let elapsed = self.started.elapsed();
         let mut text = format!(
             "{glyph} {verb}\u{2026} ({seconds}s",
             glyph = working_frame(elapsed),
@@ -379,6 +399,114 @@ fn blend(base: (u8, u8, u8), peak: (u8, u8, u8), numerator: u64, denominator: u6
         channel(base.1, peak.1),
         channel(base.2, peak.2),
     )
+}
+
+/// The compacting headline's paint at the spinner cycle's ends — a pale
+/// blue, sampled off the reference screenshots (2026-08-25). A named color
+/// rather than a theme slot, exactly as the shimmer's orange is: the
+/// reference named colors, not roles.
+const COMPACT_BLUE: (u8, u8, u8) = (0xb7, 0xd6, 0xfb);
+
+/// What the pulse reaches at the middle of the cycle: the second frame's
+/// periwinkle.
+const COMPACT_PERIWINKLE: (u8, u8, u8) = (0xaf, 0xaf, 0xf9);
+
+/// Segments the compacting gauge holds at full width, counted off the
+/// reference screenshot: twenty-one filled and nineteen outlined under 52%.
+const COMPACT_BAR: usize = 40;
+
+/// The headline's paint `elapsed` into the compaction: out toward periwinkle
+/// over the spinner cycle's first half and back over the second, riding
+/// `WORKING_FRAME_STEP` so the color moves exactly when the glyph does — the
+/// icon and the color changing together, as the reference's two frames show.
+fn compact_pulse(elapsed: Duration) -> Color {
+    let steps = u64::try_from(elapsed.as_millis() / WORKING_FRAME_STEP).unwrap_or(u64::MAX);
+    let frames = u64::try_from(WORKING_FRAMES.len()).unwrap_or(2).max(2);
+    let half = frames / 2;
+    let toward = half.saturating_sub((steps % frames).abs_diff(half));
+    blend(COMPACT_BLUE, COMPACT_PERIWINKLE, toward, half)
+}
+
+/// `59s` up to a minute, `2m 1s` past it — the reference's own spelling of a
+/// clock that a compaction, unlike most turns, actually runs into minutes.
+fn compact_elapsed(elapsed: Duration) -> String {
+    let seconds = elapsed.as_secs();
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else {
+        format!(
+            "{minutes}m {seconds}s",
+            minutes = seconds / 60,
+            seconds = seconds % 60
+        )
+    }
+}
+
+/// `840` below a thousand, `2.5k` past it (`4k` when the tenth is zero): the
+/// reference abbreviates, and the raw figure would crowd a narrow strip.
+fn compact_tokens(tokens: u64) -> String {
+    if tokens < 1_000 {
+        return tokens.to_string();
+    }
+    let tenths = tokens / 100;
+    if tenths.is_multiple_of(10) {
+        format!("{}k", tenths / 10)
+    } else {
+        format!("{}.{}k", tenths / 10, tenths % 10)
+    }
+}
+
+/// The strip's line while a compaction runs: the spinner glyph and the
+/// headline in the pulse's paint, the clock and the streamed estimate
+/// receding beside them. The token figure is the gauge's own — the summary
+/// streamed so far — not the session total the ordinary line shows, because
+/// what is streaming is the summary and nothing else.
+fn compacting_line(elapsed: Duration, compaction: Compaction, theme: &Theme) -> Line<'static> {
+    let head = format!(
+        "{glyph} Compacting conversation\u{2026} ",
+        glyph = working_frame(elapsed)
+    );
+    let mut tail = format!("({clock}", clock = compact_elapsed(elapsed));
+    if compaction.tokens > 0 {
+        tail.push_str(&format!(
+            " \u{b7} \u{2193} {tokens} tokens",
+            tokens = compact_tokens(compaction.tokens)
+        ));
+    }
+    tail.push(')');
+
+    Line::from(vec![
+        Span::styled(
+            head,
+            Style::default()
+                .fg(compact_pulse(elapsed))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(tail, theme.dim),
+    ])
+}
+
+/// The gauge under the compacting line: filled segments bright, the rest
+/// outlined, the percentage beside them — clamped at 99 while the summary is
+/// still streaming, because the budget is an expectation the stream may
+/// outrun, and a bar claiming the end of work still under way would be the
+/// strip's one lie.
+fn compacting_bar(compaction: Compaction, width: usize, theme: &Theme) -> Option<Line<'static>> {
+    // The indent, then the label at its widest: "  " and " 99%".
+    let segments = COMPACT_BAR.min(width.saturating_sub(6));
+    if segments == 0 {
+        return None;
+    }
+    let percent = usize::try_from(compaction.tokens.saturating_mul(100) / compaction.budget.max(1))
+        .unwrap_or(usize::MAX)
+        .min(99);
+    let filled = segments * percent / 100;
+
+    Some(Line::from(vec![
+        Span::styled(format!("  {}", "\u{25b0}".repeat(filled)), theme.fg),
+        Span::styled("\u{25b1}".repeat(segments - filled), theme.dim),
+        Span::styled(format!(" {percent}%"), theme.dim),
+    ]))
 }
 
 /// One line of a block before the viewport lays it out: what introduces it,
@@ -717,6 +845,30 @@ impl Chat {
         }
     }
 
+    /// Tells the strip a compaction is running and how far its summary has
+    /// streamed.
+    ///
+    /// Arms the strip when nothing else has — the automatic trigger fires at
+    /// a turn's start, before any message opens — and updates in place when
+    /// something has, so the clock stays the compaction's own from its first
+    /// event rather than restarting with every report.
+    pub fn set_compacting(&mut self, tokens: u64, budget: u64) {
+        let compaction = Some(Compaction { tokens, budget });
+        match &mut self.working {
+            Some(working) => working.compaction = compaction,
+            None => {
+                self.working = Some(Working {
+                    started: Instant::now(),
+                    // The verb never draws under the compacting dress, so
+                    // the rotation has nothing to say here.
+                    turn: 0,
+                    output_tokens: 0,
+                    compaction,
+                });
+            }
+        }
+    }
+
     /// Empties the transcript, which is what switching sessions does to it.
     pub fn clear(&mut self) {
         self.entries.clear();
@@ -1016,9 +1168,18 @@ impl Chat {
     pub fn lay_out_working(&mut self, width: u16, theme: &Theme) -> u16 {
         let lines = match self.working {
             Some(working) => {
-                let mut lines = vec![working.line()];
-                let todos = result_rows(self.working_todos(theme), false);
-                lines.extend(lay_out(&todos, usize::from(width)));
+                let mut lines = vec![working.line(theme)];
+                if let Some(compaction) = working.compaction {
+                    // The reference puts a blank row of air between the line
+                    // and its gauge, and the gauge where the checklist would
+                    // stand — a compaction runs no tools, so there is no
+                    // checklist for it to displace.
+                    lines.push(Line::styled(String::new(), Style::default()));
+                    lines.extend(compacting_bar(compaction, usize::from(width), theme));
+                } else {
+                    let todos = result_rows(self.working_todos(theme), false);
+                    lines.extend(lay_out(&todos, usize::from(width)));
+                }
 
                 lines
             }
@@ -2128,8 +2289,9 @@ mod tests {
     use ratatui::{buffer::Buffer, layout::Rect, style::Modifier};
 
     use super::{
-        BULLET, Chat, Instant, RESULT, WORKING_FRAME_STEP, WORKING_FRAMES, WORKING_VERBS, Working,
-        elapsed, split_at_width, working_frame, wrap,
+        BULLET, COMPACT_BLUE, COMPACT_PERIWINKLE, Chat, Compaction, Instant, RESULT,
+        WORKING_FRAME_STEP, WORKING_FRAMES, WORKING_VERBS, Working, compact_elapsed, compact_pulse,
+        compact_tokens, elapsed, split_at_width, working_frame, wrap,
     };
     use crate::theme::{Theme, Themes};
 
@@ -3161,6 +3323,7 @@ mod tests {
             started: Instant::now(),
             turn: 1,
             output_tokens: 0,
+            compaction: None,
         }));
 
         let boxes = |lines: &[String]| {
@@ -3234,6 +3397,7 @@ mod tests {
             started: Instant::now(),
             turn: 2,
             output_tokens: 0,
+            compaction: None,
         }));
 
         let lines = strip(&mut chat, 60);
@@ -4342,7 +4506,129 @@ mod tests {
                 .expect("the test clock is well past the epoch"),
             turn,
             output_tokens,
+            compaction: None,
         }
+    }
+
+    /// A turn that has been compacting for `seconds`, its summary `tokens`
+    /// into a `budget`.
+    fn compacting(seconds: u64, tokens: u64, budget: u64) -> Working {
+        Working {
+            compaction: Some(Compaction { tokens, budget }),
+            ..working(0, seconds, 0)
+        }
+    }
+
+    /// The strip in its compacting dress (the 2026-08-25 reference
+    /// screenshots): the spinner glyph on the headline, the clock in minutes
+    /// and the streamed estimate abbreviated beside it, and under a blank
+    /// row the forty-segment gauge with its percentage.
+    #[test]
+    fn a_compacting_turn_wears_its_own_dress_and_gauge() {
+        let mut chat = Chat::default();
+        chat.set_working(Some(compacting(121, 2_500, 4_096)));
+
+        let lines = strip(&mut chat, 60);
+
+        assert_eq!(
+            lines[0],
+            format!(
+                "{} Compacting conversation\u{2026} (2m 1s \u{b7} \u{2193} 2.5k tokens)",
+                working_frame(Duration::from_secs(121))
+            ),
+            "got {lines:?}"
+        );
+        assert_eq!(lines[1], "", "a blank row of air before the gauge");
+        assert_eq!(
+            lines[2],
+            format!("  {}{} 61%", "\u{25b0}".repeat(24), "\u{25b1}".repeat(16)),
+            "2500 of 4096 is 61%, and 61% of forty segments is 24"
+        );
+    }
+
+    /// The gauge never claims the end while the stream is still coming, and
+    /// a compaction that has streamed nothing yet shows a bare clock rather
+    /// than a zero.
+    #[test]
+    fn the_compacting_gauge_opens_bare_and_clamps_at_ninety_nine() {
+        let mut chat = Chat::default();
+        chat.set_working(Some(compacting(3, 0, 4_096)));
+        let opened = strip(&mut chat, 60);
+        assert_eq!(
+            opened[0],
+            format!(
+                "{} Compacting conversation\u{2026} (3s)",
+                working_frame(Duration::from_secs(3))
+            ),
+            "no token clause before anything streamed"
+        );
+        assert_eq!(opened[2], format!("  {} 0%", "\u{25b1}".repeat(40)));
+
+        chat.set_working(Some(compacting(3, 8_192, 4_096)));
+        let overrun = strip(&mut chat, 60);
+        assert_eq!(
+            overrun[2],
+            format!("  {}\u{25b1} 99%", "\u{25b0}".repeat(39)),
+            "a stream past the budget is 99%, never a claimed end"
+        );
+    }
+
+    /// The first progress event arms the strip on its own — the automatic
+    /// trigger fires before any message opens — and later ones update it in
+    /// place, keeping the compaction's own clock.
+    #[test]
+    fn compaction_progress_arms_the_strip_and_updates_it_in_place() {
+        let mut chat = Chat::default();
+        chat.set_compacting(0, 4_096);
+
+        let armed = strip(&mut chat, 60);
+        assert!(
+            armed
+                .first()
+                .is_some_and(|line| line.contains("Compacting conversation\u{2026}")),
+            "the first event arms the strip: {armed:?}"
+        );
+
+        chat.set_compacting(2_048, 4_096);
+        let updated = strip(&mut chat, 60);
+        assert!(
+            updated.iter().any(|line| line.ends_with(" 50%")),
+            "a later event moves the gauge: {updated:?}"
+        );
+
+        chat.set_working(None);
+        assert!(
+            strip(&mut chat, 60).is_empty(),
+            "the strip settles the way every turn's does"
+        );
+    }
+
+    /// The headline's paint rides the glyph's own clock — blue at the
+    /// cycle's ends, periwinkle at its far frame, between the two on the way
+    /// — so the icon and the color change together, as the reference's two
+    /// frames show.
+    #[test]
+    fn the_compacting_pulse_swaps_paints_on_the_spinner_clock() {
+        let step = u64::try_from(WORKING_FRAME_STEP).expect("a step fits in u64");
+        let at = |steps: u64| compact_pulse(Duration::from_millis(steps * step));
+        let paint = |(r, g, b): (u8, u8, u8)| ratatui::style::Color::Rgb(r, g, b);
+
+        assert_eq!(at(0), paint(COMPACT_BLUE));
+        assert_eq!(at(5), paint(COMPACT_PERIWINKLE), "the far frame");
+        assert_eq!(at(10), at(0), "the whole cycle in, it starts over");
+        assert_ne!(at(2), at(0), "the way there passes between the two");
+        assert_ne!(at(2), at(5));
+    }
+
+    /// The two figures spell themselves the reference's way: minutes past a
+    /// minute, `k` past a thousand, the tenth dropped when it is zero.
+    #[test]
+    fn the_compacting_figures_abbreviate_the_reference_way() {
+        assert_eq!(compact_elapsed(Duration::from_secs(59)), "59s");
+        assert_eq!(compact_elapsed(Duration::from_secs(121)), "2m 1s");
+        assert_eq!(compact_tokens(840), "840");
+        assert_eq!(compact_tokens(2_500), "2.5k");
+        assert_eq!(compact_tokens(4_000), "4k");
     }
 
     /// **AC4.** While a turn runs the strip says so, with what it has spent;

@@ -5267,6 +5267,7 @@ mod tests {
                 | Event::RevertChanged { .. }
                 | Event::AgentChanged { .. }
                 | Event::PermissionModeChanged { .. }
+                | Event::CompactionProgress { .. }
                 | Event::EffortChanged { .. } => {}
             }
         }

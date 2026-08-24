@@ -2544,6 +2544,20 @@ async fn compact_if_needed(
         return ControlFlow::Continue(None);
     }
 
+    // The frontend's compacting gauge opens on this event and on nothing
+    // else (user directive, 2026-08-25), so it fires exactly when a
+    // summarize request is really about to stream — past every walk-away
+    // above, for both triggers.
+    deliver(
+        turn,
+        Event::CompactionProgress {
+            session_id: turn.session_id.clone(),
+            tokens: 0,
+            budget: SUMMARY_OUTPUT_TOKENS,
+        },
+    )
+    .await?;
+
     // The same system prompt the conversation was held under. Summarizing
     // without it would judge what mattered by different instructions than the
     // ones that produced the transcript, and the summary is what the rest of
@@ -2629,6 +2643,11 @@ async fn summarize(
 
     let mut text = String::new();
     let mut usage: Option<Usage> = None;
+    // The gauge's own ledger: characters counted as they arrive, so each
+    // estimate is O(delta) rather than a rescan, and announced only when the
+    // estimated figure actually moved.
+    let mut chars = 0usize;
+    let mut announced = 0u64;
     loop {
         // Biased for the same reason the step loop is: a cancel already in
         // hand beats a fragment that happens to be ready.
@@ -2648,7 +2667,23 @@ async fn summarize(
         };
 
         match event {
-            ProviderEvent::TextDelta(delta) => text.push_str(&delta),
+            ProviderEvent::TextDelta(delta) => {
+                chars += delta.chars().count();
+                text.push_str(&delta);
+                let tokens = estimate_tokens(chars);
+                if tokens > announced {
+                    announced = tokens;
+                    deliver(
+                        turn,
+                        Event::CompactionProgress {
+                            session_id: turn.session_id.clone(),
+                            tokens,
+                            budget: SUMMARY_OUTPUT_TOKENS,
+                        },
+                    )
+                    .await?;
+                }
+            }
             ProviderEvent::Usage(reported) => usage = Some(reported),
             ProviderEvent::Failed(error) => {
                 return ControlFlow::Break(Some(Outcome::failed(error.to_string())));

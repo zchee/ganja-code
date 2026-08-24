@@ -739,15 +739,39 @@ async fn an_over_budget_session_is_summarized_before_the_turn() {
         .expect("an idle engine accepts a prompt");
     let seen = drain(&mut events).await;
 
-    // The first thing the frontend hears is the summary, arriving complete:
-    // the frozen protocol has no way to close a message that is not the
-    // turn's, so it is never announced half-grown.
+    // The compaction announces itself first (user directive, 2026-08-25): a
+    // run of progress events — the gauge a frontend's strip draws — opens
+    // the stream, `tokens: 0` before anything arrives and growing from
+    // there against the fit guard's own budget. The summary is the first
+    // thing after them, still arriving complete: the frozen protocol has no
+    // way to close a message that is not the turn's, so it is never
+    // announced half-grown.
+    let progress: Vec<(u64, u64)> = seen
+        .iter()
+        .take_while(|event| matches!(event, Event::CompactionProgress { .. }))
+        .map(|event| match event {
+            Event::CompactionProgress { tokens, budget, .. } => (*tokens, *budget),
+            _ => unreachable!("the prefix was just matched"),
+        })
+        .collect();
+    assert!(
+        progress.first().is_some_and(|(tokens, _)| *tokens == 0),
+        "the gauge opens before anything streams: {seen:#?}"
+    );
+    assert!(
+        progress.iter().all(|(_, budget)| *budget == 4_096),
+        "the budget is the fit guard's own reserve: {progress:?}"
+    );
+    assert!(
+        progress.windows(2).all(|pair| pair[0].0 < pair[1].0),
+        "the estimate only ever grows: {progress:?}"
+    );
     let Some(Event::MessageStarted {
         session_id: _,
         message: summary,
-    }) = seen.first()
+    }) = seen.get(progress.len())
     else {
-        panic!("the summary should open the event stream, got {seen:#?}");
+        panic!("the summary should follow its own gauge, got {seen:#?}");
     };
     assert_eq!(summary.role, Role::Assistant);
     assert!(
@@ -884,7 +908,12 @@ async fn a_cancel_during_compaction_leaves_the_window_uninstalled() {
         .expect("a compacting turn accepts a cancel");
 
     let seen = drain(&mut events).await;
-    let Some(Event::MessageFinished { reason, .. }) = seen.first() else {
+    // Past its own progress gauge (user directive, 2026-08-25), the finish
+    // is still the first and only word: no summary, no half-grown message.
+    let mut after = seen
+        .iter()
+        .skip_while(|event| matches!(event, Event::CompactionProgress { .. }));
+    let Some(Event::MessageFinished { reason, .. }) = after.next() else {
         panic!(
             "a cancel during compaction ends in a clean finish and nothing \
              else was announced first, got {seen:#?}"

@@ -879,6 +879,11 @@ impl<'a> Reporter<'a> {
             // answering a teammate mid-session, and a headless run holds no
             // mailbox anything could reach it through.
             | Event::PermissionModeChanged { .. }
+            // Compaction progress is a strip's to draw and a headless run
+            // has no strip; the summary it gauges arrives whole as the
+            // `MessageStarted` above, which is the account the reader was
+            // promised.
+            | Event::CompactionProgress { .. }
             // The quad is a dialog's lifecycle, not an account of the turn:
             // a headless run refuses every question before one can be asked,
             // and `--format json`'s six type names have no room for a shape

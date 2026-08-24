@@ -6040,6 +6040,7 @@ impl App {
                         started: Instant::now(),
                         turn: self.turns,
                         output_tokens: self.totals.output_tokens,
+                        compaction: None,
                     }));
                 }
                 self.chat.start_message(message);
@@ -6272,6 +6273,16 @@ impl App {
             // beside the agent and the effort in the status bar. The arm
             // exists so the match stays exhaustive.
             CoreEvent::PermissionModeChanged { .. } => {}
+            // A compaction reporting how far its summary has streamed (user
+            // directive, 2026-08-25): the strip flips to the compacting
+            // dress — armed here even before any message opens, which is how
+            // the automatic trigger at a turn's start gets to show itself —
+            // and the status bar spins, because a summarize request is
+            // streaming even though no part is.
+            CoreEvent::CompactionProgress { tokens, budget, .. } => {
+                self.status.set_activity(Activity::Streaming);
+                self.chat.set_compacting(tokens, budget);
+            }
             CoreEvent::MessageFinished {
                 message_id,
                 reason,
