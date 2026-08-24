@@ -232,6 +232,12 @@ pub struct Chat {
     /// the layout and [`Chat::render_working`] because the app sizes its
     /// vertical split off the count before it has an area to draw into.
     working_lines: Vec<Line<'static>>,
+    /// When a finished compaction's turn settled, while its full gauge is
+    /// being held on screen: [`Chat::settle_working`] starts this clock
+    /// instead of clearing the strip, and the next layout past
+    /// [`COMPACT_SETTLE`] clears it — a bar that reached 100 and vanished in
+    /// the same frame would never have been seen to arrive.
+    settling: Option<Instant>,
 }
 
 /// What is hidden, and the row that says so.
@@ -308,6 +314,11 @@ pub struct Compaction {
     /// The output budget a summary is expected to fit, the denominator the
     /// gauge's percentage is drawn from.
     pub budget: u64,
+    /// Whether the summary has arrived whole. The gauge cannot reach 100 on
+    /// the ratio — the budget is an expectation, not a total anybody knows
+    /// mid-stream — so the finish is a fact delivered from outside: the
+    /// summary's own complete arrival, which snaps the bar full.
+    pub done: bool,
 }
 
 impl Working {
@@ -415,6 +426,11 @@ const COMPACT_PERIWINKLE: (u8, u8, u8) = (0xaf, 0xaf, 0xf9);
 /// reference screenshot: twenty-one filled and nineteen outlined under 52%.
 const COMPACT_BAR: usize = 40;
 
+/// How long the full gauge is held after a compacting turn settles, before
+/// the strip is taken back. Long enough for an eye to register the arrival,
+/// short enough that the screen is not claiming work after the work.
+const COMPACT_SETTLE: Duration = Duration::from_millis(1_000);
+
 /// The headline's paint `elapsed` into the compaction: out toward periwinkle
 /// over the spinner cycle's first half and back over the second, riding
 /// `WORKING_FRAME_STEP` so the color moves exactly when the glyph does — the
@@ -492,14 +508,18 @@ fn compacting_line(elapsed: Duration, compaction: Compaction, theme: &Theme) -> 
 /// outrun, and a bar claiming the end of work still under way would be the
 /// strip's one lie.
 fn compacting_bar(compaction: Compaction, width: usize, theme: &Theme) -> Option<Line<'static>> {
-    // The indent, then the label at its widest: "  " and " 99%".
-    let segments = COMPACT_BAR.min(width.saturating_sub(6));
+    // The indent, then the label at its widest: "  " and " 100%".
+    let segments = COMPACT_BAR.min(width.saturating_sub(7));
     if segments == 0 {
         return None;
     }
-    let percent = usize::try_from(compaction.tokens.saturating_mul(100) / compaction.budget.max(1))
-        .unwrap_or(usize::MAX)
-        .min(99);
+    let percent = if compaction.done {
+        100
+    } else {
+        usize::try_from(compaction.tokens.saturating_mul(100) / compaction.budget.max(1))
+            .unwrap_or(usize::MAX)
+            .min(99)
+    };
     let filled = segments * percent / 100;
 
     Some(Line::from(vec![
@@ -839,6 +859,7 @@ impl Chat {
     /// a reason to take a reader who scrolled up back down, and the offset
     /// clamp already keeps a pinned viewport where it was put.
     pub fn set_working(&mut self, working: Option<Working>) {
+        self.settling = None;
         self.working = working;
         if working.is_none() {
             self.working_lines.clear();
@@ -853,7 +874,12 @@ impl Chat {
     /// something has, so the clock stays the compaction's own from its first
     /// event rather than restarting with every report.
     pub fn set_compacting(&mut self, tokens: u64, budget: u64) {
-        let compaction = Some(Compaction { tokens, budget });
+        self.settling = None;
+        let compaction = Some(Compaction {
+            tokens,
+            budget,
+            done: false,
+        });
         match &mut self.working {
             Some(working) => working.compaction = compaction,
             None => {
@@ -866,6 +892,38 @@ impl Chat {
                     compaction,
                 });
             }
+        }
+    }
+
+    /// Marks the running compaction finished — the summary arrived whole —
+    /// so the gauge snaps full. Answers whether there was one to finish,
+    /// which is how the app tells the summary's arrival from an ordinary
+    /// reply opening.
+    pub fn finish_compacting(&mut self) -> bool {
+        match &mut self.working {
+            Some(Working {
+                compaction: Some(compaction),
+                ..
+            }) => {
+                compaction.done = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Takes the strip back at a turn's end — except for a finished
+    /// compaction, whose full gauge is held for `COMPACT_SETTLE` first so
+    /// the 100% is a thing a person saw rather than a frame that never
+    /// rendered. A compaction the turn's end caught *unfinished* — a cancel,
+    /// a dead provider — clears immediately: there is no arrival to show.
+    pub fn settle_working(&mut self) {
+        match self.working {
+            Some(Working {
+                compaction: Some(Compaction { done: true, .. }),
+                ..
+            }) => self.settling = Some(Instant::now()),
+            _ => self.set_working(None),
         }
     }
 
@@ -1166,6 +1224,15 @@ impl Chat {
     /// vertical split so the strip is sized on this frame's lines, then
     /// [`Chat::render_working`] draws what was built here.
     pub fn lay_out_working(&mut self, width: u16, theme: &Theme) -> u16 {
+        // A held gauge expires here rather than on an event: the frames a
+        // settled screen still draws — the tick-driven ones — are what carry
+        // the clock past the hold.
+        if self
+            .settling
+            .is_some_and(|settled| settled.elapsed() >= COMPACT_SETTLE)
+        {
+            self.set_working(None);
+        }
         let lines = match self.working {
             Some(working) => {
                 let mut lines = vec![working.line(theme)];
@@ -4514,9 +4581,67 @@ mod tests {
     /// into a `budget`.
     fn compacting(seconds: u64, tokens: u64, budget: u64) -> Working {
         Working {
-            compaction: Some(Compaction { tokens, budget }),
+            compaction: Some(Compaction {
+                tokens,
+                budget,
+                done: false,
+            }),
             ..working(0, seconds, 0)
         }
+    }
+
+    /// The summary's whole arrival snaps the gauge full, and the settled
+    /// turn holds it on screen for the settle window instead of taking the
+    /// strip back in the same frame — then a layout past the window clears
+    /// it like any settled turn's.
+    #[test]
+    fn a_finished_compaction_snaps_full_and_lingers_before_settling() {
+        let mut chat = Chat::default();
+        chat.set_compacting(500, 4_096);
+        assert!(chat.finish_compacting(), "there was a compaction to finish");
+
+        let snapped = strip(&mut chat, 60);
+        assert_eq!(
+            snapped[2],
+            format!("  {} 100%", "\u{25b0}".repeat(40)),
+            "the gauge is full the moment the summary lands"
+        );
+
+        chat.settle_working();
+        assert!(
+            !strip(&mut chat, 60).is_empty(),
+            "the full gauge is held past the turn's end"
+        );
+
+        chat.settling = Instant::now().checked_sub(super::COMPACT_SETTLE);
+        assert!(
+            strip(&mut chat, 60).is_empty(),
+            "and a layout past the hold takes the strip back"
+        );
+    }
+
+    /// Only an arrival is held: a turn that ends mid-stream — a cancel, a
+    /// dead provider — clears at once, and so does an ordinary turn's end.
+    #[test]
+    fn settling_holds_nothing_that_never_finished() {
+        let mut chat = Chat::default();
+        chat.set_compacting(500, 4_096);
+        chat.settle_working();
+        assert!(
+            strip(&mut chat, 60).is_empty(),
+            "an unfinished compaction has no arrival to show"
+        );
+
+        chat.set_working(Some(working(1, 3, 0)));
+        assert!(
+            !chat.finish_compacting(),
+            "no compaction, nothing to finish"
+        );
+        chat.settle_working();
+        assert!(
+            strip(&mut chat, 60).is_empty(),
+            "an ordinary turn settles the way it always did"
+        );
     }
 
     /// The strip in its compacting dress (the 2026-08-25 reference

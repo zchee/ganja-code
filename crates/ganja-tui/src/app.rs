@@ -6036,12 +6036,20 @@ impl App {
                     // provider reports usage when the turn ends, so nothing
                     // moves it while the turn runs.
                     self.turns = self.turns.saturating_add(1);
-                    self.chat.set_working(Some(Working {
-                        started: Instant::now(),
-                        turn: self.turns,
-                        output_tokens: self.totals.output_tokens,
-                        compaction: None,
-                    }));
+                    // One arrival is not a streaming turn's opening: a
+                    // compaction's summary comes in already complete, and
+                    // while the compacting dress is up it is the gauge's
+                    // finish line — the bar snaps full instead of being
+                    // replaced by a verb (2026-08-25).
+                    let snapped = message.time.completed.is_some() && self.chat.finish_compacting();
+                    if !snapped {
+                        self.chat.set_working(Some(Working {
+                            started: Instant::now(),
+                            turn: self.turns,
+                            output_tokens: self.totals.output_tokens,
+                            compaction: None,
+                        }));
+                    }
                 }
                 self.chat.start_message(message);
             }
@@ -6320,8 +6328,10 @@ impl App {
                 // they are re-owned.
                 self.turn_running = false;
                 // Whatever ended it, the tail stops claiming work is under
-                // way (**D487**).
-                self.chat.set_working(None);
+                // way (**D487**) — with one settle window: a finished
+                // compaction's full gauge is held a beat first, so the 100%
+                // is seen rather than cleared in the frame it appeared.
+                self.chat.settle_working();
                 // Peers first, because the two are stranded in opposite
                 // directions: a typed message becomes the fallback lane's to
                 // replay, and a peer's goes back to the mailbox it was never

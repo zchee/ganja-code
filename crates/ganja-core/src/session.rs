@@ -2578,6 +2578,17 @@ async fn compact_if_needed(
         return ControlFlow::Continue(None);
     }
 
+    // What the next request will carry is the summary alone, so the stored
+    // measure — what the status bar's meter and the auto-trigger both read —
+    // moves with the window now rather than staying at the fill that forced
+    // this compaction until the next turn happens to report usage
+    // (2026-08-25). The provider's own output count where it reported one,
+    // the four-characters estimate where it did not.
+    let window_tokens = usage
+        .map(|usage| usage.output_tokens)
+        .filter(|tokens| *tokens > 0)
+        .unwrap_or_else(|| estimate_tokens(text.chars().count()));
+
     let mut summary = Message::assistant(turn.model.clone());
     summary.parts.push(Part::text(text));
     summary.usage = usage;
@@ -2620,6 +2631,7 @@ async fn compact_if_needed(
         {
             info.summary = Some(summary.id.clone());
             info.updated = now();
+            info.context_tokens = window_tokens;
             if let Err(error) = persist.state.storage.save_info(info) {
                 persist.complain("the compacted session record", &error);
             }

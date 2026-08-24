@@ -360,6 +360,13 @@ async fn compacting_on_demand_summarizes_a_session_that_is_nowhere_near_full() {
         Some(&summary.id),
         "the window now opens at the summary"
     );
+    assert_eq!(
+        engine.current_session().map(|info| info.context_tokens),
+        Some(7),
+        "and the stored measure says what that window carries — the summary \
+         alone, estimated at four characters a token when the provider \
+         reported no usage (2026-08-25)"
+    );
 
     // And the next turn is held inside it.
     engine
