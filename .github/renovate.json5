@@ -45,10 +45,58 @@
   // The repository's commit convention is `scope: intent`.
   commitMessagePrefix: 'deps:',
 
+  // Granularity by compatibility class, not per crate (PR #9's lesson, both
+  // ways): one breaking bump must not hold the harmless batch hostage, and a
+  // move-together family split into per-crate PRs would sit permanently red.
+  // Order matters — later rules override earlier ones, so the families are
+  // re-grouped last.
   packageRules: [
+    // Semver-compatible movement lands as the one weekly batch.
     {
       matchManagers: ['cargo'],
-      groupName: 'cargo dependencies',
+      matchUpdateTypes: ['minor', 'patch'],
+      matchCurrentVersion: '>=1.0.0',
+      groupName: 'cargo compatible',
+    },
+    {
+      matchManagers: ['cargo'],
+      matchUpdateTypes: ['patch'],
+      matchCurrentVersion: '<1.0.0',
+      groupName: 'cargo compatible',
+    },
+    // The breaking class — majors, and 0.x minors, which cargo's caret
+    // treats as majors — goes one PR per crate: a red one blocks nothing
+    // else, and each is a deliberate read anyway in a manifest where every
+    // version carries its rationale.
+    {
+      matchManagers: ['cargo'],
+      matchUpdateTypes: ['major'],
+      groupName: null,
+    },
+    {
+      matchManagers: ['cargo'],
+      matchUpdateTypes: ['minor'],
+      matchCurrentVersion: '<1.0.0',
+      groupName: null,
+    },
+    // Lockstep families move as one PR or not at all usefully: webfetch
+    // walks the DOM beneath htmd through the rcdom types it re-exports only
+    // partially (the root manifest's own comment on markup5ever_rcdom), and
+    // the ripgrep and ratatui sets version together upstream.
+    {
+      matchManagers: ['cargo'],
+      matchPackageNames: ['htmd', 'html5ever', 'markup5ever', 'markup5ever_rcdom'],
+      groupName: 'html5ever family',
+    },
+    {
+      matchManagers: ['cargo'],
+      matchPackageNames: ['grep-matcher', 'grep-regex', 'grep-searcher', 'ignore'],
+      groupName: 'ripgrep internals',
+    },
+    {
+      matchManagers: ['cargo'],
+      matchPackageNames: ['ratatui', 'ratatui-textarea'],
+      groupName: 'ratatui family',
     },
     {
       matchManagers: ['github-actions'],
