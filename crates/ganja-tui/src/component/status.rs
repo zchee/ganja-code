@@ -73,8 +73,10 @@ const SPINNER: [&str; 8] = [
     "\u{280b}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283c}", "\u{2834}", "\u{2826}", "\u{2827}",
 ];
 
-/// How long each spinner phase is shown.
-const SPINNER_PERIOD: Duration = Duration::from_millis(80);
+/// How long each spinner phase is shown — slowed from 80ms by eye on
+/// 2026-08-25 (user directive), beside the working line's own slowing, so
+/// the two things that move while a turn runs move at a walking pace.
+const SPINNER_PERIOD: Duration = Duration::from_millis(130);
 
 /// The key reminders a shell line earns, dropped whole when the terminal is
 /// too narrow for them. The *idle* footer carries none: Enter, Esc and Ctrl-C

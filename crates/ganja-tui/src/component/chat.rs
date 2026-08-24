@@ -126,10 +126,11 @@ const WORKING_FRAMES: [&str; 10] = [
     "\u{2733}", "\u{2722}",
 ];
 
-/// Milliseconds one frame is held. A screenshot pins no cadence; this is the
-/// neighbourhood of an ink spinner's, and slow enough that a frame is a
-/// thing seen rather than a flicker.
-const WORKING_FRAME_STEP: u128 = 120;
+/// Milliseconds one frame is held. A screenshot pins no cadence, so this is
+/// set by eye: 120 — an ink spinner's neighbourhood — read as a flicker on
+/// the day it landed, and 200 is slow enough that a frame is a thing seen
+/// (user directive, 2026-08-25; a whole cycle is two seconds).
+const WORKING_FRAME_STEP: u128 = 200;
 
 /// The frame `elapsed` into a turn falls on — time-driven off the same clock
 /// as the shimmer band and the seconds figure, so nothing here keeps a phase
