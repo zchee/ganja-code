@@ -77,6 +77,14 @@ pub struct Definition {
     pub agent: Option<String>,
     /// Model the command asks for, when it should not ask the session's.
     pub model: Option<String>,
+    /// A display-only hint about what to type after the name, when the
+    /// command's file declared one (`argument-hint`, Claude's own key).
+    ///
+    /// The composer draws it dim after a typed name (**D518**); it is also
+    /// folded into [`Definition::description`] so a palette row stays
+    /// informative before the name is complete. Never parsed, never
+    /// validated: what the arguments *mean* is the template's business.
+    pub argument_hint: Option<String>,
     /// The Markdown file this command was read from, when it came from one.
     ///
     /// [`None`] for a builtin and for a `command` table entry — neither is a
@@ -572,10 +580,11 @@ fn parse_command(name: &str, text: &str) -> Option<Definition> {
 
     Some(Definition {
         name: name.to_owned(),
-        description: palette_line(description, argument_hint),
+        description: palette_line(description, argument_hint.clone()),
         template: body.to_owned(),
         agent,
         model,
+        argument_hint,
         // The caller knows which file this text came from; a parser given a
         // string does not.
         source: None,
@@ -601,12 +610,11 @@ struct Frontmatter {
 
 /// The one line a palette shows for a command file.
 ///
-/// [`Definition`] carries no slot of its own for `argument-hint`, and adding
-/// one would put the hint in a struct no frontend renders — every surface that
-/// lists commands shows `description` and nothing else. Folding the hint into
-/// that line is therefore what actually reaches the person the hint is for:
-/// `review the diff — <path>`, or the hint alone when the file gave no
-/// description, which still beats a nameless row.
+/// The hint also travels on its own slot for the composer's inline rendering
+/// (**D518**), but a palette row is read *before* the name is complete, when
+/// the inline hint cannot show yet — so the fold stays: `review the diff —
+/// <path>`, or the hint alone when the file gave no description, which still
+/// beats a nameless row.
 fn palette_line(description: Option<String>, hint: Option<String>) -> Option<String> {
     match (description, hint) {
         (Some(description), Some(hint)) => Some(format!("{description} — {hint}")),
@@ -674,6 +682,7 @@ fn builtins(worktree: &Path) -> Vec<Definition> {
         template: INIT_TEMPLATE.replacen(PATH_PLACEHOLDER, &worktree.to_string_lossy(), 1),
         agent: None,
         model: None,
+        argument_hint: None,
         source: None,
     }]
 }
@@ -686,6 +695,10 @@ fn configured(name: &str, definition: &CommandConfig) -> Definition {
         template: definition.template.clone(),
         agent: definition.agent.clone(),
         model: definition.model.clone(),
+        // The curated `command` table has no hint key: adding one is a config
+        // surface decision, not a fallout of the composer learning to draw
+        // hints (**D518**).
+        argument_hint: None,
         // A `command` table entry is not a file, whichever tier declared it —
         // and a plugin's contributed command arrives through this same table,
         // so it answers to the config's loud dispatch-time refusal rather than
@@ -1187,6 +1200,7 @@ mod tests {
             template: template.to_owned(),
             agent: None,
             model: None,
+            argument_hint: None,
             source: None,
         };
 
@@ -1298,6 +1312,15 @@ mod tests {
             .iter()
             .map(|command| (command.name.as_str(), command.description.as_deref()))
             .collect();
+        // D518: the hint also travels on its own slot for the composer.
+        let hinted: Vec<Option<&str>> = commands
+            .iter()
+            .map(|command| command.argument_hint.as_deref())
+            .collect();
+        assert!(
+            hinted.contains(&Some("<issue>")),
+            "the hint slot should carry the file's argument-hint: {hinted:?}"
+        );
         assert_eq!(
             described,
             vec![

@@ -260,6 +260,7 @@ mod tests {
         vec![EngineCommand {
             name: "init".to_owned(),
             description: Some("guided AGENTS.md setup".to_owned()),
+            hint: None,
         }]
     }
 

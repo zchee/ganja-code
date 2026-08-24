@@ -519,6 +519,55 @@ pub struct TeamSpawn {
 /// [`team_spawn`] is the one parser both doors feed.
 pub const SPAWN_GRAMMAR: &str = "<name> [--backend <surface>] [--agent <kind>] [what it should do]";
 
+/// The inline hint a builtin command shows once its name is typed (**D518**).
+///
+/// `/team` is the only builtin that reads arguments off the buffer, so it is
+/// the only name here; everything else answers [`None`] and shows nothing.
+/// Display-only, like a command file's `argument-hint` — the grammar that
+/// actually decides is [`team`]'s.
+fn builtin_hint(name: &str) -> Option<&'static str> {
+    match name {
+        "team" => Some("list | spawn <name> [--backend] [--agent] [prompt] | shutdown [member]"),
+        _ => None,
+    }
+}
+
+/// The dim hint the composer draws after a typed command name (**D518**),
+/// Claude Code's own presentation: the full name and nothing after it shows
+/// what the arguments would be, and the first argument character typed
+/// removes it.
+///
+/// One refinement past the flat lookup: a `/team spawn` line that has not
+/// named anything yet shows [`SPAWN_GRAMMAR`] — the same one spelling the
+/// refusal and the `/team` dialog's input step already use.
+#[must_use]
+pub fn inline_hint(text: &str, engine: &[EngineCommand]) -> Option<String> {
+    if text.contains('\n') {
+        return None;
+    }
+    let rest = text.strip_prefix('/')?;
+    let (name, tail) = match rest.split_once(char::is_whitespace) {
+        Some((name, tail)) => (name, tail),
+        None => (rest, ""),
+    };
+    if name.is_empty() {
+        return None;
+    }
+    if !tail.trim().is_empty() {
+        if name == "team" && tail.trim() == "spawn" {
+            return Some(SPAWN_GRAMMAR.to_owned());
+        }
+        return None;
+    }
+    if let Some(hint) = builtin_hint(name) {
+        return Some(hint.to_owned());
+    }
+    engine
+        .iter()
+        .find(|command| command.name == name)
+        .and_then(|command| command.hint.clone())
+}
+
 /// What `--backend` reads when the line ends before its value. Which surfaces
 /// there are is not repeated here on purpose: the far side refuses an unknown
 /// one by name, and two lists would be two places for them to drift.
@@ -673,6 +722,10 @@ pub struct EngineCommand {
     pub name: String,
     /// The one line the engine had to say about it, where it said anything.
     pub description: Option<String>,
+    /// The file's own `argument-hint`, for the composer's inline hint
+    /// (**D518**); the description above already carries it folded, which is
+    /// what the dropdown row keeps showing.
+    pub hint: Option<String>,
 }
 
 impl EngineCommand {
@@ -685,6 +738,7 @@ impl EngineCommand {
             .map(|definition| Self {
                 name: definition.name.clone(),
                 description: definition.description.clone(),
+                hint: definition.argument_hint.clone(),
             })
             .collect()
     }
@@ -883,8 +937,8 @@ fn score(atom: &Atom, matcher: &mut Matcher, entry: &Entry, surface: Surface) ->
 #[cfg(test)]
 mod tests {
     use super::{
-        Action, COMMANDS, Category, Choice, EngineCommand, Surface, Team, TeamSpawn,
-        dropdown_matches, is_bare_exit, lookup, matches, submitted, team,
+        Action, COMMANDS, Category, Choice, EngineCommand, SPAWN_GRAMMAR, Surface, Team, TeamSpawn,
+        dropdown_matches, inline_hint, is_bare_exit, lookup, matches, submitted, team,
     };
 
     /// The commands the engine offers a session that loaded no config: one,
@@ -893,7 +947,63 @@ mod tests {
         vec![EngineCommand {
             name: "init".to_owned(),
             description: Some("guided AGENTS.md setup".to_owned()),
+            hint: None,
         }]
+    }
+
+    /// **D518.** A complete builtin name with nothing after it hints; the
+    /// first argument character removes the hint.
+    #[test]
+    fn a_typed_team_hints_until_an_argument_arrives() {
+        assert!(inline_hint("/team", &[]).is_some());
+        assert!(inline_hint("/team ", &[]).is_some());
+        assert_eq!(inline_hint("/team s", &[]), None);
+        assert_eq!(inline_hint("/tea", &[]), None);
+        assert_eq!(inline_hint("team", &[]), None);
+    }
+
+    /// **D518.** `/team spawn` with nothing named yet shows the one spelled
+    /// spawn grammar — the refusal's and the dialog's own string.
+    #[test]
+    fn a_bare_team_spawn_hints_the_spawn_grammar() {
+        assert_eq!(
+            inline_hint("/team spawn", &[]).as_deref(),
+            Some(SPAWN_GRAMMAR)
+        );
+        assert_eq!(
+            inline_hint("/team spawn ", &[]).as_deref(),
+            Some(SPAWN_GRAMMAR)
+        );
+        assert_eq!(inline_hint("/team spawn w1", &[]), None);
+    }
+
+    /// **D518.** A command file's own `argument-hint` reaches the composer,
+    /// and a command without one hints nothing.
+    #[test]
+    fn an_engine_command_hints_what_its_file_declared() {
+        let roster = vec![
+            EngineCommand {
+                name: "fix".to_owned(),
+                description: Some("fix an issue — <issue>".to_owned()),
+                hint: Some("<issue>".to_owned()),
+            },
+            EngineCommand {
+                name: "plain".to_owned(),
+                description: None,
+                hint: None,
+            },
+        ];
+        assert_eq!(inline_hint("/fix", &roster).as_deref(), Some("<issue>"));
+        assert_eq!(inline_hint("/fix now", &roster), None);
+        assert_eq!(inline_hint("/plain", &roster), None);
+        assert_eq!(inline_hint("/absent", &roster), None);
+    }
+
+    /// **D518.** A multi-line buffer is prose with a slash in it, never a
+    /// command awaiting arguments.
+    #[test]
+    fn a_multiline_buffer_hints_nothing() {
+        assert_eq!(inline_hint("/team\nmore", &[]), None);
     }
 
     /// The spellings and aliases are the command surface's contract, including
@@ -1080,6 +1190,7 @@ mod tests {
         let roster = vec![EngineCommand {
             name: "silent".to_owned(),
             description: None,
+            hint: None,
         }];
 
         let rows = dropdown_matches("silent", &roster);

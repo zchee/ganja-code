@@ -11,6 +11,7 @@ use ratatui::{
     widgets::{Block, Widget as _},
 };
 use ratatui_textarea::{CursorMove, TextArea};
+use unicode_width::UnicodeWidthStr as _;
 
 use crate::theme::Theme;
 
@@ -66,6 +67,10 @@ pub struct Editor {
     /// The palette the box was last painted in, kept because replacing the
     /// buffer means replacing the widget that holds those styles.
     theme: Theme,
+    /// The dim argument hint drawn after a typed command name (**D518**),
+    /// refreshed by the app before every frame. Display only: it never
+    /// enters the buffer and a submit never carries it.
+    hint: Option<String>,
 }
 
 impl Editor {
@@ -76,6 +81,7 @@ impl Editor {
             area: TextArea::default(),
             mode: Mode::default(),
             theme: theme.clone(),
+            hint: None,
         };
         editor.restyle(theme);
 
@@ -268,9 +274,44 @@ impl Editor {
         }
     }
 
+    /// Replaces the inline argument hint (**D518**).
+    pub fn set_hint(&mut self, hint: Option<String>) {
+        self.hint = hint;
+    }
+
     /// Draws the editor into `area`.
     pub fn render(&self, area: Rect, buffer: &mut Buffer) {
         (&self.area).render(area, buffer);
+        self.render_hint(area, buffer);
+    }
+
+    /// Paints the hint dim after the typed text, inside the border.
+    ///
+    /// The hint only ever exists for a single-line buffer (the lookup refuses
+    /// anything else), so the first content row is the row. Clipped at the
+    /// box's right edge rather than wrapped: a hint is a hint, not a manual.
+    fn render_hint(&self, area: Rect, buffer: &mut Buffer) {
+        let Some(hint) = &self.hint else {
+            return;
+        };
+        if area.width <= 2 || area.height <= 2 {
+            return;
+        }
+        let line = self.area.lines().first().map(String::as_str).unwrap_or("");
+        // One column of gap unless the typed text already ends in one.
+        let gap = u16::from(!line.is_empty() && !line.ends_with(' '));
+        let text_end = area.x + 1 + line.width() as u16 + gap;
+        let right = area.x + area.width - 1;
+        if text_end >= right {
+            return;
+        }
+        buffer.set_stringn(
+            text_end,
+            area.y + 1,
+            hint,
+            usize::from(right - text_end),
+            self.theme.dim,
+        );
     }
 }
 
@@ -310,6 +351,50 @@ mod tests {
         for character in text.chars() {
             editor.input(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
         }
+    }
+
+    /// **D518.** The hint is paint, not text: it shows dim after the typed
+    /// name, and the buffer a submit would read never contains it.
+    #[test]
+    fn the_hint_draws_after_the_text_and_never_enters_the_buffer() {
+        let mut editor = Editor::new(&Theme::default());
+        typing(&mut editor, "/team");
+        editor.set_hint(Some("list | spawn <name>".to_owned()));
+
+        let screen = drawn(&editor);
+        assert!(
+            screen.contains("/team list | spawn <name>"),
+            "got:\n{screen}"
+        );
+        assert_eq!(editor.text(), "/team");
+    }
+
+    /// **D518.** A hint wider than the box clips at the border instead of
+    /// wrapping onto the next row.
+    #[test]
+    fn a_hint_wider_than_the_box_is_clipped_not_wrapped() {
+        let mut editor = Editor::new(&Theme::default());
+        typing(&mut editor, "/team");
+        editor.set_hint(Some("x".repeat(80)));
+
+        let screen = drawn(&editor);
+        let rows: Vec<&str> = screen.lines().collect();
+        assert!(rows[1].contains("xxx"), "got:\n{screen}");
+        assert!(!rows[2].contains('x'), "got:\n{screen}");
+        // The border column survives the clip.
+        assert!(rows[1].ends_with('│'), "got:\n{screen}");
+    }
+
+    /// **D518.** Clearing the hint clears the paint.
+    #[test]
+    fn a_cleared_hint_paints_nothing() {
+        let mut editor = Editor::new(&Theme::default());
+        typing(&mut editor, "/team");
+        editor.set_hint(Some("list".to_owned()));
+        editor.set_hint(None);
+
+        let screen = drawn(&editor);
+        assert!(!screen.contains("list"), "got:\n{screen}");
     }
 
     #[test]

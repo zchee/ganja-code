@@ -2622,6 +2622,16 @@ impl App {
         // draws this frame.
         self.highlight_image_token();
 
+        // The dim argument hint after a typed command name (**D518**),
+        // recomputed each frame from the buffer: a shell line hints nothing,
+        // and neither does a name with arguments already behind it.
+        let hint = if self.editor.mode() == Mode::Prompt {
+            command::inline_hint(&self.editor.text(), &self.engine_commands)
+        } else {
+            None
+        };
+        self.editor.set_hint(hint);
+
         terminal
             .draw(|frame| {
                 let area = frame.area();
@@ -11946,6 +11956,7 @@ mod tests {
                 crate::command::EngineCommand {
                     name: "init".to_owned(),
                     description: Some("guided AGENTS.md setup".to_owned()),
+                    hint: None,
                 }
             )),
             "the engine's own command should be under the cursor"
