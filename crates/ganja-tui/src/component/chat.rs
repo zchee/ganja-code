@@ -22,7 +22,9 @@
 //!
 //! What the transcript looks like is Claude Code's own grammar, taken from a
 //! screenshot rather than ported: a `\u{25cf}` bullet leads every block a reply
-//! is made of and every tool call it makes, a `\u{23bf}` marker introduces what
+//! is made of and every settled tool call it makes — a call still in flight
+//! leads with a pulsing `\u{2022}` point instead (2026-08-25) — a `\u{23bf}`
+//! marker introduces what
 //! a call answered and hangs its preview under itself, and a `>` caret marks
 //! what a person said. Upstream opencode's pane renders none of that — it heads
 //! each message with its author's name and brackets a call's state into the
@@ -99,6 +101,17 @@ fn title(entry: &Entry) -> String {
 /// What leads a block of a reply: a text block the model wrote, or a call it
 /// made (**D487**).
 const BULLET: &str = "\u{25cf} ";
+
+/// What leads a tool call still in flight: Claude Code's own smaller point,
+/// pulsing while the call runs (user directive, 2026-08-25, two reference
+/// screenshot pairs) — the icon moves, the words hold still. A settled call
+/// takes `BULLET`, whose color answers the verdict.
+const POINT: &str = "\u{2022} ";
+
+/// How long each pulse phase holds: bright for one, the chrome's own dim for
+/// the next — two states rather than a fade, because a theme's palette is a
+/// set of styles, not RGB endpoints anything could blend.
+const POINT_BLINK: Duration = Duration::from_millis(500);
 
 /// What leads what a call answered, one step under the header it answers —
 /// and, in the `/team` dialog, a member's ring of recent calls: a call log is
@@ -238,6 +251,10 @@ pub struct Chat {
     /// [`COMPACT_SETTLE`] clears it — a bar that reached 100 and vanished in
     /// the same frame would never have been seen to arrive.
     settling: Option<Instant>,
+    /// When the in-flight pulse's clock started: seeded lazily on the first
+    /// render, so `Chat::default()` needs no clock and a fresh transcript
+    /// always opens on the bright phase.
+    blink_epoch: Option<Instant>,
 }
 
 /// What is hidden, and the row that says so.
@@ -631,6 +648,10 @@ struct Wrapped {
     /// The attached-image paths this wrap wanted placeholder cells for and
     /// did not have yet, empty once every image is answered (2026-08-15).
     images: Vec<(usize, String)>,
+    /// The pulse phase these lines were drawn on, [`None`] for an entry with
+    /// no call in flight: what lets the point move without every settled
+    /// entry losing its cache.
+    blink: Option<bool>,
 }
 
 /// Rows an attached image's reserved box stands in the transcript.
@@ -866,6 +887,14 @@ impl Chat {
         }
     }
 
+    /// Which phase of the in-flight pulse this instant falls on: `true` is
+    /// the bright half. Time-driven like `working_frame`, so the same
+    /// instant read twice draws the same frame twice.
+    fn blink_on(&mut self) -> bool {
+        let epoch = *self.blink_epoch.get_or_insert_with(Instant::now);
+        (epoch.elapsed().as_millis() / POINT_BLINK.as_millis()).is_multiple_of(2)
+    }
+
     /// Tells the strip a compaction is running and how far its summary has
     /// streamed.
     ///
@@ -1063,8 +1092,9 @@ impl Chat {
         let first_hidden = self.first_hidden();
         let hidden = self.entries.len() - first_hidden;
         let graphics = self.graphics;
+        let blink = self.blink_on();
         for entry in &mut self.entries[..first_hidden] {
-            entry.wrap(area.width, theme, graphics, &self.image_cells);
+            entry.wrap(area.width, theme, graphics, &self.image_cells, blink);
         }
         if let Some(revert) = &mut self.revert {
             revert.wrap(hidden, area.width, theme);
@@ -1338,6 +1368,7 @@ impl Revert {
             revision: theme.revision(),
             lines,
             images: Vec::new(),
+            blink: None,
         });
     }
 }
@@ -1362,12 +1393,18 @@ impl Entry {
         theme: &Theme,
         graphics: bool,
         cells: &HashMap<String, (u32, u16)>,
+        blink: bool,
     ) {
-        if self
-            .wrapped
-            .as_ref()
-            .is_some_and(|wrapped| wrapped.width == width && wrapped.revision == theme.revision())
-        {
+        // An entry holding a call still in flight keys its cache on the
+        // pulse phase too, so the point can move without anything else
+        // being rebuilt — and every settled entry stays as cacheable as it
+        // always was.
+        let animated = self.parts.iter().any(in_flight);
+        if self.wrapped.as_ref().is_some_and(|wrapped| {
+            wrapped.width == width
+                && wrapped.revision == theme.revision()
+                && wrapped.blink.is_none_or(|drawn| drawn == blink)
+        }) {
             return;
         }
 
@@ -1419,7 +1456,7 @@ impl Entry {
                     lines.extend(lay_out(&[row], columns));
                 }
                 PartBody::Tool { tool, state, .. } => {
-                    lines.extend(lay_out(&tool_lines(tool, state, theme), columns));
+                    lines.extend(lay_out(&tool_lines(tool, state, theme, blink), columns));
                 }
                 // A tool the provider ran on its own side (**D489**), drawn in
                 // the same grammar a local call is: the question a person is
@@ -1445,7 +1482,7 @@ impl Entry {
                         started: 0,
                         completed: 0,
                     };
-                    lines.extend(lay_out(&tool_lines(tool, &state, theme), columns));
+                    lines.extend(lay_out(&tool_lines(tool, &state, theme, blink), columns));
                 }
                 // A file the user attached, rendered as the token they typed
                 // — `@path`, with its `#line-range` when one was named —
@@ -1598,6 +1635,7 @@ impl Entry {
             revision: theme.revision(),
             lines,
             images,
+            blink: animated.then_some(blink),
         });
     }
 }
@@ -1733,6 +1771,24 @@ fn quoted(text: &str) -> String {
     }
 
     format!("\"{shown}\"")
+}
+
+/// Whether a part is a tool call still in flight — what the transcript
+/// pulses, and what makes its entry's wrap re-key on the pulse phase.
+fn in_flight(part: &Part) -> bool {
+    matches!(
+        &part.body,
+        PartBody::Tool {
+            state: ToolState::Pending { .. } | ToolState::Running { .. },
+            ..
+        }
+    )
+}
+
+/// The in-flight point's paint: bright on the pulse's on-phase, the chrome's
+/// own dim off it.
+fn point_style(theme: &Theme, on: bool) -> Style {
+    if on { theme.fg } else { theme.dim }
 }
 
 /// The one line a call is announced on: the tool, and what it was called with.
@@ -1949,17 +2005,19 @@ fn diff_line_style(line: &str, theme: &Theme) -> Style {
 
 /// One compact block for a tool call, in whatever state it currently stands.
 ///
-/// Every state shares the header's **shape** — `\u{25cf} Tool(args)`, the same
-/// line before and after the call settles — and differs only in the color it
-/// is painted and in what hangs under it: a running call's newest output, a
+/// Every state shares the header's **words** — `Tool(args)`, the same text
+/// before and after the call settles — and differs in the lead it wears and
+/// the color it is painted, and in what hangs under it: a running call's newest output, a
 /// finished call's summary and preview, a failed call's first line of why
-/// (**D487**). `StepStart`/`StepFinish` never reach here.
-fn tool_lines(tool: &str, state: &ToolState, theme: &Theme) -> Vec<Row> {
+/// (**D487**). `StepStart`/`StepFinish` never reach here — and a call still
+/// in flight leads with the pulsing `POINT` on `blink`'s phase rather than
+/// the bullet, the words unmoved (2026-08-25).
+fn tool_lines(tool: &str, state: &ToolState, theme: &Theme, blink: bool) -> Vec<Row> {
     // A delegated turn is one row, never a transcript of its own: everything
     // the child said reaches the model inside the tool result, and repeating
     // it here would show the same work twice.
     if tool == TASK_TOOL && !matches!(state, ToolState::Error { .. }) {
-        return task_lines(state, theme);
+        return task_lines(state, theme, blink);
     }
 
     match state {
@@ -1967,15 +2025,21 @@ fn tool_lines(tool: &str, state: &ToolState, theme: &Theme) -> Vec<Row> {
         // the stream has finished saying so (2026-08-15): the settled
         // arguments ride the pending state, and a bare name means they are
         // still streaming.
-        ToolState::Pending { input } => vec![Row::new(
-            BULLET,
+        ToolState::Pending { input } => vec![Row::led(
+            POINT,
+            point_style(theme, blink),
             tool_heading(tool, input.as_ref()),
             theme.dim,
         )],
         ToolState::Running {
             input, metadata, ..
         } => {
-            let mut rows = vec![Row::new(BULLET, tool_heading(tool, Some(input)), theme.dim)];
+            let mut rows = vec![Row::led(
+                POINT,
+                point_style(theme, blink),
+                tool_heading(tool, Some(input)),
+                theme.dim,
+            )];
             // A call that reports as it goes — the `!` passthrough streaming a
             // command's output — redraws its tail every time the part is
             // republished, so the newest lines are the ones on screen.
@@ -2100,7 +2164,7 @@ fn tool_lines(tool: &str, state: &ToolState, theme: &Theme) -> Vec<Row> {
 /// the row** — it is inside the tool result the model reads, and a transcript
 /// that printed it would be showing the same work twice, once as prose and
 /// once as a result.
-fn task_lines(state: &ToolState, theme: &Theme) -> Vec<Row> {
+fn task_lines(state: &ToolState, theme: &Theme, blink: bool) -> Vec<Row> {
     match state {
         ToolState::Pending { input } => {
             let heading = input.as_ref().map_or_else(
@@ -2108,14 +2172,20 @@ fn task_lines(state: &ToolState, theme: &Theme) -> Vec<Row> {
                 |input| task_heading(field(input, "subagent_type"), field(input, "description")),
             );
 
-            vec![Row::new(BULLET, heading, theme.dim)]
+            vec![Row::led(
+                POINT,
+                point_style(theme, blink),
+                heading,
+                theme.dim,
+            )]
         }
         ToolState::Running {
             input, metadata, ..
         } => {
             let agent = field(input, "subagent_type");
-            let mut rows = vec![Row::new(
-                BULLET,
+            let mut rows = vec![Row::led(
+                POINT,
+                point_style(theme, blink),
                 task_heading(agent, field(input, "description")),
                 theme.dim,
             )];
@@ -2903,7 +2973,7 @@ mod tests {
         let lines = rendered(&mut chat, Rect::new(0, 0, 60, 20));
 
         assert!(
-            lines.iter().any(|line| line == "\u{25cf} Shell"),
+            lines.iter().any(|line| line == "\u{2022} Shell"),
             "a call whose arguments have not arrived names the tool alone, got {lines:?}"
         );
     }
@@ -2931,9 +3001,60 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line == "\u{25cf} Shell(command: \"cargo test\")"),
+                .any(|line| line == "\u{2022} Shell(command: \"cargo test\")"),
             "got {lines:?}"
         );
+    }
+
+    /// An in-flight call's point pulses — bright on one phase, the chrome's
+    /// own dim on the other — while its words hold still (user directive,
+    /// 2026-08-25): the two frames differ in paint alone.
+    #[test]
+    fn an_in_flight_calls_point_pulses_and_its_words_hold_still() {
+        let area = Rect::new(0, 0, 60, 4);
+        let mut chat = Chat::default();
+        let mut reply = Message::assistant("canned");
+        reply.parts.push(Part {
+            id: PartId::from("prt_1".to_owned()),
+            body: PartBody::Tool {
+                call_id: "call_1".to_owned(),
+                tool: "shell".to_owned(),
+                state: ToolState::Running {
+                    input: serde_json::json!({"command": "cargo test"}),
+                    metadata: serde_json::Value::Null,
+                    started: 0,
+                },
+            },
+        });
+        chat.start_message(reply);
+
+        let frame = |chat: &mut Chat| {
+            let mut buffer = Buffer::empty(area);
+            chat.render(area, &mut buffer, &Theme::default());
+            let words: Vec<String> = (0..area.height)
+                .map(|row| {
+                    (0..area.width)
+                        .map(|column| buffer[(column, row)].symbol())
+                        .collect::<String>()
+                        .trim_end()
+                        .to_owned()
+                })
+                .collect();
+            (words, buffer[(0, 0)].style().fg)
+        };
+
+        chat.blink_epoch = Some(Instant::now());
+        let (bright, lead) = frame(&mut chat);
+        assert_eq!(
+            bright[0], "\u{2022} Shell(command: \"cargo test\")",
+            "the point leads a call still in flight"
+        );
+        assert_eq!(lead, Theme::default().fg.fg, "bright on the on-phase");
+
+        chat.blink_epoch = Instant::now().checked_sub(super::POINT_BLINK);
+        let (dim, lead) = frame(&mut chat);
+        assert_eq!(bright, dim, "the words hold still; only the paint moves");
+        assert_eq!(lead, Theme::default().dim.fg, "the chrome's own dim off it");
     }
 
     /// **AC1.** The whole grammar of a settled call in one screen: the bullet
@@ -3069,9 +3190,12 @@ mod tests {
         };
         assert_eq!(
             header(&running),
+            "\u{2022} Read(/repo/src/lib.rs \u{b7} lines 1158-1217)"
+        );
+        assert_eq!(
+            header(&settled),
             "\u{25cf} Read(/repo/src/lib.rs \u{b7} lines 1158-1217)"
         );
-        assert_eq!(header(&running), header(&settled));
         assert!(
             settled
                 .iter()
@@ -3098,7 +3222,7 @@ mod tests {
         );
 
         assert!(
-            lines.iter().any(|line| line == "\u{25cf} Read(/repo/a.rs)"),
+            lines.iter().any(|line| line == "\u{2022} Read(/repo/a.rs)"),
             "got {lines:?}"
         );
     }
@@ -3483,10 +3607,11 @@ mod tests {
     }
 
     /// **AC2.** A call that is running and the same call once it has settled
-    /// are announced by the same line: what changed is the color it is painted
-    /// in, not a word in the text.
+    /// are announced by the same words: what changed is the lead it wears —
+    /// the pulsing point in flight, the verdict bullet after (2026-08-25) —
+    /// and the color it is painted in, not a word in the text.
     #[test]
-    fn a_running_call_and_its_settled_self_share_their_header_line() {
+    fn a_running_call_and_its_settled_self_share_their_header_words() {
         let input = serde_json::json!({"command": "cargo test"});
         let running = tool_call(
             "shell",
@@ -3524,9 +3649,17 @@ mod tests {
                 .cloned()
                 .unwrap_or_default()
         };
-        assert_eq!(header(&running), "\u{25cf} Shell(command: \"cargo test\")");
-        assert_eq!(header(&running), header(&completed));
-        assert_eq!(header(&running), header(&failed));
+        assert_eq!(header(&running), "\u{2022} Shell(command: \"cargo test\")");
+        assert_eq!(
+            header(&completed),
+            "\u{25cf} Shell(command: \"cargo test\")"
+        );
+        assert_eq!(header(&completed), header(&failed));
+        assert_eq!(
+            header(&running).strip_prefix('\u{2022}'),
+            header(&completed).strip_prefix('\u{25cf}'),
+            "past the lead, not a word moves when the call settles"
+        );
     }
 
     /// A header is one line, so the arguments on it are capped — and the cut
@@ -3550,7 +3683,7 @@ mod tests {
 
         assert!(
             lines.iter().any(|line| line
-                == "\u{25cf} Grep(path: \"src\", pattern: \"fn main\", include: \"*.rs\", \u{2026})"),
+                == "\u{2022} Grep(path: \"src\", pattern: \"fn main\", include: \"*.rs\", \u{2026})"),
             "the recognizable fields come first and the cut is named, got {lines:?}"
         );
     }
@@ -3574,7 +3707,7 @@ mod tests {
 
         assert!(
             lines.iter().any(|line| line
-                == "\u{25cf} Write(filePath: \"a.rs\", content: \"fn main() {\u{2026}\")"),
+                == "\u{2022} Write(filePath: \"a.rs\", content: \"fn main() {\u{2026}\")"),
             "got {lines:?}"
         );
     }
@@ -3596,7 +3729,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line == "\u{25cf} Todowrite(todos: [\u{2026}])"),
+                .any(|line| line == "\u{2022} Todowrite(todos: [\u{2026}])"),
             "got {lines:?}"
         );
     }
@@ -3814,11 +3947,11 @@ mod tests {
             "the known id should be replaced in place, got {lines:?}"
         );
         assert!(
-            lines.iter().any(|line| line == "\u{25cf} Read"),
+            lines.iter().any(|line| line == "\u{2022} Read"),
             "an update for an id never started should still append, got {lines:?}"
         );
         assert!(
-            !lines.iter().any(|line| line == "\u{25cf} Shell"),
+            !lines.iter().any(|line| line == "\u{2022} Shell"),
             "the pending block should have been replaced, not kept alongside, got {lines:?}"
         );
     }
@@ -3987,7 +4120,7 @@ mod tests {
 
         assert_eq!(
             drawn,
-            vec![&"\u{25cf} Read(a.rs)".to_owned()],
+            vec![&"\u{2022} Read(a.rs)".to_owned()],
             "got {lines:?}"
         );
     }
@@ -4006,13 +4139,13 @@ mod tests {
         assert!(
             named
                 .iter()
-                .any(|line| line == "\u{25cf} Shell(command: \"cargo test\")"),
+                .any(|line| line == "\u{2022} Shell(command: \"cargo test\")"),
             "got {named:?}"
         );
 
         let streaming = tool_call("shell", ToolState::Pending { input: None });
         assert!(
-            streaming.iter().any(|line| line == "\u{25cf} Shell"),
+            streaming.iter().any(|line| line == "\u{2022} Shell"),
             "got {streaming:?}"
         );
     }
@@ -4035,7 +4168,7 @@ mod tests {
 
         assert!(
             lines.iter().any(|line| line
-                == "\u{25cf} Task(agent: \"explore\", description: \"find the parser\")"),
+                == "\u{2022} Task(agent: \"explore\", description: \"find the parser\")"),
             "got {lines:?}"
         );
         assert!(
@@ -4064,7 +4197,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line == "\u{25cf} Task(description: \"find the parser\")"),
+                .any(|line| line == "\u{2022} Task(description: \"find the parser\")"),
             "an agent nobody named is left off rather than invented, got {lines:?}"
         );
     }

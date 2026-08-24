@@ -2,7 +2,7 @@
 source: crates/ganja-tui/src/app.rs
 expression: screen(&terminal)
 ---
-● Task(agent: "explore", description: "find every caller of resolve")           
+• Task(agent: "explore", description: "find every caller of resolve")           
   ⎿ grep resolve                                                                
                                                                                 
                                                                                 
