@@ -325,6 +325,8 @@ fn ganja(project: &TempDir, data: &TempDir, arguments: &[&str]) -> Ganja {
         .current_dir(project.path())
         .args(arguments)
         .env("GANJA_PROVIDER", "fake")
+        // The kitty keyboard probe (D517) would stall 2s unanswered here.
+        .env("GANJA_DISABLE_TERM_PROBE", "1")
         .env("GANJA_FAKE_SCRIPT", project.path().join(SCRIPT))
         // Sessions land under the data home, so a drill with its own keeps it
         // from reading what another stored — or from writing into a

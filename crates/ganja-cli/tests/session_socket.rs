@@ -140,6 +140,8 @@ impl Fixture {
         command
             .current_dir(self.project.path())
             .env("GANJA_PROVIDER", "fake")
+            // The kitty keyboard probe (D517) would stall 2s unanswered here.
+            .env("GANJA_DISABLE_TERM_PROBE", "1")
             .env("GANJA_DISABLE_MODELS_FETCH", "1")
             .env("HOME", self.home.path())
             .env("XDG_DATA_HOME", self.home.path().join("data"))

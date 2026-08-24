@@ -109,6 +109,8 @@ struct Ganja {
 impl Ganja {
     fn spawn(mut command: Command) -> Self {
         command.env("GANJA_PROVIDER", "fake");
+        // The kitty keyboard probe (D517) would stall 2s unanswered here.
+        command.env("GANJA_DISABLE_TERM_PROBE", "1");
 
         let mut session = Session::spawn(command).expect("failed to spawn `ganja` in a pty");
         session.set_expect_timeout(Some(EXIT_DEADLINE));

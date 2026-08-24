@@ -348,7 +348,9 @@ fn a_pane_teammates_own_process_writes_a_row_that_is_listed_and_resumable() {
             LEAD_SESSION,
         ])
         .env("GANJA_CONFIG_HOME", &config_home)
-        .env("TMUX_PANE", PANE);
+        .env("TMUX_PANE", PANE)
+        // The kitty keyboard probe (D517) would stall 2s unanswered here.
+        .env("GANJA_DISABLE_TERM_PROBE", "1");
     let mut session = Session::spawn(command).expect("the member spawns in a pty");
     session.set_expect_timeout(Some(DEADLINE));
     session

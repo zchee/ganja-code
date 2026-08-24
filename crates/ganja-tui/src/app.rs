@@ -74,6 +74,7 @@ use crate::{
         themes::ThemeList,
         usage,
     },
+    escrepair::EscRepair,
     event::AppEvent,
     external, graphics,
     history::{self, History},
@@ -570,6 +571,11 @@ pub struct App {
     /// When Esc was last pressed with nothing streaming and no modal open, for
     /// the Esc Esc gesture. See the Esc arm in [`App::handle_key`].
     last_esc: Option<Instant>,
+    /// Repairs escape sequences a read boundary split (**D516**): the drive
+    /// loop feeds every terminal event through it before anything reaches
+    /// [`App::handle`], so a phantom Esc and its `[D` tail become the arrow
+    /// key they were.
+    escrepair: EscRepair,
     /// The backtrack walk, while the Esc Esc gesture is stepping the
     /// transcript's user messages (**D467**).
     backtrack: Option<Backtrack>,
@@ -891,6 +897,7 @@ impl App {
             revert_pending: false,
             code_only_rewind: false,
             last_esc: None,
+            escrepair: EscRepair::active(),
             backtrack: None,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -1215,27 +1222,48 @@ impl App {
                 self.draw(terminal)?;
             }
 
-            let event = tokio::select! {
+            let repair_wake = self
+                .escrepair
+                .deadline()
+                .map(tokio::time::Instant::from_std);
+
+            let events: Vec<AppEvent> = tokio::select! {
                 incoming = term_events.next() => match incoming {
-                    Some(incoming) => AppEvent::Term(
-                        incoming.context("failed to read a terminal event")?,
-                    ),
+                    Some(incoming) => {
+                        let event = incoming.context("failed to read a terminal event")?;
+                        self.escrepair
+                            .accept(event, Instant::now())
+                            .into_iter()
+                            .map(AppEvent::Term)
+                            .collect()
+                    }
                     // The event source closed; there is nothing left to react to.
                     None => break,
                 },
                 incoming = core_events.next() => match incoming {
-                    Some(incoming) => AppEvent::core(incoming),
+                    Some(incoming) => vec![AppEvent::core(incoming)],
                     None => break,
                 },
                 () = tokio::time::sleep(self.until_next_wakeup()), if self.wants_wakeup() => {
-                    AppEvent::Tick
+                    vec![AppEvent::Tick]
+                }
+                // A held Esc's deadline passed with nothing behind it: what
+                // was held was a real key press, released here (**D516**).
+                () = tokio::time::sleep_until(repair_wake.unwrap_or_else(tokio::time::Instant::now)), if repair_wake.is_some() => {
+                    self.escrepair
+                        .expire(Instant::now())
+                        .into_iter()
+                        .map(AppEvent::Term)
+                        .collect()
                 }
                 // Raw mode swallows Ctrl-C, so this arm only fires for a signal
                 // raised from outside the terminal, such as `kill -INT`.
                 _ = tokio::signal::ctrl_c() => break,
             };
 
-            self.handle(event).await?;
+            for event in events {
+                self.handle(event).await?;
+            }
 
             if self.quit {
                 // A spawn still in flight has nobody left to report to and may
@@ -6703,6 +6731,7 @@ mod tests {
     use crate::{
         clipboard, command,
         component::{self, effort, mcp, sessions},
+        escrepair::EscRepair,
         event::AppEvent,
         history,
         theme::{DEFAULT_THEME, Themes},
@@ -7081,6 +7110,44 @@ mod tests {
     fn typing(text: &str) -> impl Iterator<Item = AppEvent> + use<'_> {
         text.chars()
             .map(|character| key(KeyCode::Char(character), KeyModifiers::NONE))
+    }
+
+    /// **D516.** The repaired stream drives the same editor a direct key
+    /// would: a split Left arrow lands as cursor movement, never as `[D`
+    /// text, and the phantom Esc never reaches the key handler at all.
+    #[tokio::test]
+    async fn a_split_arrow_repaired_by_the_machine_edits_the_composer() {
+        let mut app = app();
+        for event in typing("ab") {
+            app.handle(event).await.expect("typing is handled");
+        }
+
+        let mut machine = EscRepair::active();
+        let base = std::time::Instant::now();
+        let split = [
+            (KeyCode::Esc, KeyModifiers::NONE),
+            (KeyCode::Char('['), KeyModifiers::NONE),
+            // crossterm marks uppercase ASCII with SHIFT, so the final does.
+            (KeyCode::Char('D'), KeyModifiers::SHIFT),
+        ];
+        let mut repaired = Vec::new();
+        for (at, (code, modifiers)) in split.into_iter().enumerate() {
+            repaired.extend(machine.accept(
+                TermEvent::Key(KeyEvent::new(code, modifiers)),
+                base + std::time::Duration::from_millis(at as u64),
+            ));
+        }
+
+        for event in repaired {
+            app.handle(AppEvent::Term(event))
+                .await
+                .expect("the repaired key is handled");
+        }
+        for event in typing("X") {
+            app.handle(event).await.expect("typing is handled");
+        }
+
+        assert_eq!(app.editor.text(), "aXb");
     }
 
     /// The prompt reaches the transcript through the engine, not through the

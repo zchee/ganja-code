@@ -32,6 +32,7 @@ use std::{
     ops::{Deref, DerefMut},
     path::PathBuf,
     process::Command,
+    thread,
     time::Duration,
 };
 
@@ -123,6 +124,9 @@ impl Ganja {
     /// reach a network or read a credential.
     fn spawn(mut command: Command, rows: u16) -> Self {
         command.env("GANJA_PROVIDER", "fake");
+        // The kitty keyboard probe (D517) blocks up to two seconds when
+        // nothing answers its query, and this harness never does.
+        command.env("GANJA_DISABLE_TERM_PROBE", "1");
 
         let mut session = Session::spawn(command).expect("failed to spawn `ganja` in a pty");
         session.set_expect_timeout(Some(EXIT_DEADLINE));
@@ -137,6 +141,22 @@ impl Ganja {
 
         Self {
             session: Some(session),
+        }
+    }
+
+    /// Keeps the pty drained for `ms` milliseconds so the app stays live.
+    ///
+    /// A bare `thread::sleep` starves the pty: the app blocks writing its
+    /// next frame into the kernel buffer nobody is reading, and never gets
+    /// to *read* the input a test sent — so bytes meant to arrive split are
+    /// read in one batch after all. Draining while waiting is what makes a
+    /// deliberate pause on this side a real pause on the app's side.
+    fn breathe(&mut self, ms: u64) {
+        let deadline = std::time::Instant::now() + Duration::from_millis(ms);
+        let mut sink = [0u8; 4096];
+        while std::time::Instant::now() < deadline {
+            let _ = self.try_read(&mut sink);
+            thread::sleep(Duration::from_millis(2));
         }
     }
 
@@ -209,6 +229,67 @@ fn ganja() -> Ganja {
 #[test]
 fn control_c_quits_the_tui_cleanly() {
     ganja().quit_and_assert_clean_exit();
+}
+
+/// **D516.** A Left arrow whose `ESC [ D` bytes are split across two writes
+/// lands as cursor movement, never as the literal text `[D` — and the phantom
+/// Esc the split once produced reaches nothing.
+///
+/// The drained pause between the two writes forces the read boundary the
+/// repair exists for: the app reads the bare ESC alone, then its tail inside
+/// the hold-off window. Asserted on the submitted transcript line, which
+/// paints in one frame — the composer's own cell-diffed echo never yields a
+/// contiguous needle for the pty stream to match.
+#[test]
+fn a_split_arrow_key_edits_instead_of_pasting_garbage() {
+    let mut session = ganja();
+    session.breathe(100);
+
+    session
+        .send("hel")
+        .expect("failed to type into the composer");
+    session.breathe(30);
+    session
+        .send("\x1b")
+        .expect("failed to send the bare escape");
+    session.breathe(5);
+    session
+        .send("[D")
+        .expect("failed to send the sequence tail");
+    session.send("X").expect("failed to type the marker");
+    session.send("\r").expect("failed to submit");
+
+    session
+        .expect("heXl")
+        .expect("the split arrow was not repaired into a Left");
+
+    session.quit_and_assert_clean_exit();
+}
+
+/// **D516.** A bare Esc followed by nothing within the hold-off was a real
+/// key press: it is released at the deadline, and a `[D` typed after that
+/// deadline is literal text — exactly what the person sent.
+#[test]
+fn a_late_continuation_stays_literal_text() {
+    let mut session = ganja();
+    session.breathe(100);
+
+    session
+        .send("ok")
+        .expect("failed to type into the composer");
+    session.breathe(30);
+    session
+        .send("\x1b")
+        .expect("failed to send the bare escape");
+    session.breathe(120);
+    session.send("[D").expect("failed to send the late tail");
+    session.send("\r").expect("failed to submit");
+
+    session
+        .expect("ok[D")
+        .expect("a late tail should stay literal text");
+
+    session.quit_and_assert_clean_exit();
 }
 
 #[test]
