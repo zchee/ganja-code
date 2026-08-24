@@ -1306,48 +1306,39 @@ impl Entry {
                 // An empty one is a part the provider opened and has not
                 // filled yet; a marker alone would be a claim about nothing.
                 PartBody::ReasoningText { .. } => {}
-                // What a teammate said (**D495**), under the caret rather
-                // than a marker of its own: this part is rendered into the
-                // *user* turn at request assembly, so what it is to this
-                // conversation is something it was told, which is exactly
-                // what `>` claims. What keeps it from reading as the person
-                // at the terminal is the name — dimmed, heading the block,
-                // carrying the sender's own one-line summary where it wrote
-                // one — with what it said hanging under that name in prose,
-                // the same split a call's header and its result use. The
-                // member's assigned `color` is deliberately unread: a palette
-                // this pane never mixed is not one it can trust against an
-                // arbitrary theme.
-                //
-                // The lead is chosen the way the file chip's is, and for the
-                // invariant stated at the top of this loop: a prompt is *one*
-                // block, so a message whose text part already drew the caret
-                // hangs this one under it rather than drawing a second one.
-                // The role is read for the same reason — a peer part reaching
-                // an assistant message is not something a person said, and a
-                // `>` on it would claim it was.
+                // What a teammate said (**D495**), under a head of its own
+                // rather than the caret or the bullet: `@ <name>\u{276f}`
+                // opens the block — Claude Code's own dress for a teammate's
+                // words — painted `info` so the sender reads apart from what
+                // the person typed and from the reply around it without
+                // borrowing either marker's claim (a `>` would say a person
+                // said this, a bullet that the model did). The sender's
+                // one-line summary follows the head where it wrote one,
+                // dimmed as chrome, with what it said hanging under the head
+                // in prose, the same split a call's header and its result
+                // use. The member's assigned `color` is deliberately unread:
+                // a palette this pane never mixed is not one it can trust
+                // against an arbitrary theme.
                 PartBody::Peer {
                     from,
                     summary,
                     body,
                     ..
                 } => {
+                    let head = format!("@ {from}\u{276f}");
                     // `display_summary` owns the blank-dropped, capped
                     // projection this renderer shares with the engine's
                     // envelope and the copy formatter.
-                    let heading = match team::display_summary(summary.as_deref()) {
-                        Some(line) => format!("{from}: {line}"),
-                        None => from.clone(),
-                    };
-                    let prefix = match self.role {
-                        Role::User => prompt_lead(lines.is_empty()),
-                        Role::Assistant => BULLET.to_owned(),
-                    };
-                    let hang = " ".repeat(prefix.width());
-                    let mut rows = vec![Row::new(&prefix, heading, theme.dim)];
+                    let mut rows = vec![match team::display_summary(summary.as_deref()) {
+                        Some(line) => Row::led(&format!("{head} "), theme.info, line, theme.dim),
+                        None => Row::led(&head, theme.info, String::new(), theme.dim),
+                    }];
+                    // Two columns of hang, not the head's own width: the body
+                    // is prose, and prose pushed past a name-sized margin
+                    // reads as a quotation rather than as what the block says.
                     rows.extend(
                         body.lines()
-                            .map(|line| Row::new(&hang, line.to_owned(), theme.fg)),
+                            .map(|line| Row::new("  ", line.to_owned(), theme.fg)),
                     );
                     lines.extend(lay_out(&rows, columns));
                 }
@@ -2519,8 +2510,9 @@ mod tests {
 
     /// The invariant stated where this loop begins: a prompt is one block
     /// however many parts it was built from. A peer part arriving beside what
-    /// the person typed hangs under the caret that part already drew, because
-    /// two carets on one entry would claim two things were said.
+    /// the person typed opens its own `@` head under the caret that part
+    /// already drew, because two carets on one entry would claim two things
+    /// were said.
     #[test]
     fn a_prompt_carrying_a_peers_words_draws_one_caret_for_the_whole_entry() {
         // Wider and taller than `VIEWPORT`: this entry is four rows and the
@@ -2558,16 +2550,17 @@ mod tests {
             "the caret leads what the person typed, got {lines:?}"
         );
         assert!(
-            lines.iter().any(|line| line == "  w1: picked up W2")
-                && lines.iter().any(|line| line == "  w2"),
-            "both peers hang under that caret, got {lines:?}"
+            lines.iter().any(|line| line == "@ w1\u{276f} picked up W2")
+                && lines.iter().any(|line| line == "@ w2\u{276f}"),
+            "both peers head their own blocks under that caret, got {lines:?}"
         );
     }
 
-    /// The same part on a reply is not something a person said, so it takes
-    /// the reply's own marker rather than the caret.
+    /// The same part on a reply is not something a person said, and not the
+    /// reply's own words either: it takes the `@` head there exactly as it
+    /// does on a prompt, claiming neither the caret nor the bullet.
     #[test]
-    fn a_peers_words_on_a_reply_take_the_bullet_and_not_the_caret() {
+    fn a_peers_words_on_a_reply_take_their_own_head_and_not_the_bullet() {
         let mut chat = Chat::default();
         let reply = Message::assistant("canned");
         chat.start_message(reply.clone());
@@ -2576,19 +2569,22 @@ mod tests {
         let lines = rendered(&mut chat, VIEWPORT);
 
         assert!(
-            lines.iter().any(|line| line == "\u{25cf} w1"),
-            "a peer part on a reply is bulleted, got {lines:?}"
+            lines.iter().any(|line| line == "@ w1\u{276f}"),
+            "a peer part on a reply heads its own block, got {lines:?}"
         );
         assert!(
-            lines.iter().all(|line| !line.starts_with("\u{3e} ")),
-            "nothing on a reply claims a person said it, got {lines:?}"
+            lines
+                .iter()
+                .all(|line| !line.starts_with("\u{3e} ") && !line.starts_with("\u{25cf} ")),
+            "neither the caret nor the bullet claims these words, got {lines:?}"
         );
     }
 
-    /// **AC-7.** The whole of the teammate rendering in one frame: the sender
-    /// dimmed at the head of its block and carrying its own one-line summary,
-    /// what it said hanging under that name in body text, and one caret for
-    /// the entry however many parts it arrived in.
+    /// **AC-7.** The whole of the teammate rendering in one frame: the
+    /// sender's `@ name\u{276f}` head painted `info` at the top of its block
+    /// with its own one-line summary dimmed beside it, what it said hanging
+    /// under that head in body text, and one caret for the entry however many
+    /// parts it arrived in.
     ///
     /// The dump is symbols only, the palette-independent shape this crate's
     /// snapshots use — so the two styles that carry the meaning here are
@@ -2640,9 +2636,14 @@ mod tests {
         };
         let theme = Theme::default();
         assert_eq!(
-            buffer[(2, row_of("w1: picked up W2"))].style().fg,
+            buffer[(0, row_of("@ w1\u{276f} picked up W2"))].style().fg,
+            theme.info.fg,
+            "the head that says whose words these are is painted info"
+        );
+        assert_eq!(
+            buffer[(6, row_of("@ w1\u{276f} picked up W2"))].style().fg,
             theme.dim.fg,
-            "the name that says whose words these are recedes"
+            "and its one-line summary recedes beside it"
         );
         assert_eq!(
             buffer[(2, row_of("The protocol surface"))].style().fg,

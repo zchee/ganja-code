@@ -3,8 +3,8 @@ source: crates/ganja-tui/src/component/chat.rs
 expression: "rendered(&mut chat, AREA).join(\"\\n\")"
 ---
 > what did w1 say
-  w1: picked up W2
+@ w1❯ picked up W2
   The protocol surface is mine.
   The envelope is W6's.
-  w2
+@ w2❯
   and I have it
