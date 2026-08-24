@@ -690,10 +690,16 @@ impl Status {
                 plain(text)
             }
             StatuslineElement::Agent => self.agent.clone().and_then(plain),
-            StatuslineElement::Effort => self
-                .effort
-                .as_ref()
-                .and_then(|(model, effort)| plain(format!("{model} ({effort})"))),
+            // In the model value's own paint rather than the accent every
+            // other plain segment wears: the segment *is* the model, with its
+            // effort beside it, and two spellings of one name in two colors
+            // read as two things (user directive, 2026-08-25).
+            StatuslineElement::Effort => self.effort.as_ref().map(|(model, effort)| {
+                vec![Span::styled(
+                    format!("{model} ({effort})"),
+                    theme.fg.add_modifier(Modifier::BOLD),
+                )]
+            }),
             // What is waiting sits beside what is happening, because the
             // two together are the answer to "where is my message": a queue
             // with a depth and no visible strip row would otherwise be the
@@ -1758,6 +1764,32 @@ mod tests {
 
         assert_eq!(line.width(), 20, "got {line:?}");
         assert!(line.ends_with("..."), "got {line:?}");
+    }
+
+    /// The effort segment wears the model value's own style — the same
+    /// color and weight the name has after `Model:` — not the accent the
+    /// other plain segments wear.
+    #[test]
+    fn the_effort_segment_wears_the_model_values_own_style() {
+        let mut status = roster(&[StatuslineElement::Model, StatuslineElement::Effort]);
+        status.set_model(Some("claude-opus-5".to_owned()));
+        status.set_effort(Some(("claude-opus-5".to_owned(), "max".to_owned())));
+        let area = Rect::new(0, 0, 80, 1);
+        let mut buffer = Buffer::empty(area);
+        status.render(area, &mut buffer, &Theme::default());
+        let line: String = (0..80).map(|column| buffer[(column, 0)].symbol()).collect();
+        let column_of = |needle: &str| {
+            u16::try_from(line.find(needle).expect("the segment is on the bar")).expect("fits")
+        };
+
+        let model_value = buffer[(column_of("Model: ") + 7, 0)].style();
+        let effort = buffer[(column_of("claude-opus-5 (max)"), 0)].style();
+        assert_eq!(effort, model_value, "on {line:?}");
+        assert_ne!(
+            effort,
+            buffer[(column_of("Model: "), 0)].style(),
+            "and not the label's dim"
+        );
     }
 
     /// `max_width` caps the bar below the terminal's width, OMC's `maxWidth`.
