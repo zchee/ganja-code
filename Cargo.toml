@@ -186,7 +186,7 @@ lsp-types = "0.97.0"
 # text path walks html5ever's own tree instead, through the rcdom types htmd
 # re-exports only partially. Already in the lock beneath htmd; declaring it
 # adds no vendor, only the right to name `NodeData`.
-markup5ever_rcdom = "0.38.0"
+markup5ever_rcdom = "0.39.0"
 # The command palette and @-file mention rank candidates in-process with the
 # same matcher helix uses, instead of hand-rolling a scorer.
 nucleo-matcher = "0.3.1"
@@ -259,7 +259,7 @@ reqwest = { version = "0.13.4", default-features = false, features = [
 # Client-side only — the default `server` feature stays off, because nothing
 # in this workspace serves MCP: the test fixture is a bun server on the
 # reference SDK, which is the point of it.
-rmcp = { version = "3.1.2", default-features = false, features = [
+rmcp = { version = "3.1.3", default-features = false, features = [
     "client",
     # Spawns and speaks to a config-named local server as a child process.
     "transport-child-process",
@@ -316,7 +316,7 @@ sha2 = { version = "0.11.0", default-features = false }
 # widen the refusal set — an observable refusal, which is the failure mode
 # this tree prefers to a line a shell misreads.
 shlex = "2.0.1"
-similar = "3.1.2"
+similar = "3.2.0"
 # Fenced-code highlighting for the markdown renderer. The regex backend is
 # the pure-Rust `fancy-regex` — `default-onig` would put a C library in
 # every build — and the bundled syntax set is the language table.
