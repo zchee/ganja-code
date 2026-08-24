@@ -298,8 +298,10 @@ struct Entry {
     /// squeezed into the status bar's one line.
     error: Option<String>,
     /// Stage 1 of the cache: one parsed markdown document per assistant text
-    /// part. Deliberately *not* inside [`Wrapped`] — a resize and a streamed
-    /// delta both clear that, and neither is a reason to parse again.
+    /// part — and, since 2026-08-25, per readable-thinking part, whose block
+    /// renders the same markdown folded into the thinking tone. Deliberately
+    /// *not* inside [`Wrapped`] — a resize and a streamed delta both clear
+    /// that, and neither is a reason to parse again.
     markdown: HashMap<PartId, markdown::Document>,
     wrapped: Option<Wrapped>,
 }
@@ -1564,25 +1566,50 @@ impl Entry {
                     };
                     lines.extend(lay_out(&[Row::new(&prefix, label, theme.dim)], columns));
                 }
-                // Thinking a person can read, behind its own marker and dimmed
-                // into italics so it never competes with the answer it is on
-                // the way to. Rendered **whole**, paragraph breaks included —
-                // the shape the user's screenshot pinned (2026-08-14,
-                // retiring the plan's pre-mortem-3 tail clamp): a long think
-                // scrolls back the way a long reply does, and hiding the
-                // start of a thought was the one cut the clamp could make.
+                // Thinking a person can read, behind its own marker and toned
+                // so it never competes with the answer it is on the way to.
+                // Rendered **whole**, paragraph breaks included — the shape
+                // the user's screenshot pinned (2026-08-14, retiring the
+                // plan's pre-mortem-3 tail clamp): a long think scrolls back
+                // the way a long reply does, and hiding the start of a
+                // thought was the one cut the clamp could make. Since
+                // 2026-08-25 the block renders its own markdown, through the
+                // same cached document a reply's text uses, every span folded
+                // back into the thinking tone by `thought` — the reasoning
+                // summaries some providers write lead with `**bold**`
+                // headings, and the markers belong to the shape, not on the
+                // screen.
                 PartBody::ReasoningText { text } if !text.is_empty() => {
-                    let style = theme.dim.add_modifier(Modifier::ITALIC);
-                    let hang = " ".repeat(THINKING.width());
-                    let rows: Vec<Row> = text
-                        .lines()
-                        .enumerate()
-                        .map(|(index, line)| {
-                            let lead = if index == 0 { THINKING } else { hang.as_str() };
-                            Row::new(lead, line.to_owned(), style)
-                        })
-                        .collect();
-                    lines.extend(lay_out(&rows, columns));
+                    let document = self.markdown.entry(part.id.clone()).or_default();
+                    document.update(text, theme);
+
+                    let indent = THINKING.width();
+                    let hang = " ".repeat(indent);
+                    let body = columns.saturating_sub(indent).max(1);
+                    let mut led = false;
+                    for line in document.lines().flat_map(|line| markdown::wrap(line, body)) {
+                        // The blank between two blocks stays blank, for
+                        // [`lay_out`]'s reason.
+                        if led && line.width() == 0 {
+                            lines.push(line);
+                            continue;
+                        }
+                        let lead = if std::mem::replace(&mut led, true) {
+                            Span::raw(hang.clone())
+                        } else {
+                            // The marker wears the block's own italic too:
+                            // AC3's contract, that thinking is set apart from
+                            // the reply by more than its color.
+                            Span::styled(
+                                THINKING.to_owned(),
+                                theme.dim.add_modifier(Modifier::ITALIC),
+                            )
+                        };
+                        let mut spans = Vec::with_capacity(line.spans.len() + 1);
+                        spans.push(lead);
+                        spans.extend(line.spans.into_iter().map(|span| thought(span, theme)));
+                        lines.push(Line::from(spans));
+                    }
                 }
                 // An empty one is a part the provider opened and has not
                 // filled yet; a marker alone would be a claim about nothing.
@@ -1856,6 +1883,18 @@ fn point_style(theme: &Theme, level: u8) -> Style {
             }
         }
     }
+}
+
+/// A rendered markdown span folded back into the thinking tone: the shapes
+/// markdown gave it stay — bold stays bold — while every color comes home to
+/// the chrome's dim italic, so a thought keeps reading as a thought whatever
+/// its markup asked for.
+fn thought(span: Span<'static>, theme: &Theme) -> Span<'static> {
+    let kept = span.style.add_modifier;
+    Span::styled(
+        span.content,
+        theme.dim.add_modifier(Modifier::ITALIC).add_modifier(kept),
+    )
 }
 
 /// The one line a call is announced on: the tool, and what it was called with.
@@ -3201,6 +3240,54 @@ mod tests {
             terminal.dim.fg,
             "and its lower middle to dim"
         );
+    }
+
+    /// A thought renders its own markdown, folded into the thinking tone
+    /// (user directive, 2026-08-25): the `**` markers leave the screen, the
+    /// bold survives as bold beside the block's italic, and no markdown
+    /// color escapes the tone.
+    #[test]
+    fn a_thought_renders_its_markdown_bold_in_the_thinking_tone() {
+        let area = Rect::new(0, 0, 60, 4);
+        let mut chat = Chat::default();
+        let mut reply = Message::assistant("canned");
+        reply.parts.push(Part {
+            id: PartId::from("prt_1".to_owned()),
+            body: PartBody::ReasoningText {
+                text: "**Confirming crate count** and planning".to_owned(),
+            },
+        });
+        chat.start_message(reply);
+
+        let mut buffer = Buffer::empty(area);
+        chat.render(area, &mut buffer, &Theme::default());
+        let row: String = (0..area.width)
+            .map(|column| buffer[(column, 0)].symbol())
+            .collect::<String>()
+            .trim_end()
+            .to_owned();
+        assert_eq!(
+            row, "\u{2234} Confirming crate count and planning",
+            "the markers belong to the shape, not on the screen"
+        );
+
+        let theme = Theme::default();
+        let bold = buffer[(2, 0)].style();
+        assert!(
+            bold.add_modifier.contains(Modifier::BOLD),
+            "the heading keeps its bold"
+        );
+        assert_eq!(bold.fg, theme.dim.fg, "and comes home to the dim");
+        assert!(
+            bold.add_modifier.contains(Modifier::ITALIC),
+            "inside the block's own italic"
+        );
+        let plain = buffer[(30, 0)].style();
+        assert!(
+            !plain.add_modifier.contains(Modifier::BOLD),
+            "past the heading the thought is not bold"
+        );
+        assert_eq!(plain.fg, theme.dim.fg);
     }
 
     /// **AC1.** The whole grammar of a settled call in one screen: the bullet
