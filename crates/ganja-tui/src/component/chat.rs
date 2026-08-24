@@ -392,8 +392,10 @@ const SHIMMER_PEAK: (u8, u8, u8) = (0xff, 0xe4, 0xb4);
 /// Columns the band reaches to either side of its center.
 const SHIMMER_RADIUS: u64 = 3;
 
-/// Milliseconds the band takes to advance one column.
-const SHIMMER_STEP: u128 = 45;
+/// Milliseconds the band takes to advance one column: 45 read as too quick
+/// a flicker once the line sat beside the calmer wink, and 70 keeps a pass
+/// over a typical line under two seconds (user directive, 2026-08-25).
+const SHIMMER_STEP: u128 = 70;
 
 /// Lays `text` out in orange with a brighter band sweeping left to right.
 ///
