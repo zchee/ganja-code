@@ -10,6 +10,7 @@
 //!   "cadence_ms": 20,
 //!   "turns": [
 //!     {
+//!       "thinking": "The file is the only thing worth reading first.",
 //!       "text": "Reading the file first.",
 //!       "tool_calls": [{"name": "read", "args": {"filePath": "src/main.rs"}}]
 //!     },
@@ -18,12 +19,17 @@
 //! }
 //! ```
 //!
-//! Both keys of a turn are optional: a turn with no `text` streams nothing
-//! before its calls, and one with no `tool_calls` is a plain reply. `args`
-//! defaults to `{}`. `cadence_ms` overrides the delay between fragments for
-//! the whole script, and an absent one keeps the provider's own.
+//! Every key of a turn is optional: a turn with no `thinking` shows no
+//! thought, one with no `text` streams nothing before its calls, and one with
+//! no `tool_calls` is a plain reply. `args` defaults to `{}`. `cadence_ms`
+//! overrides the delay between fragments for the whole script, and an absent
+//! one keeps the provider's own.
 //!
-//! A turn streams its text one word at a time, then each of its calls as a
+//! A turn streams its thinking one word at a time — as the readable kind,
+//! [`ProviderEvent::ReasoningDelta`], the display-only part every frontend
+//! draws and no wire replays, which is what a demo of the transcript's
+//! thinking block needs and a real provider charges for — then its text the
+//! same way, then each of its calls as a
 //! start, at least two argument fragments, and an end — the fragmenting is
 //! deliberate, so that anything consuming these events has to buffer the
 //! arguments rather than parse the first one it sees. Call identifiers are
@@ -191,16 +197,27 @@ impl FakeProvider {
         // does not consume the turn it failed on.
         let index = self.requests.fetch_add(1, Ordering::Relaxed);
 
-        let (text, calls) = match script.turns.get(index) {
-            Some(turn) => (turn.text.as_str(), turn.tool_calls.as_slice()),
-            None => (EXHAUSTED, &[][..]),
+        let (thinking, text, calls) = match script.turns.get(index) {
+            Some(turn) => (
+                turn.thinking.as_str(),
+                turn.text.as_str(),
+                turn.tool_calls.as_slice(),
+            ),
+            None => ("", EXHAUSTED, &[][..]),
         };
 
-        let mut events: Vec<ProviderEvent> = split_into_chunks(text)
+        // The thought first, as a model streams it; counted towards nothing,
+        // the way the engine's own meter counts readable thinking.
+        let mut events: Vec<ProviderEvent> = split_into_chunks(thinking)
+            .into_iter()
+            .map(ProviderEvent::ReasoningDelta)
+            .collect();
+        let replies: Vec<ProviderEvent> = split_into_chunks(text)
             .into_iter()
             .map(ProviderEvent::TextDelta)
             .collect();
-        let fragments = events.len();
+        let fragments = replies.len();
+        events.extend(replies);
 
         // Numbered across the whole script rather than within the turn, so that
         // no two calls in one session share an id — the engine keys a tool part
@@ -311,6 +328,10 @@ struct Script {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ScriptTurn {
+    /// Streamed one word at a time before the text, as thinking a person can
+    /// read.
+    #[serde(default)]
+    thinking: String,
     /// Streamed one word at a time before any call.
     #[serde(default)]
     text: String,
@@ -457,6 +478,49 @@ mod tests {
             messages: vec![Message::user(prompt)],
             tools: Vec::new(),
         }
+    }
+
+    /// A turn's `thinking` streams first, as readable reasoning, one word at a
+    /// time like the text after it; a turn without the key streams none.
+    #[tokio::test]
+    async fn a_turns_thinking_streams_before_its_text_as_readable_reasoning() {
+        let (_dir, path) = script_file(
+            r#"{"cadence_ms": 0, "turns": [
+                {"thinking": "short is enough", "text": "Hello there."},
+                {"text": "No thought this time."}
+            ]}"#,
+        );
+        let provider = FakeProvider::new(REPLY, Duration::from_secs(60)).with_script(&path);
+
+        let first = turn(&provider).await;
+        let thought: Vec<&str> = first
+            .iter()
+            .filter_map(|event| match event {
+                ProviderEvent::ReasoningDelta(delta) => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(thought.concat(), "short is enough");
+        let first_text = first
+            .iter()
+            .position(|event| matches!(event, ProviderEvent::TextDelta(_)))
+            .expect("the reply follows");
+        let last_thought = first
+            .iter()
+            .rposition(|event| matches!(event, ProviderEvent::ReasoningDelta(_)))
+            .expect("the thought came");
+        assert!(
+            last_thought < first_text,
+            "the thought streams before the text"
+        );
+
+        let second = turn(&provider).await;
+        assert!(
+            !second
+                .iter()
+                .any(|event| matches!(event, ProviderEvent::ReasoningDelta(_))),
+            "a turn without the key thinks nothing aloud: {second:?}"
+        );
     }
 
     /// Writes `script` to a file that goes away with the test.
