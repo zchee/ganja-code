@@ -498,6 +498,7 @@ pub async fn run(
             // After `capture_input` and before the first `EventStream` poll,
             // per the probe's own ordering constraint.
             let kitty = capture_keys();
+            let focused = initial_focus().await;
             // The model is the engine's to answer for, not the selection's:
             // the default agent may have named one of its own, and a resumed
             // session restores the one it was left on.
@@ -532,6 +533,7 @@ pub async fn run(
             // ambiguity cannot occur, so the repair runs in passthrough
             // (**D516**, **D517**).
             .with_kitty_keys(kitty)
+            .with_focused(focused)
             // The one place the prompt history reaches the disk: the default
             // store is inert, so a test that does not opt in never touches the
             // machine's own history.
@@ -725,6 +727,28 @@ fn capture_input() -> Result<()> {
 ///
 /// Must run before the first `EventStream` poll: the probe reads its answer
 /// off the same internal queue the stream consumes.
+/// Whether the terminal this ganja came up in is being looked at.
+///
+/// Focus is learned from changes — crossterm's `FocusGained`/`FocusLost` —
+/// and a change presumes a starting state. Outside tmux the only honest one
+/// is "looked at". Inside tmux the state is a question tmux answers
+/// (`Server::focused`), and it has to be asked: measured on next-3.8
+/// (2026-08-25), a pane that enables focus reporting is sent nothing about
+/// the state it starts in, and a ganja spawned into a pane beside the lead —
+/// every teammate — drew a focused composer's cursor until the first change.
+/// A tmux that will not answer leaves the default.
+async fn initial_focus() -> bool {
+    use ganja_core::teammate::tmux::{Server, TMUX_PANE};
+
+    let Ok(pane) = std::env::var(TMUX_PANE) else {
+        return true;
+    };
+    let Ok(server) = Server::current() else {
+        return true;
+    };
+    server.focused(&pane).await.unwrap_or(true)
+}
+
 fn capture_keys() -> bool {
     let disabled = std::env::var("GANJA_DISABLE_TERM_PROBE").is_ok_and(|value| {
         let value = value.to_ascii_lowercase();

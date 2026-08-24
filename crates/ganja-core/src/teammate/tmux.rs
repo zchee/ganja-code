@@ -795,6 +795,35 @@ impl Server {
             .map(|name| name.trim().to_owned())
     }
 
+    /// Whether `pane_id` is where typing goes right now: the active pane of
+    /// the current window — `#{pane_active}` and `#{window_active}` both —
+    /// which is what the pane's own focus would say if tmux told it.
+    ///
+    /// tmux does not: measured on next-3.8 (2026-08-25), a pane that enables
+    /// focus reporting is sent nothing about the state it starts in, only the
+    /// changes after, so a ganja that came up in a pane nobody was looking at
+    /// — every teammate pane, split `-d` beside the lead — drew a focused
+    /// composer's cursor until the first change. The one reader asks this
+    /// once, at startup. Not the client's own focus: whether the terminal
+    /// window is looked at is the terminal's business, and the terminal
+    /// reports that as a change like any other.
+    ///
+    /// # Errors
+    ///
+    /// The client failing to start or tmux refusing — a pane that is gone.
+    pub async fn focused(&self, pane_id: &str) -> Result<bool, TmuxError> {
+        let mut command = self.command();
+        command
+            .arg("display-message")
+            .arg("-p")
+            .arg("-t")
+            .arg(pane_id)
+            .arg("#{&&:#{pane_active},#{window_active}}");
+        run("display-message", command)
+            .await
+            .map(|answer| answer.trim() == "1")
+    }
+
     /// Lands `text` in `pane_id`'s composer as **one unsubmitted message** —
     /// into a tmux buffer through the client's stdin and pasted bracketed, one
     /// client invocation for both — and presses **no** Enter.
@@ -1443,6 +1472,23 @@ mod tests {
     /// The composed line quotes only the words that need it, and a word no
     /// quoting can carry refuses the whole line before tmux is handed
     /// anything.
+    /// Exactly one pane of the window is where typing goes, and it is the one
+    /// tmux itself calls active — a fresh split's answer is read off tmux
+    /// rather than assumed, since whether a split takes the focus is tmux's
+    /// choice.
+    #[tokio::test]
+    async fn focused_answers_for_the_active_pane_of_the_current_window_and_no_other() {
+        let server = PrivateServer::start(&["sleep", "3600"], &[], &[]);
+        let at = Server::at(server.socket(), Some(server.first_pane().to_owned()));
+        let other = server.split(None, &[], &["sleep", "3600"]);
+
+        let first = at.focused(server.first_pane()).await.expect("tmux answers");
+        let second = at.focused(&other).await.expect("tmux answers");
+        assert_ne!(first, second, "one pane of the window has the focus");
+        let active = server.run(&["display-message", "-p", "-t", &other, "#{pane_active}"]);
+        assert_eq!(second, active.trim() == "1");
+    }
+
     #[test]
     fn a_launch_line_quotes_what_needs_it_and_refuses_a_nul() {
         let line = super::launch_line(

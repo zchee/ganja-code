@@ -1123,6 +1123,18 @@ impl App {
     /// Records the kitty keyboard verdict (**D517**): with the protocol
     /// active the split-Esc ambiguity cannot occur, so the repair machine
     /// runs in passthrough rather than paying the hold-off (**D516**).
+    /// Where the focus starts. Focus is otherwise learned from changes, and
+    /// a change presumes a starting state: outside tmux "looked at" is the
+    /// only honest one, and inside tmux the pane's own standing is what tmux
+    /// answers (`Server::focused`) — a pane split beside the lead starts
+    /// unfocused, and is told nothing of it.
+    #[must_use]
+    pub fn with_focused(mut self, focused: bool) -> Self {
+        self.focused = focused;
+        self.editor.set_focused(focused);
+        self
+    }
+
     #[must_use]
     pub fn with_kitty_keys(mut self, kitty: bool) -> Self {
         self.kitty_keys = kitty;
@@ -13671,8 +13683,8 @@ mod tests {
     }
 
     /// The composer's cursor is a painted cell, so it goes with the focus:
-    /// reverse video at the cursor while the terminal is looked at, none once
-    /// the focus went, back again when it returns.
+    /// reverse video at the cursor while the terminal is looked at, a hollow
+    /// box once the focus went, the block again when it returns.
     #[tokio::test]
     async fn the_composer_cursor_goes_with_the_focus() {
         let mut app = app();
@@ -13699,7 +13711,12 @@ mod tests {
         app.draw(&mut terminal).expect("a frame draws");
         assert!(
             !cursor_modifier(&terminal).contains(ratatui::style::Modifier::REVERSED),
-            "an unfocused pane paints no cursor bar"
+            "an unfocused pane paints no solid block"
+        );
+        assert!(
+            screen(&terminal).contains("\u{25af}Ask ganja something"),
+            "it paints the hollow box before the placeholder:\n{}",
+            screen(&terminal)
         );
 
         app.handle(AppEvent::Term(TermEvent::FocusGained))
