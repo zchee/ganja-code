@@ -115,13 +115,30 @@ const PROMPT: &str = "> ";
 /// directive (2026-08-25).
 const THINKING: &str = "\u{2234} ";
 
-/// What leads the line a running turn leaves at the tail of the transcript:
-/// Claude Code's own `✻`, kept where the thought itself changed glyph. The
-/// two surfaces had shared one constant as one thing seen twice; the same
-/// day's second directive narrowed that — the working line is the turn's
-/// pulse and keeps that program's mark, while a thought on the page is
-/// ganja's to mark — so they are two constants now, on purpose.
-const WORKING: &str = "\u{273b} ";
+/// The frames the working line's glyph turns through: Claude Code's own
+/// spinner set, forward and then back (`·✢✳✶✻✽✻✶✳✢`), of which `✻` was the
+/// one frame the 2026-08-15 screenshot had frozen. The line has moved through
+/// them since 2026-08-25 (user directive) — the working line is the turn's
+/// pulse and keeps that program's mark, where a thought on the page is
+/// ganja's to mark (`THINKING`).
+const WORKING_FRAMES: [&str; 10] = [
+    "\u{b7}", "\u{2722}", "\u{2733}", "\u{2736}", "\u{273b}", "\u{273d}", "\u{273b}", "\u{2736}",
+    "\u{2733}", "\u{2722}",
+];
+
+/// Milliseconds one frame is held. A screenshot pins no cadence; this is the
+/// neighbourhood of an ink spinner's, and slow enough that a frame is a
+/// thing seen rather than a flicker.
+const WORKING_FRAME_STEP: u128 = 120;
+
+/// The frame `elapsed` into a turn falls on — time-driven off the same clock
+/// as the shimmer band and the seconds figure, so nothing here keeps a phase
+/// of its own and the same instant read twice draws the same glyph twice.
+fn working_frame(elapsed: Duration) -> &'static str {
+    let index = usize::try_from(elapsed.as_millis() / WORKING_FRAME_STEP).unwrap_or(usize::MAX)
+        % WORKING_FRAMES.len();
+    WORKING_FRAMES[index]
+}
 
 /// The words a working line runs under, one per turn in order.
 ///
@@ -282,9 +299,12 @@ impl Working {
     fn line(&self) -> Line<'static> {
         let verbs = u64::try_from(WORKING_VERBS.len()).unwrap_or(1);
         let verb = WORKING_VERBS[usize::try_from(self.turn % verbs).unwrap_or(0)];
+        // One reading of the clock for the glyph, the figure and the band.
+        let elapsed = self.started.elapsed();
         let mut text = format!(
-            "{WORKING}{verb}\u{2026} ({elapsed}s",
-            elapsed = self.started.elapsed().as_secs()
+            "{glyph} {verb}\u{2026} ({seconds}s",
+            glyph = working_frame(elapsed),
+            seconds = elapsed.as_secs()
         );
         if self.output_tokens > 0 {
             text.push_str(&format!(
@@ -294,7 +314,7 @@ impl Working {
         }
         text.push(')');
 
-        shimmer(text, self.started.elapsed())
+        shimmer(text, elapsed)
     }
 }
 
@@ -2116,7 +2136,8 @@ mod tests {
     use ratatui::{buffer::Buffer, layout::Rect, style::Modifier};
 
     use super::{
-        BULLET, Chat, Instant, RESULT, WORKING_VERBS, Working, elapsed, split_at_width, wrap,
+        BULLET, Chat, Instant, RESULT, WORKING_FRAME_STEP, WORKING_FRAMES, WORKING_VERBS, Working,
+        elapsed, split_at_width, working_frame, wrap,
     };
     use crate::theme::{Theme, Themes};
 
@@ -3151,7 +3172,7 @@ mod tests {
         let running = strip(&mut chat, 60);
 
         assert!(
-            !transcript.iter().any(|line| line.starts_with("\u{273b} ")),
+            !transcript.iter().any(|line| line.contains("\u{2026} (")),
             "the transcript itself no longer carries the line: {transcript:?}"
         );
         assert_eq!(
@@ -3162,7 +3183,7 @@ mod tests {
         assert!(
             running
                 .first()
-                .is_some_and(|line| line.starts_with("\u{273b} ")),
+                .is_some_and(|line| line.contains("\u{2026} (")),
             "the strip opens on the working line, got {running:?}"
         );
         assert_eq!(
@@ -3218,7 +3239,7 @@ mod tests {
         assert!(
             lines
                 .first()
-                .is_some_and(|line| line.starts_with("\u{273b} ")),
+                .is_some_and(|line| line.contains("\u{2026} (")),
             "the strip opens on the working line: {lines:?}"
         );
         assert_eq!(
@@ -4337,9 +4358,13 @@ mod tests {
         let lines = strip(&mut chat, 60);
 
         assert!(
-            lines
-                .iter()
-                .any(|line| line == "\u{273b} Thinking\u{2026} (12s \u{b7} \u{2193} 431 tokens)"),
+            lines.iter().any(|line| {
+                *line
+                    == format!(
+                        "{} Thinking\u{2026} (12s \u{b7} \u{2193} 431 tokens)",
+                        working_frame(Duration::from_secs(12))
+                    )
+            }),
             "got {lines:?}"
         );
         assert_eq!(
@@ -4367,10 +4392,42 @@ mod tests {
         let lines = strip(&mut chat, 60);
 
         assert!(
-            lines
-                .iter()
-                .any(|line| line == "\u{273b} Thinking\u{2026} (3s)"),
+            lines.iter().any(|line| {
+                *line
+                    == format!(
+                        "{} Thinking\u{2026} (3s)",
+                        working_frame(Duration::from_secs(3))
+                    )
+            }),
             "got {lines:?}"
+        );
+    }
+
+    /// The glyph turns through Claude Code's spinner frames forward and back,
+    /// one per step, off the turn's own clock — the first frame at the start,
+    /// the far one at the fifth step, the first again after the tenth — so a
+    /// line drawn twice at one instant is the same line, and nothing keeps a
+    /// phase of its own.
+    #[test]
+    fn the_working_glyph_turns_through_the_frames_and_back_on_the_turns_clock() {
+        let step = u64::try_from(WORKING_FRAME_STEP).expect("a step fits in u64");
+        let at = |steps: u64| working_frame(Duration::from_millis(steps * step));
+        assert_eq!(at(0), "\u{b7}");
+        assert_eq!(at(5), "\u{273d}", "the far frame at the fifth step");
+        assert_eq!(at(6), "\u{273b}", "and back the way it came");
+        assert_eq!(at(10), at(0), "the whole cycle in, it starts over");
+        // Within a step the frame holds: the same instant read twice.
+        assert_eq!(
+            working_frame(Duration::from_millis(step * 3 + step / 2)),
+            at(3)
+        );
+        let forward: Vec<&str> = WORKING_FRAMES[..6].to_vec();
+        let mut back = WORKING_FRAMES[6..].to_vec();
+        back.reverse();
+        assert_eq!(
+            forward[1..5].to_vec(),
+            back,
+            "the way back is the way forward reversed, minus its ends"
         );
     }
 
@@ -4387,8 +4444,8 @@ mod tests {
                 .unwrap_or_default()
         };
 
-        assert_eq!(verb(0), "\u{273b} Working\u{2026} (0s)");
-        assert_eq!(verb(1), "\u{273b} Thinking\u{2026} (0s)");
+        assert_eq!(verb(0), "\u{b7} Working\u{2026} (0s)");
+        assert_eq!(verb(1), "\u{b7} Thinking\u{2026} (0s)");
         assert_ne!(verb(1), verb(2));
         let len = u64::try_from(WORKING_VERBS.len()).expect("verb count fits in u64");
         assert_eq!(

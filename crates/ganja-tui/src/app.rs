@@ -8481,7 +8481,7 @@ mod tests {
         let mut terminal = terminal(80, 24);
         app.draw(&mut terminal).expect("a frame draws");
         assert!(
-            screen(&terminal).contains("\u{273b} "),
+            screen(&terminal).contains("\u{2026} (0s"),
             "got:\n{}",
             screen(&terminal)
         );
@@ -8500,7 +8500,7 @@ mod tests {
         app.draw(&mut terminal).expect("a frame draws");
 
         assert!(
-            !screen(&terminal).contains("\u{273b} "),
+            !screen(&terminal).contains("\u{2026} (0s"),
             "a settled turn leaves no working line:\n{}",
             screen(&terminal)
         );
