@@ -113,6 +113,11 @@ struct Ganja {
     /// drops belongs to a test that failed part-way through, and it is holding
     /// a pty and a temporary directory that nothing else will free.
     session: Option<OsSession>,
+    /// The isolated homes a bare spawn was given, held so they outlive the
+    /// process. [`None`] when the caller isolated the command itself, the
+    /// way [`scripted`] does with directories the test owns. Underscored:
+    /// held for its `Drop` alone.
+    _homes: Option<TempDir>,
 }
 
 impl Ganja {
@@ -124,6 +129,24 @@ impl Ganja {
     /// reach a network or read a credential.
     fn spawn(mut command: Command, rows: u16) -> Self {
         command.env("GANJA_PROVIDER", "fake");
+        // A bare spawn gets its own throwaway homes: prompt history,
+        // permission answers and spilled output all land under the data
+        // home, and a run that does not redirect them types its test
+        // prompts into the developer's real history (how `kaleidoscope`
+        // and `ok[D` came to haunt one, 2026-08-24). A caller that set
+        // `XDG_DATA_HOME` already isolated everything on its own terms.
+        let mut homes = None;
+        let isolated = command
+            .get_envs()
+            .any(|(key, _)| key == std::ffi::OsStr::new("XDG_DATA_HOME"));
+        if !isolated {
+            let dir = TempDir::new().expect("an isolated home is creatable");
+            command.env("XDG_DATA_HOME", dir.path());
+            command.env("XDG_CONFIG_HOME", dir.path().join("config"));
+            command.env("HOME", dir.path());
+            command.env_remove("GANJA_CONFIG_HOME");
+            homes = Some(dir);
+        }
         // The kitty keyboard probe (D517) blocks up to two seconds when
         // nothing answers its query, and this harness never does — except in
         // the probe drills below, which set the variable themselves and
@@ -148,6 +171,7 @@ impl Ganja {
 
         Self {
             session: Some(session),
+            _homes: homes,
         }
     }
 
