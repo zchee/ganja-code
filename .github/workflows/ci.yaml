@@ -108,8 +108,12 @@ jobs:
         working-directory: upstream/opencode-v1.18.13
         run: bun install --frozen-lockfile
 
+      # `--locked` so a manifest/lock mismatch — a Renovate branch whose
+      # artifact step half-failed, PR #12's shape — fails here by name instead
+      # of cargo silently rewriting the lock on the runner and testing a
+      # resolution the branch does not carry.
       - name: test
-        run: cargo nextest run --workspace --profile ci
+        run: cargo nextest run --locked --workspace --profile ci
         env:
           GANJA_OPENCODE_DIR: ${{ github.workspace }}/upstream/opencode-v1.18.13
           # A shared runner under load adds whole seconds of queueing to the
@@ -149,8 +153,10 @@ jobs:
       - name: rustfmt
         run: cargo fmt --all --check
 
+      # `--locked` for the same reason the test job carries it: a stale
+      # Cargo.lock is a finding, not something to quietly repair.
       - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       # Doc links are the one thing in these files nothing else checks. A
       # `[`Thing`]` whose target was renamed, made private or moved still reads
