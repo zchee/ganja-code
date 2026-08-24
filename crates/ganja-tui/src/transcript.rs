@@ -167,7 +167,7 @@ fn formatted(part: &Part) -> String {
         // for a different reason, and a deliberate one: this is the clipboard,
         // and what a person means by "copy this conversation" is the
         // conversation, not the model's scratch paper. The pane draws it
-        // behind a `✻`; the two surfaces are allowed to disagree, and the
+        // behind a `∴`; the two surfaces are allowed to disagree, and the
         // output of this function is unchanged by its arriving here.
         // A tool the *provider* ran (**D489**) renders in the tool shape
         // above, because that is what it is: the conversation includes it,
@@ -610,7 +610,7 @@ mod tests {
         assert!(rendered.ends_with("## User\n\n---\n\n"), "got: {rendered}");
     }
 
-    /// **AC5.** The pane draws thinking behind a `✻`; the clipboard does not
+    /// **AC5.** The pane draws thinking behind a `∴`; the clipboard does not
     /// carry it. What a person means by "copy this conversation" is the
     /// conversation, and the model's way to an answer is not the answer —
     /// which is also why `last_reply` cannot be answered by one.

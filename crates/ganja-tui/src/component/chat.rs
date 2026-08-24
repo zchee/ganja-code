@@ -113,8 +113,12 @@ const PROMPT: &str = "> ";
 /// at the tail of the transcript.
 ///
 /// One glyph for both because they are one thing seen twice: the tail says a
-/// turn is thinking, and this is what it thought.
-const THINKING: &str = "\u{273b} ";
+/// turn is thinking, and this is what it thought. The glyph is `∴` — the
+/// therefore sign, a conclusion being drawn — where Claude Code's grammar
+/// (D487) has `✻`; the one deliberate departure from that screenshot, by user
+/// directive (2026-08-25). `WORKING` follows it, so the two surfaces cannot
+/// drift apart.
+const THINKING: &str = "\u{2234} ";
 
 /// See [`THINKING`].
 const WORKING: &str = THINKING;
@@ -3147,7 +3151,7 @@ mod tests {
         let running = strip(&mut chat, 60);
 
         assert!(
-            !transcript.iter().any(|line| line.starts_with("\u{273b} ")),
+            !transcript.iter().any(|line| line.starts_with("\u{2234} ")),
             "the transcript itself no longer carries the line: {transcript:?}"
         );
         assert_eq!(
@@ -3158,7 +3162,7 @@ mod tests {
         assert!(
             running
                 .first()
-                .is_some_and(|line| line.starts_with("\u{273b} ")),
+                .is_some_and(|line| line.starts_with("\u{2234} ")),
             "the strip opens on the working line, got {running:?}"
         );
         assert_eq!(
@@ -3214,7 +3218,7 @@ mod tests {
         assert!(
             lines
                 .first()
-                .is_some_and(|line| line.starts_with("\u{273b} ")),
+                .is_some_and(|line| line.starts_with("\u{2234} ")),
             "the strip opens on the working line: {lines:?}"
         );
         assert_eq!(
@@ -4335,7 +4339,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line == "\u{273b} Thinking\u{2026} (12s \u{b7} \u{2193} 431 tokens)"),
+                .any(|line| line == "\u{2234} Thinking\u{2026} (12s \u{b7} \u{2193} 431 tokens)"),
             "got {lines:?}"
         );
         assert_eq!(
@@ -4365,7 +4369,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line == "\u{273b} Thinking\u{2026} (3s)"),
+                .any(|line| line == "\u{2234} Thinking\u{2026} (3s)"),
             "got {lines:?}"
         );
     }
@@ -4383,8 +4387,8 @@ mod tests {
                 .unwrap_or_default()
         };
 
-        assert_eq!(verb(0), "\u{273b} Working\u{2026} (0s)");
-        assert_eq!(verb(1), "\u{273b} Thinking\u{2026} (0s)");
+        assert_eq!(verb(0), "\u{2234} Working\u{2026} (0s)");
+        assert_eq!(verb(1), "\u{2234} Thinking\u{2026} (0s)");
         assert_ne!(verb(1), verb(2));
         let len = u64::try_from(WORKING_VERBS.len()).expect("verb count fits in u64");
         assert_eq!(
@@ -4452,7 +4456,7 @@ mod tests {
         assert_eq!(
             drawn,
             vec![
-                "\u{273b} A greeting is enough,",
+                "\u{2234} A greeting is enough,",
                 "  so keep it short",
                 "\u{25cf} Hello, world!",
             ],
@@ -4488,7 +4492,7 @@ mod tests {
         assert_eq!(
             think_and_gap,
             [
-                "\u{273b} one",
+                "\u{2234} one",
                 "  two",
                 "  three",
                 "  four",
@@ -4523,13 +4527,13 @@ mod tests {
         chat.append_delta(&reply.id, &part.id, "now there is a thought");
         let screen = rendered(&mut chat, Rect::new(0, 0, 40, 6)).join("\n");
         assert!(
-            screen.contains("\u{273b} now there is a thought"),
+            screen.contains("\u{2234} now there is a thought"),
             "got:\n{screen}"
         );
     }
 
     /// **AC3, the half this build can answer.** Sealed reasoning is a blob only
-    /// the provider can open; there is nothing in it for a `✻` line to say, so
+    /// the provider can open; there is nothing in it for a `∴` line to say, so
     /// the part draws nothing at all — and the reply around it is untouched.
     #[test]
     fn sealed_reasoning_draws_nothing_and_leaves_the_reply_alone() {
