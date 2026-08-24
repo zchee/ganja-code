@@ -108,10 +108,9 @@ const BULLET: &str = "\u{25cf} ";
 /// takes `BULLET`, whose color answers the verdict.
 const POINT: &str = "\u{2022} ";
 
-/// How long each pulse phase holds: bright for one, the chrome's own dim for
-/// the next — two states rather than a fade, because a theme's palette is a
-/// set of styles, not RGB endpoints anything could blend.
-const POINT_BLINK: Duration = Duration::from_millis(500);
+/// The top of the point's wink, in quarters above the chrome's dim: the
+/// height `point_level` counts in and `point_style` paints from.
+const POINT_BRIGHT: u8 = 4;
 
 /// What leads what a call answered, one step under the header it answers —
 /// and, in the `/team` dialog, a member's ring of recent calls: a call log is
@@ -648,10 +647,10 @@ struct Wrapped {
     /// The attached-image paths this wrap wanted placeholder cells for and
     /// did not have yet, empty once every image is answered (2026-08-15).
     images: Vec<(usize, String)>,
-    /// The pulse phase these lines were drawn on, [`None`] for an entry with
-    /// no call in flight: what lets the point move without every settled
-    /// entry losing its cache.
-    blink: Option<bool>,
+    /// The wink height these lines were drawn at, [`None`] for an entry
+    /// with no call in flight: what lets the point move without every
+    /// settled entry losing its cache.
+    blink: Option<u8>,
 }
 
 /// Rows an attached image's reserved box stands in the transcript.
@@ -887,12 +886,12 @@ impl Chat {
         }
     }
 
-    /// Which phase of the in-flight pulse this instant falls on: `true` is
-    /// the bright half. Time-driven like `working_frame`, so the same
-    /// instant read twice draws the same frame twice.
-    fn blink_on(&mut self) -> bool {
+    /// The in-flight wink's height this instant, in `point_level`'s
+    /// quarters. Time-driven like `working_frame`, so the same instant read
+    /// twice draws the same frame twice.
+    fn point_phase(&mut self) -> u8 {
         let epoch = *self.blink_epoch.get_or_insert_with(Instant::now);
-        (epoch.elapsed().as_millis() / POINT_BLINK.as_millis()).is_multiple_of(2)
+        point_level(epoch.elapsed())
     }
 
     /// Tells the strip a compaction is running and how far its summary has
@@ -1092,7 +1091,7 @@ impl Chat {
         let first_hidden = self.first_hidden();
         let hidden = self.entries.len() - first_hidden;
         let graphics = self.graphics;
-        let blink = self.blink_on();
+        let blink = self.point_phase();
         for entry in &mut self.entries[..first_hidden] {
             entry.wrap(area.width, theme, graphics, &self.image_cells, blink);
         }
@@ -1393,7 +1392,7 @@ impl Entry {
         theme: &Theme,
         graphics: bool,
         cells: &HashMap<String, (u32, u16)>,
-        blink: bool,
+        blink: u8,
     ) {
         // An entry holding a call still in flight keys its cache on the
         // pulse phase too, so the point can move without anything else
@@ -1785,10 +1784,61 @@ fn in_flight(part: &Part) -> bool {
     )
 }
 
-/// The in-flight point's paint: bright on the pulse's on-phase, the chrome's
-/// own dim off it.
-fn point_style(theme: &Theme, on: bool) -> Style {
-    if on { theme.fg } else { theme.dim }
+/// The wink's height at `elapsed`, in quarters of the way up from the
+/// chrome's dim to bright: the envelope measured frame by frame off the
+/// reference recording (2026-08-25) — bright through a long hold, straight
+/// down past it, flat at the bottom, easing back up to meet the next hold.
+fn point_level(elapsed: Duration) -> u8 {
+    /// One whole wink, milliseconds — the reference's ~2 s cycle.
+    const CYCLE: u128 = 2_000;
+    /// Where the drop starts, where the rest at the bottom starts, and
+    /// where the rise home starts — ~1.4 s of hold, ~140 ms down, ~160 ms
+    /// flat, ~300 ms back, as measured.
+    const DROP: u128 = 1_400;
+    const REST: u128 = 1_540;
+    const RISE: u128 = 1_700;
+
+    let t = elapsed.as_millis() % CYCLE;
+    let level = if t < DROP {
+        u128::from(POINT_BRIGHT)
+    } else if t < REST {
+        (REST - t) * u128::from(POINT_BRIGHT) / (REST - DROP)
+    } else if t < RISE {
+        0
+    } else {
+        (t - RISE) * u128::from(POINT_BRIGHT) / (CYCLE - RISE)
+    };
+
+    u8::try_from(level).unwrap_or(POINT_BRIGHT)
+}
+
+/// The in-flight point's paint at `level` quarters of the way up from the
+/// chrome's dim to bright. Both ends are theme styles; the way between
+/// exists only where both name RGB values — an ANSI theme's middle collapses
+/// to the nearer end instead, a wink rather than a fade, because named
+/// palette slots are not endpoints anything could blend.
+fn point_style(theme: &Theme, level: u8) -> Style {
+    if level == 0 {
+        return theme.dim;
+    }
+    if level >= POINT_BRIGHT {
+        return theme.fg;
+    }
+    match (theme.dim.fg, theme.fg.fg) {
+        (Some(Color::Rgb(dr, dg, db)), Some(Color::Rgb(br, bg, bb))) => Style::default().fg(blend(
+            (dr, dg, db),
+            (br, bg, bb),
+            u64::from(level),
+            u64::from(POINT_BRIGHT),
+        )),
+        _ => {
+            if level * 2 >= POINT_BRIGHT {
+                theme.fg
+            } else {
+                theme.dim
+            }
+        }
+    }
 }
 
 /// The one line a call is announced on: the tool, and what it was called with.
@@ -2010,9 +2060,9 @@ fn diff_line_style(line: &str, theme: &Theme) -> Style {
 /// the color it is painted, and in what hangs under it: a running call's newest output, a
 /// finished call's summary and preview, a failed call's first line of why
 /// (**D487**). `StepStart`/`StepFinish` never reach here — and a call still
-/// in flight leads with the pulsing `POINT` on `blink`'s phase rather than
+/// in flight leads with the winking `POINT` at `blink`'s height rather than
 /// the bullet, the words unmoved (2026-08-25).
-fn tool_lines(tool: &str, state: &ToolState, theme: &Theme, blink: bool) -> Vec<Row> {
+fn tool_lines(tool: &str, state: &ToolState, theme: &Theme, blink: u8) -> Vec<Row> {
     // A delegated turn is one row, never a transcript of its own: everything
     // the child said reaches the model inside the tool result, and repeating
     // it here would show the same work twice.
@@ -2164,7 +2214,7 @@ fn tool_lines(tool: &str, state: &ToolState, theme: &Theme, blink: bool) -> Vec<
 /// the row** — it is inside the tool result the model reads, and a transcript
 /// that printed it would be showing the same work twice, once as prose and
 /// once as a result.
-fn task_lines(state: &ToolState, theme: &Theme, blink: bool) -> Vec<Row> {
+fn task_lines(state: &ToolState, theme: &Theme, blink: u8) -> Vec<Row> {
     match state {
         ToolState::Pending { input } => {
             let heading = input.as_ref().map_or_else(
@@ -3006,11 +3056,11 @@ mod tests {
         );
     }
 
-    /// An in-flight call's point pulses — bright on one phase, the chrome's
-    /// own dim on the other — while its words hold still (user directive,
-    /// 2026-08-25): the two frames differ in paint alone.
+    /// An in-flight call's point winks — bright through the hold, down to
+    /// the chrome's own dim at the bottom — while its words hold still (user
+    /// directive, 2026-08-25): the two frames differ in paint alone.
     #[test]
-    fn an_in_flight_calls_point_pulses_and_its_words_hold_still() {
+    fn an_in_flight_calls_point_winks_and_its_words_hold_still() {
         let area = Rect::new(0, 0, 60, 4);
         let mut chat = Chat::default();
         let mut reply = Message::assistant("canned");
@@ -3049,12 +3099,70 @@ mod tests {
             bright[0], "\u{2022} Shell(command: \"cargo test\")",
             "the point leads a call still in flight"
         );
-        assert_eq!(lead, Theme::default().fg.fg, "bright on the on-phase");
+        assert_eq!(lead, Theme::default().fg.fg, "bright through the hold");
 
-        chat.blink_epoch = Instant::now().checked_sub(super::POINT_BLINK);
+        // 1600 ms into the wink: past the drop, flat at the bottom.
+        chat.blink_epoch = Instant::now().checked_sub(Duration::from_millis(1_600));
         let (dim, lead) = frame(&mut chat);
         assert_eq!(bright, dim, "the words hold still; only the paint moves");
-        assert_eq!(lead, Theme::default().dim.fg, "the chrome's own dim off it");
+        assert_eq!(
+            lead,
+            Theme::default().dim.fg,
+            "the chrome's own dim at the bottom"
+        );
+    }
+
+    /// The wink's envelope, measured off the reference recording: bright
+    /// through the long hold, straight down past it, flat at the bottom,
+    /// easing back up to meet the next hold.
+    #[test]
+    fn the_points_wink_holds_drops_rests_and_rises() {
+        let at = |ms: u64| super::point_level(Duration::from_millis(ms));
+
+        assert_eq!(at(0), super::POINT_BRIGHT);
+        assert_eq!(at(1_399), super::POINT_BRIGHT, "the hold runs long");
+        let falling = at(1_470);
+        assert!(
+            falling > 0 && falling < super::POINT_BRIGHT,
+            "down fast past the hold, got {falling}"
+        );
+        assert_eq!(at(1_600), 0, "flat at the bottom");
+        assert_eq!(at(1_850), 2, "easing back");
+        assert_eq!(at(2_000), at(0), "one wink in, it starts over");
+    }
+
+    /// Between its two ends the point actually fades — where the theme gives
+    /// both ends RGB values to fade between; the terminal theme's named
+    /// slots collapse to the nearer end instead.
+    #[test]
+    fn the_points_way_between_blends_where_the_theme_is_rgb() {
+        use ratatui::style::{Color, Style};
+
+        let mut theme = Theme::default();
+        theme.dim = Style::new().fg(Color::Rgb(0, 0, 0));
+        theme.fg = Style::new().fg(Color::Rgb(200, 100, 40));
+        assert_eq!(
+            super::point_style(&theme, 2).fg,
+            Some(Color::Rgb(100, 50, 20)),
+            "halfway up is halfway between"
+        );
+        assert_eq!(
+            super::point_style(&theme, super::POINT_BRIGHT).fg,
+            theme.fg.fg
+        );
+        assert_eq!(super::point_style(&theme, 0).fg, theme.dim.fg);
+
+        let terminal = Theme::default();
+        assert_eq!(
+            super::point_style(&terminal, 3).fg,
+            terminal.fg.fg,
+            "a named palette's upper middle collapses to bright"
+        );
+        assert_eq!(
+            super::point_style(&terminal, 1).fg,
+            terminal.dim.fg,
+            "and its lower middle to dim"
+        );
     }
 
     /// **AC1.** The whole grammar of a settled call in one screen: the bullet
