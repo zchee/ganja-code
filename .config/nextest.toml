@@ -49,3 +49,14 @@ threads-required = "num-cpus"
 # the window physically achievable rather than hoping the scheduler is kind.
 filter = 'binary(pty_smoke) and (test(a_split_arrow_key_edits_instead_of_pasting_garbage) or test(a_late_continuation_stays_literal_text))'
 threads-required = "num-cpus"
+
+[[profile.ci.overrides]]
+# The cancel drill asserts the plan's own number: a cancel mid-stream is
+# visible within a tenth of a second. That is a property of the engine — the
+# fake provider's cadence is 20ms, so the turn stops at the next fragment —
+# and on a runner shared with the rest of the suite it measured 122ms
+# (ubuntu, 2026-08-24): the extra was the scheduler's, not the engine's.
+# Reserving the runner keeps the number the engine's to meet, rather than
+# loosening a budget the plan set.
+filter = 'package(ganja-core) and binary(cancel)'
+threads-required = "num-cpus"

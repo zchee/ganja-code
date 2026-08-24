@@ -386,6 +386,13 @@ fn a_split_arrow_key_edits_instead_of_pasting_garbage() {
 /// **D516.** A bare Esc followed by nothing within the hold-off was a real
 /// key press: it is released at the deadline, and a `[D` typed after that
 /// deadline is literal text — exactly what the person sent.
+///
+/// The gap before the tail is twenty hold-offs, not five: the hold-off runs
+/// from when the app *reads* the Esc, which nothing on this side can see, and
+/// on the ubuntu runner the app was descheduled past a 120ms gap after the
+/// Esc was sent — it then read Esc and `[D` in one batch, repaired them into
+/// a Left arrow, and the literal text never showed (2026-08-24). A late tail
+/// is late by any margin, so the margin is the generous one.
 #[test]
 fn a_late_continuation_stays_literal_text() {
     let mut session = ganja();
@@ -398,7 +405,7 @@ fn a_late_continuation_stays_literal_text() {
     session
         .send("\x1b")
         .expect("failed to send the bare escape");
-    session.breathe(120);
+    session.breathe(500);
     session.send("[D").expect("failed to send the late tail");
     session.send("\r").expect("failed to submit");
 

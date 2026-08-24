@@ -404,9 +404,24 @@ fn two_processes_racing_the_quarantine_leave_one_aside_file() {
     // checkpointed file: an id that is still in the write-ahead log is an id
     // that is still there.
     let base = aside[0].to_string_lossy().into_owned();
-    let kept = ["", "-wal", "-shm"].into_iter().any(|suffix| {
-        fs::read(format!("{base}{suffix}")).is_ok_and(|bytes| carries(&bytes, OLD_ID.as_bytes()))
-    });
+    let scan = || {
+        ["", "-wal", "-shm"].into_iter().any(|suffix| {
+            fs::read(format!("{base}{suffix}"))
+                .is_ok_and(|bytes| carries(&bytes, OLD_ID.as_bytes()))
+        })
+    };
+    // Repeated for a while rather than read once: a checkpoint still in
+    // flight moves the row's page from the log into the file *between* one
+    // read and the next — the file read before the page landed, the log after
+    // it was reset — and a single pass through the three can miss it in both
+    // (seen on the three-core macOS runner, 2026-08-24; bead ganja-code-bry).
+    // The row is there throughout; only where it is moves.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut kept = scan();
+    while !kept && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        kept = scan();
+    }
 
     assert!(
         kept,
