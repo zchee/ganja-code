@@ -126,8 +126,23 @@ const WORKING: &str = THINKING;
 /// and upstream opencode has no such line at all to take one from. They are
 /// deliberately machine-plain: a loop churns and grinds, and none of these
 /// claims more about what is happening inside than is true.
-const WORKING_VERBS: [&str; 6] = [
-    "Working", "Thinking", "Churning", "Grinding", "Whirring", "Chewing",
+const WORKING_VERBS: [&str; 16] = [
+    "Working",
+    "Thinking",
+    "Churning",
+    "Grinding",
+    "Whirring",
+    "Chewing",
+    "Crunching",
+    "Mulling",
+    "Simmering",
+    "Percolating",
+    "Digesting",
+    "Humming",
+    "Spinning",
+    "Ticking",
+    "Brewing",
+    "Kneading",
 ];
 
 /// The line a revert leaves in place of the messages it hid.
@@ -2096,7 +2111,9 @@ mod tests {
     use ganja_protocol::{Message, MessageId, Part, PartBody, PartId, ToolState};
     use ratatui::{buffer::Buffer, layout::Rect, style::Modifier};
 
-    use super::{BULLET, Chat, Instant, RESULT, Working, elapsed, split_at_width, wrap};
+    use super::{
+        BULLET, Chat, Instant, RESULT, WORKING_VERBS, Working, elapsed, split_at_width, wrap,
+    };
     use crate::theme::{Theme, Themes};
 
     /// A reply carrying one tool part in `state`, rendered wide enough that
@@ -4369,10 +4386,11 @@ mod tests {
         assert_eq!(verb(0), "\u{273b} Working\u{2026} (0s)");
         assert_eq!(verb(1), "\u{273b} Thinking\u{2026} (0s)");
         assert_ne!(verb(1), verb(2));
+        let len = u64::try_from(WORKING_VERBS.len()).expect("verb count fits in u64");
         assert_eq!(
-            verb(6),
+            verb(len),
             verb(0),
-            "six verbs in, the list starts over rather than running out"
+            "the whole list in, it starts over rather than running out"
         );
     }
 
