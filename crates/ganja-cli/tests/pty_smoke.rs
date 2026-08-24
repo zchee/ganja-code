@@ -125,8 +125,15 @@ impl Ganja {
     fn spawn(mut command: Command, rows: u16) -> Self {
         command.env("GANJA_PROVIDER", "fake");
         // The kitty keyboard probe (D517) blocks up to two seconds when
-        // nothing answers its query, and this harness never does.
-        command.env("GANJA_DISABLE_TERM_PROBE", "1");
+        // nothing answers its query, and this harness never does — except in
+        // the probe drills below, which set the variable themselves and
+        // answer the query by hand.
+        let probing = command
+            .get_envs()
+            .any(|(key, _)| key == std::ffi::OsStr::new("GANJA_DISABLE_TERM_PROBE"));
+        if !probing {
+            command.env("GANJA_DISABLE_TERM_PROBE", "1");
+        }
 
         let mut session = Session::spawn(command).expect("failed to spawn `ganja` in a pty");
         session.set_expect_timeout(Some(EXIT_DEADLINE));
@@ -158,6 +165,20 @@ impl Ganja {
             let _ = self.try_read(&mut sink);
             thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    /// Like [`Ganja::breathe`], but keeps what it drained.
+    fn harvest(&mut self, ms: u64) -> Vec<u8> {
+        let deadline = std::time::Instant::now() + Duration::from_millis(ms);
+        let mut all = Vec::new();
+        let mut buf = [0u8; 4096];
+        while std::time::Instant::now() < deadline {
+            if let Ok(n) = self.try_read(&mut buf) {
+                all.extend_from_slice(&buf[..n]);
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+        all
     }
 
     /// Waits for the process to end and checks that it ended cleanly.
@@ -229,6 +250,78 @@ fn ganja() -> Ganja {
 #[test]
 fn control_c_quits_the_tui_cleanly() {
     ganja().quit_and_assert_clean_exit();
+}
+
+/// A `ganja` whose kitty keyboard probe (**D517**) runs: "0" is falsy, so
+/// [`Ganja::spawn`] leaves the variable alone and the test answers the query
+/// by hand.
+fn ganja_probing() -> Ganja {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ganja"));
+    command.env_remove("GANJA_FAKE_SCRIPT");
+    command.env("GANJA_DISABLE_TERM_PROBE", "0");
+    Ganja::spawn(command, SMOKE_ROWS)
+}
+
+/// The kitty keyboard query, exactly as crossterm writes it: progressive
+/// enhancement flags, then primary device attributes.
+const KITTY_QUERY: &str = "\x1b[?u\x1b[c";
+
+/// What `PushKeyboardEnhancementFlags(DISAMBIGUATE_ESCAPE_CODES)` writes.
+const KITTY_PUSH: &str = "\x1b[>1u";
+
+/// What `PopKeyboardEnhancementFlags` writes.
+const KITTY_POP: &str = "\x1b[<1u";
+
+/// **D517.** A terminal that answers the probe positively gets the
+/// disambiguate flag pushed — and popped again on the way out, so the shell
+/// underneath never sees kitty-encoded keys.
+#[test]
+fn a_positive_kitty_probe_pushes_and_the_exit_pops() {
+    let mut session = ganja_probing();
+
+    session
+        .expect(KITTY_QUERY)
+        .expect("the kitty probe never asked");
+    // Flags report (none set), then device attributes: a supporting terminal.
+    session
+        .send("\x1b[?0u\x1b[?1;2c")
+        .expect("failed to answer the probe");
+
+    session
+        .expect(KITTY_PUSH)
+        .expect("a positive probe should push the disambiguate flag");
+
+    session
+        .send(ControlCode::EndOfText)
+        .expect("failed to send Ctrl-C");
+    session
+        .expect(KITTY_POP)
+        .expect("the exit should pop what the start pushed");
+    session.assert_clean_exit();
+}
+
+/// **D517.** A terminal that answers only the device-attributes query does
+/// not speak the protocol: nothing is pushed, and the session runs on the
+/// hold-off repair alone.
+#[test]
+fn a_negative_kitty_probe_pushes_nothing() {
+    let mut session = ganja_probing();
+
+    session
+        .expect(KITTY_QUERY)
+        .expect("the kitty probe never asked");
+    // Device attributes alone: the flags query went unanswered.
+    session
+        .send("\x1b[?1;2c")
+        .expect("failed to answer the probe");
+
+    let after = session.harvest(600);
+    assert!(
+        !String::from_utf8_lossy(&after).contains(KITTY_PUSH),
+        "an unsupporting terminal must not have flags pushed at it"
+    );
+
+    session.quit_and_assert_clean_exit();
 }
 
 /// **D516.** A Left arrow whose `ESC [ D` bytes are split across two writes

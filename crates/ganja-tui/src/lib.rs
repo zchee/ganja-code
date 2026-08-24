@@ -40,7 +40,8 @@ use ganja_protocol::Message;
 use ratatui::crossterm::{
     event::{
         DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-        EnableFocusChange, EnableMouseCapture,
+        EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute,
 };
@@ -485,6 +486,9 @@ pub async fn run(
     let mut terminal = ratatui::try_init().context("failed to initialize the terminal")?;
     let outcome = match capture_input() {
         Ok(()) => {
+            // After `capture_input` and before the first `EventStream` poll,
+            // per the probe's own ordering constraint.
+            let kitty = capture_keys();
             // The model is the engine's to answer for, not the selection's:
             // the default agent may have named one of its own, and a resumed
             // session restores the one it was left on.
@@ -515,6 +519,10 @@ pub async fn run(
             // somebody who meant it and a file is written once and forgotten
             // (**D479**).
             .with_yolo(yolo)
+            // The kitty verdict: with the protocol active the split-Esc
+            // ambiguity cannot occur, so the repair runs in passthrough
+            // (**D516**, **D517**).
+            .with_kitty_keys(kitty)
             // The one place the prompt history reaches the disk: the default
             // store is inert, so a test that does not opt in never touches the
             // machine's own history.
@@ -679,6 +687,10 @@ fn capture_input() -> Result<()> {
 
     let installed = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        // Pop before the disables, mirroring push-last; popping an empty
+        // stack is a no-op by the kitty spec, so a session that never pushed
+        // loses nothing here.
+        let _ = execute!(stdout(), PopKeyboardEnhancementFlags);
         let _ = execute!(stdout(), DisableFocusChange);
         let _ = execute!(stdout(), DisableBracketedPaste);
         let _ = execute!(stdout(), DisableMouseCapture);
@@ -686,6 +698,51 @@ fn capture_input() -> Result<()> {
     }));
 
     Ok(())
+}
+
+/// Enables the kitty keyboard protocol where the terminal offers it
+/// (**D517**), answering whether it did.
+///
+/// The probe writes a query to the tty and blocks up to two seconds for an
+/// answer (`crossterm`'s own recommended detection), so `GANJA_DISABLE_TERM_PROBE`
+/// skips it wholesale — the kill switch for a terminal that never answers,
+/// and what every pty drill sets, because a test harness is exactly such a
+/// terminal. Only `DISAMBIGUATE_ESCAPE_CODES` is pushed: key events stay
+/// Press-shaped and every existing match arm holds; what changes is that Esc
+/// arrives as `CSI 27 u`, which no read boundary can split into a phantom
+/// key — the ambiguity [`escrepair`] exists to repair, removed at the
+/// protocol level, which is why a session that pushed the flag runs the
+/// repair in passthrough.
+///
+/// Must run before the first `EventStream` poll: the probe reads its answer
+/// off the same internal queue the stream consumes.
+fn capture_keys() -> bool {
+    let disabled = std::env::var("GANJA_DISABLE_TERM_PROBE").is_ok_and(|value| {
+        let value = value.to_ascii_lowercase();
+        value == "1" || value == "true"
+    });
+    if disabled {
+        return false;
+    }
+    if !matches!(
+        ratatui::crossterm::terminal::supports_keyboard_enhancement(),
+        Ok(true)
+    ) {
+        return false;
+    }
+    match execute!(
+        stdout(),
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    ) {
+        Ok(()) => {
+            tracing::info!("kitty keyboard protocol enabled");
+            true
+        }
+        Err(error) => {
+            tracing::warn!("failed to push keyboard enhancement flags: {error}");
+            false
+        }
+    }
 }
 
 fn restore() -> Result<()> {
@@ -698,6 +755,9 @@ fn restore() -> Result<()> {
         let _ = out.write_all(emitter.delete_all().as_bytes());
         let _ = out.flush();
     }
+    // Pop first, mirroring push-last; a no-op when nothing was pushed.
+    let keys =
+        execute!(stdout(), PopKeyboardEnhancementFlags).context("failed to pop keyboard flags");
     let focus = execute!(stdout(), DisableFocusChange).context("failed to disable focus reporting");
     let paste =
         execute!(stdout(), DisableBracketedPaste).context("failed to disable bracketed paste");
@@ -705,7 +765,7 @@ fn restore() -> Result<()> {
         execute!(stdout(), DisableMouseCapture).context("failed to disable mouse reporting");
     let terminal = ratatui::try_restore().context("failed to restore the terminal");
 
-    focus.and(paste).and(mouse).and(terminal)
+    keys.and(focus).and(paste).and(mouse).and(terminal)
 }
 
 #[cfg(test)]

@@ -20,7 +20,10 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use ratatui::crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture},
+    event::{
+        DisableMouseCapture, EnableMouseCapture, KeyboardEnhancementFlags,
+        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -117,7 +120,7 @@ pub fn command(shell: &Path, program: &str, path: &Path) -> Command {
 ///
 /// Returns an error if the temporary file cannot be written or read, or if the
 /// editor cannot be launched.
-pub fn edit(text: &str) -> Result<String> {
+pub fn edit(text: &str, kitty: bool) -> Result<String> {
     let directory = tempfile::tempdir().context("failed to make room for the prompt")?;
     let path = seed(directory.path(), text).context("failed to write the prompt out")?;
 
@@ -127,11 +130,11 @@ pub fn edit(text: &str) -> Result<String> {
     let shell = ganja_tool::shell::posix_shell()
         .context("failed to find a shell to run the editor under")?;
 
-    let released = release();
+    let released = release(kitty);
     let status = command(&shell, &configured_program(), &path)
         .status()
         .context("failed to run the editor");
-    let taken = take();
+    let taken = take(kitty);
 
     // The terminal comes first: a refusal the user cannot read is worse than
     // the refusal itself.
@@ -146,16 +149,33 @@ pub fn edit(text: &str) -> Result<String> {
 }
 
 /// Gives the terminal back to the shell, so a child process can use it.
-fn release() -> Result<()> {
+///
+/// A session that pushed the kitty keyboard flags (**D517**) pops them before
+/// leaving: the flag stacks are per screen buffer, so a stack left standing
+/// here would still be standing when the alternate screen comes back — and
+/// [`take`] pushes again, which unbalanced would grow the stack by one per
+/// editor round-trip.
+fn release(kitty: bool) -> Result<()> {
+    if kitty {
+        execute!(io::stdout(), PopKeyboardEnhancementFlags)
+            .context("failed to pop keyboard flags")?;
+    }
     disable_raw_mode().context("failed to leave raw mode")?;
     execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture)
         .context("failed to leave the alternate screen")
 }
 
 /// Takes the terminal back, once the child is done with it.
-fn take() -> Result<()> {
+fn take(kitty: bool) -> Result<()> {
     execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture)
         .context("failed to re-enter the alternate screen")?;
+    if kitty {
+        execute!(
+            io::stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )
+        .context("failed to re-push keyboard flags")?;
+    }
     enable_raw_mode().context("failed to re-enter raw mode")
 }
 

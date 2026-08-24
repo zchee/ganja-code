@@ -576,6 +576,10 @@ pub struct App {
     /// [`App::handle`], so a phantom Esc and its `[D` tail become the arrow
     /// key they were.
     escrepair: EscRepair,
+    /// Whether the kitty keyboard flags are pushed (**D517**) — what the
+    /// external editor door pops on the way out and re-pushes on the way
+    /// back, keeping the alternate screen's stack balanced at one entry.
+    kitty_keys: bool,
     /// The backtrack walk, while the Esc Esc gesture is stepping the
     /// transcript's user messages (**D467**).
     backtrack: Option<Backtrack>,
@@ -898,6 +902,7 @@ impl App {
             code_only_rewind: false,
             last_esc: None,
             escrepair: EscRepair::active(),
+            kitty_keys: false,
             backtrack: None,
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             root: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
@@ -1077,6 +1082,18 @@ impl App {
         // cannot afford.
         self.status.set_yolo(yolo);
 
+        self
+    }
+
+    /// Records the kitty keyboard verdict (**D517**): with the protocol
+    /// active the split-Esc ambiguity cannot occur, so the repair machine
+    /// runs in passthrough rather than paying the hold-off (**D516**).
+    #[must_use]
+    pub fn with_kitty_keys(mut self, kitty: bool) -> Self {
+        self.kitty_keys = kitty;
+        if kitty {
+            self.escrepair = EscRepair::passthrough();
+        }
         self
     }
 
@@ -3785,7 +3802,7 @@ impl App {
     /// The terminal changes hands here, so the next frame cannot be a diff
     /// against what this process last drew — the editor drew over it.
     fn compose_externally(&mut self) {
-        let composed = external::edit(&self.editor.text());
+        let composed = external::edit(&self.editor.text(), self.kitty_keys);
         self.stale = true;
 
         match composed {
