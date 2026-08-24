@@ -73,11 +73,18 @@ const CHROME: usize = 3;
 /// restraint the popup-era `HINTS` already used: the header's own tab strip
 /// already spells out the digit shortcuts, and a footer trying to fit both
 /// halves of Claude Code's pattern on an 80-column terminal has no room left
-/// for a chord the toggle that opened the overlay already taught. The vim
-/// keys the overlay also answers — `j`/`k`, and the `Ctrl+U`/`Ctrl+D`
-/// half-page pair (2026-08-25) — go unlisted for the same reason: a person
-/// who reaches for them knows them, and the row has no room to teach them.
-const HINTS: &str = "q/esc close \u{b7} up/down/pgup/pgdn scroll";
+/// for a chord the toggle that opened the overlay already taught. Of the vim
+/// keys the overlay also answers, the `Ctrl+U`/`Ctrl+D` half-page pair is
+/// named (user directive, 2026-08-25) and `j`/`k` are not: a person who
+/// reaches for those knows them, and the row has no room to teach them.
+const HINTS: &str = "q/esc close \u{b7} up/down/pgup/pgdn/ctrl+u/d scroll";
+
+/// [`HINTS`] for a row too narrow to carry the vim pair beside the rest — an
+/// 80-column terminal on the transcript tab is exactly one column short — so
+/// the row keeps every key it always named and drops only the pair a person
+/// who reaches for it already knows. Chosen by [`footer`], never shown beside
+/// the full one.
+const HINTS_NARROW: &str = "q/esc close \u{b7} up/down/pgup/pgdn scroll";
 
 /// Everything [`Inspector::render`] reads fresh every frame, bundled so the
 /// method takes a handful of parameters rather than one per field — `App`
@@ -532,17 +539,21 @@ fn position(offset: usize, rows: usize, total: usize) -> String {
 /// hints.
 fn footer(tab: Tab, offset: usize, rows: usize, total: usize, width: usize) -> String {
     let mode = tab.name();
-    let left = format!("Showing {mode} \u{b7} {HINTS}");
     let right = format!("{mode} \u{b7} {}", position(offset, rows, total));
 
-    let room = width
-        .saturating_sub(left.width())
-        .saturating_sub(right.width());
-    if room == 0 {
-        return right;
+    // The full legend where the row has room for it, the narrow one where
+    // only that fits, and the position alone on a row too narrow for either.
+    for hints in [HINTS, HINTS_NARROW] {
+        let left = format!("Showing {mode} \u{b7} {hints}");
+        let room = width
+            .saturating_sub(left.width())
+            .saturating_sub(right.width());
+        if room > 0 {
+            return format!("{left}{gap}{right}", gap = " ".repeat(room));
+        }
     }
 
-    format!("{left}{gap}{right}", gap = " ".repeat(room))
+    right
 }
 
 #[cfg(test)]
@@ -914,6 +925,31 @@ mod tests {
         assert_eq!(
             down, pinned,
             "half a page down from there is the tail again, re-pinned:\n{down}"
+        );
+    }
+
+    /// The footer's legend is the full one where the row has room for it,
+    /// the narrow one — the vim pair dropped, nothing else — where only that
+    /// fits, and the position alone where neither does. Eighty columns on
+    /// the transcript tab is the narrow case, one column short of the full
+    /// row, which is what keeps the 80-column snapshot as it was.
+    #[test]
+    fn the_footer_drops_the_vim_pair_first_and_the_rest_of_the_legend_last() {
+        let wide = super::footer(super::Tab::Transcript, 0, 10, 10, 100);
+        assert!(wide.contains("ctrl+u/d scroll"), "{wide}");
+        assert_eq!(wide.chars().count(), 100);
+
+        let eighty = super::footer(super::Tab::Transcript, 0, 10, 10, 80);
+        assert!(
+            !eighty.contains("ctrl+u/d") && eighty.contains("pgdn scroll"),
+            "{eighty}"
+        );
+        assert_eq!(eighty.chars().count(), 80);
+
+        let tiny = super::footer(super::Tab::Transcript, 0, 10, 10, 20);
+        assert!(
+            !tiny.contains("scroll") && tiny.starts_with("transcript"),
+            "{tiny}"
         );
     }
 
