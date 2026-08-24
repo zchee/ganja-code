@@ -33,7 +33,10 @@ use ganja_core::{
     AgentRegistry, Engine, SessionId, Storage, catalog,
     config::{Config, Overrides, ThemeMode},
     instruction, provider,
-    teammate::{TeammateRegistry, pane::PaneShell},
+    teammate::{
+        TeammateRegistry,
+        pane::{PaneShare, PaneShell},
+    },
 };
 use ganja_permission::Project;
 use ganja_protocol::Message;
@@ -355,6 +358,15 @@ pub async fn run(
                                 .teammates
                                 .pane_shell()
                                 .map(PaneShell::configured)
+                                .unwrap_or_default(),
+                        )
+                        // And how wide the teammates' column opens
+                        // (2026-08-25), the same way.
+                        .with_pane_share(
+                            config
+                                .teammates
+                                .pane_share()
+                                .map(PaneShare::configured)
                                 .unwrap_or_default(),
                         ),
                 );

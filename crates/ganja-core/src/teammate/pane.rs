@@ -166,6 +166,43 @@ pub const SHELL: [&str; 2] = ["/bin/sh", "-s"];
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaneShell(Vec<String>);
 
+/// How much of the window's width the teammates' column takes when the
+/// first teammate opens it, in percent — the **default**: `| lead 35% |
+/// teammates 65% |` (user directive, 2026-08-25; 70 from 2026-08-20 until
+/// then). `teammates.pane_share` names another, and [`PaneShare`] carries
+/// whichever one a spawn got.
+pub const DEFAULT_SHARE: u8 = 65;
+
+/// The teammates' column's share of the width, in percent
+/// ([`DEFAULT_SHARE`] unless `teammates.pane_share` named one), handed to
+/// [`Placement::Beside`] by the first spawn that opens the column. tmux's
+/// `-l` sizes the **new** pane, so this is the teammates' share and the lead
+/// keeps what is left — which reads backwards from the layout, and is why it
+/// is a type with a name rather than a number in an argv. The config refuses
+/// anything outside 1..=99 at load; this type only carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PaneShare(u8);
+
+impl Default for PaneShare {
+    fn default() -> Self {
+        Self(DEFAULT_SHARE)
+    }
+}
+
+impl PaneShare {
+    /// The share `teammates.pane_share` named.
+    #[must_use]
+    pub fn configured(percent: u8) -> Self {
+        Self(percent)
+    }
+
+    /// The percentage, for a split and for a test to read back.
+    #[must_use]
+    pub fn percent(self) -> u8 {
+        self.0
+    }
+}
+
 impl Default for PaneShell {
     fn default() -> Self {
         Self(SHELL.iter().map(|word| (*word).to_owned()).collect())
@@ -282,9 +319,12 @@ pub(super) async fn split_idle_shell(
     // under that column's bottom. A listing that fails is not a spawn that
     // fails — where a pane sits is cosmetic — so it falls back to the
     // placement a lead with no column would have given it anyway.
+    let beside = Placement::Beside {
+        share: spec.share.percent(),
+    };
     let placement = match server.column_bottom().await {
         Ok(Some(bottom)) => Placement::Under(bottom),
-        Ok(None) => Placement::Beside,
+        Ok(None) => beside,
         Err(error) => {
             tracing::warn!(
                 teammate = spec.name.as_str(),
@@ -292,7 +332,7 @@ pub(super) async fn split_idle_shell(
                 "the teammates' column could not be read; opening beside the lead"
             );
 
-            Placement::Beside
+            beside
         }
     };
     let pane = server
@@ -524,7 +564,7 @@ mod tests {
     use ganja_protocol::team::MemberBackend;
     use ganja_team::{MemberName, TeamName, TeamsRoot};
 
-    use super::{CARRIED_ENV, PaneShell, SHELL, arguments};
+    use super::{CARRIED_ENV, DEFAULT_SHARE, PaneShare, PaneShell, SHELL, arguments};
     use crate::teammate::SpawnSpec;
 
     /// A spawn with every field a launch could be tempted to put on the line.
@@ -543,6 +583,7 @@ mod tests {
             plan_mode_required: true,
             parent_session_id: "01998ad0-0000-7000-8000-000000000000".to_owned(),
             shell: crate::teammate::pane::PaneShell::default(),
+            share: crate::teammate::pane::PaneShare::default(),
         }
     }
 
@@ -551,6 +592,15 @@ mod tests {
     /// agent type or the plan posture, for the reasons in the module doc. No
     /// posture rides the line at all (**D513**): `--auto` in particular is
     /// not a word a lead ever composes.
+    /// The share is the default until a config names one, and the number
+    /// carried is the one named: what `-l` is handed is the teammates' side.
+    #[test]
+    fn the_pane_share_is_the_default_until_the_config_names_one() {
+        assert_eq!(PaneShare::default().percent(), DEFAULT_SHARE);
+        assert_eq!(DEFAULT_SHARE, 65, "lead 35, teammates 65 (2026-08-25)");
+        assert_eq!(PaneShare::configured(40).percent(), 40);
+    }
+
     #[test]
     fn the_launch_line_is_the_five_spawn_flags_and_nothing_else() {
         let five = [

@@ -1000,6 +1000,12 @@ pub struct TeammateConfig {
     /// it, so the shell named has to be one. Refused at load when it is
     /// empty or cannot be split into words.
     pub shell: Option<String>,
+    /// How much of the window's width the teammates' column takes when the
+    /// first teammate opens it, in **percent** — the lead keeps the rest.
+    /// Absent is 65 (`| lead 35% | teammates 65% |`, user directive
+    /// 2026-08-25; 70 before that). Refused at load outside 1..=99: a column
+    /// of nothing or of everything is a lead with no screen or no teammate.
+    pub pane_share: Option<u8>,
 }
 
 impl TeammateConfig {
@@ -1012,6 +1018,13 @@ impl TeammateConfig {
             .as_deref()
             .and_then(shlex::split)
             .filter(|words| !words.is_empty())
+    }
+
+    /// The teammates' column's share of the width, in percent, when the
+    /// config names one. [`None`] leaves the pane door's own default alone.
+    #[must_use]
+    pub fn pane_share(&self) -> Option<u8> {
+        self.pane_share
     }
 
     /// The per-turn deadline this config asks for, if it asks for one.
@@ -1476,6 +1489,7 @@ impl Config {
             other.teammates.shim_turn_timeout,
         );
         overlay(&mut self.teammates.shell, other.teammates.shell);
+        overlay(&mut self.teammates.pane_share, other.teammates.pane_share);
         overlay(&mut self.tui.notifications, other.tui.notifications);
         overlay(
             &mut self.tui.notification_method,
@@ -2111,6 +2125,15 @@ fn check_teammates(teammates: &TeammateConfig) -> Result<(), String> {
              {shell:?} is empty or cannot be split into words"
         ));
     }
+    if let Some(share) = teammates.pane_share
+        && !(1..=99).contains(&share)
+    {
+        return Err(format!(
+            "teammates.pane_share must be a percentage of the window width between 1 and 99 for \
+             the teammates' column (the lead keeps the rest; absent is 65); {share} would leave \
+             one side of the split with no screen at all"
+        ));
+    }
     if teammates.shim_turn_timeout == Some(0) {
         return Err(
             "teammates.shim_turn_timeout must be at least 1 second; a deadline of 0 would kill \
@@ -2508,6 +2531,30 @@ mod tests {
     /// **D520.** `teammates.shell` is a command line split as a shell would
     /// split it; absent leaves the pane door's `/bin/sh -s` alone, and a
     /// value that is nothing is refused rather than spawning into nothing.
+    /// The column's share is a percentage the lead's side is the rest of:
+    /// absent leaves the door's default, a value inside 1..=99 is carried,
+    /// and either edge is refused by name — a split that gives one side
+    /// nothing is no split.
+    #[test]
+    fn teammates_pane_share_is_a_percentage_and_refused_at_either_edge() {
+        let config = parse(r#"{"model": "anthropic/claude-sonnet-5"}"#).expect("it parses");
+        assert_eq!(config.teammates.pane_share(), None);
+
+        let config = parse(r#"{"teammates": {"pane_share": 60}}"#).expect("it parses");
+        assert_eq!(config.teammates.pane_share(), Some(60));
+
+        for edge in [
+            r#"{"teammates": {"pane_share": 0}}"#,
+            r#"{"teammates": {"pane_share": 100}}"#,
+        ] {
+            let error = parse(edge).expect_err("a column of nothing or everything is refused");
+            let ConfigError::Parse { message, .. } = &error else {
+                panic!("expected a parse failure, got {error:?}");
+            };
+            assert!(message.contains("teammates.pane_share"), "{message}");
+        }
+    }
+
     #[test]
     fn teammates_shell_is_a_command_line_and_nothing_is_refused() {
         let config = parse(r#"{"model": "anthropic/claude-sonnet-5"}"#).expect("it parses");

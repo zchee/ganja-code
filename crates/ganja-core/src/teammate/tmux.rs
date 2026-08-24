@@ -165,14 +165,6 @@ const DEAD_FORMAT: &str = "#{pane_id} #{pane_dead}";
 /// two refused; this says that it was the one invocation they share.
 const DELIVERY: &str = "load-buffer ; paste-buffer";
 
-/// How much of the width the teammates' column takes when the first one opens
-/// it (user directive, 2026-08-20): `| lead 30% | teammates 70% |`.
-///
-/// tmux's `-l` sizes the **new** pane, so this is the teammates' share and the
-/// lead keeps what is left — which reads backwards from the layout and is why
-/// it is a named constant rather than a literal in the argv.
-const TEAMMATE_SHARE: &str = "70%";
-
 /// Whether this process is running inside a tmux pane.
 ///
 /// Reads the environment on every call rather than once: a lead started outside
@@ -245,8 +237,14 @@ pub struct Launch<'a> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Placement {
     /// The first teammate: a column of its own, split off the lead and
-    /// taking 70% of the width.
-    Beside,
+    /// taking `share` percent of the width — 65 unless `teammates.pane_share`
+    /// says otherwise ([`crate::teammate::pane::PaneShare`]). tmux's `-l`
+    /// sizes the **new** pane, so the number is the teammates' and the lead
+    /// keeps the rest.
+    Beside {
+        /// The teammates' column's share of the width, in percent.
+        share: u8,
+    },
     /// A later one, stacked under the pane named — the column's bottom.
     Under(String),
 }
@@ -456,8 +454,8 @@ impl Server {
         let mut command = self.command();
         command.arg("split-window");
         match &launch.placement {
-            Placement::Beside => {
-                command.arg("-h").arg("-l").arg(TEAMMATE_SHARE);
+            Placement::Beside { share } => {
+                command.arg("-h").arg("-l").arg(format!("{share}%"));
                 if let Some(pane) = &self.pane {
                     command.arg("-t").arg(pane);
                 }
@@ -1618,10 +1616,42 @@ mod tests {
             cwd,
             environment: &[],
             argv: &argv,
-            placement: Placement::Beside,
+            placement: Placement::Beside {
+                share: crate::teammate::pane::DEFAULT_SHARE,
+            },
         })
         .await
         .expect("the private server splits a pane")
+    }
+
+    /// The column takes the share it is handed, and the lead keeps the rest:
+    /// on a 200-column window a 65 splits off a pane about 130 wide (tmux
+    /// rounds, and a border takes a column), and a 35 one about 70.
+    #[tokio::test]
+    async fn a_column_beside_the_lead_takes_the_share_it_is_given() {
+        for (share, expected) in [(65u8, 130usize), (35, 70)] {
+            let server = PrivateServer::start(&["sleep", "3600"], &[], &[]);
+            let at = Server::at(server.socket(), Some(server.first_pane().to_owned()));
+            let argv: Vec<OsString> = ["sleep", "3600"].iter().map(OsString::from).collect();
+            let pane = at
+                .split(Launch {
+                    cwd: Path::new("/"),
+                    environment: &[],
+                    argv: &argv,
+                    placement: Placement::Beside { share },
+                })
+                .await
+                .expect("the private server splits a pane");
+            let width: usize = server
+                .run(&["display-message", "-p", "-t", &pane.id, "#{pane_width}"])
+                .trim()
+                .parse()
+                .expect("a pane width");
+            assert!(
+                width.abs_diff(expected) <= 2,
+                "a share of {share} on 200 columns gave the column {width} columns"
+            );
+        }
     }
 
     /// Polls `probe` until it is satisfied, or fails naming `what` and the

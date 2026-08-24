@@ -198,6 +198,7 @@ fn each_backend_tells_its_teammate_how_it_answers_before_the_task() {
         plan_mode_required: false,
         parent_session_id: "01998ad0-0000-7000-8000-000000000000".to_owned(),
         shell: ganja_core::teammate::pane::PaneShell::default(),
+        share: ganja_core::teammate::pane::PaneShare::default(),
     };
     let in_process = InProcess::new(
         Arc::new(FakeProvider::new("on it", Duration::ZERO)),

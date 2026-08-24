@@ -697,6 +697,10 @@ pub struct SpawnSpec {
     /// The shell a pane backend splits, until its launch line arrives
     /// (**D520**): the registry's, resolved once from `teammates.shell`.
     pub shell: pane::PaneShell,
+    /// The teammates' column's share of the width when this spawn opens it
+    /// (2026-08-25): the registry's, resolved once from
+    /// `teammates.pane_share`.
+    pub share: pane::PaneShare,
 }
 
 /// Renders everything except the prompt, which is rendered as a size — the
@@ -720,6 +724,7 @@ impl fmt::Debug for SpawnSpec {
             .field("plan_mode_required", &self.plan_mode_required)
             .field("parent_session_id", &self.parent_session_id)
             .field("shell", &self.shell)
+            .field("share", &self.share)
             .finish()
     }
 }
@@ -1328,6 +1333,9 @@ pub struct TeammateRegistry {
     /// The shell every pane teammate is spawned into (**D520**), resolved
     /// once from `teammates.shell` the way the deadline above is.
     pane_shell: pane::PaneShell,
+    /// The teammates' column's share of the width (2026-08-25), resolved
+    /// once from `teammates.pane_share` the same way.
+    pane_share: pane::PaneShare,
     /// Where a teammate's permission dialogs are handed to the lead (**D-5**).
     ///
     /// [`None`] until a frontend attaches one, and a registry that never gets
@@ -1405,6 +1413,7 @@ impl TeammateRegistry {
             exited: Arc::default(),
             shim_turn_timeout: None,
             pane_shell: pane::PaneShell::default(),
+            pane_share: pane::PaneShare::default(),
             dialogs: Mutex::new(None),
         }
     }
@@ -1453,6 +1462,22 @@ impl TeammateRegistry {
     #[must_use]
     pub fn pane_shell(&self) -> &pane::PaneShell {
         &self.pane_shell
+    }
+
+    /// Names how much of the width the teammates' column takes when the
+    /// first teammate of this session opens it (2026-08-25), on the same
+    /// consuming builder as the shell, for the same reason.
+    #[must_use]
+    pub fn with_pane_share(mut self, share: pane::PaneShare) -> Self {
+        self.pane_share = share;
+
+        self
+    }
+
+    /// The share the teammates' column takes when it opens.
+    #[must_use]
+    pub fn pane_share(&self) -> pane::PaneShare {
+        self.pane_share
     }
 
     /// How long one `cli` turn may run in this session.
@@ -1854,6 +1879,7 @@ impl TeammateRegistry {
             plan_mode_required: request.plan_mode_required,
             parent_session_id: self.lead_session_id.clone(),
             shell: self.pane_shell.clone(),
+            share: self.pane_share,
         };
 
         // Skipped outright for a backend that seeds its own — see
