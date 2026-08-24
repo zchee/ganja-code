@@ -533,13 +533,15 @@ fn builtin_hint(name: &str) -> Option<&'static str> {
 }
 
 /// The dim hint the composer draws after a typed command name (**D518**),
-/// Claude Code's own presentation: the full name and nothing after it shows
-/// what the arguments would be, and the first argument character typed
-/// removes it.
+/// Claude Code's own presentation: the full name alone shows what the
+/// arguments would be, and words typed after it consume the hint front to
+/// back — the slot still being typed into included — so what remains stays
+/// standing beside the cursor until the grammar runs out, or a word it has
+/// not got arrives.
 ///
-/// One refinement past the flat lookup: a `/team spawn` line that has not
-/// named anything yet shows [`SPAWN_GRAMMAR`] — the same one spelling the
-/// refusal and the `/team` dialog's input step already use.
+/// `/team` refines per subcommand: a `spawn` line's hint is [`SPAWN_GRAMMAR`]
+/// — the same one spelling the refusal and the `/team` dialog's input step
+/// already use — consumed the same way.
 #[must_use]
 pub fn inline_hint(text: &str, engine: &[EngineCommand]) -> Option<String> {
     if text.contains('\n') {
@@ -553,19 +555,146 @@ pub fn inline_hint(text: &str, engine: &[EngineCommand]) -> Option<String> {
     if name.is_empty() {
         return None;
     }
-    if !tail.trim().is_empty() {
-        if name == "team" && tail.trim() == "spawn" {
-            return Some(SPAWN_GRAMMAR.to_owned());
+    if name == "team" {
+        return team_hint(tail);
+    }
+    let hint = builtin_hint(name).map(str::to_owned).or_else(|| {
+        engine
+            .iter()
+            .find(|command| command.name == name)
+            .and_then(|command| command.hint.clone())
+    })?;
+    remaining(&hint, tail)
+}
+
+/// The `/team` line's own hint: the overview while nothing follows the name,
+/// then the chosen subcommand's remaining grammar as its arguments fill in.
+fn team_hint(tail: &str) -> Option<String> {
+    let trimmed = tail.trim_start();
+    if trimmed.is_empty() {
+        return builtin_hint("team").map(str::to_owned);
+    }
+    let (first, rest) = match trimmed.split_once(char::is_whitespace) {
+        Some((first, rest)) => (first, rest),
+        None => (trimmed, ""),
+    };
+    match first {
+        "spawn" => remaining(SPAWN_GRAMMAR, rest),
+        "shutdown" => remaining("[member]", rest),
+        _ => None,
+    }
+}
+
+/// One slot of a hint's grammar — `<name>`, `[--backend <surface>]`,
+/// `[what it should do]` — as [`hint_slots`] cut them.
+struct HintSlot {
+    /// The slot verbatim, for what remains of the hint.
+    text: String,
+    /// The flag that fills this slot (`--backend`), or [`None`] for a
+    /// positional one the next bare word fills.
+    flag: Option<String>,
+    /// Whether the flag takes a value token of its own.
+    takes_value: bool,
+}
+
+/// Cuts a hint at top-level spaces, so a bracketed phrase stays one slot.
+fn hint_slots(hint: &str) -> Vec<HintSlot> {
+    let mut slots = Vec::new();
+    let mut depth = 0usize;
+    let mut current = String::new();
+    for character in hint.chars() {
+        match character {
+            '[' | '<' => {
+                depth += 1;
+                current.push(character);
+            }
+            ']' | '>' => {
+                depth = depth.saturating_sub(1);
+                current.push(character);
+            }
+            ' ' if depth == 0 => {
+                if !current.is_empty() {
+                    slots.push(slot(std::mem::take(&mut current)));
+                }
+            }
+            _ => current.push(character),
         }
+    }
+    if !current.is_empty() {
+        slots.push(slot(current));
+    }
+    slots
+}
+
+/// Reads one cut piece into a [`HintSlot`].
+fn slot(text: String) -> HintSlot {
+    let (flag, takes_value) = {
+        let inner = text.strip_prefix('[').unwrap_or(text.as_str());
+        if let Some(rest) = inner.strip_prefix("--") {
+            let name_end = rest
+                .find(|character: char| character.is_whitespace() || character == ']')
+                .unwrap_or(rest.len());
+            let flag = format!("--{}", &rest[..name_end]);
+            let value = rest[name_end..].trim_end_matches(']');
+            (Some(flag), !value.trim().is_empty())
+        } else {
+            (None, false)
+        }
+    };
+    HintSlot {
+        text,
+        flag,
+        takes_value,
+    }
+}
+
+/// What is left of `hint` once the words already typed have consumed their
+/// slots, front to back: a bare word fills the first positional slot, a flag
+/// fills its own named slot (and its value, where it takes one, fills
+/// nothing), and the slot a word is still being typed into counts as filled —
+/// which is what keeps the rest of the hint standing beside the cursor.
+///
+/// [`None`] the moment the words outrun the grammar — every slot filled, or a
+/// flag the hint never named — because a hint that cannot say what comes next
+/// honestly says nothing.
+fn remaining(hint: &str, typed: &str) -> Option<String> {
+    let mut slots = hint_slots(hint);
+    let tokens: Vec<&str> = typed.split_whitespace().collect();
+    let last_in_progress = !typed.is_empty() && !typed.ends_with(char::is_whitespace);
+    let mut expect_value = false;
+    for (index, token) in tokens.iter().enumerate() {
+        if expect_value {
+            expect_value = false;
+            continue;
+        }
+        let complete = index + 1 < tokens.len() || !last_in_progress;
+        if token.starts_with("--") {
+            let matched = slots.iter().position(|slot| {
+                slot.flag.as_deref().is_some_and(|flag| {
+                    if complete {
+                        flag == *token
+                    } else {
+                        flag.starts_with(token)
+                    }
+                })
+            })?;
+            let slot = slots.remove(matched);
+            expect_value = complete && slot.takes_value;
+        } else {
+            let position = slots.iter().position(|slot| slot.flag.is_none())?;
+            slots.remove(position);
+        }
+    }
+    if slots.is_empty() {
         return None;
     }
-    if let Some(hint) = builtin_hint(name) {
-        return Some(hint.to_owned());
-    }
-    engine
-        .iter()
-        .find(|command| command.name == name)
-        .and_then(|command| command.hint.clone())
+    Some(
+        slots
+            .iter()
+            .map(|slot| slot.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
 }
 
 /// What `--backend` reads when the line ends before its value. Which surfaces
@@ -974,7 +1103,53 @@ mod tests {
             inline_hint("/team spawn ", &[]).as_deref(),
             Some(SPAWN_GRAMMAR)
         );
-        assert_eq!(inline_hint("/team spawn w1", &[]), None);
+        assert_eq!(
+            inline_hint("/team spawn w1", &[]).as_deref(),
+            Some("[--backend <surface>] [--agent <kind>] [what it should do]")
+        );
+    }
+
+    /// **D518.** Arguments consume the hint front to back — the token still
+    /// being typed included — so what remains stays standing (2026-08-24
+    /// screenshot: `foo` typed, the flags still there).
+    #[test]
+    fn typed_arguments_consume_the_hint_front_to_back() {
+        let flags = "[--backend <surface>] [--agent <kind>] [what it should do]";
+        assert_eq!(inline_hint("/team spawn w1", &[]).as_deref(), Some(flags));
+        assert_eq!(inline_hint("/team spawn w1 ", &[]).as_deref(), Some(flags));
+        assert_eq!(
+            inline_hint("/team spawn w1 --backend ganja", &[]).as_deref(),
+            Some("[--agent <kind>] [what it should do]")
+        );
+        assert_eq!(
+            inline_hint("/team spawn w1 --back", &[]).as_deref(),
+            Some("[--agent <kind>] [what it should do]"),
+            "a flag still being typed already names its slot"
+        );
+        assert_eq!(
+            inline_hint("/team spawn w1 fix the tests", &[]),
+            None,
+            "the first prompt word takes the last slot, and the words after it are prose"
+        );
+        assert_eq!(
+            inline_hint("/team spawn w1 --bogus", &[]),
+            None,
+            "a flag the grammar has not got silences the hint rather than guessing"
+        );
+    }
+
+    /// **D518.** `shutdown` hints its optional member until one is named.
+    #[test]
+    fn a_shutdown_line_hints_its_member_until_one_is_named() {
+        assert_eq!(
+            inline_hint("/team shutdown", &[]).as_deref(),
+            Some("[member]")
+        );
+        assert_eq!(
+            inline_hint("/team shutdown ", &[]).as_deref(),
+            Some("[member]")
+        );
+        assert_eq!(inline_hint("/team shutdown w1", &[]), None);
     }
 
     /// **D518.** A command file's own `argument-hint` reaches the composer,
