@@ -15,9 +15,22 @@ use unicode_width::UnicodeWidthStr as _;
 
 use crate::theme::Theme;
 
-/// What an unfocused composer shows at its cursor: a hollow box, the glyph a
-/// terminal draws for the cursor of a window that is not the focused one.
-const INACTIVE_CURSOR: &str = "\u{25af}";
+/// The style the widget is handed for its cursor cell — a marker, not a
+/// look: `SLOW_BLINK`, which nothing else in the box wears, so the render
+/// can find the cell the widget put the cursor on and hand that position to
+/// the terminal. The marker never reaches the screen; the render strips it.
+///
+/// The composer's cursor is the **terminal's own**, not a painted cell
+/// (user directive, 2026-08-25). The widget's default paints a reverse-video
+/// cell, and a painted cell is content: tmux hides the real cursor of an
+/// inactive pane but not a cell, so two ganjas side by side both showed a
+/// solid bar, and no glyph a cell can hold looks like the hollow box a
+/// terminal draws for the cursor of an unfocused window. Placing the real
+/// cursor where the composer's is gets every one of those looks for free,
+/// from the terminal that owns them.
+fn cursor_mark() -> Style {
+    Style::default().add_modifier(Modifier::SLOW_BLINK)
+}
 
 /// Rows the editor occupies, borders included.
 pub const HEIGHT: u16 = 5;
@@ -66,9 +79,6 @@ impl Mode {
 #[derive(Debug)]
 pub struct Editor {
     area: TextArea<'static>,
-    /// Whether the terminal is being looked at; decides how the cursor is
-    /// drawn ([`Editor::set_focused`]).
-    focused: bool,
     /// What the next Enter does, which is what the box is titled after.
     mode: Mode,
     /// The palette the box was last painted in, kept because replacing the
@@ -86,7 +96,6 @@ impl Editor {
     pub fn new(theme: &Theme) -> Self {
         let mut editor = Self {
             area: TextArea::default(),
-            focused: true,
             mode: Mode::default(),
             theme: theme.clone(),
             hint: None,
@@ -114,29 +123,8 @@ impl Editor {
         // theme cannot reach.
         self.area.set_placeholder_style(theme.dim);
         self.area.set_placeholder_text(self.mode.placeholder());
-    }
-
-    /// Draws the cursor the way a terminal draws the cursor of a window that
-    /// is not the focused one: a reverse-video block while the terminal is
-    /// looked at, a hollow box once it is not.
-    ///
-    /// The widget draws its cursor as a **cell** of its own — reverse video,
-    /// its default — rather than asking the terminal for one, so a pane
-    /// nobody is looking at kept a solid bar in its composer: tmux hides the
-    /// real cursor of an inactive pane, but a cell is content and stays (two
-    /// ganjas side by side, user report 2026-08-25, with the hollow box the
-    /// asked-for look). The widget tells nobody *where* it put the cursor,
-    /// so the unfocused style is a marker no other cell in the box wears —
-    /// `SLOW_BLINK` — and the render finds the marked cell and redraws it
-    /// (`INACTIVE_CURSOR`). The focus events `App` already reads for its
-    /// notifications (**D468**) say which way to draw.
-    pub fn set_focused(&mut self, focused: bool) {
-        self.focused = focused;
-        self.area.set_cursor_style(if focused {
-            Style::default().add_modifier(Modifier::REVERSED)
-        } else {
-            Style::default().add_modifier(Modifier::SLOW_BLINK)
-        });
+        // The cursor is the terminal's, not a painted cell (`cursor_mark`).
+        self.area.set_cursor_style(cursor_mark());
     }
 
     /// Switches what the next Enter does, and says so on the box.
@@ -310,28 +298,20 @@ impl Editor {
         self.hint = hint;
     }
 
-    /// Draws the editor into `area`.
-    pub fn render(&self, area: Rect, buffer: &mut Buffer) {
+    /// Draws the editor into `area`, and says where the terminal's cursor
+    /// belongs: the screen cell the widget put its cursor on, or [`None`] for
+    /// an area too small to hold one.
+    ///
+    /// The widget tells nobody where that cell is — it paints the cursor
+    /// itself and keeps its scrolling private — so it is handed a marker style
+    /// instead (`cursor_mark`) and the marked cell is found here, stripped
+    /// of the marker, and reported. The caller places the real cursor there
+    /// (`App::draw`); nothing is painted.
+    pub fn render(&self, area: Rect, buffer: &mut Buffer) -> Option<(u16, u16)> {
         (&self.area).render(area, buffer);
         self.render_hint(area, buffer);
-        if !self.focused {
-            self.render_inactive_cursor(area, buffer);
-        }
-    }
-
-    /// Redraws the cursor cell an unfocused widget marked
-    /// ([`Editor::set_focused`]) as the hollow box.
-    ///
-    /// On a blank cell — the end of the text, where the cursor usually is —
-    /// the box itself. On a character, the character stays and is underlined
-    /// instead: a cell cannot hold a box *around* a glyph, and hiding what
-    /// was typed under one would be worse than a different shape. An empty
-    /// box needs no special case: the widget draws its cursor as a blank cell
-    /// of its own *before* the placeholder, so the box lands there and the
-    /// words follow it — the shape the reference image had.
-    fn render_inactive_cursor(&self, area: Rect, buffer: &mut Buffer) {
         if area.width <= 2 || area.height <= 2 {
-            return;
+            return None;
         }
         let (left, top) = (area.x + 1, area.y + 1);
         let (right, bottom) = (area.x + area.width - 1, area.y + area.height - 1);
@@ -341,20 +321,12 @@ impl Editor {
                 buffer
                     .cell((x, y))
                     .is_some_and(|cell| cell.modifier.contains(Modifier::SLOW_BLINK))
-            });
-        let Some((x, y)) = marked else {
-            return;
-        };
-
-        let Some(cell) = buffer.cell_mut((x, y)) else {
-            return;
-        };
-        cell.modifier.remove(Modifier::SLOW_BLINK);
-        if cell.symbol().trim().is_empty() {
-            cell.set_symbol(INACTIVE_CURSOR);
-        } else {
-            cell.modifier.insert(Modifier::UNDERLINED);
+            })?;
+        if let Some(cell) = buffer.cell_mut(marked) {
+            cell.modifier.remove(Modifier::SLOW_BLINK);
         }
+
+        Some(marked)
     }
 
     /// Paints the hint dim after the typed text, inside the border.
@@ -666,13 +638,13 @@ mod tests {
         assert_eq!(editor.prompt().as_deref(), Some("ls -la"));
     }
 
-    /// The cursor is a cell the widget paints, so the focus decides its
-    /// shape: a reverse-video block while focused; unfocused, a hollow box on
-    /// a blank cell — the one the widget keeps before its placeholder —
-    /// and an underline under a character the cursor sits on, since a box
-    /// cannot go around a glyph.
+    /// The cursor is the terminal's, not a painted cell: the render reports
+    /// the cell the widget put its cursor on — the blank one before the
+    /// placeholder, the one after typed text, the character `Home` moves onto
+    /// — with nothing painted there, and nothing on an area too small for a
+    /// cursor.
     #[test]
-    fn an_unfocused_composer_draws_a_hollow_box_where_a_focused_one_draws_a_block() {
+    fn the_render_reports_the_cursor_cell_and_paints_nothing_on_it() {
         use ratatui::style::Modifier;
         const AREA: Rect = Rect {
             x: 0,
@@ -680,44 +652,34 @@ mod tests {
             width: 40,
             height: 5,
         };
-        let cell = |editor: &Editor, x: u16| {
+        let place = |editor: &Editor| {
             let mut buffer = Buffer::empty(AREA);
-            editor.render(AREA, &mut buffer);
-            let cell = &buffer[(x, 1)];
-            (cell.symbol().to_owned(), cell.modifier)
+            let at = editor.render(AREA, &mut buffer);
+            let unpainted = at.is_none_or(|(x, y)| {
+                !buffer[(x, y)]
+                    .modifier
+                    .intersects(Modifier::REVERSED | Modifier::SLOW_BLINK)
+            });
+            assert!(unpainted, "nothing is painted on the cursor cell");
+            at
         };
         let mut editor = Editor::new(&Theme::default());
-        assert!(
-            cell(&editor, 1).1.contains(Modifier::REVERSED),
-            "focused: the block, over the placeholder's first letter"
-        );
-
-        editor.set_focused(false);
-        let (symbol, modifier) = cell(&editor, 1);
         assert_eq!(
-            symbol,
-            super::INACTIVE_CURSOR,
-            "unfocused and empty: the box"
+            place(&editor),
+            Some((1, 1)),
+            "empty: before the placeholder"
         );
-        assert!(!modifier.intersects(Modifier::REVERSED | Modifier::SLOW_BLINK));
-        assert_eq!(cell(&editor, 2).0, "A", "and the placeholder follows it");
 
         typing(&mut editor, "ok");
-        assert_eq!(
-            cell(&editor, 3).0,
-            super::INACTIVE_CURSOR,
-            "after the text: the box"
-        );
-        assert_eq!(cell(&editor, 1).0, "o");
+        assert_eq!(place(&editor), Some((3, 1)), "after the typed text");
         editor.line_home();
-        let (symbol, modifier) = cell(&editor, 1);
-        assert_eq!(symbol, "o", "on a character the character stays");
-        assert!(modifier.contains(Modifier::UNDERLINED) && !modifier.contains(Modifier::REVERSED));
+        assert_eq!(place(&editor), Some((1, 1)), "on the first character");
 
-        editor.set_focused(true);
-        assert!(
-            cell(&editor, 1).1.contains(Modifier::REVERSED),
-            "focus regained: the block again"
+        let mut tiny = Buffer::empty(Rect::new(0, 0, 2, 2));
+        assert_eq!(
+            editor.render(Rect::new(0, 0, 2, 2), &mut tiny),
+            None,
+            "an area with no inside has no cursor cell"
         );
     }
 

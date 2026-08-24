@@ -735,8 +735,9 @@ fn capture_input() -> Result<()> {
 /// (`Server::focused`), and it has to be asked: measured on next-3.8
 /// (2026-08-25), a pane that enables focus reporting is sent nothing about
 /// the state it starts in, and a ganja spawned into a pane beside the lead —
-/// every teammate — drew a focused composer's cursor until the first change.
-/// A tmux that will not answer leaves the default.
+/// every teammate — would take itself for looked-at until the first change
+/// and announce nothing (**D468**). A tmux that will not answer leaves the
+/// default.
 async fn initial_focus() -> bool {
     use ganja_core::teammate::tmux::{Server, TMUX_PANE};
 

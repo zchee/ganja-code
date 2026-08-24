@@ -1123,15 +1123,15 @@ impl App {
     /// Records the kitty keyboard verdict (**D517**): with the protocol
     /// active the split-Esc ambiguity cannot occur, so the repair machine
     /// runs in passthrough rather than paying the hold-off (**D516**).
-    /// Where the focus starts. Focus is otherwise learned from changes, and
-    /// a change presumes a starting state: outside tmux "looked at" is the
-    /// only honest one, and inside tmux the pane's own standing is what tmux
-    /// answers (`Server::focused`) — a pane split beside the lead starts
+    /// Where the focus starts — what the notifier's gate (**D468**) reads
+    /// until the first focus event. Focus is otherwise learned from changes,
+    /// and a change presumes a starting state: outside tmux "looked at" is
+    /// the only honest one, and inside tmux the pane's own standing is what
+    /// tmux answers (`Server::focused`) — a pane split beside the lead starts
     /// unfocused, and is told nothing of it.
     #[must_use]
     pub fn with_focused(mut self, focused: bool) -> Self {
         self.focused = focused;
-        self.editor.set_focused(focused);
         self
     }
 
@@ -2800,9 +2800,19 @@ impl App {
                 if let Some(permission) = &self.permission {
                     permission.render(transcript, buffer, &self.theme);
                 }
+                let mut cursor = None;
                 if self.inspector.is_none() {
-                    self.editor.render(prompt, buffer);
+                    cursor = self.editor.render(prompt, buffer);
                     self.status.render(status, buffer, &self.theme);
+                }
+                // The composer's cursor is the terminal's own, placed after
+                // the frame is drawn: whatever the terminal shows for a
+                // cursor — a block, a bar, the hollow box of an unfocused
+                // window, nothing in an inactive tmux pane — is what shows
+                // here (2026-08-25). A modal has the keys, so while one is up
+                // the frame places no cursor and the terminal hides it.
+                if let Some(cursor) = cursor.filter(|_| !self.modal_open()) {
+                    frame.set_cursor_position(cursor);
                 }
             })
             .context("failed to draw a frame")?;
@@ -2878,20 +2888,11 @@ impl App {
             // What the notifier's gate reads (**D468**): a terminal being
             // looked at needs no announcement, and these two events are the
             // only way this side ever learns which it is.
-            // And what the composer's cursor follows: the widget paints it
-            // as a cell, so an unfocused pane would keep a bar nobody's
-            // typing behind unless told to stop (2026-08-25).
             TermEvent::FocusGained => {
                 self.focused = true;
-                self.editor.set_focused(true);
-                self.dirty = true;
                 self.hint_clipboard_image();
             }
-            TermEvent::FocusLost => {
-                self.focused = false;
-                self.editor.set_focused(false);
-                self.dirty = true;
-            }
+            TermEvent::FocusLost => self.focused = false,
             _ => {}
         }
 
@@ -13682,51 +13683,43 @@ mod tests {
         log.lock().expect("the capture lock holds").clone()
     }
 
-    /// The composer's cursor is a painted cell, so it goes with the focus:
-    /// reverse video at the cursor while the terminal is looked at, a hollow
-    /// box once the focus went, the block again when it returns.
+    /// The composer's cursor is the terminal's own: the frame places it on
+    /// the composer's cursor cell — before the placeholder, after typed text
+    /// — and paints nothing there; while a modal has the keys the frame
+    /// places none.
     #[tokio::test]
-    async fn the_composer_cursor_goes_with_the_focus() {
+    async fn the_terminal_cursor_sits_in_the_composer_and_no_cell_is_painted_for_it() {
         let mut app = app();
         let mut terminal = terminal(80, 24);
-        let cursor_modifier = |terminal: &Terminal<TestBackend>| {
-            let text = screen(terminal);
-            let row = text
-                .lines()
-                .position(|line| line.contains("Ask ganja something"))
-                .expect("the composer is on screen");
-            let row = u16::try_from(row).expect("a row fits");
-            terminal.backend().buffer()[(1, row)].modifier
-        };
 
         app.draw(&mut terminal).expect("a frame draws");
+        let text = screen(&terminal);
+        let row = text
+            .lines()
+            .position(|line| line.contains("Ask ganja something"))
+            .expect("the composer is on screen");
+        let row = u16::try_from(row).expect("a row fits");
+        let placed = terminal
+            .get_cursor_position()
+            .expect("the test backend reports the cursor");
+        assert_eq!((placed.x, placed.y), (1, row), "before the placeholder");
         assert!(
-            cursor_modifier(&terminal).contains(ratatui::style::Modifier::REVERSED),
-            "focused by default, the cursor is painted"
+            !terminal.backend().buffer()[(1, row)]
+                .modifier
+                .contains(ratatui::style::Modifier::REVERSED),
+            "and no cell is painted for it"
         );
 
-        app.handle(AppEvent::Term(TermEvent::FocusLost))
-            .await
-            .expect("focus lost is handled");
+        for character in ['o', 'k'] {
+            app.handle(key(KeyCode::Char(character), KeyModifiers::NONE))
+                .await
+                .expect("typing is handled");
+        }
         app.draw(&mut terminal).expect("a frame draws");
-        assert!(
-            !cursor_modifier(&terminal).contains(ratatui::style::Modifier::REVERSED),
-            "an unfocused pane paints no solid block"
-        );
-        assert!(
-            screen(&terminal).contains("\u{25af}Ask ganja something"),
-            "it paints the hollow box before the placeholder:\n{}",
-            screen(&terminal)
-        );
-
-        app.handle(AppEvent::Term(TermEvent::FocusGained))
-            .await
-            .expect("focus gained is handled");
-        app.draw(&mut terminal).expect("a frame draws");
-        assert!(
-            cursor_modifier(&terminal).contains(ratatui::style::Modifier::REVERSED),
-            "and it is back with the focus"
-        );
+        let placed = terminal
+            .get_cursor_position()
+            .expect("the test backend reports the cursor");
+        assert_eq!((placed.x, placed.y), (3, row), "after the typed text");
     }
 
     #[tokio::test]

@@ -802,9 +802,9 @@ impl Server {
     /// tmux does not: measured on next-3.8 (2026-08-25), a pane that enables
     /// focus reporting is sent nothing about the state it starts in, only the
     /// changes after, so a ganja that came up in a pane nobody was looking at
-    /// — every teammate pane, split `-d` beside the lead — drew a focused
-    /// composer's cursor until the first change. The one reader asks this
-    /// once, at startup. Not the client's own focus: whether the terminal
+    /// — every teammate pane, split `-d` beside the lead — took itself for
+    /// looked-at until the first change. The one reader asks this once, at
+    /// startup, to seed what its notifications gate on. Not the client's own focus: whether the terminal
     /// window is looked at is the terminal's business, and the terminal
     /// reports that as a change like any other.
     ///
