@@ -109,19 +109,19 @@ pub(crate) const RESULT: &str = "  \u{23bf} ";
 /// every message with.
 const PROMPT: &str = "> ";
 
-/// What leads thinking a person can read, and the line a running turn leaves
-/// at the tail of the transcript.
-///
-/// One glyph for both because they are one thing seen twice: the tail says a
-/// turn is thinking, and this is what it thought. The glyph is `∴` — the
-/// therefore sign, a conclusion being drawn — where Claude Code's grammar
-/// (D487) has `✻`; the one deliberate departure from that screenshot, by user
-/// directive (2026-08-25). `WORKING` follows it, so the two surfaces cannot
-/// drift apart.
+/// What leads thinking a person can read in the transcript: `∴`, the
+/// therefore sign — a conclusion being drawn — where Claude Code's grammar
+/// (D487) has `✻`. The one deliberate departure from that screenshot, by user
+/// directive (2026-08-25).
 const THINKING: &str = "\u{2234} ";
 
-/// See [`THINKING`].
-const WORKING: &str = THINKING;
+/// What leads the line a running turn leaves at the tail of the transcript:
+/// Claude Code's own `✻`, kept where the thought itself changed glyph. The
+/// two surfaces had shared one constant as one thing seen twice; the same
+/// day's second directive narrowed that — the working line is the turn's
+/// pulse and keeps that program's mark, while a thought on the page is
+/// ganja's to mark — so they are two constants now, on purpose.
+const WORKING: &str = "\u{273b} ";
 
 /// The words a working line runs under, one per turn in order.
 ///
@@ -3151,7 +3151,7 @@ mod tests {
         let running = strip(&mut chat, 60);
 
         assert!(
-            !transcript.iter().any(|line| line.starts_with("\u{2234} ")),
+            !transcript.iter().any(|line| line.starts_with("\u{273b} ")),
             "the transcript itself no longer carries the line: {transcript:?}"
         );
         assert_eq!(
@@ -3162,7 +3162,7 @@ mod tests {
         assert!(
             running
                 .first()
-                .is_some_and(|line| line.starts_with("\u{2234} ")),
+                .is_some_and(|line| line.starts_with("\u{273b} ")),
             "the strip opens on the working line, got {running:?}"
         );
         assert_eq!(
@@ -3218,7 +3218,7 @@ mod tests {
         assert!(
             lines
                 .first()
-                .is_some_and(|line| line.starts_with("\u{2234} ")),
+                .is_some_and(|line| line.starts_with("\u{273b} ")),
             "the strip opens on the working line: {lines:?}"
         );
         assert_eq!(
@@ -4339,7 +4339,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line == "\u{2234} Thinking\u{2026} (12s \u{b7} \u{2193} 431 tokens)"),
+                .any(|line| line == "\u{273b} Thinking\u{2026} (12s \u{b7} \u{2193} 431 tokens)"),
             "got {lines:?}"
         );
         assert_eq!(
@@ -4369,7 +4369,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line == "\u{2234} Thinking\u{2026} (3s)"),
+                .any(|line| line == "\u{273b} Thinking\u{2026} (3s)"),
             "got {lines:?}"
         );
     }
@@ -4387,8 +4387,8 @@ mod tests {
                 .unwrap_or_default()
         };
 
-        assert_eq!(verb(0), "\u{2234} Working\u{2026} (0s)");
-        assert_eq!(verb(1), "\u{2234} Thinking\u{2026} (0s)");
+        assert_eq!(verb(0), "\u{273b} Working\u{2026} (0s)");
+        assert_eq!(verb(1), "\u{273b} Thinking\u{2026} (0s)");
         assert_ne!(verb(1), verb(2));
         let len = u64::try_from(WORKING_VERBS.len()).expect("verb count fits in u64");
         assert_eq!(
