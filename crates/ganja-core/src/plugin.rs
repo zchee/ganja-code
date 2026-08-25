@@ -1834,30 +1834,17 @@ fn read_component(path: &Path, plugin: &str) -> Option<Value> {
 }
 
 /// Splits a markdown file into its `---`-fenced frontmatter (as flat
-/// `key: value` pairs — the fields this build reads are all scalar) and its
-/// body. A file with no frontmatter is all body.
+/// `key: value` pairs) and its body — through [`ganja_tool::frontmatter`],
+/// the same reader a skill's, an agent's and a command file's own loaders
+/// use, so a plugin's markdown and a project's cannot parse two ways (that
+/// module's own "two parsers waiting to disagree" hazard; this file carried
+/// the second parser until it did disagree, on block scalars among others).
+/// A file with no frontmatter is all body.
 fn split_frontmatter(text: &str) -> (BTreeMap<String, String>, &str) {
-    let mut fields = BTreeMap::new();
-    let Some(rest) = text.strip_prefix("---") else {
-        return (fields, text);
-    };
-    let Some((front, body)) = rest.split_once("\n---") else {
-        return (fields, text);
-    };
-
-    for line in front.lines() {
-        if let Some((key, value)) = line.split_once(':') {
-            let key = key.trim();
-            let value = value.trim().trim_matches('"').trim_matches('\'');
-            if !key.is_empty() && !value.is_empty() {
-                fields.insert(key.to_owned(), value.to_owned());
-            }
-        }
+    match ganja_tool::frontmatter::split(text) {
+        Some((front, body)) => (ganja_tool::frontmatter::fields(front), body),
+        None => (BTreeMap::new(), text),
     }
-    // What follows the closing fence starts at the next line.
-    let body = body.split_once('\n').map_or("", |(_, after)| after);
-
-    (fields, body)
 }
 
 /// Merges every enabled plugin's contributions into a loaded [`Config`] —
@@ -2506,6 +2493,38 @@ mod tests {
         let (none, all) = split_frontmatter("just a body");
         assert!(none.is_empty());
         assert_eq!(all, "just a body");
+    }
+
+    /// The rows the hand-rolled parser this module once carried read
+    /// differently from [`ganja_tool::frontmatter`] — pinned here so a
+    /// plugin's markdown can never again parse two ways from a project's
+    /// (the shared reader's own "two parsers waiting to disagree" hazard).
+    #[test]
+    fn a_plugin_file_reads_through_the_same_grammar_as_a_projects() {
+        // A block-scalar description is the block, not the literal `|` — the
+        // skill estimate in `ganja plugin list` was priced from one char.
+        let (fields, _) = split_frontmatter(
+            "---\nname: reviewer\ndescription: |\n  Reviews code.\n  Carefully.\n---\nBody.",
+        );
+        assert_eq!(fields["description"], "Reviews code.\nCarefully.");
+
+        // A byte-order mark ahead of the fence must not cost somebody their
+        // frontmatter.
+        let (fields, body) = split_frontmatter("\u{feff}---\nname: bom\n---\nBody.");
+        assert_eq!(fields["name"], "bom");
+        assert_eq!(body, "Body.");
+
+        // The closing fence owns its whole line: a line merely starting with
+        // `---` does not end the block early.
+        let (fields, body) = split_frontmatter("---\nname: dashes\n---extra\n---\nBody.");
+        assert_eq!(fields["name"], "dashes");
+        assert_eq!(body, "Body.");
+
+        // A key with no scalar value (a block-list header like `tools:`) is
+        // present and empty rather than silently dropped — the same answer
+        // an agent file's own loader gives.
+        let (fields, _) = split_frontmatter("---\ntools:\n  - read\n---\nBody.");
+        assert_eq!(fields["tools"], "");
     }
 
     /// The collector is one function on purpose — `ganja plugin list` and the
