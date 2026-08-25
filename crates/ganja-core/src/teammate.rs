@@ -156,6 +156,9 @@ pub mod claude;
 pub mod codex;
 /// A teammate that is a headless `grok` child (**D508**, **D509**, **D510**).
 pub mod grok;
+/// The receiver-side admission gate: what a lead does with a peer message
+/// from outside its own team before anything is delivered (**D523**–**D525**).
+pub mod inbound;
 /// The §6.2 pass the lead makes over its own inbox.
 pub mod lead_inbox;
 /// What a process that *is* a member holds: its postbox, and its asks on their
