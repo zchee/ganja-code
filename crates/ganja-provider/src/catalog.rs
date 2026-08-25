@@ -69,8 +69,15 @@ pub const DISABLE_FETCH_ENV: &str = "GANJA_DISABLE_MODELS_FETCH";
 /// What the catalog endpoint is told the client is.
 ///
 /// Upstream sends `opencode/<channel>/<version>/<client>`; there is one
-/// channel and one client here, so the version alone says as much.
-const USER_AGENT: &str = concat!("ganja/", env!("CARGO_PKG_VERSION"));
+/// channel and one client here, so the product and the version alone say as
+/// much. **Ganja's own name, not a borrowed one** — no client registration is
+/// involved in reading a public catalog, so this host never had a reason to be
+/// told anything else, and it is
+/// [`GANJA_USER_AGENT`](crate::auth::device::GANJA_USER_AGENT) itself rather
+/// than a second spelling of it: a server logging ganja's traffic sees one
+/// product name across every wire this build speaks in its own voice, and
+/// naming the constant is what keeps that true rather than what claims it.
+const USER_AGENT: &str = crate::auth::device::GANJA_USER_AGENT;
 
 /// One deadline over connect, headers and body together.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);

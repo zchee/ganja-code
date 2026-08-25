@@ -200,10 +200,12 @@ async fn a_fetched_catalog_is_cached_verbatim_and_replaces_the_table() {
     );
     assert!(
         request.contains(&format!(
-            "user-agent: ganja/{}\r\n",
+            "user-agent: ganja-code/{}\r\n",
             env!("CARGO_PKG_VERSION")
         )),
-        "the request names this build: {request}"
+        "the request names this build, by the project's name rather than the \
+         binary's — one product name across every wire ganja speaks in its \
+         own voice: {request}"
     );
     assert!(
         !request.contains("authorization:") && !request.contains("x-api-key:"),

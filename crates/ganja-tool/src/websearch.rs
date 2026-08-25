@@ -422,9 +422,15 @@ async fn search(
             reqwest::header::ACCEPT,
             "application/json, text/event-stream",
         )
+        // Ganja's own name: neither service involves a client registration
+        // somebody else owns, so neither was ever told anything but what this
+        // is. Spelled the way `ganja-provider`'s `GANJA_USER_AGENT` spells it
+        // — a literal rather than that constant because this crate depends on
+        // `ganja-permission` and nothing else of ours, and one product name is
+        // not worth an edge in that graph.
         .header(
             reqwest::header::USER_AGENT,
-            concat!("ganja/", env!("CARGO_PKG_VERSION")),
+            concat!("ganja-code/", env!("CARGO_PKG_VERSION")),
         )
         .json(&body(service, args));
     if service == Service::Parallel {
@@ -780,6 +786,16 @@ mod tests {
         assert!(
             lowered.contains("content-type: application/json"),
             "the body is JSON: {seen}"
+        );
+        assert!(
+            lowered.contains(&format!(
+                "user-agent: ganja-code/{}\r\n",
+                env!("CARGO_PKG_VERSION")
+            )),
+            "the request names this build by the project's name — the one \
+             spelling every wire ganja speaks in its own voice carries, and \
+             never a borrowed one, since no service here involves somebody \
+             else's client registration: {seen}"
         );
         assert!(
             !lowered.contains("authorization:"),

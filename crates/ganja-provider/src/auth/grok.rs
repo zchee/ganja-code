@@ -119,6 +119,21 @@ const PLAN: &str = "generic";
 /// (`xai.ts:126-128`).
 const REFERRER: &str = "opencode";
 
+/// What x.ai is told this build is.
+///
+/// [`UPSTREAM_USER_AGENT`]'s bytes, named here rather than reached for
+/// directly so that **all three** of this host's call sites — the device
+/// authorization, the browser code exchange and the refresh — say one thing.
+/// A host that receives two different names from one client is the mismatched
+/// telemetry signature abuse detection looks for, which is why this and
+/// [`REFERRER`] beside it move together or not at all.
+///
+/// Both move in W4 of `.omc/plans/2026-08-25-ganja-code-identity-headers.md`,
+/// which probes a real `ganja auth login grok` against
+/// [`GANJA_USER_AGENT`](super::device::GANJA_USER_AGENT) before it lands;
+/// until then this is an alias and x.ai's wire bytes are unchanged.
+const XAI_USER_AGENT: &str = UPSTREAM_USER_AGENT;
+
 /// How long a browser login waits for the callback (`xai.ts:430-437`).
 pub const CALLBACK_DEADLINE: Duration = Duration::from_secs(5 * 60);
 
@@ -153,6 +168,10 @@ pub fn device_flow_at(
         token_url,
         CLIENT_ID,
         SCOPE,
+        // This host's name, not the shared one: `XAI_USER_AGENT` is what keeps
+        // the device authorization saying the same thing as the exchange and
+        // the refresh below it.
+        XAI_USER_AGENT,
         // RFC 8628 §3.1's encoding, which is what xAI's endpoints take
         // (`xai.ts:87-93`). GitHub's want JSON; see `super::copilot`.
         BodyEncoding::Form,
@@ -406,7 +425,7 @@ impl BrowserFlow {
             // The same three headers upstream sends (`xai.ts:87-93`), through
             // the same encoder the device flow's bodies go through.
             .header(reqwest::header::ACCEPT, "application/json")
-            .header(reqwest::header::USER_AGENT, UPSTREAM_USER_AGENT)
+            .header(reqwest::header::USER_AGENT, XAI_USER_AGENT)
             .header(
                 reqwest::header::CONTENT_TYPE,
                 "application/x-www-form-urlencoded",
@@ -677,7 +696,7 @@ impl super::RefreshOauth for Refresh {
             .client
             .post(&self.token_url)
             .header(reqwest::header::ACCEPT, "application/json")
-            .header(reqwest::header::USER_AGENT, UPSTREAM_USER_AGENT)
+            .header(reqwest::header::USER_AGENT, XAI_USER_AGENT)
             .header(
                 reqwest::header::CONTENT_TYPE,
                 "application/x-www-form-urlencoded",
@@ -787,7 +806,7 @@ mod tests {
             pkce::challenge_for,
             storage_key,
         },
-        BrowserError, CALLBACK_PORT, CLIENT_ID, PROVIDER_ID, Refresh, SCOPE, UPSTREAM_USER_AGENT,
+        BrowserError, CALLBACK_PORT, CLIENT_ID, PROVIDER_ID, Refresh, SCOPE, XAI_USER_AGENT,
         browser_flow_at, credential_from, device_flow_at,
     };
 
@@ -927,10 +946,12 @@ mod tests {
         );
         assert!(request.has_header("accept", "application/json"));
         // Upstream's own product name, against upstream's own registered
-        // client id — the combination the live spikes measured. Asserted as a
-        // literal as well as through the constant, so that changing the
-        // constant is a decision somebody has to come here and confirm.
-        assert!(request.has_header("user-agent", UPSTREAM_USER_AGENT));
+        // client id — the combination the live spikes measured. Asserted
+        // through this host's own constant, so that the wave which gives x.ai
+        // ganja's name moves one definition and reddens here, and as a literal
+        // as well, so that moving it is a decision somebody has to come here
+        // and confirm.
+        assert!(request.has_header("user-agent", XAI_USER_AGENT));
         assert!(request.has_header("user-agent", "opencode/1.18.22"));
 
         let fields = request.form();
@@ -1319,7 +1340,7 @@ mod tests {
             sent.head
         );
         assert!(sent.has_header("accept", "application/json"));
-        assert!(sent.has_header("user-agent", UPSTREAM_USER_AGENT));
+        assert!(sent.has_header("user-agent", XAI_USER_AGENT));
 
         let fields = sent.form();
         assert_eq!(

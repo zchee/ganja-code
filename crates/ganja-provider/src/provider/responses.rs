@@ -224,6 +224,21 @@ const ORIGINATOR_HEADER: &str = "originator";
 /// The value [`ORIGINATOR_HEADER`] carries.
 const ORIGINATOR: &str = "opencode";
 
+/// What the codex backend is told this build is.
+///
+/// [`auth::device::UPSTREAM_USER_AGENT`]'s bytes, named for
+/// `chatgpt.com/backend-api/codex` rather than reached for directly, because
+/// this header and [`ORIGINATOR`] beside it decide which feature cohort the
+/// backend serves — and a request naming itself one thing in the header and
+/// another in the query is the one shape that cannot be the intended answer.
+///
+/// Moves in W3 of `.omc/plans/2026-08-25-ganja-code-identity-headers.md`, with
+/// that originator and only after a live probe has recorded the model roster
+/// this seat is served under both names: the risk here is cohort placement
+/// rather than refusal, which is measurable and is therefore measured. Until
+/// then this is an alias and the wire bytes are unchanged.
+const CODEX_USER_AGENT: &str = auth::device::UPSTREAM_USER_AGENT;
+
 /// Opts the request into the Responses surface the Codex CLI talks to.
 ///
 /// **Not from the pin.** Upstream sends `openai-beta` only as the websocket
@@ -686,10 +701,7 @@ impl ResponsesProvider {
             built = built
                 .header(ORIGINATOR_HEADER, ORIGINATOR)
                 .header(BETA_HEADER, BETA)
-                .header(
-                    reqwest::header::USER_AGENT,
-                    auth::device::UPSTREAM_USER_AGENT,
-                );
+                .header(reqwest::header::USER_AGENT, CODEX_USER_AGENT);
 
             // Absent where the credential names no account: most people have
             // exactly one, and `auth::openai` treats a token with no such claim
@@ -1962,9 +1974,9 @@ mod tests {
 
     use super::{
         ACCOUNT_HEADER, ALLOWED_MODELS, Aliases, BETA, BETA_HEADER, Backend, Body,
-        CHAT_COMPLETIONS_ONLY, DEFAULT_BASE_URL, Frame, ID, Mapper as _, Mapping, OPENAI_CAP,
-        ORIGINATOR, ORIGINATOR_HEADER, ResponsesProvider, SEAT_ROSTER, SUBSCRIPTION_DEFAULT, alias,
-        generation, reauth, seals_reasoning, serves, summarized,
+        CHAT_COMPLETIONS_ONLY, CODEX_USER_AGENT, DEFAULT_BASE_URL, Frame, ID, Mapper as _, Mapping,
+        OPENAI_CAP, ORIGINATOR, ORIGINATOR_HEADER, ResponsesProvider, SEAT_ROSTER,
+        SUBSCRIPTION_DEFAULT, alias, generation, reauth, seals_reasoning, serves, summarized,
     };
     use crate::{
         auth::{self, AuthError, OauthCredential, RefreshOauth},
@@ -2171,9 +2183,9 @@ mod tests {
         assert_eq!(header(BETA_HEADER), Some(BETA));
         assert_eq!(
             header("user-agent"),
-            Some(auth::device::UPSTREAM_USER_AGENT),
-            "one User-Agent for every request this build makes against \
-             somebody else's client registration"
+            Some(CODEX_USER_AGENT),
+            "the name this host is told, which is this backend's own constant \
+             rather than one shared with every other host"
         );
 
         // A credential naming no account still makes a request: most people

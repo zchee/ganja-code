@@ -93,18 +93,21 @@ const ORIGINATOR: &str = "opencode";
 
 /// How this build identifies itself to the issuer.
 ///
-/// Upstream's own string, for the same reason [`ORIGINATOR`] is: every one of
-/// these logins presents a client id its own project registered, and the only
-/// header shape ever measured against a live endpoint was that project's. A
-/// `User-Agent` naming ganja, sent against somebody else's registered client,
-/// is a combination nothing has tested — and an authorization endpoint is the
-/// wrong place to discover it does not work.
+/// [`UPSTREAM_USER_AGENT`](crate::auth::device::UPSTREAM_USER_AGENT)'s bytes,
+/// named for `auth.openai.com` rather than reached for directly: every login
+/// here presents a client id upstream registered, and the only header shape
+/// ever measured against this live endpoint was that project's. The cost is
+/// worth naming — a server attributing traffic by this header credits ganja's
+/// requests to upstream — and it is why the name is now this host's to choose
+/// rather than one answer inherited by every host at once.
 ///
-/// The cost is real and worth naming: a server attributing traffic by this
-/// header will credit ganja's requests to upstream. That is a choice, recorded
-/// where it is made, and it is one constant across all three logins so it can
-/// be revisited in one place.
-const USER_AGENT: &str = crate::auth::device::UPSTREAM_USER_AGENT;
+/// Moves in W3 of `.omc/plans/2026-08-25-ganja-code-identity-headers.md`,
+/// together with [`ORIGINATOR`] because a host must never be told two
+/// different things about who is asking, and only after a real
+/// `ganja auth login` has completed against
+/// [`GANJA_USER_AGENT`](crate::auth::device::GANJA_USER_AGENT). Until then
+/// this is an alias and the wire bytes are unchanged.
+const ISSUER_USER_AGENT: &str = crate::auth::device::UPSTREAM_USER_AGENT;
 
 /// What a form-encoded body is announced as.
 const FORM: &str = "application/x-www-form-urlencoded";
@@ -589,7 +592,7 @@ impl Login {
         };
 
         let response = request
-            .header(reqwest::header::USER_AGENT, USER_AGENT)
+            .header(reqwest::header::USER_AGENT, ISSUER_USER_AGENT)
             .send()
             .await
             .map_err(unreachable)?;

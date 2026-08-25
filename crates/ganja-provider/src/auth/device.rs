@@ -42,38 +42,59 @@ use tokio_util::sync::CancellationToken;
 
 use super::RedactedTail;
 
-/// What both flows send as their `User-Agent`.
+/// The borrowed identity: what ganja sends where it presents somebody else's
+/// registered client and says so with somebody else's name.
 ///
-/// **Deliberately upstream's product name, not ganja's.** Both client ids
-/// below are applications somebody else registered — GitHub's is opencode's
-/// own (`copilot.ts:9`), xAI's is the one Grok-CLI ships and opencode reuses
-/// (`xai.ts:7-10`) — and the header shape measured against the live endpoints
-/// is this one. A different product name presented against another project's
-/// registered client id is a combination nothing has tested, and a
-/// device-authorization endpoint is the wrong place to find out; the spikes
-/// that measured it are also not repeatable, because the credentials they ran
-/// on are gone. The version is the pin this behaviour is a port of
-/// (`.omc/reference/opencode-v1.18.22`) rather than ganja's own, because
-/// `opencode/0.1.0` is a release that never existed and this string is meant
-/// to name one that did.
+/// **Deliberately upstream's product name, not ganja's** — and, since the
+/// per-host split, for **Copilot alone**: GitHub's device endpoints
+/// (`auth::copilot`) and `api.githubcopilot.com` (`provider::copilot`). The
+/// client id presented beside it is opencode's own registered application
+/// (`copilot.ts:9`), and the header shape measured against those live
+/// endpoints is this one. A different product name presented against another
+/// project's registered client id is a combination nothing has tested; the
+/// spikes that measured this one are also not repeatable, because the
+/// credentials they ran on are gone. The version is the pin this behaviour is
+/// a port of (`.omc/reference/opencode-v1.18.22`) rather than ganja's own,
+/// because `opencode/0.1.0` is a release that never existed and this string is
+/// meant to name one that did.
 ///
 /// **The cost, recorded honestly rather than argued away:** a `User-Agent` is
-/// what a server attributes traffic to, so ganja's device-flow requests are
-/// logged — and rate-limited — as opencode's. That is an externality on a
-/// third party, and it is the reason this is a decision rather than an
-/// obvious call. It is the user's to make, and it is made: the header shape is
-/// specified. Changing it later is this one constant and three assertions.
+/// what a server attributes traffic to, so ganja's Copilot requests are logged
+/// — and rate-limited — as opencode's. That is an externality on a third
+/// party, and it is the reason this is a decision rather than an obvious call.
+/// It is the user's to make, and it is now made *per host* rather than once
+/// for all of them: [`GANJA_USER_AGENT`] is what the hosts ganja can measure
+/// for itself receive, and this is what the one host it deliberately left
+/// alone still does.
 ///
-/// **Recorded for the lane that lands Copilot's request path:** the literal
-/// below is the only string the live spike ever exercised against
-/// `api.githubcopilot.com`. The *chat* API headers were never proven with any
-/// other value. That is a separate decision, on a separate host, and whoever
-/// makes it should make it deliberately rather than inherit this one.
+/// **Why that host is left alone**, recorded where the temptation to tidy it
+/// away will be: the literal below is the only string a live run ever
+/// exercised against `api.githubcopilot.com`, whose failure mode is a
+/// suspended GitHub account rather than a visible refusal, and whose named
+/// trigger is mismatched client telemetry. Every other host here fails
+/// loudly and recoverably. Moving Copilot is a decision on its own evidence.
 ///
-/// One constant, named for *which* of the two kinds of string it is, so that
-/// the OpenAI login and the wire lane share this answer rather than each
-/// inventing one.
+/// The two constants must never converge. A test in this module asserts they
+/// have not, and Copilot's two call sites pin these exact bytes as a literal
+/// beside the constant, so a rename cannot carry that host along with it.
 pub const UPSTREAM_USER_AGENT: &str = "opencode/1.18.22";
+
+/// What ganja sends where it says what it is.
+///
+/// The counterpart to [`UPSTREAM_USER_AGENT`], and the reason that one is now
+/// chosen per call site instead of inherited. `auth.openai.com`, the ChatGPT
+/// codex backend and xAI's endpoints are the hosts this is for; each of them
+/// reaches it through a constant named for that host, and each of those still
+/// aliases the borrowed value until the wave that probes its host lands, so
+/// introducing this changed no bytes on any wire. The catalog endpoint and
+/// `websearch`'s two services carry this spelling already — no borrowed
+/// registration is involved on either, so neither ever had a reason not to.
+///
+/// `ganja-code`, not `ganja`: the binary is `ganja` and the project is
+/// `ganja-code`, and a name a server logs should be one somebody can look up.
+/// The version is this build's own, which is the whole point — it names a
+/// release that exists.
+pub const GANJA_USER_AGENT: &str = concat!("ganja-code/", env!("CARGO_PKG_VERSION"));
 
 /// Added to every wait, for clock skew and timer drift.
 ///
@@ -324,6 +345,7 @@ pub struct DeviceFlow {
     token_url: String,
     client_id: &'static str,
     scope: &'static str,
+    user_agent: &'static str,
     encoding: BodyEncoding,
 }
 
@@ -336,6 +358,14 @@ impl DeviceFlow {
     /// that followed one would replay the body — which holds the device code,
     /// and later the refresh token — at whatever the redirect named.
     ///
+    /// `user_agent` is the caller's rather than this module's, because one
+    /// flow reaches two hosts that have made opposite decisions about what to
+    /// say they are: GitHub's endpoints receive
+    /// [`UPSTREAM_USER_AGENT`] and xAI's receive what `super::grok` names for
+    /// that host. A default here would be one host's answer imposed on the
+    /// other, which is exactly the choice this parameter exists to stop
+    /// anybody making by accident.
+    ///
     /// # Errors
     ///
     /// Returns [`DeviceError::Unreachable`] when no HTTP client can be built,
@@ -346,6 +376,7 @@ impl DeviceFlow {
         token_url: impl Into<String>,
         client_id: &'static str,
         scope: &'static str,
+        user_agent: &'static str,
         encoding: BodyEncoding,
     ) -> Result<Self, DeviceError> {
         let client =
@@ -361,6 +392,7 @@ impl DeviceFlow {
             token_url: token_url.into(),
             client_id,
             scope,
+            user_agent,
             encoding,
         })
     }
@@ -383,6 +415,16 @@ impl DeviceFlow {
     #[must_use]
     pub fn token_url(&self) -> &str {
         &self.token_url
+    }
+
+    /// What this flow tells both of its endpoints it is.
+    ///
+    /// Readable so that the identity a caller supplied can be asserted without
+    /// a socket: which of the two names a host receives is the decision
+    /// [`UPSTREAM_USER_AGENT`] and [`GANJA_USER_AGENT`] exist to keep apart.
+    #[must_use]
+    pub fn user_agent(&self) -> &'static str {
+        self.user_agent
     }
 
     /// Asks the provider to start an authorization, and returns what to show
@@ -582,7 +624,7 @@ impl DeviceFlow {
             .client
             .post(url)
             .header(reqwest::header::ACCEPT, "application/json")
-            .header(reqwest::header::USER_AGENT, UPSTREAM_USER_AGENT);
+            .header(reqwest::header::USER_AGENT, self.user_agent);
         let request = match self.encoding {
             BodyEncoding::Form => request
                 .header(
@@ -1009,10 +1051,11 @@ mod tests {
 
     use super::{
         BodyEncoding, DEFAULT_EXPIRES_MS, DEFAULT_INTERVAL_MS, DeviceError, DeviceFlow,
-        MIN_INTERVAL_MS, POLLING_SAFETY_MARGIN_MS,
+        GANJA_USER_AGENT, MIN_INTERVAL_MS, POLLING_SAFETY_MARGIN_MS, UPSTREAM_USER_AGENT,
         harness::{Endpoint, Reply, StalledClock, TestClock, serve},
         positive_seconds_ms, reportable_code,
     };
+    use crate::auth::copilot;
 
     /// A device-code answer with `interval` seconds between polls and a code
     /// good for `expires_in` seconds.
@@ -1023,6 +1066,13 @@ mod tests {
                  "interval":{interval},"expires_in":{expires_in}}}"#
         )
     }
+
+    /// What a flow says it is when the test is about something else.
+    ///
+    /// Neither of the two real names, deliberately: a test that happened to
+    /// pass because it sent the same string a production caller sends would
+    /// prove nothing about the parameter carrying it.
+    const TEST_USER_AGENT: &str = "device-flow-test/0.0.0";
 
     /// A flow pointed at `endpoint`, driven by `clock`.
     fn device_flow(
@@ -1035,6 +1085,7 @@ mod tests {
             format!("{}/token", endpoint.url),
             "test-client",
             "test-scope",
+            TEST_USER_AGENT,
             encoding,
         )
         .expect("a client builds")
@@ -1414,5 +1465,93 @@ mod tests {
                 "{unsafe_code:?} should not be repeated back"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn each_flow_sends_the_user_agent_its_own_caller_named() {
+        const ONE: &str = "one-name/1.1.1";
+        const ANOTHER: &str = "another-name/2.2.2";
+
+        // Both directions, because the failure this guards against is a shared
+        // value reappearing under two names — which a single construction
+        // cannot tell apart from a parameter that works.
+        for (mine, somebody_elses) in [(ONE, ANOTHER), (ANOTHER, ONE)] {
+            let endpoint = serve(vec![Reply::ok(authorization("5", "600"))]).await;
+            let flow = DeviceFlow::new(
+                format!("{}/device", endpoint.url),
+                format!("{}/token", endpoint.url),
+                "test-client",
+                "test-scope",
+                mine,
+                BodyEncoding::Form,
+            )
+            .expect("a client builds");
+
+            assert_eq!(flow.user_agent(), mine);
+
+            flow.start(&CancellationToken::new())
+                .await
+                .expect("the code is issued");
+
+            let request = endpoint.request(0);
+            assert!(
+                request.has_header("user-agent", mine),
+                "the flow should send what this caller supplied: {}",
+                request.head
+            );
+            assert!(
+                !request.has_header("user-agent", somebody_elses),
+                "and never the other caller's, which is the whole reason this \
+                 is a field rather than a constant: {}",
+                request.head
+            );
+        }
+    }
+
+    #[test]
+    fn the_borrowed_identity_and_ganjas_own_never_name_the_same_thing() {
+        // The boundary itself, asserted rather than described. Collapsing the
+        // two constants into one is the refactor that would send
+        // `ganja-code/…` to `api.githubcopilot.com`, whose named trigger for
+        // suspending an account is mismatched client telemetry.
+        assert_ne!(
+            UPSTREAM_USER_AGENT, GANJA_USER_AGENT,
+            "these two exist to be different; one of them is a name this \
+             build is not entitled to use everywhere"
+        );
+        assert_eq!(
+            UPSTREAM_USER_AGENT, "opencode/1.18.22",
+            "the borrowed identity is upstream's product at the pinned version"
+        );
+        assert!(
+            GANJA_USER_AGENT.starts_with("ganja-code/"),
+            "ganja's own name is the project's, not the binary's — which is \
+             also what rules out the pre-split spelling, since no string can \
+             begin with both: {GANJA_USER_AGENT}"
+        );
+
+        // Copilot's device half. The chat half is pinned where it is sent,
+        // beside the other three headers that were measured with it
+        // (`provider::copilot`'s own header test), as a literal as well as
+        // through this constant — between them, neither renaming this nor
+        // repointing that one can move `api.githubcopilot.com` quietly.
+        let copilot = copilot::device_flow_at(
+            "https://github.invalid/login/device/code",
+            "https://github.invalid/login/oauth/access_token",
+        )
+        .expect("a client builds");
+
+        assert_eq!(
+            copilot.user_agent(),
+            UPSTREAM_USER_AGENT,
+            "GitHub's device endpoints keep the borrowed identity"
+        );
+        assert_eq!(copilot.user_agent(), "opencode/1.18.22");
+        assert_ne!(
+            copilot.user_agent(),
+            GANJA_USER_AGENT,
+            "moving this host is a decision on its own evidence, not a \
+             consequence of tidying two constants into one"
+        );
     }
 }

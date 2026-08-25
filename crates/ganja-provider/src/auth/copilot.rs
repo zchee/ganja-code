@@ -29,7 +29,7 @@
 
 use super::{
     OauthCredential,
-    device::{BodyEncoding, DeviceError, DeviceFlow, Tokens},
+    device::{BodyEncoding, DeviceError, DeviceFlow, Tokens, UPSTREAM_USER_AGENT},
 };
 
 /// What this provider is called, on the command line and in the credential
@@ -171,6 +171,12 @@ pub fn device_flow_at(
         token_url,
         CLIENT_ID,
         SCOPE,
+        // Upstream's own product name, against upstream's own registered
+        // client id — the combination the live spikes measured, and the one
+        // host this build deliberately did not move to its own name. See
+        // `UPSTREAM_USER_AGENT`, which records what that costs and why this
+        // host in particular keeps paying it.
+        UPSTREAM_USER_AGENT,
         // GitHub's device endpoints take a **JSON** body
         // (`copilot.ts:236-245`, `:271-275`), which is a divergence from RFC
         // 8628's own examples and from what xAI wants. Sending the form
