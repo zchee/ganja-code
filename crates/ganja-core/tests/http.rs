@@ -20,6 +20,7 @@ use ganja_core::{
         AnthropicProvider, ChatRequest, OpenAiProvider, Provider, ProviderError, ProviderEvent,
     },
 };
+use ganja_testkit::drain;
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::{TcpListener, TcpStream},
@@ -956,23 +957,6 @@ async fn a_cancel_mid_stream_finishes_the_turn_as_cancelled() {
 
     assert_eq!(*reason, FinishReason::Cancelled);
     assert!(error.is_none(), "a cancel is not a failure, got {error:?}");
-}
-
-/// Drains events until the turn finishes.
-async fn drain(events: &mut futures::stream::BoxStream<'static, Event>) -> Vec<Event> {
-    let mut seen = Vec::new();
-
-    loop {
-        let Some(event) = events.next().await else {
-            return seen;
-        };
-        let finished = matches!(event, Event::MessageFinished { .. });
-        seen.push(event);
-
-        if finished {
-            return seen;
-        }
-    }
 }
 
 /// The text a transcript rebuilt from `events` alone would show.

@@ -1240,8 +1240,18 @@ mod tests {
                 client.exec_raw(&format!("display-message -p {i}")).await
             }));
         }
-        for handle in handles {
-            handle.await.unwrap().unwrap();
+        // The responder echoes each request line back as the reply body, so
+        // every exec must read back its *own* command whatever order the
+        // eight reached the wire in — a client that answered all eight from
+        // a misrouted slot would still return Ok, which is why Ok alone was
+        // not the claim.
+        for (i, handle) in handles.into_iter().enumerate() {
+            let response = handle.await.unwrap().unwrap();
+            assert_eq!(
+                response.lines,
+                vec![format!("display-message -p {i}")],
+                "exec {i} must be answered by the reply to its own command"
+            );
         }
         responder.await.unwrap();
     }

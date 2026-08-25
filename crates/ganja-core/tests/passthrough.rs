@@ -25,6 +25,7 @@ use ganja_core::{
     provider::{ChatRequest, Provider, ProviderError, ProviderEvent},
     tool::Registry,
 };
+use ganja_testkit::drain;
 use tokio_util::sync::CancellationToken;
 
 /// `text`, which a shell printed, as this platform spells a path.
@@ -137,23 +138,6 @@ fn engine(provider: Arc<dyn Provider>) -> Engine {
         Arc::new(Registry::new(Vec::new())),
         Permissions::default(),
     )
-}
-
-/// Drains until the turn finishes.
-async fn drain(events: &mut BoxStream<'static, Event>) -> Vec<Event> {
-    let mut seen = Vec::new();
-
-    loop {
-        let Some(event) = events.next().await else {
-            return seen;
-        };
-        let finished = matches!(event, Event::MessageFinished { .. });
-        seen.push(event);
-
-        if finished {
-            return seen;
-        }
-    }
 }
 
 /// The shell part as it finally stood.
