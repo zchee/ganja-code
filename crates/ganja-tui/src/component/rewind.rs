@@ -35,7 +35,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr as _;
 
 use crate::{
-    component::{body_rows, chat::clip, clamped, first_visible},
+    component::{action_row, body_rows, chat::clip, clamped, first_visible},
     theme::Theme,
 };
 
@@ -299,18 +299,7 @@ impl Rewind {
         ];
 
         for (index, (_, label, description)) in SCOPES.iter().enumerate() {
-            let row = format!(
-                "{marker}{label}",
-                marker = if index == option { MARKER } else { "  " },
-            );
-            lines.push(Line::styled(
-                clip(&row, width),
-                if index == option {
-                    theme.accent
-                } else {
-                    theme.fg
-                },
-            ));
+            lines.push(action_row(index, option, label, width, theme));
             lines.push(Line::styled(
                 clip(&format!("    {description}"), width),
                 theme.dim,

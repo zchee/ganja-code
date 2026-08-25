@@ -10,7 +10,12 @@
 //! slash, one on an `@` — plus the two read-only panels `/context` and
 //! `/usage` raise over the same chrome.
 
-use ratatui::layout::{Constraint, Rect};
+use ratatui::{
+    layout::{Constraint, Rect},
+    text::Line,
+};
+
+use crate::theme::Theme;
 
 /// What marks the row the cursor is on, and what pads every other row.
 pub(crate) const MARKER: &str = "> ";
@@ -29,6 +34,32 @@ pub(crate) const LIST_HINTS: &str = "[j/k] [up/down] move   [Enter] choose   [Es
 
 /// The keys its per-row action step answers to.
 pub(crate) const ACTION_HINTS: &str = "[j/k] [up/down] move   [Enter] run   [Esc] close";
+
+/// One row of a dialog's action step: [`MARKER`] and the accent on the
+/// selected index, two spaces and the plain foreground on every other — the
+/// one shape every two-step dialog draws its options in, spelled here so the
+/// four dialogs cannot drift into four.
+pub(crate) fn action_row(
+    index: usize,
+    option: usize,
+    label: &str,
+    width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let line = format!(
+        "{marker}{label}",
+        marker = if index == option { MARKER } else { "  " },
+    );
+
+    Line::styled(
+        chat::clip(&line, width),
+        if index == option {
+            theme.accent
+        } else {
+            theme.fg
+        },
+    )
+}
 
 /// The keys its free-text step answers to.
 pub(crate) const INPUT_HINTS: &str = "[type/backspace] edit   [Enter] submit   [Esc] cancel";

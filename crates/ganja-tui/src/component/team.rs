@@ -46,7 +46,7 @@ use crate::{
     command::TeamSpawn,
     component::{
         ACTION_HINTS, CHROME, INPUT_HINTS, LIST_HINTS, MARKER, MAX_HEIGHT, MAX_WIDTH, TwoStep,
-        body_rows,
+        action_row, body_rows,
         chat::{RESULT, clip},
         clamped, first_visible,
     },
@@ -729,19 +729,7 @@ impl Team {
 
         let mut lines = vec![Line::styled(clip(&row.name, width), theme.fg)];
         for (index, action) in Self::actions(row).iter().enumerate() {
-            let line = format!(
-                "{marker}{label}",
-                marker = if index == option { MARKER } else { "  " },
-                label = action.label(),
-            );
-            lines.push(Line::styled(
-                clip(&line, width),
-                if index == option {
-                    theme.accent
-                } else {
-                    theme.fg
-                },
-            ));
+            lines.push(action_row(index, option, action.label(), width, theme));
         }
 
         lines

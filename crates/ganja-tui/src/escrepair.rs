@@ -300,14 +300,7 @@ fn is_csi_final(c: char) -> bool {
 fn csi_key(params: &str, final_char: char) -> Option<TermEvent> {
     match final_char {
         'A' | 'B' | 'C' | 'D' | 'H' | 'F' => {
-            let code = match final_char {
-                'A' => KeyCode::Up,
-                'B' => KeyCode::Down,
-                'C' => KeyCode::Right,
-                'D' => KeyCode::Left,
-                'H' => KeyCode::Home,
-                _ => KeyCode::End,
-            };
+            let code = cursor_key(final_char)?;
             let modifiers = match params.split(';').nth(1) {
                 Some(raw) => parse_modifiers(raw)?,
                 None => KeyModifiers::NONE,
@@ -346,21 +339,31 @@ fn csi_key(params: &str, final_char: char) -> Option<TermEvent> {
     }
 }
 
+/// The cursor-cluster finals `CSI` and `SS3` spell the same way: the arrows,
+/// Home and End. One map, so the two decoders cannot disagree about what a
+/// final means — and so a final outside it is "not reconstructed" rather than
+/// a default key.
+fn cursor_key(final_char: char) -> Option<KeyCode> {
+    match final_char {
+        'A' => Some(KeyCode::Up),
+        'B' => Some(KeyCode::Down),
+        'C' => Some(KeyCode::Right),
+        'D' => Some(KeyCode::Left),
+        'H' => Some(KeyCode::Home),
+        'F' => Some(KeyCode::End),
+        _ => None,
+    }
+}
+
 /// The event crossterm would have produced for `ESC O <final>`.
 fn ss3_key(final_char: char) -> Option<TermEvent> {
-    let code = match final_char {
-        'A' => KeyCode::Up,
-        'B' => KeyCode::Down,
-        'C' => KeyCode::Right,
-        'D' => KeyCode::Left,
-        'H' => KeyCode::Home,
-        'F' => KeyCode::End,
-        'P' => KeyCode::F(1),
-        'Q' => KeyCode::F(2),
-        'R' => KeyCode::F(3),
-        'S' => KeyCode::F(4),
-        _ => return None,
-    };
+    let code = cursor_key(final_char).or(match final_char {
+        'P' => Some(KeyCode::F(1)),
+        'Q' => Some(KeyCode::F(2)),
+        'R' => Some(KeyCode::F(3)),
+        'S' => Some(KeyCode::F(4)),
+        _ => None,
+    })?;
     Some(TermEvent::Key(KeyEvent::new(code, KeyModifiers::NONE)))
 }
 

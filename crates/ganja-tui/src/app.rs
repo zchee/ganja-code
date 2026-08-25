@@ -1031,6 +1031,7 @@ impl App {
     }
 
     /// Copies through `clipboard` instead of the system's.
+    #[cfg(test)]
     #[must_use]
     pub fn with_clipboard(mut self, clipboard: Box<dyn clipboard::Clipboard>) -> Self {
         self.clipboard = clipboard;
@@ -1041,6 +1042,7 @@ impl App {
     /// Saves a pasted clipboard image under `dir` instead of the real
     /// `<XDG data>/ganja/clipboard` — a test seam, so a paste never reaches a
     /// real person's data directory.
+    #[cfg(test)]
     #[must_use]
     pub fn with_clipboard_scratch_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.clipboard_scratch = Some(dir.into());
@@ -1151,6 +1153,7 @@ impl App {
     /// discovers the machine's own store only when the `/plugin` dialog
     /// opens, so a test that hands one in never touches a real person's
     /// plugins.
+    #[cfg(test)]
     #[must_use]
     pub fn with_plugin_store(mut self, store: ganja_core::plugin::Store) -> Self {
         self.plugin_store = Some(store);
@@ -4150,6 +4153,18 @@ impl App {
         // to the chosen path the same way (`autocomplete.tsx:250,302-307`).
         let (_, start, end) = mention::split_range(&fragment.text);
 
+        self.splice_token(fragment, mention::token(path, start, end));
+    }
+
+    /// Replaces the composer fragment a menu was opened for with `token` —
+    /// the accept tail the file menu and the skill menu share, cursor left
+    /// after what was inserted.
+    ///
+    /// A space after the token closes it, so the menu does not reopen on what
+    /// was just chosen — but only when there is not one already, or completing
+    /// mid-sentence would widen the gap every time (upstream
+    /// `autocomplete.tsx:172-240` makes the same exception).
+    fn splice_token(&mut self, fragment: &mention::Fragment, token: String) {
         let mut lines: Vec<String> = self.editor.text().split('\n').map(str::to_owned).collect();
         let Some(line) = lines.get_mut(fragment.row) else {
             return;
@@ -4163,17 +4178,12 @@ impl App {
             .get(fragment.start + fragment.width()..)
             .unwrap_or_default();
         let tail: String = rest.iter().collect();
-        // A space after the mention closes it, so the menu does not reopen on
-        // the path that was just chosen — but only when there is not one
-        // already, or completing mid-sentence would widen the gap every time
-        // (upstream `autocomplete.tsx:172-240` makes the same exception).
-        let token = mention::token(path, start, end);
-        let mention = match rest.first() {
+        let inserted = match rest.first() {
             Some(next) if next.is_whitespace() => token,
             _ => format!("{token} "),
         };
-        let column = head.chars().count() + mention.chars().count();
-        *line = format!("{head}{mention}{tail}");
+        let column = head.chars().count() + inserted.chars().count();
+        *line = format!("{head}{inserted}{tail}");
 
         let row = fragment.row;
         self.editor.set_text_at(&lines.join("\n"), row, column);
@@ -4230,32 +4240,7 @@ impl App {
         };
         let fragment = menu.fragment();
 
-        let mut lines: Vec<String> = self.editor.text().split('\n').map(str::to_owned).collect();
-        let Some(line) = lines.get_mut(fragment.row) else {
-            return;
-        };
-
-        let characters: Vec<char> = line.chars().collect();
-        let head: String = characters[..fragment.start.min(characters.len())]
-            .iter()
-            .collect();
-        let rest = characters
-            .get(fragment.start + fragment.width()..)
-            .unwrap_or_default();
-        let tail: String = rest.iter().collect();
-        // A space after the token closes it, so the menu does not reopen on
-        // the name that was just chosen — the file menu's own exception when
-        // one is already there.
-        let token = format!("${name}");
-        let inserted = match rest.first() {
-            Some(next) if next.is_whitespace() => token,
-            _ => format!("{token} "),
-        };
-        let column = head.chars().count() + inserted.chars().count();
-        *line = format!("{head}{inserted}{tail}");
-
-        let row = fragment.row;
-        self.editor.set_text_at(&lines.join("\n"), row, column);
+        self.splice_token(fragment, format!("${name}"));
     }
 
     /// Opens the `/skills` dialog: one row per discovered skill — name,
@@ -4581,24 +4566,33 @@ impl App {
     /// to spawn and the second exist precisely so as not to be offered.
     fn open_agents(&mut self) {
         let rows: Vec<list::Row> = self
-            .engine
+            .selectable_agents()
+            .into_iter()
+            .map(|agent| list::Row {
+                value: agent.name.clone(),
+                label: agent.name.clone(),
+                detail: agent.description.clone(),
+                active: self.agent.as_deref() == Some(agent.name.as_str()),
+            })
+            .collect();
+
+        self.chooser = Some((Chooser::Agents, ListDialog::new(" agents ", rows)));
+    }
+
+    /// The agents a user may switch to, in registry order — the one filter
+    /// [`App::open_agents`] and [`App::cycle_agent`] both apply, so the list
+    /// and the cycle cannot drift over who is offered.
+    fn selectable_agents(&self) -> Vec<&ganja_core::agent::Agent> {
+        self.engine
             .agents()
             .map(|registry| {
                 registry
                     .agents()
                     .iter()
                     .filter(|agent| agent.selectable())
-                    .map(|agent| list::Row {
-                        value: agent.name.clone(),
-                        label: agent.name.clone(),
-                        detail: agent.description.clone(),
-                        active: self.agent.as_deref() == Some(agent.name.as_str()),
-                    })
                     .collect()
             })
-            .unwrap_or_default();
-
-        self.chooser = Some((Chooser::Agents, ListDialog::new(" agents ", rows)));
+            .unwrap_or_default()
     }
 
     /// Moves to the next agent a user may switch to, wrapping.
@@ -4608,17 +4602,10 @@ impl App {
     /// at the end would mean reaching for the mouse.
     async fn cycle_agent(&mut self) {
         let names: Vec<String> = self
-            .engine
-            .agents()
-            .map(|registry| {
-                registry
-                    .agents()
-                    .iter()
-                    .filter(|agent| agent.selectable())
-                    .map(|agent| agent.name.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
+            .selectable_agents()
+            .into_iter()
+            .map(|agent| agent.name.clone())
+            .collect();
         if names.is_empty() {
             return;
         }

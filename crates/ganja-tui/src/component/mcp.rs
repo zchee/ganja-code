@@ -29,7 +29,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr as _;
 
 use crate::{
-    component::{body_rows, chat::clip, clamped, first_visible},
+    component::{action_row, body_rows, chat::clip, clamped, first_visible},
     theme::Theme,
 };
 
@@ -307,19 +307,7 @@ impl Mcp {
 
         let mut lines = vec![Line::styled(clip(&row.name, width), theme.fg)];
         for (index, action) in row.actions.iter().enumerate() {
-            let line = format!(
-                "{marker}{label}",
-                marker = if index == option { MARKER } else { "  " },
-                label = action.label(),
-            );
-            lines.push(Line::styled(
-                clip(&line, width),
-                if index == option {
-                    theme.accent
-                } else {
-                    theme.fg
-                },
-            ));
+            lines.push(action_row(index, option, action.label(), width, theme));
         }
 
         lines
