@@ -318,6 +318,11 @@ pub async fn run(args: RunArgs) -> Result<()> {
         config,
         ..
     } = assembled;
+    // The D479 trio reaches the receiver classifier (D523): a `run --auto`
+    // session is bypass-classed for cross-session admission, exactly as the
+    // UI's `--yolo` session is. Classification only — what `auto` does to
+    // dialogs stays `refuse_interactive_permissions`' below.
+    let engine = engine.with_inbound_bypass(auto);
     refuse_interactive_permissions(&engine);
     // Dialled in the background, exactly as the UI dials them: a server that
     // never answers costs its tools rather than the run. No file watcher
@@ -890,11 +895,13 @@ impl<'a> Reporter<'a> {
             // no consumer was promised.
             | Event::QuestionAsked { .. }
             | Event::QuestionReplied { .. }
-            // A hold and its settlement are a lead's surfaces and a headless
+            // A hold and its settlement are a lead's surfaces, and a headless
             // run leads no team — it installs no teammates and binds no
-            // socket a peer could reach — so neither can arrive here. The
-            // admission gate's own lanes grow the surfaces that draw them;
-            // these rows exist to keep the match honest.
+            // socket a peer could reach (the engine's own shutdown docs say
+            // exactly that; the plan's M8 line) — so neither can arrive
+            // here. A permanent honest ignore, not a bridge: the gate landed
+            // (D523–D525) and these rows keep the match exhaustive for a
+            // reader this account never owed anything to.
             | Event::PeerHeld { .. }
             | Event::PeerHoldSettled { .. }
             | Event::QuestionRejected { .. } => {}
