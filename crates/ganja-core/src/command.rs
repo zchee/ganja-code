@@ -7,10 +7,11 @@
 //! typed after the name and sends the result the way a typed message is sent.
 //!
 //! `/init` is the one builtin this build ships. Its template is upstream's
-//! `command/template/initialize.txt` verbatim, and everything it does about
-//! `AGENTS.md` — create it if it is absent, improve it in place if it is there
-//! — is *prompt* semantics. There is no file handling here and none upstream:
-//! the model reaches for `write` and `edit` like it would for any other file.
+//! `command/template/initialize.txt` with ganja's identity substituted
+//! (**D522**), and everything it does about `AGENTS.md` — create it if it is
+//! absent, improve it in place if it is there — is *prompt* semantics. There
+//! is no file handling here and none upstream: the model reaches for `write`
+//! and `edit` like it would for any other file.
 //!
 //! Expansion keeps upstream's order: fill the argument placeholders, run each
 //! ``!`command` `` the filled template names, trim the result, then resolve the
@@ -37,9 +38,9 @@ use crate::config::{CommandConfig, Config};
 /// Name of the builtin that writes a repository's `AGENTS.md`.
 pub const INIT: &str = "init";
 
-/// What `/init` sends, ported verbatim from upstream
-/// `packages/opencode/src/command/template/initialize.txt` (MIT; see
-/// `THIRD_PARTY_NOTICES.md`).
+/// What `/init` sends, derived from upstream
+/// `packages/opencode/src/command/template/initialize.txt` with ganja's
+/// identity substituted (**D522**; MIT, see `THIRD_PARTY_NOTICES.md`).
 const INIT_TEMPLATE: &str = include_str!("prompt/initialize.txt");
 
 /// `/init`'s one-line description, upstream's own string
@@ -1000,7 +1001,7 @@ mod tests {
     use crate::tool::{Credentials, FileTimes, ToolCtx};
 
     #[test]
-    fn the_init_template_is_upstreams_verbatim_with_the_worktree_filled_in() {
+    fn the_init_template_is_upstreams_with_ganjas_identity_and_the_worktree_filled_in() {
         let registry = Registry::builtin(Path::new("/repo/ganja"));
         let init = registry.get(INIT).expect("init is builtin");
 
@@ -1017,7 +1018,7 @@ mod tests {
         assert!(
             init.template
                 .starts_with("Create or update `AGENTS.md` for this repository."),
-            "the template is upstream's, unedited: {}",
+            "the template is upstream's prose, identity substituted: {}",
             init.template
         );
         assert_eq!(init.description.as_deref(), Some("guided AGENTS.md setup"));

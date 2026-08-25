@@ -7,8 +7,8 @@
 //! five in a project that opted into memory (**D478**), whose section
 //! `suffix_from` appends last of all:
 //!
-//! 1. the base prompt for the model's family, ported verbatim from upstream's
-//!    `session/prompt/*.txt`;
+//! 1. the base prompt for the model's family, derived from upstream's
+//!    `session/prompt/*.txt` with ganja's identity substituted (**D522**);
 //! 2. an environment block — the model's own name, where it is working, and
 //!    what day it is;
 //! 3. every instruction file that applies, each rendered as
@@ -78,14 +78,14 @@ use jiff::Timestamp;
 
 use crate::{config::Config, project::Project, tool::skill};
 
-/// Base prompt for Anthropic's models, ported verbatim (MIT; see
-/// `THIRD_PARTY_NOTICES.md`).
+/// Base prompt for Anthropic's models, derived from upstream with ganja's
+/// identity substituted (**D522**; MIT, see `THIRD_PARTY_NOTICES.md`).
 const ANTHROPIC: &str = include_str!("prompt/anthropic.txt");
 
-/// Base prompt for OpenAI's models, ported verbatim.
+/// Base prompt for OpenAI's models, derived the same way (**D522**).
 const GPT: &str = include_str!("prompt/gpt.txt");
 
-/// Base prompt for everything else, ported verbatim.
+/// Base prompt for everything else, derived the same way (**D522**).
 const DEFAULT: &str = include_str!("prompt/default.txt");
 
 /// The global instruction file, under the same directory the global config
