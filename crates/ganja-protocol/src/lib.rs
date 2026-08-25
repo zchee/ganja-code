@@ -219,6 +219,38 @@ impl From<String> for QuestionId {
     }
 }
 
+/// Identifies one held inbound peer message ([`Event::PeerHeld`]), so a
+/// settlement can name what it decides (**D524**).
+///
+/// A type of its own rather than a reused [`PermissionId`], for
+/// [`QuestionId`]'s reason and one more that is load-bearing: a frontend's
+/// dialog auto-answer machinery answers `PermissionId`s, so a hold it cannot
+/// even name is a hold it can never silently release.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct HeldId(String);
+
+impl HeldId {
+    /// Mints an id that sorts after every id minted before it.
+    #[must_use]
+    pub fn ascending() -> Self {
+        Self(uuidv7())
+    }
+
+    /// The id as it travels the wire.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for HeldId {
+    /// Adopts a stored id; see [`MessageId::from`].
+    fn from(id: String) -> Self {
+        Self(id)
+    }
+}
+
 /// Identifies a session: the conversation an [`Event`] belongs to and a
 /// stored record belongs under.
 ///
@@ -1295,6 +1327,25 @@ pub enum Command {
         /// The posture the next turn runs under.
         mode: PermissionMode,
     },
+    /// Settles one held inbound peer message ([`Event::PeerHeld`]) with a
+    /// person's decision (**D524**).
+    ///
+    /// A release is a request, never an override: the engine re-checks the
+    /// admission policy first, so an approval cannot deliver past a policy
+    /// that has since become refuse — the entry settles denied instead (v2
+    /// §"Reevaluation and manual decision", evidence 620847-620877). A settle
+    /// naming an id nobody holds is ignored, the same rule a permission reply
+    /// racing a cancel already lives under: the hold may have expired or been
+    /// re-evaluated while the dialog was up.
+    ///
+    /// [`Event::PeerHoldSettled`] announces how the hold actually ended,
+    /// which the re-check means is not always what `decision` asked.
+    SettleHeld {
+        /// The held message being settled.
+        id: HeldId,
+        /// What the person decided.
+        decision: HeldDecision,
+    },
     /// Runs `command` in the shell on the user's behalf and puts both the
     /// command and its output in the transcript, where the next model request
     /// will read them. Upstream's `!` passthrough.
@@ -1483,6 +1534,129 @@ impl std::fmt::Display for UnknownPermissionMode {
 }
 
 impl std::error::Error for UnknownPermissionMode {}
+
+/// Why an inbound cross-session message was held for review instead of being
+/// delivered or refused outright (**D523**).
+///
+/// Defined once, here: it crosses on [`Event::PeerHeld`] and is rendered by
+/// the review surfaces, while the engine's admission resolver imports it and
+/// keeps its resolver-only siblings — policy, receiver class, verdict — to
+/// itself. The parity causes are the reference's matrix (v2 §"The parity
+/// matrix, and when it actually applies", evidence 620535-620617); which of
+/// them installs an expiry timer is the `expires_in_ms` contract on
+/// [`Event::PeerHeld`], not this enum's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum HoldCause {
+    /// A configured `cross_session_inbound: "hold"` decided, before any
+    /// parity was consulted — an explicit value always wins over parity (v2
+    /// §"Explicit values", evidence 680146-680160). Carries which tier said
+    /// so, for a review surface to name.
+    Explicit {
+        /// The config tier the explicit policy came from.
+        source: PolicySource,
+    },
+    /// Sender and receiver asserted different permission classes.
+    ModeMismatch,
+    /// The receiver runs bypass-classed and the sender asserted no class at
+    /// all — the collapsed matrix's one hold, and the only parity cause
+    /// ganja's wire can produce today, since no ganja sender asserts a mode.
+    NoModeAsserted,
+    /// The receiver's own mode could not be read, so the message is held
+    /// fail-closed (v2 §"Receiver permission classes"). Structurally
+    /// unreachable while the mode is plain engine state; the arm exists
+    /// before its producer does, which is what fail-closed means.
+    ModeUnknown,
+}
+
+/// The config tier an explicit inbound policy came from (**D523**).
+///
+/// Ganja's spelling of the reference's source chain (v2 §"Source precedence
+/// and repository tightening (`MRf`)", evidence 620378-620481) over its own
+/// tiers: there is no managed-policy tier to name, and the project tier may
+/// only have tightened what the trusted tiers chose.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PolicySource {
+    /// The global config home.
+    Global,
+    /// The file `GANJA_CONFIG` names, which outranks the global tier.
+    ExplicitFile,
+    /// A project config file.
+    Project,
+}
+
+/// What a person decided about one held message ([`Command::SettleHeld`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeldDecision {
+    /// Deliver it — subject to the policy re-check the command's own
+    /// documentation owns.
+    Release,
+    /// Drop it. The sender is not told: the held answer it already got was
+    /// the last word.
+    Deny,
+}
+
+/// How a hold ended (**D524**).
+///
+/// Exactly the reference's settlement statuses minus `held`, which is the
+/// initial answer rather than an ending (v2 §"Receipts and sender UX",
+/// evidence 220977-221015, 886033-886075).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeldOutcome {
+    /// Released into the ordinary delivery path — by a person, or by a mode
+    /// change whose re-evaluation now accepts it.
+    Delivered,
+    /// Dropped — by a person's deny, or by a release re-checked against a
+    /// policy that now refuses.
+    Denied,
+    /// Dropped undecided: the deadline passed, capacity evicted it, or
+    /// shutdown settled it — never delivered, because nobody said so.
+    Expired,
+}
+
+/// Somebody's words, rendered in `Debug` as their size and never their text
+/// (**D524**).
+///
+/// The `summary` and `preview` on [`Event::PeerHeld`] are a foreign sender's
+/// own prose, and a derived `Debug` would carry them into any traced event —
+/// the admission gate's observability is typed reasons and identities, never
+/// bodies. Serde is transparent, so the wire and the store carry the text for
+/// the dialogs that exist to show it; only the `{:?}` rendering is redacted.
+/// The spelling (`<N bytes>`) matches the rule `ganja-team`'s
+/// `MailboxMessage` debug states, so one grep finds every place it is
+/// applied.
+///
+/// Deliberately no `Display`: showing the text is a decision a caller makes
+/// by writing [`as_str`](Self::as_str), never one a format string makes for
+/// them.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RedactedText(String);
+
+impl RedactedText {
+    /// The text itself, for the surfaces whose purpose is to show it.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for RedactedText {
+    /// Adopts the text verbatim; capping it for display is the builder's job,
+    /// exactly as it is for a peer part's fields.
+    fn from(text: String) -> Self {
+        Self(text)
+    }
+}
+
+impl std::fmt::Debug for RedactedText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<{} bytes>", self.0.len())
+    }
+}
 
 /// One choice a question offers.
 ///
@@ -1795,6 +1969,52 @@ pub enum Event {
         /// The posture the next turn runs under.
         mode: PermissionMode,
     },
+    /// An inbound cross-session message was held for review instead of being
+    /// delivered (**D524**): it has **not** reached the model, and never will
+    /// unless something settles it delivered. No turn waits on this —
+    /// settlement rides [`Command::SettleHeld`], a mode change's
+    /// re-evaluation, expiry, capacity eviction, or shutdown, and
+    /// [`Event::PeerHoldSettled`] announces whichever came.
+    ///
+    /// A frontend branches on `cause`: the parity causes raise the
+    /// per-message approval dialog, while an explicit or mode-unknown hold is
+    /// reviewed in the listing dialog alone.
+    PeerHeld {
+        /// Session this happened in: the lead session holding the message.
+        session_id: SessionId,
+        /// Names this hold, for the settlement.
+        id: HeldId,
+        /// The sender's claimed identity, `<name>@<team>` — claimed, because
+        /// the transport validates its shape and never who wrote it.
+        from: String,
+        /// Why it was held rather than delivered.
+        cause: HoldCause,
+        /// The sender's own one-line summary, where it wrote one. Absent from
+        /// the wire when there is none, exactly as a peer part's is.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        summary: Option<RedactedText>,
+        /// The body's opening, capped by whoever built the event, for the
+        /// approval dialog's expandable preview.
+        preview: RedactedText,
+        /// How long until this hold expires on its own, for a dialog to count
+        /// down. Present exactly for the parity causes: an explicit or
+        /// mode-unknown hold installs no timer and sits until mode change,
+        /// capacity, settlement or shutdown (v2 §"Cross-pass reconciliation",
+        /// the expiry re-check, evidence 1227895-1227987, 1265450-1265503).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expires_in_ms: Option<u64>,
+    },
+    /// A hold ended, so a frontend can retire its dialog and its listing row.
+    /// What `outcome` says may differ from what a [`Command::SettleHeld`]
+    /// asked, and the difference is the policy re-check doing its job.
+    PeerHoldSettled {
+        /// Session this happened in, addressed as its hold was.
+        session_id: SessionId,
+        /// The hold that ended.
+        id: HeldId,
+        /// How it ended.
+        outcome: HeldOutcome,
+    },
     /// A compaction is summarizing the window, and this is how far along it
     /// is: the summary streamed so far, estimated in tokens, against the
     /// output budget the engine's fit guard reserves for one.
@@ -1870,6 +2090,8 @@ impl Event {
             | Event::AgentChanged { session_id, .. }
             | Event::EffortChanged { session_id, .. }
             | Event::PermissionModeChanged { session_id, .. }
+            | Event::PeerHeld { session_id, .. }
+            | Event::PeerHoldSettled { session_id, .. }
             | Event::CompactionProgress { session_id, .. }
             | Event::MessageFinished { session_id, .. } => session_id,
         }
@@ -1893,10 +2115,11 @@ mod tests {
     use std::{collections::BTreeSet, sync::Mutex, thread};
 
     use super::{
-        Command, Event, FinishReason, Mention, Message, MessageId, MessageTime, Part, PartBody,
-        PartId, PermissionId, PermissionMode, PermissionReply, QuestionId, QuestionInfo,
-        QuestionOption, QuestionSource, REASONING_TAG, RevertInfo, RevertScope, Role, SessionId,
-        ToolState, UnknownPermissionMode, Usage, is_uuidv7, team, uuidv7,
+        Command, Event, FinishReason, HeldDecision, HeldId, HeldOutcome, HoldCause, Mention,
+        Message, MessageId, MessageTime, Part, PartBody, PartId, PermissionId, PermissionMode,
+        PermissionReply, PolicySource, QuestionId, QuestionInfo, QuestionOption, QuestionSource,
+        REASONING_TAG, RedactedText, RevertInfo, RevertScope, Role, SessionId, ToolState,
+        UnknownPermissionMode, Usage, is_uuidv7, team, uuidv7,
     };
 
     /// The session every pinned event happens in.
@@ -1968,9 +2191,10 @@ mod tests {
         assert!(sessions.iter().all(|id| is_uuidv7(id.as_str())));
         assert!(sessions.windows(2).all(|pair| pair[0] < pair[1]));
 
-        // The two ids nothing above mints, so that "every id here" is every id.
+        // The three ids nothing above mints, so that "every id here" is every id.
         assert!(is_uuidv7(PermissionId::ascending().as_str()));
         assert!(is_uuidv7(QuestionId::ascending().as_str()));
+        assert!(is_uuidv7(HeldId::ascending().as_str()));
     }
 
     #[test]
@@ -2267,6 +2491,20 @@ mod tests {
             Event::PermissionModeChanged {
                 session_id: pinned_session(),
                 mode: PermissionMode::Bypass,
+            },
+            Event::PeerHeld {
+                session_id: pinned_session(),
+                id: HeldId::from("held_1".to_owned()),
+                from: "w1@inbound".to_owned(),
+                cause: HoldCause::NoModeAsserted,
+                summary: Some(RedactedText::from("picked up W2".to_owned())),
+                preview: RedactedText::from("starting on the protocol surface".to_owned()),
+                expires_in_ms: Some(300_000),
+            },
+            Event::PeerHoldSettled {
+                session_id: pinned_session(),
+                id: HeldId::from("held_1".to_owned()),
+                outcome: HeldOutcome::Delivered,
             },
         ];
 
@@ -2979,6 +3217,59 @@ mod tests {
                 }),
                 r#"{"type":"permission_mode_changed","session_id":"ses_1","mode":"bypass"}"#,
             ),
+            // The admission surface: both settlement decisions, then a hold
+            // in its two wire shapes — an explicit cause carrying its source
+            // and the sender's summary, which installs no timer, and the
+            // collapsed-parity cause a timer and no summary write — then the
+            // settlement that retires one.
+            (
+                serde_json::to_string(&Command::SettleHeld {
+                    id: HeldId::from("held_1".to_owned()),
+                    decision: HeldDecision::Release,
+                }),
+                r#"{"type":"settle_held","id":"held_1","decision":"release"}"#,
+            ),
+            (
+                serde_json::to_string(&Command::SettleHeld {
+                    id: HeldId::from("held_1".to_owned()),
+                    decision: HeldDecision::Deny,
+                }),
+                r#"{"type":"settle_held","id":"held_1","decision":"deny"}"#,
+            ),
+            (
+                serde_json::to_string(&Event::PeerHeld {
+                    session_id: pinned_session(),
+                    id: HeldId::from("held_1".to_owned()),
+                    from: "w1@inbound".to_owned(),
+                    cause: HoldCause::Explicit {
+                        source: PolicySource::Global,
+                    },
+                    summary: Some(RedactedText::from("CI is red".to_owned())),
+                    preview: RedactedText::from("CI is red on main".to_owned()),
+                    expires_in_ms: None,
+                }),
+                r#"{"type":"peer_held","session_id":"ses_1","id":"held_1","from":"w1@inbound","cause":{"kind":"explicit","source":"global"},"summary":"CI is red","preview":"CI is red on main"}"#,
+            ),
+            (
+                serde_json::to_string(&Event::PeerHeld {
+                    session_id: pinned_session(),
+                    id: HeldId::from("held_1".to_owned()),
+                    from: "w1@inbound".to_owned(),
+                    cause: HoldCause::NoModeAsserted,
+                    summary: None,
+                    preview: RedactedText::from("done".to_owned()),
+                    expires_in_ms: Some(300_000),
+                }),
+                r#"{"type":"peer_held","session_id":"ses_1","id":"held_1","from":"w1@inbound","cause":{"kind":"no_mode_asserted"},"preview":"done","expires_in_ms":300000}"#,
+            ),
+            (
+                serde_json::to_string(&Event::PeerHoldSettled {
+                    session_id: pinned_session(),
+                    id: HeldId::from("held_1".to_owned()),
+                    outcome: HeldOutcome::Expired,
+                }),
+                r#"{"type":"peer_hold_settled","session_id":"ses_1","id":"held_1","outcome":"expired"}"#,
+            ),
             // A peer's words, richest form first: both display fields
             // present, then the shape a message with neither writes — a
             // sender that wrote no summary and a member with no color assigned
@@ -3012,6 +3303,105 @@ mod tests {
         for (encoded, expected) in cases {
             assert_eq!(encoded.expect("the value serializes"), expected);
         }
+    }
+
+    /// Pins the spelling of every hold cause, policy source, decision and
+    /// outcome — the whole admission vocabulary — and that each reads back as
+    /// itself, so a dialog that switches on a cause and a store that replays a
+    /// settlement can never drift out from under the wire.
+    #[test]
+    fn the_hold_vocabulary_spells_every_variant_and_round_trips() {
+        let causes = [
+            (
+                HoldCause::Explicit {
+                    source: PolicySource::Global,
+                },
+                r#"{"kind":"explicit","source":"global"}"#,
+            ),
+            (
+                HoldCause::Explicit {
+                    source: PolicySource::ExplicitFile,
+                },
+                r#"{"kind":"explicit","source":"explicit_file"}"#,
+            ),
+            (
+                HoldCause::Explicit {
+                    source: PolicySource::Project,
+                },
+                r#"{"kind":"explicit","source":"project"}"#,
+            ),
+            (HoldCause::ModeMismatch, r#"{"kind":"mode_mismatch"}"#),
+            (HoldCause::NoModeAsserted, r#"{"kind":"no_mode_asserted"}"#),
+            (HoldCause::ModeUnknown, r#"{"kind":"mode_unknown"}"#),
+        ];
+        for (cause, expected) in causes {
+            let encoded = serde_json::to_string(&cause).expect("a cause serializes");
+            assert_eq!(encoded, expected);
+            let decoded: HoldCause = serde_json::from_str(&encoded).expect("a cause deserializes");
+            assert_eq!(decoded, cause);
+        }
+
+        let decisions = [
+            (HeldDecision::Release, r#""release""#),
+            (HeldDecision::Deny, r#""deny""#),
+        ];
+        for (decision, expected) in decisions {
+            let encoded = serde_json::to_string(&decision).expect("a decision serializes");
+            assert_eq!(encoded, expected);
+            let decoded: HeldDecision =
+                serde_json::from_str(&encoded).expect("a decision deserializes");
+            assert_eq!(decoded, decision);
+        }
+
+        let outcomes = [
+            (HeldOutcome::Delivered, r#""delivered""#),
+            (HeldOutcome::Denied, r#""denied""#),
+            (HeldOutcome::Expired, r#""expired""#),
+        ];
+        for (outcome, expected) in outcomes {
+            let encoded = serde_json::to_string(&outcome).expect("an outcome serializes");
+            assert_eq!(encoded, expected);
+            let decoded: HeldOutcome =
+                serde_json::from_str(&encoded).expect("an outcome deserializes");
+            assert_eq!(decoded, outcome);
+        }
+    }
+
+    /// The redaction is the type's, never a caller's discipline: a debugged
+    /// hold prints each body's size and none of its words — through the
+    /// event's derived `Debug` too — while serde carries the words untouched
+    /// for the dialogs that exist to show them.
+    #[test]
+    fn a_held_body_debugs_as_a_size_and_never_the_text() {
+        let body = "the sender's own sentence";
+        let preview = RedactedText::from(body.to_owned());
+
+        let debugged = format!("{preview:?}");
+        assert_eq!(debugged, format!("<{} bytes>", body.len()));
+        assert!(
+            !debugged.contains(body),
+            "a debug rendering must never carry the text: {debugged}"
+        );
+
+        let event = Event::PeerHeld {
+            session_id: pinned_session(),
+            id: HeldId::from("held_1".to_owned()),
+            from: "w1@inbound".to_owned(),
+            cause: HoldCause::ModeUnknown,
+            summary: Some(RedactedText::from(body.to_owned())),
+            preview: preview.clone(),
+            expires_in_ms: None,
+        };
+        let debugged = format!("{event:?}");
+        assert!(
+            !debugged.contains(body),
+            "the event's derived debug must inherit the redaction: {debugged}"
+        );
+
+        let encoded = serde_json::to_string(&preview).expect("the text serializes");
+        assert_eq!(encoded, format!("\"{body}\""));
+        let decoded: RedactedText = serde_json::from_str(&encoded).expect("the text deserializes");
+        assert_eq!(decoded.as_str(), body);
     }
 
     /// The shape every frontend written before mentions existed sends. It has
