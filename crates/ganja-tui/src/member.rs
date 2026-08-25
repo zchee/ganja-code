@@ -120,7 +120,7 @@ use ganja_core::{
         lead_inbox::Delivered,
         member::{Asks, Resolved},
         posture::Posture,
-        runner::{self, DROPPED_FRAME, IGNORED_STALE},
+        runner::{self, DROPPED_FRAME, IGNORED_STALE, SHUTDOWN_AHEAD},
     },
 };
 use ganja_protocol::{
@@ -483,20 +483,12 @@ impl Inbox {
 
         // Step 1, and a step of its own because it goes first: a teammate
         // wedged behind a queue of messages stays reclaimable.
-        let shutdown = contents
-            .valid
-            .iter()
-            .enumerate()
-            .find_map(|(position, message)| match message.frame() {
-                Some(Frame::ShutdownRequest(request)) => Some((position, message, request)),
-                _ => None,
-            });
-        if let Some((position, message, request)) = shutdown {
+        if let Some((position, message, request)) = runner::shutdown_ahead(&contents.valid) {
             tracing::info!(
                 member = self.name(),
                 request = request.request_id,
                 jumped = position,
-                "a shutdown request goes ahead of everything else in the inbox"
+                "{SHUTDOWN_AHEAD}"
             );
             self.prune(vec![mailbox::identity(message)]).await;
             pass.shutdown = Some(request.request_id);

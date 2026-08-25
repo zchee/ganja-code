@@ -71,6 +71,30 @@ pub const IGNORED_STALE: &str =
 /// thing.
 pub const DROPPED_FRAME: &str = "an inbox frame was dropped";
 
+/// What is logged when a shutdown request jumps the queue.
+pub const SHUTDOWN_AHEAD: &str = "a shutdown request goes ahead of everything else in the inbox";
+
+/// The shutdown request waiting in `valid`, if any: the position it jumps
+/// from, the message carrying it, and the request itself.
+///
+/// One spelling of the search for the four loops that honor the rule — this
+/// runner, both shim shapes and the TUI's member pass — so "a shutdown goes
+/// ahead, from any sender" cannot drift into two retirement policies on one
+/// mailbox. What each loop *does* with the hit stays its own: a runner tears
+/// down, a member pass only reports.
+#[must_use]
+pub fn shutdown_ahead(
+    valid: &[MailboxMessage],
+) -> Option<(usize, &MailboxMessage, ShutdownRequest)> {
+    valid
+        .iter()
+        .enumerate()
+        .find_map(|(position, message)| match message.frame() {
+            Some(Frame::ShutdownRequest(request)) => Some((position, message, request)),
+            _ => None,
+        })
+}
+
 /// How a batch of messages is put to the teammate's model.
 ///
 /// Deliberately plain: the `<teammate-message>` envelope belongs to the request
@@ -229,20 +253,12 @@ impl Runner {
         }
 
         // Step 1, and it is a step of its own because it goes first.
-        let shutdown = contents
-            .valid
-            .iter()
-            .enumerate()
-            .find_map(|(position, message)| match message.frame() {
-                Some(Frame::ShutdownRequest(request)) => Some((position, message, request)),
-                _ => None,
-            });
-        if let Some((position, message, request)) = shutdown {
+        if let Some((position, message, request)) = shutdown_ahead(&contents.valid) {
             tracing::info!(
                 teammate = self.teammate.name(),
                 request = request.request_id,
                 jumped = position,
-                "a shutdown request goes ahead of everything else in the inbox"
+                "{SHUTDOWN_AHEAD}"
             );
             self.tear_down(&request).await;
             self.prune(vec![mailbox::identity(message)]).await;

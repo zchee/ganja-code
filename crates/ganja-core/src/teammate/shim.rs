@@ -196,6 +196,11 @@ const COMPLAINT: Duration = Duration::from_millis(500);
 /// be a difference nobody asked for.
 pub const POLL: Duration = runner::POLL;
 
+/// The `/team` ring note either shim shape leaves when a frame-shaped message
+/// of a kind this build has never heard of is dropped — one spelling for the
+/// headless loop and the pane loop, ahead of the dropped kind's name.
+pub(crate) const DROPPED_UNKNOWN: &str = "dropped frame-shaped message of unknown type";
+
 /// The variables every shim child gets, whatever CLI it is.
 ///
 /// Three, and each earns its place: `HOME` because every one of these CLIs
@@ -1470,20 +1475,13 @@ impl ShimRunner {
         // sender**, matching the in-process runner, which matches
         // `shutdown_request` with no `from` check at all — two retirement rules
         // on one mailbox would be a difference nobody asked for.
-        let shutdown = contents
-            .valid
-            .iter()
-            .enumerate()
-            .find_map(|(position, message)| match message.frame() {
-                Some(Frame::ShutdownRequest(request)) => Some((position, message, request)),
-                _ => None,
-            });
-        if let Some((position, message, request)) = shutdown {
+        if let Some((position, message, request)) = runner::shutdown_ahead(&contents.valid) {
             tracing::info!(
                 teammate = self.spec.name.as_str(),
                 request = request.request_id,
                 jumped = position,
-                "a shutdown request goes ahead of everything else in the inbox"
+                "{}",
+                runner::SHUTDOWN_AHEAD
             );
             self.tear_down(&request).await;
             self.prune(vec![mailbox::identity(message)]).await;
@@ -1667,9 +1665,7 @@ impl ShimRunner {
     /// about carries a top-level `"type"`.
     async fn drop_unknown(&self, name: Option<&str>, from: &str) {
         let named = name.unwrap_or("(unnamed)");
-        self.remember(format!(
-            "dropped frame-shaped message of unknown type {named}"
-        ));
+        self.remember(format!("{DROPPED_UNKNOWN} {named}"));
         tracing::warn!(
             teammate = self.spec.name.as_str(),
             from,

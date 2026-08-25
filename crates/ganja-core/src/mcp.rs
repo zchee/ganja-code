@@ -485,7 +485,7 @@ impl Servers {
     /// [`ganja_provider::auth::mcp_oauth::Refresher`], keyed by the reserved
     /// `mcp:<name>` storage prefix.
     async fn bearer_header(&self, name: &str) -> Result<reqwest::header::HeaderValue, String> {
-        let key = format!("mcp:{name}");
+        let key = storage_key(name);
         let refresher: std::sync::Arc<dyn ganja_provider::auth::RefreshOauth> =
             std::sync::Arc::new(ganja_provider::auth::mcp_oauth::Refresher);
 
@@ -494,9 +494,9 @@ impl Servers {
             .await
         {
             Ok(credential) => bearer_value(&credential),
-            Err(error) if error.kind() == ganja_provider::auth::AuthErrorKind::NotOauth => Err(
-                format!("mcp server \"{name}\" needs a login: run `ganja mcp login {name}`"),
-            ),
+            Err(error) if error.kind() == ganja_provider::auth::AuthErrorKind::NotOauth => {
+                Err(needs_login(name))
+            }
             Err(error) => Err(error.to_string()),
         }
     }
@@ -509,13 +509,11 @@ impl Servers {
         &self,
         name: &str,
     ) -> Result<reqwest::header::HeaderValue, String> {
-        let key = format!("mcp:{name}");
+        let key = storage_key(name);
         let Some(current) =
             ganja_provider::auth::oauth_for(&key).map_err(|error| error.to_string())?
         else {
-            return Err(format!(
-                "mcp server \"{name}\" needs a login: run `ganja mcp login {name}`"
-            ));
+            return Err(needs_login(name));
         };
 
         let renewed = ganja_provider::auth::mcp_oauth::Refresher
@@ -1097,7 +1095,7 @@ impl Servers {
 
             match result {
                 Ok(credential) => {
-                    let key = format!("mcp:{name}");
+                    let key = storage_key(&name);
                     if let Err(error) = ganja_provider::auth::set_oauth(&key, &credential) {
                         tracing::warn!(server = %name, %error, "an MCP login could not be stored");
                         this.mark(
@@ -1126,6 +1124,18 @@ impl Servers {
 
         Ok(())
     }
+}
+
+/// The reserved credential-store key `name`'s login lives under — the
+/// `mcp:<server>` contract the module doc names, spelled once.
+fn storage_key(name: &str) -> String {
+    format!("mcp:{name}")
+}
+
+/// The refusal a server whose login is missing or unusable answers with,
+/// naming the command that mints one.
+fn needs_login(name: &str) -> String {
+    format!("mcp server \"{name}\" needs a login: run `ganja mcp login {name}`")
 }
 
 /// `credential`'s access token as the `Authorization` header value a request

@@ -1687,20 +1687,13 @@ impl TuiRunner {
 
         // A shutdown goes ahead of everything else, from any sender —
         // [`shim::ShimRunner`]'s rule, for its reason.
-        let shutdown = contents
-            .valid
-            .iter()
-            .enumerate()
-            .find_map(|(position, message)| match message.frame() {
-                Some(Frame::ShutdownRequest(request)) => Some((position, message, request)),
-                _ => None,
-            });
-        if let Some((position, message, request)) = shutdown {
+        if let Some((position, message, request)) = runner::shutdown_ahead(&contents.valid) {
             tracing::info!(
                 teammate = self.spec.name.as_str(),
                 request = request.request_id,
                 jumped = position,
-                "a shutdown request goes ahead of everything else in the inbox"
+                "{}",
+                runner::SHUTDOWN_AHEAD
             );
             self.tear_down(&request).await;
             self.prune(vec![mailbox::identity(message)]).await;
@@ -1996,9 +1989,7 @@ impl TuiRunner {
     /// the in-process runner, for its reason.
     async fn drop_unknown(&self, name: Option<&str>, from: &str) {
         let named = name.unwrap_or("(unnamed)");
-        self.remember(format!(
-            "dropped frame-shaped message of unknown type {named}"
-        ));
+        self.remember(format!("{} {named}", shim::DROPPED_UNKNOWN));
         tracing::warn!(
             teammate = self.spec.name.as_str(),
             from,

@@ -205,6 +205,18 @@ pub fn answers_clause(backend: MemberBackend, road: Road) -> Option<&'static str
     }
 }
 
+/// The `sessions` directory of a CLI that keeps its home under `home_env`,
+/// else under `~/<fallback>` — the one layout codex and grok share, each
+/// naming only its own variable and dot-directory.
+pub(crate) fn home_sessions(home_env: &str, fallback: &str) -> Option<PathBuf> {
+    let home = match std::env::var_os(home_env) {
+        Some(home) if !home.is_empty() => PathBuf::from(home),
+        _ => PathBuf::from(std::env::var_os("HOME")?).join(fallback),
+    };
+
+    Some(home.join("sessions"))
+}
+
 /// Whether one of `path`'s first [`FINGERPRINT_RECORDS`] records is a message
 /// the *user* sent carrying `mark`, under a [`FINGERPRINT_BYTES`] ceiling.
 ///

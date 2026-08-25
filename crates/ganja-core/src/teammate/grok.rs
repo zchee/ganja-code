@@ -848,12 +848,7 @@ pub static TRANSCRIPT: Transcript = Transcript;
 impl Transcript {
     /// Where this CLI keeps its sessions: `GROK_HOME`, else `~/.grok`.
     fn sessions() -> Option<PathBuf> {
-        let home = match std::env::var_os(HOME_ENV) {
-            Some(home) if !home.is_empty() => PathBuf::from(home),
-            _ => PathBuf::from(std::env::var_os("HOME")?).join(".grok"),
-        };
-
-        Some(home.join("sessions"))
+        readback::home_sessions(HOME_ENV, ".grok")
     }
 
     /// The vendor's own spelling of a directory as one path segment: every
