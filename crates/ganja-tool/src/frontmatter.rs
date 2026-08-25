@@ -3,9 +3,11 @@
 //!
 //! Spec: what upstream gets from `gray-matter` and what Claude's own
 //! `SKILL.md`/agent files are written in — not a YAML implementation, and
-//! deliberately not one. Three kinds of file open with a `---` fence here: a
-//! skill ([`crate::skill`]), an agent definition and a command file
-//! (`ganja-core`'s `agent.rs` and `command.rs`). The first two read exactly
+//! deliberately not one. Four kinds of file open with a `---` fence here: a
+//! skill ([`crate::skill`]), an agent definition, a command file
+//! (`ganja-core`'s `agent.rs` and `command.rs`) and a plugin's own markdown
+//! components (`ganja-core`'s `plugin.rs`, since it retired the tree's one
+//! hand-rolled copy of this parser). The first two read exactly
 //! the same shapes, and read them out of files a person may have written for
 //! another agent entirely, so they read them through one parser: two copies
 //! were two parsers waiting to disagree about what somebody's `description:`

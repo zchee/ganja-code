@@ -441,12 +441,19 @@ fn collect_skill_costs(root: &Path, into: &mut Vec<ComponentCost>) {
             continue;
         };
         let (fields, body) = split_frontmatter(&text);
-        let name = fields.get("name").cloned().unwrap_or_else(|| {
-            path.parent().and_then(Path::file_name).map_or_else(
-                || "skill".to_owned(),
-                |dir| dir.to_string_lossy().into_owned(),
-            )
-        });
+        // The shared reader answers a valueless key as present-and-empty, so
+        // the fallback has to be told an empty name is no name — the same
+        // guard the skill loader itself pairs with that reader.
+        let name = fields
+            .get("name")
+            .cloned()
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| {
+                path.parent().and_then(Path::file_name).map_or_else(
+                    || "skill".to_owned(),
+                    |dir| dir.to_string_lossy().into_owned(),
+                )
+            });
         let description = fields.get("description").map_or("", String::as_str);
         into.push(ComponentCost {
             always_on: projected_tokens(&name) + projected_tokens(description),
@@ -1709,9 +1716,14 @@ fn collect_agents(root: &Path, plugin: &str) -> BTreeMap<String, AgentConfig> {
             continue;
         };
         let (front, body) = split_frontmatter(&text);
+        // Present-and-empty must not short-circuit the file-stem fallback:
+        // agent.rs loads the same file under its stem, and a plugin agent
+        // parsing differently from a project's is the drift the shared
+        // reader exists to prevent.
         let name = front
             .get("name")
             .cloned()
+            .filter(|name| !name.is_empty())
             .or_else(|| {
                 path.file_stem()
                     .and_then(|stem| stem.to_str())
@@ -1726,9 +1738,15 @@ fn collect_agents(root: &Path, plugin: &str) -> BTreeMap<String, AgentConfig> {
         agents.insert(
             name,
             AgentConfig {
-                model: front.get("model").cloned(),
+                model: front
+                    .get("model")
+                    .cloned()
+                    .filter(|model| !model.is_empty()),
                 prompt: Some(body.trim().to_owned()).filter(|prompt| !prompt.is_empty()),
-                description: front.get("description").cloned(),
+                description: front
+                    .get("description")
+                    .cloned()
+                    .filter(|description| !description.is_empty()),
                 mode: Some(AgentMode::Subagent),
                 hidden: None,
                 disable: None,
@@ -2071,8 +2089,8 @@ mod tests {
     }
 
     use super::{
-        Contribution, Manifest, Marketplace, PluginError, Source, Store, collect, looks_like_git,
-        split_frontmatter,
+        Contribution, Manifest, Marketplace, PluginError, Source, Store, collect, collect_agents,
+        collect_skill_costs, looks_like_git, split_frontmatter,
     };
     use crate::config::{HookHandler, McpServer};
 
@@ -2525,6 +2543,44 @@ mod tests {
         // an agent file's own loader gives.
         let (fields, _) = split_frontmatter("---\ntools:\n  - read\n---\nBody.");
         assert_eq!(fields["tools"], "");
+    }
+
+    /// The callers' half of the parser swap: the shared reader answers a
+    /// valueless `name:` as present-and-empty, and the fallback the sibling
+    /// loaders pair with that answer has to fire here too — an agent lands
+    /// under its file stem and a skill cost under its directory, exactly as
+    /// `agent.rs` and the skill tool answer the same file.
+    #[test]
+    fn an_empty_name_falls_back_to_the_stem_instead_of_dropping_the_component() {
+        let plugin = TempDir::new().expect("a temporary directory");
+        let root = plugin.path();
+        plant(
+            root,
+            "agents/stemmed.md",
+            "---\nname:\nmodel:\n---\nYou review.",
+        );
+        plant(
+            root,
+            "skills/pricing/SKILL.md",
+            "---\nname:\ndescription: Prices things\n---\nBody.",
+        );
+
+        let agents = collect_agents(root, "demo");
+        let config = agents
+            .get("stemmed")
+            .expect("the agent loads under its file stem");
+        assert_eq!(
+            config.model, None,
+            "an empty model is no model, as agent.rs answers it"
+        );
+
+        let mut costs = Vec::new();
+        collect_skill_costs(&root.join("skills"), &mut costs);
+        assert_eq!(costs.len(), 1);
+        assert_eq!(
+            costs[0].name, "pricing",
+            "an empty name prices under the directory"
+        );
     }
 
     /// The collector is one function on purpose — `ganja plugin list` and the
