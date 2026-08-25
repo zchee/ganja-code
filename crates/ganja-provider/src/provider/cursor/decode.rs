@@ -248,9 +248,23 @@ impl Mapping {
             // The plugin forwards thinking to its clients beside reply text,
             // marked as thinking (proxy.ts:1059-1061); here that mark is the
             // event the Anthropic wire's thinking blocks already arrive as.
-            events.push(ProviderEvent::ReasoningDelta(
-                delta.text.clone().unwrap_or_default(),
-            ));
+            let text = delta.text.clone().unwrap_or_default();
+            // Logged at the skip log's own level because the next boundary
+            // question should read a log rather than patch one in: whether a
+            // thinking message is a token, a sentence or a whole block is
+            // what decides if a message edge could ever mean anything.
+            tracing::debug!(provider = ID, bytes = text.len(), "thinking delta");
+            events.push(ProviderEvent::ReasoningDelta(text));
+        } else if update.thinking_completed.is_set() {
+            // The plugin's own boundary between two thinking blocks,
+            // live-observed (2026-08-25) between the thought groups of one
+            // claude-fable-5-thinking turn: without it consecutive thoughts
+            // splice into one block — the transcript's account of that
+            // stream read "…to see if those work.Since tool calls…".
+            // Announced unconditionally: the frame also closes a stream's
+            // last block, where the loop finds nothing open and says
+            // nothing.
+            events.push(ProviderEvent::ReasoningBreak);
         } else if update.turn_ended.is_set() {
             self.ended = true;
         } else if update.heartbeat.is_set() {
@@ -374,7 +388,6 @@ fn update_arm(number: u32) -> String {
     let named = match number {
         2 => "tool_call_started",
         3 => "tool_call_completed",
-        5 => "thinking_completed",
         6 => "user_message_appended",
         7 => "partial_tool_call",
         8 => "token_delta",
@@ -469,6 +482,13 @@ mod tests {
             thinking_delta: buffa::MessageField::some(
                 proto::ThinkingDelta::default().with_text(delta),
             ),
+            ..Default::default()
+        }
+    }
+
+    fn thinking_completed() -> proto::Update {
+        proto::Update {
+            thinking_completed: buffa::MessageField::some(proto::ThinkingCompleted::default()),
             ..Default::default()
         }
     }
@@ -743,6 +763,29 @@ mod tests {
             vec![
                 ProviderEvent::ReasoningDelta("Weighing a greeting.".to_owned()),
                 ProviderEvent::TextDelta("Hello".to_owned()),
+                ProviderEvent::Finish(FinishReason::Completed),
+            ]
+        );
+    }
+
+    /// The boundary the plugin announces between two thinking blocks becomes
+    /// a break, so two thoughts on one stream stay two thoughts (2026-08-25,
+    /// live-observed): without it they splice — the transcript's own account
+    /// read "…to see if those work.Since tool calls…".
+    #[test]
+    fn a_thinking_completed_breaks_the_thought_before_it() {
+        let mut body = framed(thinking("Weighing a greeting."));
+        body.extend(framed(thinking_completed()));
+        body.extend(framed(thinking("Weighing the weather.")));
+        body.extend(framed(turn_ended()));
+        body.extend(end_stream("{}"));
+
+        assert_eq!(
+            mapped(&body, false),
+            vec![
+                ProviderEvent::ReasoningDelta("Weighing a greeting.".to_owned()),
+                ProviderEvent::ReasoningBreak,
+                ProviderEvent::ReasoningDelta("Weighing the weather.".to_owned()),
                 ProviderEvent::Finish(FinishReason::Completed),
             ]
         );

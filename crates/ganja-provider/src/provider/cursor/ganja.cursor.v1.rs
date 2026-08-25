@@ -1704,6 +1704,11 @@ pub struct Update {
         ThinkingDelta,
         ::buffa::Inline<ThinkingDelta>,
     >,
+    /// Field 5: `thinking_completed`
+    pub thinking_completed: ::buffa::MessageField<
+        ThinkingCompleted,
+        ::buffa::Inline<ThinkingCompleted>,
+    >,
     /// Field 13: `heartbeat`
     pub heartbeat: ::buffa::MessageField<Heartbeat, ::buffa::Inline<Heartbeat>>,
     /// Field 14: `turn_ended`
@@ -1716,6 +1721,7 @@ impl ::core::fmt::Debug for Update {
         f.debug_struct("Update")
             .field("text_delta", &self.text_delta)
             .field("thinking_delta", &self.thinking_delta)
+            .field("thinking_completed", &self.thinking_completed)
             .field("heartbeat", &self.heartbeat)
             .field("turn_ended", &self.turn_ended)
             .finish()
@@ -1764,6 +1770,14 @@ impl ::buffa::Message for Update {
                 += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
                     + inner_size as u64;
         }
+        if self.thinking_completed.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.thinking_completed.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
         if self.heartbeat.is_set() {
             let __slot = __cache.reserve();
             let inner_size = self.heartbeat.compute_size(__cache);
@@ -1805,6 +1819,14 @@ impl ::buffa::Message for Update {
                 buf,
             );
             self.thinking_delta.write_to(__cache, buf);
+        }
+        if self.thinking_completed.is_set() {
+            ::buffa::types::put_len_delimited_header(
+                5u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            self.thinking_completed.write_to(__cache, buf);
         }
         if self.heartbeat.is_set() {
             ::buffa::types::put_len_delimited_header(
@@ -1857,6 +1879,17 @@ impl ::buffa::Message for Update {
                     ctx,
                 )?;
             }
+            5u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::Message::merge_length_delimited(
+                    self.thinking_completed.get_or_insert_default(),
+                    buf,
+                    ctx,
+                )?;
+            }
             13u32 => {
                 ::buffa::encoding::check_wire_type(
                     tag,
@@ -1889,6 +1922,7 @@ impl ::buffa::Message for Update {
     fn clear(&mut self) {
         self.text_delta = ::buffa::MessageField::none();
         self.thinking_delta = ::buffa::MessageField::none();
+        self.thinking_completed = ::buffa::MessageField::none();
         self.heartbeat = ::buffa::MessageField::none();
         self.turn_ended = ::buffa::MessageField::none();
         self.__buffa_unknown_fields.clear();
@@ -2122,6 +2156,90 @@ impl ::buffa::Message for ThinkingDelta {
 }
 impl ::buffa::ExtensionSet for ThinkingDelta {
     const PROTO_FQN: &'static str = "ganja.cursor.v1.ThinkingDelta";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+/// The plugin's boundary between two thinking blocks, LIVE-OBSERVED between
+/// thought groups of a 2026-08-25 claude-fable-5-thinking turn. Modelled
+/// fieldless: the frame's arrival is the whole of what this build reads from
+/// it, and whatever it carries besides survives as unknown fields.
+#[derive(Clone, PartialEq, Default)]
+pub struct ThinkingCompleted {
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for ThinkingCompleted {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("ThinkingCompleted").finish()
+    }
+}
+impl ThinkingCompleted {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.ThinkingCompleted";
+}
+::buffa::impl_default_instance!(ThinkingCompleted);
+impl ::buffa::MessageName for ThinkingCompleted {
+    const PACKAGE: &'static str = "ganja.cursor.v1";
+    const NAME: &'static str = "ThinkingCompleted";
+    const FULL_NAME: &'static str = "ganja.cursor.v1.ThinkingCompleted";
+    const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.ThinkingCompleted";
+}
+impl ::buffa::Message for ThinkingCompleted {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for ThinkingCompleted {
+    const PROTO_FQN: &'static str = "ganja.cursor.v1.ThinkingCompleted";
     fn unknown_fields(&self) -> &::buffa::UnknownFields {
         &self.__buffa_unknown_fields
     }
@@ -7810,6 +7928,10 @@ pub mod __buffa {
             pub thinking_delta: ::buffa::MessageFieldView<
                 super::super::__buffa::view::ThinkingDeltaView<'a>,
             >,
+            /// Field 5: `thinking_completed`
+            pub thinking_completed: ::buffa::MessageFieldView<
+                super::super::__buffa::view::ThinkingCompletedView<'a>,
+            >,
             /// Field 13: `heartbeat`
             pub heartbeat: ::buffa::MessageFieldView<
                 super::super::__buffa::view::HeartbeatView<'a>,
@@ -7895,6 +8017,31 @@ pub mod __buffa {
                             None => {
                                 view.thinking_delta = ::buffa::MessageFieldView::set(
                                     <super::super::__buffa::view::ThinkingDeltaView as ::buffa::MessageView>::decode_view_ctx(
+                                        sub,
+                                        __sub_ctx,
+                                    )?,
+                                );
+                            }
+                        }
+                    }
+                    5u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        match view.thinking_completed.as_mut() {
+                            Some(existing) => {
+                                ::buffa::MessageView::merge_into_view(
+                                    existing,
+                                    sub,
+                                    __sub_ctx,
+                                )?
+                            }
+                            None => {
+                                view.thinking_completed = ::buffa::MessageFieldView::set(
+                                    <super::super::__buffa::view::ThinkingCompletedView as ::buffa::MessageView>::decode_view_ctx(
                                         sub,
                                         __sub_ctx,
                                     )?,
@@ -7993,6 +8140,15 @@ pub mod __buffa {
                         }
                         None => ::buffa::MessageField::none(),
                     },
+                    thinking_completed: match self.thinking_completed.as_option() {
+                        Some(v) => {
+                            ::buffa::MessageField::<
+                                super::super::ThinkingCompleted,
+                                ::buffa::Inline<super::super::ThinkingCompleted>,
+                            >::some(v.to_owned_from_source(__buffa_src)?)
+                        }
+                        None => ::buffa::MessageField::none(),
+                    },
                     heartbeat: match self.heartbeat.as_option() {
                         Some(v) => {
                             ::buffa::MessageField::<
@@ -8041,6 +8197,14 @@ pub mod __buffa {
                         += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
                             + inner_size as u64;
                 }
+                if self.thinking_completed.is_set() {
+                    let __slot = __cache.reserve();
+                    let inner_size = self.thinking_completed.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                            + inner_size as u64;
+                }
                 if self.heartbeat.is_set() {
                     let __slot = __cache.reserve();
                     let inner_size = self.heartbeat.compute_size(__cache);
@@ -8083,6 +8247,14 @@ pub mod __buffa {
                         buf,
                     );
                     self.thinking_delta.write_to(__cache, buf);
+                }
+                if self.thinking_completed.is_set() {
+                    ::buffa::types::put_len_delimited_header(
+                        5u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    self.thinking_completed.write_to(__cache, buf);
                 }
                 if self.heartbeat.is_set() {
                     ::buffa::types::put_len_delimited_header(
@@ -8210,6 +8382,15 @@ pub mod __buffa {
                 super::super::__buffa::view::ThinkingDeltaView<'_>,
             > {
                 &self.0.reborrow().thinking_delta
+            }
+            /// Field 5: `thinking_completed`
+            #[must_use]
+            pub fn thinking_completed(
+                &self,
+            ) -> &::buffa::MessageFieldView<
+                super::super::__buffa::view::ThinkingCompletedView<'_>,
+            > {
+                &self.0.reborrow().thinking_completed
             }
             /// Field 13: `heartbeat`
             #[must_use]
@@ -8705,6 +8886,218 @@ pub mod __buffa {
         impl ::buffa::HasMessageView for super::super::ThinkingDelta {
             type View<'a> = ThinkingDeltaView<'a>;
             type ViewHandle = ThinkingDeltaOwnedView;
+        }
+        /// The plugin's boundary between two thinking blocks, LIVE-OBSERVED between
+        /// thought groups of a 2026-08-25 claude-fable-5-thinking turn. Modelled
+        /// fieldless: the frame's arrival is the whole of what this build reads from
+        /// it, and whatever it carries besides survives as unknown fields.
+        #[derive(Clone, Debug, Default)]
+        pub struct ThinkingCompletedView<'a> {
+            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+        }
+        impl<'a> ::buffa::MessageView<'a> for ThinkingCompletedView<'a> {
+            type Owned = super::super::ThinkingCompleted;
+            fn decode_view(
+                buf: &'a [u8],
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                let __limit = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT,
+                );
+                <Self as ::buffa::MessageView>::decode_view_ctx(
+                    buf,
+                    ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit),
+                )
+            }
+            fn decode_view_with_ctx(
+                buf: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+            }
+            #[inline]
+            fn merge_view_field(
+                &mut self,
+                tag: ::buffa::encoding::Tag,
+                cur: &'a [u8],
+                before_tag: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+                let _ = ctx;
+                #[allow(unused_variables)]
+                let view = self;
+                let mut cur = cur;
+                match tag.field_number() {
+                    _ => {
+                        ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                        let span_len = before_tag.len() - cur.len();
+                        view.__buffa_unknown_fields
+                            .push_record(before_tag, span_len, ctx)?;
+                    }
+                }
+                ::core::result::Result::Ok(cur)
+            }
+            fn to_owned_message(
+                &self,
+            ) -> ::core::result::Result<
+                super::super::ThinkingCompleted,
+                ::buffa::DecodeError,
+            > {
+                self.to_owned_from_source(None)
+            }
+            #[allow(clippy::useless_conversion, clippy::needless_update)]
+            fn to_owned_from_source(
+                &self,
+                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+            ) -> ::core::result::Result<
+                super::super::ThinkingCompleted,
+                ::buffa::DecodeError,
+            > {
+                #[allow(unused_imports)]
+                use ::buffa::alloc::string::ToString as _;
+                let _ = __buffa_src;
+                ::core::result::Result::Ok(super::super::ThinkingCompleted {
+                    __buffa_unknown_fields: self
+                        .__buffa_unknown_fields
+                        .to_owned()?
+                        .into(),
+                    ..::core::default::Default::default()
+                })
+            }
+        }
+        impl<'a> ::buffa::ViewEncode<'a> for ThinkingCompletedView<'a> {
+            #[allow(clippy::needless_borrow, clippy::let_and_return)]
+            fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                let mut size = 0u64;
+                size += self.__buffa_unknown_fields.encoded_len() as u64;
+                ::buffa::saturate_size(size)
+            }
+            #[allow(clippy::needless_borrow)]
+            fn write_to(
+                &self,
+                _cache: &mut ::buffa::SizeCache,
+                buf: &mut impl ::buffa::EncodeSink,
+            ) {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                self.__buffa_unknown_fields.write_to(buf);
+            }
+        }
+        impl<'a> ::buffa::MessageName for ThinkingCompletedView<'a> {
+            const PACKAGE: &'static str = "ganja.cursor.v1";
+            const NAME: &'static str = "ThinkingCompleted";
+            const FULL_NAME: &'static str = "ganja.cursor.v1.ThinkingCompleted";
+            const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.ThinkingCompleted";
+        }
+        ::buffa::impl_default_view_instance!(ThinkingCompletedView);
+        ::buffa::impl_view_reborrow!(ThinkingCompletedView);
+        /** Self-contained, `'static` owned view of a `ThinkingCompleted` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`ThinkingCompletedView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`ThinkingCompletedView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+        #[derive(Clone, Debug)]
+        pub struct ThinkingCompletedOwnedView(
+            ::buffa::OwnedView<ThinkingCompletedView<'static>>,
+        );
+        impl ThinkingCompletedOwnedView {
+            /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+            ///
+            /// The view borrows directly from the buffer's data; the buffer is
+            /// retained inside the returned handle.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+            /// protobuf data.
+            pub fn decode(
+                bytes: ::buffa::bytes::Bytes,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    ThinkingCompletedOwnedView(::buffa::OwnedView::decode(bytes)?),
+                )
+            }
+            /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+            /// max message size).
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+            /// exceeds the configured limits.
+            pub fn decode_with_options(
+                bytes: ::buffa::bytes::Bytes,
+                opts: &::buffa::DecodeOptions,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    ThinkingCompletedOwnedView(
+                        ::buffa::OwnedView::decode_with_options(bytes, opts)?,
+                    ),
+                )
+            }
+            /// Build from an owned message via an encode → decode round-trip.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError::MessageTooLarge`] if the
+            /// message's encoded size exceeds the 2 GiB protobuf limit, or
+            /// another [`::buffa::DecodeError`] if the re-encoded bytes are
+            /// somehow invalid (should not happen for well-formed messages).
+            pub fn from_owned(
+                msg: &super::super::ThinkingCompleted,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    ThinkingCompletedOwnedView(::buffa::OwnedView::from_owned(msg)?),
+                )
+            }
+            /// Borrow the full [`ThinkingCompletedView`] with its lifetime tied to `&self`.
+            #[must_use]
+            pub fn view(&self) -> &ThinkingCompletedView<'_> {
+                self.0.reborrow()
+            }
+            /// Convert to the owned message type.
+            ///
+            /// Infallible: this type's constructors wire-decode their
+            /// buffer, and a view produced by wire decoding always
+            /// converts. Delegates to [`::buffa::OwnedView::to_owned_message`],
+            /// whose contract also governs handles converted from a raw
+            /// [`::buffa::OwnedView`].
+            #[must_use]
+            pub fn to_owned_message(&self) -> super::super::ThinkingCompleted {
+                self.0.to_owned_message()
+            }
+            /// The underlying bytes buffer.
+            #[must_use]
+            pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+                self.0.bytes()
+            }
+            /// Consume the handle, returning the underlying bytes buffer.
+            #[must_use]
+            pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+                self.0.into_bytes()
+            }
+        }
+        impl ::core::convert::From<::buffa::OwnedView<ThinkingCompletedView<'static>>>
+        for ThinkingCompletedOwnedView {
+            fn from(inner: ::buffa::OwnedView<ThinkingCompletedView<'static>>) -> Self {
+                ThinkingCompletedOwnedView(inner)
+            }
+        }
+        impl ::core::convert::From<ThinkingCompletedOwnedView>
+        for ::buffa::OwnedView<ThinkingCompletedView<'static>> {
+            fn from(wrapper: ThinkingCompletedOwnedView) -> Self {
+                wrapper.0
+            }
+        }
+        impl ::core::convert::AsRef<::buffa::OwnedView<ThinkingCompletedView<'static>>>
+        for ThinkingCompletedOwnedView {
+            fn as_ref(&self) -> &::buffa::OwnedView<ThinkingCompletedView<'static>> {
+                &self.0
+            }
+        }
+        impl ::buffa::HasMessageView for super::super::ThinkingCompleted {
+            type View<'a> = ThinkingCompletedView<'a>;
+            type ViewHandle = ThinkingCompletedOwnedView;
         }
         /// Fieldless in the plugin too (agent_pb.ts:3014); the recorded stream carried
         /// one as its only data frame.
@@ -13256,6 +13649,10 @@ pub use self::__buffa::view::TextDeltaOwnedView;
 pub use self::__buffa::view::ThinkingDeltaView;
 #[doc(inline)]
 pub use self::__buffa::view::ThinkingDeltaOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::ThinkingCompletedView;
+#[doc(inline)]
+pub use self::__buffa::view::ThinkingCompletedOwnedView;
 #[doc(inline)]
 pub use self::__buffa::view::HeartbeatView;
 #[doc(inline)]

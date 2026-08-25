@@ -158,6 +158,7 @@ message ServerMessage {
 message Update {
   TextDelta text_delta = 1;
   ThinkingDelta thinking_delta = 4;
+  ThinkingCompleted thinking_completed = 5;
   Heartbeat heartbeat = 13;
   TurnEnded turn_ended = 14;
 }
@@ -173,6 +174,12 @@ message TextDelta {
 message ThinkingDelta {
   string text = 1;
 }
+
+// The plugin's boundary between two thinking blocks, LIVE-OBSERVED between
+// thought groups of a 2026-08-25 claude-fable-5-thinking turn. Modelled
+// fieldless: the frame's arrival is the whole of what this build reads from
+// it, and whatever it carries besides survives as unknown fields.
+message ThinkingCompleted {}
 
 // Fieldless in the plugin too (agent_pb.ts:3014); the recorded stream carried
 // one as its only data frame.
