@@ -618,6 +618,52 @@ impl Report {
 /// clause that says what about it was impossible.
 type Refusal = (&'static str, String);
 
+/// Settles a whole-or-not-at-all walk: a refusal skips the entry, keeps only
+/// the collected rows that must survive one ([`Report::adopt_warnings`]'s
+/// rule), and says what was left out and why; a clean walk adopts everything.
+/// [`None`] is the refusal case, so a caller writes `settle(...)?;` and
+/// builds its document on the next line.
+fn settle(report: &mut Report, at: &At, refused: Option<Refusal>, collected: Report) -> Option<()> {
+    if let Some((reason, explanation)) = refused {
+        report.skip(&at.from, reason);
+        report.adopt_warnings(collected);
+        report.warn(format!("`{}` was left out: {explanation}", at.from));
+
+        return None;
+    }
+    report.adopt(collected);
+
+    Some(())
+}
+
+/// The `Some` pairs of `pairs`, in field order — the one fold every
+/// `document()` below runs, so the emitted key order is always the field
+/// order and "present" always means the same thing.
+fn present<const N: usize>(pairs: [(&str, Option<Json>); N]) -> Vec<(String, Json)> {
+    pairs
+        .into_iter()
+        .filter_map(|(key, value)| value.map(|value| (key.to_owned(), value)))
+        .collect()
+}
+
+/// Carries a `command` array across, refused when it names no program —
+/// upstream destructures it as `[cmd, ...args]`, so an entry with nothing to
+/// run is not a server — with the shared could-not-be-carried clause on a
+/// value that would not read.
+fn carried_command(collected: &mut Report, child: &At, field: &Json) -> Result<Json, Refusal> {
+    match string_array(collected, child, field) {
+        Ok(command) if command.is_empty() => Err((
+            reason::MALFORMED,
+            format!("`{}` names no program", child.from),
+        )),
+        Ok(command) => Ok(Json::Array(command)),
+        Err(reason) => Err((
+            reason,
+            format!("`{}` could not be carried across", child.from),
+        )),
+    }
+}
+
 /// The ganja config being built, one slot per key it can carry.
 ///
 /// Slots rather than a document under construction, so the emitted key order is
@@ -1142,7 +1188,7 @@ struct AgentFields {
 
 impl AgentFields {
     fn document(self) -> Option<Json> {
-        let entries: Vec<(String, Json)> = [
+        let entries = present([
             ("model", self.model),
             ("prompt", self.prompt),
             ("description", self.description),
@@ -1150,10 +1196,7 @@ impl AgentFields {
             ("hidden", self.hidden),
             ("disable", self.disable),
             ("permission", self.permission),
-        ]
-        .into_iter()
-        .filter_map(|(key, value)| value.map(|value| (key.to_owned(), value)))
-        .collect();
+        ]);
 
         (!entries.is_empty()).then_some(Json::Object(entries))
     }
@@ -1212,15 +1255,12 @@ struct CommandFields {
 
 impl CommandFields {
     fn document(self) -> Option<Json> {
-        let entries: Vec<(String, Json)> = [
+        let entries = present([
             ("template", self.template),
             ("description", self.description),
             ("agent", self.agent),
             ("model", self.model),
-        ]
-        .into_iter()
-        .filter_map(|(key, value)| value.map(|value| (key.to_owned(), value)))
-        .collect();
+        ]);
 
         (!entries.is_empty()).then_some(Json::Object(entries))
     }
@@ -1314,7 +1354,7 @@ struct McpFields {
 impl McpFields {
     fn document(self, kind: &str) -> Json {
         let mut entries = vec![("type".to_owned(), Json::String(kind.to_owned()))];
-        for (key, value) in [
+        entries.extend(present([
             ("command", self.command),
             ("url", self.url),
             ("cwd", self.cwd),
@@ -1322,11 +1362,7 @@ impl McpFields {
             ("headers", self.headers),
             ("enabled", self.enabled),
             ("timeout", self.timeout),
-        ] {
-            if let Some(value) = value {
-                entries.push((key.to_owned(), value));
-            }
-        }
+        ]));
 
         Json::Object(entries)
     }
@@ -1374,23 +1410,9 @@ fn mcp_server(report: &mut Report, at: &At, value: &Json) -> Option<Json> {
             // Carried by the shape itself, and rowed like every other key so
             // that nothing in the source is missing from the table.
             "type" => collected.map(&child.from, &child.to),
-            "command" if local => match string_array(&mut collected, &child, field) {
-                // Refused empty by ganja, and rightly: upstream destructures it
-                // as `[cmd, ...args]`, so an entry with nothing to run is not a
-                // server.
-                Ok(command) if command.is_empty() => {
-                    refused = Some((
-                        reason::MALFORMED,
-                        format!("`{}` names no program", child.from),
-                    ));
-                }
-                Ok(command) => fields.command = Some(Json::Array(command)),
-                Err(reason) => {
-                    refused = Some((
-                        reason,
-                        format!("`{}` could not be carried across", child.from),
-                    ));
-                }
+            "command" if local => match carried_command(&mut collected, &child, field) {
+                Ok(command) => fields.command = Some(command),
+                Err(refusal) => refused = Some(refusal),
             },
             "url" if !local => match url(&mut collected, &child, field) {
                 Ok(url) => fields.url = Some(url),
@@ -1434,14 +1456,7 @@ fn mcp_server(report: &mut Report, at: &At, value: &Json) -> Option<Json> {
         }
     }
 
-    if let Some((reason, explanation)) = refused {
-        report.skip(&at.from, reason);
-        report.adopt_warnings(collected);
-        report.warn(format!("`{}` was left out: {explanation}", at.from));
-
-        return None;
-    }
-    report.adopt(collected);
+    settle(report, at, refused, collected)?;
 
     Some(fields.document(kind))
 }
@@ -1644,18 +1659,13 @@ struct LspFields {
 
 impl LspFields {
     fn document(self) -> Json {
-        let entries: Vec<(String, Json)> = [
+        Json::Object(present([
             ("command", self.command),
             ("extensions", self.extensions),
             ("disabled", self.disabled),
             ("env", self.env),
             ("initialization", self.initialization),
-        ]
-        .into_iter()
-        .filter_map(|(key, value)| value.map(|value| (key.to_owned(), value)))
-        .collect();
-
-        Json::Object(entries)
+        ]))
     }
 }
 
@@ -1679,20 +1689,9 @@ fn lsp_entry(report: &mut Report, at: &At, name: &str, value: &Json) -> Option<J
     for (key, field) in entries {
         let child = at.child(key);
         match key.as_str() {
-            "command" => match string_array(&mut collected, &child, field) {
-                Ok(command) if command.is_empty() => {
-                    refused = Some((
-                        reason::MALFORMED,
-                        format!("`{}` names no program", child.from),
-                    ));
-                }
-                Ok(command) => fields.command = Some(Json::Array(command)),
-                Err(reason) => {
-                    refused = Some((
-                        reason,
-                        format!("`{}` could not be carried across", child.from),
-                    ));
-                }
+            "command" => match carried_command(&mut collected, &child, field) {
+                Ok(command) => fields.command = Some(command),
+                Err(refusal) => refused = Some(refusal),
             },
             // An empty list is legal and means every file, which is why this
             // one is not refused for being empty the way a command is.
@@ -1733,14 +1732,7 @@ fn lsp_entry(report: &mut Report, at: &At, name: &str, value: &Json) -> Option<J
         }
     }
 
-    if let Some((reason, explanation)) = refused {
-        report.skip(&at.from, reason);
-        report.adopt_warnings(collected);
-        report.warn(format!("`{}` was left out: {explanation}", at.from));
-
-        return None;
-    }
-    report.adopt(collected);
+    settle(report, at, refused, collected)?;
 
     Some(fields.document())
 }
@@ -1828,18 +1820,11 @@ struct ProviderFields {
 
 impl ProviderFields {
     fn document(self) -> Json {
-        let mut entries = Vec::new();
-        for (key, value) in [
+        Json::Object(present([
             ("dialect", self.dialect),
             ("base_url", self.base_url),
             ("headers", self.headers),
-        ] {
-            if let Some(value) = value {
-                entries.push((key.to_owned(), value));
-            }
-        }
-
-        Json::Object(entries)
+        ]))
     }
 }
 
@@ -1936,14 +1921,7 @@ fn provider_entry(report: &mut Report, at: &At, id: &str, value: &Json) -> Optio
         }
     }
 
-    if let Some((reason, explanation)) = refused {
-        report.skip(&at.from, reason);
-        report.adopt_warnings(collected);
-        report.warn(format!("`{}` was left out: {explanation}", at.from));
-
-        return None;
-    }
-    report.adopt(collected);
+    settle(report, at, refused, collected)?;
 
     Some(fields.document())
 }

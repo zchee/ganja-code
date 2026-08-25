@@ -373,18 +373,30 @@ async fn get_session(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let Some(storage) = state.storage.clone() else {
-        return Err(ApiError::NotFound(format!("no stored session named {id}")));
-    };
-
-    let wanted = SessionId::from(id.clone());
+    let (storage, wanted) = stored(&state, &id)?;
     let info = tokio::task::spawn_blocking(move || storage.load_info(&wanted))
         .await
         .expect("the session load neither panics nor is aborted")
         .map_err(|error| ApiError::Internal(error.to_string()))?
-        .ok_or_else(|| ApiError::NotFound(format!("no stored session named {id}")))?;
+        .ok_or_else(|| unstored(&id))?;
 
     Ok(Json(serde_json::to_value(info).unwrap_or_default()))
+}
+
+/// The storage handle and parsed id the two read-only stored-session routes
+/// start from — a build with no store answers [`unstored`] for any id, since
+/// it holds nothing under any name.
+fn stored(state: &AppState, id: &str) -> Result<(ganja_core::Storage, SessionId), ApiError> {
+    let Some(storage) = state.storage.clone() else {
+        return Err(unstored(id));
+    };
+
+    Ok((storage, SessionId::from(id.to_owned())))
+}
+
+/// The refusal every stored-session read answers when `id` names nothing.
+fn unstored(id: &str) -> ApiError {
+    ApiError::NotFound(format!("no stored session named {id}"))
 }
 
 /// `GET /session/{id}/message` (`groups/session.ts:85`): the stored
@@ -393,11 +405,7 @@ async fn messages(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let Some(storage) = state.storage.clone() else {
-        return Err(ApiError::NotFound(format!("no stored session named {id}")));
-    };
-
-    let wanted = SessionId::from(id.clone());
+    let (storage, wanted) = stored(&state, &id)?;
     let transcript = tokio::task::spawn_blocking(move || {
         if storage.load_info(&wanted)?.is_none() {
             return Ok(None);
@@ -407,7 +415,7 @@ async fn messages(
     .await
     .expect("the transcript load neither panics nor is aborted")
     .map_err(|error: ganja_core::StorageError| ApiError::Internal(error.to_string()))?
-    .ok_or_else(|| ApiError::NotFound(format!("no stored session named {id}")))?;
+    .ok_or_else(|| unstored(&id))?;
 
     Ok(Json(serde_json::to_value(transcript).unwrap_or_default()))
 }
@@ -471,7 +479,7 @@ async fn abort(
     // resume, and a resume is refused mid-turn — which is this policy saying
     // an abort names the turn it stops. `ensure_session` starts with exactly
     // that same-session check, so the busy case falls through it untouched.
-    ensure_session(&state, SessionId::from(id).as_str()).await?;
+    ensure_session(&state, &id).await?;
     state.engine.send(Command::CancelTurn).await?;
 
     Ok(Json(true))
