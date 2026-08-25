@@ -1530,6 +1530,30 @@ mod tests {
              begin with both: {GANJA_USER_AGENT}"
         );
 
+        // The hosts W3 moved. Each reaches `GANJA_USER_AGENT` through a
+        // constant named for itself, so what is asserted here is that they
+        // still arrive at the same answer and that the answer is not the
+        // borrowed one — a per-host constant quietly repointed at
+        // `UPSTREAM_USER_AGENT` would otherwise read as an ordinary alias.
+        // xAI is absent on purpose: it moves in W4 and is still borrowed.
+        for (host, sent) in [
+            ("auth.openai.com", crate::auth::openai::ISSUER_USER_AGENT),
+            (
+                "chatgpt.com/backend-api/codex",
+                crate::provider::responses::CODEX_USER_AGENT,
+            ),
+        ] {
+            assert_eq!(
+                sent, GANJA_USER_AGENT,
+                "{host} says what this build is, through its own constant"
+            );
+            assert_ne!(
+                sent, UPSTREAM_USER_AGENT,
+                "{host} was moved off the borrowed identity against a live \
+                 probe; nothing may return it without one"
+            );
+        }
+
         // Copilot's device half. The chat half is pinned where it is sent,
         // beside the other three headers that were measured with it
         // (`provider::copilot`'s own header test), as a literal as well as

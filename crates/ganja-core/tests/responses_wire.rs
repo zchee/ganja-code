@@ -515,15 +515,16 @@ async fn either_openai_credential_drives_a_responses_turn_against_the_backend_it
         Some(FIRST_ACCOUNT),
         "the backend cannot tell which of a person's accounts to serve without it"
     );
-    assert_eq!(sent.header("originator").as_deref(), Some("opencode"));
+    assert_eq!(sent.header("originator").as_deref(), Some("ganja-code"));
     assert_eq!(
         sent.header("openai-beta").as_deref(),
         Some("responses=experimental")
     );
     assert_eq!(
         sent.header("user-agent").as_deref(),
-        Some(auth::device::UPSTREAM_USER_AGENT),
-        "one User-Agent for every request this build makes"
+        Some(auth::device::GANJA_USER_AGENT),
+        "the codex backend is told what this build is; the borrowed identity \
+         is a per-host choice now, not every request's answer"
     );
 
     let body = sent.json();

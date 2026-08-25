@@ -403,7 +403,9 @@ async fn a_copilot_subscription_drives_a_turn_with_the_headers_and_the_raw_token
     assert_eq!(
         sent.header("user-agent").as_deref(),
         Some(auth::device::UPSTREAM_USER_AGENT),
-        "one User-Agent for every request this build makes"
+        "this host keeps the borrowed identity by decision, while the codex \
+         backend now carries ganja's own — moving it belongs to its own \
+         evidence, not to a tidy-up that unifies the two constants"
     );
     assert_eq!(
         sent.header("x-api-key"),

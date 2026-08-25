@@ -119,7 +119,7 @@ const ORIGINATOR: &str = "ganja-code";
 /// completed end to end under both. What that buys is the externality
 /// `UPSTREAM_USER_AGENT`'s own doc prices: a server attributing traffic by
 /// this header now credits ganja's logins to ganja.
-const ISSUER_USER_AGENT: &str = crate::auth::device::GANJA_USER_AGENT;
+pub(in crate::auth) const ISSUER_USER_AGENT: &str = crate::auth::device::GANJA_USER_AGENT;
 
 /// What a form-encoded body is announced as.
 const FORM: &str = "application/x-www-form-urlencoded";

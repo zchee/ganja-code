@@ -30,16 +30,21 @@
 //! |---|---|---|
 //! | credential | a stored ChatGPT login | an API key |
 //! | base URL | [`DEFAULT_BASE_URL`] | [`openai::DEFAULT_BASE_URL`] |
-//! | extra headers | `ACCOUNT_HEADER`, `ORIGINATOR_HEADER`, `BETA_HEADER` | none |
+//! | extra headers | `ACCOUNT_HEADER`, `ORIGINATOR_HEADER`, `BETA_HEADER`, `CODEX_USER_AGENT` | none |
 //! | model gate | `serves` | whatever the platform serves |
 //! | default model | [`SUBSCRIPTION_DEFAULT`] | the catalog's |
 //!
-//! Every one of those rows is upstream's, and all of them come off the same
-//! branch: `codex.ts:356` returns the *unwrapped* `fetch` for a credential that
-//! is not OAuth, so a key request keeps the URL the SDK built
-//! (`api.openai.com/v1/responses`) and gains none of the three headers
-//! `:405-408` set; `codex.ts:281` returns the models unfiltered for the same
-//! condition, so the allow-list is a property of the seat and not of the API.
+//! The branch those rows describe is upstream's, and all of them come off it
+//! together: `codex.ts:356` returns the *unwrapped* `fetch` for a credential
+//! that is not OAuth, so a key request keeps the URL the SDK built
+//! (`api.openai.com/v1/responses`) and gains none of the four headers the
+//! subscription branch adds; `codex.ts:281` returns the models unfiltered for
+//! the same condition, so the allow-list is a property of the seat and not of
+//! the API.
+//!
+//! What those four *say* is not all upstream's: `BETA_HEADER` is the Codex
+//! CLI's own rather than the pin's, and since W3 the originator and the
+//! User-Agent are ganja's own name. Each is documented at its constant.
 //!
 //! [`DEFAULT_BASE_URL`] being `https://chatgpt.com/backend-api/codex` rather
 //! than the platform is `codex.ts:12`'s `CODEX_API_ENDPOINT`, and
@@ -215,29 +220,34 @@ const ACCOUNT_HEADER: &str = "chatgpt-account-id";
 
 /// Who the backend is told is asking (`codex.ts:551`).
 ///
-/// **Deliberately still `opencode`**, for the reason
-/// [`auth::openai`]'s own originator is: the access token was minted against a
-/// client registration that belongs to that project, and a value the
-/// registration has never been sent is a rejection nothing here could test for.
+/// **ganja's own name**, for the reason [`auth::openai`]'s own originator is:
+/// the field is not checked against the client registration the access token
+/// was minted under. OpenAI's own Codex CLI sends `codex_cli_rs` where
+/// upstream opencode sends `opencode` on that same registration, so what this
+/// decides is which feature cohort the backend serves — not whether it answers
+/// at all.
 const ORIGINATOR_HEADER: &str = "originator";
 
 /// The value [`ORIGINATOR_HEADER`] carries.
-const ORIGINATOR: &str = "opencode";
+const ORIGINATOR: &str = "ganja-code";
 
 /// What the codex backend is told this build is.
 ///
-/// [`auth::device::UPSTREAM_USER_AGENT`]'s bytes, named for
+/// [`auth::device::GANJA_USER_AGENT`]'s bytes, named for
 /// `chatgpt.com/backend-api/codex` rather than reached for directly, because
 /// this header and [`ORIGINATOR`] beside it decide which feature cohort the
 /// backend serves — and a request naming itself one thing in the header and
 /// another in the query is the one shape that cannot be the intended answer.
 ///
-/// Moves in W3 of `.omc/plans/2026-08-25-ganja-code-identity-headers.md`, with
-/// that originator and only after a live probe has recorded the model roster
-/// this seat is served under both names: the risk here is cohort placement
-/// rather than refusal, which is measurable and is therefore measured. Until
-/// then this is an alias and the wire bytes are unchanged.
-const CODEX_USER_AGENT: &str = auth::device::UPSTREAM_USER_AGENT;
+/// Moved in W3 of `.omc/plans/2026-08-25-ganja-code-identity-headers.md`, with
+/// that originator, and only after a live probe had recorded the model roster
+/// this seat is served: the exposure here is cohort placement rather than
+/// refusal, which is measurable and was therefore measured rather than argued.
+/// That recording is
+/// `crates/ganja-core/tests/fixtures/codex-identity-probe.txt`, overwritten on
+/// each probe run, so the recording made under the borrowed name — the
+/// baseline this rename is diffed against — is commit 5d5a52a's copy of it.
+pub(crate) const CODEX_USER_AGENT: &str = auth::device::GANJA_USER_AGENT;
 
 /// Opts the request into the Responses surface the Codex CLI talks to.
 ///
@@ -689,8 +699,9 @@ impl ResponsesProvider {
             .headers(self.headers.clone());
 
         // Subscription-only, all four, and for one reason: each of them is
-        // about talking to the codex backend as the Codex CLI, whose client
-        // registration the stored access token was minted against
+        // about talking to the codex backend, whose endpoint and client
+        // registration are the Codex CLI's even though this build no longer
+        // answers to its name
         // (`codex.ts:405-408`, and `auth::openai`'s own originator). A key is
         // the caller's own credential against the platform, which asks for
         // nothing but the bearer — `codex.ts:356` hands such a request to the
@@ -2204,8 +2215,8 @@ mod tests {
     /// **nothing else**.
     ///
     /// Each of the four headers above exists because the subscription request
-    /// impersonates the Codex CLI against a client registration this project
-    /// borrowed; a key is the caller's own credential against the platform, and
+    /// is a ChatGPT seat on the Codex CLI's registration; a key is the
+    /// caller's own credential against the platform, and
     /// upstream sends such a request through the unwrapped `fetch`
     /// (`codex.ts:356`), so it gains none of them. Asserted as absences because
     /// that is the failure mode — a header added on a hunch travels with
@@ -2279,8 +2290,8 @@ mod tests {
         for absent in [ACCOUNT_HEADER, ORIGINATOR_HEADER, BETA_HEADER, "user-agent"] {
             assert!(
                 !headers.contains_key(absent),
-                "`{absent}` belongs to a ChatGPT seat impersonating the Codex CLI \
-                 and reached a different vendor entirely: {headers:?}"
+                "`{absent}` belongs to a ChatGPT seat on the Codex CLI's \
+                 registration and reached a different vendor entirely: {headers:?}"
             );
         }
 

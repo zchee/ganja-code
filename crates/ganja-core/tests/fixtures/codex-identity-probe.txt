@@ -6,7 +6,7 @@
 # doc holds the command, the gate and the three things this cannot measure.
 #
 # Build: ganja-code 0.1.0
-# Note:  not recorded; set GANJA_PROBE_NOTE to stamp one
+# Note:  post-commit-2 tree: originator+UA ganja-code on the codex backend; ganja auth login (browser) completed 2026-08-25 under originator=ganja-code
 
 == identity headers ==
 # Captured off a loopback socket this process owns. The quartet below is decided
@@ -17,9 +17,9 @@
 # diff on.
 authorization: <redacted: present>
 chatgpt-account-id: <redacted: present>
-originator: opencode
+originator: ganja-code
 openai-beta: responses=experimental
-user-agent: opencode/1.18.22
+user-agent: ganja-code/0.1.0
 
 # Also sent, names only: a header set that dropped what it did not
 # recognise would hide the next one somebody adds.
