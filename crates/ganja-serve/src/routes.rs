@@ -641,18 +641,50 @@ async fn team(State(state): State<AppState>) -> Result<Json<TeamView>, ApiError>
 ///
 /// The body is `ganja-core`'s [`SocketMessage`], the same struct the sending
 /// side serializes, so the two ends of the wire cannot drift; the answer is
-/// its [`SocketDelivered`]. What is refused, and how, is the engine's ladder
-/// ([`NotReceived`]) mapped onto the status table this crate already keeps:
-/// nothing to deliver into is `404`, a name nobody answers to is `404`, a
-/// body that is blank, structured, from a sender that will not name itself
-/// as a peer, or addressed to anyone but the lead is `400`, and an inbox
-/// that would not take the message is `500`. **The `{name}` a peer may
-/// address is the lead's, and only the lead's** (M4, ruled deliberately
-/// rather than inherited): the outbound arm addresses nobody else, no
-/// caller does, and a session's socket delivers to the session — a member
-/// is reached through its lead. A structured frame never crosses (§5.2-6): a `text` that parses
-/// as one is refused by the engine's classify, and a body that carries a
-/// frame *instead of* text does not parse as this body at all.
+/// its [`SocketDelivered`]. Serve computes nothing here (**D523**): the
+/// admission decision — policy, then the guards and the queue cap — is the
+/// engine's deliver arm's alone, and this handler carries outcomes it never
+/// computes, the crate's stateless contract holding on the socket's one
+/// write route as it does everywhere else.
+///
+/// # The outcome table
+///
+/// | outcome | answer |
+/// |---|---|
+/// | ladder refusal: blank, frame, identity shape, not the lead | `400`, the rung's own sentence |
+/// | ladder refusal: no team, a name nobody answers to | `404`, likewise |
+/// | accepted and written | `200`, the uniform arrival note |
+/// | explicit refuse, and every guard drop | `200`, **byte-identical** to the accept |
+/// | held for a person's review | `200`, the note naming held and its cause |
+/// | write failure after an accept | `500` |
+///
+/// The ladder ([`NotReceived`]) is *shape*, and predates policy — the
+/// analogue of the reference destroying a connection on malformed input (v2
+/// §"Authentication and peer provenance", evidence 886100-886230) — so its
+/// refusals keep their statuses and sentences whatever the policy says.
+/// Past the ladder the answer stops distinguishing: refused messages do not
+/// notify the sender (v2 §"Explicit outcomes (`P8a`)", evidence
+/// 620644-620683), so an explicit refuse and every guard drop answer the
+/// accept's exact bytes. The rationale is the threat statement
+/// [`socket_routes`] keeps: the socket is reachable by every same-uid
+/// process, and a distinct refuse answer would let any of them enumerate
+/// which sessions refuse inbound — a user's policy posture mapped for free —
+/// and would hand a sender's model a signal to retry against. What remains
+/// is a **timing** channel — an accept performs a mailbox write, a refuse
+/// does not — named rather than papered over: the reference's paths differ
+/// in work done too, and equalizing timing against a same-uid observer is
+/// not a boundary this transport can hold. A hold alone is announced — the
+/// note names its cause, as the reference's held receipt names its `reason`
+/// (v2 §"Receipts and sender UX", evidence 220977-221015) — and a write
+/// that fails after an accept is `500`: infrastructure, not policy.
+///
+/// **The `{name}` a peer may address is the lead's, and only the lead's**
+/// (M4, ruled deliberately rather than inherited): the outbound arm
+/// addresses nobody else, no caller does, and a session's socket delivers
+/// to the session — a member is reached through its lead. A structured
+/// frame never crosses (§5.2-6): a `text` that parses as one is refused by
+/// the engine's classify, and a body that carries a frame *instead of* text
+/// does not parse as this body at all.
 async fn team_message(
     State(state): State<AppState>,
     Path(name): Path<String>,
