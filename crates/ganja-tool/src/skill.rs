@@ -235,15 +235,7 @@ fn manifests(dir: &Path) -> Vec<PathBuf> {
         return Vec::new();
     }
 
-    let mut found: Vec<PathBuf> = ignore::WalkBuilder::new(dir)
-        .hidden(false)
-        .follow_links(false)
-        // Ignore files are for source trees; a skills directory that happens
-        // to sit inside one would otherwise be invisible.
-        .standard_filters(false)
-        .max_depth(Some(MAX_DEPTH))
-        .build()
-        .filter_map(Result::ok)
+    let mut found: Vec<PathBuf> = walk(dir)
         .filter(|entry| entry.file_name() == MANIFEST && entry.path().is_file())
         .map(|entry| entry.into_path())
         .collect();
@@ -511,13 +503,7 @@ pub fn rendered(skill: &Skill, dir: &Path) -> String {
 /// same crates `glob` uses. Sorted, where upstream takes whatever order the
 /// walk produced: "sampled" should still mean the same sample twice.
 fn beside(dir: &Path) -> Vec<PathBuf> {
-    let mut found: Vec<PathBuf> = ignore::WalkBuilder::new(dir)
-        .hidden(false)
-        .follow_links(false)
-        .standard_filters(false)
-        .max_depth(Some(MAX_DEPTH))
-        .build()
-        .filter_map(Result::ok)
+    let mut found: Vec<PathBuf> = walk(dir)
         .filter(|entry| entry.path().is_file() && entry.file_name() != MANIFEST)
         .map(|entry| entry.into_path())
         .collect();
@@ -525,6 +511,20 @@ fn beside(dir: &Path) -> Vec<PathBuf> {
     found.truncate(SAMPLED_FILES);
 
     found
+}
+
+/// The walk both readers of a skills tree share: hidden files included,
+/// ignore files not consulted — those are for source trees, and a skills
+/// directory that happens to sit inside one would otherwise be invisible —
+/// and symbolic links not followed, capped at [`MAX_DEPTH`].
+fn walk(dir: &Path) -> impl Iterator<Item = ignore::DirEntry> {
+    ignore::WalkBuilder::new(dir)
+        .hidden(false)
+        .follow_links(false)
+        .standard_filters(false)
+        .max_depth(Some(MAX_DEPTH))
+        .build()
+        .filter_map(Result::ok)
 }
 
 #[cfg(test)]

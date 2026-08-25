@@ -585,6 +585,17 @@ fn push_text(node: &Rc<Node>, out: &mut String) {
         EndBlock,
     }
 
+    // Children go on the stack reversed, so popping visits them in order.
+    fn enter_children(work: &mut Vec<Work>, node: &Rc<Node>) {
+        work.extend(
+            node.children
+                .borrow()
+                .iter()
+                .rev()
+                .map(|child| Work::Enter(Rc::clone(child))),
+        );
+    }
+
     let mut work = vec![Work::Enter(Rc::clone(node))];
     while let Some(item) = work.pop() {
         let Work::Enter(node) = item else {
@@ -611,23 +622,11 @@ fn push_text(node: &Rc<Node>, out: &mut String) {
                     end_block(out);
                     work.push(Work::EndBlock);
                 }
-                work.extend(
-                    node.children
-                        .borrow()
-                        .iter()
-                        .rev()
-                        .map(|child| Work::Enter(Rc::clone(child))),
-                );
+                enter_children(&mut work, &node);
             }
             // A document, a doctype, a comment, a processing instruction:
             // nothing a reader sees, though a document's children are the page.
-            _ => work.extend(
-                node.children
-                    .borrow()
-                    .iter()
-                    .rev()
-                    .map(|child| Work::Enter(Rc::clone(child))),
-            ),
+            _ => enter_children(&mut work, &node),
         }
     }
 }

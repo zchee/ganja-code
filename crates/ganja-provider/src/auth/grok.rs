@@ -428,17 +428,7 @@ impl BrowserFlow {
         redirect: &str,
         verifier: &SecretString,
     ) -> Result<Tokens, BrowserError> {
-        let sent = self
-            .client
-            .post(&self.token_url)
-            // The same three headers upstream sends (`xai.ts:87-93`), through
-            // the same encoder the device flow's bodies go through.
-            .header(reqwest::header::ACCEPT, "application/json")
-            .header(reqwest::header::USER_AGENT, XAI_USER_AGENT)
-            .header(
-                reqwest::header::CONTENT_TYPE,
-                "application/x-www-form-urlencoded",
-            )
+        let sent = token_request(&self.client, &self.token_url)
             .body(form(&[
                 ("grant_type", "authorization_code"),
                 ("code", code.expose_secret()),
@@ -701,15 +691,7 @@ impl super::RefreshOauth for Refresh {
             });
         }
 
-        let sent = self
-            .client
-            .post(&self.token_url)
-            .header(reqwest::header::ACCEPT, "application/json")
-            .header(reqwest::header::USER_AGENT, XAI_USER_AGENT)
-            .header(
-                reqwest::header::CONTENT_TYPE,
-                "application/x-www-form-urlencoded",
-            )
+        let sent = token_request(&self.client, &self.token_url)
             .body(form(&[
                 ("grant_type", "refresh_token"),
                 ("refresh_token", stored),
@@ -777,6 +759,23 @@ impl super::RefreshOauth for Refresh {
             expiry(positive_seconds_ms(fields.get("expires_in")).map(|ms| ms / 1_000)),
         ))
     }
+}
+
+/// The POST every grant to the token endpoint rides — the same three headers
+/// upstream sends (`xai.ts:87-93`), with the body left to each caller through
+/// the same encoder the device flow's bodies go through. Shared by the
+/// renewal and the browser flow's exchange so the two cannot drift over what
+/// this endpoint is told; what each does with the *answer* stays its own,
+/// because their error classifications are load-bearing and different.
+fn token_request(client: &reqwest::Client, token_url: &str) -> reqwest::RequestBuilder {
+    client
+        .post(token_url)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .header(reqwest::header::USER_AGENT, XAI_USER_AGENT)
+        .header(
+            reqwest::header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded",
+        )
 }
 
 /// Why the token endpoint refused, in a form that can be shown and logged.

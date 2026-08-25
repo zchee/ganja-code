@@ -501,7 +501,7 @@ fn anthropic_effort(model: &ModelInfo, effort: &str) -> Option<Map<String, Value
 fn adaptive_effort(model: &ModelInfo, effort: &str) -> Map<String, Value> {
     let mut thinking = Map::new();
     thinking.insert("type".to_owned(), "adaptive".into());
-    if anthropic_omits_thinking(&model.id) {
+    if anthropic_modern_adaptive(&model.id) {
         thinking.insert("display".to_owned(), "summarized".into());
     }
 
@@ -521,14 +521,11 @@ fn opus_45_effort(model: &ModelInfo, effort: &str) -> Map<String, Value> {
     map
 }
 
-/// Whether this Claude generation defaults adaptive `display` to omitted —
-/// upstream's `anthropicOmitsThinking`, which is its modern-adaptive check.
-fn anthropic_omits_thinking(api_id: &str) -> bool {
-    anthropic_modern_adaptive(api_id)
-}
-
 /// Claude 4.7 and newer speak adaptive thinking natively; an id that names no
-/// version at all is read as newest, upstream's own default.
+/// version at all is read as newest, upstream's own default. Upstream also
+/// asks this under a second name — `anthropicOmitsThinking`, the generations
+/// that default adaptive `display` to omitted — and the two checks are one
+/// function there as here.
 fn anthropic_modern_adaptive(api_id: &str) -> bool {
     let id = api_id.to_lowercase();
     if !id.contains("claude-") {
