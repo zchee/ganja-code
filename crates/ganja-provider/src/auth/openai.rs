@@ -84,30 +84,42 @@ const SCOPE: &str = "openid profile email offline_access";
 
 /// Who the issuer is told is asking (`openai.ts:271`).
 ///
-/// **Deliberately still `opencode`.** It is not a User-Agent — it is a
-/// parameter of a client registration that belongs to upstream, alongside the
-/// client id and the callback port above, and a value the registration has
-/// never been sent is a rejection nothing here could test for. What ganja does
-/// say in its own name is the `User-Agent`, below.
-const ORIGINATOR: &str = "opencode";
+/// **ganja's own name**, moved in W3 of
+/// `.omc/plans/2026-08-25-ganja-code-identity-headers.md`. It is not a
+/// User-Agent — it is a parameter of a client registration that belongs to
+/// upstream, alongside the client id and the callback port above — but it is
+/// not checked against that registration either: OpenAI's own Codex CLI sends
+/// `codex_cli_rs` and upstream opencode sends `opencode` on that *same*
+/// `client_id`, so the field demonstrably carries whatever its sender says.
+/// What it can decide is which feature cohort the seat this login mints lands
+/// in, and how the issuer branches on the authorize request — the simplified
+/// flow, the consent screen, the callback. Neither is argued here: this value
+/// moved only after a real `ganja auth login` completed, per W3's gate, and
+/// the roster the seat it mints is served is recorded in
+/// `crates/ganja-core/tests/fixtures/codex-identity-probe.txt`. That file is
+/// overwritten on each probe run, so the recording made under the borrowed
+/// name — the baseline this rename is diffed against — is commit 5d5a52a's
+/// copy of it.
+///
+/// Moves with [`ISSUER_USER_AGENT`] and never alone, because a host must never
+/// be told two different things about who is asking.
+const ORIGINATOR: &str = "ganja-code";
 
 /// How this build identifies itself to the issuer.
 ///
-/// [`UPSTREAM_USER_AGENT`](crate::auth::device::UPSTREAM_USER_AGENT)'s bytes,
-/// named for `auth.openai.com` rather than reached for directly: every login
-/// here presents a client id upstream registered, and the only header shape
-/// ever measured against this live endpoint was that project's. The cost is
-/// worth naming — a server attributing traffic by this header credits ganja's
-/// requests to upstream — and it is why the name is now this host's to choose
-/// rather than one answer inherited by every host at once.
+/// [`GANJA_USER_AGENT`](crate::auth::device::GANJA_USER_AGENT)'s bytes, named
+/// for `auth.openai.com` rather than reached for directly, so the choice stays
+/// this host's rather than one answer inherited by every host at once:
+/// [`UPSTREAM_USER_AGENT`](crate::auth::device::UPSTREAM_USER_AGENT) is what
+/// the one host ganja leaves borrowed by decision rather than by sequence
+/// still receives.
 ///
-/// Moves in W3 of `.omc/plans/2026-08-25-ganja-code-identity-headers.md`,
-/// together with [`ORIGINATOR`] because a host must never be told two
-/// different things about who is asking, and only after a real
-/// `ganja auth login` has completed against
-/// [`GANJA_USER_AGENT`](crate::auth::device::GANJA_USER_AGENT). Until then
-/// this is an alias and the wire bytes are unchanged.
-const ISSUER_USER_AGENT: &str = crate::auth::device::UPSTREAM_USER_AGENT;
+/// Moved in W3 of `.omc/plans/2026-08-25-ganja-code-identity-headers.md`,
+/// together with [`ORIGINATOR`] and only after a real `ganja auth login` had
+/// completed end to end under both. What that buys is the externality
+/// `UPSTREAM_USER_AGENT`'s own doc prices: a server attributing traffic by
+/// this header now credits ganja's logins to ganja.
+const ISSUER_USER_AGENT: &str = crate::auth::device::GANJA_USER_AGENT;
 
 /// What a form-encoded body is announced as.
 const FORM: &str = "application/x-www-form-urlencoded";
@@ -1105,7 +1117,7 @@ mod tests {
                 ("id_token_add_organizations".to_owned(), "true".to_owned()),
                 ("codex_cli_simplified_flow".to_owned(), "true".to_owned()),
                 ("state".to_owned(), "st".to_owned()),
-                ("originator".to_owned(), "opencode".to_owned()),
+                ("originator".to_owned(), "ganja-code".to_owned()),
             ]
         );
     }

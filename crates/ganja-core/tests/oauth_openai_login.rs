@@ -404,8 +404,9 @@ async fn the_code_exchange_presents_the_verifier_the_authorize_url_published() {
         exchange
             .user_agent
             .as_deref()
-            .is_some_and(|agent| agent.starts_with("opencode/")),
-        "{:?}",
+            .is_some_and(|agent| agent.starts_with("ganja-code/")),
+        "the token exchange says what this build is, not what it borrowed a \
+         client registration from: {:?}",
         exchange.user_agent
     );
 
