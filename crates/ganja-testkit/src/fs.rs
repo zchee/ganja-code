@@ -21,6 +21,16 @@ pub fn temp_dir() -> TempDir {
     TempDir::new().expect("a temporary directory is creatable")
 }
 
+/// Writes `text` to `root/relative`, creating whatever directories it
+/// needs — the seeding stroke every fixture-tree test makes.
+pub fn plant(root: &Path, relative: &str, text: &str) {
+    let path = root.join(relative);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("the fixture tree is creatable");
+    }
+    fs::write(path, text).expect("the fixture file is writable");
+}
+
 /// Points `XDG_DATA_HOME` at a fresh temporary directory and returns its
 /// handle, so a project's resolved data directory — and anything a test
 /// stores there — lives under it instead of the real user's.

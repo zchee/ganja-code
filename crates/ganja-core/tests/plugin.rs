@@ -19,7 +19,6 @@ use std::{
     fs,
     io::{self, Write as _},
     path::Path,
-    sync::{Arc, Mutex},
 };
 
 use ganja_core::{
@@ -28,50 +27,7 @@ use ganja_core::{
     config::{CONFIG_ENV, CONFIG_HOME_ENV},
     plugin::Store,
 };
-use tracing_subscriber::fmt::MakeWriter;
-
-/// A `tracing` writer this test can read back, so that "the collision is
-/// reported by name" is an assertion rather than a promise.
-#[derive(Clone, Default)]
-struct Capture(Arc<Mutex<Vec<u8>>>);
-
-impl Capture {
-    fn logged(&self) -> String {
-        String::from_utf8_lossy(&self.0.lock().expect("the log is never poisoned")).into_owned()
-    }
-}
-
-impl io::Write for Capture {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .expect("the log is never poisoned")
-            .extend_from_slice(buffer);
-
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'writer> MakeWriter<'writer> for Capture {
-    type Writer = Self;
-
-    fn make_writer(&'writer self) -> Self::Writer {
-        self.clone()
-    }
-}
-
-/// Writes `text` to `root/relative`, creating whatever directories it needs.
-fn plant(root: &Path, relative: &str, text: &str) {
-    let path = root.join(relative);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).expect("the fixture tree is creatable");
-    }
-    fs::write(path, text).expect("the fixture file is writable");
-}
+use ganja_testkit::{LogCapture as Capture, plant};
 
 /// A marketplace holding one plugin that carries all six surfaces — the
 /// fixture acceptance criterion 6 names — plus deliberate collisions with

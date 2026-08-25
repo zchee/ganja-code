@@ -18,8 +18,7 @@
 use std::{
     fs,
     io::{self, Write as _},
-    path::Path,
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 use ganja_core::{
@@ -30,52 +29,8 @@ use ganja_core::{
     protocol::Command,
     tool,
 };
-use ganja_testkit::{ScriptedProvider, agent_registry};
+use ganja_testkit::{LogCapture as Capture, ScriptedProvider, agent_registry, plant};
 use serde_json::json;
-use tracing_subscriber::fmt::MakeWriter;
-
-/// A `tracing` writer this test can read back, so that "the refusal names the
-/// file" is an assertion rather than a promise.
-#[derive(Clone, Default)]
-struct Capture(Arc<Mutex<Vec<u8>>>);
-
-impl Capture {
-    fn logged(&self) -> String {
-        String::from_utf8_lossy(&self.0.lock().expect("the log is never poisoned")).into_owned()
-    }
-}
-
-impl io::Write for Capture {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .expect("the log is never poisoned")
-            .extend_from_slice(buffer);
-
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'writer> MakeWriter<'writer> for Capture {
-    type Writer = Self;
-
-    fn make_writer(&'writer self) -> Self::Writer {
-        self.clone()
-    }
-}
-
-/// Writes `text` to `root/relative`, creating whatever directories it needs.
-fn plant(root: &Path, relative: &str, text: &str) {
-    let path = root.join(relative);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).expect("the fixture tree is creatable");
-    }
-    fs::write(path, text).expect("the fixture file is writable");
-}
 
 #[tokio::test]
 async fn a_command_naming_an_agent_nobody_has_is_refused_by_file_at_load_and_by_name_at_dispatch() {

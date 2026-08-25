@@ -45,7 +45,7 @@ use ganja_core::{
     storage,
     tool::{Registry, Tool, ToolCtx, ToolError, ToolOutput},
 };
-use ganja_testkit::{ScriptedProvider, says, tool_call};
+use ganja_testkit::{ScriptedProvider, drain, says, tool_call};
 use serde_json::{Value, json};
 
 /// How long any wait here is allowed to take before the test calls it a hang.
@@ -1397,20 +1397,4 @@ async fn every_child_that_ends_fires_its_own_subagent_stop() {
         vec!["explore", "general", "general"],
         "each firing names the agent that actually ran"
     );
-}
-
-/// Collects every event up to and including the turn's finish.
-async fn drain(events: &mut BoxStream<'static, Event>) -> Vec<Event> {
-    let mut seen = Vec::new();
-    loop {
-        let event = events
-            .next()
-            .await
-            .expect("the turn should finish before the stream ends");
-        let finished = matches!(event, Event::MessageFinished { .. });
-        seen.push(event);
-        if finished {
-            return seen;
-        }
-    }
 }

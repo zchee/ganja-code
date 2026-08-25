@@ -25,25 +25,21 @@
 
 use std::{
     path::Path,
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
-use async_trait::async_trait;
-use futures::{
-    StreamExt as _,
-    stream::{self, BoxStream},
-};
+use futures::StreamExt as _;
 use ganja_core::{
     Engine, LspConfig,
     lsp::{Lsp, lsp_types},
     permission::{Action, Permissions, Rule},
     protocol::{Command, Event, FinishReason, PartBody, ToolState},
-    provider::{ChatRequest, Provider, ProviderError, ProviderEvent},
+    provider::ProviderEvent,
     tool::Registry,
 };
+use ganja_testkit::{ScriptedProvider, plant, tool_call};
 use tempfile::TempDir;
-use tokio_util::sync::CancellationToken;
 
 /// What the accept pins by default: from the tool starting to the tool
 /// result, with the diagnostics block in it (plan:205).
@@ -89,57 +85,6 @@ const CORRECT_BODY: &str = "0";
 
 /// What the edit puts there instead: a `&str` where an `i32` is promised.
 const BROKEN_BODY: &str = "\"not an integer\"";
-
-/// Answers each request with the next script.
-struct ScriptedProvider {
-    scripts: Mutex<std::collections::VecDeque<Vec<ProviderEvent>>>,
-}
-
-#[async_trait]
-impl Provider for ScriptedProvider {
-    fn id(&self) -> &str {
-        "lsp-drill"
-    }
-
-    async fn stream(
-        &self,
-        _request: ChatRequest,
-        _cancel: CancellationToken,
-    ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
-        let script = self
-            .scripts
-            .lock()
-            .expect("the scripts are never poisoned")
-            .pop_front()
-            .expect("the script has a step for every request");
-
-        Ok(stream::iter(script).boxed())
-    }
-}
-
-/// One complete tool call, as a provider streams it.
-fn call(id: &str, tool: &str, arguments: &serde_json::Value) -> Vec<ProviderEvent> {
-    vec![
-        ProviderEvent::ToolCallStart {
-            id: id.to_owned(),
-            name: tool.to_owned(),
-        },
-        ProviderEvent::ToolCallDelta {
-            id: id.to_owned(),
-            json: arguments.to_string(),
-        },
-        ProviderEvent::ToolCallEnd { id: id.to_owned() },
-        ProviderEvent::Finish(FinishReason::Completed),
-    ]
-}
-
-/// Writes `contents` at `root/relative`, creating the directories above it.
-fn plant(root: &Path, relative: &str, contents: &str) {
-    let path = root.join(relative);
-    std::fs::create_dir_all(path.parent().expect("the file has a parent"))
-        .expect("the fixture directories are created");
-    std::fs::write(path, contents).expect("the fixture file is written");
-}
 
 /// A one-crate cargo project: a file that is already wrong, and one that is not
 /// yet.
@@ -296,28 +241,24 @@ async fn an_edit_that_breaks_a_type_comes_back_with_rust_analyzers_complaint_att
     // Two calls in one turn: `read` earns the right to edit — the
     // read-before-write rule is the engine's, not this test's — and `edit` is
     // the one whose result is timed.
-    let provider = Arc::new(ScriptedProvider {
-        scripts: Mutex::new(
-            vec![
-                call(
-                    "read-1",
-                    "read",
-                    &serde_json::json!({ "filePath": fresh.to_string_lossy() }),
-                ),
-                call(
-                    "edit-1",
-                    "edit",
-                    &serde_json::json!({
-                        "filePath": fresh.to_string_lossy(),
-                        "oldString": CORRECT_BODY,
-                        "newString": BROKEN_BODY,
-                    }),
-                ),
-                vec![ProviderEvent::Finish(FinishReason::Completed)],
-            ]
-            .into(),
-        ),
-    });
+    let (provider, _requests) = ScriptedProvider::strict(
+        "lsp-drill",
+        vec![
+            tool_call(
+                "read",
+                serde_json::json!({ "filePath": fresh.to_string_lossy() }),
+            ),
+            tool_call(
+                "edit",
+                serde_json::json!({
+                    "filePath": fresh.to_string_lossy(),
+                    "oldString": CORRECT_BODY,
+                    "newString": BROKEN_BODY,
+                }),
+            ),
+            vec![ProviderEvent::Finish(FinishReason::Completed)],
+        ],
+    );
     let mut permissions = Permissions::default();
     // `edit` asks by default. The drill is about diagnostics, not about the
     // gate, and the gate has its own suite.

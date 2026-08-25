@@ -14,54 +14,15 @@
 
 mod support;
 
-use std::{
-    io,
-    sync::{Arc, Mutex},
-};
-
 use base64::Engine as _;
 use ganja_core::{permission::Permissions, tool::Registry};
 use ganja_serve::Credentials;
-use ganja_testkit::says;
+use ganja_testkit::{LogCapture as Capture, says};
 use secrecy::SecretString;
 use support::{base_url, loopback_config, scripted_engine};
-use tracing_subscriber::fmt::MakeWriter;
 
 /// The password planted in the server. Nothing may render it.
 const CANARY: &str = "pw-canary-XYZZY-73";
-
-/// A `tracing` writer a test can read back.
-#[derive(Clone, Default)]
-struct Capture(Arc<Mutex<Vec<u8>>>);
-
-impl Capture {
-    fn logged(&self) -> String {
-        String::from_utf8_lossy(&self.0.lock().expect("the log is never poisoned")).into_owned()
-    }
-}
-
-impl io::Write for Capture {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .expect("the log is never poisoned")
-            .extend_from_slice(buffer);
-
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> MakeWriter<'a> for Capture {
-    type Writer = Capture;
-
-    fn make_writer(&'a self) -> Self::Writer {
-        self.clone()
-    }
-}
 
 #[tokio::test]
 async fn the_password_and_the_query_that_carries_it_reach_no_log_line() {

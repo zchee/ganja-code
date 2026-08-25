@@ -601,18 +601,7 @@ invocations! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::Invocation;
-
-    /// Every assertion below reads argv as text, for the reason
-    /// [`panes`][crate::commands::panes]'s own tests give; the one test here
-    /// that is about bytes says so in its name.
-    fn words<I: Invocation>(invocation: &I) -> Vec<String> {
-        invocation
-            .args()
-            .iter()
-            .map(|word| word.to_string_lossy().into_owned())
-            .collect()
-    }
+    use crate::commands::words;
 
     #[test]
     fn set_option_renders_every_flag_it_has() {

@@ -45,7 +45,7 @@ use ganja_core::{
     provider::{ChatRequest, Provider, ProviderError, ProviderEvent},
     tool::Registry,
 };
-use ganja_testkit::{RecorderTool, ScriptedProvider, drain};
+use ganja_testkit::{RecorderTool, ScriptedProvider, drain, says};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -61,14 +61,6 @@ fn call(id: &str, tool: &str, json: &str) -> Vec<ProviderEvent> {
             json: json.to_owned(),
         },
         ProviderEvent::ToolCallEnd { id: id.to_owned() },
-    ]
-}
-
-/// A step that says `text` and stops.
-fn says(text: &str) -> Vec<ProviderEvent> {
-    vec![
-        ProviderEvent::TextDelta(text.to_owned()),
-        ProviderEvent::Finish(FinishReason::Completed),
     ]
 }
 

@@ -72,6 +72,7 @@ use expectrl::{
 };
 use ganja_core::Storage;
 use ganja_protocol::{Message, Part, PartBody, Role};
+use ganja_testkit::temp_dir as temporary;
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -269,10 +270,6 @@ impl Drop for Ganja {
         // leaving it running would outlive the whole `cargo test` run.
         let _ = session.get_process_mut().exit(true);
     }
-}
-
-fn temporary() -> TempDir {
-    TempDir::new().expect("a temporary directory is creatable")
 }
 
 /// A project directory holding the drill's script.

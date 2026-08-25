@@ -26,6 +26,7 @@ use std::{
 };
 
 use assert_cmd::Command;
+use ganja_testkit::temp_dir as temporary;
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -47,10 +48,6 @@ const MINTED: [&str; 6] = [
     "started",
     "completed",
 ];
-
-fn temporary() -> TempDir {
-    TempDir::new().expect("a temporary directory is creatable")
-}
 
 /// A script whose only turn says `CLOSING`.
 fn one_word() -> Value {

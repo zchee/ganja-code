@@ -714,26 +714,32 @@ pub const REGISTRY: &[Entry] = &TYPED;
 /// the honest holding state while the builder is written.
 pub const EXCLUDED: &[Excluded] = &[];
 
+/// Argv as text, for the render tests here and in every family module:
+/// those assertions are about which words tmux is handed rather than about
+/// bytes — the tests that *are* about bytes say so and read `args()` raw.
+#[cfg(test)]
+fn words<I: Invocation>(invocation: &I) -> Vec<String> {
+    invocation
+        .args()
+        .iter()
+        .map(|word| word.to_string_lossy().into_owned())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::commands::panes::{ListPanes, SplitWindow};
 
-    fn words(argv: &[OsString]) -> Vec<String> {
-        argv.iter()
-            .map(|word| word.to_string_lossy().into_owned())
-            .collect()
-    }
-
     #[test]
     fn a_command_with_nothing_set_is_its_name_alone() {
-        assert_eq!(words(&ListPanes::new().args()), ["list-panes"]);
+        assert_eq!(words(&ListPanes::new()), ["list-panes"]);
     }
 
     #[test]
     fn a_switch_asked_for_twice_is_still_one_flag() {
         assert_eq!(
-            words(&ListPanes::new().all().all().args()),
+            words(&ListPanes::new().all().all()),
             ["list-panes", "-a"],
             "argv is a set of flags, not a tally of how often each was asked for"
         );
@@ -747,7 +753,6 @@ mod tests {
                     .start_directory("/one")
                     .detached()
                     .start_directory("/two")
-                    .args()
             ),
             ["split-window", "-c", "/two", "-d"],
             "a caller who sets -c twice is correcting themselves, not asking for two directories"
@@ -757,12 +762,7 @@ mod tests {
     #[test]
     fn a_repeatable_flag_keeps_every_value_in_call_order() {
         assert_eq!(
-            words(
-                &SplitWindow::new()
-                    .environment("A=1")
-                    .environment("B=2")
-                    .args()
-            ),
+            words(&SplitWindow::new().environment("A=1").environment("B=2")),
             ["split-window", "-e", "A=1", "-e", "B=2"],
             "tmux reads -e once per variable, so the builder must not fold them together"
         );
@@ -771,7 +771,7 @@ mod tests {
     #[test]
     fn flags_keep_the_order_they_were_asked_for() {
         assert_eq!(
-            words(&ListPanes::new().format("#{pane_id}").all().args()),
+            words(&ListPanes::new().format("#{pane_id}").all()),
             ["list-panes", "-F", "#{pane_id}", "-a"]
         );
     }
@@ -797,7 +797,6 @@ mod tests {
                 &SplitWindow::new()
                     .detached()
                     .command(["sh", "-c", "sleep 1"])
-                    .args()
             ),
             ["split-window", "-d", "--", "sh", "-c", "sleep 1"],
             "without the fence, a program named like a flag would be read as one"
@@ -807,12 +806,7 @@ mod tests {
     #[test]
     fn a_trailing_command_set_twice_replaces_rather_than_appends() {
         assert_eq!(
-            words(
-                &SplitWindow::new()
-                    .command(["first"])
-                    .command(["second"])
-                    .args()
-            ),
+            words(&SplitWindow::new().command(["first"]).command(["second"])),
             ["split-window", "--", "second"]
         );
     }

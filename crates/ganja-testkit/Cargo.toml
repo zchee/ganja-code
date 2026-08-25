@@ -33,6 +33,9 @@ serde_json.workspace = true
 # One temporary directory per test, for the storage- and XDG-redirect
 # builders — deleted with the handle, never the real user's state.
 tempfile.workspace = true
+# `LogCapture` is a `MakeWriter`: the trait every suite that reads its own
+# log back needs implemented once rather than eight times.
+tracing-subscriber.workspace = true
 tokio.workspace = true
 # `CancellationToken` lives behind `rt`, the same feature ganja-core itself
 # enables it with.

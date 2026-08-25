@@ -26,10 +26,7 @@
 //! empty search space. Being global means the flavour cannot matter, and the
 //! assertion that a library-internal trace arrived is what proves it.
 
-use std::{
-    env, io,
-    sync::{Arc, Mutex},
-};
+use std::env;
 
 use futures::StreamExt as _;
 use ganja_core::{
@@ -38,13 +35,13 @@ use ganja_core::{
         self, AnthropicProvider, ChatRequest, OpenAiProvider, Provider as _, ProviderEvent,
     },
 };
+use ganja_testkit::LogCapture as Capture;
 use secrecy::SecretString;
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::TcpListener,
 };
 use tokio_util::sync::CancellationToken;
-use tracing_subscriber::fmt::MakeWriter;
 
 /// The key planted in the environment. Nothing may render it.
 const CANARY: &str = "sk-test-canary-XYZ";
@@ -60,39 +57,6 @@ const REFRESH_CANARY: &str = "rt-test-canary-RST";
 /// where text the model wrote itself is read back into every prompt (D478).
 /// The prompt is where it belongs; a log line is not.
 const MEMORY_CANARY: &str = "mk-test-canary-OPQ";
-
-/// A `tracing` writer a test can read back.
-#[derive(Clone, Default)]
-struct Capture(Arc<Mutex<Vec<u8>>>);
-
-impl Capture {
-    fn logged(&self) -> String {
-        String::from_utf8_lossy(&self.0.lock().expect("the log is never poisoned")).into_owned()
-    }
-}
-
-impl io::Write for Capture {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .expect("the log is never poisoned")
-            .extend_from_slice(buffer);
-
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> MakeWriter<'a> for Capture {
-    type Writer = Self;
-
-    fn make_writer(&'a self) -> Self::Writer {
-        self.clone()
-    }
-}
 
 /// Serves `responses`, one per connection, then closes.
 async fn serve(responses: Vec<String>) -> (String, tokio::task::JoinHandle<()>) {

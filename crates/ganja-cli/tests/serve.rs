@@ -17,6 +17,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use ganja_testkit::temp_dir as temporary;
 use tempfile::TempDir;
 
 /// How long any single wait may take before the fixture is declared broken.
@@ -172,10 +173,6 @@ impl Served {
 
         stderr
     }
-}
-
-fn temporary() -> TempDir {
-    TempDir::new().expect("a temporary directory is creatable")
 }
 
 /// A script whose only turn says something and nothing else.

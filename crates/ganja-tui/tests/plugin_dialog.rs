@@ -9,13 +9,14 @@
 //! one move the homes out from under it. Everything in this file is
 //! therefore one test, the `theme_paths` discipline.
 
-use std::{fs, path::Path, sync::Arc};
+use std::{fs, sync::Arc};
 
 use ganja_core::{
     Engine,
     plugin::Store,
     provider::{FakeProvider, fake},
 };
+use ganja_testkit::plant;
 use ganja_tui::{app::App, event::AppEvent, theme::Themes};
 use ratatui::{
     Terminal,
@@ -23,15 +24,6 @@ use ratatui::{
     crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyModifiers},
 };
 use tempfile::TempDir;
-
-/// Writes `text` to `root/relative`, creating directories as needed.
-fn plant(root: &Path, relative: &str, text: &str) {
-    let path = root.join(relative);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).expect("the fixture tree is creatable");
-    }
-    fs::write(path, text).expect("the fixture file is writable");
-}
 
 /// One keypress, as the event loop would deliver it.
 fn key(code: KeyCode) -> AppEvent {

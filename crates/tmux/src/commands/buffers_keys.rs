@@ -597,18 +597,7 @@ invocations! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PaneId, commands::Invocation};
-
-    /// Every assertion below reads argv as text, because every assertion
-    /// below is about which words tmux is handed; the two that are about
-    /// bytes say so, and build their values out of them.
-    fn words<I: Invocation>(invocation: &I) -> Vec<String> {
-        invocation
-            .args()
-            .iter()
-            .map(|word| word.to_string_lossy().into_owned())
-            .collect()
-    }
+    use crate::{PaneId, commands::words};
 
     #[test]
     fn set_buffer_renders_every_flag_it_has() {

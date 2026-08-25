@@ -456,18 +456,10 @@ invocations! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{SessionId, commands::Invocation};
-
-    /// Every assertion below reads argv as text, for the reason the pane
-    /// family's own helper states: these are about which words tmux is
-    /// handed, and the one test about bytes lives beside the accumulator.
-    fn words<I: Invocation>(invocation: &I) -> Vec<String> {
-        invocation
-            .args()
-            .iter()
-            .map(|word| word.to_string_lossy().into_owned())
-            .collect()
-    }
+    use crate::{
+        SessionId,
+        commands::{Invocation, words},
+    };
 
     #[test]
     fn new_session_renders_every_flag_it_has() {

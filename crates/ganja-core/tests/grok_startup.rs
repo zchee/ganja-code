@@ -18,17 +18,14 @@
 //! One test, one binary, on purpose: it mutates `XDG_DATA_HOME`, and a plain
 //! `cargo test` runs the tests inside a binary on parallel threads.
 
-use std::{
-    env, fs, io,
-    sync::{Arc, Mutex},
-};
+use std::{env, fs};
 
 use ganja_core::{
     auth::{self, OauthCredential, grok},
     provider::{GrokProvider, Provider as _, ProviderError},
 };
+use ganja_testkit::LogCapture as Capture;
 use secrecy::SecretString;
-use tracing_subscriber::fmt::MakeWriter;
 
 /// The access token planted in the store. Nothing may render it.
 const ACCESS_CANARY: &str = "at-grok-startup-canary-JKLM";
@@ -37,39 +34,6 @@ const ACCESS_CANARY: &str = "at-grok-startup-canary-JKLM";
 /// is the one a probe that reached for "the credential" rather than "whether
 /// there is one" would be holding.
 const REFRESH_CANARY: &str = "rt-grok-startup-canary-NOPQ";
-
-/// A `tracing` writer a test can read back.
-#[derive(Clone, Default)]
-struct Capture(Arc<Mutex<Vec<u8>>>);
-
-impl Capture {
-    fn logged(&self) -> String {
-        String::from_utf8_lossy(&self.0.lock().expect("the log is never poisoned")).into_owned()
-    }
-}
-
-impl io::Write for Capture {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .expect("the log is never poisoned")
-            .extend_from_slice(buffer);
-
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> MakeWriter<'a> for Capture {
-    type Writer = Self;
-
-    fn make_writer(&'a self) -> Self::Writer {
-        self.clone()
-    }
-}
 
 #[test]
 fn a_grok_session_with_no_stored_login_refuses_before_it_starts() {

@@ -51,6 +51,7 @@ use std::{
 use expectrl::{
     ControlCode, Eof, Expect as _, Session, process::unix::WaitStatus, session::OsSession,
 };
+use ganja_testkit::temp_dir as temporary;
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -172,10 +173,6 @@ impl Drop for Ganja {
 
         let _ = session.get_process_mut().exit(true);
     }
-}
-
-fn temporary() -> TempDir {
-    TempDir::new().expect("a temporary directory is creatable")
 }
 
 /// A project directory the session will pin its state — and so its permission

@@ -34,10 +34,23 @@ use ganja_core::{
 };
 use ganja_team::{LEAD, MemberName, TeamName, TeamsRoot, mailbox, record};
 use ganja_testkit::{
-    AllowSpawn, RunnerHarness, ScriptedProvider, caller, drain, eventually, says,
-    spawn_with_prompt, team, tool_call,
+    AllowSpawn, LogCapture as Capture, RunnerHarness, ScriptedProvider, caller, drain, eventually,
+    says, spawn_with_prompt, team, tool_call,
 };
 use tracing::instrument::WithSubscriber as _;
+
+/// A subscriber writing into `capture`, for one future rather than for the
+/// process: this binary holds several tests, so a global subscriber would be
+/// one test's log read by another.
+fn subscriber(capture: &Capture) -> tracing::Dispatch {
+    tracing::Dispatch::new(
+        tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .finish(),
+    )
+}
 
 /// How long a claim about a running loop is waited for. The tick-driven
 /// tests drive the pass themselves and never wait.
@@ -100,7 +113,7 @@ async fn a_stale_plan_approval_response_is_ignored_and_logged() {
     let tick = harness
         .runner
         .tick()
-        .with_subscriber(logged.subscriber())
+        .with_subscriber(subscriber(&logged))
         .await;
 
     assert_eq!(tick.ignored, 1, "{tick:?}");
@@ -108,9 +121,9 @@ async fn a_stale_plan_approval_response_is_ignored_and_logged() {
     assert_eq!(tick.delivered, 0, "a stale approval reaches no model");
     assert_eq!(harness.left(), 0, "and it does not stay to be read again");
     assert!(
-        logged.text().contains(IGNORED_STALE),
+        logged.logged().contains(IGNORED_STALE),
         "the ignoring is not silent: {}",
-        logged.text()
+        logged.logged()
     );
 
     // The same frame, once this teammate is waiting on that request: applied,
@@ -438,51 +451,4 @@ async fn a_pane_members_ask_is_answered_at_the_leads_dialog_and_the_call_runs() 
         ran,
         "the forwarded ask, once answered, let the call run: {seen:?}"
     );
-}
-
-/// A `tracing` subscriber a test can read back.
-#[derive(Clone, Default)]
-struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
-
-impl Capture {
-    /// What has been logged so far.
-    fn text(&self) -> String {
-        String::from_utf8_lossy(&self.0.lock().expect("the log is never poisoned")).into_owned()
-    }
-
-    /// A subscriber writing into this capture, for one future rather than for
-    /// the process: this binary holds several tests, so a global subscriber
-    /// would be one test's log read by another.
-    fn subscriber(&self) -> tracing::Dispatch {
-        tracing::Dispatch::new(
-            tracing_subscriber::fmt()
-                .with_writer(self.clone())
-                .with_max_level(tracing::Level::TRACE)
-                .with_ansi(false)
-                .finish(),
-        )
-    }
-}
-
-impl std::io::Write for Capture {
-    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        self.0
-            .lock()
-            .expect("the log is never poisoned")
-            .extend_from_slice(buffer);
-
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
-    type Writer = Self;
-
-    fn make_writer(&'a self) -> Self::Writer {
-        self.clone()
-    }
 }

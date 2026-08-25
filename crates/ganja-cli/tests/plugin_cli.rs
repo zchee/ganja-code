@@ -10,6 +10,7 @@
 use std::{fs, path::Path, process::Command as Process};
 
 use assert_cmd::Command;
+use ganja_testkit::plant;
 use predicates::prelude::*;
 use serde_json::Value;
 use tempfile::TempDir;
@@ -29,15 +30,6 @@ fn ganja(home: &TempDir) -> Command {
 
 fn home() -> TempDir {
     TempDir::new().expect("a temporary directory is creatable")
-}
-
-/// Writes `text` to `root/relative`, creating whatever directories it needs.
-fn plant(root: &Path, relative: &str, text: &str) {
-    let path = root.join(relative);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).expect("the fixture tree is creatable");
-    }
-    fs::write(path, text).expect("the fixture file is writable");
 }
 
 /// A marketplace offering one plugin with a hook and a skill — enough that

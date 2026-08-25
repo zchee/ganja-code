@@ -15,6 +15,7 @@
 use std::{fs, path::Path};
 
 use assert_cmd::Command;
+use ganja_testkit::temp_dir as temporary;
 use predicates::prelude::*;
 use serde_json::Value;
 use tempfile::TempDir;
@@ -121,10 +122,6 @@ impl Run {
             .map(str::to_owned)
             .collect()
     }
-}
-
-fn temporary() -> TempDir {
-    TempDir::new().expect("a temporary directory is creatable")
 }
 
 /// A script whose only turn says `CLOSING` and nothing else.

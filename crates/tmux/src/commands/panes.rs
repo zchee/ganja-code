@@ -853,19 +853,7 @@ invocations! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PaneId, WindowId, commands::Invocation};
-
-    /// Every assertion below reads argv as text, because every assertion
-    /// below is about which words tmux is handed rather than about bytes;
-    /// the one test that *is* about bytes lives in the parent module beside
-    /// the accumulator it exercises.
-    fn words<I: Invocation>(invocation: &I) -> Vec<String> {
-        invocation
-            .args()
-            .iter()
-            .map(|word| word.to_string_lossy().into_owned())
-            .collect()
-    }
+    use crate::{PaneId, WindowId, commands::words};
 
     #[test]
     fn split_window_renders_every_flag_it_has() {

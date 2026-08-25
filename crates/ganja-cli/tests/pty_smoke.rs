@@ -39,6 +39,7 @@ use std::{
 use expectrl::{
     ControlCode, Eof, Expect as _, Session, process::unix::WaitStatus, session::OsSession,
 };
+use ganja_testkit::temp_dir as temporary;
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -427,10 +428,6 @@ fn a_submitted_prompt_streams_a_reply_before_quitting() {
         .expect("the fake provider's reply never reached the transcript");
 
     session.quit_and_assert_clean_exit();
-}
-
-fn temporary() -> TempDir {
-    TempDir::new().expect("a temporary directory is creatable")
 }
 
 /// A project directory with [`TARGET`] seeded.

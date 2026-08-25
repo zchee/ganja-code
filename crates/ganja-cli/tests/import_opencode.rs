@@ -16,6 +16,7 @@
 use std::{fs, path::Path};
 
 use assert_cmd::Command;
+use ganja_testkit::temp_dir as temporary;
 use predicates::prelude::*;
 use tempfile::TempDir;
 
@@ -26,10 +27,6 @@ const CANARY: &str = "sk-canary-8842";
 /// The fixture the table test in `src/import.rs` maps, driven here through the
 /// binary so the two cannot drift apart.
 const FIXTURE: &str = include_str!("fixtures/opencode.jsonc");
-
-fn temporary() -> TempDir {
-    TempDir::new().expect("a temporary directory is creatable")
-}
 
 /// Writes `text` to `path`, creating whatever directories it needs.
 fn plant(path: &Path, text: &str) {
