@@ -14,8 +14,13 @@
 # again.
 #
 # Operator: W4 lane (Claude, lead-supervised); both legs run by the user
-# Binary:  ganja-code 0.1.0, debug build of the W4 tree
-# Machine: macOS, 2026-08-25
+# Date:    2026-08-25
+# Binary:  ganja-code 0.1.0, this tree's own debug build, run through cargo.
+#          There is no vendor binary line here as P27's `*-posture-probe.txt`
+#          fixtures carry one: those drove somebody else's CLI, and this drives
+#          ganja against somebody else's endpoint. No machine line either — the
+#          relay this was composed from did not carry one, and a plausible
+#          guess in a recording is the one thing a recording is for not doing.
 
 == leg 1: the browser login ==
 # `ganja auth login --provider grok --method browser`
