@@ -6268,6 +6268,11 @@ impl App {
             // beside the agent and the effort in the status bar. The arm
             // exists so the match stays exhaustive.
             CoreEvent::PermissionModeChanged { .. } => {}
+            // Taken and drawn nowhere yet: the admission gate's TUI lane
+            // (L3b) grows the approval dialog, the held listing and the
+            // status segment these announce, and replaces this arm with
+            // them. Until then the arm exists so the match stays exhaustive.
+            CoreEvent::PeerHeld { .. } | CoreEvent::PeerHoldSettled { .. } => {}
             // A compaction reporting how far its summary has streamed (user
             // directive, 2026-08-25): the strip flips to the compacting
             // dress — armed here even before any message opens, which is how

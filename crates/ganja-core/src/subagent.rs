@@ -2072,6 +2072,10 @@ async fn watch(mut receiver: mpsc::Receiver<Event>, watched: Watched) -> Outcome
             | Event::PermissionModeChanged { .. }
             | Event::CompactionProgress { .. }
             | Event::EffortChanged { .. } => {}
+            // A hold and its settlement are a lead's surfaces, and no child
+            // session leads a team, so neither can arrive here — the W2
+            // inbound gate replaces this arm where it wires the buffer.
+            Event::PeerHeld { .. } | Event::PeerHoldSettled { .. } => {}
         }
     }
 

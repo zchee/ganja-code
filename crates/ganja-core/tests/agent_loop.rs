@@ -172,6 +172,10 @@ fn shape(event: &Event) -> String {
                 PermissionMode::Bypass => "bypass",
             }
         ),
+        // Named so an order test that meets one fails readably; nothing in
+        // this suite raises a hold until the W2 inbound gate lands.
+        Event::PeerHeld { .. } => "peer_held".to_owned(),
+        Event::PeerHoldSettled { .. } => "peer_hold_settled".to_owned(),
     }
 }
 

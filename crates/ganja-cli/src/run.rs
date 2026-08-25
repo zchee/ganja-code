@@ -890,6 +890,13 @@ impl<'a> Reporter<'a> {
             // no consumer was promised.
             | Event::QuestionAsked { .. }
             | Event::QuestionReplied { .. }
+            // A hold and its settlement are a lead's surfaces and a headless
+            // run leads no team — it installs no teammates and binds no
+            // socket a peer could reach — so neither can arrive here. The
+            // admission gate's own lanes grow the surfaces that draw them;
+            // these rows exist to keep the match honest.
+            | Event::PeerHeld { .. }
+            | Event::PeerHoldSettled { .. }
             | Event::QuestionRejected { .. } => {}
         }
 

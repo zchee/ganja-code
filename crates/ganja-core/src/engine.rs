@@ -3045,6 +3045,17 @@ impl Engine {
             Command::SwitchModel { model } => self.switch_model(model).await,
             Command::SwitchEffort { effort } => self.switch_effort(effort).await,
             Command::SetPermissionMode { mode } => self.set_permission_mode(mode).await,
+            // Nothing is held yet — the W2 inbound gate replaces this arm
+            // with the buffer's settlement. Until then a settle names
+            // nothing, which is already the command's own contract for an
+            // unknown id: ignored, said only to the log.
+            Command::SettleHeld { id, decision: _ } => {
+                tracing::debug!(
+                    id = id.as_str(),
+                    "nothing is held; the inbound gate has not landed"
+                );
+                Ok(())
+            }
             Command::RunShell { command } => {
                 self.start_turn(command.clone(), TurnKind::Shell { command }, None)
                     .await
@@ -5268,6 +5279,11 @@ mod tests {
                 | Event::AgentChanged { .. }
                 | Event::PermissionModeChanged { .. }
                 | Event::CompactionProgress { .. }
+                // No replayed text: a hold's whole point is that nothing
+                // reached the transcript. The W2 inbound gate replaces this
+                // arm if a settlement ever grows one.
+                | Event::PeerHeld { .. }
+                | Event::PeerHoldSettled { .. }
                 | Event::EffortChanged { .. } => {}
             }
         }
