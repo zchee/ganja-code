@@ -376,6 +376,43 @@ async fn a_turn_spans_steps_until_a_request_ends_without_tool_calls() {
     assert_eq!(*total, Some(usage(10, 16)));
 }
 
+/// Two thoughts split by the wire's boundary render as two parts: the break
+/// closes the open reasoning part, so the next delta opens a fresh one and
+/// the transcript draws each summary behind a marker of its own instead of
+/// splicing them together ("PlanningDesigning…", 2026-08-25).
+#[tokio::test]
+async fn a_reasoning_break_starts_a_new_thought_part() {
+    let script = vec![vec![
+        ProviderEvent::ReasoningDelta("Planning".to_owned()),
+        ProviderEvent::ReasoningBreak,
+        ProviderEvent::ReasoningDelta("Designing".to_owned()),
+        ProviderEvent::TextDelta("ok".to_owned()),
+        ProviderEvent::Finish(FinishReason::Completed),
+    ]];
+    let (provider, _requests) = ScriptedProvider::strict("step-scripted", script);
+    let engine = Engine::new(
+        provider,
+        "scripted-model",
+        Arc::new(Registry::new(Vec::new())),
+        Permissions::default(),
+    );
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine.send(prompt()).await.expect("an idle engine accepts");
+    let seen = drain(&mut events).await;
+
+    let shapes: Vec<String> = seen.iter().map(shape).collect();
+    let thoughts: Vec<usize> = shapes
+        .iter()
+        .enumerate()
+        .filter(|(_, shape)| *shape == "part:reasoning_text")
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(thoughts.len(), 2, "two thoughts, two parts: {shapes:?}");
+    assert_eq!(shapes[thoughts[0] + 1], "delta:Planning", "{shapes:?}");
+    assert_eq!(shapes[thoughts[1] + 1], "delta:Designing", "{shapes:?}");
+}
+
 #[tokio::test]
 async fn a_call_with_no_arguments_runs_with_an_empty_object() {
     let (provider, _requests) = ScriptedProvider::strict(

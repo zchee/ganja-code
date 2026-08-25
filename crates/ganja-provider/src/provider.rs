@@ -322,6 +322,15 @@ pub enum ProviderEvent {
         /// The sealed state, verbatim.
         encrypted: String,
     },
+    /// The boundary between two blocks of readable thinking.
+    ///
+    /// The Responses wire sends one when the provider opens a second summary
+    /// part on a stream that already streamed readable thinking: the text
+    /// deltas carry no separator of their own, and without the boundary two
+    /// summaries splice into one thought ("PlanningDesigning…", 2026-08-25).
+    /// The loop answers by closing the open reasoning part, so what follows
+    /// starts a thought of its own; a break with nothing open says nothing.
+    ReasoningBreak,
     /// The model started calling a tool.
     ToolCallStart {
         /// Correlates the call's fragments and its result.
@@ -1017,6 +1026,10 @@ fn matters(event: &ProviderEvent) -> bool {
     match event {
         ProviderEvent::TextDelta(_)
         | ProviderEvent::ReasoningDelta(_)
+        // A break exists only downstream of readable thinking — the wire
+        // says it after a block has streamed — so by the time one appears
+        // the transcript has already shown something no replay may repeat.
+        | ProviderEvent::ReasoningBreak
         | ProviderEvent::ReasoningState { .. }
         | ProviderEvent::ToolCallStart { .. }
         | ProviderEvent::ToolCallDelta { .. }

@@ -1729,6 +1729,7 @@ async fn request_title(
             // at all: this request is not part of the conversation, so there
             // is no next request of its own to hand it back on.
             ProviderEvent::ReasoningDelta(_)
+            | ProviderEvent::ReasoningBreak
             | ProviderEvent::ReasoningState { .. }
             | ProviderEvent::ToolCallStart { .. }
             | ProviderEvent::ToolCallDelta { .. }
@@ -2705,7 +2706,9 @@ async fn summarize(
             // dropped the way the step loop drops orphan reasoning. A summary
             // request is a question about the conversation rather than a step
             // of it, so state sealed while answering it belongs to nothing.
-            ProviderEvent::ReasoningDelta(_) | ProviderEvent::ReasoningState { .. } => {}
+            ProviderEvent::ReasoningDelta(_)
+            | ProviderEvent::ReasoningBreak
+            | ProviderEvent::ReasoningState { .. } => {}
             ProviderEvent::ToolCallStart { .. }
             | ProviderEvent::ToolCallDelta { .. }
             | ProviderEvent::ToolCallEnd { .. }
@@ -3332,6 +3335,14 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
                 {
                     interrupt!(stop, &ToolError::Cancelled.to_string());
                 }
+            }
+            // The boundary between two thoughts (2026-08-25): the wire says
+            // a new summary block opened, so the next readable delta starts
+            // a part of its own — one thinking marker per thought — instead
+            // of splicing onto the last. A break with nothing open says
+            // nothing.
+            ProviderEvent::ReasoningBreak => {
+                open_reasoning = None;
             }
             // Reasoning a person could read, which is a part of its own — not
             // pasted into the reply, and not sent anywhere. It is written

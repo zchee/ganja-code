@@ -1373,6 +1373,7 @@ impl Mapper for Mapping {
         match chunk["type"].as_str().unwrap_or_default() {
             "response.output_text.delta" => self.delta(&chunk, events, ProviderEvent::TextDelta),
             REASONING_SUMMARY_DELTA => self.thought(&chunk, events, REASONING_SUMMARY_DELTA),
+            REASONING_SUMMARY_PART => self.thought_break(events),
             // OpenRouter's own spelling of the same thing, which is what makes
             // it worth a second arm: that vendor serves a dialect it documents
             // as a drop-in for this one and then names this one event itself
@@ -1464,6 +1465,18 @@ impl Mapping {
         events.push(ProviderEvent::ReasoningDelta(delta.to_owned()));
     }
 
+    /// Marks the boundary the provider announced between two summary blocks.
+    ///
+    /// Emitted only once readable thinking has streamed: the same frame also
+    /// precedes the *first* block, where there is nothing yet to break from,
+    /// and a stream whose readable channel is latched shut has no thought to
+    /// end.
+    fn thought_break(&self, events: &mut Vec<ProviderEvent>) {
+        if self.thinking.is_some() {
+            events.push(ProviderEvent::ReasoningBreak);
+        }
+    }
+
     /// The thinking a settled reasoning item carries, for a stream that streamed
     /// none.
     ///
@@ -1486,7 +1499,7 @@ impl Mapping {
             return;
         };
 
-        let text = summary
+        let blocks: Vec<&str> = summary
             .iter()
             // Two documented shapes for one field: OpenRouter publishes bare
             // strings (`api_reference/responses/reasoning`, "Response with
@@ -1495,13 +1508,18 @@ impl Mapping {
             // neither shape is skipped rather than rendered as JSON.
             .filter_map(|entry| entry.as_str().or_else(|| entry["text"].as_str()))
             .filter(|line| !line.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        if text.is_empty() {
-            return;
-        }
+            .collect();
 
-        events.push(ProviderEvent::ReasoningDelta(text));
+        // One delta per block with the boundary said between them, exactly
+        // as the streaming path says it (2026-08-25): each summary block is
+        // a thought of its own, and a joined string would splice them back
+        // together.
+        for (index, block) in blocks.iter().enumerate() {
+            if index > 0 {
+                events.push(ProviderEvent::ReasoningBreak);
+            }
+            events.push(ProviderEvent::ReasoningDelta((*block).to_owned()));
+        }
     }
 
     /// Opens a call the model started making.
@@ -1746,6 +1764,12 @@ const REASONING: &str = "reasoning";
 /// OpenAI's name for a fragment of readable thinking, which only exists
 /// downstream of a `reasoning.summary` in the request ([`summarized`]).
 const REASONING_SUMMARY_DELTA: &str = "response.reasoning_summary_text.delta";
+
+/// The frame that opens a new summary block inside one reasoning item. Worth
+/// mapping for its boundary alone: the deltas of two blocks carry no
+/// separator, so this frame is the only place the stream says one thought
+/// ended and another began.
+const REASONING_SUMMARY_PART: &str = "response.reasoning_summary_part.added";
 
 /// OpenRouter's name for the same fragment, published in that vendor's own
 /// streaming example and carried in the same `delta` field
@@ -2908,6 +2932,47 @@ mod tests {
         );
     }
 
+    /// Two summary blocks on one stream stay two thoughts: the part
+    /// boundary the provider announces between them becomes a break, so they
+    /// cannot glue into "PlanningDesigning" downstream — and the boundary
+    /// ahead of the first block says nothing, because there is nothing yet
+    /// to break from.
+    #[tokio::test]
+    async fn a_second_summary_part_breaks_the_thought_before_it() {
+        let seen = events(concat!(
+            r#"data: {"type":"response.reasoning_summary_part.added","item_id":"rs_1","summary_index":0}"#,
+            "\n\n",
+            r#"data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","delta":"Planning"}"#,
+            "\n\n",
+            r#"data: {"type":"response.reasoning_summary_part.added","item_id":"rs_1","summary_index":1}"#,
+            "\n\n",
+            r#"data: {"type":"response.reasoning_summary_text.delta","item_id":"rs_1","delta":"Designing"}"#,
+            "\n\n",
+            r#"data: {"type":"response.completed","response":{}}"#,
+            "\n\n",
+        ))
+        .await;
+
+        let thoughts: Vec<&ProviderEvent> = seen
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    ProviderEvent::ReasoningDelta(_) | ProviderEvent::ReasoningBreak
+                )
+            })
+            .collect();
+        assert_eq!(
+            thoughts,
+            vec![
+                &ProviderEvent::ReasoningDelta("Planning".to_owned()),
+                &ProviderEvent::ReasoningBreak,
+                &ProviderEvent::ReasoningDelta("Designing".to_owned()),
+            ],
+            "got {seen:?}"
+        );
+    }
+
     /// The receiving half: the state arrives on the item's *closing* frame,
     /// the opening one having carried `encrypted_content: null`
     /// (`tool-runtime.test.ts:544-553`).
@@ -3031,7 +3096,24 @@ mod tests {
         ))
         .await;
 
-        assert_eq!(thinking(&seen), "First the year\n\nThen the difference");
+        let thoughts: Vec<&ProviderEvent> = seen
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    ProviderEvent::ReasoningDelta(_) | ProviderEvent::ReasoningBreak
+                )
+            })
+            .collect();
+        assert_eq!(
+            thoughts,
+            vec![
+                &ProviderEvent::ReasoningDelta("First the year".to_owned()),
+                &ProviderEvent::ReasoningBreak,
+                &ProviderEvent::ReasoningDelta("Then the difference".to_owned()),
+            ],
+            "each block is a thought of its own: {seen:?}"
+        );
         assert!(
             !seen
                 .iter()
