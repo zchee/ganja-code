@@ -27,7 +27,7 @@
 //! [`CompatProvider`] generalises exactly that shape to endpoints this build
 //! does not ship: a config's `provider` table names an id, a [`Dialect`], an
 //! endpoint, the variable holding its key and whatever headers it wants, and
-//! `ganja_core::provider::select` builds one of the two wires above from that.
+//! `ganja_core::provider::select` builds one of the wires above from that.
 //! So the set of
 //! providers a session may name is **two tiers** — the builtins in
 //! [`PROVIDERS`], plus whatever the config declares — while the narrower set

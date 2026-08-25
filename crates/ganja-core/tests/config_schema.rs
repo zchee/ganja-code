@@ -151,6 +151,10 @@ const KITCHEN_SINK: &str = r#"{
       "base_url": "http://127.0.0.1:8080",
       "key_env": "LOCAL_LLAMA_KEY",
       "headers": { "X-Custom": "1" }
+    },
+    "proxy": {
+      "dialect": "openai-responses",
+      "base_url": "https://responses.example/v1"
     }
   },
   "webfetch": { "allow_private": true },
@@ -362,6 +366,14 @@ fn the_schema_refuses_what_it_has_a_keyword_for() {
         !validator.is_valid(&sink),
         "McpOauth is an empty struct with deny_unknown_fields; the schema's \
          additionalProperties: false on McpOauth should refuse an extra key too"
+    );
+
+    let mut sink: Value = serde_json::from_str(KITCHEN_SINK).expect("the fixture is valid JSON");
+    sink["provider"]["proxy"]["dialect"] = json!("gemini");
+    assert!(
+        !validator.is_valid(&sink),
+        "a dialect nobody implements is refused by the loader naming the three \
+         that exist; the schema's closed Dialect enum should refuse it too"
     );
 
     let mut sink: Value = serde_json::from_str(KITCHEN_SINK).expect("the fixture is valid JSON");

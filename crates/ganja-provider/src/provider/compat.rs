@@ -15,10 +15,11 @@
 //!   package name is a fact about somebody's node_modules and the wire is a
 //!   fact about the endpoint.
 //!
-//! **This is not a third wire.** Both dialects are the two providers that
-//! already ship, built through the seams they publish for exactly this —
-//! `OpenAiProvider::with_credential` and its two siblings, and the set
-//! [`AnthropicProvider`] gained to match. Nothing here encodes a message or
+//! **This is not a new wire.** Every dialect is a provider that already
+//! ships, built through the seams they publish for exactly this —
+//! `OpenAiProvider::with_credential` and its two siblings, the set
+//! [`AnthropicProvider`] gained to match, and [`ResponsesProvider`]'s one
+//! constructor under `Backend::Compat`. Nothing here encodes a message or
 //! decodes a frame, and a change that starts to is a sign the endpoint stopped
 //! being compatible, which is a new provider rather than a bigger version of
 //! this one ([`super::grok`]'s standing rule, applied to a whole tier).
@@ -39,14 +40,14 @@ use tokio_util::sync::CancellationToken;
 
 use crate::provider::{
     AnthropicProvider, ChatRequest, CredentialSource, OpenAiProvider, Provider, ProviderError,
-    ProviderEvent, check_base_url,
+    ProviderEvent, ResponsesProvider, check_base_url, responses::Backend,
 };
 
 /// The wire a config-named endpoint speaks.
 ///
-/// Two, and deliberately only two: these are the request/response mappings
-/// this build already has. A third value here would mean a third mapping,
-/// which is a provider rather than a dialect.
+/// Three, and deliberately only three: these are the request/response
+/// mappings this build already has. A fourth value here would mean a fourth
+/// mapping, which is a provider rather than a dialect.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum Dialect {
@@ -54,6 +55,12 @@ pub enum Dialect {
     /// standard a local llama.cpp, an OpenRouter key or a vLLM deployment all
     /// serve. [`super::openai`] is the wire.
     OpenaiChatCompletions,
+    /// `POST {base}/responses`, `Authorization: Bearer` — the same vendor's
+    /// Responses API, for an endpoint that serves that surface instead.
+    /// [`super::responses`] is the wire, under its `Backend::Compat`: nothing
+    /// sealed is asked for and no `reasoning` default is written, because an
+    /// endpoint a config named is a vendor this build has never met.
+    OpenaiResponses,
     /// `POST {base}/v1/messages`, `x-api-key` plus the pinned
     /// [`API_VERSION`](super::anthropic::API_VERSION).
     /// [`super::anthropic`] is the wire.
@@ -75,6 +82,7 @@ pub struct CompatProvider {
 /// The provider a dialect resolves to.
 enum Wire {
     ChatCompletions(OpenAiProvider),
+    Responses(ResponsesProvider),
     Messages(AnthropicProvider),
 }
 
@@ -87,6 +95,7 @@ impl fmt::Debug for CompatProvider {
         rendered.field("id", &self.id);
         match &self.wire {
             Wire::ChatCompletions(wire) => rendered.field("wire", wire),
+            Wire::Responses(wire) => rendered.field("wire", wire),
             Wire::Messages(wire) => rendered.field("wire", wire),
         }
         .finish()
@@ -121,6 +130,10 @@ impl CompatProvider {
             Dialect::OpenaiChatCompletions => Wire::ChatCompletions(
                 OpenAiProvider::with_credential(credential, base_url)?.with_headers(headers),
             ),
+            Dialect::OpenaiResponses => Wire::Responses(
+                ResponsesProvider::built(credential, base_url.to_owned(), Backend::Compat)?
+                    .with_headers(headers),
+            ),
             Dialect::AnthropicMessages => Wire::Messages(
                 AnthropicProvider::with_credential(credential, base_url)?.with_headers(headers),
             ),
@@ -146,6 +159,7 @@ impl Provider for CompatProvider {
     ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
         match &self.wire {
             Wire::ChatCompletions(wire) => wire.stream(request, cancel).await,
+            Wire::Responses(wire) => wire.stream(request, cancel).await,
             Wire::Messages(wire) => wire.stream(request, cancel).await,
         }
     }
@@ -158,6 +172,7 @@ impl Provider for CompatProvider {
     fn rate_windows(&self) -> Vec<super::RateWindow> {
         match &self.wire {
             Wire::ChatCompletions(wire) => wire.rate_windows(),
+            Wire::Responses(wire) => wire.rate_windows(),
             Wire::Messages(wire) => wire.rate_windows(),
         }
     }
@@ -167,6 +182,7 @@ impl Provider for CompatProvider {
     fn plan_windows(&self) -> Vec<super::PlanWindow> {
         match &self.wire {
             Wire::ChatCompletions(wire) => wire.plan_windows(),
+            Wire::Responses(wire) => wire.plan_windows(),
             Wire::Messages(wire) => wire.plan_windows(),
         }
     }
@@ -197,7 +213,11 @@ mod tests {
     /// gated and disclosed by the name its provider reports.
     #[test]
     fn a_config_named_provider_answers_to_the_name_its_entry_was_written_under() {
-        for dialect in [Dialect::OpenaiChatCompletions, Dialect::AnthropicMessages] {
+        for dialect in [
+            Dialect::OpenaiChatCompletions,
+            Dialect::OpenaiResponses,
+            Dialect::AnthropicMessages,
+        ] {
             let provider = built(dialect, "http://127.0.0.1:8080/v1").expect("a client builds");
 
             assert_eq!(
@@ -222,7 +242,11 @@ mod tests {
     /// a provider becomes.
     #[test]
     fn a_configured_endpoint_may_carry_a_key_only_where_a_builtin_one_could() {
-        for dialect in [Dialect::OpenaiChatCompletions, Dialect::AnthropicMessages] {
+        for dialect in [
+            Dialect::OpenaiChatCompletions,
+            Dialect::OpenaiResponses,
+            Dialect::AnthropicMessages,
+        ] {
             let refused = built(dialect, "http://gateway.example/v1")
                 .expect_err("plain http to a public host puts the key on the wire in the clear");
             assert!(
@@ -245,13 +269,14 @@ mod tests {
         }
     }
 
-    /// The two words a config file may spell, held to the spelling `serde`
-    /// derives, because a third value here would be a third request/response
+    /// The three words a config file may spell, held to the spelling `serde`
+    /// derives, because a fourth value here would be a fourth request/response
     /// mapping rather than another endpoint.
     #[test]
     fn the_dialects_are_spelled_the_way_a_config_file_spells_them() {
         for (dialect, spelled) in [
             (Dialect::OpenaiChatCompletions, "openai-chat-completions"),
+            (Dialect::OpenaiResponses, "openai-responses"),
             (Dialect::AnthropicMessages, "anthropic-messages"),
         ] {
             // Through the derive, which is the whole mechanism: a dialect is

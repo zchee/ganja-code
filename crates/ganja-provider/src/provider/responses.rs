@@ -116,8 +116,8 @@ pub const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 /// the seat's allow-list" a fact about how the provider was constructed instead
 /// of a condition somebody could forget to write.
 ///
-/// Two of the three are one vendor's; the third is a different vendor serving
-/// the same dialect, which is why this enum answers [`Self::provider_id`] as
+/// Two are one vendor's; the rest are other people's endpoints serving the
+/// same dialect, which is why this enum answers [`Self::provider_id`] as
 /// well. See [`super::openrouter`] for what that one keeps and drops, and why.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Backend {
@@ -133,15 +133,23 @@ pub(super) enum Backend {
     /// [`super::opencode::GO_ID`]. Carries the id because *two* providers share
     /// this arm and a turn must report which one it ran as.
     Opencode(&'static str),
+    /// An endpoint a config named ([`super::compat`]'s `openai-responses`
+    /// dialect), reached with whatever credential the entry's `key_env` holds.
+    ///
+    /// The one backend whose vendor this build has never met at all, so every
+    /// predicate below gives it [`super::openrouter`]'s refuse-to-guess
+    /// answer: nothing sealed is asked for, nothing is replayed, and no
+    /// default is written into somebody else's `reasoning` object.
+    Compat,
 }
 
 impl Backend {
     /// Where this backend lives when [`BASE_URL_ENV`](openai::BASE_URL_ENV)
     /// names nothing.
     ///
-    /// Three hosts because the credential decides which one will take it: a
-    /// ChatGPT token is refused by the platform, a key is refused by the codex
-    /// backend, and neither vendor's credential is the other's.
+    /// One host per backend because the credential decides which will take
+    /// it: a ChatGPT token is refused by the platform, a key is refused by the
+    /// codex backend, and neither vendor's credential is the other's.
     const fn default_base_url(self) -> &'static str {
         match self {
             Self::Codex => DEFAULT_BASE_URL,
@@ -153,6 +161,11 @@ impl Backend {
             // `opencode::at` passes its base URL explicitly, like every
             // caller that knows its own endpoint.
             Self::Opencode(_) => opencode::ZEN_BASE_URL,
+            // Never read, for the gateway arm's reason: a config entry is
+            // refused at load without a `base_url`, and `CompatProvider`
+            // hands it over explicitly. The platform's base answers only so
+            // the function stays total.
+            Self::Compat => openai::DEFAULT_BASE_URL,
         }
     }
 
@@ -167,6 +180,13 @@ impl Backend {
             Self::Codex | Self::Platform => ID,
             Self::OpenRouter => openrouter::ID,
             Self::Opencode(id) => id,
+            // The vendor whose mapping the dialect borrows — and never the
+            // answer a session sees: a config-named endpoint is wrapped by
+            // `CompatProvider`, whose `id` shadows this one with the name the
+            // entry was written under, exactly as the other two dialects'
+            // wires are shadowed. The replay guard never reads this arm,
+            // because [`Self::replays_reasoning`] already said no.
+            Self::Compat => ID,
         }
     }
 
@@ -177,7 +197,12 @@ impl Backend {
     /// their behalf — the whole reasoning is in [`super::openrouter`]'s module
     /// doc, and [`super::opencode`] inherits it for the same reason: a vendor
     /// that documents no way to hand sealed state back is not one to hand it
-    /// back to. One predicate rather than three sites, because asking for
+    /// back to. A config-named endpoint ([`Self::Compat`]) is the strongest
+    /// case of the same rule — a vendor this build has never met — and it has
+    /// a mechanical half too: the session records reasoning under the
+    /// *wrapper's* id, the name the config entry was written under, so state
+    /// asked for here would be state the replay guard below could never match.
+    /// One predicate rather than four sites, because asking for
     /// state and replaying it are one feature and half of it is worse than
     /// neither.
     pub(super) const fn replays_reasoning(self) -> bool {
@@ -294,8 +319,11 @@ pub const SUBSCRIPTION_DEFAULT: &str = "gpt-5.4";
 /// spelling that reaches one, and costs nothing when the list is empty of
 /// whatever was asked for.
 ///
-/// Unlike [`ALLOWED_MODELS`] this is **not** per-backend: it is a fact about
-/// the model rather than about the seat, so it holds for a key as well.
+/// Unlike [`ALLOWED_MODELS`] this is **not** per-seat: it is a fact about the
+/// model rather than about the seat, so it holds for a key as well. It is a
+/// fact about the *vendor's* model, though, so it is not applied on
+/// [`Backend::Compat`] — what a config-named endpoint serves under any name
+/// is its own to answer for ([`ResponsesProvider::refuses`]).
 const CHAT_COMPLETIONS_ONLY: [&str; 1] = ["gpt-5-chat-latest"];
 
 /// The models it refuses although [`NEWER_THAN`] would admit them
@@ -428,6 +456,11 @@ pub struct ResponsesProvider {
     /// [`Backend`] is a field here — and because a request type shared by four
     /// wires must not grow a field only one of them can honour.
     server_tools: Vec<String>,
+    /// Headers a config entry declared, sent with every request
+    /// ([`Self::with_headers`]). Empty everywhere but [`Backend::Compat`],
+    /// and left out of the [`fmt::Debug`] rendering for the sibling wires'
+    /// reason: a header value is somewhere a token fits.
+    headers: reqwest::header::HeaderMap,
 }
 
 impl fmt::Debug for ResponsesProvider {
@@ -541,7 +574,20 @@ impl ResponsesProvider {
             backend,
             rates: super::RateWindows::default(),
             server_tools: Vec::new(),
+            headers: reqwest::header::HeaderMap::new(),
         })
+    }
+
+    /// Puts `headers` on every request this provider sends — the config
+    /// entry's own, reaching this wire the way they reach the other two.
+    ///
+    /// Crate-internal for
+    /// [`with_credential`](super::openai::OpenAiProvider::with_credential)'s
+    /// reason: what a caller outside this module picks between is providers.
+    #[must_use]
+    pub(super) fn with_headers(mut self, headers: reqwest::header::HeaderMap) -> Self {
+        self.headers = headers;
+        self
     }
 
     /// The same provider, asking the gateway to serve `tools` on its own side
@@ -574,15 +620,19 @@ impl ResponsesProvider {
     /// Why this provider will not put `model` on the wire, where it will not.
     ///
     /// Two refusals, and the scope of each is the point. A chat-completions-only
-    /// alias is refused on both backends, because it is a fact about the model:
-    /// the vendor speaks Responses, and that alias does not
-    /// (`plugin/provider/openai.ts:164-171`). The seat's allow-list is refused
-    /// on [`Backend::Codex`] alone, because it is a fact about the
+    /// alias is refused wherever the vendor's own roster is served, because
+    /// there it is a fact about the model: the vendor speaks Responses, and
+    /// that alias does not (`plugin/provider/openai.ts:164-171`) — and it is
+    /// **not** refused on [`Backend::Compat`], because a config-named endpoint
+    /// is not the vendor, and what it serves under any name is its own to
+    /// answer for; pre-refusing would be a guess, and the guess would come
+    /// with another provider's advice attached. The seat's allow-list is
+    /// refused on [`Backend::Codex`] alone, because it is a fact about the
     /// subscription: `codex.ts:281` hands back the unfiltered model list for
     /// any credential that is not an OAuth one, so the platform serves whatever
     /// it sells and a key session is never held to somebody's seat.
     pub(super) fn refuses(&self, model: &str) -> Option<ProviderError> {
-        if CHAT_COMPLETIONS_ONLY.contains(&model) {
+        if self.backend != Backend::Compat && CHAT_COMPLETIONS_ONLY.contains(&model) {
             return Some(chat_completions_only(model));
         }
         if self.backend == Backend::OpenRouter && openrouter::CHAT_COMPLETIONS_ONLY.contains(&model)
@@ -600,8 +650,9 @@ impl ResponsesProvider {
     ///
     /// Split out from [`Provider::stream`] so that the header set — which is
     /// the whole difference between a request the codex backend serves and one
-    /// it refuses, and the whole difference between the two backends' requests
-    /// — is provable without a socket.
+    /// it refuses, the whole difference between one backend's request and
+    /// another's, and where a config entry declared headers of its own, the
+    /// only place they travel — is provable without a socket.
     ///
     /// # Errors
     ///
@@ -615,7 +666,12 @@ impl ResponsesProvider {
         let mut built = self
             .client
             .post(format!("{}/responses", self.base_url.trim_end_matches('/')))
-            .bearer_auth(resolved.presented.expose());
+            .bearer_auth(resolved.presented.expose())
+            // After the bearer, and never carrying one: these are the config
+            // entry's own — empty on every backend a config did not build —
+            // and a credential put here would travel outside the redaction
+            // `presented` is the single source of.
+            .headers(self.headers.clone());
 
         // Subscription-only, all four, and for one reason: each of them is
         // about talking to the codex backend as the Codex CLI, whose client
@@ -670,8 +726,9 @@ fn configured(backend: Backend) -> String {
 
 #[async_trait]
 impl Provider for ResponsesProvider {
-    /// The backend's, not the module's: two of the three are this vendor and
-    /// one is not — see `Backend::provider_id` for what rides on the answer.
+    /// The backend's, not the module's: two of the backends are this vendor
+    /// and the rest are not — see `Backend::provider_id` for what rides on
+    /// the answer.
     fn id(&self) -> &str {
         self.backend.provider_id()
     }
@@ -719,9 +776,12 @@ impl Provider for ResponsesProvider {
         // The backend is here and nowhere else: it is what decides the URL, the
         // headers and whether the seat's allowlist applies at all, so a turn
         // read back from a log file without it is a turn whose refusals cannot
-        // be explained.
+        // be explained. `wire` and not `provider`, for the sibling's reason: a
+        // config-named session answers to its entry's own name, which is not
+        // knowable here, and the endpoint beside it is what tells those turns
+        // apart.
         tracing::debug!(
-            provider = ID,
+            wire = ID,
             model = request.model,
             ?backend,
             endpoint = super::endpoint(built.url(), &self.base_url),
@@ -2237,6 +2297,99 @@ mod tests {
         );
     }
 
+    /// The config-named backend's request: the entry's own headers travel
+    /// beside the bearer, nothing of the subscription's does, and the body
+    /// asks the endpoint for nothing this build cannot vouch it documents —
+    /// [`super::openrouter`]'s posture, applied to a vendor never met at all.
+    #[test]
+    fn a_config_named_request_carries_its_headers_and_asks_for_nothing_sealed() {
+        let mut declared = reqwest::header::HeaderMap::new();
+        declared.insert("x-custom", "1".parse().expect("a header value"));
+        let provider = ResponsesProvider::built(
+            CredentialSource::Key(Presented::new(KEY).expect("a non-blank key")),
+            "http://127.0.0.1:8080/v1".to_owned(),
+            Backend::Compat,
+        )
+        .expect("loopback may carry a key")
+        .with_headers(declared);
+
+        let built = provider
+            .request(&presenting(KEY, Some(ACCOUNT)), &ask())
+            .expect("the request builds");
+        let headers = built.headers();
+
+        assert_eq!(
+            built.url().as_str(),
+            "http://127.0.0.1:8080/v1/responses",
+            "the endpoint the entry named, under the wire's own path"
+        );
+        assert_eq!(
+            headers
+                .get("x-custom")
+                .and_then(|value| value.to_str().ok()),
+            Some("1"),
+            "the entry's own headers travel"
+        );
+        assert_eq!(
+            headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some(format!("Bearer {KEY}")).as_deref()
+        );
+        for absent in [ACCOUNT_HEADER, ORIGINATOR_HEADER, BETA_HEADER, "user-agent"] {
+            assert!(
+                !headers.contains_key(absent),
+                "`{absent}` belongs to the subscription backend and reached an \
+                 endpoint a config named: {headers:?}"
+            );
+        }
+
+        // `ask()`'s model is one `seals_reasoning` recognizes, so each absence
+        // below is the backend refusing, not the model failing to qualify.
+        let body =
+            serde_json::to_value(Body::new(&ask(), Backend::Compat)).expect("the body serializes");
+        assert_eq!(
+            body["store"],
+            json!(false),
+            "one encoder, so the stateless posture is not somebody's special case"
+        );
+        assert!(
+            body.get("include").is_none(),
+            "nothing sealed is asked of an endpoint this build has never met: {body}"
+        );
+        let untouched = serde_json::Map::new();
+        assert_eq!(
+            summarized(&untouched, SERVED, Backend::Compat),
+            untouched,
+            "and no default is written into somebody else's `reasoning` object"
+        );
+    }
+
+    /// The vendor's chat-completions-only fact is not pre-applied to an
+    /// endpoint that merely borrowed the vendor's wire: what a config-named
+    /// server serves under any model name is its own to answer for, and the
+    /// refusal's advice (`--model openai/…`) would name a provider such a
+    /// session is not on.
+    #[test]
+    fn a_config_named_endpoint_is_not_held_to_the_vendors_model_facts() {
+        let compat = ResponsesProvider::built(
+            CredentialSource::Key(Presented::new(KEY).expect("a non-blank key")),
+            "http://127.0.0.1:8080/v1".to_owned(),
+            Backend::Compat,
+        )
+        .expect("loopback may carry a key");
+        let alias = CHAT_COMPLETIONS_ONLY[0];
+
+        assert!(
+            compat.refuses(alias).is_none(),
+            "pre-refusing would guess about an endpoint this build has never met"
+        );
+        assert!(
+            keyed().refuses(alias).is_some(),
+            "while the vendor's own backend still refuses the alias it measured"
+        );
+    }
+
     /// Asking for sealed reasoning and replaying it are one feature, and this
     /// backend does neither: the vendor documents no `include` to ask with and
     /// no way to hand the state back. Half of the pairing would be worse than
@@ -2309,12 +2462,14 @@ mod tests {
                 "{backend:?} documents the pairing, so both halves are on"
             );
         }
-        assert!(
-            !Mapping::for_backend(Backend::OpenRouter, Aliases::default()).seals
-                && !Backend::OpenRouter.replays_reasoning(),
-            "and both halves are off together, or the transcript fills with \
-             state nothing will ever send"
-        );
+        for backend in [Backend::OpenRouter, Backend::Compat] {
+            assert!(
+                !Mapping::for_backend(backend, Aliases::default()).seals
+                    && !backend.replays_reasoning(),
+                "{backend:?}: both halves are off together, or the transcript \
+                 fills with state nothing will ever send"
+            );
+        }
     }
 
     /// `reasoning.summary: "auto"` is two of this vendor's decisions in one

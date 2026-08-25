@@ -484,7 +484,7 @@ fn connect_by_default() -> bool {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderConfig {
-    /// Which request/response mapping the endpoint speaks. Required: the two
+    /// Which request/response mapping the endpoint speaks. Required: the
     /// wires encode a message differently, and guessing from a URL is how a
     /// session sends an Anthropic body to a chat-completions server.
     pub dialect: Dialect,
@@ -3198,10 +3198,14 @@ mod tests {
                 "gateway": {
                     "dialect": "anthropic-messages",
                     "base_url": "https://messages.example/v1"
+                },
+                "proxy": {
+                    "dialect": "openai-responses",
+                    "base_url": "https://responses.example/v1"
                 }
             }}"#,
         )
-        .expect("both dialects parse");
+        .expect("all three dialects parse");
 
         let local = &config.provider["local-llama"];
         assert_eq!(local.dialect, Dialect::OpenaiChatCompletions);
@@ -3216,6 +3220,12 @@ mod tests {
             "an entry that names no variable is answered by the store alone"
         );
         assert!(gateway.headers.is_empty());
+
+        assert_eq!(
+            config.provider["proxy"].dialect,
+            Dialect::OpenaiResponses,
+            "an endpoint serving the Responses surface names that mapping"
+        );
     }
 
     /// Every one of these is a config that would otherwise have described an
@@ -3281,16 +3291,19 @@ mod tests {
             assert!(message.contains(named), "{text}: {message}");
         }
 
-        // A dialect nobody implements is refused with the two that exist named
-        // back, because "gemini is not one of them" is only half an answer.
+        // A dialect nobody implements is refused with the three that exist
+        // named back, because "gemini is not one of them" is only half an
+        // answer.
         let error =
             parse(r#"{"provider": {"x": {"dialect": "gemini", "base_url": "https://a.test"}}}"#)
-                .expect_err("there is no third mapping");
+                .expect_err("there is no fourth mapping");
         let ConfigError::Parse { message, .. } = &error else {
             panic!("expected a parse failure, got {error:?}");
         };
         assert!(
-            message.contains("openai-chat-completions") && message.contains("anthropic-messages"),
+            message.contains("openai-chat-completions")
+                && message.contains("openai-responses")
+                && message.contains("anthropic-messages"),
             "{message}"
         );
     }

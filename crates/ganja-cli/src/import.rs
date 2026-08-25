@@ -1802,17 +1802,19 @@ fn providers(report: &mut Report, at: &At, value: &Json) -> Vec<(String, Json)> 
     carried
 }
 
-/// The two npm packages whose wire this build has, and what each is in ganja's
+/// The npm packages whose wire this build has, and what each is in ganja's
 /// vocabulary.
 ///
 /// Upstream spells "which wire does this endpoint speak" as the SDK it loads
-/// (`provider.<id>.npm`), so this is that spelling translated. Deliberately
-/// short: `@ai-sdk/openai` is **not** here, because that vendor's SDK drives
-/// the Responses API and a config-named endpoint has no Responses wire — a row
-/// for it would quietly send Responses traffic down a chat-completions
-/// encoder.
-const DIALECTS: [(&str, &str); 2] = [
+/// (`provider.<id>.npm`), so this is that spelling translated —
+/// `@ai-sdk/openai` included, since that vendor's SDK drives the Responses
+/// API and a config-named endpoint speaks it as `openai-responses`. Still
+/// deliberately short: a package this table does not name is a wire this
+/// build has not got, and a guessed row would quietly send one API's traffic
+/// down another's encoder.
+const DIALECTS: [(&str, &str); 3] = [
     ("@ai-sdk/openai-compatible", "openai-chat-completions"),
+    ("@ai-sdk/openai", "openai-responses"),
     ("@ai-sdk/anthropic", "anthropic-messages"),
 ];
 
@@ -1911,11 +1913,15 @@ fn provider_entry(report: &mut Report, at: &At, id: &str, value: &Json) -> Optio
                     "`{}` names no `npm` package this build has a wire for, so nothing says \
                      which API its endpoint speaks; ganja carries {}",
                     at.from,
-                    DIALECTS
-                        .iter()
-                        .map(|(package, _)| *package)
-                        .collect::<Vec<_>>()
-                        .join(" and ")
+                    {
+                        // "a, b and c" rather than a bare join: the sentence is
+                        // read by a person, and three names glued with two
+                        // "and"s stopped reading like one.
+                        let mut named: Vec<&str> =
+                            DIALECTS.iter().map(|(package, _)| *package).collect();
+                        let last = named.pop().expect("the dialect table is never empty");
+                        format!("{} and {last}", named.join(", "))
+                    }
                 ),
             ));
         } else if fields.base_url.is_none() {
@@ -2639,6 +2645,35 @@ mod tests {
         );
     }
 
+    /// The row that used to be refused as unsupported: the vendor's own SDK
+    /// drives the Responses API, which a config-named endpoint now speaks as
+    /// its own dialect.
+    #[test]
+    fn a_responses_sdk_entry_is_carried_under_the_responses_dialect() {
+        let (built, report) = imported(
+            r#"{"provider": {"proxy": {
+                "npm": "@ai-sdk/openai",
+                "options": {"baseURL": "https://responses.test/v1"}
+            }}}"#,
+        );
+
+        assert_eq!(
+            built.document().render(),
+            "{\n  \"provider\": {\n    \"proxy\": {\n      \
+             \"dialect\": \"openai-responses\",\n      \
+             \"base_url\": \"https://responses.test/v1\"\n    }\n  }\n}\n"
+        );
+        assert_eq!(
+            rows(&report.mapped),
+            vec![
+                ("provider.proxy.npm", "provider.proxy.dialect"),
+                ("provider.proxy.options", "provider.proxy"),
+                ("provider.proxy.options.baseURL", "provider.proxy.base_url"),
+            ]
+        );
+        assert!(rows(&report.skipped).is_empty(), "{:?}", report.skipped);
+    }
+
     /// Nothing is completed on a config's behalf. Each of these describes an
     /// endpoint this build could not talk to, and each is named rather than
     /// half-written.
@@ -2652,14 +2687,6 @@ mod tests {
                    "options": {"baseURL": "https://a.test"}}}}"#,
                 "unsupported",
                 "@ai-sdk/google",
-            ),
-            // The vendor's own SDK drives the Responses API, which a
-            // config-named endpoint has no wire for.
-            (
-                r#"{"provider": {"x": {"npm": "@ai-sdk/openai",
-                   "options": {"baseURL": "https://a.test"}}}}"#,
-                "unsupported",
-                "@ai-sdk/openai",
             ),
             (
                 r#"{"provider": {"x": {"options": {"baseURL": "https://a.test"}}}}"#,

@@ -559,7 +559,7 @@
     "ProviderConfig": {
       "title": "Configured provider endpoint",
       "description": "One endpoint a config declares, and how to talk to it. There is deliberately no apiKey key: ganja's credentials travel the environment or auth.json, and `key_env` names the variable instead. Being selectable is not being cataloged — a configured provider has no sizing, pricing or auto-compaction, and must be told which model to ask for.",
-      "$comment": "crates/ganja-core/src/config.rs:406-430 (ProviderConfig, deny_unknown_fields); checks at config.rs:1594-1625 (check_providers).",
+      "$comment": "crates/ganja-core/src/config.rs:486-508 (ProviderConfig, deny_unknown_fields); checks at config.rs:1997-2027 (check_providers).",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -593,11 +593,12 @@
     },
     "Dialect": {
       "title": "Wire dialect",
-      "description": "The wire a config-named endpoint speaks: POST {base}/chat/completions with a bearer token, or POST {base}/v1/messages with x-api-key and the pinned Anthropic version.",
-      "$comment": "crates/ganja-provider/src/provider/compat.rs:50-73 (Dialect, rename_all = kebab-case).",
+      "description": "The wire a config-named endpoint speaks: POST {base}/chat/completions with a bearer token, POST {base}/responses with a bearer token (nothing sealed asked for, nothing replayed), or POST {base}/v1/messages with x-api-key and the pinned Anthropic version.",
+      "$comment": "crates/ganja-provider/src/provider/compat.rs:46-68 (Dialect, rename_all = kebab-case).",
       "type": "string",
       "enum": [
         "openai-chat-completions",
+        "openai-responses",
         "anthropic-messages"
       ]
     },
