@@ -1,0 +1,63 @@
+# What the ChatGPT codex backend is told ganja is, and what it serves back.
+#
+# The baseline W3 of .omc/plans/2026-08-25-ganja-code-identity-headers.md diffs
+# against: a roster measured after the rename proves nothing without the roster
+# measured before it. Recorded by `tests/codex_identity_probe.rs`, whose module
+# doc holds the command, the gate and the three things this cannot measure.
+#
+# Build: ganja-code 0.1.0
+# Note:  not recorded; set GANJA_PROBE_NOTE to stamp one
+
+== identity headers ==
+# Captured off a loopback socket this process owns. The quartet below is decided
+# by Backend::Codex and not by the endpoint, so these are the bytes the live
+# turn sent, read somewhere they can be read. The two credential-bearing values
+# are written as presence alone: a type that cannot render them decides that,
+# and a token's length changes on every renewal, which this block should not
+# diff on.
+authorization: <redacted: present>
+chatgpt-account-id: <redacted: present>
+originator: opencode
+openai-beta: responses=experimental
+user-agent: opencode/1.18.22
+
+# Also sent, names only: a header set that dropped what it did not
+# recognise would hide the next one somebody adds.
+also sent: accept, content-length, content-type, host
+
+== the live turn ==
+# Against the real backend. The wire reports no served-model field, so
+# what is recorded is the model asked for and whether it was accepted.
+# Offered is not servable: SUBSCRIPTION_DEFAULT is deliberately outside
+# the roster below, so unless GANJA_MODEL named a roster member this
+# turn is a sixth ask rather than one of the five.
+model asked: gpt-5.4
+outcome: served
+finish: Completed
+usage: input=21 output=5 cache_read=0 reasoning=0
+reply: "pong"
+
+== what this build offers a seat ==
+# responses::SEAT_ROSTER, compile-time and reached by no network
+# (D476). Recorded as what ganja volunteers, never as a measurement:
+# the ladder below is the measured half.
+notice: pinned to what a ChatGPT subscription is offered; --refresh does not apply
+default: gpt-5.4
+offered: gpt-5.5 (gpt-5.5)
+offered: gpt-5.6-sol (gpt-5.6-sol)
+offered: gpt-5.6-terra (gpt-5.6-terra)
+offered: gpt-5.6-luna (gpt-5.6-luna)
+offered: gpt-5.3-codex-spark (gpt-5.3-codex-spark)
+
+== the ladder ==
+# One ask per offered model, in the roster's own order. This is the
+# acceptance artifact: a cohort demotion is a row that moves from
+# served to refused. A refusal body is verbatim to 400 characters and
+# arrives already masked against the presented credential; a longer one
+# is cut on a char boundary and ends in an ellipsis. Line breaks inside
+# one are flattened to spaces, so a row stays a row.
+gpt-5.5: served
+gpt-5.6-sol: served
+gpt-5.6-terra: served
+gpt-5.6-luna: served
+gpt-5.3-codex-spark: served
