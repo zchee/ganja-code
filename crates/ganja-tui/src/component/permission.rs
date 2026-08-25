@@ -198,7 +198,11 @@ impl Permission {
 /// because a single argument can run for a screenful on its own and a source
 /// count would report that as one. The marker always displaces at least one
 /// body row of its own, so `hidden` is never less than two.
-fn overflow_marker(hidden: usize) -> String {
+///
+/// `pub(crate)` since the held-message dialog (**D524**) budgets its rows the
+/// same way for the same consent reason: what `y` approves must be what was
+/// shown, or flagged as cut.
+pub(crate) fn overflow_marker(hidden: usize) -> String {
     format!("... +{hidden} lines not shown")
 }
 
@@ -231,8 +235,8 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 }
 
 /// [`wrap`] across a run of styled lines, carrying each line's style onto
-/// every chunk it wrapped into.
-fn wrap_all(lines: &[(String, Style)], width: usize) -> Vec<(String, Style)> {
+/// every chunk it wrapped into. `pub(crate)` for [`overflow_marker`]'s reason.
+pub(crate) fn wrap_all(lines: &[(String, Style)], width: usize) -> Vec<(String, Style)> {
     lines
         .iter()
         .flat_map(|(text, style)| {

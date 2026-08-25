@@ -72,6 +72,10 @@ pub enum Action {
     /// has been doing, and the doors onto starting, messaging and shutting
     /// one down (**D503**, **D504**).
     Team,
+    /// Open the `/held` dialog: every inbound cross-session message the
+    /// admission gate is holding for review, with Release and Deny on each
+    /// row (**D524**).
+    Held,
     /// Open the key and command reference.
     Help,
     /// Leave.
@@ -118,6 +122,7 @@ impl Action {
             | Self::Usage
             | Self::Plugin
             | Self::Team
+            | Self::Held
             | Self::Help
             | Self::Copy
             | Self::CopyMessage
@@ -329,6 +334,19 @@ pub const COMMANDS: &[Entry] = &[
         aliases: &[],
         title: "Teammates",
         description: "See this session's team; start, message or shut down a member",
+        category: Category::System,
+        suggested: false,
+    },
+    // The admission gate's listing dialog (**D524**), and the *only* review
+    // surface an explicit or mode-unknown hold has — those raise no approval
+    // modal. `System` for `/team`'s reason: the hold buffer is a facility
+    // running beside this session, not the conversation itself.
+    Entry {
+        action: Action::Held,
+        name: "held",
+        aliases: &[],
+        title: "Held messages",
+        description: "Review the inbound peer messages held by the admission gate",
         category: Category::System,
         suggested: false,
     },
@@ -1488,6 +1506,7 @@ mod tests {
             ("usage", &[][..], Action::Usage),
             ("plugin", &[][..], Action::Plugin),
             ("team", &[][..], Action::Team),
+            ("held", &[][..], Action::Held),
             ("help", &[][..], Action::Help),
             ("exit", &["quit", "q"][..], Action::Exit),
             ("copy", &[][..], Action::Copy),

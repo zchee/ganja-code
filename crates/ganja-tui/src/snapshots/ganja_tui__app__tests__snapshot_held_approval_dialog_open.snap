@@ -1,0 +1,28 @@
+---
+source: crates/ganja-tui/src/app.rs
+expression: screen(&terminal)
+---
+                                                                                
+  ┌ held message ────────────────────────────────────────────────────────────┐  
+  │from (claimed): w1@ganja-team                                             │  
+  │cause: missing sender mode: this session runs bypassed and the sender asse│  
+  │rted no class                                                             │  
+  │                                                                          │  
+  │reply address: none exists on this transport                              │  
+  │verified pid: same-user socket, no process identity                       │  
+  │preview: a finding worth a look                                           │  
+  │                                                                          │  
+  │the full body of the finding                                              │  
+  │with a second line for the preview                                        │  
+  │                                                                          │  
+  │This message has not been delivered to the model.                         │  
+  │expires in 5m                                                             │  
+  │[y] deliver   [n]/[Esc] deny (drop)                                       │  
+  └──────────────────────────────────────────────────────────────────────────┘  
+                                                                                
+┌ message ─────────────────────────────────────────────────────────────────────┐
+│ Ask ganja something...                                                       │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+ready

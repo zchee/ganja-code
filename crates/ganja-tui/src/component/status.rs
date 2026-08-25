@@ -52,6 +52,16 @@ const SEPARATOR: &str = " \u{b7} ";
 /// the elements read and the plumbing recedes.
 const HUD_SEPARATOR: &str = " | ";
 
+/// One segment onto the default bar's flat left string, separator first —
+/// the walk's own four lines, extracted so the held segment's off-walk door
+/// cannot drift from the elements' (**D524**).
+fn push_flat(left: &mut String, segment: Vec<Span<'_>>) {
+    left.push_str(SEPARATOR);
+    for span in segment {
+        left.push_str(&span.content);
+    }
+}
+
 /// The standing marker a bypassed session carries (**D479**).
 ///
 /// The flag's own spelling, not a sentence about it: the word somebody typed
@@ -225,6 +235,12 @@ pub struct Status {
     /// one dialog with a second already queued has to be told there is a
     /// second.
     queued_dialogs: usize,
+    /// How many inbound peer messages the admission gate is holding for
+    /// review (**D524**). Shown only while there are any, polled off
+    /// `Engine::held_messages` like every count here — and needed most by
+    /// the holds that raise no dialog at all: an explicit hold's only other
+    /// surface is the `/held` command somebody has to know to run.
+    held: usize,
     /// How many teammates this session is leading (**D503**). Shown only while
     /// there are any, the same posture as the three above — and needed more
     /// than any of them, because the default backend runs in this process with
@@ -298,6 +314,7 @@ impl Status {
             running_jobs: 0,
             running_tasks: 0,
             queued_dialogs: 0,
+            held: 0,
             teammates: 0,
             yolo: false,
             elements: None,
@@ -452,6 +469,11 @@ impl Status {
         self.queued_dialogs = queued_dialogs;
     }
 
+    /// Records how many inbound peer messages are held for review (**D524**).
+    pub fn set_held(&mut self, held: usize) {
+        self.held = held;
+    }
+
     /// Records how many teammates this session is leading (**D503**).
     pub fn set_teammates(&mut self, teammates: usize) {
         self.teammates = teammates;
@@ -519,8 +541,9 @@ impl Status {
         }
         left.push_str(&self.activity.label());
         // The tail is [`Self::hud_segment`]'s, walked in the order this bar
-        // has always drawn it: every one of these seven appears only while it
-        // has something to say, and every one is a single accent span whose
+        // has always drawn it — plus the held count, the one segment with no
+        // element name (**D524**): every one appears only while it has
+        // something to say, and every one is a single accent span whose
         // text is exactly what this loop used to spell by hand. The rules
         // themselves — and the reasons for them — live there now, once.
         //
@@ -535,16 +558,25 @@ impl Status {
             StatuslineElement::Jobs,
             StatuslineElement::Tasks,
             StatuslineElement::Dialogs,
+        ] {
+            if let Some(segment) = self.hud_segment(element, theme) {
+                push_flat(&mut left, segment);
+            }
+        }
+        // Between the dialog count and the teammate count, because it is the
+        // same family as the first and often *about* the second — and by its
+        // own door rather than through the walk, since it has no element name
+        // yet ([`Self::held_segment`]).
+        if let Some(segment) = self.held_segment(theme) {
+            push_flat(&mut left, segment);
+        }
+        for element in [
             StatuslineElement::Teammates,
             StatuslineElement::Tokens,
             StatuslineElement::Notice,
         ] {
-            let Some(segment) = self.hud_segment(element, theme) else {
-                continue;
-            };
-            left.push_str(SEPARATOR);
-            for span in segment {
-                left.push_str(&span.content);
+            if let Some(segment) = self.hud_segment(element, theme) {
+                push_flat(&mut left, segment);
             }
         }
 
@@ -622,17 +654,29 @@ impl Status {
         if self.yolo {
             main.push(Span::styled(YOLO.to_owned(), theme.warning));
         }
-        for element in elements {
-            if matches!(element, StatuslineElement::Git | StatuslineElement::Hints) {
-                continue;
-            }
-            let Some(mut segment) = self.hud_segment(*element, theme) else {
-                continue;
-            };
+        let append = |main: &mut Vec<Span<'static>>, mut segment: Vec<Span<'static>>| {
             if !main.is_empty() {
                 main.push(Span::styled(HUD_SEPARATOR.to_owned(), theme.dim));
             }
             main.append(&mut segment);
+        };
+        for element in elements {
+            if matches!(element, StatuslineElement::Git | StatuslineElement::Hints) {
+                continue;
+            }
+            if let Some(segment) = self.hud_segment(*element, theme) {
+                append(&mut main, segment);
+            }
+            // The held count has no element name a config could write yet —
+            // that is a core vocabulary addition this crate cannot make — so
+            // a roster that names `dialogs` gets it there, beside its family,
+            // independent of whether the dialog count itself has anything to
+            // say (**D524**).
+            if *element == StatuslineElement::Dialogs
+                && let Some(held) = self.held_segment(theme)
+            {
+                append(&mut main, held);
+            }
         }
         let mut main = truncate_spans(main, limit, theme);
 
@@ -672,6 +716,21 @@ impl Status {
                 area.width,
             );
         }
+    }
+
+    /// The `N held` segment (**D524**): how many inbound peer messages the
+    /// admission gate is holding for review, present only while there are
+    /// any — the D462 posture, beside [`StatuslineElement::Dialogs`] in both
+    /// render paths because both count things waiting on the person.
+    ///
+    /// Its own method rather than a [`Self::hud_segment`] arm because it has
+    /// no [`StatuslineElement`] name: that enum is core config vocabulary,
+    /// which is not this crate's to grow — the named element is a follow-up
+    /// where the config loader lives. Until then the default bar always
+    /// carries it, and a configured roster carries it wherever `dialogs` was
+    /// placed.
+    fn held_segment(&self, theme: &Theme) -> Option<Vec<Span<'static>>> {
+        (self.held > 0).then(|| vec![Span::styled(format!("{} held", self.held), theme.accent)])
     }
 
     /// One named element's spans, or [`None`] while it has nothing to say —
@@ -1338,6 +1397,45 @@ mod tests {
         let quiet = rendered(&status, 120);
         assert!(!quiet.contains("tasks running"));
         assert!(!quiet.contains("dialogs queued"));
+    }
+
+    /// The admission gate's count (**D524**), the same posture: a session
+    /// nothing is held against renders the bar it always did, and the count
+    /// appears the moment something is — dialog count or no dialog count.
+    #[test]
+    fn the_bar_names_held_messages_only_while_there_are_any() {
+        let mut status = Status::new(None);
+        assert!(!rendered(&status, 120).contains("held"));
+
+        status.set_held(1);
+        let line = rendered(&status, 120);
+        assert!(line.contains("1 held"), "got {line:?}");
+
+        status.set_held(3);
+        assert!(rendered(&status, 120).contains("3 held"));
+
+        status.set_held(0);
+        assert!(!rendered(&status, 120).contains("held"));
+    }
+
+    /// A configured roster has no `held` element name to write — that is core
+    /// config vocabulary — so the count rides beside `dialogs`, its family,
+    /// and rides it even while the dialog count itself is silent. A roster
+    /// that leaves `dialogs` out gets no held count, which the doc on
+    /// [`Status::held_segment`] owns as the till-the-element-lands trade.
+    #[test]
+    fn a_roster_carries_the_held_count_beside_the_dialogs_element() {
+        let mut status = roster(&[StatuslineElement::Activity, StatuslineElement::Dialogs]);
+        status.set_held(2);
+        let line = rendered(&status, 120);
+        assert!(line.contains("2 held"), "got {line:?}");
+
+        let mut without = roster(&[StatuslineElement::Activity]);
+        without.set_held(2);
+        assert!(
+            !rendered(&without, 120).contains("2 held"),
+            "no dialogs element, no held column to sit beside"
+        );
     }
 
     /// The segment appears only while an effort is selected, so every bar

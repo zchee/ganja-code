@@ -255,6 +255,19 @@ pub async fn run(
     // would be a knob every interactive session still ignored.
     .with_concurrency(config.agents.concurrency())
     .with_defer_threshold(config.defer_threshold())
+    // The admission gate's two config knobs (**D523**, **D524**): the
+    // explicit `cross_session_inbound` with the tier that won it, and the
+    // review window a parity hold's timer runs on. Wired here for the
+    // concurrency knob's reason — this frontend builds its own engine, so a
+    // gate wired only into `ganja-cli`'s assembly would leave every
+    // interactive session running the unset default.
+    .with_inbound_policy(config.inbound_policy(), config.dialog_expiry())
+    // And the D479 trio's classification seed: a `--yolo` session is
+    // bypass-classed at the receiver, which is exactly the session whose
+    // unset-policy inbound holds rather than delivering into a run nobody
+    // is gating. Classification only — dialog auto-answering stays the
+    // App's own, and the approval dialog it must not answer is B1's.
+    .with_inbound_bypass(yolo)
     .with_small_model(config.small_model.clone())
     // The same value the skill tool above was installed over, so a `$name`
     // invocation and a `skill` call load from one list.

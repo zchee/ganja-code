@@ -31,8 +31,8 @@ use ganja_core::{
     },
 };
 use ganja_protocol::{
-    Command, Event as CoreEvent, FinishReason, Mention, Message, MessageId, PartBody, PermissionId,
-    PermissionReply, RevertScope, Role, ToolState, Usage,
+    Command, Event as CoreEvent, FinishReason, HeldDecision, HeldId, HoldCause, Mention, Message,
+    MessageId, PartBody, PermissionId, PermissionReply, RevertScope, Role, ToolState, Usage,
 };
 use ganja_tool::{Credentials, FileTimes, ToolCtx, job::Jobs as _};
 use ratatui::{
@@ -56,6 +56,7 @@ use crate::{
         editor::{self, Editor, Mode},
         effort,
         files::Files,
+        held,
         help::Help,
         inspector::{Feed, Inspector, TurnUsage},
         list::{self, ListDialog},
@@ -389,6 +390,61 @@ fn permission_reply(code: KeyCode) -> Option<PermissionReply> {
     }
 }
 
+/// The decision a key sends while the held-message approval modal is open
+/// (**D524**), or [`None`] for a key the modal swallows.
+///
+/// Esc is a decision, not an escape: dismissing a held message drops it,
+/// exactly as denying it does. And no key maps to anything "always" — a
+/// standing accept for inbound has exactly one spelling, the config's
+/// `cross_session_inbound: "accept"`, never a dialog answer.
+fn held_decision(code: KeyCode) -> Option<HeldDecision> {
+    match code {
+        KeyCode::Char('y') => Some(HeldDecision::Release),
+        KeyCode::Char('n') | KeyCode::Esc => Some(HeldDecision::Deny),
+        _ => None,
+    }
+}
+
+/// One dialog waiting on the person — what [`App::permission`] shows and
+/// [`App::queued_permissions`] holds behind it (**D462**, widened by
+/// **D524**).
+///
+/// The hold variant is **structurally unanswerable by the yolo drain
+/// (B1)**: it carries a [`HeldId`] and no [`PermissionId`], the
+/// `PermissionRequested` arm that feeds [`App::auto_permissions`] can only
+/// ever see permission requests, and what that drain answers with —
+/// `Command::ReplyPermission` — the engine routes through a wait registry no
+/// hold ever enters (a hold settles by `Command::SettleHeld`). A bypassed
+/// session therefore still shows every parity-hold dialog to a person;
+/// unattended inbound is spelled `cross_session_inbound: "accept"` in a
+/// trusted config tier, not a flag.
+enum PendingDialog {
+    /// A tool call waiting on the person's decision.
+    Permission(Permission),
+    /// An inbound peer message held for the person's review (**D524**).
+    Held(held::HeldApproval),
+}
+
+impl PendingDialog {
+    /// The permission request this item shows — [`None`] for a hold, which
+    /// is the whole of B1: no path that answers [`PermissionId`]s can name
+    /// one.
+    fn permission_id(&self) -> Option<&PermissionId> {
+        match self {
+            Self::Permission(permission) => Some(permission.id()),
+            Self::Held(_) => None,
+        }
+    }
+
+    /// The hold this item reviews — [`None`] for a permission request.
+    fn held_id(&self) -> Option<&HeldId> {
+        match self {
+            Self::Permission(_) => None,
+            Self::Held(held) => Some(held.id()),
+        }
+    }
+}
+
 /// The whole terminal application.
 pub struct App {
     /// Shared rather than owned since P25: a lead's engine is also the one
@@ -416,18 +472,21 @@ pub struct App {
     status: Status,
     /// Which keys reach which actions this run.
     keys: Keybinds,
-    /// The tool call currently waiting on the user's decision, if any.
-    permission: Option<Permission>,
+    /// The dialog currently waiting on the user's decision, if any: a tool
+    /// call's permission request, or a held inbound peer message's review
+    /// (**D524** — the widening is [`PendingDialog`]'s doc).
+    permission: Option<PendingDialog>,
     /// Dialogs that arrived while another was already on screen, in arrival
     /// order (**D462**).
     ///
     /// One at a time is still what a person is shown — two modals over each
-    /// other is not a design, and the answer keys are the same three either
-    /// way — so a second request queues rather than replacing the first, and
-    /// the bar counts what is behind it. Only concurrent children can produce
-    /// one: a single call is a turn blocked inside it, which is what made the
-    /// engine's own registry a single cell until this wave.
-    queued_permissions: VecDeque<Permission>,
+    /// other is not a design — so a second request queues rather than
+    /// replacing the first, and the bar counts what is behind it. Only
+    /// concurrent children can produce a second permission request: a single
+    /// call is a turn blocked inside it, which is what made the engine's own
+    /// registry a single cell until this wave. A parity hold can arrive
+    /// behind anything, since no turn waits on one.
+    queued_permissions: VecDeque<PendingDialog>,
     /// Whether this session answers its own permission dialogs (**D479**).
     ///
     /// `ganja --yolo`, and its two other spellings. What it changes is exactly
@@ -466,6 +525,10 @@ pub struct App {
     rewind: Option<Rewind>,
     /// The `/mcp` dialog, while it is open (**F5**).
     mcp_dialog: Option<mcp::Mcp>,
+    /// The `/held` listing, while it is open (**D524**): every held inbound
+    /// peer message, with Release and Deny on each row. Rows are re-polled
+    /// off `Engine::held_messages` on the tick, like every status surface.
+    held_dialog: Option<held::HeldList>,
     /// The `/plugin` dialog, while it is open (**D474**).
     plugin_dialog: Option<plugin::Plugin>,
     /// The `/team` dialog, while it is open (**D504**).
@@ -843,6 +906,11 @@ impl App {
     /// configuration in has somewhere to put a configured theme.
     #[must_use]
     pub fn new(engine: Engine, notice: Option<String>, mut themes: Themes) -> Self {
+        // Shared from the first line rather than at the struct literal,
+        // because the gated inbox below closes over the engine it will ask
+        // for the receiver class — a clone of the same handle every other
+        // seam holds (**D505**).
+        let engine = Arc::new(engine);
         let theme = themes.theme();
         let agent = engine.agent();
         let model = engine.model();
@@ -868,10 +936,17 @@ impl App {
         // frontend and both are take-once: the mailbox pass, and the queue a
         // teammate's dialogs cross on. A session leading no team gets neither,
         // which is what makes every test that builds a bare engine cost
-        // nothing (**D503**).
-        let lead_inbox = engine
-            .teammates()
-            .map(|team| LeadInbox::new(Arc::clone(team.registry())));
+        // nothing (**D503**). The pass is **gated** (**D523**): the engine's
+        // own admission state, and its receiver-class read carried as a
+        // closure, so a non-roster scribble in the inbox is policy's to
+        // admit, hold or refuse — and a fabricated frame from one raises no
+        // dialog (AC-21) — instead of the pre-gate deliver-everything bridge.
+        let lead_inbox = engine.teammates().map(|team| {
+            LeadInbox::new(Arc::clone(team.registry())).gated(Arc::clone(engine.inbound()), {
+                let engine = Arc::clone(&engine);
+                move || engine.receiver_class()
+            })
+        });
         let teammate_dialogs = engine.teammate_dialogs();
         // Built unconditionally, because a channel nobody sends on costs one
         // allocation and a branch here would be a second thing to keep in step
@@ -879,7 +954,7 @@ impl App {
         let (spawn_asker, spawn_asks) = tokio::sync::mpsc::channel(SPAWN_ASKS);
 
         Self {
-            engine: Arc::new(engine),
+            engine,
             provider: String::new(),
             model,
             // A fresh engine runs no effort, and a resumed one announces its
@@ -900,6 +975,7 @@ impl App {
             history_search: None,
             rewind: None,
             mcp_dialog: None,
+            held_dialog: None,
             plugin_dialog: None,
             team_dialog: None,
             team_spawn: None,
@@ -1396,6 +1472,7 @@ impl App {
                 self.poll_rates();
                 self.poll_plans();
                 self.poll_mcp_dialog();
+                self.poll_held();
                 self.poll_team().await;
                 self.poll_member().await;
                 self.poll_wire_models().await;
@@ -2221,6 +2298,14 @@ impl App {
     /// engine's own `PermissionRequested`, a teammate's forwarded dialog, and
     /// a spawn's own gate — so they cannot drift apart.
     fn raise_permission(&mut self, summary: &str, asked: Permission) {
+        self.raise_dialog(summary, PendingDialog::Permission(asked));
+    }
+
+    /// [`App::raise_permission`]'s machinery, over the widened item
+    /// (**D524**): a held message's review rides the same one-on-screen,
+    /// rest-queued discipline, because a person answering questions should
+    /// not have two modals fighting for the same three keys.
+    fn raise_dialog(&mut self, summary: &str, asked: PendingDialog) {
         self.announce(NotificationEvent::ApprovalRequested, summary);
         match &self.permission {
             Some(_) => self.queued_permissions.push_back(asked),
@@ -2754,6 +2839,9 @@ impl App {
                 if let Some(mcp_dialog) = &self.mcp_dialog {
                     mcp_dialog.render(transcript, buffer, &self.theme);
                 }
+                if let Some(held_dialog) = &self.held_dialog {
+                    held_dialog.render(transcript, buffer, &self.theme);
+                }
                 if let Some(plugin_dialog) = &self.plugin_dialog {
                     plugin_dialog.render(transcript, buffer, &self.theme);
                 }
@@ -2800,8 +2888,14 @@ impl App {
                 if let Some(question) = &self.question {
                     question.render(transcript, buffer, &self.theme);
                 }
-                if let Some(permission) = &self.permission {
-                    permission.render(transcript, buffer, &self.theme);
+                match &self.permission {
+                    Some(PendingDialog::Permission(permission)) => {
+                        permission.render(transcript, buffer, &self.theme);
+                    }
+                    Some(PendingDialog::Held(held)) => {
+                        held.render(transcript, buffer, &self.theme);
+                    }
+                    None => {}
                 }
                 let mut cursor = None;
                 if self.inspector.is_none() {
@@ -3285,25 +3379,44 @@ impl App {
             }
         }
 
-        if let Some(permission) = &self.permission {
-            // Every other key is swallowed while the modal is open: the
-            // editor and the transcript beneath it are not what the user is
-            // acting on right now.
-            if let Some(reply) = permission_reply(key.code) {
-                let id = permission.id().clone();
-                // A teammate's dialog is answered on the channel it arrived
-                // on, because the turn waiting on it is another engine's
-                // (**D-5**). One `if`, and the same keys either way: which
-                // conversation raised a question is not something a person
-                // answering it should have to know.
-                if !self.answer_teammate_dialog(&id, reply) {
+        match &self.permission {
+            Some(PendingDialog::Permission(permission)) => {
+                // Every other key is swallowed while the modal is open: the
+                // editor and the transcript beneath it are not what the user
+                // is acting on right now.
+                if let Some(reply) = permission_reply(key.code) {
+                    let id = permission.id().clone();
+                    // A teammate's dialog is answered on the channel it
+                    // arrived on, because the turn waiting on it is another
+                    // engine's (**D-5**). One `if`, and the same keys either
+                    // way: which conversation raised a question is not
+                    // something a person answering it should have to know.
+                    if !self.answer_teammate_dialog(&id, reply) {
+                        self.engine
+                            .send(Command::ReplyPermission { id, reply })
+                            .await?;
+                    }
+                }
+
+                return Ok(());
+            }
+            Some(PendingDialog::Held(held)) => {
+                // The same swallow-everything posture; what differs is the
+                // road the answer takes. A settle rides `SettleHeld`, never
+                // the permission wait registry, and the dialog stays up
+                // until its own `PeerHoldSettled` — a settle that raced the
+                // deadline is ignored by the engine, and the event closes
+                // this either way (**D524**).
+                if let Some(decision) = held_decision(key.code) {
+                    let id = held.id().clone();
                     self.engine
-                        .send(Command::ReplyPermission { id, reply })
+                        .send(Command::SettleHeld { id, decision })
                         .await?;
                 }
-            }
 
-            return Ok(());
+                return Ok(());
+            }
+            None => {}
         }
 
         if let Some(question) = &mut self.question {
@@ -3437,6 +3550,12 @@ impl App {
 
         if self.mcp_dialog.is_some() {
             self.handle_mcp_key(key.code).await;
+
+            return Ok(());
+        }
+
+        if self.held_dialog.is_some() {
+            self.handle_held_key(key.code).await;
 
             return Ok(());
         }
@@ -3741,6 +3860,7 @@ impl App {
             || self.history_search.is_some()
             || self.rewind.is_some()
             || self.mcp_dialog.is_some()
+            || self.held_dialog.is_some()
             || self.plugin_dialog.is_some()
             || self.team_dialog.is_some()
             || self.context_dialog.is_some()
@@ -3768,6 +3888,7 @@ impl App {
             command::Action::Usage => self.open_usage(),
             command::Action::Plugin => self.open_plugin(),
             command::Action::Team => self.open_team(),
+            command::Action::Held => self.open_held(),
             command::Action::Help => self.help = Some(Help::new(self.keys.clone())),
             command::Action::Exit => self.quit = true,
             command::Action::Copy => self.copy_transcript(),
@@ -5324,6 +5445,103 @@ impl App {
         }
     }
 
+    /// Opens the `/held` listing over what the admission gate holds right now
+    /// (**D524**) — the only review surface an explicit or mode-unknown hold
+    /// has, and the second one a parity hold does.
+    fn open_held(&mut self) {
+        self.held_dialog = Some(held::HeldList::new(self.held_dialog_rows()));
+    }
+
+    /// The `/held` listing's rows, fresh off [`Engine::held_messages`]:
+    /// sender, cause, age and a one-line preview — the summary where the
+    /// sender wrote one, the body's first line otherwise, display-capped by
+    /// the row builder (the engine caps the preview and deliberately not the
+    /// summary).
+    fn held_dialog_rows(&self) -> Vec<held::Row> {
+        self.engine
+            .held_messages()
+            .into_iter()
+            .map(|entry| {
+                held::Row::new(
+                    entry.id,
+                    entry.from,
+                    entry.cause,
+                    entry.age,
+                    entry.summary.as_ref().map(|summary| summary.as_str()),
+                    entry.preview.as_str(),
+                )
+            })
+            .collect()
+    }
+
+    /// Polls the held count onto the status bar — the D462 posture: read off
+    /// engine state, never tracked as a tally — and refreshes the `/held`
+    /// listing while it is open. Also keeps the approval modal's countdown
+    /// moving, since nothing else redraws an idle screen under it.
+    fn poll_held(&mut self) {
+        let held = self.engine.held_messages();
+        self.status.set_held(held.len());
+        if self.held_dialog.is_some() {
+            let rows = self.held_dialog_rows();
+            if let Some(dialog) = &mut self.held_dialog {
+                dialog.refresh(rows);
+            }
+            self.dirty = true;
+        } else if matches!(&self.permission, Some(PendingDialog::Held(_))) {
+            self.dirty = true;
+        }
+    }
+
+    /// One keypress while the `/held` listing is open, which owns every
+    /// key — [`App::handle_mcp_key`]'s shape, Esc closing from either step.
+    /// Closing reviews nothing: unlike the approval modal's Esc, the listing
+    /// is a window over the buffer, and leaving it decides nothing.
+    async fn handle_held_key(&mut self, code: KeyCode) {
+        match code {
+            KeyCode::Esc => self.held_dialog = None,
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let Some(dialog) = &mut self.held_dialog {
+                    dialog.move_selection(-1);
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let Some(dialog) = &mut self.held_dialog {
+                    dialog.move_selection(1);
+                }
+            }
+            KeyCode::Enter => self.advance_held().await,
+            _ => {}
+        }
+    }
+
+    /// Enter in the `/held` listing: on the row step, opens the entry's
+    /// Release/Deny choice; on the action step, settles the entry and
+    /// returns to the rows — the dialog stays open, and the next poll
+    /// retires the settled row.
+    async fn advance_held(&mut self) {
+        let Some(dialog) = &mut self.held_dialog else {
+            return;
+        };
+
+        if !dialog.is_choosing_action() {
+            dialog.advance();
+
+            return;
+        }
+
+        let Some((id, action)) = dialog.chosen() else {
+            return;
+        };
+        let id = id.clone();
+        let decision = action.decision();
+        dialog.back_to_rows();
+        if let Err(error) = self.engine.send(Command::SettleHeld { id, decision }).await {
+            self.status
+                .set_notice(Some(format!("the settle was refused: {error}")));
+        }
+        self.poll_held();
+    }
+
     /// Opens the `/plugin` dialog over what the store holds right now.
     ///
     /// The rows come off [`ganja_core::plugin::Store::list`] — the same call
@@ -6159,7 +6377,7 @@ impl App {
                 let names_open_request = self
                     .permission
                     .as_ref()
-                    .is_some_and(|permission| *permission.id() == id);
+                    .is_some_and(|dialog| dialog.permission_id() == Some(&id));
                 if names_open_request {
                     // The next question, if this turn's children raised one
                     // while this dialog was up. The activity only goes back to
@@ -6172,9 +6390,10 @@ impl App {
                     // A queued request that was answered without being shown —
                     // a cancel refusing every open dialog is the way that
                     // happens — retires from the queue rather than being asked
-                    // about after the fact.
+                    // about after the fact. A held item can never match: it
+                    // has no permission id to answer by (B1).
                     self.queued_permissions
-                        .retain(|waiting| *waiting.id() != id);
+                        .retain(|waiting| waiting.permission_id() != Some(&id));
                 }
                 self.sync_dialog_status();
             }
@@ -6268,11 +6487,74 @@ impl App {
             // beside the agent and the effort in the status bar. The arm
             // exists so the match stays exhaustive.
             CoreEvent::PermissionModeChanged { .. } => {}
-            // Taken and drawn nowhere yet: the admission gate's TUI lane
-            // (L3b) grows the approval dialog, the held listing and the
-            // status segment these announce, and replaces this arm with
-            // them. Until then the arm exists so the match stays exhaustive.
-            CoreEvent::PeerHeld { .. } | CoreEvent::PeerHoldSettled { .. } => {}
+            // An inbound peer message was held for review (**D524**). The
+            // parity causes raise the approval modal — a deadline is
+            // counting down on those, so a person is put in front of it now,
+            // through the same one-on-screen queue every dialog rides. An
+            // explicit or mode-unknown hold raises nothing: no timer races
+            // anybody, and its review surface is the `/held` listing the
+            // `N held` segment points at.
+            //
+            // **No yolo branch, on purpose (B1)**: a bypass-classed session
+            // is exactly the one whose every unset-policy inbound holds, so
+            // an auto-answer here would convert the gate's holds into
+            // accepts wholesale. The hold rides [`PendingDialog::Held`] —
+            // a variant the drain that answers [`PermissionId`]s cannot
+            // name — and unattended inbound is spelled
+            // `cross_session_inbound: "accept"`, never a flag.
+            CoreEvent::PeerHeld {
+                id,
+                from,
+                cause,
+                summary,
+                preview,
+                expires_in_ms,
+                ..
+            } => {
+                match cause {
+                    HoldCause::ModeMismatch | HoldCause::NoModeAsserted => {
+                        let notice = format!("held for review: a message from {from}");
+                        let dialog = held::HeldApproval::new(
+                            id,
+                            from,
+                            cause,
+                            summary.map(|summary| summary.as_str().to_owned()),
+                            preview.as_str().to_owned(),
+                            expires_in_ms,
+                        );
+                        self.raise_dialog(&notice, PendingDialog::Held(dialog));
+                    }
+                    HoldCause::Explicit { .. } | HoldCause::ModeUnknown => {}
+                }
+                self.poll_held();
+            }
+            // A hold ended — by whatever settled it, a person's answer or
+            // the deadline's — so the modal it raised retires, shown or
+            // still queued, and the listing's next poll drops its row.
+            CoreEvent::PeerHoldSettled { id, .. } => {
+                let names_open_dialog = self
+                    .permission
+                    .as_ref()
+                    .is_some_and(|dialog| dialog.held_id() == Some(&id));
+                if names_open_dialog {
+                    self.permission = self.queued_permissions.pop_front();
+                    if self.permission.is_none() {
+                        self.status.set_activity(if self.turn_running {
+                            Activity::Streaming
+                        } else {
+                            Activity::Ready
+                        });
+                    }
+                } else {
+                    // A hold settled while its dialog was still queued — the
+                    // deadline, a mode change, or `/held` — retires from the
+                    // queue rather than being asked about after the fact.
+                    self.queued_permissions
+                        .retain(|waiting| waiting.held_id() != Some(&id));
+                }
+                self.sync_dialog_status();
+                self.poll_held();
+            }
             // A compaction reporting how far its summary has streamed (user
             // directive, 2026-08-25): the strip flips to the compacting
             // dress — armed here even before any message opens, which is how
@@ -6847,8 +7129,9 @@ mod tests {
         storage::VERSION,
     };
     use ganja_protocol::{
-        Event as CoreEvent, FinishReason, Message, Part, PartBody, PartId, PermissionId,
-        PermissionReply, QuestionId, QuestionInfo, QuestionOption, ToolState, Usage,
+        Event as CoreEvent, FinishReason, HeldId, HeldOutcome, HoldCause, Message, Part, PartBody,
+        PartId, PermissionId, PermissionReply, QuestionId, QuestionInfo, QuestionOption,
+        RedactedText, ToolState, Usage,
     };
     use ratatui::{
         Terminal,
@@ -6863,8 +7146,8 @@ mod tests {
 
     use super::{
         App, BACKTRACK_HINT, Chooser, Cleared, Dropdown, ESC_CHORD, FRAME, Help, JoinHandle,
-        ListDialog, MAX_EVENT_LOG, MessageId, Mode, NO_EFFORTS, Palette, Permission, RevertScope,
-        Rewind, WireListing, permission_reply,
+        ListDialog, MAX_EVENT_LOG, MessageId, Mode, NO_EFFORTS, Palette, PendingDialog, Permission,
+        RevertScope, Rewind, WireListing, permission_reply,
     };
 
     /// The session every hand-built fixture event happens in. One pinned id,
@@ -8692,7 +8975,10 @@ mod tests {
             .expect("the second request is handled");
 
         assert_eq!(
-            app.permission.as_ref().map(|open| open.id().as_str()),
+            app.permission
+                .as_ref()
+                .and_then(PendingDialog::permission_id)
+                .map(|id| id.as_str()),
             Some("perm_1"),
             "the dialog on screen is still the one that was asked first"
         );
@@ -8715,7 +9001,10 @@ mod tests {
         .expect("the first reply is handled");
 
         assert_eq!(
-            app.permission.as_ref().map(|open| open.id().as_str()),
+            app.permission
+                .as_ref()
+                .and_then(PendingDialog::permission_id)
+                .map(|id| id.as_str()),
             Some("perm_2"),
             "answering one asks the next rather than leaving the queue stranded"
         );
@@ -8756,10 +9045,367 @@ mod tests {
             "the refused request left the queue"
         );
         assert_eq!(
-            app.permission.as_ref().map(|open| open.id().as_str()),
+            app.permission
+                .as_ref()
+                .and_then(PendingDialog::permission_id)
+                .map(|id| id.as_str()),
             Some("perm_1"),
             "and the one on screen is untouched by it"
         );
+    }
+
+    // ---- D524: the admission gate's review surfaces ----
+
+    /// A `PeerHeld` as the engine's forwarder stamps one, with the parity
+    /// deadline where the cause carries a timer.
+    fn held_event(id: &str, cause: HoldCause) -> CoreEvent {
+        let parity = matches!(cause, HoldCause::ModeMismatch | HoldCause::NoModeAsserted);
+        CoreEvent::PeerHeld {
+            session_id: session(),
+            id: HeldId::from(id.to_owned()),
+            from: "w1@ganja-team".to_owned(),
+            cause,
+            summary: Some(RedactedText::from("a finding worth a look".to_owned())),
+            preview: RedactedText::from("the full body of the finding".to_owned()),
+            expires_in_ms: parity.then_some(300_000),
+        }
+    }
+
+    /// The parity causes put a person in front of the message now (AC-27):
+    /// the modal rides the same one-on-screen queue every dialog does, and
+    /// its own settlement — whoever settled it — is what closes it.
+    #[tokio::test]
+    async fn a_parity_hold_raises_the_approval_dialog_and_its_settlement_closes_it() {
+        let mut app = app();
+        app.handle(AppEvent::core(held_event(
+            "held_1",
+            HoldCause::NoModeAsserted,
+        )))
+        .await
+        .expect("the hold is handled");
+
+        let open = app.permission.as_ref().expect("the modal is on screen");
+        assert_eq!(
+            open.held_id().map(HeldId::as_str),
+            Some("held_1"),
+            "and it is the hold's own dialog, not a permission's"
+        );
+        assert!(
+            open.permission_id().is_none(),
+            "a hold has no permission id"
+        );
+
+        app.handle(AppEvent::core(CoreEvent::PeerHoldSettled {
+            session_id: session(),
+            id: HeldId::from("held_1".to_owned()),
+            outcome: HeldOutcome::Expired,
+        }))
+        .await
+        .expect("the settlement is handled");
+
+        assert!(
+            app.permission.is_none(),
+            "the settlement retires the modal, whatever settled it"
+        );
+    }
+
+    /// An explicit hold — and a mode-unknown one — raises **no** modal
+    /// (AC-27): no deadline races anybody, and their review surface is the
+    /// `/held` listing alone.
+    #[tokio::test]
+    async fn an_explicit_or_mode_unknown_hold_raises_no_dialog() {
+        let mut app = app();
+        for (id, cause) in [
+            (
+                "held_1",
+                HoldCause::Explicit {
+                    source: ganja_protocol::PolicySource::Global,
+                },
+            ),
+            ("held_2", HoldCause::ModeUnknown),
+        ] {
+            app.handle(AppEvent::core(held_event(id, cause)))
+                .await
+                .expect("the hold is handled");
+        }
+
+        assert!(
+            app.permission.is_none(),
+            "an explicit hold is /held's to review, not a modal's"
+        );
+        assert!(app.queued_permissions.is_empty());
+    }
+
+    /// A hold that settles while its modal is still queued behind another
+    /// dialog retires from the queue without ever being shown — the
+    /// permission queue's own rule, on the other variant.
+    #[tokio::test]
+    async fn a_hold_settled_while_queued_retires_without_being_shown() {
+        let mut app = app();
+        app.handle(AppEvent::core(permission_event("perm_1")))
+            .await
+            .expect("the permission is handled");
+        app.handle(AppEvent::core(held_event(
+            "held_1",
+            HoldCause::ModeMismatch,
+        )))
+        .await
+        .expect("the hold is handled");
+        assert_eq!(app.queued_permissions.len(), 1, "the hold queued behind");
+
+        app.handle(AppEvent::core(CoreEvent::PeerHoldSettled {
+            session_id: session(),
+            id: HeldId::from("held_1".to_owned()),
+            outcome: HeldOutcome::Denied,
+        }))
+        .await
+        .expect("the settlement is handled");
+
+        assert!(app.queued_permissions.is_empty(), "the hold left the queue");
+        assert_eq!(
+            app.permission
+                .as_ref()
+                .and_then(PendingDialog::permission_id)
+                .map(|id| id.as_str()),
+            Some("perm_1"),
+            "and the permission on screen is untouched by it"
+        );
+    }
+
+    /// The modal's keys send the settle and nothing closes locally: the
+    /// engine's `PeerHoldSettled` is the one closer, so a keypress that
+    /// raced the deadline cannot double-decide (**D524**).
+    #[tokio::test]
+    async fn approval_keys_settle_by_event_never_by_keypress() {
+        let mut app = app();
+        app.handle(AppEvent::core(held_event(
+            "held_1",
+            HoldCause::NoModeAsserted,
+        )))
+        .await
+        .expect("the hold is handled");
+
+        app.handle(AppEvent::Term(TermEvent::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        ))))
+        .await
+        .expect("the dismiss is handled");
+
+        assert!(
+            app.permission.is_some(),
+            "Esc sent the deny; the settlement event is what closes"
+        );
+
+        app.handle(AppEvent::core(CoreEvent::PeerHoldSettled {
+            session_id: session(),
+            id: HeldId::from("held_1".to_owned()),
+            outcome: HeldOutcome::Denied,
+        }))
+        .await
+        .expect("the settlement is handled");
+        assert!(app.permission.is_none());
+    }
+
+    /// **AC-32.** Under the D479 trio — the TUI's yolo drain active *and*
+    /// the engine seeded bypass — a parity hold still raises the dialog and
+    /// the drain does not answer it: the hold item survives the drain pass,
+    /// nothing sent `SettleHeld`, and the entry stays held in the engine.
+    /// The guarantee is B1's type shape, exercised here at runtime: the
+    /// drain answers `PermissionId`s, and [`PendingDialog::Held`] carries
+    /// none.
+    #[tokio::test]
+    async fn a_yolo_session_never_answers_a_hold_and_the_entry_stays_held() {
+        use ganja_core::teammate::inbound::SocketAdmission;
+
+        let mut app =
+            App::new(engine().with_inbound_bypass(true), None, Themes::builtin()).with_yolo(true);
+
+        // A real hold, through the engine's own socket door: a bypass-classed
+        // receiver with no explicit policy holds every inbound
+        // (`no_mode_asserted`), which is exactly the state AC-32 is about.
+        let admission = app.engine.inbound().admit_socket(
+            app.engine.receiver_class(),
+            "w1@ganja-team",
+            "the body of the message",
+            None,
+        );
+        assert!(
+            matches!(
+                admission,
+                SocketAdmission::Held {
+                    cause: HoldCause::NoModeAsserted,
+                    ..
+                }
+            ),
+            "a bypassed receiver's unset policy holds: {admission:?}"
+        );
+        let held = app.engine.held_messages();
+        assert_eq!(held.len(), 1, "the engine really holds the entry");
+        let id = held[0].id.clone();
+
+        // The event as the forwarder would stamp it, through the full
+        // `App::handle` path — which runs the yolo drain
+        // (`answer_for_the_absent`) right after `handle_core`.
+        app.handle(AppEvent::core(CoreEvent::PeerHeld {
+            session_id: session(),
+            id: id.clone(),
+            from: "w1@ganja-team".to_owned(),
+            cause: HoldCause::NoModeAsserted,
+            summary: None,
+            preview: RedactedText::from("the body of the message".to_owned()),
+            expires_in_ms: Some(300_000),
+        }))
+        .await
+        .expect("the hold is handled");
+
+        assert!(
+            matches!(&app.permission, Some(PendingDialog::Held(dialog)) if *dialog.id() == id),
+            "the dialog is up — yolo answers permissions, never holds"
+        );
+        assert!(
+            app.auto_permissions.is_empty(),
+            "the drain was handed nothing to answer: a hold carries no permission id"
+        );
+        assert_eq!(
+            app.engine.held_messages().len(),
+            1,
+            "and the entry stays held — nothing sent SettleHeld"
+        );
+    }
+
+    /// The `N held` segment counts what the engine holds, appearing only
+    /// while that is anything (AC-27) — polled on the tick, the D462 way.
+    #[tokio::test]
+    async fn the_bar_counts_held_messages_only_while_any_are_held() {
+        let mut app = App::new(engine().with_inbound_bypass(true), None, Themes::builtin());
+        app.handle(AppEvent::Tick).await.expect("a tick is handled");
+        assert!(!status_line(&mut app).contains("held"));
+
+        let admission = app.engine.inbound().admit_socket(
+            app.engine.receiver_class(),
+            "w1@ganja-team",
+            "the body",
+            None,
+        );
+        assert!(
+            matches!(
+                admission,
+                ganja_core::teammate::inbound::SocketAdmission::Held { .. }
+            ),
+            "the seed held: {admission:?}"
+        );
+        app.handle(AppEvent::Tick).await.expect("a tick is handled");
+        assert!(
+            status_line(&mut app).contains("1 held"),
+            "got: {}",
+            status_line(&mut app)
+        );
+
+        let id = app.engine.held_messages()[0].id.clone();
+        app.engine
+            .send(ganja_protocol::Command::SettleHeld {
+                id,
+                decision: super::HeldDecision::Deny,
+            })
+            .await
+            .expect("the settle is accepted");
+        app.handle(AppEvent::Tick).await.expect("a tick is handled");
+        assert!(!status_line(&mut app).contains("held"));
+    }
+
+    /// The `/held` listing over the engine's own buffer: rows appear with
+    /// sender, cause and preview, Enter opens Release/Deny, and a deny
+    /// retires the row through the engine (AC-27's working Release/Deny).
+    #[tokio::test]
+    async fn the_held_listing_lists_and_its_deny_retires_the_row() {
+        let mut app = App::new(engine().with_inbound_bypass(true), None, Themes::builtin());
+        let admission = app.engine.inbound().admit_socket(
+            app.engine.receiver_class(),
+            "w1@ganja-team",
+            "the body of the finding",
+            Some("a finding worth a look"),
+        );
+        assert!(
+            matches!(
+                admission,
+                ganja_core::teammate::inbound::SocketAdmission::Held { .. }
+            ),
+            "the seed held: {admission:?}"
+        );
+
+        app.run_command(command::Action::Held).await;
+        let dialog = app.held_dialog.as_ref().expect("/held opens the dialog");
+        assert_eq!(
+            dialog.selected().map(|row| row.from.as_str()),
+            Some("w1@ganja-team")
+        );
+
+        // Enter opens the actions; Down moves to Deny; Enter settles it.
+        app.handle_held_key(KeyCode::Enter).await;
+        app.handle_held_key(KeyCode::Down).await;
+        app.handle_held_key(KeyCode::Enter).await;
+
+        assert!(
+            app.engine.held_messages().is_empty(),
+            "the deny settled the entry in the engine"
+        );
+        let dialog = app.held_dialog.as_ref().expect("the dialog stays open");
+        assert!(
+            dialog.selected().is_none(),
+            "and the row is gone from the listing"
+        );
+
+        app.handle_held_key(KeyCode::Esc).await;
+        assert!(app.held_dialog.is_none(), "Esc closes the listing");
+    }
+
+    #[test]
+    fn snapshot_held_approval_dialog_open() {
+        let mut app = app();
+        app.permission = Some(PendingDialog::Held(super::held::HeldApproval::new(
+            HeldId::from("held_1".to_owned()),
+            "w1@ganja-team".to_owned(),
+            HoldCause::NoModeAsserted,
+            Some("a finding worth a look".to_owned()),
+            "the full body of the finding\nwith a second line for the preview".to_owned(),
+            Some(300_000),
+        )));
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(screen(&terminal));
+    }
+
+    #[test]
+    fn snapshot_held_listing_open() {
+        let mut app = app();
+        app.held_dialog = Some(super::held::HeldList::new(vec![
+            super::held::Row::new(
+                HeldId::from("held_1".to_owned()),
+                "w1@ganja-team".to_owned(),
+                HoldCause::NoModeAsserted,
+                Duration::from_secs(65),
+                Some("a finding worth a look"),
+                "the full body",
+            ),
+            super::held::Row::new(
+                HeldId::from("held_2".to_owned()),
+                "scribbler@nowhere".to_owned(),
+                HoldCause::Explicit {
+                    source: ganja_protocol::PolicySource::Global,
+                },
+                Duration::from_secs(12),
+                None,
+                "an unsummarized body",
+            ),
+        ]));
+
+        let mut terminal = terminal(80, 24);
+        app.draw(&mut terminal).expect("a frame draws");
+
+        insta::assert_snapshot!(screen(&terminal));
     }
 
     /// What the scripted shell call echoes, so "the tool ran" is a question
@@ -9304,13 +9950,13 @@ mod tests {
     #[test]
     fn snapshot_permission_dialog_open() {
         let mut app = app();
-        app.permission = Some(Permission::new(
+        app.permission = Some(PendingDialog::Permission(Permission::new(
             PermissionId::from("perm_1".to_owned()),
             "shell".to_owned(),
             "cargo test".to_owned(),
             serde_json::json!({"command": "cargo test"}),
             Vec::new(),
-        ));
+        )));
 
         let mut terminal = terminal(80, 24);
         app.draw(&mut terminal).expect("a frame draws");
@@ -9331,13 +9977,13 @@ mod tests {
             "--skip live --skip golden --skip pty --skip slow --skip flaky ".repeat(12),
         );
         let mut app = app();
-        app.permission = Some(Permission::new(
+        app.permission = Some(PendingDialog::Permission(Permission::new(
             PermissionId::from("perm_1".to_owned()),
             "shell".to_owned(),
             command.clone(),
             serde_json::json!({ "command": command }),
             Vec::new(),
-        ));
+        )));
 
         let mut terminal = terminal(80, 24);
         app.draw(&mut terminal).expect("a frame draws");
@@ -14857,10 +15503,10 @@ mod tests {
         let mut app = app();
         app.run_command(command::Action::Help).await;
 
-        // One row taller than it was, because the roster this card lists gained
-        // `/team` (**D504**) — the card grows with the commands, which is what
-        // "the whole card" means.
-        let mut terminal = terminal(90, 41);
+        // Two rows taller than it once was, because the roster this card lists
+        // gained `/team` (**D504**) and then `/held` (**D524**) — the card
+        // grows with the commands, which is what "the whole card" means.
+        let mut terminal = terminal(90, 42);
         app.draw(&mut terminal).expect("a frame draws");
         let screen = screen(&terminal);
 
@@ -16817,7 +17463,7 @@ mod tests {
         });
 
         let dialog = app.permission.as_ref().expect("the dialog is on screen");
-        assert_eq!(dialog.id(), &id);
+        assert_eq!(dialog.permission_id(), Some(&id));
         let mut terminal = terminal(80, 24);
         app.draw(&mut terminal).expect("a frame draws");
         let screen = screen(&terminal);
@@ -17373,7 +18019,7 @@ mod tests {
         );
 
         let on_screen = app.permission.as_ref().expect("the queue advanced");
-        assert_eq!(on_screen.id(), &second);
+        assert_eq!(on_screen.permission_id(), Some(&second));
         assert!(app.answer_teammate_dialog(&second, PermissionReply::Once));
         assert!(app.permission.is_none());
     }

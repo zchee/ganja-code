@@ -98,6 +98,7 @@ pub mod dropdown;
 pub mod editor;
 pub mod effort;
 pub mod files;
+pub mod held;
 pub mod help;
 pub mod inspector;
 pub mod list;
