@@ -1,7 +1,7 @@
 //! OpenCode Zen and OpenCode Go — one vendor's gateway, **three dialects off
 //! one base URL**, chosen per model.
 //!
-//! Spec standing: **absent from the pinned v1.18.13 checkout**, which knows
+//! Spec standing: **absent from the pinned v1.18.22 checkout**, which knows
 //! `zenmux` and nothing called Zen or Go. These are the vendor's later
 //! subscription products, so the spec here is the cursor-wire method
 //! (**D488**): the live model catalog, the vendor's own open-source client at a

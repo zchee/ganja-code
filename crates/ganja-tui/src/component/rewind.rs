@@ -2,7 +2,7 @@
 //! choice of how much of one to put back.
 //!
 //! **Semantics are upstream's, presentation is Claude Code's.** Upstream
-//! v1.18.13 reverts to a message (`session/revert.ts:13-23`) from a dialog that
+//! v1.18.22 reverts to a message (`session/revert.ts:13-23`) from a dialog that
 //! lists messages (`component/dialog-message.tsx:22-52`), and that is exactly
 //! what [`ganja_protocol::Command::RevertTo`] asks the engine for. What this
 //! draws is Claude Code's rewind panel (screenshot 2026-08-11): checkpoint rows

@@ -325,7 +325,7 @@ mod tests {
         // literal as well as through the constant, so that changing the
         // constant is a decision somebody has to come here and confirm.
         assert!(request.has_header("user-agent", UPSTREAM_USER_AGENT));
-        assert!(request.has_header("user-agent", "opencode/1.18.13"));
+        assert!(request.has_header("user-agent", "opencode/1.18.22"));
 
         assert_eq!(
             request.json(),

@@ -248,7 +248,7 @@ const BETA: &str = "responses=experimental";
 /// the API's — upstream filters the model list on the same `auth.type ===
 /// "oauth"` condition the fetch override branches on (`codex.ts:281`), so a
 /// session holding a key sees whatever the platform sells. The list is a
-/// snapshot of somebody else's product decision as of v1.18.13 and **will
+/// snapshot of somebody else's product decision as of v1.18.22 and **will
 /// drift**; [`NEWER_THAN`] is what keeps it from aging badly, and when the
 /// seat's offering changes these four lines are what to re-read against
 /// `codex.ts:15-16`.

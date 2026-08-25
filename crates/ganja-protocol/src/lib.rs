@@ -1164,7 +1164,7 @@ pub enum Command {
     /// typed while the model works reaches *that* model request instead of
     /// waiting for the next turn.
     ///
-    /// **D450** (`steer-is-an-explicit-command`). Upstream v1.18.13 has the
+    /// **D450** (`steer-is-an-explicit-command`). Upstream v1.18.22 has the
     /// same *observable* behavior and no contract for it: `session/prompt.ts`
     /// persists a message mid-turn and `effect/runner.ts`'s loop re-reads the
     /// conversation each iteration, so whether a prompt starts a turn or

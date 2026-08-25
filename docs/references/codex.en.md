@@ -3,7 +3,7 @@
 > [!IMPORTANT]
 > **This document is a reference inventory, not a roadmap. Not every feature
 > listed here will be ported.** ganja's charter is behavioral parity with
-> opencode v1.18.13; Codex CLI is a third product, catalogued here for
+> opencode v1.18.22; Codex CLI is a third product, catalogued here for
 > comparison only. A ❌ is an observation, never a promise.
 
 Snapshot: 2026-08-12, against Codex CLI's main branch (Codex has no pin in

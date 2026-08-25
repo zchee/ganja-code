@@ -681,6 +681,13 @@ pub struct Overrides {
 pub const DEFAULT_TOOL_DEFER_THRESHOLD: usize = 32;
 
 /// Everything the config files asked for, merged.
+///
+/// The curated posture — an unknown key is refused **by name** — was
+/// upstream's too until v1.18.22 moved to ignoring excess properties
+/// (`config/parse.ts`, #41312). Ganja keeps the refusal deliberately: an
+/// ignored setting is one whose author still believes it applies, and the
+/// schema drift tests in `tests/config_schema.rs` lean on serde's own
+/// enumeration of what exists.
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Config {

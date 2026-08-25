@@ -2,7 +2,7 @@
 //!
 //! The port's claim is behavioural, not textual — that a session driven by the
 //! same model does the same things. Nothing that reads only ganja can check
-//! that, so this runs both agents: upstream opencode v1.18.13 out of
+//! that, so this runs both agents: upstream opencode v1.18.22 out of
 //! `.omc/reference/`, and this crate's [`Engine`] over
 //! [`Registry::with_builtins`], and compares the one thing a user would notice
 //! if the port drifted — the ordered list of tool calls each side actually
@@ -550,7 +550,7 @@ fn checkout() -> PathBuf {
     let directory = std::env::var_os(CHECKOUT_ENV).map_or_else(
         || {
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../.omc/reference/opencode-v1.18.13")
+                .join("../../.omc/reference/opencode-v1.18.22")
                 .to_owned()
         },
         PathBuf::from,
@@ -560,7 +560,7 @@ fn checkout() -> PathBuf {
     assert!(
         entry.is_file(),
         "the upstream checkout is not where this expects it: {} does not exist. \
-         Vendor opencode v1.18.13 there, or point {CHECKOUT_ENV} at it.",
+         Vendor opencode v1.18.22 there, or point {CHECKOUT_ENV} at it.",
         entry.display()
     );
     assert!(

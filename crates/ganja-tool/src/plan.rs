@@ -22,7 +22,7 @@
 //!
 //! # `plan_enter` is synthesized rather than ported (**D477**, `plan-enter-synthesized`)
 //!
-//! Upstream v1.18.13 ships the *vocabulary* of a plan-enter door and none of
+//! Upstream v1.18.22 ships the *vocabulary* of a plan-enter door and none of
 //! its body. `tool/plan-enter.txt` is the model-facing description;
 //! `agent/agent.ts:127` defaults the `plan_enter` permission to deny;
 //! `agent/agent.ts:147-150` allows it on the **build** agent beside

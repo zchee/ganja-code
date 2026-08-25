@@ -15,14 +15,19 @@
 //! module's schedule before the failure is allowed to end the turn.
 //!
 //! The delays are ported from upstream `packages/opencode/src/session/retry.ts`
-//! (v1.18.13): 2s initial, doubling, capped at 30s, with `retry-after-ms` and
-//! `retry-after` honoured ahead of the schedule.
+//! (v1.18.22): 2s initial, doubling, jittered by up to a quarter, capped at
+//! 30s and at five retries, with `retry-after-ms` and `retry-after` honoured
+//! ahead of the schedule — and, past the statuses, that file's
+//! `RETRYABLE_MESSAGE_PATTERNS`, because a transient condition does not
+//! always arrive under a status anyone can classify.
 
 use std::{
     fmt::Write as _,
+    sync::LazyLock,
     time::{Duration, SystemTime},
 };
 
+use regex::Regex;
 use reqwest::header::HeaderMap;
 use secrecy::zeroize::Zeroize as _;
 use tokio_util::sync::CancellationToken;
@@ -40,23 +45,64 @@ pub const MAX_DELAY: Duration = Duration::from_secs(30);
 
 /// Attempts, including the first.
 ///
-/// Upstream sets no limit — its schedule retries for as long as the error keeps
-/// classifying as retryable. Ganja bounds it because nothing yet reports a
-/// pending retry to the status bar, so an unbounded loop would look like a
-/// hung turn. Four retries spend at most 2 + 4 + 8 + 16 = 30 seconds, which is
-/// the same order as upstream's per-delay ceiling.
-pub const MAX_ATTEMPTS: u32 = 5;
+/// Upstream capped its schedule at v1.18.22 (`RETRY_MAX_RETRIES`: five
+/// retries after the first attempt); until then ganja bounded what upstream
+/// left unbounded, one retry short of this number. Five retries spend at most
+/// 2 + 4 + 8 + 16 + 30 = 60 seconds of scheduled delay.
+pub const MAX_ATTEMPTS: u32 = 6;
 
 /// Statuses worth sending the same request again for: rate limits, transient
-/// gateway failures, and Anthropic's 529 "overloaded".
-pub const RETRYABLE_STATUS: [u16; 5] = [429, 500, 502, 503, 529];
+/// gateway failures, the two gateway-timeout spellings upstream's own pattern
+/// list names (504, and Cloudflare's 524), and Anthropic's 529 "overloaded".
+pub const RETRYABLE_STATUS: [u16; 7] = [429, 500, 502, 503, 504, 524, 529];
 
 /// Fraction of the scheduled delay that jitter may add, in percent.
 ///
-/// Upstream has no jitter. It is added here because every ganja process that
-/// hits one account's rate limit would otherwise come back in lockstep, and
-/// only ever extends a delay so the ported schedule stays a lower bound.
-const JITTER_PERCENT: u32 = 10;
+/// Upstream's `RETRY_JITTER_FACTOR` (0.25, v1.18.22); ganja carried its own
+/// ten percent before upstream had any, and now follows the vendor's number.
+/// Jitter only ever extends a delay — and never a server-requested
+/// `retry-after`, which upstream's `exponential` leaves exact too.
+const JITTER_PERCENT: u32 = 25;
+
+/// The error messages worth retrying on regardless of status, ported verbatim
+/// from upstream `session/retry.ts` (`RETRYABLE_MESSAGE_PATTERNS`, v1.18.22):
+/// a vendor's transient condition often arrives with a status this build
+/// cannot classify — an in-body error object, a gateway's own spelling — and
+/// the message is then the only thing that says "again might work".
+static TRANSIENT_MESSAGES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    [
+        r"429|500|502|503|504|524",
+        r"rate increased too quickly|rate limit|rate-limit|rate_limit|too many requests",
+        concat!(
+            "overloaded|service unavailable|service_unavailable|service-unavailable|",
+            "internal error|internal_error|internal server error|server error|server_error|",
+            "server-error|provider returned error|provider_returned_error|provider-returned-error",
+        ),
+        concat!(
+            r"terminated|fetch failed|failed to fetch|network[-_\s]error|upstream connect|",
+            "connection error|connection refused|connection lost|socket connection was closed|",
+            "socket hang up|reset before headers|getaddrinfo|enotfound|eai_again|econnrefused|",
+            "econnreset|etimedout",
+        ),
+        concat!(
+            r"^timeout$",
+            r"|\b(?:request|response|connection|network|stream|read) (?:timeout|timed out|time out)\b",
+        ),
+        r"try your request again|retry your request|resource exhausted|resource_exhausted",
+        r"\btry again (?:later|in\b)|\b(?:currently|temporarily) at capacity\b",
+    ]
+    .into_iter()
+    .map(|pattern| Regex::new(&format!("(?i){pattern}")).expect("upstream's own patterns compile"))
+    .collect()
+});
+
+/// Whether `message` names a condition upstream's pattern list calls
+/// transient.
+fn transient_message(message: &str) -> bool {
+    TRANSIENT_MESSAGES
+        .iter()
+        .any(|pattern| pattern.is_match(message))
+}
 
 /// Longest error body kept for a status message; a status bar cannot hold more
 /// and a provider's HTML error page is not worth a megabyte of transcript.
@@ -79,7 +125,13 @@ impl ProviderError {
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         match self {
-            Self::Status { status, .. } => RETRYABLE_STATUS.contains(status),
+            // By the status, or by what the body said (v1.18.22's message
+            // patterns): an in-body failure is synthesized as a 500 here, but
+            // a vendor proxying somebody else's refusal can surface a
+            // transient condition under a status this list has never met.
+            Self::Status { status, message } => {
+                RETRYABLE_STATUS.contains(status) || transient_message(message)
+            }
             Self::Transport(_) => true,
             Self::Auth(_) | Self::Parse(_) => false,
         }
@@ -122,23 +174,46 @@ pub(super) async fn send(
             Ok(response) if response.status().is_success() => return Ok(response),
             Ok(response) => {
                 let status = response.status().as_u16();
-                if attempt >= MAX_ATTEMPTS || !RETRYABLE_STATUS.contains(&status) {
+                // Read before the body consumes the response, whichever way
+                // the classification below goes.
+                let requested = retry_after(response.headers(), SystemTime::now());
+                if attempt >= MAX_ATTEMPTS {
                     return Err(refusal(response, presented).await);
                 }
-
-                delay(attempt, retry_after(response.headers(), SystemTime::now()))
+                if !RETRYABLE_STATUS.contains(&status) {
+                    // The status alone says final, but the body may still
+                    // name a transient condition — upstream classifies the
+                    // error it built, message included (v1.18.22), so the
+                    // body is read before the request is given up on.
+                    let refused = refusal(response, presented).await;
+                    let transient = matches!(
+                        &refused,
+                        ProviderError::Status { message, .. } if transient_message(message)
+                    );
+                    if !transient {
+                        return Err(refused);
+                    }
+                }
+                match requested {
+                    // A server-mandated pause is honoured exactly; jitter is
+                    // the schedule's own, as upstream's `exponential` has it.
+                    Some(_) => delay(attempt, requested),
+                    None => jitter(delay(attempt, None)),
+                }
             }
             Err(error) => {
-                if attempt >= MAX_ATTEMPTS || !is_retryable_transport(&error) {
+                if attempt >= MAX_ATTEMPTS
+                    || !(is_retryable_transport(&error) || transient_message(&chained(&error)))
+                {
                     return Err(transport(error));
                 }
 
-                delay(attempt, None)
+                jitter(delay(attempt, None))
             }
         };
 
         tracing::debug!(attempt, ?wait, "retrying the request that opens the turn");
-        pause(jitter(wait), cancel).await?;
+        pause(wait, cancel).await?;
         attempt += 1;
     }
 }
@@ -184,16 +259,24 @@ fn summarize(body: &str) -> String {
 /// configuration back, and a base URL is allowed to carry credentials in its
 /// userinfo. What went wrong is in the causes either way.
 pub(super) fn transport(error: reqwest::Error) -> ProviderError {
-    let error = error.without_url();
+    ProviderError::Transport(chained(&error.without_url()))
+}
+
+/// The error and every cause under it, flattened into one line.
+///
+/// Also what the transient-message classification reads — over the error as
+/// it arrived, URL included, because the classification never leaves this
+/// module while [`transport`] scrubs what the caller is handed.
+fn chained(error: &reqwest::Error) -> String {
     let mut message = error.to_string();
-    let mut source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(&error);
+    let mut source: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(error);
 
     while let Some(cause) = source {
         let _ = write!(message, ": {cause}");
         source = cause.source();
     }
 
-    ProviderError::Transport(message)
+    message
 }
 
 /// Whether a failed send never reached the provider, which is the only kind of
@@ -350,11 +433,12 @@ mod tests {
             ]
         );
 
-        // Every attempt this build actually makes stays under the ceiling, so
-        // upstream's larger header-present cap would produce the same delays.
+        // The last scheduled retry is the one that touches the ceiling, so
+        // upstream's larger header-present cap changes at most that delay.
         assert!(
-            (1..MAX_ATTEMPTS).all(|attempt| delay(attempt, None) < MAX_DELAY),
-            "the attempt budget should not reach the cap"
+            (1..MAX_ATTEMPTS - 1).all(|attempt| delay(attempt, None) < MAX_DELAY)
+                && delay(MAX_ATTEMPTS - 1, None) == MAX_DELAY,
+            "the attempt budget reaches the cap exactly once, at its tail"
         );
     }
 
@@ -373,14 +457,14 @@ mod tests {
             let extended = jitter(Duration::from_secs(10));
 
             assert!(
-                (Duration::from_secs(10)..=Duration::from_secs(11)).contains(&extended),
-                "jitter should add at most ten percent, got {extended:?}"
+                (Duration::from_secs(10)..=Duration::from_millis(12_500)).contains(&extended),
+                "jitter should add at most a quarter, got {extended:?}"
             );
         }
 
         assert_eq!(
-            jitter(Duration::from_millis(5)),
-            Duration::from_millis(5),
+            jitter(Duration::from_millis(3)),
+            Duration::from_millis(3),
             "a delay too short to jitter is left alone"
         );
     }
@@ -388,17 +472,17 @@ mod tests {
     /// Both ends of the span, which sampling a live draw sixty-four times can
     /// only ever suggest.
     #[test]
-    fn the_span_a_draw_walks_is_the_scheduled_tenth_and_no_more() {
+    fn the_span_a_draw_walks_is_the_scheduled_quarter_and_no_more() {
         let base = Duration::from_secs(10);
 
         assert_eq!(scattered(base, 0), base, "the smallest draw adds nothing");
         assert_eq!(
-            scattered(base, 1_000),
-            Duration::from_millis(11_000),
-            "a draw at the top of the span adds the whole tenth"
+            scattered(base, 2_500),
+            Duration::from_millis(12_500),
+            "a draw at the top of the span adds the whole quarter"
         );
         assert_eq!(
-            scattered(base, 1_001),
+            scattered(base, 2_501),
             base,
             "and the span wraps rather than spilling past it"
         );
@@ -406,6 +490,46 @@ mod tests {
             scattered(MAX_DELAY, u64::MAX) <= MAX_DELAY,
             "the ceiling outranks the scatter"
         );
+    }
+
+    /// The message classification ported from upstream's
+    /// `RETRYABLE_MESSAGE_PATTERNS` (v1.18.22): each row is one pattern
+    /// family, and the refusals below are the reason the list is patterns
+    /// rather than substrings.
+    #[test]
+    fn a_message_naming_a_transient_condition_is_worth_another_attempt() {
+        for transient in [
+            "Provider returned error (status 502)",
+            "rate increased too quickly, please slow down",
+            "The model is currently overloaded. Try again shortly.",
+            "socket hang up",
+            "getaddrinfo ENOTFOUND api.example.test",
+            "timeout",
+            "the request timed out after 30s",
+            "Please try again later.",
+            "Our servers are temporarily at capacity.",
+            "Resource exhausted: out of quota for this minute",
+        ] {
+            assert!(
+                super::transient_message(transient),
+                "upstream retries this: {transient}"
+            );
+        }
+
+        for lasting in [
+            "invalid api key",
+            "model not found",
+            "context length exceeded",
+            // The anchored `^timeout$` and the bounded phrases must not turn
+            // every sentence containing the word into a retry.
+            "set the timeout in your config",
+            "do not try again with the same key",
+        ] {
+            assert!(
+                !super::transient_message(lasting),
+                "no pattern should match: {lasting}"
+            );
+        }
     }
 
     #[test]

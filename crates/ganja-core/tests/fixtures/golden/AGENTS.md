@@ -5,7 +5,7 @@
 
 ## Purpose
 
-The canned tasks the differential harness drives **both** agents through — this port and real upstream opencode v1.18.13 — so the two can be compared on the one thing a user would notice if the port drifted: the ordered list of tool calls each actually executed, and the arguments each ran with.
+The canned tasks the differential harness drives **both** agents through — this port and real upstream opencode v1.18.22 — so the two can be compared on the one thing a user would notice if the port drifted: the ordered list of tool calls each actually executed, and the arguments each ran with.
 
 ## Key Files
 
@@ -41,6 +41,6 @@ Each task is one JSON document:
 cargo test -p ganja-core --test golden
 ```
 
-Requires `bun` and an installed upstream checkout (`GANJA_OPENCODE_DIR`, else `.omc/reference/opencode-v1.18.13`). Missing prerequisites fail the suite rather than skipping it — see `../AGENTS.md`.
+Requires `bun` and an installed upstream checkout (`GANJA_OPENCODE_DIR`, else `.omc/reference/opencode-v1.18.22`). Missing prerequisites fail the suite rather than skipping it — see `../AGENTS.md`.
 
 <!-- MANUAL: -->

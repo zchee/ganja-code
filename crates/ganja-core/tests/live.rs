@@ -304,5 +304,8 @@ async fn opencode_go_answers_on_the_same_key_and_a_different_dialect() {
 /// while tuning a delay.
 #[test]
 fn a_live_turn_gives_up_after_a_bounded_number_of_attempts() {
-    assert_eq!(MAX_ATTEMPTS, 5);
+    assert_eq!(
+        MAX_ATTEMPTS, 6,
+        "upstream's RETRY_MAX_RETRIES, plus the first"
+    );
 }

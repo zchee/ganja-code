@@ -252,6 +252,20 @@ Rules:
 - Preserve exact file paths, symbols, commands, error strings, URLs, and identifiers when known.
 - Do not mention the summary process or that context was compacted."#;
 
+/// What a summarize request says when a prior summary exists, ported verbatim
+/// from upstream `packages/core/src/session/compaction.ts`
+/// (`SUMMARY_UPDATE_INSTRUCTIONS`, v1.18.22; MIT, see
+/// `THIRD_PARTY_NOTICES.md`).
+const SUMMARY_UPDATE_INSTRUCTIONS: &str = r#"The <prior-summary> summarizes everything that happened before the <conversation>. Construct a new summary that combines both. The <prior-summary> is discarded after this: anything you do not carry into the new summary is lost.
+
+When combining:
+- Carry forward objectives, constraints, user directives, decisions, and parallel workstreams from the <prior-summary> even when the <conversation> does not mention them. Drop only what is finished and no longer needed.
+- The <conversation> is more recent than the <prior-summary>. Where they conflict, the conversation wins: state the corrected fact and drop the old claim.
+- Add new progress, decisions, constraints, and context from the conversation.
+- Move completed work from "Active" to "Completed".
+- If a blocker has been resolved, update the summary to reflect that while keeping any details still needed to continue the work.
+- Update "Objective" and "Next Move" to reflect the current work state."#;
+
 /// What the engine keeps about the turn in flight; holding one is what makes
 /// the engine busy.
 pub(crate) struct TurnHandle {
@@ -1184,7 +1198,7 @@ fn mention_parts(mentions: &[crate::protocol::Mention]) -> impl Iterator<Item = 
 /// person typing the token is the consent, exactly as it is for the tool's
 /// own default-allow standing.
 ///
-/// **D491** (`dollar-skill-invocation`): upstream opencode v1.18.13 has no
+/// **D491** (`dollar-skill-invocation`): upstream opencode v1.18.22 has no
 /// user-facing skill invocation at all — skills reach only the model, through
 /// the `skill` tool. The grammar here is the OpenAI Codex CLI's `$skill-name`
 /// mention (its `/skills` listing rides along in the frontends), and the
@@ -2517,7 +2531,7 @@ async fn compact_if_needed(
     let window = turn.history.lock().await.clone();
     let (previous, context) = match (&summary_id, window.first()) {
         // The window already opens with an earlier summary: upstream folds it
-        // into the prompt as <previous-summary> and summarizes what follows.
+        // into the prompt as <prior-summary> and summarizes what follows.
         (Some(id), Some(first)) if first.id == *id && first.role == Role::Assistant => {
             (summary_text(first), &window[1..])
         }
@@ -2849,25 +2863,32 @@ fn truncate_output(output: &str) -> String {
     format!("{kept}\n[truncated]")
 }
 
-/// Upstream core's `buildPrompt`: the instruction — updating when a previous
-/// summary exists, creating otherwise — then the template, then the
-/// serialized history, blank-line separated with empties dropped.
+/// Upstream core's `buildPrompt` (v1.18.22): the conversation inside its own
+/// tags first; then — when a previous summary exists — the prior summary in
+/// its tags and the combining instructions; the template always last.
 fn build_summary_prompt(previous: Option<&str>, context: &str) -> String {
-    let opening = match previous {
-        Some(previous) => format!(
-            "Update the anchored summary below using the conversation history above.\n\
-             Preserve still-true details, remove stale details, and merge in the new facts.\n\
-             <previous-summary>\n{previous}\n</previous-summary>"
-        ),
-        None => "Create a new anchored summary from the conversation history.".to_owned(),
-    };
+    let conversation =
+        format!("Here is the conversation so far:\n\n<conversation>\n{context}\n</conversation>");
 
-    [opening.as_str(), SUMMARY_TEMPLATE, context]
-        .iter()
-        .filter(|block| !block.is_empty())
-        .copied()
-        .collect::<Vec<_>>()
-        .join("\n\n")
+    match previous {
+        None => [
+            conversation.as_str(),
+            "Create a new anchored summary from the conversation history in the <conversation> \
+             tags above so another coding agent can continue the work.",
+            SUMMARY_TEMPLATE,
+        ]
+        .join("\n\n"),
+        Some(previous) => [
+            conversation.as_str(),
+            &format!(
+                "Here is the summary of the conversation before the <conversation> above:\n\n\
+                 <prior-summary>\n{previous}\n</prior-summary>"
+            ),
+            SUMMARY_UPDATE_INSTRUCTIONS,
+            SUMMARY_TEMPLATE,
+        ]
+        .join("\n\n"),
+    }
 }
 
 /// How one model request ended.

@@ -53,7 +53,7 @@ use super::RedactedTail;
 /// device-authorization endpoint is the wrong place to find out; the spikes
 /// that measured it are also not repeatable, because the credentials they ran
 /// on are gone. The version is the pin this behaviour is a port of
-/// (`.omc/reference/opencode-v1.18.13`) rather than ganja's own, because
+/// (`.omc/reference/opencode-v1.18.22`) rather than ganja's own, because
 /// `opencode/0.1.0` is a release that never existed and this string is meant
 /// to name one that did.
 ///
@@ -73,7 +73,7 @@ use super::RedactedTail;
 /// One constant, named for *which* of the two kinds of string it is, so that
 /// the OpenAI login and the wire lane share this answer rather than each
 /// inventing one.
-pub const UPSTREAM_USER_AGENT: &str = "opencode/1.18.13";
+pub const UPSTREAM_USER_AGENT: &str = "opencode/1.18.22";
 
 /// Added to every wait, for clock skew and timer drift.
 ///

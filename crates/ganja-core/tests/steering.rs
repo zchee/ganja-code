@@ -1,6 +1,6 @@
 //! Steering: a message typed while a turn is running joins **that** turn.
 //!
-//! Spec: no upstream port. Upstream v1.18.13 has a mid-turn join
+//! Spec: no upstream port. Upstream v1.18.22 has a mid-turn join
 //! (`session/prompt.ts:1052-1071` with `effect/runner.ts:115-137`) whose whole
 //! contract is implicit — persist a message and hope the running loop re-reads
 //! it — and this build refused that shape in favour of a named command with a

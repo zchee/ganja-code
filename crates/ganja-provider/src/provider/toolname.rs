@@ -21,7 +21,7 @@
 //!
 //! # Upstream
 //!
-//! opencode v1.18.13 has **no length transform anywhere** — nothing in its tree
+//! opencode v1.18.22 has **no length transform anywhere** — nothing in its tree
 //! caps a tool name at 64 or 128. It does carry this module's alphabet twice,
 //! and both are cited because the rule here is theirs:
 //!

@@ -111,7 +111,7 @@ This file maps the ganja-code build phases (P0–P13) to hands-on learning exerc
   - Indentation-flexible: preserve destination indentation
   - Block-anchor: use surrounding context lines as anchors
   
-  Implement the strategy in `ganja-core/src/tool/edit/mod.rs`. Port the upstream test fixtures (available in the local `.omc/reference/opencode-v1.18.13/` checkout if your team has cloned it) into `tests/fixtures/edit_*.rs` as table-driven cases. Assert that edits produce byte-identical output to upstream for ≥3 fixtures.
+  Implement the strategy in `ganja-core/src/tool/edit/mod.rs`. Port the upstream test fixtures (available in the local `.omc/reference/opencode-v1.18.22/` checkout if your team has cloned it) into `tests/fixtures/edit_*.rs` as table-driven cases. Assert that edits produce byte-identical output to upstream for ≥3 fixtures.
 
 - [ ] **Port tool descriptions**: Copy the text from upstream `tool/read.txt`, `tool/write.txt`, `tool/glob.txt`, etc. (MIT licensed, already attributed in `THIRD_PARTY_NOTICES.md`). Implement the `Tool` trait with a `description()` method returning these strings verbatim. Create `ganja-core/src/tool/mod.rs` as a registry.
 
@@ -218,7 +218,7 @@ This file maps the ganja-code build phases (P0–P13) to hands-on learning exerc
 
 ## P7: Parity Stretch (L effort — mostly landed; unchecked items name what's still open)
 
-**Goal**: Achieve feature parity with opencode v1.18.13 where feasible; support server mode and additional providers. **Status, 2026-08-11**: six of seven items landed in full or in part; the remaining gaps are named per item below rather than the whole phase staying "optional."
+**Goal**: Achieve feature parity with opencode v1.18.22 where feasible; support server mode and additional providers. **Status, 2026-08-11**: six of seven items landed in full or in part; the remaining gaps are named per item below rather than the whole phase staying "optional."
 
 ### Rust Concepts
 

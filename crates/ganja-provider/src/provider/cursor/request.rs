@@ -45,7 +45,7 @@
 //! because leaving it unanswered would have hung the turn instead.
 //!
 //! **What diverges.** There is no upstream counterpart to weigh this
-//! against — upstream opencode v1.18.13 has no cursor wire at all, so no
+//! against — upstream opencode v1.18.22 has no cursor wire at all, so no
 //! ported behavior is being contradicted. The divergence is from *cursor's
 //! own shipped client*, which executes these asks: it registers handlers
 //! for shell, read, write, grep, MCP and the rest, runs them against the

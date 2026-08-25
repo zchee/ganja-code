@@ -363,7 +363,7 @@ mod tests {
 
         assert_eq!(headers.len(), 4, "four, and nothing that crept in beside");
         assert_eq!(value("user-agent"), auth::device::UPSTREAM_USER_AGENT);
-        assert_eq!(value("user-agent"), "opencode/1.18.13");
+        assert_eq!(value("user-agent"), "opencode/1.18.22");
         assert_eq!(value(API_VERSION_HEADER), auth::copilot::API_VERSION);
         // Asserted as a literal as well as through the constant, so that moving
         // the date is a decision somebody has to come here and confirm.

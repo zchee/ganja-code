@@ -134,7 +134,7 @@ const FILE: &str = "auth.json";
 /// then rewrites `auth.json` from those instances. An in-entry foreign field
 /// therefore dies on opencode's next write, and an entry a stricter decoder
 /// rejects is dropped from the map entirely (verified 2026-08-08 against the
-/// v1.18.13 checkout). A stamp that upstream would silently erase is a default
+/// v1.18.22 checkout). A stamp that upstream would silently erase is a default
 /// that flips the day someone runs `opencode auth login`, so the stamps live
 /// in a file only ganja writes, and `auth.json`'s shape is never touched.
 ///

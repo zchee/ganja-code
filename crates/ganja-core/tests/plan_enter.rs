@@ -3,7 +3,7 @@
 //! announced after the finish, durable on the row, applied at the next entry.
 //!
 //! Spec: none. `plan_enter` is **synthesized** (**D477**,
-//! `plan-enter-synthesized`): upstream v1.18.13 publishes the permission
+//! `plan-enter-synthesized`): upstream v1.18.22 publishes the permission
 //! vocabulary and the model-facing description and wires no tool at all, so
 //! what these drills pin is ganja's own contract — the mirror of the one
 //! `plan_exit.rs` pins, under `.omc/plans/p7-plan-exit.md`'s two-phase
@@ -629,7 +629,7 @@ async fn plan_enter_survives_the_mcp_dial_rebuild() {
     let checkout = std::env::var_os("GANJA_OPENCODE_DIR").map_or_else(
         || {
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../.omc/reference/opencode-v1.18.13")
+                .join("../../.omc/reference/opencode-v1.18.22")
                 .to_owned()
         },
         std::path::PathBuf::from,

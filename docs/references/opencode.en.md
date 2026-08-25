@@ -3,13 +3,13 @@
 > [!IMPORTANT]
 > **This document is a reference inventory, not a roadmap. Not every feature
 > listed here will be ported.** ganja's charter is behavioral parity with
-> opencode **v1.18.13** — the pin, not the moving tip. This revision surveys
+> opencode **v1.18.22** — the pin, not the moving tip. This revision surveys
 > **v1.18.16** (the latest release at the snapshot date); §18 isolates what
 > moved after the pin, and everything post-pin is out of charter until a
 > deliberate re-pin. A ❌ is an observation, never a promise.
 
 Snapshot: 2026-08-12, against v1.18.16. Source-level rows link to the pinned
-tag (`anomalyco/opencode@v1.18.13`), which remains the spec ganja reads —
+tag (`anomalyco/opencode@v1.18.22`), which remains the spec ganja reads —
 the v1.18.14–16 delta is bugfix-and-Desktop only (§18). Documented features
 link to opencode.ai. The ganja-side cells were refreshed 2026-08-15 against
 the post-P22 tree; the upstream survey is still the 2026-08-12 pass.
@@ -24,12 +24,12 @@ Legend: ✅ present in ganja (parity or a near equivalent) · ⚠️ partial · 
 
 | Module | Notes | ganja |
 |---|---|---|
-| [`frecency.tsx`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/tui/src/component/prompt/frecency.tsx) | frequency+recency completion ranking | ❌ |
-| [`stash.tsx`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/tui/src/component/prompt/stash.tsx) | draft stash | ❌ |
-| [`move.tsx` / `workspace.tsx` / `cwd.ts`](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/tui/src/component/prompt) | session move, workspace, cwd context | ❌ |
-| [`local-attachment.ts`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/tui/src/component/prompt/local-attachment.ts) | mime attachments | ✅ |
-| [`history.tsx`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/tui/src/prompt/history.tsx) | prompt history | ✅ |
-| [`autocomplete.tsx`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/tui/src/component/prompt/autocomplete.tsx) | `@`/`/` completion + `#line-range` | ✅ |
+| [`frecency.tsx`](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/tui/src/component/prompt/frecency.tsx) | frequency+recency completion ranking | ❌ |
+| [`stash.tsx`](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/tui/src/component/prompt/stash.tsx) | draft stash | ❌ |
+| [`move.tsx` / `workspace.tsx` / `cwd.ts`](https://github.com/anomalyco/opencode/tree/v1.18.22/packages/tui/src/component/prompt) | session move, workspace, cwd context | ❌ |
+| [`local-attachment.ts`](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/tui/src/component/prompt/local-attachment.ts) | mime attachments | ✅ |
+| [`history.tsx`](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/tui/src/prompt/history.tsx) | prompt history | ✅ |
+| [`autocomplete.tsx`](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/tui/src/component/prompt/autocomplete.tsx) | `@`/`/` completion + `#line-range` | ✅ |
 
 ## 2. TUI — larger surfaces and keybinds
 
@@ -37,16 +37,16 @@ Legend: ✅ present in ganja (parity or a near equivalent) · ⚠️ partial · 
 
 | Surface | Notes | ganja |
 |---|---|---|
-| [Session rename / tag / move / export dialogs](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/tui/src/component) | | ❌ |
-| [Timeline + fork-from-timeline](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/tui/src/component/dialog-timeline.tsx) | `<leader>g` | ⚠️ the checkpoint-list half is ported — `/rewind` + idle Esc Esc list every user message newest-first, Timeline's own picker shape; forking a session from a past point is not (Session forking ❌, §14) |
-| [Message inspect dialog](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/tui/src/component/dialog-message.tsx) | | ⚠️ Revert is ported as `/rewind`'s second step (`Command::RevertTo`, Both/Conversation/Files scopes — a superset of upstream's single revert); Fork isn't (no session forking) and Copy isn't reachable from this picker (`/copy-message` is its own command) |
-| [Workspace UI](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/tui/src/component) | create/list/file-changes/destination | ❌ out of scope by design |
-| [Sidebar](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/tui/src/feature-plugins/sidebar) | context/files/lsp/mcp/todo panes | ❌ |
-| [Diff viewer](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/tui/src/component/diff-viewer) | file tree, split/unified, hunk nav | ❌ inline unified diffs only |
-| [Subagent transcript viewer](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/tui/src/component/dialog-subagent.tsx) | | ⚠️ no per-child dialog, but a running task row hangs the child's recent calls under it (a capped log the watcher writes, whole in the Ctrl+T transcript, 2026-08-15) where upstream's metadata named only the current tool |
-| [Provider / MCP / skill / status / debug pickers](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/tui/src/component) | | ⚠️ `/effort` picker ✅; skills ✅ as the typed-`$` selector + `/skills` dialog (D491); provider/status/debug ❌ |
+| [Session rename / tag / move / export dialogs](https://github.com/anomalyco/opencode/tree/v1.18.22/packages/tui/src/component) | | ❌ |
+| [Timeline + fork-from-timeline](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/tui/src/component/dialog-timeline.tsx) | `<leader>g` | ⚠️ the checkpoint-list half is ported — `/rewind` + idle Esc Esc list every user message newest-first, Timeline's own picker shape; forking a session from a past point is not (Session forking ❌, §14) |
+| [Message inspect dialog](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/tui/src/component/dialog-message.tsx) | | ⚠️ Revert is ported as `/rewind`'s second step (`Command::RevertTo`, Both/Conversation/Files scopes — a superset of upstream's single revert); Fork isn't (no session forking) and Copy isn't reachable from this picker (`/copy-message` is its own command) |
+| [Workspace UI](https://github.com/anomalyco/opencode/tree/v1.18.22/packages/tui/src/component) | create/list/file-changes/destination | ❌ out of scope by design |
+| [Sidebar](https://github.com/anomalyco/opencode/tree/v1.18.22/packages/tui/src/feature-plugins/sidebar) | context/files/lsp/mcp/todo panes | ❌ |
+| [Diff viewer](https://github.com/anomalyco/opencode/tree/v1.18.22/packages/tui/src/component/diff-viewer) | file tree, split/unified, hunk nav | ❌ inline unified diffs only |
+| [Subagent transcript viewer](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/tui/src/component/dialog-subagent.tsx) | | ⚠️ no per-child dialog, but a running task row hangs the child's recent calls under it (a capped log the watcher writes, whole in the Ctrl+T transcript, 2026-08-15) where upstream's metadata named only the current tool |
+| [Provider / MCP / skill / status / debug pickers](https://github.com/anomalyco/opencode/tree/v1.18.22/packages/tui/src/component) | | ⚠️ `/effort` picker ✅; skills ✅ as the typed-`$` selector + `/skills` dialog (D491); provider/status/debug ❌ |
 | Delete-failed / retry recovery dialogs | | ❌ |
-| [Desktop notifications](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/tui/src/notifications.ts) | | ❌ |
+| [Desktop notifications](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/tui/src/notifications.ts) | | ❌ |
 | Toast overlay | | ⚠️ adapted to status-bar notices, texts verbatim |
 | Logo / startup animations / tips | | ❌ |
 | TUI plugin runtime | | ❌ |
@@ -54,7 +54,7 @@ Legend: ✅ present in ganja (parity or a near equivalent) · ⚠️ partial · 
 
 ### The full keybind registry
 
-Ported and rebindable (6): [`app_exit`, `command_list`, `session_list`, `theme_list`, `agent_cycle`, `input_newline`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/tui/src/config/keybind.ts).
+Ported and rebindable (6): [`app_exit`, `command_list`, `session_list`, `theme_list`, `agent_cycle`, `input_newline`](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/tui/src/config/keybind.ts).
 Everything below is from the same registry. *Tab also completes upstream's own
 `@`/`/` menus, through a separate `prompt.autocomplete.complete` binding (not
 one of the six ported top-level actions, and not one of the rows below) —
@@ -116,41 +116,41 @@ its agents, and this section says so in the shared outline's slot.*
 
 | Feature | Notes | ganja |
 |---|---|---|
-| [`/init` builtin](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/command/index.ts) | guided `AGENTS.md` setup | ✅ template verbatim |
-| [`/review` builtin](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/command/index.ts) | `[commit\|branch\|pr]`, runs as a subtask | ❌ |
+| [`/init` builtin](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/opencode/src/command/index.ts) | guided `AGENTS.md` setup | ✅ template verbatim |
+| [`/review` builtin](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/opencode/src/command/index.ts) | `[commit\|branch\|pr]`, runs as a subtask | ❌ |
 | [Markdown command files](https://opencode.ai/docs/commands) | `command/` or `commands/` under both scopes, filename = command name | ✅ ganja's two homes (D481): `<config home>/commands/*.md` + `.ganja/commands/*.md`, frontmatter `description`/`agent`/`model`/`argument-hint`, body as template, builtin < global < project < config — the `commands/` spelling only |
 | [Frontmatter](https://opencode.ai/docs/commands) | `description`, `agent`, `model` | ✅ config equivalents |
-| [`subtask: true`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/command/index.ts) | run the command in a child session | ❌ |
+| [`subtask: true`](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/opencode/src/command/index.ts) | run the command in a child session | ❌ |
 | [`$ARGUMENTS` / `$1..$N`](https://opencode.ai/docs/commands) | whole string, or positional tokens with the highest-numbered placeholder taking the rest | ✅ incl. quoted tokens |
 | [`` !`cmd` `` substitution](https://opencode.ai/docs/commands) | shell output spliced into the template | ✅ spawned at the project root; stderr-merge and failure-reporting are named deviations |
 | [`@file` references](https://opencode.ai/docs/commands) | attach files like a composer mention | ✅ |
-| [MCP prompts as commands](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/command/index.ts) | a server's prompts surface as slash commands | ❌ MCP tools only |
+| [MCP prompts as commands](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/opencode/src/command/index.ts) | a server's prompts surface as slash commands | ❌ MCP tools only |
 | [Skills (SKILL.md)](https://opencode.ai/docs/skills) | config home + project + `skills.paths`, loaded on request by the `skill` tool | ✅ |
-| [Foreign skill discovery](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/skill/index.ts) | walks `.claude/` and `.agents/` too (`OPENCODE_DISABLE_EXTERNAL_SKILLS` opts out) | ❌ standing ruling: nothing foreign discovered, one `skills.paths` line away |
+| [Foreign skill discovery](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/opencode/src/skill/index.ts) | walks `.claude/` and `.agents/` too (`OPENCODE_DISABLE_EXTERNAL_SKILLS` opts out) | ❌ standing ruling: nothing foreign discovered, one `skills.paths` line away |
 
 ## 5. Tools
 
 | Tool | Notes | ganja |
 |---|---|---|
-| [`plan_enter`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/tool/plan.ts) | enter plan mode | ✅ synthesized — upstream ships the description and the permission vocabulary and wires no tool (D477) |
-| [`plan_exit`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/tool/plan.ts) | hand the wheel to build | ✅ |
-| [`lsp`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/tool/lsp.ts) | hover/symbols exposed to the model | ❌ deviation `lsp-tool-unported` |
-| [`apply_patch`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/tool/apply_patch.ts) | OpenAI-model-gated patch editing | ❌ named in the permission table only |
-| [`execute` (code-mode)](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/codemode) | script over MCP tools | ❌ whole package out of scope |
-| [`doom_loop`](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/opencode/src/tool) | experimental | ❌ |
-| [Spill/truncation discipline](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/tool/truncate.ts) | oversized tool output truncated to a stale-swept spill dir | ✅ ganja's own spill files, redirected under test |
-| [read / edit / write / glob / grep / bash / todowrite / webfetch / websearch / skill / question / task](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/opencode/src/tool) | the working set | ✅ incl. anchored writes, read-before-write, permission gating |
+| [`plan_enter`](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/opencode/src/tool/plan.ts) | enter plan mode | ✅ synthesized — upstream ships the description and the permission vocabulary and wires no tool (D477) |
+| [`plan_exit`](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/opencode/src/tool/plan.ts) | hand the wheel to build | ✅ |
+| [`lsp`](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/opencode/src/tool/lsp.ts) | hover/symbols exposed to the model | ❌ deviation `lsp-tool-unported` |
+| [`apply_patch`](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/opencode/src/tool/apply_patch.ts) | OpenAI-model-gated patch editing | ❌ named in the permission table only |
+| [`execute` (code-mode)](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/codemode) | script over MCP tools | ❌ whole package out of scope |
+| [`doom_loop`](https://github.com/anomalyco/opencode/tree/v1.18.22/packages/opencode/src/tool) | experimental | ❌ |
+| [Spill/truncation discipline](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/opencode/src/tool/truncate.ts) | oversized tool output truncated to a stale-swept spill dir | ✅ ganja's own spill files, redirected under test |
+| [read / edit / write / glob / grep / bash / todowrite / webfetch / websearch / skill / question / task](https://github.com/anomalyco/opencode/tree/v1.18.22/packages/opencode/src/tool) | the working set | ✅ incl. anchored writes, read-before-write, permission gating |
 
 ## 6. Permission grammar
 
 | Feature | Notes | ganja |
 |---|---|---|
 | [Three actions](https://opencode.ai/docs/permissions) | `allow` / `ask` / `deny` per tool, or per pattern under a tool | ✅ |
-| [Last match wins](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/permission/index.ts) | `findLast` over the ruleset; every pattern of a call must be allowed to run unasked | ✅ the engine's core rule |
+| [Last match wins](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/opencode/src/permission/index.ts) | `findLast` over the ruleset; every pattern of a call must be allowed to run unasked | ✅ the engine's core rule |
 | [Layering](https://opencode.ai/docs/permissions) | builtin defaults < agent's rules < config rules < stored answers | ✅ |
 | [Bash patterns](https://opencode.ai/docs/permissions) | wildcards over command text; "always" answers remember the *kind* via the arity table | ✅ |
-| [The edit group](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/permission/index.ts) | `edit` governs `edit`, `write` **and** `apply_patch` | ✅ named in the table |
-| [`~/` and `$HOME` expansion](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/permission/index.ts) | in path patterns | ✅ |
+| [The edit group](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/opencode/src/permission/index.ts) | `edit` governs `edit`, `write` **and** `apply_patch` | ✅ named in the table |
+| [`~/` and `$HOME` expansion](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/opencode/src/permission/index.ts) | in path patterns | ✅ |
 | [Per-agent overrides](https://opencode.ai/docs/permissions) | agent rules append after global ones | ✅ |
 | Subagent inheritance | | ✅ with a documented divergence: a subagent inherits refusals and never allows |
 | [`OPENCODE_PERMISSION`](https://opencode.ai/docs/permissions) | inline JSON ruleset from the environment | ❌ |
@@ -172,19 +172,19 @@ upstream lacks.*
 | Feature | Notes | ganja |
 |---|---|---|
 | [Global `AGENTS.md`](https://opencode.ai/docs/rules) | in the config directory | ✅ ganja's config home |
-| [`~/.claude/CLAUDE.md` fallback](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/session/instruction.ts) | Claude Code compatibility, off via `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT` | ✅ read as the global fallback; the disable knob ❌ |
-| [Project walk](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/session/instruction.ts) | `AGENTS.md` → `CLAUDE.md` → `CONTEXT.md` (deprecated), first match per level, ancestors not stacked | ✅ |
+| [`~/.claude/CLAUDE.md` fallback](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/opencode/src/session/instruction.ts) | Claude Code compatibility, off via `OPENCODE_DISABLE_CLAUDE_CODE_PROMPT` | ✅ read as the global fallback; the disable knob ❌ |
+| [Project walk](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/opencode/src/session/instruction.ts) | `AGENTS.md` → `CLAUDE.md` → `CONTEXT.md` (deprecated), first match per level, ancestors not stacked | ✅ |
 | [`instructions` config](https://opencode.ai/docs/rules) | extra files and globs appended | ✅ |
 
 ## 9. Agents
 
 | Feature | Notes | ganja |
 |---|---|---|
-| [Builtins](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/agent/agent.ts) | `build`, `plan`, `general`, `explore` | ✅ all four, explore's prompt verbatim |
-| [Hidden internal agents](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/agent/agent.ts) | `compaction`, `title`, `summary` modeled as agents | ❌ ganja does those jobs outside the agent roster |
+| [Builtins](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/opencode/src/agent/agent.ts) | `build`, `plan`, `general`, `explore` | ✅ all four, explore's prompt verbatim |
+| [Hidden internal agents](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/opencode/src/agent/agent.ts) | `compaction`, `title`, `summary` modeled as agents | ❌ ganja does those jobs outside the agent roster |
 | [Markdown agent files](https://opencode.ai/docs/agents) | `~/.config/opencode/agent/*.md` + `.opencode/agent/*.md`, frontmatter + body-as-prompt | ✅ ganja's two homes (D482): `<config home>/agents/*.md` + `.ganja/agents/*.md`, frontmatter + body-as-prompt; `tools:` compiles to permission rules — an unlisted tool is refused, never hidden |
 | [Config fields](https://opencode.ai/docs/agents) | `description`, `mode` (`primary`/`subagent`/`all`), `hidden`, `disable`, `model`, `prompt`, `permission` | ✅ all seven |
-| [Sampling fields](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/agent/agent.ts) | `temperature`, `top_p`, `color`, `steps` | ❌ |
+| [Sampling fields](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/opencode/src/agent/agent.ts) | `temperature`, `top_p`, `color`, `steps` | ❌ |
 | Unknown fields inside an agent | carried, not refused (upstream tolerates) | ✅ same posture |
 | Tab cycle / `<leader>a` list | | ⚠️ Tab ✅, list via `/agents` |
 
@@ -201,7 +201,7 @@ upstream lacks.*
 | [LSP auto-install](https://opencode.ai/docs/lsp) | downloads servers (`OPENCODE_DISABLE_LSP_DOWNLOAD` opts out) | ❌ never installs |
 | [Custom LSP servers](https://opencode.ai/docs/lsp) | `command`, `extensions`, `env`, `initialization`, per-entry `disabled` | ✅ |
 | Diagnostics on edit/write | push + pull, errors only, appended at one seam | ✅ |
-| Remaining diagnostics pulls, [`lsp` tool](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/tool/lsp.ts) | | ❌ |
+| Remaining diagnostics pulls, [`lsp` tool](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/opencode/src/tool/lsp.ts) | | ❌ |
 
 ## 11. Auth and providers
 
@@ -217,7 +217,7 @@ upstream lacks.*
 | [`small_model`](https://opencode.ai/docs/config) | the title request (upstream's `getSmallModel` is read by `ensureTitle` and by nothing else; summaries run on the turn's own model) | ✅ bound to the provider its prefix names |
 | Anthropic subscription OAuth (Pro/Max) | upstream removed it to comply with Anthropic's terms; community plugins exist at users' own risk | n/a — ganja never carried it, and no spec existed at the pin |
 | xAI device-code login | single-flow since [v1.18.14](https://github.com/anomalyco/opencode/releases/tag/v1.18.14) | ✅ ganja's grok login is already a device flow |
-| MCP OAuth | remote MCP auth | ✅ P13 addition, no upstream counterpart — the v1.18.13 checkout still refuses the `oauth` key by name: RFC 8414 discovery + RFC 7591 registration + PKCE/loopback + refresh-then-redial on 401, stored under a reserved `mcp:<server>` key (D466) |
+| MCP OAuth | remote MCP auth | ✅ P13 addition, no upstream counterpart — the v1.18.22 checkout silently ignores the `oauth` key it once refused by name (#41312): RFC 8414 discovery + RFC 7591 registration + PKCE/loopback + refresh-then-redial on 401, stored under a reserved `mcp:<server>` key (D466) |
 | [`providers login/list/logout`](https://opencode.ai/docs/providers) | unified credential UI | ⚠️ `auth` covers ganja's providers only |
 | anthropic / openai (both credentials) / openrouter / opencode + opencode-go / grok / copilot / cursor / fake + compat | ganja's roster; cursor is ganja-original, openrouter rides the Responses machinery with the vendor's documented reasoning/effort, tool_choice and opt-in server tools (D489), and the two zen ids share one key with per-model wire dispatch (D488) | ✅ incl. OAuth logins and credential-travel bounds |
 
@@ -232,7 +232,7 @@ Mechanics first, then the top-level keys of `opencode.json(c)`.
 | [`{env:VAR}` / `{file:path}` substitution](https://opencode.ai/docs/config) | dynamic values in any string | ❌ deliberate divergence, documented in `config.rs` — `key_env` names the variable instead |
 | JSONC dialect | comments, trailing commas | ✅ decoded in document order |
 | Unknown top-level keys | the pin **fails** config parsing; **v1.18.16 ignores them** ([release](https://github.com/anomalyco/opencode/releases/tag/v1.18.16)) | ✅ ganja keeps the pin's posture: refused by name, deliberately |
-| [`tui.json`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/tui/src/config/index.tsx) (`OPENCODE_TUI_CONFIG`) | separate TUI config: `theme`, `keybinds`, `leader_timeout`, `scroll_speed`, `scroll_acceleration`, `diff_style`, `mouse`, `attention` | ❌ no second file — ganja's `theme`/`keybinds` live in `ganja.jsonc`; the scroll/diff/mouse knobs are absent |
+| [`tui.json`](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/tui/src/config/index.tsx) (`OPENCODE_TUI_CONFIG`) | separate TUI config: `theme`, `keybinds`, `leader_timeout`, `scroll_speed`, `scroll_acceleration`, `diff_style`, `mouse`, `attention` | ❌ no second file — ganja's `theme`/`keybinds` live in `ganja.jsonc`; the scroll/diff/mouse knobs are absent |
 
 | Top-level key | Notes | ganja |
 |---|---|---|
@@ -285,12 +285,12 @@ lived under subsystems plus researched detail.*
 | [`upgrade` / `uninstall`](https://opencode.ai/docs/cli) | self-update, self-removal | ❌ |
 | [`attach <url>`](https://opencode.ai/docs/cli) | TUI onto a running server | ⚠️ headless `run --attach` only |
 | [`web`](https://opencode.ai/docs/cli) | web UI | ❌ |
-| [`account` / `db` / `plug` / `generate` / `debug/*`](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/opencode/src/cli/cmd) | account, database, plugin and debug utilities | ❌ |
+| [`account` / `db` / `plug` / `generate` / `debug/*`](https://github.com/anomalyco/opencode/tree/v1.18.22/packages/opencode/src/cli/cmd) | account, database, plugin and debug utilities | ❌ |
 | [`run --fork`](https://opencode.ai/docs/cli) | fork while continuing | ❌ |
 | [`run -f <file>`](https://opencode.ai/docs/cli) | attach files/images from the CLI | ❌ (in-prompt `@` is ✅) |
-| [`run --command <name>`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/cli/cmd/run.ts) | run a slash command headless | ❌ |
-| [`run --share` / `--title`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/cli/cmd/run.ts) | share the session, name it | ❌ |
-| [`run --variant <v>`](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/cli/cmd/run.ts) | reasoning-effort variant from the CLI | ❌ (`/effort` in the TUI ✅) |
+| [`run --command <name>`](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/opencode/src/cli/cmd/run.ts) | run a slash command headless | ❌ |
+| [`run --share` / `--title`](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/opencode/src/cli/cmd/run.ts) | share the session, name it | ❌ |
+| [`run --variant <v>`](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/opencode/src/cli/cmd/run.ts) | reasoning-effort variant from the CLI | ❌ (`/effort` in the TUI ✅) |
 | [`serve --cors` / `--mdns`](https://opencode.ai/docs/server) | CORS origins, mDNS discovery | ❌ (serve itself ✅) |
 | [`run` / `serve` / `auth` / `models` / `sessions` / `mcp`](https://opencode.ai/docs/cli) | the working set | ✅ incl. nd-JSON output, `--continue`/`--session`, Basic-auth serve |
 
@@ -348,10 +348,10 @@ repository root's `AGENTS.md`.
 |---|---|---|
 | [Plugins](https://opencode.ai/docs/plugins) | JS runtime; npm specs + local `{plugin,plugins}/*.{ts,js}`; hooks (`tool.execute.before/after`, `permission.ask`, `chat.message`, event bus); `@opencode-ai/plugin` types, ctx carries an SDK client and Bun's `$` | ❌ the JS plugin runtime itself is out of scope; ganja's own `hooks` config key (P13, §7) is a **different, Claude-shaped mechanism** — nine named moments, `sh -c` command handlers, no JS runtime, no event bus — not a port of this row (D456) |
 | [Share](https://opencode.ai/docs/share) | `opencode.ai/s/<id>` publishing, `/share` `/unshare`, `manual`/`auto`/`disabled` | ❌ out of scope |
-| [Formatters](https://github.com/anomalyco/opencode/blob/v1.18.13/packages/opencode/src/format/formatter.ts) | 26+ built-ins (gofmt, prettier, biome, ruff, rustfmt, shfmt, terraform, clang-format, …) run after edits; per-formatter disable or custom `command`+`extensions`+`environment` | ❌ |
-| [Background agents](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/opencode/src/background) | async dispatch, summaries, notifications | ❌ |
-| [Worktrees](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/opencode/src/worktree) | per-agent git worktree isolation | ❌ |
-| [Image pipeline](https://github.com/anomalyco/opencode/tree/v1.18.13/packages/opencode/src/image) | image attachments | ✅ `@`-mention attach, plus Ctrl+V clipboard PNG intake encoded in-process (D449) |
+| [Formatters](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/opencode/src/format/formatter.ts) | 26+ built-ins (gofmt, prettier, biome, ruff, rustfmt, shfmt, terraform, clang-format, …) run after edits; per-formatter disable or custom `command`+`extensions`+`environment` | ❌ |
+| [Background agents](https://github.com/anomalyco/opencode/tree/v1.18.22/packages/opencode/src/background) | async dispatch, summaries, notifications | ❌ |
+| [Worktrees](https://github.com/anomalyco/opencode/tree/v1.18.22/packages/opencode/src/worktree) | per-agent git worktree isolation | ❌ |
+| [Image pipeline](https://github.com/anomalyco/opencode/tree/v1.18.22/packages/opencode/src/image) | image attachments | ✅ `@`-mention attach, plus Ctrl+V clipboard PNG intake encoded in-process (D449) |
 | Account / sync / control-plane | cloud account machinery | ❌ out of scope |
 | Installation (self-update) | | ❌ |
 | [IDE / ACP](https://opencode.ai/docs/ide) | editor extensions, sidebar chat | ❌ out of scope |

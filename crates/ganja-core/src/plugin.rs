@@ -4,7 +4,7 @@
 //! Spec: the `.claude-plugin` plugin and marketplace format, Claude Code
 //! 2.1.x (code.claude.com/docs/en/plugins-reference and
 //! code.claude.com/docs/en/plugin-marketplaces, read 2026-08-12). Upstream
-//! opencode v1.18.13 has no plugin system at all, so the whole surface is a
+//! opencode v1.18.22 has no plugin system at all, so the whole surface is a
 //! named divergence, **D472** (`claude-plugin-spec`): the manifest and
 //! marketplace shapes are Claude's verbatim, and what an installed plugin
 //! contributes maps onto the six config surfaces ganja already owns —

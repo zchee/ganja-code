@@ -94,18 +94,18 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: anomalyco/opencode
-          ref: v1.18.13
-          path: upstream/opencode-v1.18.13
+          ref: v1.18.22
+          path: upstream/opencode-v1.18.22
           persist-credentials: false
 
       - name: cache the upstream dependency install
         uses: actions/cache@v6
         with:
-          path: upstream/opencode-v1.18.13/node_modules
-          key: opencode-v1.18.13-${{ runner.os }}-${{ hashFiles('upstream/opencode-v1.18.13/bun.lock') }}
+          path: upstream/opencode-v1.18.22/node_modules
+          key: opencode-v1.18.22-${{ runner.os }}-${{ hashFiles('upstream/opencode-v1.18.22/bun.lock') }}
 
       - name: install the upstream dependencies
-        working-directory: upstream/opencode-v1.18.13
+        working-directory: upstream/opencode-v1.18.22
         run: bun install --frozen-lockfile
 
       # `--locked` so a manifest/lock mismatch — a Renovate branch whose
@@ -115,7 +115,7 @@ jobs:
       - name: test
         run: cargo nextest run --locked --workspace --profile ci
         env:
-          GANJA_OPENCODE_DIR: ${{ github.workspace }}/upstream/opencode-v1.18.13
+          GANJA_OPENCODE_DIR: ${{ github.workspace }}/upstream/opencode-v1.18.22
           # A shared runner under load adds whole seconds of queueing to the
           # lsp drill's timed edit, so CI holds the drill just past the
           # client's own 5s ceiling; the tighter 3s default stays what a
@@ -132,7 +132,7 @@ jobs:
       - name: doc-tests
         run: cargo test --workspace --doc
         env:
-          GANJA_OPENCODE_DIR: ${{ github.workspace }}/upstream/opencode-v1.18.13
+          GANJA_OPENCODE_DIR: ${{ github.workspace }}/upstream/opencode-v1.18.22
 
   lint:
     name: lint

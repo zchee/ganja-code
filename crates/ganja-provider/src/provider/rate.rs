@@ -1,7 +1,7 @@
 //! What a vendor's rate-limit headers say is left (**D484**,
 //! `rate-limit-visibility`).
 //!
-//! No upstream counterpart: opencode v1.18.13 reads no rate-limit header
+//! No upstream counterpart: opencode v1.18.22 reads no rate-limit header
 //! anywhere — its only use of a rate signal is `retry-after` on a refusal,
 //! which [`super::retry`] ports. This module exists because P14 left two holes
 //! that wanted a *usage* API ganja holds no credential tier for (**D471**: the

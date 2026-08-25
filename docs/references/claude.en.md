@@ -3,7 +3,7 @@
 > [!IMPORTANT]
 > **This document is a reference inventory, not a roadmap. Not every feature
 > listed here will be ported.** ganja's charter is behavioral parity with
-> opencode v1.18.13; Claude Code is a separate product, catalogued here for
+> opencode v1.18.22; Claude Code is a separate product, catalogued here for
 > comparison only. A ❌ in these tables is an observation, never a promise.
 
 Snapshot: 2026-08-12, against the Claude Code 2.1.x generation. Claude Code

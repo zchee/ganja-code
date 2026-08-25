@@ -851,7 +851,7 @@ async fn plan_exit_survives_the_mcp_dial_rebuild() {
     let checkout = std::env::var_os("GANJA_OPENCODE_DIR").map_or_else(
         || {
             Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../.omc/reference/opencode-v1.18.13")
+                .join("../../.omc/reference/opencode-v1.18.22")
                 .to_owned()
         },
         std::path::PathBuf::from,
