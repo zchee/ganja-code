@@ -35,8 +35,8 @@ use url::form_urlencoded;
 use super::{
     AuthError, OauthCredential,
     device::{
-        BodyEncoding, DeviceError, DeviceFlow, Tokens, UPSTREAM_USER_AGENT, form, json_object,
-        positive_seconds_ms, reportable_code, text,
+        BodyEncoding, DeviceError, DeviceFlow, Tokens, form, json_object, positive_seconds_ms,
+        reportable_code, text,
     },
     loopback::{self, LoopbackError},
     now_ms,
@@ -111,28 +111,37 @@ const PLAN: &str = "generic";
 
 /// Who xAI is told the login came from (`xai.ts:139`).
 ///
-/// **Deliberately still `opencode`**, for the reason
-/// [`super::openai`]'s `ORIGINATOR` is: this is a parameter of somebody else's
-/// client registration, alongside [`CLIENT_ID`] and [`CALLBACK_PORT`], and the
-/// combination that was measured against the live endpoint is that project's.
-/// Upstream describes it as best-effort attribution in xAI's OAuth server logs
-/// (`xai.ts:126-128`).
-const REFERRER: &str = "opencode";
+/// **ganja's own name**, moved in W4 of
+/// `.omc/plans/2026-08-25-ganja-code-identity-headers.md`. It is a parameter
+/// of somebody else's client registration, alongside [`CLIENT_ID`] and
+/// [`CALLBACK_PORT`] — but upstream describes it as best-effort attribution
+/// in xAI's OAuth server logs (`xai.ts:126-128`), which is to say a field
+/// whose entire purpose is to record who was asking. Carrying another
+/// project's name in it was the one thing it could get wrong.
+///
+/// Moves with [`XAI_USER_AGENT`] and never alone.
+const REFERRER: &str = "ganja-code";
 
 /// What x.ai is told this build is.
 ///
-/// [`UPSTREAM_USER_AGENT`]'s bytes, named here rather than reached for
-/// directly so that **all three** of this host's call sites — the device
-/// authorization, the browser code exchange and the refresh — say one thing.
-/// A host that receives two different names from one client is the mismatched
-/// telemetry signature abuse detection looks for, which is why this and
-/// [`REFERRER`] beside it move together or not at all.
+/// [`GANJA_USER_AGENT`](super::device::GANJA_USER_AGENT)'s bytes, named here
+/// rather than reached for directly so that **all three** of this host's call
+/// sites — the device authorization, the browser code exchange and the
+/// refresh — say one thing. A host that receives two different names from one
+/// client is the mismatched telemetry signature abuse detection looks for,
+/// which is why this and [`REFERRER`] beside it move together or not at all.
 ///
-/// Both move in W4 of `.omc/plans/2026-08-25-ganja-code-identity-headers.md`,
-/// which probes a real `ganja auth login grok` against
-/// [`GANJA_USER_AGENT`](super::device::GANJA_USER_AGENT) before it lands;
-/// until then this is an alias and x.ai's wire bytes are unchanged.
-const XAI_USER_AGENT: &str = UPSTREAM_USER_AGENT;
+/// Moved in W4 of `.omc/plans/2026-08-25-ganja-code-identity-headers.md`,
+/// after a real `ganja auth login grok` and a turn under it both completed.
+/// There is no seat roster on this host to diff as there is on the codex
+/// backend — x.ai's models come from the catalog rather than from a per-seat
+/// ladder — so the gate was the login and the turn themselves, recorded in
+/// `crates/ganja-core/tests/fixtures/grok-identity-probe.txt`. That file is
+/// composed by hand from that login and turn, in the shape P27/P28's
+/// `*-probe.txt` fixtures use, and re-recorded by hand if the login is run
+/// again: it is a record of what happened rather than a baseline anything is
+/// diffed against.
+pub(in crate::auth) const XAI_USER_AGENT: &str = super::device::GANJA_USER_AGENT;
 
 /// How long a browser login waits for the callback (`xai.ts:430-437`).
 pub const CALLBACK_DEADLINE: Duration = Duration::from_secs(5 * 60);
@@ -945,14 +954,23 @@ mod tests {
             request.head
         );
         assert!(request.has_header("accept", "application/json"));
-        // Upstream's own product name, against upstream's own registered
-        // client id — the combination the live spikes measured. Asserted
-        // through this host's own constant, so that the wave which gives x.ai
-        // ganja's name moves one definition and reddens here, and as a literal
-        // as well, so that moving it is a decision somebody has to come here
-        // and confirm.
+        // ganja's own product name since W4, against upstream's registered
+        // client id — what that combination was probed against is this host's
+        // constant's own doc. Asserted through that constant and again against
+        // the name itself, so that repointing it is a decision somebody has to
+        // come here and confirm. The version is deliberately not pinned: it
+        // moves with every release of this crate, and pinning it here would
+        // turn an ordinary version bump into a red test about identity.
         assert!(request.has_header("user-agent", XAI_USER_AGENT));
-        assert!(request.has_header("user-agent", "opencode/1.18.22"));
+        let names_ganja = request.head.lines().any(|line| {
+            line.to_ascii_lowercase()
+                .starts_with("user-agent: ganja-code/")
+        });
+        assert!(
+            names_ganja,
+            "x.ai is told ganja's own name, not a borrowed one: {}",
+            request.head
+        );
 
         let fields = request.form();
         assert_eq!(fields.get("client_id").map(String::as_str), Some(CLIENT_ID));
@@ -1235,7 +1253,7 @@ mod tests {
                 ("state".to_owned(), "the-state".to_owned()),
                 ("nonce".to_owned(), "the-nonce".to_owned()),
                 ("plan".to_owned(), "generic".to_owned()),
-                ("referrer".to_owned(), "opencode".to_owned()),
+                ("referrer".to_owned(), "ganja-code".to_owned()),
             ]
         );
     }

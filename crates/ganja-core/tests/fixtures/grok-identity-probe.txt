@@ -1,0 +1,59 @@
+# What xAI is told ganja is when a person logs in, and that a turn follows it.
+#
+# The record W4 of .omc/plans/2026-08-25-ganja-code-identity-headers.md gates
+# on. This host has no seat roster to diff the way the codex backend does —
+# x.ai's models come from the catalog rather than from a per-seat ladder — so
+# there is no before-and-after here and none is implied. The gate was a real
+# login and a real turn completing under ganja's own name, and this file is the
+# record that they did.
+#
+# Unlike `codex-identity-probe.txt` there is no probe binary behind this one.
+# It is composed by hand from the CLI's own stdout, relayed verbatim; the single
+# edit is unescaping `&amp;` back to `&` in the authorize URL, which the
+# terminal capture had HTML-escaped. Re-recorded by hand if the login is run
+# again.
+#
+# Operator: W4 lane (Claude, lead-supervised); both legs run by the user
+# Binary:  ganja-code 0.1.0, debug build of the W4 tree
+# Machine: macOS, 2026-08-25
+
+== leg 1: the browser login ==
+# `ganja auth login --provider grok --method browser`
+#
+# What this leg is evidence of: the authorize query carries
+# `referrer=ganja-code` — the moved constant, on the wire, in front of xAI —
+# and the login it opened completed. The two credential stubs are the CLI's own
+# masked rendering; no token bytes were printed by the run and none are recorded
+# here. The `code_challenge`, `state` and `nonce` are one login's own
+# single-use values, dead the moment it finished.
+
+Go to: https://auth.x.ai/oauth2/authorize?response_type=code&client_id=b1a00492-073a-47ea-816f-4c329264a828&redirect_uri=http%3A%2F%2F127.0.0.1%3A56121%2Fcallback&scope=openid+profile+email+offline_access+grok-cli%3Aaccess+api%3Aaccess&code_challenge=gDFHxWy0SvpNq_T_oAY8bc4EQDskbaVffQ8GKyPjZg0&code_challenge_method=S256&state=hpEPagb13iklJYWpbihPC-AlHEyZ82buC-FiWwhUpDg&nonce=MJJdgq7IOjgFcnvsTK6YH8IGCIgJ2CwdtrjpH0qMUfg&plan=generic&referrer=ganja-code
+Waiting for authorization...
+note: this replaces the oauth credential ****QEwA already stored for grok
+login successful; stored the grok credential ****K99Q in /Users/zchee/.local/share/ganja/auth.json
+
+== leg 2: one turn on the credential that login minted ==
+# `GANJA_PROVIDER=grok ganja run "reply with exactly: pong"`
+#
+# The second half of the gate, and the half a login alone cannot give: a
+# credential minted under the new referrer is one xAI's token endpoint accepted,
+# and a turn served on it is that credential working against the API.
+
+> build · grok-4.5
+pong
+
+== what this recording does not show ==
+# The `User-Agent`, deliberately. Neither leg printed one — a login's stdout is
+# the authorize URL and the CLI's own result lines, and `ganja run` prints the
+# turn — so it is recorded here as unobserved rather than asserted. What carries
+# it is `auth::grok::XAI_USER_AGENT`, which the divergence test in
+# `auth::device`'s own tests holds equal to `GANJA_USER_AGENT` and unequal to
+# `UPSTREAM_USER_AGENT`, for all three of this host's call sites at once. Both
+# legs above ran on the tree where that constant already names ganja, so the
+# requests carried it; that is a fact about the code, checked by a test, and
+# copying the string into this file from the constant would make the recording
+# a second copy of the source instead of a measurement of it.
+#
+# Also not shown, for the same reason: the token exchange's own request headers.
+# They leave on a socket this process does not own, and nothing in either leg
+# prints them.

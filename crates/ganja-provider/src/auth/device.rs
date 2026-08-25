@@ -1530,18 +1530,20 @@ mod tests {
              begin with both: {GANJA_USER_AGENT}"
         );
 
-        // The hosts W3 moved. Each reaches `GANJA_USER_AGENT` through a
-        // constant named for itself, so what is asserted here is that they
-        // still arrive at the same answer and that the answer is not the
-        // borrowed one — a per-host constant quietly repointed at
-        // `UPSTREAM_USER_AGENT` would otherwise read as an ordinary alias.
-        // xAI is absent on purpose: it moves in W4 and is still borrowed.
+        // Every host that says what this build is. Each reaches
+        // `GANJA_USER_AGENT` through a constant named for itself, so what is
+        // asserted here is that they still arrive at the same answer and that
+        // the answer is not the borrowed one — a per-host constant quietly
+        // repointed at `UPSTREAM_USER_AGENT` would otherwise read as an
+        // ordinary alias. With W4 landed this list is every host but one, and
+        // the one is below.
         for (host, sent) in [
             ("auth.openai.com", crate::auth::openai::ISSUER_USER_AGENT),
             (
                 "chatgpt.com/backend-api/codex",
                 crate::provider::responses::CODEX_USER_AGENT,
             ),
+            ("x.ai", crate::auth::grok::XAI_USER_AGENT),
         ] {
             assert_eq!(
                 sent, GANJA_USER_AGENT,
