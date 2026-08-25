@@ -84,9 +84,9 @@ pub const UPSTREAM_USER_AGENT: &str = "opencode/1.18.22";
 /// The counterpart to [`UPSTREAM_USER_AGENT`], and the reason that one is now
 /// chosen per call site instead of inherited. `auth.openai.com`, the ChatGPT
 /// codex backend and xAI's endpoints are the hosts this is for; each of them
-/// reaches it through a constant named for that host, and each of those still
-/// aliases the borrowed value until the wave that probes its host lands, so
-/// introducing this changed no bytes on any wire. The catalog endpoint and
+/// reaches it through a constant named for that host, and all three carry this
+/// value today, each having moved only after a live run against its own host
+/// recorded what that host did with it (**D521**). The catalog endpoint and
 /// `websearch`'s two services carry this spelling already — no borrowed
 /// registration is involved on either, so neither ever had a reason not to.
 ///
