@@ -1394,34 +1394,58 @@ pub enum NotReceived {
     },
 }
 
-/// The receiving end of the socket route: one message from a peer, judged
-/// and delivered (**D505**).
+/// One peer message past the ladder: everything the rungs validated, waiting
+/// on the admission gate's verdict before anything is written (**D523**).
+///
+/// Plain owned strings rather than a live handle, so the gate between the
+/// two halves holds nothing of the team while it decides.
+pub(crate) struct PeerMessage {
+    /// The sender's derived identity, shape-checked by [`Postbox::peer`].
+    pub(crate) from: String,
+    /// The body, non-blank and frame-free.
+    pub(crate) text: String,
+    /// The peer's one line about it, blank dropped and capped for display.
+    pub(crate) summary: Option<String>,
+    /// The lead's canonical name — the one recipient this door delivers to,
+    /// and the `to` every answer reports whatever the verdict was, so a
+    /// refuse cannot be told from an accept by the name it echoes.
+    pub(crate) lead: String,
+}
+
+/// The receiving end of the socket route, first half (**D505**, **D523**):
+/// the rungs judged, nothing written. The one production caller is
+/// [`crate::Engine::receive_peer_message`], which runs the admission gate's
+/// verdict between this and [`deliver_to_lead`] — the ladder judges shape,
+/// the gate decides admission, and only a `Deliver` reaches the tail.
 ///
 /// The rungs are the tool's own, applied on the side that has no tool in
 /// front of it: blank text (rung 5), a frame in the text (rung 7, and rung 6
 /// with it — nothing structured crosses), the identity's shape
-/// ([`Postbox::peer`]), the recipient — **the lead, and the lead alone**:
-/// a `uds:` address names a session and a session's next turn is its
-/// lead's, so that is the one member this door delivers to — and then the
-/// delivery every local message gets, so a peer's message to the lead is
-/// written by the same code a teammate's is. The summary is capped here as
-/// it is at every other seam it crosses: the type says it arrives
-/// capped, and a peer's word for that is not enough.
+/// ([`Postbox::peer`]), and the recipient — **the lead, and the lead
+/// alone**: a `uds:` address names a session and a session's next turn is
+/// its lead's. The summary is capped here as it is at every other seam it
+/// crosses: the type says it arrives capped, and a peer's word for that is
+/// not enough. These refusals are *shape* errors that predate policy, which
+/// is why they keep their own statuses and sentences while a policy refuse
+/// answers byte-identically to an accept.
 ///
 /// # Errors
 ///
 /// A [`NotReceived`], one per rung.
-pub async fn receive(
+pub(crate) fn receive_ladder(
     registry: &Arc<TeammateRegistry>,
     incoming: Incoming,
-) -> Result<Sent, NotReceived> {
+) -> Result<PeerMessage, NotReceived> {
     if incoming.text.trim().is_empty() {
         return Err(NotReceived::Blank);
     }
     if let Some(kind) = Frame::reserved_kind(&incoming.text) {
         return Err(NotReceived::Frame { kind });
     }
-    let postbox = Postbox::peer(registry, &incoming.from)?;
+    // The shape check alone: the postbox it builds binds the peer's identity,
+    // and the delivery tail rebuilds that binding from the same validated
+    // string, so nothing live has to cross the gate.
+    let _ = Postbox::peer(registry, &incoming.from)?;
     let lead = registry.lead().as_str();
     if !incoming.to.eq_ignore_ascii_case(lead) {
         return Err(NotReceived::NotTheLead {
@@ -1434,24 +1458,106 @@ pub async fn receive(
         .filter(|summary| !summary.trim().is_empty())
         .map(|summary| cap_for_display(&summary).to_owned());
 
-    let name = incoming.to;
-    team::Postbox::deliver(
-        &postbox,
-        Address::Local(name.clone()),
+    Ok(PeerMessage {
+        from: incoming.from,
+        text: incoming.text,
+        summary,
+        lead: lead.to_owned(),
+    })
+}
+
+/// The receiving end of the socket route, second half: the write every local
+/// delivery ends in, aimed at the lead, answering with the [`RECEIVED`] note
+/// and the §2.3 identity the write minted (M6) — what the engine's socket
+/// door hands to the gate's admitted set, and what a released hold's write
+/// hands back the same way. Reached only past an admission the gate decided;
+/// a peer's message to the lead is still written by the same code a
+/// teammate's is.
+///
+/// # Errors
+///
+/// [`NotReceived::Failed`] for a write that did not land — the delivery
+/// path's own failure channel, as it is for any peer write.
+pub(crate) async fn deliver_to_lead(
+    registry: &Arc<TeammateRegistry>,
+    message: PeerMessage,
+) -> Result<(Sent, ganja_team::mailbox::Identity), NotReceived> {
+    // The lead resolved directly rather than through the roster walk: the
+    // ladder already held `to` to this one name, and the lead is the member
+    // that cannot leave its own team.
+    let recipient = Peer {
+        name: message.lead.clone(),
+        description: Some(crate::teammate::postbox::LEADS.to_owned()),
+        lead: true,
+    };
+    let (sent, identity) = crate::teammate::postbox::write_to_peer(
+        &message.from,
+        registry.root(),
+        registry.team(),
+        &recipient,
         Body::Text {
-            text: incoming.text,
-            summary,
+            text: message.text,
+            summary: message.summary,
         },
     )
     .await
     .map_err(|undelivered| match undelivered {
-        Undelivered::Unknown => NotReceived::Unknown { name },
-        // A local address never wants a transport; the arm is the enum's,
+        // Unreachable for the lead's own name; the arm is the enum's,
         // answered rather than unwrapped.
+        Undelivered::Unknown => NotReceived::Unknown { name: message.lead },
         Undelivered::NoTransport { reason } | Undelivered::Failed { reason } => {
             NotReceived::Failed { reason }
         }
-    })
+    })?;
+
+    Ok((
+        Sent {
+            to: sent.to,
+            // The socket door's own note, never the in-team `WRITTEN`: the
+            // gate can now falsify "it will be read", and the uniform wording
+            // is what keeps a refuse byte-identical to this accept (D523).
+            note: RECEIVED.to_owned(),
+        },
+        identity,
+    ))
+}
+
+/// What the socket door answers for a message that arrived — under accept
+/// **and** under an explicit refuse or a guard drop, byte-identically,
+/// because refused messages do not notify the sender (v2 §"Explicit outcomes
+/// (`P8a`)", evidence 620644-620683). True either way: it claims arrival
+/// alone and defers admission to the receiving session's own policy.
+pub(crate) const RECEIVED: &str =
+    "It reached that session; what its inbound policy admits is that session's own.";
+
+/// The socket door's answer for a held message: named, as the reference's
+/// held receipt names its `reason` (v2 §"Receipts and sender UX", evidence
+/// 220977-221015), riding the free-text `note` so an older sender's
+/// `deny_unknown_fields` never sees a new field.
+pub(crate) fn held_note(cause: ganja_protocol::HoldCause) -> String {
+    let why = match cause {
+        ganja_protocol::HoldCause::Explicit { source } => {
+            let tier = match source {
+                ganja_protocol::PolicySource::Global => "its global config",
+                ganja_protocol::PolicySource::ExplicitFile => "its explicit config file",
+                ganja_protocol::PolicySource::Project => "a project config file",
+            };
+            format!("an explicit hold policy from {tier}")
+        }
+        ganja_protocol::HoldCause::ModeMismatch => {
+            "a permission-mode mismatch with the sender".to_owned()
+        }
+        ganja_protocol::HoldCause::NoModeAsserted => {
+            "no sender mode asserted at a bypassed receiver".to_owned()
+        }
+        ganja_protocol::HoldCause::ModeUnknown => {
+            "a receiver mode that could not be read".to_owned()
+        }
+    };
+
+    format!(
+        "It reached that session and is held for a person's review ({why}); it has not been delivered."
+    )
 }
 
 #[async_trait]
@@ -1488,6 +1594,10 @@ impl team::Postbox for Postbox {
             body,
         )
         .await
+        // The minted identity is the admission gate's key (M6), recorded only
+        // where the engine's socket door writes; an in-team delivery is
+        // ungated and has no set to feed.
+        .map(|(sent, _)| sent)
     }
 
     fn roster(&self) -> Vec<Peer> {
@@ -2072,9 +2182,11 @@ async fn watch(mut receiver: mpsc::Receiver<Event>, watched: Watched) -> Outcome
             | Event::PermissionModeChanged { .. }
             | Event::CompactionProgress { .. }
             | Event::EffortChanged { .. } => {}
-            // A hold and its settlement are a lead's surfaces, and no child
-            // session leads a team, so neither can arrive here — the W2
-            // inbound gate replaces this arm where it wires the buffer.
+            // A hold and its settlement are a lead's surfaces (**D524**), and
+            // no child session leads a team — a subagent installs no
+            // teammates and binds no socket a peer could reach — so neither
+            // can arrive here. Permanent, not a bridge: the gate landed and
+            // this stayed true by construction.
             Event::PeerHeld { .. } | Event::PeerHoldSettled { .. } => {}
         }
     }
@@ -2149,7 +2261,7 @@ mod tests {
         Reserved, SOCKET_LEAD_UNNAMED, SOCKET_OVERSIZED, SOCKET_REFUSED, SOCKET_UNREACHABLE, Sent,
         SocketMessage, Spawn, SpawnAsk, SpawnAsker, SpawnRequest, TEAM_GONE, TEAM_ROUTE, Teammate,
         TeammateRegistry, TeammateSpawn, Teammated, Teammates, Undelivered, Watched, async_trait,
-        denies_task, receive, roster, subagent_rules, team, watch,
+        deliver_to_lead, denies_task, receive_ladder, roster, subagent_rules, team, watch,
     };
     use crate::{
         agent::{self, Registry},
@@ -2165,6 +2277,21 @@ mod tests {
 
     fn registry() -> Registry {
         Registry::from_config(&Config::default()).expect("the default config resolves agents")
+    }
+
+    /// The ungated compose of the socket door's two halves — the ladder, then
+    /// the delivery tail — which is what this suite exercises: the rungs and
+    /// the write are this file's, while the admission gate between them is
+    /// the engine's and is pinned by the engine's own suite
+    /// (`Engine::receive_peer_message`).
+    async fn receive(
+        registry: &Arc<TeammateRegistry>,
+        incoming: Incoming,
+    ) -> Result<Sent, NotReceived> {
+        let message = receive_ladder(registry, incoming)?;
+        let (sent, _identity) = deliver_to_lead(registry, message).await?;
+
+        Ok(sent)
     }
 
     #[test]

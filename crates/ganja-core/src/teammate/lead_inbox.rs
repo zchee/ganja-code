@@ -84,8 +84,21 @@
 //! **refuses** to deliver is not this module's to know — the messages come back
 //! in the pass and are pruned by the caller once they have really landed
 //! ([`crate::teammate::lead_inbox::LeadInbox::delivered`]).
+//!
+//! # The mailbox door of the admission gate (**D523**–**D525**)
+//!
+//! Since the gate landed, a gated pass
+//! ([`crate::teammate::lead_inbox::LeadInbox::gated`]) classifies every entry
+//! before anything above happens to it: a roster member's mail is ungated as
+//! ever, and everything else is the gate's — admitted delivers without
+//! re-gating, held skips (the entry stays durable, C1), and an unknown writer
+//! is demoted to a peer from `unknown` and run through the normal peer gate,
+//! its frames dropped by name rather than applied. The pass's own doc
+//! (`poll_one`) carries the full table; the gate itself, its buffer and both
+//! sets are [`crate::teammate::inbound`]'s.
 
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -98,7 +111,9 @@ use ganja_team::{MailboxMessage, MemberName, Surface, TeamsRoot, mailbox, record
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    Delivery, TeammateRegistry, claude, member,
+    Delivery, TeammateRegistry, claude,
+    inbound::{Inbound, MailboxAdmission, PassDisposition, ReceiverClass},
+    member,
     posture::Forwarded,
     runner::{drop_frame, prune_inbox, read_inbox},
     shim_tui::Exited,
@@ -283,6 +298,26 @@ impl Pass {
     }
 }
 
+/// The admission gate's half of the lead's pass (**D523**–**D525**): the
+/// engine-owned [`Inbound`] this pass shares with the socket door, and the
+/// read of this session's receiver class each pass decides under.
+///
+/// A closure rather than the engine, because this module must not hold the
+/// engine that holds the registry this holds — the same cycle rule every
+/// postbox keeps — and a class, not a mode: the D479 trio seed is half of
+/// the classification and only the engine has both halves
+/// (`Engine::receiver_class`).
+struct Gate {
+    inbound: Arc<Inbound>,
+    receiver: Box<dyn Fn() -> Option<ReceiverClass> + Send + Sync>,
+}
+
+impl std::fmt::Debug for Gate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("Gate").finish_non_exhaustive()
+    }
+}
+
 /// The lead's own mailbox, and the §6.2 pass over it.
 #[derive(Debug)]
 pub struct LeadInbox {
@@ -297,6 +332,12 @@ pub struct LeadInbox {
     /// which is [`claude::REFUSED_NO_CONFIG_DIR`]'s own case and one in which no
     /// claude teammate could have been spawned either.
     claude: Option<TeamsRoot>,
+    /// The admission gate, once [`LeadInbox::gated`] installed it. [`None`]
+    /// keeps the pre-gate pass — every entry delivered, every frame applied —
+    /// which is the **bridge** the TUI's construction still stands on until
+    /// its own lane moves it (W3-L3b); the gated pass is the production
+    /// shape, and every admission test drives it.
+    gate: Option<Gate>,
 }
 
 impl LeadInbox {
@@ -315,7 +356,35 @@ impl LeadInbox {
     /// to look) does not have to mutate the process it runs in to be heard.
     #[must_use]
     pub fn reading(registry: Arc<TeammateRegistry>, claude: Option<TeamsRoot>) -> Self {
-        Self { registry, claude }
+        Self {
+            registry,
+            claude,
+            gate: None,
+        }
+    }
+
+    /// Installs the admission gate (**D523**): the engine's own [`Inbound`] —
+    /// `Engine::inbound`, so the pass and the socket door share one buffer
+    /// and two sets — and the engine's receiver-class read,
+    /// `Engine::receiver_class`, carried as a closure over the shared engine
+    /// handle.
+    ///
+    /// A builder beside [`LeadInbox::new`] rather than a parameter on it, so
+    /// the ungated construction keeps compiling where it stands while the
+    /// frontend lane moves to this; once every construction is gated the
+    /// bridge form retires.
+    #[must_use]
+    pub fn gated(
+        mut self,
+        inbound: Arc<Inbound>,
+        receiver: impl Fn() -> Option<ReceiverClass> + Send + Sync + 'static,
+    ) -> Self {
+        self.gate = Some(Gate {
+            inbound,
+            receiver: Box::new(receiver),
+        });
+
+        self
     }
 
     /// Every teams **root** this lead's replies can arrive under, in the order
@@ -372,10 +441,23 @@ impl LeadInbox {
     /// Over every root `LeadInbox::roots` names, in one [`Pass`]: which directory
     /// a teammate's answer arrived in is a fact about that teammate's backend and
     /// nothing a frontend should have to know.
+    ///
+    /// A gated pass ends by **reconciling** the gate against everything it
+    /// read (**D525**): consumed admitted identities leave the set — the
+    /// caller's [`LeadInbox::delivered`] prune is the consumption signal —
+    /// and a held identity gone from every inbox settles its record
+    /// `expired`, because a review offer cannot outlive the bytes it
+    /// reviews. Once per poll rather than per root, since an identity's
+    /// residence is whichever root holds it and a per-root reconcile would
+    /// read absence where there is none.
     pub async fn poll(&self) -> Pass {
         let mut pass = Pass::default();
+        let mut present = HashSet::new();
         for root in self.roots() {
-            self.poll_one(&root, &mut pass).await;
+            self.poll_one(&root, &mut pass, &mut present).await;
+        }
+        if let Some(gate) = &self.gate {
+            gate.inbound.reconcile(&present);
         }
         self.retire_exited(&mut pass).await;
 
@@ -429,7 +511,41 @@ impl LeadInbox {
     /// [`crate::teammate::lead_inbox::LeadInbox::delivered`] says so — a lead that quit between the read and
     /// the delivery loses nothing, which is the property a durable mailbox
     /// exists for.
-    async fn poll_one(&self, root: &TeamsRoot, pass: &mut Pass) {
+    ///
+    /// # The gated classification (**D523**)
+    ///
+    /// A **roster member's** entry is ungated — frames apply, plain mail
+    /// delivers, exactly the pre-gate pass: the roster is the trust the team
+    /// itself established, and the gate exists for what is outside it. Every
+    /// other writer is answered by the gate's two sets first
+    /// ([`Inbound::disposition`]): an **admitted** identity delivers with no
+    /// re-run of policy or guards — accepted is final, and the 1 s re-offer
+    /// loop must not drain a bucket — carrying H1's hold-time summary
+    /// snapshot where a release reviewed one; a **held** identity is skipped,
+    /// its entry left durable and its review copy in the buffer (C1); and an
+    /// identity the gate has never met is **demoted** — a peer from
+    /// `unknown`. A demoted *frame* is dropped by name and pruned, never
+    /// acted on: structure does not cross a trust boundary, the rule the
+    /// socket already enforces (v2 §"Rejection of structured protocol
+    /// frames", evidence 623036), and the hardening that closes the
+    /// fabricated-dialog hole a non-roster `permission_request` once had.
+    /// Demoted *plain* mail runs the normal peer gate
+    /// ([`Inbound::admit_mailbox`]): accept delivers and joins the admitted
+    /// set, hold leaves the entry in place under the held-index, refuse — and
+    /// every guard drop — prunes, traced. A capacity eviction's mailbox-door
+    /// victim is pruned best-effort in this inbox's own batch; a victim
+    /// living under the other root re-gates as a fresh hold next pass —
+    /// fail-closed, never delivered.
+    ///
+    /// Ungated construction ([`LeadInbox::new`] with no [`LeadInbox::gated`])
+    /// keeps the pre-gate pass whole, the bridge the TUI stands on until its
+    /// lane installs the gate.
+    async fn poll_one(
+        &self,
+        root: &TeamsRoot,
+        pass: &mut Pass,
+        present: &mut HashSet<mailbox::Identity>,
+    ) {
         let inbox = self.lead_inbox_in(root);
         let Some(contents) = read_inbox(inbox.clone(), self.registry.lead().as_str()).await else {
             return;
@@ -438,14 +554,73 @@ impl LeadInbox {
             return;
         }
 
+        // Once per pass, not per entry: a mode change mid-pass is the next
+        // pass's fact, exactly as it is the next turn's on the engine.
+        let receiver = self.gate.as_ref().map(|gate| (gate.receiver)());
         let mut handled = Vec::new();
         for message in &contents.valid {
-            let Some(kind) = Frame::reserved_kind(&message.text) else {
-                pass.messages.push(self.plain(message));
+            let identity = mailbox::identity(message);
+            present.insert(identity.clone());
+            let kind = Frame::reserved_kind(&message.text);
+            // The roster check the classification stands on: the registry
+            // answers for the members it holds, and `None` — a retired
+            // member's late mail included — is the demoted class, fail-closed.
+            let roster = self.registry.delivery_of(&message.from).is_some();
+
+            let Some(gate) = self.gate.as_ref().filter(|_| !roster) else {
+                match kind {
+                    Some(kind) => {
+                        self.apply(kind, message, pass, root).await;
+                        handled.push(identity);
+                    }
+                    None => pass.messages.push(self.plain(message)),
+                }
                 continue;
             };
-            self.apply(kind, message, pass, root).await;
-            handled.push(mailbox::identity(message));
+            match gate.inbound.disposition(&identity) {
+                PassDisposition::Deliver => pass.messages.push(self.plain(message)),
+                PassDisposition::DeliverReviewed { summary } => {
+                    // H1: the summary reviewed at hold time, never the durable
+                    // entry's current one — `summary` sits outside §2.3's
+                    // identity key, so a same-uid writer could have swapped it
+                    // under an unchanged identity between review and delivery.
+                    // Even a `None` snapshot overrides.
+                    let mut delivered = self.plain(message);
+                    delivered.summary = summary.map(|snapshot| snapshot.as_str().to_owned());
+                    pass.messages.push(delivered);
+                }
+                PassDisposition::Skip => {}
+                PassDisposition::Classify => match kind {
+                    Some(kind) => {
+                        self.drop_it(kind, message, pass);
+                        handled.push(identity);
+                    }
+                    None => match gate.inbound.admit_mailbox(receiver.flatten(), message) {
+                        MailboxAdmission::Deliver => pass.messages.push(self.plain(message)),
+                        MailboxAdmission::Held {
+                            cause,
+                            evicted_prune,
+                        } => {
+                            tracing::info!(
+                                from = message.from,
+                                ?cause,
+                                "a non-roster inbox entry was held for review"
+                            );
+                            if let Some(evicted) = evicted_prune {
+                                handled.push(evicted);
+                            }
+                        }
+                        MailboxAdmission::Drop(reason) => {
+                            tracing::info!(
+                                from = message.from,
+                                ?reason,
+                                "a non-roster inbox entry was dropped"
+                            );
+                            handled.push(identity);
+                        }
+                    },
+                },
+            }
         }
         if !handled.is_empty() {
             self.prune(&inbox, handled).await;

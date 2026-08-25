@@ -172,10 +172,14 @@ fn shape(event: &Event) -> String {
                 PermissionMode::Bypass => "bypass",
             }
         ),
-        // Named so an order test that meets one fails readably; nothing in
-        // this suite raises a hold until the W2 inbound gate lands.
-        Event::PeerHeld { .. } => "peer_held".to_owned(),
-        Event::PeerHoldSettled { .. } => "peer_hold_settled".to_owned(),
+        // Named with their payloads so an order test that meets one fails
+        // readably. Nothing in this suite feeds the admission gate — no test
+        // here installs a team, and only a lead session can hold — so a hold
+        // event in this binary is itself the finding.
+        Event::PeerHeld { id, cause, .. } => format!("peer_held:{}:{cause:?}", id.as_str()),
+        Event::PeerHoldSettled { id, outcome, .. } => {
+            format!("peer_hold_settled:{}:{outcome:?}", id.as_str())
+        }
     }
 }
 

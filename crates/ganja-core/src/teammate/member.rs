@@ -284,6 +284,9 @@ impl team::Postbox for MemberPostbox {
             body,
         )
         .await
+        // The minted identity is the admission gate's key (M6), and a member
+        // gates nothing: only the lead's socket door records it.
+        .map(|(sent, _)| sent)
     }
 
     fn roster(&self) -> Vec<Peer> {

@@ -65,6 +65,13 @@ pub(crate) fn peer_description(backend_word: &str) -> String {
 /// text, one stamped message into the inbox that name resolves to under
 /// `root`/`team`.
 ///
+/// Beside the [`Sent`] it answers with the §2.3 identity of the message **as
+/// written** (M6, **D525**): the stamp — sender, timestamp, text — is minted
+/// here and nowhere else, and the admission gate's admitted set is keyed by
+/// it, so the one mint site hands the key back rather than letting a second
+/// site re-derive and mis-stamp it. The two [`crate::tool::team::Postbox`]
+/// implementations discard it; the engine's socket door records it.
+///
 /// # Errors
 ///
 /// [`Undelivered::Failed`]: a roster name the grammar refuses (impossible
@@ -77,7 +84,7 @@ pub(crate) async fn write_to_peer(
     team: &TeamName,
     recipient: &Peer,
     body: Body,
-) -> Result<Sent, Undelivered> {
+) -> Result<(Sent, mailbox::Identity), Undelivered> {
     let member = MemberName::parse(&recipient.name).map_err(|error| Undelivered::Failed {
         reason: format!("{UNADDRESSABLE} {:?}: {error}", recipient.name),
     })?;
@@ -92,13 +99,21 @@ pub(crate) async fn write_to_peer(
     };
     let mut message = MailboxMessage::new(sender, text, record::now_iso8601());
     message.summary = summary;
+    // Before the write, off the very message it stamps: `mailbox::write`
+    // fills envelope fields (`kind`, `read`, `msg_v`, `msg_id`) that sit
+    // outside the identity's three, so the key computed here is the key any
+    // later read of the entry derives.
+    let identity = mailbox::identity(&message);
 
     let path = root.inbox_path(team, &member);
     match blocking_io(move || mailbox::write(&path, message)).await {
-        Ok(_) => Ok(Sent {
-            to: member.into_inner(),
-            note: WRITTEN.to_owned(),
-        }),
+        Ok(_) => Ok((
+            Sent {
+                to: member.into_inner(),
+                note: WRITTEN.to_owned(),
+            },
+            identity,
+        )),
         Err(reason) => Err(Undelivered::Failed {
             reason: format!("{UNWRITTEN} {reason}"),
         }),

@@ -70,6 +70,12 @@ use crate::{
 /// one is evicted.
 pub const EVENT_CAPACITY: usize = 1024;
 
+/// How long [`Engine::shutdown_settle`] waits for the gate's event drain to
+/// land the shutdown settlements in the fanout before proceeding regardless —
+/// the reference's own shutdown bound (v2 §"Shutdown", evidence
+/// 620390-620431).
+const SHUTDOWN_SETTLE_FLUSH: std::time::Duration = std::time::Duration::from_millis(750);
+
 /// Teammate permission dialogs the lead may fall behind on before a teammate's
 /// forwarding waits for it (**D-5**).
 ///
@@ -1096,7 +1102,12 @@ pub struct Engine {
     /// its lazy create upsert over the previous one's row. Agent and model
     /// switches never touch it — they change what the session runs as, not
     /// which session it is.
-    session: std::sync::Mutex<SessionId>,
+    ///
+    /// Behind an [`Arc`] since the admission gate landed (**D524**): the
+    /// gate's event drain stamps each hold transition with the current id
+    /// **at publish**, exactly where every non-turn publish stamps, and that
+    /// task outlives any borrow of this struct it could hold.
+    session: Arc<std::sync::Mutex<SessionId>>,
     /// Every subscriber's queue; the one place events leave the engine.
     fanout: Arc<Fanout>,
     /// The receiver of the queue the engine was born with, waiting for the
@@ -1191,6 +1202,32 @@ pub struct Engine {
     /// rather than cached here. [`None`] is a config that named none, which is
     /// the default and every scripted and golden run.
     small_model: Option<String>,
+    /// The receiver-side admission gate (**D523**–**D525**): what this
+    /// session, where it leads a team, does with a peer message from outside
+    /// that team before anything is delivered. Always present — an engine
+    /// with no team simply never feeds it — and shared, because the socket
+    /// door, the lead's §6.2 pass and the settlement commands all read one
+    /// buffer and two sets.
+    inbound: Arc<teammate::inbound::Inbound>,
+    /// The receiving half of the gate's ordered transition queue (M10),
+    /// waiting for [`Engine::with_teammates`] to spawn the drain task that
+    /// turns each transition into a published [`Event`]. Take-once, like the
+    /// birth event queue; still here on a session that never leads a team,
+    /// where nothing can enqueue onto it.
+    inbound_drain:
+        std::sync::Mutex<Option<mpsc::UnboundedReceiver<teammate::inbound::HoldTransition>>>,
+    /// The flush handshake into that drain task: [`Engine::shutdown_settle`]
+    /// sends a one-shot acknowledger and the drain answers it only once its
+    /// queue is empty, which is what makes the shutdown flush a bounded wait
+    /// on real publication rather than a sleep. [`None`] until the drain task
+    /// exists.
+    inbound_flush: std::sync::Mutex<Option<mpsc::UnboundedSender<oneshot::Sender<()>>>>,
+    /// Whether this session started under the D479 bypass trio
+    /// (`--auto`/`--yolo`/`--dangerously-skip-permissions`) — **for the
+    /// receiver classifier only** (**D523**, user-ratified 2026-08-25).
+    /// Dialog auto-answering stays the frontend's; D479's "answers a dialog;
+    /// repeals no rule" semantics are untouched by this bit.
+    inbound_bypass: bool,
 }
 
 impl Engine {
@@ -1251,6 +1288,13 @@ impl Engine {
         // readable directory falls back to relative resolution.
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let root = crate::project::Project::resolve(&cwd).root().to_owned();
+        // Unset policy and the default review window, until a frontend hands
+        // the config's answer through `with_inbound_policy`; inert either way
+        // on a session that never leads a team.
+        let (inbound, inbound_drain) = teammate::inbound::Inbound::new(
+            teammate::inbound::ResolvedInbound::new(None),
+            crate::config::DialogExpiry::default(),
+        );
 
         let engine = Self {
             provider,
@@ -1293,7 +1337,7 @@ impl Engine {
                 .ok()
                 .map_or(Credentials::Unguarded, Credentials::Guarded),
             watcher: std::sync::Mutex::new(None),
-            session: std::sync::Mutex::new(SessionId::ascending()),
+            session: Arc::new(std::sync::Mutex::new(SessionId::ascending())),
             fanout: Arc::new(Fanout::new(events)),
             unclaimed: Mutex::new(Some(receiver)),
             turn: TurnSlot::new(),
@@ -1309,6 +1353,10 @@ impl Engine {
             hook_context: std::sync::Mutex::new(Vec::new()),
             concurrency: crate::config::AgentsConfig::DEFAULT_CONCURRENCY,
             small_model: None,
+            inbound: Arc::new(inbound),
+            inbound_drain: std::sync::Mutex::new(Some(inbound_drain)),
+            inbound_flush: std::sync::Mutex::new(None),
+            inbound_bypass: false,
         };
         // The builder-time run of the shared composition path, for the one
         // engine no rebuild ever reaches: a fixture whose `mcp__*` names
@@ -1524,6 +1572,51 @@ impl Engine {
     #[must_use]
     pub fn with_concurrency(mut self, concurrency: usize) -> Self {
         self.concurrency = concurrency.max(1);
+
+        self
+    }
+
+    /// Gives the admission gate the config's answer (**D523**): the explicit
+    /// `cross_session_inbound` value with the tier that established it —
+    /// [`crate::config::Config::inbound_policy`]'s pair, since the merged
+    /// config keeps only the winner — and the `dialog_expiry` review window.
+    ///
+    /// Consuming, and it must be: the expiry is baked into the gate at its
+    /// construction, so this **rebuilds** the gate and its transition queue,
+    /// which is only sound while nothing else holds them — exactly what a
+    /// builder-phase engine guarantees and a shared one could not.
+    #[must_use]
+    pub fn with_inbound_policy(
+        mut self,
+        explicit: Option<(crate::config::InboundPolicy, ganja_protocol::PolicySource)>,
+        expiry: crate::config::DialogExpiry,
+    ) -> Self {
+        let (inbound, drain) = teammate::inbound::Inbound::new(
+            teammate::inbound::ResolvedInbound::new(explicit),
+            expiry,
+        );
+        self.inbound = Arc::new(inbound);
+        *self
+            .inbound_drain
+            .lock()
+            .expect("the inbound drain slot is never poisoned") = Some(drain);
+
+        self
+    }
+
+    /// Records that this session started under the D479 bypass trio — **for
+    /// the receiver classifier only** (**D523**, user-ratified 2026-08-25).
+    ///
+    /// A classification seed, not a posture: dialog auto-answering stays the
+    /// frontend's own (`--yolo` answers dialogs in the TUI, and repeals no
+    /// rule), and nothing about [`Command::SetPermissionMode`]'s slot moves.
+    /// What it changes is one reading — [`Engine::receiver_class`] answers
+    /// bypass for a session so started, which is exactly the session whose
+    /// every unset-policy inbound then holds `no_mode_asserted` rather than
+    /// delivering into a run nobody is gating.
+    #[must_use]
+    pub fn with_inbound_bypass(mut self, seeded: bool) -> Self {
+        self.inbound_bypass = seeded;
 
         self
     }
@@ -1872,8 +1965,132 @@ impl Engine {
         )));
         self.install_postbox(lead);
         self.recompose_tools();
+        // A team is what makes the gate reachable — the socket exists only
+        // for a lead session — so this is where its event drain starts.
+        self.spawn_inbound_drain();
 
         self
+    }
+
+    /// Starts the gate's ordered event forwarder and its expiry timers (M10,
+    /// **D524**): one task that drains [`teammate::inbound::HoldTransition`]s
+    /// into the fanout — stamping each with the **current** session id at
+    /// publish, the same slot every non-turn publish stamps — spawns a
+    /// deadline timer per parity hold, aborts it on that hold's settlement,
+    /// and answers [`Engine::shutdown_settle`]'s flush handshake only when
+    /// its queue is empty.
+    ///
+    /// Decoupled from the socket door's request path on purpose: a lossless
+    /// subscriber makes a publisher wait, so publishing inside
+    /// [`Engine::receive_peer_message`] would let one wedged SSE client delay
+    /// — and jitter — every peer's POST. What a stalled drain delays is event
+    /// visibility, never a decision.
+    ///
+    /// Guarded on a live runtime rather than assumed into one: the one
+    /// builder-path caller outside a runtime is a synchronous unit test's
+    /// engine, which spawns no teammates and admits nothing, so skipping the
+    /// drain there loses observability of events that cannot occur.
+    fn spawn_inbound_drain(&self) {
+        if tokio::runtime::Handle::try_current().is_err() {
+            tracing::debug!(
+                "no async runtime at team install; the inbound gate's events will not publish"
+            );
+
+            return;
+        }
+        let Some(mut transitions) = self
+            .inbound_drain
+            .lock()
+            .expect("the inbound drain slot is never poisoned")
+            .take()
+        else {
+            // A second team install on one engine; the first task stands.
+            return;
+        };
+        let (flush, mut flushes) = mpsc::unbounded_channel::<oneshot::Sender<()>>();
+        *self
+            .inbound_flush
+            .lock()
+            .expect("the inbound flush slot is never poisoned") = Some(flush);
+
+        let fanout = Arc::clone(&self.fanout);
+        let session = Arc::clone(&self.session);
+        // Weak on both counts, so the drain task keeps neither the gate nor
+        // the team alive: when the engine goes, the gate's sender drops, the
+        // queue ends, and the task ends with it.
+        let inbound = Arc::downgrade(&self.inbound);
+        let teammates = self.teammates.as_ref().map(Arc::downgrade);
+
+        tokio::spawn(async move {
+            let mut timers: BTreeMap<String, tokio::task::JoinHandle<()>> = BTreeMap::new();
+            let mut flushes_open = true;
+            loop {
+                let transition = if flushes_open {
+                    tokio::select! {
+                        // Biased so a flush is answered only once every
+                        // transition enqueued before it has been published —
+                        // the whole meaning of the handshake.
+                        biased;
+                        transition = transitions.recv() => transition,
+                        request = flushes.recv() => match request {
+                            Some(ack) => {
+                                // Reached only while the transition queue is
+                                // empty at this poll: everything earlier is
+                                // in the fanout.
+                                let _ = ack.send(());
+                                continue;
+                            }
+                            None => {
+                                // The engine dropped its flush handle; a
+                                // closed channel answers `None` instantly, so
+                                // leave the select before it becomes a spin.
+                                flushes_open = false;
+                                continue;
+                            }
+                        },
+                    }
+                } else {
+                    transitions.recv().await
+                };
+                let Some(transition) = transition else {
+                    break;
+                };
+
+                match &transition {
+                    teammate::inbound::HoldTransition::Held {
+                        id,
+                        expires_in_ms: Some(wait),
+                        ..
+                    } => {
+                        // The expiry re-check's narrowness arrives as data:
+                        // only a parity hold carries a deadline, so only a
+                        // parity hold gets a timer.
+                        let timer = tokio::spawn(expire_hold(
+                            *wait,
+                            id.clone(),
+                            inbound.clone(),
+                            teammates.clone(),
+                        ));
+                        timers.insert(id.as_str().to_owned(), timer);
+                    }
+                    teammate::inbound::HoldTransition::Held { .. } => {}
+                    teammate::inbound::HoldTransition::Settled { id, .. } => {
+                        if let Some(timer) = timers.remove(id.as_str()) {
+                            timer.abort();
+                        }
+                    }
+                }
+
+                let current = session
+                    .lock()
+                    .expect("the session id is never poisoned")
+                    .clone();
+                let _ = fanout.send(transition.into_event(current)).await;
+            }
+            for (_, timer) in timers {
+                timer.abort();
+            }
+        });
     }
 
     /// The team this session leads, for a status display, the `/team` dialog
@@ -1907,19 +2124,34 @@ impl Engine {
 
     /// A plain message another session sent over **this** session's socket,
     /// delivered into this team (**D505**) — the engine's side of
-    /// `ganja-serve`'s socket-only `POST /team/{name}/message`.
+    /// `ganja-serve`'s socket-only `POST /team/{name}/message`, and since
+    /// **D523** the seam the admission gate sits in.
     ///
     /// The route reaches the team through this rather than through the
     /// registry so that serve invents no state and holds no team: the rungs
-    /// a peer's message climbs, and the postbox it is delivered through, are
-    /// `subagent::receive`'s, the same code a local teammate's message goes
-    /// through, and the identity it is stamped with is decided there
-    /// (`Postbox::peer`) and nowhere a route could choose.
+    /// a peer's message climbs, and the write it is delivered through, are
+    /// `subagent`'s, the same code a local teammate's message goes through,
+    /// and the identity it is stamped with is decided there (`Postbox::peer`)
+    /// and nowhere a route could choose. Between the two halves the gate
+    /// decides — synchronously, because this answer **is** the receipt
+    /// channel: a `Deliver` writes and answers the uniform arrival note, a
+    /// `Held` writes nothing and names its cause (the reference's own held
+    /// receipt), and a `Silent` — an explicit refuse, a guard drop, the
+    /// queue cap — writes nothing and answers **byte-identically** to the
+    /// accept, traced with its typed reason and told to nobody (v2
+    /// §"Explicit outcomes (`P8a`)", evidence 620644-620683).
+    ///
+    /// The `NoTeam` refusal stays first, ahead of every rung and any policy:
+    /// it is the structural analogue of the reference's kill-switch refuse —
+    /// a session with no team has no gate to consult (v2 §"Bundle gate
+    /// (`Hg()`)", evidence 220730-220742, and the divergence note in
+    /// [`teammate::inbound`]'s module doc).
     ///
     /// # Errors
     ///
     /// [`NotReceived::NoTeam`](crate::NotReceived::NoTeam) when this session
-    /// leads no team, and otherwise whichever rung the message failed.
+    /// leads no team, and otherwise whichever rung the message failed — the
+    /// ladder's shape errors predate policy and keep their own sentences.
     pub async fn receive_peer_message(
         &self,
         incoming: crate::Incoming,
@@ -1927,8 +2159,98 @@ impl Engine {
         let Some(team) = &self.teammates else {
             return Err(crate::NotReceived::NoTeam);
         };
+        let registry = team.registry();
 
-        subagent::receive(team.registry(), incoming).await
+        let message = subagent::receive_ladder(registry, incoming)?;
+        let lead = message.lead.clone();
+        let admission = self.inbound.admit_socket(
+            self.receiver_class(),
+            &message.from,
+            &message.text,
+            message.summary.as_deref(),
+        );
+        match admission {
+            teammate::inbound::SocketAdmission::Deliver => {
+                let (sent, identity) = subagent::deliver_to_lead(registry, message).await?;
+                // After the write that minted it (M6): only now does the
+                // identity exist to record, and the §6.2 pass delivers what
+                // the set holds without re-running policy or guards (D525).
+                self.inbound.admit_identity(identity);
+
+                Ok(sent)
+            }
+            teammate::inbound::SocketAdmission::Held {
+                cause,
+                evicted_prune,
+            } => {
+                if let Some(identity) = evicted_prune {
+                    // A capacity eviction's mailbox-door victim, pruned
+                    // best-effort: its record is already settled `expired`,
+                    // and an entry a failed prune leaves behind re-gates as a
+                    // fresh hold — fail-closed — never delivers.
+                    if !prune_lead_inboxes(registry, &identity).await {
+                        tracing::warn!(
+                            ?identity,
+                            "an evicted hold's inbox entry could not be pruned; it re-gates as a fresh hold"
+                        );
+                    }
+                }
+
+                Ok(crate::tool::team::Sent {
+                    to: lead,
+                    note: subagent::held_note(cause),
+                })
+            }
+            teammate::inbound::SocketAdmission::Silent(reason) => {
+                // The typed reason is the whole receiver-side record; the
+                // sender reads the same bytes an accept answers.
+                tracing::info!(
+                    from = message.from,
+                    reason = ?reason,
+                    "an inbound peer message was dropped without telling the sender"
+                );
+
+                Ok(crate::tool::team::Sent {
+                    to: lead,
+                    note: subagent::RECEIVED.to_owned(),
+                })
+            }
+        }
+    }
+
+    /// This session's receiver permission class, as the admission gate's
+    /// parity matrix reads it (**D523**): bypass iff the engine's mode is
+    /// [`PermissionMode::Bypass`] or the session started under the D479 trio
+    /// ([`Engine::with_inbound_bypass`]); prompting otherwise.
+    ///
+    /// Total today — both sources are plain engine state — so this never
+    /// answers [`None`]; the [`Option`] is the resolver's fail-closed slot
+    /// (an unreadable mode holds `mode_unknown`), carried so every caller
+    /// hands the gate the shape it decides on.
+    #[must_use]
+    pub fn receiver_class(&self) -> Option<teammate::inbound::ReceiverClass> {
+        Some(teammate::inbound::classify_receiver(
+            self.permission_mode(),
+            self.inbound_bypass,
+        ))
+    }
+
+    /// The admission gate itself, for the one consumer outside this file
+    /// that shares its state: the lead's §6.2 pass
+    /// ([`teammate::lead_inbox::LeadInbox`]'s gated construction), whose
+    /// mailbox door, held-index and admitted set are the same ones the
+    /// socket door above feeds.
+    #[must_use]
+    pub fn inbound(&self) -> &Arc<teammate::inbound::Inbound> {
+        &self.inbound
+    }
+
+    /// The messages the admission gate is holding for review — what `/held`,
+    /// the approval dialog's countdown and the `N held` status segment poll,
+    /// in the [`Engine::team_view`]/[`Engine::jobs`] family (**D524**).
+    #[must_use]
+    pub fn held_messages(&self) -> Vec<teammate::inbound::HeldEntry> {
+        self.inbound.held_messages()
     }
 
     /// The queue this session's teammates raise their permission dialogs on
@@ -2014,9 +2336,49 @@ impl Engine {
     /// teammate's own turn and ends its own background jobs — and nothing
     /// else's.
     pub async fn shutdown_teammates(&self) {
+        // Held inbound settles first (**D524**): the holds are a lead's
+        // surfaces and the lead is what is ending, so their `expired` events
+        // are flushed while the fanout is still being read.
+        self.shutdown_settle().await;
         if let Some(teammates) = &self.teammates {
             teammates.registry().shutdown().await;
         }
+    }
+
+    /// Settles every held inbound message `expired` and gives the event
+    /// drain a **bounded** wait — `SHUTDOWN_SETTLE_FLUSH`, 750 ms — to move
+    /// the settlements into the fanout, then proceeds regardless: the
+    /// reference's own shutdown bound (v2 §"Shutdown", evidence
+    /// 620390-620431).
+    ///
+    /// Idempotent like [`Engine::shutdown_mcp`] and [`Engine::shutdown_jobs`]
+    /// — a second call finds nothing held and an empty queue to flush. Per
+    /// C1, `expired` here settles the **review record**: a mailbox-door
+    /// hold's durable inbox entry is deliberately left in place for
+    /// next-start re-gating (the no-lost-mail half), while a socket-door
+    /// hold is gone with the process — a crash provides no settlement at all,
+    /// and the same split applies.
+    ///
+    /// The wait is a handshake, not a sleep: the drain task acknowledges
+    /// only once its queue is empty, so a healthy fanout completes in
+    /// microseconds and only a wedged lossless subscriber spends the bound.
+    pub async fn shutdown_settle(&self) {
+        self.inbound.shutdown_settle();
+        let flush = self
+            .inbound_flush
+            .lock()
+            .expect("the inbound flush slot is never poisoned")
+            .clone();
+        let Some(flush) = flush else {
+            // No drain task — a session that never led a team, whose gate
+            // never held anything to announce.
+            return;
+        };
+        let (ack, flushed) = oneshot::channel();
+        if flush.send(ack).is_err() {
+            return;
+        }
+        let _ = tokio::time::timeout(SHUTDOWN_SETTLE_FLUSH, flushed).await;
     }
 
     /// The store this engine persists into, for a second engine that shares
@@ -3045,15 +3407,31 @@ impl Engine {
             Command::SwitchModel { model } => self.switch_model(model).await,
             Command::SwitchEffort { effort } => self.switch_effort(effort).await,
             Command::SetPermissionMode { mode } => self.set_permission_mode(mode).await,
-            // Nothing is held yet — the W2 inbound gate replaces this arm
-            // with the buffer's settlement. Until then a settle names
-            // nothing, which is already the command's own contract for an
-            // unknown id: ignored, said only to the log.
-            Command::SettleHeld { id, decision: _ } => {
-                tracing::debug!(
-                    id = id.as_str(),
-                    "nothing is held; the inbound gate has not landed"
-                );
+            // A person's word on one held inbound message (**D524**). The
+            // release re-checks current policy inside the gate — an approval
+            // cannot override a policy that has since become refuse — and a
+            // settle naming an id nobody holds is ignored, which is also how
+            // a person racing the expiry timer loses gracefully.
+            Command::SettleHeld { id, decision } => {
+                let settlement = match decision {
+                    crate::protocol::HeldDecision::Release => self.inbound.release(&id),
+                    crate::protocol::HeldDecision::Deny => self.inbound.deny(&id),
+                };
+                match settlement {
+                    None => tracing::debug!(
+                        id = id.as_str(),
+                        "a settle named a hold nobody holds; ignored"
+                    ),
+                    Some(settlement) => {
+                        settle_side_effects(
+                            &self.inbound,
+                            self.teammates.as_ref(),
+                            &id,
+                            settlement,
+                        )
+                        .await;
+                    }
+                }
                 Ok(())
             }
             Command::RunShell { command } => {
@@ -4232,6 +4610,16 @@ impl Engine {
                 mode,
             })
             .await;
+        // A mode change re-decides every held inbound message under its own
+        // recorded origin (**D524**, v2 §"Reevaluation and manual decision",
+        // evidence 620778-620845): the receiver class just moved, and today
+        // it is the only thing that moves mid-session — config does not
+        // change under a running engine.
+        for teammate::inbound::Reevaluated { id, settlement } in
+            self.inbound.reevaluate(self.receiver_class())
+        {
+            settle_side_effects(&self.inbound, self.teammates.as_ref(), &id, settlement).await;
+        }
 
         Ok(())
     }
@@ -5115,6 +5503,145 @@ fn close_interrupted(storage: &Storage, session: &SessionId, transcript: &mut [M
     }
 }
 
+/// One parity hold's deadline (**D524**): sleeps to it, then expires the hold
+/// — and loses gracefully to any settlement that got there first, because
+/// [`teammate::inbound::Inbound::expire`] answers [`None`] for a claimed or
+/// gone id.
+///
+/// Weak on both handles so a pending timer keeps neither the gate nor the
+/// team alive past the engine; a deadline that fires after either is gone has
+/// nothing left to expire.
+async fn expire_hold(
+    wait_ms: u64,
+    id: crate::protocol::HeldId,
+    inbound: std::sync::Weak<teammate::inbound::Inbound>,
+    teammates: Option<std::sync::Weak<subagent::Teammates>>,
+) {
+    tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+    let Some(inbound) = inbound.upgrade() else {
+        return;
+    };
+    let Some(settlement) = inbound.expire(&id) else {
+        // Settled, or claimed by a drop whose prune is in flight: the race's
+        // loser no-ops, first-settler-wins.
+        return;
+    };
+    let teammates = teammates.as_ref().and_then(std::sync::Weak::upgrade);
+
+    settle_side_effects(&inbound, teammates.as_ref(), &id, settlement).await;
+}
+
+/// What one settlement decision requires of the engine, performed after the
+/// gate's lock is long gone (**D524**): nothing for a settled drop, the
+/// release write for a socket-door delivery (M6's identity recorded after
+/// the write that minted it), and H2's prune-before-unindex for a
+/// mailbox-door drop — a failed prune re-holds, fail-closed and retryable,
+/// never delivers.
+async fn settle_side_effects(
+    inbound: &Arc<teammate::inbound::Inbound>,
+    teammates: Option<&Arc<subagent::Teammates>>,
+    id: &crate::protocol::HeldId,
+    settlement: teammate::inbound::Settlement,
+) {
+    match settlement {
+        teammate::inbound::Settlement::Done(outcome) => {
+            tracing::info!(id = id.as_str(), ?outcome, "a held peer message settled");
+        }
+        teammate::inbound::Settlement::Deliver(released) => {
+            let Some(team) = teammates else {
+                // The team is gone, so there is no inbox to release into; the
+                // record is already settled, and the message goes with it —
+                // the same end shutdown gives a socket-door hold.
+                tracing::warn!(
+                    id = id.as_str(),
+                    "a released peer message had no team left to deliver into"
+                );
+
+                return;
+            };
+            let registry = team.registry();
+            let message = subagent::PeerMessage {
+                from: released.from,
+                text: released.text,
+                summary: released.summary,
+                lead: registry.lead().as_str().to_owned(),
+            };
+            match subagent::deliver_to_lead(registry, message).await {
+                Ok((_sent, identity)) => {
+                    tracing::info!(id = id.as_str(), "a held peer message was released");
+                    inbound.admit_identity(identity);
+                }
+                // The write's failure is the delivery path's own failure
+                // channel, as it is for any peer write: the record stands
+                // settled `delivered`, and the bytes are lost with the write.
+                Err(error) => tracing::warn!(
+                    id = id.as_str(),
+                    %error,
+                    "a released peer message could not be written"
+                ),
+            }
+        }
+        teammate::inbound::Settlement::PruneFirst { identity } => {
+            let Some(team) = teammates else {
+                // No team means no inbox to prune; the claim clears so the
+                // record re-holds rather than wedging half-settled (H2).
+                inbound.prune_failed(id);
+
+                return;
+            };
+            if prune_lead_inboxes(team.registry(), &identity).await {
+                if let Some(outcome) = inbound.pruned(id) {
+                    tracing::info!(id = id.as_str(), ?outcome, "a held peer message settled");
+                }
+            } else {
+                inbound.prune_failed(id);
+                tracing::warn!(
+                    id = id.as_str(),
+                    "a held entry's prune failed; the hold stands, retryable (H2)"
+                );
+            }
+        }
+    }
+}
+
+/// Prunes one identity from every lead inbox this session reads — its own
+/// root always, and a real `claude`'s root exactly when the roster holds a
+/// claude-backed member, the same two-roots rule the §6.2 pass reads under
+/// ([`teammate::lead_inbox::LeadInbox`]'s own doc owns why the second root
+/// is conditional).
+///
+/// `true` only when every prune landed: pruning an identity from an inbox
+/// that never held it is a rewrite that changes nothing, so the conjunction
+/// is safe, and H2 needs the failure reported rather than shrugged at.
+async fn prune_lead_inboxes(
+    registry: &Arc<teammate::TeammateRegistry>,
+    identity: &ganja_team::mailbox::Identity,
+) -> bool {
+    let own = registry.root().clone();
+    let mut roots = vec![own.clone()];
+    if registry.holds_backend(ganja_protocol::team::MemberBackend::Claude)
+        && let Some(claude) = teammate::claude::teams_root()
+        && claude != own
+    {
+        roots.push(claude);
+    }
+
+    let mut pruned = true;
+    for root in roots {
+        let path = root.inbox_path(registry.team(), registry.lead());
+        let identities = vec![identity.clone()];
+        if let Err(reason) =
+            teammate::blocking_io(move || ganja_team::mailbox::prune_delivered(&path, &identities))
+                .await
+        {
+            tracing::warn!(?identity, reason, "a held entry's inbox prune failed");
+            pruned = false;
+        }
+    }
+
+    pruned
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -5279,9 +5806,10 @@ mod tests {
                 | Event::AgentChanged { .. }
                 | Event::PermissionModeChanged { .. }
                 | Event::CompactionProgress { .. }
-                // No replayed text: a hold's whole point is that nothing
-                // reached the transcript. The W2 inbound gate replaces this
-                // arm if a settlement ever grows one.
+                // No replayed text, permanently: a hold's whole point is
+                // that nothing reached the transcript, and even a released
+                // message arrives as a peer part on the steer lane — which
+                // `Part::as_text` excludes — never as replayed text (D524).
                 | Event::PeerHeld { .. }
                 | Event::PeerHoldSettled { .. }
                 | Event::EffortChanged { .. } => {}

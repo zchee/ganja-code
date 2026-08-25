@@ -942,6 +942,18 @@ pub struct Config {
     /// `deny_unknown_fields` would reject one — and above every tier here.
     #[serde(skip)]
     pub overrides: Overrides,
+    /// The tier that established [`Config::cross_session_inbound`]'s winning
+    /// value (**D523**), recovered at the one seam that still sees tiers:
+    /// the merge itself keeps only the winner, and the admission gate's
+    /// resolver wants the pair — the review surfaces name which tier said
+    /// `hold`, and [`Config::inbound_policy`] is what hands it over.
+    ///
+    /// Not a config key — `#[serde(skip)]`, `overrides`' own pattern, so the
+    /// schema and the drift test never see it — and filled only by
+    /// [`Config::load_with`]: a `Config` built by hand carries [`None`] here,
+    /// which the accessor reads as the global tier, the least specific claim.
+    #[serde(skip)]
+    pub cross_session_inbound_source: Option<ganja_protocol::PolicySource>,
 }
 
 /// How this session runs the agents it has, rather than what those agents are.
@@ -1625,6 +1637,23 @@ impl Config {
         self.dialog_expiry.unwrap_or_default()
     }
 
+    /// The explicit inbound policy with the tier that established it, in the
+    /// shape the admission gate's resolver takes (**D523**) — [`None`] when
+    /// no tier set `cross_session_inbound`, which is the class-dependent
+    /// default and not a fourth policy.
+    ///
+    /// A value without a recorded source — a `Config` built by hand rather
+    /// than through [`Config::load_with`] — answers the global tier, the
+    /// least specific claim a review surface could name.
+    #[must_use]
+    pub fn inbound_policy(&self) -> Option<(InboundPolicy, ganja_protocol::PolicySource)> {
+        Some((
+            self.cross_session_inbound?,
+            self.cross_session_inbound_source
+                .unwrap_or(ganja_protocol::PolicySource::Global),
+        ))
+    }
+
     /// Loads the config for a session working in `cwd`.
     ///
     /// # Errors
@@ -1656,21 +1685,40 @@ impl Config {
             }
         }
 
-        let mut trusted = global_files();
-        trusted.extend(explicit);
-
-        let mut config = merge_files(&trusted)?;
-        // The project tier does not join the trusted vector (**D523**): a
+        // The trusted tiers merge in two steps rather than one vector, so the
+        // tier that establishes `cross_session_inbound` is knowable while it
+        // still is a tier (**D523**): the fold is the same sequential merge
+        // either way, split exactly at the global/explicit boundary.
+        let mut config = merge_files(&global_files())?;
+        let mut source = config
+            .cross_session_inbound
+            .map(|_| ganja_protocol::PolicySource::Global);
+        if let Some(path) = explicit
+            && let Some(tier) = read(&path)?
+        {
+            if tier.cross_session_inbound.is_some() {
+                source = Some(ganja_protocol::PolicySource::ExplicitFile);
+            }
+            config.merge(tier);
+        }
+        // The project tier does not join the trusted merge (**D523**): a
         // checkout's file may only *tighten* `cross_session_inbound` and may
         // not set `dialog_expiry` at all, and `merge_project` is where both
         // rules live — every other key keeps the later-wins the trusted
         // tiers just used. Per file, because the ancestor walk can find
-        // several and each may tighten further.
+        // several and each may tighten further. The source moves only when
+        // the value did: a project file that merely agrees with the standing
+        // policy did not establish it.
         for path in project_files(cwd) {
             if let Some(tier) = read(&path)? {
+                let standing = config.cross_session_inbound;
                 config.merge_project(tier, &path)?;
+                if config.cross_session_inbound != standing {
+                    source = Some(ganja_protocol::PolicySource::Project);
+                }
             }
         }
+        config.cross_session_inbound_source = source;
         // Installed plugins contribute here — below every explicit tier,
         // above the builtin defaults each surface resolves later — and per
         // surface rather than as a fourth tier through [`Config::merge`],
