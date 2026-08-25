@@ -26,7 +26,7 @@ pub(crate) const USERNAME_ENV: &str = "GANJA_SERVER_USERNAME";
 
 /// The username when [`USERNAME_ENV`] says nothing, as upstream defaults to
 /// `"opencode"`.
-pub const DEFAULT_USERNAME: &str = "ganja";
+pub(crate) const DEFAULT_USERNAME: &str = "ganja";
 
 /// The query parameter that may carry the credential instead of the
 /// `Authorization` header (`middleware/authorization.ts:12`).

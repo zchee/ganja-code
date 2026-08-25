@@ -90,12 +90,6 @@ tokio-util = { workspace = true, features = ["rt"] }
 tracing-appender.workspace = true
 # `env-filter` is what makes `RUST_LOG` mean anything here.
 tracing-subscriber.workspace = true
-# `mcp add` refuses a remote URL the loader would refuse, using the loader's
-# own predicate (`ganja_provider::provider::reachable_in_the_clear`) rather
-# than a second spelling of it — and that predicate takes a parsed `Url`,
-# because every cheap textual version of the loopback check is bypassable.
-# The workspace already pins this; only the opt-in is new.
-url.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true

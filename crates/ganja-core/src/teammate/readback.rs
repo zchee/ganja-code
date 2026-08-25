@@ -153,7 +153,7 @@ pub trait Transcript: Send + Sync {
 ///
 /// The same shape [`crate::teammate::posture_line`] and
 /// [`crate::teammate::shim_tui::pane_line`] use, for the same reason: a
-/// seventh CLI that forgot to say how its answers are read would be a build
+/// fourth CLI that forgot to say how its answers are read would be a build
 /// failure rather than a teammate that silently never answers.
 #[must_use]
 pub fn of(cli: ShimCli) -> &'static dyn Transcript {

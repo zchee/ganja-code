@@ -48,7 +48,10 @@ pub fn tool_ctx(spawn: Arc<dyn Subagents>) -> ToolCtx {
 /// arguments against its schema, but the registry still has to advertise
 /// one.
 #[derive(schemars::JsonSchema)]
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "never constructed; the field exists so the derived schema advertises one property"
+)]
 struct PlaceholderArgs {
     key: Option<String>,
 }

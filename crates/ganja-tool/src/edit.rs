@@ -571,7 +571,11 @@ fn block_anchor<'a>(content: &'a str, find: &'a str) -> Vec<Cow<'a, str>> {
     let first_line = js_trim(search[0]);
     let last_line = js_trim(search[search.len() - 1]);
     let block_size = search.len();
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "line counts stay tiny"
+    )]
     let max_delta = ((block_size as f64 * 0.25).floor() as usize).max(1);
 
     let mut candidates = Vec::new();
@@ -612,7 +616,10 @@ fn block_anchor<'a>(content: &'a str, find: &'a str) -> Vec<Cow<'a, str>> {
                 else {
                     continue;
                 };
-                #[allow(clippy::cast_precision_loss)]
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "line and char counts stay far below 2^53"
+                )]
                 let share = step / to_check as f64;
                 similarity += share;
                 if similarity >= SINGLE_CANDIDATE_SIMILARITY_THRESHOLD {
@@ -643,7 +650,10 @@ fn block_anchor<'a>(content: &'a str, find: &'a str) -> Vec<Cow<'a, str>> {
             let total: f64 = (1..block_size.min(end - start + 1) - 1)
                 .filter_map(|offset| line_similarity(original[start + offset], search[offset]))
                 .sum();
-            #[allow(clippy::cast_precision_loss)]
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "line and char counts stay far below 2^53"
+            )]
             let averaged = total / to_check as f64;
             averaged
         };
@@ -675,7 +685,10 @@ fn line_similarity(original: &str, search: &str) -> Option<f64> {
     if longest == 0 {
         return None;
     }
-    #[allow(clippy::cast_precision_loss)]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "line and char counts stay far below 2^53"
+    )]
     Some(1.0 - levenshtein(original, search) as f64 / longest as f64)
 }
 
@@ -880,7 +893,10 @@ fn context_aware<'a>(content: &'a str, find: &'a str) -> Vec<Cow<'a, str>> {
             }
         }
 
-        #[allow(clippy::cast_precision_loss)]
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "line and char counts stay far below 2^53"
+        )]
         let alike = compared == 0 || matching as f64 / compared as f64 >= 0.5;
         if alike {
             found.push(Cow::Borrowed(block(content, &spans, start, length)));

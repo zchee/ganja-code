@@ -337,7 +337,7 @@ pub async fn sweep_on(registry: &TeammateRegistry, server: &Server) -> Swept {
                 // is unreachable through `surface()` besides (the shim guard
                 // above catches every shim first, and `Surface::read` answers
                 // in-process for a headless one). Written out rather than folded
-                // into a wildcard so that a seventh surface still has to decide
+                // into a wildcard so that a fifth surface still has to decide
                 // what a pane sweep does with it.
                 Surface::Leader | Surface::InProcess | Surface::Shim { .. } => None,
             }

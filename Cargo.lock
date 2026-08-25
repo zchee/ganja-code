@@ -1330,7 +1330,6 @@ dependencies = [
  "tokio-util",
  "tracing-appender",
  "tracing-subscriber",
- "url",
 ]
 
 [[package]]

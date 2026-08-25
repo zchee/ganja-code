@@ -81,11 +81,14 @@ mod request;
 /// drift test in this module's tests proves the checked-in copy still
 /// matches the `.proto`.
 ///
-/// The allow is for the generated decoders of fieldless messages, whose
+/// The suppression is for the generated decoders of fieldless messages, whose
 /// unknown-field handling is a one-arm match: the codegen's own allow list
 /// covers its view module but not these, and the alternative is hand-editing
 /// a file whose whole contract is that nobody does.
-#[allow(clippy::match_single_binding)]
+#[expect(
+    clippy::match_single_binding,
+    reason = "generated fieldless-message decoders reduce to a one-arm match"
+)]
 pub mod proto {
     include!("cursor/ganja.cursor.v1.rs");
 }

@@ -62,8 +62,8 @@
 //! already sends its own vendor's header — `x-api-key` is what
 //! [`super::anthropic`] has always sent. **Choosing the wire chooses the
 //! header**, which is why `Dialect` carries no header of its own; the test
-//! `each_dialect_presents_the_key_under_the_name_that_dialect_requires` pins
-//! that this stays true.
+//! `the_catalogs_transport_hint_picks_the_wire_and_the_wire_picks_the_header`
+//! (`ganja-core/tests/opencode_dialects.rs`) pins that this stays true.
 //!
 //! `anthropic-version` is *optional* here (probed: `200` without it). The
 //! Messages wire pins `2023-06-01` and keeps doing so — following what that
