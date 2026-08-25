@@ -118,6 +118,27 @@ pub enum MailboxError {
         /// expectation and the type found — never the value found.
         issues: Vec<String>,
     },
+    /// The inbox is at its caller-supplied [`Ceiling`], and the append was
+    /// refused rather than grown past it (**D526**). The counts are what the
+    /// check observed — the state this append would have left — and the file
+    /// is exactly as it was: a ceiling refusal happens under the hold and
+    /// writes nothing, so not even the rewrite's usual prune of unreadable
+    /// neighbours runs. Counts and bounds only, never a body.
+    #[error(
+        "the inbox is full: this append would leave it holding {held} messages in {bytes} \
+         bytes, past its ceiling of {max_messages} messages / {max_bytes} bytes; nothing was \
+         written"
+    )]
+    Full {
+        /// How many messages the inbox would hold with this append.
+        held: usize,
+        /// How many bytes the rewritten file would hold with this append.
+        bytes: usize,
+        /// The bound on messages, as the caller supplied it.
+        max_messages: usize,
+        /// The bound on bytes, as the caller supplied it.
+        max_bytes: usize,
+    },
     /// The inbox could not be held while it was rewritten.
     ///
     /// Carried transparently because [`LockError`] already says everything
@@ -163,6 +184,23 @@ pub struct Pruned {
     pub pruned: usize,
     /// How many remain.
     pub remaining: usize,
+}
+
+/// A caller-supplied bound on what one inbox file may hold (**D526**).
+///
+/// The mechanics live here and the numbers do not: this crate enforces
+/// whatever bound it is handed and decides nothing — the same posture as
+/// [`crate::lock`], whose schedule is likewise somebody else's. Every ganja
+/// writer passes the one ceiling `ganja-core` keeps beside its postbox;
+/// [`write()`] passes none, which is the unbounded behavior a peer's own
+/// tooling and this crate's fixtures still get.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ceiling {
+    /// The most messages the file may hold once an append lands.
+    pub max_messages: usize,
+    /// The most bytes the rewritten file may hold once an append lands,
+    /// measured on the document this build would write.
+    pub max_bytes: usize,
 }
 
 /// §2.3's `messageIdentityKey`: `from|timestamp|text`, and **not** `msg_id`.
@@ -259,8 +297,21 @@ pub fn read(path: &Path) -> io::Result<Contents> {
     Ok(parse(path, &text))
 }
 
+/// [`write_bounded`] with no ceiling — the unbounded append, kept under the
+/// old name because a bound is the caller's to have (**D526**): this crate
+/// holds no number of its own, and a peer's tooling or a test fixture appends
+/// here without one.
+///
+/// # Errors
+///
+/// [`write_bounded`]'s, less [`MailboxError::Full`].
+pub fn write(path: &Path, message: MailboxMessage) -> Result<String, MailboxError> {
+    write_bounded(path, message, None)
+}
+
 /// Writes a message into the inbox, stamping §2.3's envelope, and answers with
-/// the `msg_id` it stamped.
+/// the `msg_id` it stamped — refusing first when `ceiling` says the inbox is
+/// full.
 ///
 /// **A write is also a destructive prune.** It is a read-modify-write, and the
 /// read keeps only what §2.4's validation accepts, so any *neighbouring* entry
@@ -275,12 +326,25 @@ pub fn read(path: &Path) -> io::Result<Contents> {
 /// stays readable — but that is the thing keeping this safe, so it is named
 /// rather than assumed.
 ///
+/// **The ceiling is checked under the hold** (**D526**), on the document this
+/// write would produce — the entries that read cleanly plus this message — so
+/// two writers racing an almost-full inbox cannot both squeeze past the bound.
+/// A refusal is [`MailboxError::Full`] naming the counts it observed, and it
+/// leaves the file **byte-identical**: nothing is written, not even the
+/// rewrite that would have pruned an unreadable neighbour. The check encodes
+/// the prospective document once beside the write's own encode; at any depth a
+/// ceiling permits, that is noise under the fsync beneath it.
+///
 /// # Errors
 ///
 /// [`MailboxError::SchemaInvalid`] when the message's passthrough map would
-/// shadow one of the schema's own keys, and whatever the read-modify-write
-/// returned.
-pub fn write(path: &Path, mut message: MailboxMessage) -> Result<String, MailboxError> {
+/// shadow one of the schema's own keys, [`MailboxError::Full`] for an append
+/// the ceiling refuses, and whatever the read-modify-write returned.
+pub fn write_bounded(
+    path: &Path,
+    mut message: MailboxMessage,
+    ceiling: Option<Ceiling>,
+) -> Result<String, MailboxError> {
     // §2.3: the write is what decides these three, not the sender. `read` is
     // forced false because §3.1 never writes it true — see the module note.
     message.kind = Some(MESSAGE_TYPE.to_owned());
@@ -301,7 +365,35 @@ pub fn write(path: &Path, mut message: MailboxMessage) -> Result<String, Mailbox
         return Err(MailboxError::SchemaInvalid { issues });
     }
 
-    update(path, move |messages| messages.push(message))?;
+    let outcome = update(path, move |messages| {
+        messages.push(message);
+        if let Some(ceiling) = ceiling {
+            let held = messages.len();
+            let bytes = document(&*messages)?.len();
+            if held > ceiling.max_messages || bytes > ceiling.max_bytes {
+                return Err(MailboxError::Full {
+                    held,
+                    bytes,
+                    max_messages: ceiling.max_messages,
+                    max_bytes: ceiling.max_bytes,
+                });
+            }
+        }
+
+        Ok(())
+    });
+    if let Err(MailboxError::Full { held, bytes, .. }) = &outcome {
+        // Counts and a path, never a body (the module's own rule): the
+        // refusal is the caller's to surface, and this line is where the
+        // inbox it protected is named.
+        tracing::warn!(
+            inbox = %path.display(),
+            held,
+            bytes,
+            "an append was refused at the inbox's ceiling"
+        );
+    }
+    outcome?;
     tracing::debug!(inbox = %path.display(), %msg_id, "a message joined an inbox");
 
     Ok(msg_id)
@@ -325,10 +417,10 @@ pub fn prune_delivered(path: &Path, delivered: &[Identity]) -> Result<Pruned, Ma
             !message.read.unwrap_or(false) && !delivered.contains(&identity(message))
         });
 
-        Pruned {
+        Ok(Pruned {
             pruned: before - messages.len(),
             remaining: messages.len(),
-        }
+        })
     })?;
     tracing::debug!(
         inbox = %path.display(),
@@ -343,16 +435,23 @@ pub fn prune_delivered(path: &Path, delivered: &[Identity]) -> Result<Pruned, Ma
 /// Read, change, write back — the shape every mutation here has (§2.5).
 ///
 /// The closure is handed the entries that read cleanly, and whatever it leaves
-/// behind is what lands on disk. **The closure** cannot fail — it returns a
-/// `T`, not a `Result`, because every public mutator above refuses *before*
-/// getting here, so there is no path that takes a hold and then decides not to
-/// write. The I/O *after* it still can: the read, the encode and the atomic
-/// replace each return, and each leaves through the `?` below with the hold
-/// released by [`Guard`](crate::lock::Guard)'s `Drop` on the way out.
+/// behind is what lands on disk. **A closure that refuses stops the write**:
+/// it leaves through the `?` below before [`write_atomically`] runs, so the
+/// file is byte-identical to what the read found. Exactly one refusal lives
+/// there — [`write_bounded`]'s ceiling check (**D526**) — and it sits inside
+/// rather than in front of the hold on purpose: judged outside it, two
+/// writers racing an almost-full inbox would both observe room and both land.
+/// Every *other* precondition still refuses before getting here, so the hold
+/// is never taken for a write that its own arguments doomed. The I/O after
+/// the closure can fail too — the read, the encode and the atomic replace
+/// each return — and every early exit releases the hold through
+/// [`Guard`](crate::lock::Guard)'s `Drop` on the way out.
 ///
 /// Because the write-back is whatever the read produced, **every mutation here
-/// prunes what would not read** — see [`write()`]'s own note, which is where that
-/// consequence is stated for callers rather than for this function.
+/// prunes what would not read** — see [`write_bounded`]'s own note, which is
+/// where that consequence is stated for callers rather than for this function
+/// — while a mutation that *refused* prunes nothing, which is the other half
+/// of the same contract.
 ///
 /// The two steps below are §2.5's own order and not an implementation detail:
 /// the seed comes first because the lock is on `realpath(target) + ".lock"` and
@@ -366,13 +465,13 @@ pub fn prune_delivered(path: &Path, delivered: &[Identity]) -> Result<Pruned, Ma
 /// stands and hold nothing at all.
 fn update<T>(
     path: &Path,
-    change: impl FnOnce(&mut Vec<MailboxMessage>) -> T,
+    change: impl FnOnce(&mut Vec<MailboxMessage>) -> Result<T, MailboxError>,
 ) -> Result<T, MailboxError> {
     seed(path)?;
     let _hold = lock::acquire(path)?;
 
     let mut messages = read(path)?.valid;
-    let outcome = change(&mut messages);
+    let outcome = change(&mut messages)?;
     write_atomically(path, document(&messages)?.as_bytes())?;
 
     Ok(outcome)
@@ -626,8 +725,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        Contents, MailboxError, first_report, identity, prune_delivered, read, seed, validate,
-        write,
+        Ceiling, Contents, MailboxError, first_report, identity, prune_delivered, read, seed,
+        validate, write, write_bounded,
     };
     use crate::record::{MailboxMessage, SCHEMA_KEYS};
 
@@ -985,6 +1084,122 @@ mod tests {
         let held = read(&path).expect("the inbox reads");
         assert_eq!(held.dropped, 1);
         assert_eq!(held.reports.len(), 1);
+    }
+
+    /// A ceiling no test here ever reaches on the axis it is not testing.
+    const ROOMY: usize = usize::MAX;
+
+    #[test]
+    fn an_append_past_the_message_bound_is_refused_naming_the_counts() {
+        let (_home, path) = inbox();
+        let ceiling = Some(Ceiling {
+            max_messages: 2,
+            max_bytes: ROOMY,
+        });
+        write_bounded(&path, MailboxMessage::new("w", "first", WHEN), ceiling)
+            .expect("an inbox under its ceiling takes a message");
+        write_bounded(&path, MailboxMessage::new("w", "second", WHEN), ceiling)
+            .expect("an inbox at its last slot takes a message");
+        let before = fs::read_to_string(&path).expect("the inbox is readable");
+
+        let refusal = write_bounded(&path, MailboxMessage::new("w", "third", WHEN), ceiling)
+            .expect_err("an inbox at its message bound refuses the append");
+        let sentence = refusal.to_string();
+        assert!(
+            sentence.contains("3 messages") && sentence.contains("2 messages"),
+            "the refusal names the observed count and the bound: {sentence}"
+        );
+        let MailboxError::Full {
+            held,
+            max_messages,
+            max_bytes,
+            ..
+        } = refusal
+        else {
+            panic!("expected a full refusal, got {refusal:?}");
+        };
+        assert_eq!(held, 3, "the counts are what the append would have left");
+        assert_eq!(max_messages, 2);
+        assert_eq!(max_bytes, ROOMY);
+
+        // The refusal wrote nothing: the file is byte-identical, and a read
+        // still finds exactly the two admitted messages.
+        assert_eq!(
+            fs::read_to_string(&path).expect("the inbox is readable"),
+            before
+        );
+        assert_eq!(read(&path).expect("the inbox reads").valid.len(), 2);
+    }
+
+    #[test]
+    fn an_append_past_the_byte_bound_is_refused_naming_the_counts() {
+        let (_home, path) = inbox();
+        let ceiling = Some(Ceiling {
+            max_messages: ROOMY,
+            max_bytes: 256,
+        });
+        write_bounded(&path, MailboxMessage::new("w", "short", WHEN), ceiling)
+            .expect("a small message fits under the byte bound");
+        let before = fs::read_to_string(&path).expect("the inbox is readable");
+
+        let oversized = "x".repeat(300);
+        let refusal = write_bounded(&path, MailboxMessage::new("w", oversized, WHEN), ceiling)
+            .expect_err("an append past the byte bound is refused");
+        let MailboxError::Full { held, bytes, .. } = refusal else {
+            panic!("expected a full refusal, got {refusal:?}");
+        };
+        assert_eq!(held, 2);
+        assert!(
+            bytes > 256,
+            "the observed byte count is the document the append would have written: {bytes}"
+        );
+
+        assert_eq!(
+            fs::read_to_string(&path).expect("the inbox is readable"),
+            before
+        );
+    }
+
+    #[test]
+    fn a_ceiling_refusal_leaves_even_a_damaged_neighbour_untouched() {
+        // The half of "byte-identical" that is easy to lose: an ordinary
+        // write destructively prunes what would not read (the test above
+        // this module's write doc), so a refusal that still wrote the file
+        // back would delete the neighbour as a side effect of refusing.
+        let (_home, path) = inbox();
+        damaged_pair(&path);
+        let before = fs::read_to_string(&path).expect("the inbox is readable");
+
+        let refusal = write_bounded(
+            &path,
+            MailboxMessage::new("w", "one too many", WHEN),
+            Some(Ceiling {
+                max_messages: 1,
+                max_bytes: ROOMY,
+            }),
+        )
+        .expect_err("the valid entry already fills the one slot");
+        assert!(matches!(refusal, MailboxError::Full { held: 2, .. }));
+
+        let after = fs::read_to_string(&path).expect("the inbox is readable");
+        assert_eq!(after, before, "a refusal is not a rewrite");
+        assert!(
+            after.contains(DAMAGED_BODY),
+            "the unreadable neighbour survives a refused append"
+        );
+    }
+
+    #[test]
+    fn no_ceiling_keeps_the_unbounded_append() {
+        let (_home, path) = inbox();
+        for n in 0..4 {
+            write_bounded(&path, MailboxMessage::new("w", format!("{n}"), WHEN), None)
+                .expect("an unbounded append always lands");
+        }
+        // And `write` is that spelling under the old name.
+        write(&path, MailboxMessage::new("w", "fifth", WHEN)).expect("a message writes");
+
+        assert_eq!(read(&path).expect("the inbox reads").valid.len(), 5);
     }
 
     #[test]

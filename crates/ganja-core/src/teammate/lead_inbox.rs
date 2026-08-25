@@ -934,7 +934,10 @@ impl Answer {
             }
         };
         let path = self.inbox.clone();
-        let written = crate::teammate::blocking_io(move || mailbox::write(&path, message)).await;
+        let written = crate::teammate::blocking_io(move || {
+            mailbox::write_bounded(&path, message, Some(super::postbox::INBOX_CEILING))
+        })
+        .await;
         match written {
             Ok(_) => tracing::info!(
                 request = self.request_id,

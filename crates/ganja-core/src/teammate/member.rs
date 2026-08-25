@@ -432,7 +432,10 @@ impl Asks {
             .insert(id.clone(), tool.clone());
 
         let path = self.lead_inbox.clone();
-        let written = crate::teammate::blocking_io(move || mailbox::write(&path, message)).await;
+        let written = crate::teammate::blocking_io(move || {
+            mailbox::write_bounded(&path, message, Some(postbox::INBOX_CEILING))
+        })
+        .await;
         if let Err(reason) = written {
             self.pending
                 .lock()

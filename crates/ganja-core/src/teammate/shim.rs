@@ -2240,8 +2240,10 @@ impl ShimRunner {
     /// Writes one plain message into an inbox, as this member.
     async fn mail(&self, inbox: PathBuf, text: String) {
         let message = MailboxMessage::new(self.spec.name.as_str(), text, record::now_iso8601());
-        if let Err(error) =
-            crate::teammate::blocking_io(move || mailbox::write(&inbox, message)).await
+        if let Err(error) = crate::teammate::blocking_io(move || {
+            mailbox::write_bounded(&inbox, message, Some(super::postbox::INBOX_CEILING))
+        })
+        .await
         {
             tracing::error!(
                 who = self.spec.name.as_str(),

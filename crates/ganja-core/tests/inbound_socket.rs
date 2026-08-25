@@ -16,7 +16,7 @@ use std::{sync::Arc, time::Duration};
 
 use futures::{StreamExt as _, stream::BoxStream};
 use ganja_core::{
-    Engine, Incoming,
+    Engine, Incoming, NotReceived,
     config::{DialogExpiry, InboundPolicy},
     permission::Permissions,
     protocol::{Command, Event, HeldDecision, HeldId, HeldOutcome, HoldCause, PermissionMode},
@@ -26,7 +26,7 @@ use ganja_core::{
 };
 use ganja_protocol::PolicySource;
 use ganja_team::mailbox;
-use ganja_testkit::team;
+use ganja_testkit::{flooded_inbox, team};
 
 /// How long an event or a shutdown is given on a loaded machine.
 const EVENTUALLY: Duration = Duration::from_secs(10);
@@ -152,6 +152,43 @@ async fn a_refused_message_answers_byte_identically_to_an_accepted_one() {
     assert!(
         refusing.engine.held_messages().is_empty(),
         "a refuse is a drop, not a hold"
+    );
+}
+
+// D526: past the inbox's ceiling an *accepted* message still cannot land.
+// The write refuses by name and the door surfaces it on the arm the serve
+// crate already maps to 500 (`routes.rs`: `NotReceived::Failed` →
+// `ApiError::Internal`) — infrastructure, never a new admission outcome —
+// and the file is byte-identical after, because a ceiling refusal writes
+// nothing: an unread backlog is not reshaped by the flood that failed to
+// join it.
+#[tokio::test]
+async fn a_full_inbox_refuses_the_accepted_write_on_the_failure_arm_and_changes_nothing() {
+    let lead = Lead::new(None, false);
+    let inbox = lead.registry.lead_inbox();
+    let planted = flooded_inbox(&inbox);
+
+    let refused = lead
+        .engine
+        .receive_peer_message(incoming("one more onto the pile"))
+        .await
+        .expect_err("a full inbox refuses the write");
+
+    let NotReceived::Failed { reason } = refused else {
+        panic!("a ceiling refusal rides the write-failure arm, got {refused:?}");
+    };
+    assert!(
+        reason.contains("could not be written") && reason.contains("past its ceiling"),
+        "the failure names the write and the ceiling, not the policy: {reason}"
+    );
+    assert!(
+        !reason.contains("xxxx"),
+        "a refusal carries counts, never a body"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&inbox).expect("the inbox is readable"),
+        planted,
+        "a refused append leaves the file byte-identical"
     );
 }
 

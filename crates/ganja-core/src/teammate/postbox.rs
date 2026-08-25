@@ -18,6 +18,24 @@ use crate::{
     tool::team::{Body, Peer, Reserved, Sent, Undelivered},
 };
 
+/// What one inbox file may hold before a ganja writer is refused (**D526**).
+///
+/// The numbers are ganja's own, module constants in the D525 style rather
+/// than config, and they live beside the write path they bound: `ganja-team`
+/// carries the mechanics and no policy, so **every** ganja append — this
+/// module's tail, the spawn seed, a permission ask or answer, a runner's
+/// frame, a shim's mail — passes this one value. 256 messages is an order of
+/// magnitude past any backlog a §3.1 queue really drains (the lead's pass
+/// runs every second), and 1 MiB bounds the whole-file rewrite the format
+/// makes of each append; either bound met means a reader has stopped
+/// draining, and growing the file further buys nobody anything. A refusal
+/// is [`mailbox::MailboxError::Full`] naming the counts, the file left
+/// byte-identical, surfaced on the write-failure arm each door already has.
+pub(crate) const INBOX_CEILING: mailbox::Ceiling = mailbox::Ceiling {
+    max_messages: 256,
+    max_bytes: 1 << 20,
+};
+
 /// A member of the team whose name the name grammar refuses — impossible
 /// through this build's own registration, and answered rather than trusted.
 pub(crate) const UNADDRESSABLE: &str =
@@ -106,7 +124,7 @@ pub(crate) async fn write_to_peer(
     let identity = mailbox::identity(&message);
 
     let path = root.inbox_path(team, &member);
-    match blocking_io(move || mailbox::write(&path, message)).await {
+    match blocking_io(move || mailbox::write_bounded(&path, message, Some(INBOX_CEILING))).await {
         Ok(_) => Ok((
             Sent {
                 to: member.into_inner(),

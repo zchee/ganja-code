@@ -178,6 +178,29 @@ fn asked_about(requests: &[ChatRequest], needle: &str) -> Option<ChatRequest> {
         .cloned()
 }
 
+/// The first tool answer carrying `needle`, read off what a request's
+/// transcript holds — a failed call travels as the error the model reads
+/// next, so this is what "the sender is told" looks like on the wire.
+fn tool_answer_about(requests: &[ChatRequest], needle: &str) -> Option<String> {
+    use ganja_core::protocol::{PartBody, ToolState};
+
+    requests
+        .iter()
+        .flat_map(|request| &request.messages)
+        .flat_map(|message| &message.parts)
+        .find_map(|part| match &part.body {
+            PartBody::Tool {
+                state: ToolState::Error { error, .. },
+                ..
+            } if error.contains(needle) => Some(error.clone()),
+            PartBody::Tool {
+                state: ToolState::Completed { output, .. },
+                ..
+            } if output.contains(needle) => Some(output.clone()),
+            _ => None,
+        })
+}
+
 /// The engine's team wiring, end to end: the door starts a teammate over this
 /// session's own store, and both sides are told who they may write to.
 #[tokio::test]
@@ -265,6 +288,59 @@ async fn a_team_gives_both_engines_a_postbox_and_the_teammate_a_store() {
     assert!(
         offered(&worker_request, "task").is_none(),
         "a teammate is not a place to nest a second team"
+    );
+
+    lead.engine.shutdown_teammates().await;
+}
+
+/// **D526**, the in-team half: the admission gate deliberately does not
+/// gate roster mail, so a teammate pouring into a full lead inbox is bounded
+/// by the *write* — refused by name at the ceiling — and reads that refusal
+/// back as the failed delivery `send_message` already answers with. The
+/// inbox is byte-identical after: the backlog nobody drained is not reshaped
+/// by the message that failed to join it.
+#[tokio::test]
+async fn a_send_into_a_full_inbox_reports_the_named_refusal_and_changes_nothing() {
+    let (provider, requests) = ScriptedProvider::new(vec![
+        tool_call(
+            send_message::ID,
+            serde_json::json!({"to": ganja_team::LEAD, "message": REPORT}),
+        ),
+        says("told about it"),
+        says("a title"),
+    ]);
+    let lead = lead(provider).await;
+    let inbox = lead.registry.lead_inbox();
+    let planted = ganja_testkit::flooded_inbox(&inbox);
+
+    spawn_worker(&lead).await;
+
+    let refusal = eventually(
+        EVENTUALLY,
+        "the sender to read the named refusal",
+        async || {
+            let seen = requests
+                .lock()
+                .expect("the request log is never poisoned")
+                .clone();
+
+            tool_answer_about(&seen, "past its ceiling")
+        },
+    )
+    .await;
+    assert!(
+        refusal.contains("could not be written"),
+        "the sender is told the write failed, in the delivery arm's own words: {refusal}"
+    );
+    assert!(
+        !refusal.contains("xxxx"),
+        "a refusal carries counts, never a body"
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(&inbox).expect("the inbox is readable"),
+        planted,
+        "a refused append leaves the lead's inbox byte-identical"
     );
 
     lead.engine.shutdown_teammates().await;

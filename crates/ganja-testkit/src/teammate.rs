@@ -431,6 +431,29 @@ impl RunnerHarness {
     }
 }
 
+/// Fills `inbox` past any ceiling a ganja writer carries (**D526**), and
+/// answers with the exact bytes planted.
+///
+/// One **valid** entry whose text alone is past the byte bound, written as
+/// raw bytes rather than through the mailbox: a suite proving "the file is
+/// unchanged after a refusal" needs the before-bytes in hand, and the entry
+/// must be one §2.4 accepts on purpose — an entry the read would drop is
+/// *deleted* by the next admitted write, which would make "unchanged" a
+/// claim about a file that can still shrink.
+pub fn flooded_inbox(inbox: &Path) -> String {
+    let entry = serde_json::json!([{
+        "from": "flood",
+        "text": "x".repeat(2 * 1024 * 1024),
+        "timestamp": "2026-08-17T00:00:00.000Z",
+    }]);
+    let bytes = serde_json::to_string(&entry).expect("the flood fixture encodes");
+    std::fs::create_dir_all(inbox.parent().expect("an inbox lives in a directory"))
+        .expect("the inbox directory is creatable");
+    std::fs::write(inbox, &bytes).expect("the inbox is writable");
+
+    bytes
+}
+
 /// Polls `read` every 25ms until it answers, or panics with `what` after
 /// `limit`.
 ///

@@ -614,7 +614,10 @@ pub async fn write_frame(inbox: PathBuf, from: &str, frame: &Frame, what: &'stat
             return;
         }
     };
-    if let Err(error) = crate::teammate::blocking_io(move || mailbox::write(&inbox, message)).await
+    if let Err(error) = crate::teammate::blocking_io(move || {
+        mailbox::write_bounded(&inbox, message, Some(super::postbox::INBOX_CEILING))
+    })
+    .await
     {
         tracing::error!(
             who = from,

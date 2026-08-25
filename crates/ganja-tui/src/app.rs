@@ -113,6 +113,14 @@ const MAX_EVENT_LOG: usize = 2000;
 /// still bounded rather than open-ended.
 const MAX_TURN_USAGE: usize = 1000;
 
+/// Most peer messages one [`App::deliver_peers`] drain hands the model
+/// (**D526**). Ganja's own number: a pass's batch becomes rows on a single
+/// user message, and eight is more than a working team says in a second while
+/// keeping what a flooded mailbox can make of one turn readable. The
+/// remainder stays in the inbox — the durable queue — and rides the next
+/// pass, oldest first; see the function's own note for why that is free.
+const PEER_BATCH_CAP: usize = 8;
+
 /// How long a first Esc stays armed for the backtrack gesture (**D467**).
 ///
 /// Short enough that two deliberate presses are the only thing that reaches
@@ -2513,6 +2521,17 @@ impl App {
     /// reason. One command also means one outcome — the batch lands or none of
     /// it does — and nothing has to reason about half a delivered pass.
     ///
+    /// # At most [`PEER_BATCH_CAP`] per pass
+    ///
+    /// A drain hands the model the cap and no more (**D526**); everything past
+    /// it is simply not consumed this pass. That costs no machinery because
+    /// the durable-queue shape below already carries it: the remainder is
+    /// never delivered, so never pruned, never in the in-flight set, and the
+    /// next pass offers it again in the same order. The admission gate agrees
+    /// — its `disposition` is a read and its reconcile keeps every identity
+    /// still present in the file, so an **admitted** message capped out of one
+    /// drain is still admitted, and still undelivered, at the next.
+    ///
     /// **The mailbox is the durable queue.** Nothing is pruned until the
     /// engine has taken the message, so a refusal, a crash or a turn that
     /// ended without draining its steers all end the same way: the message is
@@ -2529,10 +2548,13 @@ impl App {
     /// peers are present, and putting the same words in both would tell the
     /// model twice, once attributed and once as though this conversation had
     /// said it.
-    async fn deliver_peers(&mut self, messages: Vec<Delivered>) -> bool {
+    async fn deliver_peers(&mut self, mut messages: Vec<Delivered>) -> bool {
         if messages.is_empty() {
             return true;
         }
+        // The batch cap (D526): what is cut off here was never delivered, so
+        // the mailbox still holds it and the next pass offers it again.
+        messages.truncate(PEER_BATCH_CAP);
         if !self.turn_running {
             // An accepted prompt *is* the turn, so there is nothing to render
             // as pending and nothing to wait for.
@@ -17387,6 +17409,59 @@ mod tests {
             1,
             "all under the one id that will retire them together"
         );
+    }
+
+    /// **D526**: one drain hands the model at most [`super::PEER_BATCH_CAP`]
+    /// messages; the remainder was never delivered, so the mailbox still
+    /// holds it and the next pass — the same `in_flight` filter the tick
+    /// runs — offers exactly the messages the cap cut off, oldest first.
+    #[tokio::test]
+    async fn a_backlog_past_the_cap_delivers_the_cap_now_and_the_rest_on_the_next_drain() {
+        let backlog = || -> Vec<ganja_core::teammate::lead_inbox::Delivered> {
+            (0..super::PEER_BATCH_CAP + 2)
+                .map(|n| {
+                    ganja_core::teammate::lead_inbox::Delivered::new(
+                        "w1",
+                        format!("2026-08-17T00:00:{n:02}.000Z"),
+                        format!("message {n}"),
+                        ganja_core::teammate::Delivery::Acknowledged,
+                    )
+                })
+                .collect()
+        };
+        let directory = temporary();
+        let (mut app, _registry, mut events) = leading(&directory).await;
+        turn_in_flight(&mut app, &mut events).await;
+
+        assert!(app.deliver_peers(backlog()).await);
+        assert_eq!(
+            app.queue.depth(),
+            super::PEER_BATCH_CAP,
+            "one drain hands over the cap and no more"
+        );
+
+        // The next pass, as the tick builds it: the same backlog read back
+        // from the durable mailbox, minus what is already in flight.
+        let leftover: Vec<ganja_core::teammate::lead_inbox::Delivered> = backlog()
+            .into_iter()
+            .filter(|message| !app.in_flight(message))
+            .collect();
+        assert_eq!(
+            leftover
+                .iter()
+                .map(|message| message.body.as_str())
+                .collect::<Vec<_>>(),
+            ["message 8", "message 9"],
+            "what the cap cut off is exactly what the next pass is offered"
+        );
+
+        assert!(app.deliver_peers(leftover).await);
+        assert_eq!(
+            app.queue.depth(),
+            super::PEER_BATCH_CAP + 2,
+            "and the second drain delivers the remainder"
+        );
+        assert_eq!(app.steers, 2, "each drain crossed as one command");
     }
 
     /// An idle lead is not a busy one: the only thing it is waiting for is a

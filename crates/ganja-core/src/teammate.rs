@@ -2438,7 +2438,7 @@ pub(super) async fn seed_inbox(
             path: inbox.display().to_string(),
             source: error,
         })?;
-        mailbox::write(&inbox, message)?;
+        mailbox::write_bounded(&inbox, message, Some(postbox::INBOX_CEILING))?;
 
         Ok(())
     })
