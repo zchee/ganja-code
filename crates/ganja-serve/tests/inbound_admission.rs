@@ -3,7 +3,9 @@
 //! policy decided — an explicit refuse and every guard drop byte-identical
 //! to an accept, a hold alone announced with its cause — while the ladder's
 //! own refusals keep their statuses ahead of any policy. AC-8, AC-9, AC-10
-//! and AC-11 at the HTTP layer, over a real bound Unix socket.
+//! and AC-11 at the HTTP layer, over a real bound Unix socket — plus the
+//! observability leg: a hold and its settlement reach `GET /event`, so an
+//! attached client learns of them without polling.
 //!
 //! Every server here is a real `ganja_serve::serve` over a real engine
 //! leading a real (empty) team under a temporary home, spoken to with
@@ -20,6 +22,7 @@ mod support;
 
 use std::{path::PathBuf, sync::Arc};
 
+use futures::StreamExt as _;
 use ganja_core::{
     Engine,
     config::{DialogExpiry, InboundPolicy},
@@ -27,10 +30,13 @@ use ganja_core::{
     teammate::TeammateRegistry,
     tool::Registry,
 };
-use ganja_protocol::{HoldCause, PolicySource};
+use ganja_protocol::{Command, HeldDecision, HoldCause, PolicySource};
 use ganja_serve::Listen;
 use ganja_testkit::{ScriptedProvider, says};
-use support::{SOCKET_URL, socket_client, with_listen};
+use support::{
+    DEADLINE, Frame, SOCKET_URL, base_url, drain_frames, loopback_config, socket_client,
+    with_listen,
+};
 
 /// The session every team here is led by — a fixed id, so the lead's name
 /// in every answer is a fixed thing the byte comparisons can trust.
@@ -468,4 +474,140 @@ async fn a_repeated_body_inside_the_window_answers_like_an_accept_and_lands_once
     assert_eq!(lead_inbox(&registry).len(), 1, "and it landed exactly once");
 
     server.shutdown().await.expect("the server stops");
+}
+
+// ---------------------------------------------------------------------------
+// Observability: the hold and its settlement on the event stream
+// ---------------------------------------------------------------------------
+
+/// One open `GET /event` connection, read frame by frame — the reader
+/// `tests/replay_identity.rs` drives a whole turn through, here spanning a
+/// hold and its settlement.
+struct SseReader {
+    // `axum::body::Bytes` is the same `bytes::Bytes` reqwest yields; naming
+    // it through axum keeps the bytes crate out of this manifest.
+    stream: futures::stream::BoxStream<'static, reqwest::Result<axum::body::Bytes>>,
+    buffer: Vec<u8>,
+    frames: Vec<Frame>,
+}
+
+impl SseReader {
+    fn new(response: reqwest::Response) -> Self {
+        Self {
+            stream: response.bytes_stream().boxed(),
+            buffer: Vec::new(),
+            frames: Vec::new(),
+        }
+    }
+
+    /// Reads until `done` says the frames collected so far are enough.
+    async fn read_until(&mut self, mut done: impl FnMut(&[Frame]) -> bool) -> &[Frame] {
+        while !done(&self.frames) {
+            let chunk = tokio::time::timeout(DEADLINE, self.stream.next())
+                .await
+                .expect("the stream should keep speaking within the deadline")
+                .expect("the stream should not end before the test does")
+                .expect("the transport should not fail");
+            self.buffer.extend_from_slice(&chunk);
+            self.frames.extend(drain_frames(&mut self.buffer));
+        }
+
+        &self.frames
+    }
+}
+
+/// The first engine event of `wanted` type among the message frames.
+fn first_event(frames: &[Frame], wanted: &str) -> Option<serde_json::Value> {
+    frames
+        .iter()
+        .filter(|frame| frame.event == "message")
+        .find_map(|frame| {
+            serde_json::from_str::<serde_json::Value>(&frame.data)
+                .ok()
+                .filter(|value| value["type"] == wanted)
+        })
+}
+
+/// A hold and its settlement reach the SSE stream: `peer_held` names the id
+/// and the cause the moment the POST is held, and a person's deny arrives
+/// as `peer_hold_settled` naming the same id — so an attached client can
+/// review holds it never polled for. The stream is TCP's and the POST is
+/// the socket's, one engine serving both, exactly as a lead session runs.
+#[tokio::test]
+async fn a_hold_and_its_settlement_reach_the_event_stream() {
+    let home = ganja_testkit::temp_dir();
+    let (engine, registry) = led_engine(
+        home.path(),
+        Some((InboundPolicy::Hold, PolicySource::Global)),
+    );
+    let path = socket_path(&home, "e.sock");
+    let socket = socket_server(&engine, &path).await;
+    let tcp = ganja_serve::serve(Arc::clone(&engine), loopback_config())
+        .await
+        .expect("the TCP server comes up");
+
+    // The stream first: registration precedes the response, so a reader
+    // that has the connected frame cannot miss what the POST publishes.
+    let response = reqwest::get(format!("{}/event", base_url(&tcp)))
+        .await
+        .expect("the event stream answers");
+    assert_eq!(response.status(), 200);
+    let mut reader = SseReader::new(response);
+    reader
+        .read_until(|frames| frames.iter().any(|frame| frame.event == "connected"))
+        .await;
+
+    let held = post(&socket_client(&path), &message("hold and watch")).await;
+    assert_eq!(held.status, 200);
+
+    let frames = reader
+        .read_until(|frames| first_event(frames, "peer_held").is_some())
+        .await;
+    let held_event = first_event(frames, "peer_held").expect("just read");
+    assert_eq!(held_event["session_id"], engine.session_id().as_str());
+    assert_eq!(held_event["from"], PEER);
+    assert_eq!(held_event["cause"]["kind"], "explicit");
+    assert_eq!(held_event["cause"]["source"], "global");
+    assert!(
+        held_event["expires_in_ms"].is_null(),
+        "an explicit hold installs no timer: {held_event}"
+    );
+
+    // The wire id names the engine's own hold — settle exactly that one.
+    let held_list = engine.held_messages();
+    assert_eq!(held_list.len(), 1);
+    assert_eq!(
+        serde_json::to_value(&held_list[0].id).expect("an id serializes"),
+        held_event["id"],
+        "the event names the entry the engine holds"
+    );
+    engine
+        .send(Command::SettleHeld {
+            id: held_list[0].id.clone(),
+            decision: HeldDecision::Deny,
+        })
+        .await
+        .expect("the settle is taken");
+
+    let frames = reader
+        .read_until(|frames| first_event(frames, "peer_hold_settled").is_some())
+        .await;
+    let settled = first_event(frames, "peer_hold_settled").expect("just read");
+    assert_eq!(
+        settled["id"], held_event["id"],
+        "the settlement names the hold"
+    );
+    assert_eq!(settled["outcome"], "denied");
+
+    assert!(
+        engine.held_messages().is_empty(),
+        "the hold left the engine's list"
+    );
+    assert!(
+        lead_inbox(&registry).is_empty(),
+        "and a denied socket-door hold wrote nothing"
+    );
+
+    tcp.shutdown().await.expect("the TCP server stops");
+    socket.shutdown().await.expect("the socket server stops");
 }
