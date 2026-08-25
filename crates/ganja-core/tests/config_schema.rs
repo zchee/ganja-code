@@ -165,7 +165,7 @@ const KITCHEN_SINK: &str = r#"{
     "notifications": ["turn-complete", "approval-requested"],
     "notification_method": "bel",
     "statusline": {
-      "elements": ["git", "model", "context", "rate", "tokens", "session", "cwd", "todos"],
+      "elements": ["git", "model", "context", "rate", "held", "tokens", "session", "cwd", "todos"],
       "max_width": 160,
       "detail": true
     }
@@ -420,6 +420,20 @@ fn the_schema_refuses_what_it_has_a_keyword_for() {
     // rides the kitchen sink above; these pin that widening the enum by one
     // name widened it by exactly one.
     for near_miss in ["ratelimit", "rate-limit", "rates"] {
+        let mut sink: Value =
+            serde_json::from_str(KITCHEN_SINK).expect("the fixture is valid JSON");
+        sink["tui"]["statusline"]["elements"] = json!([near_miss]);
+        assert!(
+            !validator.is_valid(&sink),
+            "{near_miss:?} is not the name the loader accepts, and the schema must \
+             not accept it either"
+        );
+    }
+
+    // The same discipline for the element D524's segment grew into. `held`
+    // itself rides the kitchen sink above; these pin that this widening too
+    // was by exactly one name.
+    for near_miss in ["hold", "helds", "held-count"] {
         let mut sink: Value =
             serde_json::from_str(KITCHEN_SINK).expect("the fixture is valid JSON");
         sink["tui"]["statusline"]["elements"] = json!([near_miss]);

@@ -1389,6 +1389,14 @@ pub enum StatuslineElement {
     Tasks,
     /// How many permission dialogs are waiting behind the open one.
     Dialogs,
+    /// How many inbound peer messages the admission gate is holding for
+    /// review (**D524**), as `N held` — present only while there are any.
+    ///
+    /// Naming it moves nothing by default: the absent-config bar carries the
+    /// segment exactly where it always did, beside [`Self::Dialogs`]. The
+    /// name is what lets a configured roster place and order the count like
+    /// every other element instead of inheriting the default bar's seat.
+    Held,
     /// How many teammates this session is leading (**D503**).
     ///
     /// Beside [`Self::Jobs`] and [`Self::Tasks`] because it answers their
@@ -3250,6 +3258,23 @@ mod tests {
         );
         assert_eq!(statusline.max_width, Some(120));
         assert_eq!(statusline.detail, Some(true));
+    }
+
+    /// D524's segment gained its element name: a roster places the held
+    /// count like any other element, so the loader accepts the word.
+    #[test]
+    fn a_statusline_roster_may_name_the_held_count() {
+        let config = parse(r#"{"tui": {"statusline": {"elements": ["held", "dialogs"]}}}"#)
+            .expect("it parses");
+
+        assert_eq!(
+            config
+                .tui
+                .statusline
+                .expect("the table was written")
+                .elements,
+            Some(vec![StatuslineElement::Held, StatuslineElement::Dialogs]),
+        );
     }
 
     /// An element name nothing renders is refused naming it — serde's closed
