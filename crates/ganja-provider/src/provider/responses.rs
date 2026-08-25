@@ -1381,6 +1381,24 @@ impl Mapper for Mapping {
             // 2026-08-14). Unmapped, a gateway turn's thinking reached the
             // debug log and the pane stayed empty.
             REASONING_DELTA => self.thought(&chunk, events, REASONING_DELTA),
+            REASONING_TEXT_DELTA => self.thought(&chunk, events, REASONING_TEXT_DELTA),
+            REASONING_TEXT_DONE => self.thought_break(events),
+            // Structure and lifecycle announcements whose content arrives on
+            // the arms above, named so the debug log stops calling them
+            // unmapped (4855 lines on 2026-08-25): the stream's opening
+            // pair, a content part's own open and close, the whole-text and
+            // whole-arguments echoes of what already streamed, the summary
+            // blocks' own closes — the `.added` boundary is the one that
+            // breaks — and the gateway's keepalive.
+            "response.created"
+            | "response.in_progress"
+            | "response.content_part.added"
+            | "response.content_part.done"
+            | "response.output_text.done"
+            | "response.function_call_arguments.done"
+            | "response.reasoning_summary_text.done"
+            | "response.reasoning_summary_part.done"
+            | "keepalive" => {}
             "response.output_item.added" => self.opened(&chunk["item"], events),
             "response.function_call_arguments.delta" => self.filled(&chunk, events),
             "response.output_item.done" => self.closed(&chunk["item"], events),
@@ -1770,6 +1788,17 @@ const REASONING_SUMMARY_DELTA: &str = "response.reasoning_summary_text.delta";
 /// separator, so this frame is the only place the stream says one thought
 /// ended and another began.
 const REASONING_SUMMARY_PART: &str = "response.reasoning_summary_part.added";
+
+/// The third spelling of readable thinking, live-observed from
+/// `google/gemini-3.7-flash` over the OpenRouter gateway (2026-08-25): the
+/// model's thinking streamed under this name and nothing else, so unmapped it
+/// reached the debug log and the pane stayed empty — `REASONING_DELTA`'s
+/// story, one vendor later.
+const REASONING_TEXT_DELTA: &str = "response.reasoning_text.delta";
+
+/// The close of one `REASONING_TEXT_DELTA` block, and the only boundary that
+/// stream carries between two thoughts.
+const REASONING_TEXT_DONE: &str = "response.reasoning_text.done";
 
 /// OpenRouter's name for the same fragment, published in that vendor's own
 /// streaming example and carried in the same `delta` field
@@ -2968,6 +2997,45 @@ mod tests {
                 &ProviderEvent::ReasoningDelta("Planning".to_owned()),
                 &ProviderEvent::ReasoningBreak,
                 &ProviderEvent::ReasoningDelta("Designing".to_owned()),
+            ],
+            "got {seen:?}"
+        );
+    }
+
+    /// The spelling Gemini serves over the gateway: thinking streams as
+    /// `response.reasoning_text.delta` and its blocks close with `.done`,
+    /// which is the only boundary that stream carries — mapped, the two
+    /// thoughts stay two thoughts; unmapped, the pane stayed empty
+    /// (2026-08-25).
+    #[tokio::test]
+    async fn a_reasoning_text_stream_breaks_at_its_own_block_close() {
+        let seen = events(concat!(
+            r#"data: {"type":"response.reasoning_text.delta","item_id":"rs_1","delta":"Weighing"}"#,
+            "\n\n",
+            r#"data: {"type":"response.reasoning_text.done","item_id":"rs_1"}"#,
+            "\n\n",
+            r#"data: {"type":"response.reasoning_text.delta","item_id":"rs_2","delta":"Steeping"}"#,
+            "\n\n",
+            r#"data: {"type":"response.completed","response":{}}"#,
+            "\n\n",
+        ))
+        .await;
+
+        let thoughts: Vec<&ProviderEvent> = seen
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    ProviderEvent::ReasoningDelta(_) | ProviderEvent::ReasoningBreak
+                )
+            })
+            .collect();
+        assert_eq!(
+            thoughts,
+            vec![
+                &ProviderEvent::ReasoningDelta("Weighing".to_owned()),
+                &ProviderEvent::ReasoningBreak,
+                &ProviderEvent::ReasoningDelta("Steeping".to_owned()),
             ],
             "got {seen:?}"
         );
