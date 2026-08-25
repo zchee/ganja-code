@@ -1541,7 +1541,11 @@ impl std::error::Error for UnknownPermissionMode {}
 /// Defined once, here: it crosses on [`Event::PeerHeld`] and is rendered by
 /// the review surfaces, while the engine's admission resolver imports it and
 /// keeps its resolver-only siblings — policy, receiver class, verdict — to
-/// itself. The parity causes are the reference's matrix (v2 §"The parity
+/// itself. Three surfaces render it — the approval modal's sentence, the
+/// `/held` listing's short label, the sender's held note — each in its own
+/// words, deliberately: no shared `Display` here, because a spelling sized
+/// for a modal, a column and a wire note at once would serve none of those
+/// readers. The parity causes are the reference's matrix (v2 §"The parity
 /// matrix, and when it actually applies", evidence 620535-620617); which of
 /// them installs an expiry timer is the `expires_in_ms` contract on
 /// [`Event::PeerHeld`], not this enum's.

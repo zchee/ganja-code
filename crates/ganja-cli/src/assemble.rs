@@ -101,6 +101,15 @@ pub(crate) fn assemble(cwd: &Path, overrides: &Overrides) -> Result<Assembled> {
     .with_snapshots(snapshots)
     .with_concurrency(config.agents.concurrency())
     .with_defer_threshold(config.defer_threshold())
+    // The admission gate's two config knobs (**D523**, **D524**), the
+    // screen's own line kept in the half that must never drift. Inert today:
+    // a headless `run` or `serve` installs no teammates and leads no team,
+    // so nothing can arrive to gate (the plan's M8 line) — wired anyway so a
+    // later serve-led team reads the person's policy rather than the unset
+    // default. The D479 classification seed is deliberately *not* here:
+    // `--auto` is `run`'s own state, seeded at its call site beside its
+    // auto-refuse permission rules, so the seed has exactly one road.
+    .with_inbound_policy(config.inbound_policy(), config.dialog_expiry())
     .with_small_model(config.small_model.clone())
     // The same value the skill tool above was installed over, so a `$name`
     // invocation and a `skill` call load from one list.

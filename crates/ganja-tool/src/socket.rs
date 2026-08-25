@@ -54,11 +54,14 @@
 //! directory of its own — which is inside the trust line the socket's own
 //! route table draws (a same-uid peer may reach **any lead of this user's,
 //! in any project on this machine — not only this team's members** — and
-//! nothing else), and no listener anybody else set up. Three rules bound
+//! nothing else), and no listener anybody else set up. Four rules bound
 //! the crossing and each covers its own edge, none the others': this gate
 //! bounds *where* a message may go; the deliverer bounds *what a peer may
-//! answer*; and the send side is bounded by **nothing yet** — no rate, no
-//! inbox ceiling, no batch cap (bead `ganja-code-qfk`).
+//! answer*; the receiver's admission gate bounds *what an inbox admits* —
+//! policy, guards and a queue cap in front of every out-of-team delivery
+//! (**D523**–**D525**, `ganja-core`'s `teammate/inbound.rs`); and the send
+//! side is bounded by **nothing yet** — no per-inbox byte ceiling at the
+//! mailbox write, no batch cap on delivery (bead `ganja-code-qfk`).
 //!
 //! The directory clause is checked, not trusted: a symlink, a foreign owner,
 //! or a mode looser than `0700` is refused by name. The check→bind window,
