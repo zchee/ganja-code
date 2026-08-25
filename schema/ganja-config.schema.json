@@ -74,6 +74,14 @@
       "description": "How this session runs the teammates it spawns, as opposed to what they are. Plural for `agents`' reason: the singular is what a later per-name teammate map will want.",
       "default": {}
     },
+    "cross_session_inbound": {
+      "$ref": "#/$defs/InboundPolicy",
+      "description": "What this session, leading a team, does with a peer message arriving from outside that team: accept delivers it, hold parks it for a person's review, refuse drops it. Absent is unset — the engine then decides per receiver class, and an explicit value always wins over that default. The one key whose project tier diverges from later-beats-earlier: a project file replaces the standing value only when strictly more severe (accept < hold < refuse), so a checkout can tighten but never loosen, while the file GANJA_CONFIG names outranks the global config home ordinarily. Not a key a plugin can contribute."
+    },
+    "dialog_expiry": {
+      "$ref": "#/$defs/DialogExpiry",
+      "description": "How long a held peer message's review dialog waits for a person before it expires. Absent is \"5m\"; \"never\" is no deadline at all. Trusted tiers only — the global config home and the file GANJA_CONFIG names may set it, and a project file that sets it fails the load naming this key and that file: a checkout must not stretch or shrink the human review window. Not a key a plugin can contribute."
+    },
     "permission": {
       "$ref": "#/$defs/PermissionConfig",
       "description": "Permission rules layered over the built-in ones.",
@@ -353,6 +361,29 @@
       "enum": [
         "dark",
         "light"
+      ]
+    },
+    "InboundPolicy": {
+      "title": "Cross-session inbound policy",
+      "description": "What to do with a peer message from outside this session's own team: deliver it, park it for review, or drop it. accept < hold < refuse is the tightening order the project tier merges under.",
+      "$comment": "crates/ganja-core/src/config.rs:1121-1128 (InboundPolicy; Deserialize is hand-written so a bad value names the key).",
+      "type": "string",
+      "enum": [
+        "accept",
+        "hold",
+        "refuse"
+      ]
+    },
+    "DialogExpiry": {
+      "title": "Held-dialog expiry",
+      "description": "How long a held peer message's review dialog waits: a minute, five, ten, or never — no deadline at all. Absent is \"5m\".",
+      "$comment": "crates/ganja-core/src/config.rs:1187-1197 (DialogExpiry; Deserialize is hand-written so a bad value names the key).",
+      "type": "string",
+      "enum": [
+        "60s",
+        "5m",
+        "10m",
+        "never"
       ]
     },
     "PermissionAction": {

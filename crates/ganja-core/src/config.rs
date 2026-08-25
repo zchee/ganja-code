@@ -760,6 +760,72 @@ pub struct Config {
     /// they are; see [`TeammateConfig`] (**D509**).
     #[serde(default)]
     pub teammates: TeammateConfig,
+    /// What this session, leading a team, does with a peer message arriving
+    /// from **outside** that team, before anything is delivered (**D523**):
+    /// `"accept"` delivers it, `"hold"` parks it for a person's review,
+    /// `"refuse"` drops it.
+    ///
+    /// **Absent is unset**, and unset is not a fourth policy: the engine then
+    /// decides per receiver class, and an explicit value here always wins
+    /// over that default — v2 §"Explicit values", evidence 680146-680160.
+    ///
+    /// # Which tier may say what
+    ///
+    /// The reference resolves this key through a chain ganja's tiers map
+    /// onto almost exactly — *almost*, because **ganja has no managed-policy
+    /// tier**: nothing here answers to the reference's administrator-owned
+    /// top tier, and this table says so rather than leaving the row implied.
+    ///
+    /// | reference tier | ganja tier | rule |
+    /// |---|---|---|
+    /// | managed policy | **none** | — |
+    /// | the `--settings` file | the file [`CONFIG_ENV`] or `--config` names | outranks the global tier, by merge order |
+    /// | user settings | the global config home | ordinary overlay |
+    /// | repository settings | the project files | **tighten-only**, per file |
+    ///
+    /// The project tier is the one tier whose author is the checkout rather
+    /// than the person running it, which is why it diverges from this file's
+    /// ordinary later-wins: a project file replaces the standing value only
+    /// when **strictly more severe** on the order `accept (0) < hold (1) <
+    /// refuse (2)` — a repository can tighten a user's choice but never
+    /// loosen it (v2 §"Source precedence and repository tightening (`MRf`)",
+    /// evidence 620378-620481). An unset standing value has nothing to
+    /// loosen, so the first tier to say anything — a project file included —
+    /// establishes the value; the ancestor walk can find several project
+    /// files, and each may only escalate further. `merge_project` is the
+    /// seam.
+    ///
+    /// Not a key a plugin can contribute: [`crate::plugin`]'s `apply` merges
+    /// per surface, and D473's six surfaces do not include it.
+    pub cross_session_inbound: Option<InboundPolicy>,
+    /// How long a **held** peer message's review dialog waits for a person
+    /// before it expires (**D523**): `"60s"`, `"5m"`, `"10m"`, or
+    /// `"never"`, which maps to no deadline at all.
+    ///
+    /// **Absent is `"5m"`** — [`Config::dialog_expiry()`] is what reads it —
+    /// and an [`Option`] rather than a bare value for [`Config::snapshot`]'s
+    /// reason: a tier that says nothing has to leave the tier below it
+    /// alone. The vocabulary, the default and the trusted-sources
+    /// restriction are all v2 §"`dialogExpiry` is narrower than its name
+    /// suggests", evidence 322685-322708.
+    ///
+    /// **Trusted sources only.** The global config home and the file
+    /// [`CONFIG_ENV`] or `--config` names may set it; a project file that
+    /// sets it fails the load naming this key and that file — a checkout
+    /// must not stretch or shrink the human review window. The reference's
+    /// own restriction is the same shape (local and project settings cannot
+    /// set it, same section); ganja refuses loudly where the reference
+    /// ignores, because this file's whole posture is that an ignored setting
+    /// is one its author still believes applies.
+    ///
+    /// The reference also honors an environment override for this deadline
+    /// (`CLAUDE_CODE_USER_DIALOG_TIMEOUT_MS`, same section), and it is
+    /// **deliberately not ported**: ganja's environment surface is curated,
+    /// no ruling asked for it, and a test that needs a short deadline sets
+    /// this key. Not a key a plugin can contribute either:
+    /// [`crate::plugin`]'s `apply` merges per surface, and D473's six
+    /// surfaces do not include it.
+    pub dialog_expiry: Option<DialogExpiry>,
     /// Permission rules layered over the built-in ones.
     #[serde(default)]
     pub permission: PermissionConfig,
@@ -1042,6 +1108,137 @@ impl TeammateConfig {
     #[must_use]
     pub fn shim_turn_timeout(&self) -> Option<std::time::Duration> {
         self.shim_turn_timeout.map(std::time::Duration::from_secs)
+    }
+}
+
+/// Policy for a peer message arriving from outside this session's own team
+/// (**D523**): the vocabulary of the `cross_session_inbound` key, and of
+/// nothing else.
+///
+/// [`InboundPolicy::severity`] carries the tightening order the project tier
+/// merges under; the config spellings are the lowercase variant names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InboundPolicy {
+    /// Deliver it.
+    Accept,
+    /// Park it for a person's review.
+    Hold,
+    /// Drop it.
+    Refuse,
+}
+
+impl InboundPolicy {
+    /// Where this value sits on the tightening order a project file merges
+    /// under: `accept (0) < hold (1) < refuse (2)` — v2 §"Source precedence
+    /// and repository tightening (`MRf`)", evidence 620378-620481. Spelled
+    /// as a number rather than an `Ord` derive, so the order cannot drift
+    /// under a reordered declaration.
+    #[must_use]
+    pub const fn severity(self) -> u8 {
+        match self {
+            Self::Accept => 0,
+            Self::Hold => 1,
+            Self::Refuse => 2,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for InboundPolicy {
+    /// Hand-written for [`Notifications`]'s reason taken one step further:
+    /// the derived refusal names the value and the vocabulary but not the
+    /// key, and `cross_session_inbound` is a policy line somebody will grep
+    /// a config for. The type belongs to exactly one key, which is what lets
+    /// the key's name live in its error honestly.
+    fn deserialize<D: de::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        /// The one spelling the key takes.
+        struct Shape;
+
+        impl Visitor<'_> for Shape {
+            type Value = InboundPolicy;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("cross_session_inbound as \"accept\", \"hold\" or \"refuse\"")
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                match value {
+                    "accept" => Ok(InboundPolicy::Accept),
+                    "hold" => Ok(InboundPolicy::Hold),
+                    "refuse" => Ok(InboundPolicy::Refuse),
+                    other => Err(E::custom(format!(
+                        "cross_session_inbound is \"accept\", \"hold\" or \"refuse\", \
+                         not {other:?}"
+                    ))),
+                }
+            }
+        }
+
+        deserializer.deserialize_str(Shape)
+    }
+}
+
+/// How long a held peer message's review dialog waits (**D523**): the
+/// vocabulary of the `dialog_expiry` key, and of nothing else.
+///
+/// The four spellings are the reference's own — v2 §"`dialogExpiry` is
+/// narrower than its name suggests", evidence 322685-322708 — and
+/// [`DialogExpiry::deadline`] is their mapping onto wall-clock time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DialogExpiry {
+    /// `"60s"`.
+    OneMinute,
+    /// `"5m"`, what an absent key means.
+    #[default]
+    FiveMinutes,
+    /// `"10m"`.
+    TenMinutes,
+    /// `"never"`: no deadline at all.
+    Never,
+}
+
+impl DialogExpiry {
+    /// The wall-clock deadline this value names, or [`None`] for
+    /// [`DialogExpiry::Never`] — `never` maps to no deadline.
+    #[must_use]
+    pub const fn deadline(self) -> Option<std::time::Duration> {
+        match self {
+            Self::OneMinute => Some(std::time::Duration::from_secs(60)),
+            Self::FiveMinutes => Some(std::time::Duration::from_secs(5 * 60)),
+            Self::TenMinutes => Some(std::time::Duration::from_secs(10 * 60)),
+            Self::Never => None,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for DialogExpiry {
+    /// Hand-written for [`InboundPolicy`]'s reason: the refusal names the
+    /// key, which one type serving one key can do honestly.
+    fn deserialize<D: de::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        /// The one spelling the key takes.
+        struct Shape;
+
+        impl Visitor<'_> for Shape {
+            type Value = DialogExpiry;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("dialog_expiry as \"60s\", \"5m\", \"10m\" or \"never\"")
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                match value {
+                    "60s" => Ok(DialogExpiry::OneMinute),
+                    "5m" => Ok(DialogExpiry::FiveMinutes),
+                    "10m" => Ok(DialogExpiry::TenMinutes),
+                    "never" => Ok(DialogExpiry::Never),
+                    other => Err(E::custom(format!(
+                        "dialog_expiry is \"60s\", \"5m\", \"10m\" or \"never\", \
+                         not {other:?}"
+                    ))),
+                }
+            }
+        }
+
+        deserializer.deserialize_str(Shape)
     }
 }
 
@@ -1420,13 +1617,23 @@ impl Config {
         self.webfetch.allow_private == Some(true)
     }
 
+    /// The held-dialog review window this config asks for, or the default
+    /// when it asks for nothing — [`DialogExpiry::FiveMinutes`], the
+    /// `dialog_expiry` key's own doc carries why (**D523**).
+    #[must_use]
+    pub fn dialog_expiry(&self) -> DialogExpiry {
+        self.dialog_expiry.unwrap_or_default()
+    }
+
     /// Loads the config for a session working in `cwd`.
     ///
     /// # Errors
     ///
     /// Returns [`ConfigError`] for a file that exists and cannot be read or
-    /// understood, including one naming a key this build does not have. A file
-    /// that is simply absent is not an error.
+    /// understood, including one naming a key this build does not have — or,
+    /// for a project file, one setting `dialog_expiry`, the key the project
+    /// tier may not set (**D523**). A file that is simply absent is not an
+    /// error.
     pub fn load(cwd: &Path) -> Result<Self, ConfigError> {
         Self::load_with(cwd, &Overrides::default())
     }
@@ -1449,11 +1656,21 @@ impl Config {
             }
         }
 
-        let mut tiers = global_files();
-        tiers.extend(explicit);
-        tiers.extend(project_files(cwd));
+        let mut trusted = global_files();
+        trusted.extend(explicit);
 
-        let mut config = merge_files(&tiers)?;
+        let mut config = merge_files(&trusted)?;
+        // The project tier does not join the trusted vector (**D523**): a
+        // checkout's file may only *tighten* `cross_session_inbound` and may
+        // not set `dialog_expiry` at all, and `merge_project` is where both
+        // rules live — every other key keeps the later-wins the trusted
+        // tiers just used. Per file, because the ancestor walk can find
+        // several and each may tighten further.
+        for path in project_files(cwd) {
+            if let Some(tier) = read(&path)? {
+                config.merge_project(tier, &path)?;
+            }
+        }
         // Installed plugins contribute here — below every explicit tier,
         // above the builtin defaults each surface resolves later — and per
         // surface rather than as a fourth tier through [`Config::merge`],
@@ -1497,6 +1714,12 @@ impl Config {
         );
         overlay(&mut self.teammates.shell, other.teammates.shell);
         overlay(&mut self.teammates.pane_share, other.teammates.pane_share);
+        // The two D523 keys ride this ordinary overlay between **trusted**
+        // tiers only: a project file reaches them through `merge_project`,
+        // which refuses one and tightens the other before handing the rest
+        // of its file back here.
+        overlay(&mut self.cross_session_inbound, other.cross_session_inbound);
+        overlay(&mut self.dialog_expiry, other.dialog_expiry);
         overlay(&mut self.tui.notifications, other.tui.notifications);
         overlay(
             &mut self.tui.notification_method,
@@ -1568,6 +1791,49 @@ impl Config {
                 self.instructions.push(instruction);
             }
         }
+    }
+
+    /// Overlays one **project-tier** file onto the running result (**D523**).
+    ///
+    /// The project tier is the one tier whose author is the checkout rather
+    /// than the person running it, so two keys diverge from [`Config::merge`]'s
+    /// later-wins: `dialog_expiry` is refused outright — the complaint names
+    /// the key and `path` — and `cross_session_inbound` replaces the running
+    /// result only when strictly more severe on [`InboundPolicy::severity`]'s
+    /// order, so a checkout can tighten the person's policy and never loosen
+    /// it. Every other key merges exactly as [`Config::merge`] merges it.
+    ///
+    /// # Errors
+    ///
+    /// [`ConfigError::Parse`] naming `dialog_expiry` and the file when the
+    /// file sets it.
+    fn merge_project(&mut self, mut other: Self, path: &Path) -> Result<(), ConfigError> {
+        if other.dialog_expiry.is_some() {
+            return Err(ConfigError::Parse {
+                path: path.to_owned(),
+                message: "dialog_expiry is set by trusted tiers only — the global config, \
+                          or the file GANJA_CONFIG or --config names — never by a project \
+                          file: a checkout must not stretch or shrink the human review \
+                          window"
+                    .to_owned(),
+            });
+        }
+        match (
+            self.cross_session_inbound,
+            other.cross_session_inbound.take(),
+        ) {
+            // An equal or less severe project value leaves the standing one:
+            // tightening is the only direction a checkout has.
+            (Some(standing), Some(incoming)) if incoming.severity() <= standing.severity() => {}
+            // A strictly more severe value replaces, and an unset standing
+            // value has nothing to loosen — the first tier to say anything
+            // establishes the policy.
+            (_, Some(incoming)) => self.cross_session_inbound = Some(incoming),
+            (_, None) => {}
+        }
+        self.merge(other);
+
+        Ok(())
     }
 }
 
@@ -2181,10 +2447,11 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        AgentMode, AgentsConfig, Config, ConfigError, Dialect, HookCommand, HookHandler,
-        HookMatcher, LspConfig, McpOauth, McpServer, NonZeroU64, NotificationEvent,
-        NotificationMethod, Notifications, Overrides, StatuslineConfig, StatuslineElement,
-        ThemeMode, existing, merge_files, model_bound_to, project_files, read, split_model,
+        AgentMode, AgentsConfig, Config, ConfigError, Dialect, DialogExpiry, HookCommand,
+        HookHandler, HookMatcher, InboundPolicy, LspConfig, McpOauth, McpServer, NonZeroU64,
+        NotificationEvent, NotificationMethod, Notifications, Overrides, StatuslineConfig,
+        StatuslineElement, ThemeMode, existing, merge_files, model_bound_to, project_files, read,
+        split_model,
     };
     use crate::permission::{Action, Rule};
 
@@ -2597,6 +2864,171 @@ mod tests {
             panic!("expected a parse failure, got {error:?}");
         };
         assert!(message.contains("teammates.shell"), "{message}");
+    }
+
+    #[test]
+    fn cross_session_inbound_parses_its_three_values_and_absent_is_unset() {
+        let config = parse(r#"{"model": "anthropic/claude-sonnet-5"}"#).expect("it parses");
+        assert_eq!(
+            config.cross_session_inbound, None,
+            "absent is unset, not a fourth policy"
+        );
+
+        for (spelled, parsed) in [
+            ("accept", InboundPolicy::Accept),
+            ("hold", InboundPolicy::Hold),
+            ("refuse", InboundPolicy::Refuse),
+        ] {
+            let config = parse(&format!(r#"{{"cross_session_inbound": "{spelled}"}}"#))
+                .expect("a policy this build has is a config value");
+            assert_eq!(config.cross_session_inbound, Some(parsed));
+        }
+    }
+
+    /// The refusal names the key — the whole reason the type deserializes by
+    /// hand — and lists the vocabulary, on a wrong string and a wrong type
+    /// alike.
+    #[test]
+    fn an_inbound_policy_nothing_admits_is_refused_naming_the_key() {
+        for bogus in [
+            r#"{"cross_session_inbound": "sometimes"}"#,
+            r#"{"cross_session_inbound": true}"#,
+        ] {
+            let error = parse(bogus).expect_err("a policy nothing admits is refused");
+            let ConfigError::Parse { message, .. } = &error else {
+                panic!("expected a parse failure, got {error:?}");
+            };
+            assert!(message.contains("cross_session_inbound"), "{message}");
+            for admitted in ["accept", "hold", "refuse"] {
+                assert!(
+                    message.contains(admitted),
+                    "and the refusal lists what would have worked: {message}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dialog_expiry_parses_its_four_values_and_absent_is_five_minutes() {
+        let config = parse(r#"{"model": "anthropic/claude-sonnet-5"}"#).expect("it parses");
+        assert_eq!(config.dialog_expiry, None, "absence travels to the merge");
+        assert_eq!(
+            config.dialog_expiry(),
+            DialogExpiry::FiveMinutes,
+            "and reads as the default"
+        );
+
+        for (spelled, parsed, seconds) in [
+            ("60s", DialogExpiry::OneMinute, Some(60)),
+            ("5m", DialogExpiry::FiveMinutes, Some(300)),
+            ("10m", DialogExpiry::TenMinutes, Some(600)),
+            ("never", DialogExpiry::Never, None),
+        ] {
+            let config = parse(&format!(r#"{{"dialog_expiry": "{spelled}"}}"#))
+                .expect("a window this build has is a config value");
+            assert_eq!(config.dialog_expiry, Some(parsed));
+            assert_eq!(
+                config
+                    .dialog_expiry()
+                    .deadline()
+                    .map(|deadline| deadline.as_secs()),
+                seconds,
+                "{spelled} and its wall-clock meaning travel together"
+            );
+        }
+
+        let error =
+            parse(r#"{"dialog_expiry": "90s"}"#).expect_err("a window nothing times is refused");
+        let ConfigError::Parse { message, .. } = &error else {
+            panic!("expected a parse failure, got {error:?}");
+        };
+        assert!(message.contains("dialog_expiry"), "{message}");
+        assert!(
+            message.contains("never"),
+            "and the refusal lists what would have worked: {message}"
+        );
+    }
+
+    /// The merge seam of the one deliberate divergence from later-wins: a
+    /// project file replaces the standing policy only when strictly more
+    /// severe, while the trusted tiers keep the ordinary overlay between
+    /// themselves. `tests/config_inbound_tiers.rs` proves the same through
+    /// the real loader, where the environment that orders the tiers can be
+    /// set.
+    #[test]
+    fn a_project_file_can_tighten_but_never_loosen() {
+        for (standing, project, expected) in [
+            ("accept", "refuse", InboundPolicy::Refuse),
+            ("refuse", "accept", InboundPolicy::Refuse),
+            ("hold", "accept", InboundPolicy::Hold),
+            ("hold", "refuse", InboundPolicy::Refuse),
+            ("refuse", "refuse", InboundPolicy::Refuse),
+        ] {
+            let mut merged = parse(&format!(r#"{{"cross_session_inbound": "{standing}"}}"#))
+                .expect("the trusted tier parses");
+            merged
+                .merge_project(
+                    parse(&format!(r#"{{"cross_session_inbound": "{project}"}}"#))
+                        .expect("the project tier parses"),
+                    Path::new("ganja.jsonc"),
+                )
+                .expect("tightening is never an error");
+            assert_eq!(
+                merged.cross_session_inbound,
+                Some(expected),
+                "{standing} under a project {project}"
+            );
+        }
+
+        // An unset standing value has nothing to loosen: the first file to
+        // say anything establishes the policy.
+        let mut merged = parse("{}").expect("an empty config parses");
+        merged
+            .merge_project(
+                parse(r#"{"cross_session_inbound": "accept"}"#).expect("it parses"),
+                Path::new("ganja.jsonc"),
+            )
+            .expect("establishing a value is not loosening one");
+        assert_eq!(merged.cross_session_inbound, Some(InboundPolicy::Accept));
+
+        // Between trusted tiers the key keeps later-wins — the explicit
+        // `GANJA_CONFIG` file outranks the global one by merge order, in the
+        // loosening direction too, because both are the person's own files.
+        let mut merged = parse(r#"{"cross_session_inbound": "refuse"}"#).expect("it parses");
+        merged.merge(parse(r#"{"cross_session_inbound": "accept"}"#).expect("it parses"));
+        assert_eq!(merged.cross_session_inbound, Some(InboundPolicy::Accept));
+
+        // And every other key still merges ordinarily on the project path.
+        let mut merged = parse(r#"{"model": "anthropic/claude-sonnet-5"}"#).expect("it parses");
+        merged
+            .merge_project(
+                parse(r#"{"model": "openai/gpt-5.6"}"#).expect("it parses"),
+                Path::new("ganja.jsonc"),
+            )
+            .expect("an ordinary key is no error");
+        assert_eq!(merged.model.as_deref(), Some("openai/gpt-5.6"));
+    }
+
+    /// The other divergence at the same seam: the error names the key and
+    /// the file, and the same value stays a trusted tier's to set.
+    #[test]
+    fn a_project_dialog_expiry_is_refused_by_name() {
+        let mut merged = parse("{}").expect("an empty config parses");
+        let project = parse(r#"{"dialog_expiry": "60s"}"#).expect("the value itself parses");
+
+        let error = merged
+            .merge_project(project, Path::new("/checkout/ganja.jsonc"))
+            .expect_err("a checkout must not size the review window");
+        let ConfigError::Parse { path, message } = &error else {
+            panic!("expected a parse failure, got {error:?}");
+        };
+        assert_eq!(path, Path::new("/checkout/ganja.jsonc"));
+        assert!(message.contains("dialog_expiry"), "{message}");
+
+        // The same key between trusted tiers is an ordinary overlay.
+        let mut merged = parse(r#"{"dialog_expiry": "10m"}"#).expect("it parses");
+        merged.merge(parse(r#"{"dialog_expiry": "60s"}"#).expect("it parses"));
+        assert_eq!(merged.dialog_expiry(), DialogExpiry::OneMinute);
     }
 
     /// `true` is both moments and `false` is none — the same answer absent
