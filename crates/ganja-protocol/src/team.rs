@@ -19,7 +19,8 @@
 //! frames and the two `sandbox_*` frames keep camelCase, and
 //! `permission_request`/`permission_response` keep the snake_case Claude's
 //! constructor-built pair happens to use. The inconsistency is the wire's,
-//! not this module's, and every golden test below pins one half of it.
+//! not this module's, and every golden test in `team_tests.rs` pins one
+//! half of it.
 //!
 //! One type here carries **no serde derives at all**, which is a deliberate
 //! exception to this crate's rule that every type round-trips. [`LeadFrame`]

@@ -139,7 +139,7 @@ impl Tool for GlobTool {
 /// path matches a glob override, then matching stops"), which runs before
 /// either the ignore-file check or the hidden check. Upstream's `--glob`
 /// flag is the identical mechanism, so a pattern naming a dotfile or a
-/// gitignored file directly still finds it — see the tests below.
+/// gitignored file directly still finds it — see `glob_tests.rs`.
 fn walk(
     search: &Path,
     pattern: &str,

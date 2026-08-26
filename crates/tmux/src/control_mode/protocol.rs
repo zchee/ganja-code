@@ -27,7 +27,8 @@
 //! accepts the first matching terminator — ported verbatim from Go's
 //! `sameMarkerIdentity` doc comment, including its caveat that a payload
 //! mimicking a *different* command's end marker must not terminate the
-//! active block (see the `mismatched_end_marker_remains_output` test below).
+//! active block (see `mismatched_end_marker_remains_output` in
+//! `protocol_tests.rs`).
 
 use crate::{
     control_mode::notification::{self, Notification},

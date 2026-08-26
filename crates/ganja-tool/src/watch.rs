@@ -169,7 +169,7 @@ async fn run(
 ///
 /// A function rather than a loop inside [`run`] so a test can hold the sender
 /// and decide exactly what is read and when; dropping that sender ends it,
-/// which is what makes the assertions below deterministic.
+/// which is what makes `watch_tests.rs`'s assertions deterministic.
 pub(crate) async fn register_reads<W: notify::Watcher>(
     mut reads: mpsc::UnboundedReceiver<PathBuf>,
     mut registrar: Registrar<W>,

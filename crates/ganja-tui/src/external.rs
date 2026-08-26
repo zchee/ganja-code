@@ -10,7 +10,7 @@
 //! gives it back, and it is exercised by hand rather than by a test — a test
 //! that spawned a real editor would be testing the machine it ran on. What a
 //! test *can* pin is that the seed a session hands over comes back verbatim,
-//! and that is what the round-trip test below does.
+//! and that is what `external_tests.rs`'s round-trip test does.
 
 use std::{
     io::{self, Write as _},

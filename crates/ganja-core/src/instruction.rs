@@ -220,7 +220,8 @@ pub(crate) fn joined(head: Option<&str>, suffix: Option<&str>) -> Option<String>
 /// [`suffix`], with the global instruction candidates and the skill roots
 /// handed in.
 ///
-/// The split is what lets the tests below prove the composition without the
+/// The split is what lets `instruction_tests.rs` prove the composition
+/// without the
 /// machine running them contributing an `AGENTS.md` of its own — and the
 /// global candidates really are an input to discovery rather than something it
 /// knows. The roots are an input for a second reason the candidates share:

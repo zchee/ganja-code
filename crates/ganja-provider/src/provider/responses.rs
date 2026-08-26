@@ -302,8 +302,8 @@ const ALLOWED_MODELS: [&str; 4] = ["gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.4", 
 /// absence costs nothing — the id stands in.
 ///
 /// Every id here has to satisfy `serves`: an offer this backend would then
-/// refuse is a lie the listing tells, and the test below is what keeps it
-/// honest.
+/// refuse is a lie the listing tells, and the test in `responses_tests.rs`
+/// is what keeps it honest.
 pub const SEAT_ROSTER: [&str; 5] = [
     "gpt-5.5",
     "gpt-5.6-sol",

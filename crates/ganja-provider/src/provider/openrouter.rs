@@ -99,7 +99,7 @@ use crate::provider::{
 /// spelling of ganja's own would silently cost this provider its sizing, its
 /// pricing and its auto-compaction. Upstream's `ProviderV2.ID.openrouter` is
 /// the same string, so a shared `auth.json` needs no alias either — see the
-/// test below, which pins both halves.
+/// test in `openrouter_tests.rs`, which pins both halves.
 pub const ID: &str = "openrouter";
 
 /// Environment variable carrying the credential.
