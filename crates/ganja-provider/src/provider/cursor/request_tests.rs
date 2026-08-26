@@ -1,0 +1,346 @@
+use std::collections::HashMap;
+
+use buffa::Message as _;
+
+use super::{
+    super::proto, ChatRequest, Message, context_answer, decode, fresh_id, kv_answer,
+    newest_user_text, refusal_answer, run_message,
+};
+use crate::protocol::Part;
+
+/// A two-message conversation whose newest user message has two text
+/// parts, the richest shape this assembly reads.
+fn request() -> ChatRequest {
+    let mut asked = Message::user("What does this crate do?");
+    asked.parts.push(Part::text("Answer briefly."));
+
+    ChatRequest {
+        effort_options: Default::default(),
+        model: "gpt-5.3-codex".to_owned(),
+        system: Some("You are terse.".to_owned()),
+        messages: vec![Message::user("An older question."), asked],
+        tools: Vec::new(),
+    }
+}
+
+#[test]
+fn the_assembled_bytes_decode_back_to_what_the_assembly_promised() {
+    let bytes = run_message(&request()).expect("the assembly encodes");
+    let decoded = proto::ClientMessage::decode_from_slice(&bytes).expect("what was sent decodes");
+
+    let run = decoded
+        .run_request
+        .as_option()
+        .expect("a run request first");
+    assert!(
+        run.conversation_state.is_set(),
+        "the state is present even when it holds nothing"
+    );
+
+    let model = run
+        .model_details
+        .as_option()
+        .expect("the model description");
+    assert_eq!(model.model_id.as_deref(), Some("gpt-5.3-codex"));
+    assert_eq!(model.display_name.as_deref(), Some("gpt-5.3-codex"));
+    assert_eq!(
+        run.requested_model
+            .as_option()
+            .and_then(|requested| requested.model_id.as_deref()),
+        Some("gpt-5.3-codex"),
+        "the model is named on both channels the server reads"
+    );
+
+    let user = run
+        .action
+        .as_option()
+        .and_then(|action| action.user_message_action.as_option())
+        .and_then(|action| action.user_message.as_option())
+        .expect("the user message rides the action");
+    assert_eq!(
+        user.text.as_deref(),
+        Some("What does this crate do?\n\nAnswer briefly."),
+        "the newest user message travels whole, part by part"
+    );
+    assert_eq!(
+        user.message_id.as_deref().map(str::len),
+        Some(36),
+        "the message is stamped in the shape the recorded client stamps"
+    );
+}
+
+#[test]
+fn the_system_prompt_never_rides_the_run_request() {
+    let bytes = run_message(&request()).expect("the assembly encodes");
+
+    let prompt = b"You are terse.";
+    assert!(
+        !bytes.windows(prompt.len()).any(|window| window == prompt),
+        "the prompt must not ride the allowlist-gated member the server refuses; \
+             its channel is the context answer"
+    );
+}
+
+#[test]
+fn the_context_answer_echoes_the_ids_and_carries_the_prompt_on_cloud_rule() {
+    let bytes = context_answer(
+        decode::ContextAsk {
+            id: Some(7),
+            exec_id: Some("exec-abc".to_owned()),
+        },
+        Some("You are terse."),
+    );
+    let decoded = proto::ClientMessage::decode_from_slice(&bytes).expect("what was sent decodes");
+
+    assert!(
+        decoded.run_request.as_option().is_none(),
+        "an answer is not a second run request"
+    );
+    let answer = decoded.exec_response.as_option().expect("the exec answer");
+    assert_eq!(answer.id, Some(7), "the id the server minted comes back");
+    assert_eq!(answer.exec_id.as_deref(), Some("exec-abc"));
+
+    let context = answer
+        .request_context_result
+        .as_option()
+        .and_then(|result| result.success.as_option())
+        .and_then(|success| success.request_context.as_option())
+        .expect("a success carrying the context");
+    assert_eq!(context.cloud_rule.as_deref(), Some("You are terse."));
+}
+
+/// The plugin's no-prompt answer sends the context message with
+/// `cloudRule` unset, and so does this one — present context, absent
+/// member, never an empty string pretending to be a prompt.
+#[test]
+fn a_promptless_turn_answers_with_a_present_but_empty_context() {
+    for system in [None, Some("")] {
+        let bytes = context_answer(
+            decode::ContextAsk {
+                id: None,
+                exec_id: None,
+            },
+            system,
+        );
+        let decoded = proto::ClientMessage::decode_from_slice(&bytes).expect("decodes");
+        let answer = decoded.exec_response.as_option().expect("the exec answer");
+        assert_eq!(
+            answer.id, None,
+            "an id the server never sent is not invented"
+        );
+
+        let context = answer
+            .request_context_result
+            .as_option()
+            .and_then(|result| result.success.as_option())
+            .and_then(|success| success.request_context.as_option())
+            .expect("the context is present even without a prompt");
+        assert_eq!(
+            context.cloud_rule, None,
+            "an absent prompt is absent, not empty"
+        );
+    }
+}
+
+/// The refusal's bytes decode back to the arms the shipped client's own
+/// descriptor declares, in the order that client writes them: the throw
+/// carrying the echoed id and a reason the server's agent loop can read,
+/// then the stream close that ends the exchange.
+#[test]
+fn a_refused_exec_is_a_throw_naming_the_kind_and_then_a_stream_close() {
+    let refused = refusal_answer(&decode::ExecRefusal {
+        id: Some(5),
+        kind: "shell_stream_args".to_owned(),
+    });
+    assert_eq!(refused.len(), 2, "a throw, and the close that ends it");
+
+    let decoded: Vec<proto::ClientMessage> = refused
+        .iter()
+        .map(|message| {
+            proto::ClientMessage::decode_from_slice(message).expect("what was sent decodes")
+        })
+        .collect();
+
+    for message in &decoded {
+        assert!(
+            message.run_request.as_option().is_none()
+                && message.exec_response.as_option().is_none()
+                && message.kv_response.as_option().is_none(),
+            "a refusal travels the control channel and no other"
+        );
+    }
+
+    let thrown = decoded[0]
+        .exec_control
+        .as_option()
+        .and_then(|control| control.throw.as_option())
+        .expect("the throw first");
+    assert_eq!(thrown.id, Some(5), "the id the server minted comes back");
+    let reason = thrown
+        .error
+        .as_deref()
+        .expect("a reason, because the reason is the whole message");
+    assert!(
+        reason.contains("ganja") && reason.contains("shell_stream_args"),
+        "the refusal names who refused and what: {reason}"
+    );
+
+    let closed = decoded[1]
+        .exec_control
+        .as_option()
+        .expect("the control channel again");
+    assert!(
+        closed.throw.as_option().is_none(),
+        "the close is the exchange ending, not a second failure"
+    );
+    assert_eq!(
+        closed.stream_close.as_option().and_then(|close| close.id),
+        Some(5)
+    );
+
+    // The arm numbers themselves, on the wire: exec_control = 5 wraps
+    // the ClientMessage (tag 0x2a), stream_close = 1 (0x0a) and
+    // throw = 2 (0x12) are the arms inside it, and id = 1 (0x08) is the
+    // echo. The close carries nothing else, so its six bytes are the
+    // whole message.
+    assert_eq!(refused[1], b"\x2a\x04\x0a\x02\x08\x05");
+    // The throw's own length varies with the reason, so only its tags
+    // are fixed: byte 1 is that length.
+    assert_eq!(refused[0][0], 0x2a, "exec_control = 5, length-delimited");
+    assert_eq!(refused[0][2], 0x12, "throw = 2, length-delimited");
+}
+
+/// An id the server never sent is not invented on the refusal channel
+/// either — the same discipline the context and kv answers hold.
+#[test]
+fn a_refusal_for_an_exec_without_an_id_invents_none() {
+    let refused = refusal_answer(&decode::ExecRefusal {
+        id: None,
+        kind: "no recognizable kind".to_owned(),
+    });
+
+    let decoded = proto::ClientMessage::decode_from_slice(&refused[0]).expect("decodes");
+    let thrown = decoded
+        .exec_control
+        .as_option()
+        .and_then(|control| control.throw.as_option())
+        .expect("the throw");
+    assert_eq!(thrown.id, None);
+    assert!(
+        thrown
+            .error
+            .as_deref()
+            .is_some_and(|reason| reason.contains("no recognizable kind")),
+        "an unnameable kind is still named as far as it can be: {thrown:?}"
+    );
+}
+
+/// The plugin's kv semantics, end to end: the set is stored and acked
+/// with the empty result, and the get that follows is answered with the
+/// bytes the server handed over — id echoed on each, because the id is
+/// how the server matches answer to question.
+#[test]
+fn a_kv_set_is_stored_and_acked_and_the_get_that_follows_returns_it() {
+    let mut blobs = HashMap::new();
+
+    let stored = kv_answer(
+        decode::KvAsk {
+            id: Some(11),
+            op: decode::KvOp::Set {
+                blob_id: b"blob-a".to_vec(),
+                data: b"opaque-state".to_vec(),
+            },
+        },
+        &mut blobs,
+    );
+    let decoded = proto::ClientMessage::decode_from_slice(&stored).expect("decodes");
+    assert!(
+        decoded.run_request.as_option().is_none() && decoded.exec_response.as_option().is_none(),
+        "a kv answer is a kv answer and nothing else"
+    );
+    let answer = decoded.kv_response.as_option().expect("the kv answer");
+    assert_eq!(answer.id, Some(11), "the id the server minted comes back");
+    assert!(
+        answer.set_blob_result.is_set(),
+        "the ack is the present-but-empty result the plugin sends"
+    );
+    assert!(answer.get_blob_result.as_option().is_none());
+
+    let read = kv_answer(
+        decode::KvAsk {
+            id: Some(12),
+            op: decode::KvOp::Get {
+                blob_id: b"blob-a".to_vec(),
+            },
+        },
+        &mut blobs,
+    );
+    let decoded = proto::ClientMessage::decode_from_slice(&read).expect("decodes");
+    let answer = decoded.kv_response.as_option().expect("the kv answer");
+    assert_eq!(answer.id, Some(12));
+    assert_eq!(
+        answer
+            .get_blob_result
+            .as_option()
+            .and_then(|result| result.blob_data.as_deref()),
+        Some(b"opaque-state".as_slice()),
+        "the get reads back exactly what the set stored"
+    );
+}
+
+/// The plugin's miss shape (proxy.ts:1101-1105): the result message is
+/// present, the data member is absent — never empty bytes pretending to
+/// be a blob, and never a failure, because a fresh turn holding nothing
+/// is a state the server itself created.
+#[test]
+fn a_kv_get_before_any_set_answers_not_found_without_inventing_bytes() {
+    let mut blobs = HashMap::new();
+
+    let read = kv_answer(
+        decode::KvAsk {
+            id: None,
+            op: decode::KvOp::Get {
+                blob_id: b"blob-b".to_vec(),
+            },
+        },
+        &mut blobs,
+    );
+    let decoded = proto::ClientMessage::decode_from_slice(&read).expect("decodes");
+    let answer = decoded.kv_response.as_option().expect("the kv answer");
+    assert_eq!(
+        answer.id, None,
+        "an id the server never sent is not invented"
+    );
+    let result = answer
+        .get_blob_result
+        .as_option()
+        .expect("the result is present even without the blob");
+    assert_eq!(
+        result.blob_data, None,
+        "not-found is absence, not empty bytes"
+    );
+    assert!(blobs.is_empty(), "a get stores nothing");
+}
+
+#[test]
+fn the_newest_user_message_wins_and_other_roles_are_passed_over() {
+    let conversation = [
+        Message::user("first"),
+        Message::assistant("gpt-5.3-codex"),
+        Message::user("second"),
+    ];
+    assert_eq!(newest_user_text(&conversation), "second");
+    assert_eq!(newest_user_text(&[]), "");
+}
+
+#[test]
+fn a_minted_id_is_a_v4_uuid_and_two_are_two() {
+    let id = fresh_id().expect("entropy is available");
+    assert_eq!(id.len(), 36);
+    assert_eq!(id.as_bytes()[14], b'4', "the version nibble: {id}");
+    assert!(
+        matches!(id.as_bytes()[19], b'8' | b'9' | b'a' | b'b'),
+        "the variant bits: {id}"
+    );
+    assert_ne!(id, fresh_id().expect("entropy is available"));
+}

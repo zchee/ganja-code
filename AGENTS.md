@@ -214,7 +214,7 @@ The rule that keeps those two columns apart is a test rather than a comment — 
 
 ### Testing Requirements
 
-The four gates above, all green, before a phase is called done. Unit tests live beside the code in `#[cfg(test)] mod tests`; anything needing a real socket, a real filesystem layout, or process-wide environment mutation goes in a crate's `tests/`.
+The four gates above, all green, before a phase is called done. Unit tests live beside the code as a **sibling file**: `foo.rs` declares `#[cfg(test)] #[path = "foo_tests.rs"] mod tests;` and the tests live in `foo_tests.rs` next to it (the flat layout the OpenAI Codex CLI's Rust workspace uses, adopted 2026-08-27; `#[path]` on a non-inline `mod` resolves against the declaring file's own directory, which is what keeps the pair adjacent). The module is still `tests`, so `use super::*` privacy, insta snapshot names and nextest filters are exactly what the old inline form gave; a declaration needing visibility keeps it on the declaration (`teammate.rs`'s `pub(crate) mod tests;`, whose doubles other modules' tests import), and `#[cfg(test)]` *support* modules that are not test suites (`binder.rs`/`lister.rs`'s `mod fake`) stay inline. Anything needing a real socket, a real filesystem layout, or process-wide environment mutation goes in a crate's `tests/`.
 
 ### Common Patterns
 
