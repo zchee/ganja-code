@@ -59,8 +59,8 @@ use crate::{
     provider::{ChatRequest, Provider, ProviderError, ProviderEvent},
     storage::{SessionId, SessionInfo, Storage, StorageError},
     tool::{
-        Credentials, FileTimes, Registry, Tool, ToolCtx, ToolError, ToolOutput, question, shell,
-        skill,
+        Credentials, FileTimes, Registry, Tool, ToolCtx, ToolError, ToolOutput, question,
+        send_message, shell, skill,
     },
 };
 
@@ -305,6 +305,10 @@ pub(crate) struct SteerInput {
     /// teammate's sentence is not a reference to something that could be
     /// re-read later, it is what was said.
     pub(crate) peers: Vec<crate::protocol::team::PeerPayload>,
+    /// `@`-mention tokens naming a teammate or a live session, resolved the
+    /// same read-at-send way a prompt's are — see
+    /// [`TurnKind::Prompt::session_mentions`].
+    pub(crate) session_mentions: Vec<String>,
 }
 
 /// The running turn's mailbox: what has been handed to it, and what it has
@@ -797,6 +801,12 @@ pub(crate) enum TurnKind {
         /// Messages teammates wrote, which become [`PartBody::Peer`] parts on
         /// the user's message — see [`peer_parts`] (**D495**).
         peers: Vec<crate::protocol::team::PeerPayload>,
+        /// `@`-mention tokens naming a teammate or a live session, resolved
+        /// against [`Turn::identity`] when the message is built — see
+        /// [`session_mention_parts`] (**D528**, **D529**). Read-at-send, the
+        /// same rule a file mention follows: what the token points at now,
+        /// not at the moment it was typed.
+        session_mentions: Vec<String>,
     },
     /// Run a command the *user* typed and put it and its output in the
     /// transcript, without asking the model anything. Upstream's `!`
@@ -858,6 +868,19 @@ pub(crate) struct Turn {
     /// every engine whose frontend installed no roots: expansion then answers
     /// each name with the tool's own not-found sentence.
     pub(crate) skill_roots: skill::Roots,
+    /// Where this turn's `@`-mention tokens resolve a teammate or a live
+    /// session (**D528**), carried the way [`Turn::skill_roots`] is: cloned
+    /// from the engine at the turn's start, so a resolution never disagrees
+    /// mid-turn about which registry it is reading.
+    pub(crate) identity: Arc<crate::teammate::identity::Identity>,
+    /// Whether this turn's own `send_message` posts through the solo postbox
+    /// rather than a team's (**D530**), read once at the turn's start beside
+    /// [`Turn::teamless_send`] for the call-time posture computation
+    /// (**D531**) — the two together are the `(has-team, resolved key)` pair
+    /// `prepare`'s default hand-in reads.
+    pub(crate) teamless: bool,
+    /// The resolved `teamless_send` posture this turn runs under (**D531**).
+    pub(crate) teamless_send: crate::config::TeamlessSend,
     /// Which registry names are deferred and which this session has
     /// activated (**D492**), cloned from the engine at the turn's start the
     /// way [`Turn::tools`] is snapshotted — the candidates travel by value,
@@ -1027,6 +1050,16 @@ impl Turn {
             // invocation belongs to what a *person* typed. Its `skill` tool
             // still loads through the registry above.
             skill_roots: skill::Roots::none(),
+            // The parent's own resolver — a child's prompt carries no
+            // `@`-mentions of its own (`kind` above is always seeded with an
+            // empty `session_mentions`), so this is never consulted, but
+            // cloning it keeps a test's `--socket-dir` override reaching a
+            // child the same way it reaches the parent.
+            identity: Arc::clone(&host.identity),
+            // A child is offered no `send_message` (`postbox: None`, below),
+            // so neither of these is ever read.
+            teamless: false,
+            teamless_send: crate::config::TeamlessSend::default(),
             // The parent's own value: a child reads the same advertised
             // subset, and its activations land in the same session set — the
             // parent's next step sees them in memory, and the parent's
@@ -1256,8 +1289,90 @@ fn peer_parts(peers: &[crate::protocol::team::PeerPayload]) -> impl Iterator<Ite
     peers.iter().cloned().map(|peer| peer.into_part())
 }
 
+/// One `@`-mention token, resolved roster-first and then through **D528**'s
+/// identity index — the logic [`session_mention_parts`] runs inside a
+/// blocking task, factored out so that closure stays a one-line map.
+///
+/// Roster-first is the trust order the mention seam shares with the deliver
+/// arm (`crate::teammate::identity`'s own module doc): a roster name is
+/// **lead-assigned**, given at a spawn door a person consented at, while a
+/// registry name is **self-asserted** by whatever process wrote the file — so
+/// when both exist, the assigned one wins. A `uds:` token skips the roster
+/// entirely and resolves by socket path (**ADJ-3**): a person who pointed at
+/// an address meant that address, not a name to look up.
+fn mention_of(
+    identity: &crate::teammate::identity::Identity,
+    roster: Option<&[crate::tool::team::Peer]>,
+    own_session: &str,
+    name: String,
+) -> crate::teammate::identity::Mentioned {
+    use crate::teammate::identity::{Mentioned, address_path};
+
+    if let Some(path) = address_path(&name) {
+        let path = path.to_owned();
+        return Mentioned::of_address(&name, identity.resolve_address(&path, own_session));
+    }
+    if let Some(peer) = roster.and_then(|roster| {
+        roster
+            .iter()
+            .find(|peer| peer.name.eq_ignore_ascii_case(&name))
+    }) {
+        return Mentioned::Teammate {
+            name,
+            lead: peer.lead,
+        };
+    }
+
+    let resolution = identity.resolve(&name, own_session);
+    Mentioned::of_name(&name, resolution)
+}
+
+/// Turns the `@`-mention tokens that named a teammate or a live session into
+/// the reminder blocks the model reads (**D528**, **D529**), each rendered
+/// through [`identity::reminder`](crate::teammate::identity::reminder) — the
+/// one function, so a test compares against it rather than a second copy of
+/// its words.
+///
+/// **Consult-only, like a `$` invocation's own seam.** Resolving a name reads
+/// [`Turn::identity`]'s registry and this turn's own roster; nothing here
+/// pins, sends, raises a permission dialog, or fires a hook — the person
+/// typing the token is the consent, the same rule stated at `skill_parts`'s
+/// seam. A miss becomes the not-found rendering and the turn proceeds: a miss
+/// is information the model reads, never control flow.
+///
+/// Resolution is a filesystem read (`Identity`'s own module doc says why it
+/// is a fresh one every call), so the whole batch runs inside one
+/// [`tokio::task::spawn_blocking`] rather than parking this turn's own thread
+/// on it — the same hop `ganja-team`'s synchronous mailbox writes take
+/// (`crate::teammate::blocking_io`).
+async fn session_mention_parts(turn: &Turn, names: &[String]) -> Vec<Part> {
+    if names.is_empty() {
+        return Vec::new();
+    }
+
+    let roster = turn.postbox.as_ref().map(|postbox| postbox.roster());
+    let own_session = turn.session_id.as_str().to_owned();
+    let identity = Arc::clone(&turn.identity);
+    let names = names.to_vec();
+
+    let mentioned = tokio::task::spawn_blocking(move || {
+        names
+            .into_iter()
+            .map(|name| mention_of(&identity, roster.as_deref(), &own_session, name))
+            .collect::<Vec<_>>()
+    })
+    .await
+    .expect("resolving a session mention never panics");
+
+    mentioned
+        .iter()
+        .map(|mentioned| Part::text(crate::teammate::identity::reminder(mentioned)))
+        .collect()
+}
+
 /// Builds the user message a prompt or a steer becomes: the text where it
-/// belongs, then the teammate, mention and skill parts in that order.
+/// belongs, then the teammate, mention, skill and session-mention parts in
+/// that order.
 ///
 /// A delivery turn — the lead's inbox poll handing on what a teammate said —
 /// has no text of its own, and an empty text part is worth avoiding twice
@@ -1265,12 +1380,13 @@ fn peer_parts(peers: &[crate::protocol::team::PeerPayload]) -> impl Iterator<Ite
 /// would draw a `>` over nothing, which claims the person typed something they
 /// did not. A message with no peers keeps its empty text part exactly as it
 /// always did, so nothing outside a team changes.
-fn user_message(
+async fn user_message(
+    turn: &Turn,
     text: String,
     peers: &[crate::protocol::team::PeerPayload],
     mentions: &[crate::protocol::Mention],
     skills: &[String],
-    roots: &skill::Roots,
+    session_mentions: &[String],
 ) -> Message {
     let carries = peers.is_empty() || !text.trim().is_empty();
     let mut user = Message::user(text);
@@ -1279,7 +1395,9 @@ fn user_message(
     }
     user.parts.extend(peer_parts(peers));
     user.parts.extend(mention_parts(mentions));
-    user.parts.extend(skill_parts(roots, skills));
+    user.parts.extend(skill_parts(&turn.skill_roots, skills));
+    user.parts
+        .extend(session_mention_parts(turn, session_mentions).await);
 
     user
 }
@@ -1330,12 +1448,14 @@ async fn drain_steers(turn: &Turn) -> ControlFlow<Option<Outcome>, bool> {
         }
 
         let user = user_message(
+            turn,
             input.text,
             &input.peers,
             &input.mentions,
             &input.skills,
-            &turn.skill_roots,
-        );
+            &input.session_mentions,
+        )
+        .await;
 
         // Disk before the provider hears it, exactly as the opening prompt
         // reaches it: a `kill -9` mid-stream must still preserve what was
@@ -1963,15 +2083,18 @@ async fn drive(turn: &Turn) -> (Message, Option<Outcome>) {
         mentions,
         skills,
         peers,
+        session_mentions,
     } = &turn.kind
     {
         user_message(
+            turn,
             turn.prompt.clone(),
             peers,
             mentions,
             skills,
-            &turn.skill_roots,
+            session_mentions,
         )
+        .await
     } else {
         Message::user(turn.prompt.clone())
     };
@@ -3907,6 +4030,27 @@ async fn resolve_batch(
     }
 }
 
+/// The call-time effective default [`prepare`] hands `gate_with_default`
+/// (**D531**): [`Decision::Ask`] for exactly `send_message`, in exactly a
+/// teamless session whose resolved posture asks — otherwise [`None`], the
+/// static ladder untouched.
+///
+/// A function of `turn`'s own two fields rather than a value baked in at the
+/// turn's start, so the wording stays literal to the ruling's own "the
+/// engine computes the tool's effective default from live state ... at each
+/// `send_message` call" — though both inputs are in fact fixed for this
+/// turn's whole life, the same read-once-at-start discipline every other
+/// per-turn value here keeps. Everything above this rung is untouched by
+/// construction: an explicit rule, a stored "always allow", and a deny all
+/// still outrank whatever this returns — [`Permissions::gate_with_default`]'s
+/// own contract.
+fn effective_default(turn: &Turn, tool: &str) -> Option<Decision> {
+    (tool == send_message::ID
+        && turn.teamless
+        && turn.teamless_send == crate::config::TeamlessSend::Ask)
+        .then_some(Decision::Ask)
+}
+
 /// Parses, hooks and gates one call, and reports what is left to run.
 ///
 /// [`None`] is a call that is already over — unparseable, naming a tool that
@@ -3977,7 +4121,7 @@ async fn prepare(
         .permissions
         .lock()
         .expect("the permission rules are never poisoned")
-        .gate(&call.name, &args);
+        .gate_with_default(&call.name, &args, effective_default(turn, &call.name));
 
     match decision.action {
         Decision::Allow => {}
@@ -4976,7 +5120,7 @@ mod tests {
     use super::{
         Answered, BufferedCall, ChildParts, PendingReplies, Turn, TurnKind, add_usage, attached,
         context_carried, parse_args, peer_envelope, resolve, resolve_mentions, serialize_message,
-        sliced, title_model,
+        session_mention_parts, sliced, title_model, user_message,
     };
     use crate::{
         catalog,
@@ -4988,7 +5132,11 @@ mod tests {
         },
         provider::{FakeProvider, fake},
         subagent::{Host, Spawn},
-        tool::{Credentials, FileTimes, Registry, Tool, ToolCtx, ToolError, ToolOutput},
+        teammate::identity::{Identity, TAG},
+        tool::{
+            Credentials, FileTimes, Registry, Tool, ToolCtx, ToolError, ToolOutput,
+            team::{Address, Body, Peer, Postbox, Reserved, Sent, Undelivered},
+        },
     };
 
     /// Two dialogs stand open together, and each reply reaches the one it
@@ -5156,9 +5304,15 @@ mod tests {
                 mentions: Vec::new(),
                 skills: Vec::new(),
                 peers: Vec::new(),
+                session_mentions: Vec::new(),
             },
             tools: Arc::new(Registry::new(vec![tool])),
             skill_roots: crate::tool::skill::Roots::none(),
+            identity: Arc::new(crate::teammate::identity::Identity::new(
+                std::env::temp_dir(),
+            )),
+            teamless: false,
+            teamless_send: crate::config::TeamlessSend::default(),
             deferral: crate::tool::deferral::Deferral::none(),
             permissions: Arc::new(std::sync::Mutex::new(Permissions::default())),
             cwd: std::env::temp_dir(),
@@ -5712,6 +5866,7 @@ mod tests {
                     None,
                     "and I have it",
                 )],
+                session_mentions: Vec::new(),
             });
 
         let drained = super::drain_steers(&turn).await;
@@ -5767,6 +5922,7 @@ mod tests {
                     None,
                     "and I have it",
                 )],
+                session_mentions: Vec::new(),
             });
 
         let drained = super::drain_steers(&turn).await;
@@ -5800,17 +5956,25 @@ mod tests {
     /// The branch that keeps the text: real words beside a teammate's message
     /// keep their part, and keep it first — the model reads the person, then
     /// the peer.
-    #[test]
-    fn a_message_with_text_and_peers_keeps_the_text_part_first() {
+    #[tokio::test]
+    async fn a_message_with_text_and_peers_keeps_the_text_part_first() {
+        let (turn, _received) = turn_with(
+            CancellationToken::new(),
+            Arc::new(Effectful {
+                marker: PathBuf::from("/nonexistent"),
+            }),
+        );
         let user = super::user_message(
+            &turn,
             "what did w1 say".to_owned(),
             &[crate::protocol::team::PeerPayload::new(
                 "w1", None, None, "done",
             )],
             &[],
             &[],
-            &crate::tool::skill::Roots::none(),
-        );
+            &[],
+        )
+        .await;
         assert!(
             matches!(
                 user.parts.as_slice(),
@@ -5868,6 +6032,9 @@ mod tests {
             jobs: None,
             hooks: None,
             teammates: None,
+            identity: Arc::new(crate::teammate::identity::Identity::new(
+                std::env::temp_dir(),
+            )),
         };
 
         let spawn = Spawn {
@@ -5897,6 +6064,7 @@ mod tests {
                     mentions: Vec::new(),
                     skills: Vec::new(),
                     peers: Vec::new(),
+                    session_mentions: Vec::new(),
                 },
                 prompt: "do the thing".to_owned(),
                 permissions: Permissions::default(),
@@ -6228,6 +6396,176 @@ mod tests {
                 Some("anthropic/claude-haiku-4-5")
             ),
             "claude-haiku-4-5"
+        );
+    }
+
+    /// A postbox that never delivers, and counts every attempt — the spy
+    /// [`session_mention_parts`]'s own module doc says a mention is never
+    /// allowed to reach.
+    #[derive(Debug, Default)]
+    struct SpyPostbox {
+        roster: Vec<Peer>,
+        delivered: std::sync::Mutex<usize>,
+    }
+
+    #[async_trait::async_trait]
+    impl Postbox for SpyPostbox {
+        fn classify(&self, _text: &str) -> Reserved {
+            Reserved::No
+        }
+
+        async fn deliver(&self, _to: Address, _body: Body) -> Result<Sent, Undelivered> {
+            *self.delivered.lock().expect("no panic") += 1;
+
+            Err(Undelivered::Unknown)
+        }
+
+        fn roster(&self) -> Vec<Peer> {
+            self.roster.clone()
+        }
+    }
+
+    /// A registration record for `name` at `stem` under `directory`, held
+    /// live for the test's whole life — the identity module's own test
+    /// shape, reimplemented here because that helper is private to its
+    /// module.
+    fn live_record(directory: &std::path::Path, stem: &str, name: &str) -> std::fs::File {
+        let rest = "0".repeat(32 - stem.len());
+        let hex = format!("{stem}{rest}");
+        let session_id = format!(
+            "{}-{}-7{}-8{}-{}",
+            &hex[..8],
+            &hex[8..12],
+            &hex[13..16],
+            &hex[17..20],
+            &hex[20..32]
+        );
+        ganja_tool::registry::write(
+            directory,
+            stem,
+            &ganja_tool::registry::Record {
+                format: ganja_tool::registry::FORMAT,
+                session_id,
+                name: name.to_owned(),
+                name_source: ganja_tool::registry::NameSource::User,
+                cwd: directory.to_path_buf(),
+                root: directory.to_path_buf(),
+                pid: 4242,
+                started_at: 1_756_150_000_000,
+            },
+        )
+        .expect("a record writes");
+        let held = ganja_tool::socket::open_lock(&directory.join(format!("{stem}.sock")))
+            .expect("the lock file opens");
+        held.try_lock().expect("nothing else holds a fresh lock");
+
+        held
+    }
+
+    /// **AC-25**: a session mention is consult-only. Resolving one against a
+    /// live registered session opens no connection and writes no mailbox —
+    /// the spy postbox's own count stays zero — and leaves the pin map
+    /// byte-unchanged.
+    #[tokio::test]
+    async fn a_session_mention_never_delivers_or_pins() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let _held = live_record(dir.path(), "0198c1a2", "backend");
+        let (mut turn, _events) = turn_with(
+            CancellationToken::new(),
+            Arc::new(Effectful {
+                marker: PathBuf::from("/nonexistent"),
+            }),
+        );
+        turn.identity = Arc::new(Identity::new(dir.path()));
+        let spy = Arc::new(SpyPostbox::default());
+        turn.postbox = Some(spy.clone());
+
+        let parts = session_mention_parts(&turn, &["backend".to_owned()]).await;
+
+        assert_eq!(*spy.delivered.lock().expect("no panic"), 0);
+        assert_eq!(
+            turn.identity.pinned("backend"),
+            None,
+            "a mention never pins"
+        );
+        assert_eq!(parts.len(), 1);
+        let text = parts[0].as_text().expect("a mention becomes text");
+        assert!(text.contains(&format!("<{TAG}")), "got {text}");
+        assert!(
+            text.contains("self-chosen and unverified"),
+            "a registry-sourced name is labelled honestly: {text}"
+        );
+    }
+
+    /// Roster precedence: a name on the roster is a teammate, lead-assigned,
+    /// even when a live registered session answers to the same spelling —
+    /// the assigned identity wins over the self-asserted one.
+    #[tokio::test]
+    async fn a_roster_hit_outranks_a_same_named_live_session() {
+        let dir = tempfile::tempdir().expect("a scratch directory");
+        let _held = live_record(dir.path(), "0198c1a2", "w1");
+        let (mut turn, _events) = turn_with(
+            CancellationToken::new(),
+            Arc::new(Effectful {
+                marker: PathBuf::from("/nonexistent"),
+            }),
+        );
+        turn.identity = Arc::new(Identity::new(dir.path()));
+        turn.postbox = Some(Arc::new(SpyPostbox {
+            roster: vec![Peer {
+                name: "w1".to_owned(),
+                description: None,
+                lead: false,
+            }],
+            delivered: std::sync::Mutex::new(0),
+        }));
+
+        let parts = session_mention_parts(&turn, &["w1".to_owned()]).await;
+
+        assert_eq!(parts.len(), 1);
+        let text = parts[0].as_text().expect("a mention becomes text");
+        assert!(
+            text.contains("lead-assigned"),
+            "the roster name wins over the live session sharing it: {text}"
+        );
+    }
+
+    /// **AC-26**'s engine half: a teammate's own words never feed name
+    /// resolution — `session_mentions` is a field of its own, so an `@`
+    /// sitting inside a peer's text is never scanned for one, whatever it
+    /// says.
+    #[tokio::test]
+    async fn a_peers_own_words_are_never_scanned_for_a_session_mention() {
+        let (turn, _events) = turn_with(
+            CancellationToken::new(),
+            Arc::new(Effectful {
+                marker: PathBuf::from("/nonexistent"),
+            }),
+        );
+
+        let message = user_message(
+            &turn,
+            String::new(),
+            &[crate::protocol::team::PeerPayload::new(
+                "w2",
+                None,
+                None,
+                "check @backend and uds:/tmp/whatever.sock",
+            )],
+            &[],
+            &[],
+            &[],
+        )
+        .await;
+
+        assert!(
+            message
+                .parts
+                .iter()
+                .filter_map(Part::as_text)
+                .all(|text| !text.contains(TAG)),
+            "no session-mention block is rendered from a peer's own words: {:?}",
+            message.parts
         );
     }
 }

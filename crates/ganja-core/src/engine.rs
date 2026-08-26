@@ -32,7 +32,10 @@
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use futures::{
@@ -46,7 +49,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     agent::{self, Agent},
     catalog, command,
-    config::AgentMode,
+    config::{AgentMode, TeamlessSend},
     hook, job, lsp, mcp,
     permission::{Permissions, Rule},
     protocol::{
@@ -60,8 +63,9 @@ use crate::{
     },
     snapshot,
     storage::{self, SessionId, SessionInfo, Storage, StorageError},
-    subagent, teammate,
-    tool::{Credentials, FileTimes, Registry, plan, send_message, task, team::Peer},
+    subagent,
+    teammate::{self, identity::Identity},
+    tool::{Credentials, FileTimes, Registry, Tool, plan, send_message, task, team::Peer},
     watch,
 };
 
@@ -1228,6 +1232,39 @@ pub struct Engine {
     /// Dialog auto-answering stays the frontend's; D479's "answers a dialog;
     /// repeals no rule" semantics are untouched by this bit.
     inbound_bypass: bool,
+    /// Which session a name points at, and what a person is told about the
+    /// name they typed (**D528**). Always present, the admission gate's own
+    /// posture: a session that registers nothing simply feeds it no records
+    /// of its own, and a resolution consulted from a session with no name of
+    /// its own excludes nothing new. Seeded at assembly from the socket
+    /// directory the binder and the lister read
+    /// ([`Engine::with_socket_directory`]), so the hidden `--socket-dir`
+    /// override reaches every reader the same way.
+    identity: Arc<Identity>,
+    /// This session's own self-name (**D530**, **ADJ-2**): the value
+    /// [`Engine::with_solo_postbox`]'s postbox stamps `from` with as
+    /// `<self-name>@solo`, read fresh at send time so `/rename` moves the
+    /// *next* send without this cell holding a stale copy. Every interactive
+    /// session gets one — a lead's own registration name rides the same
+    /// value — set through the one seam, [`Engine::set_self_name`], that
+    /// only a frontend calls; a model's arguments cannot reach it. Defaults
+    /// to [`crate::tool::registry::FALLBACK_NAME`] until seeded, the same
+    /// fallback the D527 name grammar's own sanitizer falls back to.
+    self_name: Arc<std::sync::Mutex<String>>,
+    /// Whether this session's `send_message` posts through the solo postbox
+    /// rather than a team's (**D530**, **D531**): the input the call-time
+    /// posture computation reads alongside [`Engine::teamless_send`]. Set
+    /// `false` by every [`Engine::install_postbox`] call and `true`
+    /// afterward by [`Engine::install_solo_postbox`] alone, so installing
+    /// any other kind of postbox — a lead's, a member's — always clears it.
+    teamless: AtomicBool,
+    /// The resolved `teamless_send` posture (**D531**): `Unasked` unless a
+    /// frontend's config named `ask` through
+    /// [`Engine::with_teamless_send`]. Consulted only while
+    /// [`Engine::teamless`] is set — in-team `send_message` stays D498's
+    /// static ladder regardless of this value, the ruling's own "in a
+    /// session that holds a team, this key has no effect at all".
+    teamless_send: TeamlessSend,
 }
 
 impl Engine {
@@ -1357,6 +1394,12 @@ impl Engine {
             inbound_drain: std::sync::Mutex::new(Some(inbound_drain)),
             inbound_flush: std::sync::Mutex::new(None),
             inbound_bypass: false,
+            identity: Arc::new(Identity::default()),
+            self_name: Arc::new(std::sync::Mutex::new(
+                crate::tool::registry::FALLBACK_NAME.to_owned(),
+            )),
+            teamless: AtomicBool::new(false),
+            teamless_send: TeamlessSend::default(),
         };
         // The builder-time run of the shared composition path, for the one
         // engine no rebuild ever reaches: a fixture whose `mcp__*` names
@@ -1895,7 +1938,10 @@ impl Engine {
     /// running a teammate whose transcript evaporates.
     #[must_use]
     pub fn with_teammates(mut self, registry: Arc<teammate::TeammateRegistry>) -> Self {
-        let lead = Arc::new(subagent::Postbox::lead(&registry));
+        let lead = Arc::new(subagent::Postbox::lead(
+            &registry,
+            Some((&self.identity, Arc::clone(&self.session))),
+        ));
         let in_process: Arc<dyn teammate::TeammateBackend> = match self.storage() {
             Some(storage) => Arc::new(teammate::InProcess::lending(
                 Arc::clone(&self.provider),
@@ -2318,8 +2364,132 @@ impl Engine {
     /// [`crate::subagent::Postbox`] exists to make impossible. The public door
     /// is the consuming builder above, which can only run before the engine
     /// is anybody's to hold.
+    ///
+    /// Also clears [`Engine::teamless`] (**D530**, **D531**): every kind
+    /// this hands the postbox mutex — a lead's, a member's, a real
+    /// teammate's — is a session that holds *something other than* the solo
+    /// postbox, so the call-time posture computation must stop reading
+    /// [`Engine::teamless_send`] the moment any of them lands. Only
+    /// [`Engine::install_solo_postbox`] sets the flag back, and it does so
+    /// **after** calling this, which is what makes the two calls compose
+    /// into "team spawns ⇒ this clears it; team ends ⇒ that sets it again"
+    /// without either seam needing to know the other ran.
     pub(crate) fn install_postbox(&self, postbox: Arc<dyn crate::tool::team::Postbox>) {
         *self.postbox.lock().expect("the postbox is never poisoned") = Some(postbox);
+        self.teamless.store(false, Ordering::Relaxed);
+    }
+
+    /// Installs the solo postbox (**D530**): a session that leads no team,
+    /// addressing other live sessions by name or by `uds:` address, bound to
+    /// this engine's own self-name cell, identity resolver and live session
+    /// id. Consuming, like every other assembly-time installer here.
+    #[must_use]
+    pub fn with_solo_postbox(self) -> Self {
+        self.install_solo_postbox();
+
+        self
+    }
+
+    /// [`Engine::with_solo_postbox`]'s mechanism, and [`Engine::retire_team`]'s
+    /// — the one place a [`subagent::SoloPostbox`] is built, so the two
+    /// callers cannot drift into building it two different ways.
+    fn install_solo_postbox(&self) {
+        let solo = Arc::new(subagent::SoloPostbox::new(
+            Arc::clone(&self.self_name),
+            Arc::clone(&self.identity),
+            Arc::clone(&self.session),
+        ));
+        self.install_postbox(solo);
+        // After `install_postbox`'s own reset, which is what makes this the
+        // "swaps back" half of D530/F10's bidirectional seam.
+        self.teamless.store(true, Ordering::Relaxed);
+        self.recompose_tools();
+    }
+
+    /// Installs `registry`'s lead postbox on this session (**D530**, **F10**:
+    /// "a team spawning mid-session flips the **D531** computed default back
+    /// to allow, with no rule mutation"), reusing `Engine::install_postbox`'s
+    /// own anti-forgery shape — the caller hands a [`teammate::TeammateRegistry`],
+    /// never a bare identity, so nothing here can stamp an arbitrary sender
+    /// name. [`Engine::with_teammates`] calls this at assembly; nothing else
+    /// in this build calls it mid-session yet, because nothing yet *has* a
+    /// team to hand over after assembling teamless — the seam exists so the
+    /// posture computation is provably correct the day something does, and
+    /// [`Engine::retire_team`] is its exact reverse.
+    ///
+    /// Narrower than [`Engine::with_teammates`] on purpose: it does not touch
+    /// [`Engine::teammates`] (the `task` door) or the dialog-forwarding
+    /// channel, so a caller after this method alone still cannot spawn a
+    /// teammate — only `send_message`'s posture and roster description move.
+    pub fn install_team(&self, registry: &Arc<teammate::TeammateRegistry>) {
+        let lead = Arc::new(subagent::Postbox::lead(
+            registry,
+            Some((&self.identity, Arc::clone(&self.session))),
+        ));
+        self.install_postbox(lead);
+        self.recompose_tools();
+    }
+
+    /// The reverse of [`Engine::install_team`] (**D530**, **F10**'s "team
+    /// ends ⇒ solo postbox swaps back"): reinstalls the solo postbox, so a
+    /// send afterward stamps `from` as `<self-name>@solo` again and carries
+    /// the one-way note. `subagent::TEAM_GONE` cannot answer such a
+    /// send — `subagent::SoloPostbox` holds no
+    /// `Weak<teammate::TeammateRegistry>` to fail upgrading in the first
+    /// place, which is the structural half of **AC-42**.
+    pub fn retire_team(&self) {
+        self.install_solo_postbox();
+    }
+
+    /// Sets this session's self-name (**D530**, **ADJ-2**): the value the
+    /// solo postbox stamps `from` with, and — for a lead — the name a
+    /// frontend's own registration record carries. The one seam every
+    /// `/rename` calls, whether or not this session leads: a lead's own
+    /// wire identity (`<name>@<team>`) is untouched, because `/rename` never
+    /// renames a team member, but its self-name still moves so a team-end
+    /// swap-back sends under the name the person last chose. Only a
+    /// frontend calls this — a model's arguments cannot reach it, the same
+    /// property [`crate::tool::team::Postbox`]'s own doc states of `from`.
+    pub fn set_self_name(&self, name: impl Into<String>) {
+        *self
+            .self_name
+            .lock()
+            .expect("the self-name cell is never poisoned") = name.into();
+    }
+
+    /// The self-name [`Engine::set_self_name`] last set, or the derived
+    /// fallback no frontend has replaced yet.
+    #[must_use]
+    pub fn self_name(&self) -> String {
+        self.self_name
+            .lock()
+            .expect("the self-name cell is never poisoned")
+            .clone()
+    }
+
+    /// Seeds the identity resolver's socket directory (**D528**): the same
+    /// directory the binder binds under and the lister lists from, so the
+    /// hidden `--socket-dir` override reaches every reader identically.
+    /// Consuming, like every other assembly-time seed here.
+    #[must_use]
+    pub fn with_socket_directory(mut self, directory: impl Into<PathBuf>) -> Self {
+        self.identity = Arc::new(Identity::new(directory));
+
+        self
+    }
+
+    /// Sets the resolved `teamless_send` posture (**D531**) a teamless
+    /// session's `send_message` calls run under. Consuming, like the config
+    /// values this mirrors (`Engine::concurrency`'s own pattern): resolved
+    /// once by a frontend from its config and handed in, never read from a
+    /// `Config` here — the engine stays as ignorant of *where* the value came
+    /// from as `ganja-permission`'s own `gate_with_default` stays of this
+    /// value's own source.
+    #[must_use]
+    pub fn with_teamless_send(mut self, policy: TeamlessSend) -> Self {
+        self.teamless_send = policy;
+
+        self
     }
 
     /// Ends every teammate this session started, waiting for each one's turn
@@ -3368,7 +3538,7 @@ impl Engine {
                 mentions,
                 skills,
                 peers,
-                session_mentions: _,
+                session_mentions,
             } => {
                 self.start_turn(
                     text,
@@ -3376,6 +3546,7 @@ impl Engine {
                         mentions,
                         skills,
                         peers,
+                        session_mentions,
                     },
                     None,
                 )
@@ -3387,8 +3558,11 @@ impl Engine {
                 mentions,
                 skills,
                 peers,
-                session_mentions: _,
-            } => self.steer(id, text, mentions, skills, peers).await,
+                session_mentions,
+            } => {
+                self.steer(id, text, mentions, skills, peers, session_mentions)
+                    .await
+            }
             Command::CancelTurn => {
                 self.cancel_turn().await;
                 Ok(())
@@ -3527,6 +3701,10 @@ impl Engine {
                 // in an expanded command is scanned for invocations.
                 skills: Vec::new(),
                 peers: Vec::new(),
+                // A command's template carries no composer `@`-mentions of
+                // its own — those are a person's prompt, not a template's
+                // expansion — so an expanded command names none.
+                session_mentions: Vec::new(),
             },
             overrides,
         )
@@ -3590,6 +3768,10 @@ impl Engine {
             .expect("the activated set is never poisoned")
             .clear();
         self.recompose_tools();
+        // A new conversation has addressed nobody (**D528**'s pin guard's own
+        // `NewSession` door): carrying the old one's choices forward would be
+        // guarding a history that no longer exists.
+        self.identity.clear_pins();
         // Nothing before this turn to compare against, so the plan-to-build
         // reminder does not fire on the first turn of a new session.
         self.active().previous_agent = None;
@@ -4236,32 +4418,50 @@ impl Engine {
         self.compose_deferral(self.team_messaging(registry))
     }
 
-    /// Adds `send_message` when this session has a team, and nothing at all
-    /// when it has none (**D498**).
+    /// Adds `send_message` when this session has a postbox — a team's, or a
+    /// teamless interactive session's solo one (**D498**, **D530**) — and
+    /// nothing at all when it has none.
     ///
     /// Registered here rather than in `Registry::with_builtins` for `task`'s
-    /// reason: presence is ability. A session with no team has nobody to
+    /// reason: presence is ability. A session with no postbox has nobody to
     /// address, so the tool is not offered — which is also what keeps the
     /// golden differential comparing two agents rather than two teams — and a
     /// session that has one is offered it again on every rebuild, so a
     /// `/plugin` Reload cannot quietly drop it.
     ///
-    /// Both halves come off the one postbox this engine posts through, which
-    /// is what keeps the roster the model *reads* and the roster its call is
-    /// *judged against* the same answer: the description lists everybody the
-    /// sender may address, and the last rung of the tool's ladder asks that
-    /// same value which of them leads.
+    /// A teamless session's description carries no roster claim at all
+    /// ([`send_message::SendMessageTool::teamless`]) rather than the empty
+    /// roster a team-of-one renders — the two must not read alike (D530's own
+    /// distinction) — decided by [`Engine::teamless`], which
+    /// [`Engine::install_postbox`] and [`Engine::install_solo_postbox`]
+    /// keep in lockstep with whichever postbox is actually installed. Both
+    /// non-teamless halves come off the one postbox this engine posts
+    /// through, which is what keeps the roster the model *reads* and the
+    /// roster its call is *judged against* the same answer: the description
+    /// lists everybody the sender may address, and the last rung of the
+    /// tool's ladder asks that same value which of them leads.
     ///
     /// A subagent is offered the *lent* set rather than the composed one, so
     /// it does not get this — deliberately, and for the reason it does not get
     /// `task` either: a delegated turn runs inside the lead's own turn, and
     /// the identity it would send under is the lead's.
     fn team_messaging(&self, registry: Arc<Registry>) -> Arc<Registry> {
-        let Some(roster) = self.postbox_roster() else {
+        let postbox = self
+            .postbox
+            .lock()
+            .expect("the postbox is never poisoned")
+            .clone();
+        let Some(postbox) = postbox else {
             return registry;
         };
 
-        Arc::new(registry.with(Arc::new(send_message::SendMessageTool::new(&roster))))
+        let tool: Arc<dyn Tool> = if self.teamless.load(Ordering::Relaxed) {
+            Arc::new(send_message::SendMessageTool::teamless())
+        } else {
+            Arc::new(send_message::SendMessageTool::new(&postbox.roster()))
+        };
+
+        Arc::new(registry.with(tool))
     }
 
     /// Everybody this engine's own `send_message` may address, as its postbox
@@ -4385,6 +4585,7 @@ impl Engine {
             // runs with `spawn: None` (no `task` tool at all), and a teammate
             // engine is built without a team of its own.
             teammates: self.teammates.clone(),
+            identity: Arc::clone(&self.identity),
         }))
     }
 
@@ -5048,6 +5249,9 @@ impl Engine {
             kind,
             tools: self.tools(),
             skill_roots: self.skill_roots(),
+            identity: Arc::clone(&self.identity),
+            teamless: self.teamless.load(Ordering::Relaxed),
+            teamless_send: self.teamless_send,
             deferral: self.deferral(),
             permissions,
             cwd: self.cwd.clone(),
@@ -5113,6 +5317,7 @@ impl Engine {
         mentions: Vec<crate::protocol::Mention>,
         skills: Vec<String>,
         peers: Vec<crate::protocol::team::PeerPayload>,
+        session_mentions: Vec<String>,
     ) -> Result<(), EngineError> {
         let queued = self
             .turn
@@ -5129,6 +5334,7 @@ impl Engine {
                         mentions,
                         skills,
                         peers,
+                        session_mentions,
                     });
 
                 true
@@ -5662,8 +5868,11 @@ mod tests {
         Engine, EngineError, STALE_FILES, message_chars, send_message, stale_notice, teammate,
     };
     use crate::{
+        config::TeamlessSend,
         permission::Permissions,
-        protocol::{Command, Event, FinishReason, Message, Part, RevertScope, Role, Usage},
+        protocol::{
+            Command, Event, FinishReason, Message, Part, PermissionReply, RevertScope, Role, Usage,
+        },
         provider::{
             ChatRequest, FakeProvider, Provider, ProviderError, ProviderEvent, fake::MODEL,
         },
@@ -7165,6 +7374,289 @@ mod tests {
         assert!(
             engine.tools().get(send_message::ID).is_some(),
             "a reload rebuilds through the shared composition path, which offers it again"
+        );
+    }
+
+    /// **D530**: a session with no team gets the solo postbox and the
+    /// teamless-described tool — not the empty-roster ("team of one")
+    /// variant, which must not read alike.
+    #[test]
+    fn a_solo_postbox_is_offered_send_message_with_the_teamless_description() {
+        let engine = engine().with_solo_postbox();
+        let tools = engine.tools();
+        let tool = tools
+            .get(send_message::ID)
+            .expect("a solo session is offered it");
+        assert!(
+            !tool
+                .description()
+                .contains("Teammates this session can address"),
+            "no roster is claimed, unlike a team of one: {}",
+            tool.description()
+        );
+        assert!(engine.teammates().is_none(), "and leads no team of its own");
+    }
+
+    /// **AC-40's engine-cell half (ADJ-2)**: `/rename` sets the self-name
+    /// cell the solo postbox reads at send time, moving the *next* send's
+    /// `from` without this cell holding a stale copy — [`Engine::self_name`]
+    /// answers it back exactly as set.
+    #[test]
+    fn set_self_name_moves_the_cell_the_solo_postbox_reads() {
+        let engine = engine().with_solo_postbox();
+        assert_eq!(
+            engine.self_name(),
+            crate::tool::registry::FALLBACK_NAME,
+            "unseeded, the cell holds the same fallback D527's own sanitizer falls back to"
+        );
+
+        engine.set_self_name("fresh");
+
+        assert_eq!(engine.self_name(), "fresh");
+    }
+
+    /// A solo-postbox engine over one script per step, ready for a
+    /// `send_message` call — D530/D531's fixture. Distinct from this
+    /// module's own single-script [`ScriptedProvider`] because a posture test
+    /// needs a different script for each of several turns.
+    fn teamless(
+        scripts: Vec<Vec<ProviderEvent>>,
+        rules: Vec<crate::permission::Rule>,
+        posture: TeamlessSend,
+    ) -> Engine {
+        let (provider, _requests) = ganja_testkit::ScriptedProvider::new(scripts);
+        let mut permissions = Permissions::default();
+        permissions.set_baseline(rules);
+
+        Engine::new(
+            provider,
+            MODEL,
+            Arc::new(Registry::new(Vec::new())),
+            permissions,
+        )
+        .with_solo_postbox()
+        .with_teamless_send(posture)
+    }
+
+    /// A `send_message` call to a name nobody answers to, one turn's worth.
+    fn send_call(to: &str, message: &str) -> Vec<ProviderEvent> {
+        ganja_testkit::tool_call(
+            send_message::ID,
+            serde_json::json!({ "to": to, "message": message }),
+        )
+    }
+
+    async fn prompt(engine: &Engine, text: &str) {
+        engine
+            .send(Command::SendPrompt {
+                text: text.to_owned(),
+                mentions: Vec::new(),
+                skills: Vec::new(),
+                session_mentions: Vec::new(),
+                peers: Vec::new(),
+            })
+            .await
+            .expect("an idle engine accepts a prompt");
+    }
+
+    /// Reads until a `PermissionRequested` arrives, and answers its id —
+    /// this module's own `drain` cannot be used first, since the turn sits
+    /// in the dialog rather than finishing.
+    async fn until_requested(
+        events: &mut BoxStream<'static, Event>,
+    ) -> crate::protocol::PermissionId {
+        loop {
+            if let Event::PermissionRequested { id, .. } =
+                events.next().await.expect("the stream outlives the turn")
+            {
+                return id;
+            }
+        }
+    }
+
+    /// **D531**: unasked by default, for a session that never named a
+    /// posture at all.
+    #[tokio::test]
+    async fn a_teamless_send_is_unasked_by_default() {
+        let engine = teamless(
+            vec![send_call("nobody", "hi"), ganja_testkit::says("done")],
+            Vec::new(),
+            TeamlessSend::Unasked,
+        );
+        let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+        prompt(&engine, "send it").await;
+        let seen = drain(&mut events).await;
+
+        assert!(
+            !seen
+                .iter()
+                .any(|event| matches!(event, Event::PermissionRequested { .. })),
+            "a teamless session's default send is unasked: {seen:?}"
+        );
+    }
+
+    /// **D531**: `teamless_send: "ask"` raises the ordinary permission
+    /// dialog, and a stored "always allow" answer silences the next one —
+    /// the computed default sits *beneath* every rule, never above it.
+    #[tokio::test]
+    async fn teamless_ask_raises_a_dialog_and_a_stored_always_answer_silences_the_next() {
+        let engine = teamless(
+            vec![
+                send_call("nobody", "first"),
+                ganja_testkit::says("first done"),
+                send_call("nobody", "second"),
+                ganja_testkit::says("second done"),
+            ],
+            Vec::new(),
+            TeamlessSend::Ask,
+        );
+        let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+        prompt(&engine, "one").await;
+        let waiting = until_requested(&mut events).await;
+        engine
+            .send(Command::ReplyPermission {
+                id: waiting,
+                reply: PermissionReply::Always,
+            })
+            .await
+            .expect("the dialog this turn raised is answerable");
+        drain(&mut events).await;
+
+        prompt(&engine, "two").await;
+        let second = drain(&mut events).await;
+        assert!(
+            !second
+                .iter()
+                .any(|event| matches!(event, Event::PermissionRequested { .. })),
+            "a stored always answer outranks the handed-in default: {second:?}"
+        );
+    }
+
+    /// **D531**: a deny rule still denies — the computed default sits
+    /// beneath every rule, never above one.
+    #[tokio::test]
+    async fn a_deny_rule_outranks_the_teamless_ask_default() {
+        let engine = teamless(
+            vec![send_call("nobody", "hi"), ganja_testkit::says("done")],
+            vec![crate::permission::Rule {
+                permission: send_message::ID.to_owned(),
+                pattern: "*".to_owned(),
+                action: crate::permission::Action::Deny,
+            }],
+            TeamlessSend::Ask,
+        );
+        let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+        prompt(&engine, "send it").await;
+        let seen = drain(&mut events).await;
+
+        assert!(
+            !seen
+                .iter()
+                .any(|event| matches!(event, Event::PermissionRequested { .. })),
+            "a rule already answered this; nobody is asked: {seen:?}"
+        );
+    }
+
+    /// **AC-35's mid-session clause, and AC-42**: a team installed mid-session
+    /// flips the computed default back to `allow` with the key still `ask` —
+    /// in-team D498 stays byte-untouched — and retiring the team swaps the
+    /// solo postbox back, so asking resumes.
+    #[tokio::test]
+    async fn a_team_installed_mid_session_reverts_to_unasked_and_retiring_it_reverts_to_teamless() {
+        let engine = teamless(
+            vec![
+                send_call("nobody", "one"),
+                ganja_testkit::says("one done"),
+                send_call("nobody", "two"),
+                ganja_testkit::says("two done"),
+                send_call("nobody", "three"),
+                ganja_testkit::says("three done"),
+            ],
+            Vec::new(),
+            TeamlessSend::Ask,
+        );
+        let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+        // Teamless, ask key set: the first send is asked about.
+        prompt(&engine, "one").await;
+        let waiting = until_requested(&mut events).await;
+        engine
+            .send(Command::ReplyPermission {
+                id: waiting,
+                reply: PermissionReply::Once,
+            })
+            .await
+            .expect("the dialog this turn raised is answerable");
+        drain(&mut events).await;
+
+        // A team is installed mid-session (D530/F10's seam): the key still
+        // says `ask`, but a session that holds a team is D498's static
+        // ladder again, key regardless.
+        let home = tempfile::tempdir().expect("a temp teams root");
+        let registry = Arc::new(teammate::TeammateRegistry::new(
+            ganja_team::TeamsRoot::new(home.path().join("teams")),
+            ganja_team::TeamName::parse("session-abcd1234").expect("a team name"),
+            "session-abcd1234",
+            home.path(),
+        ));
+        engine.install_team(&registry);
+
+        prompt(&engine, "two").await;
+        let second = drain(&mut events).await;
+        assert!(
+            !second
+                .iter()
+                .any(|event| matches!(event, Event::PermissionRequested { .. })),
+            "in-team D498 stays unasked regardless of the key: {second:?}"
+        );
+
+        // The team ends: the solo postbox swaps back, and asking resumes —
+        // `TEAM_GONE` never answers this, because the reinstalled postbox
+        // holds no registry to fail upgrading at all.
+        engine.retire_team();
+
+        prompt(&engine, "three").await;
+        let waiting = until_requested(&mut events).await;
+        engine
+            .send(Command::ReplyPermission {
+                id: waiting,
+                reply: PermissionReply::Once,
+            })
+            .await
+            .expect("the dialog this turn raised is answerable");
+        let third = drain(&mut events).await;
+        assert!(
+            !third.iter().any(|event| matches!(
+                event,
+                Event::PermissionReplied {
+                    reply: PermissionReply::Reject,
+                    ..
+                }
+            )),
+            "the send was not rejected: {third:?}"
+        );
+    }
+
+    /// **D528**'s `NewSession` door: a pin this conversation made does not
+    /// survive a new one.
+    #[tokio::test]
+    async fn new_session_clears_the_identity_pin_map() {
+        let engine = engine();
+        engine.identity.pin("backend", "ses-far", "0198c1a2");
+        assert!(engine.identity.pinned("backend").is_some());
+
+        engine
+            .new_session()
+            .await
+            .expect("an idle engine accepts a new session");
+
+        assert_eq!(
+            engine.identity.pinned("backend"),
+            None,
+            "a new conversation has addressed nobody"
         );
     }
 

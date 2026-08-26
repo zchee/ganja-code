@@ -190,7 +190,7 @@ fn sessions_live(directory: &Path, homes: &TempDir) -> tokio::process::Command {
 async fn send_as_child(socket: PathBuf, home: PathBuf, report: PathBuf) {
     let cwd = env::current_dir().expect("the working directory resolves");
     let registry = Arc::new(TeammateRegistry::for_session(&home, SENDER_SESSION, cwd));
-    let postbox = Postbox::lead(&registry);
+    let postbox = Postbox::lead(&registry, None);
 
     let sent = tokio::time::timeout(
         DEADLINE,
@@ -384,7 +384,7 @@ async fn a_structured_message_does_not_cross_a_socket() {
         SENDER_SESSION,
         cwd,
     ));
-    let postbox = Postbox::lead(&sender);
+    let postbox = Postbox::lead(&sender, None);
     let refused = postbox
         .deliver(
             Address::Uds {

@@ -136,7 +136,7 @@ use crate::{
     storage::{self, SessionId, SessionInfo},
     teammate::{
         DEFAULT_BACKEND, SpawnRequest, Teammate, TeammateBackend, TeammateRegistry, backend_name,
-        parse_backend, postbox::LEADS, posture, posture_line,
+        identity, parse_backend, postbox::LEADS, posture, posture_line,
     },
     tool::{
         Credentials, Registry,
@@ -231,6 +231,14 @@ pub(crate) struct Host {
     /// subagent gets no `task` tool at all, which is the depth guard applying
     /// to this door as it already does to the other.
     pub(crate) teammates: Option<Arc<Teammates>>,
+    /// The parent engine's own identity resolver (**D528**), carried so a
+    /// child [`Turn`] has a value to hold even though it is never consulted:
+    /// a subagent's prompt carries no `@`-mentions of its own (`session.rs`'s
+    /// `Turn::child` always seeds an empty `session_mentions`), and cloning
+    /// the parent's `Arc` — rather than building a fresh resolver over the
+    /// default socket directory — keeps a test's `--socket-dir` override
+    /// reaching a child the same way it reaches the parent.
+    pub(crate) identity: Arc<identity::Identity>,
 }
 
 impl std::fmt::Debug for Host {
@@ -802,7 +810,7 @@ impl Teammates {
             reason: format!("{UNENCODABLE} {error}"),
         })?;
 
-        Postbox::lead(&self.registry)
+        Postbox::lead(&self.registry, None)
             .deliver(Address::Local(member.to_owned()), Body::Frame(document))
             .await
     }
@@ -866,6 +874,13 @@ pub struct Postbox {
     ///
     /// [`Engine`]: crate::Engine
     registry: Weak<TeammateRegistry>,
+    /// The identity resolver and this engine's live session id, present on
+    /// **the lead's own postbox only** (**D528**): the plan's own scoping
+    /// puts the `to` ladder's extension on "the lead postbox's" `Address::Local`
+    /// arm, and a teammate's own postbox ([`Postbox::of`]) has no cross-team
+    /// addressing to extend — its roster miss stays [`Undelivered::Unknown`]
+    /// exactly as it always has.
+    resolver: Option<(Arc<identity::Identity>, Arc<std::sync::Mutex<SessionId>>)>,
 }
 
 /// Renders which team and which sender this speaks for, and nothing of the
@@ -891,11 +906,24 @@ impl Postbox {
     /// Takes the [`Arc`] rather than a [`Weak`] because the sender's name is
     /// read off the team here and now; what is *kept* is the downgrade, so a
     /// postbox never keeps alive the team that holds the engine that holds it.
+    ///
+    /// `resolver` is the D528 identity index and this engine's live session
+    /// id, threaded so the roster-miss arm below can consult it — the lead's
+    /// alone, per [`Postbox`]'s own doc — and [`None`] for the one internal
+    /// caller that never reaches that arm at all
+    /// ([`Teammates::ask_shutdown`], whose recipient is always a known
+    /// roster name). The session id is the engine's own live cell rather
+    /// than a snapshot, so a rebind (a resume, a `NewSession`) is reflected
+    /// without this postbox holding a copy that could go stale.
     #[must_use]
-    pub fn lead(registry: &Arc<TeammateRegistry>) -> Self {
+    pub fn lead(
+        registry: &Arc<TeammateRegistry>,
+        resolver: Option<(&Arc<identity::Identity>, Arc<std::sync::Mutex<SessionId>>)>,
+    ) -> Self {
         Self {
             sender: registry.lead().as_str().to_owned(),
             registry: Arc::downgrade(registry),
+            resolver: resolver.map(|(identity, own_session)| (Arc::clone(identity), own_session)),
         }
     }
 
@@ -911,6 +939,7 @@ impl Postbox {
         Self {
             sender: teammate.name().to_owned(),
             registry: Arc::downgrade(registry),
+            resolver: None,
         }
     }
 
@@ -1003,6 +1032,9 @@ impl Postbox {
         Ok(Self {
             sender: identity.to_owned(),
             registry: Arc::downgrade(registry),
+            // A shape check only — this value is dropped without ever
+            // calling `deliver`, so it needs no resolver.
+            resolver: None,
         })
     }
 
@@ -1030,11 +1062,6 @@ impl Postbox {
     /// never switched; every failure is a typed [`Undelivered`] naming the
     /// socket, under a deadline, never a hang.
     async fn deliver_over_socket(&self, path: &Path, body: Body) -> Result<Sent, Undelivered> {
-        let Body::Text { text, summary } = body else {
-            return Err(Undelivered::Failed {
-                reason: FRAME_OVER_SOCKET.to_owned(),
-            });
-        };
         let Some(registry) = self.registry.upgrade() else {
             return Err(Undelivered::Failed {
                 reason: TEAM_GONE.to_owned(),
@@ -1043,52 +1070,137 @@ impl Postbox {
         let from = format!("{}@{}", self.sender, registry.team());
         drop(registry);
 
-        // The tool's rung 3 has already judged the address; it is judged
-        // once more here because [`team::Postbox`] is a public trait and this
-        // arm is what every caller of it gets — the last gate before a
-        // connection is the one that has to hold by construction, whoever
-        // called. Same predicate, one spelling (`ganja_tool::socket`), and
-        // the refusal in the rung's own sentence.
-        crate::tool::socket::vet_address(path).map_err(|why| Undelivered::Failed {
-            reason: format!("{NOT_A_SESSION_SOCKET} {}: {why}.", path.display()),
-        })?;
+        deliver_over_socket(path, body, from, FRAME_OVER_SOCKET).await
+    }
+}
 
-        let socket = Socket::open(path)?;
-        let view: TeamView = socket.get(TEAM_ROUTE).await?;
-        // The lead's name is the far end's word, and it goes into a URL: it
-        // is held to the member-name grammar before it does — which refuses
-        // `/`, `.`, `?`, `#` and everything else that could steer the POST
-        // to some other route on that server — so a listener in a session
-        // socket's shape cannot choose where this side posts.
-        // The grammar's own error is not repeated: it spells the name whole,
-        // and the name is the peer's word — `reflected` is the one place it
-        // is allowed to appear, cut.
-        let lead = MemberName::parse(&view.lead).map_err(|_| Undelivered::Failed {
-            reason: format!(
-                "{SOCKET_LEAD_UNNAMED} {}: {:?}.",
-                path.display(),
-                reflected(&view.lead)
-            ),
-        })?;
-        let delivered: SocketDelivered = socket
-            .post(
-                &format!("{TEAM_ROUTE}/{lead}{MESSAGE_ROUTE}"),
-                &SocketMessage {
-                    from,
-                    text,
-                    summary,
-                },
-            )
-            .await?;
+/// The vet-connect-answer sequence every socket-crossing send shares
+/// (**D530**, **F1**): [`Postbox::deliver_over_socket`]'s own body until this
+/// plan, factored out and **parameterized by `from`** because that method's
+/// `from` is composed off the upgraded team registry
+/// (`<sender>@<team>`) — a composition a registry-less caller cannot repeat.
+/// The lead's own arm above feeds it exactly that; [`SoloPostbox`] feeds the
+/// self-name cell's `<self-name>@solo` instead, and both is why `frame_refusal`
+/// is a parameter too — the sentence a frame body earns names "a member of
+/// this team" for the lead and has no team to name for a teamless sender.
+///
+/// Two requests, and the first is not overhead: `GET /team` is how this side
+/// learns the peer's lead's name and team without assuming either, and it is
+/// the one probe that tells a dead socket from a live one before anything is
+/// written. What then crosses is **plain text only** (§5.2-6): a frame is
+/// refused here as well as at the tool's rung 6, because [`team::Postbox`] is
+/// a public trait and this is what every caller of it gets. `from` is
+/// whatever the caller stamped — the same derived identity the far side's
+/// [`Postbox::peer`] holds it to, so both ends agree on what a peer's name
+/// looks like without a second rule.
+async fn deliver_over_socket(
+    path: &Path,
+    body: Body,
+    from: String,
+    frame_refusal: &'static str,
+) -> Result<Sent, Undelivered> {
+    let Body::Text { text, summary } = body else {
+        return Err(Undelivered::Failed {
+            reason: frame_refusal.to_owned(),
+        });
+    };
 
-        Ok(Sent {
-            // The far side answers with the bare name it wrote to; what this
-            // side reports back is that name *in that session*, so a transcript
-            // never reads a peer's `team-lead` as this team's. Both are the
-            // peer's words, and are cut to a line before the model reads them.
-            to: reflected(&format!("{}@{}", delivered.to, view.team)),
-            note: reflected(&delivered.note),
-        })
+    // The tool's rung 3 has already judged the address; it is judged
+    // once more here because [`team::Postbox`] is a public trait and this
+    // arm is what every caller of it gets — the last gate before a
+    // connection is the one that has to hold by construction, whoever
+    // called. Same predicate, one spelling (`ganja_tool::socket`), and
+    // the refusal in the rung's own sentence.
+    crate::tool::socket::vet_address(path).map_err(|why| Undelivered::Failed {
+        reason: format!("{NOT_A_SESSION_SOCKET} {}: {why}.", path.display()),
+    })?;
+
+    let socket = Socket::open(path)?;
+    let view: TeamView = socket.get(TEAM_ROUTE).await?;
+    // The lead's name is the far end's word, and it goes into a URL: it
+    // is held to the member-name grammar before it does — which refuses
+    // `/`, `.`, `?`, `#` and everything else that could steer the POST
+    // to some other route on that server — so a listener in a session
+    // socket's shape cannot choose where this side posts.
+    // The grammar's own error is not repeated: it spells the name whole,
+    // and the name is the peer's word — `reflected` is the one place it
+    // is allowed to appear, cut.
+    let lead = MemberName::parse(&view.lead).map_err(|_| Undelivered::Failed {
+        reason: format!(
+            "{SOCKET_LEAD_UNNAMED} {}: {:?}.",
+            path.display(),
+            reflected(&view.lead)
+        ),
+    })?;
+    let delivered: SocketDelivered = socket
+        .post(
+            &format!("{TEAM_ROUTE}/{lead}{MESSAGE_ROUTE}"),
+            &SocketMessage {
+                from,
+                text,
+                summary,
+            },
+        )
+        .await?;
+
+    Ok(Sent {
+        // The far side answers with the bare name it wrote to; what this
+        // side reports back is that name *in that session*, so a transcript
+        // never reads a peer's `team-lead` as this team's. Both are the
+        // peer's words, and are cut to a line before the model reads them.
+        to: reflected(&format!("{}@{}", delivered.to, view.team)),
+        note: reflected(&delivered.note),
+    })
+}
+
+/// The D528 table both postboxes' name-resolved sends apply identically:
+/// ambiguity, a moved pin and a partial listing all refuse; a unique session
+/// pins (text bodies only, and before the connect — the pin protects the
+/// *choice* of recipient, not the delivery's success) and crosses
+/// [`deliver_over_socket`]; nothing answers is `Unknown`. `Sent.to` composes
+/// all three identities a transcript needs to audit a name-resolved delivery
+/// (**N6**): the name as asked, the resolved socket, and the far side's own
+/// reflected answer.
+async fn deliver_resolved(
+    resolver: &identity::Identity,
+    name: &str,
+    resolution: identity::Resolution,
+    body: Body,
+    from: String,
+    frame_refusal: &'static str,
+) -> Result<Sent, Undelivered> {
+    match resolution {
+        identity::Resolution::Session {
+            id, stem, socket, ..
+        } => {
+            // A frame is refused by `deliver_over_socket`'s own guard before
+            // anything is pinned — checked here, ahead of the move, because
+            // pinning is the choice this arm accepted, not the connect's own
+            // later failure.
+            if matches!(body, Body::Text { .. }) {
+                resolver.pin(name, &id, &stem);
+            }
+
+            let inner = deliver_over_socket(&socket, body, from, frame_refusal).await?;
+            Ok(Sent {
+                to: format!("{name} (uds:{} \u{2192} {})", socket.display(), inner.to),
+                note: inner.note,
+            })
+        }
+        identity::Resolution::Ambiguous { candidates, .. } => Err(Undelivered::Ambiguous {
+            reason: identity::ambiguous_refusal(name, &candidates),
+        }),
+        identity::Resolution::Moved {
+            pinned_stem,
+            candidates,
+            ..
+        } => Err(Undelivered::NameMoved {
+            reason: identity::moved_refusal(name, &pinned_stem, &candidates),
+        }),
+        identity::Resolution::NoneSuch { .. } => Err(Undelivered::Unknown),
+        identity::Resolution::ListingFailed { error } => Err(Undelivered::Failed {
+            reason: identity::listing_refusal(name, &error),
+        }),
     }
 }
 
@@ -1583,22 +1695,48 @@ impl team::Postbox for Postbox {
                 reason: TEAM_GONE.to_owned(),
             });
         };
-        let Some(recipient) = self.recipient(&registry, &name) else {
+        if let Some(recipient) = self.recipient(&registry, &name) {
+            return crate::teammate::postbox::write_to_peer(
+                &self.sender,
+                registry.root(),
+                registry.team(),
+                &recipient,
+                body,
+            )
+            .await
+            // The minted identity is the admission gate's key (M6), recorded
+            // only where the engine's socket door writes; an in-team
+            // delivery is ungated and has no set to feed.
+            .map(|(sent, _)| sent);
+        }
+
+        // Roster miss: **D528**'s extension, the lead postbox's alone
+        // (`self.resolver`'s own doc says why a teammate's postbox has
+        // none). Answered `Unknown` unchanged where there is nothing to
+        // consult.
+        let Some((identity, own_session)) = self.resolver.clone() else {
             return Err(Undelivered::Unknown);
         };
+        let own = own_session
+            .lock()
+            .expect("the session id is never poisoned")
+            .as_str()
+            .to_owned();
+        let from = format!("{}@{}", self.sender, registry.team());
+        drop(registry);
 
-        crate::teammate::postbox::write_to_peer(
-            &self.sender,
-            registry.root(),
-            registry.team(),
-            &recipient,
-            body,
-        )
-        .await
-        // The minted identity is the admission gate's key (M6), recorded only
-        // where the engine's socket door writes; an in-team delivery is
-        // ungated and has no set to feed.
-        .map(|(sent, _)| sent)
+        // A registry read (`Identity`'s own module doc says it is a fresh
+        // one every call), off this call's own thread rather than the
+        // runtime's — the same hop `ganja-team`'s synchronous mailbox writes
+        // take (`crate::teammate::blocking_io`).
+        let blocking_identity = Arc::clone(&identity);
+        let resolve_name = name.clone();
+        let resolution =
+            tokio::task::spawn_blocking(move || blocking_identity.resolve(&resolve_name, &own))
+                .await
+                .expect("resolving a send_message recipient never panics");
+
+        deliver_resolved(&identity, &name, resolution, body, from, FRAME_OVER_SOCKET).await
     }
 
     fn roster(&self) -> Vec<Peer> {
@@ -1639,6 +1777,11 @@ const REFUSED_BY_HAND: &str =
 /// without the tool in front of it (§5.2-6).
 const FRAME_OVER_SOCKET: &str = "A protocol frame does not cross a socket: a session reached at a uds: address takes plain text. Send prose, or address a member of this team by name.";
 
+/// [`FRAME_OVER_SOCKET`]'s solo-postbox variant (**D530**, the D528 table's
+/// frame-body row): there is no team to point a teamless caller at, so the
+/// sentence names a live session instead.
+const FRAME_OVER_SOCKET_SOLO: &str = "A protocol frame does not cross a socket: a session reached at a uds: address takes plain text. Send prose, or address a live session by name.";
+
 /// A client that would not build for a socket path — ahead of what reqwest
 /// said, and unreachable for any path the tool's rung 3 let through.
 const SOCKET_CLIENT_FAILED: &str = "The socket could not be opened at";
@@ -1668,6 +1811,123 @@ const SOCKET_OVERSIZED: &str = "The session at that socket answered more than a 
 /// had a team at all — this one is a team that has ended.
 const TEAM_GONE: &str =
     "The team this session led has been shut down; there is nobody left to deliver to.";
+
+/// The reserved team-shape word marking the absence of a team in a teamless
+/// sender's derived identity (**D530**): a real team named `solo` collides
+/// only in display — `from` is unauthenticated routing data on the
+/// receiving side regardless (the admission gate's own axiom), so the
+/// collision adds no confusion the gate does not already price in.
+pub const SOLO_TEAM: &str = "solo";
+
+/// Appended to a teamless send's success note (**D530**'s asymmetry rule): a
+/// session with no registered record and no bound socket cannot be answered
+/// back, and no text this build ships may imply otherwise.
+const ONE_WAY_NOTE: &str = " This session is not addressable back — it binds no socket.";
+
+/// A session that leads no team, addressing other live sessions by name or by
+/// `uds:` address (**D530**).
+///
+/// No roster, and — the structural half of **AC-42** — no
+/// `Weak<TeammateRegistry>` to fail upgrading: [`TEAM_GONE`] can answer
+/// [`Postbox`]'s send because a lead's postbox holds a registry that can go
+/// away underneath it, and this one holds no registry at all, so that arm has
+/// nothing here to be unreachable *from* rather than merely never taken.
+#[derive(Debug)]
+pub struct SoloPostbox {
+    /// Where this session's self-name lives, read at send time so a
+    /// `/rename` moves the next send's `from` without this postbox holding a
+    /// stale copy of its own (**ADJ-2**; `Engine::set_self_name`'s cell).
+    self_name: Arc<std::sync::Mutex<String>>,
+    /// The D528 identity index this session's sends and mentions share.
+    identity: Arc<identity::Identity>,
+    /// This engine's live session id — the same cell [`Engine::session_id`]
+    /// reads, shared rather than snapshotted so a resume or a `NewSession`
+    /// moves this postbox's own-session exclusion with it.
+    own_session: Arc<std::sync::Mutex<SessionId>>,
+}
+
+impl SoloPostbox {
+    /// A postbox for a session that leads no team, bound to the engine's own
+    /// self-name cell, identity resolver and live session id.
+    #[must_use]
+    pub fn new(
+        self_name: Arc<std::sync::Mutex<String>>,
+        identity: Arc<identity::Identity>,
+        own_session: Arc<std::sync::Mutex<SessionId>>,
+    ) -> Self {
+        Self {
+            self_name,
+            identity,
+            own_session,
+        }
+    }
+
+    /// The derived identity every send through this stamps `from` with:
+    /// `<self-name>@solo`, read fresh so a `/rename` since construction is
+    /// honoured.
+    fn from(&self) -> String {
+        format!(
+            "{}@{SOLO_TEAM}",
+            self.self_name
+                .lock()
+                .expect("the self-name cell is never poisoned")
+        )
+    }
+
+    fn own_session(&self) -> String {
+        self.own_session
+            .lock()
+            .expect("the session id is never poisoned")
+            .as_str()
+            .to_owned()
+    }
+}
+
+#[async_trait]
+impl team::Postbox for SoloPostbox {
+    fn classify(&self, text: &str) -> Reserved {
+        crate::teammate::postbox::classify_reserved(text)
+    }
+
+    async fn deliver(&self, to: Address, body: Body) -> Result<Sent, Undelivered> {
+        let sent = match to {
+            Address::Local(name) => {
+                let identity = Arc::clone(&self.identity);
+                let own = self.own_session();
+                let resolve_name = name.clone();
+                let resolution =
+                    tokio::task::spawn_blocking(move || identity.resolve(&resolve_name, &own))
+                        .await
+                        .expect("resolving a send_message recipient never panics");
+
+                deliver_resolved(
+                    &self.identity,
+                    &name,
+                    resolution,
+                    body,
+                    self.from(),
+                    FRAME_OVER_SOCKET_SOLO,
+                )
+                .await?
+            }
+            Address::Uds { path } => {
+                deliver_over_socket(&path, body, self.from(), FRAME_OVER_SOCKET_SOLO).await?
+            }
+        };
+
+        Ok(Sent {
+            note: format!("{}{ONE_WAY_NOTE}", sent.note),
+            ..sent
+        })
+    }
+
+    fn roster(&self) -> Vec<Peer> {
+        // There is no team, so there is no roster to consult before the
+        // resolver: every `Address::Local` name goes straight to `identity`
+        // (Axis 11 / D530).
+        Vec::new()
+    }
+}
 
 /// The reason a lead gives a teammate it is asking to stop.
 ///
@@ -1833,6 +2093,11 @@ impl Child {
                     mentions: Vec::new(),
                     skills: Vec::new(),
                     peers: Vec::new(),
+                    // A `task` call's own prompt carries no composer
+                    // `@`-mentions: that grammar belongs to a person's
+                    // prompt, and a subagent is offered no `send_message` to
+                    // point one at anyway (`postbox: None`, below).
+                    session_mentions: Vec::new(),
                 },
                 prompt: request.prompt.clone(),
                 permissions,
@@ -2257,12 +2522,13 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::{
-        Address, Backends, Body, Caller, FRAME_OVER_SOCKET, Host, Incoming, MESSAGE_ROUTE,
-        MemberBackend, NOT_A_SESSION_SOCKET, NotReceived, NotSpawned, PermissionReply, Postbox,
-        Reserved, SOCKET_LEAD_UNNAMED, SOCKET_OVERSIZED, SOCKET_REFUSED, SOCKET_UNREACHABLE, Sent,
-        SocketMessage, Spawn, SpawnAsk, SpawnAsker, SpawnRequest, TEAM_GONE, TEAM_ROUTE, Teammate,
-        TeammateRegistry, TeammateSpawn, Teammated, Teammates, Undelivered, Watched, async_trait,
-        deliver_to_lead, denies_task, receive_ladder, roster, subagent_rules, team, watch,
+        Address, Backends, Body, Caller, FRAME_OVER_SOCKET, FRAME_OVER_SOCKET_SOLO, Host, Incoming,
+        MESSAGE_ROUTE, MemberBackend, NOT_A_SESSION_SOCKET, NotReceived, NotSpawned, ONE_WAY_NOTE,
+        PermissionReply, Postbox, Reserved, SOCKET_LEAD_UNNAMED, SOCKET_OVERSIZED, SOCKET_REFUSED,
+        SOCKET_UNREACHABLE, Sent, SocketMessage, SoloPostbox, Spawn, SpawnAsk, SpawnAsker,
+        SpawnRequest, TEAM_GONE, TEAM_ROUTE, Teammate, TeammateRegistry, TeammateSpawn, Teammated,
+        Teammates, Undelivered, Watched, async_trait, deliver_to_lead, denies_task, identity,
+        receive_ladder, roster, subagent_rules, team, watch,
     };
     use crate::{
         agent::{self, Registry},
@@ -2883,6 +3149,7 @@ mod tests {
             hooks: None,
             concurrency: crate::config::AgentsConfig::DEFAULT_CONCURRENCY,
             teammates: Some(teammates),
+            identity: Arc::new(identity::Identity::new(std::env::temp_dir())),
         })
     }
 
@@ -3125,7 +3392,7 @@ mod tests {
     #[tokio::test]
     async fn a_recipient_is_matched_without_regard_to_case_and_reported_in_the_teams_spelling() {
         let team = Team::new().await;
-        let lead = Postbox::lead(&team.registry);
+        let lead = Postbox::lead(&team.registry, None);
         let lead: &dyn team::Postbox = &lead;
 
         let sent = lead
@@ -3865,7 +4132,7 @@ mod tests {
         );
         assert_eq!(seen.iter().filter(|peer| peer.lead).count(), 1);
 
-        let seen = team::Postbox::roster(&Postbox::lead(&team.registry));
+        let seen = team::Postbox::roster(&Postbox::lead(&team.registry, None));
         assert_eq!(
             seen.iter()
                 .map(|peer| peer.name.as_str())
@@ -3931,6 +4198,337 @@ mod tests {
                 reason: TEAM_GONE.to_owned(),
             }),
             "and says so, rather than reporting a name nobody answers to"
+        );
+    }
+
+    /// A session id whose compact hex begins with `stem`, the identity
+    /// module's own test shape (`teammate::identity::tests::id_for`),
+    /// reimplemented here because that helper is private to its own module.
+    fn id_for(stem: &str) -> String {
+        let rest = "0".repeat(32 - stem.len());
+        let hex = format!("{stem}{rest}");
+
+        format!(
+            "{}-{}-7{}-8{}-{}",
+            &hex[..8],
+            &hex[8..12],
+            &hex[13..16],
+            &hex[17..20],
+            &hex[20..32]
+        )
+    }
+
+    /// A tempdir at the `0700` mode [`crate::tool::socket::vet_address`]
+    /// requires of a session socket's directory — `Team::session_socket_path`'s
+    /// own fix, needed here too because [`ganja_testkit::temp_dir`] does not
+    /// promise that mode and a resolved-name delivery really connects.
+    fn private_dir() -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = ganja_testkit::temp_dir();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("the fixture directory is chmod-able");
+
+        dir
+    }
+
+    /// Registers `name` at `stem` under `directory` and holds the flock that
+    /// marks it live (**D527**'s liveness token) — the returned guard must
+    /// outlive every assertion that depends on the record reading live.
+    fn live_record(directory: &std::path::Path, stem: &str, name: &str) -> (String, std::fs::File) {
+        let session_id = id_for(stem);
+        ganja_tool::registry::write(
+            directory,
+            stem,
+            &ganja_tool::registry::Record {
+                format: ganja_tool::registry::FORMAT,
+                session_id: session_id.clone(),
+                name: name.to_owned(),
+                name_source: ganja_tool::registry::NameSource::User,
+                cwd: directory.to_path_buf(),
+                root: directory.to_path_buf(),
+                pid: 4242,
+                started_at: 1_756_150_000_000,
+            },
+        )
+        .expect("a record writes");
+        let held = ganja_tool::socket::open_lock(&directory.join(format!("{stem}.sock")))
+            .expect("the lock file opens");
+        held.try_lock().expect("nothing else holds a fresh lock");
+
+        (session_id, held)
+    }
+
+    /// **AC-11 / AC-12 / AC-41** (D528, D530/F1): the lead postbox's
+    /// roster-miss consults the identity index — a unique live session's
+    /// `Sent.to` composes all three identities a transcript needs to audit
+    /// it (the name asked, the resolved socket, the far side's reflected
+    /// answer), a name that later resolves to a different session halts as
+    /// `NameMoved` without re-pinning, and the new claimant is still
+    /// reachable — and the pin still untouched — by its own `uds:` address.
+    #[tokio::test]
+    async fn a_resolved_name_delivers_moves_and_still_answers_by_address() {
+        let team = Team::new().await;
+        let registry_dir = private_dir();
+        let identity = Arc::new(identity::Identity::new(registry_dir.path()));
+        let own_session = Arc::new(std::sync::Mutex::new(SessionId::from(
+            "ses-lead-own".to_owned(),
+        )));
+        let lead = Postbox::lead(&team.registry, Some((&identity, Arc::clone(&own_session))));
+
+        let (_id_a, held_a) = live_record(registry_dir.path(), "01110001", "backend");
+        let socket_a = registry_dir.path().join("01110001.sock");
+        let _peer_a = PeerStub::listen(&socket_a).await;
+
+        let sent = team::Postbox::deliver(
+            &lead,
+            Address::Local("backend".to_owned()),
+            Body::Text {
+                text: "hi".to_owned(),
+                summary: None,
+            },
+        )
+        .await
+        .expect("a unique live session resolves and delivers");
+        assert_eq!(
+            sent.to,
+            format!(
+                "backend (uds:{} \u{2192} team-lead@session-feedbeef)",
+                socket_a.display()
+            ),
+            "the transcript can audit all three identities (N6)"
+        );
+        assert_eq!(
+            identity.pinned("backend").expect("the pin stands").stem,
+            "01110001"
+        );
+
+        // A different session claims the name.
+        drop(held_a);
+        std::fs::remove_file(registry_dir.path().join("01110001.json"))
+            .expect("the stale record goes");
+        let (_id_b, _held_b) = live_record(registry_dir.path(), "02220002", "backend");
+        let socket_b = registry_dir.path().join("02220002.sock");
+        let _peer_b = PeerStub::listen(&socket_b).await;
+
+        let moved = team::Postbox::deliver(
+            &lead,
+            Address::Local("backend".to_owned()),
+            Body::Text {
+                text: "hi again".to_owned(),
+                summary: None,
+            },
+        )
+        .await;
+        assert!(
+            matches!(moved, Err(Undelivered::NameMoved { .. })),
+            "got {moved:?}"
+        );
+        assert_eq!(
+            identity
+                .pinned("backend")
+                .expect("the pin still stands")
+                .stem,
+            "01110001",
+            "a halted resolution never re-pins"
+        );
+
+        // The new claimant is still reachable by its own address, and an
+        // address neither consults nor creates a pin.
+        let by_address = team::Postbox::deliver(
+            &lead,
+            Address::Uds {
+                path: socket_b.clone(),
+            },
+            Body::Text {
+                text: "direct".to_owned(),
+                summary: None,
+            },
+        )
+        .await
+        .expect("a uds: address bypasses the name and its pin entirely");
+        assert_eq!(by_address.to, "team-lead@session-feedbeef");
+        assert_eq!(
+            identity.pinned("backend").expect("still stands").stem,
+            "01110001",
+            "a uds: send neither consults nor creates a pin"
+        );
+    }
+
+    /// **AC-13 / AC-14 / AC-15**: ambiguity, a miss and an unreadable
+    /// registry all refuse rather than guess, and nothing is pinned by
+    /// either refusal.
+    #[tokio::test]
+    async fn a_lead_postbox_refuses_ambiguity_a_miss_and_an_unreadable_registry() {
+        let team = Team::new().await;
+        let registry_dir = private_dir();
+        let identity = Arc::new(identity::Identity::new(registry_dir.path()));
+        let own_session = Arc::new(std::sync::Mutex::new(SessionId::from(
+            "ses-lead-own".to_owned(),
+        )));
+        let lead = Postbox::lead(&team.registry, Some((&identity, Arc::clone(&own_session))));
+
+        // A miss: nothing this session may address goes by that name.
+        let missed = team::Postbox::deliver(
+            &lead,
+            Address::Local("nobody".to_owned()),
+            Body::Text {
+                text: "hi".to_owned(),
+                summary: None,
+            },
+        )
+        .await;
+        assert_eq!(missed, Err(Undelivered::Unknown));
+
+        // Two live sessions share a name — a name never held by any roster
+        // member, so the roster-hit arm above cannot answer first.
+        let (_id1, _held1) = live_record(registry_dir.path(), "03330003", "gateway");
+        let (_id2, _held2) = live_record(registry_dir.path(), "04440004", "gateway");
+        let ambiguous = team::Postbox::deliver(
+            &lead,
+            Address::Local("gateway".to_owned()),
+            Body::Text {
+                text: "hi".to_owned(),
+                summary: None,
+            },
+        )
+        .await;
+        assert!(
+            matches!(ambiguous, Err(Undelivered::Ambiguous { .. })),
+            "got {ambiguous:?}"
+        );
+        assert_eq!(identity.pinned("gateway"), None, "refusing pins nothing");
+
+        // An unreadable registry: a failure to search, never a verdict.
+        let missing = Arc::new(identity::Identity::new(
+            registry_dir.path().join("was-never-there"),
+        ));
+        let lead_missing = Postbox::lead(&team.registry, Some((&missing, own_session)));
+        let failed = team::Postbox::deliver(
+            &lead_missing,
+            Address::Local("gateway".to_owned()),
+            Body::Text {
+                text: "hi".to_owned(),
+                summary: None,
+            },
+        )
+        .await;
+        assert!(
+            matches!(failed, Err(Undelivered::Failed { .. })),
+            "got {failed:?}"
+        );
+    }
+
+    /// The D528 table's frame-body row: a structured body to a resolved name
+    /// is refused via the socket arm's own frame guard, and — because a
+    /// frame body is never accepted — pins nothing at all: resolution
+    /// answered, but the arm that would pin never ran.
+    #[tokio::test]
+    async fn a_frame_body_to_a_resolved_name_is_refused_and_pins_nothing() {
+        let team = Team::new().await;
+        let registry_dir = private_dir();
+        let identity = Arc::new(identity::Identity::new(registry_dir.path()));
+        let own_session = Arc::new(std::sync::Mutex::new(SessionId::from(
+            "ses-lead-own".to_owned(),
+        )));
+        let lead = Postbox::lead(&team.registry, Some((&identity, own_session)));
+        let (_id, _held) = live_record(registry_dir.path(), "05550005", "relay");
+        let socket = registry_dir.path().join("05550005.sock");
+        let _peer = PeerStub::listen(&socket).await;
+
+        let refused = team::Postbox::deliver(
+            &lead,
+            Address::Local("relay".to_owned()),
+            Body::Frame(serde_json::json!({"type": "shutdown_approved", "requestId": "r1"})),
+        )
+        .await;
+        assert_eq!(
+            refused,
+            Err(Undelivered::Failed {
+                reason: FRAME_OVER_SOCKET.to_owned(),
+            })
+        );
+        assert_eq!(
+            identity.pinned("relay"),
+            None,
+            "a refused frame body pins nothing"
+        );
+    }
+
+    /// **D530**: the solo postbox has no roster to consult first, resolves
+    /// straight through the identity index, stamps `from` as
+    /// `<self-name>@solo` on the wire, and appends the one-way clause to
+    /// every success note — and a frame body earns the solo-worded refusal
+    /// rather than the lead's "member of this team" phrasing.
+    #[tokio::test]
+    async fn the_solo_postbox_resolves_directly_stamps_solo_and_appends_the_one_way_note() {
+        let registry_dir = private_dir();
+        let identity = Arc::new(identity::Identity::new(registry_dir.path()));
+        let own_session = Arc::new(std::sync::Mutex::new(SessionId::from(
+            "ses-solo-own".to_owned(),
+        )));
+        let self_name = Arc::new(std::sync::Mutex::new("frank".to_owned()));
+        let solo = SoloPostbox::new(
+            Arc::clone(&self_name),
+            Arc::clone(&identity),
+            Arc::clone(&own_session),
+        );
+
+        assert!(
+            team::Postbox::roster(&solo).is_empty(),
+            "a teamless session has no roster"
+        );
+
+        let (_id, _held) = live_record(registry_dir.path(), "06660006", "backend");
+        let socket = registry_dir.path().join("06660006.sock");
+        let peer = PeerStub::listen(&socket).await;
+
+        let sent = team::Postbox::deliver(
+            &solo,
+            Address::Local("backend".to_owned()),
+            Body::Text {
+                text: "hi".to_owned(),
+                summary: None,
+            },
+        )
+        .await
+        .expect("a unique live session resolves");
+        assert!(
+            sent.note.ends_with(ONE_WAY_NOTE),
+            "the not-addressable-back clause is appended: {:?}",
+            sent.note
+        );
+        assert_eq!(
+            identity.pinned("backend").expect("the pin stands").stem,
+            "06660006"
+        );
+
+        let posted: Vec<_> = peer
+            .requests()
+            .into_iter()
+            .filter(|(method, route, _)| method == "POST" && route.starts_with("/team/"))
+            .collect();
+        assert_eq!(posted.len(), 1, "exactly one message posted: {posted:?}");
+        assert!(
+            posted[0].2.contains("\"from\":\"frank@solo\""),
+            "the wire carries the reserved solo identity: {}",
+            posted[0].2
+        );
+
+        // A frame body earns the solo-worded refusal, not the team-worded one.
+        let refused = team::Postbox::deliver(
+            &solo,
+            Address::Uds {
+                path: socket.clone(),
+            },
+            Body::Frame(serde_json::json!({"anything": "goes"})),
+        )
+        .await;
+        assert_eq!(
+            refused,
+            Err(Undelivered::Failed {
+                reason: FRAME_OVER_SOCKET_SOLO.to_owned(),
+            })
         );
     }
 }

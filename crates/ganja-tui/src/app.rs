@@ -2277,7 +2277,10 @@ impl App {
         let Some(teammates) = self.engine.teammates() else {
             return NO_TEAM.to_owned();
         };
-        let postbox = ganja_core::Postbox::lead(teammates.registry());
+        // Always a known roster name from the `/team` dialog, never a
+        // resolved one — the D528 identity index is `None` here for the same
+        // reason `Teammates::ask_shutdown`'s internal use is.
+        let postbox = ganja_core::Postbox::lead(teammates.registry(), None);
         let outcome = postbox
             .deliver(ganja_tool::team::Address::Local(to.to_owned()), body)
             .await;
