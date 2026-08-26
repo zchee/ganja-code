@@ -154,6 +154,7 @@ async fn an_uncataloged_providers_session_never_auto_compacts_and_reports_no_cos
             text: "next step please".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await

@@ -97,6 +97,7 @@ async fn a_slow_consumer_receives_every_event_in_order() {
             text: "flood".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -186,6 +187,7 @@ async fn prompt(engine: &Engine, text: &str) {
             text: text.to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await

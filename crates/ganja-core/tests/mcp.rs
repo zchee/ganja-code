@@ -277,6 +277,7 @@ async fn turn(
             text: prompt.to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await

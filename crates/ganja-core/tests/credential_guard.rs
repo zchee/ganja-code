@@ -76,6 +76,7 @@ async fn an_engines_own_credential_store_is_refused_to_the_model_that_asks_for_i
             text: "read the auth file".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await

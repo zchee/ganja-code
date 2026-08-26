@@ -124,6 +124,26 @@ pub enum Undelivered {
         /// What is missing, in the terms the model reads next.
         reason: String,
     },
+    /// Several live sessions hold the asked name, so delivering to any one
+    /// of them would be a guess about which the caller meant — refused
+    /// instead (**D528**, the resolution half of the collision rule,
+    /// user-ratified 2026-08-26). The sentence lists every candidate with
+    /// its exact `uds:` spelling and is the deliverer's — it owns the
+    /// listing — while the kind is the contract a test pins.
+    Ambiguous {
+        /// The candidates, in the terms the model acts on next.
+        reason: String,
+    },
+    /// The asked name now resolves to a different session than the one this
+    /// conversation already addressed under it: delivery halts rather than
+    /// silently following the name to its new claimant (**D528**'s pin
+    /// guard; v2 §"Resolution precedence and the pin guard", evidence
+    /// 619672-620120). The sentence names the pinned stem and the current
+    /// candidates' `uds:` spellings, and nothing is delivered.
+    NameMoved {
+        /// What moved, and the addresses that still work.
+        reason: String,
+    },
     /// Delivery was attempted and failed: a mailbox that would not open, a
     /// socket that refused the connection. The message is what the model
     /// reads, so it says what went wrong in terms it can act on.
@@ -173,7 +193,11 @@ pub struct Peer {
 /// caller is a model, one whose arguments could say `"from": "team-lead"` and
 /// stamp the lead's name on its own message, which every sibling would then
 /// believe. Bound at construction, the identity is a fact about *who is
-/// calling*, which is the only thing a recipient can safely act on.
+/// calling*, which is the only thing a recipient can safely act on. What
+/// construction binds is the identity's **source**: the sender is
+/// session-owned state — a lead's team registry, or a self-name cell the
+/// session owns and a rename moves — read by the postbox itself, and never
+/// a call argument. However the value is held, no call may pass one.
 ///
 /// [`std::fmt::Debug`] is required because [`ToolCtx`] derives it, and an
 /// implementation is expected to render which team and which sender it speaks

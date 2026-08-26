@@ -38,6 +38,7 @@ async fn cancelling_mid_stream_finishes_the_turn_inside_the_budget() {
             text: "hello".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await

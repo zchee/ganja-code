@@ -12,10 +12,14 @@
 //! message to a named teammate is conversation, not authority: what changes
 //! is one entry in a mailbox this user already owns, whatever the recipient
 //! goes on to *do* is gated by the recipient's own rules, and the tool is
-//! offered at all only where a team already exists. The permission that
-//! matters was answered at **spawn** — whether this session may run a
-//! teammate, and under which posture — and raising a dialog per message would
-//! train a person to click through the one dialog that does carry a decision.
+//! offered wherever a postbox stands behind it — a team's, or the solo one a
+//! teamless interactive session gets (**D530**). The permission that matters
+//! was answered elsewhere: for a teammate, at **spawn** — whether this
+//! session may run one, and under which posture — and for a cross-session
+//! send, at the receiver's own admission gate (**D523**–**D525**), which
+//! polices every out-of-team delivery whatever the sender's dialogs said.
+//! Raising a dialog per message would train a person to click through the
+//! one dialog that does carry a decision.
 //!
 //! The premise has to hold across a socket too, and since D505 it is held
 //! there by rung 3 rather than assumed: a `uds:` address may name **only a
@@ -118,6 +122,26 @@ a shutdown — by passing that answer's frame; anything else belongs in prose. \
 Use `summary` for the one line that should stand beside the message where it \
 is displayed.";
 
+/// What the model is told where this session leads no team (**D530**): no
+/// roster section — there is no team to claim — the live-session addressing
+/// with its honest label (a session's name is that session's own choice, and
+/// nothing verifies it), and where names come from, since this build offers
+/// the model no listing tool: the person's `@`-mentions, or a `uds:`
+/// spelling they supplied. Deliberately silent on any reply channel — a
+/// teamless sender cannot be addressed back, and no shipped text may imply
+/// it can.
+const TEAMLESS_DESCRIPTION: &str = "\
+Send a message to another live ganja session of this user's on this machine. \
+This session leads no team, so there is no teammate roster: `to` names a \
+session by the name it registered — a name that session chose for itself and \
+that nothing verifies — or by its uds: socket address. Which names are live \
+comes from the person: an @-mention in their prompt, or a uds: spelling they \
+supplied.
+
+Name exactly one recipient in `to`: there is no broadcast, so reaching three \
+sessions is three calls. `message` is plain text. Use `summary` for the one \
+line that should stand beside the message where it is displayed.";
+
 /// Header the roster is listed under, so a description that grew a second
 /// paragraph still ends with the names a `to` argument may carry.
 const ROSTER_HEADER: &str = "Teammates this session can address:";
@@ -174,8 +198,10 @@ pub const SUMMARY_CAP: usize = 200;
 /// account of what became of it.
 const DELIVERED: &str = "Message sent to";
 
-/// Rung zero: the tool was offered without a team behind it. Not reachable
-/// through the engine, which registers it only where a team exists.
+/// Rung zero: the tool was offered without a postbox behind it. Not
+/// reachable through the engine, whose registration follows the postbox and
+/// not the team (**D530**): it registers the tool only where it installed
+/// one — a team's, or a teamless interactive session's solo postbox.
 const NO_TEAM: &str = "This session has no team to send a message to.";
 
 /// Rung 1: broadcast.
@@ -222,8 +248,13 @@ const HARNESS_ONLY_FRAME: &str = "This frame is the harness's to originate, whoe
 /// Rung 8: the shutdown answer, addressed to somebody other than the lead.
 const SHUTDOWN_APPROVED_NOT_TO_LEAD: &str = "A shutdown_approved answers the lead's own request, so the lead is the only address it may carry.";
 
-/// What the model reads when there is a message but nobody by that name.
-const UNKNOWN_RECIPIENT: &str = "Nobody in this team goes by that name:";
+/// What the model reads when there is a message but nobody by that name —
+/// worded team-agnostically since **D530** opened the tool to sessions that
+/// lead no team: the miss it reports is the whole of what this session can
+/// address, teammate roster and live-session registry both, so the sentence
+/// names both misses and claims no team the session may not have.
+const UNKNOWN_RECIPIENT: &str =
+    "Nobody this session can address goes by that name — no teammate, and no live session:";
 
 /// Why a call did not send anything, as one of the ladder's rungs.
 ///
@@ -355,6 +386,19 @@ impl SendMessageTool {
     pub fn new(roster: &[Peer]) -> Self {
         Self {
             description: describe(roster),
+        }
+    }
+
+    /// The tool as a session that leads no team sees it (**D530**): the
+    /// teamless description, with no roster to render. A separate
+    /// constructor rather than [`SendMessageTool::new`] over an empty
+    /// roster, because an empty roster already means something else — a
+    /// team of one, listed as having nobody yet — and the two must not read
+    /// alike.
+    #[must_use]
+    pub fn teamless() -> Self {
+        Self {
+            description: TEAMLESS_DESCRIPTION.to_owned(),
         }
     }
 }
@@ -606,12 +650,17 @@ impl Tool for SendMessageTool {
             Err(Undelivered::Unknown) => {
                 Err(ToolError::Failed(format!("{UNKNOWN_RECIPIENT} {to:?}")))
             }
-            // The deliverer's own sentence, passed through: what is missing or
-            // what broke is its fact, and a wrapper here would only be a
-            // second voice saying less.
-            Err(Undelivered::NoTransport { reason } | Undelivered::Failed { reason }) => {
-                Err(ToolError::Failed(reason))
-            }
+            // The deliverer's own sentence, passed through: what is missing,
+            // what broke, or what the resolver refused to guess at — D528's
+            // ambiguity and moved-pin refusals ride the same discipline — is
+            // its fact, and a wrapper here would only be a second voice
+            // saying less.
+            Err(
+                Undelivered::NoTransport { reason }
+                | Undelivered::Ambiguous { reason }
+                | Undelivered::NameMoved { reason }
+                | Undelivered::Failed { reason },
+            ) => Err(ToolError::Failed(reason)),
         }
     }
 }
@@ -1032,7 +1081,9 @@ mod tests {
     }
 
     /// A message nobody answers to is information the model reads and retries
-    /// on, not a dead turn.
+    /// on, not a dead turn — and since D530 the sentence is team-agnostic
+    /// (F6): it names both misses, teammate and live session, and claims no
+    /// team the session may not have.
     #[tokio::test]
     async fn an_unknown_recipient_is_reported_in_words() {
         let postbox = Arc::new(Fake::answering(Err(Undelivered::Unknown)));
@@ -1040,6 +1091,83 @@ mod tests {
 
         assert!(message.starts_with(UNKNOWN_RECIPIENT), "got {message}");
         assert!(message.contains("nobody"), "got {message}");
+        assert!(
+            message.contains("no teammate") && message.contains("no live session"),
+            "the sentence names both misses: {message}"
+        );
+        assert!(
+            !message.contains("this team"),
+            "the sentence claims no team (F6): {message}"
+        );
+    }
+
+    /// D528's two resolver refusals cross the seam like the transport's own:
+    /// the deliverer composed the sentence — the candidates, the pinned stem,
+    /// the `uds:` spellings — and the tool passes it through without learning
+    /// anything.
+    #[tokio::test]
+    async fn a_resolver_refusal_is_passed_through_in_the_deliverers_words() {
+        let ambiguous = "Two live sessions answer to that name.";
+        let moved = "That name now belongs to a different session.";
+        for (undelivered, said) in [
+            (
+                Undelivered::Ambiguous {
+                    reason: ambiguous.to_owned(),
+                },
+                ambiguous,
+            ),
+            (
+                Undelivered::NameMoved {
+                    reason: moved.to_owned(),
+                },
+                moved,
+            ),
+        ] {
+            let postbox = Arc::new(Fake::answering(Err(undelivered)));
+
+            let message = refusal(&postbox, json!({"to": "worker", "message": "hello"})).await;
+
+            assert_eq!(message, said, "the deliverer's sentence is passed through");
+        }
+    }
+
+    /// AC-31's description half: the teamless variant claims no roster,
+    /// labels a session's name self-chosen and unverified, says where names
+    /// come from — the person's `@`-mentions or `uds:` spellings — and
+    /// implies no reply channel anywhere (D530's asymmetry rule).
+    #[test]
+    fn the_teamless_description_claims_no_roster_and_names_no_reply_channel() {
+        let tool = SendMessageTool::teamless();
+        let described = tool.description();
+
+        assert!(
+            !described.contains(ROSTER_HEADER),
+            "no roster is claimed: {described}"
+        );
+        assert!(
+            described.contains("chose for itself") && described.contains("nothing verifies"),
+            "a registry name is labeled self-asserted: {described}"
+        );
+        assert!(
+            described.contains("@-mention") && described.contains("uds:"),
+            "the two ways a name arrives are named: {described}"
+        );
+        // The no-reply-channel rule, as absence: no word of hearing back
+        // appears. The roster's absence is asserted on the rendered header
+        // above rather than on the word, because the description's own
+        // denial — "there is no teammate roster" — legitimately carries it.
+        let lowered = described.to_lowercase();
+        for claim in ["reply", "back"] {
+            assert!(
+                !lowered.contains(claim),
+                "no {claim:?} in the teamless description: {described}"
+            );
+        }
+
+        // Distinct from a team of one, whose empty roster is listed as such.
+        let team_of_one = SendMessageTool::new(&[]);
+        assert!(team_of_one.description().contains(super::NO_PEERS));
+        assert_ne!(described, team_of_one.description());
     }
 
     /// The delivered path: the body crosses whole, and the model reads what

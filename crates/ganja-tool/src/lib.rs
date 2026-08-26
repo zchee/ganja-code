@@ -33,6 +33,7 @@ pub mod kill_shell;
 pub mod plan;
 pub mod question;
 pub mod read;
+pub mod registry;
 pub mod send_message;
 pub mod shell;
 pub mod skill;

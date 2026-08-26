@@ -156,6 +156,7 @@ async fn an_undone_turn_leaves_neither_its_files_nor_its_prompt_behind() {
             text: UNDONE.to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         },
     )
@@ -236,6 +237,7 @@ async fn an_undone_turn_leaves_neither_its_files_nor_its_prompt_behind() {
             text: KEPT.to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         },
     )
@@ -354,6 +356,7 @@ async fn an_engine_never_handed_snapshots_refuses_an_undo_even_in_a_checkout() {
             text: "write the file".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         },
     )

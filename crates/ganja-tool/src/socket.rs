@@ -104,6 +104,37 @@ pub const DIRECTORY_MODE: u32 = 0o700;
 /// The mode a bound socket, and the lock file beside it, are left at.
 pub const SOCKET_MODE: u32 = 0o600;
 
+/// Opens the lock file that holds `socket`'s name — [`lock_path`]'s file,
+/// created at [`SOCKET_MODE`] when absent, never truncated — without locking
+/// it: what the caller does with the descriptor is the caller's protocol.
+///
+/// Extracted (**D527**) because two protocols now read one file and the
+/// opening must stay one spelling: the registry's liveness probe
+/// (`crate::registry`) builds a try-lock-and-drop on it, and `ganja-serve`'s
+/// `NameLock::claim` — the binder's claim-then-unlink discipline — opens the
+/// identical options today and is invited to adopt this primitive when that
+/// crate is next edited; recorded here rather than done, because that crate
+/// is untouched by the plan that extracted this. Creating an absent lock
+/// file is deliberate and already the lister's stated price: lock files are
+/// never removed, so the zero-byte `.lock` a probe of an unbound name leaves
+/// behind is the same one a binder would.
+///
+/// # Errors
+///
+/// What opening the lock file said.
+#[cfg(unix)]
+pub fn open_lock(socket: &Path) -> io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(SOCKET_MODE)
+        .open(lock_path(socket))
+}
+
 /// The directory this user's session sockets live in: the literal
 /// `/tmp/ganja-<uid>/`, exactly as tmux keeps `/tmp/tmux-<uid>/`.
 ///

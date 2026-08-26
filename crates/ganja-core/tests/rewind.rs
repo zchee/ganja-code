@@ -158,6 +158,7 @@ async fn both() {
             text: "never mind, do this instead".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         },
     )
@@ -303,6 +304,7 @@ async fn achieved_files() {
             text: FIRST.to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         },
     )
@@ -379,6 +381,7 @@ async fn a_rewind_to_something_that_is_not_a_checkpoint_is_refused_by_name() {
             text: "the only prompt there is".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         },
     )
@@ -449,6 +452,7 @@ async fn a_scope_that_moves_files_is_refused_without_snapshots() {
             text: "the only prompt there is".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         },
     )
@@ -497,6 +501,7 @@ async fn seeded(root: &Path) -> (Engine, BoxStream<'static, Event>, MessageId, M
                 text: text.to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             },
         )

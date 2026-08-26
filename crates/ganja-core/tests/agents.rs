@@ -87,6 +87,7 @@ async fn the_planning_agent_refuses_an_edit_without_asking_anyone() {
             text: "how would you do it".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -154,6 +155,7 @@ async fn the_building_agent_runs_what_the_planning_one_refused() {
             text: "do it".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -254,6 +256,7 @@ async fn switching_agents_swaps_the_prompt_and_keeps_the_environment() {
                 text: text.to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             })
             .await
@@ -326,6 +329,7 @@ async fn switching_models_recomposes_the_environment_block_for_the_new_model() {
             text: "first".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -344,6 +348,7 @@ async fn switching_models_recomposes_the_environment_block_for_the_new_model() {
             text: "second".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -421,6 +426,7 @@ async fn switching_to_an_agent_that_prefers_a_model_recomposes_the_environment_b
             text: "first".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -444,6 +450,7 @@ async fn switching_to_an_agent_that_prefers_a_model_recomposes_the_environment_b
             text: "second".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -510,6 +517,7 @@ async fn a_shell_passthrough_does_not_consume_the_notice_that_planning_is_over()
             text: "how would you do it".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -535,6 +543,7 @@ async fn a_shell_passthrough_does_not_consume_the_notice_that_planning_is_over()
             text: "go ahead".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -593,6 +602,7 @@ async fn the_plan_reminders_reach_the_request_and_not_the_stored_history() {
                 text: text.to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             })
             .await
@@ -692,6 +702,7 @@ async fn a_switch_applies_to_the_next_turn_and_outlives_the_process() {
             text: "first".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -725,6 +736,7 @@ async fn a_switch_applies_to_the_next_turn_and_outlives_the_process() {
             text: "second".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -786,6 +798,7 @@ async fn a_switch_sent_mid_turn_is_refused() {
             text: "hello".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -949,6 +962,7 @@ async fn an_agents_model_is_adopted_from_the_spelling_a_config_writes() {
             text: "look at it".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await

@@ -797,6 +797,11 @@ pub struct Config {
     ///
     /// Not a key a plugin can contribute: [`crate::plugin`]'s `apply` merges
     /// per surface, and D473's six surfaces do not include it.
+    ///
+    /// The sender-side sibling is [`Config::teamless_send`] (**D531**):
+    /// `"hold"` here configures **receiver-side** human review of what
+    /// arrives, while that key's `"ask"` adds **sender-side** dialogs on
+    /// what leaves — two independent knobs on the two ends of one wire.
     pub cross_session_inbound: Option<InboundPolicy>,
     /// How long a **held** peer message's review dialog waits for a person
     /// before it expires (**D523**): `"60s"`, `"5m"`, `"10m"`, or
@@ -826,6 +831,57 @@ pub struct Config {
     /// [`crate::plugin`]'s `apply` merges per surface, and D473's six
     /// surfaces do not include it.
     pub dialog_expiry: Option<DialogExpiry>,
+    /// Whether a session that leads **no team** asks a person before its
+    /// `send_message` leaves for another session (**D531**, user-ratified
+    /// 2026-08-26): `"unasked"` sends as any tool call the rules allow,
+    /// `"ask"` raises the ordinary permission dialog on each send.
+    ///
+    /// **Absent is `"unasked"`** — [`Config::teamless_send()`] is what reads
+    /// it — and the default is deliberate: every cross-session delivery
+    /// already terminates in the *receiver's* admission gate (D523–D525),
+    /// built exactly for the foreign socket peer, so the sender-side dialog
+    /// this key can add re-asks a question the receiving side answers with
+    /// machinery. In a session that **holds a team** the key has no effect
+    /// at all: in-team sends stay D498's, and the engine computes the
+    /// tool's effective default from the live team state, so a team
+    /// spawning mid-session reverts to that posture with no rule mutation.
+    ///
+    /// The dialogs `"ask"` raises are ordinary storable permission answers:
+    /// a stored "always allow" outranks the computed default exactly as it
+    /// does for every tool, and a deny rule still denies. One deliberate
+    /// asymmetry: the D479 `--yolo`/`--auto` drain **does** auto-answer
+    /// these dialogs — they are ordinary asks with `PermissionId`s — unlike
+    /// the held-message dialog, whose immunity is structural (D524). A
+    /// bypass session that also wants sender-side asks is asking for two
+    /// contradictory things, and the flags win as they do everywhere.
+    ///
+    /// # Which tier may say what
+    ///
+    /// Ganja's own key, no reference chain to map (**D531**); the tier rule
+    /// is the `cross_session_inbound` precedent applied:
+    ///
+    /// | ganja tier | rule |
+    /// |---|---|
+    /// | the file [`CONFIG_ENV`] or `--config` names | outranks the global tier, by merge order |
+    /// | the global config home | ordinary overlay |
+    /// | the project files | **tighten-only**, per file |
+    ///
+    /// The project tier merges by severity on the order `unasked (0) <
+    /// ask (1)`: a checkout may demand more human oversight of what its
+    /// sessions send out, and can never loosen a person's `"ask"` back to
+    /// `"unasked"` — the replace happens only when strictly more severe and
+    /// silently fails to loosen otherwise, exactly as the sibling key's
+    /// project-tier `accept` fails to loosen `refuse`. `merge_project` is
+    /// the seam, and `tighten` is the one spelling both keys merge
+    /// through. Not a key a plugin can contribute: [`crate::plugin`]'s
+    /// `apply` merges per surface, and D473's six surfaces do not include
+    /// it.
+    ///
+    /// The receiver-side sibling is [`Config::cross_session_inbound`]:
+    /// that key configures **receiver-side** human review of what arrives,
+    /// while this one adds **sender-side** dialogs on what leaves — two
+    /// independent knobs on the two ends of one wire.
+    pub teamless_send: Option<TeamlessSend>,
     /// Permission rules layered over the built-in ones.
     #[serde(default)]
     pub permission: PermissionConfig,
@@ -1254,6 +1310,67 @@ impl<'de> Deserialize<'de> for DialogExpiry {
     }
 }
 
+/// Whether a teamless session's `send_message` asks a person first
+/// (**D531**, user-ratified 2026-08-26): the vocabulary of the
+/// `teamless_send` key, and of nothing else.
+///
+/// Ganja's own key, not a port — the posture and both spellings are the
+/// 2026-08-26 ruling, with [`InboundPolicy`] as the mechanism precedent.
+/// [`TeamlessSend::severity`] carries the tightening order the project tier
+/// merges under; the config spellings are the lowercase variant names.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TeamlessSend {
+    /// Send without a dialog, what an absent key means.
+    #[default]
+    Unasked,
+    /// Raise the ordinary permission dialog on each send.
+    Ask,
+}
+
+impl TeamlessSend {
+    /// Where this value sits on the tightening order a project file merges
+    /// under: `unasked (0) < ask (1)` — [`InboundPolicy::severity`]'s
+    /// pattern on this key's own two values. Spelled as a number rather
+    /// than an `Ord` derive, so the order cannot drift under a reordered
+    /// declaration.
+    #[must_use]
+    pub const fn severity(self) -> u8 {
+        match self {
+            Self::Unasked => 0,
+            Self::Ask => 1,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TeamlessSend {
+    /// Hand-written for [`InboundPolicy`]'s reason: the refusal names the
+    /// key, which one type serving one key can do honestly.
+    fn deserialize<D: de::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        /// The one spelling the key takes.
+        struct Shape;
+
+        impl Visitor<'_> for Shape {
+            type Value = TeamlessSend;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("teamless_send as \"unasked\" or \"ask\"")
+            }
+
+            fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                match value {
+                    "unasked" => Ok(TeamlessSend::Unasked),
+                    "ask" => Ok(TeamlessSend::Ask),
+                    other => Err(E::custom(format!(
+                        "teamless_send is \"unasked\" or \"ask\", not {other:?}"
+                    ))),
+                }
+            }
+        }
+
+        deserializer.deserialize_str(Shape)
+    }
+}
+
 /// What OpenRouter is asked to run on its own side (**D489**).
 ///
 /// Spec: that vendor's `docs/guides/features/server-tools`, read 2026-08-14 —
@@ -1662,6 +1779,16 @@ impl Config {
         ))
     }
 
+    /// The sender-side posture a **teamless** session's `send_message` runs
+    /// under, or the default when no tier says — [`TeamlessSend::Unasked`],
+    /// the `teamless_send` key's own doc carries why (**D531**). The engine
+    /// computes the tool's effective default from this and the live team
+    /// state; in a session that holds a team the value changes nothing.
+    #[must_use]
+    pub fn teamless_send(&self) -> TeamlessSend {
+        self.teamless_send.unwrap_or_default()
+    }
+
     /// Loads the config for a session working in `cwd`.
     ///
     /// # Errors
@@ -1770,12 +1897,14 @@ impl Config {
         );
         overlay(&mut self.teammates.shell, other.teammates.shell);
         overlay(&mut self.teammates.pane_share, other.teammates.pane_share);
-        // The two D523 keys ride this ordinary overlay between **trusted**
-        // tiers only: a project file reaches them through `merge_project`,
-        // which refuses one and tightens the other before handing the rest
-        // of its file back here.
+        // The two D523 keys — and D531's sender-side sibling — ride this
+        // ordinary overlay between **trusted** tiers only: a project file
+        // reaches them through `merge_project`, which refuses one and
+        // tightens the other two before handing the rest of its file back
+        // here.
         overlay(&mut self.cross_session_inbound, other.cross_session_inbound);
         overlay(&mut self.dialog_expiry, other.dialog_expiry);
+        overlay(&mut self.teamless_send, other.teamless_send);
         overlay(&mut self.tui.notifications, other.tui.notifications);
         overlay(
             &mut self.tui.notification_method,
@@ -1852,12 +1981,14 @@ impl Config {
     /// Overlays one **project-tier** file onto the running result (**D523**).
     ///
     /// The project tier is the one tier whose author is the checkout rather
-    /// than the person running it, so two keys diverge from [`Config::merge`]'s
-    /// later-wins: `dialog_expiry` is refused outright — the complaint names
-    /// the key and `path` — and `cross_session_inbound` replaces the running
-    /// result only when strictly more severe on [`InboundPolicy::severity`]'s
-    /// order, so a checkout can tighten the person's policy and never loosen
-    /// it. Every other key merges exactly as [`Config::merge`] merges it.
+    /// than the person running it, so three keys diverge from
+    /// [`Config::merge`]'s later-wins: `dialog_expiry` is refused outright —
+    /// the complaint names the key and `path` — while `cross_session_inbound`
+    /// and `teamless_send` (**D531**) replace the running result only when
+    /// strictly more severe on their own [`InboundPolicy::severity`] /
+    /// [`TeamlessSend::severity`] orders, so a checkout can tighten the
+    /// person's policy and never loosen it. Every other key merges exactly
+    /// as [`Config::merge`] merges it.
     ///
     /// # Errors
     ///
@@ -1874,19 +2005,16 @@ impl Config {
                     .to_owned(),
             });
         }
-        match (
-            self.cross_session_inbound,
+        tighten(
+            &mut self.cross_session_inbound,
             other.cross_session_inbound.take(),
-        ) {
-            // An equal or less severe project value leaves the standing one:
-            // tightening is the only direction a checkout has.
-            (Some(standing), Some(incoming)) if incoming.severity() <= standing.severity() => {}
-            // A strictly more severe value replaces, and an unset standing
-            // value has nothing to loosen — the first tier to say anything
-            // establishes the policy.
-            (_, Some(incoming)) => self.cross_session_inbound = Some(incoming),
-            (_, None) => {}
-        }
+            InboundPolicy::severity,
+        );
+        tighten(
+            &mut self.teamless_send,
+            other.teamless_send.take(),
+            TeamlessSend::severity,
+        );
         self.merge(other);
 
         Ok(())
@@ -1932,6 +2060,22 @@ fn merge_lsp(slot: &mut Option<LspConfig>, incoming: Option<LspConfig>) {
 fn overlay<T>(slot: &mut Option<T>, incoming: Option<T>) {
     if incoming.is_some() {
         *slot = incoming;
+    }
+}
+
+/// Replaces `standing` only when `incoming` is strictly more severe on
+/// `severity`'s order — the project tier's tightening rule, one spelling for
+/// both keys that merge under it (**D523**, **D531**).
+fn tighten<T: Copy>(standing: &mut Option<T>, incoming: Option<T>, severity: impl Fn(T) -> u8) {
+    match (*standing, incoming) {
+        // An equal or less severe project value leaves the standing one:
+        // tightening is the only direction a checkout has.
+        (Some(held), Some(new)) if severity(new) <= severity(held) => {}
+        // A strictly more severe value replaces, and an unset standing
+        // value has nothing to loosen — the first tier to say anything
+        // establishes the policy.
+        (_, Some(new)) => *standing = Some(new),
+        (_, None) => {}
     }
 }
 
@@ -2506,8 +2650,8 @@ mod tests {
         AgentMode, AgentsConfig, Config, ConfigError, Dialect, DialogExpiry, HookCommand,
         HookHandler, HookMatcher, InboundPolicy, LspConfig, McpOauth, McpServer, NonZeroU64,
         NotificationEvent, NotificationMethod, Notifications, Overrides, StatuslineConfig,
-        StatuslineElement, ThemeMode, existing, merge_files, model_bound_to, project_files, read,
-        split_model,
+        StatuslineElement, TeamlessSend, ThemeMode, existing, merge_files, model_bound_to,
+        project_files, read, split_model,
     };
     use crate::permission::{Action, Rule};
 
@@ -3005,6 +3149,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn teamless_send_parses_its_two_values_and_absent_is_unasked() {
+        let config = parse(r#"{"model": "anthropic/claude-sonnet-5"}"#).expect("it parses");
+        assert_eq!(config.teamless_send, None, "absence travels to the merge");
+        assert_eq!(
+            config.teamless_send(),
+            TeamlessSend::Unasked,
+            "and reads as the default"
+        );
+
+        for (spelled, parsed) in [
+            ("unasked", TeamlessSend::Unasked),
+            ("ask", TeamlessSend::Ask),
+        ] {
+            let config = parse(&format!(r#"{{"teamless_send": "{spelled}"}}"#))
+                .expect("a posture this build has is a config value");
+            assert_eq!(config.teamless_send, Some(parsed));
+        }
+    }
+
+    /// The refusal names the key — the whole reason the type deserializes by
+    /// hand — and lists the vocabulary, on a wrong string and a wrong type
+    /// alike.
+    #[test]
+    fn a_teamless_send_nothing_admits_is_refused_naming_the_key() {
+        for bogus in [
+            r#"{"teamless_send": "always"}"#,
+            r#"{"teamless_send": true}"#,
+        ] {
+            let error = parse(bogus).expect_err("a posture nothing admits is refused");
+            let ConfigError::Parse { message, .. } = &error else {
+                panic!("expected a parse failure, got {error:?}");
+            };
+            assert!(message.contains("teamless_send"), "{message}");
+            for admitted in ["unasked", "ask"] {
+                assert!(
+                    message.contains(admitted),
+                    "and the refusal lists what would have worked: {message}"
+                );
+            }
+        }
+    }
+
     /// The merge seam of the one deliberate divergence from later-wins: a
     /// project file replaces the standing policy only when strictly more
     /// severe, while the trusted tiers keep the ordinary overlay between
@@ -3063,6 +3250,56 @@ mod tests {
             )
             .expect("an ordinary key is no error");
         assert_eq!(merged.model.as_deref(), Some("openai/gpt-5.6"));
+    }
+
+    /// The same seam for the sender-side sibling (**D531**): the project
+    /// tier tightens on `unasked (0) < ask (1)` through the one `tighten`
+    /// spelling `cross_session_inbound` merges under, and the trusted tiers
+    /// keep later-wins between themselves — which is what makes the file
+    /// `GANJA_CONFIG` names outrank the global tier, in both directions,
+    /// because both are the person's own files.
+    #[test]
+    fn a_project_file_can_tighten_teamless_send_but_never_loosen() {
+        // A project `ask` lands over an absent standing value: the first
+        // tier to say anything establishes the posture.
+        let mut merged = parse("{}").expect("an empty config parses");
+        merged
+            .merge_project(
+                parse(r#"{"teamless_send": "ask"}"#).expect("the project tier parses"),
+                Path::new("ganja.jsonc"),
+            )
+            .expect("establishing a value is not loosening one");
+        assert_eq!(merged.teamless_send, Some(TeamlessSend::Ask));
+
+        // And over an explicit global `unasked`: unasked → ask is the
+        // tightening direction, a checkout demanding more oversight.
+        let mut merged = parse(r#"{"teamless_send": "unasked"}"#).expect("it parses");
+        merged
+            .merge_project(
+                parse(r#"{"teamless_send": "ask"}"#).expect("it parses"),
+                Path::new("ganja.jsonc"),
+            )
+            .expect("tightening is never an error");
+        assert_eq!(merged.teamless_send, Some(TeamlessSend::Ask));
+
+        // A project `unasked` over a person's `ask` silently fails to
+        // loosen — the same mechanism, not a refusal.
+        let mut merged = parse(r#"{"teamless_send": "ask"}"#).expect("it parses");
+        merged
+            .merge_project(
+                parse(r#"{"teamless_send": "unasked"}"#).expect("it parses"),
+                Path::new("ganja.jsonc"),
+            )
+            .expect("a loosening project value is ignored, never an error");
+        assert_eq!(merged.teamless_send, Some(TeamlessSend::Ask));
+
+        // Between trusted tiers the key keeps later-wins — the explicit
+        // `GANJA_CONFIG` file outranks the global one by merge order, in
+        // the loosening direction too, because both are the person's own
+        // files.
+        let mut merged = parse(r#"{"teamless_send": "ask"}"#).expect("it parses");
+        merged.merge(parse(r#"{"teamless_send": "unasked"}"#).expect("it parses"));
+        assert_eq!(merged.teamless_send, Some(TeamlessSend::Unasked));
     }
 
     /// The other divergence at the same seam: the error names the key and

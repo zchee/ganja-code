@@ -84,6 +84,7 @@ async fn prompt(engine: &Engine, text: &str) {
             text: text.to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await

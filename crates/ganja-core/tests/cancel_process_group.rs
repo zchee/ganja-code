@@ -150,6 +150,7 @@ async fn cancelling_a_turn_kills_the_process_group_of_the_command_it_was_running
             text: "run it".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await

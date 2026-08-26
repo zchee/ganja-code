@@ -104,6 +104,7 @@ async fn run_prompt_and_await_bash_id(
             text: "run it".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await

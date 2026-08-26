@@ -17,6 +17,19 @@
 //! run unasked, which is what keeps `cargo test` from carrying `&& rm -rf /`
 //! in with it.
 //!
+//! That fallback — and only that fallback — is a caller's to move.
+//! [`Permissions::gate_with_default`] takes an effective default for the call
+//! and consults it exactly where no rule matched, ahead of the static lists;
+//! [`Permissions::gate`] is the same walk with nothing handed in. The caller
+//! computes the default from state this crate deliberately cannot see —
+//! whether the session holds a team, what a config key resolved to — and
+//! hands in only the conclusion, so the crate still reads no config and stays
+//! ignorant of policy. The alternative — a provenance field on the verdict,
+//! overridden above this crate — was rejected: whoever overrides a verdict
+//! re-derives the precedence ladder outside it, and a second spelling of the
+//! ladder is free to disagree with the first. In here the ladder is spelled
+//! once.
+//!
 //! # Where a call may run
 //!
 //! Those patterns say *what* a call does and nothing about *where*, and the
@@ -823,6 +836,32 @@ impl Permissions {
     /// be about three subtly different things.
     #[must_use]
     pub fn gate(&self, tool: &str, args: &serde_json::Value) -> CallDecision {
+        self.gate_with_default(tool, args, None)
+    }
+
+    /// [`Permissions::gate`], with the caller's own answer for the layer
+    /// where nothing matched.
+    ///
+    /// `unmatched` sits at exactly one rung: beneath every rule — the agent's
+    /// baseline, the config's, the answers a person stored — and ahead of the
+    /// static [`ASK_BY_DEFAULT`]/allow defaults. [`None`] is that static
+    /// ladder untouched, which is what [`Permissions::gate`] hands in.
+    /// Everything above the rung is out of the caller's reach by
+    /// construction: an explicit rule still wins, a stored "always allow"
+    /// still allows, and a deny still denies.
+    ///
+    /// The default speaks for `tool` and for nothing else. The location gate
+    /// a call raises beside its own permission ([`EXTERNAL_DIRECTORY`]) keeps
+    /// the static ladder: what a caller knows about the tool says nothing
+    /// about *where* the call may work, and a default that also answered the
+    /// location question would cover more than the caller computed.
+    #[must_use]
+    pub fn gate_with_default(
+        &self,
+        tool: &str,
+        args: &serde_json::Value,
+        unmatched: Option<Decision>,
+    ) -> CallDecision {
         let directories = self.outside_dirs(tool, args);
 
         // Upstream raises this one first and on its own (`tool/shell.ts`,
@@ -833,9 +872,13 @@ impl Permissions {
         // Every directory the call names has to come back allowed, the same
         // all-or-nothing rule the patterns below get: a call naming three
         // directories is stopped by the one that was never answered for.
+        //
+        // And it keeps the static ladder whatever the caller handed in:
+        // `unmatched` speaks for the tool, and where a call may work is not a
+        // question the caller's computation was about.
         let located = directories
             .iter()
-            .map(|directory| self.decide(EXTERNAL_DIRECTORY, &covering(directory)))
+            .map(|directory| self.decide(EXTERNAL_DIRECTORY, &covering(directory), None))
             .max()
             .unwrap_or(Decision::Allow);
 
@@ -852,7 +895,7 @@ impl Permissions {
         // — and one denied command refuses it, whatever the rest said.
         let asked = patterns
             .iter()
-            .map(|pattern| self.decide(tool, pattern))
+            .map(|pattern| self.decide(tool, pattern, unmatched))
             .max()
             .unwrap_or(Decision::Allow);
 
@@ -1116,22 +1159,25 @@ impl Permissions {
         })
     }
 
-    /// What the rules say about one pattern, or what the defaults say when
-    /// they say nothing.
-    fn decide(&self, tool: &str, pattern: &str) -> Decision {
+    /// What the rules say about one pattern, or — when they say nothing —
+    /// what the caller handed in, or the static defaults beneath that.
+    fn decide(&self, tool: &str, pattern: &str, unmatched: Option<Decision>) -> Decision {
         let matched = self
             .ordered()
             .rev()
             .find(|rule| matches(tool, &rule.permission) && matches(pattern, &rule.pattern));
 
-        match matched {
-            Some(rule) => rule.action.decision(),
-            None if ASK_BY_DEFAULT.contains(&tool) => Decision::Ask,
+        match (matched, unmatched) {
+            (Some(rule), _) => rule.action.decision(),
+            // The caller's default, and this arm's position is the API's
+            // whole contract: beneath every rule, ahead of the static lists.
+            (None, Some(default)) => default,
+            (None, None) if ASK_BY_DEFAULT.contains(&tool) => Decision::Ask,
             // The one default decided by shape rather than by name; see
             // [`MCP_PREFIX`]. Below the rules, so a config that answered for
             // `"mcp__github__*"` still answers.
-            None if tool.starts_with(MCP_PREFIX) => Decision::Ask,
-            None => Decision::Allow,
+            (None, None) if tool.starts_with(MCP_PREFIX) => Decision::Ask,
+            (None, None) => Decision::Allow,
         }
     }
 }
@@ -2185,6 +2231,111 @@ mod tests {
         let decision = permissions.gate("shell", &args);
         permissions.remember(&decision);
         assert_eq!(permissions.gate("shell", &args).action, Decision::Allow);
+    }
+
+    /// The handed-in default moves only the nothing-matched layer. The tool
+    /// here is on no static list, so its unmatched answer is Allow and the
+    /// handed-in Ask is the only thing that can move it — and every rule
+    /// tier still can.
+    #[test]
+    fn an_explicit_rule_and_a_stored_always_both_outrank_the_handed_in_default() {
+        let tool = "send_message";
+        let call = serde_json::json!({});
+        let asked = Some(Decision::Ask);
+
+        // No rule anywhere: the handed-in default decides.
+        let permissions = memory();
+        assert_eq!(
+            permissions.gate_with_default(tool, &call, asked).action,
+            Decision::Ask
+        );
+
+        // An explicit allow rule outranks it.
+        let mut permissions = memory();
+        permissions.set_baseline(vec![Rule {
+            permission: tool.to_owned(),
+            pattern: "*".to_owned(),
+            action: Action::Allow,
+        }]);
+        assert_eq!(
+            permissions.gate_with_default(tool, &call, asked).action,
+            Decision::Allow
+        );
+
+        // So does a stored "always allow" answer: the person's yes was to
+        // this tool, and no later default re-opens the question.
+        let mut permissions = memory();
+        let decision = permissions.gate_with_default(tool, &call, asked);
+        permissions.remember(&decision);
+        assert_eq!(
+            permissions.gate_with_default(tool, &call, asked).action,
+            Decision::Allow
+        );
+
+        // And a deny still denies — even under a default that would have
+        // *loosened*, because the default sits beneath every rule.
+        let mut permissions = memory();
+        permissions.set_baseline(vec![Rule {
+            permission: tool.to_owned(),
+            pattern: "*".to_owned(),
+            action: Action::Deny,
+        }]);
+        assert_eq!(
+            permissions.gate_with_default(tool, &call, asked).action,
+            Decision::Deny
+        );
+        assert_eq!(
+            permissions
+                .gate_with_default(tool, &call, Some(Decision::Allow))
+                .action,
+            Decision::Deny
+        );
+    }
+
+    /// `gate` is `gate_with_default` handed nothing — pinned over a spread of
+    /// calls that exercises every judging path (rules matched and not, the
+    /// location gate, the MCP namespace, the static lists), so the delegation
+    /// cannot quietly stop being one.
+    #[test]
+    fn gate_answers_exactly_as_gate_with_default_handed_nothing() {
+        let store = temporary();
+        let project = temporary();
+        let elsewhere = temporary();
+        let mut permissions = scoped(&store, &project);
+        permissions.set_baseline(vec![
+            Rule {
+                permission: "shell".to_owned(),
+                pattern: "cargo *".to_owned(),
+                action: Action::Allow,
+            },
+            Rule {
+                permission: "webfetch".to_owned(),
+                pattern: "*".to_owned(),
+                action: Action::Deny,
+            },
+        ]);
+
+        let calls = [
+            ("shell", shell("cargo test")),
+            ("shell", shell("rm -rf /tmp/x")),
+            ("bash", shell_in("cargo test", elsewhere.path())),
+            ("write", json!({ "filePath": "a.txt" })),
+            ("webfetch", json!({ "url": "https://example.com" })),
+            ("mcp__github__create_issue", json!({})),
+            ("read", json!({})),
+            ("task", json!({ "subagent_type": "explore" })),
+        ];
+        for (tool, args) in &calls {
+            let plain = permissions.gate(tool, args);
+            let widened = permissions.gate_with_default(tool, args, None);
+            assert_eq!(plain.action, widened.action, "{tool}: action");
+            assert_eq!(plain.rules, widened.rules, "{tool}: rules");
+            assert_eq!(
+                plain.directories, widened.directories,
+                "{tool}: directories"
+            );
+            assert_eq!(plain.learned, widened.learned, "{tool}: learned");
+        }
     }
 
     /// A dialog cannot ask "may this run" without saying where, and what it

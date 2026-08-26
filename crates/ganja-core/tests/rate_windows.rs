@@ -152,6 +152,7 @@ async fn turn(engine: &Engine, prompt: &str) {
             text: prompt.to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await

@@ -95,6 +95,7 @@ async fn a_scripted_task_name_call_starts_a_teammate_through_the_engine() {
             text: "hold the fort while I look at the parser".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await

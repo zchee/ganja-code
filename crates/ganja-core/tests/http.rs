@@ -878,6 +878,7 @@ async fn a_failure_mid_stream_finishes_the_turn_as_failed_and_keeps_the_text() {
             text: "hi".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -932,6 +933,7 @@ async fn a_cancel_mid_stream_finishes_the_turn_as_cancelled() {
             text: "hi".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await

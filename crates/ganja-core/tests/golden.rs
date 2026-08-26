@@ -450,6 +450,7 @@ async fn ganja(task: &Task) -> Vec<Executed> {
             text: task.prompt.clone(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await

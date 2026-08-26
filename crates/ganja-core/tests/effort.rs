@@ -123,6 +123,7 @@ async fn selecting_an_effort_lands_its_option_map_in_the_next_request() {
             text: "hi".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -230,6 +231,7 @@ async fn the_stored_effort_survives_a_resume() {
             text: "hi".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -283,6 +285,7 @@ async fn a_configured_effort_is_adopted_and_announced_before_the_first_turn() {
             text: "hi".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -325,6 +328,7 @@ async fn a_configured_effort_the_model_does_not_serve_clears_instead_of_refusing
             text: "hi".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -375,6 +379,7 @@ async fn a_resumed_session_keeps_its_stored_effort_over_the_configured_one() {
             text: "hi".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -395,6 +400,7 @@ async fn a_resumed_session_keeps_its_stored_effort_over_the_configured_one() {
         text: "hi".to_owned(),
         mentions: Vec::new(),
         skills: Vec::new(),
+        session_mentions: Vec::new(),
         peers: Vec::new(),
     })
     .await

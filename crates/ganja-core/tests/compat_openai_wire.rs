@@ -151,6 +151,7 @@ async fn a_config_named_openai_compatible_endpoint_takes_a_whole_turn_on_the_key
             text: "hi".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await

@@ -244,6 +244,7 @@ async fn a_team_gives_both_engines_a_postbox_and_the_teammate_a_store() {
             text: LEAD_PROMPT.to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -425,6 +426,7 @@ async fn what_the_lead_sends_is_what_its_teammate_reads_next() {
             text: LEAD_PROMPT.to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await

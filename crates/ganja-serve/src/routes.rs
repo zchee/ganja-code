@@ -462,6 +462,7 @@ async fn prompt(
             text: body.text,
             mentions: body.mentions,
             skills: body.skills,
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await?;

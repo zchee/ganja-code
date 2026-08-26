@@ -3368,6 +3368,7 @@ impl Engine {
                 mentions,
                 skills,
                 peers,
+                session_mentions: _,
             } => {
                 self.start_turn(
                     text,
@@ -3386,6 +3387,7 @@ impl Engine {
                 mentions,
                 skills,
                 peers,
+                session_mentions: _,
             } => self.steer(id, text, mentions, skills, peers).await,
             Command::CancelTurn => {
                 self.cancel_turn().await;
@@ -5833,6 +5835,7 @@ mod tests {
                 text: "hi".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             })
             .await
@@ -5917,6 +5920,7 @@ mod tests {
                     text: prompt.to_owned(),
                     mentions: Vec::new(),
                     skills: Vec::new(),
+                    session_mentions: Vec::new(),
                     peers: Vec::new(),
                 })
                 .await
@@ -5975,6 +5979,7 @@ mod tests {
                 text: "hi".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             })
             .await
@@ -5998,6 +6003,7 @@ mod tests {
                 text: "again".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             })
             .await
@@ -6019,6 +6025,7 @@ mod tests {
                     text: prompt.to_owned(),
                     mentions: Vec::new(),
                     skills: Vec::new(),
+                    session_mentions: Vec::new(),
                     peers: Vec::new(),
                 })
                 .await
@@ -6106,6 +6113,7 @@ mod tests {
                 text: "next".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             })
             .await
@@ -6294,6 +6302,7 @@ mod tests {
                 text: "fill the conversation a little".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             })
             .await
@@ -6342,6 +6351,7 @@ mod tests {
                 text: "the first prompt".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             })
             .await
@@ -6354,6 +6364,7 @@ mod tests {
                 text: "the second prompt, which the revert takes back".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             })
             .await
@@ -6423,6 +6434,7 @@ mod tests {
                 text: "x".repeat(400),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             })
             .await
@@ -6458,6 +6470,7 @@ mod tests {
                 text: "hi".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             })
             .await
@@ -6504,6 +6517,7 @@ mod tests {
                 text: "hi".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             })
             .await
@@ -6545,6 +6559,7 @@ mod tests {
                 text: "first".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             })
             .await
@@ -6574,6 +6589,7 @@ mod tests {
                 text: "second".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             })
             .await
@@ -6610,6 +6626,7 @@ mod tests {
                 text: "first".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             })
             .await
@@ -6625,6 +6642,7 @@ mod tests {
                     text: "second".to_owned(),
                     mentions: Vec::new(),
                     skills: Vec::new(),
+                    session_mentions: Vec::new(),
                     peers: Vec::new(),
                 })
                 .await,
@@ -6647,6 +6665,7 @@ mod tests {
                 text: "first".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             })
             .await
@@ -6680,6 +6699,7 @@ mod tests {
                 text: "first".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             })
             .await
@@ -6707,6 +6727,7 @@ mod tests {
                 text: "first".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             })
             .await
@@ -6719,6 +6740,7 @@ mod tests {
                 text: "second".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             })
             .await
@@ -6856,6 +6878,7 @@ mod tests {
                 text: String::new(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: vec![crate::protocol::team::PeerPayload::new(
                     "w1",
                     Some("picked up W2".to_owned()),
@@ -6929,6 +6952,7 @@ mod tests {
                     text: prompt.to_owned(),
                     mentions: Vec::new(),
                     skills: Vec::new(),
+                    session_mentions: Vec::new(),
                     peers: Vec::new(),
                 })
                 .await
@@ -6988,6 +7012,7 @@ mod tests {
                 text: "now what".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             })
             .await

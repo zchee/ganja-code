@@ -1505,9 +1505,10 @@ pub(crate) async fn deliver_to_lead(
         // Unreachable for the lead's own name; the arm is the enum's,
         // answered rather than unwrapped.
         Undelivered::Unknown => NotReceived::Unknown { name: message.lead },
-        Undelivered::NoTransport { reason } | Undelivered::Failed { reason } => {
-            NotReceived::Failed { reason }
-        }
+        Undelivered::NoTransport { reason }
+        | Undelivered::Ambiguous { reason }
+        | Undelivered::NameMoved { reason }
+        | Undelivered::Failed { reason } => NotReceived::Failed { reason },
     })?;
 
     Ok((

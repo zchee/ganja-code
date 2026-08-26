@@ -659,6 +659,7 @@ async fn drive(
                     text: message.to_owned(),
                     mentions: Vec::new(),
                     skills,
+                    session_mentions: Vec::new(),
                     peers: Vec::new(),
                 })
                 .await

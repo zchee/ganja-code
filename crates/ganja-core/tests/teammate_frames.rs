@@ -252,6 +252,7 @@ async fn a_member_postbox_cannot_send_as_the_lead() {
             text: "tell the lead you are done".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -354,6 +355,7 @@ async fn a_pane_members_ask_is_answered_at_the_leads_dialog_and_the_call_runs() 
             text: "run it".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await

@@ -316,6 +316,7 @@ async fn a_message_addressed_uds_reaches_the_peers_next_turn() {
             text: String::new(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: vec![PeerPayload::new(
                 &delivered.from,
                 delivered.summary.clone(),

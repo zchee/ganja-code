@@ -1170,6 +1170,16 @@ pub enum Command {
         /// when there are none, same as `mentions`.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         skills: Vec<String>,
+        /// Teammates and live sessions the user's `@`-mention tokens named
+        /// (**D529**) — still present in `text`, exactly as `skills` names
+        /// are. Names, not resolutions: the engine resolves each one at the
+        /// seam skills expand at, so which session a name means is decided
+        /// where the roster and the identity index live, not by whichever
+        /// frontend sent this. Absent from the wire when there are none,
+        /// same as the fields beside it, so a prompt naming no session is
+        /// byte-for-byte the prompt this protocol always sent.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        session_mentions: Vec<String>,
         /// Messages teammates wrote, which this prompt hands to the model as
         /// [`PartBody::Peer`] parts rather than as text (**D495**).
         ///
@@ -1232,6 +1242,12 @@ pub enum Command {
         /// there are none.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         skills: Vec<String>,
+        /// Teammates and live sessions the message's `@` tokens named, on
+        /// [`Command::SendPrompt::session_mentions`]' terms — names, not
+        /// resolutions, resolved when the carrying request is built. Absent
+        /// from the wire when there are none.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        session_mentions: Vec<String>,
         /// Messages teammates wrote, on [`Command::SendPrompt::peers`]' terms.
         ///
         /// A teammate that answers while a turn is running is answering *this*
@@ -2316,6 +2332,7 @@ mod tests {
                 text: "hello".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             },
             Command::SendPrompt {
@@ -2325,6 +2342,7 @@ mod tests {
                     ..Default::default()
                 }],
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             },
             Command::SendPrompt {
@@ -2335,6 +2353,7 @@ mod tests {
                     end: Some(20),
                 }],
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             },
             Command::Steer {
@@ -2342,6 +2361,7 @@ mod tests {
                 text: "actually, use the other file".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             },
             Command::Steer {
@@ -2353,6 +2373,22 @@ mod tests {
                     end: Some(20),
                 }],
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
+                peers: Vec::new(),
+            },
+            Command::SendPrompt {
+                text: "ask @backend about it".to_owned(),
+                mentions: Vec::new(),
+                skills: Vec::new(),
+                session_mentions: vec!["backend".to_owned()],
+                peers: Vec::new(),
+            },
+            Command::Steer {
+                id: "steer-6".to_owned(),
+                text: "and tell @worker too".to_owned(),
+                mentions: Vec::new(),
+                skills: Vec::new(),
+                session_mentions: vec!["worker".to_owned()],
                 peers: Vec::new(),
             },
             Command::CancelTurn,
@@ -2573,6 +2609,7 @@ mod tests {
                     text: "hi".to_owned(),
                     mentions: Vec::new(),
                     skills: Vec::new(),
+                    session_mentions: Vec::new(),
                     peers: Vec::new(),
                 }),
                 r#"{"type":"send_prompt","text":"hi"}"#,
@@ -2591,6 +2628,7 @@ mod tests {
                         },
                     ],
                     skills: Vec::new(),
+                    session_mentions: Vec::new(),
                     peers: Vec::new(),
                 }),
                 r#"{"type":"send_prompt","text":"hi","mentions":[{"path":"src/main.rs"},{"path":"README.md"}]}"#,
@@ -2606,6 +2644,7 @@ mod tests {
                         end: Some(40),
                     }],
                     skills: Vec::new(),
+                    session_mentions: Vec::new(),
                     peers: Vec::new(),
                 }),
                 r#"{"type":"send_prompt","text":"hi","mentions":[{"path":"src/main.rs","start":12,"end":40}]}"#,
@@ -2619,6 +2658,7 @@ mod tests {
                     text: "use the other file".to_owned(),
                     mentions: Vec::new(),
                     skills: Vec::new(),
+                    session_mentions: Vec::new(),
                     peers: Vec::new(),
                 }),
                 r#"{"type":"steer","id":"steer-1","text":"use the other file"}"#,
@@ -2633,6 +2673,7 @@ mod tests {
                         end: Some(20),
                     }],
                     skills: Vec::new(),
+                    session_mentions: Vec::new(),
                     peers: Vec::new(),
                 }),
                 r#"{"type":"steer","id":"steer-2","text":"this one","mentions":[{"path":"src/main.rs","start":10,"end":20}]}"#,
@@ -2645,6 +2686,7 @@ mod tests {
                     text: "use $porting here".to_owned(),
                     mentions: Vec::new(),
                     skills: vec!["porting".to_owned()],
+                    session_mentions: Vec::new(),
                     peers: Vec::new(),
                 }),
                 r#"{"type":"send_prompt","text":"use $porting here","skills":["porting"]}"#,
@@ -2655,9 +2697,36 @@ mod tests {
                     text: "and $tdd too".to_owned(),
                     mentions: Vec::new(),
                     skills: vec!["tdd".to_owned()],
+                    session_mentions: Vec::new(),
                     peers: Vec::new(),
                 }),
                 r#"{"type":"steer","id":"steer-3","text":"and $tdd too","skills":["tdd"]}"#,
+            ),
+            // An `@`-mention that named a teammate or a live session rides as
+            // names beside the skills — the token itself stays in the text —
+            // and keeps the same absence rule (**D529**): the prompts above
+            // that carry none still write exactly the bytes they wrote before
+            // this field existed.
+            (
+                serde_json::to_string(&Command::SendPrompt {
+                    text: "ask @backend about it".to_owned(),
+                    mentions: Vec::new(),
+                    skills: Vec::new(),
+                    session_mentions: vec!["backend".to_owned()],
+                    peers: Vec::new(),
+                }),
+                r#"{"type":"send_prompt","text":"ask @backend about it","session_mentions":["backend"]}"#,
+            ),
+            (
+                serde_json::to_string(&Command::Steer {
+                    id: "steer-5".to_owned(),
+                    text: "and tell @worker too".to_owned(),
+                    mentions: Vec::new(),
+                    skills: Vec::new(),
+                    session_mentions: vec!["worker".to_owned()],
+                    peers: Vec::new(),
+                }),
+                r#"{"type":"steer","id":"steer-5","text":"and tell @worker too","session_mentions":["worker"]}"#,
             ),
             // A teammate's message rides beside them under the same absence
             // rule, which is the whole of the backward-compatibility claim:
@@ -2668,6 +2737,7 @@ mod tests {
                     text: String::new(),
                     mentions: Vec::new(),
                     skills: Vec::new(),
+                    session_mentions: Vec::new(),
                     peers: vec![team::PeerPayload::new(
                         "w1",
                         Some("picked up W2".to_owned()),
@@ -2683,6 +2753,7 @@ mod tests {
                     text: String::new(),
                     mentions: Vec::new(),
                     skills: Vec::new(),
+                    session_mentions: Vec::new(),
                     peers: vec![team::PeerPayload::new(
                         "w2",
                         None,
@@ -3422,6 +3493,7 @@ mod tests {
                 text: "hi".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             }
         );
@@ -3440,6 +3512,7 @@ mod tests {
                     end: None,
                 }],
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             }
         );
@@ -3462,6 +3535,7 @@ mod tests {
                 text: "use the other file".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             }
         );
@@ -3481,6 +3555,7 @@ mod tests {
                     end: None,
                 }],
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             }
         );

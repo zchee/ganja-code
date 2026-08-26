@@ -161,6 +161,7 @@ async fn an_answered_question_produces_one_reply_and_the_model_reads_the_labels(
             text: "ask me".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -228,6 +229,7 @@ async fn a_dismissed_question_produces_one_rejection_and_the_turn_carries_on() {
             text: "ask me".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -266,6 +268,7 @@ async fn a_cancel_refuses_the_open_question_with_exactly_one_rejection() {
             text: "ask me".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -296,6 +299,7 @@ async fn an_answer_that_arrives_after_the_cancel_adds_no_second_terminal() {
             text: "ask me".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -339,6 +343,7 @@ async fn a_permission_reply_cannot_answer_an_open_question() {
             text: "ask me".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -387,6 +392,7 @@ async fn an_answer_naming_an_unknown_question_is_ignored() {
             text: "ask me".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -440,6 +446,7 @@ async fn a_skipped_question_is_named_to_the_model_as_unanswered() {
             text: "ask me".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -502,6 +509,7 @@ async fn a_crossing_question_carries_the_parents_session_id() {
             text: "delegate it".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -565,6 +573,7 @@ async fn a_cancel_during_a_childs_question_still_produces_one_rejection() {
             text: "delegate it".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -612,6 +621,7 @@ async fn several_questions_are_answered_together_and_read_back_in_order() {
             text: "ask me".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await

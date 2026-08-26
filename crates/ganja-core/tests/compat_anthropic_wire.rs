@@ -133,6 +133,7 @@ async fn a_config_named_anthropic_compatible_endpoint_speaks_messages_on_the_key
             text: "hi".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await

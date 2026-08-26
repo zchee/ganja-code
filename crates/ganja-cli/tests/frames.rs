@@ -213,6 +213,7 @@ async fn a_running_server_writes_the_frames_the_client_declares() {
             text: "say something".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -289,6 +290,7 @@ async fn a_subscriber_that_stops_reading_is_told_it_was_evicted() {
             text: "say a great deal".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await

@@ -257,6 +257,7 @@ async fn a_command_that_names_an_agent_runs_as_it_for_one_turn() {
             text: "hi".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -374,6 +375,7 @@ async fn compacting_on_demand_summarizes_a_session_that_is_nowhere_near_full() {
             text: "carry on".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -409,6 +411,7 @@ async fn starting_a_new_session_leaves_the_old_one_on_disk_and_the_next_prompt_f
             text: "first".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -433,6 +436,7 @@ async fn starting_a_new_session_leaves_the_old_one_on_disk_and_the_next_prompt_f
             text: "second".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -494,6 +498,7 @@ async fn a_new_session_does_not_inherit_what_the_last_one_had_read() {
             text: "read it".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -510,6 +515,7 @@ async fn a_new_session_does_not_inherit_what_the_last_one_had_read() {
             text: "now write it".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await

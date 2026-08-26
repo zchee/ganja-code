@@ -220,6 +220,7 @@ async fn a_passthrough_writes_the_command_and_its_output_into_the_transcript() {
             text: "what did that print".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await
@@ -387,6 +388,7 @@ async fn a_passthrough_is_refused_while_a_turn_is_streaming() {
             text: "think about it".to_owned(),
             mentions: Vec::new(),
             skills: Vec::new(),
+            session_mentions: Vec::new(),
             peers: Vec::new(),
         })
         .await

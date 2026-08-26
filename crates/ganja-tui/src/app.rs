@@ -2575,6 +2575,7 @@ impl App {
                 text: String::new(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: messages.iter().map(payload).collect(),
             })
             .await;
@@ -2631,6 +2632,7 @@ impl App {
                 text: String::new(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: messages.iter().map(payload).collect(),
             })
             .await;
@@ -5933,6 +5935,7 @@ impl App {
                         text: prompt,
                         mentions,
                         skills,
+                        session_mentions: Vec::new(),
                         peers: Vec::new(),
                     })
                     .await
@@ -5994,6 +5997,7 @@ impl App {
                 text: prompt.clone(),
                 mentions,
                 skills,
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             })
             .await;
@@ -7064,6 +7068,8 @@ fn undelivered_reason(undelivered: &ganja_tool::team::Undelivered) -> String {
             "nobody on this team answers to that name".to_owned()
         }
         ganja_tool::team::Undelivered::NoTransport { reason }
+        | ganja_tool::team::Undelivered::Ambiguous { reason }
+        | ganja_tool::team::Undelivered::NameMoved { reason }
         | ganja_tool::team::Undelivered::Failed { reason } => reason.clone(),
     }
 }
@@ -7394,6 +7400,7 @@ mod tests {
                 text: "ask me".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             })
             .await
@@ -9484,6 +9491,7 @@ mod tests {
                 text: "run it".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             })
             .await
@@ -18464,6 +18472,7 @@ mod tests {
                 text: "run it".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             })
             .await

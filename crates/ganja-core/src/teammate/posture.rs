@@ -947,6 +947,7 @@ mod tests {
                 text: "write the note".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             })
             .await
@@ -994,6 +995,7 @@ mod tests {
                 text: "write the note".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             })
             .await
@@ -1072,6 +1074,7 @@ mod tests {
                 text: "write the note".to_owned(),
                 mentions: Vec::new(),
                 skills: Vec::new(),
+                session_mentions: Vec::new(),
                 peers: Vec::new(),
             })
             .await
