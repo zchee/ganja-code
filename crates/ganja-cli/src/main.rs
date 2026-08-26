@@ -1550,12 +1550,16 @@ async fn live_sessions_command(directory: Option<PathBuf>) -> Result<()> {
         return Ok(());
     }
 
-    println!("{:<36}  {:<32}  SOCKET", "SESSION", "NAME");
+    // The NAME column is padded to the grammar's own cap
+    // (`registry::MOST_NAME_POINTS`) rather than a shorter guess, so a name
+    // using the width the grammar actually admits still leaves SOCKET
+    // aligned on every row.
+    let width = ganja_core::tool::registry::MOST_NAME_POINTS;
+    println!("{:<36}  {:<width$}  SOCKET", "SESSION", "NAME");
     for (session, name, path) in live {
         println!(
-            "{:<36}  {:<32}  {}",
+            "{:<36}  {name:<width$}  {}",
             printable_session(&session),
-            name,
             path.display()
         );
     }

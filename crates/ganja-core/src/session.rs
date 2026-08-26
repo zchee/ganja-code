@@ -1315,7 +1315,7 @@ fn mention_of(
     if let Some(peer) = roster.and_then(|roster| {
         roster
             .iter()
-            .find(|peer| peer.name.eq_ignore_ascii_case(&name))
+            .find(|peer| ganja_tool::registry::same_name(&peer.name, &name))
     }) {
         return Mentioned::Teammate {
             name,

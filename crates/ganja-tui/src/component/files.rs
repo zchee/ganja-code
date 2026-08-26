@@ -206,10 +206,13 @@ impl Files {
         let inner_width = usize::from(area.width).saturating_sub(2);
         let visible = usize::from(area.height).saturating_sub(2);
 
+        // Titled generically rather than "files": since D529 this box lists
+        // roster teammates and live sessions beside files, and a name row
+        // under a "files" heading would be its own small dishonesty.
         let title = if self.incomplete.is_some() {
-            " files (partial) "
+            " mentions (partial) "
         } else {
-            " files "
+            " mentions "
         };
         Paragraph::new(Text::from(self.lines(inner_width, visible, theme)))
             .block(Block::bordered().title(title))

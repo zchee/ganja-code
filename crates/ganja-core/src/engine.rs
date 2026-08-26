@@ -1257,6 +1257,17 @@ pub struct Engine {
     /// `false` by every [`Engine::install_postbox`] call and `true`
     /// afterward by [`Engine::install_solo_postbox`] alone, so installing
     /// any other kind of postbox — a lead's, a member's — always clears it.
+    ///
+    /// A separate atomic beside [`Engine::postbox`]'s own mutex rather than
+    /// a field inside it: a reader (`Engine::team_messaging`, a turn's own
+    /// construction) takes the two locks one after the other, so a
+    /// concurrent installer could in principle be observed mid-swap — the
+    /// postbox already moved, this flag not yet (or the reverse). Left as
+    /// is rather than merged under one lock because nothing reaches either
+    /// installer mid-session today (`Engine::install_team` and
+    /// `Engine::retire_team` are production-callerless, the plan's own
+    /// ratified narrowing); the day a caller lands, that seam's own tests
+    /// are the place to decide whether the pairing needs to be atomic.
     teamless: AtomicBool,
     /// The resolved `teamless_send` posture (**D531**): `Unasked` unless a
     /// frontend's config named `ask` through

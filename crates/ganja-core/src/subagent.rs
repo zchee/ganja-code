@@ -4355,6 +4355,69 @@ mod tests {
         );
     }
 
+    /// **AC-10**'s deliver half: a roster member and a live registry record
+    /// can share a name, and the roster wins — the mailbox write lands,
+    /// nothing is resolved or pinned, and the shadowed session stays
+    /// reachable at its own `uds:` address. [`Team::new`] always spawns a
+    /// teammate named `worker`; the record below claims that same spelling
+    /// for a session the roster never heard of.
+    #[tokio::test]
+    async fn a_roster_hit_outranks_a_same_named_live_record() {
+        let team = Team::new().await;
+        let registry_dir = private_dir();
+        let identity = Arc::new(identity::Identity::new(registry_dir.path()));
+        let own_session = Arc::new(std::sync::Mutex::new(SessionId::from(
+            "ses-lead-own".to_owned(),
+        )));
+        let lead = Postbox::lead(&team.registry, Some((&identity, Arc::clone(&own_session))));
+
+        // Nothing listens at this socket — the roster-hit arm must never
+        // reach for it, so a wrong reorder would fail this delivery outright
+        // rather than merely go unproven.
+        let (_id, _held) = live_record(registry_dir.path(), "07770007", "worker");
+
+        let sent = team::Postbox::deliver(
+            &lead,
+            Address::Local("worker".to_owned()),
+            Body::Text {
+                text: "for the roster member".to_owned(),
+                summary: None,
+            },
+        )
+        .await
+        .expect("the roster answers before any socket is touched");
+        assert_eq!(sent.to, "worker");
+        assert_eq!(
+            identity.pinned("worker"),
+            None,
+            "a roster hit never consults the resolver, so it never pins"
+        );
+        let inbox = team.inbox("worker");
+        assert_eq!(
+            inbox.last().map(|message| message.text.as_str()),
+            Some("for the roster member"),
+            "the mailbox write landed, not a socket delivery"
+        );
+
+        // The shadowed session is still reachable — by the one spelling
+        // that was never ambiguous: its own address.
+        let socket = registry_dir.path().join("07770007.sock");
+        let _peer = PeerStub::listen(&socket).await;
+        let by_address = team::Postbox::deliver(
+            &lead,
+            Address::Uds {
+                path: socket.clone(),
+            },
+            Body::Text {
+                text: "for the shadowed session".to_owned(),
+                summary: None,
+            },
+        )
+        .await
+        .expect("a uds: address reaches the record the roster shadowed");
+        assert_eq!(by_address.to, "team-lead@session-feedbeef");
+    }
+
     /// **AC-13 / AC-14 / AC-15**: ambiguity, a miss and an unreadable
     /// registry all refuse rather than guess, and nothing is pinned by
     /// either refusal.

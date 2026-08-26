@@ -1593,12 +1593,24 @@ impl App {
     /// this, and it never refuses — the registry is advisory data any
     /// same-uid process can write.
     ///
+    /// Every holder found is also seeded into [`App::known_colliders`] — not
+    /// only the one the notice names — so [`App::poll_collision_scan`]'s own
+    /// first pass, due immediately after registration because nothing else
+    /// has set [`App::collision_scanned`] yet, does not re-report a holder
+    /// that predates this session under the *other* notice's wording ("another
+    /// session registered your name"): that framing is for a collider
+    /// arriving after registration, and a holder this call already told the
+    /// person about is not one.
+    ///
     /// Answers whether a notice actually fired, so a caller that has a
     /// second notice of its own to show does not clobber this one.
     fn warn_of_collision(&mut self, directory: &Path, name: &str, own_session: &str) -> bool {
         let Ok(holders) = registry::holders(directory, name, own_session) else {
             return false;
         };
+        for holder in &holders {
+            self.known_colliders.insert(holder.stem.clone());
+        }
         let Some(holder) = holders.first() else {
             return false;
         };
@@ -11538,21 +11550,65 @@ mod tests {
         assert!(line.contains(holder_stem), "{line}");
     }
 
-    /// AC-39: the incumbent's own collision re-scan, throttled to once per
-    /// [`COLLISION_RESCAN_INTERVAL`], surfaces "another session registered
-    /// your name" once per newly seen collider — never refusing anything.
+    /// **S1 / AC-39**: `register_self`'s own collision notice seeds the
+    /// incumbent's throttle, so a holder that predated registration is never
+    /// re-reported under the other notice's wording — asserted here on the
+    /// **un-primed** path, with nothing manually setting
+    /// [`App::collision_scanned`], because that is what a real first pass
+    /// runs on. Once that is settled, the incumbent's own re-scan, throttled
+    /// to once per [`COLLISION_RESCAN_INTERVAL`], surfaces "another session
+    /// registered your name" once per newly seen collider — never refusing
+    /// anything.
     #[tokio::test]
     async fn the_incumbents_collision_scan_warns_once_per_newly_seen_collider() {
         let directory = temporary();
         let registry_dir = temporary();
+
+        // A holder already answers to this session's name *before* it ever
+        // registers — the scenario AC-6 covers for the registering side's
+        // own notice; what is new here is the *incumbent's* side of it.
+        let preexisting_stem = "0598f5e6";
+        registry::write(
+            registry_dir.path(),
+            preexisting_stem,
+            &registry::Record {
+                format: registry::FORMAT,
+                session_id: "0598f5e6-0000-7000-8000-000000000005".to_owned(),
+                name: "worker".to_owned(),
+                name_source: registry::NameSource::User,
+                cwd: "/work/preexisting".into(),
+                root: "/work/preexisting".into(),
+                pid: 3,
+                started_at: 0,
+            },
+        )
+        .expect("the fixture writes");
+        let preexisting_held = ganja_tool::socket::open_lock(
+            &registry_dir.path().join(format!("{preexisting_stem}.sock")),
+        )
+        .expect("the lock file opens");
+        preexisting_held
+            .try_lock()
+            .expect("nothing else holds a fresh lock");
+
         let (mut app, _recording) = registering_app(&directory, &registry_dir);
+        app.engine.set_self_name("worker");
         app.handle(AppEvent::Tick).await.expect("a tick is handled");
         let name = app.engine.self_name();
-        // A scan "just ran" (simulating the ordinary case: this session's
-        // own registering tick already primed the throttle before any
-        // collider existed to find), so the manual poll below is genuinely
-        // not due.
-        app.collision_scanned = Some(Instant::now());
+        assert_eq!(name, "worker");
+
+        // The un-primed path (**S1**): nothing here manually sets
+        // `collision_scanned`, so this is genuinely the first pass, due
+        // immediately because registration never sets it either. It must
+        // not re-report the holder that predated registration — that
+        // holder was already named by `register_self`'s own notice.
+        app.status.set_notice(None);
+        app.poll_collision_scan();
+        assert!(
+            !status_line(&mut app).contains("registered your name"),
+            "a holder seen at registration is not reported as newly arrived: {}",
+            status_line(&mut app)
+        );
 
         // A collider registers under the same name, after this session
         // already holds it.

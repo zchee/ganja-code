@@ -48,7 +48,14 @@
 //! 153113-153175 — applied as a refusal rather than the reference's
 //! truncation, because the name is the person's own input at their own
 //! prompt; the control-character refusal applies the same section's
-//! sanitization classes the same way.
+//! sanitization classes the same way. The mention-range clause is the same
+//! reasoning applied to a surface this grammar's first pass missed: a name
+//! ending in `#<digits>` or `#<digits>-<digits>` is exactly the shape
+//! `ganja-tui`'s `@`-mention scanner reads as a line-range suffix, so such a
+//! name could be typed and stored but never @-mentioned back — the grammar
+//! refuses it rather than shipping a name some of its own readers cannot
+//! spell. `send_message`'s `to` is unaffected: it never runs the mention
+//! scanner, so an already-registered name in this shape still receives.
 //!
 //! # Tolerant read, exact write
 //!
@@ -409,6 +416,15 @@ pub enum NameRefusal {
     /// A leading `/` reads as a socket path at the same parser.
     #[error("a name does not begin with `/`, which reads as a socket path")]
     LeadingSlash,
+    /// The mention grammar's own line-range suffix (`ganja-tui`'s
+    /// `mention::split_range`) reparses this exact shape at the last `#` in
+    /// whatever it is pointed at, so a name ending in one could never be
+    /// @-mentioned as typed — the range would split off and only the
+    /// truncated remainder would be looked up.
+    #[error(
+        "a name does not end in a `#`-digits range, which the @-mention grammar would read as a line range"
+    )]
+    MentionRange,
     /// v2's sanitization classes, applied as refusal — the module doc's
     /// citation.
     #[error("a name carries no control characters")]
@@ -452,11 +468,33 @@ pub fn vet_name(name: &str) -> Result<(), NameRefusal> {
     if name.starts_with('/') {
         return Err(NameRefusal::LeadingSlash);
     }
+    if ends_in_a_mention_range(name) {
+        return Err(NameRefusal::MentionRange);
+    }
     if name.chars().any(char::is_control) {
         return Err(NameRefusal::Control);
     }
 
     Ok(())
+}
+
+/// Whether `name`'s tail parses as the mention grammar's own line-range
+/// suffix — the last `#`, then digits or `digits-digits` — reproducing
+/// `ganja-tui`'s `mention::split_range`/`parse_range` shape without a
+/// dependency on it: `ganja-tool` sits beneath the frontends, so the two
+/// copies of this one small grammar are the crate boundary's price, and
+/// this function's doc is the pin against the two drifting apart.
+fn ends_in_a_mention_range(name: &str) -> bool {
+    let Some((_, suffix)) = name.rsplit_once('#') else {
+        return false;
+    };
+    let (start, end) = match suffix.split_once('-') {
+        None => (suffix, None),
+        Some((start, end)) => (start, Some(end)),
+    };
+    let digits = |text: &str| !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit());
+
+    digits(start) && end.is_none_or(|end| end.is_empty() || digits(end))
 }
 
 /// The derived name: `candidate` — the project root's basename
@@ -680,9 +718,22 @@ mod tests {
         assert_eq!(vet_name("name@scope"), Err(NameRefusal::Scoped));
         assert_eq!(vet_name("uds:name"), Err(NameRefusal::Scheme));
         assert_eq!(vet_name("/leading"), Err(NameRefusal::LeadingSlash));
+        assert_eq!(vet_name("build#2"), Err(NameRefusal::MentionRange));
+        assert_eq!(vet_name("w#5-9"), Err(NameRefusal::MentionRange));
+        assert_eq!(vet_name("w#5-"), Err(NameRefusal::MentionRange));
         assert_eq!(vet_name("bell\u{7}"), Err(NameRefusal::Control));
 
         assert_eq!(vet_name("worker-1"), Ok(()));
+        assert_eq!(
+            vet_name("release-candidate"),
+            Ok(()),
+            "a `#`-free hyphenated name is untouched by the new clause"
+        );
+        assert_eq!(
+            vet_name("build#one"),
+            Ok(()),
+            "a `#`-tail that is not digits is a name, not a range"
+        );
         assert_eq!(
             vet_name("日本語の名前"),
             Ok(()),
@@ -705,6 +756,7 @@ mod tests {
             NameRefusal::Scoped,
             NameRefusal::Scheme,
             NameRefusal::LeadingSlash,
+            NameRefusal::MentionRange,
             NameRefusal::Control,
         ] {
             let sentence = refusal.to_string();
@@ -727,12 +779,25 @@ mod tests {
         assert_eq!(sanitize("*"), FALLBACK_NAME);
         assert_eq!(sanitize(" \t\n"), FALLBACK_NAME);
         assert_eq!(
+            sanitize("server#2"),
+            FALLBACK_NAME,
+            "a basename shaped like a mention range falls back like `*` does"
+        );
+        assert_eq!(
             sanitize(&"x".repeat(MOST_NAME_POINTS + 20)).chars().count(),
             MOST_NAME_POINTS,
             "an over-long basename is cut at the cap rather than refused"
         );
 
-        for hostile in ["", "*", "///", "a b@c:d\n", "\u{7}\u{8}", &"y".repeat(200)] {
+        for hostile in [
+            "",
+            "*",
+            "///",
+            "a b@c:d\n",
+            "\u{7}\u{8}",
+            "server#2",
+            &"y".repeat(200),
+        ] {
             assert_eq!(
                 vet_name(&sanitize(hostile)),
                 Ok(()),
