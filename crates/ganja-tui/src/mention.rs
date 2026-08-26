@@ -21,6 +21,13 @@
 //! `extractLineRange` grammar (`autocomplete.tsx:39-50`), split off by
 //! [`split_range`] and carried on the [`Mention`] so the send-time read can
 //! slice to exactly the lines it names.
+//!
+//! Since D529 the submit-time classification has a second consumer: a token
+//! [`scan`] does **not** resolve to a real file may still name a teammate or
+//! a live session and ride `session_mentions` instead — that decision lives
+//! in `app.rs`, downstream of this module, and the file rule here stays
+//! byte-for-byte first: a token that resolves to a file is a file mention,
+//! whatever else shares its name.
 
 use std::path::{Path, PathBuf};
 
