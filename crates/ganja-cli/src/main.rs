@@ -33,6 +33,8 @@ mod assemble;
 #[cfg(unix)]
 mod binder;
 mod import;
+#[cfg(unix)]
+mod lister;
 mod login;
 mod mcp;
 mod plugin;
@@ -68,6 +70,19 @@ struct Cli {
     bypass: BypassArgs,
     #[command(flatten)]
     member: MemberArgs,
+    /// This session's own name (**D527**): how another session on this
+    /// machine may address it, by `send_message`'s roster-miss arm resolving
+    /// a bare name or by the composer's `@` mention — over the project
+    /// root's basename this session takes when nothing was typed.
+    ///
+    /// Validated at parse, before the terminal is taken over, against the
+    /// same grammar `/rename` enforces mid-session
+    /// ([`ganja_core::tool::registry::vet_name`]): a name is self-asserted
+    /// display-and-routing data, never an authenticated identity, and only a
+    /// socket-binding lead ever registers one (**D530**) — meaningless to a
+    /// pane member, which registers nothing whatever this says.
+    #[arg(long, value_parser = vetted_name, value_name = "NAME")]
+    name: Option<String>,
     /// The directory a lead session binds its socket in, instead of this
     /// user's own (**D505**).
     ///
@@ -571,6 +586,16 @@ fn named_provider(spelled: &str) -> Result<NamedProvider, String> {
     Ok(NamedProvider::Configured(spelled.to_owned()))
 }
 
+/// Refuses a `--name` the D527 grammar refuses, by the grammar's own
+/// sentence ([`ganja_core::tool::registry::NameRefusal`]) — the same
+/// predicate `/rename` runs mid-session, so a name good enough to type here
+/// is good enough to hold for the run.
+fn vetted_name(spelled: &str) -> Result<String, String> {
+    ganja_core::tool::registry::vet_name(spelled)
+        .map(|()| spelled.to_owned())
+        .map_err(|refusal| refusal.to_string())
+}
+
 /// Refuses a configured provider this project's config does not declare.
 ///
 /// A builtin is nothing to check — clap already did. For anything else the
@@ -736,9 +761,26 @@ async fn main() -> Result<()> {
             // the UI nothing rather than a door that would refuse.
             #[cfg(unix)]
             let binder: Option<Box<dyn ganja_tui::binder::Binder>> =
-                Some(Box::new(binder::SocketBinder::new(cli.socket_dir)));
+                Some(Box::new(binder::SocketBinder::new(cli.socket_dir.clone())));
             #[cfg(not(unix))]
             let binder: Option<Box<dyn ganja_tui::binder::Binder>> = None;
+
+            // The live-session listing the `@` menu offers beside files and
+            // roster (**D529** Axis 5, **D530**'s re-derived gate): handed
+            // in unconditionally, wider than the binder's lead-only gate —
+            // `ganja-tui` is the one that knows whether this session is a
+            // pane member, and gates its own use of it accordingly. The same
+            // directory the binder binds under, so the two can never read a
+            // different `--socket-dir`.
+            #[cfg(unix)]
+            let lister: Option<Box<dyn ganja_tui::lister::Lister>> =
+                Some(Box::new(lister::RegistryLister::new(
+                    cli.socket_dir
+                        .clone()
+                        .unwrap_or_else(ganja_serve::socket::directory),
+                )));
+            #[cfg(not(unix))]
+            let lister: Option<Box<dyn ganja_tui::lister::Lister>> = None;
 
             ganja_tui::run(
                 cli.resume.wanted(),
@@ -746,6 +788,9 @@ async fn main() -> Result<()> {
                 cli.bypass.wanted(),
                 cli.member.wanted(),
                 binder,
+                lister,
+                cli.name,
+                cli.socket_dir,
             )
             .await
         }
@@ -1257,7 +1302,12 @@ async fn sessions_command(args: SessionsArgs) -> Result<()> {
 /// socket directory that answers `GET /global/health`, under the session id
 /// the server itself reports — the name in the filename is a prefix of that
 /// id and no more, since every session minted in one 65-second window shares
-/// its first eight hex digits.
+/// its first eight hex digits. Beside it, a **NAME** column: the D527
+/// registration record beside a live socket, when one is there — a bare `-`
+/// for a socket nobody named (a pane, or a build predating the registry) —
+/// printed defensively exactly as the session column already is
+/// ([`printable_name`]), since a name is another same-uid process's own word
+/// and nothing enforces the grammar on a hand-written record.
 ///
 /// The directory is `ganja_serve::socket::directory()`'s, and it is **vetted
 /// before it is read** by the binder's own predicate: a real directory of
@@ -1279,13 +1329,24 @@ async fn sessions_command(args: SessionsArgs) -> Result<()> {
 /// per name and kept, by that module's design. And a socket that vanishes
 /// mid-walk is a server that stopped and unlinked its own; the walk goes on.
 ///
+/// GC now runs the registry's own record beside every socket it already
+/// removes (**D527**, N4), under the same claimed-lock discipline — never a
+/// second lock protocol: a stale socket's sibling `<stem>.json` is removed
+/// in the very claim window that unlinks the socket, and — a separate pass,
+/// after the walk — a record with **no** socket sibling at all (residue from
+/// a crash between the write and teardown) is claimed and removed the same
+/// way, the claim creating the name's `.lock` where none was, exactly as a
+/// stale socket's own claim already does. A held name's record is left
+/// exactly as its socket is; `.lock` files are never removed, in either arm.
+///
 /// The health check rides `ganja-client`'s socket form, one client per
 /// socket path (the plan's rule for `unix_socket`); this binary names the
 /// client and never `reqwest`.
 #[cfg(unix)]
 async fn live_sessions_command(directory: Option<PathBuf>) -> Result<()> {
-    use std::{fs, os::unix::fs::FileTypeExt as _};
+    use std::{collections::HashMap, fs, os::unix::fs::FileTypeExt as _};
 
+    use ganja_core::tool::registry;
     use ganja_serve::socket::EXTENSION;
 
     /// How long one socket is given to answer before it is treated as
@@ -1304,6 +1365,10 @@ async fn live_sessions_command(directory: Option<PathBuf>) -> Result<()> {
     /// it wears a different mark.
     const HELD: &str = "(held)";
 
+    /// The name column of a socket the registry names nobody: a pane member
+    /// (which registers nothing), or a build that predates the registry.
+    const UNNAMED: &str = "-";
+
     let directory = directory.unwrap_or_else(ganja_serve::socket::directory);
     if !private_socket_directory(&directory)? {
         println!(
@@ -1314,6 +1379,26 @@ async fn live_sessions_command(directory: Option<PathBuf>) -> Result<()> {
         return Ok(());
     }
 
+    // Read once, up front: every stem this directory's records name, keyed
+    // by the stem the listing walk below already computes for its sockets.
+    // A directory this listing could not even walk for records is not fatal
+    // — the sockets are still probed and listed, only unnamed — because a
+    // registry that will not read is a reason to show `-`, not a reason to
+    // refuse a listing of what is actually running.
+    let mut records: HashMap<String, registry::Record> = match registry::list(&directory) {
+        Ok(registered) => registered
+            .into_iter()
+            .map(|entry| (entry.stem, entry.record))
+            .collect(),
+        Err(error) => {
+            eprintln!(
+                "note: the registry at {} could not be read: {error}; names are unavailable",
+                directory.display()
+            );
+            HashMap::new()
+        }
+    };
+
     let mut entries: Vec<PathBuf> = fs::read_dir(&directory)
         .with_context(|| format!("failed to read {}", directory.display()))?
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
@@ -1323,7 +1408,7 @@ async fn live_sessions_command(directory: Option<PathBuf>) -> Result<()> {
         .collect();
     entries.sort();
 
-    let mut live: Vec<(String, PathBuf)> = Vec::new();
+    let mut live: Vec<(String, String, PathBuf)> = Vec::new();
     for path in entries {
         // `symlink_metadata`, and only what this binary's own binder makes is
         // ever probed or removed: a plain file or a link wearing the
@@ -1342,6 +1427,18 @@ async fn live_sessions_command(directory: Option<PathBuf>) -> Result<()> {
             continue;
         }
 
+        // The registry's own stem for this socket — the filename minus its
+        // extension, exactly [`registry::list`]'s own — so its record, when
+        // there is one, is found the one way every reader finds it.
+        let stem = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or_default()
+            .to_owned();
+        let name = records
+            .get(&stem)
+            .map_or_else(|| UNNAMED.to_owned(), |record| printable_name(&record.name));
+
         // A name the client cannot be bound to is named and walked past for
         // the same reason: one entry never ends the listing of the rest.
         let client = match ganja_client::Client::on_socket(&path) {
@@ -1353,7 +1450,7 @@ async fn live_sessions_command(directory: Option<PathBuf>) -> Result<()> {
         };
         let answered = tokio::time::timeout(HEALTH_DEADLINE, client.health()).await;
         match answered {
-            Ok(Ok(health)) => live.push((health.session_id.as_str().to_owned(), path)),
+            Ok(Ok(health)) => live.push((health.session_id.as_str().to_owned(), name, path)),
             // Something answered and it was not health as this build reads
             // it: a server all the same, listed as one, with the session it
             // would not say.
@@ -1366,7 +1463,7 @@ async fn live_sessions_command(directory: Option<PathBuf>) -> Result<()> {
                     "note: {} answered, but not with a session: {refusal}",
                     path.display()
                 );
-                live.push((UNREADABLE.to_owned(), path));
+                live.push((UNREADABLE.to_owned(), name, path));
             }
             Ok(Err(_)) | Err(_) => {
                 // Held is live, whatever the silence: it joins the table
@@ -1378,7 +1475,7 @@ async fn live_sessions_command(directory: Option<PathBuf>) -> Result<()> {
                         "note: {} is held by a live server that did not answer; left in place",
                         path.display()
                     );
-                    live.push((HELD.to_owned(), path));
+                    live.push((HELD.to_owned(), name, path));
                     continue;
                 };
                 match lock.unlink_stale() {
@@ -1388,11 +1485,60 @@ async fn live_sessions_command(directory: Option<PathBuf>) -> Result<()> {
                             .with_context(|| format!("failed to remove {}", path.display()));
                     }
                 }
+                // The stale socket's own record, in the same claimed window
+                // (**N4**): a dead socket's advertised name must not outlive
+                // the socket that backed it. Absent is nothing to remove.
+                if records.remove(&stem).is_some() {
+                    let record_path = registry::record_path(&directory, &stem);
+                    match fs::remove_file(&record_path) {
+                        Ok(()) => {
+                            eprintln!("note: removed the stale record {}", record_path.display());
+                        }
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            return Err(error).with_context(|| {
+                                format!("failed to remove {}", record_path.display())
+                            });
+                        }
+                    }
+                }
                 // The window closes here: only now may a binder take the
                 // name, and it finds no file to be misled by.
                 drop(lock);
             }
         }
+    }
+
+    // **N4**: whatever record no socket claimed above — a stemmed `.json`
+    // with no `.sock` sibling on disk, crash residue from between the write
+    // and teardown — is claimed and removed the same way, a separate pass
+    // because the walk above only ever visits filenames the directory holds
+    // as sockets. Held names are left exactly as a stale socket's own is.
+    for stem in records.keys() {
+        let socket = directory.join(format!("{stem}.{EXTENSION}"));
+        if socket.exists() {
+            continue;
+        }
+        let record_path = registry::record_path(&directory, stem);
+        let Some(lock) = claim_name(&socket)? else {
+            eprintln!(
+                "note: {} is held by a live server; left in place",
+                record_path.display()
+            );
+            continue;
+        };
+        match fs::remove_file(&record_path) {
+            Ok(()) => eprintln!(
+                "note: removed the orphaned record {}",
+                record_path.display()
+            ),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("failed to remove {}", record_path.display()));
+            }
+        }
+        drop(lock);
     }
 
     if live.is_empty() {
@@ -1404,9 +1550,14 @@ async fn live_sessions_command(directory: Option<PathBuf>) -> Result<()> {
         return Ok(());
     }
 
-    println!("{:<36}  SOCKET", "SESSION");
-    for (session, path) in live {
-        println!("{:<36}  {}", printable_session(&session), path.display());
+    println!("{:<36}  {:<32}  SOCKET", "SESSION", "NAME");
+    for (session, name, path) in live {
+        println!(
+            "{:<36}  {:<32}  {}",
+            printable_session(&session),
+            name,
+            path.display()
+        );
     }
 
     Ok(())
@@ -1427,6 +1578,27 @@ fn printable_session(session: &str) -> String {
                 character
             } else {
                 '?'
+            }
+        })
+        .collect()
+}
+
+/// The name column, safe to print: a registry record is another same-uid
+/// process's own self-asserted word (**D527**'s axiom), and nothing enforces
+/// [`ganja_core::tool::registry::vet_name`]'s grammar on a hand-written
+/// record — only [`ganja_core::tool::registry::write`]'s own callers run it.
+/// Unlike [`printable_session`], a real name is expected to carry non-ASCII
+/// code points the grammar admits (`日本語の名前` is a valid name), so only
+/// a **control** character — an escape sequence among them — is replaced,
+/// never plain non-ASCII text; the length cap matches the grammar's own.
+fn printable_name(name: &str) -> String {
+    name.chars()
+        .take(ganja_core::tool::registry::MOST_NAME_POINTS)
+        .map(|character| {
+            if character.is_control() {
+                '?'
+            } else {
+                character
             }
         })
         .collect()
@@ -2417,6 +2589,34 @@ mod tests {
             args.socket_dir.as_deref(),
             Some(std::path::Path::new("/tmp/x"))
         );
+    }
+
+    /// AC-5's CLI half: `--name` is validated at parse, against the same
+    /// grammar `/rename` runs mid-session, with the refusal's own sentence
+    /// — every clause of it, not only one.
+    #[test]
+    fn the_name_flag_is_vetted_at_parse_by_the_d527_grammar() {
+        let Ok(Cli { name, .. }) = Cli::try_parse_from(["ganja", "--name", "worker-1"]) else {
+            panic!("a name the grammar admits parses");
+        };
+        assert_eq!(name.as_deref(), Some("worker-1"));
+
+        for (spelled, refusal) in [
+            ("", "empty"),
+            ("a b", "carries no whitespace"),
+            ("*", "broadcast token"),
+            ("name@scope", "carries no `@`"),
+            ("uds:name", "carries no `:`"),
+            ("/leading", "does not begin with `/`"),
+        ] {
+            let error = Cli::try_parse_from(["ganja", "--name", spelled])
+                .expect_err(&format!("{spelled:?} is refused by the grammar"));
+            let rendered = error.to_string();
+            assert!(
+                rendered.contains(refusal),
+                "{spelled:?} names its own clause: {rendered}"
+            );
+        }
     }
 
     #[test]

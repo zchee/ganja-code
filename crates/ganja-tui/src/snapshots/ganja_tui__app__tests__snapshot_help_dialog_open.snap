@@ -17,7 +17,7 @@ expression: screen(&terminal)
     │/context       Context usage                                          │    
     │/usage         Session usage                                          │    
     │                                                                      │    
-    │[up/down] scroll   [Esc] close                              1-12 of 30│    
+    │[up/down] scroll   [Esc] close                              1-12 of 31│    
     └──────────────────────────────────────────────────────────────────────┘    
                                                                                 
 ┌ message ─────────────────────────────────────────────────────────────────────┐

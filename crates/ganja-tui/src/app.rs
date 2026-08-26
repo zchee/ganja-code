@@ -21,7 +21,7 @@ use anyhow::{Context as _, Result};
 use etcetera::{BaseStrategy as _, base_strategy::Xdg};
 use futures::StreamExt as _;
 use ganja_core::{
-    Engine, EngineError, attachment, catalog,
+    Engine, EngineError, SessionId, attachment, catalog,
     config::{NotificationEvent, StatuslineConfig},
     provider,
     teammate::{
@@ -34,7 +34,7 @@ use ganja_protocol::{
     Command, Event as CoreEvent, FinishReason, HeldDecision, HeldId, HoldCause, Mention, Message,
     MessageId, PartBody, PermissionId, PermissionReply, RevertScope, Role, ToolState, Usage,
 };
-use ganja_tool::{Credentials, FileTimes, ToolCtx, job::Jobs as _};
+use ganja_tool::{Credentials, FileTimes, ToolCtx, job::Jobs as _, registry};
 use ratatui::{
     DefaultTerminal, Terminal,
     backend::Backend,
@@ -55,7 +55,7 @@ use crate::{
         dropdown::{self, Dropdown},
         editor::{self, Editor, Mode},
         effort,
-        files::Files,
+        files::{Files, Row as MenuRow},
         held,
         help::Help,
         inspector::{Feed, Inspector, TurnUsage},
@@ -80,13 +80,35 @@ use crate::{
     external, graphics,
     history::{self, History},
     keybind::{self, Keybinds},
-    member, mention, notify,
+    lister, member, mention, notify,
     theme::{Theme, Themes},
     transcript,
 };
 
 /// Shortest gap between frames: roughly 60 FPS.
 pub const FRAME: Duration = Duration::from_millis(16);
+
+/// Milliseconds since the epoch, for [`registry::Record::started_at`] —
+/// display and sort only, never consulted for liveness (the flock is).
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+/// The `uds:` address scheme (**D528**): spelled again here, as
+/// `crate::teammate::identity::ADDRESS_SCHEME` is in `ganja-core`, because
+/// every candidate this side names must carry an address `to` accepts
+/// verbatim and the constant is private to the crate that owns the ladder.
+const ADDRESS_SCHEME: &str = "uds:";
+
+/// The incumbent's own collision re-scan runs at most this often (**S1**,
+/// **R4**): the bound that keeps the probe's documented side costs — an
+/// absent `.lock` created, a concurrently walking binder's one-digit stem
+/// extension — rare by design rather than a per-tick cost.
+const COLLISION_RESCAN_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Modifiers that turn Enter into a line break. Terminals disagree about which
 /// of these they can report, so all of them mean the same thing.
@@ -816,6 +838,45 @@ pub struct App {
     /// a lead handed a binder — a pane member, a build with no config home,
     /// every test — which binds nothing and costs nothing.
     socket: Option<binder::SessionSocket>,
+    /// The live-session listing the `@` menu and the incumbent collision
+    /// scan read (**D527**–**D530**), handed in for every interactive
+    /// non-member session — wider than [`App::socket`]'s lead-only gate.
+    /// [`None`] degrades to files and roster only (**AC-27**).
+    lister: Option<Box<dyn lister::Lister>>,
+    /// The engine's session id and the bound socket path this session's own
+    /// registration record was last written beside, if this session is
+    /// registered right now. Both are re-derived from it: [`App::socket`]
+    /// itself exposes neither outside tests, and the app tracking its own
+    /// copy is what lets it know a rebind is happening (P3) without touching
+    /// [`binder::SessionSocket::sync`].
+    registered: Option<(SessionId, PathBuf)>,
+    /// Where [`App::registered`]'s name came from — `--name`'s or the
+    /// project root's derived default (**D527**) — flipped to
+    /// [`registry::NameSource::User`] by every `/rename` (**ADJ-2**): a
+    /// typed rename is always the person's own.
+    self_name_source: registry::NameSource,
+    /// The registry directory this session's own registration and collision
+    /// scans read and write, standing in for [`ganja_tool::socket::directory`]
+    /// — the hidden `--socket-dir` override in production (a lead's own
+    /// bound path already reflects it; a **teamless** session binds no
+    /// socket, so this is the only way its own scan reads the same
+    /// directory), and [`App::clipboard_scratch`]'s own reason in a test: a
+    /// test's registration and collision scans must never reach a real
+    /// person's `/tmp`.
+    registry_directory: Option<PathBuf>,
+    /// The live sessions the `@` menu last saw (**D529** Axis 5), also what
+    /// submit-time classification checks a token's name against —
+    /// persists past the menu's own close, since submit runs after Enter
+    /// already closed it.
+    session_listing: Vec<lister::LiveSession>,
+    /// Colliders already surfaced by the incumbent's re-scan (**S1**), so a
+    /// name already warned about is not warned about again every thirty
+    /// seconds — "once per newly seen collider".
+    known_colliders: std::collections::HashSet<String>,
+    /// When the incumbent collision re-scan last ran, throttled to at most
+    /// once every [`COLLISION_RESCAN_INTERVAL`] (**R4**) — [`App::team_polled`]'s
+    /// pattern, on the same `Tick`.
+    collision_scanned: Option<Instant>,
     /// A `shutdown_request` this member has taken and not yet answered,
     /// because a turn was still running when it arrived.
     ///
@@ -1049,6 +1110,16 @@ impl App {
             member: None,
             member_polled: None,
             socket: None,
+            lister: None,
+            registered: None,
+            // No one has typed anything yet; the first registration derives
+            // its name from the project root, which is what makes the
+            // default `Derived` rather than `User` (**D527**).
+            self_name_source: registry::NameSource::Derived,
+            registry_directory: None,
+            session_listing: Vec::new(),
+            known_colliders: std::collections::HashSet::new(),
+            collision_scanned: None,
             member_shutdown: None,
             member_finished: None,
             member_asks: Vec::new(),
@@ -1171,6 +1242,58 @@ impl App {
     #[must_use]
     pub fn with_socket(mut self, binder: Box<dyn binder::Binder>, served: binder::Served) -> Self {
         self.socket = Some(binder::SessionSocket::new(binder, served));
+
+        self
+    }
+
+    /// Offers the `@` menu and the send resolver the live-session listing
+    /// `lister` answers (**D529** Axis 5, **D530**'s re-derived gate).
+    ///
+    /// A builder for the reason [`App::with_socket`] is one: only the
+    /// startup lane knows whether this session is interactive and not a
+    /// pane member, and holds whatever the binary built over the registry
+    /// and a health probe. The default offers nothing, so a test that does
+    /// not opt in sees files and roster only (**AC-27**).
+    #[must_use]
+    pub fn with_lister(mut self, lister: Box<dyn lister::Lister>) -> Self {
+        self.lister = Some(lister);
+
+        self
+    }
+
+    /// Reads and writes this session's own registration record, and scans
+    /// for collisions, under `directory` instead of
+    /// [`ganja_tool::socket::directory`].
+    ///
+    /// Two callers, one seam: the hidden `--socket-dir` override, so a
+    /// **teamless** session's own collision scan — which binds no socket of
+    /// its own to read a directory off — reads the same directory the
+    /// binder and the resolver do (a lead's own scan already gets this for
+    /// free, off its bound path); and a test, for the same reason
+    /// `clipboard_scratch` exists — it must never reach a real person's
+    /// `/tmp/ganja-<uid>/`, and a fake-bound socket's own path
+    /// (`/nowhere/...`, `binder.rs::fake`) names no directory a record
+    /// could really be written into.
+    #[must_use]
+    pub fn with_registry_directory(mut self, directory: impl Into<PathBuf>) -> Self {
+        self.registry_directory = Some(directory.into());
+
+        self
+    }
+
+    /// Where this session's registration record will name its own name
+    /// from once it registers — `--name`'s (or a fresh `/rename`'s) is
+    /// [`registry::NameSource::User`],
+    /// the project root's derived basename is
+    /// [`registry::NameSource::Derived`] (**D527**).
+    ///
+    /// A builder because only the startup lane knows which of the two
+    /// [`ganja_core::Engine::set_self_name`] was seeded with (REVISION-3
+    /// P5's resolution); the default is [`registry::NameSource::Derived`],
+    /// matching a session nothing renamed yet.
+    #[must_use]
+    pub fn with_self_name_source(mut self, source: registry::NameSource) -> Self {
+        self.self_name_source = source;
 
         self
     }
@@ -1322,10 +1445,16 @@ impl App {
         // first socket is named by the session the screen opens on.
         self.sync_socket().await;
         let outcome = self.drive(terminal).await;
-        // The socket first, whichever way the loop ended: nobody here will
-        // read a peer's message once the loop is over, and the file is what
-        // `ganja sessions --live` would otherwise list as dead. Held here for
-        // the reason `session_end` is — `run` consumes the app.
+        // The record first, and the socket after it (**D527**): stop
+        // advertising before stopping answering. A record without a live
+        // lock is filtered by every reader; a socket without a record is
+        // simply unlisted — so either order is safe, and this one means
+        // nobody ever reads a record naming a socket that has already gone
+        // quiet. Then the socket, whichever way the loop ended: nobody here
+        // will read a peer's message once the loop is over, and the file is
+        // what `ganja sessions --live` would otherwise list as dead. Held
+        // here for the reason `session_end` is — `run` consumes the app.
+        self.unregister_self();
         if let Some(socket) = &mut self.socket {
             socket.shutdown().await;
         }
@@ -1347,16 +1476,184 @@ impl App {
     /// comparison of an id is cheaper than knowing every door. A refusal
     /// reaches the status bar once per id (**D505**, best-effort by design).
     async fn sync_socket(&mut self) {
-        let Some(socket) = &mut self.socket else {
+        if self.socket.is_none() {
             return;
+        }
+        let wanted = self.engine.session_id();
+        // The registration record's own rebind rule (**D527**, **P3**): the
+        // app removes its own old record the moment it observes the slot
+        // is about to move — ahead of the new bind's outcome, and without
+        // touching `SessionSocket::sync` itself (`binder.rs` stays
+        // byte-untouched) — so a refused rebind still leaves no stale
+        // advertisement behind (N9a). A first bind (nothing registered yet)
+        // removes nothing.
+        if self
+            .registered
+            .as_ref()
+            .is_some_and(|(previous, _)| *previous != wanted)
+        {
+            self.unregister_self();
+        }
+        let synced = {
+            let socket = self.socket.as_mut().expect("checked above");
+            socket.sync(&self.engine).await
         };
-        match socket.sync(&self.engine).await {
-            binder::Synced::Unchanged | binder::Synced::Bound(_) => {}
+        match synced {
+            binder::Synced::Unchanged => {}
+            binder::Synced::Bound(path) => self.register_self(wanted, path),
             binder::Synced::Refused(sentence) => {
                 self.status.set_notice(Some(sentence));
                 self.dirty = true;
             }
         }
+    }
+
+    /// Where this session's own registration lives, and where the
+    /// collision scan reads: [`App::registry_directory`] in a test, else
+    /// wherever this session is registered right now, else the well-known
+    /// default (**D527**).
+    ///
+    /// The default is what a **teamless** session's collision scan reads —
+    /// it binds no socket, so it has no bound path of its own to derive a
+    /// directory from, and the shared `/tmp/ganja-<uid>/` is a well-known
+    /// location rather than something only a bound socket's path can name.
+    fn registry_dir(&self) -> PathBuf {
+        self.registry_directory.clone().unwrap_or_else(|| {
+            self.registered
+                .as_ref()
+                .and_then(|(_, path)| path.parent().map(Path::to_path_buf))
+                .unwrap_or_else(ganja_tool::socket::directory)
+        })
+    }
+
+    /// Registers this session under a fresh bind, replacing whatever it held
+    /// before (**D527**): writes a [`registry::Record`] beside the socket at
+    /// `path`, the stem read off the path itself. Registration **never
+    /// refuses** — a same-uid collision surfaces a notice naming the
+    /// holder's stem and cwd and registers anyway (**user-ratified
+    /// 2026-08-26**).
+    fn register_self(&mut self, session_id: SessionId, path: PathBuf) {
+        let Some(stem) = path
+            .file_stem()
+            .and_then(std::ffi::OsStr::to_str)
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        let directory = self
+            .registry_directory
+            .clone()
+            .unwrap_or_else(|| path.parent().map(Path::to_path_buf).unwrap_or_default());
+        let name = self.engine.self_name();
+
+        self.warn_of_collision(&directory, &name, session_id.as_str());
+
+        let record = registry::Record {
+            format: registry::FORMAT,
+            session_id: session_id.as_str().to_owned(),
+            name,
+            name_source: self.self_name_source,
+            cwd: self.cwd.clone(),
+            root: self.root.clone(),
+            pid: std::process::id(),
+            started_at: now_millis(),
+        };
+        if let Err(error) = registry::write(&directory, &stem, &record) {
+            tracing::warn!(stem, %error, "failed to write this session's registration record");
+            return;
+        }
+        self.registered = Some((session_id, path));
+    }
+
+    /// Removes this session's own registration record, when it has one
+    /// (**D527**). The app's own act, never conditioned on the socket that
+    /// named it still being bound — see the two call sites: a rebind that
+    /// has only just been observed, and the tail of [`App::run`].
+    fn unregister_self(&mut self) {
+        let Some((_, path)) = self.registered.take() else {
+            return;
+        };
+        let Some(stem) = path.file_stem().and_then(std::ffi::OsStr::to_str) else {
+            return;
+        };
+        let directory = self
+            .registry_directory
+            .clone()
+            .unwrap_or_else(|| path.parent().map(Path::to_path_buf).unwrap_or_default());
+
+        if let Err(error) = std::fs::remove_file(registry::record_path(&directory, stem))
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(stem, %error, "failed to remove this session's registration record");
+        }
+    }
+
+    /// Surfaces a status-bar notice when a live record already holds `name`
+    /// (**user-ratified 2026-08-26**): registration and `/rename` alike call
+    /// this, and it never refuses — the registry is advisory data any
+    /// same-uid process can write.
+    ///
+    /// Answers whether a notice actually fired, so a caller that has a
+    /// second notice of its own to show does not clobber this one.
+    fn warn_of_collision(&mut self, directory: &Path, name: &str, own_session: &str) -> bool {
+        let Ok(holders) = registry::holders(directory, name, own_session) else {
+            return false;
+        };
+        let Some(holder) = holders.first() else {
+            return false;
+        };
+        self.status.set_notice(Some(format!(
+            "another session is already registered as {name:?} ({} at {})",
+            holder.stem,
+            holder.record.cwd.display()
+        )));
+        self.dirty = true;
+
+        true
+    }
+
+    /// The incumbent's own re-scan (**S1**, **R4**): on the app's existing
+    /// `Tick`, throttled to at most one pass per [`COLLISION_RESCAN_INTERVAL`],
+    /// tells this session when another one has registered under its own
+    /// name — the notice's other direction, since [`App::warn_of_collision`]
+    /// only ever tells the *registering* side. Surfaced once per newly seen
+    /// collider (tracked in [`App::known_colliders`]); the never-refuse rule
+    /// stays intact — nothing here undoes a registration.
+    fn poll_collision_scan(&mut self) {
+        // A registered lead is one whose own scan matters; a teamless
+        // session's own collision notice already fires at `/rename` and at
+        // whatever assembly seam seeds its name — there is no record here
+        // for another session to have taken over from.
+        let Some((session_id, _)) = &self.registered else {
+            return;
+        };
+        let due = self
+            .collision_scanned
+            .is_none_or(|last| last.elapsed() >= COLLISION_RESCAN_INTERVAL);
+        if !due {
+            return;
+        }
+        self.collision_scanned = Some(Instant::now());
+
+        let name = self.engine.self_name();
+        let directory = self.registry_dir();
+        let Ok(holders) = registry::holders(&directory, &name, session_id.as_str()) else {
+            return;
+        };
+        let fresh: Vec<_> = holders
+            .into_iter()
+            .filter(|holder| !self.known_colliders.contains(&holder.stem))
+            .collect();
+        let Some(holder) = fresh.into_iter().next() else {
+            return;
+        };
+        self.known_colliders.insert(holder.stem.clone());
+        self.status.set_notice(Some(format!(
+            "another session registered your name {name:?} ({} at {})",
+            holder.stem,
+            holder.record.cwd.display()
+        )));
+        self.dirty = true;
     }
 
     /// The loop itself; see [`App::run`], which owns what happens after it.
@@ -1481,6 +1778,7 @@ impl App {
                 self.poll_plans();
                 self.poll_mcp_dialog();
                 self.poll_held();
+                self.poll_collision_scan();
                 self.poll_team().await;
                 self.poll_member().await;
                 self.poll_wire_models().await;
@@ -2057,6 +2355,58 @@ impl App {
             // mistyped them just the same — so it is answered without the
             // roster being consulted at all.
             command::Team::Refused(refusal) => self.tell_team(refusal),
+        }
+    }
+
+    /// Runs a typed `/rename` line (**D527**).
+    async fn run_rename_line(&mut self, line: command::Rename) {
+        match line {
+            command::Rename::Missing => {
+                self.status
+                    .set_notice(Some("/rename needs a name: /rename <name>".to_owned()));
+                self.dirty = true;
+            }
+            command::Rename::To(name) => self.rename_self(name),
+        }
+    }
+
+    /// `/rename <name>` (**D527**, **ADJ-2**): validates through
+    /// [`registry::vet_name`], surfacing each refusal's own sentence; sets
+    /// the engine's self-name cell through [`Engine::set_self_name`] — the
+    /// one seam **every** `/rename` calls, whether or not this session
+    /// leads, since a lead's own wire identity (`<name>@<team>`) never moves
+    /// and a teamless session's self-name is what its next send stamps
+    /// `from` with. A lead additionally rewrites its record in place (same
+    /// stem) — the TUI stays the record's one writer. Either way the
+    /// collision notice fires against live records (**F9**): the notice
+    /// warns about a name this session may later lead under, teamless or
+    /// not.
+    fn rename_self(&mut self, name: String) {
+        if let Err(refusal) = registry::vet_name(&name) {
+            self.status.set_notice(Some(refusal.to_string()));
+            self.dirty = true;
+            return;
+        }
+
+        self.engine.set_self_name(name.clone());
+        self.self_name_source = registry::NameSource::User;
+
+        match self.registered.clone() {
+            // `register_self` runs its own collision scan against the
+            // fresh name, so nothing here duplicates it.
+            Some((session_id, path)) => self.register_self(session_id, path),
+            None => {
+                // No record of this session's own to rewrite — a teamless
+                // session, or a lead that has not bound yet — but the
+                // notice still fires (F9): the collision is about the name
+                // this session now answers to, record or not.
+                let own_session = self.engine.session_id();
+                let directory = self.registry_dir();
+                if !self.warn_of_collision(&directory, &name, own_session.as_str()) {
+                    self.status.set_notice(Some(format!("renamed to {name:?}")));
+                    self.dirty = true;
+                }
+            }
         }
     }
 
@@ -3923,6 +4273,15 @@ impl App {
             command::Action::Undo => self.undo().await,
             command::Action::Redo => self.redo().await,
             command::Action::Rewind => self.open_rewind(),
+            // Bare `/rename` names nothing to rename to — reached only
+            // through a dropdown Tab-complete that stops at the name, since
+            // `command::rename` intercepts an argument-carrying line before
+            // this dispatch is ever reached (D527, the `/team` precedent).
+            command::Action::Rename => {
+                self.status
+                    .set_notice(Some("/rename needs a name: /rename <name>".to_owned()));
+                self.dirty = true;
+            }
         }
     }
 
@@ -4266,17 +4625,31 @@ impl App {
             // never yields one (`glob.rs` filters to `is_file()`), so the two
             // keys are simply two names for the one outcome here.
             KeyCode::Enter | KeyCode::Tab if !key.modifiers.intersects(NEWLINE_MODIFIERS) => {
-                let chosen = self
-                    .files
-                    .as_ref()
-                    .and_then(Files::selected)
-                    .map(str::to_owned);
-                if let Some(path) = chosen {
-                    self.insert_mention(&path);
-                } else {
-                    // Nothing matched, so there is nothing to insert; the menu
-                    // still goes away rather than swallowing every Enter.
-                    self.files = None;
+                let chosen = self.files.as_ref().and_then(Files::selected).cloned();
+                match chosen {
+                    Some(MenuRow::File(path)) => self.insert_mention(&path),
+                    // A roster mention is never ambiguous — the roster
+                    // wins any collision at resolution (**D528**) — so a
+                    // teammate's completion is always the bare name.
+                    Some(MenuRow::Teammate { name, .. }) => self.insert_roster_mention(&name),
+                    Some(MenuRow::Session {
+                        name,
+                        address,
+                        colliding,
+                        ..
+                    }) => {
+                        if colliding {
+                            self.insert_session_address(&address);
+                        } else {
+                            self.insert_roster_mention(&name);
+                        }
+                    }
+                    None => {
+                        // Nothing matched, so there is nothing to insert; the
+                        // menu still goes away rather than swallowing every
+                        // Enter.
+                        self.files = None;
+                    }
                 }
 
                 true
@@ -4302,6 +4675,29 @@ impl App {
         let (_, start, end) = mention::split_range(&fragment.text);
 
         self.splice_token(fragment, mention::token(path, start, end));
+    }
+
+    /// Splices a unique roster or live-session mention: `@name ` (**D529**),
+    /// through the same accept tail [`App::insert_mention`] uses.
+    fn insert_roster_mention(&mut self, name: &str) {
+        let Some(files) = self.files.take() else {
+            return;
+        };
+        let fragment = files.fragment().clone();
+
+        self.splice_token(&fragment, format!("@{name}"));
+    }
+
+    /// Splices a colliding live-session mention's `uds:` spelling —
+    /// `@`-prefixed and snapshot-pinned byte-for-byte (**ADJ-3**) — so the
+    /// person's exact choice cannot be reassigned by a later resolution.
+    fn insert_session_address(&mut self, address: &str) {
+        let Some(files) = self.files.take() else {
+            return;
+        };
+        let fragment = files.fragment().clone();
+
+        self.splice_token(&fragment, format!("@{address}"));
     }
 
     /// Replaces the composer fragment a menu was opened for with `token` —
@@ -4560,9 +4956,17 @@ impl App {
             return;
         }
         let walk = self.file_walk.take().expect("checked finished above");
-        let Ok(paths) = walk.task.await else {
+        let Ok((paths, listing)) = walk.task.await else {
             return;
         };
+
+        // Cached past the menu's own close: submit-time classification
+        // reads this after Enter has already torn `self.files` down.
+        let (sessions, incomplete) = match listing {
+            lister::Listing::Complete(sessions) => (sessions, None),
+            lister::Listing::Partial { rows, error } => (rows, Some(error)),
+        };
+        self.session_listing = sessions.clone();
 
         // The editor may have moved on while the project was being walked; a
         // menu for a fragment nobody is typing any more would be a lie.
@@ -4570,9 +4974,79 @@ impl App {
         if self.editor.mode() != Mode::Shell
             && mention::trigger(&text, cursor).is_some_and(|current| current == walk.fragment)
         {
-            self.files = Some(Files::new(walk.fragment, paths));
+            let rows = self.assemble_at_rows(paths, sessions);
+            self.files = Some(Files::new(walk.fragment, rows, incomplete));
             self.dirty = true;
         }
+    }
+
+    /// Assembles the `@` menu's full row list (**D529**): the walked file
+    /// paths in the walk's own order, then roster teammates (lead-assigned,
+    /// so a completion never resolves ambiguously — **D528**), then live
+    /// sessions off the injected lister, this session's own excluded.
+    ///
+    /// A session row whose name is held by another row too — teammate or
+    /// session, under the registry's own case-insensitive fold — is marked
+    /// `colliding`, so its completion splices the `uds:` spelling rather
+    /// than the bare name (ADJ-3); one shadowed by a same-named real file
+    /// is still shown, marked, because the file wins at submit regardless
+    /// (**F12**).
+    fn assemble_at_rows(
+        &self,
+        paths: Vec<String>,
+        sessions: Vec<lister::LiveSession>,
+    ) -> Vec<MenuRow> {
+        let own_session = self.engine.session_id();
+        let sessions: Vec<lister::LiveSession> = sessions
+            .into_iter()
+            .filter(|session| session.session_id != own_session.as_str())
+            .collect();
+
+        let teammates: Vec<MenuRow> = self
+            .team_roster()
+            .map(|view| team::rows(&view))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|row| MenuRow::Teammate {
+                name: row.name,
+                lead: row.is_lead,
+            })
+            .collect();
+
+        // Every name in play, so a session's collision check sees teammates
+        // and other sessions alike ("among themselves or with the other
+        // kind", D529). Owned, not borrowed: `teammates` and `sessions`
+        // both move into `rows` right below.
+        let all_names: Vec<String> = teammates
+            .iter()
+            .filter_map(|row| match row {
+                MenuRow::Teammate { name, .. } => Some(name.clone()),
+                MenuRow::File(_) | MenuRow::Session { .. } => None,
+            })
+            .chain(sessions.iter().map(|session| session.name.clone()))
+            .collect();
+
+        let mut rows: Vec<MenuRow> = paths.iter().cloned().map(MenuRow::File).collect();
+        rows.extend(teammates);
+        rows.extend(sessions.into_iter().map(|session| {
+            let colliding = all_names
+                .iter()
+                .filter(|name| registry::same_name(name, &session.name))
+                .count()
+                > 1;
+            let shadowed = paths.contains(&session.name);
+
+            MenuRow::Session {
+                address: format!("{ADDRESS_SCHEME}{}", session.socket.display()),
+                name: session.name,
+                cwd: session.cwd,
+                stem: session.stem,
+                colliding,
+                shadowed,
+            }
+        }));
+
+        rows
     }
 
     /// The files a mention fragment offers, relative to [`App::cwd`].
@@ -4611,17 +5085,27 @@ impl App {
         };
         let cwd = self.cwd.clone();
         let wanted = pattern(&fragment.text);
+        // The live-session listing rides the same spawn (**D529** Axis 5):
+        // a session with no lister — a pane member, a headless build —
+        // fetches nothing, which is the graceful absence AC-27 pins.
+        let sessions = self.lister.as_ref().map(|lister| lister.list());
 
         let task = tokio::spawn(async move {
             // A fragment is typed, not written: half of one is a pattern that
             // does not parse yet, and a menu is not the place to say so.
-            match glob
+            let paths = match glob
                 .run(serde_json::json!({ "pattern": wanted }), &ctx)
                 .await
             {
                 Ok(found) => relative_paths(&cwd, &found.output),
                 Err(_) => Vec::new(),
-            }
+            };
+            let listing = match sessions {
+                Some(sessions) => sessions.await,
+                None => lister::Listing::Complete(Vec::new()),
+            };
+
+            (paths, listing)
         });
         self.file_walk = Some(FileWalk {
             fragment,
@@ -5861,6 +6345,17 @@ impl App {
             return;
         }
 
+        // `/rename`'s own grammar, for `/team`'s exact reason: it is the
+        // other UI command that carries an argument, so a bare `/rename`
+        // reaches `run_command` above while `/rename fresh` reaches this
+        // (**D527**).
+        if let Some(line) = command::rename(&prompt) {
+            self.clear_composer();
+            self.history.append(history::PromptInfo::text(&prompt));
+            self.run_rename_line(line).await;
+            return;
+        }
+
         // A turn already holds the engine, so what was typed is not a prompt:
         // it is a message for the turn that is running (**F4**). See
         // [`App::enqueue`].
@@ -5928,17 +6423,20 @@ impl App {
                 degraded = self.degraded(&mentions);
 
                 let skills = self.requested_skills(&prompt);
+                let session_mentions = self.session_mention_tokens(&prompt, &mentions);
                 self.engine
                     .send(Command::SendPrompt {
-                        // The `@path`, `[Image #N]` and `$skill` tokens stay
-                        // in the text: they are what the user wrote, and the
-                        // engine reads the files `mentions` names — and loads
-                        // the skills `skills` names — when it builds the
-                        // request.
+                        // The `@path`, `[Image #N]`, `$skill` and
+                        // `@session`/`@teammate` tokens all stay in the
+                        // text: they are what the user wrote, and the
+                        // engine reads the files `mentions` names, loads
+                        // the skills `skills` names, and resolves
+                        // `session_mentions` into a reminder — none of it
+                        // sent — when it builds the request (**D529**).
                         text: prompt,
                         mentions,
                         skills,
-                        session_mentions: Vec::new(),
+                        session_mentions,
                         peers: Vec::new(),
                     })
                     .await
@@ -5993,6 +6491,7 @@ impl App {
         mentions.extend(self.pasted_images_in(&prompt));
         let degraded = self.degraded(&mentions);
         let skills = self.requested_skills(&prompt);
+        let session_mentions = self.session_mention_tokens(&prompt, &mentions);
         let sent = self
             .engine
             .send(Command::Steer {
@@ -6000,7 +6499,7 @@ impl App {
                 text: prompt.clone(),
                 mentions,
                 skills,
-                session_mentions: Vec::new(),
+                session_mentions,
                 peers: Vec::new(),
             })
             .await;
@@ -6178,6 +6677,41 @@ impl App {
         let roots = self.engine.skill_roots();
 
         ganja_tool::skill::requested_in(text, &ganja_tool::skill::discover(&roots))
+    }
+
+    /// The `@` tokens `text` carries that name a teammate or a live session
+    /// rather than a file (**D529**, AC-22): every mention [`mention::scan`]
+    /// finds, in fixed order — resolved to a real file ⇒ already in
+    /// `mentions`, and skipped here (the D113 rule, file wins, kept first);
+    /// else matching a roster name or a name the last `@` menu listed (the
+    /// registry's own fold), or carrying the `uds:` scheme ⇒ collected here,
+    /// as typed; anything else is left where [`mention::scan`] found it —
+    /// literal text, exactly as a mistyped path is.
+    ///
+    /// A bare `/path` staying literal is deliberate (**AC-22**): only the
+    /// menu's own `uds:` completion, or a hand-typed one, carries the intent
+    /// unambiguously enough to route here.
+    fn session_mention_tokens(&self, text: &str, mentions: &[Mention]) -> Vec<String> {
+        let roster: Vec<String> = self
+            .team_roster()
+            .map(|view| view.members.into_iter().map(|member| member.name).collect())
+            .unwrap_or_default();
+
+        mention::scan(text)
+            .into_iter()
+            .filter(|token| !mentions.iter().any(|mention| mention.path == token.path))
+            .filter(|token| {
+                token.path.starts_with(ADDRESS_SCHEME)
+                    || roster
+                        .iter()
+                        .any(|name| registry::same_name(name, &token.path))
+                    || self
+                        .session_listing
+                        .iter()
+                        .any(|session| registry::same_name(&session.name, &token.path))
+            })
+            .map(|token| token.path)
+            .collect()
     }
 
     /// The mentions whose bytes the selected provider will not carry, as
@@ -7095,11 +7629,13 @@ fn payload(message: &Delivered) -> ganja_protocol::team::PeerPayload {
 }
 
 /// One in-flight `@`-menu walk: the fragment it answers, the token that
-/// supersedes it, and the walk itself.
+/// supersedes it, and the walk itself — the file paths and the live-session
+/// listing fetched together (**D529**), so opening `@` costs one spawn
+/// rather than two and both are reaped by the one poll.
 struct FileWalk {
     fragment: mention::Fragment,
     cancel: CancellationToken,
-    task: JoinHandle<Vec<String>>,
+    task: JoinHandle<(Vec<String>, lister::Listing)>,
 }
 
 fn pattern(fragment: &str) -> String {
@@ -7149,6 +7685,7 @@ fn relative_paths(cwd: &Path, output: &str) -> Vec<String> {
 mod tests {
     use std::{
         fs,
+        path::{Path, PathBuf},
         sync::Arc,
         time::{Duration, Instant},
     };
@@ -7187,12 +7724,14 @@ mod tests {
     fn session() -> SessionId {
         SessionId::from("ses_fixture".to_owned())
     }
+    use ganja_tool::registry;
+
     use crate::{
-        clipboard, command,
-        component::{self, effort, mcp, sessions},
+        binder, clipboard, command,
+        component::{self, effort, files::Row as MenuRow, mcp, sessions},
         escrepair::EscRepair,
         event::AppEvent,
-        history,
+        history, lister, mention,
         theme::{DEFAULT_THEME, Themes},
     };
 
@@ -10663,6 +11202,655 @@ mod tests {
         );
     }
 
+    // ---- D527: registration lifecycle ----
+
+    /// A binder that mirrors `binder::fake::Recording`'s recording and
+    /// refusal behavior, but — unlike it — names a bound path after the
+    /// session id's **compact hex** form, the real binder's own naming rule
+    /// (`ganja-serve/src/socket.rs:87-105`): a registration record's stem
+    /// is read off the bound path, and only a compact-hex path can stand
+    /// in for one in a test. `binder.rs` itself stays byte-untouched
+    /// (AC-29) — this is a second, local fixture, not an edit to the
+    /// shared one.
+    #[derive(Default)]
+    struct CompactRecording {
+        bound: std::sync::Mutex<Vec<SessionId>>,
+        closed: Arc<std::sync::Mutex<Vec<PathBuf>>>,
+        refuse: std::sync::atomic::AtomicBool,
+    }
+
+    impl CompactRecording {
+        fn path_for(id: &SessionId) -> PathBuf {
+            PathBuf::from(format!("/nowhere/{}.sock", compact(id)))
+        }
+    }
+
+    /// `id`'s compact hex form — dashes stripped, the real binder's own
+    /// naming rule — for a test to compute the stem a bound path (real or
+    /// [`CompactRecording`]'s) will actually carry.
+    fn compact(id: &SessionId) -> String {
+        id.as_str()
+            .chars()
+            .filter(char::is_ascii_hexdigit)
+            .collect()
+    }
+
+    struct CompactBound {
+        path: PathBuf,
+        closed: Arc<std::sync::Mutex<Vec<PathBuf>>>,
+    }
+
+    impl binder::Bound for CompactBound {
+        fn path(&self) -> &Path {
+            &self.path
+        }
+
+        fn shutdown(self: Box<Self>) -> futures::future::BoxFuture<'static, anyhow::Result<()>> {
+            self.closed
+                .lock()
+                .expect("not poisoned")
+                .push(self.path.clone());
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    impl binder::Binder for Arc<CompactRecording> {
+        fn bind(
+            &self,
+            _engine: Arc<Engine>,
+            id: SessionId,
+            _served: binder::Served,
+        ) -> futures::future::BoxFuture<'static, anyhow::Result<Box<dyn binder::Bound>>> {
+            if self.refuse.load(std::sync::atomic::Ordering::SeqCst) {
+                return Box::pin(async { Err(anyhow::anyhow!("the directory is not ours")) });
+            }
+            self.bound.lock().expect("not poisoned").push(id.clone());
+            let bound: Box<dyn binder::Bound> = Box::new(CompactBound {
+                path: CompactRecording::path_for(&id),
+                closed: Arc::clone(&self.closed),
+            });
+
+            Box::pin(async move { Ok(bound) })
+        }
+    }
+
+    /// A lead app over [`CompactRecording`], registering into
+    /// `registry_dir` instead of a real person's `/tmp/ganja-<uid>/`.
+    fn registering_app(
+        directory: &TempDir,
+        registry_dir: &TempDir,
+    ) -> (App, Arc<CompactRecording>) {
+        let recording = Arc::new(CompactRecording::default());
+        let app = persistent_app(directory)
+            .with_socket(
+                Box::new(Arc::clone(&recording)),
+                crate::binder::fake::served(),
+            )
+            .with_registry_directory(registry_dir.path());
+
+        (app, recording)
+    }
+
+    /// AC-2: a lead's own record appears beside its bound socket on the
+    /// first pass, a rebind moves it — the old one removed the moment the
+    /// slot is observed to move (P3), before the new bind's own outcome is
+    /// known — and teardown removes it before the socket is asked to close.
+    #[tokio::test]
+    async fn a_lead_session_registers_beside_its_socket_and_unregisters_on_teardown() {
+        let directory = temporary();
+        store_pickable_sessions(&directory);
+        let registry_dir = temporary();
+        let (mut app, _recording) = registering_app(&directory, &registry_dir);
+        let minted = app.engine.session_id();
+
+        app.handle(AppEvent::Tick).await.expect("a tick is handled");
+
+        let minted_record = registry::record_path(registry_dir.path(), &compact(&minted));
+        assert!(
+            minted_record.exists(),
+            "a record appears beside the bound socket"
+        );
+        let read: registry::Record =
+            serde_json::from_slice(&fs::read(&minted_record).expect("the record reads"))
+                .expect("the record is JSON");
+        assert_eq!(read.session_id, minted.as_str());
+
+        // The rebind: the picker moves the slot.
+        app.handle(key(KeyCode::Char('s'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-s is handled");
+        let chosen = app
+            .sessions
+            .as_ref()
+            .and_then(|sessions| sessions.selected())
+            .map(|info| info.id.clone())
+            .expect("the picker has a row under the cursor");
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+        assert_eq!(app.engine.session_id(), chosen, "the resume moved the slot");
+
+        assert!(
+            !minted_record.exists(),
+            "the old record is gone the moment the slot moved"
+        );
+        let chosen_record = registry::record_path(registry_dir.path(), &compact(&chosen));
+        assert!(
+            chosen_record.exists(),
+            "a fresh record appears beside the rebound socket"
+        );
+
+        // `App::run`'s own teardown order: the record goes before the
+        // socket is asked to close.
+        app.unregister_self();
+        assert!(!chosen_record.exists(), "teardown removes the record");
+    }
+
+    /// AC-3: a refused **first** bind writes nothing at all, and a refused
+    /// **rebind** writes no new record — the old one's removal is the
+    /// previous test's outcome, not a contradiction of this one.
+    #[tokio::test]
+    async fn a_refused_bind_writes_no_record() {
+        let directory = temporary();
+        let registry_dir = temporary();
+        let (mut app, recording) = registering_app(&directory, &registry_dir);
+        recording
+            .refuse
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+
+        app.handle(AppEvent::Tick).await.expect("a tick is handled");
+
+        assert!(
+            fs::read_dir(registry_dir.path())
+                .expect("the directory reads")
+                .next()
+                .is_none(),
+            "a refused first bind writes nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_rebind_writes_no_new_record_but_the_old_one_still_goes() {
+        let directory = temporary();
+        store_pickable_sessions(&directory);
+        let registry_dir = temporary();
+        let (mut app, recording) = registering_app(&directory, &registry_dir);
+        let minted = app.engine.session_id();
+        app.handle(AppEvent::Tick).await.expect("a tick is handled");
+        let minted_record = registry::record_path(registry_dir.path(), &compact(&minted));
+        assert!(minted_record.exists());
+
+        recording
+            .refuse
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        app.handle(key(KeyCode::Char('s'), KeyModifiers::CONTROL))
+            .await
+            .expect("control-s is handled");
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        assert!(
+            !minted_record.exists(),
+            "the old record is still removed on observing the slot move"
+        );
+        assert!(
+            fs::read_dir(registry_dir.path())
+                .expect("the directory reads")
+                .next()
+                .is_none(),
+            "a refused rebind writes no new record"
+        );
+    }
+
+    /// AC-6: registration never refuses a collision — it notices instead,
+    /// naming the live holder's stem and cwd, and still registers.
+    #[tokio::test]
+    async fn a_name_collision_is_a_notice_never_a_refusal_at_registration() {
+        let directory = temporary();
+        let registry_dir = temporary();
+        let holder_stem = "0298c1a2";
+        registry::write(
+            registry_dir.path(),
+            holder_stem,
+            &registry::Record {
+                format: registry::FORMAT,
+                session_id: "0298c1a2-0000-7000-8000-000000000002".to_owned(),
+                name: "worker".to_owned(),
+                name_source: registry::NameSource::User,
+                cwd: "/work/holder".into(),
+                root: "/work/holder".into(),
+                pid: 1,
+                started_at: 0,
+            },
+        )
+        .expect("the fixture writes");
+        let held =
+            ganja_tool::socket::open_lock(&registry_dir.path().join(format!("{holder_stem}.sock")))
+                .expect("the lock file opens");
+        held.try_lock().expect("nothing else holds a fresh lock");
+
+        let (mut app, _recording) = registering_app(&directory, &registry_dir);
+        app.engine.set_self_name("worker");
+
+        app.handle(AppEvent::Tick).await.expect("a tick is handled");
+
+        let line = status_line(&mut app);
+        assert!(line.contains("worker"), "{line}");
+        assert!(line.contains(holder_stem), "{line}");
+
+        let record = registry::record_path(registry_dir.path(), &compact(&app.engine.session_id()));
+        assert!(
+            record.exists(),
+            "registration succeeds despite the collision"
+        );
+    }
+
+    /// AC-7: `/rename` rewrites a lead's own record in place — same stem,
+    /// old name gone from the file — surfacing the collision notice when the
+    /// new name is held, and refusing a grammar violation with AC-5's own
+    /// sentence.
+    #[tokio::test]
+    async fn rename_rewrites_a_leads_record_in_place() {
+        let directory = temporary();
+        let registry_dir = temporary();
+        let (mut app, _recording) = registering_app(&directory, &registry_dir);
+        app.handle(AppEvent::Tick).await.expect("a tick is handled");
+        let stem = compact(&app.engine.session_id());
+        let record_path = registry::record_path(registry_dir.path(), &stem);
+        assert!(record_path.exists(), "the record exists before the rename");
+
+        for event in typing("/rename fresh") {
+            app.handle(event).await.expect("typing is handled");
+        }
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        assert_eq!(app.engine.self_name(), "fresh");
+        let read: registry::Record =
+            serde_json::from_slice(&fs::read(&record_path).expect("the record still reads"))
+                .expect("json");
+        assert_eq!(read.name, "fresh", "same stem, name rewritten in place");
+        assert_eq!(read.name_source, registry::NameSource::User);
+
+        // A grammar violation refuses with AC-5's own sentence, and renames
+        // nothing.
+        for event in typing("/rename a@b") {
+            app.handle(event).await.expect("typing is handled");
+        }
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+        assert_eq!(
+            app.engine.self_name(),
+            "fresh",
+            "the refused rename changed nothing"
+        );
+        let line = status_line(&mut app);
+        assert!(
+            line.contains("scopes an address"),
+            "the grammar's own sentence: {line}"
+        );
+    }
+
+    /// AC-40 TUI half: in a **teamless** session (no socket, no record),
+    /// `/rename` still updates the engine's self-name cell and still
+    /// surfaces the collision notice against a live record (**F9**).
+    #[tokio::test]
+    async fn teamless_rename_updates_the_cell_and_still_warns_of_collisions() {
+        let registry_dir = temporary();
+        let holder_stem = "0398d3c4";
+        registry::write(
+            registry_dir.path(),
+            holder_stem,
+            &registry::Record {
+                format: registry::FORMAT,
+                session_id: "0398d3c4-0000-7000-8000-000000000003".to_owned(),
+                name: "fresh".to_owned(),
+                name_source: registry::NameSource::User,
+                cwd: "/work/holder".into(),
+                root: "/work/holder".into(),
+                pid: 1,
+                started_at: 0,
+            },
+        )
+        .expect("the fixture writes");
+        let held =
+            ganja_tool::socket::open_lock(&registry_dir.path().join(format!("{holder_stem}.sock")))
+                .expect("the lock file opens");
+        held.try_lock().expect("nothing else holds a fresh lock");
+
+        // No `with_socket`: a teamless session binds no socket and has no
+        // record of its own to rewrite.
+        let mut app = app().with_registry_directory(registry_dir.path());
+        assert!(app.registered.is_none(), "a teamless session has no record");
+
+        for event in typing("/rename fresh") {
+            app.handle(event).await.expect("typing is handled");
+        }
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+            .await
+            .expect("enter is handled");
+
+        assert_eq!(app.engine.self_name(), "fresh");
+        let line = status_line(&mut app);
+        assert!(line.contains(holder_stem), "{line}");
+    }
+
+    /// AC-39: the incumbent's own collision re-scan, throttled to once per
+    /// [`COLLISION_RESCAN_INTERVAL`], surfaces "another session registered
+    /// your name" once per newly seen collider — never refusing anything.
+    #[tokio::test]
+    async fn the_incumbents_collision_scan_warns_once_per_newly_seen_collider() {
+        let directory = temporary();
+        let registry_dir = temporary();
+        let (mut app, _recording) = registering_app(&directory, &registry_dir);
+        app.handle(AppEvent::Tick).await.expect("a tick is handled");
+        let name = app.engine.self_name();
+        // A scan "just ran" (simulating the ordinary case: this session's
+        // own registering tick already primed the throttle before any
+        // collider existed to find), so the manual poll below is genuinely
+        // not due.
+        app.collision_scanned = Some(Instant::now());
+
+        // A collider registers under the same name, after this session
+        // already holds it.
+        let collider_stem = "0498e4d5";
+        registry::write(
+            registry_dir.path(),
+            collider_stem,
+            &registry::Record {
+                format: registry::FORMAT,
+                session_id: "0498e4d5-0000-7000-8000-000000000004".to_owned(),
+                name: name.clone(),
+                name_source: registry::NameSource::User,
+                cwd: "/work/collider".into(),
+                root: "/work/collider".into(),
+                pid: 2,
+                started_at: 0,
+            },
+        )
+        .expect("the fixture writes");
+        let held = ganja_tool::socket::open_lock(
+            &registry_dir.path().join(format!("{collider_stem}.sock")),
+        )
+        .expect("the lock file opens");
+        held.try_lock().expect("nothing else holds a fresh lock");
+
+        // Not due yet: the throttle has not elapsed.
+        app.poll_collision_scan();
+        assert!(
+            !status_line(&mut app).contains("registered your name"),
+            "the scan has not run yet"
+        );
+
+        // Force the throttle open, as a real thirty seconds would.
+        app.collision_scanned =
+            Some(Instant::now() - super::COLLISION_RESCAN_INTERVAL - Duration::from_secs(1));
+        app.poll_collision_scan();
+        let line = status_line(&mut app);
+        assert!(line.contains("registered your name"), "{line}");
+        assert!(line.contains(collider_stem), "{line}");
+
+        // A second scan, immediately due again, warns nobody twice.
+        app.status.set_notice(None);
+        app.collision_scanned =
+            Some(Instant::now() - super::COLLISION_RESCAN_INTERVAL - Duration::from_secs(1));
+        app.poll_collision_scan();
+        assert!(
+            !status_line(&mut app).contains("registered your name"),
+            "the same collider is not warned about twice"
+        );
+
+        drop(held);
+    }
+
+    // ---- D529: the `@` menu's roster and live-session rows ----
+
+    fn live_session(name: &str, stem: &str, cwd: &str) -> lister::LiveSession {
+        lister::LiveSession {
+            name: name.to_owned(),
+            name_source: registry::NameSource::Derived,
+            session_id: format!("{stem}-0000-7000-8000-000000000009"),
+            stem: stem.to_owned(),
+            socket: format!("/tmp/ganja-0/{stem}.sock").into(),
+            cwd: cwd.into(),
+            health: lister::Health::Answered,
+        }
+    }
+
+    /// AC-27: with no lister, the menu offers files and roster only —
+    /// nothing else regresses.
+    #[tokio::test]
+    async fn with_no_lister_the_at_menu_offers_files_and_roster_only() {
+        let directory = project();
+        let mut app = app_in(&directory);
+
+        typed(&mut app, "compare @lib").await;
+
+        let files = app.files.as_ref().expect("the menu is open");
+        assert!(
+            !files
+                .rows()
+                .iter()
+                .any(|row| matches!(row, MenuRow::Session { .. })),
+            "no session rows without a lister"
+        );
+    }
+
+    /// AC-37 (D530): a **teamless** interactive session — no member, no
+    /// team — still shows live-session rows once a lister is injected, the
+    /// gate wider than the socket's.
+    #[tokio::test]
+    async fn a_teamless_session_shows_live_session_rows_when_a_lister_is_injected() {
+        let directory = project();
+        let recording = Arc::new(crate::lister::fake::Recording::default());
+        recording.set(lister::Listing::Complete(vec![live_session(
+            "backend",
+            "0298c1a2",
+            "/work/backend",
+        )]));
+        let mut app = app_in(&directory).with_lister(Box::new(recording));
+
+        typed(&mut app, "ping @back").await;
+
+        let files = app.files.as_ref().expect("the menu is open");
+        assert!(
+            files
+                .rows()
+                .iter()
+                .any(|row| matches!(row, MenuRow::Session { name, .. } if name == "backend")),
+            "a teamless session sees live-session rows"
+        );
+    }
+
+    /// AC-37: a pane **member** shows roster rows only — no lister is ever
+    /// handed to a member (`lib.rs`'s own gate), so its menu offers files
+    /// and its roster and nothing else, however many live sessions exist.
+    #[tokio::test]
+    async fn a_member_shows_roster_rows_only_never_live_sessions() {
+        let directory = temporary();
+        let (mut app, _events) = membered(&directory).await;
+        app.cwd = directory.path().to_path_buf();
+        // A member is never handed a lister at all (`lib.rs`'s own gate) —
+        // this app simply has none, which is the production shape.
+        assert!(app.lister.is_none());
+
+        for event in typing("ping @anything") {
+            app.handle(event).await.expect("typing is handled");
+        }
+        settle_file_menu(&mut app).await;
+
+        if let Some(files) = &app.files {
+            assert!(
+                !files
+                    .rows()
+                    .iter()
+                    .any(|row| matches!(row, MenuRow::Session { .. })),
+                "a member's menu never carries session rows"
+            );
+        }
+    }
+
+    /// AC-23 + AC-28: a live session appears in the menu, snapshot-pinned;
+    /// a partial listing marks the menu incomplete and still completes.
+    #[tokio::test]
+    async fn snapshot_at_menu_shows_a_live_session_row() {
+        let directory = project();
+        let recording = Arc::new(crate::lister::fake::Recording::default());
+        recording.set(lister::Listing::Complete(vec![live_session(
+            "backend",
+            "0298c1a2",
+            "/work/backend",
+        )]));
+        let mut app = app_in(&directory).with_lister(Box::new(recording));
+
+        typed(&mut app, "ping @back").await;
+        assert!(app.files.is_some());
+
+        let mut terminal = terminal(80, 16);
+        app.draw(&mut terminal).expect("a frame draws");
+        insta::assert_snapshot!(screen(&terminal));
+    }
+
+    #[tokio::test]
+    async fn a_partial_listing_marks_the_menu_incomplete_and_still_completes() {
+        let directory = project();
+        let recording = Arc::new(crate::lister::fake::Recording::default());
+        recording.set(lister::Listing::Partial {
+            rows: vec![live_session("backend", "0298c1a2", "/work/backend")],
+            error: "the directory could not be fully read".to_owned(),
+        });
+        let mut app = app_in(&directory).with_lister(Box::new(recording));
+
+        typed(&mut app, "ping @back").await;
+
+        let files = app.files.as_ref().expect("the menu is open");
+        assert!(
+            files.selected().is_some_and(
+                |row| matches!(row, MenuRow::Session { name, .. } if name == "backend")
+            ),
+            "the partial listing's own row still shows"
+        );
+
+        let mut terminal = terminal(80, 16);
+        app.draw(&mut terminal).expect("a frame draws");
+        assert!(
+            screen(&terminal).contains("partial"),
+            "the incomplete marker shows"
+        );
+    }
+
+    /// AC-23 (ADJ-3): completing a duplicate-named session row splices the
+    /// `@`-prefixed `uds:` spelling, byte for byte; a unique row splices the
+    /// bare name.
+    #[tokio::test]
+    async fn a_colliding_session_completion_splices_its_uds_address() {
+        let directory = project();
+        let recording = Arc::new(crate::lister::fake::Recording::default());
+        recording.set(lister::Listing::Complete(vec![
+            live_session("worker", "0298c1a2", "/work/a"),
+            live_session("worker", "0398d3c4", "/work/b"),
+        ]));
+        let mut app = app_in(&directory).with_lister(Box::new(recording));
+
+        typed(&mut app, "ping @work").await;
+        // Both rows are files-then-roster-then-sessions; select the first
+        // session row (index 0, since there are no files or roster rows for
+        // this fragment).
+        app.handle(key(KeyCode::Tab, KeyModifiers::NONE))
+            .await
+            .expect("tab is handled");
+
+        let prompt = app.editor.text();
+        assert!(
+            prompt.contains("@uds:/tmp/ganja-0/0298c1a2.sock"),
+            "a colliding row splices its exact uds: address: {prompt}"
+        );
+    }
+
+    // ---- D529: submit-time classification (AC-22) ----
+
+    /// AC-22: a token resolving to a real file rides `mentions` even when a
+    /// live session shares the name (file wins, first); a non-file token
+    /// matching the roster or the listed live sessions rides
+    /// `session_mentions`, as does a `uds:`-prefixed token whether or not it
+    /// matches a listing; anything else stays literal.
+    #[tokio::test]
+    async fn a_token_that_is_neither_file_nor_name_stays_literal() {
+        let root = project();
+        std::fs::write(root.path().join("backend"), "shadowing file\n")
+            .expect("the fixture file writes");
+        let mut app = App::new(engine(), None, Themes::builtin())
+            .with_cwd(root.path())
+            .with_root(root.path());
+        app.session_listing = vec![live_session("worker", "0298c1a2", "/work/a")];
+
+        let mentions = mention::attachable(
+            "@backend @worker @uds:/tmp/ganja-0/x.sock @nobody",
+            &app.root,
+        );
+        let session_mentions = app.session_mention_tokens(
+            "@backend @worker @uds:/tmp/ganja-0/x.sock @nobody",
+            &mentions,
+        );
+
+        assert_eq!(
+            mentions.iter().map(|m| m.path.as_str()).collect::<Vec<_>>(),
+            vec!["backend"],
+            "the real file wins, even though a live session shares its name"
+        );
+        assert_eq!(
+            session_mentions,
+            vec!["worker".to_owned(), "uds:/tmp/ganja-0/x.sock".to_owned()],
+            "the roster/session name and the uds: token both classify; @nobody stays literal"
+        );
+    }
+
+    // ---- D495: peer text never reaches session_mentions (AC-26 TUI half) ----
+
+    /// AC-26 TUI half: `deliver_peers` (via `start_peer_turn`, the not-yet-
+    /// running-turn arm) sends a peer's `@`- and `$`-laden body through
+    /// with `mentions`, `skills` **and** `session_mentions` all empty — the
+    /// engine never resolves a peer's own words as a mention (**D495**),
+    /// confirmed here by the resulting message carrying no
+    /// `session_mention`-tagged reminder part despite the body naming a
+    /// live-looking session.
+    #[tokio::test]
+    async fn deliver_peers_sends_no_session_mentions() {
+        let directory = temporary();
+        let (mut app, _registry, mut events) = leading(&directory).await;
+
+        assert!(
+            app.deliver_peers(vec![ganja_core::teammate::lead_inbox::Delivered::new(
+                "w1",
+                "2026-08-17T00:00:00.000Z",
+                "check in with @backend and run $porting",
+                ganja_core::teammate::Delivery::FireAndForget,
+            )])
+            .await,
+            "the not-yet-running-turn arm sends a prompt"
+        );
+
+        let CoreEvent::MessageStarted {
+            session_id: _,
+            message,
+        } = events.next().await.expect("the engine reports the prompt")
+        else {
+            panic!("the first event should be the prompt starting");
+        };
+
+        assert!(
+            !message
+                .parts
+                .iter()
+                .filter_map(ganja_protocol::Part::as_text)
+                .any(|text| text.contains(ganja_core::teammate::identity::TAG)),
+            "no session-mention reminder part is appended for a peer's own words"
+        );
+    }
+
     /// An engine carrying the four builtin agents, which is what the agent
     /// list and Tab both read.
     fn agentic_app() -> App {
@@ -12361,7 +13549,10 @@ mod tests {
         app().with_cwd(directory.path())
     }
 
-    /// The paths the file menu is currently offering.
+    /// The file paths the `@` menu is currently offering — roster and
+    /// live-session rows, which callers pinned before D529 landed never
+    /// asked about, are skipped here rather than changing what those tests
+    /// assert.
     fn offered(app: &App) -> Vec<String> {
         let mut listed = Vec::new();
         let Some(files) = &app.files else {
@@ -12370,8 +13561,8 @@ mod tests {
         let mut cursor = files.clone();
         cursor.move_selection(-99);
         for _ in 0..16 {
-            if let Some(path) = cursor.selected() {
-                listed.push(path.to_owned());
+            if let Some(MenuRow::File(path)) = cursor.selected() {
+                listed.push(path.clone());
             }
             cursor.move_selection(1);
         }
@@ -15536,10 +16727,11 @@ mod tests {
         let mut app = app();
         app.run_command(command::Action::Help).await;
 
-        // Two rows taller than it once was, because the roster this card lists
-        // gained `/team` (**D504**) and then `/held` (**D524**) — the card
-        // grows with the commands, which is what "the whole card" means.
-        let mut terminal = terminal(90, 42);
+        // Taller than it once was, because the roster this card lists gained
+        // `/team` (**D504**), then `/held` (**D524**), then `/rename`
+        // (**D527**) — the card grows with the commands, which is what "the
+        // whole card" means.
+        let mut terminal = terminal(90, 43);
         app.draw(&mut terminal).expect("a frame draws");
         let screen = screen(&terminal);
 

@@ -52,7 +52,7 @@ use ganja_core::{
     provider::fake::FakeProvider,
     teammate::{TeammateRegistry, lead_inbox::LeadInbox},
     tool::{
-        Registry,
+        Registry, registry,
         team::{Address, Body, Postbox as _, Undelivered},
     },
 };
@@ -84,6 +84,25 @@ const SENDER_SESSION: &str = "0198c1a2-9999-7d5e-8f60-718293a4b5c6";
 /// What the sender says.
 const TEXT: &str = "the release is out; pick up W8 when you are idle";
 const SUMMARY: &str = "release";
+
+/// The environment the re-executed **teamless resolving** sender reads its
+/// role from (**AC-19**, **AC-32**, **AC-40**'s far half): the socket
+/// directory both processes share, and the bare name to resolve — the D527
+/// record a real `--name backend` launch would have registered.
+const RESOLVE_DIR: &str = "GANJA_UDS_TEST_RESOLVE_DIR";
+const RESOLVE_NAME: &str = "GANJA_UDS_TEST_RESOLVE_NAME";
+
+/// The teamless sender's self-name across its two sends — **AC-40**'s far
+/// half: a rename moves the *next* send's `from`. Driven through the one
+/// seam a frontend calls (`Engine::set_self_name`, **ADJ-2**) rather than a
+/// real `/rename` command, which needs a terminal this binary is not one —
+/// stated exactly so in the test's own doc.
+const FIRST_SELF_NAME: &str = "frontend";
+const SECOND_SELF_NAME: &str = "frontend-renamed";
+
+/// What the resolving sender says on its first and second sends.
+const RESOLVE_TEXT_1: &str = "first: resolved by bare name";
+const RESOLVE_TEXT_2: &str = "second: after a rename";
 
 /// A fresh directory at `0700` — what a socket directory has to be, where
 /// `tempdir()`'s default is whatever the umask leaves.
@@ -160,6 +179,27 @@ fn dead_socket(path: &Path) {
     assert!(path.exists(), "dropping a listener leaves its file behind");
 }
 
+/// A D527 registration record at `stem`, named `name`, written exactly as a
+/// lead's TUI writes one on `Synced::Bound` — the fixture every GC and
+/// naming test in this file builds its socket directory's other half from.
+fn write_registered(directory: &Path, stem: &str, name: &str) {
+    registry::write(
+        directory,
+        stem,
+        &registry::Record {
+            format: registry::FORMAT,
+            session_id: format!("{stem}-0000-7000-8000-000000000001"),
+            name: name.to_owned(),
+            name_source: registry::NameSource::User,
+            cwd: "/work".into(),
+            root: "/work".into(),
+            pid: 4242,
+            started_at: 1_756_150_000_000,
+        },
+    )
+    .expect("a registry record writes");
+}
+
 /// The shipped `ganja sessions --live` over `directory`, in its own homes
 /// so its log lands nowhere near the developer's — a `tokio` child, because
 /// the servers it probes are tasks on this test's own runtime and a blocking
@@ -211,6 +251,159 @@ async fn send_as_child(socket: PathBuf, home: PathBuf, report: PathBuf) {
         serde_json::json!({ "to": sent.to, "note": sent.note }).to_string(),
     )
     .expect("the report writes");
+}
+
+/// A `send_message` tool call, one turn's worth — the same scripted-provider
+/// idiom `ganja-core`'s own D530/D531 engine tests drive a solo postbox
+/// through, since [`ganja_core::subagent::SoloPostbox`] itself is
+/// crate-private and unreachable from here.
+fn send_call(to: &str, message: &str) -> Vec<ganja_core::provider::ProviderEvent> {
+    ganja_testkit::tool_call(
+        ganja_core::tool::send_message::ID,
+        serde_json::json!({ "to": to, "message": message }),
+    )
+}
+
+/// **AC-19** (D528's resolver, over a real process boundary), **AC-32**
+/// (a teamless sender's far-inbox `from`) and **AC-40**'s far half (a
+/// rename moving the *next* send's `from`), all in the child process a bare
+/// name is resolved from: a solo-postbox engine — no roster, no `uds:`
+/// address typed anywhere — over the shared `--socket-dir`, sending twice
+/// with a `set_self_name` in between.
+///
+/// The rename is driven through the one seam a frontend calls
+/// (`Engine::set_self_name`, **ADJ-2**) rather than a real `/rename`
+/// command: this binary is not a terminal, and the seam is exactly what
+/// `/rename` itself calls, so exercising it here is exercising `/rename`'s
+/// own mechanism minus the keystroke.
+async fn resolve_and_send_as_child(directory: PathBuf, target: String) {
+    let (provider, _requests) = ganja_testkit::ScriptedProvider::new(vec![
+        send_call(&target, RESOLVE_TEXT_1),
+        ganja_testkit::says("first done"),
+        send_call(&target, RESOLVE_TEXT_2),
+        ganja_testkit::says("second done"),
+    ]);
+    let engine = Engine::new(
+        provider,
+        "canned",
+        Arc::new(Registry::new(Vec::new())),
+        Permissions::default(),
+    )
+    .with_socket_directory(directory)
+    .with_solo_postbox();
+    engine.set_self_name(FIRST_SELF_NAME);
+    let _events = engine.subscribe().await.expect("a subscriber joins");
+
+    engine
+        .send(Command::SendPrompt {
+            text: "one".to_owned(),
+            mentions: Vec::new(),
+            skills: Vec::new(),
+            session_mentions: Vec::new(),
+            peers: Vec::new(),
+        })
+        .await
+        .expect("an idle engine accepts the first prompt");
+    assert!(
+        engine.settle(DEADLINE).await,
+        "the first send's turn settles"
+    );
+
+    // **AC-40**'s far half: renamed before the second send, so the far
+    // inbox's second entry has to carry the new self-name or the assertion
+    // in the parent fails.
+    engine.set_self_name(SECOND_SELF_NAME);
+
+    engine
+        .send(Command::SendPrompt {
+            text: "two".to_owned(),
+            mentions: Vec::new(),
+            skills: Vec::new(),
+            session_mentions: Vec::new(),
+            peers: Vec::new(),
+        })
+        .await
+        .expect("an idle engine accepts the second prompt");
+    assert!(
+        engine.settle(DEADLINE).await,
+        "the second send's turn settles"
+    );
+}
+
+/// **AC-19**, **AC-32**, **AC-40** (far half): session A registers as
+/// `backend` — the D527 record a real `--name backend` launch's TUI would
+/// have written on `Synced::Bound` (`ganja-tui`'s to build; this fixture
+/// stands in for it, exactly as [`led_engine`] already stands in for "a real
+/// lead's engine") — and leads a team; session B, this binary re-executed
+/// and **teamless**, resolves `backend` by bare name through `send_message`
+/// twice, renaming itself between the two sends. Nothing here types a
+/// `uds:` address: the D528 resolver, seeded with the shared
+/// `--socket-dir`, is what finds session A.
+#[tokio::test]
+async fn a_bare_name_resolves_across_a_socket_directory_and_carries_a_solo_identity() {
+    // The child's role, when this binary was re-executed as the resolving
+    // sender.
+    if let (Some(directory), Some(target)) = (env::var_os(RESOLVE_DIR), env::var_os(RESOLVE_NAME)) {
+        resolve_and_send_as_child(
+            directory.into(),
+            target.into_string().expect("the target name is utf-8"),
+        )
+        .await;
+
+        return;
+    }
+
+    let directory = private_dir();
+    let receiver_home = TempDir::new().expect("a home for the receiving team");
+    let (engine, team_registry) = led_engine(receiver_home.path());
+    let handle = serve_session(&engine, directory.path()).await;
+    let living = bound(&handle);
+    let living_stem = living
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .expect("the bound socket has a stem")
+        .to_owned();
+    // The D527 record a `--name backend` launch would have registered —
+    // this test's fixture for the TUI's own writer.
+    write_registered(directory.path(), &living_stem, "backend");
+
+    let status = tokio::time::timeout(
+        DEADLINE,
+        tokio::process::Command::new(env::current_exe().expect("a test binary knows its own path"))
+            .args([
+                "a_bare_name_resolves_across_a_socket_directory_and_carries_a_solo_identity",
+                "--exact",
+                "--test-threads=1",
+            ])
+            .env(RESOLVE_DIR, directory.path())
+            .env(RESOLVE_NAME, "backend")
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .status(),
+    )
+    .await
+    .expect("the resolving sender finishes within the deadline")
+    .expect("the sender process is waitable");
+    assert!(status.success(), "the resolving sender failed: {status}");
+
+    let inbox = lead_inbox(&team_registry);
+    assert_eq!(
+        inbox.len(),
+        2,
+        "both bare-name-resolved sends landed: {inbox:?}"
+    );
+    assert_eq!(
+        inbox[0]["from"], "frontend@solo",
+        "**AC-32**: a teamless sender's far-inbox `from` is its derived solo identity"
+    );
+    assert_eq!(inbox[0]["text"], RESOLVE_TEXT_1);
+    assert_eq!(
+        inbox[1]["from"], "frontend-renamed@solo",
+        "**AC-40**'s far half: the rename between the two sends moved this one's `from`"
+    );
+    assert_eq!(inbox[1]["text"], RESOLVE_TEXT_2);
+
+    handle.shutdown().await.expect("a clean stop");
 }
 
 // ---------------------------------------------------------------------------
@@ -727,4 +920,152 @@ async fn a_socket_that_vanishes_mid_walk_does_not_end_the_listing() {
 
     drop(lock);
     handle.shutdown().await.expect("a clean stop");
+}
+
+// ---------------------------------------------------------------------------
+// D527: the registration record beside the socket
+// ---------------------------------------------------------------------------
+
+/// **AC-8** (paired-removal half), **AC-30**: the D527 record beside a live
+/// socket shows in the listing's NAME column, typed case and all, and a
+/// stale socket's own record is removed in the same claimed window that
+/// removes the socket — never a second lock protocol.
+#[tokio::test]
+async fn sessions_live_shows_a_registered_name_and_gcs_it_with_its_dead_socket() {
+    let directory = private_dir();
+    let homes = TempDir::new().expect("homes for the listing");
+    let (engine, _team_registry) = led_engine(homes.path());
+    let handle = serve_session(&engine, directory.path()).await;
+    let living = bound(&handle);
+    let living_stem = living
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .expect("the bound socket has a stem")
+        .to_owned();
+    write_registered(directory.path(), &living_stem, "Backend");
+
+    // The dead one: bound and dropped, with the lock file a binder would
+    // have left, and a record beside it — the pair AC-8 says dies together.
+    let dead = directory.path().join(format!("deadbeef.{EXTENSION}"));
+    dead_socket(&dead);
+    let dead_lock = dead.with_extension(LOCK_EXTENSION);
+    fs::write(&dead_lock, b"").expect("the stale lock file writes");
+    write_registered(directory.path(), "deadbeef", "ghost");
+    let dead_record = registry::record_path(directory.path(), "deadbeef");
+
+    let output = tokio::time::timeout(DEADLINE, sessions_live(directory.path(), &homes).output())
+        .await
+        .expect("the listing finishes within the deadline")
+        .expect("the listing runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "the listing succeeds:\n{stdout}\n{stderr}"
+    );
+
+    assert!(
+        stdout.contains("NAME") && stdout.contains("Backend"),
+        "the living socket's typed-case name is shown:\n{stdout}"
+    );
+    let row = stdout
+        .lines()
+        .find(|line| line.contains(&living.display().to_string()))
+        .unwrap_or_else(|| panic!("the living session is listed by socket:\n{stdout}"));
+    assert!(row.contains("Backend"), "on the same row: {row}");
+
+    assert!(
+        !dead_record.exists(),
+        "the dead socket's own record is removed with it"
+    );
+    assert!(
+        stderr.contains("removed the stale record")
+            && stderr.contains(&dead_record.display().to_string()),
+        "the removal is said, by path: {stderr}"
+    );
+    assert!(dead_lock.exists(), "the dead socket's lock file is left");
+
+    let living_record = registry::record_path(directory.path(), &living_stem);
+    assert!(
+        living_record.exists(),
+        "the living socket's record is untouched"
+    );
+
+    handle.shutdown().await.expect("a clean stop");
+}
+
+/// **N4/AC-8**: a record with no socket sibling at all — residue from a
+/// crash between the write and teardown — is claimed and removed the same
+/// way a stale socket's own record is; the claim creates the name's `.lock`
+/// where none was, and that lock is never removed, exactly as a stale
+/// socket's own claim already behaves.
+#[tokio::test]
+async fn sessions_live_claims_and_removes_an_orphaned_record_with_no_socket_sibling() {
+    let directory = private_dir();
+    let homes = TempDir::new().expect("homes for the listing");
+    write_registered(directory.path(), "0198c1a2", "orphan");
+    let record_path = registry::record_path(directory.path(), "0198c1a2");
+    let lock_path = socket::lock_path(&directory.path().join(format!("0198c1a2.{EXTENSION}")));
+    assert!(!lock_path.exists(), "nothing has claimed this name yet");
+
+    let output = tokio::time::timeout(DEADLINE, sessions_live(directory.path(), &homes).output())
+        .await
+        .expect("the listing finishes within the deadline")
+        .expect("the listing runs");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "the listing succeeds:\n{stdout}\n{stderr}"
+    );
+
+    assert!(
+        !record_path.exists(),
+        "the orphaned record is removed: {stderr}"
+    );
+    assert!(
+        stderr.contains("removed the orphaned record")
+            && stderr.contains(&record_path.display().to_string()),
+        "the removal is said, by path: {stderr}"
+    );
+    assert!(
+        lock_path.exists(),
+        "the claim created this name's lock, and it is never removed"
+    );
+    assert!(
+        stdout.contains("no live sessions"),
+        "no socket ever answered, so nothing is listed as live:\n{stdout}"
+    );
+}
+
+/// **N3**: the registry's own liveness probe must never drift from the
+/// binder's real token — a name held by a real
+/// [`ganja_serve::socket::NameLock`] (this crate is the one that links both
+/// the registry, in `ganja-tool`, and the binder's lock, in `ganja-serve`)
+/// probes live through [`registry::is_live`], and probes stale the instant
+/// the lock drops.
+#[test]
+fn the_registry_probe_agrees_with_a_real_namelock() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let stem = "0198c1a2";
+    let socket_path = dir.path().join(format!("{stem}.{EXTENSION}"));
+
+    assert!(
+        !registry::is_live(dir.path(), stem).expect("the probe answers"),
+        "nothing has claimed the name yet"
+    );
+
+    let lock = socket::NameLock::claim(&socket_path)
+        .expect("the lock file opens")
+        .expect("nothing else holds a fresh lock");
+    assert!(
+        registry::is_live(dir.path(), stem).expect("the probe answers"),
+        "a real NameLock reads live to the registry's own probe"
+    );
+
+    drop(lock);
+    assert!(
+        !registry::is_live(dir.path(), stem).expect("the probe answers"),
+        "and stale the instant the lock drops"
+    );
 }

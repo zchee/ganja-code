@@ -171,7 +171,14 @@ impl Fixture {
     }
 
     /// `ganja sessions --live --socket-dir <sockets>`: every `(session id,
-    /// socket path)` the listing printed.
+    /// socket path)` the listing printed — the D527 NAME column, its own
+    /// field between the two, is read past rather than parsed: this
+    /// fixture's own assertions are about the socket, not the registered
+    /// name. `split_whitespace` rather than a fixed-width split because the
+    /// column widths are display padding, not a field separator this
+    /// fixture may assume the shape of — a session id, a name (never
+    /// whitespace-bearing, the D527 grammar's own rule) and a socket path
+    /// (never whitespace-bearing, a `tempfile` path) are each one token.
     fn live(&self, sockets: &Path) -> Vec<(String, PathBuf)> {
         let output = self
             .ganja()
@@ -191,8 +198,11 @@ impl Fixture {
             .skip_while(|line| !line.starts_with("SESSION"))
             .skip(1)
             .filter_map(|line| {
-                let (session, path) = line.split_once("  ")?;
-                Some((session.trim().to_owned(), PathBuf::from(path.trim())))
+                let mut fields = line.split_whitespace();
+                let session = fields.next()?.to_owned();
+                let _name = fields.next()?;
+                let path = fields.next()?;
+                Some((session, PathBuf::from(path)))
             })
             .collect()
     }

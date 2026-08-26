@@ -15,6 +15,7 @@ pub mod external;
 pub mod graphics;
 pub mod history;
 pub mod keybind;
+pub mod lister;
 pub(crate) mod markdown;
 pub mod member;
 pub mod mention;
@@ -89,7 +90,18 @@ pub enum Resume {
 /// binary that links the server hands one in, and this crate — which may not
 /// name that server — decides when it is asked, which is only for a session
 /// that leads a team; a pane member and a build with no config home hand it
-/// back unused, and a caller with no server passes [`None`].
+/// back unused, and a caller with no server passes [`None`]. `lister` is the
+/// `@` menu's and the send resolver's live-session listing (**D529** Axis 5,
+/// **D530**'s re-derived gate, [`lister`]): every **interactive non-member**
+/// session is handed one — team or none, wider than `binder`'s lead-only
+/// gate — and a pane member or a caller with no server passes [`None`].
+/// `name` is `--name`'s value, already validated by the CLI boundary
+/// (**D527**'s grammar) — this function only asserts that in a debug build,
+/// never re-refuses it; [`None`] falls back to the project root's derived
+/// basename (REVISION-3 P5). `socket_dir` is the hidden `--socket-dir`
+/// override, seeded onto the identity resolver so the binder, the lister and
+/// a name's resolution all read the one directory; [`None`] leaves the
+/// well-known default standing.
 ///
 /// Everything that can refuse does so *before* the terminal is taken over: a
 /// config file that will not parse, a key binding this build cannot read, a
@@ -108,12 +120,21 @@ pub enum Resume {
 ///
 /// Returns an error for any of the refusals above, and if the terminal cannot
 /// be initialized, drawn to, read from, or restored.
+///
+/// Eight independent startup knobs, each documented above and each optional
+/// on its own: a struct would not shorten a call site that already names
+/// every one of them, and would only hide which knob a diff actually
+/// touched.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     resume: Option<Resume>,
     overrides: Overrides,
     yolo: bool,
     member: Option<member::Flags>,
     binder: Option<Box<dyn binder::Binder>>,
+    lister: Option<Box<dyn lister::Lister>>,
+    name: Option<String>,
+    socket_dir: Option<PathBuf>,
 ) -> Result<()> {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     // Resolved first, and refused readably before anything else is built: a
@@ -303,6 +324,65 @@ pub async fn run(
         // from the model's name alone.
         .with_base_for_model();
 
+    // **D527/D530, REVISION-3 P5**: the self-name every registration, every
+    // `@` menu label and every solo send reads (`Engine::self_name`,
+    // `App::self_name_source`), resolved once here. `--name` is the
+    // person's own choice, already vetted at the CLI boundary before it
+    // reaches this signature — asserted, never re-refused, since a second
+    // refusal here would be a second grammar to keep in step with
+    // `registry::vet_name`'s own. Absent one, the project root's basename
+    // stands in, run through the same grammar sanitizer a typed name would
+    // be, falling back to [`ganja_core::tool::registry::FALLBACK_NAME`] on
+    // nothing usable — the [`ganja_core::tool::registry::NameSource`] that
+    // came out is what tells a registration record `user` from `derived`
+    // (AC-4).
+    let (resolved_name, name_source) = match name {
+        Some(name) => {
+            debug_assert!(
+                ganja_core::tool::registry::vet_name(&name).is_ok(),
+                "the CLI already validated --name; this asserts it stayed valid"
+            );
+
+            (name, ganja_core::tool::registry::NameSource::User)
+        }
+        None => (
+            ganja_core::tool::registry::sanitize(
+                project
+                    .root()
+                    .file_name()
+                    .and_then(std::ffi::OsStr::to_str)
+                    .unwrap_or_default(),
+            ),
+            ganja_core::tool::registry::NameSource::Derived,
+        ),
+    };
+    // Every seam below is scoped to an interactive **non-member** assembly
+    // (**D530**'s gate, restated at each): a pane member speaks through its
+    // own `MemberPostbox`, never registers, and is handed no lister — its
+    // self-name cell, socket directory and `teamless_send` posture go
+    // unread, so seeding them would be work with no reader.
+    let interactive = membership.is_none();
+    // The identity resolver's own directory (**D528**), seeded **before**
+    // anything below captures `&Engine::identity` — `with_teammates`' lead
+    // postbox and `with_solo_postbox`'s solo one both do, in the match
+    // that follows, so this has to run first or either would capture the
+    // engine's un-seeded default instead of the hidden `--socket-dir`
+    // override.
+    let engine = if interactive {
+        engine
+            .with_socket_directory(
+                socket_dir
+                    .clone()
+                    .unwrap_or_else(ganja_tool::socket::directory),
+            )
+            .with_teamless_send(config.teamless_send())
+    } else {
+        engine
+    };
+    if interactive {
+        engine.set_self_name(resolved_name);
+    }
+
     // Dialled from here on, in the background: the first turn is offered
     // whichever servers have answered by the time it starts, and a server
     // that never answers costs its tools and a line of the status bar rather
@@ -345,8 +425,12 @@ pub async fn run(
     // and would strand every running teammate in a team nothing was reading.
     //
     // A build with no config home has nowhere to keep a team, so it leads
-    // none: `Engine::teammates()` answers `None`, the `send_message` tool is
-    // never registered, and the frontend's whole lead side is inert.
+    // none: `Engine::teammates()` answers `None` and the frontend's whole
+    // lead side is inert. Since **D530** it still speaks, though: the solo
+    // postbox below opens `send_message` to named live sessions and `uds:`
+    // addresses, sending as `<self-name>@solo` with the one-way note — a
+    // sender, never an addressee, because only a socket-binding lead
+    // registers a name.
     //
     // **A pane teammate leads no team either** (§10.3): it is a member of the
     // one that launched it, and a teammate is not a place to nest a second
@@ -457,10 +541,12 @@ pub async fn run(
             ),
             None => {
                 tracing::warn!(
-                    "no config home, so this session leads no team and cannot spawn teammates"
+                    "no config home, so this session leads no team and cannot spawn \
+                     teammates; cross-session sending stays open through the solo \
+                     postbox (D530)"
                 );
 
-                (engine, None, None)
+                (engine.with_solo_postbox(), None, None)
             }
         };
     // What the status bar says about who this process is, beside the provider
@@ -568,7 +654,17 @@ pub async fn run(
             // the directory the user opened rather than the project root: what
             // they typed is relative to where they are standing.
             .with_cwd(cwd)
+            // The registration record's own source column (**D527**, AC-4):
+            // `user` for `--name`, `derived` for the project-basename
+            // fallback — the same resolution [`Engine::set_self_name`] was
+            // seeded from, above.
+            .with_self_name_source(name_source)
             .watching_mcp(config.mcp.len());
+            // The lister's gate is wider than the socket's (**D530**): every
+            // interactive session that is not a pane member gets one — team
+            // or none — so it is read off `membership` before that value
+            // moves into `with_member` below.
+            let is_member = membership.is_some();
             // The member's inbox, on the tick that already polls everything
             // else here; a session nobody launched as a teammate installs
             // nothing and reads nothing (§10.3).
@@ -577,6 +673,16 @@ pub async fn run(
             }
             if let Some((binder, served)) = socket {
                 app = app.with_socket(binder, served);
+            }
+            if !is_member && let Some(lister) = lister {
+                app = app.with_lister(lister);
+            }
+            // A **teamless** session binds no socket, so its own collision
+            // scan has no bound path to read a directory off — an explicit
+            // `--socket-dir` reaches it only through this seam (a lead's own
+            // scan already gets the override for free, off its bound path).
+            if !is_member && let Some(socket_dir) = socket_dir {
+                app = app.with_registry_directory(socket_dir);
             }
             app.seed(seed);
             // `SessionEnd` fires at the tail of this call rather than beside

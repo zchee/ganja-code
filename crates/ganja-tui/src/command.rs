@@ -90,6 +90,10 @@ pub enum Action {
     Redo,
     /// Open the picker that takes the session back to a checkpoint.
     Rewind,
+    /// Give this session a name (**D527**). Bare `/rename` names nothing to
+    /// rename to; [`rename`] is the door that reads the argument off the
+    /// buffer, the same shape [`team`] reads `/team spawn`'s off.
+    Rename,
 }
 
 impl Action {
@@ -128,7 +132,8 @@ impl Action {
             | Self::CopyMessage
             | Self::Undo
             | Self::Redo
-            | Self::Rewind => None,
+            | Self::Rewind
+            | Self::Rename => None,
         }
     }
 }
@@ -428,6 +433,19 @@ pub const COMMANDS: &[Entry] = &[
         category: Category::Session,
         suggested: false,
     },
+    // `System` for `/team`'s reason: naming this session is a facility
+    // beside the conversation, not something done to it. The one other
+    // builtin besides `/team` that reads an argument off the buffer — see
+    // [`rename`].
+    Entry {
+        action: Action::Rename,
+        name: "rename",
+        aliases: &[],
+        title: "Rename this session",
+        description: "Give this session a name other sessions can address it by",
+        category: Category::System,
+        suggested: false,
+    },
 ];
 
 /// The words that quit when they are the whole prompt.
@@ -540,13 +558,14 @@ pub const SPAWN_GRAMMAR: &str = "<name> [--backend <surface>] [--agent <kind>] [
 
 /// The inline hint a builtin command shows once its name is typed (**D518**).
 ///
-/// `/team` is the only builtin that reads arguments off the buffer, so it is
-/// the only name here; everything else answers [`None`] and shows nothing.
-/// Display-only, like a command file's `argument-hint` — the grammar that
-/// actually decides is [`team`]'s.
+/// `/team` and `/rename` are the only builtins that read arguments off the
+/// buffer; everything else answers [`None`] and shows nothing. Display-only,
+/// like a command file's `argument-hint` — the grammar that actually
+/// decides is [`team`]'s and [`rename`]'s respectively.
 fn builtin_hint(name: &str) -> Option<&'static str> {
     match name {
         "team" => Some("list | spawn <name> [--backend] [--agent] [prompt] | shutdown [member]"),
+        "rename" => Some("<name>"),
         _ => None,
     }
 }
@@ -777,6 +796,42 @@ pub fn team(text: &str) -> Option<Team> {
         other => Team::Refused(format!(
             "`/team` has no {other:?} subcommand: it lists the team, and takes `spawn`, `list` and `shutdown`"
         )),
+    })
+}
+
+/// What a submitted `/rename` line asked for (**D527**).
+///
+/// [`Action::Rename`]'s second door, and the only one that can carry an
+/// argument — the palette has nowhere to type one and the dropdown closes
+/// the moment a space follows the name — so a line naming a target has to be
+/// read off the buffer on submit exactly as [`team`] reads `/team spawn`'s.
+/// Unlike `/team`'s grammar this one takes no subcommands: everything after
+/// the name, trimmed, is the name asked for — a name may carry no whitespace
+/// (`registry::vet_name`'s own clause), so there is nothing here to split on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Rename {
+    /// A name was given, unvalidated: `registry::vet_name` is the grammar
+    /// that actually decides whether it may be used.
+    To(String),
+    /// `/rename` alone: nothing to rename to.
+    Missing,
+}
+
+/// The `/rename` command a submitted buffer names, or [`None`] when the
+/// buffer is not a `/rename` line at all — in which case it is prose, and
+/// nothing here has an opinion about it.
+#[must_use]
+pub fn rename(text: &str) -> Option<Rename> {
+    let (name, rest) = split_word(text.strip_prefix('/')?);
+    if lookup(name).is_none_or(|entry| entry.action != Action::Rename) {
+        return None;
+    }
+
+    let rest = rest.trim();
+    Some(if rest.is_empty() {
+        Rename::Missing
+    } else {
+        Rename::To(rest.to_owned())
     })
 }
 
@@ -1514,6 +1569,7 @@ mod tests {
             ("undo", &[][..], Action::Undo),
             ("redo", &[][..], Action::Redo),
             ("rewind", &[][..], Action::Rewind),
+            ("rename", &[][..], Action::Rename),
         ];
 
         for (name, aliases, action) in cases {
