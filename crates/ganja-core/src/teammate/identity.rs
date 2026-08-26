@@ -107,7 +107,10 @@
 //! carry, have nothing in this build to attach to: ganja's precedence list
 //! has one live tier, the local socket directory. Stated rather than
 //! invented — no name in this module is a stub for a tier that does not
-//! exist.
+//! exist. Nor is there a model-facing listing tool over this index: in v1
+//! discovery rides the person's `@`-mentions and `uds:` spellings, and a
+//! roster the model could enumerate is its own tool with its own trust
+//! story (a filed bead holds the question).
 //!
 //! # What a resolution leaves out
 //!

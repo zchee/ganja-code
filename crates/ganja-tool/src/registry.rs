@@ -97,6 +97,10 @@
 //!   notice-and-resolution-refusal above, user-ratified 2026-08-26.
 //! - The `[ref]` disambiguator hash: provisional in v2 itself; the socket
 //!   stem serves the role with no new derivation (**D528**).
+//! - Registration for `serve`-led sessions: `ganja serve` leads no team
+//!   today, so no serve path reaches a bind this record would advertise —
+//!   the day it leads one, its bind needs this lifecycle (a filed bead
+//!   holds the question).
 
 use std::{
     io,
