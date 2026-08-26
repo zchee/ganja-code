@@ -1309,8 +1309,7 @@ fn mention_of(
     use crate::teammate::identity::{Mentioned, address_path};
 
     if let Some(path) = address_path(&name) {
-        let path = path.to_owned();
-        return Mentioned::of_address(&name, identity.resolve_address(&path, own_session));
+        return Mentioned::of_address(&name, identity.resolve_address(path, own_session));
     }
     if let Some(peer) = roster.and_then(|roster| {
         roster

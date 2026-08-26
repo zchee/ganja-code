@@ -294,13 +294,6 @@ impl Identity {
         }
     }
 
-    /// The directory this handle reads, for a caller that must spell a path
-    /// beside it rather than guess at one.
-    #[must_use]
-    pub fn directory(&self) -> &Path {
-        &self.directory
-    }
-
     /// What `name` points at right now, this conversation's pins consulted.
     ///
     /// A fresh read every call (the module doc says why): list the records,
@@ -318,25 +311,20 @@ impl Identity {
             Err(error) => return error,
         };
 
-        let mut live = live.into_iter();
-        let (Some(found), rest) = (live.next(), live) else {
+        if live.len() > 1 {
+            // Ambiguity outranks the pin deliberately: both refuse, and
+            // "several sessions answer to this" is the more precise thing to
+            // say than "the one I knew about moved".
+            return Resolution::Ambiguous {
+                name: name.to_owned(),
+                candidates: live.iter().map(|held| self.candidate(held)).collect(),
+            };
+        }
+        let Some(found) = live.into_iter().next() else {
             return Resolution::NoneSuch {
                 name: name.to_owned(),
             };
         };
-        let rest: Vec<registry::Registered> = rest.collect();
-        if !rest.is_empty() {
-            // Ambiguity outranks the pin deliberately: both refuse, and
-            // "several sessions answer to this" is the more precise thing to
-            // say than "the one I knew about moved".
-            let mut candidates = vec![self.candidate(&found)];
-            candidates.extend(rest.iter().map(|held| self.candidate(held)));
-
-            return Resolution::Ambiguous {
-                name: name.to_owned(),
-                candidates,
-            };
-        }
 
         if let Some(pinned) = self.pinned(name)
             && pinned.session_id != found.record.session_id

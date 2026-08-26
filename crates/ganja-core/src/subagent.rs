@@ -1153,6 +1153,24 @@ async fn deliver_over_socket(
     })
 }
 
+/// One name's resolution — a registry read (`Identity`'s own module doc says
+/// it is a fresh one every call) — off this call's own thread rather than
+/// the runtime's, the same hop `ganja-team`'s synchronous mailbox writes
+/// take (`crate::teammate::blocking_io`). One spelling for the two postboxes
+/// whose name-resolved sends share it.
+async fn resolve_blocking(
+    identity: &Arc<identity::Identity>,
+    name: &str,
+    own_session: String,
+) -> identity::Resolution {
+    let identity = Arc::clone(identity);
+    let name = name.to_owned();
+
+    tokio::task::spawn_blocking(move || identity.resolve(&name, &own_session))
+        .await
+        .expect("resolving a send_message recipient never panics")
+}
+
 /// The D528 table both postboxes' name-resolved sends apply identically:
 /// ambiguity, a moved pin and a partial listing all refuse; a unique session
 /// pins (text bodies only, and before the connect — the pin protects the
@@ -1725,16 +1743,7 @@ impl team::Postbox for Postbox {
         let from = format!("{}@{}", self.sender, registry.team());
         drop(registry);
 
-        // A registry read (`Identity`'s own module doc says it is a fresh
-        // one every call), off this call's own thread rather than the
-        // runtime's — the same hop `ganja-team`'s synchronous mailbox writes
-        // take (`crate::teammate::blocking_io`).
-        let blocking_identity = Arc::clone(&identity);
-        let resolve_name = name.clone();
-        let resolution =
-            tokio::task::spawn_blocking(move || blocking_identity.resolve(&resolve_name, &own))
-                .await
-                .expect("resolving a send_message recipient never panics");
+        let resolution = resolve_blocking(&identity, &name, own).await;
 
         deliver_resolved(&identity, &name, resolution, body, from, FRAME_OVER_SOCKET).await
     }
@@ -1892,13 +1901,7 @@ impl team::Postbox for SoloPostbox {
     async fn deliver(&self, to: Address, body: Body) -> Result<Sent, Undelivered> {
         let sent = match to {
             Address::Local(name) => {
-                let identity = Arc::clone(&self.identity);
-                let own = self.own_session();
-                let resolve_name = name.clone();
-                let resolution =
-                    tokio::task::spawn_blocking(move || identity.resolve(&resolve_name, &own))
-                        .await
-                        .expect("resolving a send_message recipient never panics");
+                let resolution = resolve_blocking(&self.identity, &name, self.own_session()).await;
 
                 deliver_resolved(
                     &self.identity,

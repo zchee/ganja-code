@@ -26,6 +26,10 @@ use ganja_core::{
     provider,
     teammate::{
         Delivery,
+        // The `uds:` address scheme (**D528**): the resolver's own pub
+        // spelling, so every candidate this side names carries an address
+        // `to` accepts verbatim without a second copy that could drift.
+        identity::ADDRESS_SCHEME,
         lead_inbox::{Delivered, LeadInbox},
         posture::{Forwarded, Posture},
     },
@@ -97,12 +101,6 @@ fn now_millis() -> u64 {
             u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
         })
 }
-
-/// The `uds:` address scheme (**D528**): spelled again here, as
-/// `crate::teammate::identity::ADDRESS_SCHEME` is in `ganja-core`, because
-/// every candidate this side names must carry an address `to` accepts
-/// verbatim and the constant is private to the crate that owns the ladder.
-const ADDRESS_SCHEME: &str = "uds:";
 
 /// The incumbent's own collision re-scan runs at most this often (**S1**,
 /// **R4**): the bound that keeps the probe's documented side costs — an
@@ -4288,12 +4286,9 @@ impl App {
             // Bare `/rename` names nothing to rename to — reached only
             // through a dropdown Tab-complete that stops at the name, since
             // `command::rename` intercepts an argument-carrying line before
-            // this dispatch is ever reached (D527, the `/team` precedent).
-            command::Action::Rename => {
-                self.status
-                    .set_notice(Some("/rename needs a name: /rename <name>".to_owned()));
-                self.dirty = true;
-            }
+            // this dispatch is ever reached (D527, the `/team` precedent) —
+            // so it answers with the missing-name notice, spelled once.
+            command::Action::Rename => self.run_rename_line(command::Rename::Missing).await,
         }
     }
 
@@ -4643,7 +4638,7 @@ impl App {
                     // A roster mention is never ambiguous — the roster
                     // wins any collision at resolution (**D528**) — so a
                     // teammate's completion is always the bare name.
-                    Some(MenuRow::Teammate { name, .. }) => self.insert_roster_mention(&name),
+                    Some(MenuRow::Teammate { name, .. }) => self.insert_at_mention(&name),
                     Some(MenuRow::Session {
                         name,
                         address,
@@ -4651,9 +4646,9 @@ impl App {
                         ..
                     }) => {
                         if colliding {
-                            self.insert_session_address(&address);
+                            self.insert_at_mention(&address);
                         } else {
-                            self.insert_roster_mention(&name);
+                            self.insert_at_mention(&name);
                         }
                     }
                     None => {
@@ -4689,27 +4684,18 @@ impl App {
         self.splice_token(fragment, mention::token(path, start, end));
     }
 
-    /// Splices a unique roster or live-session mention: `@name ` (**D529**),
-    /// through the same accept tail [`App::insert_mention`] uses.
-    fn insert_roster_mention(&mut self, name: &str) {
+    /// Splices a roster or live-session mention through the same accept tail
+    /// [`App::insert_mention`] uses (**D529**): the bare name for a teammate
+    /// or a unique live session, and — for a colliding session row — its
+    /// `uds:` spelling, `@`-prefixed and snapshot-pinned byte-for-byte
+    /// (**ADJ-3**), so the person's exact choice cannot be reassigned by a
+    /// later resolution.
+    fn insert_at_mention(&mut self, token: &str) {
         let Some(files) = self.files.take() else {
             return;
         };
-        let fragment = files.fragment().clone();
 
-        self.splice_token(&fragment, format!("@{name}"));
-    }
-
-    /// Splices a colliding live-session mention's `uds:` spelling —
-    /// `@`-prefixed and snapshot-pinned byte-for-byte (**ADJ-3**) — so the
-    /// person's exact choice cannot be reassigned by a later resolution.
-    fn insert_session_address(&mut self, address: &str) {
-        let Some(files) = self.files.take() else {
-            return;
-        };
-        let fragment = files.fragment().clone();
-
-        self.splice_token(&fragment, format!("@{address}"));
+        self.splice_token(files.fragment(), format!("@{token}"));
     }
 
     /// Replaces the composer fragment a menu was opened for with `token` —

@@ -1369,6 +1369,23 @@ async fn live_sessions_command(directory: Option<PathBuf>) -> Result<()> {
     /// (which registers nothing), or a build that predates the registry.
     const UNNAMED: &str = "-";
 
+    /// Removes one registration record under the GC's claimed window, saying
+    /// so by path — one spelling for the walk's two arms, `kind` naming
+    /// which found it (`stale` beside a dead socket, `orphaned` with no
+    /// socket at all). Absent is nothing to remove.
+    fn remove_record(record_path: &std::path::Path, kind: &str) -> Result<()> {
+        match fs::remove_file(record_path) {
+            Ok(()) => {
+                eprintln!("note: removed the {kind} record {}", record_path.display());
+                Ok(())
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => {
+                Err(error).with_context(|| format!("failed to remove {}", record_path.display()))
+            }
+        }
+    }
+
     let directory = directory.unwrap_or_else(ganja_serve::socket::directory);
     if !private_socket_directory(&directory)? {
         println!(
@@ -1489,18 +1506,7 @@ async fn live_sessions_command(directory: Option<PathBuf>) -> Result<()> {
                 // (**N4**): a dead socket's advertised name must not outlive
                 // the socket that backed it. Absent is nothing to remove.
                 if records.remove(&stem).is_some() {
-                    let record_path = registry::record_path(&directory, &stem);
-                    match fs::remove_file(&record_path) {
-                        Ok(()) => {
-                            eprintln!("note: removed the stale record {}", record_path.display());
-                        }
-                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                        Err(error) => {
-                            return Err(error).with_context(|| {
-                                format!("failed to remove {}", record_path.display())
-                            });
-                        }
-                    }
+                    remove_record(&registry::record_path(&directory, &stem), "stale")?;
                 }
                 // The window closes here: only now may a binder take the
                 // name, and it finds no file to be misled by.
@@ -1527,17 +1533,7 @@ async fn live_sessions_command(directory: Option<PathBuf>) -> Result<()> {
             );
             continue;
         };
-        match fs::remove_file(&record_path) {
-            Ok(()) => eprintln!(
-                "note: removed the orphaned record {}",
-                record_path.display()
-            ),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("failed to remove {}", record_path.display()));
-            }
-        }
+        remove_record(&record_path, "orphaned")?;
         drop(lock);
     }
 
