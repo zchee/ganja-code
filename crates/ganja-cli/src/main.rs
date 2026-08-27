@@ -405,9 +405,11 @@ enum McpAction {
     ///
     /// `--url` makes a remote server and a trailing `-- <cmd> [args…]` makes
     /// a local one; exactly one of the two. The entry is refused before
-    /// anything is written if this build could not read it back, and a
-    /// `ganja.jsonc` at the target tier is refused by name rather than
-    /// rewritten without its comments.
+    /// anything is written if this build could not read it back. A commented
+    /// `ganja.toml` is edited with its comments, ordering and formatting
+    /// intact; what is refused is a *legacy* file at the target tier, named
+    /// along with the `ganja config migrate` that converts one, because the
+    /// loader no longer reads it either (**D536**).
     Add(mcp::AddArgs),
     /// Show the configured servers and the tools they lend.
     ///

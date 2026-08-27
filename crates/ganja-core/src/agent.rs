@@ -73,7 +73,7 @@
 //!   one is skipped with a warning naming the file and the form expected,
 //!   rather than starting a session against a model nobody chose.
 //! - **The file tier sits below the config tier**: builtin < global file <
-//!   project file < `agent.<name>` in `ganja.jsonc`, and the collision is
+//!   project file < `agent.<name>` in `ganja.toml`, and the collision is
 //!   logged by name. A config `disable: true` removes a file agent outright,
 //!   which is the escape hatch that keeps the config the last word.
 

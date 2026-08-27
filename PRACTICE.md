@@ -172,7 +172,7 @@ This file maps the ganja-code build phases (P0–P13) to hands-on learning exerc
 
 ### Exercises
 
-- [ ] **Config precedence**: Implement `ganja-core/src/config/mod.rs` that loads (in order, later overrides earlier): global `~/.config/ganja/config.json` → project `.ganja/config.json` → `GANJA_*` env vars → CLI flags. Implement unit tests with fixtures that verify the precedence order. Create a `ganja config import-opencode` command that reads an `opencode.json` and maps its keys to ganja config keys (one-way; data-only, no storage interop).
+- [ ] **Config precedence**: Implement `ganja-core/src/config/mod.rs` that loads (in order, later overrides earlier): global `~/.config/ganja/ganja.toml` → project `ganja.toml` → `GANJA_*` env vars → CLI flags. Implement unit tests with fixtures that verify the precedence order. Create a `ganja config import-opencode` command that reads an `opencode.json` and maps its keys to ganja config keys (one-way; data-only, no storage interop).
 
 - [ ] **AGENTS.md loading**: Implement `ganja-core/src/session/instruction.rs` (spec: `src/session/instruction.ts`). Search for an `AGENTS.md` file in the project root and parse it as YAML frontmatter + fenced code blocks. Load custom agent definitions and merge their instructions into the system prompt. Test with a fixture `AGENTS.md` file that defines 2–3 agents.
 

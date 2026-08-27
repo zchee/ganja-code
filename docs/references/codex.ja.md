@@ -138,7 +138,7 @@ Codex のピンは存在しない — upstream の変化とともに行は古く
 | 機能 | 補足 | ganja |
 |---|---|---|
 | [MCP クライアント](https://github.com/openai/codex/blob/main/docs/config.md) | stdio(`command`/`args`/`env`)+ streamable HTTP(`url`/`bearer_token_env_var`)・サーバー毎 enable+タイムアウト・OAuth ストア(keyring/file) | ✅ stdio+HTTP・サーバー毎 `enabled`/`timeout`/`output_limit`・静的 `headers`(bearer もここに書く);OAuth も追加(RFC 8414 発見+RFC 7591 登録+PKCE、`mcp:<server>` 予約キーに保存、D466) |
-| [`codex mcp add/list/get/remove`](https://developers.openai.com/codex/cli) | `config.toml` を書き換える CLI 管理 | ✅ `ganja mcp add/list/get/remove`(D483): `ganja.json` への検証付き staged 書込み、`ganja.jsonc` は CST 保存編集(コメント不変)、`get` は由来 tier を報告 |
+| [`codex mcp add/list/get/remove`](https://developers.openai.com/codex/cli) | `config.toml` を書き換える CLI 管理 | ✅ `ganja mcp add/list/get/remove`(D483): `ganja.toml`(D536 以降は同じ形式)への検証付き staged 書込み、toml_edit の CST で保存編集(コメント不変)、退役した `ganja.jsonc`/`ganja.json` があるディレクトリは `ganja config migrate` を案内して拒否、`get` は由来 tier を報告 |
 | [`codex mcp login`](https://developers.openai.com/codex/cli) | リモートサーバーの OAuth フロー | ✅ `ganja mcp login <server>` |
 | [Codex の MCP サーバー化](https://developers.openai.com/codex/cli) | エンジンを MCP として公開 | ❌ |
 | 言語サーバー | なし — Codex に LSP サブシステムはない | n/a — ganja 側の優位: config 宣言 LSP(rust/gopls 内蔵+カスタム)、edit/write 結果への診断付記 |

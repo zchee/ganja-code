@@ -65,7 +65,7 @@ pub enum SelectionError {
     ///
     /// The message names **both** tiers of what would have been accepted. A
     /// refusal that listed only [`PROVIDERS`] would tell somebody who had just
-    /// declared an endpoint in `ganja.jsonc` that their own entry does not
+    /// declared an endpoint in `ganja.toml` that their own entry does not
     /// exist, which is the one answer that cannot be acted on. And it names
     /// which tier asked: four of them can put an id here, and "unset the
     /// variable" is no repair for a key sitting in a config file.

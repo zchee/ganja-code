@@ -232,7 +232,7 @@ Mechanics first, then the top-level keys of `opencode.json(c)`.
 | [`{env:VAR}` / `{file:path}` substitution](https://opencode.ai/docs/config) | dynamic values in any string | ❌ deliberate divergence, documented in `config.rs` — `key_env` names the variable instead |
 | JSONC dialect | comments, trailing commas | ✅ decoded in document order |
 | Unknown top-level keys | the pin **fails** config parsing; **v1.18.16 ignores them** ([release](https://github.com/anomalyco/opencode/releases/tag/v1.18.16)) | ✅ ganja keeps the pin's posture: refused by name, deliberately |
-| [`tui.json`](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/tui/src/config/index.tsx) (`OPENCODE_TUI_CONFIG`) | separate TUI config: `theme`, `keybinds`, `leader_timeout`, `scroll_speed`, `scroll_acceleration`, `diff_style`, `mouse`, `attention` | ❌ no second file — ganja's `theme`/`keybinds` live in `ganja.jsonc`; the scroll/diff/mouse knobs are absent |
+| [`tui.json`](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/tui/src/config/index.tsx) (`OPENCODE_TUI_CONFIG`) | separate TUI config: `theme`, `keybinds`, `leader_timeout`, `scroll_speed`, `scroll_acceleration`, `diff_style`, `mouse`, `attention` | ❌ no second file — ganja's `theme`/`keybinds` live in `ganja.toml`; the scroll/diff/mouse knobs are absent |
 
 | Top-level key | Notes | ganja |
 |---|---|---|

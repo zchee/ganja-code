@@ -2,14 +2,14 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "ganja-config",
   "title": "ganja configuration",
-  "description": "A ganja.jsonc / ganja.json file. Both names are read in three tiers — the global config home, the one file GANJA_CONFIG or --config names, then every directory from the working directory up to the project root — and later beats earlier. Both extensions are parsed as JSONC: line and block comments and trailing commas are accepted, while single-quoted strings, unquoted keys, hexadecimal numbers and missing commas are not. This schema describes the resulting JSON value; the comment and trailing-comma syntax is a property of the reader, not of the value. Every top-level key this build understands is listed here, and any other key is a hard load error naming it.",
-  "$comment": "Derived from crates/ganja-core/src/config.rs:602-740 (struct Config, #[serde(deny_unknown_fields)]). Audited against config.rs and crates/ganja-core/tests/config_schema.rs, which catches drift in both directions.",
+  "description": "A ganja.toml file, read in three tiers — the global config home, the one file GANJA_CONFIG or --config names, then every directory from the working directory up to the project root — where later beats earlier. TOML is the only format: the retired ganja.jsonc / ganja.json names are refused at load, by extension rather than by whole file name, with a message naming the path and the `ganja config migrate` command that converts one. This schema is JSON because JSON Schema is, and it describes the value a config file decodes to rather than the syntax that spelled it — so an ordering or comment property of the TOML document is a property of the reader, not of the value. Taplo, the language server that completes a .toml file, reads this schema from a `#:schema <url>` directive on the document's first line. Every top-level key this build understands is listed here, and any other key is a hard load error naming it.",
+  "$comment": "Derived from crates/ganja-core/src/config.rs:713-1045 (struct Config, #[serde(deny_unknown_fields)]). Audited against config.rs and crates/ganja-core/tests/config_schema.rs, which catches drift in both directions.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
     "$schema": {
       "type": "string",
-      "description": "Editor schema reference. Read so that writing one is not an error; nothing consults it."
+      "description": "Editor schema reference, curated so that writing one is not an error; nothing consults it. A quoted \"$schema\" key is legal TOML, so a file carrying one from before the format change still loads — but the way a TOML editor is pointed at this schema is taplo's `#:schema <url>` directive on the document's first line, not this key."
     },
     "model": {
       "type": "string",
@@ -791,7 +791,7 @@
     },
     "HookMatcher": {
       "title": "Hook group",
-      "description": "One group of hooks for one event: which subjects it applies to, and what to run for them. Claude Code's shape verbatim (D456), so a .claude/settings.json block can be pasted in and still mean what it meant.",
+      "description": "One group of hooks for one event: which subjects it applies to, and what to run for them. Claude Code's shape verbatim (D456), so somebody who knows that block knows this one — but the paste itself left with the JSON format (D536) and was traded for a command: `ganja config import-claude-hooks` maps a .claude/settings.json's hooks block onto a ganja.toml and names every event, handler type and field it could not carry (D537).",
       "$comment": "crates/ganja-core/src/config.rs:539-550 (HookMatcher, deny_unknown_fields).",
       "type": "object",
       "additionalProperties": false,

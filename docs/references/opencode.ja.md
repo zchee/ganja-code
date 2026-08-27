@@ -230,7 +230,7 @@ ganja が仕様として読むピン済みタグ(`anomalyco/opencode@v1.18.22`)�
 | [`{env:VAR}` / `{file:path}` 置換](https://opencode.ai/docs/config) | 任意の文字列値で動的展開 | ❌ 意図的 divergence として `config.rs` に明記 — 代わりに `key_env` が変数名を持つ |
 | JSONC 方言 | コメント・末尾カンマ | ✅ 文書順を保って解読 |
 | 未知のトップレベルキー | ピンは設定パースを**失敗**させる。**v1.18.16 は無視する**([release](https://github.com/anomalyco/opencode/releases/tag/v1.18.16)) | ✅ ganja はピンの姿勢を維持: 意図的に名指しで拒否 |
-| [`tui.json`](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/tui/src/config/index.tsx)(`OPENCODE_TUI_CONFIG`) | 独立した TUI 設定: `theme`・`keybinds`・`leader_timeout`・`scroll_speed`・`scroll_acceleration`・`diff_style`・`mouse`・`attention` | ❌ 第二のファイルなし — ganja の `theme`/`keybinds` は `ganja.jsonc` 内、scroll/diff/mouse 系ノブは不在 |
+| [`tui.json`](https://github.com/anomalyco/opencode/blob/v1.18.22/packages/tui/src/config/index.tsx)(`OPENCODE_TUI_CONFIG`) | 独立した TUI 設定: `theme`・`keybinds`・`leader_timeout`・`scroll_speed`・`scroll_acceleration`・`diff_style`・`mouse`・`attention` | ❌ 第二のファイルなし — ganja の `theme`/`keybinds` は `ganja.toml` 内、scroll/diff/mouse 系ノブは不在 |
 
 | トップレベルキー | 補足 | ganja |
 |---|---|---|

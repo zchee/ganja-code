@@ -63,10 +63,14 @@ const DESTINATION: &str = "ganja.toml";
 /// The two names the config format left behind, and the reason a directory
 /// holding one of them is as occupied as one already holding [`DESTINATION`].
 ///
-/// While both spellings are still read, a `ganja.toml` written beside a
-/// `ganja.jsonc` would quietly outrank it; once the loader refuses the legacy
-/// names outright, the same directory would stop loading altogether. Neither
-/// is what the person who ran this asked for, so both are refused by name.
+/// The loader refuses either of them outright (**D536**), and refuses them
+/// whether or not a [`DESTINATION`] is sitting beside them. So writing into
+/// such a directory would not produce a config that quietly outranks the old
+/// one — it would produce a directory that stops loading at all, whose next
+/// launch names the *legacy* file and asks for a `ganja config migrate` that
+/// has nothing left to do. That is not what the person who ran this asked
+/// for, so a directory holding either is as occupied as one already holding
+/// [`DESTINATION`], and the refusal names the file it found.
 const DESTINATION_LEGACY: [&str; 2] = ["ganja.jsonc", "ganja.json"];
 
 /// The values upstream's agent `mode` field takes, which are also ganja's.

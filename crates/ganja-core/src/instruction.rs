@@ -823,7 +823,7 @@ fn discover(global: &[PathBuf], config: &Config, cwd: &Path) -> Vec<PathBuf> {
 /// The global instruction candidates, most preferred first.
 ///
 /// The first is `AGENTS.md` under [`crate::config::config_home`] — the same
-/// directory the global `ganja.jsonc` and the global `skills/` come out of, so
+/// directory the global `ganja.toml` and the global `skills/` come out of, so
 /// `GANJA_CONFIG_HOME` or a `~/.ganja` moves all three together. Resolving it
 /// here against the XDG path directly is how a build ends up reading its
 /// instructions from one home and its config from another.

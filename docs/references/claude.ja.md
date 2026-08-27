@@ -181,7 +181,7 @@ ganja 側セルは 2026-08-15 に post-P22 のツリーへ更新済み(Claude �
 |---|---|---|
 | [transport](https://code.claude.com/docs/en/mcp) | stdio・streamable HTTP・SSE | ✅ stdio+streamable HTTP・legacy SSE ❌ |
 | [設定スコープ](https://code.claude.com/docs/en/mcp) | local(`~/.claude.json`)/ project(`.mcp.json`)/ user+優先順位 | ⚠️ グローバル+プロジェクト config・repo 毎 local スコープなし |
-| [CLI 管理](https://code.claude.com/docs/en/mcp) | `claude mcp add/list --scope --transport` | ✅ `ganja mcp add/list/get/remove`(D483): ローダー自身の述語で検証してから `ganja.json` へ staged 書込み(未知キーはバイト意味不変に保存)、`ganja.jsonc` は CST 保存編集(コメント・整形・並びはバイト不変、jsonc-parser の cst)、`get` は由来ファイルと override を正直に報告 | |
+| [CLI 管理](https://code.claude.com/docs/en/mcp) | `claude mcp add/list --scope --transport` | ✅ `ganja mcp add/list/get/remove`(D483): ローダー自身の述語で検証してから `ganja.toml` へ staged 書込み(未知キーはバイト意味不変に保存)、CST 保存編集(コメント・整形・並びはバイト不変、D536 以降は toml_edit の cst)、退役した `ganja.jsonc`/`ganja.json` を持つディレクトリは `ganja config migrate` を案内して拒否、`get` は由来ファイルと override を正直に報告 | |
 | [OAuth](https://code.claude.com/docs/en/mcp) | PKCE・メタデータ発見・トークン更新 | ✅ RFC 8414 発見+RFC 7591 登録(フォールバック client id)+PKCE/loopback+401 時の refresh-then-redial;意図的に最小構成 — resource-metadata discovery なし・呼出し中の reactive re-auth なし(D466) |
 | [project スコープの初回承認](https://code.claude.com/docs/en/mcp) | repo 注入サーバー対策 | ✅ より強い: 全 MCP ツールが既定で ask |
 | [タイムアウト・出力上限](https://code.claude.com/docs/en/settings) | `MCP_TIMEOUT`・`MCP_TOOL_TIMEOUT`・`MAX_MCP_OUTPUT_TOKENS` | ⚠️ サーバー毎 `timeout`/`output_limit` config キー(バイト単位・トークンではない);グローバルな env var ノブはなし |
