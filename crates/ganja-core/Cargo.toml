@@ -54,11 +54,13 @@ ignore.workspace = true
 # The prompt's UTC date is rendered through the workspace's one calendar
 # vocabulary while remaining stable across the machine that runs a session.
 jiff.workspace = true
-# Config files are JSONC, the way upstream's are. Only the `serde` feature is
-# on: it makes the parser itself a `serde::Deserializer` over the token stream,
-# so a config decodes straight into its typed struct and sees keys in document
-# order. Going through a `serde_json::Value` instead would sort them, and the
-# order permission rules were written in is what decides which one wins.
+# `config::legacy` alone, which is the one place the dialect this build has
+# left is still decoded — for `ganja config migrate` to read what it converts.
+# Only the `serde` feature is on: it makes the parser itself a
+# `serde::Deserializer` over the token stream, so such a file decodes straight
+# into the same typed struct and sees keys in document order. Going through a
+# `serde_json::Value` instead would sort them, and the order permission rules
+# were written in is what decides which one wins.
 jsonc-parser = { workspace = true, features = ["serde"] }
 # The config file's own format. Read through `toml::de`, whose deserializer
 # walks the parsed document rather than a re-sorted map, so a config decodes

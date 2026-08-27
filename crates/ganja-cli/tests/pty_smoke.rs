@@ -511,7 +511,7 @@ fn scripted(project: &TempDir, data: &TempDir, script: &serde_json::Value) -> Ga
         // stored — or from writing into a developer's real one.
         .env("XDG_DATA_HOME", data.path())
         // The global config home moves with it: a developer's real
-        // `ganja.jsonc` can pick a provider or a theme, either of which would
+        // `ganja.toml` can pick a provider or a theme, either of which would
         // change what this smoke's screen holds.
         .env("HOME", data.path())
         .env("XDG_CONFIG_HOME", data.path().join("config"))

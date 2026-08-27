@@ -39,44 +39,18 @@ fn rules(spelled: &[(&str, &str, Action)]) -> Vec<Rule> {
 /// Parses `text` as a config file, the way discovery would.
 fn parse(text: &str) -> Result<Config, ConfigError> {
     let directory = temporary();
-    let path = directory.path().join("ganja.jsonc");
-    plant(&path, text);
-
-    read(&path).map(|config| config.expect("the fixture exists"))
-}
-
-/// The same, for a file named `ganja.toml` — which is what decides that the
-/// TOML arm of [`read`] is the one that answers.
-fn parse_toml(text: &str) -> Result<Config, ConfigError> {
-    let directory = temporary();
     let path = directory.path().join("ganja.toml");
     plant(&path, text);
 
     read(&path).map(|config| config.expect("the fixture exists"))
 }
 
-#[test]
-fn comments_and_trailing_commas_are_part_of_the_dialect() {
-    let config = parse(
-        r#"{
-              // the model this project talks to
-              "model": "anthropic/claude-sonnet-5",
-              /* and the cheap one */
-              "small_model": "anthropic/claude-haiku-4.5",
-            }"#,
-    )
-    .expect("JSONC is what a config file is written in");
-
-    assert_eq!(config.model.as_deref(), Some("anthropic/claude-sonnet-5"));
-    assert_eq!(
-        config.small_model.as_deref(),
-        Some("anthropic/claude-haiku-4.5")
-    );
-}
-
+/// A document is a table, so an empty one has no keys to miss, and every field
+/// of `Config` is optional or defaulted — which is what makes a file holding
+/// nothing a config rather than a type error.
 #[test]
 fn a_file_holding_nothing_is_an_empty_config_rather_than_an_error() {
-    for text in ["", "   \n  ", "// nothing but a comment\n"] {
+    for text in ["", "   \n  ", "# nothing but a comment\n"] {
         assert_eq!(
             parse(text).expect("an empty config file is legal"),
             Config::default(),
@@ -85,38 +59,11 @@ fn a_file_holding_nothing_is_an_empty_config_rather_than_an_error() {
     }
 }
 
-/// The TOML arm reaches the same answer by another route: a document is a
-/// table, so an empty one has no keys to miss and every field of `Config` is
-/// optional or defaulted. Worth pinning separately because the two arms agree
-/// here **without** agreeing on how — the legacy reader needs an `Option` to
-/// swallow a `null` this format cannot express.
-#[test]
-fn a_toml_file_holding_nothing_is_an_empty_config_rather_than_an_error() {
-    for text in ["", "   \n  ", "# nothing but a comment\n"] {
-        assert_eq!(
-            parse_toml(text).expect("an empty config file is legal"),
-            Config::default(),
-            "parsing {text:?}"
-        );
-    }
-}
-
-#[test]
-fn an_unknown_top_level_key_is_refused_by_name() {
-    let error = parse(r#"{"modle": "anthropic/claude-sonnet-5"}"#)
-        .expect_err("a misspelled key is a setting that does not work");
-
-    let ConfigError::Parse { message, .. } = &error else {
-        panic!("expected a parse failure, got {error:?}");
-    };
-    assert!(message.contains("modle"), "{message}");
-}
-
-/// The curated key set is serde's, so it survives the format change whole:
+/// The curated key set is serde's, so it survived the format change whole:
 /// the refusal is the same refusal, and it still names the key.
 #[test]
-fn an_unknown_top_level_key_in_a_toml_file_is_refused_by_name_too() {
-    let error = parse_toml(r#"modle = "anthropic/claude-sonnet-5""#)
+fn an_unknown_top_level_key_is_refused_by_name() {
+    let error = parse(r#"modle = "anthropic/claude-sonnet-5""#)
         .expect_err("a misspelled key is a setting that does not work");
 
     let ConfigError::Parse { message, .. } = &error else {
@@ -135,14 +82,14 @@ fn an_unknown_top_level_key_in_a_toml_file_is_refused_by_name_too() {
 /// by anything.
 #[test]
 fn a_quoted_schema_key_is_read_and_the_taplo_directive_is_just_a_comment() {
-    let quoted = parse_toml(r#""$schema" = "https://ganja.example/config.json""#)
+    let quoted = parse(r#""$schema" = "https://ganja.example/config.json""#)
         .expect("a quoted $schema key is legal");
     assert_eq!(
         quoted.schema.as_deref(),
         Some("https://ganja.example/config.json")
     );
 
-    let directive = parse_toml(
+    let directive = parse(
         "#:schema https://ganja.example/config.json\nmodel = \"anthropic/claude-sonnet-5\"\n",
     )
     .expect("a directive is a comment");
@@ -158,15 +105,15 @@ fn a_quoted_schema_key_is_read_and_the_taplo_directive_is_just_a_comment() {
 /// — which is what makes `/undo` work without anybody configuring it.
 #[test]
 fn snapshots_are_on_until_a_config_says_false() {
-    let absent = parse(r#"{"model": "anthropic/claude-sonnet-5"}"#).expect("it parses");
+    let absent = parse(r#"model = "anthropic/claude-sonnet-5""#).expect("it parses");
     assert_eq!(absent.snapshot, None);
     assert!(absent.snapshots_enabled());
 
-    let asked = parse(r#"{"snapshot": true}"#).expect("it parses");
+    let asked = parse(r#"snapshot = true"#).expect("it parses");
     assert_eq!(asked.snapshot, Some(true));
     assert!(asked.snapshots_enabled());
 
-    let refused = parse(r#"{"snapshot": false}"#).expect("it parses");
+    let refused = parse(r#"snapshot = false"#).expect("it parses");
     assert_eq!(refused.snapshot, Some(false));
     assert!(!refused.snapshots_enabled());
 }
@@ -175,11 +122,11 @@ fn snapshots_are_on_until_a_config_says_false() {
 /// alone; one that says `false` outranks a `true` above it.
 #[test]
 fn a_closer_tier_decides_snapshots_only_when_it_mentions_them() {
-    let mut merged = parse(r#"{"snapshot": true}"#).expect("it parses");
-    merged.merge(parse(r#"{"model": "anthropic/claude-sonnet-5"}"#).expect("it parses"));
+    let mut merged = parse(r#"snapshot = true"#).expect("it parses");
+    merged.merge(parse(r#"model = "anthropic/claude-sonnet-5""#).expect("it parses"));
     assert_eq!(merged.snapshot, Some(true));
 
-    merged.merge(parse(r#"{"snapshot": false}"#).expect("it parses"));
+    merged.merge(parse(r#"snapshot = false"#).expect("it parses"));
     assert_eq!(merged.snapshot, Some(false));
     assert!(!merged.snapshots_enabled());
 }
@@ -189,20 +136,20 @@ fn a_closer_tier_decides_snapshots_only_when_it_mentions_them() {
 /// prompt weight and a door to write outside the worktree.
 #[test]
 fn memory_is_off_until_a_config_asks_for_it() {
-    let absent = parse(r#"{"model": "anthropic/claude-sonnet-5"}"#).expect("it parses");
+    let absent = parse(r#"model = "anthropic/claude-sonnet-5""#).expect("it parses");
     assert_eq!(absent.memory, None);
     assert!(!absent.memory_enabled());
 
-    let asked = parse(r#"{"memory": true}"#).expect("it parses");
+    let asked = parse(r#"memory = true"#).expect("it parses");
     assert_eq!(asked.memory, Some(true));
     assert!(asked.memory_enabled());
 
     // A tier that says nothing leaves the tier below it alone, and a
     // closer `false` still wins — the reason the field is an `Option`.
     let mut merged = asked;
-    merged.merge(parse(r#"{"model": "anthropic/claude-sonnet-5"}"#).expect("it parses"));
+    merged.merge(parse(r#"model = "anthropic/claude-sonnet-5""#).expect("it parses"));
     assert!(merged.memory_enabled(), "silence is not a refusal");
-    merged.merge(parse(r#"{"memory": false}"#).expect("it parses"));
+    merged.merge(parse(r#"memory = false"#).expect("it parses"));
     assert!(!merged.memory_enabled());
 }
 
@@ -211,23 +158,22 @@ fn memory_is_off_until_a_config_asks_for_it() {
 /// deferral — so neither is refused.
 #[test]
 fn tool_defer_threshold_is_thirty_two_until_a_config_says_otherwise() {
-    let absent = parse(r#"{"model": "anthropic/claude-sonnet-5"}"#).expect("it parses");
+    let absent = parse(r#"model = "anthropic/claude-sonnet-5""#).expect("it parses");
     assert_eq!(absent.tool_defer_threshold, None);
     assert_eq!(absent.defer_threshold(), 32);
 
-    let zero = parse(r#"{"tool_defer_threshold": 0}"#).expect("0 defers every server");
+    let zero = parse(r#"tool_defer_threshold = 0"#).expect("0 defers every server");
     assert_eq!(zero.defer_threshold(), 0);
 
-    let huge =
-        parse(r#"{"tool_defer_threshold": 100000}"#).expect("a huge budget disables deferral");
+    let huge = parse(r#"tool_defer_threshold = 100000"#).expect("a huge budget disables deferral");
     assert_eq!(huge.defer_threshold(), 100_000);
 
     // A tier that says nothing leaves the tier below it alone; a closer
     // tier's number wins.
     let mut merged = zero;
-    merged.merge(parse(r#"{"model": "anthropic/claude-sonnet-5"}"#).expect("it parses"));
+    merged.merge(parse(r#"model = "anthropic/claude-sonnet-5""#).expect("it parses"));
     assert_eq!(merged.defer_threshold(), 0, "silence is not an opinion");
-    merged.merge(parse(r#"{"tool_defer_threshold": 8}"#).expect("it parses"));
+    merged.merge(parse(r#"tool_defer_threshold = 8"#).expect("it parses"));
     assert_eq!(merged.defer_threshold(), 8);
 }
 
@@ -237,9 +183,9 @@ fn tool_defer_threshold_is_thirty_two_until_a_config_says_otherwise() {
 #[test]
 fn a_tool_defer_threshold_that_is_not_a_count_is_refused() {
     for wrong in [
-        r#"{"tool_defer_threshold": "many"}"#,
-        r#"{"tool_defer_threshold": 1.5}"#,
-        r#"{"tool_defer_threshold": -1}"#,
+        r#"tool_defer_threshold = "many""#,
+        r#"tool_defer_threshold = 1.5"#,
+        r#"tool_defer_threshold = -1"#,
     ] {
         let error = parse(wrong).expect_err("a threshold is an unsigned integer");
         assert!(
@@ -253,22 +199,17 @@ fn a_tool_defer_threshold_that_is_not_a_count_is_refused() {
 #[test]
 fn a_hooks_block_parses_into_its_groups_and_handlers() {
     let config = parse(
-        r#"{
-              "hooks": {
-                "PreToolUse": [
-                  {
-                    "matcher": "Edit|Write",
-                    "hooks": [
-                      { "type": "command", "command": "./check.sh", "timeout": 5 },
-                      { "type": "command", "command": "./log.sh" }
-                    ]
-                  }
-                ],
-                "SessionStart": [
-                  { "hooks": [{ "type": "command", "command": "git status" }] }
-                ]
-              }
-            }"#,
+        r#"
+            [[hooks.PreToolUse]]
+            matcher = "Edit|Write"
+            hooks = [
+              { type = "command", command = "./check.sh", timeout = 5 },
+              { type = "command", command = "./log.sh" },
+            ]
+
+            [[hooks.SessionStart]]
+            hooks = [{ type = "command", command = "git status" }]
+        "#,
     )
     .expect("the documented shape parses");
 
@@ -300,7 +241,7 @@ fn a_hooks_block_parses_into_its_groups_and_handlers() {
 /// one shape in the file that does not read as a plain assignment.
 #[test]
 fn a_toml_hooks_block_is_an_array_of_tables_holding_the_same_groups() {
-    let config = parse_toml(
+    let config = parse(
         r#"
             [[hooks.PreToolUse]]
             matcher = "Edit|Write"
@@ -345,7 +286,7 @@ fn a_toml_hooks_block_is_an_array_of_tables_holding_the_same_groups() {
 #[test]
 fn an_unknown_hook_event_is_refused_by_name() {
     let error =
-        parse(r#"{"hooks": {"PreToolUsage": [{"hooks": [{"type": "command", "command": "x"}]}]}}"#)
+        parse(r#"hooks = { PreToolUsage = [{ hooks = [{ type = "command", command = "x" }] }] }"#)
             .expect_err("a hook that never fires is worse than one that fails");
 
     let ConfigError::Parse { message, .. } = &error else {
@@ -360,7 +301,7 @@ fn an_unknown_hook_event_is_refused_by_name() {
 
 #[test]
 fn an_unknown_hook_handler_type_is_refused_by_name() {
-    let error = parse(r#"{"hooks": {"Stop": [{"hooks": [{"type": "webhook", "url": "x"}]}]}}"#)
+    let error = parse(r#"hooks = { Stop = [{ hooks = [{ type = "webhook", url = "x" }] }] }"#)
         .expect_err("this build runs command handlers and says so");
 
     let ConfigError::Parse { message, .. } = &error else {
@@ -375,8 +316,8 @@ fn an_unknown_hook_handler_type_is_refused_by_name() {
 #[test]
 fn a_hook_handler_with_no_command_is_refused() {
     for text in [
-        r#"{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": ""}]}]}}"#,
-        r#"{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "   "}]}]}}"#,
+        r#"hooks = { Stop = [{ hooks = [{ type = "command", command = "" }] }] }"#,
+        r#"hooks = { Stop = [{ hooks = [{ type = "command", command = "   " }] }] }"#,
     ] {
         let error = parse(text).expect_err("a handler with nothing to run is not one");
         let ConfigError::Parse { message, .. } = &error else {
@@ -392,7 +333,7 @@ fn a_hook_handler_with_no_command_is_refused() {
 #[test]
 fn a_matcher_that_is_not_a_regular_expression_is_refused() {
     let error = parse(
-            r#"{"hooks": {"PreToolUse": [{"matcher": "(unclosed", "hooks": [{"type": "command", "command": "x"}]}]}}"#,
+            r#"hooks = { PreToolUse = [{ matcher = "(unclosed", hooks = [{ type = "command", command = "x" }] }] }"#,
         )
         .expect_err("a matcher nothing can compile is a group that never fires");
 
@@ -407,14 +348,14 @@ fn a_matcher_that_is_not_a_regular_expression_is_refused() {
 /// concurrency nobody named is the documented default.
 #[test]
 fn agents_is_the_settings_object_beside_the_agent_map() {
-    let config = parse(r#"{"agent": {"plan": {"description": "plans"}}}"#).expect("it parses");
+    let config = parse(r#"agent = { plan = { description = "plans" } }"#).expect("it parses");
     assert_eq!(
         config.agents.concurrency(),
         AgentsConfig::DEFAULT_CONCURRENCY,
         "absent is the default, not zero"
     );
 
-    let config = parse(r#"{"agents": {"concurrency": 1}}"#).expect("it parses");
+    let config = parse(r#"agents = { concurrency = 1 }"#).expect("it parses");
     assert_eq!(
         config.agents.concurrency(),
         1,
@@ -431,7 +372,7 @@ fn agents_is_the_settings_object_beside_the_agent_map() {
 #[test]
 fn a_concurrency_of_zero_is_refused_by_name() {
     let error =
-        parse(r#"{"agents": {"concurrency": 0}}"#).expect_err("a cap of nothing is not a cap");
+        parse(r#"agents = { concurrency = 0 }"#).expect_err("a cap of nothing is not a cap");
 
     let ConfigError::Parse { message, .. } = &error else {
         panic!("expected a parse failure, got {error:?}");
@@ -444,28 +385,28 @@ fn a_concurrency_of_zero_is_refused_by_name() {
 /// alone.
 #[test]
 fn teammates_carries_the_one_deadline_a_person_can_move() {
-    let config = parse(r#"{"model": "anthropic/claude-sonnet-5"}"#).expect("it parses");
+    let config = parse(r#"model = "anthropic/claude-sonnet-5""#).expect("it parses");
     assert_eq!(
         config.teammates.shim_turn_timeout(),
         None,
         "absent leaves each CLI's own default alone"
     );
 
-    let config = parse(r#"{"teammates": {"shim_turn_timeout": 90}}"#).expect("it parses");
+    let config = parse(r#"teammates = { shim_turn_timeout = 90 }"#).expect("it parses");
     assert_eq!(
         config.teammates.shim_turn_timeout(),
         Some(std::time::Duration::from_secs(90)),
         "the key is seconds, like a hook's timeout"
     );
 
-    let error = parse(r#"{"teammates": {"shim_turn_timeout": 0}}"#)
+    let error = parse(r#"teammates = { shim_turn_timeout = 0 }"#)
         .expect_err("a deadline of nothing is not a deadline");
     let ConfigError::Parse { message, .. } = &error else {
         panic!("expected a parse failure, got {error:?}");
     };
     assert!(message.contains("teammates.shim_turn_timeout"), "{message}");
 
-    let error = parse(r#"{"teammates": {"shim_turn_timout": 90}}"#)
+    let error = parse(r#"teammates = { shim_turn_timout = 90 }"#)
         .expect_err("a misspelled key is refused rather than ignored");
     let ConfigError::Parse { message, .. } = &error else {
         panic!("expected a parse failure, got {error:?}");
@@ -482,15 +423,15 @@ fn teammates_carries_the_one_deadline_a_person_can_move() {
 /// nothing is no split.
 #[test]
 fn teammates_pane_share_is_a_percentage_and_refused_at_either_edge() {
-    let config = parse(r#"{"model": "anthropic/claude-sonnet-5"}"#).expect("it parses");
+    let config = parse(r#"model = "anthropic/claude-sonnet-5""#).expect("it parses");
     assert_eq!(config.teammates.pane_share(), None);
 
-    let config = parse(r#"{"teammates": {"pane_share": 60}}"#).expect("it parses");
+    let config = parse(r#"teammates = { pane_share = 60 }"#).expect("it parses");
     assert_eq!(config.teammates.pane_share(), Some(60));
 
     for edge in [
-        r#"{"teammates": {"pane_share": 0}}"#,
-        r#"{"teammates": {"pane_share": 100}}"#,
+        r#"teammates = { pane_share = 0 }"#,
+        r#"teammates = { pane_share = 100 }"#,
     ] {
         let error = parse(edge).expect_err("a column of nothing or everything is refused");
         let ConfigError::Parse { message, .. } = &error else {
@@ -502,16 +443,16 @@ fn teammates_pane_share_is_a_percentage_and_refused_at_either_edge() {
 
 #[test]
 fn teammates_shell_is_a_command_line_and_nothing_is_refused() {
-    let config = parse(r#"{"model": "anthropic/claude-sonnet-5"}"#).expect("it parses");
+    let config = parse(r#"model = "anthropic/claude-sonnet-5""#).expect("it parses");
     assert_eq!(config.teammates.pane_shell(), None);
 
-    let config = parse(r#"{"teammates": {"shell": "/bin/zsh -f"}}"#).expect("it parses");
+    let config = parse(r#"teammates = { shell = "/bin/zsh -f" }"#).expect("it parses");
     assert_eq!(
         config.teammates.pane_shell(),
         Some(vec!["/bin/zsh".to_owned(), "-f".to_owned()])
     );
 
-    let config = parse(r#"{"teammates": {"shell": "'/opt/my shell/zsh'"}}"#).expect("it parses");
+    let config = parse(r#"teammates = { shell = "'/opt/my shell/zsh'" }"#).expect("it parses");
     assert_eq!(
         config.teammates.pane_shell(),
         Some(vec!["/opt/my shell/zsh".to_owned()]),
@@ -519,8 +460,8 @@ fn teammates_shell_is_a_command_line_and_nothing_is_refused() {
     );
 
     for empty in [
-        r#"{"teammates": {"shell": ""}}"#,
-        r#"{"teammates": {"shell": "   "}}"#,
+        r#"teammates = { shell = "" }"#,
+        r#"teammates = { shell = "   " }"#,
     ] {
         let error = parse(empty).expect_err("a shell of nothing is refused");
         let ConfigError::Parse { message, .. } = &error else {
@@ -528,7 +469,7 @@ fn teammates_shell_is_a_command_line_and_nothing_is_refused() {
         };
         assert!(message.contains("teammates.shell"), "{message}");
     }
-    let error = parse(r#"{"teammates": {"shell": "/bin/zsh '"}}"#)
+    let error = parse(r#"teammates = { shell = "/bin/zsh '" }"#)
         .expect_err("an unbalanced quote cannot be split");
     let ConfigError::Parse { message, .. } = &error else {
         panic!("expected a parse failure, got {error:?}");
@@ -538,7 +479,7 @@ fn teammates_shell_is_a_command_line_and_nothing_is_refused() {
 
 #[test]
 fn cross_session_inbound_parses_its_three_values_and_absent_is_unset() {
-    let config = parse(r#"{"model": "anthropic/claude-sonnet-5"}"#).expect("it parses");
+    let config = parse(r#"model = "anthropic/claude-sonnet-5""#).expect("it parses");
     assert_eq!(
         config.cross_session_inbound, None,
         "absent is unset, not a fourth policy"
@@ -549,7 +490,7 @@ fn cross_session_inbound_parses_its_three_values_and_absent_is_unset() {
         ("hold", InboundPolicy::Hold),
         ("refuse", InboundPolicy::Refuse),
     ] {
-        let config = parse(&format!(r#"{{"cross_session_inbound": "{spelled}"}}"#))
+        let config = parse(&format!(r#"cross_session_inbound = "{spelled}""#))
             .expect("a policy this build has is a config value");
         assert_eq!(config.cross_session_inbound, Some(parsed));
     }
@@ -561,8 +502,8 @@ fn cross_session_inbound_parses_its_three_values_and_absent_is_unset() {
 #[test]
 fn an_inbound_policy_nothing_admits_is_refused_naming_the_key() {
     for bogus in [
-        r#"{"cross_session_inbound": "sometimes"}"#,
-        r#"{"cross_session_inbound": true}"#,
+        r#"cross_session_inbound = "sometimes""#,
+        r#"cross_session_inbound = true"#,
     ] {
         let error = parse(bogus).expect_err("a policy nothing admits is refused");
         let ConfigError::Parse { message, .. } = &error else {
@@ -580,7 +521,7 @@ fn an_inbound_policy_nothing_admits_is_refused_naming_the_key() {
 
 #[test]
 fn dialog_expiry_parses_its_four_values_and_absent_is_five_minutes() {
-    let config = parse(r#"{"model": "anthropic/claude-sonnet-5"}"#).expect("it parses");
+    let config = parse(r#"model = "anthropic/claude-sonnet-5""#).expect("it parses");
     assert_eq!(config.dialog_expiry, None, "absence travels to the merge");
     assert_eq!(
         config.dialog_expiry(),
@@ -594,7 +535,7 @@ fn dialog_expiry_parses_its_four_values_and_absent_is_five_minutes() {
         ("10m", DialogExpiry::TenMinutes, Some(600)),
         ("never", DialogExpiry::Never, None),
     ] {
-        let config = parse(&format!(r#"{{"dialog_expiry": "{spelled}"}}"#))
+        let config = parse(&format!(r#"dialog_expiry = "{spelled}""#))
             .expect("a window this build has is a config value");
         assert_eq!(config.dialog_expiry, Some(parsed));
         assert_eq!(
@@ -607,8 +548,7 @@ fn dialog_expiry_parses_its_four_values_and_absent_is_five_minutes() {
         );
     }
 
-    let error =
-        parse(r#"{"dialog_expiry": "90s"}"#).expect_err("a window nothing times is refused");
+    let error = parse(r#"dialog_expiry = "90s""#).expect_err("a window nothing times is refused");
     let ConfigError::Parse { message, .. } = &error else {
         panic!("expected a parse failure, got {error:?}");
     };
@@ -621,7 +561,7 @@ fn dialog_expiry_parses_its_four_values_and_absent_is_five_minutes() {
 
 #[test]
 fn teamless_send_parses_its_two_values_and_absent_is_unasked() {
-    let config = parse(r#"{"model": "anthropic/claude-sonnet-5"}"#).expect("it parses");
+    let config = parse(r#"model = "anthropic/claude-sonnet-5""#).expect("it parses");
     assert_eq!(config.teamless_send, None, "absence travels to the merge");
     assert_eq!(
         config.teamless_send(),
@@ -633,7 +573,7 @@ fn teamless_send_parses_its_two_values_and_absent_is_unasked() {
         ("unasked", TeamlessSend::Unasked),
         ("ask", TeamlessSend::Ask),
     ] {
-        let config = parse(&format!(r#"{{"teamless_send": "{spelled}"}}"#))
+        let config = parse(&format!(r#"teamless_send = "{spelled}""#))
             .expect("a posture this build has is a config value");
         assert_eq!(config.teamless_send, Some(parsed));
     }
@@ -644,10 +584,7 @@ fn teamless_send_parses_its_two_values_and_absent_is_unasked() {
 /// alike.
 #[test]
 fn a_teamless_send_nothing_admits_is_refused_naming_the_key() {
-    for bogus in [
-        r#"{"teamless_send": "always"}"#,
-        r#"{"teamless_send": true}"#,
-    ] {
+    for bogus in [r#"teamless_send = "always""#, r#"teamless_send = true"#] {
         let error = parse(bogus).expect_err("a posture nothing admits is refused");
         let ConfigError::Parse { message, .. } = &error else {
             panic!("expected a parse failure, got {error:?}");
@@ -677,13 +614,13 @@ fn a_project_file_can_tighten_but_never_loosen() {
         ("hold", "refuse", InboundPolicy::Refuse),
         ("refuse", "refuse", InboundPolicy::Refuse),
     ] {
-        let mut merged = parse(&format!(r#"{{"cross_session_inbound": "{standing}"}}"#))
+        let mut merged = parse(&format!(r#"cross_session_inbound = "{standing}""#))
             .expect("the trusted tier parses");
         merged
             .merge_project(
-                parse(&format!(r#"{{"cross_session_inbound": "{project}"}}"#))
+                parse(&format!(r#"cross_session_inbound = "{project}""#))
                     .expect("the project tier parses"),
-                Path::new("ganja.jsonc"),
+                Path::new("ganja.toml"),
             )
             .expect("tightening is never an error");
         assert_eq!(
@@ -695,11 +632,11 @@ fn a_project_file_can_tighten_but_never_loosen() {
 
     // An unset standing value has nothing to loosen: the first file to
     // say anything establishes the policy.
-    let mut merged = parse("{}").expect("an empty config parses");
+    let mut merged = parse("").expect("an empty config parses");
     merged
         .merge_project(
-            parse(r#"{"cross_session_inbound": "accept"}"#).expect("it parses"),
-            Path::new("ganja.jsonc"),
+            parse(r#"cross_session_inbound = "accept""#).expect("it parses"),
+            Path::new("ganja.toml"),
         )
         .expect("establishing a value is not loosening one");
     assert_eq!(merged.cross_session_inbound, Some(InboundPolicy::Accept));
@@ -707,16 +644,16 @@ fn a_project_file_can_tighten_but_never_loosen() {
     // Between trusted tiers the key keeps later-wins — the explicit
     // `GANJA_CONFIG` file outranks the global one by merge order, in the
     // loosening direction too, because both are the person's own files.
-    let mut merged = parse(r#"{"cross_session_inbound": "refuse"}"#).expect("it parses");
-    merged.merge(parse(r#"{"cross_session_inbound": "accept"}"#).expect("it parses"));
+    let mut merged = parse(r#"cross_session_inbound = "refuse""#).expect("it parses");
+    merged.merge(parse(r#"cross_session_inbound = "accept""#).expect("it parses"));
     assert_eq!(merged.cross_session_inbound, Some(InboundPolicy::Accept));
 
     // And every other key still merges ordinarily on the project path.
-    let mut merged = parse(r#"{"model": "anthropic/claude-sonnet-5"}"#).expect("it parses");
+    let mut merged = parse(r#"model = "anthropic/claude-sonnet-5""#).expect("it parses");
     merged
         .merge_project(
-            parse(r#"{"model": "openai/gpt-5.6"}"#).expect("it parses"),
-            Path::new("ganja.jsonc"),
+            parse(r#"model = "openai/gpt-5.6""#).expect("it parses"),
+            Path::new("ganja.toml"),
         )
         .expect("an ordinary key is no error");
     assert_eq!(merged.model.as_deref(), Some("openai/gpt-5.6"));
@@ -732,33 +669,33 @@ fn a_project_file_can_tighten_but_never_loosen() {
 fn a_project_file_can_tighten_teamless_send_but_never_loosen() {
     // A project `ask` lands over an absent standing value: the first
     // tier to say anything establishes the posture.
-    let mut merged = parse("{}").expect("an empty config parses");
+    let mut merged = parse("").expect("an empty config parses");
     merged
         .merge_project(
-            parse(r#"{"teamless_send": "ask"}"#).expect("the project tier parses"),
-            Path::new("ganja.jsonc"),
+            parse(r#"teamless_send = "ask""#).expect("the project tier parses"),
+            Path::new("ganja.toml"),
         )
         .expect("establishing a value is not loosening one");
     assert_eq!(merged.teamless_send, Some(TeamlessSend::Ask));
 
     // And over an explicit global `unasked`: unasked → ask is the
     // tightening direction, a checkout demanding more oversight.
-    let mut merged = parse(r#"{"teamless_send": "unasked"}"#).expect("it parses");
+    let mut merged = parse(r#"teamless_send = "unasked""#).expect("it parses");
     merged
         .merge_project(
-            parse(r#"{"teamless_send": "ask"}"#).expect("it parses"),
-            Path::new("ganja.jsonc"),
+            parse(r#"teamless_send = "ask""#).expect("it parses"),
+            Path::new("ganja.toml"),
         )
         .expect("tightening is never an error");
     assert_eq!(merged.teamless_send, Some(TeamlessSend::Ask));
 
     // A project `unasked` over a person's `ask` silently fails to
     // loosen — the same mechanism, not a refusal.
-    let mut merged = parse(r#"{"teamless_send": "ask"}"#).expect("it parses");
+    let mut merged = parse(r#"teamless_send = "ask""#).expect("it parses");
     merged
         .merge_project(
-            parse(r#"{"teamless_send": "unasked"}"#).expect("it parses"),
-            Path::new("ganja.jsonc"),
+            parse(r#"teamless_send = "unasked""#).expect("it parses"),
+            Path::new("ganja.toml"),
         )
         .expect("a loosening project value is ignored, never an error");
     assert_eq!(merged.teamless_send, Some(TeamlessSend::Ask));
@@ -767,8 +704,8 @@ fn a_project_file_can_tighten_teamless_send_but_never_loosen() {
     // `GANJA_CONFIG` file outranks the global one by merge order, in
     // the loosening direction too, because both are the person's own
     // files.
-    let mut merged = parse(r#"{"teamless_send": "ask"}"#).expect("it parses");
-    merged.merge(parse(r#"{"teamless_send": "unasked"}"#).expect("it parses"));
+    let mut merged = parse(r#"teamless_send = "ask""#).expect("it parses");
+    merged.merge(parse(r#"teamless_send = "unasked""#).expect("it parses"));
     assert_eq!(merged.teamless_send, Some(TeamlessSend::Unasked));
 }
 
@@ -776,21 +713,21 @@ fn a_project_file_can_tighten_teamless_send_but_never_loosen() {
 /// the file, and the same value stays a trusted tier's to set.
 #[test]
 fn a_project_dialog_expiry_is_refused_by_name() {
-    let mut merged = parse("{}").expect("an empty config parses");
-    let project = parse(r#"{"dialog_expiry": "60s"}"#).expect("the value itself parses");
+    let mut merged = parse("").expect("an empty config parses");
+    let project = parse(r#"dialog_expiry = "60s""#).expect("the value itself parses");
 
     let error = merged
-        .merge_project(project, Path::new("/checkout/ganja.jsonc"))
+        .merge_project(project, Path::new("/checkout/ganja.toml"))
         .expect_err("a checkout must not size the review window");
     let ConfigError::Parse { path, message } = &error else {
         panic!("expected a parse failure, got {error:?}");
     };
-    assert_eq!(path, Path::new("/checkout/ganja.jsonc"));
+    assert_eq!(path, Path::new("/checkout/ganja.toml"));
     assert!(message.contains("dialog_expiry"), "{message}");
 
     // The same key between trusted tiers is an ordinary overlay.
-    let mut merged = parse(r#"{"dialog_expiry": "10m"}"#).expect("it parses");
-    merged.merge(parse(r#"{"dialog_expiry": "60s"}"#).expect("it parses"));
+    let mut merged = parse(r#"dialog_expiry = "10m""#).expect("it parses");
+    merged.merge(parse(r#"dialog_expiry = "60s""#).expect("it parses"));
     assert_eq!(merged.dialog_expiry(), DialogExpiry::OneMinute);
 }
 
@@ -798,15 +735,15 @@ fn a_project_dialog_expiry_is_refused_by_name() {
 /// gives — so a config only ever writes the boolean to say something.
 #[test]
 fn a_boolean_notifications_key_switches_both_moments_at_once() {
-    let config = parse(r#"{"tui": {"notifications": true}}"#).expect("it parses");
+    let config = parse(r#"tui = { notifications = true }"#).expect("it parses");
     assert!(config.tui.notifies(NotificationEvent::TurnComplete));
     assert!(config.tui.notifies(NotificationEvent::ApprovalRequested));
 
-    let config = parse(r#"{"tui": {"notifications": false}}"#).expect("it parses");
+    let config = parse(r#"tui = { notifications = false }"#).expect("it parses");
     assert!(!config.tui.notifies(NotificationEvent::TurnComplete));
     assert!(!config.tui.notifies(NotificationEvent::ApprovalRequested));
 
-    let config = parse("{}").expect("it parses");
+    let config = parse("").expect("it parses");
     assert!(
         !config.tui.notifies(NotificationEvent::TurnComplete),
         "absent is none of them"
@@ -817,7 +754,7 @@ fn a_boolean_notifications_key_switches_both_moments_at_once() {
 /// are announced.
 #[test]
 fn a_notification_list_names_exactly_the_moments_it_announces() {
-    let config = parse(r#"{"tui": {"notifications": ["turn-complete"]}}"#).expect("it parses");
+    let config = parse(r#"tui = { notifications = ["turn-complete"] }"#).expect("it parses");
     assert!(config.tui.notifies(NotificationEvent::TurnComplete));
     assert!(!config.tui.notifies(NotificationEvent::ApprovalRequested));
 }
@@ -826,7 +763,7 @@ fn a_notification_list_names_exactly_the_moments_it_announces() {
 /// `check_hooks`'s argument, applied to a smaller vocabulary.
 #[test]
 fn an_event_name_nothing_announces_is_refused_by_name() {
-    let error = parse(r#"{"tui": {"notifications": ["turn-done"]}}"#)
+    let error = parse(r#"tui = { notifications = ["turn-done"] }"#)
         .expect_err("an event nothing announces is refused");
 
     let ConfigError::Parse { message, .. } = &error else {
@@ -842,7 +779,7 @@ fn an_event_name_nothing_announces_is_refused_by_name() {
 /// The method vocabulary is as closed as the event one.
 #[test]
 fn a_notification_method_nothing_sends_is_refused_by_name() {
-    let error = parse(r#"{"tui": {"notification_method": "toast"}}"#)
+    let error = parse(r#"tui = { notification_method = "toast" }"#)
         .expect_err("a method nothing sends is refused");
 
     let ConfigError::Parse { message, .. } = &error else {
@@ -860,7 +797,7 @@ fn a_notification_method_nothing_sends_is_refused_by_name() {
 #[test]
 fn a_key_the_tui_table_does_not_have_is_refused_by_name() {
     let error =
-        parse(r#"{"tui": {"zzz_probe": 1}}"#).expect_err("an unknown key inside tui is refused");
+        parse(r#"tui = { zzz_probe = 1 }"#).expect_err("an unknown key inside tui is refused");
 
     let ConfigError::Parse { message, .. } = &error else {
         panic!("expected a parse failure, got {error:?}");
@@ -873,20 +810,20 @@ fn a_key_the_tui_table_does_not_have_is_refused_by_name() {
 /// refusal instead of a mid-turn 400.
 #[test]
 fn the_openrouter_table_takes_a_roster_and_refuses_a_name_outside_it() {
-    let config = parse(r#"{"openrouter": {"server_tools": ["web_search", "datetime"]}}"#)
+    let config = parse(r#"openrouter = { server_tools = ["web_search", "datetime"] }"#)
         .expect("a roster of published names parses");
     assert_eq!(config.openrouter.server_tools, ["web_search", "datetime"]);
 
     // Absent is empty, which is the whole opt-in: they bill per call.
     assert!(
-        parse("{}")
+        parse("")
             .expect("an empty config parses")
             .openrouter
             .server_tools
             .is_empty()
     );
 
-    let error = parse(r#"{"openrouter": {"server_tools": ["web_serach"]}}"#)
+    let error = parse(r#"openrouter = { server_tools = ["web_serach"] }"#)
         .expect_err("a name this gateway does not serve is refused");
     let ConfigError::Parse { message, .. } = &error else {
         panic!("expected a parse failure, got {error:?}");
@@ -898,7 +835,7 @@ fn the_openrouter_table_takes_a_roster_and_refuses_a_name_outside_it() {
     );
 
     // The table is curated like every other one here.
-    let error = parse(r#"{"openrouter": {"zzz_probe": 1}}"#)
+    let error = parse(r#"openrouter = { zzz_probe = 1 }"#)
         .expect_err("an unknown key inside openrouter is refused");
     let ConfigError::Parse { message, .. } = &error else {
         panic!("expected a parse failure, got {error:?}");
@@ -910,10 +847,10 @@ fn the_openrouter_table_takes_a_roster_and_refuses_a_name_outside_it() {
 /// right failure for a default.
 #[test]
 fn the_notification_method_is_osc9_until_a_config_says_otherwise() {
-    let config = parse(r#"{"tui": {}}"#).expect("it parses");
+    let config = parse(r#"tui = {}"#).expect("it parses");
     assert_eq!(config.tui.notification_method(), NotificationMethod::Osc9);
 
-    let config = parse(r#"{"tui": {"notification_method": "bel"}}"#).expect("it parses");
+    let config = parse(r#"tui = { notification_method = "bel" }"#).expect("it parses");
     assert_eq!(config.tui.notification_method(), NotificationMethod::Bel);
 }
 
@@ -921,10 +858,9 @@ fn the_notification_method_is_osc9_until_a_config_says_otherwise() {
 /// with a tier that says nothing leaving the tier below it alone.
 #[test]
 fn a_closer_tier_overlays_the_tui_table_field_by_field() {
-    let mut merged = parse(r#"{"tui": {"notifications": true, "notification_method": "bel"}}"#)
-        .expect("it parses");
-    merged
-        .merge(parse(r#"{"tui": {"notifications": ["approval-requested"]}}"#).expect("it parses"));
+    let mut merged =
+        parse(r#"tui = { notifications = true, notification_method = "bel" }"#).expect("it parses");
+    merged.merge(parse(r#"tui = { notifications = ["approval-requested"] }"#).expect("it parses"));
 
     assert_eq!(
         merged.tui.notifications,
@@ -945,11 +881,7 @@ fn a_closer_tier_overlays_the_tui_table_field_by_field() {
 #[test]
 fn a_statusline_roster_keeps_the_order_the_config_wrote() {
     let config = parse(
-        r#"{"tui": {"statusline": {
-              "elements": ["model", "context", "tokens"],
-              "max_width": 120,
-              "detail": true
-            }}}"#,
+        r#"tui = { statusline = { elements = ["model", "context", "tokens"], max_width = 120, detail = true } }"#,
     )
     .expect("it parses");
 
@@ -971,7 +903,7 @@ fn a_statusline_roster_keeps_the_order_the_config_wrote() {
 #[test]
 fn a_statusline_roster_may_name_the_held_count() {
     let config =
-        parse(r#"{"tui": {"statusline": {"elements": ["held", "dialogs"]}}}"#).expect("it parses");
+        parse(r#"tui = { statusline = { elements = ["held", "dialogs"] } }"#).expect("it parses");
 
     assert_eq!(
         config
@@ -987,7 +919,7 @@ fn a_statusline_roster_may_name_the_held_count() {
 /// enum, the same refusal an unknown notification event gets.
 #[test]
 fn an_element_name_nothing_renders_is_refused_by_name() {
-    let error = parse(r#"{"tui": {"statusline": {"elements": ["contextbar"]}}}"#)
+    let error = parse(r#"tui = { statusline = { elements = ["contextbar"] } }"#)
         .expect_err("an unknown element name is refused");
 
     let ConfigError::Parse { message, .. } = &error else {
@@ -1003,7 +935,7 @@ fn an_element_name_nothing_renders_is_refused_by_name() {
 /// The statusline table is curated like the `tui` table above it.
 #[test]
 fn a_key_the_statusline_table_does_not_have_is_refused_by_name() {
-    let error = parse(r#"{"tui": {"statusline": {"zzz_probe": 1}}}"#)
+    let error = parse(r#"tui = { statusline = { zzz_probe = 1 } }"#)
         .expect_err("an unknown key inside statusline is refused");
 
     let ConfigError::Parse { message, .. } = &error else {
@@ -1017,11 +949,10 @@ fn a_key_the_statusline_table_does_not_have_is_refused_by_name() {
 /// says nothing leaves the whole table alone.
 #[test]
 fn a_closer_tier_overlays_the_statusline_table_field_by_field() {
-    let mut merged = parse(r#"{"tui": {"statusline": {"elements": ["model"], "max_width": 100}}}"#)
+    let mut merged = parse(r#"tui = { statusline = { elements = ["model"], max_width = 100 } }"#)
         .expect("it parses");
     merged.merge(
-        parse(r#"{"tui": {"statusline": {"elements": ["context", "tokens"]}}}"#)
-            .expect("it parses"),
+        parse(r#"tui = { statusline = { elements = ["context", "tokens"] } }"#).expect("it parses"),
     );
 
     let statusline = merged.tui.statusline.expect("the table survives the merge");
@@ -1036,8 +967,8 @@ fn a_closer_tier_overlays_the_statusline_table_field_by_field() {
         "the width it said nothing about stays"
     );
 
-    let mut untouched = parse(r#"{"tui": {"statusline": {"detail": true}}}"#).expect("it parses");
-    untouched.merge(parse(r#"{"tui": {}}"#).expect("it parses"));
+    let mut untouched = parse(r#"tui = { statusline = { detail = true } }"#).expect("it parses");
+    untouched.merge(parse(r#"tui = {}"#).expect("it parses"));
     assert_eq!(
         untouched.tui.statusline,
         Some(StatuslineConfig {
@@ -1055,21 +986,18 @@ fn a_closer_tier_overlays_the_statusline_table_field_by_field() {
 #[test]
 fn a_closer_tier_replaces_one_hook_event_and_leaves_the_others() {
     let mut merged = parse(
-        r#"{
-              "hooks": {
-                "PreToolUse": [{"hooks": [{"type": "command", "command": "global-pre"}]}],
-                "Stop": [{"hooks": [{"type": "command", "command": "global-stop"}]}]
-              }
-            }"#,
+        r#"
+            [[hooks.PreToolUse]]
+            hooks = [{ type = "command", command = "global-pre" }]
+
+            [[hooks.Stop]]
+            hooks = [{ type = "command", command = "global-stop" }]
+        "#,
     )
     .expect("it parses");
     merged.merge(
         parse(
-            r#"{
-                  "hooks": {
-                    "PreToolUse": [{"hooks": [{"type": "command", "command": "project-pre"}]}]
-                  }
-                }"#,
+            r#"hooks = { PreToolUse = [{ hooks = [{ type = "command", command = "project-pre" }] }] }"#,
         )
         .expect("it parses"),
     );
@@ -1097,7 +1025,7 @@ fn a_closer_tier_replaces_one_hook_event_and_leaves_the_others() {
 
 #[test]
 fn an_absent_lsp_key_is_no_language_servers_at_all() {
-    let config = parse(r#"{"model": "anthropic/claude-sonnet-5"}"#).expect("it parses");
+    let config = parse(r#"model = "anthropic/claude-sonnet-5""#).expect("it parses");
 
     assert_eq!(
         config.lsp, None,
@@ -1108,7 +1036,7 @@ fn an_absent_lsp_key_is_no_language_servers_at_all() {
 #[test]
 fn the_lsp_key_takes_a_bare_boolean() {
     for (text, expected) in [("true", true), ("false", false)] {
-        let config = parse(&format!(r#"{{"lsp": {text}}}"#)).expect("a boolean is a shape");
+        let config = parse(&format!("lsp = {text}")).expect("a boolean is a shape");
 
         assert_eq!(config.lsp, Some(LspConfig::Enabled(expected)), "for {text}");
     }
@@ -1117,14 +1045,13 @@ fn the_lsp_key_takes_a_bare_boolean() {
 #[test]
 fn an_lsp_entry_carries_every_field_it_may_hold() {
     let config = parse(
-        r#"{"lsp": {
-                "zls": {
-                    "command": ["zls", "--enable-debug-log"],
-                    "extensions": [".zig", ".zon"],
-                    "env": {"ZLS_HOME": "/opt/zls"},
-                    "initialization": {"zls": {"enable_build_on_save": true}}
-                }
-            }}"#,
+        r#"
+            [lsp.zls]
+            command = ["zls", "--enable-debug-log"]
+            extensions = [".zig", ".zon"]
+            env = { ZLS_HOME = "/opt/zls" }
+            initialization = { zls = { enable_build_on_save = true } }
+        "#,
     )
     .expect("a full entry parses");
 
@@ -1150,7 +1077,7 @@ fn an_lsp_entry_carries_every_field_it_may_hold() {
 
 #[test]
 fn disabling_a_builtin_is_the_one_legal_entry_with_no_command() {
-    let config = parse(r#"{"lsp": {"rust": {"disabled": true}}}"#)
+    let config = parse(r#"lsp = { rust = { disabled = true } }"#)
         .expect("this is how a builtin is switched off");
 
     let Some(LspConfig::Servers(entries)) = &config.lsp else {
@@ -1162,7 +1089,7 @@ fn disabling_a_builtin_is_the_one_legal_entry_with_no_command() {
 
 #[test]
 fn an_lsp_entry_with_no_command_is_refused_by_name() {
-    let error = parse(r#"{"lsp": {"rust": {"extensions": [".rs"]}}}"#)
+    let error = parse(r#"lsp = { rust = { extensions = [".rs"] } }"#)
         .expect_err("a server with no program is not a server");
 
     let ConfigError::Parse { message, .. } = &error else {
@@ -1174,7 +1101,7 @@ fn an_lsp_entry_with_no_command_is_refused_by_name() {
 
 #[test]
 fn a_custom_lsp_server_without_extensions_is_refused_in_upstreams_words() {
-    let error = parse(r#"{"lsp": {"zls": {"command": ["zls"]}}}"#)
+    let error = parse(r#"lsp = { zls = { command = ["zls"] } }"#)
         .expect_err("nothing tells ganja which files zls claims");
 
     let ConfigError::Parse { message, .. } = &error else {
@@ -1192,7 +1119,7 @@ fn a_custom_lsp_server_without_extensions_is_refused_in_upstreams_words() {
 
 #[test]
 fn a_builtin_without_extensions_inherits_them_instead_of_being_refused() {
-    let config = parse(r#"{"lsp": {"rust": {"command": ["ra-multiplex"]}}}"#)
+    let config = parse(r#"lsp = { rust = { command = ["ra-multiplex"] } }"#)
         .expect("a builtin has extensions to inherit");
 
     let Some(LspConfig::Servers(entries)) = &config.lsp else {
@@ -1203,7 +1130,7 @@ fn a_builtin_without_extensions_inherits_them_instead_of_being_refused() {
 
 #[test]
 fn an_unknown_field_inside_an_lsp_entry_is_refused_by_name() {
-    let error = parse(r#"{"lsp": {"rust": {"command": ["x"], "rootMarkers": ["Cargo.toml"]}}}"#)
+    let error = parse(r#"lsp = { rust = { command = ["x"], rootMarkers = ["Cargo.toml"] } }"#)
         .expect_err("upstream has no such key either");
 
     let ConfigError::Parse { message, .. } = &error else {
@@ -1215,27 +1142,26 @@ fn an_unknown_field_inside_an_lsp_entry_is_refused_by_name() {
 #[test]
 fn an_mcp_entry_carries_everything_the_two_shapes_hold() {
     let config = parse(
-        r#"{"mcp": {
-                "fs": {
-                    "type": "local",
-                    "command": ["bun", "x", "server"],
-                    "cwd": "tools",
-                    "environment": {"TOKEN": "x"},
-                    "timeout": 1234,
-                    "output_limit": 4096
-                },
-                "hub": {
-                    "type": "remote",
-                    "url": "https://mcp.example/mcp",
-                    "headers": {"Authorization": "Bearer x"},
-                    "enabled": false
-                },
-                "auth": {
-                    "type": "remote",
-                    "url": "https://oauth.example/mcp",
-                    "oauth": {}
-                }
-            }}"#,
+        r#"
+            [mcp.fs]
+            type = "local"
+            command = ["bun", "x", "server"]
+            cwd = "tools"
+            environment = { TOKEN = "x" }
+            timeout = 1234
+            output_limit = 4096
+
+            [mcp.hub]
+            type = "remote"
+            url = "https://mcp.example/mcp"
+            headers = { Authorization = "Bearer x" }
+            enabled = false
+
+            [mcp.auth]
+            type = "remote"
+            url = "https://oauth.example/mcp"
+            oauth = {}
+        "#,
     )
     .expect("both shapes parse");
 
@@ -1282,26 +1208,26 @@ fn an_mcp_entry_that_describes_no_reachable_server_is_refused_by_name() {
     let cases = [
         // Upstream skips a type-less entry with a log line; a config that
         // names a server means to have one.
-        (r#"{"mcp": {"x": {"command": ["a"]}}}"#, "type"),
-        (r#"{"mcp": {"x": {"type": "local", "command": []}}}"#, "x"),
+        (r#"mcp = { x = { command = ["a"] } }"#, "type"),
+        (r#"mcp = { x = { type = "local", command = [] } }"#, "x"),
         (
-            r#"{"mcp": {"x": {"type": "remote", "url": "http://mcp.example/mcp"}}}"#,
+            r#"mcp = { x = { type = "remote", url = "http://mcp.example/mcp" } }"#,
             "loopback",
         ),
         (
-            r#"{"mcp": {"x": {"type": "remote", "url": "not a url"}}}"#,
+            r#"mcp = { x = { type = "remote", url = "not a url" } }"#,
             "url",
         ),
         // A zero-millisecond budget is not a budget.
         (
-            r#"{"mcp": {"x": {"type": "local", "command": ["a"], "timeout": 0}}}"#,
+            r#"mcp = { x = { type = "local", command = ["a"], timeout = 0 } }"#,
             "0",
         ),
         // A zero-byte output budget refuses every result, named by
         // `check_mcp` rather than by serde's generic NonZeroU64 message —
         // `output_limit` is a plain `u64` for exactly this reason.
         (
-            r#"{"mcp": {"x": {"type": "local", "command": ["a"], "output_limit": 0}}}"#,
+            r#"mcp = { x = { type = "local", command = ["a"], output_limit = 0 } }"#,
             "output_limit",
         ),
     ];
@@ -1326,21 +1252,32 @@ fn an_mcp_entry_that_describes_no_reachable_server_is_refused_by_name() {
 #[test]
 fn the_post_decode_checks_are_one_method_three_callers_share() {
     let cases = [
-        (r#"{"type": "local", "command": []}"#, "empty command"),
         (
-            r#"{"type": "local", "command": ["a"], "output_limit": 0}"#,
+            r#"type = "local"
+command = []"#,
+            "empty command",
+        ),
+        (
+            r#"type = "local"
+command = ["a"]
+output_limit = 0"#,
             "output_limit of 0",
         ),
         (
-            r#"{"type": "remote", "url": "http://mcp.example/mcp"}"#,
+            r#"type = "remote"
+url = "http://mcp.example/mcp""#,
             "loopback",
         ),
-        (r#"{"type": "remote", "url": "not a url"}"#, "no valid url"),
+        (
+            r#"type = "remote"
+url = "not a url""#,
+            "no valid url",
+        ),
     ];
 
     for (text, named) in cases {
         let server: McpServer =
-            serde_json::from_str(text).unwrap_or_else(|error| panic!("{text}: {error}"));
+            toml::from_str(text).unwrap_or_else(|error| panic!("{text}: {error}"));
         let message = server
             .check("x")
             .expect_err(&format!("{text} describes no usable server"));
@@ -1348,8 +1285,11 @@ fn the_post_decode_checks_are_one_method_three_callers_share() {
         assert!(message.contains("\"x\""), "and names the server: {message}");
     }
 
-    let fine: McpServer = serde_json::from_str(r#"{"type": "local", "command": ["a"]}"#)
-        .expect("the fixture is a server");
+    let fine: McpServer = toml::from_str(
+        r#"type = "local"
+command = ["a"]"#,
+    )
+    .expect("the fixture is a server");
     assert_eq!(fine.check("x"), Ok(()));
 }
 
@@ -1395,8 +1335,7 @@ fn the_post_decode_refusals_answer_for_a_toml_file_too() {
     ];
 
     for (key, text, named) in cases {
-        let error =
-            parse_toml(text).expect_err(&format!("the {key} table describes nothing usable"));
+        let error = parse(text).expect_err(&format!("the {key} table describes nothing usable"));
         let ConfigError::Parse { message, .. } = &error else {
             panic!("expected a parse failure for {key}, got {error:?}");
         };
@@ -1410,8 +1349,8 @@ fn the_post_decode_refusals_answer_for_a_toml_file_too() {
 #[test]
 fn an_mcp_entry_survives_the_round_trip_through_its_own_serialization() {
     for text in [
-        r#"{"mcp": {"x": {"type": "local", "command": ["bun", "x"], "environment": {"K": "v"}, "output_limit": 4096}}}"#,
-        r#"{"mcp": {"x": {"type": "remote", "url": "https://mcp.example/mcp", "headers": {"X-A": "1"}, "oauth": {}}}}"#,
+        r#"mcp = { x = { type = "local", command = ["bun", "x"], environment = { K = "v" }, output_limit = 4096 } }"#,
+        r#"mcp = { x = { type = "remote", url = "https://mcp.example/mcp", headers = { X-A = "1" }, oauth = {} } }"#,
     ] {
         let config = parse(text).unwrap_or_else(|error| panic!("{text}: {error}"));
         let written = serde_json::to_string(&config.mcp["x"]).expect("the entry serializes");
@@ -1432,7 +1371,7 @@ fn a_remote_server_may_be_plain_http_only_to_loopback() {
         "http://[::1]:8000/mcp",
     ];
     for url in allowed {
-        let text = format!(r#"{{"mcp": {{"x": {{"type": "remote", "url": "{url}"}}}}}}"#);
+        let text = format!(r#"mcp.x = {{ type = "remote", url = "{url}" }}"#);
         parse(&text).unwrap_or_else(|error| panic!("{url} is reachable: {error}"));
     }
 
@@ -1444,7 +1383,7 @@ fn a_remote_server_may_be_plain_http_only_to_loopback() {
         "http://127.0.0.1@evil.test/mcp",
     ];
     for url in refused {
-        let text = format!(r#"{{"mcp": {{"x": {{"type": "remote", "url": "{url}"}}}}}}"#);
+        let text = format!(r#"mcp.x = {{ type = "remote", url = "{url}" }}"#);
         parse(&text).expect_err(url);
     }
 }
@@ -1454,22 +1393,21 @@ fn a_remote_server_may_be_plain_http_only_to_loopback() {
 #[test]
 fn a_provider_entry_carries_every_field_it_may_hold() {
     let config = parse(
-        r#"{"provider": {
-                "local-llama": {
-                    "dialect": "openai-chat-completions",
-                    "base_url": "http://127.0.0.1:11434/v1",
-                    "key_env": "LLAMA_API_KEY",
-                    "headers": {"x-route": "gpu-0"}
-                },
-                "gateway": {
-                    "dialect": "anthropic-messages",
-                    "base_url": "https://messages.example/v1"
-                },
-                "proxy": {
-                    "dialect": "openai-responses",
-                    "base_url": "https://responses.example/v1"
-                }
-            }}"#,
+        r#"
+            [provider.local-llama]
+            dialect = "openai-chat-completions"
+            base_url = "http://127.0.0.1:11434/v1"
+            key_env = "LLAMA_API_KEY"
+            headers = { x-route = "gpu-0" }
+
+            [provider.gateway]
+            dialect = "anthropic-messages"
+            base_url = "https://messages.example/v1"
+
+            [provider.proxy]
+            dialect = "openai-responses"
+            base_url = "https://responses.example/v1"
+        "#,
     )
     .expect("all three dialects parse");
 
@@ -1503,48 +1441,43 @@ fn a_provider_entry_that_describes_no_usable_endpoint_is_refused_by_name() {
         // Selection matches the builtins first, so this entry would be
         // dead the moment it loaded.
         (
-            r#"{"provider": {"anthropic": {"dialect": "anthropic-messages",
-                   "base_url": "https://proxy.example"}}}"#,
+            r#"provider = { anthropic = { dialect = "anthropic-messages", base_url = "https://proxy.example" } }"#,
             "anthropic",
         ),
         // A dialect is a request/response mapping, and there is no arm for
         // one this build does not implement.
         (
-            r#"{"provider": {"x": {"dialect": "gemini", "base_url": "https://a.test"}}}"#,
+            r#"provider = { x = { dialect = "gemini", base_url = "https://a.test" } }"#,
             "gemini",
         ),
         // Required: guessing the wire from a URL is how an Anthropic body
         // reaches a chat-completions server.
         (
-            r#"{"provider": {"x": {"base_url": "https://a.test"}}}"#,
+            r#"provider = { x = { base_url = "https://a.test" } }"#,
             "dialect",
         ),
         (
-            r#"{"provider": {"x": {"dialect": "anthropic-messages"}}}"#,
+            r#"provider = { x = { dialect = "anthropic-messages" } }"#,
             "base_url",
         ),
         // A key in a config file is the one thing that must not travel, so
         // the key upstream spells it with is not a key here.
         (
-            r#"{"provider": {"x": {"dialect": "anthropic-messages",
-                   "base_url": "https://a.test", "api_key": "sk-canary"}}}"#,
+            r#"provider = { x = { dialect = "anthropic-messages", base_url = "https://a.test", api_key = "sk-canary" } }"#,
             "api_key",
         ),
         (
-            r#"{"provider": {"x": {"dialect": "openai-chat-completions",
-                   "base_url": "http://gateway.example/v1"}}}"#,
+            r#"provider = { x = { dialect = "openai-chat-completions", base_url = "http://gateway.example/v1" } }"#,
             "loopback",
         ),
         (
-            r#"{"provider": {"x": {"dialect": "openai-chat-completions",
-                   "base_url": "not a url"}}}"#,
+            r#"provider = { x = { dialect = "openai-chat-completions", base_url = "not a url" } }"#,
             "base_url",
         ),
         // A blank variable names none, and would read as "there is no key"
         // — which sends somebody to fix a store that was never the problem.
         (
-            r#"{"provider": {"x": {"dialect": "openai-chat-completions",
-                   "base_url": "https://a.test", "key_env": "  "}}}"#,
+            r#"provider = { x = { dialect = "openai-chat-completions", base_url = "https://a.test", key_env = "  " } }"#,
             "key_env",
         ),
     ];
@@ -1560,9 +1493,8 @@ fn a_provider_entry_that_describes_no_usable_endpoint_is_refused_by_name() {
     // A dialect nobody implements is refused with the three that exist
     // named back, because "gemini is not one of them" is only half an
     // answer.
-    let error =
-        parse(r#"{"provider": {"x": {"dialect": "gemini", "base_url": "https://a.test"}}}"#)
-            .expect_err("there is no fourth mapping");
+    let error = parse(r#"provider = { x = { dialect = "gemini", base_url = "https://a.test" } }"#)
+        .expect_err("there is no fourth mapping");
     let ConfigError::Parse { message, .. } = &error else {
         panic!("expected a parse failure, got {error:?}");
     };
@@ -1594,15 +1526,13 @@ fn a_configured_endpoint_may_be_plain_http_only_to_loopback() {
 
     for base_url in allowed {
         let text = format!(
-            r#"{{"provider": {{"x": {{"dialect": "openai-chat-completions",
-                   "base_url": "{base_url}"}}}}}}"#
+            r#"provider.x = {{ dialect = "openai-chat-completions", base_url = "{base_url}" }}"#
         );
         parse(&text).unwrap_or_else(|error| panic!("{base_url} is reachable: {error}"));
     }
     for base_url in refused {
         let text = format!(
-            r#"{{"provider": {{"x": {{"dialect": "openai-chat-completions",
-                   "base_url": "{base_url}"}}}}}}"#
+            r#"provider.x = {{ dialect = "openai-chat-completions", base_url = "{base_url}" }}"#
         );
         let error = parse(&text).expect_err(base_url);
         // A base URL is allowed to carry a credential in its userinfo, so
@@ -1620,17 +1550,15 @@ fn a_configured_endpoint_may_be_plain_http_only_to_loopback() {
 #[test]
 fn a_closer_tier_replaces_a_whole_provider_entry() {
     let directory = temporary();
-    let outer = directory.path().join("outer.json");
-    let inner = directory.path().join("inner.json");
+    let outer = directory.path().join("outer.toml");
+    let inner = directory.path().join("inner.toml");
     plant(
         &outer,
-        r#"{"provider": {"x": {"dialect": "openai-chat-completions",
-               "base_url": "https://old.test/v1", "key_env": "OLD_KEY"}}}"#,
+        r#"provider = { x = { dialect = "openai-chat-completions", base_url = "https://old.test/v1", key_env = "OLD_KEY" } }"#,
     );
     plant(
         &inner,
-        r#"{"provider": {"x": {"dialect": "anthropic-messages",
-               "base_url": "https://new.test"}}}"#,
+        r#"provider = { x = { dialect = "anthropic-messages", base_url = "https://new.test" } }"#,
     );
 
     let config = merge_files(&[outer, inner]).expect("both tiers parse");
@@ -1646,15 +1574,15 @@ fn a_closer_tier_replaces_a_whole_provider_entry() {
 #[test]
 fn a_closer_tier_replaces_a_whole_mcp_entry() {
     let directory = temporary();
-    let outer = directory.path().join("outer.json");
-    let inner = directory.path().join("inner.json");
+    let outer = directory.path().join("outer.toml");
+    let inner = directory.path().join("inner.toml");
     plant(
         &outer,
-        r#"{"mcp": {"x": {"type": "local", "command": ["old"], "cwd": "here"}}}"#,
+        r#"mcp = { x = { type = "local", command = ["old"], cwd = "here" } }"#,
     );
     plant(
         &inner,
-        r#"{"mcp": {"x": {"type": "remote", "url": "https://new.test/mcp"}}}"#,
+        r#"mcp = { x = { type = "remote", url = "https://new.test/mcp" } }"#,
     );
 
     let config = merge_files(&[outer, inner]).expect("both tiers parse");
@@ -1668,10 +1596,9 @@ fn a_closer_tier_replaces_a_whole_mcp_entry() {
 /// later build, or for upstream, still loads here.
 #[test]
 fn an_unknown_key_inside_an_agent_is_carried_rather_than_refused() {
-    let config = parse(
-        r#"{"agent": {"build": {"temperature": 0.2, "steps": 40, "model": "openai/gpt-5.6"}}}"#,
-    )
-    .expect("an agent definition stays open");
+    let config =
+        parse(r#"agent = { build = { temperature = 0.2, steps = 40, model = "openai/gpt-5.6" } }"#)
+            .expect("an agent definition stays open");
 
     assert_eq!(
         config.agent["build"].model.as_deref(),
@@ -1682,8 +1609,8 @@ fn an_unknown_key_inside_an_agent_is_carried_rather_than_refused() {
 #[test]
 fn a_malformed_file_names_itself_and_where_it_stopped() {
     let directory = temporary();
-    let path = directory.path().join("ganja.json");
-    plant(&path, r#"{"model": }"#);
+    let path = directory.path().join("ganja.toml");
+    plant(&path, "model =\n");
 
     let error = read(&path).expect_err("a broken config file is fatal");
     let ConfigError::Parse { message, .. } = &error else {
@@ -1700,7 +1627,7 @@ fn a_malformed_file_names_itself_and_where_it_stopped() {
 #[test]
 fn a_config_file_asked_for_by_name_has_to_exist() {
     let directory = temporary();
-    let missing = directory.path().join("nowhere.jsonc");
+    let missing = directory.path().join("nowhere.toml");
     let overrides = Overrides {
         config_file: Some(missing.clone()),
         ..Overrides::default()
@@ -1712,36 +1639,47 @@ fn a_config_file_asked_for_by_name_has_to_exist() {
     assert!(matches!(error, ConfigError::Missing { path } if path == missing));
 }
 
-/// A file `GANJA_CONFIG` or `--config` names can be called anything, so which
-/// reader answers is decided by its extension rather than by the three names
-/// discovery knows. One rule for both questions — and during the migration
-/// window a named file may still be either format, so both are proved here.
+/// A file `GANJA_CONFIG` or `--config` names can be called anything, and the
+/// name discovery would have refused is refused there too — by extension,
+/// because that is all a path chosen by somebody else has to go on.
+///
+/// The default falls the other way from discovery's: an extension this build
+/// does not know, or none at all, is read. Somebody who names a file means
+/// that file, and the only way to be wrong about it is to look like the format
+/// that is gone.
 #[test]
-fn an_explicitly_named_file_is_read_in_the_dialect_its_extension_claims() {
+fn an_explicitly_named_file_is_refused_only_when_its_extension_is_the_old_one() {
     let directory = temporary();
 
-    let modern = directory.path().join("elsewhere.toml");
-    plant(&modern, r#"model = "openai/gpt-5.6""#);
-    let config = read(&modern)
-        .expect("a named .toml file parses as TOML")
-        .expect("the fixture exists");
-    assert_eq!(config.model.as_deref(), Some("openai/gpt-5.6"));
+    for name in ["elsewhere.toml", "elsewhere.conf", "elsewhere"] {
+        let path = directory.path().join(name);
+        plant(&path, r#"model = "openai/gpt-5.6""#);
+        let config = read(&path)
+            .unwrap_or_else(|error| panic!("{name} is a file somebody named: {error}"))
+            .expect("the fixture exists");
+        assert_eq!(config.model.as_deref(), Some("openai/gpt-5.6"));
+    }
 
-    let legacy = directory.path().join("elsewhere.jsonc");
-    plant(&legacy, r#"{"model": "anthropic/claude-sonnet-5"}"#);
-    let config = read(&legacy)
-        .expect("a named legacy file still parses")
-        .expect("the fixture exists");
-    assert_eq!(config.model.as_deref(), Some("anthropic/claude-sonnet-5"));
+    // Both legacy extensions, and the refusal names the path that carries it
+    // rather than the format in general.
+    for name in ["elsewhere.jsonc", "elsewhere.json"] {
+        let path = directory.path().join(name);
+        plant(&path, r#"{"model": "anthropic/claude-sonnet-5"}"#);
 
-    // And the two readers really are told apart, rather than one of them
-    // happening to accept both: TOML in a file claiming to be JSONC fails.
+        let error = read(&path).expect_err("the old dialect is not read");
+        assert!(matches!(&error, ConfigError::Legacy { path: named } if named == &path));
+        assert!(
+            error.to_string().contains("ganja config migrate"),
+            "the refusal says what to run: {error}"
+        );
+    }
+
+    // And the refusal is the *name*, not the contents: a file spelling
+    // perfectly good TOML under a legacy extension is refused unread, because
+    // reading it would be the second format this landing exists to end.
     let confused = directory.path().join("confused.jsonc");
     plant(&confused, r#"model = "openai/gpt-5.6""#);
-    assert!(
-        read(&confused).is_err(),
-        "the extension is what picks the reader"
-    );
+    assert!(matches!(read(&confused), Err(ConfigError::Legacy { .. })));
 }
 
 /// The order rules were written in is the order they are evaluated in, and
@@ -1750,13 +1688,7 @@ fn an_explicitly_named_file_is_read_in_the_dialect_its_extension_claims() {
 #[test]
 fn permission_rules_keep_the_order_they_were_written_in() {
     let config = parse(
-        r#"{
-              "permission": {
-                "webfetch": "allow",
-                "bash": { "git status": "allow", "git *": "ask", "*": "deny" },
-                "edit": "ask"
-              }
-            }"#,
+        r#"permission = { webfetch = "allow", bash = { "git status" = "allow", "git *" = "ask", "*" = "deny" }, edit = "ask" }"#,
     )
     .expect("a permission object is a config key");
 
@@ -1839,7 +1771,7 @@ fn permission_rules_keep_document_order_across_interleaved_toml_tables() {
     ];
 
     for (spelling, text) in spellings {
-        let config = parse_toml(text).expect("a permission table is a config key");
+        let config = parse(text).expect("a permission table is a config key");
 
         assert_eq!(
             config.permission.rules(),
@@ -1875,7 +1807,7 @@ fn permission_rules_keep_document_order_across_interleaved_toml_tables() {
 /// passing vacuously.
 #[test]
 fn a_toml_loaded_config_decides_calls_in_document_order() {
-    let config = parse_toml(
+    let config = parse(
         r#"
             [permission]
             webfetch = "allow"
@@ -1932,94 +1864,9 @@ fn a_toml_loaded_config_decides_calls_in_document_order() {
     );
 }
 
-/// One config, two dialects, one value — the whole 1:1 claim of the format
-/// change made mechanical.
-///
-/// The fixture is deliberately the awkward half of the file rather than a
-/// handful of scalars: the array-of-tables `hooks` block, an ordered
-/// `permission` table, the two maps keyed by a name somebody chose (`mcp`,
-/// `provider`), and a nested `tui` table. Those are where a translation
-/// between the two spellings can quietly change a shape; `model` cannot.
-#[test]
-fn the_same_config_in_both_dialects_loads_to_the_same_value() {
-    let legacy = parse(
-        r#"{
-              "$schema": "https://ganja.example/config.json",
-              "model": "anthropic/claude-sonnet-5",
-              "permission": {
-                "webfetch": "allow",
-                "bash": { "git status": "allow", "*": "ask" }
-              },
-              "tui": {
-                "notification_method": "bel",
-                "statusline": { "elements": ["model", "rate"], "detail": true }
-              },
-              "mcp": {
-                "docs": { "type": "local", "command": ["bun", "x", "docs"], "timeout": 1234 }
-              },
-              "provider": {
-                "local-llama": {
-                  "dialect": "openai-chat-completions",
-                  "base_url": "http://127.0.0.1:11434/v1"
-                }
-              },
-              "hooks": {
-                "PreToolUse": [
-                  {
-                    "matcher": "Edit|Write",
-                    "hooks": [{ "type": "command", "command": "./check.sh", "timeout": 5 }]
-                  }
-                ]
-              }
-            }"#,
-    )
-    .expect("the legacy fixture parses");
-
-    let toml = parse_toml(
-        r#"
-            "$schema" = "https://ganja.example/config.json"
-            model = "anthropic/claude-sonnet-5"
-
-            [permission]
-            webfetch = "allow"
-
-            [permission.bash]
-            "git status" = "allow"
-            "*" = "ask"
-
-            [tui]
-            notification_method = "bel"
-
-            [tui.statusline]
-            elements = ["model", "rate"]
-            detail = true
-
-            [mcp.docs]
-            type = "local"
-            command = ["bun", "x", "docs"]
-            timeout = 1234
-
-            [provider.local-llama]
-            dialect = "openai-chat-completions"
-            base_url = "http://127.0.0.1:11434/v1"
-
-            [[hooks.PreToolUse]]
-            matcher = "Edit|Write"
-
-            [[hooks.PreToolUse.hooks]]
-            type = "command"
-            command = "./check.sh"
-            timeout = 5
-        "#,
-    )
-    .expect("the TOML fixture parses");
-
-    assert_eq!(legacy, toml);
-}
-
 #[test]
 fn a_bare_action_covers_every_tool() {
-    let config = parse(r#"{"permission": "ask"}"#).expect("a bare action is legal");
+    let config = parse(r#"permission = "ask""#).expect("a bare action is legal");
 
     let rules = config.permission.rules();
     assert_eq!(rules.len(), 1);
@@ -2034,10 +1881,10 @@ fn a_bare_action_covers_every_tool() {
 #[test]
 fn merging_permissions_keeps_positions_and_adds_what_is_new() {
     let mut base =
-        parse(r#"{"permission": {"bash": {"git *": "allow", "*": "ask"}, "edit": "ask"}}"#)
+        parse(r#"permission = { bash = { "git *" = "allow", "*" = "ask" }, edit = "ask" }"#)
             .expect("the base tier parses");
     let project = parse(
-        r#"{"permission": {"bash": {"*": "deny", "cargo *": "allow"}, "webfetch": "allow"}}"#,
+        r#"permission = { bash = { "*" = "deny", "cargo *" = "allow" }, webfetch = "allow" }"#,
     )
     .expect("the project tier parses");
 
@@ -2064,8 +1911,8 @@ fn merging_permissions_keeps_positions_and_adds_what_is_new() {
 #[test]
 fn a_bare_action_replaces_the_rules_it_is_merged_over() {
     let mut base =
-        parse(r#"{"permission": {"bash": "allow", "edit": "allow"}}"#).expect("base parses");
-    base.merge(parse(r#"{"permission": "ask"}"#).expect("the override parses"));
+        parse(r#"permission = { bash = "allow", edit = "allow" }"#).expect("base parses");
+    base.merge(parse(r#"permission = "ask""#).expect("the override parses"));
 
     let rules = base.permission.rules();
     assert_eq!(rules.len(), 1, "{rules:?}");
@@ -2076,24 +1923,20 @@ fn a_bare_action_replaces_the_rules_it_is_merged_over() {
 #[test]
 fn merging_replaces_scalars_deepens_objects_and_concatenates_instructions() {
     let mut base = parse(
-        r#"{
-              "model": "anthropic/claude-sonnet-5",
-              "theme": "gruvbox",
-              "instructions": ["docs/style.md", "docs/shared.md"],
-              "agent": {"build": {"model": "openai/gpt-5.6", "description": "builds"}},
-              "keybinds": {"app_exit": "ctrl+c"}
-            }"#,
+        r#"model = "anthropic/claude-sonnet-5"
+theme = "gruvbox"
+instructions = ["docs/style.md", "docs/shared.md"]
+agent = { build = { model = "openai/gpt-5.6", description = "builds" } }
+keybinds = { app_exit = "ctrl+c" }"#,
     )
     .expect("the base tier parses");
     base.merge(
         parse(
-            r#"{
-                  "model": "openai/gpt-5.6",
-                  "theme_mode": "light",
-                  "instructions": ["docs/shared.md", "docs/local.md"],
-                  "agent": {"build": {"description": "still builds", "hidden": true}},
-                  "keybinds": {"palette_open": "ctrl+p"}
-                }"#,
+            r#"model = "openai/gpt-5.6"
+theme_mode = "light"
+instructions = ["docs/shared.md", "docs/local.md"]
+agent = { build = { description = "still builds", hidden = true } }
+keybinds = { palette_open = "ctrl+p" }"#,
         )
         .expect("the project tier parses"),
     );
@@ -2120,28 +1963,23 @@ fn merging_replaces_scalars_deepens_objects_and_concatenates_instructions() {
 #[test]
 fn the_curated_keys_all_parse() {
     let config = parse(
-            r#"{
-              "$schema": "https://ganja.invalid/config.json",
-              "model": "anthropic/claude-sonnet-5",
-              "small_model": "anthropic/claude-haiku-4.5",
-              "default_provider": "openai",
-              "default_agent": "plan",
-              "agent": {"plan": {"mode": "primary", "disable": false}},
-              "agents": {"concurrency": 3},
-              "permission": {"bash": "ask"},
-              "instructions": ["AGENTS.md"],
-              "theme": "tokyonight",
-              "theme_mode": "dark",
-              "keybinds": {"agent_cycle": "tab"},
-              "shell": "/bin/zsh",
-              "command": {"ship": {"template": "release $ARGUMENTS", "agent": "build"}},
-              "mcp": {"fs": {"type": "local", "command": ["bun", "x", "mcp-fs"], "output_limit": 8192}},
-              "hooks": {"Stop": [{"hooks": [{"type": "command", "command": "notify"}]}]},
-              "provider": {"local-llama": {
-                "dialect": "openai-chat-completions",
-                "base_url": "http://127.0.0.1:11434/v1"
-              }}
-            }"#,
+            r#""$schema" = "https://ganja.invalid/config.json"
+model = "anthropic/claude-sonnet-5"
+small_model = "anthropic/claude-haiku-4.5"
+default_provider = "openai"
+default_agent = "plan"
+agent = { plan = { mode = "primary", disable = false } }
+agents = { concurrency = 3 }
+permission = { bash = "ask" }
+instructions = ["AGENTS.md"]
+theme = "tokyonight"
+theme_mode = "dark"
+keybinds = { agent_cycle = "tab" }
+shell = "/bin/zsh"
+command = { ship = { template = "release $ARGUMENTS", agent = "build" } }
+mcp = { fs = { type = "local", command = ["bun", "x", "mcp-fs"], output_limit = 8192 } }
+hooks = { Stop = [{ hooks = [{ type = "command", command = "notify" }] }] }
+provider = { local-llama = { dialect = "openai-chat-completions", base_url = "http://127.0.0.1:11434/v1" } }"#,
         )
         .expect("every curated key is a key");
 
@@ -2168,11 +2006,11 @@ fn the_curated_keys_all_parse() {
 /// says nothing leaves the tier below it alone, and a closer one replaces.
 #[test]
 fn a_closer_tier_decides_the_default_provider_only_when_it_names_one() {
-    let mut merged = parse(r#"{"default_provider": "anthropic"}"#).expect("it parses");
-    merged.merge(parse(r#"{"model": "openai/gpt-5.6"}"#).expect("it parses"));
+    let mut merged = parse(r#"default_provider = "anthropic""#).expect("it parses");
+    merged.merge(parse(r#"model = "openai/gpt-5.6""#).expect("it parses"));
     assert_eq!(merged.default_provider.as_deref(), Some("anthropic"));
 
-    merged.merge(parse(r#"{"default_provider": "openai"}"#).expect("it parses"));
+    merged.merge(parse(r#"default_provider = "openai""#).expect("it parses"));
     assert_eq!(merged.default_provider.as_deref(), Some("openai"));
 }
 
@@ -2181,13 +2019,13 @@ fn a_closer_tier_decides_the_default_provider_only_when_it_names_one() {
 /// run hotter without restating anything else.
 #[test]
 fn a_closer_tier_decides_the_effort_only_when_it_names_one() {
-    let mut merged = parse(r#"{"effort": "high"}"#).expect("it parses");
+    let mut merged = parse(r#"effort = "high""#).expect("it parses");
     assert_eq!(merged.effort.as_deref(), Some("high"));
 
-    merged.merge(parse(r#"{"model": "openai/gpt-5.6"}"#).expect("it parses"));
+    merged.merge(parse(r#"model = "openai/gpt-5.6""#).expect("it parses"));
     assert_eq!(merged.effort.as_deref(), Some("high"));
 
-    merged.merge(parse(r#"{"effort": "max"}"#).expect("it parses"));
+    merged.merge(parse(r#"effort = "max""#).expect("it parses"));
     assert_eq!(merged.effort.as_deref(), Some("max"));
 }
 
@@ -2197,10 +2035,10 @@ fn a_closer_tier_decides_the_effort_only_when_it_names_one() {
 /// struct has no field for — the discipline every key here holds.
 #[test]
 fn an_effort_name_is_carried_unvalidated_and_its_neighbours_still_are_not() {
-    let config = parse(r#"{"effort": "wildly-not-an-effort"}"#).expect("it parses");
+    let config = parse(r#"effort = "wildly-not-an-effort""#).expect("it parses");
     assert_eq!(config.effort.as_deref(), Some("wildly-not-an-effort"));
 
-    let error = parse(r#"{"efort": "high"}"#).expect_err("a typo is refused");
+    let error = parse(r#"efort = "high""#).expect_err("a typo is refused");
     assert!(format!("{error}").contains("efort"), "got {error}");
 }
 
@@ -2279,31 +2117,54 @@ fn a_prefixed_model_binds_to_the_provider_it_names_and_to_no_other() {
 }
 
 #[test]
-fn a_directory_offers_jsonc_before_json_so_the_reversal_makes_jsonc_win() {
+fn a_directory_offers_the_one_name_there_is() {
     let directory = temporary();
-    plant(&directory.path().join("ganja.json"), "{}");
-    plant(&directory.path().join("ganja.jsonc"), "{}");
-
-    let found = existing(directory.path());
-    assert_eq!(found.len(), 2);
-    assert!(found[0].ends_with("ganja.jsonc"), "{found:?}");
-    assert!(found[1].ends_with("ganja.json"), "{found:?}");
-}
-
-/// And the new name is probed ahead of both, so the same reversal makes it
-/// beat them. The rule did not change when the list grew; what it ranks did.
-#[test]
-fn a_directory_offers_toml_first_so_the_reversal_makes_toml_win() {
-    let directory = temporary();
-    plant(&directory.path().join("ganja.json"), "{}");
-    plant(&directory.path().join("ganja.jsonc"), "{}");
     plant(&directory.path().join("ganja.toml"), "");
 
-    let found = existing(directory.path());
-    assert_eq!(found.len(), 3);
+    let found = existing(directory.path()).expect("a directory holding the config is no error");
+    assert_eq!(found.len(), 1);
     assert!(found[0].ends_with("ganja.toml"), "{found:?}");
-    assert!(found[1].ends_with("ganja.jsonc"), "{found:?}");
-    assert!(found[2].ends_with("ganja.json"), "{found:?}");
+}
+
+/// Both legacy names, one at a time, and each refused by its own path — the
+/// message has to name the file somebody has to convert, not the format in
+/// general, because the walk can find more than one.
+#[test]
+fn a_legacy_name_in_a_directory_is_refused_by_path() {
+    for name in super::LEGACY_FILES {
+        let directory = temporary();
+        let path = directory.path().join(name);
+        plant(&path, "{}");
+
+        let error = existing(directory.path()).expect_err("the old format is not read");
+        let ConfigError::Legacy { path: named } = &error else {
+            panic!("expected a legacy refusal, got {error:?}");
+        };
+        assert_eq!(named, &path);
+        assert!(
+            error.to_string().contains("ganja config migrate"),
+            "the refusal says what to run: {error}"
+        );
+    }
+}
+
+/// And a `ganja.toml` beside it does **not** settle it. Reading the new file
+/// and silently skipping the old one is the ignored-setting failure this whole
+/// key set exists to prevent, so a half-migrated directory is refused until
+/// somebody removes what it no longer reads.
+#[test]
+fn a_legacy_file_is_refused_even_with_the_config_beside_it() {
+    let directory = temporary();
+    let legacy = directory.path().join("ganja.jsonc");
+    plant(&legacy, r#"model = "anthropic/claude-sonnet-5""#);
+    plant(
+        &directory.path().join("ganja.toml"),
+        r#"model = "openai/gpt-5.6""#,
+    );
+
+    let error = existing(directory.path()).expect_err("the old file is still there to answer for");
+
+    assert!(matches!(&error, ConfigError::Legacy { path } if path == &legacy));
 }
 
 /// Every ancestor up to the project root contributes, outermost first, so
@@ -2315,11 +2176,10 @@ fn the_project_walk_stacks_from_the_root_down_to_the_working_directory() {
     let nested = root.join("crates").join("core");
     fs::create_dir_all(&nested).expect("the fixture tree is creatable");
     fs::create_dir(root.join(".git")).expect("the fixture repository is creatable");
-    plant(&root.join("ganja.json"), "{}");
-    plant(&root.join("ganja.jsonc"), "{}");
-    plant(&nested.join("ganja.jsonc"), "{}");
+    plant(&root.join("ganja.toml"), "");
+    plant(&nested.join("ganja.toml"), "");
 
-    let found = project_files(&nested);
+    let found = project_files(&nested).expect("the walk finds only the one name");
     let names: Vec<String> = found
         .iter()
         .map(|path| {
@@ -2334,8 +2194,8 @@ fn the_project_walk_stacks_from_the_root_down_to_the_working_directory() {
 
     assert_eq!(
         names,
-        vec!["api/ganja.json", "api/ganja.jsonc", "core/ganja.jsonc"],
-        "root first, and jsonc after json within a directory"
+        vec!["api/ganja.toml", "core/ganja.toml"],
+        "the root's first, so the closest has the last word"
     );
 }
 
@@ -2345,10 +2205,10 @@ fn the_walk_stops_at_the_project_root() {
     let root = directory.path().join("api");
     fs::create_dir_all(&root).expect("the fixture tree is creatable");
     fs::create_dir(root.join(".git")).expect("the fixture repository is creatable");
-    plant(&directory.path().join("ganja.jsonc"), "{}");
-    plant(&root.join("ganja.jsonc"), "{}");
+    plant(&directory.path().join("ganja.toml"), "");
+    plant(&root.join("ganja.toml"), "");
 
-    let found = project_files(&root);
+    let found = project_files(&root).expect("the walk parses");
     assert_eq!(found.len(), 1, "{found:?}");
     assert!(found[0].starts_with(fs::canonicalize(&root).expect("the fixture exists")));
 }
@@ -2363,121 +2223,44 @@ fn the_closest_project_file_wins() {
     fs::create_dir_all(&nested).expect("the fixture tree is creatable");
     fs::create_dir(root.join(".git")).expect("the fixture repository is creatable");
     plant(
-        &root.join("ganja.jsonc"),
-        r#"{"model": "anthropic/claude-sonnet-5", "theme": "gruvbox"}"#,
+        &root.join("ganja.toml"),
+        "model = \"anthropic/claude-sonnet-5\"\ntheme = \"gruvbox\"\n",
     );
-    plant(
-        &nested.join("ganja.jsonc"),
-        r#"{"model": "openai/gpt-5.6"}"#,
-    );
+    plant(&nested.join("ganja.toml"), r#"model = "openai/gpt-5.6""#);
 
     // The project tier alone, so the machine running the suite cannot
     // contribute a global config of its own. Which tiers stack in which
     // order is `tests/config.rs`'s to prove, where the environment that
     // decides it can be set.
-    let config = merge_files(&project_files(&nested)).expect("both tiers parse");
-
-    assert_eq!(config.model.as_deref(), Some("openai/gpt-5.6"));
-    assert_eq!(config.theme.as_deref(), Some("gruvbox"));
-}
-
-#[test]
-fn jsonc_beats_json_in_the_same_directory() {
-    let directory = temporary();
-    fs::create_dir(directory.path().join(".git")).expect("the fixture repository is creatable");
-    plant(
-        &directory.path().join("ganja.json"),
-        r#"{"model": "anthropic/claude-sonnet-5", "theme": "gruvbox"}"#,
-    );
-    plant(
-        &directory.path().join("ganja.jsonc"),
-        r#"{"model": "openai/gpt-5.6"}"#,
-    );
-
-    let config = merge_files(&project_files(directory.path())).expect("both files parse");
-
-    assert_eq!(config.model.as_deref(), Some("openai/gpt-5.6"));
-    assert_eq!(config.theme.as_deref(), Some("gruvbox"));
-}
-
-/// A directory holding both formats is what a half-migrated checkout looks
-/// like, and the new file is the one that decides — while the old one still
-/// contributes the keys it alone names, because during the window it is still
-/// a file that was read. The contract step is what stops reading it.
-#[test]
-fn toml_beats_a_legacy_file_in_the_same_directory() {
-    let directory = temporary();
-    fs::create_dir(directory.path().join(".git")).expect("the fixture repository is creatable");
-    plant(
-        &directory.path().join("ganja.jsonc"),
-        r#"{"model": "anthropic/claude-sonnet-5", "theme": "gruvbox"}"#,
-    );
-    plant(
-        &directory.path().join("ganja.toml"),
-        r#"model = "openai/gpt-5.6""#,
-    );
-
-    let config = merge_files(&project_files(directory.path())).expect("both files parse");
-
-    assert_eq!(config.model.as_deref(), Some("openai/gpt-5.6"));
-    assert_eq!(config.theme.as_deref(), Some("gruvbox"));
-}
-
-/// What "wins" does **not** mean, for the one key where it is not obvious.
-///
-/// The two files merge rather than one replacing the other, and
-/// `PermissionConfig::merge` keeps a re-specified tool where it already sat.
-/// The legacy file merges first, so a tool named in both keeps the *legacy*
-/// file's position while carrying the `ganja.toml` rules for it, and a tool
-/// only the new file names is appended after everything. Position is not
-/// cosmetic here — evaluation is last-match-wins — so this is pinned rather
-/// than left as a sentence in the module doc that nobody could check. It goes
-/// when the window does.
-#[test]
-fn a_tool_named_in_both_files_keeps_the_legacy_files_position() {
-    let directory = temporary();
-    fs::create_dir(directory.path().join(".git")).expect("the fixture repository is creatable");
-    plant(
-        &directory.path().join("ganja.jsonc"),
-        r#"{"permission": {"bash": "ask", "webfetch": "deny"}}"#,
-    );
-    plant(
-        &directory.path().join("ganja.toml"),
-        "permission.bash = \"allow\"\npermission.edit = \"ask\"\n",
-    );
-
-    let config = merge_files(&project_files(directory.path())).expect("both files parse");
-
-    assert_eq!(
-        config.permission.rules(),
-        rules(&[
-            // First, because the legacy file said `bash` first — but `allow`,
-            // because the file that wins the value is the new one.
-            ("bash", "*", Action::Allow),
-            ("webfetch", "*", Action::Deny),
-            // Named by the new file alone, so it appends rather than sorting
-            // itself in.
-            ("edit", "*", Action::Ask),
-        ])
-    );
-}
-
-/// Flags travel on the config rather than into it, so that the tier
-/// between them and the files — the environment, read in
-/// [`crate::provider::select`] — still has somewhere to sit.
-#[test]
-fn overrides_travel_on_the_loaded_config() {
-    let directory = temporary();
-    let overrides = Overrides {
-        model: Some("openai/gpt-5.6".to_owned()),
-        agent: Some("plan".to_owned()),
-        config_file: None,
-    };
-
     let config =
-        Config::load_with(directory.path(), &overrides).expect("an empty tree still loads");
+        merge_files(&project_files(&nested).expect("the walk parses")).expect("both tiers parse");
 
-    assert_eq!(config.overrides, overrides);
+    assert_eq!(config.model.as_deref(), Some("openai/gpt-5.6"));
+    assert_eq!(config.theme.as_deref(), Some("gruvbox"));
+}
+
+/// The refusal is not a property of the directory the walk starts in: an
+/// ancestor holding a legacy file refuses the load from wherever the session
+/// was launched, which is the only way a file somebody forgot about gets
+/// mentioned at all.
+#[test]
+fn a_legacy_file_anywhere_in_the_walk_refuses_the_load() {
+    let directory = temporary();
+    let root = directory.path().join("api");
+    let nested = root.join("crates");
+    fs::create_dir_all(&nested).expect("the fixture tree is creatable");
+    fs::create_dir(root.join(".git")).expect("the fixture repository is creatable");
+    let legacy = root.join("ganja.jsonc");
+    plant(&legacy, r#"model = "anthropic/claude-sonnet-5""#);
+    plant(&nested.join("ganja.toml"), r#"model = "openai/gpt-5.6""#);
+
+    let error = project_files(&nested).expect_err("an ancestor's old file is still its author's");
+
+    // The walk canonicalises what it starts from, so the path the refusal
+    // carries is the canonical one — which is the path somebody would have to
+    // go and convert.
+    let named = fs::canonicalize(&legacy).expect("the fixture exists");
+    assert!(matches!(&error, ConfigError::Legacy { path } if path == &named));
 }
 
 /// The config home's two *discovered* candidates, ruled on by what is

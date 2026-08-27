@@ -172,7 +172,7 @@ fn receiving_engine(
         Permissions::default(),
     )
     // The seam a loaded `cross_session_inbound` key lands on. Named here
-    // rather than written into a `ganja.jsonc` because this engine is
+    // rather than written into a `ganja.toml` because this engine is
     // assembled rather than launched: the config loader's own refusals are
     // `ganja-core`'s to pin, and what this drill is about is what the gate
     // does once it holds the value.

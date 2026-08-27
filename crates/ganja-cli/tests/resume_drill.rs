@@ -330,7 +330,7 @@ fn ganja(project: &TempDir, data: &TempDir, arguments: &[&str]) -> Ganja {
         // developer's real one.
         .env("XDG_DATA_HOME", data.path())
         // The global config home moves with it, exactly as `rewind_drill`
-        // moves it: a developer's real `ganja.jsonc` can pick a provider or
+        // moves it: a developer's real `ganja.toml` can pick a provider or
         // rebind a key, and their `commands/*.md` (**D481**) join the roster
         // this drill's keystrokes drive — either of which would change what
         // those keystrokes mean.

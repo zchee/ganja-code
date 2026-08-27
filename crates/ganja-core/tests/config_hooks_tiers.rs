@@ -10,12 +10,10 @@
 //! before a tool call would still be running the global one underneath it, with
 //! nothing it could write to stop that.
 //!
-//! The two tiers are written in the two dialects — the global one in TOML, the
-//! project one in the legacy format the loader still reads — because that is
-//! what a half-migrated machine holds, and because replacement is a rule about
-//! tiers rather than about how either of them was spelled. The project file's
-//! name changes when the loader stops reading it: the contract step that lands
-//! the by-name refusal and `ganja config migrate`.
+//! Both tiers are one file name in one format, which is what makes this a
+//! test about tiers rather than about spellings: the global home and the
+//! checkout each hold a `ganja.toml`, and which one decides is the only thing
+//! under test.
 
 use std::{env, fs};
 
@@ -59,12 +57,11 @@ fn a_project_hook_replaces_the_global_one_for_its_own_event_only() {
     )
     .expect("the fixture file is writable");
     fs::write(
-        project.join("ganja.jsonc"),
-        r#"{
-          "hooks": {
-            "PreToolUse": [{ "hooks": [{ "type": "command", "command": "project-pre" }] }]
-          }
-        }"#,
+        project.join("ganja.toml"),
+        r#"
+          [[hooks.PreToolUse]]
+          hooks = [{ type = "command", command = "project-pre" }]
+        "#,
     )
     .expect("the fixture file is writable");
 

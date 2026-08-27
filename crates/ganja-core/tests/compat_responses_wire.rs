@@ -6,7 +6,7 @@
 //! path — `store: false` with **no** `include` and **no** `reasoning` object,
 //! on a model the vendor's own backends would have asked sealed reasoning
 //! for. A unit test pins that posture on the body encoder; what is under test
-//! here is that nothing between a `ganja.jsonc` and the socket reintroduces
+//! here is that nothing between a `ganja.toml` and the socket reintroduces
 //! it.
 //!
 //! One test, one binary, on purpose: it mutates process-wide environment

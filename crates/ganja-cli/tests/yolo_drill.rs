@@ -220,7 +220,7 @@ fn scripted(project: &TempDir, data: &TempDir, spelled: &[&str]) -> Ganja {
         // about this session rather than about the machine.
         .env("XDG_DATA_HOME", data.path())
         // The global config home moves with it: a developer's real
-        // `ganja.jsonc` could allow or deny `bash` outright, either of which
+        // `ganja.toml` could allow or deny `bash` outright, either of which
         // would decide this drill's question before the flag got to.
         .env("HOME", data.path())
         .env("XDG_CONFIG_HOME", data.path().join("config"))

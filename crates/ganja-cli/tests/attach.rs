@@ -103,8 +103,8 @@ fn asks_then_questions() -> Value {
 /// standing refusals, so without this the call would simply be allowed and
 /// there would be no dialog to observe. A deployment that wants to see its
 /// model's questions writes exactly this.
-fn asks_before_questioning() -> Value {
-    serde_json::json!({"permission": {"question": "ask"}})
+fn asks_before_questioning() -> &'static str {
+    "[permission]\nquestion = \"ask\"\n"
 }
 
 /// Everything a `ganja` invocation must not inherit from the machine running
@@ -189,20 +189,20 @@ impl Server {
         Self::playing_under(script, None)
     }
 
-    /// The same, with `configured` written to the project's `ganja.json`.
+    /// The same, with `configured` written to the project's `ganja.toml`.
     ///
     /// The server's config is the only tier an attached run can move: this
     /// process assembles no engine, and the one it drives belongs to whoever
     /// started it. A rule a test wants the *dialog loop* to meet therefore has
     /// to be written here rather than passed on the client's command line.
-    fn playing_under(script: &Value, configured: Option<&Value>) -> Self {
+    fn playing_under(script: &Value, configured: Option<&str>) -> Self {
         let project = temporary();
         let data = temporary();
         let config = temporary();
         fs::write(project.path().join("script.json"), script.to_string())
             .expect("the script is writable");
         if let Some(configured) = configured {
-            fs::write(project.path().join("ganja.json"), configured.to_string())
+            fs::write(project.path().join("ganja.toml"), configured)
                 .expect("the config is writable");
         }
 
@@ -496,7 +496,7 @@ fn an_attached_run_refuses_a_dialog_nobody_is_there_to_answer() {
 /// make on its own.
 #[test]
 fn an_attached_auto_run_answers_a_shell_dialog_and_still_refuses_a_question() {
-    let server = Server::playing_under(&asks_then_questions(), Some(&asks_before_questioning()));
+    let server = Server::playing_under(&asks_then_questions(), Some(asks_before_questioning()));
     let (attached, attached_err) =
         server.attached_run(&["--auto", "--agent", "build", "have a look"]);
     server.stop();
@@ -593,7 +593,7 @@ fn attaching_to_nothing_names_the_address_that_was_tried() {
 /// decide nothing is refused rather than accepted and ignored.
 #[test]
 fn attaching_refuses_the_flags_that_only_mean_something_to_a_local_engine() {
-    for conflicting in [vec!["--config", "ganja.json"], vec!["--command", "review"]] {
+    for conflicting in [vec!["--config", "ganja.toml"], vec!["--command", "review"]] {
         let elsewhere = temporary();
         let data = temporary();
         let config = temporary();

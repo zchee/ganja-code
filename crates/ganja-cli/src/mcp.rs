@@ -56,7 +56,15 @@ use std::{
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::Args;
-use ganja_core::config::{Config, McpServer};
+use ganja_core::config::{
+    Config,
+    // The loader's own list of the names ganja's config used to go by, rather
+    // than a second copy of it: this command refuses a directory holding one
+    // and no `CONFIG_FILE`, in the loader's own words, and two spellings of
+    // "what a legacy file is" is one of them being wrong later.
+    LEGACY_FILES,
+    McpServer,
+};
 use ganja_permission::Project;
 use serde_json::{Map, Value};
 use tempfile::NamedTempFile;
@@ -64,16 +72,6 @@ use toml_edit::{DocumentMut, Item, Table};
 
 /// The config file this edits, in every tier — the one name ganja reads.
 const CONFIG_FILE: &str = "ganja.toml";
-
-/// The names ganja's config used to go by, in the order the loader probes for
-/// them.
-///
-/// Not edit targets. A directory holding one of these and no [`CONFIG_FILE`]
-/// is refused by name rather than written in a dialect this build has left:
-/// the entry would land in a file whose author still has to convert it, and
-/// converting it *after* the edit is one more step to remember at exactly the
-/// moment nobody is thinking about the format.
-const LEGACY_FILES: [&str; 2] = ["ganja.jsonc", "ganja.json"];
 
 /// The table an entry lives under, in every tier.
 const TABLE: &str = "mcp";
@@ -281,22 +279,26 @@ pub(crate) fn remove(args: &RemoveArgs) -> Result<()> {
 
 /// The file a write to `tier` lands in.
 ///
-/// One name, and the only one the loader reads. A directory holding nothing
-/// but a legacy config is refused rather than edited — that file has to be
-/// converted whatever this command does, and an entry written into it now
-/// would be an entry to convert later.
+/// One name, and the only one the loader reads. A directory holding a legacy
+/// config is refused rather than edited — that file has to be converted
+/// whatever this command does, and an entry written now would be an entry to
+/// convert later.
+///
+/// The refusal fires whether or not a `ganja.toml` sits beside the legacy file
+/// (**R-15**, amending **R-7**). It used to fire only for a directory holding
+/// no `ganja.toml` at all, on the reasoning that the loader would say the rest
+/// and this command should not say it twice — which was right only while the
+/// loader still *read* the legacy file. It refuses one now, so writing into
+/// the `ganja.toml` beside it would print a success over a directory the very
+/// next launch declines. The condition mirrors the loader's own (**AC-2**),
+/// which is what keeps one answer between them.
 fn writable(tier: Tier, cwd: &Path) -> Result<PathBuf> {
     let directory = tier.directory(cwd)?;
     let target = directory.join(CONFIG_FILE);
-    // Only when there is no `ganja.toml` at all. One sitting *beside* a legacy
-    // file is the file this edits and the file that loads; whether the legacy
-    // one beside it is an error is the loader's sentence to say, not this
-    // command's to say twice.
-    if !target.is_file()
-        && let Some(legacy) = LEGACY_FILES
-            .iter()
-            .map(|name| directory.join(name))
-            .find(|path| path.is_file())
+    if let Some(legacy) = LEGACY_FILES
+        .iter()
+        .map(|name| directory.join(name))
+        .find(|path| path.is_file())
     {
         bail!(
             "{} is a config in the format ganja has moved off; run \

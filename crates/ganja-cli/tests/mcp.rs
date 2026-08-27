@@ -52,7 +52,7 @@ fn listing(project: &TempDir, data: &TempDir, config: Option<&std::path::Path>) 
         .current_dir(project.path())
         .env("XDG_DATA_HOME", data.path())
         // The global config home is pinned with the data home — a developer's
-        // real `ganja.jsonc` can declare MCP servers of its own, which is
+        // real `ganja.toml` can declare MCP servers of its own, which is
         // exactly what "reading `config` and nothing else" must exclude.
         .env("HOME", data.path())
         .env("XDG_CONFIG_HOME", data.path().join("config"))
@@ -72,11 +72,35 @@ fn listing(project: &TempDir, data: &TempDir, config: Option<&std::path::Path>) 
 }
 
 /// Writes `config` where `GANJA_CONFIG` can name it, and answers the path.
-fn config_file(directory: &TempDir, config: &Value) -> std::path::PathBuf {
-    let path = directory.path().join("ganja.json");
-    std::fs::write(&path, config.to_string()).expect("the config file is writable");
+fn config_file(directory: &TempDir, config: &str) -> std::path::PathBuf {
+    let path = directory.path().join("ganja.toml");
+    std::fs::write(&path, config).expect("the config file is writable");
 
     path
+}
+
+/// One server of each kind there is an outcome for, pointed at `url`.
+///
+/// `broken` names a program no machine has, so the connect fails at the spawn
+/// rather than at a timeout this test would have to wait out; `off` is a
+/// server that was told not to run.
+fn servers(url: &str) -> String {
+    format!(
+        r#"
+          [mcp.hub]
+          type = "remote"
+          url = "{url}"
+
+          [mcp.broken]
+          type = "local"
+          command = ["ganja-no-such-program-8842"]
+
+          [mcp.off]
+          type = "local"
+          command = ["never-run"]
+          enabled = false
+        "#
+    )
 }
 
 /// A configured server of each kind there is an outcome for: one that answers,
@@ -90,18 +114,7 @@ fn the_listing_names_each_server_its_standing_and_the_tools_it_lends() {
     let project = project();
     let data = TempDir::new().expect("a temporary directory is creatable");
     let url = endpoint();
-    let path = config_file(
-        &project,
-        &json!({
-            "mcp": {
-                "hub": { "type": "remote", "url": url },
-                // A program no machine has, so the connect fails at the spawn
-                // rather than at a timeout this test would have to wait out.
-                "broken": { "type": "local", "command": ["ganja-no-such-program-8842"] },
-                "off": { "type": "local", "command": ["never-run"], "enabled": false },
-            }
-        }),
-    );
+    let path = config_file(&project, &servers(&url));
 
     listing(&project, &data, Some(&path))
         .assert()
@@ -131,16 +144,7 @@ fn the_listing_names_a_tool_count_beside_each_servers_standing() {
     let project = project();
     let data = TempDir::new().expect("a temporary directory is creatable");
     let url = endpoint();
-    let path = config_file(
-        &project,
-        &json!({
-            "mcp": {
-                "hub": { "type": "remote", "url": url },
-                "broken": { "type": "local", "command": ["ganja-no-such-program-8842"] },
-                "off": { "type": "local", "command": ["never-run"], "enabled": false },
-            }
-        }),
-    );
+    let path = config_file(&project, &servers(&url));
 
     listing(&project, &data, Some(&path))
         .assert()
@@ -165,16 +169,7 @@ fn a_standing_is_reported_per_server_and_not_once_for_all_of_them() {
     let project = project();
     let data = TempDir::new().expect("a temporary directory is creatable");
     let url = endpoint();
-    let path = config_file(
-        &project,
-        &json!({
-            "mcp": {
-                "hub": { "type": "remote", "url": url },
-                "broken": { "type": "local", "command": ["ganja-no-such-program-8842"] },
-                "off": { "type": "local", "command": ["never-run"], "enabled": false },
-            }
-        }),
-    );
+    let path = config_file(&project, &servers(&url));
 
     let output = listing(&project, &data, Some(&path))
         .assert()
@@ -243,12 +238,15 @@ fn a_login_is_refused_by_name_before_it_reaches_a_network() {
     let data = TempDir::new().expect("a temporary directory is creatable");
     let path = config_file(
         &project,
-        &json!({
-            "mcp": {
-                "hub": { "type": "remote", "url": "https://mcp.example/mcp" },
-                "fs": { "type": "local", "command": ["ganja-no-such-program-8842"] },
-            }
-        }),
+        r#"
+          [mcp.hub]
+          type = "remote"
+          url = "https://mcp.example/mcp"
+
+          [mcp.fs]
+          type = "local"
+          command = ["ganja-no-such-program-8842"]
+        "#,
     );
 
     login(&project, &data, Some(&path), "nowhere")

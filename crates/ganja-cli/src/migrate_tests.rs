@@ -7,6 +7,8 @@
 
 use std::path::Path;
 
+use tempfile::TempDir;
+
 use super::*;
 
 /// The path every fixture is attributed to, so a failure names something.
@@ -20,15 +22,27 @@ fn migrated(text: &str) -> (String, Report) {
     (document.to_string(), report)
 }
 
+/// `text` on disk under [`FIXTURE`]'s name, because [`decode`] reads a file
+/// rather than a string — it is the loader's own legacy reader, and that
+/// reader is handed paths.
+fn planted(text: &str) -> (TempDir, std::path::PathBuf) {
+    let directory = TempDir::new().expect("a temporary directory is creatable");
+    let path = directory.path().join(FIXTURE);
+    std::fs::write(&path, text).expect("the fixture file is writable");
+
+    (directory, path)
+}
+
 /// The two configs a round trip compares: the source as this build reads it,
 /// and the written file as this build reads it.
 fn both(text: &str) -> (Config, Config, String) {
-    let legacy = decode(Path::new(FIXTURE), text).expect("the fixture decodes");
+    let (_directory, path) = planted(text);
+    let source = decode(&path).expect("the fixture decodes");
     let (rendered, _) = migrated(text);
     let toml = toml_edit::de::from_str::<Config>(&rendered)
         .unwrap_or_else(|error| panic!("the migrated document decodes: {error}\n{rendered}"));
 
-    (legacy, toml, rendered)
+    (source, toml, rendered)
 }
 
 /// The tools a permission config names, in the order it will be evaluated in.
@@ -291,22 +305,55 @@ fn every_top_level_key_is_a_row() {
 /// The loader refuses an MCP entry it could not start *after* decoding it, so
 /// a source carrying one is refused here rather than translated into a
 /// `ganja.toml` the next launch declines.
-///
-/// The MCP case and no other: `McpServer::check` is the only one of the
-/// loader's seven post-decode checks with a public authority to call, so this
-/// is the only one [`decode`] can make. The module doc says what the other
-/// six cost until `config::legacy` runs them in-crate, and this test's name
-/// is kept narrow so it cannot be read as covering them.
 #[test]
 fn an_mcp_entry_this_build_could_not_start_is_refused_before_it_is_translated() {
-    let error = decode(
-        Path::new(FIXTURE),
-        r#"{ "mcp": { "docs": { "type": "local", "command": [] } } }"#,
-    )
-    .expect_err("an entry with nothing to run is not one this build loads");
+    let (_directory, path) =
+        planted(r#"{ "mcp": { "docs": { "type": "local", "command": [] } } }"#);
+
+    let error =
+        decode(&path).expect_err("an entry with nothing to run is not one this build loads");
 
     assert!(
         format!("{error}").contains(FIXTURE),
         "the refusal names the file that said it: {error}"
+    );
+}
+
+/// And the case that was **not** covered while this command had a reader of
+/// its own: a hooks matcher that does not compile.
+///
+/// `McpServer::check` was the only post-decode refusal with a public
+/// authority to call, so a source failing any of the other six translated
+/// cleanly here and was refused at the *next launch* instead — a migration
+/// that reported success and left somebody with a `ganja.toml` their session
+/// declines. Reading through `config::legacy` runs the loader's own seven, so
+/// this is now refused before a byte is translated. The regex is the fixture:
+/// `Edit(` is an unclosed group, which is what a person writing a matcher by
+/// hand actually gets wrong.
+#[test]
+fn a_hooks_matcher_that_does_not_compile_is_refused_before_it_is_translated() {
+    let (_directory, path) = planted(
+        r#"{
+             "hooks": {
+               "PreToolUse": [
+                 {
+                   "matcher": "Edit(",
+                   "hooks": [{ "type": "command", "command": "./check.sh" }]
+                 }
+               ]
+             }
+           }"#,
+    );
+
+    let error = decode(&path).expect_err("a matcher nothing can compile matches nothing");
+
+    let rendered = format!("{error}");
+    assert!(
+        rendered.contains(FIXTURE),
+        "the refusal names the file that said it: {rendered}"
+    );
+    assert!(
+        rendered.contains("matcher"),
+        "and what about it: {rendered}"
     );
 }

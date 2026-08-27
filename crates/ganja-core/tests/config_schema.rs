@@ -9,8 +9,8 @@
 //! - **Code → schema.** [`Config`] and the two MCP shapes are all
 //!   `#[serde(deny_unknown_fields)]`. Feeding the real loader one bogus key
 //!   makes serde's derived `Deserialize` impl report `"unknown field `x`,
-//!   expected one of `a`, `b`, ...`` — [`jsonc_parser::ParseError`] only
-//!   overrides `serde::de::Error::custom`, so that enumeration is serde's own
+//!   expected one of `a`, `b`, ...`` — `toml::de::Error` only overrides
+//!   `serde::de::Error::custom`, so that enumeration is serde's own
 //!   unmodified wording. [`expected_fields`] parses it back out, and the tests
 //!   below assert that set equals the schema's own `properties` keys — so a
 //!   field added to a struct and forgotten in the schema fails here, not in
@@ -61,9 +61,9 @@ fn schema_keys(schema: &Value, def: Option<&str>) -> BTreeSet<String> {
 /// `"unknown field \`x\`, expected one of \`a\`, \`b\`, ..."` wording —
 /// `OneOf`'s `Display` impl, reached through
 /// `serde::de::Error::unknown_field`'s default implementation, which
-/// [`jsonc_parser::ParseError`] does not override. Panics on a message that
-/// does not contain "expected" at all, since that means the probe below did
-/// not trip the refusal it was written to trip.
+/// `toml::de::Error` does not override. Panics on a message that does not
+/// contain "expected" at all, since that means the probe below did not trip
+/// the refusal it was written to trip.
 fn expected_fields(message: &str) -> BTreeSet<String> {
     let after_expected = message
         .split_once("expected")
@@ -80,7 +80,7 @@ fn expected_fields(message: &str) -> BTreeSet<String> {
 /// discovery would, and returns the parse error's message.
 fn bogus_key_error(project: &Path, text: &str) -> String {
     fs::create_dir_all(project.join(".git")).expect("the fixture repository is creatable");
-    fs::write(project.join("ganja.jsonc"), text).expect("the fixture file is writable");
+    fs::write(project.join("ganja.toml"), text).expect("the fixture file is writable");
 
     let error = Config::load_with(project, &Overrides::default())
         .expect_err("a bogus key is refused by name");
@@ -95,85 +95,109 @@ fn bogus_key_error(project: &Path, text: &str) -> String {
 /// `an_mcp_entry_carries_everything_the_two_shapes_hold` gives the loader's
 /// own suite, reused here so the schema is checked against a document that
 /// actually exercises it rather than an empty one.
-const KITCHEN_SINK: &str = r#"{
-  "$schema": "./schema/ganja-config.schema.json",
-  "model": "anthropic/claude-sonnet-5",
-  "small_model": "anthropic/claude-haiku-4.5",
-  "default_provider": "anthropic",
-  "default_agent": "build",
-  "effort": "high",
-  "agent": {
-    "plan": { "description": "plans", "mode": "primary" }
-  },
-  "agents": { "concurrency": 2 },
-  "teammates": { "shim_turn_timeout": 900, "shell": "/bin/zsh -f", "pane_share": 60 },
-  "permission": { "bash": "ask" },
-  "instructions": ["AGENTS.md"],
-  "theme": "dracula",
-  "theme_mode": "dark",
-  "keybinds": { "redraw": "f6" },
-  "shell": "/bin/zsh",
-  "command": {
-    "commit": { "template": "commit $ARGUMENTS", "description": "commit" }
-  },
-  "mcp": {
-    "fs": {
-      "type": "local",
-      "command": ["bun", "x", "server"],
-      "cwd": "tools",
-      "environment": { "TOKEN": "x" },
-      "timeout": 1234,
-      "output_limit": 4096
-    },
-    "hub": {
-      "type": "remote",
-      "url": "https://mcp.example/mcp",
-      "headers": { "Authorization": "Bearer x" },
-      "enabled": false,
-      "timeout": 5000,
-      "output_limit": 8192
-    },
-    "auth": {
-      "type": "remote",
-      "url": "https://oauth.example/mcp",
-      "oauth": {}
-    }
-  },
-  "hooks": {
-    "PreToolUse": [
-      { "matcher": "Edit", "hooks": [{ "type": "command", "command": "./check.sh", "timeout": 5 }] }
-    ]
-  },
-  "lsp": { "rust": { "command": ["rust-analyzer"] } },
-  "provider": {
-    "local-llama": {
-      "dialect": "openai-chat-completions",
-      "base_url": "http://127.0.0.1:8080",
-      "key_env": "LOCAL_LLAMA_KEY",
-      "headers": { "X-Custom": "1" }
-    },
-    "proxy": {
-      "dialect": "openai-responses",
-      "base_url": "https://responses.example/v1"
-    }
-  },
-  "webfetch": { "allow_private": true },
-  "skills": { "paths": ["~/.claude/skills"], "urls": ["https://example/skills"] },
-  "memory": true,
-  "snapshot": false,
-  "tui": {
-    "notifications": ["turn-complete", "approval-requested"],
-    "notification_method": "bel",
-    "statusline": {
-      "elements": ["git", "model", "context", "rate", "held", "tokens", "session", "cwd", "todos"],
-      "max_width": 160,
-      "detail": true
-    }
-  },
-  "openrouter": {
-    "server_tools": ["web_search", "datetime"]
-  }
-}"#;
+const KITCHEN_SINK: &str = r#"
+"$schema" = "./schema/ganja-config.schema.json"
+model = "anthropic/claude-sonnet-5"
+small_model = "anthropic/claude-haiku-4.5"
+default_provider = "anthropic"
+default_agent = "build"
+effort = "high"
+instructions = ["AGENTS.md"]
+theme = "dracula"
+theme_mode = "dark"
+shell = "/bin/zsh"
+memory = true
+snapshot = false
+
+[agent.plan]
+description = "plans"
+mode = "primary"
+
+[agents]
+concurrency = 2
+
+[teammates]
+shim_turn_timeout = 900
+shell = "/bin/zsh -f"
+pane_share = 60
+
+[permission]
+bash = "ask"
+
+[keybinds]
+redraw = "f6"
+
+[command.commit]
+template = "commit $ARGUMENTS"
+description = "commit"
+
+[mcp.fs]
+type = "local"
+command = ["bun", "x", "server"]
+cwd = "tools"
+environment = { TOKEN = "x" }
+timeout = 1234
+output_limit = 4096
+
+[mcp.hub]
+type = "remote"
+url = "https://mcp.example/mcp"
+headers = { Authorization = "Bearer x" }
+enabled = false
+timeout = 5000
+output_limit = 8192
+
+[mcp.auth]
+type = "remote"
+url = "https://oauth.example/mcp"
+oauth = {}
+
+[[hooks.PreToolUse]]
+matcher = "Edit"
+hooks = [{ type = "command", command = "./check.sh", timeout = 5 }]
+
+[lsp.rust]
+command = ["rust-analyzer"]
+
+[provider.local-llama]
+dialect = "openai-chat-completions"
+base_url = "http://127.0.0.1:8080"
+key_env = "LOCAL_LLAMA_KEY"
+headers = { X-Custom = "1" }
+
+[provider.proxy]
+dialect = "openai-responses"
+base_url = "https://responses.example/v1"
+
+[webfetch]
+allow_private = true
+
+[skills]
+paths = ["~/.claude/skills"]
+urls = ["https://example/skills"]
+
+[tui]
+notifications = ["turn-complete", "approval-requested"]
+notification_method = "bel"
+
+[tui.statusline]
+elements = ["git", "model", "context", "rate", "held", "tokens", "session", "cwd", "todos"]
+max_width = 160
+detail = true
+
+[openrouter]
+server_tools = ["web_search", "datetime"]
+"#;
+
+/// [`KITCHEN_SINK`] as the JSON value a JSON Schema validator takes.
+///
+/// The document is written once, in the format the loader reads, and the
+/// schema-only half of this file converts it rather than keeping a second
+/// copy: two hand-maintained spellings of "every key this build understands"
+/// would drift, which is the exact failure this binary exists to catch.
+fn kitchen_sink() -> Value {
+    toml::from_str(KITCHEN_SINK).expect("the fixture is a valid config document")
+}
 
 /// The single environment-mutating test in this binary: everything that
 /// needs the real loader (and therefore `Config::load_with`'s global-tier
@@ -216,7 +240,7 @@ fn the_schema_matches_what_the_real_loader_accepts() {
 /// exactly the schema's top-level `properties` — no more (a stale schema key
 /// nothing loads any more), no fewer (a struct field the schema forgot).
 fn the_loader_names_exactly_the_top_level_keys_the_schema_lists(project: &Path, schema: &Value) {
-    let message = bogus_key_error(project, r#"{"zzz_schema_probe": 1}"#);
+    let message = bogus_key_error(project, "zzz_schema_probe = 1\n");
     let loader_fields = expected_fields(&message);
     let schema_fields = schema_keys(schema, None);
 
@@ -233,7 +257,7 @@ fn the_loader_names_exactly_the_top_level_keys_the_schema_lists(project: &Path, 
 fn the_loader_names_exactly_the_fields_a_local_mcp_entry_accepts(project: &Path, schema: &Value) {
     let message = bogus_key_error(
         project,
-        r#"{"mcp": {"fs": {"type": "local", "command": ["x"], "zzz_schema_probe": 1}}}"#,
+        "[mcp.fs]\ntype = \"local\"\ncommand = [\"x\"]\nzzz_schema_probe = 1\n",
     );
     let loader_fields = expected_fields(&message);
     // `type` is the enum's internal tag: serde strips it from the map before
@@ -260,7 +284,7 @@ fn the_loader_names_exactly_the_fields_a_local_mcp_entry_accepts(project: &Path,
 fn the_loader_names_exactly_the_fields_a_remote_mcp_entry_accepts(project: &Path, schema: &Value) {
     let message = bogus_key_error(
         project,
-        r#"{"mcp": {"hub": {"type": "remote", "url": "https://x/mcp", "zzz_schema_probe": 1}}}"#,
+        "[mcp.hub]\ntype = \"remote\"\nurl = \"https://x/mcp\"\nzzz_schema_probe = 1\n",
     );
     let loader_fields = expected_fields(&message);
     let schema_fields: BTreeSet<String> = schema_keys(schema, Some("McpRemote"))
@@ -281,7 +305,7 @@ fn the_loader_names_exactly_the_fields_a_remote_mcp_entry_accepts(project: &Path
 /// which checks the same text against the schema alone.
 fn the_kitchen_sink_document_loads_through_the_real_loader(project: &Path) {
     fs::create_dir_all(project.join(".git")).expect("the fixture repository is creatable");
-    fs::write(project.join("ganja.jsonc"), KITCHEN_SINK).expect("the fixture file is writable");
+    fs::write(project.join("ganja.toml"), KITCHEN_SINK).expect("the fixture file is writable");
 
     Config::load_with(project, &Overrides::default())
         .expect("a document naming every key this build understands loads");
@@ -296,8 +320,8 @@ fn the_kitchen_sink_document_loads_through_the_real_loader(project: &Path) {
 fn the_loader_refuses_a_non_loopback_mcp_url_that_the_schema_alone_would_accept(project: &Path) {
     fs::create_dir_all(project.join(".git")).expect("the fixture repository is creatable");
     fs::write(
-        project.join("ganja.jsonc"),
-        r#"{"mcp": {"hub": {"type": "remote", "url": "http://example.com/mcp"}}}"#,
+        project.join("ganja.toml"),
+        "[mcp.hub]\ntype = \"remote\"\nurl = \"http://example.com/mcp\"\n",
     )
     .expect("the fixture file is writable");
 
@@ -325,7 +349,7 @@ fn the_schema_is_a_valid_draft_2020_12_document() {
 #[test]
 fn a_kitchen_sink_document_also_validates_against_the_schema() {
     let validator = jsonschema::validator_for(&schema()).expect("the schema compiles");
-    let instance: Value = serde_json::from_str(KITCHEN_SINK).expect("the fixture is valid JSON");
+    let instance: Value = kitchen_sink();
 
     let errors: Vec<String> = validator
         .iter_errors(&instance)
@@ -343,7 +367,7 @@ fn a_kitchen_sink_document_also_validates_against_the_schema() {
 #[test]
 fn the_schema_refuses_what_it_has_a_keyword_for() {
     let validator = jsonschema::validator_for(&schema()).expect("the schema compiles");
-    let mut sink: Value = serde_json::from_str(KITCHEN_SINK).expect("the fixture is valid JSON");
+    let mut sink: Value = kitchen_sink();
 
     sink["mcp"]["fs"]["output_limit"] = json!(0);
     assert!(
@@ -352,7 +376,7 @@ fn the_schema_refuses_what_it_has_a_keyword_for() {
          minimum should refuse it too"
     );
 
-    let mut sink: Value = serde_json::from_str(KITCHEN_SINK).expect("the fixture is valid JSON");
+    let mut sink: Value = kitchen_sink();
     sink["zzz_schema_probe"] = json!(1);
     assert!(
         !validator.is_valid(&sink),
@@ -360,7 +384,7 @@ fn the_schema_refuses_what_it_has_a_keyword_for() {
          should refuse it too"
     );
 
-    let mut sink: Value = serde_json::from_str(KITCHEN_SINK).expect("the fixture is valid JSON");
+    let mut sink: Value = kitchen_sink();
     sink["mcp"]["auth"]["oauth"]["scope"] = json!("read");
     assert!(
         !validator.is_valid(&sink),
@@ -368,7 +392,7 @@ fn the_schema_refuses_what_it_has_a_keyword_for() {
          additionalProperties: false on McpOauth should refuse an extra key too"
     );
 
-    let mut sink: Value = serde_json::from_str(KITCHEN_SINK).expect("the fixture is valid JSON");
+    let mut sink: Value = kitchen_sink();
     sink["provider"]["proxy"]["dialect"] = json!("gemini");
     assert!(
         !validator.is_valid(&sink),
@@ -376,7 +400,7 @@ fn the_schema_refuses_what_it_has_a_keyword_for() {
          that exist; the schema's closed Dialect enum should refuse it too"
     );
 
-    let mut sink: Value = serde_json::from_str(KITCHEN_SINK).expect("the fixture is valid JSON");
+    let mut sink: Value = kitchen_sink();
     sink["tui"]["zzz_schema_probe"] = json!(1);
     assert!(
         !validator.is_valid(&sink),
@@ -384,7 +408,7 @@ fn the_schema_refuses_what_it_has_a_keyword_for() {
          additionalProperties: false on TuiConfig should refuse an unknown key too"
     );
 
-    let mut sink: Value = serde_json::from_str(KITCHEN_SINK).expect("the fixture is valid JSON");
+    let mut sink: Value = kitchen_sink();
     sink["tui"]["notifications"] = json!(["turn-done"]);
     assert!(
         !validator.is_valid(&sink),
@@ -392,7 +416,7 @@ fn the_schema_refuses_what_it_has_a_keyword_for() {
          schema's closed NotificationEvent enum should refuse it too"
     );
 
-    let mut sink: Value = serde_json::from_str(KITCHEN_SINK).expect("the fixture is valid JSON");
+    let mut sink: Value = kitchen_sink();
     sink["tui"]["notification_method"] = json!("toast");
     assert!(
         !validator.is_valid(&sink),
@@ -400,7 +424,7 @@ fn the_schema_refuses_what_it_has_a_keyword_for() {
          closed NotificationMethod enum should refuse it too"
     );
 
-    let mut sink: Value = serde_json::from_str(KITCHEN_SINK).expect("the fixture is valid JSON");
+    let mut sink: Value = kitchen_sink();
     sink["tui"]["statusline"]["zzz_schema_probe"] = json!(1);
     assert!(
         !validator.is_valid(&sink),
@@ -408,7 +432,7 @@ fn the_schema_refuses_what_it_has_a_keyword_for() {
          additionalProperties: false on StatuslineConfig should refuse an unknown key too"
     );
 
-    let mut sink: Value = serde_json::from_str(KITCHEN_SINK).expect("the fixture is valid JSON");
+    let mut sink: Value = kitchen_sink();
     sink["tui"]["statusline"]["elements"] = json!(["contextbar"]);
     assert!(
         !validator.is_valid(&sink),
@@ -420,8 +444,7 @@ fn the_schema_refuses_what_it_has_a_keyword_for() {
     // rides the kitchen sink above; these pin that widening the enum by one
     // name widened it by exactly one.
     for near_miss in ["ratelimit", "rate-limit", "rates"] {
-        let mut sink: Value =
-            serde_json::from_str(KITCHEN_SINK).expect("the fixture is valid JSON");
+        let mut sink: Value = kitchen_sink();
         sink["tui"]["statusline"]["elements"] = json!([near_miss]);
         assert!(
             !validator.is_valid(&sink),
@@ -434,8 +457,7 @@ fn the_schema_refuses_what_it_has_a_keyword_for() {
     // itself rides the kitchen sink above; these pin that this widening too
     // was by exactly one name.
     for near_miss in ["hold", "helds", "held-count"] {
-        let mut sink: Value =
-            serde_json::from_str(KITCHEN_SINK).expect("the fixture is valid JSON");
+        let mut sink: Value = kitchen_sink();
         sink["tui"]["statusline"]["elements"] = json!([near_miss]);
         assert!(
             !validator.is_valid(&sink),
@@ -453,8 +475,7 @@ fn the_boolean_notification_spelling_also_validates() {
     let validator = jsonschema::validator_for(&schema()).expect("the schema compiles");
 
     for spelling in [json!(true), json!(false)] {
-        let mut sink: Value =
-            serde_json::from_str(KITCHEN_SINK).expect("the fixture is valid JSON");
+        let mut sink: Value = kitchen_sink();
         sink["tui"]["notifications"] = spelling.clone();
         assert!(
             validator.is_valid(&sink),

@@ -439,7 +439,7 @@ enum Config {
     /// Translate an opencode config into a ganja one.
     ///
     /// Config keys only, in one direction: what maps is written to a new
-    /// `ganja.json`, and everything else is listed with the reason it was left
+    /// `ganja.toml`, and everything else is listed with the reason it was left
     /// out. An API key is never written, and `{env:…}`/`{file:…}` is never
     /// expanded.
     ImportOpencode {
@@ -1150,7 +1150,7 @@ async fn mcp_command(action: Option<McpAction>) -> Result<()> {
     let config = ganja_core::config::Config::load(&cwd).context("failed to read the config")?;
 
     if config.mcp.is_empty() {
-        println!("no MCP servers configured; add one under `mcp` in this project's ganja.json");
+        println!("no MCP servers configured; add one under `mcp` in this project's ganja.toml");
 
         return Ok(());
     }

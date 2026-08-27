@@ -565,12 +565,12 @@ fn a_name_that_needs_quoting_round_trips_through_the_loader() {
     );
 }
 
-/// The format ganja has left. Editing one would land an entry in a file its
-/// author still has to convert, so the refusal names the file and the command
-/// that converts it — and it fires only where there is no `ganja.toml` to
-/// edit instead.
+/// The format ganja has left. Editing a directory that holds one would land an
+/// entry in a tree the next launch refuses, so the refusal names the file and
+/// the command that converts it — and it fires whether or not a `ganja.toml`
+/// is sitting beside it (**R-15**).
 #[test]
-fn a_tier_holding_only_the_older_config_is_refused_by_name() {
+fn a_tier_holding_the_older_config_is_refused_by_name() {
     let home = Home::new();
     let legacy = home.project().join("ganja.jsonc");
     plant(&legacy, "{\n  \"mcp\": {}\n}\n");
@@ -602,9 +602,31 @@ fn a_tier_holding_only_the_older_config_is_refused_by_name() {
         .stderr(predicate::str::contains(global.display().to_string()))
         .stderr(predicate::str::contains("ganja config migrate"));
 
-    // And a `ganja.toml` beside one is the file that is edited: what the
-    // legacy file's presence then means is the loader's sentence to say.
+    // And a `ganja.toml` beside one does **not** settle it (**R-15**). This
+    // used to be the case that succeeded, back when the loader still read the
+    // legacy file and the worst a write bought was an entry to convert later.
+    // The loader refuses such a directory now, so the edit would have printed
+    // a success over a tree the very next launch declines — the one outcome
+    // worse than refusing.
     plant(&home.project_config(), "# converted\n");
+    let beside = fs::read_to_string(home.project_config()).expect("the fixture exists");
+
+    home.ganja()
+        .args(["mcp", "add", "docs", "--", "bun"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(legacy.display().to_string()))
+        .stderr(predicate::str::contains("ganja config migrate"));
+
+    assert_eq!(
+        fs::read_to_string(home.project_config()).expect("the fixture survives"),
+        beside,
+        "the refusal did not edit the ganja.toml beside the file it refused"
+    );
+
+    // Converting is what unblocks it, which is what the refusal told them to
+    // do: with the legacy file gone, the same invocation lands.
+    fs::remove_file(&legacy).expect("the source is removable");
     home.ganja()
         .args(["mcp", "add", "docs", "--", "bun"])
         .assert()

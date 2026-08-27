@@ -5,7 +5,7 @@
 //! by the variable its entry named, carrying the headers its entry declared
 //! and none of the ones a builtin provider would have added. Everything about
 //! that comes off config, so a mock of the provider would prove nothing — what
-//! is under test is the path from a `ganja.jsonc` to the bytes on a socket.
+//! is under test is the path from a `ganja.toml` to the bytes on a socket.
 //!
 //! The turn is driven through the ordinary [`Engine`], not through
 //! `Provider::stream` directly, because a configured provider has to be

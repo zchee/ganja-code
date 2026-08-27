@@ -11,11 +11,10 @@
 //! directory the global `AGENTS.md` and `skills/` sit in, resolved once by
 //! `config::config_home`.
 //!
-//! Written in TOML, where a list of groups is an **array of tables**. The
-//! shape a `hooks` block takes is the one thing about it a person migrating
-//! has to re-learn, so at least one tier proves it end to end rather than
-//! only in the loader's own unit tests; `config_hooks_tiers.rs` then proves a
-//! tier in each dialect stacks against the other.
+//! A list of groups is an **array of tables**, which is the one thing about a
+//! `hooks` block a person migrating has to re-learn — so at least one tier
+//! proves that shape end to end rather than only in the loader's own unit
+//! tests; `config_hooks_tiers.rs` then proves two tiers stack.
 
 use std::{env, fs};
 

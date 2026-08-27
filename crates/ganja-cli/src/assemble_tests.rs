@@ -31,8 +31,8 @@ fn the_configured_cap_reaches_an_assembled_engine() {
         std::env::remove_var("GANJA_MODEL");
     }
     std::fs::write(
-        project.path().join("ganja.json"),
-        r#"{"agents": {"concurrency": 3}}"#,
+        project.path().join("ganja.toml"),
+        "[agents]\nconcurrency = 3\n",
     )
     .expect("the fixture config is writable");
 

@@ -34,16 +34,12 @@
 //!   equality *before* anything is written, and a mismatch refuses. That is
 //!   the belt to [`orders`]' suspenders: if the inline rule ever stopped being
 //!   enough, or a shape translated wrong, this refuses rather than writing a
-//!   file that means something else. *One* of the refusals the loader makes
-//!   after decoding is made here too, on the legacy side — `McpServer::check`,
-//!   the only one of its seven whose authority is public. The other six (the
-//!   hooks, LSP, provider, agents, teammates and openrouter checks) are
-//!   private to `ganja_core::config`, so a source failing one of those still
-//!   translates cleanly and is refused at the *next launch* rather than here:
-//!   a legacy file whose hooks matcher does not compile is the case to know
-//!   about. Mirroring the six is not the fix and none is spelled here; they
-//!   arrive when this read moves onto `config::legacy`, which runs the
-//!   loader's own seven in-crate.
+//!   file that means something else. The refusals the loader makes *after*
+//!   decoding are made here too, all seven of them, because the source is read
+//!   through `ganja_core::config::legacy` — the loader's own reader for the
+//!   old dialect, which runs them in-crate. So a legacy file whose hooks
+//!   matcher does not compile is refused before a byte is translated, rather
+//!   than translating cleanly and failing at the next launch.
 //! * **Comments do not survive, and are counted.** A JSON value carries no
 //!   comments, so the translation cannot carry them either. Every line that
 //!   held one is listed by number in a warning: knowing three lines were lost
@@ -56,8 +52,9 @@
 //! migration instead: dropping it would shorten a list, and there is no
 //! spelling that keeps it.
 //!
-//! The legacy read below is the last one outside `import.rs`; lane L1b folds
-//! it into a `ganja_core::config::legacy` module that owns the old dialect.
+//! Reading is `ganja_core::config::legacy`'s; what is here is the translation
+//! and the report. The other reader of that dialect is `import.rs`, which
+//! reads upstream's files rather than ganja's own.
 
 use std::{
     fs,
@@ -66,7 +63,7 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use ganja_core::config::Config;
+use ganja_core::config::{Config, LEGACY_FILES, legacy};
 use ganja_permission::Project;
 use jsonc_parser::ast::{Object, Value as Ast};
 use tempfile::NamedTempFile;
@@ -74,11 +71,6 @@ use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, Val
 
 /// What this writes, beside whatever it read.
 const DESTINATION: &str = "ganja.toml";
-
-/// The two names this reads, in the order a directory is probed for them —
-/// which is the loader's own preference between them, so a directory holding
-/// both is migrated from the file that currently wins.
-const LEGACY_FILES: [&str; 2] = ["ganja.jsonc", "ganja.json"];
 
 /// Left column of both sections of the table.
 const HEADER: &str = "KEY";
@@ -137,9 +129,9 @@ pub fn migrate(file: Option<PathBuf>, global: bool, dry_run: bool) -> Result<()>
         );
     }
 
+    let decoded = decode(&source)?;
     let text = fs::read_to_string(&source)
         .with_context(|| format!("{} could not be read", source.display()))?;
-    let legacy = decode(&source, &text)?;
     let (document, report) = translate(&source, &text)?;
 
     print_table(&report);
@@ -157,7 +149,7 @@ pub fn migrate(file: Option<PathBuf>, global: bool, dry_run: bool) -> Result<()>
             destination.display()
         )
     })?;
-    if migrated != legacy {
+    if migrated != decoded {
         bail!(
             "{} does not read back as {} does, so nothing was written{}",
             destination.display(),
@@ -174,9 +166,10 @@ pub fn migrate(file: Option<PathBuf>, global: bool, dry_run: bool) -> Result<()>
     }
 
     println!(
-        "{} was left exactly as it is. This build reads {DESTINATION} first, so the \
-         legacy file beside it no longer decides anything — remove it once you are \
-         satisfied with what was written.",
+        "{} was left exactly as it is, so you can compare it against what was \
+         written — but this build refuses to load a directory holding one, so \
+         remove it once you are satisfied and the next launch will read \
+         {DESTINATION}.",
         source.display()
     );
     remaining(&source, &cwd);
@@ -258,11 +251,11 @@ fn nearest(cwd: &Path) -> Option<PathBuf> {
 
 /// Names every *other* legacy file this build's discovery can still see.
 ///
-/// The countermeasure to the pre-mortem's second failure: the loader's refusal
-/// will name one file, a migration fixes that one, and the next launch names
-/// the next — a user who was never told the others exist concludes the command
-/// is broken. One run tells the whole story instead. Silent when there is
-/// nothing else to say.
+/// The countermeasure to the pre-mortem's second failure: the loader refuses
+/// one file by name, a migration fixes that one, and the next launch names the
+/// next — a user who was never told the others exist concludes the command is
+/// broken. One run tells the whole story instead. Silent when there is nothing
+/// else to say.
 fn remaining(source: &Path, cwd: &Path) {
     let mut found: Vec<PathBuf> = Vec::new();
     let mut add = |path: PathBuf| {
@@ -310,7 +303,7 @@ fn remaining(source: &Path, cwd: &Path) {
     }
 
     println!(
-        "still legacy, and still read by this build: {}",
+        "still legacy, and still refused by this build: {}",
         found
             .iter()
             .map(|path| path.display().to_string())
@@ -322,33 +315,13 @@ fn remaining(source: &Path, cwd: &Path) {
 
 /// The source as this build's loader decodes it.
 ///
-/// Through the loader's own dialect, so a file only a looser parser accepts is
-/// refused here rather than translated into a TOML that will not load either.
-/// The `Option` is what makes an empty file, or one holding nothing but
-/// comments, an empty config rather than a type error about `null`.
-///
-/// One post-decode refusal travels with it, and only one: the loader runs
-/// `McpServer::check` over every entry after decoding, so a source that
-/// decodes and fails *that* is one this build refuses at launch —
-/// `import.rs` calls the same method for the same reason, and calling it
-/// beats spelling the rule a third time. The loader's six other post-decode
-/// checks are private to it and are **not** applied here; see the module doc
-/// for what that costs and where it is repaid.
-fn decode(path: &Path, text: &str) -> Result<Config> {
-    let config = jsonc_parser::parse_to_serde_value::<Option<Config>>(
-        text,
-        &ganja_core::config::parse_options(),
-    )
-    .map_err(|error| anyhow!("{}: {error}", path.display()))?
-    .unwrap_or_default();
-
-    for (name, server) in &config.mcp {
-        server
-            .check(name)
-            .map_err(|message| anyhow!("{}: {message}", path.display()))?;
-    }
-
-    Ok(config)
+/// One line, and the line is the point: `ganja_core::config::legacy` is the
+/// loader's own reader for the old dialect, so a file only a looser parser
+/// accepts is refused here rather than translated into a TOML that will not
+/// load either — and every post-decode refusal the loader makes is made here,
+/// on the source, before anything is translated.
+fn decode(path: &Path) -> Result<Config> {
+    Ok(legacy::read(path)?)
 }
 
 /// The source as a TOML document, in the order the source wrote it.

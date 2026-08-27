@@ -110,6 +110,12 @@ fn config_home(home: &TempDir) -> std::path::PathBuf {
 /// refuses to write a file that does not read back as its source — that check
 /// is what a zero exit code above means — and this is the independent half:
 /// a second process, no shared state, reading the file off the disk.
+///
+/// The source is removed before that second process runs, because that is the
+/// workflow the command's own closing line describes: this build refuses a
+/// directory holding a legacy file at all, so "the written file loads" is a
+/// claim about the tree somebody has after they finish the migration, not
+/// during it.
 #[test]
 fn the_written_file_is_one_the_real_loader_reads() {
     let home = temporary();
@@ -129,6 +135,7 @@ fn the_written_file_is_one_the_real_loader_reads() {
         "document order, not sorted order:\n{written}"
     );
 
+    fs::remove_file(project.path().join("ganja.jsonc")).expect("the source is removable");
     ganja(&home, project.path())
         .arg("skills")
         .assert()
@@ -241,7 +248,7 @@ fn the_closing_line_names_the_other_legacy_files_the_walk_can_still_see() {
 
     migrate(&home, project.path()).assert().success().stdout(
         predicate::str::contains(format!(
-            "still legacy, and still read by this build: {}",
+            "still legacy, and still refused by this build: {}",
             global.display()
         ))
         .and(predicate::str::contains("ganja config migrate --file")),
@@ -346,23 +353,56 @@ fn a_project_with_no_legacy_file_says_what_it_looked_for() {
     );
 }
 
-/// A source carrying an MCP entry this build could not start is refused before
-/// it is translated: a `ganja.toml` the next launch declines is exactly the
-/// file this command exists not to produce.
+/// A source this build would refuse to *load* is refused before it is
+/// translated: a `ganja.toml` the next launch declines is exactly the file
+/// this command exists not to produce.
 ///
-/// The MCP case and no other — see `src/migrate.rs`'s module doc for which of
-/// the loader's post-decode checks reach this command and which do not.
+/// Two cases, and the pair is the point. The MCP entry is the one that was
+/// always caught — `McpServer::check` has a public authority anyone can call,
+/// so this command could make that refusal even while it read the legacy
+/// dialect itself. The hooks matcher is the one that was not: the other six
+/// post-decode checks are private to the loader, so a source failing any of
+/// them translated cleanly here and was declined at the *next* launch
+/// instead. Reading through `config::legacy` runs the loader's own seven, and
+/// a run that reported success over a file the next session refuses is what
+/// that closed.
 #[test]
-fn an_mcp_entry_the_loader_would_refuse_is_refused_before_anything_is_written() {
-    let home = temporary();
-    let project = temporary();
-    checkout(project.path());
-    plant(
-        &project.path().join("ganja.jsonc"),
-        r#"{ "mcp": { "docs": { "type": "local", "command": [] } } }"#,
-    );
+fn a_source_the_loader_would_refuse_is_refused_before_anything_is_written() {
+    for (named, fixture) in [
+        (
+            "an mcp entry with nothing to run",
+            r#"{ "mcp": { "docs": { "type": "local", "command": [] } } }"#,
+        ),
+        (
+            "a hooks matcher that does not compile",
+            r#"{
+                 "hooks": {
+                   "PreToolUse": [
+                     {
+                       "matcher": "Edit(",
+                       "hooks": [{ "type": "command", "command": "./check.sh" }]
+                     }
+                   ]
+                 }
+               }"#,
+        ),
+    ] {
+        let home = temporary();
+        let project = temporary();
+        checkout(project.path());
+        let source = project.path().join("ganja.jsonc");
+        plant(&source, fixture);
 
-    migrate(&home, project.path()).assert().failure();
+        migrate(&home, project.path())
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains(
+                resolved(&source).display().to_string(),
+            ));
 
-    assert!(!project.path().join("ganja.toml").exists());
+        assert!(
+            !project.path().join("ganja.toml").exists(),
+            "{named}: nothing is written for a source that would not load"
+        );
+    }
 }

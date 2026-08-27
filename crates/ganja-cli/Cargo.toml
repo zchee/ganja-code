@@ -53,14 +53,14 @@ ganja-tui.workspace = true
 # The daily log rolls on the machine's own civil date. Jiff supplies the
 # system-timezone lookup without the unsafe unix-only `localtime_r` path.
 jiff.workspace = true
-# The importer reads someone else's config, which is JSONC whatever its
-# extension says, and it has to see the keys in document order — permission
-# rules are evaluated last-match-wins, so a reader that sorted them would change
-# which rule decides. The AST preserves that order; `serde` is what then proves
-# the file this writes is one `ganja_core::config::Config` can read back. The
-# workspace entry's `cst` feature is the other half of the same need: `ganja mcp
-# add` edits one property of a file somebody wrote by hand, and the CST is what
-# puts the entry back without printing that file's comments away.
+# Two commands here read a file written in the dialect ganja's own config has
+# left: `import-opencode` reads upstream's, and `migrate` translates a legacy
+# ganja one. Both need the keys in document order — permission rules are
+# evaluated last-match-wins, so a reader that sorted them would change which
+# rule decides — and the AST is what preserves it. `serde` is the other half:
+# it decodes such a file into `ganja_core::config::Config`, which is what makes
+# "the same config, both spellings" a comparison rather than a claim. Writing
+# is `toml_edit`'s now, on both paths.
 jsonc-parser = { workspace = true, features = ["serde"] }
 # Only for the raw-mode read that keeps a typed API key off the screen, through
 # the same crossterm instance the UI drives so the two cannot disagree about

@@ -106,17 +106,10 @@ impl Fixture {
         // The hook reads its envelope so the engine's write never sees a
         // closed pipe, then appends one line: the turn count, for `Ganja`.
         let ledger = project.path().join(LEDGER);
+        let record = format!("{{ cat >/dev/null; echo stop; }} >> {}", ledger.display());
         fs::write(
-            project.path().join("ganja.jsonc"),
-            serde_json::json!({
-                "hooks": {
-                    "Stop": [{ "hooks": [{
-                        "type": "command",
-                        "command": format!("{{ cat >/dev/null; echo stop; }} >> {}", ledger.display()),
-                    }] }],
-                }
-            })
-            .to_string(),
+            project.path().join("ganja.toml"),
+            format!("[[hooks.Stop]]\nhooks = [{{ type = \"command\", command = {record:?} }}]\n"),
         )
         .expect("the project config is writable");
         let home = TempDir::new().expect("a temporary directory is creatable");

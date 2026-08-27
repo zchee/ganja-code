@@ -401,8 +401,8 @@ fn a_configured_pane_shell_still_execs_the_launch_line() {
     let fixture = Fixture::new();
     fs::create_dir_all(fixture.config_home()).expect("the config home is creatable");
     fs::write(
-        fixture.config_home().join("ganja.jsonc"),
-        r#"{ "teammates": { "shell": "/bin/bash" } }"#,
+        fixture.config_home().join("ganja.toml"),
+        "[teammates]\nshell = \"/bin/bash\"\n",
     )
     .expect("the config is writable");
     let tmux = Tmux::start(&fixture.server_env(), WITHHELD);

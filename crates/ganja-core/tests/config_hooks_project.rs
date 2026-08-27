@@ -3,17 +3,12 @@
 //! The second of the three tier binaries; see `config_hooks_global.rs` for why
 //! they are three.
 //!
-//! The project file here is `<project root>/ganja.jsonc` — the file the
+//! The project file here is `<project root>/ganja.toml` — the file the
 //! ancestor walk in `config::project_files` finds, the same one `model` and
 //! `permission` are written in. There is deliberately **no**
-//! `.ganja/ganja.jsonc`: the `.ganja/` directory holds what a project *gives*
+//! `.ganja/ganja.toml`: the `.ganja/` directory holds what a project *gives*
 //! ganja (its skills), and the config file has always sat at the root beside
 //! the rest of a checkout's configuration.
-//!
-//! The legacy name is what this one keeps, on purpose: `config_hooks_global.rs`
-//! plants the same block as TOML, so between the three binaries a `hooks` block
-//! is proved from each tier and in each dialect the loader still reads. The
-//! name here changes when the loader stops reading it.
 
 use std::{env, fs};
 
@@ -34,12 +29,11 @@ fn hooks_written_in_the_project_file_are_the_sessions_hooks() {
     fs::create_dir_all(&global).expect("the fixture config directory is creatable");
     fs::create_dir_all(project.join(".git")).expect("the fixture repository is creatable");
     fs::write(
-        project.join("ganja.jsonc"),
-        r#"{
-          "hooks": {
-            "Stop": [{ "hooks": [{ "type": "command", "command": "project-hook", "timeout": 3 }] }]
-          }
-        }"#,
+        project.join("ganja.toml"),
+        r#"
+          [[hooks.Stop]]
+          hooks = [{ type = "command", command = "project-hook", timeout = 3 }]
+        "#,
     )
     .expect("the fixture file is writable");
 

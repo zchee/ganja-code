@@ -30,7 +30,7 @@ fn ganja(data: &TempDir) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ganja"));
     command.env("XDG_DATA_HOME", data.path());
     // `auth login`/`logout` now validate a name that is not a builtin against
-    // the loaded config, so a developer's global `ganja.jsonc` would otherwise
+    // the loaded config, so a developer's global `ganja.toml` would otherwise
     // decide whether a provider exists here. The data home does for a config
     // home too: what matters is that it is not theirs.
     command.env("XDG_CONFIG_HOME", data.path());
@@ -677,17 +677,18 @@ fn a_provider_this_table_does_not_carry_is_named_rather_than_listed_as_empty() {
 
 /// A config file declaring one endpoint, in a project directory of its own.
 ///
-/// Written as `ganja.json` in a directory carrying a checkout marker, which is
+/// Written as `ganja.toml` in a directory carrying a checkout marker, which is
 /// where discovery's project tier looks — the same file a person would write.
 fn declaring_project() -> TempDir {
     let directory = project();
     fs::write(
-        directory.path().join("ganja.json"),
-        r#"{"provider": {"local-llama": {
-             "dialect": "openai-chat-completions",
-             "base_url": "http://127.0.0.1:11434/v1",
-             "key_env": "LOCAL_LLAMA_KEY"
-           }}}"#,
+        directory.path().join("ganja.toml"),
+        r#"
+          [provider.local-llama]
+          dialect = "openai-chat-completions"
+          base_url = "http://127.0.0.1:11434/v1"
+          key_env = "LOCAL_LLAMA_KEY"
+        "#,
     )
     .expect("the config file is writable");
 
@@ -1040,7 +1041,9 @@ fn a_first_run_in_a_fresh_data_home_says_nothing_on_stderr() {
 /// raw mode, or the message is drawn over and lost.
 #[test]
 fn an_unknown_provider_is_refused_before_the_terminal_is_taken_over() {
-    Command::new(env!("CARGO_BIN_EXE_ganja"))
+    let data = TempDir::new().expect("a temporary directory is creatable");
+
+    ganja(&data)
         .env("GANJA_PROVIDER", "definitely-not-a-provider")
         .assert()
         .failure()

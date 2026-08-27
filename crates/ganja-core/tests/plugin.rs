@@ -122,24 +122,24 @@ fn plant_project(project: &Path) {
     fs::create_dir_all(project.join("own-skills")).expect("the fixture tree is creatable");
     plant(
         project,
-        "ganja.jsonc",
-        r#"{
-          "hooks": {
-            "PreToolUse": [
-              {"hooks": [{"type": "command", "command": "config-pre.sh"}]}
-            ]
-          },
-          "agent": {
-            "reviewer": { "description": "the config's reviewer" }
-          },
-          "command": {
-            "full:taken": { "template": "the config's version" }
-          },
-          "lsp": {
-            "go": { "command": ["config-gopls"], "extensions": [".go"] }
-          },
-          "skills": { "paths": ["./own-skills"] }
-        }"#,
+        "ganja.toml",
+        r#"
+          [[hooks.PreToolUse]]
+          hooks = [{ type = "command", command = "config-pre.sh" }]
+
+          [agent.reviewer]
+          description = "the config's reviewer"
+
+          [command."full:taken"]
+          template = "the config's version"
+
+          [lsp.go]
+          command = ["config-gopls"]
+          extensions = [".go"]
+
+          [skills]
+          paths = ["./own-skills"]
+        "#,
     );
 }
 

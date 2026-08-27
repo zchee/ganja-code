@@ -3,23 +3,12 @@
 //! Spec: upstream `packages/opencode/src/config/config.ts` and
 //! `packages/opencode/src/config/paths.ts`.
 //!
-//! The file is `ganja.toml`, the dialect the rest of this tree already speaks.
-//! Two legacy names, `ganja.jsonc` and `ganja.json`, are still read beside it
-//! and still lose to it in the same directory. That second reader is
-//! **temporary**: the plan's Dv-1 splits the format change into expand and
-//! contract, and it exists only until `ganja config migrate` ships and can
-//! answer for the file it refuses. Nothing new should be written against it —
-//! `read` and the `decode` beneath it are where the two paths part.
-//!
-//! One consequence of the window is worth stating, because it is invisible in
-//! the file that loses: a directory holding both **merges** them rather than
-//! ignoring the older one, and `PermissionConfig::merge` keeps a re-specified
-//! tool at the position it already had. The legacy file merges first, so a
-//! tool named in both evaluates where the *legacy* file put it, carrying the
-//! `ganja.toml` rules for it — which matters because evaluation is
-//! last-match-wins. Moving a rule between the two files can therefore change
-//! which rule decides, and only removing the legacy file settles it. The
-//! contract step removes the window, and with it this paragraph.
+//! The file is `ganja.toml`, the dialect the rest of this tree already speaks,
+//! and it is the only one this module reads. The two names it used to go by,
+//! [`LEGACY_FILES`], are refused by path with the command that converts them
+//! — the same refuse-don't-ignore posture an unknown key gets, applied to the
+//! format itself. The old dialect survives in exactly one place, [`legacy`],
+//! which exists for `ganja config migrate` to read what it converts.
 //!
 //! Files are found in three places, and later beats earlier:
 //!
@@ -89,9 +78,8 @@ use crate::{
 pub const CONFIG_ENV: &str = "GANJA_CONFIG";
 
 /// Environment variable naming the **directory** ganja keeps its own things
-/// in, outright: the global `ganja.toml` (and, for the length of the migration
-/// window, `ganja.jsonc`/`ganja.json` beside it), the global `AGENTS.md`, and
-/// the `skills/` folder beneath it.
+/// in, outright: the global `ganja.toml`, the global `AGENTS.md`, and the
+/// `skills/` folder beneath it.
 ///
 /// Distinct from [`CONFIG_ENV`], which names a file. Set, this outranks both
 /// discovered locations unconditionally — see [`config_home`], which is the one
@@ -126,45 +114,32 @@ pub(crate) const PROJECT_DIRECTORY: &str = HOME_DIRECTORY;
 /// nothing when neither is inherited from another tool.
 const SKILLS_SUBDIR: &str = "skills";
 
-/// The config file names, in the order a directory is probed for them.
+/// The config file name, in every tier.
 ///
-/// All that exist are read. The list is reversed before merging, which is what
-/// makes `ganja.toml` win over either legacy name in the same directory, and
-/// the first legacy name win over the second — upstream's `toReversed()`,
-/// whose second effect is that the outermost ancestor merges first so the
-/// closest directory wins.
-///
-/// The two legacy names are here for the migration window only; the module doc
-/// says what ends it.
-const FILES: [&str; 3] = ["ganja.toml", "ganja.jsonc", "ganja.json"];
+/// A list of one, still a list, because the merge order it feeds is upstream's
+/// `toReversed()` and that shape is what makes the outermost ancestor merge
+/// first so the closest directory wins. A second name would have to earn the
+/// dialect that comes with it.
+const FILES: [&str; 1] = ["ganja.toml"];
 
-/// How a config file is parsed.
+/// The names ganja's config used to go by, in the order the loader used to
+/// probe for them.
 ///
-/// Comments and trailing commas are the JSONC dialect upstream accepts, and are
-/// why `.json` is parsed by the same reader. Everything else the crate would
-/// tolerate by default — single quotes, hexadecimal numbers, missing commas,
-/// unquoted keys — is refused, because a file that loads here and nowhere else
-/// is a file that has stopped being JSON.
+/// Not read. Found, they are [`ConfigError::Legacy`] — naming the file and the
+/// command that converts it — because a config file whose author still
+/// believes it applies is exactly what the curated key set already refuses to
+/// let happen one key at a time.
 ///
-/// Public because two more readers of the same files live outside this crate —
-/// `ganja config import-opencode`, which writes one, and `ganja mcp add`,
-/// which edits one in place — and the dialect has to agree in **both**
-/// directions: looser there and they would edit a file the next launch
-/// refuses; stricter and they would refuse to touch a file that loads
-/// perfectly well. They each kept a copy with a doc comment promising to track
-/// this one, which is a promise a compiler cannot keep.
-#[must_use]
-pub fn parse_options() -> jsonc_parser::ParseOptions {
-    jsonc_parser::ParseOptions {
-        allow_comments: true,
-        allow_trailing_commas: true,
-        allow_loose_object_property_names: false,
-        allow_missing_commas: false,
-        allow_single_quoted_strings: false,
-        allow_hexadecimal_numbers: false,
-        allow_unary_plus_numbers: false,
-    }
-}
+/// Public because the two commands that answer for such a file, `ganja config
+/// migrate` and `ganja mcp add`, have to recognise one by the same list rather
+/// than by a second copy of it.
+pub const LEGACY_FILES: [&str; 2] = ["ganja.jsonc", "ganja.json"];
+
+/// The dialect this build has left, and the one reader still allowed to speak
+/// it. Its own module doc says who is left asking.
+pub mod legacy;
+
+pub use legacy::parse_options;
 
 /// A config file could not be used.
 ///
@@ -201,6 +176,24 @@ pub enum ConfigError {
     #[error("{} does not exist", path.display())]
     Missing {
         /// The file that was asked for by name.
+        path: PathBuf,
+    },
+    /// A file in the dialect this build has left ([`LEGACY_FILES`], or a path
+    /// named by [`CONFIG_ENV`] or `--config` that ends in one of their
+    /// extensions).
+    ///
+    /// Refused rather than read, and refused rather than ignored: reading it
+    /// would be two config formats forever, and ignoring it would leave its
+    /// author believing settings apply that do not. The message carries the
+    /// path that triggered it — not the format in general — because the walk
+    /// can see more than one, and the one command that answers for it.
+    #[error(
+        "{} is in the config format this build has left; \
+         run `ganja config migrate` to convert it to ganja.toml",
+        path.display()
+    )]
+    Legacy {
+        /// The file that has to be converted.
         path: PathBuf,
     },
 }
@@ -631,11 +624,18 @@ impl CommandConfig {
 /// run for them.
 ///
 /// Spec: Claude Code's `hooks` block (2.1.x), whose shape this keeps verbatim
-/// so a `.claude/settings.json` block can be pasted into a `ganja.jsonc` and
-/// still mean what it meant (**D456**). The array-of-groups shape is that
-/// spelling: one event maps to a list of `{ matcher, hooks }` objects rather
-/// than to a flat list of commands, because the matcher is a property of the
-/// group and several groups may match one call.
+/// (**D456**). The array-of-groups shape is that spelling: one event maps to a
+/// list of `{ matcher, hooks }` objects rather than to a flat list of
+/// commands, because the matcher is a property of the group and several groups
+/// may match one call.
+///
+/// The shape is kept for migration familiarity — somebody who knows Claude's
+/// block knows this one — but the *paste* it used to allow is gone with the
+/// format, and was traded deliberately rather than lost: `ganja config
+/// import-claude-hooks` reads a `.claude/settings.json`, maps its hooks block
+/// onto a `ganja.toml`, and reports every event, handler type and field it
+/// could not carry. A command that names what it skipped is worth more than a
+/// paste that silently drops what this build has no `hooks` roster for.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HookMatcher {
@@ -1828,8 +1828,9 @@ impl Config {
     /// Returns [`ConfigError`] for a file that exists and cannot be read or
     /// understood, including one naming a key this build does not have — or,
     /// for a project file, one setting `dialog_expiry`, the key the project
-    /// tier may not set (**D523**). A file that is simply absent is not an
-    /// error.
+    /// tier may not set (**D523**). One of [`LEGACY_FILES`] found in any tier
+    /// is [`ConfigError::Legacy`], whether or not a `ganja.toml` sits beside
+    /// it. A file that is simply absent is not an error.
     pub fn load(cwd: &Path) -> Result<Self, ConfigError> {
         Self::load_with(cwd, &Overrides::default())
     }
@@ -1856,7 +1857,7 @@ impl Config {
         // tier that establishes `cross_session_inbound` is knowable while it
         // still is a tier (**D523**): the fold is the same sequential merge
         // either way, split exactly at the global/explicit boundary.
-        let mut config = merge_files(&global_files())?;
+        let mut config = merge_files(&global_files()?)?;
         let mut source = config
             .cross_session_inbound
             .map(|_| ganja_protocol::PolicySource::Global);
@@ -1876,7 +1877,7 @@ impl Config {
         // several and each may tighten further. The source moves only when
         // the value did: a project file that merely agrees with the standing
         // policy did not establish it.
-        for path in project_files(cwd) {
+        for path in project_files(cwd)? {
             if let Some(tier) = read(&path)? {
                 let standing = config.cross_session_inbound;
                 config.merge_project(tier, &path)?;
@@ -2165,9 +2166,8 @@ pub fn model_bound_to<'a>(spec: &'a str, provider_id: &str, named_by: &str) -> O
 }
 
 /// **The** directory ganja keeps its own things in, resolved once for
-/// everything that needs it: the global `ganja.toml` (with the two legacy
-/// names still read beside it for now), the global `AGENTS.md`, and the
-/// `skills/` folder of [`default_skill_dirs`].
+/// everything that needs it: the global `ganja.toml`, the global `AGENTS.md`,
+/// and the `skills/` folder of [`default_skill_dirs`].
 ///
 /// Three places, in this order:
 ///
@@ -2257,14 +2257,14 @@ fn discovered(xdg: PathBuf, dotted: PathBuf) -> PathBuf {
 /// must be merged last. Which name that is, is [`FILES`]' doc to say and not
 /// this one's — a ranking spelled in two places is a ranking that can
 /// disagree with itself.
-fn global_files() -> Vec<PathBuf> {
-    config_home()
-        .map(|dir| {
-            let mut files = existing(&dir);
-            files.reverse();
-            files
-        })
-        .unwrap_or_default()
+fn global_files() -> Result<Vec<PathBuf>, ConfigError> {
+    let Some(dir) = config_home() else {
+        return Ok(Vec::new());
+    };
+    let mut files = existing(&dir)?;
+    files.reverse();
+
+    Ok(files)
 }
 
 /// The one file a flag or [`CONFIG_ENV`] named, if either did. The flag wins:
@@ -2351,7 +2351,7 @@ pub(crate) fn home_dirs(root: &Path, subdir: &str) -> Vec<PathBuf> {
 }
 
 /// Every project-tier file, outermost first so the closest directory wins.
-fn project_files(cwd: &Path) -> Vec<PathBuf> {
+fn project_files(cwd: &Path) -> Result<Vec<PathBuf>, ConfigError> {
     // Canonicalised the same way `Project::resolve` canonicalises its root, or
     // the walk would never recognise the root it is supposed to stop at. The
     // ancestor walk terminates at the filesystem root either way, so the worst
@@ -2361,68 +2361,60 @@ fn project_files(cwd: &Path) -> Vec<PathBuf> {
 
     let mut found = Vec::new();
     for directory in start.ancestors() {
-        found.extend(existing(directory));
+        found.extend(existing(directory)?);
         if directory == stop {
             break;
         }
     }
     found.reverse();
 
-    found
+    Ok(found)
 }
 
-/// The config files that exist in `directory`, in [`FILES`] order.
-fn existing(directory: &Path) -> Vec<PathBuf> {
-    FILES
+/// The config files that exist in `directory`, in [`FILES`] order — or the
+/// refusal a file in the old dialect earns.
+///
+/// The legacy probe runs **first**, and runs whether or not a `ganja.toml` is
+/// sitting beside it. Reading the new file and saying nothing about the old
+/// one would be the ignored-setting failure wearing a different hat: whoever
+/// left a `ganja.jsonc` in a directory believes it is doing something, and the
+/// only honest moment to say otherwise is the launch that would have skipped
+/// it.
+fn existing(directory: &Path) -> Result<Vec<PathBuf>, ConfigError> {
+    if let Some(path) = LEGACY_FILES
+        .iter()
+        .map(|name| directory.join(name))
+        .find(|path| path.is_file())
+    {
+        return Err(ConfigError::Legacy { path });
+    }
+
+    Ok(FILES
         .iter()
         .map(|name| directory.join(name))
         .filter(|path| path.is_file())
-        .collect()
+        .collect())
 }
 
-/// Whether `path` is read as TOML rather than through the legacy reader.
+/// Whether `path` is read as a config file at all, rather than refused as one
+/// in the dialect this build has left.
 ///
-/// Decided by extension rather than by whole file name, because the same
-/// question is asked of two different things: a name discovery found, which is
-/// one of [`FILES`], and a path [`CONFIG_ENV`] or `--config` named, which can
-/// be anything. One rule answers both.
+/// Decided by extension rather than by whole file name, because discovery is
+/// not the only way a path gets here: [`CONFIG_ENV`] and `--config` name one
+/// that can be anything, and a `~/mine.jsonc` deserves the same sentence a
+/// discovered `ganja.jsonc` gets. One rule answers both.
 ///
-/// Anything else — an extension this does not know, or none — goes to the
-/// legacy reader, which is what it did before this file had a second format.
-/// That default is the half the plan's Dv-1 contract step inverts; until then,
-/// changing it here would refuse files that load today without the command
-/// that fixes them existing yet.
+/// An extension this does not know, or none at all, is read as TOML. That is
+/// the direction the default has to fall now that there is one format: a file
+/// somebody named explicitly is a file they want read, and the only way to be
+/// wrong about it is to *look* like the format that is gone.
 fn is_toml(path: &Path) -> bool {
-    path.extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("toml"))
-}
-
-/// Decodes one config file's text, in whichever dialect its name says.
-///
-/// Both arms decode straight into [`Config`] from a reader that sees keys in
-/// document order — `toml::de` walks the parsed document, `jsonc-parser`'s
-/// `serde` feature its token stream. Neither may go through a value type that
-/// sorts: permission rules are evaluated last-match-wins, so the order a
-/// document spelled its keys in is the answer to which rule decides
-/// (`config_tests.rs` pins both arms against the same fixture).
-///
-/// The `Option` on the legacy arm is what makes an empty file, or one holding
-/// nothing but comments, an empty config rather than a type error about
-/// `null`. TOML needs no such wrapper for it — a document is a table, an empty
-/// one has no keys, and every field of [`Config`] is optional or defaulted —
-/// so the two arms agree on the empty file without agreeing on how.
-fn decode(path: &Path, text: &str) -> Result<Config, ConfigError> {
-    let parsed = if is_toml(path) {
-        toml::from_str::<Config>(text).map_err(|error| error.to_string())
-    } else {
-        jsonc_parser::parse_to_serde_value::<Option<Config>>(text, &parse_options())
-            .map(Option::unwrap_or_default)
-            .map_err(|error| error.to_string())
-    };
-
-    parsed.map_err(|message| ConfigError::Parse {
-        path: path.to_owned(),
-        message,
+    !path.extension().is_some_and(|extension| {
+        LEGACY_FILES.iter().any(|name| {
+            Path::new(name)
+                .extension()
+                .is_some_and(|legacy| extension.eq_ignore_ascii_case(legacy))
+        })
     })
 }
 
@@ -2430,8 +2422,21 @@ fn decode(path: &Path, text: &str) -> Result<Config, ConfigError> {
 ///
 /// Absence is checked by reading rather than by asking first: the file may
 /// vanish between the two, and a missing file at this point means the same
-/// thing either way.
+/// thing either way. The dialect is checked before that, because a file that
+/// will be refused for its name is refused whether or not it can be read.
+///
+/// `toml::de` walks the parsed document rather than a re-sorted map, so
+/// [`Config`] is decoded from a reader that sees keys in the order the file
+/// spelled them. That is not a nicety: permission rules are evaluated
+/// last-match-wins, so document order is the answer to which rule decides
+/// (`config_tests.rs` pins it, headers and dotted keys alike).
 fn read(path: &Path) -> Result<Option<Config>, ConfigError> {
+    if !is_toml(path) {
+        return Err(ConfigError::Legacy {
+            path: path.to_owned(),
+        });
+    }
+
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -2443,43 +2448,41 @@ fn read(path: &Path) -> Result<Option<Config>, ConfigError> {
         }
     };
 
-    let config = decode(path, &text)?;
-
-    // Checked per file rather than after the merge, so the complaint names the
-    // file that said it. Merging only ever replaces a whole entry, so every
-    // entry that survives has been through here. Format-independent, all of
-    // them: what they refuse is what a decoded config says, not how it was
-    // spelled, so both arms of `decode` answer for the same rules.
-    check_mcp(&config.mcp).map_err(|message| ConfigError::Parse {
+    let config = toml::from_str::<Config>(&text).map_err(|error| ConfigError::Parse {
         path: path.to_owned(),
-        message,
-    })?;
-    check_lsp(config.lsp.as_ref()).map_err(|message| ConfigError::Parse {
-        path: path.to_owned(),
-        message,
-    })?;
-    check_providers(&config.provider).map_err(|message| ConfigError::Parse {
-        path: path.to_owned(),
-        message,
-    })?;
-    check_hooks(&config.hooks).map_err(|message| ConfigError::Parse {
-        path: path.to_owned(),
-        message,
-    })?;
-    check_agents(&config.agents).map_err(|message| ConfigError::Parse {
-        path: path.to_owned(),
-        message,
-    })?;
-    check_teammates(&config.teammates).map_err(|message| ConfigError::Parse {
-        path: path.to_owned(),
-        message,
-    })?;
-    check_openrouter(&config.openrouter).map_err(|message| ConfigError::Parse {
-        path: path.to_owned(),
-        message,
+        message: error.to_string(),
     })?;
 
-    Ok(Some(config))
+    checked(path, config).map(Some)
+}
+
+/// The seven refusals a decoded config still has to pass, and the one place
+/// they are spelled.
+///
+/// Checked per file rather than after the merge, so the complaint names the
+/// file that said it. Merging only ever replaces a whole entry, so every entry
+/// that survives has been through here.
+///
+/// Format-independent, all of them: what they refuse is what a decoded config
+/// *says*, not how it was spelled. That is why [`legacy::read`] runs them too
+/// — a source this build would decline at launch is declined at the read that
+/// converts it, instead of translating cleanly into a file the next launch
+/// refuses.
+fn checked(path: &Path, config: Config) -> Result<Config, ConfigError> {
+    let refused = |message: String| ConfigError::Parse {
+        path: path.to_owned(),
+        message,
+    };
+
+    check_mcp(&config.mcp).map_err(refused)?;
+    check_lsp(config.lsp.as_ref()).map_err(refused)?;
+    check_providers(&config.provider).map_err(refused)?;
+    check_hooks(&config.hooks).map_err(refused)?;
+    check_agents(&config.agents).map_err(refused)?;
+    check_teammates(&config.teammates).map_err(refused)?;
+    check_openrouter(&config.openrouter).map_err(refused)?;
+
+    Ok(config)
 }
 
 /// Refuses an `lsp` entry that describes a server nothing could start.

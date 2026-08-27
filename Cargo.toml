@@ -170,14 +170,16 @@ indexmap = { version = "2.14.0", features = ["serde"] }
 # each adopting crate's jiff surface is enumerated in its commit so a future
 # major is a grep-sized migration.
 jiff = "0.2.35"
-# Config files take comments and trailing commas, the way upstream's do; this
-# parses that dialect into a value `serde` can then decode strictly. `cst` is
-# the concrete syntax tree — the same document with its comments, its key order
-# and its whitespace still in it, plus the methods to edit one property and
-# leave the rest of the bytes alone. `ganja mcp add` is why it is on: without
-# it, editing a commented `ganja.jsonc` means printing a parsed value back and
-# deleting every comment somebody wrote it for.
-jsonc-parser = { version = "0.33.1", features = ["cst"] }
+# The JSONC dialect ganja's own config has left, kept for the two readers that
+# still meet a file written in it: `config::legacy`, which is how `ganja config
+# migrate` reads what it converts, and `import.rs`, which reads upstream
+# opencode's files — those are somebody else's format and are not migrating
+# anywhere. It parses the dialect into a value `serde` can then decode
+# strictly, and hands back an AST that still holds the order the document was
+# written in, which is what a translation of `permission` rules needs.
+# Nothing writes this dialect any more, and the `cst` feature left with the
+# last writer — `mcp add` edits TOML through toml_edit now.
+jsonc-parser = "0.33.1"
 # Compiles and validates the in-repo config schema against Draft 2020-12, both
 # in the drift test (crates/ganja-core/tests/config_schema.rs) and nowhere
 # else — dev-only. Default features add a `reqwest`-backed resolver for

@@ -325,11 +325,11 @@ fn a_turn_the_provider_could_not_answer_exits_one() {
 fn a_configured_command_runs_as_a_turn_with_no_message_of_its_own() {
     let run = Run::playing(&one_word());
     fs::write(
-        run.path().join("ganja.json"),
-        serde_json::json!({
-            "command": {"greet": {"template": "say hello to $ARGUMENTS"}},
-        })
-        .to_string(),
+        run.path().join("ganja.toml"),
+        r#"
+          [command.greet]
+          template = "say hello to $ARGUMENTS"
+        "#,
     )
     .expect("the config is writable");
 
@@ -1017,15 +1017,12 @@ fn hooks_fire_for_a_headless_run_exactly_as_they_would_for_a_screen() {
     let ledger = run.path().join("ledger");
     let record = format!("{{ cat; echo; }} >> {}", ledger.display());
     fs::write(
-        run.path().join("ganja.jsonc"),
-        serde_json::json!({
-            "hooks": {
-                "SessionStart": [{ "hooks": [{ "type": "command", "command": record }] }],
-                "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": record }] }],
-                "Stop": [{ "hooks": [{ "type": "command", "command": record }] }],
-            }
-        })
-        .to_string(),
+        run.path().join("ganja.toml"),
+        format!(
+            "[[hooks.SessionStart]]\nhooks = [{{ type = \"command\", command = {record:?} }}]\n\n\
+             [[hooks.UserPromptSubmit]]\nhooks = [{{ type = \"command\", command = {record:?} }}]\n\n\
+             [[hooks.Stop]]\nhooks = [{{ type = \"command\", command = {record:?} }}]\n"
+        ),
     )
     .expect("the project config is writable");
 
