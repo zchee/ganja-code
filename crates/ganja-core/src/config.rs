@@ -46,6 +46,7 @@ use std::{
     collections::BTreeMap,
     env, fmt, fs, io,
     num::NonZeroU64,
+    ops::Range,
     path::{Path, PathBuf},
 };
 
@@ -152,7 +153,10 @@ pub use legacy::parse_options;
 pub enum ConfigError {
     /// The file exists and is not valid in the dialect its name claims, or
     /// does not describe a config. The message carries the position the parser
-    /// stopped at, in whichever parser's own words — both name a line.
+    /// stopped at, built from the parser's own accessors rather than its
+    /// `Display` — so the line it points at is named and never reproduced,
+    /// which is what keeps a config's own bytes out of a message somebody
+    /// pastes.
     #[error("{}: {message}", path.display())]
     Parse {
         /// File that did not parse.
@@ -2450,10 +2454,58 @@ fn read(path: &Path) -> Result<Option<Config>, ConfigError> {
 
     let config = toml::from_str::<Config>(&text).map_err(|error| ConfigError::Parse {
         path: path.to_owned(),
-        message: error.to_string(),
+        message: located(error.message(), error.span(), &text),
     })?;
 
     checked(path, config).map(Some)
+}
+
+/// What the parser said and where, and deliberately nothing else.
+///
+/// `toml::de::Error`'s own `Display` reproduces the offending line with a
+/// caret under it, which is a fine thing for a compiler and the wrong thing
+/// here: the line that failed to parse is a line of somebody's config, and an
+/// `mcp` entry's `headers` map is where a bearer token lives. This build
+/// withholds header *values* even from `ganja mcp get`, so a parse error must
+/// not print one back through a log or a terminal somebody shares. The
+/// accessors carry exactly the two facts that help — what went wrong, and
+/// where to look — with none of the file's own bytes.
+///
+/// Columns are counted in characters rather than bytes, so a line holding
+/// multi-byte text still points at the character somebody would count to.
+/// A span-less error (serde's own `custom`, which carries no position) renders
+/// as the message alone rather than inventing a line 1.
+///
+/// The guarantee is about the *line*, which is the whole of what `Display`
+/// adds and the whole of what a neighbouring key on it would give away. It is
+/// not a claim that no byte of the file can appear: a serde type mismatch
+/// names the value it rejected ("invalid type: integer `1`"), the way every
+/// serde-backed loader does and the way this build's own JSONC reader always
+/// did. That is one value, chosen because the message is useless without it,
+/// rather than every value that shared a line with it.
+fn located(message: &str, span: Option<Range<usize>>, text: &str) -> String {
+    let Some(span) = span else {
+        return message.to_owned();
+    };
+
+    // Walked rather than sliced, because a span is a byte range and slicing at
+    // one that is not a character boundary would have to fall back to
+    // something — and every "something" here reports a position that is not
+    // the one that failed.
+    let (mut line, mut column) = (1usize, 1usize);
+    for (index, character) in text.char_indices() {
+        if index >= span.start {
+            break;
+        }
+        if character == '\n' {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+
+    format!("{message} at line {line}, column {column}")
 }
 
 /// The seven refusals a decoded config still has to pass, and the one place

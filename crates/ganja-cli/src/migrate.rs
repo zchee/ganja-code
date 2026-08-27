@@ -68,6 +68,7 @@ use jsonc_parser::ast::{Object, Value as Ast};
 use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, Value};
 
 use crate::{
+    position::{line_of, located},
     report::{Report, print_table},
     staging::stage,
 };
@@ -141,15 +142,17 @@ pub fn migrate(file: Option<PathBuf>, global: bool, dry_run: bool) -> Result<()>
     warn(&comments(&source, &text)?);
 
     let rendered = document.to_string();
-    // The error and the path, never the document body: an `mcp` entry's
+    // The message and the position, never the document body: an `mcp` entry's
     // headers map is where a bearer token lives, and this build withholds
-    // header *values* even from `ganja mcp get`. `toml_edit`'s own error
-    // already names the key and the position, which is the whole of what
-    // somebody needs to find it.
+    // header *values* even from `ganja mcp get`. `toml_edit`'s `Display`
+    // reproduces the offending line, so the error is rendered through
+    // `position::located` instead, which by construction carries what went
+    // wrong and where to look and nothing else.
     let migrated = toml_edit::de::from_str::<Config>(&rendered).map_err(|error| {
         anyhow!(
-            "{} would not have been one ganja can load, so nothing was written: {error}",
-            destination.display()
+            "{} would not have been one ganja can load, so nothing was written: {}",
+            destination.display(),
+            located(error.message(), error.span(), &rendered)
         )
     })?;
     if migrated != decoded {
@@ -250,6 +253,37 @@ fn nearest(cwd: &Path) -> Option<PathBuf> {
     }
 
     None
+}
+
+/// Refuses a directory that still holds a legacy config.
+///
+/// Every command here that *writes* a `ganja.toml` goes through this —
+/// `ganja mcp add` (**R-15**) and `ganja config import-claude-hooks` — because
+/// the loader refuses a directory holding one of [`LEGACY_FILES`] whether or
+/// not a `ganja.toml` sits beside it. Writing into that `ganja.toml` would
+/// print a success over a directory the very next launch declines to read, so
+/// the answer has to be the same on both sides, and the way to keep it the
+/// same is to say it once. The condition mirrors the loader's own, and the
+/// sentence names the file and the command that converts it.
+///
+/// It lives here, beside [`remaining`], because everything this crate knows
+/// about the format that left is in this module and because the sentence
+/// names this module's own command.
+pub(crate) fn unmigrated(directory: &Path) -> Result<()> {
+    if let Some(legacy) = LEGACY_FILES
+        .iter()
+        .map(|name| directory.join(name))
+        .find(|path| path.is_file())
+    {
+        bail!(
+            "{} is a config in the format ganja has moved off; run \
+             `ganja config migrate` to write a {DESTINATION} beside it, then \
+             run this again",
+            legacy.display()
+        );
+    }
+
+    Ok(())
 }
 
 /// Names every *other* legacy file this build's discovery can still see.
@@ -576,15 +610,6 @@ fn comments(path: &Path, text: &str) -> Result<Vec<usize>> {
     lines.dedup();
 
     Ok(lines)
-}
-
-/// The one-based line `offset` falls on.
-fn line_of(text: &str, offset: usize) -> usize {
-    text.get(..offset.min(text.len()))
-        .unwrap_or(text)
-        .matches('\n')
-        .count()
-        + 1
 }
 
 /// The comment warning, silent when there were none to lose.

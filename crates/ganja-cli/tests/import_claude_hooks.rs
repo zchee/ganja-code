@@ -371,3 +371,154 @@ fn a_settings_file_that_is_not_json_is_refused_by_name() {
 
     assert!(!project.path().join("ganja.toml").exists());
 }
+
+/// A settings file whose one group runs two commands, which is the shape the
+/// per-command rows exist for.
+const TWO_COMMANDS: &str = r#"{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command", "command": "./first.sh --audit" },
+          { "type": "command", "command": "curl https://example.test/telemetry" }
+        ]
+      }
+    ]
+  }
+}
+"#;
+
+/// The command lines are the thing being approved, so they are printed.
+///
+/// A hook runs with the user's own authority and crosses no permission dialog,
+/// which makes the report the only place anybody sees what is about to be
+/// installed. A group row alone would be asking for approval of a payload the
+/// command declined to show.
+#[test]
+fn every_command_a_group_installs_gets_a_row_of_its_own() {
+    let home = temporary();
+    let project = temporary();
+    checkout(project.path());
+    plant(&project.path().join(".claude/settings.json"), TWO_COMMANDS);
+
+    import(&home, project.path()).assert().success().stdout(
+        // The group row keeps its own column padding, which the two
+        // longer handler keys below set; only the handler rows can be
+        // matched with their spacing spelled out.
+        predicate::str::contains("settings.json:hooks.PreToolUse[0]  ")
+            .and(predicate::str::contains("[[hooks.PreToolUse]]"))
+            .and(predicate::str::contains(
+                "settings.json:hooks.PreToolUse[0].hooks[0]  ./first.sh --audit",
+            ))
+            .and(predicate::str::contains(
+                "settings.json:hooks.PreToolUse[0].hooks[1]  curl https://example.test/telemetry",
+            )),
+    );
+}
+
+/// The preview is where somebody decides, so it shows exactly what the write
+/// would — and still writes nothing.
+#[test]
+fn a_dry_run_lists_the_command_lines_it_would_install() {
+    let home = temporary();
+    let project = temporary();
+    checkout(project.path());
+    plant(&project.path().join(".claude/settings.json"), TWO_COMMANDS);
+
+    import(&home, project.path())
+        .arg("--dry-run")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("./first.sh --audit")
+                .and(predicate::str::contains(
+                    "curl https://example.test/telemetry",
+                ))
+                .and(predicate::str::contains("dry run — nothing written")),
+        );
+
+    assert!(!project.path().join("ganja.toml").exists());
+}
+
+/// The guard `ganja mcp add` writes through, on the other command that writes
+/// a `ganja.toml`.
+///
+/// The loader refuses a directory holding a legacy config whole, so an import
+/// that reported success into the `ganja.toml` beside one would be reporting a
+/// hook installed into a file the very next launch declines to read.
+#[test]
+fn a_directory_holding_a_legacy_config_is_refused_and_nothing_is_written() {
+    let home = temporary();
+    let project = temporary();
+    checkout(project.path());
+    plant(&project.path().join(".claude/settings.json"), FIXTURE);
+    plant(&project.path().join("ganja.jsonc"), "{}\n");
+
+    import(&home, project.path()).assert().failure().stderr(
+        predicate::str::contains("ganja.jsonc")
+            .and(predicate::str::contains("ganja config migrate")),
+    );
+
+    assert!(
+        !project.path().join("ganja.toml").exists(),
+        "a refused run writes nothing"
+    );
+
+    // The same invocation, once the legacy file is gone.
+    fs::remove_file(project.path().join("ganja.jsonc")).expect("the fixture is removable");
+    import(&home, project.path()).assert().success();
+    assert!(project.path().join("ganja.toml").exists());
+}
+
+/// A target that does not parse is named by position, and never by its bytes.
+///
+/// `toml_edit`'s own `Display` reproduces the offending line, and the line an
+/// existing config fails on may be an `mcp` entry's `headers` — the one place
+/// a bearer token is spelled. What comes out is what went wrong and where to
+/// look, so the refusal cannot carry a credential into a shared terminal.
+#[test]
+fn a_target_that_does_not_parse_is_named_by_position_and_never_by_its_bytes() {
+    let home = temporary();
+    let project = temporary();
+    checkout(project.path());
+    plant(&project.path().join(".claude/settings.json"), FIXTURE);
+    plant(
+        &project.path().join("ganja.toml"),
+        "[mcp.vendor]\ntype = \"remote\"\nheaders = { Authorization = \"Bearer NEVER-PRINT-ME }\n",
+    );
+
+    import(&home, project.path()).assert().failure().stderr(
+        predicate::str::contains("line 3")
+            .and(predicate::str::contains("column"))
+            .and(predicate::str::contains("NEVER-PRINT-ME").not()),
+    );
+}
+
+/// The warnings channel prints beside the table, so it is filtered like the
+/// table.
+///
+/// The one warning this command builds quotes the settings file's own matcher
+/// back through a regex error, which means an escape sequence planted in a
+/// matcher would otherwise reach the terminal on the line printed right next
+/// to the rows it could repaint.
+#[test]
+fn a_warning_quoting_the_file_back_is_neutralized_like_a_row_is() {
+    let home = temporary();
+    let project = temporary();
+    checkout(project.path());
+    // An unbalanced group, so the matcher fails to compile and the pattern is
+    // quoted back — with the escape sequence still inside it.
+    plant(
+        &project.path().join(".claude/settings.json"),
+        r#"{ "hooks": { "Stop": [{ "matcher": "Edit(\u001b[2K", "hooks": [
+             { "type": "command", "command": "./x.sh" }
+           ] }] } }"#,
+    );
+
+    import(&home, project.path()).assert().success().stderr(
+        predicate::str::contains("not a regular expression")
+            .and(predicate::str::contains("\u{fffd}[2K"))
+            .and(predicate::str::contains("\u{1b}").not()),
+    );
+}

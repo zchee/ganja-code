@@ -737,6 +737,34 @@ fn a_field_an_mcp_entry_does_not_have_is_reported_rather_than_written() {
 /// `Vec<String>`, a zero `output_limit` a legal `u64` — and both are
 /// files the next launch would refuse, which is the one thing a writer
 /// exists to prevent.
+/// The refusal names what went wrong and where, and never the line it
+/// happened on.
+///
+/// `toml_edit`'s own `Display` reproduces the offending line with a caret
+/// under it, and the line a translated document fails on may be an `mcp`
+/// entry's `headers` — the one place a bearer token is spelled, whose values
+/// this build withholds even from `ganja mcp get`. The message is built from
+/// the accessors instead, so the bytes cannot ride out through a terminal
+/// somebody is sharing or a log somebody keeps.
+#[test]
+fn a_document_that_will_not_decode_is_named_by_position_and_never_by_its_bytes() {
+    // One line carrying both the credential and the mistake, which is what
+    // separates the two renderings: `Display` reproduces the line and hands
+    // over the token beside the error, and the accessors hand over neither.
+    let document = concat!(
+        "[mcp]\n",
+        "vendor = { type = \"remote\", url = \"https://example.test\", ",
+        "headers = { Authorization = \"Bearer NEVER-PRINT-ME\" }, enabled = 1 }\n",
+    );
+
+    let refused = validate(document).expect_err("`enabled` is a boolean, so this does not decode");
+    let said = refused.to_string();
+
+    assert!(said.contains("line 2"), "{said}");
+    assert!(said.contains("column"), "{said}");
+    assert!(!said.contains("NEVER-PRINT-ME"), "{said}");
+}
+
 #[test]
 fn a_written_mcp_entry_that_decodes_but_would_not_load_is_still_refused() {
     for (document, named) in [

@@ -40,6 +40,7 @@ mod login;
 mod mcp;
 mod migrate;
 mod plugin;
+mod position;
 mod report;
 mod run;
 mod serve;

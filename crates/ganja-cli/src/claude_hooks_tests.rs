@@ -376,20 +376,118 @@ fn a_value_of_the_wrong_shape_is_reported_where_it_was_written() {
     );
 }
 
-/// The mapped section names where each group lands, which is the half of the
-/// table a person checks before letting it write.
+/// The mapped section names where each group lands and what each of its
+/// handlers runs, which is the half of the table a person checks before
+/// letting it write.
+///
+/// The command rows are not decoration: a hook runs with the user's own
+/// authority and crosses no permission dialog, so the command line is the
+/// whole of what there is to review, and the group row alone would name a
+/// destination without naming the payload.
 #[test]
-fn a_group_that_travels_is_a_row_naming_where_it_lands() {
+fn a_group_that_travels_is_a_row_naming_where_it_lands_and_a_row_per_command() {
     let (_, report) = collected(
-        r#"{ "hooks": { "Stop": [{ "hooks": [{ "type": "command", "command": "./x.sh" }] }] } }"#,
+        r#"{ "hooks": { "Stop": [{ "hooks": [
+             { "type": "command", "command": "./x.sh" },
+             { "type": "command", "command": "./y.sh --now" }
+           ] }] } }"#,
     );
 
     assert_eq!(
         report.mapped,
-        [(
-            format!("{FIXTURE}:hooks.Stop[0]"),
-            "[[hooks.Stop]]".to_owned()
-        )]
+        [
+            (
+                format!("{FIXTURE}:hooks.Stop[0]"),
+                "[[hooks.Stop]]".to_owned()
+            ),
+            (
+                format!("{FIXTURE}:hooks.Stop[0].hooks[0]"),
+                "./x.sh".to_owned()
+            ),
+            (
+                format!("{FIXTURE}:hooks.Stop[0].hooks[1]"),
+                "./y.sh --now".to_owned()
+            ),
+        ]
+    );
+}
+
+/// Both sections of the table index the settings file's own array.
+///
+/// The mapped rows are written from the handlers that survived and the skipped
+/// rows from the source array as it is walked, so numbering the mapped ones by
+/// their position among the survivors would put two different `settings.json`
+/// entries under one path in one table — a left column somebody cannot go and
+/// look at. This fixture is that collision exactly: the third entry is the
+/// second survivor, so a filtered index would have written `hooks[1]` for
+/// `./two.sh` — the path the skipped section already uses for the handler
+/// this build cannot run.
+#[test]
+fn the_mapped_and_skipped_rows_number_the_same_array() {
+    let (_, report) = collected(
+        r#"{ "hooks": { "Stop": [{ "hooks": [
+             { "type": "command", "command": "./zero.sh" },
+             { "type": "prompt", "prompt": "summarise" },
+             { "type": "command", "command": "./two.sh" },
+             { "type": "command", "command": "./three.sh", "timeout": -1 }
+           ] }] } }"#,
+    );
+
+    let at = |index: usize| format!("{FIXTURE}:hooks.Stop[0].hooks[{index}]");
+    assert_eq!(
+        report
+            .mapped
+            .iter()
+            .filter(|(key, _)| key.contains(".hooks["))
+            .cloned()
+            .collect::<Vec<_>>(),
+        [
+            (at(0), "./zero.sh".to_owned()),
+            (at(2), "./two.sh".to_owned()),
+        ]
+    );
+
+    // The two that fell out, at the positions they actually sit at.
+    assert_eq!(
+        why(&report, "hooks.Stop[0].hooks[1]").as_deref(),
+        Some("unsupported")
+    );
+    assert_eq!(
+        why(&report, "hooks.Stop[0].hooks[3].timeout").as_deref(),
+        Some("malformed")
+    );
+
+    // And the claim that makes the two lists one table: no path is used by
+    // both sections, which is what a filtered index would have broken.
+    for (key, _) in &report.mapped {
+        assert!(
+            !report.skipped.iter().any(|(skipped, _)| skipped == key),
+            "{key} is in both sections"
+        );
+    }
+}
+
+/// A handler the group dropped leaves no command row, because the row is a
+/// claim that this command line is about to be installed.
+#[test]
+fn a_handler_that_was_left_out_gets_no_command_row() {
+    let (_, report) = collected(
+        r#"{ "hooks": { "Stop": [{ "hooks": [
+             { "type": "prompt", "prompt": "summarise" },
+             { "type": "command", "command": "./y.sh" }
+           ] }] } }"#,
+    );
+
+    let commands: Vec<&String> = report
+        .mapped
+        .iter()
+        .filter(|(key, _)| key.contains(".hooks["))
+        .map(|(_, value)| value)
+        .collect();
+    assert_eq!(commands, ["./y.sh"]);
+    assert_eq!(
+        why(&report, "hooks.Stop[0].hooks[0]").as_deref(),
+        Some("unsupported")
     );
 }
 

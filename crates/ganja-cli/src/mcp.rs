@@ -55,20 +55,12 @@ use std::{
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::Args;
-use ganja_core::config::{
-    Config,
-    // The loader's own list of the names ganja's config used to go by, rather
-    // than a second copy of it: this command refuses a directory holding one
-    // and no `CONFIG_FILE`, in the loader's own words, and two spellings of
-    // "what a legacy file is" is one of them being wrong later.
-    LEGACY_FILES,
-    McpServer,
-};
+use ganja_core::config::{Config, McpServer};
 use ganja_permission::Project;
 use serde_json::{Map, Value};
 use toml_edit::{DocumentMut, Item, Table};
 
-use crate::staging::stage;
+use crate::{position::located, staging::stage};
 
 /// The config file this edits, in every tier — the one name ganja reads.
 const CONFIG_FILE: &str = "ganja.toml";
@@ -291,24 +283,14 @@ pub(crate) fn remove(args: &RemoveArgs) -> Result<()> {
 /// loader still *read* the legacy file. It refuses one now, so writing into
 /// the `ganja.toml` beside it would print a success over a directory the very
 /// next launch declines. The condition mirrors the loader's own (**AC-2**),
-/// which is what keeps one answer between them.
+/// which is what keeps one answer between them, and it is spelled once in
+/// [`crate::migrate::unmigrated`] so that every command writing a `ganja.toml`
+/// answers the same way.
 fn writable(tier: Tier, cwd: &Path) -> Result<PathBuf> {
     let directory = tier.directory(cwd)?;
-    let target = directory.join(CONFIG_FILE);
-    if let Some(legacy) = LEGACY_FILES
-        .iter()
-        .map(|name| directory.join(name))
-        .find(|path| path.is_file())
-    {
-        bail!(
-            "{} is a config in the format ganja has moved off; run \
-             `ganja config migrate` to write a {CONFIG_FILE} beside it, then \
-             run this again",
-            legacy.display()
-        );
-    }
+    crate::migrate::unmigrated(&directory)?;
 
-    Ok(target)
+    Ok(directory.join(CONFIG_FILE))
 }
 
 /// Reads the target file as an editable document, or an empty one when it is
@@ -323,6 +305,11 @@ fn writable(tier: Tier, cwd: &Path) -> Result<PathBuf> {
 /// touch is returned unchanged rather than re-rendered. A file that does not
 /// parse is an error and never an empty document, because the alternative is a
 /// write that deletes whatever was in it.
+///
+/// The refusal names the message and the position and never the line itself:
+/// `toml_edit`'s own `Display` reproduces the offending line, and the line
+/// this failed on may be an `mcp` entry's `headers` — the one place a bearer
+/// token is spelled, whose values this command withholds even from `get`.
 fn document(path: &Path) -> Result<DocumentMut> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
@@ -332,8 +319,13 @@ fn document(path: &Path) -> Result<DocumentMut> {
         }
     };
 
-    text.parse::<DocumentMut>()
-        .map_err(|error| anyhow!("{} could not be parsed: {error}", path.display()))
+    text.parse::<DocumentMut>().map_err(|error| {
+        anyhow!(
+            "{} could not be parsed: {}",
+            path.display(),
+            located(error.message(), error.span(), &text)
+        )
+    })
 }
 
 /// The document's `mcp` table, created empty when the file has none.

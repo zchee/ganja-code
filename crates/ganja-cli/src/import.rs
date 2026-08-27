@@ -44,7 +44,10 @@ use ganja_core::{config::Config, lsp::server::BUILTIN_IDS};
 use ganja_permission::Project;
 use toml_edit::{DocumentMut, InlineTable, Item, Table, Value};
 
-use crate::report::{Report, print_table};
+use crate::{
+    position::located,
+    report::{Report, print_table, print_warnings},
+};
 
 /// Directory opencode keeps its global config in, under the XDG config home.
 const OPENCODE_DIRECTORY: &str = "opencode";
@@ -267,9 +270,7 @@ pub fn import_opencode(file: Option<PathBuf>, global: bool, dry_run: bool) -> Re
 
     let (built, report) = map_config(&sources.config);
     print_table(&report, HEADER, "GANJA");
-    for warning in &report.warnings {
-        eprintln!("warning: {warning}");
-    }
+    print_warnings(&report);
 
     if built.is_empty() {
         println!("nothing to import: nothing in it maps to a key ganja has");
@@ -2113,12 +2114,18 @@ fn options(
 /// what is proved is the file — a value that survived construction and does
 /// not survive being written and read back is exactly the bug worth catching.
 fn validate(document: &str) -> Result<()> {
-    // The error alone, never the document body: an `mcp` entry's headers map
-    // is where a bearer token lives, and this build withholds header *values*
-    // even from `ganja mcp get`. `toml_edit`'s own error already names the key
-    // and the position, which is the whole of what somebody needs to find it.
-    let config: Config = toml_edit::de::from_str(document)
-        .map_err(|error| anyhow!("the imported config is not one ganja can load: {error}"))?;
+    // The message and the position, never the document body: an `mcp` entry's
+    // headers map is where a bearer token lives, and this build withholds
+    // header *values* even from `ganja mcp get`. `toml_edit`'s `Display`
+    // reproduces the offending line, so the error is rendered through
+    // `position::located` instead, which by construction carries what went
+    // wrong and where to look and nothing else.
+    let config: Config = toml_edit::de::from_str(document).map_err(|error| {
+        anyhow!(
+            "the imported config is not one ganja can load: {}",
+            located(error.message(), error.span(), document)
+        )
+    })?;
 
     for (name, server) in &config.mcp {
         server.check(name).map_err(|message| {

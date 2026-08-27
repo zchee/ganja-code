@@ -72,6 +72,33 @@ fn an_unknown_top_level_key_is_refused_by_name() {
     assert!(message.contains("modle"), "{message}");
 }
 
+/// A parse failure names what went wrong and where, and never the line it
+/// happened on.
+///
+/// `toml::de::Error`'s own `Display` reproduces the offending line with a
+/// caret under it, which here would mean printing back a line of somebody's
+/// config — and an `mcp` entry's `headers` map is the one place a bearer token
+/// is spelled, whose values this build withholds even from `ganja mcp get`.
+/// The message is built from the accessors instead, so those bytes cannot ride
+/// out through a terminal somebody is sharing or a log somebody keeps.
+#[test]
+fn a_parse_failure_names_the_position_and_never_the_line_it_happened_on() {
+    let error = parse(concat!(
+        "[mcp.vendor]\n",
+        "type = \"remote\"\n",
+        "url = \"https://example.test\"\n",
+        "headers = { Authorization = \"Bearer NEVER-PRINT-ME }\n",
+    ))
+    .expect_err("an unterminated string is not a config");
+
+    let ConfigError::Parse { message, .. } = &error else {
+        panic!("expected a parse failure, got {error:?}");
+    };
+    assert!(message.contains("line 4"), "{message}");
+    assert!(message.contains("column"), "{message}");
+    assert!(!message.contains("NEVER-PRINT-ME"), "{message}");
+}
+
 /// `$schema` is not a bare key in TOML, so it is written quoted — and it is
 /// still read, because refusing what an editor wrote would be a startup
 /// failure about an annotation.

@@ -21,6 +21,16 @@
 //!   a matcher that is not a regular expression are both reported with the
 //!   reason and left out, and the rest of the import still lands. See
 //!   [`refusal`], which mirrors the rule rather than sharing it, and says so.
+//! * **Every command line is a row of its own.** The mapped section carries a
+//!   row for the group — its `settings.json` path against the
+//!   `[[hooks.<Event>]]` it becomes — and then one row per handler beneath it,
+//!   whose right column is the command line itself. A hook runs with the
+//!   user's own authority and crosses no permission dialog (**D456**), so the
+//!   command line is the whole of what there is to review, and a `--dry-run`
+//!   that named only the groups would be asking somebody to approve a payload
+//!   it declined to show them. The rows go through `report`'s own renderer,
+//!   which neutralizes control characters, so a command line cannot repaint
+//!   the table it is listed in.
 //! * **Only `hooks` is read.** Every other key of a settings file is a row in
 //!   the skipped section: this command copies hooks, and a person who ran it
 //!   expecting their permissions or their model to come across should be told
@@ -56,7 +66,10 @@ use ganja_permission::Project;
 use serde_json::Value;
 use toml_edit::{ArrayOfTables, DocumentMut, InlineTable, Item, Table};
 
-use crate::report::{Report, print_table};
+use crate::{
+    position::located,
+    report::{Report, print_table, print_warnings},
+};
 
 /// The directory Claude keeps its settings in, under a home or a project root.
 const CLAUDE_DIRECTORY: &str = ".claude";
@@ -139,9 +152,7 @@ pub fn import_claude_hooks(file: Option<PathBuf>, global: bool, dry_run: bool) -
     }
 
     print_table(&report, HEADER, "GANJA");
-    for warning in &report.warnings {
-        eprintln!("warning: {warning}");
-    }
+    print_warnings(&report);
 
     if collected.is_empty() {
         println!("nothing to import: no hooks group survived");
@@ -167,25 +178,29 @@ pub fn import_claude_hooks(file: Option<PathBuf>, global: bool, dry_run: bool) -
 
     let existing = existing(&target)?;
     // Decoded before the merge as well as after, so a target that was already
-    // unreadable is named as such rather than blamed on this import.
+    // unreadable is named as such rather than blamed on this import. Rendered
+    // through `position::located` for the reason the write-side one below is.
     toml_edit::de::from_str::<Config>(&existing).map_err(|error| {
         anyhow!(
-            "{} is not a config ganja can load, and this refuses to edit one that is not: \
-             {error}",
-            target.display()
+            "{} is not a config ganja can load, and this refuses to edit one that is not: {}",
+            target.display(),
+            located(error.message(), error.span(), &existing)
         )
     })?;
 
     let document = merge(&target, &existing, &collected)?;
     let rendered = document.to_string();
-    // The error and the path, never the document body: an `mcp` entry the
-    // target already carries has a headers map, and that is where a bearer
+    // The message and the position, never the document body: an `mcp` entry
+    // the target already carries has a headers map, and that is where a bearer
     // token lives — this build withholds header *values* even from `ganja mcp
-    // get`. `toml_edit`'s own error already names the key and the position.
+    // get`. `toml_edit`'s `Display` reproduces the offending line, so the
+    // error is rendered through `position::located` instead, which by
+    // construction carries what went wrong and where to look and nothing else.
     toml_edit::de::from_str::<Config>(&rendered).map_err(|error| {
         anyhow!(
-            "{} would not have been one ganja can load, so nothing was written: {error}",
-            target.display()
+            "{} would not have been one ganja can load, so nothing was written: {}",
+            target.display(),
+            located(error.message(), error.span(), &rendered)
         )
     })?;
 
@@ -262,6 +277,11 @@ fn target(global: bool, cwd: &Path) -> Result<PathBuf> {
     } else {
         Project::resolve(cwd).root().to_path_buf()
     };
+    // The same guard `ganja mcp add` writes through, and for the same reason:
+    // a directory holding a legacy config is one the loader refuses whole, so
+    // hooks written into the `ganja.toml` beside it would be reported as
+    // installed over a directory the very next launch declines to read.
+    crate::migrate::unmigrated(&directory)?;
 
     Ok(directory.join(TARGET))
 }
@@ -291,6 +311,17 @@ struct Group {
 /// One `type: "command"` handler.
 #[derive(Debug)]
 struct Handler {
+    /// Where it sat in the settings file's own array.
+    ///
+    /// Carried rather than re-derived from this vector's own position,
+    /// because the two are not the same number the moment a handler is left
+    /// out: a group whose second entry this build cannot run leaves its third
+    /// at index 1 here and index 2 there. The skipped rows are written from
+    /// the source array as it is walked, so a mapped row numbered from the
+    /// survivors would put two different `settings.json` entries under one
+    /// path in one table — and the whole point of the left column is that
+    /// somebody can go and look at what it names.
+    index: usize,
     /// The command line.
     command: String,
     /// Its deadline in **seconds**, which is the unit on both sides.
@@ -360,6 +391,24 @@ fn collect(
             let at = format!("{at}[{index}]");
             if let Some(group) = group(&at, value, report) {
                 report.map(&at, &format!("[[{TABLE}.{event}]]"));
+                // The command lines themselves, one row each. A group row says
+                // that a hook landed; what somebody reading a `--dry-run` has
+                // to decide is whether to let *this command line* run with
+                // their own authority at every one of those moments, and
+                // naming only the group would put that decision behind a file
+                // they have not seen yet. The path is the handler's *source*
+                // index and never this vector's, so the two sections of the
+                // table index the same array. The text goes to the renderer
+                // raw: `report::printable` is where control characters are
+                // neutralized, so every column of every command's table is
+                // covered by one choke point rather than by each caller
+                // remembering.
+                for handler in &group.handlers {
+                    report.map(
+                        &format!("{at}.{TABLE}[{}]", handler.index),
+                        &handler.command,
+                    );
+                }
                 into.entry(known.name()).or_default().push(group);
             }
         }
@@ -399,7 +448,7 @@ fn group(at: &str, value: &Value, report: &mut Report) -> Option<Group> {
                     return None;
                 };
                 for (index, item) in items.iter().enumerate() {
-                    if let Some(handler) = handler(&format!("{child}[{index}]"), item, report) {
+                    if let Some(handler) = handler(&child, index, item, report) {
                         handlers.push(handler);
                     }
                 }
@@ -425,7 +474,12 @@ fn group(at: &str, value: &Value, report: &mut Report) -> Option<Group> {
 }
 
 /// One handler, or nothing and a row saying why.
-fn handler(at: &str, value: &Value, report: &mut Report) -> Option<Handler> {
+///
+/// Takes the array's path and the entry's index rather than the finished path,
+/// so the number a skipped row is written with and the number a mapped row is
+/// written with are one value read once.
+fn handler(array: &str, index: usize, value: &Value, report: &mut Report) -> Option<Handler> {
+    let at = &format!("{array}[{index}]");
     let Some(object) = value.as_object() else {
         report.skip(at, reason::MALFORMED);
 
@@ -479,7 +533,11 @@ fn handler(at: &str, value: &Value, report: &mut Report) -> Option<Handler> {
         return None;
     };
 
-    Some(Handler { command, timeout })
+    Some(Handler {
+        index,
+        command,
+        timeout,
+    })
 }
 
 /// The refusals `ganja_core::config`'s `check_hooks` makes, applied before
@@ -547,9 +605,13 @@ fn merge(
     text: &str,
     collected: &BTreeMap<&'static str, Vec<Group>>,
 ) -> Result<DocumentMut> {
-    let mut document: DocumentMut = text
-        .parse()
-        .map_err(|error| anyhow!("{} could not be parsed: {error}", target.display()))?;
+    let mut document: DocumentMut = text.parse().map_err(|error: toml_edit::TomlError| {
+        anyhow!(
+            "{} could not be parsed: {}",
+            target.display(),
+            located(error.message(), error.span(), text)
+        )
+    })?;
 
     let table = document.as_table_mut().entry(TABLE).or_insert_with(|| {
         let mut table = Table::new();
