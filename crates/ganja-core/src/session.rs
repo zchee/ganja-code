@@ -873,6 +873,12 @@ pub(crate) struct Turn {
     /// from the engine at the turn's start, so a resolution never disagrees
     /// mid-turn about which registry it is reading.
     pub(crate) identity: Arc<crate::teammate::identity::Identity>,
+    /// Settlements this session has learned about and not yet shown its
+    /// model (**D534**), carried the way [`Turn::identity`] is — the
+    /// engine's own cell rather than a snapshot, so a receipt that arrives
+    /// mid-turn reaches the next steer rather than waiting for the next
+    /// prompt.
+    pub(crate) receipts: Arc<std::sync::Mutex<Vec<crate::teammate::receipts::Settled>>>,
     /// Whether this turn's own `send_message` posts through the solo postbox
     /// rather than a team's (**D530**), read once at the turn's start beside
     /// [`Turn::teamless_send`] for the call-time posture computation
@@ -1050,6 +1056,11 @@ impl Turn {
             // invocation belongs to what a *person* typed. Its `skill` tool
             // still loads through the registry above.
             skill_roots: skill::Roots::none(),
+            // A batch of its own, permanently empty: a child is offered no
+            // `send_message` (`postbox: None`, below), so it has nothing
+            // outstanding to be settled and no receipt to read. Sharing the
+            // parent's would hand a delegated turn the parent's own news.
+            receipts: Arc::default(),
             // The parent's own resolver — a child's prompt carries no
             // `@`-mentions of its own (`kind` above is always seeded with an
             // empty `session_mentions`), so this is never consulted, but
@@ -1369,6 +1380,33 @@ async fn session_mention_parts(turn: &Turn, names: &[String]) -> Vec<Part> {
         .collect()
 }
 
+/// Every settlement this session has learned about and not yet shown its
+/// model, drained into one `<peer_receipt>`-tagged part (**D534**).
+///
+/// D529's own vehicle, reused rather than reinvented: a receipt is a fact
+/// the model must be able to act on — retry, or route elsewhere — so it
+/// rides ordinary conversation text exactly as a mention reminder does,
+/// rather than a display-only part. The rendering is
+/// [`crate::teammate::receipts::rendered`]'s and nothing here re-spells it,
+/// which is what lets a test compare against that one function.
+///
+/// Draining rather than reading: a settlement is news once. A batch that
+/// stayed would be re-read at every steer in the turn, which would read to
+/// the model as the same message settling over and over.
+fn receipt_part(turn: &Turn) -> Option<Part> {
+    let batch = std::mem::take(
+        &mut *turn
+            .receipts
+            .lock()
+            .expect("the settled receipts batch is never poisoned"),
+    );
+    if batch.is_empty() {
+        return None;
+    }
+
+    Some(Part::text(crate::teammate::receipts::rendered(&batch)))
+}
+
 /// Builds the user message a prompt or a steer becomes: the text where it
 /// belongs, then the teammate, mention, skill and session-mention parts in
 /// that order.
@@ -1397,6 +1435,10 @@ async fn user_message(
     user.parts.extend(skill_parts(&turn.skill_roots, skills));
     user.parts
         .extend(session_mention_parts(turn, session_mentions).await);
+    // Last, after the mention parts (**D534**): a receipt is news about a
+    // send this session already made, so it belongs behind everything this
+    // message is *about*.
+    user.parts.extend(receipt_part(turn));
 
     user
 }

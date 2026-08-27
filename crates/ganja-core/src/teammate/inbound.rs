@@ -34,14 +34,24 @@
 //! 620535-620617) under `honor_sender_mode = true`, and the collapsed
 //! two-row path under `false`: prompting receiver → accept, bypass receiver
 //! → hold `no_mode_asserted`, the sender class never consulted (v2
-//! §"Cross-pass reconciliation" verdict 6, evidence 620525-620531). `false`
-//! is the observed default — the sender emits its mode only under a flag
-//! whose embedded default is off (v2 §"Sender mode is feature-gated",
-//! evidence 620372-620375, 623133-623145) — and the *only* path ganja's wire
-//! can exercise: `SocketMessage` carries no mode field, so every production
-//! call site passes `honor_sender_mode = false` and `sender = None`, and the
-//! eight-row matrix is specification kept ready for a sender that does not
-//! exist yet.
+//! §"Cross-pass reconciliation" verdict 6, evidence 620525-620531).
+//!
+//! **D532 gave `SocketMessage` a real `from_mode`, and the matrix is now
+//! reached through a never-loosen composition rather than a flag flip**
+//! (Axis 5, **OQ2(a)**). `HONOR_SENDER_MODE` stays `false` as the *floor* —
+//! see its own doc — and [`Inbound::admit_socket`](crate::teammate::inbound::Inbound::admit_socket)'s production call site
+//! asks [`ResolvedInbound::decide`](crate::teammate::inbound::ResolvedInbound::decide) for the answer **twice**, once
+//! collapsed (`honor_sender_mode = false`) and once honored (`= true`), and
+//! keeps the **stricter** of the two (`strictest_of`): refuse outranks
+//! hold outranks accept, so no wire field can ever *grant* — the composed
+//! verdict's severity is always at least the collapse's own. Exactly one
+//! row moves under this composition (`prompting` receiver, `bypass`
+//! sender: accept → hold `mode_mismatch`), and one row is a **recorded
+//! divergence from v2**: `(bypass, bypass)` stays held rather than
+//! accepting, because an unproven wire attestation may not do a
+//! credential's work (P2). `decide_unset`'s eight rows are reached exactly
+//! as they always were — this composition sits **above** them, at the one
+//! production call site, and changes nothing about the function itself.
 //!
 //! Two arms exist before their producers do, which is what fail-closed
 //! means:
@@ -216,7 +226,15 @@
 //!
 //! After policy accepts and before the write — `accept` is necessary but not
 //! sufficient (v2 §"Post-policy queue admission" preamble) —
-//! [`PeerGuard::admit`](crate::teammate::inbound::PeerGuard::admit) returns exactly four reasons
+//! [`PeerGuard::admit`](crate::teammate::inbound::PeerGuard::admit) runs. Since **D534** (N1, D1) it also runs
+//! ahead of a *parity-cause* hold ([`HoldCause::ModeMismatch`](ganja_protocol::HoldCause::ModeMismatch), [`HoldCause::NoModeAsserted`](ganja_protocol::HoldCause::NoModeAsserted)) —
+//! never an explicit or `mode_unknown` one, which this landing routes no
+//! new traffic onto — using the same [`Origin`](crate::teammate::inbound::Origin) the accept path would have
+//! built, so a would-be hold a same-uid writer floods is bucket-limited,
+//! deduplicated and hop-checked exactly like an accept, and a guard-dropped
+//! would-be hold answers byte-identically to one. `PeerGuard::admit` itself
+//! is unchanged by any of this: what moved is where it is *called from*,
+//! never what it does. `admit` returns exactly four reasons
 //! ([`Dropped::HopRunaway`](crate::teammate::inbound::Dropped::HopRunaway), [`Dropped::HopLoop`](crate::teammate::inbound::Dropped::HopLoop), [`Dropped::Duplicate`](crate::teammate::inbound::Dropped::Duplicate),
 //! [`Dropped::RateLimited`](crate::teammate::inbound::Dropped::RateLimited)); the 50-message queue cap is a **separate
 //! enqueue-time test**, not an `admit` reason (v2 §"Cross-pass
@@ -232,10 +250,13 @@
 //! envelope's `from` is sender-authored routing data, not an authenticated
 //! principal).
 //!
-//! The hop checks are real logic over an empty chain: ganja's wire carries
-//! no `hop-chain`, so both trivially pass in production, but the functions
-//! are total and unit-tested with synthetic chains. Two readings are
-//! **ganja-inferred and marked so** (M5): v2 pins the constants, not the
+//! The hop checks were real logic over an empty chain until **D532**: ganja's
+//! wire now carries a real `hop_chain` and `own_marker` at the socket door
+//! (`admit_socket`'s [`Origin`](crate::teammate::inbound::Origin)), so both checks are live in production —
+//! the mailbox door still passes `&[]`/`None`, stated rather than defaulted,
+//! since a demoted writer's entry crossed no socket and carries no chain at
+//! all. Two readings are **ganja-inferred and marked so** (M5): v2 pins the
+//! constants, not the
 //! comparator, so exceeding-drops (29 drops where 28 passes, 11 own-marker
 //! occurrences drop where 10 pass) is this port's reading; and the
 //! 256-tracked-sender bound is evicted least-recently-used, v2 recording
@@ -280,17 +301,11 @@
 //!
 //! # Deliberately not implemented
 //!
-//! - **Sender-side `from-mode` emission** — v2's own embedded default is off
-//!   (v2 §"Sender mode is feature-gated", evidence 620372-620375), and
-//!   emission is a wire-evolution project of its own.
-//! - **Sender-side `hop-chain` emission**, and its 32-entry serialized cap —
-//!   no hops are emitted, so the sender cap has no site; the receiver split
-//!   and guards exist so a future sender cannot leak or overflow.
-//! - **Receipts beyond the HTTP response** — ganja's `from` is an identity,
-//!   not a reply address; CC's settlement receipts ride the sender's `uds:`
-//!   reply address (v2 §"Receipts and sender UX", evidence 886033-886075).
-//!   Post-response settlement is observable receiver-side only; a follow-up
-//!   bead tracks reply-capable receipts.
+//! - **Sender-side `from-mode` and `hop-chain` emission, and receipts beyond
+//!   the synchronous HTTP response** all **landed with D532/D534** (this
+//!   plan) — the three items this list used to name here are built, at
+//!   [`crate::subagent::SocketMessage`]/[`crate::teammate::receipts`], and
+//!   not repeated as absences.
 //! - **A durable held store** — process-local by design (v2 §"Storage and
 //!   capacity"); durability would deliver unreviewed text after a crash.
 //! - **The `selfSent` ancestry walk** — the gap note above; probe-first
@@ -341,10 +356,25 @@ const PREVIEW_LINES: usize = 8;
 /// The character half of the preview cap; see [`PREVIEW_LINES`].
 const PREVIEW_CHARS: usize = 1024;
 
-/// The sender-mode flag's value at every production call site: v2's observed
-/// default is off (v2 §"Sender mode is feature-gated", evidence
-/// 620372-620375), and ganja's wire carries nothing that could turn it on.
-/// The `true` half of [`decide_unset`] stays specification kept ready.
+/// The sender-mode flag's value as `decide_unset`'s own **collapsed**
+/// branch — one half of the never-loosen composition (Axis 5, **OQ2(a)**),
+/// not a switch [`Inbound::admit_socket`](crate::teammate::inbound::Inbound::admit_socket) flips.
+///
+/// v2's sender emits `from-mode` only when a flag whose embedded default is
+/// off is on (v2 §"Sender mode is feature-gated", evidence 620372-620375,
+/// 623133-623145), so a real deployment's traffic is usually unattested —
+/// **"Treat the matrix as the specification and the two-row collapse as the
+/// likely observed behavior, and check the flag before relying on
+/// either."** (v2 §"The parity matrix, and when it actually applies",
+/// evidence 620535-620617, quoted whole rather than truncated at the half
+/// that suits the argument). Since **D532/D534** ganja's own production
+/// call site checks both: it asks [`ResolvedInbound::decide`](crate::teammate::inbound::ResolvedInbound::decide) once with
+/// this constant (`false`, the collapse) and once with `true` (the honored
+/// eight-row matrix), and keeps the **stricter** answer
+/// (`strictest_of`). This constant therefore stays the *floor* the
+/// composition can never fall below — it is never itself the whole
+/// decision — and the `true` half of [`decide_unset`](crate::teammate::inbound::decide_unset) is fully reachable
+/// through the honored call, not dormant specification.
 const HONOR_SENDER_MODE: bool = false;
 
 /// This session's permission class, as the parity matrix reads it (**D523**).
@@ -456,6 +486,39 @@ pub fn decide_unset(
         }
         (ReceiverClass::Prompting, None) => Verdict::Accept,
         (ReceiverClass::Bypass, None) => Verdict::Hold(HoldCause::NoModeAsserted),
+    }
+}
+
+/// Where one [`Verdict`] sits on the strictness ladder [`strictest_of`]
+/// composes over: refuse outranks hold outranks accept.
+const fn severity(verdict: &Verdict) -> u8 {
+    match verdict {
+        Verdict::Accept => 0,
+        Verdict::Hold(_) => 1,
+        Verdict::Refuse(_) => 2,
+    }
+}
+
+/// The **never-loosen composition** (Axis 5, **OQ2(a)**): the stricter of
+/// two verdicts decided for the same message, so no wire field can ever
+/// *grant* — the result's severity is always at least each input's own,
+/// which is what "never looser than the collapse" means as code rather
+/// than as a sentence (**AC-49**).
+///
+/// A tie keeps `honored`'s cause: the two calls this composes differ only
+/// in whether the sender's asserted mode was consulted at all, and the
+/// honored answer is the more informative sentence when both land on the
+/// same outcome (`decide_unset`'s `(Bypass, Some(Prompting))` row moves
+/// `no_mode_asserted` → `mode_mismatch` this way, cause only). An explicit
+/// policy answers identically on both branches — `ResolvedInbound::decide`
+/// resolves it before `decide_unset` is ever reached — so the tie there is
+/// a genuine no-op, not merely a harmless one.
+#[must_use]
+fn strictest_of(collapsed: Verdict, honored: Verdict) -> Verdict {
+    if severity(&honored) >= severity(&collapsed) {
+        honored
+    } else {
+        collapsed
     }
 }
 
@@ -692,14 +755,48 @@ pub enum Tier<'a> {
 pub struct Origin<'a> {
     /// Which eligibility tier this arrival is.
     pub tier: Tier<'a>,
-    /// The message's hop chain — empty at every production call site, real
-    /// input for the total hop checks.
+    /// The message's hop chain — real input for the total hop checks. The
+    /// socket door reads this from the wire since **D532**; the mailbox
+    /// door still passes `&[]`, stated rather than defaulted, because a
+    /// demoted writer's entry crossed no socket and has no chain.
     pub hop_chain: &'a [String],
-    /// This session's own marker, for the loop check — `None` until a wire
-    /// carries chains at all.
+    /// This session's own marker, for the loop check. The socket door
+    /// reads this from `PeerFacts` since **D532**; the mailbox door still
+    /// passes `None`, for the same reason its `hop_chain` is empty.
     pub own_marker: Option<&'a str>,
     /// The body, hashed for dedup — never stored by the guard.
     pub body: &'a str,
+}
+
+/// The peer-asserted facts one socket-door arrival carries (**D532**): the
+/// sender's own claimed permission class, and the chain [`Origin`]'s hop
+/// checks read. Bundled into one value so [`Inbound::admit_socket`]'s
+/// callers — the engine, and every test that asserts none of this — pass
+/// one argument rather than three parameters repeated at every call site.
+#[derive(Clone, Copy, Debug)]
+pub struct WireFacts<'a> {
+    /// The sender's own asserted class, parsed from `from_mode` — [`None`]
+    /// for a sender with no class to assert.
+    pub sender: Option<SenderClass>,
+    /// The message's hop chain, oldest first — empty for a sender with none
+    /// to forward.
+    pub hop_chain: &'a [String],
+    /// This session's own bound-socket stem, for the loop check — [`None`]
+    /// until this session itself has one bound.
+    pub own_marker: Option<&'a str>,
+}
+
+impl WireFacts<'_> {
+    /// No wire facts asserted at all — every caller with none of this to
+    /// give, a test included.
+    #[must_use]
+    pub const fn none() -> Self {
+        Self {
+            sender: None,
+            hop_chain: &[],
+            own_marker: None,
+        }
+    }
 }
 
 /// One tracked sender's bucket, dedup window and recency.
@@ -955,6 +1052,13 @@ pub enum SocketAdmission {
     /// Held for review; the answer names the cause, as the reference's held
     /// receipt names its reason.
     Held {
+        /// Names this hold, for a receipt to key its eventual settlement to
+        /// (**N3**, **D534**) — additive over the record itself, which
+        /// stays byte-untouched: the engine pairs this id with the
+        /// message's own `message_id` and vetted `reply_to` in
+        /// [`crate::teammate::receipts`]'s own map, never on
+        /// `HeldMessage` (this module's own record, private by design).
+        id: HeldId,
         /// Why it was held.
         cause: HoldCause,
         /// A capacity eviction's mailbox-door victim, for the caller to
@@ -1048,9 +1152,11 @@ impl Inbound {
         (gate, drain)
     }
 
-    /// The socket door: policy, then — on accept only — the qualified guard
-    /// tier and the separate queue cap. Runs synchronously in the deliver
-    /// arm because the HTTP response must carry the outcome.
+    /// The socket door: the never-loosen composition, then — on accept
+    /// always, and on a *parity-cause* hold since **D534** — the qualified
+    /// guard tier, and on accept alone the separate queue cap. Runs
+    /// synchronously in the deliver arm because the HTTP response must
+    /// carry the outcome.
     #[must_use]
     pub fn admit_socket(
         &self,
@@ -1058,14 +1164,42 @@ impl Inbound {
         from: &str,
         text: &str,
         summary: Option<&str>,
+        facts: WireFacts<'_>,
     ) -> SocketAdmission {
         let mut state = self.lock();
-        match state
-            .resolved
-            .decide(receiver, None, false, HONOR_SENDER_MODE)
-        {
+        let origin = Origin {
+            tier: Tier::Qualified { sender: from },
+            hop_chain: facts.hop_chain,
+            own_marker: facts.own_marker,
+            body: text,
+        };
+
+        // The never-loosen composition (Axis 5, **OQ2(a)**): composed over
+        // `ResolvedInbound::decide`, never `decide_unset` directly — `decide`
+        // resolves an explicit `cross_session_inbound` value in its first
+        // branch, and composing beneath it would silently break that config
+        // key (MA). Calling it twice is safe and cheap: where an explicit
+        // policy is set both calls return the same verdict, so
+        // `strictest_of` is a no-op there.
+        let collapsed = state.resolved.decide(receiver, facts.sender, false, false);
+        let honored = state.resolved.decide(receiver, facts.sender, false, true);
+
+        match strictest_of(collapsed, honored) {
             Verdict::Refuse(cause) => SocketAdmission::Silent(DropReason::Refused(cause)),
             Verdict::Hold(cause) => {
+                // The guard now runs ahead of the hold arm too (**N1**,
+                // **D1**), scoped to the two parity causes this landing
+                // newly routes traffic onto: an explicitly configured hold
+                // and a fail-closed mode-unknown hold pass ungated, because
+                // neither gains any new traffic here — the person who
+                // configured `cross_session_inbound: "hold"` asked for
+                // every message to reach review, and gating that path would
+                // quietly deliver less than it names.
+                let newly_routed =
+                    matches!(cause, HoldCause::ModeMismatch | HoldCause::NoModeAsserted);
+                if newly_routed && let Err(dropped) = state.guard.admit(&origin) {
+                    return SocketAdmission::Silent(DropReason::Guard(dropped));
+                }
                 let evicted_prune = self.hold(
                     &mut state,
                     Door::Socket,
@@ -1074,18 +1208,23 @@ impl Inbound {
                     summary.map(str::to_owned),
                     cause,
                 );
+                // `hold()` stays byte-unchanged (**D534**, **N3**): the id
+                // it just minted is read back off the buffer's own tail —
+                // the last thing it does before returning — rather than
+                // threaded through its signature.
+                let id = state
+                    .buffer
+                    .back()
+                    .expect("hold() always pushes exactly one record before returning")
+                    .id
+                    .clone();
                 SocketAdmission::Held {
+                    id,
                     cause,
                     evicted_prune,
                 }
             }
             Verdict::Accept => {
-                let origin = Origin {
-                    tier: Tier::Qualified { sender: from },
-                    hop_chain: &[],
-                    own_marker: None,
-                    body: text,
-                };
                 if let Err(dropped) = state.guard.admit(&origin) {
                     return SocketAdmission::Silent(DropReason::Guard(dropped));
                 }

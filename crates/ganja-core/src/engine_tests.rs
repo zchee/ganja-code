@@ -1927,3 +1927,109 @@ fn replacing_the_environment_recomposes_the_suffix_immediately() {
         "the swap recomposes now rather than waiting for a model switch"
     );
 }
+
+// ---------------------------------------------------------------------
+// The peer address seam and the facts it feeds (**D532**)
+// ---------------------------------------------------------------------
+
+/// The one seam sets both readings of one fact, and clears both together:
+/// there is no way to end up advertising a reply address with no marker, or
+/// a marker with no address.
+#[test]
+fn the_peer_address_seam_sets_and_clears_both_readings_at_once() {
+    let engine = engine();
+    assert_eq!(
+        engine.peer_address(),
+        None,
+        "an unbound session has neither"
+    );
+
+    let socket = std::path::Path::new("/tmp/ganja-501/0198c1a2.sock");
+    engine.set_peer_address(Some(socket));
+    assert_eq!(
+        engine.peer_address(),
+        Some((socket.to_path_buf(), "0198c1a2".to_owned())),
+        "one call, both readings, off one path"
+    );
+
+    engine.set_peer_address(None);
+    assert_eq!(
+        engine.peer_address(),
+        None,
+        "and one call takes both away again"
+    );
+}
+
+/// A path with no readable stem records **nothing** rather than half of the
+/// fact: a marker guessed from a nameless path would be the invention this
+/// design refuses everywhere else.
+#[test]
+fn a_path_with_no_stem_records_nothing_at_all() {
+    let engine = engine();
+
+    engine.set_peer_address(Some(std::path::Path::new("/")));
+
+    assert_eq!(engine.peer_address(), None);
+}
+
+/// The facts value reads the engine's **cells**, so a mode switch, a bind and
+/// an inbound chain all reach the next send rather than a copy taken when the
+/// postbox was built.
+#[test]
+fn the_peer_facts_read_the_cells_rather_than_a_snapshot() {
+    use crate::subagent::SenderMode;
+
+    let engine = engine();
+    let facts = engine.peer_facts();
+
+    assert_eq!(facts.sender_mode(), Some(SenderMode::Prompting));
+    assert_eq!(facts.reply_to(), None);
+    assert!(facts.hop_chain().is_empty());
+
+    *engine
+        .permission_mode
+        .lock()
+        .expect("the permission mode is never poisoned") = crate::protocol::PermissionMode::Bypass;
+    let socket = std::path::Path::new("/tmp/ganja-501/0198c1a2.sock");
+    engine.set_peer_address(Some(socket));
+
+    assert_eq!(
+        facts.sender_mode(),
+        Some(SenderMode::Bypass),
+        "the class is read live, through the same call the receiver's own door makes"
+    );
+    assert_eq!(facts.reply_to(), Some(socket.to_path_buf()));
+    assert_eq!(facts.hop_chain(), vec!["0198c1a2".to_owned()]);
+}
+
+/// The sender cap truncates **oldest-first**, which is the clause no door in
+/// this build can reach: the receiver's own chain check drops anything past
+/// 28 entries, so a chain can only ever *inherit* 28 and the 33rd entry
+/// cannot arrive that way. Asserted over the facts value, where the chain can
+/// be as long as the arithmetic needs.
+#[test]
+fn the_sender_cap_drops_the_oldest_entries_first() {
+    use crate::subagent::MAX_HOP_CHAIN_ENTRIES;
+
+    let engine = engine();
+    let inherited: Vec<String> = (0..40).map(|index| format!("0198c{index:03}")).collect();
+    *engine
+        .inbound_chain
+        .lock()
+        .expect("the inbound chain cell is never poisoned") = inherited.clone();
+    engine.set_peer_address(Some(std::path::Path::new("/tmp/ganja-501/0198ffff.sock")));
+
+    let carried = engine.peer_facts().hop_chain();
+
+    assert_eq!(carried.len(), MAX_HOP_CHAIN_ENTRIES, "the cap bounds it");
+    assert_eq!(
+        carried[0],
+        inherited[40 - (MAX_HOP_CHAIN_ENTRIES - 1)],
+        "what survives is the newest, oldest-first being what goes"
+    );
+    assert_eq!(
+        carried[MAX_HOP_CHAIN_ENTRIES - 1],
+        "0198ffff",
+        "and this session is still the last entry"
+    );
+}

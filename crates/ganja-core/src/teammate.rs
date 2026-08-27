@@ -183,6 +183,10 @@ pub mod preamble;
 pub mod readback;
 /// Killing panes the lead left behind when it died (P25b).
 pub mod reaper;
+/// Held-settlement receipts (**D534**): the sender-side outstanding-id
+/// registry, the receiver-side `HeldId` association, and the best-effort
+/// client that carries a settlement back over the sender's own socket.
+pub mod receipts;
 /// The §6.1 loop that drives one in-process teammate.
 pub mod runner;
 /// A teammate that is another vendor's CLI, driven through its own

@@ -888,6 +888,12 @@ pub struct Postbox {
     /// [`Postbox::with_peer_facts`] — every constructor below keeps
     /// building against that default and never has to change for it.
     peer_facts: Arc<dyn PeerFacts>,
+    /// Where a held answer registers an outstanding send (**D534**): the
+    /// engine's own receipt state, shared with every other reader of it.
+    /// [`None`] until the engine installs one, which is every fixture and
+    /// every teammate's own postbox — a send from one of those simply
+    /// registers nothing and expects no settlement.
+    receipts: Option<Arc<crate::teammate::receipts::Receipts>>,
 }
 
 /// Renders which team and which sender this speaks for, and nothing of the
@@ -932,6 +938,7 @@ impl Postbox {
             registry: Arc::downgrade(registry),
             resolver: resolver.map(|(identity, own_session)| (Arc::clone(identity), own_session)),
             peer_facts: Arc::new(Unbound),
+            receipts: None,
         }
     }
 
@@ -949,6 +956,7 @@ impl Postbox {
             registry: Arc::downgrade(registry),
             resolver: None,
             peer_facts: Arc::new(Unbound),
+            receipts: None,
         }
     }
 
@@ -959,6 +967,27 @@ impl Postbox {
     pub fn with_peer_facts(mut self, peer_facts: Arc<dyn PeerFacts>) -> Self {
         self.peer_facts = peer_facts;
         self
+    }
+
+    /// Installs the engine's own receipt state (**D534**), the seam
+    /// [`Postbox::with_peer_facts`] is the twin of and for the same reason:
+    /// the state lives on the engine and this postbox is built before the
+    /// engine exists to hand it over, so every constructor above keeps
+    /// building against [`None`] and never has to change for it.
+    #[must_use]
+    pub fn with_receipts(mut self, receipts: Arc<crate::teammate::receipts::Receipts>) -> Self {
+        self.receipts = Some(receipts);
+        self
+    }
+
+    /// What a socket-crossing send reads about this session — the two
+    /// installed values, borrowed together, so no arm can pass one and
+    /// forget the other.
+    fn sender_side(&self) -> SenderSide<'_> {
+        SenderSide {
+            facts: self.peer_facts.as_ref(),
+            receipts: self.receipts.as_deref(),
+        }
     }
 
     /// The team as this caller may address it, once somebody holding the team
@@ -1055,6 +1084,7 @@ impl Postbox {
             // the default.
             resolver: None,
             peer_facts: Arc::new(Unbound),
+            receipts: None,
         })
     }
 
@@ -1090,14 +1120,7 @@ impl Postbox {
         let from = format!("{}@{}", self.sender, registry.team());
         drop(registry);
 
-        deliver_over_socket(
-            path,
-            body,
-            from,
-            FRAME_OVER_SOCKET,
-            self.peer_facts.as_ref(),
-        )
-        .await
+        deliver_over_socket(path, body, from, FRAME_OVER_SOCKET, self.sender_side()).await
     }
 }
 
@@ -1134,7 +1157,7 @@ async fn deliver_over_socket(
     body: Body,
     from: String,
     frame_refusal: &'static str,
-    peer_facts: &dyn PeerFacts,
+    sender: SenderSide<'_>,
 ) -> Result<Sent, Undelivered> {
     let Body::Text { text, summary } = body else {
         return Err(Undelivered::Failed {
@@ -1169,6 +1192,8 @@ async fn deliver_over_socket(
             reflected(&view.lead)
         ),
     })?;
+    let message_id = PeerMessageId::ascending();
+    let reply_to = sender.facts.reply_to();
     let delivered: SocketDelivered = socket
         .post(
             &format!("{TEAM_ROUTE}/{lead}{MESSAGE_ROUTE}"),
@@ -1176,24 +1201,44 @@ async fn deliver_over_socket(
                 from,
                 text,
                 summary,
-                message_id: Some(PeerMessageId::ascending()),
-                from_mode: peer_facts.sender_mode(),
-                hop_chain: peer_facts.hop_chain(),
-                reply_to: peer_facts
-                    .reply_to()
+                message_id: Some(message_id.clone()),
+                from_mode: sender.facts.sender_mode(),
+                hop_chain: sender.facts.hop_chain(),
+                reply_to: reply_to
+                    .as_ref()
                     .map(|path| format!("uds:{}", path.display())),
             },
         )
         .await?;
 
-    Ok(Sent {
+    let sent = Sent {
         // The far side answers with the bare name it wrote to; what this
         // side reports back is that name *in that session*, so a transcript
         // never reads a peer's `team-lead` as this team's. Both are the
         // peer's words, and are cut to a line before the model reads them.
         to: reflected(&format!("{}@{}", delivered.to, view.team)),
         note: reflected(&delivered.note),
-    })
+    };
+
+    // **D534**: an outstanding id is kept **only** when the synchronous
+    // answer said held *and* this session named somewhere to answer. An
+    // accept and a refuse were both fully resolved by the very bytes above,
+    // so neither leaves anything to wait on — which is what makes silence on
+    // the receipt route mean exactly one thing, still held. The fact is read
+    // off the typed `held` field rather than off `note`'s prose (**N2**):
+    // that note is a display cut of the peer's own sentence, and a state
+    // machine driven by string-sniffing it would be a state machine driven
+    // by the peer.
+    if let Some(receipts) = sender.receipts {
+        receipts.register(
+            message_id,
+            sent.to.clone(),
+            delivered.held.is_some(),
+            reply_to.as_deref(),
+        );
+    }
+
+    Ok(sent)
 }
 
 /// One name's resolution — a registry read (`Identity`'s own module doc says
@@ -1229,7 +1274,7 @@ async fn deliver_resolved(
     body: Body,
     from: String,
     frame_refusal: &'static str,
-    peer_facts: &dyn PeerFacts,
+    sender: SenderSide<'_>,
 ) -> Result<Sent, Undelivered> {
     match resolution {
         identity::Resolution::Session {
@@ -1243,7 +1288,7 @@ async fn deliver_resolved(
                 resolver.pin(name, &id, &stem);
             }
 
-            let inner = deliver_over_socket(&socket, body, from, frame_refusal, peer_facts).await?;
+            let inner = deliver_over_socket(&socket, body, from, frame_refusal, sender).await?;
             Ok(Sent {
                 to: format!("{name} (uds:{} \u{2192} {})", socket.display(), inner.to),
                 note: inner.note,
@@ -1527,6 +1572,24 @@ pub trait PeerFacts: fmt::Debug + Send + Sync {
     /// it. Empty for a sender with no bound socket and nothing inherited
     /// (Axis 3's unbound sub-case).
     fn hop_chain(&self) -> Vec<String>;
+}
+
+/// What one socket-crossing send reads about the session making it
+/// (**D532**, **D534**): the facts it stamps onto the envelope, and the
+/// receipt state a held answer registers into.
+///
+/// One borrowed value rather than two parameters because the two travel
+/// together through every arm of the crossing and always come from the same
+/// postbox — and because splitting them apart is how a future arm comes to
+/// pass one and forget the other.
+#[derive(Clone, Copy)]
+struct SenderSide<'a> {
+    /// This session's own asserted class, reply address and hop chain.
+    facts: &'a dyn PeerFacts,
+    /// Where a held answer registers an outstanding send. [`None`] for every
+    /// postbox the engine has not installed its own state into — a fixture,
+    /// a teammate's own — which registers nothing and expects no settlement.
+    receipts: Option<&'a crate::teammate::receipts::Receipts>,
 }
 
 /// The [`PeerFacts`] every postbox is built with until the engine installs
@@ -2042,7 +2105,7 @@ impl team::Postbox for Postbox {
             body,
             from,
             FRAME_OVER_SOCKET,
-            self.peer_facts.as_ref(),
+            self.sender_side(),
         )
         .await
     }
@@ -2155,6 +2218,12 @@ pub struct SoloPostbox {
     /// See [`Postbox`]'s own field of the same name — [`Unbound`] until
     /// [`SoloPostbox::with_peer_facts`] installs the engine's.
     peer_facts: Arc<dyn PeerFacts>,
+    /// Where a held answer registers an outstanding send (**D534**): the
+    /// engine's own receipt state, shared with every other reader of it.
+    /// [`None`] until the engine installs one, which is every fixture and
+    /// every teammate's own postbox — a send from one of those simply
+    /// registers nothing and expects no settlement.
+    receipts: Option<Arc<crate::teammate::receipts::Receipts>>,
 }
 
 impl SoloPostbox {
@@ -2171,23 +2240,32 @@ impl SoloPostbox {
             identity,
             own_session,
             peer_facts: Arc::new(Unbound),
+            receipts: None,
         }
     }
 
     /// Installs the engine's own [`PeerFacts`] (**D532**); see
     /// [`Postbox::with_peer_facts`], this postbox's twin.
     #[must_use]
-    // Only this crate's own test double calls it today — the engine calls
-    // it for real in W2 — so the expectation is scoped to the non-test
-    // build: this crate's own tests already exercise it, and `expect`
-    // cannot be unconditional without going unfulfilled there.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "wired by the engine in W2 (D534)")
-    )]
     pub fn with_peer_facts(mut self, peer_facts: Arc<dyn PeerFacts>) -> Self {
         self.peer_facts = peer_facts;
         self
+    }
+
+    /// Installs the engine's own receipt state (**D534**); see
+    /// [`Postbox::with_receipts`], this postbox's twin.
+    #[must_use]
+    pub fn with_receipts(mut self, receipts: Arc<crate::teammate::receipts::Receipts>) -> Self {
+        self.receipts = Some(receipts);
+        self
+    }
+
+    /// See [`Postbox::sender_side`], this postbox's twin.
+    fn sender_side(&self) -> SenderSide<'_> {
+        SenderSide {
+            facts: self.peer_facts.as_ref(),
+            receipts: self.receipts.as_deref(),
+        }
     }
 
     /// The derived identity every send through this stamps `from` with:
@@ -2229,7 +2307,7 @@ impl team::Postbox for SoloPostbox {
                     body,
                     self.from(),
                     FRAME_OVER_SOCKET_SOLO,
-                    self.peer_facts.as_ref(),
+                    self.sender_side(),
                 )
                 .await?
             }
@@ -2239,7 +2317,7 @@ impl team::Postbox for SoloPostbox {
                     body,
                     self.from(),
                     FRAME_OVER_SOCKET_SOLO,
-                    self.peer_facts.as_ref(),
+                    self.sender_side(),
                 )
                 .await?
             }

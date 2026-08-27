@@ -2102,7 +2102,7 @@ async fn approval_keys_settle_by_event_never_by_keypress() {
 /// none.
 #[tokio::test]
 async fn a_yolo_session_never_answers_a_hold_and_the_entry_stays_held() {
-    use ganja_core::teammate::inbound::SocketAdmission;
+    use ganja_core::teammate::inbound::{SocketAdmission, WireFacts};
 
     let mut app =
         App::new(engine().with_inbound_bypass(true), None, Themes::builtin()).with_yolo(true);
@@ -2115,6 +2115,7 @@ async fn a_yolo_session_never_answers_a_hold_and_the_entry_stays_held() {
         "w1@ganja-team",
         "the body of the message",
         None,
+        WireFacts::none(),
     );
     assert!(
         matches!(
@@ -2173,6 +2174,7 @@ async fn the_bar_counts_held_messages_only_while_any_are_held() {
         "w1@ganja-team",
         "the body",
         None,
+        ganja_core::teammate::inbound::WireFacts::none(),
     );
     assert!(
         matches!(
@@ -2211,6 +2213,7 @@ async fn the_held_listing_lists_and_its_deny_retires_the_row() {
         "w1@ganja-team",
         "the body of the finding",
         Some("a finding worth a look"),
+        ganja_core::teammate::inbound::WireFacts::none(),
     );
     assert!(
         matches!(

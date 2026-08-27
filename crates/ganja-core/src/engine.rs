@@ -46,6 +46,11 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
+/// The two wire vocabularies this module's own public types are spelled in
+/// (**D532**, **D534**), re-exported here because [`PeerEnvelope`] and
+/// [`Received`] carry them and `crate::subagent` is a private module: a
+/// caller that can name the value cannot otherwise name its type.
+pub use crate::subagent::{HeldWire, SenderMode};
 use crate::{
     agent::{self, Agent},
     catalog, command,
@@ -79,6 +84,19 @@ pub const EVENT_CAPACITY: usize = 1024;
 /// the reference's own shutdown bound (v2 §"Shutdown", evidence
 /// 620390-620431).
 const SHUTDOWN_SETTLE_FLUSH: std::time::Duration = std::time::Duration::from_millis(750);
+
+/// How many settlements one `<peer_receipt>` batch may name (**D534**:
+/// "the batch is bounded and the ids are rendered short").
+///
+/// **Ganja-inferred**: v2 records that its sender-side UI batches status
+/// updates (v2 §"Receipts and sender UX", evidence 1228101-1228199) and no
+/// number for the batch. The bound exists for the reason every other bound
+/// in this landing does — a queue of peer-provoked text that grows without
+/// limit is the thing the gate exists to refuse — and is far above what the
+/// channel can actually produce, since a settlement only ever follows a
+/// message a person was asked to review. The oldest are dropped first, the
+/// hold buffer's own eviction order.
+const RECEIPT_BATCH_CAP: usize = 32;
 
 /// Teammate permission dialogs the lead may fall behind on before a teammate's
 /// forwarding waits for it (**D-5**).
@@ -1175,7 +1193,7 @@ pub struct Engine {
     /// [`Command::NewSession`], for the reason the model and the agent are
     /// not: it is what this engine runs as, and neither the person nor the
     /// lead who set it asked for it back.
-    permission_mode: std::sync::Mutex<PermissionMode>,
+    permission_mode: Arc<std::sync::Mutex<PermissionMode>>,
     /// What a config asked to be run at the nine moments [`crate::hook`]
     /// names. [`None`] is an engine whose config asked for none, which does no
     /// hook work at all rather than inert hook work at nine seams. Locked
@@ -1276,6 +1294,92 @@ pub struct Engine {
     /// static ladder regardless of this value, the ruling's own "in a
     /// session that holds a team, this key has no effect at all".
     teamless_send: TeamlessSend,
+    /// The socket this session answers on, when a frontend has bound one
+    /// (**D532**): the `reply_to` a send stamps and the `own_marker` the hop
+    /// check reads, held **together** in one cell through the one seam that
+    /// sets them, [`Engine::set_peer_address`]. Two readings of one fact —
+    /// the socket this session is reachable at — and letting them drift
+    /// apart is the only way this design goes quietly wrong, which is why
+    /// there is no second setter for either half.
+    peer_address: Arc<std::sync::Mutex<Option<PeerAddress>>>,
+    /// The hop chain of the most recently **admitted** inbound peer message
+    /// (**D532**, Axis 4), which the next outbound send forwards with this
+    /// session's own marker appended.
+    ///
+    /// Conversation-scoped and volatile, the pin map's own shape and
+    /// lifetime (`teammate::identity`'s pins, D528 Axis 3) — cleared by
+    /// [`Command::NewSession`] through the same door. A loop is A→B→C→A
+    /// across turns rather than within one, so turn-scoped state would empty
+    /// exactly the chain the guard's loop check exists to read.
+    inbound_chain: Arc<std::sync::Mutex<Vec<String>>>,
+    /// Both halves of D534's receipt state: the sender-side outstanding-id
+    /// registry a held answer registers into, and the receiver-side
+    /// `HeldId → (message id, reply address)` association a settlement is
+    /// posted from. Always present, the admission gate's own posture — a
+    /// session that never sends and never holds simply feeds it nothing.
+    receipts: Arc<teammate::receipts::Receipts>,
+    /// Settlements this session has learned about and not yet shown its
+    /// model: [`Engine::apply_receipt`] appends, and the next prompt intake
+    /// drains the whole batch into one `<peer_receipt>` part
+    /// (`crate::session`'s `user_message` seam, D529's own vehicle).
+    ///
+    /// Bounded at [`RECEIPT_BATCH_CAP`] with the oldest dropped first, the
+    /// hold buffer's own shape: a batch that grew without limit would be a
+    /// second unbounded queue of peer-provoked text, which is the thing the
+    /// gate exists to refuse. Cleared by [`Command::NewSession`] beside the
+    /// outstanding registry, because a settlement of a message the previous
+    /// conversation sent is not this one's news.
+    settled_receipts: Arc<std::sync::Mutex<Vec<teammate::receipts::Settled>>>,
+    /// Where session registration records live, for the model-facing
+    /// listing (**D535**): the same directory [`Engine::with_socket_directory`]
+    /// seeds the resolver with, kept beside it because `list_sessions` needs
+    /// the path itself rather than a resolution over it.
+    socket_directory: PathBuf,
+    /// Whether the installed postbox can **cross-session send** (**D535**'s
+    /// registration gate): a lead's and the solo one can, a
+    /// [`teammate::member::MemberPostbox`] and a teammate's own
+    /// [`subagent::Postbox::of`] cannot — the first refuses
+    /// `Address::Uds` outright and resolves a name only against its own team
+    /// file, so handing it a directory of this user's sessions, cwds and
+    /// `uds:` addresses would hand it a list of addresses it structurally
+    /// cannot use.
+    ///
+    /// A flag beside [`Engine::teamless`] rather than a query on the trait,
+    /// and kept in lockstep the same way: [`Engine::install_postbox`] clears
+    /// it, and the two installers that put a cross-session-capable postbox in
+    /// place set it back afterwards. Deliberately **not** `send_message`'s
+    /// gate, which is postbox presence alone — a member is offered
+    /// `send_message` from its first turn and must keep it.
+    cross_session_postbox: AtomicBool,
+}
+
+/// The socket one session answers on, in the two spellings a send needs
+/// (**D532**): the address a receipt is posted back to, and the marker a hop
+/// chain carries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PeerAddress {
+    /// The bound socket's own path — what `reply_to` is spelled from.
+    path: PathBuf,
+    /// That path's file stem, which is this session's hop marker (Axis 3,
+    /// **ganja-inferred**): the bind walk already made every live stem
+    /// unique in one directory, it is already visible in `Sent.to`, in every
+    /// refusal sentence and in `sessions --live`, and it discloses nothing
+    /// new inside a boundary that is already same-uid.
+    marker: String,
+}
+
+impl PeerAddress {
+    /// Reads both spellings off one bound socket path, or [`None`] when the
+    /// path carries no usable stem — a marker guessed from a nameless path
+    /// would be the invention this design refuses everywhere else.
+    fn of(path: &Path) -> Option<Self> {
+        let marker = path.file_stem()?.to_str()?.to_owned();
+
+        Some(Self {
+            path: path.to_owned(),
+            marker,
+        })
+    }
 }
 
 impl Engine {
@@ -1396,7 +1500,7 @@ impl Engine {
             postbox: std::sync::Mutex::new(None),
             teammate_dialogs: std::sync::Mutex::new(None),
             team_roster: std::sync::Mutex::new(Vec::new()),
-            permission_mode: std::sync::Mutex::new(PermissionMode::Ask),
+            permission_mode: Arc::new(std::sync::Mutex::new(PermissionMode::Ask)),
             hooks: std::sync::Mutex::new(None),
             hook_context: std::sync::Mutex::new(Vec::new()),
             concurrency: crate::config::AgentsConfig::DEFAULT_CONCURRENCY,
@@ -1411,6 +1515,12 @@ impl Engine {
             )),
             teamless: AtomicBool::new(false),
             teamless_send: TeamlessSend::default(),
+            peer_address: Arc::default(),
+            inbound_chain: Arc::default(),
+            receipts: Arc::new(teammate::receipts::Receipts::new()),
+            settled_receipts: Arc::default(),
+            socket_directory: crate::tool::socket::directory(),
+            cross_session_postbox: AtomicBool::new(false),
         };
         // The builder-time run of the shared composition path, for the one
         // engine no rebuild ever reaches: a fixture whose `mcp__*` names
@@ -1949,10 +2059,11 @@ impl Engine {
     /// running a teammate whose transcript evaporates.
     #[must_use]
     pub fn with_teammates(mut self, registry: Arc<teammate::TeammateRegistry>) -> Self {
-        let lead = Arc::new(subagent::Postbox::lead(
-            &registry,
-            Some((&self.identity, Arc::clone(&self.session))),
-        ));
+        let lead = Arc::new(
+            subagent::Postbox::lead(&registry, Some((&self.identity, Arc::clone(&self.session))))
+                .with_peer_facts(self.peer_facts())
+                .with_receipts(Arc::clone(&self.receipts)),
+        );
         let in_process: Arc<dyn teammate::TeammateBackend> = match self.storage() {
             Some(storage) => Arc::new(teammate::InProcess::lending(
                 Arc::clone(&self.provider),
@@ -2021,6 +2132,9 @@ impl Engine {
             },
         )));
         self.install_postbox(lead);
+        // A lead's postbox reaches `deliver_over_socket` and the resolver, so
+        // this session may be handed the model-facing listing (**D535**).
+        self.cross_session_postbox.store(true, Ordering::Relaxed);
         self.recompose_tools();
         // A team is what makes the gate reachable — the socket exists only
         // for a lead session — so this is where its event drain starts.
@@ -2077,6 +2191,10 @@ impl Engine {
         // queue ends, and the task ends with it.
         let inbound = Arc::downgrade(&self.inbound);
         let teammates = self.teammates.as_ref().map(Arc::downgrade);
+        // Weak for the same reason the other two are: a pending timer must
+        // keep nothing alive past the engine, and a deadline that fires after
+        // the receipt state is gone has nothing left to post.
+        let receipts = Arc::downgrade(&self.receipts);
 
         tokio::spawn(async move {
             let mut timers: BTreeMap<String, tokio::task::JoinHandle<()>> = BTreeMap::new();
@@ -2127,6 +2245,7 @@ impl Engine {
                             id.clone(),
                             inbound.clone(),
                             teammates.clone(),
+                            receipts.clone(),
                         ));
                         timers.insert(id.as_str().to_owned(), timer);
                     }
@@ -2204,6 +2323,11 @@ impl Engine {
     /// (`Hg()`)", evidence 220730-220742, and the divergence note in
     /// [`teammate::inbound`]'s module doc).
     ///
+    /// Since **D532** this is the arm for a caller with **no envelope to
+    /// hand in** — an old sender's body, and every fixture — and delegates to
+    /// [`Engine::receive_peer_envelope`], which is where the four new wire
+    /// fields are read and where the typed hold fact is answered.
+    ///
     /// # Errors
     ///
     /// [`NotReceived::NoTeam`](crate::NotReceived::NoTeam) when this session
@@ -2213,6 +2337,45 @@ impl Engine {
         &self,
         incoming: crate::Incoming,
     ) -> Result<crate::tool::team::Sent, crate::NotReceived> {
+        self.receive_peer_envelope(incoming, PeerEnvelope::none())
+            .await
+            .map(|received| received.sent)
+    }
+
+    /// The same door, reading the envelope the sender actually wrote
+    /// (**D532**, **D534**) — what `ganja-serve`'s socket route calls once it
+    /// carries the four new fields across.
+    ///
+    /// Additive rather than a widened signature on purpose: every caller that
+    /// has nothing to assert keeps calling [`Engine::receive_peer_message`]
+    /// and gets exactly today's behavior, because an absent envelope is
+    /// indistinguishable from an old sender's body (**AC-2**).
+    ///
+    /// What the envelope buys, in order:
+    ///
+    /// - `from_mode` reaches [`teammate::inbound::Inbound::admit_socket`] as a
+    ///   real [`teammate::inbound::SenderClass`], so the never-loosen
+    ///   composition has something to compose over — an **attestation**, never
+    ///   a proof, which is why the composition can only tighten.
+    /// - `hop_chain` and this session's own marker fill the [`Origin`] the
+    ///   guard's two hop checks read, which were total logic over an empty
+    ///   chain until now.
+    /// - `message_id` and a **vetted** `reply_to` are paired with the
+    ///   [`HeldId`](crate::protocol::HeldId) a hold now returns, so a
+    ///   settlement can name the message that caused it (**N3**). The pairing
+    ///   lives in [`teammate::receipts`]'s own map and never on the buffer's
+    ///   record, which stays byte-untouched.
+    ///
+    /// [`Origin`]: teammate::inbound::Origin
+    ///
+    /// # Errors
+    ///
+    /// As [`Engine::receive_peer_message`].
+    pub async fn receive_peer_envelope(
+        &self,
+        incoming: crate::Incoming,
+        envelope: PeerEnvelope,
+    ) -> Result<Received, crate::NotReceived> {
         let Some(team) = &self.teammates else {
             return Err(crate::NotReceived::NoTeam);
         };
@@ -2220,11 +2383,27 @@ impl Engine {
 
         let message = subagent::receive_ladder(registry, incoming)?;
         let lead = message.lead.clone();
+        // Read once, before the gate's lock is taken: the marker is a borrow
+        // into the `Origin` below, and taking the address cell's lock inside
+        // the gate's own would be two locks in an order nothing else uses.
+        let marker = self
+            .peer_address()
+            .map(|(_, marker)| marker)
+            .unwrap_or_default();
         let admission = self.inbound.admit_socket(
             self.receiver_class(),
             &message.from,
             &message.text,
             message.summary.as_deref(),
+            teammate::inbound::WireFacts {
+                sender: envelope.from_mode.map(sender_class_of),
+                hop_chain: &envelope.hop_chain,
+                // An unbound session asserts no marker: nothing can route to
+                // it, so it cannot be a loop target, and the chain's own
+                // length cap still bounds runaway forwarding (Axis 3's
+                // unbound sub-case).
+                own_marker: (!marker.is_empty()).then_some(marker.as_str()),
+            },
         );
         match admission {
             teammate::inbound::SocketAdmission::Deliver => {
@@ -2233,10 +2412,20 @@ impl Engine {
                 // identity exist to record, and the §6.2 pass delivers what
                 // the set holds without re-running policy or guards (D525).
                 self.inbound.admit_identity(identity);
+                // The chain a forward carries is the one an **admitted**
+                // message arrived with (Axis 4). A held message sets nothing:
+                // it has not been admitted, and a chain recorded from text
+                // nobody has approved would let a refused message steer the
+                // loop check of a send this session makes later.
+                *self
+                    .inbound_chain
+                    .lock()
+                    .expect("the inbound chain cell is never poisoned") = envelope.hop_chain;
 
-                Ok(sent)
+                Ok(Received::accepted(sent))
             }
             teammate::inbound::SocketAdmission::Held {
+                id,
                 cause,
                 evicted_prune,
             } => {
@@ -2252,10 +2441,28 @@ impl Engine {
                         );
                     }
                 }
+                // **N3**: the association that lets this hold's eventual
+                // settlement name the message that caused it. Both halves must
+                // be present — a sender that minted no id, or one that named no
+                // reply address, is a sender with nothing to answer — and the
+                // address is vetted through the one predicate before it is
+                // ever kept, let alone opened.
+                if let (Some(message_id), Some(reply_to)) = (
+                    envelope.message_id,
+                    vetted_reply_to(envelope.reply_to.as_deref()),
+                ) {
+                    self.receipts.associate(id, message_id, reply_to);
+                }
 
-                Ok(crate::tool::team::Sent {
-                    to: lead,
-                    note: subagent::held_note(cause),
+                Ok(Received {
+                    sent: crate::tool::team::Sent {
+                        to: lead,
+                        note: subagent::held_note(cause),
+                    },
+                    // The typed half of the same fact the note carries in
+                    // prose (**N2**), so the sender drives its outstanding-id
+                    // registry off a value rather than off a peer's sentence.
+                    held: Some(subagent::HeldWire { cause }),
                 })
             }
             teammate::inbound::SocketAdmission::Silent(reason) => {
@@ -2267,10 +2474,10 @@ impl Engine {
                     "an inbound peer message was dropped without telling the sender"
                 );
 
-                Ok(crate::tool::team::Sent {
+                Ok(Received::accepted(crate::tool::team::Sent {
                     to: lead,
                     note: subagent::RECEIVED.to_owned(),
-                })
+                }))
             }
         }
     }
@@ -2388,6 +2595,12 @@ impl Engine {
     pub(crate) fn install_postbox(&self, postbox: Arc<dyn crate::tool::team::Postbox>) {
         *self.postbox.lock().expect("the postbox is never poisoned") = Some(postbox);
         self.teamless.store(false, Ordering::Relaxed);
+        // Cleared for the same reason `teamless` is, and set back by the same
+        // two installers (**D535**): the kinds that land here directly — a
+        // member pane's `MemberPostbox`, a teammate's own `Postbox::of` —
+        // cannot cross-session send at all, and a listing they could not act
+        // on is noise.
+        self.cross_session_postbox.store(false, Ordering::Relaxed);
     }
 
     /// Installs the solo postbox (**D530**): a session that leads no team,
@@ -2405,15 +2618,23 @@ impl Engine {
     /// — the one place a [`subagent::SoloPostbox`] is built, so the two
     /// callers cannot drift into building it two different ways.
     fn install_solo_postbox(&self) {
-        let solo = Arc::new(subagent::SoloPostbox::new(
-            Arc::clone(&self.self_name),
-            Arc::clone(&self.identity),
-            Arc::clone(&self.session),
-        ));
+        let solo = Arc::new(
+            subagent::SoloPostbox::new(
+                Arc::clone(&self.self_name),
+                Arc::clone(&self.identity),
+                Arc::clone(&self.session),
+            )
+            .with_peer_facts(self.peer_facts())
+            .with_receipts(Arc::clone(&self.receipts)),
+        );
         self.install_postbox(solo);
         // After `install_postbox`'s own reset, which is what makes this the
         // "swaps back" half of D530/F10's bidirectional seam.
         self.teamless.store(true, Ordering::Relaxed);
+        // The solo postbox is the other half of D535's gate: it resolves
+        // names against the registry and crosses a socket, so it too may be
+        // handed the listing.
+        self.cross_session_postbox.store(true, Ordering::Relaxed);
         self.recompose_tools();
     }
 
@@ -2433,11 +2654,13 @@ impl Engine {
     /// channel, so a caller after this method alone still cannot spawn a
     /// teammate — only `send_message`'s posture and roster description move.
     pub fn install_team(&self, registry: &Arc<teammate::TeammateRegistry>) {
-        let lead = Arc::new(subagent::Postbox::lead(
-            registry,
-            Some((&self.identity, Arc::clone(&self.session))),
-        ));
+        let lead = Arc::new(
+            subagent::Postbox::lead(registry, Some((&self.identity, Arc::clone(&self.session))))
+                .with_peer_facts(self.peer_facts())
+                .with_receipts(Arc::clone(&self.receipts)),
+        );
         self.install_postbox(lead);
+        self.cross_session_postbox.store(true, Ordering::Relaxed);
         self.recompose_tools();
     }
 
@@ -2478,13 +2701,125 @@ impl Engine {
             .clone()
     }
 
+    /// Records the socket this session answers on, or that it answers on
+    /// none (**D532**) — **the one seam** that sets a send's `reply_to` and
+    /// its `own_marker`, because they are two readings of one fact and
+    /// letting them drift apart is the only way this design goes quietly
+    /// wrong.
+    ///
+    /// Called by the frontend at exactly the points that already write and
+    /// remove this session's registration record: `Synced::Bound` sets it,
+    /// teardown and an observed rebind clear it. `&self`, like
+    /// [`Engine::set_self_name`], because a bind happens while the engine is
+    /// already shared; only a frontend reaches it, so a model's arguments
+    /// cannot make this session claim an address it does not answer on.
+    ///
+    /// A path with no readable file stem clears the cell rather than
+    /// recording half of it: a session that cannot name its own marker
+    /// carries no chain entry and offers no reply address, which is Axis 3's
+    /// unbound sub-case reached by a different road.
+    pub fn set_peer_address(&self, path: Option<&Path>) {
+        *self
+            .peer_address
+            .lock()
+            .expect("the peer address cell is never poisoned") = path.and_then(PeerAddress::of);
+    }
+
+    /// This session's own bound socket, as [`Engine::set_peer_address`] last
+    /// recorded it — the `uds:` address a send stamps and the marker its hop
+    /// chain carries, read together or not at all.
+    #[must_use]
+    pub fn peer_address(&self) -> Option<(PathBuf, String)> {
+        self.peer_address
+            .lock()
+            .expect("the peer address cell is never poisoned")
+            .as_ref()
+            .map(|address| (address.path.clone(), address.marker.clone()))
+    }
+
+    /// The engine-side [`subagent::PeerFacts`] both postboxes send under
+    /// (**D532**), built fresh at each install so the postbox that outlives
+    /// this call still reads *this* engine's cells.
+    ///
+    /// It holds the cells rather than the engine: both installers run before
+    /// the engine is anybody's [`Arc`] to hold, so there is nothing to
+    /// downgrade from. What that costs is nothing that matters, because the
+    /// cells **are** the state — `sender_mode` reads the very
+    /// `permission_mode` mutex [`Engine::receiver_class`] reads, through the
+    /// very same [`teammate::inbound::classify_receiver`] call, so a session
+    /// cannot assert one class on the wire and enforce another (**AC-3**).
+    fn peer_facts(&self) -> Arc<dyn subagent::PeerFacts> {
+        Arc::new(EnginePeerFacts {
+            permission_mode: Arc::clone(&self.permission_mode),
+            inbound_bypass: self.inbound_bypass,
+            address: Arc::clone(&self.peer_address),
+            inbound_chain: Arc::clone(&self.inbound_chain),
+        })
+    }
+
+    /// Applies one inbound `POST /peer/receipt` (**D534**): an id this
+    /// session actually registered is settled, announced on the event stream
+    /// and queued for the model's next prompt intake; an unknown id, a
+    /// settled one and a second terminal for the same id each do nothing at
+    /// all.
+    ///
+    /// Answers nothing either way, deliberately: the route above this must
+    /// reply byte-identically whether or not the id was outstanding, or any
+    /// same-uid process could probe which ids a session is holding — the
+    /// same argument the message route already makes.
+    pub async fn apply_receipt(&self, receipt: crate::subagent::SocketReceipt) {
+        let Some(settled) = self
+            .receipts
+            .settle_sent(&receipt.message_id, receipt.status)
+        else {
+            tracing::debug!(
+                id = receipt.message_id.as_str(),
+                status = ?receipt.status,
+                "a receipt named no outstanding send; dropped"
+            );
+
+            return;
+        };
+
+        tracing::info!(
+            id = settled.id.as_str(),
+            status = ?settled.status,
+            "an outstanding send settled"
+        );
+        {
+            let mut batch = self
+                .settled_receipts
+                .lock()
+                .expect("the settled receipts batch is never poisoned");
+            if batch.len() >= RECEIPT_BATCH_CAP {
+                batch.remove(0);
+            }
+            batch.push(settled.clone());
+        }
+        let _ = self
+            .fanout
+            .send(Event::PeerReceipt {
+                session_id: self.session_id(),
+                id: settled.id,
+                status: settled.status,
+                to: settled.to,
+            })
+            .await;
+    }
+
     /// Seeds the identity resolver's socket directory (**D528**): the same
     /// directory the binder binds under and the lister lists from, so the
     /// hidden `--socket-dir` override reaches every reader identically.
     /// Consuming, like every other assembly-time seed here.
     #[must_use]
     pub fn with_socket_directory(mut self, directory: impl Into<PathBuf>) -> Self {
+        let directory = directory.into();
+        // One value, two readers (**D535**): the resolver walks it to answer
+        // a name, and `list_sessions` walks it to show the model what is
+        // running. Seeding them apart is how they would come to disagree.
+        self.socket_directory = directory.clone();
         self.identity = Arc::new(Identity::new(directory));
+        self.recompose_tools();
 
         self
     }
@@ -3610,6 +3945,14 @@ impl Engine {
                         "a settle named a hold nobody holds; ignored"
                     ),
                     Some(settlement) => {
+                        // **D534**: one of the exactly three sites that may
+                        // post a settlement receipt — a person's release, a
+                        // person's deny, and the `dialog_expiry` timer's fire.
+                        // The outcome is read off what the gate actually did
+                        // rather than off what was asked for: a release under
+                        // a policy that has since become refuse settles
+                        // `denied`, and the sender must be told that.
+                        let posted = receipt_outcome(&settlement);
                         settle_side_effects(
                             &self.inbound,
                             self.teammates.as_ref(),
@@ -3617,6 +3960,9 @@ impl Engine {
                             settlement,
                         )
                         .await;
+                        if let Some(outcome) = posted {
+                            self.receipts.settle_and_post(&id, outcome).await;
+                        }
                     }
                 }
                 Ok(())
@@ -3783,6 +4129,20 @@ impl Engine {
         // `NewSession` door): carrying the old one's choices forward would be
         // guarding a history that no longer exists.
         self.identity.clear_pins();
+        // The same door, for the same reason, for the three cells D532/D534
+        // add (**AC-7**, **AC-27**): the chain a forward would carry belongs
+        // to a conversation that has ended, an outstanding send whose fate
+        // arrives now is news about that conversation rather than this one,
+        // and a settlement nobody has read yet is news nobody will.
+        self.inbound_chain
+            .lock()
+            .expect("the inbound chain cell is never poisoned")
+            .clear();
+        self.receipts.clear_sent();
+        self.settled_receipts
+            .lock()
+            .expect("the settled receipts batch is never poisoned")
+            .clear();
         // Nothing before this turn to compare against, so the plan-to-build
         // reminder does not fire on the first turn of a new session.
         self.active().previous_agent = None;
@@ -4471,6 +4831,39 @@ impl Engine {
         } else {
             Arc::new(send_message::SendMessageTool::new(&postbox.roster()))
         };
+        let registry = Arc::new(registry.with(tool));
+
+        self.session_listing(registry)
+    }
+
+    /// Registers the model-facing live-session listing (**D535**), wherever
+    /// the installed postbox can actually **cross-session send**.
+    ///
+    /// Deliberately **not** `send_message`'s own gate, which is postbox
+    /// presence alone: a pane member holds a
+    /// [`teammate::member::MemberPostbox`], which refuses `Address::Uds`
+    /// outright and resolves a name only against its own team file — no
+    /// registry read, no resolver, no socket — so handing it this directory
+    /// would hand it a list of addresses it structurally cannot use, which is
+    /// the "a listing with no way to act on it is noise" this pairing rule
+    /// was written against. A member that wants to know who else is running
+    /// asks its lead, the same road its permission dialogs already take. The
+    /// two gates are therefore visibly different rather than accidentally
+    /// divergent, and a later "simplification" of them into one is what this
+    /// paragraph exists to stop.
+    ///
+    /// The excluded session id is read **here**, at composition, rather than
+    /// held from assembly: `Command::NewSession` re-mints the id and
+    /// recomposes, so the tool a fresh conversation is offered excludes the
+    /// id that conversation actually runs under.
+    fn session_listing(&self, registry: Arc<Registry>) -> Arc<Registry> {
+        if !self.cross_session_postbox.load(Ordering::Relaxed) {
+            return registry;
+        }
+        let tool: Arc<dyn Tool> = Arc::new(crate::tool::list_sessions::ListSessionsTool::new(
+            self.socket_directory.clone(),
+            self.session_id().as_str().to_owned(),
+        ));
 
         Arc::new(registry.with(tool))
     }
@@ -5261,6 +5654,7 @@ impl Engine {
             tools: self.tools(),
             skill_roots: self.skill_roots(),
             identity: Arc::clone(&self.identity),
+            receipts: Arc::clone(&self.settled_receipts),
             teamless: self.teamless.load(Ordering::Relaxed),
             teamless_send: self.teamless_send,
             deferral: self.deferral(),
@@ -5722,6 +6116,181 @@ fn close_interrupted(storage: &Storage, session: &SessionId, transcript: &mut [M
     }
 }
 
+/// The four envelope fields a socket arrival carries beyond
+/// [`crate::Incoming`]'s own (**D532**), as
+/// [`Engine::receive_peer_envelope`] takes them.
+///
+/// A value beside `Incoming` rather than four more fields on it, so the
+/// route above may keep handing in exactly what it always did while it
+/// learns to carry these: an absent envelope is the wire an old sender
+/// writes, and the gate answers it exactly as it did before this landing
+/// (**AC-2**). **Nothing in it is trusted** — `from_mode` is an attestation,
+/// `hop_chain` is unsigned loop metadata, `reply_to` is a routing hint vetted
+/// before it is opened, and `message_id` names a message rather than
+/// authorizing anything.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PeerEnvelope {
+    /// The sender's own id for this message, if it minted one.
+    pub message_id: Option<ganja_protocol::PeerMessageId>,
+    /// The sender's asserted permission class, if it asserted one.
+    pub from_mode: Option<subagent::SenderMode>,
+    /// The route this message has already crossed, oldest first. Already
+    /// bounded at parse by the wire's own cap.
+    pub hop_chain: Vec<String>,
+    /// The `uds:` address the sender answers on, if it answers anywhere.
+    pub reply_to: Option<String>,
+}
+
+impl PeerEnvelope {
+    /// An arrival asserting none of it — an old sender's body, and every
+    /// caller with nothing to hand in.
+    #[must_use]
+    pub fn none() -> Self {
+        Self::default()
+    }
+}
+
+/// What the socket door answers (**N2**): the note the sender reads, and the
+/// typed hold fact `SocketDelivered.held` carries beside it.
+///
+/// `held` is [`Some`] **only** for a hold. An accept and a refuse both leave
+/// it [`None`], which is what keeps those two answers byte-identical to each
+/// other and to the two-field body that shipped before this field existed —
+/// a value that named `accept` would have reopened the enumeration channel
+/// the socket's route table closes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Received {
+    /// The uniform arrival note, whichever verdict produced it.
+    pub sent: crate::tool::team::Sent,
+    /// Why the gate held it, when it held it.
+    pub held: Option<subagent::HeldWire>,
+}
+
+impl Received {
+    /// An answer that is not a hold — an accept, or any of the silent drops
+    /// that answer byte-identically to one.
+    fn accepted(sent: crate::tool::team::Sent) -> Self {
+        Self { sent, held: None }
+    }
+}
+
+/// The sender's asserted mode as the parity matrix's own vocabulary
+/// (**D532**): a plain match rather than a `From` impl, so the direction of
+/// the conversion is legible at the one call site that makes it — the wire's
+/// word becoming an input to a decision, never the other way round.
+const fn sender_class_of(mode: subagent::SenderMode) -> teammate::inbound::SenderClass {
+    match mode {
+        subagent::SenderMode::Prompting => teammate::inbound::SenderClass::Prompting,
+        subagent::SenderMode::Bypass => teammate::inbound::SenderClass::Bypass,
+    }
+}
+
+/// A sender's claimed reply address, kept only if it is a shape this build
+/// would ever open (**D534**): the `uds:` prefix stripped, then
+/// [`crate::tool::socket::vet_address`] — the same predicate the outbound
+/// crossing applies, one spelling — so a receipt's target is confined to a
+/// `.sock` in this uid's own `0700` directory before it is even recorded.
+///
+/// Vetted here, at admission, rather than at the post: an association held
+/// against an address nothing would ever open is a settlement that looks
+/// answerable and is not, and the honest answer is to keep no association at
+/// all. Refusals trace the reason and never the path (**AC-10**).
+fn vetted_reply_to(reply_to: Option<&str>) -> Option<PathBuf> {
+    let address = reply_to?;
+    let path = PathBuf::from(address.strip_prefix("uds:").unwrap_or(address));
+    match crate::tool::socket::vet_address(&path) {
+        Ok(()) => Some(path),
+        Err(refusal) => {
+            tracing::debug!(%refusal, "an arrival's reply_to failed vetting; no receipt is kept");
+
+            None
+        }
+    }
+}
+
+/// The engine's own [`subagent::PeerFacts`] (**D532**): what a `uds:` send
+/// stamps onto its envelope beyond `from`.
+///
+/// Holds this engine's **cells**, never a snapshot of their values, so a
+/// `/rename`, a `Command::SetPermissionMode`, a fresh bind or an inbound
+/// chain arriving between two sends all reach the next one. Every method
+/// takes a lock, clones what it needs and drops the guard before returning —
+/// nothing here may hold a `std::sync::Mutex` guard across
+/// `deliver_over_socket`'s socket `await`, which `await_holding_lock` would
+/// catch at the clippy gate.
+#[derive(Debug)]
+struct EnginePeerFacts {
+    /// The very cell [`Engine::permission_mode`] reads, shared rather than
+    /// copied: half of what makes the asserted class and the enforced class
+    /// one answer (**AC-3**).
+    permission_mode: Arc<std::sync::Mutex<PermissionMode>>,
+    /// The other half — whether this session started under the D479 trio.
+    /// Plain state on the engine, so a copy here cannot go stale.
+    inbound_bypass: bool,
+    /// This session's bound socket, in both spellings a send needs.
+    address: Arc<std::sync::Mutex<Option<PeerAddress>>>,
+    /// The chain of the most recently admitted inbound peer message.
+    inbound_chain: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl subagent::PeerFacts for EnginePeerFacts {
+    /// This session's own class, through the **one** function the receiver
+    /// side reads (`teammate::inbound::classify_receiver`) over the **one**
+    /// state it reads — so a session cannot assert `prompting` on the wire
+    /// while enforcing `bypass` at its own door.
+    ///
+    /// Emitted whether or not a socket is bound: a class is a fact about how
+    /// this session answers its own dialogs, not about whether anybody can
+    /// reach it.
+    fn sender_mode(&self) -> Option<subagent::SenderMode> {
+        let mode = *self
+            .permission_mode
+            .lock()
+            .expect("the permission mode is never poisoned");
+
+        Some(teammate::inbound::classify_receiver(mode, self.inbound_bypass).into())
+    }
+
+    fn reply_to(&self) -> Option<PathBuf> {
+        self.address
+            .lock()
+            .expect("the peer address cell is never poisoned")
+            .as_ref()
+            .map(|address| address.path.clone())
+    }
+
+    /// The inbound chain with this session's own marker appended, truncated
+    /// **oldest-first** to the sender cap (v2 §"Hop chain: two different
+    /// caps", evidence 153301-153329).
+    ///
+    /// Oldest-first because the entries that matter to a loop check are the
+    /// recent ones: the marker a forwarder is about to add, and the ones it
+    /// might collide with. An unbound sender appends nothing and forwards
+    /// whatever it inherited, which for a session that has received nothing
+    /// is an empty chain (Axis 3's unbound sub-case).
+    fn hop_chain(&self) -> Vec<String> {
+        let mut chain = self
+            .inbound_chain
+            .lock()
+            .expect("the inbound chain cell is never poisoned")
+            .clone();
+        let marker = self
+            .address
+            .lock()
+            .expect("the peer address cell is never poisoned")
+            .as_ref()
+            .map(|address| address.marker.clone());
+        if let Some(marker) = marker {
+            chain.push(marker);
+        }
+        if chain.len() > subagent::MAX_HOP_CHAIN_ENTRIES {
+            chain.drain(..chain.len() - subagent::MAX_HOP_CHAIN_ENTRIES);
+        }
+
+        chain
+    }
+}
+
 /// One parity hold's deadline (**D524**): sleeps to it, then expires the hold
 /// — and loses gracefully to any settlement that got there first, because
 /// [`teammate::inbound::Inbound::expire`] answers [`None`] for a claimed or
@@ -5735,6 +6304,7 @@ async fn expire_hold(
     id: crate::protocol::HeldId,
     inbound: std::sync::Weak<teammate::inbound::Inbound>,
     teammates: Option<std::sync::Weak<subagent::Teammates>>,
+    receipts: std::sync::Weak<teammate::receipts::Receipts>,
 ) {
     tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
     let Some(inbound) = inbound.upgrade() else {
@@ -5746,8 +6316,47 @@ async fn expire_hold(
         return;
     };
     let teammates = teammates.as_ref().and_then(std::sync::Weak::upgrade);
-
+    // **D534**: the third and last site that may post a settlement receipt,
+    // and the only one that can emit `Expired` — which is what makes
+    // "`Expired` means the review window ran out" a property of the code
+    // rather than a sentence in a doc. A capacity eviction and the shutdown
+    // drain settle their victims entirely inside the gate and never reach
+    // here (N1, D3).
+    let posted = receipt_outcome(&settlement);
     settle_side_effects(&inbound, teammates.as_ref(), &id, settlement).await;
+    if let (Some(outcome), Some(receipts)) = (posted, receipts.upgrade()) {
+        // Detached, and that is load-bearing rather than tidy: the settlement
+        // this task just made is published as a `HoldTransition::Settled`,
+        // and the drain that publishes it **aborts this very task** on
+        // seeing it — the abort that stops a timer racing an approval. An
+        // awaited post here would therefore be cancelled by the settlement it
+        // is reporting, every time. Spawning it moves the post out of the
+        // aborted task's own lifetime while keeping every other property the
+        // doc claims: one attempt, no retry, its own short deadline, and a
+        // failure that is a trace line rather than a reason the settlement
+        // should not stand.
+        tokio::spawn(async move { receipts.settle_and_post(&id, outcome).await });
+    }
+}
+
+/// What a settlement should be reported to its sender as, or [`None`] where
+/// nothing may be reported (**D534**).
+///
+/// [`teammate::inbound::Settlement::PruneFirst`] is a **mailbox-door** drop,
+/// and only the socket door ever records an association, so it could never
+/// post anything: answering [`None`] here says that on purpose rather than
+/// relying on the association map to be empty. A socket-door release is
+/// always `delivered`; every other in-memory settlement carries the outcome
+/// the gate decided, which is not always the one the person asked for — a
+/// release under a policy that has since become refuse settles `denied`.
+const fn receipt_outcome(
+    settlement: &teammate::inbound::Settlement,
+) -> Option<crate::protocol::HeldOutcome> {
+    match settlement {
+        teammate::inbound::Settlement::Done(outcome) => Some(*outcome),
+        teammate::inbound::Settlement::Deliver(_) => Some(crate::protocol::HeldOutcome::Delivered),
+        teammate::inbound::Settlement::PruneFirst { .. } => None,
+    }
 }
 
 /// What one settlement decision requires of the engine, performed after the

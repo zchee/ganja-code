@@ -193,6 +193,7 @@ fn turn_with(
         identity: Arc::new(crate::teammate::identity::Identity::new(
             std::env::temp_dir(),
         )),
+        receipts: Arc::default(),
         teamless: false,
         teamless_send: crate::config::TeamlessSend::default(),
         deferral: crate::tool::deferral::Deferral::none(),
