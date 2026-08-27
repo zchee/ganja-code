@@ -32,11 +32,13 @@ use tracing_appender::non_blocking::WorkerGuard;
 mod assemble;
 #[cfg(unix)]
 mod binder;
+mod claude_hooks;
 mod import;
 #[cfg(unix)]
 mod lister;
 mod login;
 mod mcp;
+mod migrate;
 mod plugin;
 mod run;
 mod serve;
@@ -457,6 +459,50 @@ enum Config {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Translate a legacy `ganja.jsonc`/`ganja.json` into a `ganja.toml`.
+    ///
+    /// Writes beside the file it read and never touches it: the loader reads
+    /// `ganja.toml` first, so the legacy file stops deciding anything the
+    /// moment this lands, and removing it stays a decision its owner makes.
+    /// Comments do not survive — the lines that held one are listed — and a
+    /// destination that already exists is refused rather than overwritten.
+    Migrate {
+        /// Migrate exactly this file, instead of looking for one.
+        ///
+        /// The result still lands beside it, so `--global` then decides
+        /// nothing.
+        #[arg(long, value_name = "PATH")]
+        file: Option<PathBuf>,
+        /// Migrate the config home's legacy file instead of this project's.
+        #[arg(long)]
+        global: bool,
+        /// Print what would be written, and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Copy a Claude Code `settings.json`'s hooks into a `ganja.toml`.
+    ///
+    /// The `hooks` block and nothing else. Groups for an event this build
+    /// fires are appended after whatever the target already has for it; an
+    /// event it does not fire, a handler that is not a command, and a group
+    /// this build would refuse to load are listed with the reason and left
+    /// out. Every other key of the settings file is reported unread.
+    ImportClaudeHooks {
+        /// Read exactly this settings file, instead of looking for Claude's.
+        #[arg(long, value_name = "PATH")]
+        file: Option<PathBuf>,
+        /// Read `~/.claude/settings.json`, and write ganja's global config.
+        ///
+        /// Without this the project's `.claude/settings.json` and
+        /// `.claude/settings.local.json` are read — the local one last, as
+        /// Claude itself resolves them — and the result lands at the project
+        /// root.
+        #[arg(long)]
+        global: bool,
+        /// Print what would be merged, and write nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -826,6 +872,16 @@ fn config_command(action: Config) -> Result<()> {
             global,
             dry_run,
         } => import::import_opencode(file, global, dry_run),
+        Config::Migrate {
+            file,
+            global,
+            dry_run,
+        } => migrate::migrate(file, global, dry_run),
+        Config::ImportClaudeHooks {
+            file,
+            global,
+            dry_run,
+        } => claude_hooks::import_claude_hooks(file, global, dry_run),
     }
 }
 

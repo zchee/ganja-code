@@ -66,6 +66,12 @@ jsonc-parser = { workspace = true, features = ["serde"] }
 # the same crossterm instance the UI drives so the two cannot disagree about
 # terminal state.
 ratatui.workspace = true
+# `import-claude-hooks` refuses a hook group before writing it when its matcher
+# would not compile — the one `check_hooks` refusal a mirror cannot spell
+# without the same regex engine the loader itself judges matchers with. Already
+# in this binary's tree through `ganja-core`, so this opt-in compiles nothing
+# new.
+regex.workspace = true
 # A typed or piped key is wrapped the moment it is whole, and the buffer it was
 # assembled in is wiped rather than left in the heap.
 secrecy.workspace = true

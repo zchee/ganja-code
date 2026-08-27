@@ -2,8 +2,11 @@
 //!
 //! The importer validates its own output before writing it, which proves the
 //! bytes decode. This proves the other half — that the file lands where
-//! `ganja_core::config` looks, and that every value survives the trip with its
-//! meaning intact, permission order included.
+//! `ganja_core::config` looks, under the name it now reads, and that every
+//! value survives the trip with its meaning intact, permission order included.
+//! Order is asserted twice on purpose: once off the written bytes, which is
+//! what a person opens, and once off the rules the loader hands back, which is
+//! what decides a call.
 //!
 //! One test, one binary, on purpose: it mutates process-wide environment
 //! variables so that the in-process load and the subprocess that wrote the file
@@ -62,6 +65,34 @@ fn an_imported_config_is_one_the_next_launch_reads_back_whole() {
         .args(["config", "import-opencode"])
         .assert()
         .success();
+
+    // The file it wrote, under the name the loader now reads — and under
+    // neither name it used to.
+    let written = fs::read_to_string(project.join("ganja.toml")).expect("the import wrote a file");
+    for retired in ["ganja.jsonc", "ganja.json"] {
+        assert!(
+            !project.join(retired).exists(),
+            "{retired} was written beside it"
+        );
+    }
+
+    // Order read off the bytes, before any reader has had a chance to hand
+    // back something tidier than what is on disk. `[permission]` spells four
+    // rules in an order that is not alphabetical and is not the order a map
+    // would produce, which is the only evidence that the *file* carries what
+    // the source said rather than the loader reconstructing it.
+    let permission: Vec<&str> = written
+        .lines()
+        .skip_while(|line| *line != "[permission]")
+        .skip(1)
+        .take_while(|line| !line.is_empty())
+        .filter_map(|line| line.split(" = ").next())
+        .collect();
+    assert_eq!(
+        permission,
+        ["webfetch", "bash", "edit", "read"],
+        "the written file reordered the rules: {written}"
+    );
 
     let config = Config::load(&project).expect("the imported config is one ganja loads");
 

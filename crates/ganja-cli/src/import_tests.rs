@@ -1,6 +1,6 @@
 use super::{
-    At, BUILTIN_IDS, Built, Json, Report, guard, map_config, parse, permission,
-    reachable_in_the_clear, tokens, validate, write_string,
+    At, BUILTIN_IDS, Built, Config, Json, Report, guard, map_config, parse, permission,
+    reachable_in_the_clear, tokens, validate,
 };
 
 /// One opencode config holding every shape the mapping has a rule for.
@@ -132,116 +132,75 @@ fn the_fixture_maps_agents_commands_permissions_and_leaves_the_rest_named() {
         ]
     );
 
-    let rendered = built.document().render();
+    // Two orders are visible here and only one of them means anything. The
+    // document's own keys precede its tables — which is why `snapshot`, added
+    // last, is written sixth — and that is TOML's layout rule rather than a
+    // decision of this module's. What the module *does* decide is the order
+    // inside `[permission]`: `webfetch` before `bash` before `edit` before
+    // `read`, none of it alphabetical, all of it the order the source spelled
+    // and the order last-match-wins evaluation reads.
+    let rendered = built.document().to_string();
     assert_eq!(
         rendered,
-        r#"{
-  "model": "anthropic/claude-sonnet-5",
-  "default_agent": "plan",
-  "theme": "tokyonight",
-  "shell": "/bin/zsh",
-  "instructions": [
-    "AGENTS.md",
-    "docs/{env:TEAM}/style.md"
-  ],
-  "permission": {
-    "webfetch": "deny",
-    "bash": {
-      "git status": "allow",
-      "git *": "ask",
-      "*": "deny"
-    },
-    "edit": "ask",
-    "read": "allow"
-  },
-  "agent": {
-    "review": {
-      "model": "anthropic/claude-haiku-4-5",
-      "description": "reads a diff and complains",
-      "mode": "subagent",
-      "permission": {
-        "edit": "deny",
-        "webfetch": "allow"
-      }
-    },
-    "ship": {
-      "prompt": "You ship what is already green.",
-      "mode": "primary",
-      "hidden": false
-    }
-  },
-  "command": {
-    "release": {
-      "template": "cut a release for $ARGUMENTS",
-      "description": "tag and push",
-      "agent": "build"
-    }
-  },
-  "mcp": {
-    "fs": {
-      "type": "local",
-      "command": [
-        "mcp-fs",
-        "--root",
-        "."
-      ],
-      "cwd": "./servers",
-      "environment": {
-        "MCP_FS_MODE": "ro"
-      },
-      "enabled": true,
-      "timeout": 45000
-    },
-    "docs": {
-      "type": "remote",
-      "url": "https://mcp.example.invalid/mcp",
-      "headers": {
-        "Authorization": "Bearer {env:DOCS_TOKEN}"
-      }
-    }
-  },
-  "provider": {
-    "local-llama": {
-      "dialect": "openai-chat-completions",
-      "base_url": "http://127.0.0.1:11434/v1",
-      "headers": {
-        "x-route": "gpu-0"
-      }
-    }
-  },
-  "lsp": {
-    "rust": {
-      "disabled": true
-    },
-    "deno": {
-      "command": [
-        "deno",
-        "lsp"
-      ],
-      "extensions": [
-        ".ts",
-        ".tsx"
-      ]
-    },
-    "nickel": {
-      "command": [
-        "nls"
-      ],
-      "extensions": [
-        ".ncl"
-      ],
-      "env": {
-        "NICKEL_LOG": "info"
-      },
-      "initialization": {
-        "eval": {
-          "limit": 500
-        }
-      }
-    }
-  },
-  "snapshot": false
-}
+        r#"model = "anthropic/claude-sonnet-5"
+default_agent = "plan"
+theme = "tokyonight"
+shell = "/bin/zsh"
+instructions = ["AGENTS.md", "docs/{env:TEAM}/style.md"]
+snapshot = false
+
+[permission]
+webfetch = "deny"
+bash = { "git status" = "allow", "git *" = "ask", "*" = "deny" }
+edit = "ask"
+read = "allow"
+
+[agent.review]
+model = "anthropic/claude-haiku-4-5"
+description = "reads a diff and complains"
+mode = "subagent"
+permission = { edit = "deny", webfetch = "allow" }
+
+[agent.ship]
+prompt = "You ship what is already green."
+mode = "primary"
+hidden = false
+
+[command.release]
+template = "cut a release for $ARGUMENTS"
+description = "tag and push"
+agent = "build"
+
+[mcp.fs]
+type = "local"
+command = ["mcp-fs", "--root", "."]
+cwd = "./servers"
+environment = { MCP_FS_MODE = "ro" }
+enabled = true
+timeout = 45000
+
+[mcp.docs]
+type = "remote"
+url = "https://mcp.example.invalid/mcp"
+headers = { Authorization = "Bearer {env:DOCS_TOKEN}" }
+
+[provider.local-llama]
+dialect = "openai-chat-completions"
+base_url = "http://127.0.0.1:11434/v1"
+headers = { x-route = "gpu-0" }
+
+[lsp.rust]
+disabled = true
+
+[lsp.deno]
+command = ["deno", "lsp"]
+extensions = [".ts", ".tsx"]
+
+[lsp.nickel]
+command = ["nls"]
+extensions = [".ncl"]
+env = { NICKEL_LOG = "info" }
+initialization = { eval = { limit = 500 } }
 "#
     );
 
@@ -276,7 +235,7 @@ fn an_api_key_is_never_written_and_is_pointed_at_the_credential_store() {
         ]
     );
 
-    let rendered = built.document().render();
+    let rendered = built.document().to_string();
     for canary in ["sk-canary-8842", "sk-canary-4471"] {
         assert!(
             !rendered.contains(canary),
@@ -321,11 +280,11 @@ fn a_provider_entry_this_build_has_a_wire_for_is_carried_flattened() {
     );
 
     assert_eq!(
-        built.document().render(),
-        "{\n  \"provider\": {\n    \"gateway\": {\n      \
-             \"dialect\": \"anthropic-messages\",\n      \
-             \"base_url\": \"https://gateway.test/v1\",\n      \
-             \"headers\": {\n        \"x-route\": \"eu\"\n      }\n    }\n  }\n}\n"
+        built.document().to_string(),
+        "[provider.gateway]\n\
+             dialect = \"anthropic-messages\"\n\
+             base_url = \"https://gateway.test/v1\"\n\
+             headers = { x-route = \"eu\" }\n"
     );
     assert_eq!(
         rows(&report.mapped),
@@ -365,10 +324,10 @@ fn a_responses_sdk_entry_is_carried_under_the_responses_dialect() {
     );
 
     assert_eq!(
-        built.document().render(),
-        "{\n  \"provider\": {\n    \"proxy\": {\n      \
-             \"dialect\": \"openai-responses\",\n      \
-             \"base_url\": \"https://responses.test/v1\"\n    }\n  }\n}\n"
+        built.document().to_string(),
+        "[provider.proxy]\n\
+             dialect = \"openai-responses\"\n\
+             base_url = \"https://responses.test/v1\"\n"
     );
     assert_eq!(
         rows(&report.mapped),
@@ -713,12 +672,15 @@ fn only_an_endpoint_this_can_prove_is_https_or_this_machine_is_carried() {
 
 /// Ganja types the budget as a `NonZeroU64`, so anything that is not a
 /// positive whole number is a row rather than an import that fails on one
-/// line of somebody else's config.
+/// line of somebody else's config — and so is anything above what a TOML
+/// integer holds, which would otherwise reach the file as a float.
 #[test]
 fn an_mcp_timeout_is_carried_only_when_it_is_a_positive_whole_number() {
-    let cases: [(&str, bool); 6] = [
+    let cases: [(&str, bool); 8] = [
         ("45000", true),
         ("1", true),
+        ("9223372036854775807", true),
+        ("9223372036854775808", false),
         ("0", false),
         ("-1", false),
         ("1.5", false),
@@ -731,7 +693,7 @@ fn an_mcp_timeout_is_carried_only_when_it_is_a_positive_whole_number() {
         ));
 
         assert_eq!(
-            built.document().render().contains("\"timeout\""),
+            built.document().to_string().contains("timeout = "),
             carried,
             "carrying {spelled}"
         );
@@ -754,7 +716,7 @@ fn a_field_an_mcp_entry_does_not_have_is_reported_rather_than_written() {
                "url": "https://elsewhere.invalid"}}}"#,
     );
 
-    let rendered = built.document().render();
+    let rendered = built.document().to_string();
     assert!(!rendered.contains("sparkles"), "{rendered}");
     assert!(
         !rendered.contains("elsewhere.invalid"),
@@ -779,11 +741,11 @@ fn a_field_an_mcp_entry_does_not_have_is_reported_rather_than_written() {
 fn a_written_mcp_entry_that_decodes_but_would_not_load_is_still_refused() {
     for (document, named) in [
         (
-            r#"{"mcp": {"fs": {"type": "local", "command": []}}}"#,
+            "[mcp.fs]\ntype = \"local\"\ncommand = []\n",
             "empty command",
         ),
         (
-            r#"{"mcp": {"fs": {"type": "local", "command": ["s"], "output_limit": 0}}}"#,
+            "[mcp.fs]\ntype = \"local\"\ncommand = [\"s\"]\noutput_limit = 0\n",
             "output_limit of 0",
         ),
     ] {
@@ -992,26 +954,140 @@ fn a_malformed_file_says_where_it_stopped() {
 /// The writer is the only thing between a value and a file that has to
 /// parse again, so the characters that would end the literal early get
 /// their own case.
+///
+/// Which escape each one takes is `toml_edit`'s business rather than this
+/// module's, so what is asserted is the property that was always the point:
+/// a value written and read back is the value that went in. Each case is
+/// spelled twice on the way in — once as a value, once as the permission
+/// pattern that is the only place a user's own text becomes a *key* — since
+/// a quote ends a key as readily as it ends a value.
 #[test]
-fn a_written_string_escapes_what_would_break_the_literal() {
+fn a_written_string_comes_back_as_itself() {
     let cases = [
-        ("plain", r#""plain""#),
-        ("say \"hi\"", r#""say \"hi\"""#),
-        (r"back\slash", r#""back\\slash""#),
-        ("two\nlines", r#""two\nlines""#),
-        ("a\tb", r#""a\tb""#),
-        ("bell\u{7}", r#""bell\u0007""#),
-        // Beyond the escapes, text is written as itself rather than as
-        // `\u` pairs — the file is UTF-8 either way.
-        ("ずっと", r#""ずっと""#),
+        "plain",
+        "say \"hi\"",
+        r"back\slash",
+        "two\nlines",
+        "a\tb",
+        "bell\u{7}",
+        // The file is UTF-8, so text outside ASCII travels as itself rather
+        // than as `\u` pairs — either way it has to survive.
+        "ずっと",
     ];
 
-    for (value, expected) in cases {
-        let mut written = String::new();
-        write_string(&mut written, value);
+    for value in cases {
+        let quoted = serde_json::to_string(value).expect("a JSON string literal");
+        let (built, _) = imported(&format!(
+            r#"{{"agent": {{"build": {{"prompt": {quoted}}}}},
+                 "permission": {{"bash": {{{quoted}: "allow"}}}}}}"#
+        ));
 
-        assert_eq!(written, expected, "writing {value:?}");
+        let rendered = built.document().to_string();
+        let read: Config = toml_edit::de::from_str(&rendered)
+            .unwrap_or_else(|error| panic!("writing {value:?} produced {rendered}: {error}"));
+
+        assert_eq!(
+            read.agent["build"].prompt.as_deref(),
+            Some(value),
+            "a value carrying {value:?} came back changed: {rendered}"
+        );
+        assert_eq!(
+            read.permission
+                .rules()
+                .into_iter()
+                .map(|rule| rule.pattern)
+                .collect::<Vec<_>>(),
+            vec![value.to_owned()],
+            "a key carrying {value:?} came back changed: {rendered}"
+        );
     }
+}
+
+/// TOML has no way to write a `null`, and nothing may be invented in its
+/// place — so the key is left out and named, which is the answer this
+/// command gives to everything else it cannot carry.
+///
+/// Both places one can reach: a permission rule, and a value inside an
+/// `initialization` block, which travels as the document it is.
+#[test]
+fn a_null_is_left_out_and_named_rather_than_written_as_something_else() {
+    let (built, report) = imported(
+        r#"{
+              "permission": {"bash": null, "edit": "ask"},
+              "lsp": {"nickel": {"command": ["nls"], "extensions": [".ncl"],
+                      "initialization": {"eval": null, "limit": 500}}}
+            }"#,
+    );
+
+    assert_eq!(
+        rows(&report.skipped),
+        vec![
+            ("permission.bash", "null"),
+            ("lsp.nickel.initialization.eval", "null"),
+        ]
+    );
+
+    let rendered = built.document().to_string();
+    assert!(!rendered.contains("null"), "{rendered}");
+    assert_eq!(
+        rendered,
+        "[permission]\n\
+             edit = \"ask\"\n\
+             \n\
+             [lsp.nickel]\n\
+             command = [\"nls\"]\n\
+             extensions = [\".ncl\"]\n\
+             initialization = { limit = 500 }\n"
+    );
+    validate(&rendered).expect("what survived is still a config ganja reads");
+}
+
+/// The boundary of what TOML holds, from both sides.
+///
+/// `i64::MAX` is a number the destination has room for and travels as the
+/// digits that were read. One more than that is a number it has no room for,
+/// and the only two things that could happen to it are a reported row and a
+/// silently different value — a failed integer parse falling through to a
+/// float writes `9.223372036854776e18`, which then reaches a language server
+/// as though somebody had asked for it. So the row is asserted *and* the
+/// float spelling is asserted absent, since a test that only checked the row
+/// would still pass if the number were carried wrongly beside it.
+///
+/// The untyped `initialization` block is the one place an out-of-range number
+/// can reach: every number ganja gives a type to goes through
+/// `positive_integer`, which already refuses what it cannot parse as a
+/// positive `i64`.
+#[test]
+fn a_whole_number_wider_than_toml_holds_is_named_rather_than_rounded() {
+    let (built, report) = imported(
+        r#"{
+              "lsp": {"nickel": {"command": ["nls"], "extensions": [".ncl"],
+                      "initialization": {"big": 9223372036854775807,
+                                         "bigger": 9223372036854775808,
+                                         "fraction": 1.5}}}
+            }"#,
+    );
+
+    assert_eq!(
+        rows(&report.skipped),
+        vec![("lsp.nickel.initialization.bigger", "range")],
+        "the one it cannot hold, and only that one"
+    );
+
+    let rendered = built.document().to_string();
+    assert!(
+        rendered.contains("big = 9223372036854775807"),
+        "the largest whole number TOML holds travels as its own digits:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("fraction = 1.5"),
+        "a number written as a fraction still goes through a float:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("9.223372036854776e18") && !rendered.contains("bigger"),
+        "nothing is written in place of the one that would not fit:\n{rendered}"
+    );
+    validate(&rendered).expect("what survived is still a config ganja reads");
 }
 
 /// Everything the importer can emit has to survive the reader that will
@@ -1027,6 +1103,6 @@ fn what_the_importer_writes_is_what_ganja_reads() {
             }"#,
     );
 
-    let rendered = built.document().render();
+    let rendered = built.document().to_string();
     validate(&rendered).expect("the escaped values survive the round trip");
 }

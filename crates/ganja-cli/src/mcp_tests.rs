@@ -2,10 +2,10 @@
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 
-use jsonc_parser::cst::CstInputValue;
-use serde_json::{Value, json};
+use serde_json::json;
+use toml_edit::{DocumentMut, Item};
 
-use super::{AddArgs, Tier, check_name, document, entry, input, pairs, table, validate};
+use super::{AddArgs, Tier, check_name, document, entry, pairs, put, servers, shaped, validate};
 
 /// The shape a test asks for, with every optional flag unset.
 fn args(name: &str) -> AddArgs {
@@ -23,6 +23,20 @@ fn args(name: &str) -> AddArgs {
         disabled: false,
         command: Vec::new(),
     }
+}
+
+/// A document with `name` added to it, printed — the whole write path bar the
+/// disk.
+fn added(text: &str, name: &str, asked: &AddArgs) -> String {
+    let mut document = text
+        .parse::<DocumentMut>()
+        .expect("the fixture is a TOML document");
+    let built = entry(asked).expect("the entry is buildable");
+    validate(name, &built).expect("the loader would read it back");
+    let table = servers(&mut document, Path::new("ganja.toml")).expect("the table is reachable");
+    put(table, name, shaped(name, &built).expect("the entry shapes"));
+
+    document.to_string()
 }
 
 #[test]
@@ -220,7 +234,7 @@ fn the_project_tier_writes_at_the_worktree_root() {
 
 #[test]
 fn an_absent_file_reads_as_an_empty_document_and_a_broken_one_refuses() {
-    let missing = Path::new("/nonexistent-ganja-mcp-test/ganja.json");
+    let missing = Path::new("/nonexistent-ganja-mcp-test/ganja.toml");
     let empty = document(missing).expect("an absent file is nothing to merge");
     assert_eq!(
         empty.to_string(),
@@ -230,7 +244,7 @@ fn an_absent_file_reads_as_an_empty_document_and_a_broken_one_refuses() {
 
     let directory = tempfile::tempdir().expect("a temporary directory is creatable");
     let path = directory.path().join(super::CONFIG_FILE);
-    std::fs::write(&path, "{ oops").expect("the fixture is writable");
+    std::fs::write(&path, "theme = ").expect("the fixture is writable");
     assert!(
         document(&path).is_err(),
         "a file that does not parse is never treated as empty"
@@ -238,50 +252,107 @@ fn an_absent_file_reads_as_an_empty_document_and_a_broken_one_refuses() {
 }
 
 #[test]
-fn a_file_only_a_looser_parser_reads_is_refused_rather_than_edited() {
-    let directory = tempfile::tempdir().expect("a temporary directory is creatable");
-    let path = directory.path().join(super::CONFIG_FILE);
-    // Every one of these is something `jsonc_parser` would take by
-    // default and the loader refuses — so editing it would produce a file
-    // that still does not load.
-    for refused in ["{'theme': 'ganja'}", "{theme: \"ganja\"}", "{\"n\": 0xFF}"] {
-        std::fs::write(&path, refused).expect("the fixture is writable");
-        assert!(document(&path).is_err(), "{refused} is not the dialect");
-    }
+fn the_table_is_created_empty_and_a_non_table_mcp_key_is_refused() {
+    let path = Path::new("ganja.toml");
+    let missing = Path::new("/nonexistent-ganja-mcp-test/ganja.toml");
 
-    // And what the loader *does* take, this takes too.
-    std::fs::write(&path, "{\n  // a note\n  \"theme\": \"ganja\",\n}\n")
-        .expect("the fixture is writable");
-    document(&path).expect("comments and trailing commas are the dialect");
+    let mut document = document(missing).expect("an absent file is an empty document");
+    let table = servers(&mut document, path).expect("an absent table is created");
+    let mut asked = args("docs");
+    asked.command = vec!["bun".to_owned()];
+    let built = entry(&asked).expect("the entry is buildable");
+    put(
+        table,
+        "docs",
+        shaped("docs", &built).expect("the entry shapes"),
+    );
+    assert_eq!(
+        document.to_string(),
+        "[mcp.docs]\ncommand = [\"bun\"]\ntype = \"local\"\n",
+        "the entry lands under a table this created, and no empty `[mcp]` \
+         header is written above it"
+    );
+
+    // Whatever this is, it is not this command's to throw away.
+    let mut hostile = "mcp = [\"not\", \"a\", \"table\"]\n"
+        .parse::<DocumentMut>()
+        .expect("the fixture parses");
+    assert!(servers(&mut hostile, path).is_err());
+}
+
+/// toml_edit quotes a key that needs it, which is the whole reason an entry is
+/// serialized rather than composed: a name with a dot in it is two keys if it
+/// is written bare, and `ganja mcp add` accepts one (`check_name` refuses only
+/// path separators).
+#[test]
+fn a_name_that_needs_quoting_arrives_quoted() {
+    let mut asked = args("docs.v2");
+    asked.command = vec!["bun".to_owned()];
+
+    let written = added("", "docs.v2", &asked);
+
+    assert_eq!(
+        written, "[mcp.\"docs.v2\"]\ncommand = [\"bun\"]\ntype = \"local\"\n",
+        "the dot is inside the name rather than a path through two tables"
+    );
+    assert!(
+        written
+            .parse::<DocumentMut>()
+            .expect("what this printed parses")
+            .get("mcp")
+            .and_then(Item::as_table_like)
+            .is_some_and(|table| table.contains_key("docs.v2")),
+        "and reading it back finds the name that was typed: {written}"
+    );
+}
+
+/// The position and the comment above a replaced entry are the two things a
+/// remove-and-append would lose, and both live on the table this writes into
+/// the slot the old one held.
+#[test]
+fn a_replaced_entry_keeps_its_place_in_the_file_and_the_comment_above_it() {
+    let before = "\
+# Servers.
+
+# Reads the design tokens. Do not point this at staging.
+[mcp.tokens]
+command = [\"cat\", \"tokens.json\"]
+type = \"local\"
+
+[mcp.notes]
+command = [\"cat\"]
+type = \"local\"
+
+[tui]
+notifications = true
+";
+    let mut asked = args("tokens");
+    asked.command = vec!["cat".to_owned(), "moved.json".to_owned()];
+
+    let after = added(before, "tokens", &asked);
+
+    assert_eq!(
+        after,
+        before.replace("tokens.json", "moved.json"),
+        "only the one value moved: the comment, the blank lines and the two \
+         tables after it are where they were"
+    );
 }
 
 #[test]
-fn the_table_is_created_empty_and_a_non_object_mcp_key_is_refused() {
-    let path = Path::new("ganja.json");
-    let missing = Path::new("/nonexistent-ganja-mcp-test/ganja.json");
+fn an_entry_the_file_spelled_inline_is_replaced_inline() {
+    let before = "[mcp]\n# the one server\ntokens = { command = [\"cat\"], type = \"local\" }\n";
+    let mut asked = args("tokens");
+    asked.command = vec!["cat".to_owned(), "again.json".to_owned()];
 
-    let document = document(missing).expect("an absent file is an empty document");
-    table(&document, path)
-        .expect("an absent table is created")
-        .append("docs", input(&json!({"type": "local", "command": ["bun"]})));
+    let after = added(before, "tokens", &asked);
+
     assert_eq!(
-        jsonc_parser::parse_to_serde_value::<Option<Value>>(
-            &document.to_string(),
-            &ganja_core::config::parse_options()
-        )
-        .expect("what this printed is readable"),
-        Some(json!({"mcp": {"docs": {"type": "local", "command": ["bun"]}}})),
-        "the entry lands under a table this created"
+        after,
+        "[mcp]\n# the one server\ntokens = { command = [\"cat\", \"again.json\"], type = \"local\" }\n",
+        "promoting it to a `[mcp.tokens]` header would move it out of the \
+         table somebody wrote it in"
     );
-
-    for hostile in ["{\"mcp\": [\"not\", \"a\", \"table\"]}", "[1, 2, 3]"] {
-        let document = super::CstRootNode::parse(hostile, &ganja_core::config::parse_options())
-            .expect("the fixture parses");
-        assert!(
-            table(&document, path).is_err(),
-            "whatever {hostile} is, it is not this command's to throw away"
-        );
-    }
 }
 
 /// `RLIMIT_FSIZE` at zero, so that writing any byte to any file in this
@@ -350,7 +421,7 @@ impl Drop for NoFileMayGrow {
 fn a_write_that_fails_leaves_no_staged_file_beside_the_config() {
     let directory = tempfile::tempdir().expect("a temporary directory is creatable");
     let path = directory.path().join(super::CONFIG_FILE);
-    let original = "{\n  // a note\n  \"theme\": \"ganja\",\n}\n";
+    let original = "# a note\ntheme = \"ganja\"\n";
     std::fs::write(&path, original).expect("the fixture is writable");
     let parsed = document(&path).expect("the fixture parses");
 
@@ -407,7 +478,7 @@ fn a_fresh_config_is_private_to_its_owner() {
 fn a_config_rewrite_keeps_the_documents_existing_mode() {
     let directory = tempfile::tempdir().expect("a temporary directory is creatable");
     let path = directory.path().join(super::CONFIG_FILE);
-    std::fs::write(&path, "{\n  \"theme\": \"ganja\"\n}\n").expect("the fixture is writable");
+    std::fs::write(&path, "theme = \"ganja\"\n").expect("the fixture is writable");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))
         .expect("the fixture mode is settable");
     let parsed = document(&path).expect("the fixture parses");
@@ -425,14 +496,13 @@ fn a_config_rewrite_keeps_the_documents_existing_mode() {
     );
 }
 
+/// `entry` never builds one this large, but the serializer is what stands
+/// between a config's own numbers and an `f64` round trip, and 2^53 + 1 is
+/// where that round trip starts lying.
 #[test]
 fn a_number_reaches_the_document_as_the_digits_it_arrived_as() {
-    // `entry` never builds one this large, but the converter is what
-    // stands between a config's own numbers and an `f64` round trip, and
-    // 2^53 + 1 is where that round trip starts lying.
-    let CstInputValue::Number(rendered) = input(&json!(9_007_199_254_740_993_u64)) else {
-        panic!("a JSON number converts to a number")
-    };
+    let shaped = shaped("docs", &json!({"n": 9_007_199_254_740_993_u64}))
+        .expect("a JSON number shapes into TOML");
 
-    assert_eq!(rendered, "9007199254740993");
+    assert_eq!(shaped.to_string(), "n = 9007199254740993\n");
 }

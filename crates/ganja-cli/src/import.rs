@@ -42,6 +42,7 @@ use std::{
 use anyhow::{Context as _, Result, anyhow, bail};
 use ganja_core::{config::Config, lsp::server::BUILTIN_IDS};
 use ganja_permission::Project;
+use toml_edit::{DocumentMut, InlineTable, Item, Table, Value};
 
 /// Directory opencode keeps its global config in, under the XDG config home.
 const OPENCODE_DIRECTORY: &str = "opencode";
@@ -56,14 +57,17 @@ const GLOBAL_FILES: [&str; 3] = ["config.json", "opencode.json", "opencode.jsonc
 /// ancestors — upstream's `toReversed()`.
 const PROJECT_FILES: [&str; 2] = ["opencode.jsonc", "opencode.json"];
 
-/// What this writes. The `.jsonc` spelling is deliberately not used: the
-/// generated file has no comments to justify one.
-const DESTINATION: &str = "ganja.json";
+/// What this writes: ganja's own config format.
+const DESTINATION: &str = "ganja.toml";
 
-/// The other name ganja will read, and the one that would *beat* what this
-/// writes — so a destination directory holding it is as occupied as one
-/// holding [`DESTINATION`].
-const DESTINATION_ALTERNATE: &str = "ganja.jsonc";
+/// The two names the config format left behind, and the reason a directory
+/// holding one of them is as occupied as one already holding [`DESTINATION`].
+///
+/// While both spellings are still read, a `ganja.toml` written beside a
+/// `ganja.jsonc` would quietly outrank it; once the loader refuses the legacy
+/// names outright, the same directory would stop loading altogether. Neither
+/// is what the person who ran this asked for, so both are refused by name.
+const DESTINATION_LEGACY: [&str; 2] = ["ganja.jsonc", "ganja.json"];
 
 /// The values upstream's agent `mode` field takes, which are also ganja's.
 const MODES: [&str; 3] = ["primary", "subagent", "all"];
@@ -144,6 +148,13 @@ mod reason {
     pub const DEFERRED: &str = "deferred";
     /// The value is nothing but an unexpanded `{env:}`/`{file:}` token.
     pub const TOKEN: &str = "token";
+    /// The value is `null`, which ganja's config format cannot spell — and
+    /// which nothing may be invented in place of.
+    pub const NULL: &str = "null";
+    /// The value is a whole number outside the signed 64 bits TOML holds —
+    /// [`NULL`]'s case with different digits, and reported rather than
+    /// rounded for [`NULL`]'s reason.
+    pub const RANGE: &str = "range";
     /// A key opencode does not document.
     pub const UNKNOWN: &str = "unknown";
     /// The value is not the shape the key takes.
@@ -260,7 +271,7 @@ pub fn import_opencode(file: Option<PathBuf>, global: bool, dry_run: bool) -> Re
         return Ok(());
     }
 
-    let rendered = built.document().render();
+    let rendered = built.document().to_string();
     validate(&rendered)?;
 
     let Some(destination) = destination else {
@@ -280,17 +291,26 @@ pub fn import_opencode(file: Option<PathBuf>, global: bool, dry_run: bool) -> Re
 /// Order is why an object is a `Vec` and not a map. Permission rules are
 /// evaluated last-match-wins, so which of two rules covering the same call was
 /// written second is the whole answer, and a map that sorted its keys would
-/// silently change which rule decides. The same type is read into and written
-/// out of, so nothing has to agree twice about what a document is.
+/// silently change which rule decides. The source is read into this and the
+/// mapping carries it in this, so nothing has to agree twice about what a
+/// document is; [`value`] is the one seam where it becomes the TOML that gets
+/// written, and it is a seam that cannot re-sort.
 #[derive(Clone, Debug, PartialEq)]
 enum Json {
     Null,
     Bool(bool),
-    /// Kept as it was written, digits and all, so a value that is re-emitted
-    /// is the one that was read rather than one that went through a float.
-    /// Two keys carry a number across — an MCP server's `timeout` and whatever
-    /// sits inside an LSP entry's `initialization` — and every other number in
-    /// an opencode config exists here to be *reported*.
+    /// Kept as it was written, digits and all, so that what decides whether a
+    /// number can be carried is the text the source held rather than whatever
+    /// a parse made of it — which is [`positive_integer`]'s whole question.
+    /// [`number`] is where it stops being text: a whole number is re-emitted
+    /// as the same digits, a number *written* as a fraction goes through a
+    /// float, and a whole number too large for TOML's signed 64 bits goes
+    /// through neither — it becomes a reported row in [`guarded`], because
+    /// rounding one into a float would send a different value to a language
+    /// server with nothing said. Two keys
+    /// carry a number across — an MCP server's `timeout` and whatever sits
+    /// inside an LSP entry's `initialization` — and every other number in an
+    /// opencode config exists here to be *reported*.
     Number(String),
     String(String),
     Array(Vec<Json>),
@@ -358,88 +378,109 @@ impl Json {
             .find(|(name, _)| name == key)
             .map(|(_, value)| value)
     }
-
-    /// The document as pretty JSON, two spaces to a level, newline-terminated.
-    fn render(&self) -> String {
-        let mut rendered = String::new();
-        self.write(&mut rendered, 0);
-        rendered.push('\n');
-
-        rendered
-    }
-
-    fn write(&self, out: &mut String, depth: usize) {
-        match self {
-            Self::Null => out.push_str("null"),
-            Self::Bool(value) => out.push_str(if *value { "true" } else { "false" }),
-            Self::Number(value) => out.push_str(value),
-            Self::String(value) => write_string(out, value),
-            Self::Array(elements) if elements.is_empty() => out.push_str("[]"),
-            Self::Array(elements) => {
-                out.push_str("[\n");
-                for (index, element) in elements.iter().enumerate() {
-                    indent(out, depth + 1);
-                    element.write(out, depth + 1);
-                    separate(out, index + 1 < elements.len());
-                }
-                indent(out, depth);
-                out.push(']');
-            }
-            Self::Object(entries) if entries.is_empty() => out.push_str("{}"),
-            Self::Object(entries) => {
-                out.push_str("{\n");
-                for (index, (key, value)) in entries.iter().enumerate() {
-                    indent(out, depth + 1);
-                    write_string(out, key);
-                    out.push_str(": ");
-                    value.write(out, depth + 1);
-                    separate(out, index + 1 < entries.len());
-                }
-                indent(out, depth);
-                out.push('}');
-            }
-        }
-    }
 }
 
-fn indent(out: &mut String, depth: usize) {
-    for _ in 0..depth {
-        out.push_str("  ");
-    }
-}
-
-/// Ends one element of an object or array, with a comma when another follows.
-fn separate(out: &mut String, more: bool) {
-    if more {
-        out.push(',');
-    }
-    out.push('\n');
-}
-
-/// Writes `value` as a JSON string literal.
+/// One mapped value as TOML, or [`None`] for the one thing TOML cannot spell.
 ///
-/// Spelled out rather than delegated because this crate has no JSON writer of
-/// its own, and the escaping is the part that has to be right: every control
-/// character becomes an escape, so a value carrying a newline or a tab survives
-/// the round trip [`validate`] then proves.
-fn write_string(out: &mut String, value: &str) {
-    out.push('"');
-    for character in value.chars() {
-        match character {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{8}' => out.push_str("\\b"),
-            '\u{c}' => out.push_str("\\f"),
-            control if control.is_control() => {
-                out.push_str(&format!("\\u{:04x}", control as u32));
-            }
-            other => out.push(other),
+/// A `null` is dropped here as well as in [`guarded`], which is where one is
+/// *reported*. Nothing the mapping produces can reach this arm — every value
+/// that carries a source document's own shape goes through `guarded` first —
+/// and a document with no way to write `null` has no other answer than to
+/// leave the key out.
+///
+/// A map becomes an **inline** table rather than a header, everywhere. That is
+/// what makes order survive: `toml_edit` writes a table's own keys before the
+/// tables nested under it, so a `[permission]` whose `bash` entry was spelled
+/// before its `edit` entry would come back out the other way around — and
+/// permission rules are evaluated last-match-wins, which makes that reordering
+/// a change of meaning rather than of layout.
+fn value(json: &Json) -> Option<Value> {
+    Some(match json {
+        Json::Null => return None,
+        Json::Bool(flag) => Value::from(*flag),
+        Json::Number(spelled) => number(spelled)?,
+        Json::String(text) => Value::from(text.as_str()),
+        Json::Array(elements) => Value::Array(elements.iter().filter_map(value).collect()),
+        Json::Object(entries) => Value::InlineTable(entries.iter().fold(
+            InlineTable::new(),
+            |mut table, (key, entry)| {
+                if let Some(entry) = value(entry) {
+                    table.insert(key.as_str(), entry);
+                }
+
+                table
+            },
+        )),
+    })
+}
+
+/// A JSON number as the TOML number it is, or [`None`] when TOML holds no
+/// such number.
+///
+/// Whole where it was written whole — [`positive_integer`] has already made
+/// the one number ganja types a `NonZeroU64` a `u64` — and a float where it
+/// was written as one, which is the only other thing a TOML document holds.
+/// Both spellings are re-emitted by the writer rather than copied as digits,
+/// because a JSON literal is not always a TOML one.
+///
+/// Which of the two it is, is decided on the **literal's own text** and never
+/// on whether an integer parse failed. That distinction is the whole of this
+/// function: `9223372036854775808` is a whole number no TOML integer holds,
+/// and letting a failed integer parse fall through to a float would write it
+/// as `9.223372036854776e18` — a different number, reaching a language server,
+/// with nothing said about the change. It is refused here instead and reported
+/// by [`guarded`], which is where a row can be emitted.
+///
+/// A hexadecimal literal and a leading `+` never arrive: the loader's own
+/// dialect refuses both, and this reads through it.
+fn number(spelled: &str) -> Option<Value> {
+    if spelled.contains(['.', 'e', 'E']) {
+        return spelled.parse::<f64>().ok().map(Value::from);
+    }
+
+    spelled.parse::<i64>().ok().map(Value::from)
+}
+
+/// A table whose every key is a value, in the order it was built.
+///
+/// The one shape an entry takes: a `[mcp.fs]` or a `[permission]` holds
+/// values and nothing else, so [`value`]'s inline rule keeps the field order
+/// its `*Fields` struct decided, and nothing in it can be hoisted past a
+/// sibling.
+fn leaf(fields: &[(String, Json)]) -> Table {
+    let mut table = Table::new();
+    for (key, field) in fields {
+        if let Some(field) = value(field) {
+            table.insert(key, Item::Value(field));
         }
     }
-    out.push('"');
+
+    table
+}
+
+/// A named section — `agent`, `command`, `mcp`, `provider`, `lsp` — as one
+/// `[section.<name>]` table per entry.
+///
+/// Implicit, so the file carries `[agent.review]` without an empty `[agent]`
+/// above it. An entry is an object in every case the mapping produces; the
+/// other arm is what keeps this total rather than what any caller reaches.
+fn tables(entries: &[(String, Json)]) -> Item {
+    let mut section = Table::new();
+    section.set_implicit(true);
+    for (name, entry) in entries {
+        match entry {
+            Json::Object(fields) => {
+                section.insert(name, Item::Table(leaf(fields)));
+            }
+            other => {
+                if let Some(other) = value(other) {
+                    section.insert(name, Item::Value(other));
+                }
+            }
+        }
+    }
+
+    Item::Table(section)
 }
 
 /// Inserts `value` under `key`, keeping the position a key of that name
@@ -704,48 +745,78 @@ impl Built {
             && self.snapshot.is_none()
     }
 
-    fn document(self) -> Json {
-        let mut entries = Vec::new();
-        for (key, value) in [
+    /// The file, in this struct's field order.
+    ///
+    /// Written in that order and emitted in it, with TOML's own layout rule
+    /// laid over the top: a document's own keys are written before the tables
+    /// under it, so `snapshot` — a key, where everything declared above it is
+    /// a section — reaches the file ahead of `[agent]` however late it is
+    /// added here. That rearrangement is layout; the order that carries
+    /// meaning is the one *inside* `permission`, and [`value`] is what keeps
+    /// it.
+    fn document(self) -> DocumentMut {
+        let mut document = DocumentMut::new();
+        let root = document.as_table_mut();
+        for (key, text) in [
             ("model", self.model),
             ("small_model", self.small_model),
             ("default_agent", self.default_agent),
             ("theme", self.theme),
             ("shell", self.shell),
         ] {
-            if let Some(value) = value {
-                entries.push((key.to_owned(), Json::String(value)));
+            if let Some(text) = text {
+                root.insert(key, Item::Value(Value::from(text)));
             }
         }
         if !self.instructions.is_empty() {
-            entries.push((
-                "instructions".to_owned(),
-                Json::Array(self.instructions.into_iter().map(Json::String).collect()),
-            ));
+            root.insert(
+                "instructions",
+                Item::Value(self.instructions.iter().map(String::as_str).collect()),
+            );
         }
+        // A bare action rather than a table of rules, which is a value and not
+        // a section — the one key here that is either.
         if let Some(permission) = self.permission {
-            entries.push(("permission".to_owned(), permission));
+            match &permission {
+                Json::Object(rules) => {
+                    root.insert("permission", Item::Table(leaf(rules)));
+                }
+                other => {
+                    if let Some(other) = value(other) {
+                        root.insert("permission", Item::Value(other));
+                    }
+                }
+            }
         }
-        if !self.agent.is_empty() {
-            entries.push(("agent".to_owned(), Json::Object(self.agent)));
+        for (key, entries) in [
+            ("agent", self.agent),
+            ("command", self.command),
+            ("mcp", self.mcp),
+            ("provider", self.provider),
+        ] {
+            if !entries.is_empty() {
+                root.insert(key, tables(&entries));
+            }
         }
-        if !self.command.is_empty() {
-            entries.push(("command".to_owned(), Json::Object(self.command)));
-        }
-        if !self.mcp.is_empty() {
-            entries.push(("mcp".to_owned(), Json::Object(self.mcp)));
-        }
-        if !self.provider.is_empty() {
-            entries.push(("provider".to_owned(), Json::Object(self.provider)));
-        }
+        // `lsp` is the other either: the boolean that switches every server
+        // off, or the map of entries.
         if let Some(lsp) = self.lsp {
-            entries.push(("lsp".to_owned(), lsp));
+            match &lsp {
+                Json::Object(entries) => {
+                    root.insert("lsp", tables(entries));
+                }
+                other => {
+                    if let Some(other) = value(other) {
+                        root.insert("lsp", Item::Value(other));
+                    }
+                }
+            }
         }
         if let Some(snapshot) = self.snapshot {
-            entries.push(("snapshot".to_owned(), Json::Bool(snapshot)));
+            root.insert("snapshot", Item::Value(Value::from(snapshot)));
         }
 
-        Json::Object(entries)
+        document
     }
 }
 
@@ -870,12 +941,16 @@ fn agent_mode(report: &mut Report, at: &At, value: &Json) -> Option<Json> {
     Some(Json::String(spelled.to_owned()))
 }
 
-/// A key whose value has to be a positive whole number.
+/// A key whose value has to be a positive whole number a TOML document can
+/// hold.
 ///
 /// Guarded here rather than left to [`validate`] because ganja types the one
 /// number it reads — an MCP server's `timeout` — as a `NonZeroU64`: a zero, a
 /// fraction or a negative would otherwise turn one line of somebody else's
-/// config into a failed import instead of a row.
+/// config into a failed import instead of a row. `i64` rather than `u64` for
+/// the same reason and no other: TOML's integer is signed, so a value above
+/// its ceiling has no spelling in the file this writes and would leave through
+/// a float — which is what the row exists to say instead.
 fn positive_integer(report: &mut Report, at: &At, value: &Json) -> Option<Json> {
     let Json::Number(spelled) = value else {
         report.skip(&at.from, reason::MALFORMED);
@@ -885,7 +960,7 @@ fn positive_integer(report: &mut Report, at: &At, value: &Json) -> Option<Json> 
     // Re-emitted as the digits that were read, so the value that lands is the
     // one the source wrote.
     if spelled
-        .parse::<u64>()
+        .parse::<i64>()
         .is_ok_and(|milliseconds| milliseconds > 0)
     {
         report.map(&at.from, &at.to);
@@ -1132,9 +1207,31 @@ fn permission(
 }
 
 /// Copies a value that is carried as it stands, dropping the strings inside it
-/// that are nothing but a `{env:}`/`{file:}` token.
+/// that are nothing but a `{env:}`/`{file:}` token, and the `null`s.
+///
+/// A `null` is dropped for the same reason a token-only string is: what is
+/// left is not the value the source had. TOML has no way to write one, and
+/// substituting an empty string or a `false` for it would be completing a
+/// config on its author's behalf, so the key is left out with its own row —
+/// the answer this command gives everywhere else it cannot carry something.
 fn guarded(report: &mut Report, at: &At, value: &Json) -> Option<Json> {
     match value {
+        Json::Null => {
+            report.skip(&at.from, reason::NULL);
+
+            None
+        }
+        // A whole number too large for TOML is the same case as a `null` with
+        // different digits: the destination cannot hold it, and the one thing
+        // that must not happen is quietly writing a *different* number in its
+        // place. Caught here rather than at [`value`] because here is where a
+        // row can be emitted; typed numbers never reach this arm, since
+        // [`positive_integer`] has already refused the ones it reads.
+        Json::Number(spelled) if number(spelled).is_none() => {
+            report.skip(&at.from, reason::RANGE);
+
+            None
+        }
         Json::String(text) => guard(report, &at.from, text).map(Json::String),
         Json::Object(entries) => Some(Json::Object(
             entries
@@ -2060,13 +2157,17 @@ fn section(name: &str, right: &str, rows: &[(String, String)], width: usize) {
 /// which is what a translator holding a raw `Json` can do — so this is the
 /// belt to that suspenders, and the one authority for all three refusals
 /// rather than a fourth spelling of them.
+///
+/// The bytes are decoded rather than the document this crate still holds, so
+/// what is proved is the file — a value that survived construction and does
+/// not survive being written and read back is exactly the bug worth catching.
 fn validate(document: &str) -> Result<()> {
-    let config = jsonc_parser::parse_to_serde_value::<Option<Config>>(
-        document,
-        &ganja_core::config::parse_options(),
-    )
-    .map_err(|error| anyhow!("the imported config is not one ganja can load: {error}\n{document}"))?
-    .unwrap_or_default();
+    // The error alone, never the document body: an `mcp` entry's headers map
+    // is where a bearer token lives, and this build withholds header *values*
+    // even from `ganja mcp get`. `toml_edit`'s own error already names the key
+    // and the position, which is the whole of what somebody needs to find it.
+    let config: Config = toml_edit::de::from_str(document)
+        .map_err(|error| anyhow!("the imported config is not one ganja can load: {error}"))?;
 
     for (name, server) in &config.mcp {
         server.check(name).map_err(|message| {
@@ -2227,15 +2328,14 @@ fn destination(global: bool, cwd: &Path) -> Result<PathBuf> {
     Ok(directory.join(DESTINATION))
 }
 
-/// The config file already sitting where `destination` would land, if either
-/// name is taken. Both are checked: `ganja.jsonc` would *beat* what this
-/// writes, so leaving it in place would make the import look like it did
-/// nothing.
+/// The config file already sitting where `destination` would land, if any of
+/// the three names is taken — [`DESTINATION_LEGACY`] says why the legacy pair
+/// counts.
 fn occupied(destination: &Path) -> Option<PathBuf> {
     let directory = destination.parent()?;
 
-    [DESTINATION_ALTERNATE, DESTINATION]
-        .into_iter()
+    std::iter::once(DESTINATION)
+        .chain(DESTINATION_LEGACY)
         .map(|name| directory.join(name))
         .find(|path| path.exists())
 }

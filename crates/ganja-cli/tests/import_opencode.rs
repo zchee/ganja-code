@@ -68,7 +68,7 @@ fn opencode_dir(home: &TempDir) -> std::path::PathBuf {
 
 /// Where a `--global` import lands.
 fn global_destination(home: &TempDir) -> std::path::PathBuf {
-    home.path().join("config").join("ganja").join("ganja.json")
+    home.path().join("config").join("ganja").join("ganja.toml")
 }
 
 /// All three global files are read, and later beats earlier — so the last one
@@ -104,14 +104,14 @@ fn the_global_tier_merges_all_three_files_with_the_jsonc_last() {
 
     let written = fs::read_to_string(global_destination(&home)).expect("the import wrote a file");
     assert!(
-        written.contains(r#""model": "anthropic/third""#),
+        written.contains(r#"model = "anthropic/third""#),
         "{written}"
     );
     assert!(
-        written.contains(r#""shell": "/bin/from-config-json""#),
+        written.contains(r#"shell = "/bin/from-config-json""#),
         "config.json is read too, not just skipped past: {written}"
     );
-    assert!(written.contains(r#""theme": "gruvbox""#), "{written}");
+    assert!(written.contains(r#"theme = "gruvbox""#), "{written}");
 }
 
 /// Every directory from the working directory up to the project root
@@ -137,12 +137,12 @@ fn the_project_walk_stacks_from_the_root_down_and_the_closest_file_wins() {
     ganja(&home, &nested).assert().success();
 
     // The project root, not the working directory: the file is the project's.
-    let written = fs::read_to_string(root.join("ganja.json")).expect("the import wrote a file");
+    let written = fs::read_to_string(root.join("ganja.toml")).expect("the import wrote a file");
     assert!(
-        written.contains(r#""model": "anthropic/closest""#),
+        written.contains(r#"model = "anthropic/closest""#),
         "{written}"
     );
-    assert!(written.contains(r#""theme": "gruvbox""#), "{written}");
+    assert!(written.contains(r#"theme = "gruvbox""#), "{written}");
 }
 
 /// `opencode.jsonc` beats `opencode.json` in one directory, which is the second
@@ -164,12 +164,12 @@ fn jsonc_beats_json_in_the_same_directory() {
     ganja(&home, project.path()).assert().success();
 
     let written =
-        fs::read_to_string(project.path().join("ganja.json")).expect("the import wrote a file");
+        fs::read_to_string(project.path().join("ganja.toml")).expect("the import wrote a file");
     assert!(
-        written.contains(r#""model": "anthropic/from-jsonc""#),
+        written.contains(r#"model = "anthropic/from-jsonc""#),
         "{written}"
     );
-    assert!(written.contains(r#""shell": "/bin/zsh""#), "{written}");
+    assert!(written.contains(r#"shell = "/bin/zsh""#), "{written}");
 }
 
 /// Two tiers stack rather than replace each other: an object merges key by key,
@@ -199,17 +199,17 @@ fn a_project_adds_to_the_global_tier_rather_than_replacing_it() {
     ganja(&home, project.path()).assert().success();
 
     let written =
-        fs::read_to_string(project.path().join("ganja.json")).expect("the import wrote a file");
+        fs::read_to_string(project.path().join("ganja.toml")).expect("the import wrote a file");
     assert!(
-        written.contains("\"global.md\",\n    \"shared.md\",\n    \"local.md\""),
+        written.contains(r#"instructions = ["global.md", "shared.md", "local.md"]"#),
         "the two lists concatenate, deduplicated, in order: {written}"
     );
     assert!(
-        written.contains(r#""model": "anthropic/from-global""#),
+        written.contains(r#"model = "anthropic/from-global""#),
         "a field only the global tier set survives: {written}"
     );
     assert!(
-        written.contains(r#""description": "still builds""#),
+        written.contains(r#"description = "still builds""#),
         "a field both set takes the closer value: {written}"
     );
 }
@@ -238,9 +238,9 @@ fn a_named_file_is_imported_on_its_own() {
         .success();
 
     let written =
-        fs::read_to_string(project.path().join("ganja.json")).expect("the import wrote a file");
+        fs::read_to_string(project.path().join("ganja.toml")).expect("the import wrote a file");
     assert!(
-        written.contains(r#""model": "anthropic/named""#),
+        written.contains(r#"model = "anthropic/named""#),
         "{written}"
     );
     assert!(
@@ -280,7 +280,7 @@ fn a_malformed_config_names_the_file_and_the_position() {
     );
 
     assert!(
-        !project.path().join("ganja.json").exists(),
+        !project.path().join("ganja.toml").exists(),
         "a failed import writes nothing"
     );
 }
@@ -324,7 +324,7 @@ fn a_dry_run_prints_the_table_and_writes_nothing() {
         );
 
     assert!(
-        !project.path().join("ganja.json").exists(),
+        !project.path().join("ganja.toml").exists(),
         "a dry run writes nothing"
     );
 }
@@ -361,19 +361,23 @@ fn an_api_key_in_the_source_reaches_neither_the_file_nor_the_terminal() {
         );
 
     let written =
-        fs::read_to_string(project.path().join("ganja.json")).expect("the import wrote a file");
+        fs::read_to_string(project.path().join("ganja.toml")).expect("the import wrote a file");
     assert!(
         !written.contains(CANARY),
         "a credential was written into a config file: {written}"
     );
 }
 
-/// Both names ganja reads are refused, `ganja.jsonc` included — it would *beat*
-/// the file this writes, so overwriting around it would make the import look
-/// like it had done nothing.
+/// All three names ganja reads are refused, the two legacy spellings
+/// included: writing beside one of those would leave a directory holding two
+/// configs, one of which the import silently outranks.
 #[test]
 fn an_existing_config_is_never_overwritten() {
-    for existing in ["ganja.json", "ganja.jsonc"] {
+    for (existing, held) in [
+        ("ganja.toml", r#"theme = "gruvbox""#),
+        ("ganja.jsonc", r#"{"theme": "gruvbox"}"#),
+        ("ganja.json", r#"{"theme": "gruvbox"}"#),
+    ] {
         let home = temporary();
         let project = temporary();
         checkout(project.path());
@@ -382,7 +386,7 @@ fn an_existing_config_is_never_overwritten() {
             r#"{"theme": "aura"}"#,
         );
         let occupied = project.path().join(existing);
-        plant(&occupied, r#"{"theme": "gruvbox"}"#);
+        plant(&occupied, held);
 
         ganja(&home, project.path()).assert().failure().stderr(
             predicate::str::contains(existing).and(predicate::str::contains("already exists")),
@@ -390,7 +394,7 @@ fn an_existing_config_is_never_overwritten() {
 
         assert_eq!(
             fs::read_to_string(&occupied).expect("the file is still there"),
-            r#"{"theme": "gruvbox"}"#,
+            held,
             "{existing} was written over"
         );
     }
@@ -415,7 +419,7 @@ fn a_machine_with_no_opencode_config_says_so_and_says_where_it_looked() {
                 .and(predicate::str::contains("up to the project root")),
         );
 
-    assert!(!project.path().join("ganja.json").exists());
+    assert!(!project.path().join("ganja.toml").exists());
 }
 
 /// A config whose every key is one ganja has no home for is also nothing to
@@ -437,5 +441,5 @@ fn a_config_of_nothing_but_skipped_keys_writes_no_file_but_still_reports() {
             .and(predicate::str::contains("nothing to import")),
     );
 
-    assert!(!project.path().join("ganja.json").exists());
+    assert!(!project.path().join("ganja.toml").exists());
 }

@@ -16,12 +16,13 @@
 //!   equality *and* as key-set equality — the second catches a key that was
 //!   dropped and re-added with the same value by a typed round trip.
 //! * **A commented file survives being edited.** This shipped refusing a
-//!   `ganja.jsonc` outright, and the field found within the day that a
-//!   commented `ganja.jsonc` is precisely what somebody who configures
-//!   anything has — so the refusal refused the feature. It now edits that
-//!   file through a syntax tree, and the tests that pinned the refusal pin
-//!   the preservation instead: every comment line still there, byte for byte,
-//!   and no line that was not the inserted entry changed.
+//!   commented config outright, and the field found within the day that a
+//!   commented config is precisely what somebody who configures anything has —
+//!   so the refusal refused the feature. It now edits that file through a
+//!   format-preserving document, and the tests that pinned the refusal pin the
+//!   preservation instead: every comment line still there, byte for byte, no
+//!   line that was not the inserted entry changed, and a replaced entry left
+//!   where it was with the comment above it intact.
 //!
 //! Every invocation pins its own config home and data home, per the standing
 //! rule for stored-state tests: nothing here may read or write the config of
@@ -63,14 +64,14 @@ impl Home {
         self.directory.path().join("ganja-home")
     }
 
-    /// `<project>/ganja.json`.
+    /// `<project>/ganja.toml`.
     fn project_config(&self) -> std::path::PathBuf {
-        self.project().join("ganja.json")
+        self.project().join("ganja.toml")
     }
 
-    /// `<config home>/ganja.json`.
+    /// `<config home>/ganja.toml`.
     fn global_config(&self) -> std::path::PathBuf {
-        self.config_home().join("ganja.json")
+        self.config_home().join("ganja.toml")
     }
 
     /// An invocation that runs in the project and sees only these homes.
@@ -91,7 +92,8 @@ impl Home {
 /// formatting.
 fn read(path: &Path) -> Value {
     let text = fs::read_to_string(path).expect("the config file exists");
-    serde_json::from_str(&text).expect("the config file is JSON")
+
+    toml_edit::de::from_str(&text).expect("the config file is TOML")
 }
 
 /// Every key path in `value`, flattened — what "the same keys" is asserted
@@ -274,15 +276,16 @@ fn an_edit_leaves_every_unrelated_key_exactly_as_it_found_it() {
     let home = Home::new();
     plant(
         &home.project_config(),
-        r#"{
-  "model": "anthropic/claude-sonnet-4-5",
-  "theme": "ganja",
-  "permission": {"edit": "ask"},
-  "instructions": ["./NOTES.md"],
-  "mcp": {
-    "keep-me": {"type": "local", "command": ["cat"]}
-  }
-}
+        r#"model = "anthropic/claude-sonnet-4-5"
+theme = "ganja"
+instructions = ["./NOTES.md"]
+
+[permission]
+edit = "ask"
+
+[mcp.keep-me]
+command = ["cat"]
+type = "local"
 "#,
     );
     let before = read(&home.project_config());
@@ -324,14 +327,18 @@ fn a_key_this_build_does_not_have_survives_the_edit_it_cannot_be_loaded_through(
     // this one. This build refuses such a file *at load* — that is
     // `config.rs`'s standing "unknown keys are refused by name" — but the
     // writer is not entitled to drop it, which is exactly why the file is
-    // read as a `Value` and never as a typed `Config`.
+    // edited as a document and never as a typed `Config`.
     plant(
         &home.project_config(),
-        r#"{
-  "theme": "ganja",
-  "experimental": {"from": "a newer build", "keep": [1, 2, {"nested": true}]},
-  "mcp": {"keep-me": {"type": "local", "command": ["cat"]}}
-}
+        r#"theme = "ganja"
+
+[experimental]
+from = "a newer build"
+keep = [1, 2, { nested = true }]
+
+[mcp.keep-me]
+command = ["cat"]
+type = "local"
 "#,
     );
     let before = read(&home.project_config());
@@ -360,23 +367,23 @@ fn a_key_this_build_does_not_have_survives_the_edit_it_cannot_be_loaded_through(
         .stderr(predicate::str::contains("unknown field `experimental`"));
 }
 
-/// A commented config of the kind somebody actually keeps: a note above the
-/// table, a note inside it, one beside an entry, and one after everything.
-const COMMENTED: &str = r#"{
-  // What model a session starts on. Changed 2026-03; see the team doc.
-  "model": "anthropic/claude-sonnet-4-5",
+/// A commented config of the kind somebody actually keeps: a note above a
+/// key, one above the table, one beside an entry, and one after everything.
+const COMMENTED: &str = r#"# What model a session starts on. Changed 2026-03; see the team doc.
+model = "anthropic/claude-sonnet-4-5"
 
-  /* The theme is deliberately not the default — the default's diff colours
-     are unreadable on this terminal. */
-  "theme": "ganja",
+# The theme is deliberately not the default — the default's diff colours
+# are unreadable on this terminal.
+theme = "ganja"
 
-  // Servers. Anything added here needs a review first.
-  "mcp": {
-    // Reads the design tokens. Do not point this at staging.
-    "tokens": {"type": "local", "command": ["cat", "tokens.json"]}
-  }
-  // Everything below this line is deliberately unset.
-}
+# Servers. Anything added here needs a review first.
+
+# Reads the design tokens. Do not point this at staging.
+[mcp.tokens]
+command = ["cat", "tokens.json"]
+type = "local"
+
+# Everything below this line is deliberately unset.
 "#;
 
 /// Every line of `text` that carries a comment, trimmed — what "the comments
@@ -384,30 +391,25 @@ const COMMENTED: &str = r#"{
 fn comment_lines(text: &str) -> Vec<String> {
     text.lines()
         .map(str::trim)
-        .filter(|line| line.starts_with("//") || line.starts_with("/*") || line.starts_with('*'))
+        .filter(|line| line.starts_with('#'))
         .map(str::to_owned)
         .collect()
 }
 
 #[test]
-fn adding_to_a_commented_jsonc_edits_it_and_keeps_every_comment_in_it() {
+fn adding_to_a_commented_config_edits_it_and_keeps_every_comment_in_it() {
     let home = Home::new();
-    let commented = home.project().join("ganja.jsonc");
-    plant(&commented, COMMENTED);
+    plant(&home.project_config(), COMMENTED);
 
     home.ganja()
         .args(["mcp", "add", "docs", "--", "bun", "server.ts"])
         .assert()
         .success()
-        // The `.jsonc` is the file that gets edited — not a refusal, and not a
-        // `.json` written beside the file that would have beaten it.
-        .stdout(predicate::str::contains(commented.display().to_string()));
-    assert!(
-        !home.project_config().exists(),
-        "the tier's own file was edited; nothing was written beside it"
-    );
+        .stdout(predicate::str::contains(
+            home.project_config().display().to_string(),
+        ));
 
-    let after = fs::read_to_string(&commented).expect("the fixture survives");
+    let after = fs::read_to_string(home.project_config()).expect("the fixture survives");
     assert_eq!(
         comment_lines(&after),
         comment_lines(COMMENTED),
@@ -415,36 +417,25 @@ fn adding_to_a_commented_jsonc_edits_it_and_keeps_every_comment_in_it() {
     );
     // And every line that was not the inserted entry is untouched — which
     // catches reindentation and reordering that the comment check alone would
-    // not. Compared without trailing commas, because gaining one is what
-    // happens to the line an entry is appended after, and that comma is JSON
-    // rather than a change of anybody's formatting.
-    let bare = |line: &str| line.trim_end_matches(',').to_owned();
-    let kept: Vec<String> = COMMENTED.lines().map(bare).collect();
-    let inserted: Vec<String> = after
-        .lines()
-        .map(bare)
-        .filter(|line| !kept.contains(line))
-        .collect();
+    // not.
+    let kept: Vec<&str> = COMMENTED.lines().collect();
+    let inserted: Vec<&str> = after.lines().filter(|line| !kept.contains(line)).collect();
     assert_eq!(
         inserted,
-        vec![
-            "    \"docs\": {".to_owned(),
-            "      \"command\": [\"bun\", \"server.ts\"]".to_owned(),
-            "      \"type\": \"local\"".to_owned(),
-            "    }".to_owned(),
-        ],
-        "the entry's own lines are the only new ones, and they arrive at the \
-         file's own indentation"
+        vec!["[mcp.docs]", "command = [\"bun\", \"server.ts\"]"],
+        "the entry's own lines are the only new ones — `type = \"local\"` is \
+         not among them because the entry it replaces nothing spells it too"
     );
 
-    // The loader — the real one — reads back what was written into the file it
-    // actually prefers.
+    // The loader — the real one — reads back what was written.
     home.ganja()
         .args(["mcp", "get", "docs"])
         .assert()
         .success()
         .stdout(predicate::str::contains("bun server.ts"))
-        .stdout(predicate::str::contains(commented.display().to_string()));
+        .stdout(predicate::str::contains(
+            home.project_config().display().to_string(),
+        ));
     home.ganja()
         .args(["mcp", "get", "tokens"])
         .assert()
@@ -453,10 +444,9 @@ fn adding_to_a_commented_jsonc_edits_it_and_keeps_every_comment_in_it() {
 }
 
 #[test]
-fn removing_from_a_commented_jsonc_keeps_every_comment_in_it_too() {
+fn removing_from_a_commented_config_keeps_every_comment_in_it_too() {
     let home = Home::new();
-    let commented = home.project().join("ganja.jsonc");
-    plant(&commented, COMMENTED);
+    plant(&home.project_config(), COMMENTED);
 
     home.ganja()
         .args(["mcp", "add", "docs", "--", "bun"])
@@ -466,13 +456,15 @@ fn removing_from_a_commented_jsonc_keeps_every_comment_in_it_too() {
         .args(["mcp", "remove", "docs"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(commented.display().to_string()));
+        .stdout(predicate::str::contains(
+            home.project_config().display().to_string(),
+        ));
 
     // Not merely "the comments survived" — an add and its removal give the
-    // file back byte for byte, comma and blank line included. That is the
-    // whole claim the old refusal said could not be made.
+    // file back byte for byte, blank line included. That is the whole claim
+    // the old refusal said could not be made.
     assert_eq!(
-        fs::read_to_string(&commented).expect("the fixture survives"),
+        fs::read_to_string(home.project_config()).expect("the fixture survives"),
         COMMENTED,
         "an add and its removal leave the commented file exactly as it was"
     );
@@ -483,26 +475,53 @@ fn removing_from_a_commented_jsonc_keeps_every_comment_in_it_too() {
         .stderr(predicate::str::contains("configured: tokens"));
 }
 
+/// The other half of the comment promise: a `--force` replacement is written
+/// into the slot the old entry held, so the note above it still describes it
+/// and the table after it has not moved.
+#[test]
+fn replacing_an_entry_leaves_it_where_it_was_with_its_comment_above_it() {
+    let home = Home::new();
+    plant(&home.project_config(), COMMENTED);
+
+    home.ganja()
+        .args(["mcp", "add", "tokens", "--force", "--", "cat", "moved.json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("replaced mcp server \"tokens\""));
+
+    assert_eq!(
+        fs::read_to_string(home.project_config()).expect("the fixture survives"),
+        COMMENTED.replace("tokens.json", "moved.json"),
+        "one value changed and nothing else did — not the comment above the \
+         entry, not its position, not the blank lines around it"
+    );
+    home.ganja()
+        .args(["mcp", "get", "tokens"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cat moved.json"));
+}
+
 #[test]
 fn adding_where_there_is_no_mcp_table_yet_creates_one_and_disturbs_nothing() {
     let home = Home::new();
-    let commented = home.project().join("ganja.jsonc");
-    let before = "{\n  // the only thing configured here\n  \"theme\": \"ganja\"\n}\n";
-    plant(&commented, before);
+    let before = "# the only thing configured here\ntheme = \"ganja\"\n";
+    plant(&home.project_config(), before);
 
     home.ganja()
         .args(["mcp", "add", "docs", "--", "bun"])
         .assert()
         .success();
 
-    let after = fs::read_to_string(&commented).expect("the fixture survives");
+    let after = fs::read_to_string(home.project_config()).expect("the fixture survives");
     assert!(
-        after.contains("// the only thing configured here"),
-        "the comment survived a table being created under it: {after}"
+        after.starts_with(before),
+        "the comment and the sibling key are the bytes they were, and the \
+         table arrived under them: {after}"
     );
     assert!(
-        after.contains("\"theme\": \"ganja\""),
-        "the sibling key is spelled as it was: {after}"
+        !after.contains("[mcp]\n"),
+        "no empty header was written above the entry: {after}"
     );
     home.ganja()
         .args(["mcp", "get", "docs"])
@@ -511,122 +530,88 @@ fn adding_where_there_is_no_mcp_table_yet_creates_one_and_disturbs_nothing() {
         .stdout(predicate::str::contains("command      bun"));
 }
 
+/// A name with a dot in it is two keys if the header is written bare, and
+/// `check_name` refuses only path separators — so quoting is the library's
+/// job and this is where that is pinned.
 #[test]
-fn a_json_beside_the_jsonc_that_beats_it_is_named_rather_than_written() {
+fn a_name_that_needs_quoting_round_trips_through_the_loader() {
     let home = Home::new();
-    let commented = home.project().join("ganja.jsonc");
-    plant(
-        &commented,
-        "{\n  // this one wins at load\n  \"mcp\": {}\n}\n",
-    );
-    plant(
-        &home.project_config(),
-        r#"{"mcp": {"docs": {"type": "local", "command": ["cat"]}}}"#,
-    );
-    let ignored = fs::read_to_string(home.project_config()).expect("the fixture exists");
 
     home.ganja()
-        .args(["mcp", "add", "docs", "--", "bun"])
+        .args(["mcp", "add", "tools.v2", "--", "bun"])
         .assert()
-        .success()
-        .stdout(predicate::str::contains(commented.display().to_string()))
-        // The `.json` holds the name too, and it is the one being ignored.
-        .stderr(predicate::str::contains("also in"))
-        .stderr(predicate::str::contains(
-            home.project_config().display().to_string(),
-        ));
-    assert_eq!(
-        fs::read_to_string(home.project_config()).expect("the fixture survives"),
-        ignored,
-        "the file that loses at load is not the file that was written"
-    );
+        .success();
 
-    // The entry that resolves is the one just written, and removing it says the
-    // shadowed file still holds the name.
+    assert!(
+        fs::read_to_string(home.project_config())
+            .expect("the config exists")
+            .contains("[mcp.\"tools.v2\"]"),
+        "the dot is inside the name rather than a path through two tables"
+    );
     home.ganja()
-        .args(["mcp", "get", "docs"])
+        .args(["mcp", "get", "tools.v2"])
         .assert()
         .success()
         .stdout(predicate::str::contains("command      bun"));
     home.ganja()
-        .args(["mcp", "remove", "docs"])
+        .args(["mcp", "remove", "tools.v2"])
+        .assert()
+        .success();
+    assert_eq!(
+        read(&home.project_config()),
+        json!({}),
+        "and the same name is what the removal found — a table this created \
+         and then emptied leaves no header behind either"
+    );
+}
+
+/// The format ganja has left. Editing one would land an entry in a file its
+/// author still has to convert, so the refusal names the file and the command
+/// that converts it — and it fires only where there is no `ganja.toml` to
+/// edit instead.
+#[test]
+fn a_tier_holding_only_the_older_config_is_refused_by_name() {
+    let home = Home::new();
+    let legacy = home.project().join("ganja.jsonc");
+    plant(&legacy, "{\n  \"mcp\": {}\n}\n");
+    let untouched = fs::read_to_string(&legacy).expect("the fixture exists");
+
+    home.ganja()
+        .args(["mcp", "add", "docs", "--", "bun"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(legacy.display().to_string()))
+        .stderr(predicate::str::contains("ganja config migrate"));
+    assert!(
+        !home.project_config().exists(),
+        "the refusal wrote nothing beside the file it refused"
+    );
+    assert_eq!(
+        fs::read_to_string(&legacy).expect("the fixture survives"),
+        untouched,
+        "and it did not edit the file it refused either"
+    );
+
+    // The other tier says the same about its own file.
+    let global = home.config_home().join("ganja.json");
+    plant(&global, "{\"mcp\": {}}\n");
+    home.ganja()
+        .args(["mcp", "add", "docs", "--global", "--", "bun"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(global.display().to_string()))
+        .stderr(predicate::str::contains("ganja config migrate"));
+
+    // And a `ganja.toml` beside one is the file that is edited: what the
+    // legacy file's presence then means is the loader's sentence to say.
+    plant(&home.project_config(), "# converted\n");
+    home.ganja()
+        .args(["mcp", "add", "docs", "--", "bun"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("still configured in"))
         .stdout(predicate::str::contains(
             home.project_config().display().to_string(),
         ));
-}
-
-#[test]
-fn an_entry_arrives_in_the_jsonc_style_the_file_already_uses() {
-    let home = Home::new();
-    let commented = home.project().join("ganja.jsonc");
-    // Trailing commas are the other half of the dialect the loader takes, and
-    // a file written with them is written with them on purpose.
-    plant(
-        &commented,
-        "{\n  // note\n  \"mcp\": {\n    \"a\": {\"type\": \"local\", \"command\": [\"cat\"]},\n  },\n}\n",
-    );
-
-    home.ganja()
-        .args(["mcp", "add", "b", "--url", "https://mcp.example/api"])
-        .assert()
-        .success();
-
-    let after = fs::read_to_string(&commented).expect("the fixture survives");
-    assert!(
-        after.contains("\"url\": \"https://mcp.example/api\",\n"),
-        "the new entry took the file's trailing commas rather than the \
-         writer's preference: {after}"
-    );
-    assert!(after.contains("// note"), "and the comment is still there");
-    home.ganja()
-        .args(["mcp", "get", "b"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("https://mcp.example/api"));
-}
-
-/// The field failure this whole path was rewritten for, typed exactly as it
-/// was typed: a remote server added to a global `ganja.jsonc` full of
-/// comments. It refused; it now edits the file.
-#[test]
-fn the_context7_command_that_was_refused_now_lands_in_the_commented_global() {
-    let home = Home::new();
-    let global = home.config_home().join("ganja.jsonc");
-    plant(
-        &global,
-        "{\n  // my own global config, commented since forever\n  \"theme\": \"ganja\",\n\n  // servers\n  \"mcp\": {}\n}\n",
-    );
-
-    home.ganja()
-        .args([
-            "mcp",
-            "add",
-            "context7",
-            "--global",
-            "--url",
-            "https://mcp.context7.com/mcp",
-        ])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("added mcp server \"context7\""))
-        .stdout(predicate::str::contains(global.display().to_string()));
-
-    let after = fs::read_to_string(&global).expect("the fixture survives");
-    assert!(
-        after.contains("// my own global config, commented since forever")
-            && after.contains("// servers"),
-        "the comments the old refusal existed to protect are all still there: {after}"
-    );
-    home.ganja()
-        .args(["mcp", "get", "context7"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("type         remote"))
-        .stdout(predicate::str::contains("https://mcp.context7.com/mcp"))
-        .stdout(predicate::str::contains(global.display().to_string()));
 }
 
 #[test]
@@ -647,7 +632,7 @@ fn a_url_the_loader_would_refuse_is_never_written() {
     );
 
     // And with a file already there, it is left untouched rather than rewritten.
-    plant(&home.project_config(), "{\n  \"theme\": \"ganja\"\n}\n");
+    plant(&home.project_config(), "theme = \"ganja\"\n");
     let before = fs::read_to_string(home.project_config()).expect("the fixture exists");
     home.ganja()
         .args(["mcp", "add", "hosted", "--url", "ftp://mcp.example/api"])
@@ -663,7 +648,7 @@ fn a_url_the_loader_would_refuse_is_never_written() {
 #[test]
 fn a_file_that_does_not_parse_refuses_rather_than_being_overwritten() {
     let home = Home::new();
-    plant(&home.project_config(), "{ this is not JSON");
+    plant(&home.project_config(), "[unclosed\n");
 
     home.ganja()
         .args(["mcp", "add", "docs", "--", "bun"])
@@ -672,7 +657,7 @@ fn a_file_that_does_not_parse_refuses_rather_than_being_overwritten() {
         .stderr(predicate::str::contains("could not be parsed"));
     assert_eq!(
         fs::read_to_string(home.project_config()).expect("the fixture survives"),
-        "{ this is not JSON",
+        "[unclosed\n",
         "the file nobody could read is the file nobody overwrote"
     );
 }
