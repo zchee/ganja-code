@@ -10,7 +10,7 @@
 //!
 //! The spy is `peer_support`'s socket stub standing in for the *sender's* own
 //! socket: every settlement that would be reported lands on it as a real
-//! `POST /peer/receipt`, and every one that must not simply never arrives.
+//! `POST /peer/receipt`, and every one that must not arrive never does.
 //!
 //! Every root is handed in and nothing here mutates the environment, so this
 //! binary may hold more than one test (the `teammate_engine.rs` rule).
@@ -124,7 +124,7 @@ impl Sender {
 
     /// The text of the **newest user message** in the last request — the
     /// bytes this turn's own intake added, rather than the whole transcript,
-    /// which of course still carries what earlier intakes added.
+    /// which still carries what earlier intakes added.
     fn last_intake(&self) -> String {
         self.requests
             .lock()
