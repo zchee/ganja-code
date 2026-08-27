@@ -129,8 +129,10 @@ pub use storage::{SessionInfo, Storage, StorageError};
 /// in front of somebody. [`Incoming`], [`NotReceived`], [`SocketMessage`]
 /// and [`SocketDelivered`] are the socket route's half (**D505**): what
 /// `ganja-serve` hands [`Engine::receive_peer_message`] and reads back, and
-/// the two wire bodies both ends of `uds:` delivery spell.
+/// the two wire bodies both ends of `uds:` delivery spell. [`SocketReceipt`]
+/// and [`ReceiptStatus`] are the same route's settlement half (**D534**):
+/// what a sender's own socket answers `POST /peer/receipt` with.
 pub use subagent::{
-    Backends, Caller, Incoming, NotReceived, Postbox, SocketDelivered, SocketMessage, SpawnAsk,
-    SpawnAsker, Teammates,
+    Backends, Caller, Incoming, NotReceived, Postbox, ReceiptStatus, SocketDelivered,
+    SocketMessage, SocketReceipt, SpawnAsk, SpawnAsker, Teammates,
 };

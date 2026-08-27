@@ -3,11 +3,13 @@ use std::collections::BTreeSet;
 use super::{
     AGENT_SENDABLE, CompletedStatus, DISPLAY_FIELD_CAP, Frame, HARNESS_ONLY, HostPattern,
     IdleNotification, IdleReason, LeadFrame, MemberBackend, MemberView, ModeSetRequest,
-    PermissionRequest, PermissionResponse, PermissionResponseBody, PermissionResponseSubtype,
-    PlanApprovalRequest, PlanApprovalResponse, SandboxPermissionRequest, SandboxPermissionResponse,
-    ShutdownApproved, ShutdownRejected, ShutdownRequest, Tagged, TaskAssignment, TaskCompleted,
-    TeamPermissionUpdate, TeamView, TeammateTerminated, cap_for_display,
+    PeerMessageId, PeerReceiptStatus, PermissionRequest, PermissionResponse,
+    PermissionResponseBody, PermissionResponseSubtype, PlanApprovalRequest, PlanApprovalResponse,
+    SandboxPermissionRequest, SandboxPermissionResponse, ShutdownApproved, ShutdownRejected,
+    ShutdownRequest, Tagged, TaskAssignment, TaskCompleted, TeamPermissionUpdate, TeamView,
+    TeammateTerminated, cap_for_display,
 };
+use crate::{Event, SessionId, is_uuidv7};
 
 /// The timestamp every pinned frame carries, so a golden differs from its
 /// neighbour only where the schema does.
@@ -677,4 +679,85 @@ fn a_team_view_round_trips_and_refuses_a_key_it_does_not_declare() {
         )
         .is_err()
     );
+}
+
+/// [`PeerMessageId`]'s own instance of the id family's ordering pin
+/// (**D493**, **D532**), in the style `lib_tests.rs`'s
+/// `uuidv7_ids_sort_in_creation_order` already applies to every sibling id.
+#[test]
+fn peer_message_ids_sort_in_creation_order() {
+    let ids: Vec<PeerMessageId> = (0..64).map(|_| PeerMessageId::ascending()).collect();
+
+    assert!(
+        ids.iter().all(|id| is_uuidv7(id.as_str())),
+        "ids should be bare lowercase hyphenated UUIDv7: {ids:?}"
+    );
+    assert!(
+        ids.windows(2).all(|pair| pair[0] < pair[1]),
+        "ids should sort in creation order: {ids:?}"
+    );
+    let distinct: BTreeSet<&str> = ids.iter().map(PeerMessageId::as_str).collect();
+    assert_eq!(distinct.len(), ids.len(), "no id should repeat: {ids:?}");
+
+    // Adopting a stored id keeps it verbatim rather than re-minting.
+    assert_eq!(PeerMessageId::from("msg-1".to_owned()).as_str(), "msg-1");
+}
+
+/// **AC-1's protocol half.** `SocketMessage`/`SocketReceipt` themselves are
+/// `ganja-core`'s (L1c's charter), so what this crate pins on its own is the
+/// wire shape of what it *does* own: [`Event::PeerReceipt`]'s exact bytes,
+/// in this crate's own wire-pin style (`every_frames_wire_spelling_is_pinned`).
+/// Every other [`Event`] variant's bytes are unaffected by this addition —
+/// guaranteed by `#[serde(tag = "type")]`'s per-variant independence, and
+/// exercised by `lib_tests.rs`'s own pinned tests, untouched by this change
+/// and still green.
+#[test]
+fn a_peer_receipt_event_round_trips_and_pins_its_wire_shape() {
+    let event = Event::PeerReceipt {
+        session_id: SessionId::from("ses_1".to_owned()),
+        id: PeerMessageId::from("msg_1".to_owned()),
+        status: PeerReceiptStatus::Delivered,
+        to: "w1@team-1".to_owned(),
+    };
+
+    let encoded = serde_json::to_string(&event).expect("a PeerReceipt event serializes");
+    assert_eq!(
+        encoded,
+        r#"{"type":"peer_receipt","session_id":"ses_1","id":"msg_1","status":"delivered","to":"w1@team-1"}"#
+    );
+
+    let decoded: Event = serde_json::from_str(&encoded).expect("a PeerReceipt event deserializes");
+    assert_eq!(decoded, event);
+    assert_eq!(decoded.session_id(), &SessionId::from("ses_1".to_owned()));
+}
+
+/// [`PeerReceiptStatus`]'s three wire spellings, and the reference's fourth
+/// status — `held`, which ganja answers synchronously rather than over this
+/// route (D534) — refused by name rather than silently accepted.
+#[test]
+fn peer_receipt_status_pins_its_three_spellings_and_refuses_a_fourth() {
+    for (status, spelling) in [
+        (PeerReceiptStatus::Delivered, "\"delivered\""),
+        (PeerReceiptStatus::Denied, "\"denied\""),
+        (PeerReceiptStatus::Expired, "\"expired\""),
+    ] {
+        assert_eq!(
+            serde_json::to_string(&status).expect("a status serializes"),
+            spelling
+        );
+        assert_eq!(
+            serde_json::from_str::<PeerReceiptStatus>(spelling)
+                .expect("a pinned spelling round-trips"),
+            status
+        );
+    }
+
+    let held = serde_json::from_str::<PeerReceiptStatus>("\"held\"");
+    assert!(
+        held.is_err(),
+        "held is answered synchronously and must never cross this route"
+    );
+
+    let unknown = serde_json::from_str::<PeerReceiptStatus>("\"delayed\"");
+    assert!(unknown.is_err(), "an unrecognized status refuses readably");
 }

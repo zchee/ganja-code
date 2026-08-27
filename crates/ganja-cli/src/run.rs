@@ -896,15 +896,18 @@ impl<'a> Reporter<'a> {
             // no consumer was promised.
             | Event::QuestionAsked { .. }
             | Event::QuestionReplied { .. }
-            // A hold and its settlement are a lead's surfaces, and a headless
-            // run leads no team — it installs no teammates and binds no
-            // socket a peer could reach (the engine's own shutdown docs say
-            // exactly that; the plan's M8 line) — so neither can arrive
-            // here. A permanent honest ignore, not a bridge: the gate landed
-            // (D523–D525) and these rows keep the match exhaustive for a
-            // reader this account never owed anything to.
+            // A hold, its settlement and a settlement receipt are a lead's
+            // or a sender's surfaces, and a headless run leads no team and
+            // sends no `uds:` message of its own — it installs no
+            // teammates and binds no socket a peer could reach (the
+            // engine's own shutdown docs say exactly that; the plan's M8
+            // line) — so none of the three can arrive here. A permanent
+            // honest ignore, not a bridge: the gate landed (D523–D525,
+            // D534) and these rows keep the match exhaustive for a reader
+            // this account never owed anything to.
             | Event::PeerHeld { .. }
             | Event::PeerHoldSettled { .. }
+            | Event::PeerReceipt { .. }
             | Event::QuestionRejected { .. } => {}
         }
 

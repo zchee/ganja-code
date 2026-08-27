@@ -1221,6 +1221,90 @@ pub fn display_summary(summary: Option<&str>) -> Option<&str> {
         .map(cap_for_display)
 }
 
+/// Identifies one peer-to-socket message the sender minted, so a receipt can
+/// later name what it settles (**D532**, **D534**).
+///
+/// A type of its own rather than a reused
+/// [`MessageId`](crate::MessageId), for [`QuestionId`](crate::QuestionId)'s
+/// reason: the two are answered by different questions even though both sort
+/// in creation order. This one is minted per `SocketMessage` send, lives only
+/// in the sender's volatile outstanding-receipt registry, and is settled by
+/// [`Event::PeerReceipt`](crate::Event::PeerReceipt);
+/// [`MessageId`](crate::MessageId) names a [`Message`](crate::Message)
+/// permanently stored in this session's own transcript. A caller holding
+/// both must not be able to pass a stored message's id where a peer send's
+/// id belongs, or the reverse.
+///
+/// v2 §"Receipts and sender UX", evidence 220977-221015: local sends register
+/// up to two hundred outstanding message ids, each later matched against
+/// exactly one settlement.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PeerMessageId(String);
+
+impl PeerMessageId {
+    /// Mints an id that sorts after every id minted before it.
+    #[must_use]
+    pub fn ascending() -> Self {
+        Self(crate::uuidv7())
+    }
+
+    /// The id as it travels the wire.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for PeerMessageId {
+    /// Adopts a text id verbatim, for a caller that already holds one as a
+    /// [`String`] — a decoded wire body, or a test fixture — rather than
+    /// through [`PeerMessageId::ascending`].
+    fn from(id: String) -> Self {
+        Self(id)
+    }
+}
+
+/// How a peer message this session *sent* ultimately settled, as reported
+/// back over the receipt route (**D534**).
+///
+/// A type of its own rather than a reused
+/// [`HeldOutcome`](crate::HeldOutcome), for the same rule that keeps
+/// [`QuestionId`](crate::QuestionId) apart from
+/// [`PermissionId`](crate::PermissionId): the two are answered by different
+/// questions even where their spellings coincide, and here the coincidence
+/// hides a real divergence rather than none at all.
+/// [`HeldOutcome`](crate::HeldOutcome) is a **receiver's** own record of how
+/// *its* hold ended, and its `Expired` covers three causes — the review
+/// deadline, a capacity eviction, or a shutdown drain. A settlement that
+/// crosses the receipt route as `expired`, by contrast, means **only** the
+/// review deadline: a capacity eviction and a shutdown drain each settle the
+/// receiver's own hold the same way locally but post nothing on this route
+/// at all (D534's `N1`/`D3` corrections). Sharing
+/// [`HeldOutcome`](crate::HeldOutcome) here would let that narrower
+/// guarantee rot into a comment nobody reads instead of a fact the type
+/// states.
+///
+/// Exactly the reference's four settlement statuses minus `held`, which
+/// ganja already answers **synchronously**, in the very POST answer that was
+/// held, rather than over this route (v2 §"Receipts and sender UX", evidence
+/// 886033-886075, 886636-886697). An unknown status — `held` included —
+/// refuses readably at deserialization rather than being guessed at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerReceiptStatus {
+    /// A person approved the held message and it reached its ordinary
+    /// delivery path.
+    Delivered,
+    /// A person denied the held message; it goes no further.
+    Denied,
+    /// The review window ran out with nobody deciding. On this route that is
+    /// the *only* way an entry ends up here — a capacity eviction or a
+    /// shutdown drain settles the receiver's own hold the same way but never
+    /// posts a receipt for it.
+    Expired,
+}
+
 /// Which surface a member runs on, spelled as the `--backend` argument spells
 /// it.
 ///

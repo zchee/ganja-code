@@ -7116,6 +7116,10 @@ impl App {
                 self.sync_dialog_status();
                 self.poll_held();
             }
+            // A settlement receipt for a message this session sent (D534).
+            // No behavior yet — the frontend notice is W3/L3b's own work —
+            // named here only to keep this match exhaustive.
+            CoreEvent::PeerReceipt { .. } => {}
             // A compaction reporting how far its summary has streamed (user
             // directive, 2026-08-25): the strip flips to the compacting
             // dress — armed here even before any message opens, which is how

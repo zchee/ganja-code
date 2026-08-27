@@ -180,6 +180,12 @@ fn shape(event: &Event) -> String {
         Event::PeerHoldSettled { id, outcome, .. } => {
             format!("peer_hold_settled:{}:{outcome:?}", id.as_str())
         }
+        // Same reasoning as the two arms above: nothing in this suite sends
+        // a `uds:` message either, so a receipt event here is itself the
+        // finding, named with its payload rather than swallowed.
+        Event::PeerReceipt { id, status, to, .. } => {
+            format!("peer_receipt:{}:{status:?}:{to}", id.as_str())
+        }
     }
 }
 

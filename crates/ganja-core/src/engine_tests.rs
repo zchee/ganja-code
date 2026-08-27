@@ -167,6 +167,10 @@ fn replay(events: &[Event]) -> String {
                 // `Part::as_text` excludes — never as replayed text (D524).
                 | Event::PeerHeld { .. }
                 | Event::PeerHoldSettled { .. }
+                // A receipt's model-facing half is its own batched
+                // `<peer_receipt>` text part (D534); the event itself
+                // carries nothing this replay collects.
+                | Event::PeerReceipt { .. }
                 | Event::EffortChanged { .. } => {}
             }
     }

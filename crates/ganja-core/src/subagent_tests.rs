@@ -1,23 +1,26 @@
 use std::sync::Arc;
 
 use ganja_team::{MailboxMessage, MemberName, TeamName, TeamsRoot, mailbox};
+use serde::Deserialize;
 use tokio::sync::mpsc;
 
 use super::{
-    Address, Backends, Body, Caller, FRAME_OVER_SOCKET, FRAME_OVER_SOCKET_SOLO, Host, Incoming,
-    MESSAGE_ROUTE, MemberBackend, NOT_A_SESSION_SOCKET, NotReceived, NotSpawned, ONE_WAY_NOTE,
-    PermissionReply, Postbox, Reserved, SOCKET_LEAD_UNNAMED, SOCKET_OVERSIZED, SOCKET_REFUSED,
-    SOCKET_UNREACHABLE, Sent, SocketMessage, SoloPostbox, Spawn, SpawnAsk, SpawnAsker,
-    SpawnRequest, TEAM_GONE, TEAM_ROUTE, Teammate, TeammateRegistry, TeammateSpawn, Teammated,
-    Teammates, Undelivered, Watched, async_trait, deliver_to_lead, denies_task, identity,
-    receive_ladder, roster, subagent_rules, team, watch,
+    Address, Backends, Body, Caller, FRAME_OVER_SOCKET, FRAME_OVER_SOCKET_SOLO, HeldWire, Host,
+    Incoming, MAX_HOP_CHAIN_ENTRIES, MESSAGE_ROUTE, MemberBackend, NOT_A_SESSION_SOCKET,
+    NotReceived, NotSpawned, ONE_WAY_NOTE, PeerFacts, PermissionReply, Postbox, RECEIVED,
+    ReceiptStatus, Reserved, SOCKET_LEAD_UNNAMED, SOCKET_OVERSIZED, SOCKET_REFUSED,
+    SOCKET_UNREACHABLE, SenderMode, Sent, SocketDelivered, SocketMessage, SocketReceipt,
+    SoloPostbox, Spawn, SpawnAsk, SpawnAsker, SpawnRequest, TEAM_GONE, TEAM_ROUTE, Teammate,
+    TeammateRegistry, TeammateSpawn, Teammated, Teammates, Undelivered, Watched, async_trait,
+    deliver_to_lead, denies_task, held_note, identity, receive_ladder, roster, subagent_rules,
+    team, watch,
 };
 use crate::{
     agent::{self, Registry},
     config::Config,
     engine::Fanout,
     permission::{Action, Permissions, Rule},
-    protocol::{Event, MessageId, Part, PartBody, PartId, SessionId, ToolState},
+    protocol::{Event, MessageId, Part, PartBody, PartId, PeerMessageId, SessionId, ToolState},
     tool::{
         Tool as _,
         task::{DESCRIPTION, ROSTER_HEADER, Subagents as _, TaskTool},
@@ -1066,13 +1069,20 @@ async fn a_socket_delivery_asks_who_leads_and_posts_to_them_stamped_with_its_ide
     let posted: SocketMessage =
         serde_json::from_str(&requests[1].2).expect("the body is the wire shape");
     assert_eq!(
-        posted,
-        SocketMessage {
-            from: "worker@session-abcd1234".to_owned(),
-            text: "the release is out".to_owned(),
-            summary: Some("release".to_owned()),
-        },
+        posted.from, "worker@session-abcd1234",
         "stamped with the sender's derived identity, never a bare name"
+    );
+    assert_eq!(posted.text, "the release is out");
+    assert_eq!(posted.summary, Some("release".to_owned()));
+    assert!(
+        posted.message_id.is_some(),
+        "a fresh id is minted for every send (D532), bound or not"
+    );
+    assert_eq!(
+        (posted.from_mode, posted.hop_chain, posted.reply_to),
+        (None, Vec::new(), None),
+        "this postbox was never given a `PeerFacts` beyond the `Unbound` default: no \
+         class asserted, nothing to forward, nowhere to reply"
     );
 }
 
@@ -2066,5 +2076,413 @@ async fn the_solo_postbox_resolves_directly_stamps_solo_and_appends_the_one_way_
         Err(Undelivered::Failed {
             reason: FRAME_OVER_SOCKET_SOLO.to_owned(),
         })
+    );
+}
+
+// D532/D534's own wire types and the `PeerFacts` composition seam
+// (cross-session-full-parity, W1/L1c). Each test names the acceptance
+// criterion it pins.
+
+/// **AC-1**: every new field defaults away, so a message carrying none of
+/// them serializes to exactly the three keys this wire has always had.
+#[test]
+fn a_message_with_every_new_field_absent_serializes_byte_identically_to_before_d532() {
+    let message = SocketMessage {
+        from: "worker@session-abcd1234".to_owned(),
+        text: "the release is out".to_owned(),
+        summary: Some("release".to_owned()),
+        message_id: None,
+        from_mode: None,
+        hop_chain: Vec::new(),
+        reply_to: None,
+    };
+
+    let encoded = serde_json::to_string(&message).expect("a plain message serializes");
+    assert_eq!(
+        encoded,
+        r#"{"from":"worker@session-abcd1234","text":"the release is out","summary":"release"}"#,
+        "every new field is absent-by-default, so the bytes are today's own, unchanged"
+    );
+
+    let decoded: SocketMessage =
+        serde_json::from_str(&encoded).expect("today's own shape still parses");
+    assert_eq!(decoded, message, "and it round-trips to the same value");
+}
+
+/// **AC-2**: a body an old sender wrote — just `from`/`text`, no `summary`
+/// and none of D532's four fields — still parses, and every new field reads
+/// as the collapsed default a receiver already treats as "nothing new
+/// asserted".
+#[test]
+fn a_new_receiver_reads_an_old_senders_body() {
+    let old_sender_body = r#"{"from":"worker@session-abcd1234","text":"hello"}"#;
+
+    let decoded: SocketMessage =
+        serde_json::from_str(old_sender_body).expect("an old sender's own body still parses");
+    assert_eq!(decoded.summary, None);
+    assert_eq!(decoded.message_id, None);
+    assert_eq!(decoded.from_mode, None);
+    assert_eq!(decoded.hop_chain, Vec::<String>::new());
+    assert_eq!(decoded.reply_to, None);
+}
+
+/// A stand-in [`PeerFacts`] this suite drives directly — the engine that
+/// would ordinarily implement the trait does not exist in this crate's own
+/// tests, so **AC-5**'s composition half is pinned against a double instead.
+#[derive(Debug)]
+struct StubFacts {
+    sender_mode: Option<SenderMode>,
+    reply_to: Option<std::path::PathBuf>,
+    hop_chain: Vec<String>,
+}
+
+impl PeerFacts for StubFacts {
+    fn sender_mode(&self) -> Option<SenderMode> {
+        self.sender_mode
+    }
+
+    fn reply_to(&self) -> Option<std::path::PathBuf> {
+        self.reply_to.clone()
+    }
+
+    fn hop_chain(&self) -> Vec<String> {
+        self.hop_chain.clone()
+    }
+}
+
+/// **AC-5** (composition half): the sender-side composition reads only what
+/// [`PeerFacts`] answers — `from_mode` and `hop_chain` cross unmodified, and
+/// `reply_to` is composed into the `uds:` spelling here rather than expected
+/// pre-formatted. The unbound case (nothing asserted, nothing forwarded, no
+/// reply address) is pinned by
+/// `a_socket_delivery_asks_who_leads_and_posts_to_them_stamped_with_its_identity`
+/// above, which never installs a `PeerFacts` beyond the `Unbound` default.
+#[tokio::test]
+async fn the_sender_side_composition_reads_only_what_peer_facts_answers() {
+    let registry_dir = private_dir();
+    let identity = Arc::new(identity::Identity::new(registry_dir.path()));
+    let own_session = Arc::new(std::sync::Mutex::new(SessionId::from(
+        "ses-composed-own".to_owned(),
+    )));
+    let self_name = Arc::new(std::sync::Mutex::new("composer".to_owned()));
+    let solo = SoloPostbox::new(Arc::clone(&self_name), identity, own_session).with_peer_facts(
+        Arc::new(StubFacts {
+            sender_mode: Some(SenderMode::Bypass),
+            reply_to: Some(std::path::PathBuf::from("/tmp/ganja-501/deadbeef.sock")),
+            hop_chain: vec!["abcd1234".to_owned(), "ef012345".to_owned()],
+        }),
+    );
+
+    let socket = registry_dir.path().join("06660007.sock");
+    let peer = PeerStub::listen(&socket).await;
+
+    let _sent = team::Postbox::deliver(
+        &solo,
+        Address::Uds {
+            path: socket.clone(),
+        },
+        Body::Text {
+            text: "carrying a chain".to_owned(),
+            summary: None,
+        },
+    )
+    .await
+    .expect("a listening peer takes the message");
+
+    let posted: SocketMessage = peer
+        .requests()
+        .into_iter()
+        .find(|(method, route, _)| method == "POST" && route.starts_with("/team/"))
+        .map(|(_, _, body)| serde_json::from_str(&body).expect("the body is the wire shape"))
+        .expect("exactly one message posted");
+
+    assert_eq!(
+        posted.from_mode,
+        Some(SenderMode::Bypass),
+        "read straight off the facts"
+    );
+    assert_eq!(
+        posted.reply_to.as_deref(),
+        Some("uds:/tmp/ganja-501/deadbeef.sock"),
+        "the `uds:` spelling is composed at the send site, not read off PeerFacts pre-formatted"
+    );
+    assert_eq!(
+        posted.hop_chain,
+        vec!["abcd1234".to_owned(), "ef012345".to_owned()],
+        "the chain crosses exactly as PeerFacts answered it, with no further processing here"
+    );
+    assert!(
+        posted.message_id.is_some(),
+        "a fresh id is minted for every send regardless of what PeerFacts answers"
+    );
+}
+
+/// A replica of the wire's shape before D532 — three fields,
+/// `deny_unknown_fields` — kept only to pin **AC-9**: this suite has no
+/// second binary to hold "today's" struct in, so the shape is frozen here
+/// instead.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct PreD532SocketMessage {
+    from: String,
+    text: String,
+    summary: Option<String>,
+}
+
+/// **AC-9**: an old, `deny_unknown_fields` receiver refuses a body carrying
+/// D532's new fields readably — a version-skew regression, not a silent
+/// misread.
+#[test]
+fn an_old_receiver_refuses_a_new_body_readably() {
+    let new_body = serde_json::to_string(&SocketMessage {
+        from: "worker@team".to_owned(),
+        text: "hi".to_owned(),
+        summary: None,
+        message_id: Some(PeerMessageId::ascending()),
+        from_mode: Some(SenderMode::Prompting),
+        hop_chain: vec!["abcd1234".to_owned()],
+        reply_to: Some("uds:/tmp/x.sock".to_owned()),
+    })
+    .expect("a new sender's body serializes");
+
+    let refused: Result<PreD532SocketMessage, _> = serde_json::from_str(&new_body);
+    assert!(
+        refused.is_err(),
+        "an old, deny_unknown_fields receiver refuses fields it has never heard of, readably \
+         rather than silently: {new_body}"
+    );
+}
+
+/// **AC-25**: `SocketReceipt` round-trips for each of the three statuses
+/// this route actually carries.
+#[test]
+fn a_socket_receipt_round_trips_with_each_status() {
+    for status in [
+        ReceiptStatus::Delivered,
+        ReceiptStatus::Denied,
+        ReceiptStatus::Expired,
+    ] {
+        let receipt = SocketReceipt {
+            message_id: PeerMessageId::ascending(),
+            status,
+        };
+        let encoded = serde_json::to_string(&receipt).expect("a receipt serializes");
+        let decoded: SocketReceipt =
+            serde_json::from_str(&encoded).expect("and a receipt this crate wrote parses back");
+        assert_eq!(decoded, receipt);
+    }
+}
+
+/// **AC-25**: the string `"held"` — v2's fourth status, which ganja answers
+/// synchronously rather than over this route — is refused by name rather
+/// than silently accepted as a fourth state this enum does not carry.
+#[test]
+fn an_unknown_receipt_status_is_refused_by_name_including_held() {
+    let held = r#"{"message_id":"some-id","status":"held"}"#;
+    let refused: Result<SocketReceipt, _> = serde_json::from_str(held);
+    let error = refused.expect_err("`held` is answered synchronously, never over this route");
+    assert!(
+        error.to_string().contains("held"),
+        "the refusal names the value it does not recognize: {error}"
+    );
+
+    let other_unknown = r#"{"message_id":"some-id","status":"delayed"}"#;
+    assert!(
+        serde_json::from_str::<SocketReceipt>(other_unknown).is_err(),
+        "any other unrecognized status is refused the same way"
+    );
+}
+
+/// **AC-25**: the divergence — ganja answers `held` synchronously, never
+/// over this route — is stated in `ReceiptStatus`'s own doc, not left for a
+/// reader to rediscover.
+#[test]
+fn the_receipt_status_doc_states_the_synchronous_held_divergence() {
+    let source = include_str!("subagent.rs");
+    let enum_at = source
+        .find("pub enum ReceiptStatus")
+        .expect("ReceiptStatus is declared in this file");
+    let preceding_doc = &source[..enum_at];
+    let doc_start = preceding_doc
+        .rfind("/// How a held entry")
+        .expect("its doc block opens with this sentence");
+    let doc_block = &preceding_doc[doc_start..];
+
+    assert!(
+        doc_block.contains("ganja answers **synchronously**")
+            && doc_block.contains("SocketDelivered")
+            && doc_block.contains("rather than over this route"),
+        "the enum's own doc must state the divergence so a later reader meets it at the \
+         declaration rather than rediscovering it: {doc_block:?}"
+    );
+}
+
+/// **AC-48**: a body claiming one more hop than the sender cap is refused
+/// at deserialization, before the guard's own thresholds ever see a `Vec`;
+/// exactly the cap still parses.
+#[test]
+fn a_hop_chain_past_the_sender_cap_is_refused_at_parse_and_the_cap_itself_parses() {
+    let one_past_the_cap: Vec<String> =
+        (0..=MAX_HOP_CHAIN_ENTRIES).map(|n| n.to_string()).collect();
+    let body = serde_json::json!({
+        "from": "worker@team",
+        "text": "x",
+        "hop_chain": one_past_the_cap,
+    })
+    .to_string();
+    let refused: Result<SocketMessage, _> = serde_json::from_str(&body);
+    let error = refused.expect_err("one more entry than the sender cap is refused");
+    assert!(
+        error
+            .to_string()
+            .contains(&MAX_HOP_CHAIN_ENTRIES.to_string()),
+        "the refusal names the cap it exceeded: {error}"
+    );
+
+    let exactly_the_cap: Vec<String> = (0..MAX_HOP_CHAIN_ENTRIES).map(|n| n.to_string()).collect();
+    let body = serde_json::json!({
+        "from": "worker@team",
+        "text": "x",
+        "hop_chain": exactly_the_cap,
+    })
+    .to_string();
+    let parsed: SocketMessage =
+        serde_json::from_str(&body).expect("exactly the cap is still a conforming sender");
+    assert_eq!(parsed.hop_chain.len(), MAX_HOP_CHAIN_ENTRIES);
+}
+
+/// **AC-52**: `held` absent produces exactly the two-field bytes this answer
+/// has always had.
+#[test]
+fn socket_delivered_with_held_absent_is_byte_identical_to_before_d534() {
+    let delivered = SocketDelivered {
+        to: "team-lead".to_owned(),
+        note: RECEIVED.to_owned(),
+        held: None,
+    };
+    let encoded = serde_json::to_string(&delivered).expect("an accept answer serializes");
+    // A literal, field-order-sensitive string rather than `serde_json::json!`
+    // — that macro's own `Value::Object` sorts keys alphabetically without
+    // the `preserve_order` feature, which is exactly the byte-identity claim
+    // this test exists to pin, not something to launder through.
+    assert_eq!(
+        encoded,
+        format!(
+            r#"{{"to":"team-lead","note":{}}}"#,
+            serde_json::to_string(RECEIVED).expect("a plain string serializes")
+        ),
+        "held absent produces exactly today's two-field bytes, in today's field order"
+    );
+}
+
+/// **AC-52**: an accept's answer and a refuse's answer are byte-identical
+/// to each other with `held` present in neither — the new field does not
+/// reopen the enumeration channel D523 closed.
+#[test]
+fn an_accept_and_a_refuse_answer_are_byte_identical_with_held_absent_from_both() {
+    let accept = SocketDelivered {
+        to: "team-lead".to_owned(),
+        note: RECEIVED.to_owned(),
+        held: None,
+    };
+    let refuse = SocketDelivered {
+        to: "team-lead".to_owned(),
+        note: RECEIVED.to_owned(),
+        held: None,
+    };
+    assert_eq!(
+        serde_json::to_string(&accept).expect("an accept serializes"),
+        serde_json::to_string(&refuse).expect("a refuse serializes"),
+        "D523's uniform answer: `held`'s own absence in both keeps the two indistinguishable"
+    );
+}
+
+/// **AC-52**: a hold's answer carries the typed cause, and round-trips.
+#[test]
+fn a_holds_answer_carries_the_typed_cause() {
+    let delivered = SocketDelivered {
+        to: "team-lead".to_owned(),
+        note: held_note(ganja_protocol::HoldCause::NoModeAsserted),
+        held: Some(HeldWire {
+            cause: ganja_protocol::HoldCause::NoModeAsserted,
+        }),
+    };
+    let encoded = serde_json::to_string(&delivered).expect("a held answer serializes");
+    let decoded: SocketDelivered =
+        serde_json::from_str(&encoded).expect("and a held answer this crate wrote parses back");
+    assert_eq!(
+        decoded.held,
+        Some(HeldWire {
+            cause: ganja_protocol::HoldCause::NoModeAsserted,
+        })
+    );
+}
+
+/// **AC-52**: a new sender reading an old receiver's answer never sees
+/// `held` at all — nothing to register, nothing to post, exactly AC-2's
+/// posture mirrored onto the answer side.
+#[test]
+fn a_new_sender_reading_an_old_receivers_answer_sees_no_held_fact() {
+    let old_answer = r#"{"to":"team-lead","note":"It reached that session."}"#;
+    let decoded: SocketDelivered =
+        serde_json::from_str(old_answer).expect("an old receiver's own answer still parses");
+    assert_eq!(
+        decoded.held, None,
+        "nothing to register, nothing to post — AC-2's posture, mirrored"
+    );
+}
+
+/// **AC-52** (D2's honest worse direction): an old sender's
+/// `deny_unknown_fields` answer type refuses a **new** receiver's held
+/// answer — surfacing to that sender's model as a failed send, on a
+/// message that is, in fact, in review on the far side.
+#[test]
+fn an_old_senders_answer_type_refuses_a_new_receivers_held_answer() {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    #[allow(dead_code)]
+    struct PreD534SocketDelivered {
+        to: String,
+        note: String,
+    }
+
+    let held_answer = serde_json::to_string(&SocketDelivered {
+        to: "team-lead".to_owned(),
+        note: held_note(ganja_protocol::HoldCause::ModeMismatch),
+        held: Some(HeldWire {
+            cause: ganja_protocol::HoldCause::ModeMismatch,
+        }),
+    })
+    .expect("a held answer serializes");
+
+    let refused: Result<PreD534SocketDelivered, _> = serde_json::from_str(&held_answer);
+    assert!(
+        refused.is_err(),
+        "an old sender's deny_unknown_fields type refuses a `held` field it has never heard of: \
+         {held_answer}"
+    );
+}
+
+/// **AC-52** (D2's standing note): whoever adds the next answer field meets
+/// the consequence at `SocketDelivered`'s own declaration.
+#[test]
+fn socket_delivereds_own_doc_carries_the_standing_note_for_future_fields() {
+    let source = include_str!("subagent.rs");
+    let struct_at = source
+        .find("pub struct SocketDelivered")
+        .expect("SocketDelivered is declared in this file");
+    let preceding_doc = &source[..struct_at];
+    let doc_start = preceding_doc
+        .rfind("/// What the socket route answers")
+        .expect("its doc block opens with this sentence");
+    let doc_block = &preceding_doc[doc_start..];
+
+    assert!(
+        doc_block.contains("deny_unknown_fields")
+            && doc_block.contains("every additive answer field")
+            && doc_block.contains("**old** sender"),
+        "the struct's own doc must warn whoever adds the next field that an old sender's parse \
+         fails on it too: {doc_block:?}"
     );
 }

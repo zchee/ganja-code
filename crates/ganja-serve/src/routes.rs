@@ -716,6 +716,11 @@ async fn team_message(
     Ok(Json(SocketDelivered {
         to: sent.to,
         note: sent.note,
+        // This route does not yet run the admission gate that could hold a
+        // message and fill in a cause (W2, D534); until it does, every
+        // answer here is an accept, and `held`'s own absence keeps it
+        // byte-identical to today's two-field body.
+        held: None,
     }))
 }
 

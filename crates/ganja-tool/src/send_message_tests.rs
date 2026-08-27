@@ -462,10 +462,9 @@ async fn a_resolver_refusal_is_passed_through_in_the_deliverers_words() {
     }
 }
 
-/// AC-31's description half: the teamless variant claims no roster,
-/// labels a session's name self-chosen and unverified, says where names
-/// come from — the person's `@`-mentions or `uds:` spellings — and
-/// implies no reply channel anywhere (D530's asymmetry rule).
+/// AC-31's description half: the teamless variant claims no roster, labels
+/// a session's name self-chosen and unverified, and implies no reply
+/// channel anywhere (D530's asymmetry rule).
 #[test]
 fn the_teamless_description_claims_no_roster_and_names_no_reply_channel() {
     let tool = SendMessageTool::teamless();
@@ -478,10 +477,6 @@ fn the_teamless_description_claims_no_roster_and_names_no_reply_channel() {
     assert!(
         described.contains("chose for itself") && described.contains("nothing verifies"),
         "a registry name is labeled self-asserted: {described}"
-    );
-    assert!(
-        described.contains("@-mention") && described.contains("uds:"),
-        "the two ways a name arrives are named: {described}"
     );
     // The no-reply-channel rule, as absence: no word of hearing back
     // appears. The roster's absence is asserted on the rendered header
@@ -499,6 +494,30 @@ fn the_teamless_description_claims_no_roster_and_names_no_reply_channel() {
     let team_of_one = SendMessageTool::new(&[]);
     assert!(team_of_one.description().contains(super::NO_PEERS));
     assert_ne!(described, team_of_one.description());
+}
+
+/// AC-24, narrowed by the 2026-08-27 user ruling: `list_sessions` now
+/// answers "which names are live", so the teamless description's own claim
+/// that this build offers no listing tool is gone — replaced by a pointer
+/// to that tool — while the one-way silence this test does not touch stays
+/// exactly as it was (`ONE_WAY_NOTE` lives in `subagent.rs`, a different
+/// lane's file, and ships or does not on its own schedule).
+#[test]
+fn the_teamless_description_points_at_list_sessions_instead_of_claiming_no_listing_tool() {
+    let described = SendMessageTool::teamless().description().to_owned();
+
+    assert!(
+        described.contains("list_sessions"),
+        "a pointer to the listing tool replaces the removed clause: {described}"
+    );
+    assert!(
+        !described.contains("Which names are live comes from the person"),
+        "the removed no-listing-tool clause does not resurface: {described}"
+    );
+    assert!(
+        !described.to_lowercase().contains("no listing tool"),
+        "no phrasing claims this build offers none: {described}"
+    );
 }
 
 /// The delivered path: the body crosses whole, and the model reads what

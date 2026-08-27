@@ -125,18 +125,16 @@ is displayed.";
 /// What the model is told where this session leads no team (**D530**): no
 /// roster section — there is no team to claim — the live-session addressing
 /// with its honest label (a session's name is that session's own choice, and
-/// nothing verifies it), and where names come from, since this build offers
-/// the model no listing tool: the person's `@`-mentions, or a `uds:`
-/// spelling they supplied. Deliberately silent on any reply channel — a
-/// teamless sender cannot be addressed back, and no shipped text may imply
-/// it can.
+/// nothing verifies it), and where names come from: the `list_sessions` tool
+/// (**D535**), which now answers that question directly. Deliberately silent
+/// on any reply channel — a teamless sender cannot be addressed back, and no
+/// shipped text may imply it can.
 const TEAMLESS_DESCRIPTION: &str = "\
 Send a message to another live ganja session of this user's on this machine. \
 This session leads no team, so there is no teammate roster: `to` names a \
 session by the name it registered — a name that session chose for itself and \
-that nothing verifies — or by its uds: socket address. Which names are live \
-comes from the person: an @-mention in their prompt, or a uds: spelling they \
-supplied.
+that nothing verifies — or by its uds: socket address. Call list_sessions to \
+see which names are live.
 
 Name exactly one recipient in `to`: there is no broadcast, so reaching three \
 sessions is three calls. `message` is plain text. Use `summary` for the one \

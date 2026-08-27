@@ -24,13 +24,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 /// The [`team`] types that appear in signatures outside the frame vocabulary:
 /// a trust boundary ([`LeadFrame`]), the classifier every
-/// messaging path asks ([`Frame`]), and the projection a frontend renders
-/// ([`TeamView`] and its two halves).
+/// messaging path asks ([`Frame`]), the projection a frontend renders
+/// ([`TeamView`] and its two halves), and the two [`Event::PeerReceipt`]
+/// carries — [`PeerMessageId`] and [`PeerReceiptStatus`] — which live beside
+/// the rest of the peer surface in `team.rs` rather than here, for the same
+/// reason `Frame` does.
 ///
 /// Everything else — the fifteen frame payloads, the two reserved-set consts,
 /// the display cap — stays behind `team::`, because a caller naming one of
 /// those is already inside that vocabulary and the qualification says so.
-pub use team::{Frame, LeadFrame, MemberBackend, MemberView, TeamView};
+pub use team::{
+    Frame, LeadFrame, MemberBackend, MemberView, PeerMessageId, PeerReceiptStatus, TeamView,
+};
 use uuid::Uuid;
 
 /// Milliseconds since the Unix epoch, saturating rather than failing when the
@@ -2035,6 +2040,32 @@ pub enum Event {
         /// How it ended.
         outcome: HeldOutcome,
     },
+    /// A peer message this session **sent** was held on the far side and has
+    /// now settled, for the frontend's notice line (**D534**).
+    ///
+    /// Never fired for a plain accept, a refuse, or a guard drop: the receipt
+    /// route exists only for a message this session's own send held on
+    /// arrival, and only that hold's settlement ever crosses it back.
+    ///
+    /// The model-facing half — one `<peer_receipt>`-tagged
+    /// [`Part::text`](crate::Part::text) batched at the next prompt intake —
+    /// is **ganja-inferred**: v2 places the settlement notice on the
+    /// sender-side UI alone and does not say it reaches the model (v2
+    /// §"Receipts and sender UX", evidence 1228101-1228199 — the UI batches
+    /// status updates and injects a meta notice). Rendering it as
+    /// conversation text besides is ganja's own call, argued from D529's own
+    /// mention-reminder precedent rather than borrowed from the reference.
+    PeerReceipt {
+        /// Session this happened in: the one that sent the message.
+        session_id: SessionId,
+        /// The sender's own id for the message this receipt settles.
+        id: PeerMessageId,
+        /// How it settled.
+        status: PeerReceiptStatus,
+        /// Who it was sent to — `<name>@<team>` or `<name>@solo`, the same
+        /// identity a peer part or a hold's `from` already carries.
+        to: String,
+    },
     /// A compaction is summarizing the window, and this is how far along it
     /// is: the summary streamed so far, estimated in tokens, against the
     /// output budget the engine's fit guard reserves for one.
@@ -2112,6 +2143,7 @@ impl Event {
             | Event::PermissionModeChanged { session_id, .. }
             | Event::PeerHeld { session_id, .. }
             | Event::PeerHoldSettled { session_id, .. }
+            | Event::PeerReceipt { session_id, .. }
             | Event::CompactionProgress { session_id, .. }
             | Event::MessageFinished { session_id, .. } => session_id,
         }

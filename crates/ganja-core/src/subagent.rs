@@ -128,8 +128,8 @@ use crate::{
     engine::{EVENT_CAPACITY, Fanout},
     permission::{Action, Decision, Permissions, Rule, TASK},
     protocol::{
-        Event, FinishReason, MessageId, Part, PartBody, PartId, PermissionId, PermissionReply,
-        Role, ToolState, Usage,
+        Event, FinishReason, MessageId, Part, PartBody, PartId, PeerMessageId, PermissionId,
+        PermissionReply, Role, ToolState, Usage,
     },
     provider::Provider,
     session::{ChildParts, Persist, SessionState, Turn, TurnKind, run_turn},
@@ -881,6 +881,13 @@ pub struct Postbox {
     /// addressing to extend — its roster miss stays [`Undelivered::Unknown`]
     /// exactly as it always has.
     resolver: Option<(Arc<identity::Identity>, Arc<std::sync::Mutex<SessionId>>)>,
+    /// The three facts a `uds:` send stamps onto its [`SocketMessage`]
+    /// beyond `from` (**D532**): this session's own asserted permission
+    /// class, its reply address and its outgoing hop chain. [`Unbound`]
+    /// until the engine installs its own through
+    /// [`Postbox::with_peer_facts`] — every constructor below keeps
+    /// building against that default and never has to change for it.
+    peer_facts: Arc<dyn PeerFacts>,
 }
 
 /// Renders which team and which sender this speaks for, and nothing of the
@@ -924,6 +931,7 @@ impl Postbox {
             sender: registry.lead().as_str().to_owned(),
             registry: Arc::downgrade(registry),
             resolver: resolver.map(|(identity, own_session)| (Arc::clone(identity), own_session)),
+            peer_facts: Arc::new(Unbound),
         }
     }
 
@@ -940,7 +948,17 @@ impl Postbox {
             sender: teammate.name().to_owned(),
             registry: Arc::downgrade(registry),
             resolver: None,
+            peer_facts: Arc::new(Unbound),
         }
+    }
+
+    /// Installs the engine's own `PeerFacts` (**D532**), the one seam the
+    /// engine calls once it exists to implement anything — see
+    /// `SoloPostbox::with_peer_facts`, this postbox's twin.
+    #[must_use]
+    pub fn with_peer_facts(mut self, peer_facts: Arc<dyn PeerFacts>) -> Self {
+        self.peer_facts = peer_facts;
+        self
     }
 
     /// The team as this caller may address it, once somebody holding the team
@@ -1033,8 +1051,10 @@ impl Postbox {
             sender: identity.to_owned(),
             registry: Arc::downgrade(registry),
             // A shape check only — this value is dropped without ever
-            // calling `deliver`, so it needs no resolver.
+            // calling `deliver`, so it needs no resolver and no facts beyond
+            // the default.
             resolver: None,
+            peer_facts: Arc::new(Unbound),
         })
     }
 
@@ -1070,7 +1090,14 @@ impl Postbox {
         let from = format!("{}@{}", self.sender, registry.team());
         drop(registry);
 
-        deliver_over_socket(path, body, from, FRAME_OVER_SOCKET).await
+        deliver_over_socket(
+            path,
+            body,
+            from,
+            FRAME_OVER_SOCKET,
+            self.peer_facts.as_ref(),
+        )
+        .await
     }
 }
 
@@ -1093,11 +1120,21 @@ impl Postbox {
 /// whatever the caller stamped — the same derived identity the far side's
 /// [`Postbox::peer`] holds it to, so both ends agree on what a peer's name
 /// looks like without a second rule.
+///
+/// **Sender-side composition** (**D532**): `peer_facts` is read for exactly
+/// three of the four new fields — `from_mode`, `hop_chain` and `reply_to`,
+/// each carried onto the wire exactly as [`PeerFacts`] answers it, with no
+/// further processing here. `message_id` is not one of them: it names *this*
+/// message rather than a fact about the sender, so it is minted fresh for
+/// every send, bound or not — whether it is ever spent by registering an
+/// outstanding receipt is a later, held-and-reply-capable question this
+/// function does not answer.
 async fn deliver_over_socket(
     path: &Path,
     body: Body,
     from: String,
     frame_refusal: &'static str,
+    peer_facts: &dyn PeerFacts,
 ) -> Result<Sent, Undelivered> {
     let Body::Text { text, summary } = body else {
         return Err(Undelivered::Failed {
@@ -1139,6 +1176,12 @@ async fn deliver_over_socket(
                 from,
                 text,
                 summary,
+                message_id: Some(PeerMessageId::ascending()),
+                from_mode: peer_facts.sender_mode(),
+                hop_chain: peer_facts.hop_chain(),
+                reply_to: peer_facts
+                    .reply_to()
+                    .map(|path| format!("uds:{}", path.display())),
             },
         )
         .await?;
@@ -1186,6 +1229,7 @@ async fn deliver_resolved(
     body: Body,
     from: String,
     frame_refusal: &'static str,
+    peer_facts: &dyn PeerFacts,
 ) -> Result<Sent, Undelivered> {
     match resolution {
         identity::Resolution::Session {
@@ -1199,7 +1243,7 @@ async fn deliver_resolved(
                 resolver.pin(name, &id, &stem);
             }
 
-            let inner = deliver_over_socket(&socket, body, from, frame_refusal).await?;
+            let inner = deliver_over_socket(&socket, body, from, frame_refusal, peer_facts).await?;
             Ok(Sent {
                 to: format!("{name} (uds:{} \u{2192} {})", socket.display(), inner.to),
                 note: inner.note,
@@ -1222,13 +1266,90 @@ async fn deliver_resolved(
     }
 }
 
+/// This session's own permission class, as it is written onto the wire
+/// (**D532**) — an assertion, never a proof: a same-uid writer of this field
+/// is trusted for nothing beyond what it says (v2 §"Attribute semantics and
+/// trust").
+///
+/// [`SenderMode::from`] is the **one** function both directions of the
+/// parity matrix read through (**AC-3**): the receiver's own
+/// [`inbound::ReceiverClass`](crate::teammate::inbound::ReceiverClass) and
+/// what this session emits here can never name two different classes,
+/// because both are one enum apart from the same
+/// [`Engine::receiver_class`](crate::engine::Engine::receiver_class) read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SenderMode {
+    /// This session prompts: dialogs ask, and the rules decide for it.
+    Prompting,
+    /// This session bypasses: its own dialogs answer themselves.
+    Bypass,
+}
+
+impl From<crate::teammate::inbound::ReceiverClass> for SenderMode {
+    fn from(class: crate::teammate::inbound::ReceiverClass) -> Self {
+        match class {
+            crate::teammate::inbound::ReceiverClass::Prompting => Self::Prompting,
+            crate::teammate::inbound::ReceiverClass::Bypass => Self::Bypass,
+        }
+    }
+}
+
+/// The most hop markers a [`SocketMessage`] may carry (**D532**, **AC-48**):
+/// v2's own sender cap (v2 §"Hop chain: two different caps", evidence
+/// 153301-153329), enforced here — at deserialization, before the `Vec`
+/// exists at all — rather than left to the guard's own, smaller thresholds
+/// (10 own-marker / 28 chain entries) to reject after allocating one. No
+/// conforming sender ever exceeds it; axum's request-body cap bounds the
+/// request itself and is not the bound anything here relies on.
+pub(crate) const MAX_HOP_CHAIN_ENTRIES: usize = 32;
+
+/// Refuses a `hop_chain` past [`MAX_HOP_CHAIN_ENTRIES`] readably, at parse
+/// time, instead of silently truncating or accepting an unbounded body.
+fn deserialize_hop_chain<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let chain = Vec::<String>::deserialize(deserializer)?;
+    if chain.len() > MAX_HOP_CHAIN_ENTRIES {
+        return Err(serde::de::Error::custom(format!(
+            "hop_chain carries {} entries, more than the {MAX_HOP_CHAIN_ENTRIES} a conforming \
+             sender may send",
+            chain.len(),
+        )));
+    }
+    Ok(chain)
+}
+
 /// The socket route's request body, as both ends of the wire spell it: what
 /// the outbound `uds:` arm of `Postbox::deliver` sends and what the engine's
 /// receiving door takes in.
 ///
 /// One struct rather than two so the two ends cannot drift — the sender is
 /// this crate, and the receiver is `ganja-serve`'s handler feeding
-/// [`Incoming`], which reads exactly these three names.
+/// [`Incoming`], which shapes `from`/`text`/`summary` into a validated peer
+/// message; the four fields below cross the same struct and are the
+/// admission gate's own to read (**D532**).
+///
+/// # What does not port, and why (**P1**)
+///
+/// v2's envelope is a text grammar (v2 §"Grammar", evidence 153204-153209)
+/// guarded by a byte-exact canonical re-serialization check, because a
+/// crafted body could otherwise terminate the grammar early inside prompt
+/// text it is embedded in (v2 §"Canonical parsing (`ndd`)", evidence
+/// 153210-153247). This struct is a JSON body behind `deny_unknown_fields`,
+/// never embedded in anything a model reads as markup, so the grammar, its
+/// escaper, its attribute-order contract and the re-serialization check that
+/// defends them all have nothing here to defend and are not ported.
+///
+/// Also absent, and named rather than silently missing: `from-session`,
+/// which v2's own reference records both call sites passing as `undefined`;
+/// and the model-visible/control-plane split v2 draws around hop metadata
+/// (v2 §"Hop metadata is retained separately", evidence 153248-153285,
+/// 415199-415235). Ganja's chain never enters prompt text at all — the model
+/// reads [`PartBody::Peer`] composed from `text` alone — so the property v2
+/// achieves there by stripping a field out of what it renders, this build
+/// has structurally, by never putting one in.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SocketMessage {
@@ -1239,10 +1360,62 @@ pub struct SocketMessage {
     /// The sender's one line about it, when it wrote one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /// This message's own id, minted per send (D493's v7 family, so it sorts
+    /// in creation order) — sender-minted and trusted for nothing beyond
+    /// naming the message a later receipt might settle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<PeerMessageId>,
+    /// This sender's own asserted permission class — an attestation, never a
+    /// proof (v2 §"Attribute semantics and trust").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_mode: Option<SenderMode>,
+    /// The route this message has already crossed, oldest first: loop
+    /// metadata carrying no signature, sender-capped at
+    /// `MAX_HOP_CHAIN_ENTRIES` and refused past it at parse (**AC-48**).
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "deserialize_hop_chain"
+    )]
+    pub hop_chain: Vec<String>,
+    /// This sender's own `uds:` address, present only when it has one bound
+    /// — the same present-only-if-applicable shape v2's own `rOn` derivation
+    /// uses for its reply address ("only if that env is set; otherwise
+    /// omitted", v2 §"Reply addresses and one-way sends"; §"Same-machine
+    /// send (`rOn` / `oFd`)", evidence 220949-220975). A routing hint,
+    /// vetted before it is ever opened and never a principal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<String>,
+}
+
+/// The typed fact a hold answer carries back to the sender (**N2**,
+/// **D532**/**D534**): present on [`SocketDelivered`] only when the gate
+/// held the message, carrying the cause as a typed value rather than
+/// leaving a lane to string-sniff `note`'s free prose.
+///
+/// The absence, not just the presence, is load-bearing: an accept and a
+/// refuse both omit this field and so stay byte-identical to each other and
+/// to a hold answered before this field existed — an outcome enum naming
+/// accept was considered and rejected for exactly the reason this shape
+/// exists, because it would have reopened the enumeration channel `ganja-serve`'s
+/// routes close (D523).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeldWire {
+    /// Why the gate held it, in [`Event::PeerHeld`]'s own vocabulary — a
+    /// review surface and a sender's wire answer are both honest about the
+    /// same fact rather than each inventing its own spelling of it.
+    pub cause: ganja_protocol::HoldCause,
 }
 
 /// What the socket route answers when the message landed — [`Sent`] as it
 /// crosses the wire.
+///
+/// **Standing note for whoever adds the next field here**: this struct is
+/// `deny_unknown_fields`, so every additive answer field, this one included,
+/// makes a new receiver's answer unparseable to an **old** sender — reported
+/// to that sender's model as a failed send, not as the version skew it
+/// actually is. `held`'s own skew is priced at the field below; the same
+/// price is owed by whatever is added after it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SocketDelivered {
@@ -1250,6 +1423,27 @@ pub struct SocketDelivered {
     pub to: String,
     /// What became of it, in the far side's words.
     pub note: String,
+    /// Present **only** when this answer is a hold — absent for an accept
+    /// **and** absent for a refuse, so those two stay byte-identical to each
+    /// other (**N2**, **AC-52**).
+    ///
+    /// Skew, both directions: a **new sender** reading an **old receiver's**
+    /// answer never sees this field and degrades to [`SocketMessage`]'s own
+    /// AC-2 posture — no registration, no receipt, nothing to wait on. A
+    /// **new receiver** answering a hold to an **old sender** fails that
+    /// sender's parse under `deny_unknown_fields` — and unlike an ordinary
+    /// version-skew refusal, the message in that case **was** accepted into
+    /// review and will most likely deliver the moment somebody approves it,
+    /// so the sending model is told "failed" about a message that is, in
+    /// fact, alive on the far side. Bounded by circumstance rather than by
+    /// design: both binaries are one user's, in one `/tmp/ganja-<uid>/`
+    /// directory, so a mixed-version pair is a transient state during that
+    /// user's own upgrade. Dropping `deny_unknown_fields` would close it and
+    /// is refused — the strict answer-parse is this build's analogue of v2's
+    /// canonical-parsing posture, and trading it away to soften an upgrade
+    /// window would be the larger loss.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub held: Option<HeldWire>,
 }
 
 /// A refusal as `ganja-serve` puts one on the wire: its tag and its sentence.
@@ -1258,6 +1452,102 @@ pub struct SocketDelivered {
 struct SocketRefusal {
     #[serde(default)]
     message: String,
+}
+
+/// One sender's settlement of an outstanding held entry, as `POST
+/// /peer/receipt` on **that sender's own socket** carries it (**D534**).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SocketReceipt {
+    /// The id this sender minted for the message this receipt settles.
+    pub message_id: PeerMessageId,
+    /// How it settled.
+    pub status: ReceiptStatus,
+}
+
+/// How a held entry this session sent ultimately settled.
+///
+/// Exactly the reference's four settlement statuses minus `held`, which
+/// ganja answers **synchronously**, in the very [`SocketDelivered`] that was
+/// held, rather than over this route (v2 §"Receipts and sender UX", evidence
+/// 886033-886075, 886636-886697; v2 §"Explicit outcomes (`P8a`)", evidence
+/// 620644-620683: accept merely lets the message continue and only a hold
+/// ever sends a receipt at all). An unknown status — the string `"held"`
+/// included — refuses readably at deserialization by the ordinary derived
+/// behavior of an externally-tagged enum, rather than being guessed at or
+/// silently accepted as a fourth state this route does not carry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReceiptStatus {
+    /// A person approved the held message and it reached its ordinary
+    /// delivery path.
+    Delivered,
+    /// A person denied it. It was never delivered and never will be.
+    Denied,
+    /// The review window ran out with nobody having decided.
+    Expired,
+}
+
+/// What a postbox's own session can state about itself when it sends a
+/// `uds:` message, beyond `from` (**D532**): its own asserted permission
+/// class, where a settlement should be posted back, and the chain of
+/// sessions this message has already crossed.
+///
+/// A trait rather than a plain field, because the facts live on the
+/// [`Engine`](crate::engine::Engine) — the receiver class, the inbound-chain
+/// cell, the bound socket's own path — while both postbox constructors are
+/// called from `engine.rs` before the engine exists to implement anything
+/// (moving the composition into a later wave was considered and rejected:
+/// it would have left this wave's own new wire fields untested until the
+/// wave after they land). [`Postbox::with_peer_facts`] and
+/// [`SoloPostbox::with_peer_facts`] are the one seam the engine installs its
+/// own implementation through; every constructor above keeps building
+/// against [`Unbound`] and never has to change to make room for it.
+///
+/// Every method returns an owned value with its lock already dropped:
+/// nothing implementing this may hold a `std::sync::Mutex` guard across
+/// [`deliver_over_socket`]'s socket `await` — `await_holding_lock` runs at
+/// `-D warnings` and would catch it at the clippy gate rather than in
+/// review.
+pub trait PeerFacts: fmt::Debug + Send + Sync {
+    /// This session's own permission class, translated through
+    /// [`SenderMode`]'s one conversion (**AC-3**) — [`None`] for a sender
+    /// with no class to assert.
+    fn sender_mode(&self) -> Option<SenderMode>;
+
+    /// This session's own bound socket, as a `uds:` address, when one is
+    /// bound — [`None`] otherwise.
+    fn reply_to(&self) -> Option<PathBuf>;
+
+    /// The chain this send carries, **already composed**: whatever this
+    /// session inherited from the peer message it is answering, with this
+    /// session's own marker appended and the whole truncated oldest-first to
+    /// [`MAX_HOP_CHAIN_ENTRIES`] (v2 §"Hop chain: two different caps",
+    /// evidence 153301-153329) — a caller here does nothing to it but read
+    /// it. Empty for a sender with no bound socket and nothing inherited
+    /// (Axis 3's unbound sub-case).
+    fn hop_chain(&self) -> Vec<String>;
+}
+
+/// The [`PeerFacts`] every postbox is built with until the engine installs
+/// its own: a sender with no bound socket asserts no permission class,
+/// gives no reply address, and forwards no chain — Axis 3's unbound
+/// sub-case, and **AC-5**'s unbound case, both name this arm.
+#[derive(Clone, Copy, Debug)]
+struct Unbound;
+
+impl PeerFacts for Unbound {
+    fn sender_mode(&self) -> Option<SenderMode> {
+        None
+    }
+
+    fn reply_to(&self) -> Option<PathBuf> {
+        None
+    }
+
+    fn hop_chain(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// The two routes this side drives, spelled once. `ganja-serve` registers the
@@ -1745,7 +2035,16 @@ impl team::Postbox for Postbox {
 
         let resolution = resolve_blocking(&identity, &name, own).await;
 
-        deliver_resolved(&identity, &name, resolution, body, from, FRAME_OVER_SOCKET).await
+        deliver_resolved(
+            &identity,
+            &name,
+            resolution,
+            body,
+            from,
+            FRAME_OVER_SOCKET,
+            self.peer_facts.as_ref(),
+        )
+        .await
     }
 
     fn roster(&self) -> Vec<Peer> {
@@ -1853,6 +2152,9 @@ pub struct SoloPostbox {
     /// reads, shared rather than snapshotted so a resume or a `NewSession`
     /// moves this postbox's own-session exclusion with it.
     own_session: Arc<std::sync::Mutex<SessionId>>,
+    /// See [`Postbox`]'s own field of the same name — [`Unbound`] until
+    /// [`SoloPostbox::with_peer_facts`] installs the engine's.
+    peer_facts: Arc<dyn PeerFacts>,
 }
 
 impl SoloPostbox {
@@ -1868,7 +2170,24 @@ impl SoloPostbox {
             self_name,
             identity,
             own_session,
+            peer_facts: Arc::new(Unbound),
         }
+    }
+
+    /// Installs the engine's own [`PeerFacts`] (**D532**); see
+    /// [`Postbox::with_peer_facts`], this postbox's twin.
+    #[must_use]
+    // Only this crate's own test double calls it today — the engine calls
+    // it for real in W2 — so the expectation is scoped to the non-test
+    // build: this crate's own tests already exercise it, and `expect`
+    // cannot be unconditional without going unfulfilled there.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "wired by the engine in W2 (D534)")
+    )]
+    pub fn with_peer_facts(mut self, peer_facts: Arc<dyn PeerFacts>) -> Self {
+        self.peer_facts = peer_facts;
+        self
     }
 
     /// The derived identity every send through this stamps `from` with:
@@ -1910,11 +2229,19 @@ impl team::Postbox for SoloPostbox {
                     body,
                     self.from(),
                     FRAME_OVER_SOCKET_SOLO,
+                    self.peer_facts.as_ref(),
                 )
                 .await?
             }
             Address::Uds { path } => {
-                deliver_over_socket(&path, body, self.from(), FRAME_OVER_SOCKET_SOLO).await?
+                deliver_over_socket(
+                    &path,
+                    body,
+                    self.from(),
+                    FRAME_OVER_SOCKET_SOLO,
+                    self.peer_facts.as_ref(),
+                )
+                .await?
             }
         };
 
@@ -2451,12 +2778,14 @@ async fn watch(mut receiver: mpsc::Receiver<Event>, watched: Watched) -> Outcome
             | Event::PermissionModeChanged { .. }
             | Event::CompactionProgress { .. }
             | Event::EffortChanged { .. } => {}
-            // A hold and its settlement are a lead's surfaces (**D524**), and
-            // no child session leads a team — a subagent installs no
-            // teammates and binds no socket a peer could reach — so neither
-            // can arrive here. Permanent, not a bridge: the gate landed and
+            // A hold, its settlement and a sender's own settlement receipt
+            // are a lead's or a sender's surfaces (**D524**, **D534**), and
+            // no child session leads a team, binds a socket a peer could
+            // reach, or sends a `uds:` message of its own to hold a receipt
+            // for — a subagent installs no teammates and posts through
+            // none of this. Permanent, not a bridge: the gate landed and
             // this stayed true by construction.
-            Event::PeerHeld { .. } | Event::PeerHoldSettled { .. } => {}
+            Event::PeerHeld { .. } | Event::PeerHoldSettled { .. } | Event::PeerReceipt { .. } => {}
         }
     }
 

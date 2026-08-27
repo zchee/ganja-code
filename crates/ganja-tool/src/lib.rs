@@ -30,6 +30,7 @@ pub mod glob;
 pub mod grep;
 pub mod job;
 pub mod kill_shell;
+pub mod list_sessions;
 pub mod plan;
 pub mod question;
 pub mod read;
