@@ -348,6 +348,23 @@ tokio = { version = "1.53.1", features = [
 ] }
 tokio-stream = "0.1.19"
 tokio-util = "0.7.19"
+# The config file's own dialect, replacing JSONC. Order is semantic here —
+# permission rules evaluate last-match-wins, so a reader that handed the loader
+# a sorted map would change which rule decides. The straight-to-struct path
+# does not need `preserve_order` for that: its deserializer walks the parsed
+# document, so a Visitor sees keys where the file spelled them, interleaved
+# table headers included (`config_tests.rs` pins it rather than trusting it).
+# The feature is on for the other route — `toml::Table`/`Value` is a `BTreeMap`
+# without it, and anything reaching for one would re-sort exactly the order
+# that pin exists to protect.
+toml = { version = "1.1.4", features = ["preserve_order"] }
+# The same project's format-preserving half, and the reason `ganja mcp add`
+# keeps its contract (D483): editing one `[mcp.<name>]` entry of a file
+# somebody hand-commented has to put the entry back without printing the
+# comments away, which is this crate's whole job. `serde` is on because the
+# writers spell an entry out of the same serde type the loader reads back,
+# through `toml_edit::ser`, rather than composing table syntax by hand.
+toml_edit = { version = "0.25.13", features = ["serde"] }
 # The service trait axum is built on. Admitted alongside it so the serve layer
 # can write one middleware (auth, header posture) without a second admission
 # round.

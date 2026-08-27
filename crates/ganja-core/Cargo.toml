@@ -60,6 +60,12 @@ jiff.workspace = true
 # order. Going through a `serde_json::Value` instead would sort them, and the
 # order permission rules were written in is what decides which one wins.
 jsonc-parser = { workspace = true, features = ["serde"] }
+# The config file's own format. Read through `toml::de`, whose deserializer
+# walks the parsed document rather than a re-sorted map, so a config decodes
+# straight into its typed struct and sees keys in document order — the same
+# property the JSONC reader beside it was chosen for, and the same reason:
+# permission rules are evaluated last-match-wins.
+toml.workspace = true
 # The LSP client's payloads are LSP's own types — diagnostics, positions,
 # sync kinds — decoded straight off the wire rather than re-declared here
 # and drifting from the protocol at the next revision of it.

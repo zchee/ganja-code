@@ -1,4 +1,4 @@
-//! Which of the two config names wins where both sit in the global directory.
+//! Which of the config names wins where several sit in the global directory.
 //!
 //! Its own binary because it rewrites `XDG_CONFIG_HOME`, and because
 //! `tests/config.rs` — which holds the precedence table across all five tiers —
@@ -6,8 +6,9 @@
 //!
 //! Merging applies later over earlier, so the order a directory's files are
 //! merged in *is* which one wins. The project walk reverses that order to make
-//! `ganja.jsonc` beat `ganja.json`; the global tier has to do the same, or one
-//! rule holds in a project and its opposite holds in the home directory.
+//! `ganja.toml` beat both legacy names, and `ganja.jsonc` beat `ganja.json`;
+//! the global tier has to do the same, or one rule holds in a project and its
+//! opposite holds in the home directory.
 
 use std::{env, fs};
 
@@ -18,7 +19,7 @@ use ganja_core::{
 };
 
 #[test]
-fn a_global_jsonc_outranks_a_global_json_beside_it() {
+fn a_global_toml_outranks_the_legacy_names_beside_it() {
     let home = tempfile::tempdir().expect("a temporary directory");
     let config_home = home.path().join("config");
     let global = config_home.join("ganja");
@@ -36,6 +37,9 @@ fn a_global_jsonc_outranks_a_global_json_beside_it() {
         )
         .expect("the fixture file is writable");
     }
+    let toml = global.join("ganja.toml");
+    fs::write(&toml, format!("model = \"{}/toml-model\"\n", fake::ID))
+        .expect("the fixture file is writable");
 
     // SAFETY: this binary holds one test, so nothing else in the process is
     // reading the environment while it is being written.
@@ -47,11 +51,23 @@ fn a_global_jsonc_outranks_a_global_json_beside_it() {
         env::remove_var(provider::MODEL_ENV);
     }
 
+    let config = Config::load_with(&project, &Overrides::default()).expect("all three files parse");
+
+    assert_eq!(
+        config.model.as_deref(),
+        Some(format!("{}/toml-model", fake::ID).as_str()),
+        "the same rule the project walk follows: toml beats either legacy name"
+    );
+
+    // And with the new name gone, the order between the two old ones is
+    // unchanged — the list grew a first entry, it was not re-ranked.
+    fs::remove_file(&toml).expect("the fixture file is removable");
+
     let config = Config::load_with(&project, &Overrides::default()).expect("both files parse");
 
     assert_eq!(
         config.model.as_deref(),
         Some(format!("{}/jsonc-model", fake::ID).as_str()),
-        "the same rule the project walk follows: jsonc beats json in one directory"
+        "jsonc still beats json in one directory"
     );
 }

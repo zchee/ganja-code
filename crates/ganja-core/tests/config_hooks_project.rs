@@ -3,12 +3,17 @@
 //! The second of the three tier binaries; see `config_hooks_global.rs` for why
 //! they are three.
 //!
-//! The project file is `<project root>/ganja.jsonc` — the file the ancestor
-//! walk in `config::project_files` finds, the same one `model` and `permission`
-//! are written in. There is deliberately **no** `.ganja/ganja.jsonc`: the
-//! `.ganja/` directory holds what a project *gives* ganja (its skills), and the
-//! config file has always sat at the root beside the rest of a checkout's
-//! configuration.
+//! The project file here is `<project root>/ganja.jsonc` — the file the
+//! ancestor walk in `config::project_files` finds, the same one `model` and
+//! `permission` are written in. There is deliberately **no**
+//! `.ganja/ganja.jsonc`: the `.ganja/` directory holds what a project *gives*
+//! ganja (its skills), and the config file has always sat at the root beside
+//! the rest of a checkout's configuration.
+//!
+//! The legacy name is what this one keeps, on purpose: `config_hooks_global.rs`
+//! plants the same block as TOML, so between the three binaries a `hooks` block
+//! is proved from each tier and in each dialect the loader still reads. The
+//! name here changes when the loader stops reading it.
 
 use std::{env, fs};
 

@@ -38,8 +38,13 @@ fn plant(path: &Path, text: &str) {
 fn the_inbound_keys_cross_the_tiers_under_the_tighten_only_rule() {
     let home = tempfile::tempdir().expect("a temporary directory");
     let config_home = home.path().join("config");
-    let global = config_home.join("ganja").join("ganja.jsonc");
-    let explicit = home.path().join("explicit.jsonc");
+    // The two trusted tiers in the new format and the project tier in the old
+    // one: which tier a file is is what these rules turn on, and the loader
+    // reads both dialects for the length of the migration window. The project
+    // tier's name changes when the loader stops reading it — the contract step
+    // that lands the by-name refusal and `ganja config migrate`.
+    let global = config_home.join("ganja").join("ganja.toml");
+    let explicit = home.path().join("explicit.toml");
     let project = home.path().join("project");
     // A checkout, so the project walk stops here instead of climbing out of
     // the fixture and into whatever the temporary directory sits under.
@@ -69,7 +74,7 @@ fn the_inbound_keys_cross_the_tiers_under_the_tighten_only_rule() {
     ] {
         plant(
             &global,
-            &format!(r#"{{"cross_session_inbound": "{global_value}"}}"#),
+            &format!("cross_session_inbound = \"{global_value}\"\n"),
         );
         plant(
             &project.join("ganja.jsonc"),
@@ -87,8 +92,8 @@ fn the_inbound_keys_cross_the_tiers_under_the_tighten_only_rule() {
     // The trusted half: the file `GANJA_CONFIG` names outranks the global
     // tier ordinarily — in the loosening direction too, because both files
     // are the person's own.
-    plant(&global, r#"{"cross_session_inbound": "refuse"}"#);
-    plant(&explicit, r#"{"cross_session_inbound": "accept"}"#);
+    plant(&global, "cross_session_inbound = \"refuse\"\n");
+    plant(&explicit, "cross_session_inbound = \"accept\"\n");
     plant(&project.join("ganja.jsonc"), "{}");
     // SAFETY: as above.
     unsafe { env::set_var(CONFIG_ENV, &explicit) };
@@ -114,8 +119,8 @@ fn the_inbound_keys_cross_the_tiers_under_the_tighten_only_rule() {
     );
 
     // `dialog_expiry` is the trusted tiers' to set, in the same order...
-    plant(&global, r#"{"dialog_expiry": "10m"}"#);
-    plant(&explicit, r#"{"dialog_expiry": "60s"}"#);
+    plant(&global, "dialog_expiry = \"10m\"\n");
+    plant(&explicit, "dialog_expiry = \"60s\"\n");
     plant(&project.join("ganja.jsonc"), "{}");
 
     let config = load(&project).expect("a trusted dialog_expiry loads");
@@ -132,6 +137,22 @@ fn the_inbound_keys_cross_the_tiers_under_the_tighten_only_rule() {
     let offender = fs::canonicalize(&project)
         .expect("the fixture directory resolves")
         .join("ganja.jsonc");
+
+    let error = load(&project).expect_err("a checkout must not size the review window");
+    let ConfigError::Parse { path, message } = &error else {
+        panic!("expected a parse failure, got {error:?}");
+    };
+    assert_eq!(path, &offender, "the complaint names the file that said it");
+    assert!(message.contains("dialog_expiry"), "{message}");
+
+    // ...whichever dialect the checkout wrote it in. The refusal is about
+    // which tier said the key, and a tier is a place rather than a format, so
+    // a `ganja.toml` at the same spot is refused in the same words.
+    fs::remove_file(project.join("ganja.jsonc")).expect("the fixture file is removable");
+    plant(&project.join("ganja.toml"), "dialog_expiry = \"5m\"\n");
+    let offender = fs::canonicalize(&project)
+        .expect("the fixture directory resolves")
+        .join("ganja.toml");
 
     let error = load(&project).expect_err("a checkout must not size the review window");
     let ConfigError::Parse { path, message } = &error else {

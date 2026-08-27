@@ -26,13 +26,28 @@ use ganja_core::{
     provider::{self, fake},
 };
 
-/// Writes a config file naming `model` and one instruction file.
+/// Writes a config file naming `model` and one instruction file, in whichever
+/// dialect `path`'s extension claims.
+///
+/// The tiers below are planted in **both** formats on purpose. The loader
+/// reads `ganja.toml` and, for the length of the migration window, the two
+/// legacy names beside it — and precedence is a property of the tiers, not of
+/// how any one of them is spelled. A ladder written entirely in one dialect
+/// would still pass if the other's files were quietly being skipped.
+///
+/// The legacy half goes when the loader stops reading it: the contract step
+/// that lands the by-name refusal and `ganja config migrate` is what turns the
+/// remaining `.jsonc` fixture here into a `.toml` one.
 fn plant(path: &Path, model: &str, instruction: &str) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("the fixture tree is creatable");
     }
-    fs::write(
-        path,
+    let text = if path.extension().is_some_and(|kind| kind == "toml") {
+        format!(
+            "# planted by tests/config.rs\nmodel = \"{}/{model}\"\ninstructions = [\"{instruction}\"]\n",
+            fake::ID
+        )
+    } else {
         format!(
             r#"{{
               // planted by tests/config.rs
@@ -40,17 +55,19 @@ fn plant(path: &Path, model: &str, instruction: &str) {
               "instructions": ["{instruction}"],
             }}"#,
             fake::ID
-        ),
-    )
-    .expect("the fixture file is writable");
+        )
+    };
+    fs::write(path, text).expect("the fixture file is writable");
 }
 
 #[test]
 fn each_tier_that_names_a_model_outranks_every_tier_below_it() {
     let home = tempfile::tempdir().expect("a temporary directory");
     let config_home = home.path().join("config");
-    let global = config_home.join("ganja").join("ganja.jsonc");
-    let explicit = home.path().join("explicit.jsonc");
+    // Two tiers in the new format and one in the old, so the ladder is proved
+    // over a stack a half-migrated machine would actually hold; see `plant`.
+    let global = config_home.join("ganja").join("ganja.toml");
+    let explicit = home.path().join("explicit.toml");
     let project = home.path().join("project");
     // A checkout, so the project walk stops here instead of climbing out of
     // the fixture and into whatever the temporary directory sits under.

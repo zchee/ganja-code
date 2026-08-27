@@ -7,9 +7,15 @@
 //! `GANJA_CONFIG_HOME`, and a plain `cargo test` runs the tests inside one
 //! binary on parallel threads.
 //!
-//! The global file this plants is `<config home>/ganja.jsonc` — the same
+//! The global file this plants is `<config home>/ganja.toml` — the same
 //! directory the global `AGENTS.md` and `skills/` sit in, resolved once by
 //! `config::config_home`.
+//!
+//! Written in TOML, where a list of groups is an **array of tables**. The
+//! shape a `hooks` block takes is the one thing about it a person migrating
+//! has to re-learn, so at least one tier proves it end to end rather than
+//! only in the loader's own unit tests; `config_hooks_tiers.rs` then proves a
+//! tier in each dialect stacks against the other.
 
 use std::{env, fs};
 
@@ -30,14 +36,15 @@ fn hooks_written_in_the_global_home_are_the_sessions_hooks() {
     fs::create_dir_all(project.join(".git")).expect("the fixture repository is creatable");
     fs::create_dir_all(&global).expect("the fixture config directory is creatable");
     fs::write(
-        global.join("ganja.jsonc"),
-        r#"{
-          "hooks": {
-            "PreToolUse": [
-              { "matcher": "edit", "hooks": [{ "type": "command", "command": "global-hook" }] }
-            ]
-          }
-        }"#,
+        global.join("ganja.toml"),
+        r#"
+          [[hooks.PreToolUse]]
+          matcher = "edit"
+
+          [[hooks.PreToolUse.hooks]]
+          type = "command"
+          command = "global-hook"
+        "#,
     )
     .expect("the fixture file is writable");
 

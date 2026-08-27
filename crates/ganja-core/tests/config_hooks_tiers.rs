@@ -9,6 +9,13 @@
 //! directory unremovable from a checkout — a project that lists what to run
 //! before a tool call would still be running the global one underneath it, with
 //! nothing it could write to stop that.
+//!
+//! The two tiers are written in the two dialects — the global one in TOML, the
+//! project one in the legacy format the loader still reads — because that is
+//! what a half-migrated machine holds, and because replacement is a rule about
+//! tiers rather than about how either of them was spelled. The project file's
+//! name changes when the loader stops reading it: the contract step that lands
+//! the by-name refusal and `ganja config migrate`.
 
 use std::{env, fs};
 
@@ -35,13 +42,20 @@ fn a_project_hook_replaces_the_global_one_for_its_own_event_only() {
     fs::create_dir_all(&global).expect("the fixture config directory is creatable");
     fs::create_dir_all(project.join(".git")).expect("the fixture repository is creatable");
     fs::write(
-        global.join("ganja.jsonc"),
-        r#"{
-          "hooks": {
-            "PreToolUse": [{ "hooks": [{ "type": "command", "command": "global-pre" }] }],
-            "SessionEnd": [{ "hooks": [{ "type": "command", "command": "global-end" }] }]
-          }
-        }"#,
+        global.join("ganja.toml"),
+        r#"
+          [[hooks.PreToolUse]]
+
+          [[hooks.PreToolUse.hooks]]
+          type = "command"
+          command = "global-pre"
+
+          [[hooks.SessionEnd]]
+
+          [[hooks.SessionEnd.hooks]]
+          type = "command"
+          command = "global-end"
+        "#,
     )
     .expect("the fixture file is writable");
     fs::write(

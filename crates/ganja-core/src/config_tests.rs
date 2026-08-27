@@ -9,7 +9,7 @@ use super::{
     TeamlessSend, ThemeMode, existing, merge_files, model_bound_to, project_files, read,
     split_model,
 };
-use crate::permission::{Action, Rule};
+use crate::permission::{Action, Decision, Permissions, Rule};
 
 fn temporary() -> TempDir {
     TempDir::new().expect("a temporary directory is creatable")
@@ -45,6 +45,16 @@ fn parse(text: &str) -> Result<Config, ConfigError> {
     read(&path).map(|config| config.expect("the fixture exists"))
 }
 
+/// The same, for a file named `ganja.toml` — which is what decides that the
+/// TOML arm of [`read`] is the one that answers.
+fn parse_toml(text: &str) -> Result<Config, ConfigError> {
+    let directory = temporary();
+    let path = directory.path().join("ganja.toml");
+    plant(&path, text);
+
+    read(&path).map(|config| config.expect("the fixture exists"))
+}
+
 #[test]
 fn comments_and_trailing_commas_are_part_of_the_dialect() {
     let config = parse(
@@ -75,6 +85,22 @@ fn a_file_holding_nothing_is_an_empty_config_rather_than_an_error() {
     }
 }
 
+/// The TOML arm reaches the same answer by another route: a document is a
+/// table, so an empty one has no keys to miss and every field of `Config` is
+/// optional or defaulted. Worth pinning separately because the two arms agree
+/// here **without** agreeing on how — the legacy reader needs an `Option` to
+/// swallow a `null` this format cannot express.
+#[test]
+fn a_toml_file_holding_nothing_is_an_empty_config_rather_than_an_error() {
+    for text in ["", "   \n  ", "# nothing but a comment\n"] {
+        assert_eq!(
+            parse_toml(text).expect("an empty config file is legal"),
+            Config::default(),
+            "parsing {text:?}"
+        );
+    }
+}
+
 #[test]
 fn an_unknown_top_level_key_is_refused_by_name() {
     let error = parse(r#"{"modle": "anthropic/claude-sonnet-5"}"#)
@@ -84,6 +110,47 @@ fn an_unknown_top_level_key_is_refused_by_name() {
         panic!("expected a parse failure, got {error:?}");
     };
     assert!(message.contains("modle"), "{message}");
+}
+
+/// The curated key set is serde's, so it survives the format change whole:
+/// the refusal is the same refusal, and it still names the key.
+#[test]
+fn an_unknown_top_level_key_in_a_toml_file_is_refused_by_name_too() {
+    let error = parse_toml(r#"modle = "anthropic/claude-sonnet-5""#)
+        .expect_err("a misspelled key is a setting that does not work");
+
+    let ConfigError::Parse { message, .. } = &error else {
+        panic!("expected a parse failure, got {error:?}");
+    };
+    assert!(message.contains("modle"), "{message}");
+}
+
+/// `$schema` is not a bare key in TOML, so it is written quoted — and it is
+/// still read, because refusing what an editor wrote would be a startup
+/// failure about an annotation.
+///
+/// The second half is what a `.toml` file will actually carry: taplo takes its
+/// schema from a `#:schema` directive on the first line, which is a comment
+/// and reaches no parser at all. Both spellings load, and neither is consulted
+/// by anything.
+#[test]
+fn a_quoted_schema_key_is_read_and_the_taplo_directive_is_just_a_comment() {
+    let quoted = parse_toml(r#""$schema" = "https://ganja.example/config.json""#)
+        .expect("a quoted $schema key is legal");
+    assert_eq!(
+        quoted.schema.as_deref(),
+        Some("https://ganja.example/config.json")
+    );
+
+    let directive = parse_toml(
+        "#:schema https://ganja.example/config.json\nmodel = \"anthropic/claude-sonnet-5\"\n",
+    )
+    .expect("a directive is a comment");
+    assert_eq!(directive.schema, None);
+    assert_eq!(
+        directive.model.as_deref(),
+        Some("anthropic/claude-sonnet-5")
+    );
 }
 
 /// The one key here whose absence means *yes*. Upstream reads it as
@@ -223,6 +290,55 @@ fn a_hooks_block_parses_into_its_groups_and_handlers() {
     );
     // An absent matcher is the common case and stays absent rather than
     // becoming an empty string that means the same thing in one more way.
+    assert_eq!(config.hooks["SessionStart"][0].matcher, None);
+}
+
+/// The same block in TOML, where a list of objects is an **array of tables**
+/// and the nested list of handlers is a second one under it. The type is
+/// unchanged, so this is a test about the spelling — and the spelling is the
+/// thing a person migrating a `hooks` block has to get right, since it is the
+/// one shape in the file that does not read as a plain assignment.
+#[test]
+fn a_toml_hooks_block_is_an_array_of_tables_holding_the_same_groups() {
+    let config = parse_toml(
+        r#"
+            [[hooks.PreToolUse]]
+            matcher = "Edit|Write"
+
+            [[hooks.PreToolUse.hooks]]
+            type = "command"
+            command = "./check.sh"
+            timeout = 5
+
+            [[hooks.PreToolUse.hooks]]
+            type = "command"
+            command = "./log.sh"
+
+            [[hooks.SessionStart]]
+
+            [[hooks.SessionStart.hooks]]
+            type = "command"
+            command = "git status"
+        "#,
+    )
+    .expect("the array-of-tables shape parses");
+
+    let pre = &config.hooks["PreToolUse"];
+    assert_eq!(pre.len(), 1);
+    assert_eq!(pre[0].matcher.as_deref(), Some("Edit|Write"));
+    assert_eq!(
+        pre[0].hooks,
+        vec![
+            HookHandler::Command(HookCommand {
+                command: "./check.sh".to_owned(),
+                timeout: Some(5),
+            }),
+            HookHandler::Command(HookCommand {
+                command: "./log.sh".to_owned(),
+                timeout: None,
+            }),
+        ]
+    );
     assert_eq!(config.hooks["SessionStart"][0].matcher, None);
 }
 
@@ -1237,6 +1353,57 @@ fn the_post_decode_checks_are_one_method_three_callers_share() {
     assert_eq!(fine.check("x"), Ok(()));
 }
 
+/// Every refusal `read` makes after decoding is about what a config *says*,
+/// not how it was spelled, so all seven answer for a `ganja.toml` too. Pinned
+/// as one table rather than seven tests because what is under test is that the
+/// checks sit past the fork in `decode` — one of them landing on the wrong
+/// side of it is the failure this catches.
+#[test]
+fn the_post_decode_refusals_answer_for_a_toml_file_too() {
+    let cases = [
+        (
+            "mcp",
+            "[mcp.docs]\ntype = \"local\"\ncommand = []\n",
+            "empty command",
+        ),
+        (
+            "lsp",
+            "[lsp.mine]\nextensions = [\".x\"]\n",
+            "has no command",
+        ),
+        (
+            "provider",
+            "[provider.anthropic]\ndialect = \"anthropic-messages\"\nbase_url = \"https://x.example/v1\"\n",
+            "already ships",
+        ),
+        (
+            "hooks",
+            "[[hooks.PreToolUse]]\nmatcher = \"[\"\n\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = \"x\"\n",
+            "matcher",
+        ),
+        ("agents", "[agents]\nconcurrency = 0\n", "concurrency"),
+        (
+            "teammates",
+            "[teammates]\nshim_turn_timeout = 0\n",
+            "shim_turn_timeout",
+        ),
+        (
+            "openrouter",
+            "[openrouter]\nserver_tools = [\"telepathy\"]\n",
+            "telepathy",
+        ),
+    ];
+
+    for (key, text, named) in cases {
+        let error =
+            parse_toml(text).expect_err(&format!("the {key} table describes nothing usable"));
+        let ConfigError::Parse { message, .. } = &error else {
+            panic!("expected a parse failure for {key}, got {error:?}");
+        };
+        assert!(message.contains(named), "{key}: {message}");
+    }
+}
+
 /// `Serialize` beside `Deserialize`, so a caller that writes an entry —
 /// `ganja mcp add` building one, a listing asked for JSON — spells it out
 /// of the type the loader reads back rather than by hand.
@@ -1545,6 +1712,38 @@ fn a_config_file_asked_for_by_name_has_to_exist() {
     assert!(matches!(error, ConfigError::Missing { path } if path == missing));
 }
 
+/// A file `GANJA_CONFIG` or `--config` names can be called anything, so which
+/// reader answers is decided by its extension rather than by the three names
+/// discovery knows. One rule for both questions — and during the migration
+/// window a named file may still be either format, so both are proved here.
+#[test]
+fn an_explicitly_named_file_is_read_in_the_dialect_its_extension_claims() {
+    let directory = temporary();
+
+    let modern = directory.path().join("elsewhere.toml");
+    plant(&modern, r#"model = "openai/gpt-5.6""#);
+    let config = read(&modern)
+        .expect("a named .toml file parses as TOML")
+        .expect("the fixture exists");
+    assert_eq!(config.model.as_deref(), Some("openai/gpt-5.6"));
+
+    let legacy = directory.path().join("elsewhere.jsonc");
+    plant(&legacy, r#"{"model": "anthropic/claude-sonnet-5"}"#);
+    let config = read(&legacy)
+        .expect("a named legacy file still parses")
+        .expect("the fixture exists");
+    assert_eq!(config.model.as_deref(), Some("anthropic/claude-sonnet-5"));
+
+    // And the two readers really are told apart, rather than one of them
+    // happening to accept both: TOML in a file claiming to be JSONC fails.
+    let confused = directory.path().join("confused.jsonc");
+    plant(&confused, r#"model = "openai/gpt-5.6""#);
+    assert!(
+        read(&confused).is_err(),
+        "the extension is what picks the reader"
+    );
+}
+
 /// The order rules were written in is the order they are evaluated in, and
 /// evaluation is last-match-wins — so a map that sorted its keys would
 /// silently change which rule decides a call.
@@ -1573,6 +1772,249 @@ fn permission_rules_keep_the_order_they_were_written_in() {
             ("edit", "*", Action::Ask),
         ])
     );
+}
+
+/// The same claim against the TOML arm, and the reason it is a separate test
+/// with a fixture shaped like this one.
+///
+/// A TOML document may spell one table's keys in two places: `[permission]`
+/// opens it, another table interrupts, and `[permission.bash]` re-enters it
+/// further down. A parser that buffered those into a sorted map — which is
+/// what `toml::Table` is without `preserve_order`, and what any detour through
+/// a value type would produce — would hand the loader `bash, edit, webfetch`
+/// where the file said `webfetch, edit, bash`. Evaluation is last-match-wins,
+/// so that inversion would silently hand a call to the wrong rule: the `deny`
+/// written last would lose to an `allow` written first, and nothing would say
+/// so. Hence the interleaved `[tui]` in the middle, which is what makes this
+/// fixture different from the one above rather than a translation of it.
+///
+/// Both spellings a document may reach the same table by are exercised, since
+/// they are two paths through the parser rather than one: table headers, and
+/// **dotted keys** written at the document's own level. The second is the one
+/// somebody hand-writing a short `permission` block is most likely to use, and
+/// it is what the plan's pre-mortem asks for by name.
+#[test]
+fn permission_rules_keep_document_order_across_interleaved_toml_tables() {
+    let spellings = [
+        // Opened by a header, interrupted by an unrelated table, re-entered by
+        // a sub-table header further down.
+        (
+            "table headers",
+            r#"
+                [permission]
+                webfetch = "allow"
+                edit = "ask"
+
+                # An unrelated table between the two halves of `permission`,
+                # which is what forces the parser to hold the first half
+                # somewhere.
+                [tui]
+                notification_method = "bel"
+
+                [permission.bash]
+                "git status" = "allow"
+                "git *" = "ask"
+                "*" = "deny"
+            "#,
+        ),
+        // The same table, opened by dotted keys at the document's own level
+        // and interrupted twice — once by an unrelated key between two of its
+        // own, and once by a table — before a header re-enters it.
+        (
+            "dotted keys",
+            r#"
+                permission.webfetch = "allow"
+                model = "anthropic/claude-sonnet-5"
+                permission.edit = "ask"
+
+                [tui]
+                notification_method = "bel"
+
+                [permission.bash]
+                "git status" = "allow"
+                "git *" = "ask"
+                "*" = "deny"
+            "#,
+        ),
+    ];
+
+    for (spelling, text) in spellings {
+        let config = parse_toml(text).expect("a permission table is a config key");
+
+        assert_eq!(
+            config.permission.rules(),
+            rules(&[
+                ("webfetch", "*", Action::Allow),
+                ("edit", "*", Action::Ask),
+                ("bash", "git status", Action::Allow),
+                ("bash", "git *", Action::Ask),
+                ("bash", "*", Action::Deny),
+            ]),
+            "document order, not sorted order, spelled with {spelling}"
+        );
+    }
+}
+
+/// And the order the loader preserved is the order the engine *decides* by —
+/// the half the pin above cannot see.
+///
+/// The pin asserts a list; this asserts an answer. Between them sits
+/// `Permissions`, which evaluates last-match-wins, so a reader that sorted
+/// would not merely reorder a `Vec` somebody could inspect: it would hand a
+/// different verdict to a call nobody would think to re-check. That is the
+/// failure this landing's pre-mortem calls the worst it can produce, so it is
+/// asserted through the real engine over a real TOML file rather than inferred
+/// from the two facts on either side of it.
+///
+/// The fixture discriminates at **both** levels a sorting reader would touch:
+/// the tool keys (`webfetch` before the catch-all `"*"`, which sorts first)
+/// and one tool's patterns (`"git push"` before `"git *"`, which also sorts
+/// first). Rather than leave a reader to do that alphabetical arithmetic in
+/// their head, the sorted ordering is built here and gated too — a fixture
+/// that had stopped discriminating would fail on `assert_ne!` instead of
+/// passing vacuously.
+#[test]
+fn a_toml_loaded_config_decides_calls_in_document_order() {
+    let config = parse_toml(
+        r#"
+            [permission]
+            webfetch = "allow"
+            "*" = "ask"
+
+            [tui]
+            notification_method = "bel"
+
+            [permission.bash]
+            "git push" = "allow"
+            "git *" = "deny"
+        "#,
+    )
+    .expect("a permission table is a config key");
+
+    // What a reader that sorted its keys would have produced instead: the
+    // same rules, ranked by name rather than by where the file put them.
+    let mut sorted = config.permission.rules();
+    sorted.sort_by(|left, right| {
+        (&left.permission, &left.pattern).cmp(&(&right.permission, &right.pattern))
+    });
+
+    let decide = |rules: Vec<Rule>, tool: &str, args: serde_json::Value| {
+        let mut permissions = Permissions::default();
+        permissions.set_baseline(rules);
+
+        permissions.gate(tool, &args).action
+    };
+
+    // A `git push` is covered by three rules; the last one the document
+    // spelled is the `deny`, and it is the one that decides.
+    let call = serde_json::json!({ "command": "git push" });
+    assert_eq!(
+        decide(config.permission.rules(), "bash", call.clone()),
+        Decision::Deny
+    );
+    assert_eq!(
+        decide(sorted.clone(), "bash", call),
+        Decision::Allow,
+        "the fixture discriminates: sorted, the narrower deny stops being last"
+    );
+
+    // And at the other level: a `webfetch` is covered by its own rule and by
+    // the catch-all written after it, so the catch-all decides.
+    let none = serde_json::json!({});
+    assert_eq!(
+        decide(config.permission.rules(), "webfetch", none.clone()),
+        Decision::Ask
+    );
+    assert_eq!(
+        decide(sorted, "webfetch", none),
+        Decision::Allow,
+        "the fixture discriminates here too: sorted, the catch-all sinks to first"
+    );
+}
+
+/// One config, two dialects, one value — the whole 1:1 claim of the format
+/// change made mechanical.
+///
+/// The fixture is deliberately the awkward half of the file rather than a
+/// handful of scalars: the array-of-tables `hooks` block, an ordered
+/// `permission` table, the two maps keyed by a name somebody chose (`mcp`,
+/// `provider`), and a nested `tui` table. Those are where a translation
+/// between the two spellings can quietly change a shape; `model` cannot.
+#[test]
+fn the_same_config_in_both_dialects_loads_to_the_same_value() {
+    let legacy = parse(
+        r#"{
+              "$schema": "https://ganja.example/config.json",
+              "model": "anthropic/claude-sonnet-5",
+              "permission": {
+                "webfetch": "allow",
+                "bash": { "git status": "allow", "*": "ask" }
+              },
+              "tui": {
+                "notification_method": "bel",
+                "statusline": { "elements": ["model", "rate"], "detail": true }
+              },
+              "mcp": {
+                "docs": { "type": "local", "command": ["bun", "x", "docs"], "timeout": 1234 }
+              },
+              "provider": {
+                "local-llama": {
+                  "dialect": "openai-chat-completions",
+                  "base_url": "http://127.0.0.1:11434/v1"
+                }
+              },
+              "hooks": {
+                "PreToolUse": [
+                  {
+                    "matcher": "Edit|Write",
+                    "hooks": [{ "type": "command", "command": "./check.sh", "timeout": 5 }]
+                  }
+                ]
+              }
+            }"#,
+    )
+    .expect("the legacy fixture parses");
+
+    let toml = parse_toml(
+        r#"
+            "$schema" = "https://ganja.example/config.json"
+            model = "anthropic/claude-sonnet-5"
+
+            [permission]
+            webfetch = "allow"
+
+            [permission.bash]
+            "git status" = "allow"
+            "*" = "ask"
+
+            [tui]
+            notification_method = "bel"
+
+            [tui.statusline]
+            elements = ["model", "rate"]
+            detail = true
+
+            [mcp.docs]
+            type = "local"
+            command = ["bun", "x", "docs"]
+            timeout = 1234
+
+            [provider.local-llama]
+            dialect = "openai-chat-completions"
+            base_url = "http://127.0.0.1:11434/v1"
+
+            [[hooks.PreToolUse]]
+            matcher = "Edit|Write"
+
+            [[hooks.PreToolUse.hooks]]
+            type = "command"
+            command = "./check.sh"
+            timeout = 5
+        "#,
+    )
+    .expect("the TOML fixture parses");
+
+    assert_eq!(legacy, toml);
 }
 
 #[test]
@@ -1848,6 +2290,22 @@ fn a_directory_offers_jsonc_before_json_so_the_reversal_makes_jsonc_win() {
     assert!(found[1].ends_with("ganja.json"), "{found:?}");
 }
 
+/// And the new name is probed ahead of both, so the same reversal makes it
+/// beat them. The rule did not change when the list grew; what it ranks did.
+#[test]
+fn a_directory_offers_toml_first_so_the_reversal_makes_toml_win() {
+    let directory = temporary();
+    plant(&directory.path().join("ganja.json"), "{}");
+    plant(&directory.path().join("ganja.jsonc"), "{}");
+    plant(&directory.path().join("ganja.toml"), "");
+
+    let found = existing(directory.path());
+    assert_eq!(found.len(), 3);
+    assert!(found[0].ends_with("ganja.toml"), "{found:?}");
+    assert!(found[1].ends_with("ganja.jsonc"), "{found:?}");
+    assert!(found[2].ends_with("ganja.json"), "{found:?}");
+}
+
 /// Every ancestor up to the project root contributes, outermost first, so
 /// that the closest directory has the last word.
 #[test]
@@ -1940,6 +2398,68 @@ fn jsonc_beats_json_in_the_same_directory() {
 
     assert_eq!(config.model.as_deref(), Some("openai/gpt-5.6"));
     assert_eq!(config.theme.as_deref(), Some("gruvbox"));
+}
+
+/// A directory holding both formats is what a half-migrated checkout looks
+/// like, and the new file is the one that decides — while the old one still
+/// contributes the keys it alone names, because during the window it is still
+/// a file that was read. The contract step is what stops reading it.
+#[test]
+fn toml_beats_a_legacy_file_in_the_same_directory() {
+    let directory = temporary();
+    fs::create_dir(directory.path().join(".git")).expect("the fixture repository is creatable");
+    plant(
+        &directory.path().join("ganja.jsonc"),
+        r#"{"model": "anthropic/claude-sonnet-5", "theme": "gruvbox"}"#,
+    );
+    plant(
+        &directory.path().join("ganja.toml"),
+        r#"model = "openai/gpt-5.6""#,
+    );
+
+    let config = merge_files(&project_files(directory.path())).expect("both files parse");
+
+    assert_eq!(config.model.as_deref(), Some("openai/gpt-5.6"));
+    assert_eq!(config.theme.as_deref(), Some("gruvbox"));
+}
+
+/// What "wins" does **not** mean, for the one key where it is not obvious.
+///
+/// The two files merge rather than one replacing the other, and
+/// `PermissionConfig::merge` keeps a re-specified tool where it already sat.
+/// The legacy file merges first, so a tool named in both keeps the *legacy*
+/// file's position while carrying the `ganja.toml` rules for it, and a tool
+/// only the new file names is appended after everything. Position is not
+/// cosmetic here — evaluation is last-match-wins — so this is pinned rather
+/// than left as a sentence in the module doc that nobody could check. It goes
+/// when the window does.
+#[test]
+fn a_tool_named_in_both_files_keeps_the_legacy_files_position() {
+    let directory = temporary();
+    fs::create_dir(directory.path().join(".git")).expect("the fixture repository is creatable");
+    plant(
+        &directory.path().join("ganja.jsonc"),
+        r#"{"permission": {"bash": "ask", "webfetch": "deny"}}"#,
+    );
+    plant(
+        &directory.path().join("ganja.toml"),
+        "permission.bash = \"allow\"\npermission.edit = \"ask\"\n",
+    );
+
+    let config = merge_files(&project_files(directory.path())).expect("both files parse");
+
+    assert_eq!(
+        config.permission.rules(),
+        rules(&[
+            // First, because the legacy file said `bash` first — but `allow`,
+            // because the file that wins the value is the new one.
+            ("bash", "*", Action::Allow),
+            ("webfetch", "*", Action::Deny),
+            // Named by the new file alone, so it appends rather than sorting
+            // itself in.
+            ("edit", "*", Action::Ask),
+        ])
+    );
 }
 
 /// Flags travel on the config rather than into it, so that the tier
