@@ -709,6 +709,65 @@ async fn a_mode_change_reevaluation_releases_parity_holds_and_leaves_explicit_on
     assert_eq!(explicit_gate.held_messages(), before);
 }
 
+// Re-evaluation runs the same never-loosen composition admission ran, under
+// the sender class the record kept from the wire: the one moved row's hold
+// (OQ2(a) — a bypass-asserted sender at a prompting receiver) survives a
+// mode change to either class, while the unasserted parity hold beside it
+// still releases exactly as the sibling test pins.
+#[tokio::test(start_paused = true)]
+async fn a_mode_change_cannot_release_a_bypass_asserted_hold() {
+    let (gate, _drain) = Inbound::new(unset(), DialogExpiry::default());
+    assert!(matches!(
+        gate.admit_socket(
+            Some(ReceiverClass::Bypass),
+            "quiet@t",
+            "no assertion",
+            None,
+            WireFacts::none()
+        ),
+        SocketAdmission::Held {
+            cause: HoldCause::NoModeAsserted,
+            ..
+        }
+    ));
+    assert!(matches!(
+        gate.admit_socket(
+            Some(ReceiverClass::Prompting),
+            "asserted@t",
+            "bypass asserted",
+            None,
+            WireFacts {
+                sender: Some(SenderClass::Bypass),
+                hop_chain: &[],
+                own_marker: None,
+            }
+        ),
+        SocketAdmission::Held {
+            cause: HoldCause::ModeMismatch,
+            ..
+        }
+    ));
+
+    // The unasserted hold releases under a prompting receiver; the asserted
+    // one does not, because the honored half of the composition re-consults
+    // the class recorded at arrival.
+    let actions = gate.reevaluate(Some(ReceiverClass::Prompting));
+    assert_eq!(actions.len(), 1);
+    assert!(
+        matches!(&actions[0].settlement, Settlement::Deliver(released) if released.text == "no assertion")
+    );
+
+    // And no receiver class loosens it: at bypass the collapsed half holds
+    // `no_mode_asserted`, at prompting the honored half holds
+    // `mode_mismatch` — the stricter answer is a hold either way, and a
+    // standing hold keeps its original cause and record.
+    assert!(gate.reevaluate(Some(ReceiverClass::Bypass)).is_empty());
+    let held = gate.held_messages();
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].cause, HoldCause::ModeMismatch);
+    assert_eq!(held[0].from, "asserted@t");
+}
+
 // Reconciliation: a held identity gone from the inbox settles expired —
 // a review offer cannot outlive the bytes it reviews — and a consumed
 // admitted identity leaves the set.

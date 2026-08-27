@@ -21,14 +21,19 @@
 //! team that may not exist.
 //!
 //! **Live sessions**, from this crate's own [`crate::registry`]: every
-//! other session's registration record whose stem's lock is held, walked in
-//! [`crate::registry::holders`]'s own drop-own, probe-only-matches order —
-//! the same composition, minus its name filter, since this tool lists every
-//! live holder rather than one name's collisions. Axis 14's own reason
-//! applies here too: [`crate::registry::is_live`] **creates** the `.lock`
-//! beside a stem it probes, so this walk drops its own session first and
-//! only then probes what remains, rather than probing everything the
-//! directory holds. The current session is excluded — the reference
+//! other session's registration record whose stem's lock is held —
+//! [`crate::registry::list`], this session's own record dropped, then the
+//! [`crate::registry::is_live`] probe on each remaining stem. That is
+//! [`crate::registry::holders`]'s composition minus its name filter, and
+//! the filter's absence is a priced cost, not an avoided one:
+//! [`crate::registry::is_live`] **creates** the `.lock` beside any stem it
+//! probes that lacks one and never removes it, so where `holders` probes
+//! only the stems its name filter kept, this walk probes every other
+//! record and leaves one empty lock file beside each stale record it
+//! judges. Bounded by what the walk reads — size-capped records in this
+//! uid's own `0700` directory, at the cadence of a model's tool call — and
+//! the price of answering with every live session rather than one name's
+//! collisions. The current session is excluded — the reference
 //! excludes its own socket from the same listing (v2 §"Liveness validation
 //! and garbage collection", section-name-only: that section's evidence
 //! range sits on its record-reader sentence, not on the exclusion) — and so
@@ -236,9 +241,9 @@ fn neutralize(value: &str) -> String {
     }
 }
 
-/// Every live session under `directory` besides `own_session`, in
-/// [`registry::holders`]'s own drop-own, probe-only-matches order without
-/// its name filter.
+/// Every live session under `directory` besides `own_session`:
+/// [`registry::holders`]'s composition without its name filter, so every
+/// other record is probed — at the lock-litter cost the module doc prices.
 #[cfg(unix)]
 fn live_sessions(directory: &Path, own_session: &str) -> io::Result<Vec<registry::Registered>> {
     let mut sessions = registry::list(directory)?;

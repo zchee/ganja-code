@@ -363,6 +363,26 @@ fn an_empty_batch_still_wraps_the_tag() {
     assert_eq!(rendered(&[]), "<peer_receipt>\n</peer_receipt>");
 }
 
+// `PeerMessageId` wraps any string a wire hands it, so the short cut must
+// land on a character boundary rather than a byte offset — an id this build
+// never mints still must not panic a rendering.
+#[test]
+fn a_non_ascii_id_is_cut_on_a_character_boundary() {
+    let batch = vec![Settled {
+        id: PeerMessageId::from("éééééééééé".to_owned()),
+        to: "w@t".to_owned(),
+        status: PeerReceiptStatus::Delivered,
+    }];
+    assert!(rendered(&batch).contains("- message éééééééé to"));
+
+    let shorter = vec![Settled {
+        id: PeerMessageId::from("éé".to_owned()),
+        to: "w@t".to_owned(),
+        status: PeerReceiptStatus::Delivered,
+    }];
+    assert!(rendered(&shorter).contains("- message éé to"));
+}
+
 // Peer-authored text (`to`, echoed off a far session's own answer) is
 // neutralized before it is framed — the same rule the `@`-mention reminder
 // applies, for the same reason.

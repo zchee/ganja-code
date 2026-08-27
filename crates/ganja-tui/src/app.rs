@@ -2285,7 +2285,13 @@ impl App {
     /// keeps a control character a peer chose from reaching the terminal.
     fn receipt_notice(id: &PeerMessageId, status: PeerReceiptStatus, to: &str) -> String {
         let id = id.as_str();
-        let short = &id[..id.len().min(RECEIPT_ID_SHOWN)];
+        // A character-boundary cut, like the rendering it mirrors: this
+        // build mints ASCII v7 ids, but the id type wraps any string a wire
+        // hands it, and a status-bar line must not panic on one.
+        let short = match id.char_indices().nth(RECEIPT_ID_SHOWN) {
+            Some((cut, _)) => &id[..cut],
+            None => id,
+        };
         let word = match status {
             PeerReceiptStatus::Delivered => "delivered",
             PeerReceiptStatus::Denied => "denied",

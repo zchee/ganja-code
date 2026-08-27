@@ -133,8 +133,9 @@ png.workspace = true
 # proves those in microseconds where one that slept would spend seconds and
 # still be a race.
 tokio = { workspace = true, features = ["net", "test-util"] }
-# Only to prove that a failed request logs nothing resembling an API key: the
-# secret-hygiene test needs a subscriber it can read back.
+# Only for tests that read a subscriber back: the secret-hygiene canary, and
+# the receipt-vetting test whose observable is which refusal's trace line
+# fired.
 tracing-subscriber.workspace = true
 
 # The two pane binaries are their own `main`. The program `pane.rs` starts in a

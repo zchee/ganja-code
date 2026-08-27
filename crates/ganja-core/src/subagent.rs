@@ -1342,28 +1342,57 @@ impl From<crate::teammate::inbound::ReceiverClass> for SenderMode {
 
 /// The most hop markers a [`SocketMessage`] may carry (**D532**, **AC-48**):
 /// v2's own sender cap (v2 §"Hop chain: two different caps", evidence
-/// 153301-153329), enforced here — at deserialization, before the `Vec`
-/// exists at all — rather than left to the guard's own, smaller thresholds
-/// (10 own-marker / 28 chain entries) to reject after allocating one. No
+/// 153301-153329), enforced here — at deserialization, where the visitor
+/// refuses the first entry past the cap so the `Vec` never grows beyond it —
+/// rather than left to the guard's own, smaller thresholds (10 own-marker /
+/// 28 chain entries), which fire only after a full chain is in memory. No
 /// conforming sender ever exceeds it; axum's request-body cap bounds the
 /// request itself and is not the bound anything here relies on.
 pub(crate) const MAX_HOP_CHAIN_ENTRIES: usize = 32;
 
 /// Refuses a `hop_chain` past [`MAX_HOP_CHAIN_ENTRIES`] readably, at parse
-/// time, instead of silently truncating or accepting an unbounded body.
+/// time, instead of silently truncating or accepting an unbounded body. A
+/// visitor rather than materialize-then-measure, so the refusal happens at
+/// the first entry past the cap and the bound above is a fact about the
+/// allocation, not only about what a caller sees.
 fn deserialize_hop_chain<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let chain = Vec::<String>::deserialize(deserializer)?;
-    if chain.len() > MAX_HOP_CHAIN_ENTRIES {
-        return Err(serde::de::Error::custom(format!(
-            "hop_chain carries {} entries, more than the {MAX_HOP_CHAIN_ENTRIES} a conforming \
-             sender may send",
-            chain.len(),
-        )));
+    struct BoundedChain;
+
+    impl<'de> serde::de::Visitor<'de> for BoundedChain {
+        type Value = Vec<String>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                formatter,
+                "at most the {MAX_HOP_CHAIN_ENTRIES} hop markers a conforming sender may send"
+            )
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            // The size hint is a sender's claim: capped, so a hostile
+            // length cannot pre-allocate what the cap exists to refuse.
+            let mut chain =
+                Vec::with_capacity(seq.size_hint().unwrap_or(0).min(MAX_HOP_CHAIN_ENTRIES));
+            while let Some(marker) = seq.next_element::<String>()? {
+                if chain.len() == MAX_HOP_CHAIN_ENTRIES {
+                    return Err(serde::de::Error::custom(format!(
+                        "hop_chain carries more than the {MAX_HOP_CHAIN_ENTRIES} entries a \
+                         conforming sender may send"
+                    )));
+                }
+                chain.push(marker);
+            }
+            Ok(chain)
+        }
     }
-    Ok(chain)
+
+    deserializer.deserialize_seq(BoundedChain)
 }
 
 /// The socket route's request body, as both ends of the wire spell it: what

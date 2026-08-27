@@ -700,8 +700,24 @@ async fn a_reply_to_naming_a_third_session_is_a_bounded_reflection() {
 /// [`ganja_core::tool::socket::vet_address`] refuses is never kept, so its
 /// settlement posts nothing at all — the honest silence, rather than an
 /// association that looks answerable and is not.
+///
+/// The admission-time vet is behaviorally shadowed by `post`'s own second
+/// vet — a kept bad address would still never be opened — so the observable
+/// that tells the two apart is each refusal's own trace line: the
+/// admission-time sentence must appear at receive time, and the post-time
+/// sentence must never appear at settlement, which is exactly the state the
+/// admission-time vet guarantees (nothing was kept for the settlement to
+/// vet again). The capture is a thread-local default; the presence
+/// assertion is what proves the search space was not empty.
 #[tokio::test]
 async fn a_reply_to_that_fails_vetting_is_never_kept() {
+    let capture = ganja_testkit::LogCapture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_writer(capture.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
     let receiver = Receiver::new(Some((InboundPolicy::Hold, PolicySource::Global)), false);
 
     let held = receiver
@@ -723,6 +739,13 @@ async fn a_reply_to_that_fails_vetting_is_never_kept() {
         .await
         .expect("a hold still answers success");
     assert!(held.held.is_some(), "it is held all the same");
+    assert!(
+        capture
+            .logged()
+            .contains("an arrival's reply_to failed vetting; no receipt is kept"),
+        "the refusal happens at admission, before anything is associated: {}",
+        capture.logged()
+    );
 
     let id = receiver.engine.held_messages()[0].id.clone();
     receiver
@@ -737,5 +760,15 @@ async fn a_reply_to_that_fails_vetting_is_never_kept() {
     assert!(
         receiver.engine.held_messages().is_empty(),
         "the settlement itself is unaffected by where it could not be reported"
+    );
+    // The settle's own post is awaited inline by the command, so by now a
+    // kept association would have reached `post` and tripped its second
+    // vet — the sentence that must never appear, because nothing was kept.
+    assert!(
+        !capture
+            .logged()
+            .contains("a receipt's reply_to failed vetting; not opened"),
+        "nothing was kept for the settlement to vet again: {}",
+        capture.logged()
     );
 }

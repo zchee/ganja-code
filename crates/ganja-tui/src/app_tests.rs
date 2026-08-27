@@ -12313,6 +12313,21 @@ fn a_receipt_notice_escapes_the_recipient_the_far_side_named() {
     );
 }
 
+/// The short cut lands on a character boundary: an id this build never
+/// mints — `PeerMessageId` wraps any string a wire hands it — still must
+/// not panic the status bar.
+#[test]
+fn a_receipt_notice_cuts_a_non_ascii_id_on_a_character_boundary() {
+    let id = ganja_protocol::PeerMessageId::from("éééééééééé".to_owned());
+
+    let line = App::receipt_notice(&id, ganja_protocol::PeerReceiptStatus::Delivered, "w@t");
+
+    assert!(
+        line.starts_with("peer message éééééééé to"),
+        "eight characters, not eight bytes: {line}"
+    );
+}
+
 // ---- D529's amendment: the classifier's fresh registry read (AC-38) ----
 
 /// Registers a live session named `name` at `stem` under `directory`, and

@@ -154,14 +154,16 @@
 //! rotating livelock that makes the cap meaningless. Eviction is a *decided*
 //! capacity outcome; the no-lost-mail property is scoped to *undecided* ends.
 //!
-//! The record keeps the **control-plane/model-visible split** even though
-//! ganja's wire carries no hop data yet: origin metadata — the door, the
-//! asserted sender class, `self_sent` — lives beside the body, and nothing
-//! ever composes it into the text (v2 §"Hop metadata is retained
-//! separately", evidence 153248-153285, 415199-415235, applied
-//! pre-emptively: a future sender's hop data lands on the control-plane side
-//! by construction). The hop chain itself is consumed by the guard at the
-//! door and not stored — today it is empty at every production call site.
+//! The record keeps the **control-plane/model-visible split**: origin
+//! metadata — the door, the asserted sender class, `self_sent` — lives
+//! beside the body, and nothing ever composes it into the text (v2 §"Hop
+//! metadata is retained separately", evidence 153248-153285,
+//! 415199-415235). Since **D532** the wire really does carry that data: a
+//! socket-door hold records the sender's asserted class for re-evaluation
+//! under its own origin, while the hop chain is consumed by the guard at
+//! the door and deliberately not stored on the record — the chain a later
+//! send forwards is the *admitted* inbound chain, kept by the engine, never
+//! one a held or refused message asserted.
 //!
 //! # Expiry, settlement, and first-settler-wins
 //!
@@ -367,10 +369,11 @@ const PREVIEW_CHARS: usize = 1024;
 /// likely observed behavior, and check the flag before relying on
 /// either."** (v2 §"The parity matrix, and when it actually applies",
 /// evidence 620535-620617, quoted whole rather than truncated at the half
-/// that suits the argument). Since **D532/D534** ganja's own production
-/// call site checks both: it asks [`ResolvedInbound::decide`](crate::teammate::inbound::ResolvedInbound::decide) once with
-/// this constant (`false`, the collapse) and once with `true` (the honored
-/// eight-row matrix), and keeps the **stricter** answer
+/// that suits the argument). Since **D532/D534** ganja's production call
+/// sites — admission, and a mode change's re-evaluation of what admission
+/// held — check both: each asks [`ResolvedInbound::decide`](crate::teammate::inbound::ResolvedInbound::decide) once with
+/// this constant's value (`false`, the collapse) and once with `true` (the
+/// honored eight-row matrix), and keeps the **stricter** answer
 /// (`strictest_of`). This constant therefore stays the *floor* the
 /// composition can never fall below — it is never itself the whole
 /// decision — and the `true` half of [`decide_unset`](crate::teammate::inbound::decide_unset) is fully reachable
@@ -611,8 +614,10 @@ struct HeldMessage {
     /// When it expires on its own — `Some` exactly for the parity causes
     /// (the expiry re-check).
     deadline: Option<Instant>,
-    /// The class the sender asserted at arrival — today always `None`, kept
-    /// on the control-plane side for re-evaluation under its own origin.
+    /// The class the sender asserted at arrival — the wire's `from_mode` on
+    /// the socket door since **D532**, always `None` on the mailbox door,
+    /// whose writer asserts no class. Control-plane only: re-evaluation
+    /// re-decides under it, and nothing composes it into the text.
     sender: Option<SenderClass>,
     /// Whether the sender proved itself this session's own child — today
     /// always `false` (no kernel peer identity at the route).
@@ -1210,16 +1215,23 @@ impl Inbound {
                     summary.map(str::to_owned),
                     cause,
                 );
-                // `hold()` stays byte-unchanged (**D534**, **N3**): the id
-                // it just minted is read back off the buffer's own tail —
-                // the last thing it does before returning — rather than
-                // threaded through its signature.
-                let id = state
+                // `hold()` keeps its door-agnostic signature (**D534**,
+                // **N3**): the record it just pushed is the buffer's own
+                // tail — the last thing it does before returning — so the
+                // minted id is read back there, and the sender's asserted
+                // class is recorded onto the same tail rather than threaded
+                // through. Recording it is what keeps the re-evaluation
+                // contract true: `reevaluate` re-runs the composition this
+                // arm just decided by, and without the recorded assertion a
+                // mode change would re-decide a `mode_mismatch` hold as an
+                // unasserted accept and deliver what admission held for
+                // review.
+                let record = state
                     .buffer
-                    .back()
-                    .expect("hold() always pushes exactly one record before returning")
-                    .id
-                    .clone();
+                    .back_mut()
+                    .expect("hold() always pushes exactly one record before returning");
+                record.sender = facts.sender;
+                let id = record.id.clone();
                 SocketAdmission::Held {
                     id,
                     cause,
@@ -1251,6 +1263,13 @@ impl Inbound {
     ) -> MailboxAdmission {
         let identity = mailbox::identity(message);
         let mut state = self.lock();
+        // No composition here, on an equivalence rather than an exemption:
+        // this door's sender is always `None` — a mailbox entry carries no
+        // `from_mode` — and with no assertion to consult, the collapsed and
+        // honored branches of `decide_unset` agree on every row, so the
+        // stricter-of-two would be a second call returning the first's
+        // answer. `admit_socket`'s composition is the spelling for the door
+        // where the two can differ.
         match state
             .resolved
             .decide(receiver, None, false, HONOR_SENDER_MODE)
@@ -1436,9 +1455,13 @@ impl Inbound {
 
     /// Re-decides every held entry under its own recorded origin and the
     /// given receiver class (v2 §"Reevaluation and manual decision",
-    /// evidence 620778-620845): now-accept delivers, now-refuse denies, a
-    /// verdict that still holds leaves the record exactly as it was.
-    /// Records with a prune in flight are already claimed and skipped.
+    /// evidence 620778-620845), through the same never-loosen composition
+    /// [`Inbound::admit_socket`] admits by — the honored half re-consults
+    /// the sender class recorded at arrival, so a mode change can release
+    /// only what admission itself would now accept: now-accept delivers,
+    /// now-refuse denies, a verdict that still holds leaves the record
+    /// exactly as it was. Records with a prune in flight are already
+    /// claimed and skipped.
     #[must_use]
     pub fn reevaluate(&self, receiver: Option<ReceiverClass>) -> Vec<Reevaluated> {
         let mut state = self.lock();
@@ -1455,11 +1478,19 @@ impl Inbound {
                 continue;
             };
             let held = &state.buffer[position];
-            let verdict =
-                state
-                    .resolved
-                    .decide(receiver, held.sender, held.self_sent, HONOR_SENDER_MODE);
-            match verdict {
+            // The composition `admit_socket` decided by, re-run under the
+            // record's own origin: deciding here with the collapse alone
+            // would drop the recorded assertion and release a
+            // `mode_mismatch` hold as an unasserted accept — a mode change
+            // loosening what admission held, which the composition exists
+            // to forbid.
+            let collapsed = state
+                .resolved
+                .decide(receiver, held.sender, held.self_sent, false);
+            let honored = state
+                .resolved
+                .decide(receiver, held.sender, held.self_sent, true);
+            match strictest_of(collapsed, honored) {
                 Verdict::Hold(_) => {}
                 Verdict::Accept => {
                     let Some(held) = state.buffer.remove(position) else {

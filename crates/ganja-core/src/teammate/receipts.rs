@@ -472,10 +472,16 @@ pub fn rendered(batch: &[Settled]) -> String {
 
 /// The first eight characters of a message id — "the ids are rendered
 /// short" (D534) — long enough to tell a small batch's rows apart without
-/// repeating a full id the model has no use for.
+/// repeating a full id the model has no use for. Cut on a character
+/// boundary, not a byte count: this session mints ASCII v7 ids, but
+/// [`PeerMessageId`] wraps any string a wire hands it, and a rendering must
+/// not be the thing that panics on one.
 fn short_id(id: &PeerMessageId) -> &str {
     let id = id.as_str();
-    &id[..id.len().min(8)]
+    match id.char_indices().nth(8) {
+        Some((cut, _)) => &id[..cut],
+        None => id,
+    }
 }
 
 /// One settled status, in the sentence [`rendered`] shows it with.
