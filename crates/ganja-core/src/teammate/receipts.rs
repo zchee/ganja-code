@@ -62,11 +62,18 @@
 //!   costs one timeout, never a hang.
 //! - **Only a held entry's *settlement* emits one, and only by a person's
 //!   decision or the `dialog_expiry` clock.** This is the bound D534's own
-//!   guard hoist (`inbound.rs`'s N1/D1) makes true rather than assumed:
-//!   with the guard now running ahead of the hold arm for the parity
-//!   causes, hold *generation* is rate-limited and deduplicated exactly
-//!   like an accept, so this side cannot be flooded into existence at
-//!   machine rate either. A capacity eviction and the shutdown drain each
+//!   guard hoist (`inbound.rs`'s N1/D1) makes true rather than assumed —
+//!   with one correction the parity security review's §2 forced, because
+//!   the hoist alone did not make it true. The guard runs ahead of the hold
+//!   arm for the parity causes, so hold *generation* is deduplicated and
+//!   rate-limited per sender exactly like an accept; but every one of those
+//!   limits is keyed on the peer's own claimed `from`, so a sender that
+//!   rotates it was buying a fresh bucket each message. What makes the
+//!   sentence true is the second bucket behind that hoist
+//!   ([`PeerGuard::admit_hold`](crate::teammate::inbound::PeerGuard::admit_hold)):
+//!   one bucket for the whole door, keyed on nothing a wire carries, so
+//!   this side cannot be flooded into existence at machine rate under any
+//!   identity or any number of them. A capacity eviction and the shutdown drain each
 //!   settle their victim without ever calling
 //!   [`Receipts::settle_and_post`](crate::teammate::receipts::Receipts::settle_and_post)
 //!   at all — `hold()` and `shutdown_settle()` in `inbound.rs` stay
@@ -396,10 +403,16 @@ fn peer_status_of(status: ReceiptStatus) -> PeerReceiptStatus {
 /// a trace line naming the id and the status only (**AC-10**'s rule: no
 /// bodies, no `reply_to` paths), never a reason the delivery it describes
 /// should reverse (**AC-30**).
+///
+/// The id on those lines is the **sender's**, so it is cut and escaped the
+/// way every other rendering of one is: [`PeerMessageId`] wraps whatever
+/// string a wire handed it, and a developer's own terminal is not somewhere
+/// a peer's control characters or a peer's kilobytes may arrive.
 async fn post(reply_to: &Path, message_id: PeerMessageId, status: ReceiptStatus) {
+    let short = short_id(&message_id).to_owned();
     if let Err(refusal) = crate::tool::socket::vet_address(reply_to) {
         tracing::debug!(
-            id = message_id.as_str(),
+            id = ?short,
             ?status,
             %refusal,
             "a receipt's reply_to failed vetting; not opened"
@@ -415,7 +428,7 @@ async fn post(reply_to: &Path, message_id: PeerMessageId, status: ReceiptStatus)
         Ok(client) => client,
         Err(error) => {
             tracing::debug!(
-                id = message_id.as_str(),
+                id = ?short,
                 ?status,
                 %error,
                 "a receipt client could not be built"
@@ -424,7 +437,6 @@ async fn post(reply_to: &Path, message_id: PeerMessageId, status: ReceiptStatus)
         }
     };
 
-    let id = message_id.as_str().to_owned();
     let body = SocketReceipt { message_id, status };
     if let Err(error) = client
         .post(format!("{RECEIPT_URL}{RECEIPT_ROUTE}"))
@@ -433,7 +445,7 @@ async fn post(reply_to: &Path, message_id: PeerMessageId, status: ReceiptStatus)
         .await
     {
         tracing::debug!(
-            id,
+            id = ?short,
             ?status,
             %error,
             "a receipt post failed; the delivery it describes stands regardless"
@@ -476,7 +488,7 @@ pub fn rendered(batch: &[Settled]) -> String {
 /// boundary, not a byte count: this session mints ASCII v7 ids, but
 /// [`PeerMessageId`] wraps any string a wire hands it, and a rendering must
 /// not be the thing that panics on one.
-fn short_id(id: &PeerMessageId) -> &str {
+pub(crate) fn short_id(id: &PeerMessageId) -> &str {
     let id = id.as_str();
     match id.char_indices().nth(8) {
         Some((cut, _)) => &id[..cut],

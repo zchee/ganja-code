@@ -2417,10 +2417,18 @@ impl Engine {
                 // it has not been admitted, and a chain recorded from text
                 // nobody has approved would let a refused message steer the
                 // loop check of a send this session makes later.
+                //
+                // Admitted is not the same as adoptable, which is why the
+                // arriving chain is clamped rather than stored: the guard
+                // asked whether *this* message may land, and what is stored
+                // is the prefix of every message this session sends next.
+                // `adoptable_chain` states both clauses and the one it
+                // deliberately leaves out.
                 *self
                     .inbound_chain
                     .lock()
-                    .expect("the inbound chain cell is never poisoned") = envelope.hop_chain;
+                    .expect("the inbound chain cell is never poisoned") =
+                    teammate::inbound::adoptable_chain(envelope.hop_chain);
 
                 Ok(Received::accepted(sent))
             }
@@ -2772,8 +2780,12 @@ impl Engine {
             .receipts
             .settle_sent(&receipt.message_id, receipt.status)
         else {
+            // The only id on this line that a peer chose: an unknown one
+            // matched nothing this session minted, so it is cut and escaped
+            // like every other rendering of a peer's own string. The
+            // settled line below names an id this session minted itself.
             tracing::debug!(
-                id = receipt.message_id.as_str(),
+                id = ?teammate::receipts::short_id(&receipt.message_id),
                 status = ?receipt.status,
                 "a receipt named no outstanding send; dropped"
             );
@@ -3961,7 +3973,21 @@ impl Engine {
                         )
                         .await;
                         if let Some(outcome) = posted {
-                            self.receipts.settle_and_post(&id, outcome).await;
+                            // Detached, like the expiry timer's own post and
+                            // for the neighbouring reason: `reply_to` is
+                            // vetted for shape and never for being the
+                            // sender, so the socket this opens is one a peer
+                            // chose and may accept without ever answering.
+                            // Awaited here, that peer would hold a person's
+                            // approve or deny on the command path for the
+                            // receipt deadline, once per decision. The post
+                            // keeps every property its doc claims — one
+                            // attempt, no retry, its own deadline — and the
+                            // settlement it reports already stands.
+                            let receipts = Arc::clone(&self.receipts);
+                            tokio::spawn(async move {
+                                receipts.settle_and_post(&id, outcome).await;
+                            });
                         }
                     }
                 }

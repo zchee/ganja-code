@@ -1154,6 +1154,11 @@ async fn a_parity_hold_is_guarded_like_an_accept() {
     );
     assert_eq!(gate.held_messages().len(), 30);
 
+    // Two seconds buys back exactly one door-wide token: that bucket is
+    // spent by the burst above whatever identity spent it, so the dedup
+    // clause below needs one back before a second sender can hold at all.
+    tokio::time::advance(Duration::from_secs(2)).await;
+
     // A repeated identical body is deduplicated rather than held twice.
     assert!(matches!(
         gate.admit_socket(
@@ -1273,4 +1278,164 @@ async fn the_four_byte_untouched_promises_still_hold() {
     assert_eq!(entry.preview, RedactedText::from("held body".to_owned()));
 
     assert_eq!(HELD_CAP, 100);
+}
+
+// §2 of the parity security review: the guard hoist alone is keyed on the
+// peer's own `from`, so it bounds an honest peer and not a hostile one. Every
+// message here carries a fresh identity and a fresh body — nothing the
+// per-sender bucket or the dedup window can answer — and the door-wide bucket
+// stops the flood a long way short of `HELD_CAP`.
+#[tokio::test(start_paused = true)]
+async fn rotating_the_claimed_sender_cannot_re_key_the_hold_flood() {
+    let (gate, _drain) = Inbound::new(unset(), DialogExpiry::default());
+    let flood = |gate: &Inbound, index: usize| {
+        gate.admit_socket(
+            Some(ReceiverClass::Bypass),
+            &format!("rotator{index}@t"),
+            &format!("body {index}"),
+            None,
+            WireFacts::none(),
+        )
+    };
+
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the bucket capacity is a small whole number written as f64"
+    )]
+    let burst = BUCKET_CAPACITY as usize;
+    for index in 0..burst {
+        assert!(
+            matches!(flood(&gate, index), SocketAdmission::Held { .. }),
+            "message {index} of the burst should still hold"
+        );
+    }
+    assert_eq!(
+        flood(&gate, burst),
+        SocketAdmission::Silent(DropReason::Guard(Dropped::RateLimited)),
+        "a fresh identity buys no fresh bucket on the hold arm"
+    );
+    assert_eq!(
+        gate.held_messages().len(),
+        burst,
+        "the review surface stopped filling well short of HELD_CAP"
+    );
+    assert!(
+        burst < HELD_CAP,
+        "and short is what makes that worth saying"
+    );
+
+    // It refills on the clock and on nothing else.
+    tokio::time::advance(Duration::from_secs(2)).await;
+    assert!(
+        matches!(flood(&gate, burst + 1), SocketAdmission::Held { .. }),
+        "two seconds is one token back"
+    );
+}
+
+// The same bound, from the honest peer's side: an identity that has spent
+// nothing is still refused while the door-wide bucket is empty, and that
+// refusal is the same silent, typed drop an accept-arm rate limit produces —
+// so a sender learns nothing from it (**D523**).
+#[tokio::test(start_paused = true)]
+async fn a_hold_dropped_by_the_door_wide_bucket_is_silent_like_any_other() {
+    let (gate, _drain) = Inbound::new(unset(), DialogExpiry::default());
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the bucket capacity is a small whole number written as f64"
+    )]
+    let burst = BUCKET_CAPACITY as usize;
+    for index in 0..burst {
+        assert!(matches!(
+            gate.admit_socket(
+                Some(ReceiverClass::Bypass),
+                &format!("rotator{index}@t"),
+                &format!("body {index}"),
+                None,
+                WireFacts::none(),
+            ),
+            SocketAdmission::Held { .. }
+        ));
+    }
+
+    assert_eq!(
+        gate.admit_socket(
+            Some(ReceiverClass::Bypass),
+            "honest@t",
+            "the first thing this peer has ever said",
+            None,
+            WireFacts::none(),
+        ),
+        SocketAdmission::Silent(DropReason::Guard(Dropped::RateLimited)),
+        "an honest peer shares the door-wide bucket — the stated cost"
+    );
+}
+
+// §1 of the parity security review, at the clamp itself: what an admitted
+// message's chain becomes before this session forwards it.
+#[test]
+fn an_adopted_chain_keeps_only_stems_and_leaves_room_for_this_session() {
+    // Clause 1: anything that is not a bound socket's stem goes, which is
+    // also what bounds a single entry's size.
+    assert_eq!(
+        adoptable_chain(vec![
+            "0198aaaa".to_owned(),
+            "not-a-stem".to_owned(),
+            "0198bb".to_owned(),
+            "x".repeat(4096),
+            "0198bbbb".to_owned(),
+        ]),
+        vec!["0198aaaa".to_owned(), "0198bbbb".to_owned()],
+        "only well-formed stems survive adoption"
+    );
+
+    // Clause 2: oldest-first, to one below the receiver's own cap, so a
+    // forward's appended marker still lands inside it.
+    let arriving: Vec<String> = (0..MAX_CHAIN_LENGTH)
+        .map(|index| format!("0198c{index:03}"))
+        .collect();
+    let adopted = adoptable_chain(arriving.clone());
+    assert_eq!(adopted.len(), MAX_CHAIN_LENGTH - 1);
+    assert_eq!(
+        adopted[0], arriving[1],
+        "the oldest entry is the one that goes"
+    );
+    assert_eq!(
+        adopted[MAX_CHAIN_LENGTH - 2],
+        arriving[MAX_CHAIN_LENGTH - 1],
+        "and the newest is kept"
+    );
+
+    // The property the two clauses exist for: whatever a peer sends, the
+    // chain this session forwards is one a receiver still admits.
+    let mut forwarded = adopted;
+    forwarded.push("0198ffff".to_owned());
+    let mut guard = PeerGuard::new();
+    assert_eq!(
+        guard.admit(&Origin {
+            tier: Tier::Qualified { sender: "w@t" },
+            hop_chain: &forwarded,
+            own_marker: None,
+            body: "the forward",
+        }),
+        Ok(()),
+        "a forward built on an adopted chain is never a runaway"
+    );
+}
+
+// The clause `adoptable_chain` deliberately does not have, pinned as a
+// property rather than as prose: this session's own marker survives
+// adoption, which is the only reason the own-marker count can ever climb to
+// the loop check's threshold.
+#[test]
+fn an_adopted_chain_keeps_this_sessions_own_marker() {
+    const OWN: &str = "0198ffff";
+
+    let adopted = adoptable_chain(vec![OWN.to_owned(), "0198aaaa".to_owned(), OWN.to_owned()]);
+    assert_eq!(
+        adopted.iter().filter(|hop| hop.as_str() == OWN).count(),
+        2,
+        "stripping it would hold a two-cycle at constant length forever"
+    );
 }

@@ -850,6 +850,21 @@ pub struct PeerGuard {
     senders: HashMap<String, SenderState>,
     /// A monotonic touch counter — recency without reading any clock.
     clock: u64,
+    /// The hold arm's own door-wide bucket, filled at its first
+    /// consultation — see [`PeerGuard::admit_hold`]. [`None`] until then, so
+    /// constructing a guard reads no clock and a session that never holds
+    /// anything carries no bucket.
+    holds: Option<HoldBucket>,
+}
+
+/// The door-wide hold bucket's own state: [`SenderState`]'s two rate-limit
+/// fields and none of the rest, because a bucket keyed on nothing has no
+/// identity to age out and no body history to keep.
+struct HoldBucket {
+    /// Tokens remaining, refilled continuously at [`REFILL_PER_SECOND`].
+    tokens: f64,
+    /// When the bucket last refilled.
+    refilled_at: Instant,
 }
 
 impl PeerGuard {
@@ -859,6 +874,7 @@ impl PeerGuard {
         Self {
             senders: HashMap::new(),
             clock: 0,
+            holds: None,
         }
     }
 
@@ -911,6 +927,59 @@ impl PeerGuard {
         Ok(())
     }
 
+    /// [`PeerGuard::admit`], then the hold arm's own door-wide bucket.
+    ///
+    /// Everything `admit` weighs is keyed on `from`, which is peer-authored
+    /// and shape-checked rather than authenticated. That is the right key for
+    /// *fairness* — one noisy peer must not spend another's tokens, and the
+    /// dedup window is only meaningful per sender — and the wrong one for a
+    /// *bound*: a sender that rotates its claimed identity gets a fresh
+    /// bucket and a fresh window every message, and evicts honest peers' state
+    /// out of the 256-slot table on the way past. On the accept arm that
+    /// buys an attacker nothing the queue cap does not already refuse. On the
+    /// hold arm it would buy the review surface itself: entries a person has
+    /// not read yet, evicted oldest-first by attacker-chosen text at machine
+    /// rate.
+    ///
+    /// So the hold arm consults a second bucket that no envelope field can
+    /// re-key. It is deliberately the same shape and the same two constants
+    /// as a sender's own — a burst of thirty, then one per two seconds —
+    /// because the exposure it bounds is the same kind of thing, and
+    /// because those are the numbers the hold path's arithmetic was always
+    /// described with. Ordered after `admit` so an
+    /// honest peer's own limits still answer first and a body a sender
+    /// repeats is still a duplicate rather than a rate-limit; a would-be hold
+    /// that fails either test is dropped byte-identically to an accept, which
+    /// is what the hoist already promised (**D523**).
+    ///
+    /// The cost is stated rather than hidden: while an attacker is spending
+    /// this bucket an honest peer's parity hold is dropped instead of
+    /// reaching review. That is the same trade the accept arm makes, and it
+    /// is strictly better than the alternative it replaces, where the honest
+    /// hold reached the buffer by evicting another one.
+    ///
+    /// # Errors
+    ///
+    /// The [`Dropped`] reason the arrival was refused for.
+    pub fn admit_hold(&mut self, origin: &Origin<'_>) -> Result<(), Dropped> {
+        self.admit(origin)?;
+
+        let now = Instant::now();
+        let bucket = self.holds.get_or_insert(HoldBucket {
+            tokens: BUCKET_CAPACITY,
+            refilled_at: now,
+        });
+        let elapsed = now.duration_since(bucket.refilled_at).as_secs_f64();
+        bucket.tokens = (bucket.tokens + elapsed * REFILL_PER_SECOND).min(BUCKET_CAPACITY);
+        bucket.refilled_at = now;
+        if bucket.tokens < 1.0 {
+            return Err(Dropped::RateLimited);
+        }
+        bucket.tokens -= 1.0;
+
+        Ok(())
+    }
+
     /// The sender's state, created full if unseen — evicting the least
     /// recently touched entry first when the table is at its bound — and
     /// touched either way.
@@ -943,6 +1012,53 @@ impl Default for PeerGuard {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// What an admitted message's chain may become before this session stores it
+/// as the route its own next forward will carry.
+///
+/// The gate reads an arriving chain, but the engine *adopts* one — and those
+/// are different jobs. Reading it, every entry is somebody else's claim about
+/// somebody else's route and only its length and this session's own count
+/// matter. Adopting it, the entries become the prefix of what this session
+/// will put on the wire, so an unclamped adoption lets a peer choose what
+/// every later receiver measures — and a chain arriving at the receiver's own
+/// limit, plus the marker a forward appends, is one entry past it, which
+/// every receiver on the machine then drops as a runaway while the sending
+/// model is told it was delivered.
+///
+/// Two clauses, and one deliberately absent:
+///
+/// 1. **Only well-formed session stems survive.** A hop marker is a bound
+///    socket's stem or it is not a route this session may claim to have
+///    crossed, and the predicate is the binder's own
+///    ([`is_session_stem`](ganja_tool::socket::is_session_stem)) rather than a
+///    second spelling of it. This is also what bounds a single entry's size:
+///    the wire's own cap counts entries, not their length.
+/// 2. **Oldest-first to one below [`MAX_CHAIN_LENGTH`]**, the same direction
+///    the sender cap truncates in and for the same reason — the recent
+///    entries are the ones a loop check is about. One below, because a
+///    forward appends this session's own marker, and the sum has to be a
+///    chain a receiver still admits.
+///
+/// **Not** dropped: this session's own marker. Stripping it would read as
+/// hygiene and is in fact the loop check's own undoing — the own-marker count
+/// accumulates only because each forwarder leaves its marker in the chain,
+/// so a session that removed its own on every adoption would hold a two-cycle
+/// at constant length forever, never reaching either cap. A chain arriving
+/// with more than [`MAX_SELF_HOPS`] of this session's marker is already
+/// refused by [`PeerGuard::admit`] before adoption can see it; what remains
+/// is a peer able to make this session's *own* return traffic look loopy for
+/// as long as one cell holds it, which is the smaller of the two harms and
+/// the one that leaves the check working.
+pub(crate) fn adoptable_chain(mut chain: Vec<String>) -> Vec<String> {
+    chain.retain(|hop| ganja_tool::socket::is_session_stem(hop));
+    let room = MAX_CHAIN_LENGTH - 1;
+    if chain.len() > room {
+        chain.drain(..chain.len() - room);
+    }
+
+    chain
 }
 
 /// The **separate** enqueue-time test (v2 §"Cross-pass reconciliation"
@@ -1202,9 +1318,15 @@ impl Inbound {
                 // configured `cross_session_inbound: "hold"` asked for
                 // every message to reach review, and gating that path would
                 // quietly deliver less than it names.
+                //
+                // `admit_hold` rather than `admit`: everything `admit`
+                // weighs is keyed on the peer's own claimed `from`, so on
+                // its own the hoist bounds an honest peer and not a hostile
+                // one. The door-wide bucket behind it is what makes the
+                // rate a bound.
                 let newly_routed =
                     matches!(cause, HoldCause::ModeMismatch | HoldCause::NoModeAsserted);
-                if newly_routed && let Err(dropped) = state.guard.admit(&origin) {
+                if newly_routed && let Err(dropped) = state.guard.admit_hold(&origin) {
                     return SocketAdmission::Silent(DropReason::Guard(dropped));
                 }
                 let evicted_prune = self.hold(

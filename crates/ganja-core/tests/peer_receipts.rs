@@ -761,9 +761,15 @@ async fn a_reply_to_that_fails_vetting_is_never_kept() {
         receiver.engine.held_messages().is_empty(),
         "the settlement itself is unaffected by where it could not be reported"
     );
-    // The settle's own post is awaited inline by the command, so by now a
-    // kept association would have reached `post` and tripped its second
-    // vet — the sentence that must never appear, because nothing was kept.
+    // The settle's own post is detached (the parity security review's §3:
+    // a peer-chosen socket may not hold a person's decision on the command
+    // path), so the silence below is asserted after the same grace every
+    // other must-not-arrive assertion in this file waits out — long enough
+    // for a kept association to have reached `post` and tripped its second
+    // vet, which is the sentence that must never appear because nothing was
+    // kept. The spawned post runs on this test's own thread, so the
+    // thread-local capture would have seen it.
+    tokio::time::sleep(GRACE).await;
     assert!(
         !capture
             .logged()

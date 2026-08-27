@@ -424,12 +424,12 @@ async fn a_send_carries_this_sessions_marker_after_whatever_it_admitted() {
 /// appends no marker and names nowhere to answer.
 ///
 /// The 33-entry truncation is not driven from here on purpose, and the reason
-/// is a fact about the two caps rather than a gap: the receiver's own chain
-/// check drops anything past 28 entries, so the most a chain can *inherit*
-/// through an admission is 28, and 28 plus this session's own marker is 29 —
-/// four short of the sender cap. The truncation arithmetic is therefore
-/// pinned where it can be reached at all, over the facts value itself, in
-/// `engine_tests.rs`.
+/// is a fact about the caps rather than a gap: the receiver's own chain check
+/// drops anything past 28 entries, and since the parity security review's §1
+/// an adoption keeps at most 27 of them, so what a forward carries tops out
+/// at exactly 28 — five short of the sender cap. The truncation arithmetic is
+/// therefore pinned where it can be reached at all, over the facts value
+/// itself, in `engine_tests.rs`.
 #[tokio::test]
 async fn a_chain_grows_oldest_first_and_an_unbound_sender_appends_nothing() {
     let far = FarSide::accepting();
@@ -459,12 +459,16 @@ async fn a_chain_grows_oldest_first_and_an_unbound_sender_appends_nothing() {
         .as_array()
         .expect("a chain is an array")
         .clone();
-    assert_eq!(carried.len(), 29, "everything inherited, plus this session");
     assert_eq!(
-        carried[0], inherited[0],
-        "the oldest entry stays at the front"
+        carried.len(),
+        28,
+        "the adoption left room for this session's own marker"
     );
-    assert_eq!(carried[28], OWN_STEM, "and this session is the newest");
+    assert_eq!(
+        carried[0], inherited[1],
+        "the oldest inherited entry is the one the clamp dropped"
+    );
+    assert_eq!(carried[27], OWN_STEM, "and this session is the newest");
 
     // Unbound: the address cell cleared, so no marker and no reply address.
     sender.engine.set_peer_address(None);
@@ -474,8 +478,8 @@ async fn a_chain_grows_oldest_first_and_an_unbound_sender_appends_nothing() {
     let second = &far.taken_on(&format!("/team/{FAR_LEAD}/message"))[1].body;
     assert_eq!(
         second["hop_chain"].as_array().map(Vec::len),
-        Some(28),
-        "an unbound sender forwards what it inherited and appends nothing"
+        Some(27),
+        "an unbound sender forwards what it adopted and appends nothing"
     );
     assert!(
         !second["hop_chain"]
@@ -567,6 +571,121 @@ async fn a_looping_or_runaway_chain_is_dropped_and_the_sender_cannot_tell() {
         ),
         (None, None, None),
         "and none of the three names a hold"
+    );
+}
+
+// ---------------------------------------------------------------------
+// §1 of the parity security review — the adopted chain, end to end
+// ---------------------------------------------------------------------
+
+/// A peer cannot spend a session's forwarding budget on its behalf.
+///
+/// The vector is that admission and adoption ask different questions: the
+/// guard admits a chain at exactly the receiver's own limit, and before this
+/// clamp the engine then stored all of it, so the very next thing that
+/// session said carried one entry too many and was dropped as a runaway by
+/// **every** receiver on the machine — while its own model was told, on each
+/// send, that the message had been delivered. One admitted message, and the
+/// victim is deaf until its next admitted inbound or a `NewSession`.
+///
+/// Driven the whole way round rather than at the clamp: a real admission
+/// through the gate, a real turn whose `send_message` goes out over the
+/// socket, and then that exact forwarded chain offered to a **second**
+/// session's own gate, which is the party whose verdict the attack was
+/// aiming at.
+#[tokio::test]
+async fn a_chain_at_the_limit_does_not_cost_the_victim_its_next_send() {
+    let far = FarSide::accepting();
+    let victim = Sender::new();
+    victim
+        .engine
+        .set_peer_address(Some(&far.directory().join(format!("{OWN_STEM}.sock"))));
+
+    // The most a chain can carry through an admission — one more is
+    // `HopRunaway`, so this is the worst case a peer can actually deliver.
+    victim
+        .engine
+        .receive_peer_envelope(
+            incoming("carry this the rest of the way"),
+            PeerEnvelope {
+                hop_chain: (0..28).map(|index| format!("0198e{index:03}")).collect(),
+                ..PeerEnvelope::none()
+            },
+        )
+        .await
+        .expect("a 28-entry chain is the most the receiver's own check admits");
+
+    let mut events = victim.events().await;
+    victim.will_send_to(&far.address(), TEXT);
+    victim.turn(&mut events).await;
+
+    let forwarded: Vec<String> =
+        far.taken_on(&format!("/team/{FAR_LEAD}/message"))[0].body["hop_chain"]
+            .as_array()
+            .expect("a chain is an array")
+            .iter()
+            .map(|hop| hop.as_str().expect("a hop marker is a string").to_owned())
+            .collect();
+
+    // The party the attack was aiming at: a third session, deciding on the
+    // bytes the victim actually put on the wire.
+    let onward = Receiver::new(None, false);
+    onward
+        .engine
+        .receive_peer_envelope(
+            incoming("the victim's own next word"),
+            PeerEnvelope {
+                hop_chain: forwarded.clone(),
+                ..PeerEnvelope::none()
+            },
+        )
+        .await
+        .expect("a dropped message would still answer success");
+    assert_eq!(
+        onward.inbox().len(),
+        1,
+        "the victim's next send reached a receiver rather than being dropped \
+         as a runaway: {forwarded:?}"
+    );
+}
+
+/// The clamp's shape half, over the same round trip: a peer's chain entries
+/// become the prefix of what this session says next, so anything that is not
+/// a bound socket's stem — including a megabyte of it — never reaches the
+/// wire at all.
+#[tokio::test]
+async fn a_malformed_hop_never_reaches_the_wire_through_a_forward() {
+    let far = FarSide::accepting();
+    let victim = Sender::new();
+    victim
+        .engine
+        .set_peer_address(Some(&far.directory().join(format!("{OWN_STEM}.sock"))));
+
+    victim
+        .engine
+        .receive_peer_envelope(
+            incoming("with something odd in the route"),
+            PeerEnvelope {
+                hop_chain: vec![
+                    "0198aaaa".to_owned(),
+                    "../../etc/passwd".to_owned(),
+                    "z".repeat(64 * 1024),
+                    "0198bbbb".to_owned(),
+                ],
+                ..PeerEnvelope::none()
+            },
+        )
+        .await
+        .expect("an unset policy at a prompting receiver accepts");
+
+    let mut events = victim.events().await;
+    victim.will_send_to(&far.address(), TEXT);
+    victim.turn(&mut events).await;
+
+    assert_eq!(
+        far.taken_on(&format!("/team/{FAR_LEAD}/message"))[0].body["hop_chain"],
+        serde_json::json!(["0198aaaa", "0198bbbb", OWN_STEM]),
+        "only well-formed stems are forwarded, and this session last"
     );
 }
 
@@ -739,6 +858,7 @@ async fn the_far_sides_answer_still_composes_into_the_senders_own_note() {
 async fn no_new_path_logs_a_body_a_reply_address_or_a_chain() {
     const SECRET_BODY: &str = "xyzzy-the-body-nobody-may-log";
     const SECRET_STEM: &str = "0198f00d";
+    const SECRET_ID_TAIL: &str = "plugh-the-tail-of-an-id-nobody-may-log";
 
     let capture = ganja_testkit::LogCapture::default();
     let subscriber = tracing_subscriber::fmt()
@@ -766,10 +886,36 @@ async fn no_new_path_logs_a_body_a_reply_address_or_a_chain() {
         .await
         .expect("a refuse still answers success");
 
+    // A receipt naming no outstanding send traces the id it named, and that
+    // id is the only string on that line a peer chose: cut like every other
+    // rendering of one, and escaped, so neither its length nor its control
+    // characters are the developer's problem.
+    receiver
+        .engine
+        .apply_receipt(ganja_core::SocketReceipt {
+            message_id: ganja_protocol::PeerMessageId::from(format!(
+                "0123456789\n\u{1b}[2J{SECRET_ID_TAIL}"
+            )),
+            status: ganja_core::ReceiptStatus::Delivered,
+        })
+        .await;
+
     let logged = capture.logged();
     assert!(
         !logged.contains(SECRET_BODY),
         "a body reached a log line: {logged}"
+    );
+    assert!(
+        !logged.contains(SECRET_ID_TAIL),
+        "an unknown receipt's id reached a log line whole: {logged}"
+    );
+    assert!(
+        !logged.contains("\u{1b}[2J"),
+        "an unknown receipt's id carried a control sequence into one: {logged}"
+    );
+    assert!(
+        logged.contains("01234567"),
+        "and the cut is what it should be, not silence: {logged}"
     );
     assert!(
         !logged.contains(SECRET_STEM),
