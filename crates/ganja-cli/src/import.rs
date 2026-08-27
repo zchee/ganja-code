@@ -44,6 +44,8 @@ use ganja_core::{config::Config, lsp::server::BUILTIN_IDS};
 use ganja_permission::Project;
 use toml_edit::{DocumentMut, InlineTable, Item, Table, Value};
 
+use crate::report::{Report, print_table};
+
 /// Directory opencode keeps its global config in, under the XDG config home.
 const OPENCODE_DIRECTORY: &str = "opencode";
 
@@ -264,7 +266,7 @@ pub fn import_opencode(file: Option<PathBuf>, global: bool, dry_run: bool) -> Re
     }
 
     let (built, report) = map_config(&sources.config);
-    print_table(&report);
+    print_table(&report, HEADER, "GANJA");
     for warning in &report.warnings {
         eprintln!("warning: {warning}");
     }
@@ -604,30 +606,8 @@ fn join(prefix: &str, key: &str) -> String {
     }
 }
 
-/// What the import did with every key it saw.
-#[derive(Debug, Default)]
-struct Report {
-    /// `opencode key` → `ganja key`, in the order the document spelled them.
-    mapped: Vec<(String, String)>,
-    /// `opencode key` → why it was left out.
-    skipped: Vec<(String, String)>,
-    /// Everything that needs saying on the way, for stderr.
-    warnings: Vec<String>,
-}
-
+/// The two ways one entry's [`Report`] is folded into the run's.
 impl Report {
-    fn map(&mut self, from: &str, to: &str) {
-        self.mapped.push((from.to_owned(), to.to_owned()));
-    }
-
-    fn skip(&mut self, key: &str, reason: &str) {
-        self.skipped.push((key.to_owned(), reason.to_owned()));
-    }
-
-    fn warn(&mut self, warning: String) {
-        self.warnings.push(warning);
-    }
-
     /// Takes everything `other` collected.
     fn adopt(&mut self, other: Self) {
         self.mapped.extend(other.mapped);
@@ -2111,39 +2091,6 @@ fn options(
     fields.base_url = endpoint.or(base_url);
 
     refused.map_or(Ok(()), Err)
-}
-
-/// Prints what the import did, in two sections.
-///
-/// One width across both, so the two read as one table rather than as two that
-/// happen to be printed together.
-fn print_table(report: &Report) {
-    let width = report
-        .mapped
-        .iter()
-        .chain(&report.skipped)
-        .map(|(key, _)| key.chars().count())
-        .chain(std::iter::once(HEADER.chars().count()))
-        .max()
-        .unwrap_or_default();
-
-    section("mapped", "GANJA", &report.mapped, width);
-    println!();
-    section("skipped", "REASON", &report.skipped, width);
-}
-
-fn section(name: &str, right: &str, rows: &[(String, String)], width: usize) {
-    println!("{name}");
-    if rows.is_empty() {
-        println!("  (nothing)");
-
-        return;
-    }
-
-    println!("  {HEADER:<width$}  {right}");
-    for (left, value) in rows {
-        println!("  {left:<width$}  {value}");
-    }
 }
 
 /// Proves the file about to be written is one ganja can read.

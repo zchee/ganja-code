@@ -31,11 +31,11 @@ use super::{Config, ConfigError};
 /// commas, unquoted keys — is refused, because a file that loads here and
 /// nowhere else is a file that has stopped being JSON.
 ///
-/// Public because one more reader of the same dialect lives outside this
-/// crate: `ganja config import-opencode`, reading files upstream wrote. It
-/// keeps a copy with a doc comment promising to track this one, which is a
-/// promise a compiler cannot keep — so the looser-or-stricter question is
-/// settled here and nowhere else.
+/// Public because two readers of the same dialect live outside this crate:
+/// `ganja config import-opencode`, reading the files upstream writes, and
+/// `ganja config migrate`, reading the ones this build has left behind. Both
+/// *call* this rather than keeping a copy of it, so the looser-or-stricter
+/// question has one answer by construction.
 #[must_use]
 pub fn parse_options() -> jsonc_parser::ParseOptions {
     jsonc_parser::ParseOptions {

@@ -91,12 +91,13 @@ tokio.workspace = true
 # only crate that can catch the keystroke which fires one. The token lives
 # behind `rt`, which is why the workspace declaration carries no features.
 tokio-util = { workspace = true, features = ["rt"] }
-# The format-preserving half of the config's own dialect, admitted here ahead
-# of the code that will use it: nothing in this crate reaches for it yet. It is
-# what `mcp add/remove` will edit a hand-commented entry through, and what the
-# importers will write an entry out of — both needing the document rather than
-# a value. Declared with the loader's own landing so that retargeting those
-# surfaces is a source change and not another manifest round; see the workspace
+# The format-preserving editor for `ganja.toml`, which every command that
+# writes one goes through: `mcp add`/`remove`, `config import-opencode`,
+# `config migrate` and `config import-claude-hooks`. The two that edit an
+# existing file need the document — comments, key order and spacing and all —
+# rather than a value type, which would print a correct config back with
+# every comment its owner wrote deleted; the two that create one need the
+# same library for ordered, correctly escaped rendering. See the workspace
 # declaration for the rest of the reason.
 toml_edit.workspace = true
 # Rolling files, so a long-lived session cannot grow one without bound, and a

@@ -49,8 +49,7 @@
 
 use std::{
     collections::BTreeMap,
-    fs,
-    io::{self, Write as _},
+    fs, io,
     path::{Path, PathBuf},
 };
 
@@ -67,8 +66,9 @@ use ganja_core::config::{
 };
 use ganja_permission::Project;
 use serde_json::{Map, Value};
-use tempfile::NamedTempFile;
 use toml_edit::{DocumentMut, Item, Table};
+
+use crate::staging::stage;
 
 /// The config file this edits, in every tier — the one name ganja reads.
 const CONFIG_FILE: &str = "ganja.toml";
@@ -472,54 +472,6 @@ fn write(path: &Path, document: &DocumentMut) -> Result<()> {
     })?;
 
     Ok(())
-}
-
-/// Writes `bytes` to a fresh file beside `path`, and hands back the file
-/// itself — unnamed by anything the caller has to remember to clean up.
-///
-/// Staged beside rather than at a fixed name because two `ganja mcp add`
-/// processes in one directory would otherwise write the same staging file and
-/// one would rename the other's half-written bytes into place. The uniqueness
-/// used to be a `create_new` loop over a pid-stamped name, which was correct
-/// about collisions and silent about failure: a write that failed returned
-/// early and left the staged file where it fell, since only the *rename*
-/// arm above ever cleaned up. Tying the temporary's life to a value fixes
-/// both halves at once — the file is removed when this is dropped, on every
-/// path out of every caller, including the one nobody wrote.
-fn stage(path: &Path, bytes: &[u8]) -> Result<NamedTempFile> {
-    let directory = path.parent().unwrap_or_else(|| Path::new("."));
-
-    // Both sentences name `path` and not the staged file: the temporary's
-    // name is this function's business and never something somebody typed,
-    // so a person reading the failure is told about the config file they
-    // asked to edit.
-    let mut staged = NamedTempFile::new_in(directory)
-        .with_context(|| format!("{} could not be written", path.display()))?;
-    staged
-        .write_all(bytes)
-        .with_context(|| format!("{} could not be written", path.display()))?;
-    // The rename publishes the file as complete, so its bytes must reach the
-    // backing store before that atomic namespace change makes them current.
-    staged
-        .as_file()
-        .sync_all()
-        .with_context(|| format!("{} could not be written", path.display()))?;
-
-    // A temporary is created `0600`, and a rename carries that mode onto the
-    // target — so an existing config would quietly lose whatever mode its
-    // owner gave it. Copying the mode across keeps the edit an edit. A file
-    // this *creates* keeps the `0600`, which is the safer default for a
-    // document whose remote entries carry `Authorization` headers.
-    if let Ok(existing) = fs::symlink_metadata(path)
-        && existing.file_type().is_file()
-    {
-        staged
-            .as_file()
-            .set_permissions(existing.permissions())
-            .with_context(|| format!("{} could not be written", path.display()))?;
-    }
-
-    Ok(staged)
 }
 
 /// Refuses a name that could not be an entry key.

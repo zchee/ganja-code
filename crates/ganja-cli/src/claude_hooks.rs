@@ -56,6 +56,8 @@ use ganja_permission::Project;
 use serde_json::Value;
 use toml_edit::{ArrayOfTables, DocumentMut, InlineTable, Item, Table};
 
+use crate::report::{Report, print_table};
+
 /// The directory Claude keeps its settings in, under a home or a project root.
 const CLAUDE_DIRECTORY: &str = ".claude";
 
@@ -136,7 +138,7 @@ pub fn import_claude_hooks(file: Option<PathBuf>, global: bool, dry_run: bool) -
         collect(path, &mut collected, &mut report)?;
     }
 
-    print_table(&report);
+    print_table(&report, HEADER, "GANJA");
     for warning in &report.warnings {
         eprintln!("warning: {warning}");
     }
@@ -640,62 +642,6 @@ fn inline(group: &Group) -> toml_edit::Value {
     table.insert(TABLE, handlers.into());
 
     table.into()
-}
-
-/// What was taken, and why anything was left.
-#[derive(Debug, Default)]
-struct Report {
-    /// One row per group that will be written, and where it lands.
-    mapped: Vec<(String, String)>,
-    /// One row per thing left out, at whatever depth, with the reason.
-    skipped: Vec<(String, String)>,
-    /// A sentence for the rows a single word cannot explain — which is every
-    /// `refused` row, since the reason a group would not load is the whole
-    /// point of refusing it here rather than at the next launch.
-    warnings: Vec<String>,
-}
-
-impl Report {
-    fn map(&mut self, key: &str, spelling: &str) {
-        self.mapped.push((key.to_owned(), spelling.to_owned()));
-    }
-
-    fn skip(&mut self, key: &str, reason: &str) {
-        self.skipped.push((key.to_owned(), reason.to_owned()));
-    }
-
-    fn warn(&mut self, warning: String) {
-        self.warnings.push(warning);
-    }
-}
-
-fn print_table(report: &Report) {
-    let width = report
-        .mapped
-        .iter()
-        .chain(&report.skipped)
-        .map(|(key, _)| key.chars().count())
-        .chain(std::iter::once(HEADER.chars().count()))
-        .max()
-        .unwrap_or_default();
-
-    section("mapped", "GANJA", &report.mapped, width);
-    println!();
-    section("skipped", "REASON", &report.skipped, width);
-}
-
-fn section(name: &str, right: &str, rows: &[(String, String)], width: usize) {
-    println!("{name}");
-    if rows.is_empty() {
-        println!("  (nothing)");
-
-        return;
-    }
-
-    println!("  {HEADER:<width$}  {right}");
-    for (left, value) in rows {
-        println!("  {left:<width$}  {value}");
-    }
 }
 
 #[cfg(test)]

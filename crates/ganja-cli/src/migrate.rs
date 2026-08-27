@@ -58,7 +58,6 @@
 
 use std::{
     fs,
-    io::Write as _,
     path::{Path, PathBuf},
 };
 
@@ -66,8 +65,12 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use ganja_core::config::{Config, LEGACY_FILES, legacy};
 use ganja_permission::Project;
 use jsonc_parser::ast::{Object, Value as Ast};
-use tempfile::NamedTempFile;
 use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, Value};
+
+use crate::{
+    report::{Report, print_table},
+    staging::stage,
+};
 
 /// What this writes, beside whatever it read.
 const DESTINATION: &str = "ganja.toml";
@@ -134,7 +137,7 @@ pub fn migrate(file: Option<PathBuf>, global: bool, dry_run: bool) -> Result<()>
         .with_context(|| format!("{} could not be read", source.display()))?;
     let (document, report) = translate(&source, &text)?;
 
-    print_table(&report);
+    print_table(&report, HEADER, "TOML");
     warn(&comments(&source, &text)?);
 
     let rendered = document.to_string();
@@ -627,68 +630,23 @@ fn dropped(report: &Report) -> String {
     )
 }
 
-/// What became of every key, and why anything was left out.
-#[derive(Debug, Default)]
-struct Report {
-    /// One row per top-level key: what it was, and the shape it took.
-    mapped: Vec<(String, String)>,
-    /// One row per value that could not be carried, at whatever depth.
-    skipped: Vec<(String, String)>,
-}
-
-impl Report {
-    fn map(&mut self, key: &str, spelling: &str) {
-        self.mapped.push((key.to_owned(), spelling.to_owned()));
-    }
-
-    fn skip(&mut self, key: &str, reason: &str) {
-        self.skipped.push((key.to_owned(), reason.to_owned()));
-    }
-}
-
-fn print_table(report: &Report) {
-    let width = report
-        .mapped
-        .iter()
-        .chain(&report.skipped)
-        .map(|(key, _)| key.chars().count())
-        .chain(std::iter::once(HEADER.chars().count()))
-        .max()
-        .unwrap_or_default();
-
-    section("mapped", "TOML", &report.mapped, width);
-    println!();
-    section("skipped", "REASON", &report.skipped, width);
-}
-
-fn section(name: &str, right: &str, rows: &[(String, String)], width: usize) {
-    println!("{name}");
-    if rows.is_empty() {
-        println!("  (nothing)");
-
-        return;
-    }
-
-    println!("  {HEADER:<width$}  {right}");
-    for (left, value) in rows {
-        println!("  {left:<width$}  {value}");
-    }
-}
-
 /// Writes `document` to `path`, staged beside it and renamed into place.
 ///
-/// Shared with `claude_hooks.rs`, which writes into the same directory for the
-/// same reason. `mcp.rs` holds a third copy of the pattern; hoisting all three
-/// into one home is a tidy-up this landing deliberately does not make, because
-/// that file belongs to another command and the move would touch it for no
-/// behavioral reason.
+/// Shared with `claude_hooks.rs` through [`write_with()`], which writes into
+/// the same directory for the same reason. `mcp.rs` writes a third file the
+/// same way, and what all three share is the staging step alone
+/// ([`crate::staging::stage`]). The renames stay apart on purpose: each
+/// publishes something different — a printed document against a rendered
+/// string, with and without a trailing newline, over `persist` against
+/// `persist_noclobber` — so one function for all of them would be a parameter
+/// per difference.
 ///
 /// Staged rather than written in place because the bytes have to reach the
 /// disk before anything can read a half-file, and a rename within one
 /// directory is the one step that cannot be interrupted. `persist_noclobber`
 /// is what keeps the destination refusal true at the moment of writing rather
 /// than only at the moment it was checked.
-pub(crate) fn write(path: &Path, document: &str) -> Result<()> {
+fn write(path: &Path, document: &str) -> Result<()> {
     write_with(path, document, true)
 }
 
@@ -727,49 +685,6 @@ pub(crate) fn write_with(path: &Path, document: &str, create_only: bool) -> Resu
     })?;
 
     Ok(())
-}
-
-/// Writes `bytes` to a fresh file beside `path`, and hands back the file
-/// itself — unnamed by anything the caller has to remember to clean up.
-///
-/// `mcp.rs`'s twin, and for its reasons: staged *beside* so two processes in
-/// one directory cannot rename each other's half-written bytes into place, and
-/// tied to a value so the file is removed on every path out of every caller,
-/// including the one nobody wrote.
-fn stage(path: &Path, bytes: &[u8]) -> Result<NamedTempFile> {
-    let directory = path.parent().unwrap_or_else(|| Path::new("."));
-
-    // Every sentence names `path` and not the staged file: the temporary's
-    // name is this function's business and never something somebody typed, so
-    // a person reading the failure is told about the config file they asked
-    // to write.
-    let mut staged = NamedTempFile::new_in(directory)
-        .with_context(|| format!("{} could not be written", path.display()))?;
-    staged
-        .write_all(bytes)
-        .with_context(|| format!("{} could not be written", path.display()))?;
-    // The rename publishes the file as complete, so its bytes must reach the
-    // backing store before that atomic namespace change makes them current.
-    staged
-        .as_file()
-        .sync_all()
-        .with_context(|| format!("{} could not be written", path.display()))?;
-
-    // A temporary is created `0600`, and a rename carries that mode onto the
-    // target — so an existing config would quietly lose whatever mode its
-    // owner gave it. Copying the mode across keeps an edit an edit; a file
-    // this *creates* keeps the `0600`, which is the safer default for a
-    // document whose remote entries carry `Authorization` headers.
-    if let Ok(existing) = fs::symlink_metadata(path)
-        && existing.file_type().is_file()
-    {
-        staged
-            .as_file()
-            .set_permissions(existing.permissions())
-            .with_context(|| format!("{} could not be written", path.display()))?;
-    }
-
-    Ok(staged)
 }
 
 #[cfg(test)]

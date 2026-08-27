@@ -40,9 +40,11 @@ mod login;
 mod mcp;
 mod migrate;
 mod plugin;
+mod report;
 mod run;
 mod serve;
 mod skills;
+mod staging;
 
 // A plain comment, and above the doc comment rather than below it: clap
 // renders a doc comment as the help a person reads — every line of it — and

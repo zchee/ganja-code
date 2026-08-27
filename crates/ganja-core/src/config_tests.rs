@@ -1802,9 +1802,9 @@ fn permission_rules_keep_document_order_across_interleaved_toml_tables() {
 /// the tool keys (`webfetch` before the catch-all `"*"`, which sorts first)
 /// and one tool's patterns (`"git push"` before `"git *"`, which also sorts
 /// first). Rather than leave a reader to do that alphabetical arithmetic in
-/// their head, the sorted ordering is built here and gated too — a fixture
-/// that had stopped discriminating would fail on `assert_ne!` instead of
-/// passing vacuously.
+/// their head, the sorted ordering is built here and asserted to reach the
+/// *opposite* verdict on both — so a fixture that had stopped discriminating
+/// fails those assertions instead of passing vacuously.
 #[test]
 fn a_toml_loaded_config_decides_calls_in_document_order() {
     let config = parse(
