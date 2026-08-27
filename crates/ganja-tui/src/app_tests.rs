@@ -4133,9 +4133,14 @@ async fn a_token_that_is_neither_file_nor_name_stays_literal() {
     let root = project();
     std::fs::write(root.path().join("backend"), "shadowing file\n")
         .expect("the fixture file writes");
+    // The registry directory is a tempdir of this test's own: the
+    // classifier's last-resort read (AC-38) would otherwise reach the real
+    // `/tmp/ganja-<uid>/` for `@nobody`.
+    let registry_dir = temporary();
     let mut app = App::new(engine(), None, Themes::builtin())
         .with_cwd(root.path())
-        .with_root(root.path());
+        .with_root(root.path())
+        .with_registry_directory(registry_dir.path());
     app.session_listing = vec![live_session("worker", "0298c1a2", "/work/a")];
 
     let mentions = mention::attachable(
@@ -12108,5 +12113,406 @@ async fn a_pane_teammates_ask_travels_to_the_lead_and_the_answer_lets_the_call_r
     assert!(
         completed_shell(&seen).is_some_and(|output| output.contains(ECHOED)),
         "the call the ask was about actually ran: {seen:#?}"
+    );
+}
+
+// ---- D532: the peer reply address follows the registration record ----
+
+/// **AC-8**, this frontend's half: the engine's peer address is set at the
+/// one moment this app writes its registration record and cleared at both
+/// moments it removes one — the observed rebind and teardown — so the disk's
+/// advertisement and the wire's reply address can never disagree about the
+/// socket this session answers on. (What a *send* then stamps with it is the
+/// engine's own contract, pinned by `ganja-core`'s tests; what this pins is
+/// that the frontend calls the seam at exactly these moments.)
+#[tokio::test]
+async fn the_peer_reply_address_moves_with_the_registration_record() {
+    let directory = temporary();
+    store_pickable_sessions(&directory);
+    let registry_dir = temporary();
+    let (mut app, _recording) = registering_app(&directory, &registry_dir);
+    let minted = app.engine.session_id();
+
+    assert_eq!(
+        app.engine.peer_address(),
+        None,
+        "before the first bind this session answers nowhere"
+    );
+
+    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+    assert_eq!(
+        app.engine.peer_address(),
+        Some((CompactRecording::path_for(&minted), compact(&minted))),
+        "the bind sets the address and the marker together, off the bound path"
+    );
+
+    // The picker moves the slot: the old record goes, and the address goes
+    // with it — then the new bind sets both again.
+    app.handle(key(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        .await
+        .expect("control-s is handled");
+    let chosen = app
+        .sessions
+        .as_ref()
+        .and_then(|sessions| sessions.selected())
+        .map(|info| info.id.clone())
+        .expect("the picker has a row under the cursor");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+        .await
+        .expect("enter is handled");
+    assert_eq!(
+        app.engine.peer_address(),
+        Some((CompactRecording::path_for(&chosen), compact(&chosen))),
+        "the rebind moved the address to the socket it actually bound"
+    );
+
+    // `App::run`'s teardown order, the same call it makes.
+    app.unregister_self();
+    assert_eq!(
+        app.engine.peer_address(),
+        None,
+        "teardown stops claiming an address before the socket stops answering"
+    );
+}
+
+/// **AC-8**'s refusal case: a rebind whose new bind is refused leaves this
+/// session claiming no reply address at all — cleared the moment the slot was
+/// observed to move, which is *before* the new bind's outcome exists, exactly
+/// as the record is.
+#[tokio::test]
+async fn a_refused_rebind_leaves_this_session_claiming_no_reply_address() {
+    let directory = temporary();
+    store_pickable_sessions(&directory);
+    let registry_dir = temporary();
+    let (mut app, recording) = registering_app(&directory, &registry_dir);
+    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+    assert!(app.engine.peer_address().is_some());
+
+    recording
+        .refuse
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    app.handle(key(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        .await
+        .expect("control-s is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
+        .await
+        .expect("enter is handled");
+
+    assert_eq!(
+        app.engine.peer_address(),
+        None,
+        "a refused rebind advertises no address, the way it leaves no record"
+    );
+}
+
+/// And a refused **first** bind never claimed one to begin with.
+#[tokio::test]
+async fn a_refused_first_bind_claims_no_reply_address() {
+    let directory = temporary();
+    let registry_dir = temporary();
+    let (mut app, recording) = registering_app(&directory, &registry_dir);
+    recording
+        .refuse
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+
+    assert_eq!(app.engine.peer_address(), None);
+}
+
+// ---- D534: the settlement receipt's notice ----
+
+/// One settled receipt for a hand-built event, so the notice tests read
+/// alike.
+fn receipt(status: ganja_protocol::PeerReceiptStatus) -> CoreEvent {
+    CoreEvent::PeerReceipt {
+        session_id: session(),
+        id: ganja_protocol::PeerMessageId::from("0198f2c4-a1b0-7000-8000-000000000042".to_owned()),
+        status,
+        to: "backend@solo".to_owned(),
+    }
+}
+
+/// **AC-29**, the notice half: each of the three settlements a receipt can
+/// carry reaches the status bar as one line naming the short id, the
+/// recipient and the status word — and nothing else happens, because there is
+/// nothing for a person to decide about a message already sent.
+#[tokio::test]
+async fn a_settlement_receipt_says_one_line_on_the_status_bar() {
+    let mut app = app();
+
+    for status in [
+        ganja_protocol::PeerReceiptStatus::Delivered,
+        ganja_protocol::PeerReceiptStatus::Denied,
+        ganja_protocol::PeerReceiptStatus::Expired,
+    ] {
+        app.handle(AppEvent::core(receipt(status)))
+            .await
+            .expect("a receipt is handled");
+
+        assert!(
+            app.permission.is_none() && app.held_dialog.is_none(),
+            "a receipt raises no dialog"
+        );
+        let line = status_line(&mut app);
+        assert!(line.contains("0198f2c4"), "the short id is named: {line}");
+        assert!(
+            line.contains("backend@solo"),
+            "the recipient is named: {line}"
+        );
+    }
+}
+
+/// The three lines themselves, byte-pinned: a person reading the bar and a
+/// model reading its own `<peer_receipt>` batch must be told about the same
+/// send in the same words, so the short id is asserted against
+/// `receipts::rendered` rather than against a second copy of its arithmetic.
+#[test]
+fn snapshot_receipt_notice_lines() {
+    let id = ganja_protocol::PeerMessageId::from("0198f2c4-a1b0-7000-8000-000000000042".to_owned());
+    let lines: Vec<String> = [
+        ganja_protocol::PeerReceiptStatus::Delivered,
+        ganja_protocol::PeerReceiptStatus::Denied,
+        ganja_protocol::PeerReceiptStatus::Expired,
+    ]
+    .into_iter()
+    .map(|status| App::receipt_notice(&id, status, "backend@solo"))
+    .collect();
+
+    let batch =
+        ganja_core::teammate::receipts::rendered(&[ganja_core::teammate::receipts::Settled {
+            id: id.clone(),
+            to: "backend@solo".to_owned(),
+            status: ganja_protocol::PeerReceiptStatus::Delivered,
+        }]);
+    let short = &id.as_str()[..super::RECEIPT_ID_SHOWN];
+    assert!(
+        batch.contains(short),
+        "the bar and the model's batch name one send the same way: {batch}"
+    );
+
+    insta::assert_snapshot!(lines.join("\n"));
+}
+
+/// A peer-authored recipient reaches the bar through `{:?}`, the same
+/// escaping every other peer word on this bar goes through — so a control
+/// character the far side chose cannot reach the terminal as one.
+#[test]
+fn a_receipt_notice_escapes_the_recipient_the_far_side_named() {
+    let id = ganja_protocol::PeerMessageId::from("0198f2c4".to_owned());
+
+    let line = App::receipt_notice(
+        &id,
+        ganja_protocol::PeerReceiptStatus::Delivered,
+        "back\u{1b}[2Jend@solo",
+    );
+
+    assert!(
+        !line.contains('\u{1b}'),
+        "no escape survives into the line: {line}"
+    );
+}
+
+// ---- D529's amendment: the classifier's fresh registry read (AC-38) ----
+
+/// Registers a live session named `name` at `stem` under `directory`, and
+/// answers the lock file that keeps it live — dropped by the caller, never
+/// before.
+fn live_holder(directory: &TempDir, stem: &str, name: &str) -> fs::File {
+    registry::write(
+        directory.path(),
+        stem,
+        &registry::Record {
+            format: registry::FORMAT,
+            session_id: format!("{stem}-0000-7000-8000-000000000003"),
+            name: name.to_owned(),
+            name_source: registry::NameSource::User,
+            cwd: "/work/holder".into(),
+            root: "/work/holder".into(),
+            pid: 1,
+            started_at: 0,
+        },
+    )
+    .expect("the fixture record writes");
+    let lock = ganja_tool::socket::open_lock(&directory.path().join(format!("{stem}.sock")))
+        .expect("the lock file opens");
+    lock.try_lock().expect("nothing else holds a fresh lock");
+
+    lock
+}
+
+/// Every `.lock` file under `directory`, so a test can diff the set across a
+/// submit.
+fn locks(directory: &TempDir) -> Vec<String> {
+    let mut found: Vec<String> = fs::read_dir(directory.path())
+        .expect("the directory reads")
+        .filter_map(|entry| {
+            let name = entry.expect("the entry reads").file_name();
+            let name = name.to_string_lossy().into_owned();
+            name.ends_with(".lock").then_some(name)
+        })
+        .collect();
+    found.sort();
+
+    found
+}
+
+/// **AC-38** (the D529 amendment): a token typed or pasted without the `@`
+/// menu ever opening still classifies into `session_mentions`, because the
+/// classifier takes one fresh registry read before letting a token fall back
+/// to literal — and the read is `registry::holders`, so it leaves a `.lock`
+/// only beside the stems whose name actually folded equal, never beside every
+/// name in the directory.
+#[tokio::test]
+async fn a_pasted_mention_that_never_opened_the_menu_still_resolves() {
+    let root = project();
+    let registry_dir = temporary();
+    let _held = live_holder(&registry_dir, "0298c1a2", "backend");
+    // A second registered session whose name no token names, and whose lock
+    // file does **not** exist yet: `is_live` would create one if the read
+    // probed every record it listed, so this record is what makes the
+    // directory diff below say something.
+    registry::write(
+        registry_dir.path(),
+        "0398d3c4",
+        &registry::Record {
+            format: registry::FORMAT,
+            session_id: "0398d3c4-0000-7000-8000-000000000004".to_owned(),
+            name: "frontend".to_owned(),
+            name_source: registry::NameSource::User,
+            cwd: "/work/other".into(),
+            root: "/work/other".into(),
+            pid: 2,
+            started_at: 0,
+        },
+    )
+    .expect("the second fixture record writes");
+    let before = locks(&registry_dir);
+    assert!(
+        !before.iter().any(|lock| lock.starts_with("0398")),
+        "the unnamed session's lock does not exist before the read: {before:?}"
+    );
+    let app = app()
+        .with_cwd(root.path())
+        .with_root(root.path())
+        .with_registry_directory(registry_dir.path());
+    assert!(
+        app.session_listing.is_empty(),
+        "the `@` menu never opened, so nothing is cached"
+    );
+
+    let text = "ping @backend and @nobody";
+    let mentions = mention::attachable(text, &app.root);
+    let session_mentions = app.session_mention_tokens(text, &mentions);
+
+    assert_eq!(
+        session_mentions,
+        vec!["backend".to_owned()],
+        "the live registry name classifies; the token nothing answers to stays literal"
+    );
+    let after = locks(&registry_dir);
+    let fresh: Vec<&String> = after.iter().filter(|lock| !before.contains(lock)).collect();
+    assert!(
+        fresh.is_empty(),
+        "the only lock touched is the holder's own, which the fixture already made: {fresh:?}"
+    );
+    assert!(
+        !after.iter().any(|lock| lock.starts_with("0398")),
+        "no lock is scattered beside a name that never folded equal: {after:?}"
+    );
+}
+
+/// The classification **order** is what the fresh read may not disturb: a
+/// real file named `backend` still wins over a live session of that name,
+/// exactly as it did before the read existed (the D113 rule, AC-22's own
+/// pin, re-asserted here against the new arm).
+#[tokio::test]
+async fn a_real_file_still_wins_over_a_live_session_of_the_same_name() {
+    let root = project();
+    fs::write(root.path().join("backend"), "shadowing file\n").expect("the fixture file writes");
+    let registry_dir = temporary();
+    let _held = live_holder(&registry_dir, "0298c1a2", "backend");
+    let app = app()
+        .with_cwd(root.path())
+        .with_root(root.path())
+        .with_registry_directory(registry_dir.path());
+
+    let mentions = mention::attachable("@backend", &app.root);
+    let session_mentions = app.session_mention_tokens("@backend", &mentions);
+
+    assert_eq!(
+        mentions.iter().map(|m| m.path.as_str()).collect::<Vec<_>>(),
+        vec!["backend"],
+        "the file still wins"
+    );
+    assert!(
+        session_mentions.is_empty(),
+        "and the fresh read never gets to see a token the file already took"
+    );
+}
+
+/// A session naming *itself* gets a literal token: `holders` drops this
+/// session's own record, which is the honest answer to a mention nobody
+/// could deliver.
+#[tokio::test]
+async fn a_token_naming_this_session_itself_stays_literal() {
+    let root = project();
+    let registry_dir = temporary();
+    let app = app()
+        .with_cwd(root.path())
+        .with_root(root.path())
+        .with_registry_directory(registry_dir.path());
+    let stem = "0298c1a2";
+    registry::write(
+        registry_dir.path(),
+        stem,
+        &registry::Record {
+            format: registry::FORMAT,
+            session_id: app.engine.session_id().as_str().to_owned(),
+            name: "myself".to_owned(),
+            name_source: registry::NameSource::User,
+            cwd: "/work/here".into(),
+            root: "/work/here".into(),
+            pid: std::process::id(),
+            started_at: 0,
+        },
+    )
+    .expect("the fixture record writes");
+    let _held = ganja_tool::socket::open_lock(&registry_dir.path().join(format!("{stem}.sock")))
+        .expect("the lock file opens");
+
+    let mentions = mention::attachable("@myself", &app.root);
+
+    assert!(
+        app.session_mention_tokens("@myself", &mentions).is_empty(),
+        "this session is not somewhere to send to"
+    );
+}
+
+/// The read is taken **once per distinct token**, not once per repetition:
+/// the memo is asked twice for one name with the record removed in between,
+/// and answers the first read's answer both times.
+#[tokio::test]
+async fn the_fresh_read_is_taken_once_per_distinct_token() {
+    let root = project();
+    let registry_dir = temporary();
+    let _held = live_holder(&registry_dir, "0298c1a2", "backend");
+    let app = app()
+        .with_cwd(root.path())
+        .with_root(root.path())
+        .with_registry_directory(registry_dir.path());
+    let mut fresh = super::FreshHolders::new();
+
+    assert!(fresh.holds(&app, "backend"), "the first ask reads the disk");
+    fs::remove_file(registry::record_path(registry_dir.path(), "0298c1a2"))
+        .expect("the record removes");
+
+    assert!(
+        fresh.holds(&app, "backend"),
+        "the second ask answers from the memo rather than reading again"
+    );
+    assert!(
+        !fresh.holds(&app, "gone"),
+        "a name never asked about is read now, and is not held"
     );
 }

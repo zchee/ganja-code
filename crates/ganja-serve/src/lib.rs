@@ -28,29 +28,54 @@
 //!   protocol event, but there is no `/question` or
 //!   `/question/{id}/reply` route yet. Mirroring the existing `GET
 //!   /permission` plus `POST /permission/{id}/reply` pair is follow-up work.
-//! * **A Unix socket serves three routes to the same user and nobody else**
-//!   (**D505**, no upstream counterpart — opencode serves TCP only).
-//!   [`Listen`] names the transport, [`Address`] reports the one bound, and
-//!   [`socket`] holds the binder's half of the scheme (the scheme itself is
-//!   `ganja_tool::socket`'s, re-exported): a private `/tmp/ganja-<uid>/`
-//!   directory the bind refuses unless it is ours at `0700`, one `0600`
-//!   socket per session named by its id, a stale file reused and a live one
-//!   never stolen, and a peer-uid check on every accepted connection. The
-//!   password posture is untouched — a socket takes no password because the
-//!   filesystem already said who may connect — and the guard that reads the
-//!   transport is `routes.rs`'s. **What the socket serves is exactly what
-//!   its consumers use** (a standing ruling): `GET /global/health`,
-//!   `GET /team` and `POST /team/{name}/message`, and nothing else — every
-//!   session-mutating route (a prompt, an abort, a shell line, a command, a
-//!   revert, an agent or model switch, a permission reply) and every other
-//!   read of the session is TCP's alone and answers `404` on the socket.
-//!   The socket exists so a peer reaches the lead and the lead reaches its
-//!   members; and same-uid is not trusted — `ganja-permission`'s premise is
-//!   that code this user runs (an MCP server, a hook, the model's `bash`) is
-//!   not the user, and a credential-less socket that served the write API
-//!   would hand every such thing a prompt into every session on the machine.
-//!   A route added to the socket later is added deliberately, named in
-//!   `routes::socket_routes`' doc, and pinned by `tests/team.rs`.
+//! * **A Unix socket serves four routes to the same user and nobody else**
+//!   (**D505**, **D534**; no upstream counterpart — opencode serves TCP
+//!   only). [`Listen`] names the transport, [`Address`] reports the one
+//!   bound, and [`socket`] holds the binder's half of the scheme (the scheme
+//!   itself is `ganja_tool::socket`'s, re-exported): a private
+//!   `/tmp/ganja-<uid>/` directory the bind refuses unless it is ours at
+//!   `0700`, one `0600` socket per session named by its id, a stale file
+//!   reused and a live one never stolen, and a peer-uid check on every
+//!   accepted connection. The password posture is untouched — a socket takes
+//!   no password because the filesystem already said who may connect — and
+//!   the guard that reads the transport is `routes.rs`'s. **What the socket
+//!   serves is exactly what its consumers use** (a standing ruling): `GET
+//!   /global/health`, `GET /team`, `POST /team/{name}/message` and `POST
+//!   /peer/receipt`, and nothing else — every session-mutating route (a
+//!   prompt, an abort, a shell line, a command, a revert, an agent or model
+//!   switch, a permission reply) and every other read of the session is
+//!   TCP's alone and answers `404` on the socket. The socket exists so a
+//!   peer reaches the lead and the lead reaches its members; and same-uid is
+//!   not trusted — `ganja-permission`'s premise is that code this user runs
+//!   (an MCP server, a hook, the model's `bash`) is not the user, and a
+//!   credential-less socket that served the write API would hand every such
+//!   thing a prompt into every session on the machine. A route added to the
+//!   socket later is added deliberately, named in `routes::socket_routes`'
+//!   doc, and pinned by `tests/team.rs`.
+//! * **Why the fourth route keeps that posture** (**D534**). The rule the
+//!   socket's table holds is *no write API without a credential*, and a
+//!   route is a write API when posting to it changes what the session will
+//!   do next. `POST /peer/receipt` — another session's settlement of a
+//!   message this one sent and was told synchronously was being held for
+//!   review — does not. Its whole effect is to settle one entry in a
+//!   **volatile, in-memory map of ids this session itself minted and
+//!   posted**: nothing reaches disk, no turn is enqueued, no permission
+//!   state moves, no mailbox is written, and no text a poster wrote ever
+//!   reaches the model, because the only thing a poster supplies is one of
+//!   three enum values and every word the model reads about it is ganja's
+//!   own rendering. **The id is the whole capability, and this route hands
+//!   none out**: an entry exists only because this session minted a v7 UUID,
+//!   posted it to exactly one address, and was told that address is holding
+//!   the message — so a process that can name the id either is that address
+//!   or was told by it, and the route reaches no further than the sending
+//!   session already reached when it chose where to send. **And it answers
+//!   identically whether or not the id was outstanding**, for the reason
+//!   `POST /team/{name}/message` answers a refuse in an accept's bytes: a
+//!   distinct answer would let any same-uid process enumerate which
+//!   settlements a session is waiting on. What a forged receipt can do is
+//!   lie about one known message's fate to the session that sent it; it
+//!   cannot inject text, enqueue a turn, touch permission state, or reach an
+//!   id it does not know.
 
 mod auth;
 mod error;

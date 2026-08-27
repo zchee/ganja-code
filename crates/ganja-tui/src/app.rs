@@ -36,7 +36,8 @@ use ganja_core::{
 };
 use ganja_protocol::{
     Command, Event as CoreEvent, FinishReason, HeldDecision, HeldId, HoldCause, Mention, Message,
-    MessageId, PartBody, PermissionId, PermissionReply, RevertScope, Role, ToolState, Usage,
+    MessageId, PartBody, PeerMessageId, PeerReceiptStatus, PermissionId, PermissionReply,
+    RevertScope, Role, ToolState, Usage,
 };
 use ganja_tool::{Credentials, FileTimes, ToolCtx, job::Jobs as _, registry};
 use ratatui::{
@@ -140,6 +141,13 @@ const MAX_TURN_USAGE: usize = 1000;
 /// remainder stays in the inbox — the durable queue — and rides the next
 /// pass, oldest first; see the function's own note for why that is free.
 const PEER_BATCH_CAP: usize = 8;
+
+/// How much of a settled send's id [`App::receipt_notice`] shows (**D534**):
+/// the same eight characters `ganja_core::teammate::receipts::rendered` shows
+/// the model, so a person comparing the bar against the transcript is reading
+/// one send named twice rather than two sends. The full id is a v7 UUID that
+/// nobody reads and no status bar has room for.
+const RECEIPT_ID_SHOWN: usize = 8;
 
 /// How long a first Esc stays armed for the backtrack gesture (**D467**).
 ///
@@ -1484,7 +1492,11 @@ impl App {
         // touching `SessionSocket::sync` itself (`binder.rs` stays
         // byte-untouched) — so a refused rebind still leaves no stale
         // advertisement behind (N9a). A first bind (nothing registered yet)
-        // removes nothing.
+        // removes nothing. The peer reply address goes with it, through
+        // `unregister_self`'s own unconditional clear (**D532**): the third
+        // moment the record moves is the third moment the wire's address
+        // does, and routing both through one function is what keeps them
+        // from drifting.
         if self
             .registered
             .as_ref()
@@ -1560,6 +1572,14 @@ impl App {
             tracing::warn!(stem, %error, "failed to write this session's registration record");
             return;
         }
+        // The wire's own half of the same fact (**D532**): the socket this
+        // session answers on is what a send stamps as `reply_to` and what its
+        // hop chain carries as this session's marker, and the engine sets both
+        // through one seam. Called here rather than beside the bind so the
+        // disk's advertisement and the wire's reply address move together — a
+        // record written and an address unset would offer a name nobody could
+        // answer, and the reverse would answer for a session nothing lists.
+        self.engine.set_peer_address(Some(&path));
         self.registered = Some((session_id, path));
     }
 
@@ -1568,6 +1588,13 @@ impl App {
     /// named it still being bound — see the two call sites: a rebind that
     /// has only just been observed, and the tail of [`App::run`].
     fn unregister_self(&mut self) {
+        // Cleared **before** the early returns below and unconditionally
+        // (**D532**): every road out of this function is a road on which this
+        // session stops advertising, and an address left standing past one of
+        // them would stamp a `reply_to` at a socket about to go quiet. The
+        // engine's own cell is idempotent, so clearing one that is already
+        // clear costs a lock and says nothing.
+        self.engine.set_peer_address(None);
         let Some((_, path)) = self.registered.take() else {
             return;
         };
@@ -2240,6 +2267,32 @@ impl App {
         if let Some(inbox) = &self.member {
             inbox.report_idle(reason, failure.as_deref()).await;
         }
+    }
+
+    /// The one line a settlement receipt reaches the status bar as
+    /// (**D534**): which send it settles, who it was sent to, and the word
+    /// for how it ended.
+    ///
+    /// The id is cut to the same eight characters
+    /// [`ganja_core::teammate::receipts::rendered`] cuts it to — the bar and
+    /// the model's own batch name one send the same way, which is what lets a
+    /// person read the two side by side; a test pins the agreement against
+    /// that function rather than against a second copy of its arithmetic.
+    ///
+    /// `to` is the far side's own answer, already cut to a line by the socket
+    /// crossing's `reflected`, and it is written through `{:?}` for the reason
+    /// every other peer-authored word on this bar is: the escaping is what
+    /// keeps a control character a peer chose from reaching the terminal.
+    fn receipt_notice(id: &PeerMessageId, status: PeerReceiptStatus, to: &str) -> String {
+        let id = id.as_str();
+        let short = &id[..id.len().min(RECEIPT_ID_SHOWN)];
+        let word = match status {
+            PeerReceiptStatus::Delivered => "delivered",
+            PeerReceiptStatus::Denied => "denied",
+            PeerReceiptStatus::Expired => "expired",
+        };
+
+        format!("peer message {short} to {to:?}: {word}")
     }
 
     /// One §6.2 pass, or [`None`] on a session leading no team.
@@ -6683,8 +6736,30 @@ impl App {
     /// `mentions`, and skipped here (the D113 rule, file wins, kept first);
     /// else matching a roster name or a name the last `@` menu listed (the
     /// registry's own fold), or carrying the `uds:` scheme ⇒ collected here,
-    /// as typed; anything else is left where [`mention::scan`] found it —
-    /// literal text, exactly as a mistyped path is.
+    /// as typed; else — the D529 amendment this landing makes — matching a
+    /// name the registry holds *right now* ⇒ collected here too; anything
+    /// else is left where [`mention::scan`] found it — literal text, exactly
+    /// as a mistyped path is.
+    ///
+    /// The fresh read is what makes a **pasted or hand-typed** `@backend`
+    /// behave like one completed from the menu. Until this landing the
+    /// registry half of the answer was [`App::session_listing`], which only
+    /// the `@` menu's own open populates, so a token that never raised the
+    /// menu stayed literal however live the session it named was. The order
+    /// above is unchanged and the read sits **last**: it runs only for a
+    /// token that missed every cheap source, so an ordinary prompt — and a
+    /// prompt whose every mention is a file — touches the directory not at
+    /// all.
+    ///
+    /// It is [`registry::holders`] rather than [`registry::list`] plus a
+    /// probe of everything it returns, and the difference is not a matter of
+    /// taste: [`registry::is_live`] **creates** the lock file it opens, so
+    /// probing every listed record would scatter a `.lock` beside every name
+    /// in a shared directory on every submit. `holders` drops this session's
+    /// own record, folds by name, and probes only the records that matched —
+    /// the resolver's own order. The cost is one blocking directory read on
+    /// this thread, at human submit cadence, named here rather than
+    /// discovered later.
     ///
     /// A bare `/path` staying literal is deliberate (**AC-22**): only the
     /// menu's own `uds:` completion, or a hand-typed one, carries the intent
@@ -6694,6 +6769,7 @@ impl App {
             .team_roster()
             .map(|view| view.members.into_iter().map(|member| member.name).collect())
             .unwrap_or_default();
+        let mut fresh = FreshHolders::new();
 
         mention::scan(text)
             .into_iter()
@@ -6707,6 +6783,7 @@ impl App {
                         .session_listing
                         .iter()
                         .any(|session| registry::same_name(&session.name, &token.path))
+                    || fresh.holds(self, &token.path)
             })
             .map(|token| token.path)
             .collect()
@@ -7116,10 +7193,19 @@ impl App {
                 self.sync_dialog_status();
                 self.poll_held();
             }
-            // A settlement receipt for a message this session sent (D534).
-            // No behavior yet — the frontend notice is W3/L3b's own work —
-            // named here only to keep this match exhaustive.
-            CoreEvent::PeerReceipt { .. } => {}
+            // A settlement receipt for a message this session sent
+            // (**D534**): one status-bar notice, in this bar's own voice.
+            //
+            // A notice and nothing else — no dialog, no sound, no config key.
+            // A receipt says how a message this session already sent turned
+            // out; there is nothing for a person to decide about it, and the
+            // model reads its own `<peer_receipt>` batch at the next prompt
+            // intake regardless of whether anybody was looking at the bar.
+            CoreEvent::PeerReceipt { id, status, to, .. } => {
+                self.status
+                    .set_notice(Some(Self::receipt_notice(&id, status, &to)));
+                self.dirty = true;
+            }
             // A compaction reporting how far its summary has streamed (user
             // directive, 2026-08-25): the strip flips to the compacting
             // dress — armed here even before any message opens, which is how
@@ -7506,6 +7592,61 @@ const NOBODY_TO_STOP: &str = "this team has no teammates to stop";
 /// before answering the lead's shutdown request.
 const SHUTTING_DOWN: &str =
     "the lead asked this teammate to shut down \u{b7} waiting for the turn to end";
+
+/// One submit's memo over [`registry::holders`] (**D529**'s amendment,
+/// AC-38), so the classifier's last-resort read is taken **once per distinct
+/// token** rather than once per candidate record or once per repetition of
+/// the same name.
+///
+/// A submit carrying no unmatched `@`-token never constructs a read at all —
+/// the arm this feeds is the last one in an `||` chain — and the ordinary
+/// submit carrying one takes exactly one directory read, which is the cost
+/// the design priced. The memo exists for the prompt that names the same
+/// absent session twice: without it that prompt would pay twice for one
+/// answer, and would probe the same lock twice.
+///
+/// Deliberately not a field on [`App`]: an answer cached across submits
+/// would be [`App::session_listing`]'s own staleness under a new name, which
+/// is the defect this arm exists to close.
+#[derive(Default)]
+struct FreshHolders {
+    /// `(token, whether the registry holds a live session under it)`, in the
+    /// order the tokens were asked about. A `Vec` rather than a map for the
+    /// hold buffer's own reason: at this size a linear scan is cheaper than
+    /// what a map's invariants cost, and one submit's `@`-tokens are few.
+    asked: Vec<(String, bool)>,
+}
+
+impl FreshHolders {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether some **other** live session is registered under `token` right
+    /// now — `holders` drops this session's own record, so a person naming
+    /// their own session's name gets a literal token, which is the honest
+    /// answer to a mention nobody could deliver.
+    ///
+    /// A listing that cannot be taken answers `false`: this is a
+    /// classification, and one that cannot be made leaves the token where
+    /// [`mention::scan`] found it, exactly as an unmatched one is left.
+    fn holds(&mut self, app: &App, token: &str) -> bool {
+        if let Some((_, held)) = self
+            .asked
+            .iter()
+            .find(|(asked, _)| registry::same_name(asked, token))
+        {
+            return *held;
+        }
+
+        let held = registry::holders(&app.registry_dir(), token, app.engine.session_id().as_str())
+            .map(|holders| !holders.is_empty())
+            .unwrap_or(false);
+        self.asked.push((token.to_owned(), held));
+
+        held
+    }
+}
 
 /// A `shutdown_request` waiting on a running turn (§10.3-4).
 #[derive(Debug)]

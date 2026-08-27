@@ -1,0 +1,7 @@
+---
+source: crates/ganja-tui/src/app_tests.rs
+expression: "lines.join(\"\\n\")"
+---
+peer message 0198f2c4 to "backend@solo": delivered
+peer message 0198f2c4 to "backend@solo": denied
+peer message 0198f2c4 to "backend@solo": expired

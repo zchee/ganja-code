@@ -24,21 +24,24 @@
 //! /session/{id}/agent` / `…/model` routes (deviation:
 //! switches-are-state-not-prompt-fields).
 //!
-//! # The team routes (D-13, **D505**)
+//! # The team and peer routes (D-13, **D505**, **D534**)
 //!
 //! Spec: Claude Code's teammates (§5.6, cross-session addressing) — upstream
-//! opencode has no teammates and no counterpart to any of it. Two routes,
+//! opencode has no teammates and no counterpart to any of it. Three routes,
 //! and two route tables built by the transport: `GET /team` answers on TCP
 //! and on the session's own Unix socket alike, read-only, one JSON body of
 //! the engine's `TeamView`; `POST /team/{name}/message` is **registered on
 //! the socket router only**, so on TCP it is not there — `404`, the same
 //! answer as any route that does not exist, rather than a `403` that would
-//! announce a door and refuse it. And the socket's table is *only* those
-//! two plus `GET /global/health` — see [`socket_routes`] — so a listener
-//! that takes no credential serves nothing that mutates a session. Both
-//! team routes reach the team through engine accessors and never through
-//! the team crate: serve invents no state, holds no team, and keeps its
-//! dependency list where it was.
+//! announce a door and refuse it — and `POST /peer/receipt`, the settlement
+//! of a held message this session itself sent, is socket-only for the same
+//! reason and answered the same way on TCP. And the socket's table is *only*
+//! those three plus `GET /global/health` — see [`socket_routes`], which
+//! carries the argument for why the fourth entry leaves the credential-less
+//! posture where it was — so a listener that takes no credential serves
+//! nothing that mutates a session. All three reach the engine through its
+//! own accessors and never through the team crate: serve invents no state,
+//! holds no team, and keeps its dependency list where it was.
 
 use axum::{
     Json,
@@ -50,7 +53,8 @@ use axum::{
     routing::{get, post},
 };
 use ganja_core::{
-    EngineError, Incoming, NotReceived, SocketDelivered, SocketMessage, config::AgentMode,
+    EngineError, Incoming, NotReceived, SocketDelivered, SocketMessage, SocketReceipt,
+    config::AgentMode, engine::PeerEnvelope,
 };
 use ganja_protocol::{Command, Mention, PermissionId, PermissionReply, SessionId, team::TeamView};
 use serde::Deserialize;
@@ -116,14 +120,17 @@ fn tcp_routes() -> axum::Router<AppState> {
         .route("/team", get(team))
 }
 
-/// Every route a session's socket serves — **exactly three**, the ones its
+/// Every route a session's socket serves — **exactly four**, the ones its
 /// consumers use, and nothing else (**D505**, the ruling recorded in the
 /// crate docs): `GET /global/health` for `ganja sessions --live`, `GET /team`
-/// for whoever asks who leads, and `POST /team/{name}/message` for a peer's
-/// plain message. Every route that mutates the session — a prompt, an abort,
-/// a shell line, a permission reply, the switches — is TCP's alone, and on
-/// the socket does not exist: `404`, the same answer as any route that is
-/// not there, rather than a `403` that would announce a door and refuse it.
+/// for whoever asks who leads, `POST /team/{name}/message` for a peer's
+/// plain message, and — added deliberately in **D534**, which is what the
+/// section below exists to record — `POST /peer/receipt` for another
+/// session's settlement of a held message this one sent it. Every route that
+/// mutates the session — a prompt, an abort, a shell line, a permission
+/// reply, the switches — is TCP's alone, and on the socket does not exist:
+/// `404`, the same answer as any route that is not there, rather than a
+/// `403` that would announce a door and refuse it.
 ///
 /// The socket takes no credential, so this table is the whole of what a
 /// same-uid peer may do to a session; and same-uid is not the same as
@@ -132,11 +139,49 @@ fn tcp_routes() -> axum::Router<AppState> {
 /// that served the write API to it would hand every such thing a prompt into
 /// every session on the machine. What the socket is for is a peer reaching
 /// the lead and the lead reaching its members, and that is what it serves.
+///
+/// # Why the fourth route keeps that posture (**D534**, **AC-44**)
+///
+/// The rule this table holds is **no write API without a credential**, and a
+/// route is a write API when posting to it changes what the session will do
+/// next. `POST /peer/receipt` does not. Its whole effect is to settle one
+/// entry in a **volatile, in-memory map of ids this session itself minted
+/// and posted** — nothing reaches disk, no turn is enqueued, no permission
+/// state moves, no mailbox is written, and no text a poster wrote ever
+/// reaches the model, because the only thing a poster supplies is one of
+/// three enum values and every word the model reads about it is ganja's own
+/// rendering.
+///
+/// **The id is the whole capability, and this route hands none out.** An
+/// entry exists only because this session minted a v7 UUID, posted it to
+/// exactly one address, and was told synchronously that the message is being
+/// held there. A process that can name that id either is that address or was
+/// told by it, so the route reaches no further than the sending session
+/// already reached when it chose where to send; a process that cannot name
+/// one is answered exactly as a process that can.
+///
+/// **And it answers identically whether or not the id was outstanding** —
+/// the same rule, for the same reason, as [`team_message`]'s outcome table:
+/// a distinct answer would let any same-uid process enumerate which
+/// settlements a session is waiting on. `Engine::apply_receipt` returns
+/// nothing at all, so this handler has nothing to branch on even if a later
+/// edit wanted it to.
+///
+/// What a forged receipt can do, then, is lie about one known message's fate
+/// to the session that sent it. It cannot inject text, enqueue a turn, touch
+/// permission state, or reach an id it does not know — and the same argument
+/// from the settling end is `ganja-core`'s `teammate::receipts` module doc.
+///
+/// The whole of this section is **ganja-inferred** and marked so: the
+/// reference carries receipts, but it has no credential-less socket table to
+/// weigh one against, so what it says nothing about is exactly the question
+/// this paragraph answers.
 fn socket_routes() -> axum::Router<AppState> {
     axum::Router::new()
         .route("/global/health", get(health))
         .route("/team", get(team))
         .route("/team/{name}/message", post(team_message))
+        .route("/peer/receipt", post(peer_receipt))
 }
 
 /// Every request passes here first: one log line that is **method and path
@@ -648,6 +693,18 @@ async fn team(State(state): State<AppState>) -> Result<Json<TeamView>, ApiError>
 /// computes, the crate's stateless contract holding on the socket's one
 /// write route as it does everywhere else.
 ///
+/// # The envelope (**D532**)
+///
+/// The four optional wire fields beside `from`/`text`/`summary` — the
+/// sender's minted `message_id`, its asserted `from_mode`, the `hop_chain`
+/// it crossed and the `reply_to` it answers on — are read off the very same
+/// body and handed to the engine as a [`PeerEnvelope`], which is the only
+/// thing this handler does with them. **Nothing here judges any of them**:
+/// the attestation, the chain and the address are all the gate's to weigh,
+/// and a body that carries none of the four is indistinguishable from the
+/// one an older sender writes, so the engine answers it exactly as it did
+/// before this landing.
+///
 /// # The outcome table
 ///
 /// | outcome | answer |
@@ -656,7 +713,7 @@ async fn team(State(state): State<AppState>) -> Result<Json<TeamView>, ApiError>
 /// | ladder refusal: no team, a name nobody answers to | `404`, likewise |
 /// | accepted and written | `200`, the uniform arrival note |
 /// | explicit refuse, and every guard drop | `200`, **byte-identical** to the accept |
-/// | held for a person's review | `200`, the note naming held and its cause |
+/// | held for a person's review | `200`, the note naming held and its cause, plus the typed `held` fact |
 /// | write failure after an accept | `500` |
 ///
 /// The ladder ([`NotReceived`]) is *shape*, and predates policy — the
@@ -691,16 +748,34 @@ async fn team_message(
     Path(name): Path<String>,
     body: Bytes,
 ) -> Result<Json<SocketDelivered>, ApiError> {
-    let body: SocketMessage = parse(&body)?;
+    // Destructured rather than field-read, so a fifth wire field cannot be
+    // added later and quietly go unforwarded: this stops compiling instead.
+    let SocketMessage {
+        from,
+        text,
+        summary,
+        message_id,
+        from_mode,
+        hop_chain,
+        reply_to,
+    } = parse(&body)?;
 
-    let sent = state
+    let received = state
         .engine
-        .receive_peer_message(Incoming {
-            from: body.from,
-            to: name,
-            text: body.text,
-            summary: body.summary,
-        })
+        .receive_peer_envelope(
+            Incoming {
+                from,
+                to: name,
+                text,
+                summary,
+            },
+            PeerEnvelope {
+                message_id,
+                from_mode,
+                hop_chain,
+                reply_to,
+            },
+        )
         .await
         .map_err(|refused| match refused {
             NotReceived::NoTeam | NotReceived::Unknown { .. } => {
@@ -714,14 +789,46 @@ async fn team_message(
         })?;
 
     Ok(Json(SocketDelivered {
-        to: sent.to,
-        note: sent.note,
-        // This route does not yet run the admission gate that could hold a
-        // message and fill in a cause (W2, D534); until it does, every
-        // answer here is an accept, and `held`'s own absence keeps it
-        // byte-identical to today's two-field body.
-        held: None,
+        to: received.sent.to,
+        note: received.sent.note,
+        // The gate's own typed answer, carried and never computed (**N2**):
+        // `Some` for a hold alone, so an accept and a refuse keep answering
+        // each other's exact bytes and the enumeration channel this table
+        // closes stays closed.
+        held: received.held,
     }))
+}
+
+/// `POST /peer/receipt` (**D534**, socket router only): another session's
+/// settlement of a message **this** one sent and was told, synchronously,
+/// was being held for review.
+///
+/// The body is `ganja-core`'s [`SocketReceipt`], the struct the settling
+/// side serializes, so the two ends cannot drift. The answer is `204` in
+/// every case, and that is the point rather than a convenience: an id this
+/// session is holding open, an id it never minted, one it already settled,
+/// and a second terminal for the same id are four different facts about the
+/// receiver and exactly one answer on the wire (**AC-26**), for the reason
+/// [`socket_routes`]' own section gives. `Engine::apply_receipt` answers
+/// nothing at all, so there is nothing here to branch on.
+///
+/// A body that does not parse is still `400` — shape predates policy, the
+/// way [`team_message`]'s ladder does — and an unknown status, the string
+/// `"held"` included, is such a body: ganja answers `held` synchronously on
+/// the message route and this one carries only the three terminals (v2
+/// §"Receipts and sender UX", evidence 886033-886075, 886636-886697, for the
+/// status set this narrows; v2 §"Explicit outcomes (`P8a`)", evidence
+/// 620644-620683, for why a hold is the only outcome that emits one at all).
+///
+/// The status this route answers with, and the rule that it is the same one
+/// four ways, are **ganja-inferred**: the reference records what a receipt
+/// carries and not what the surface receiving it replies, so the answer here
+/// is derived from the socket's own posture rather than ported.
+async fn peer_receipt(State(state): State<AppState>, body: Bytes) -> Result<StatusCode, ApiError> {
+    let receipt: SocketReceipt = parse(&body)?;
+    state.engine.apply_receipt(receipt).await;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// What `GET /team` says when this session leads no team. Its own sentence
@@ -765,3 +872,7 @@ async fn reply_permission(
 
     Ok(StatusCode::NO_CONTENT)
 }
+
+#[cfg(test)]
+#[path = "routes_tests.rs"]
+mod tests;

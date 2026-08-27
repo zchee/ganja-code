@@ -755,10 +755,18 @@ async fn main() -> Result<()> {
 
     match cli.command {
         None => {
-            // The one binder this binary has (**D505**): the UI may not link
-            // the server, so it is handed the door and decides — lead only —
-            // whether to open it. Windows is parked, and a build there hands
-            // the UI nothing rather than a door that would refuse.
+            // The one binder this binary has (**D505**): the UI may not
+            // link the server, so it is handed the door and decides for
+            // itself whether to open it. **Handed in unconditionally** —
+            // this binary takes no view of what the session turns out to
+            // be, and never has: which sessions actually bind is
+            // `ganja-tui`'s own gate (`lib.rs`'s assembly match — a session
+            // that locates a config home and is not a pane member), which
+            // is not "lead only" and was not on the day D505 shipped. The
+            // lister below is handed in on exactly the same terms; the two
+            // gates behind them differ by one condition, and both live over
+            // there. Windows is parked, and a build there hands the UI
+            // nothing rather than a door that would refuse.
             #[cfg(unix)]
             let binder: Option<Box<dyn ganja_tui::binder::Binder>> =
                 Some(Box::new(binder::SocketBinder::new(cli.socket_dir.clone())));
@@ -767,11 +775,13 @@ async fn main() -> Result<()> {
 
             // The live-session listing the `@` menu offers beside files and
             // roster (**D529** Axis 5, **D530**'s re-derived gate): handed
-            // in unconditionally, wider than the binder's lead-only gate —
-            // `ganja-tui` is the one that knows whether this session is a
-            // pane member, and gates its own use of it accordingly. The same
-            // directory the binder binds under, so the two can never read a
-            // different `--socket-dir`.
+            // in unconditionally, exactly as the binder above is. What
+            // differs is downstream — `ganja-tui` gates the lister on
+            // membership alone, one condition wider than the gate it puts
+            // in front of the binder — and the difference is stated where
+            // both gates are read rather than guessed at from here. The
+            // same directory the binder binds under, so the two can never
+            // read a different `--socket-dir`.
             #[cfg(unix)]
             let lister: Option<Box<dyn ganja_tui::lister::Lister>> =
                 Some(Box::new(lister::RegistryLister::new(
