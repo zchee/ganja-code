@@ -389,8 +389,10 @@ pub enum ReceiverClass {
 }
 
 /// A sender's asserted class — the envelope's two tokens (v2 §"Receiver
-/// permission classes"); no ganja wire carries one yet, so only tests and
-/// the matrix function's signature build one (**D523**).
+/// permission classes"), carried on the wire since **D532** as
+/// [`crate::subagent::SocketMessage`]'s `from_mode` and reaching this
+/// gate as [`WireFacts::sender`]; before that only tests and the matrix
+/// function's signature ever built one (**D523**).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SenderClass {
     /// The sender says it prompts.
