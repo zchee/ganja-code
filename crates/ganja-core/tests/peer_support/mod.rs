@@ -27,6 +27,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use ganja_core::protocol::{MemberBackend, MemberView, TeamView};
+
 /// How long a test waits for the stub to record something before declaring
 /// the fixture broken.
 pub const EVENTUALLY: Duration = Duration::from_secs(10);
@@ -85,13 +87,14 @@ impl Answer {
 pub struct FarSide {
     directory: tempfile::TempDir,
     path: PathBuf,
+    team: String,
     taken: Arc<Mutex<Vec<Taken>>>,
     answers: Arc<Mutex<VecDeque<Answer>>>,
     running: Arc<AtomicBool>,
 }
 
 impl FarSide {
-    /// A peer that accepts everything.
+    /// A peer that accepts everything, leading a team of nobody.
     #[must_use]
     pub fn accepting() -> Self {
         Self::answering(Vec::new())
@@ -108,6 +111,7 @@ impl FarSide {
                 .expect("a private directory"),
             "0198c1a2",
             answers,
+            0,
         )
     }
 
@@ -122,10 +126,32 @@ impl FarSide {
                 .expect("a private directory"),
             stem,
             answers,
+            0,
         )
     }
 
-    fn at(directory: tempfile::TempDir, stem: &str, answers: Vec<Answer>) -> Self {
+    /// A peer that accepts everything and names `teammates` members beside
+    /// its lead — the one place a receiver's own shape reaches this wire, and
+    /// so the only way a test comparing two receiver kinds can differ them.
+    #[must_use]
+    pub fn leading(teammates: usize) -> Self {
+        Self::at(
+            tempfile::Builder::new()
+                .permissions(std::fs::Permissions::from_mode(0o700))
+                .tempdir()
+                .expect("a private directory"),
+            "0198c1a2",
+            Vec::new(),
+            teammates,
+        )
+    }
+
+    fn at(
+        directory: tempfile::TempDir,
+        stem: &str,
+        answers: Vec<Answer>,
+        teammates: usize,
+    ) -> Self {
         let path = directory.path().join(format!("{stem}.sock"));
         let listener = UnixListener::bind(&path).expect("a socket binds");
         listener
@@ -136,9 +162,11 @@ impl FarSide {
         let answers = Arc::new(Mutex::new(VecDeque::from(answers)));
         let running = Arc::new(AtomicBool::new(true));
 
+        let team = roster(teammates);
         let served = Arc::clone(&taken);
         let queued = Arc::clone(&answers);
         let alive = Arc::clone(&running);
+        let answered = team.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 if !alive.load(Ordering::Relaxed) {
@@ -147,13 +175,14 @@ impl FarSide {
                 let Ok(stream) = stream else {
                     return;
                 };
-                serve_one(stream, &served, &queued);
+                serve_one(stream, &served, &queued, &answered);
             }
         });
 
         Self {
             directory,
             path,
+            team,
             taken,
             answers,
             running,
@@ -176,6 +205,14 @@ impl FarSide {
     #[must_use]
     pub fn address(&self) -> String {
         format!("uds:{}", self.path.display())
+    }
+
+    /// What this peer answers `GET /team` with — exposed so a test whose
+    /// whole claim is that two peers differ can assert that they do, rather
+    /// than trust a constructor argument it cannot see the effect of.
+    #[must_use]
+    pub fn team_answer(&self) -> &str {
+        &self.team
     }
 
     /// Everything it has taken in so far.
@@ -240,12 +277,40 @@ impl Drop for FarSide {
     }
 }
 
+/// The `GET /team` body a peer leading `teammates` members answers with,
+/// serialized from the very types the sender deserializes so a stub roster
+/// cannot drift from the wire it stands in for.
+fn roster(teammates: usize) -> String {
+    let member = |name: &str, is_lead: bool| MemberView {
+        name: name.to_owned(),
+        agent_id: format!("{name}@{FAR_TEAM}"),
+        backend: MemberBackend::InProcess,
+        color: None,
+        is_lead,
+        recent_calls: Vec::new(),
+    };
+
+    // A lead is a member of its own team, so even a peer leading nobody
+    // names one; what a receiver's shape varies is who stands beside it.
+    let members = std::iter::once(member(FAR_LEAD, true))
+        .chain((0..teammates).map(|nth| member(&format!("w{nth}"), false)))
+        .collect();
+
+    serde_json::to_string(&TeamView {
+        team: FAR_TEAM.to_owned(),
+        lead: FAR_LEAD.to_owned(),
+        members,
+    })
+    .expect("a team view serializes")
+}
+
 /// One HTTP/1.1 exchange: the request line, headers until the blank line,
 /// exactly `Content-Length` body bytes, then one answer and a close.
 fn serve_one(
     mut stream: std::os::unix::net::UnixStream,
     taken: &Arc<Mutex<Vec<Taken>>>,
     answers: &Arc<Mutex<VecDeque<Answer>>>,
+    team: &str,
 ) {
     let mut reader = BufReader::new(stream.try_clone().expect("a stream clones"));
     let mut request = String::new();
@@ -287,9 +352,7 @@ fn serve_one(
         });
 
     let answer = if route == "/team" {
-        Some(format!(
-            r#"{{"team":"{FAR_TEAM}","lead":"{FAR_LEAD}","members":[]}}"#
-        ))
+        Some(team.to_owned())
     } else if route == format!("/team/{FAR_LEAD}/message") {
         Some(
             answers

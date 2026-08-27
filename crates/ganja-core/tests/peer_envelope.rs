@@ -635,22 +635,28 @@ async fn reply_to_is_on_the_wire_exactly_while_a_socket_is_bound() {
 /// produce (the solo receiving surface is not built): a **team-led** receiver
 /// and a **zero-teammate** one are indistinguishable from the sending side.
 ///
+/// The pair is spelled the only way a receiver's shape reaches this wire at
+/// all — the roster its `GET /team` answers with, which a sender reads for
+/// the lead's name and the team's and never for who is in it — and the two
+/// answers are asserted to really differ before the traces are compared, so
+/// a stub that stopped varying could not quietly leave this passing on
+/// nothing.
+///
 /// Asserted by driving both through one parameterized send and comparing the
-/// **sender-side trace** — the routes it drove, in order, and the shape of the
-/// body it wrote — rather than by diffing `deliver_over_socket` against its
-/// old bytes.
+/// **sender-side trace** — the routes it drove, in order, and the body it
+/// wrote, minus the one field minted fresh per send — rather than by diffing
+/// `deliver_over_socket` against its old bytes.
 #[tokio::test]
 async fn the_sender_takes_no_branch_on_what_the_far_side_is() {
+    let mut rosters = Vec::new();
     let mut traces = Vec::new();
+    // A lead with nobody beside it, then a lead with one teammate.
     for teammates in [0usize, 1] {
-        let far = FarSide::accepting();
+        let far = FarSide::leading(teammates);
         let sender = Sender::new();
-        // The receiver's own roster is the far stub's, which answers the same
-        // `GET /team` either way — which is the point: a team of nobody and a
-        // team of somebody are one answer on this wire.
-        let _ = teammates;
         send_once(&sender, &far, TEXT).await;
 
+        rosters.push(far.team_answer().to_owned());
         let taken = far.taken();
         traces.push((
             taken
@@ -658,22 +664,29 @@ async fn the_sender_takes_no_branch_on_what_the_far_side_is() {
                 .map(|one| one.route.clone())
                 .collect::<Vec<_>>(),
             {
-                let mut keys: Vec<String> = taken[1]
-                    .body
-                    .as_object()
+                // Everything a branch could reach is compared by value —
+                // which fields are there at all, the identity, the text, the
+                // asserted class, the chain, the reply address. Only
+                // `message_id` is dropped, and only because it names this
+                // send rather than anything about the far side.
+                let mut body = taken[1].body.clone();
+                body.as_object_mut()
                     .expect("a message body is an object")
-                    .keys()
-                    .cloned()
-                    .collect();
-                keys.sort();
-                keys
+                    .remove("message_id")
+                    .expect("every send mints one");
+                body
             },
         ));
     }
 
+    assert_ne!(
+        rosters[0], rosters[1],
+        "the two peers really are two receiver kinds, or the comparison below \
+         is one setup compared against itself"
+    );
     assert_eq!(
         traces[0], traces[1],
-        "the crossing drives the same routes and writes the same fields whatever answers"
+        "the crossing drives the same routes and writes the same body whatever answers"
     );
     assert_eq!(
         traces[0].0,

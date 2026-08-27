@@ -1303,8 +1303,8 @@ pub struct Engine {
     /// there is no second setter for either half.
     peer_address: Arc<std::sync::Mutex<Option<PeerAddress>>>,
     /// The hop chain of the most recently **admitted** inbound peer message
-    /// (**D532**, Axis 4), which the next outbound send forwards with this
-    /// session's own marker appended.
+    /// (**D532**, Axis 4, **ganja-inferred**), which the next outbound send
+    /// forwards with this session's own marker appended.
     ///
     /// Conversation-scoped and volatile, the pin map's own shape and
     /// lifetime (`teammate::identity`'s pins, D528 Axis 3) — cleared by
