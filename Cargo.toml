@@ -45,6 +45,15 @@ ganja-provider = { path = "crates/ganja-provider" }
 # that keeps ratatui out of the engine, and CI asserts it the same inverted
 # way.
 ganja-serve = { path = "crates/ganja-serve" }
+# Where sessions live between runs — one SQLite database per project — and
+# the working-tree snapshots `/undo`/`/rewind` walk. A leaf a level above
+# `ganja-permission` and `ganja-protocol` rather than beneath the engine
+# (**D540**): both modules only ever need to know which worktree they are
+# anchored on and what a stored record decodes to, never the loop that calls
+# them, so `rusqlite` and the git-snapshot machinery live here and nowhere
+# else. `ganja-core` re-exports it whole as `::storage`/`::snapshot`, exactly
+# the shape `ganja-provider`'s own split from the engine took.
+ganja-storage = { path = "crates/ganja-storage" }
 # Claude Code's teams directory — the member records and the file-backed
 # mailboxes a teammate is addressed through. Its own crate because the
 # documents are *somebody else's format*, read and written by a real `claude`

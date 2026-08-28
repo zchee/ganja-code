@@ -1359,6 +1359,7 @@ dependencies = [
  "ganja-permission",
  "ganja-protocol",
  "ganja-provider",
+ "ganja-storage",
  "ganja-team",
  "ganja-teammate-local",
  "ganja-testkit",
@@ -1462,6 +1463,21 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "ganja-storage"
+version = "0.1.0"
+dependencies = [
+ "ganja-permission",
+ "ganja-protocol",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

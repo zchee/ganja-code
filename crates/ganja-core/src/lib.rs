@@ -56,8 +56,6 @@ pub mod mcp;
 pub mod plugin;
 pub mod provider;
 pub mod session;
-pub mod snapshot;
-pub mod storage;
 /// Runs the second agent loop a `task` call delegates to, and starts the
 /// teammates that call's other door asks for.
 ///
@@ -99,6 +97,14 @@ pub use ganja_protocol as protocol;
 /// provider/auth boundary carries no invariant anyone would gate — and both are
 /// named here so no caller had to notice.
 pub use ganja_provider::{auth, catalog};
+/// The session store and the working-tree snapshots, as the modules they
+/// always were before **D540** moved them below the engine rather than
+/// inside it: `storage.rs` and `snapshot.rs` needed only a project's
+/// worktree and the wire types a stored record decodes to, never the loop
+/// that calls them, which is what makes `ganja-storage` a leaf rather than a
+/// module here. `crate::snapshot` and `crate::storage` keep meaning what
+/// they always meant to every caller that reads them.
+pub use ganja_storage::{snapshot, storage};
 /// Claude's own team documents — the team file, the member records and the
 /// mailbox — as the module they would have been if they had not needed a crate
 /// of their own ([`crate::teammate`]'s neighbour, and its store).
@@ -124,7 +130,9 @@ pub use snapshot::{RevertState, Snapshots};
 /// type had to move to [`ganja_protocol`]. The root keeps naming it because
 /// callers outside that change's blast radius were already reading it here,
 /// and the curation rule is about not inviting new flattening, not about
-/// breaking the readers the old shape has.
+/// breaking the readers the old shape has. `storage` itself is
+/// [`ganja_storage::storage`] now (**D540**), reached through the re-export
+/// two lines above; this re-export's own path is unaffected by that move.
 pub use storage::SessionId;
 pub use storage::{SessionInfo, Storage, StorageError};
 /// The two seams a session that leads a team installs into its tool contexts:

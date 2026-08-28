@@ -70,13 +70,12 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, mpsc};
 use std::{fs, io, thread};
 
+use ganja_protocol::{
+    Message, MessageId, Part, PartBody, PartId, REASONING_TAG, Usage, is_uuidv7, now,
+};
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-
-use crate::protocol::{
-    Message, MessageId, Part, PartBody, PartId, REASONING_TAG, Usage, is_uuidv7, now,
-};
 
 /// The record format this build writes.
 pub const VERSION: u32 = 1;
@@ -120,7 +119,7 @@ const MIGRATED: &str = "migrated";
 /// the two say different things to whoever reads the directory afterwards: a
 /// `corrupt-` file is one nothing could read, while a `preuuid-` file reads
 /// perfectly and is set aside only because its ids came from the
-/// process-local counter [`crate::protocol::uuidv7`] replaced (**D493**) —
+/// process-local counter [`ganja_protocol::uuidv7`] replaced (**D493**) —
 /// superseded, not unreadable.
 const PREUUID: &str = "preuuid";
 
@@ -282,10 +281,10 @@ const MIGRATIONS: &[Migration] =
     &[Migration { id: "20260805000000_session_message_part", up: SCHEMA }];
 
 /// The session id began life here, beside the rows it names, and moved to
-/// [`crate::protocol`] when events started carrying it — a wire type has to
+/// [`ganja_protocol`] when events started carrying it — a wire type has to
 /// live with the wire. The re-export keeps `storage::SessionId` meaning what
 /// it always meant to every caller that reads it here.
-pub use crate::protocol::SessionId;
+pub use ganja_protocol::SessionId;
 
 /// Everything known about a session apart from its transcript.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1249,7 +1248,7 @@ fn set_aside(database: &Path, reason: &str, kind: &str) -> bool {
 /// The question is data-shaped rather than schema-shaped — there is no version
 /// to bump for it, and a store from before the change is structurally
 /// identical to one from after — so it is asked of the rows: does any session
-/// carry an id [`crate::protocol::is_uuidv7`] refuses? Those ids came from a
+/// carry an id [`ganja_protocol::is_uuidv7`] refuses? Those ids came from a
 /// counter that started at zero in each *process*, so two processes reaching
 /// one millisecond minted the same one; mixing them with ids that cannot
 /// collide would fuse two sessions into one row, which is the outcome this

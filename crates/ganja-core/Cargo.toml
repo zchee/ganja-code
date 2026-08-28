@@ -37,6 +37,11 @@ ganja-protocol.workspace = true
 # that reads a `Config` — `ganja_core::provider`. One way only: a wire has no
 # idea a session exists.
 ganja-provider.workspace = true
+# Where sessions live between runs and the working-tree snapshots `/undo`
+# walks, re-exported as `ganja_core::storage` and `ganja_core::snapshot`
+# (**D540**) — neither module ever needed the loop that calls it, only a
+# project's worktree and the wire types a stored record decodes to.
+ganja-storage.workspace = true
 # Claude Code's teams directory: the member records a spawn writes and the
 # file-backed mailboxes a teammate's runner polls. The engine is what owns a
 # teammate's lifetime, so it is the crate that names this — and it names it
@@ -83,10 +88,6 @@ reqwest.workspace = true
 # a second hand-rolled JSON-RPC client: the workspace declaration carries the
 # stdio and streamable-HTTP transports this module connects over.
 rmcp.workspace = true
-# The session store. WAL keeps readers from ever blocking the writer;
-# `bundled` (declared at the workspace) keeps the pragma defaults the storage
-# layer relies on compiled in rather than inherited from the platform.
-rusqlite.workspace = true
 # The one secret this crate's own code reads rather than only tests: an MCP
 # server's stored OAuth access token, exposed once to build the `Authorization:
 # Bearer` header `mcp.rs`'s dial sends. Every other credential stays inside
@@ -128,6 +129,15 @@ ganja-teammate-local.workspace = true
 # The scripted-provider/recorder-tool/storage-seeding scaffolding
 # `tests/*.rs` shares across binaries — see `crates/ganja-testkit`.
 ganja-testkit.workspace = true
+# `tests/{storage_preuuid,storage_preuuid_wal,storage_preuuid_inode,
+# reasoning_downgrade}.rs` alone, for the raw `rusqlite::Connection` each opens
+# to write a fixture database byte-for-byte the way an old build or a
+# concurrent writer would, ahead of what `ganja-storage` reads back. **Dev-only
+# and deliberately**, the same shape as `ganja-teammate-local` above: `-e
+# normal` is what every boundary gate reads, so this line does not widen
+# `ganja-core`'s shipped closure — `ganja-storage` remains the only member
+# whose *normal* manifest names `rusqlite` (**D540**).
+rusqlite.workspace = true
 # Compiles `ganja-config.schema.json` and validates fixtures against it in
 # `tests/config_schema.rs`. Nothing in the library itself reads a schema.
 jsonschema.workspace = true

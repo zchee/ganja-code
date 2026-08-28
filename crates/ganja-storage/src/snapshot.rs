@@ -29,12 +29,11 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use ganja_permission::project::{self, Project};
+use ganja_protocol::{Message, MessageId, PartBody, RevertInfo, Role};
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::Mutex;
-
-use crate::project::{self, Project};
-use crate::protocol::{Message, MessageId, PartBody, RevertInfo, Role};
 
 /// Directory the per-project snapshot repositories hang under, beside the
 /// `project/` tree the rest of a project's state lives in:

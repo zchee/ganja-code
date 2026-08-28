@@ -190,15 +190,16 @@ jobs:
           test "$internal" = "ganja-permission "
 
       # The same closed form for the engine: its internal deps are exactly the
-      # five crates beneath it, in sorted order. A split crate joining this
+      # six crates beneath it, in sorted order. A split crate joining this
       # list is a deliberate edit here, never an accident the old greps missed
-      # — `ganja-team` is the fifth, because a teammate's lifetime is the
+      # — `ganja-team` joined in P25 because a teammate's lifetime is the
       # engine's and the documents that lifetime is written into are that
-      # crate's.
-      - name: ganja-core's internal dependencies are exactly the five beneath it
+      # crate's; `ganja-storage` joined in W3 (**D540**) because the session
+      # store and the working-tree snapshots became a leaf of their own.
+      - name: ganja-core's internal dependencies are exactly the six beneath it
         run: |
           internal="$(cargo tree -p ganja-core -e normal --prefix none | awk '{print $1}' | grep '^ganja-' | grep -v '^ganja-core$' | sort -u | tr '\n' ' ')"
-          test "$internal" = "ganja-permission ganja-protocol ganja-provider ganja-team ganja-tool "
+          test "$internal" = "ganja-permission ganja-protocol ganja-provider ganja-storage ganja-team ganja-tool "
 
       # The teams directory is file I/O over a document format ganja does not
       # own, so the list that matters is the one it must never grow: the
@@ -249,6 +250,16 @@ jobs:
           ! cargo tree -p ganja-permission -e normal | tail -n +2 | grep -q ganja-
           ! cargo tree -p ganja-protocol -e normal | tail -n +2 | grep -q ganja-
 
+      # ganja-storage sits one level above the two leaves: the session store
+      # and the working-tree snapshots need a project's worktree root
+      # (`ganja-permission::project`) and the wire types a stored record is
+      # (`ganja-protocol`), and nothing else — the engine reaches it only
+      # through the re-export `ganja-core`'s `lib.rs` carries (**D540**).
+      - name: ganja-storage's internal dependencies are exactly the two leaves
+        run: |
+          internal="$(cargo tree -p ganja-storage -e normal --prefix none | awk '{print $1}' | grep '^ganja-' | grep -v '^ganja-storage$' | sort -u | tr '\n' ' ')"
+          test "$internal" = "ganja-permission ganja-protocol "
+
       # The leaf gate above only sees ganja-* crates, so it cannot notice the
       # protocol quietly widening its external list — measured: a scratch
       # `schemars.workspace = true` resolved cleanly, dragged six transitive
@@ -279,11 +290,12 @@ jobs:
       # here is one: a `∌ ganja-core` grep could not see this crate widen its
       # own internal list, only an exact set closes. What this line proves is
       # the crate's own half of the split's promise — it reaches nothing
-      # beyond the engine and the five crates beneath it.
-      - name: ganja-teammate-local's internal dependencies are exactly the six beneath it
+      # beyond the engine and the six crates beneath it, `ganja-storage`
+      # (**D540**) among them since W3.
+      - name: ganja-teammate-local's internal dependencies are exactly the seven beneath it
         run: |
           internal="$(cargo tree -p ganja-teammate-local -e normal --prefix none | awk '{print $1}' | grep '^ganja-' | grep -v '^ganja-teammate-local$' | sort -u | tr '\n' ' ')"
-          test "$internal" = "ganja-core ganja-permission ganja-protocol ganja-provider ganja-team ganja-tool "
+          test "$internal" = "ganja-core ganja-permission ganja-protocol ganja-provider ganja-storage ganja-team ganja-tool "
 
       # The frontends' own lanes, previously true but unasserted: the
       # terminal frontend never grows the HTTP server, the HTTP frontend

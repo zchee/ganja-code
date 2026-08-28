@@ -1,14 +1,14 @@
 use std::fs;
 use std::path::Path;
 
+use ganja_protocol::{
+    Message, MessageId, MessageTime, Part, PartBody, PartId, REASONING_TAG, Role, ToolState, Usage,
+};
 use rusqlite::Connection;
 use tempfile::TempDir;
 
 use super::{
     DATABASE, MIGRATIONS, PRAGMAS, SessionId, SessionInfo, Storage, StorageError, VERSION, connect,
-};
-use crate::protocol::{
-    Message, MessageId, MessageTime, Part, PartBody, PartId, REASONING_TAG, Role, ToolState, Usage,
 };
 
 fn temporary() -> TempDir {
@@ -35,7 +35,7 @@ fn session(id: &str) -> SessionId {
 /// than read (**D493**), which is a different test and has four of its own
 /// binaries. Those name their sessions through here instead, which keeps
 /// the ordinal readable while spelling the id the way
-/// [`crate::protocol::uuidv7`] spells one; the ordinal lands in the
+/// [`ganja_protocol::uuidv7`] spells one; the ordinal lands in the
 /// trailing field, so `ORDER BY id` still orders them the way the test
 /// wrote them.
 fn minted(ordinal: u32) -> String {

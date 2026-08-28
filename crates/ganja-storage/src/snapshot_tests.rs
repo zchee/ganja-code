@@ -1,13 +1,13 @@
 use std::path::Path;
 use std::time::Duration;
 
+use ganja_permission::project::Project;
+use ganja_protocol::{Message, MessageId, Part, PartBody, Role};
 use tempfile::TempDir;
 
 use super::{
     Patch, Snapshots, dedupe, patches_from, pathspecs, redo_anchor, split_nul, undo_anchor,
 };
-use crate::project::Project;
-use crate::protocol::{Message, MessageId, Part, PartBody, Role};
 
 fn temporary() -> TempDir {
     TempDir::new().expect("a temporary directory is creatable")
@@ -28,7 +28,7 @@ fn message(id: &str, role: Role, parts: Vec<Part>) -> Message {
 
 fn patch(hash: &str, files: &[&str]) -> Part {
     Part {
-        id: crate::protocol::PartId::ascending(),
+        id: ganja_protocol::PartId::ascending(),
         body: PartBody::Patch {
             hash: hash.to_owned(),
             files: files.iter().map(|file| (*file).to_owned()).collect(),
@@ -73,7 +73,9 @@ fn a_checkout_keeps_its_snapshots_beside_the_project_state_and_creates_nothing()
 
     assert!(snapshots.enabled(), "git is a test prerequisite");
     assert!(
-        snapshots.gitdir.starts_with(crate::project::data_home().expect("the data home resolves")),
+        snapshots
+            .gitdir
+            .starts_with(ganja_permission::project::data_home().expect("the data home resolves")),
         "{}",
         snapshots.gitdir.display()
     );

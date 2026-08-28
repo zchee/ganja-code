@@ -1,0 +1,51 @@
+[package]
+name = "ganja-storage"
+description = "Where sessions live between runs, and the working-tree snapshots /undo walks."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Never published to crates.io. Also load-bearing for deny.toml: with every
+# member unpublished, `allow-wildcard-paths` exempts the workspace's own path
+# dependencies from `wildcards = "deny"`.
+publish = false
+
+# A leaf one level above the two bottom crates. This is file I/O and SQLite
+# over a project's worktree, so it needs to know which worktree that is
+# (`ganja-permission::project`) and what a stored record decodes to
+# (`ganja-protocol`) — and nothing else. The engine reaches this crate only
+# through the re-export `ganja-core`'s `lib.rs` carries (**D540**), never the
+# other way: neither name here may appear in this crate's own dependency list.
+[dependencies]
+# Which worktree a session's snapshot repository is keyed by, and the data
+# home the store and the snapshots both live under.
+ganja-permission.workspace = true
+# The message/part types a stored record decodes to, the session id it is
+# named by, and the version-tagged reasoning tag the lost-reasoning marker
+# checks for.
+ganja-protocol.workspace = true
+# The session store. WAL keeps readers from ever blocking the writer;
+# `bundled` (declared at the workspace) keeps the pragma defaults the storage
+# layer relies on compiled in rather than inherited from the platform.
+rusqlite.workspace = true
+serde.workspace = true
+# Every stored row carries its record as an opaque JSON envelope, so a build
+# that has never heard of a part kind still stores and returns it whole.
+serde_json.workspace = true
+thiserror.workspace = true
+# The snapshot repository's own git invocations run as child processes;
+# `io-util` is `AsyncWriteExt` for the stdin write a `check-ignore --stdin`
+# call needs, `sync` is the mutation lock every snapshot command takes,
+# `time` is the timeout a huge `check-ignore` reply is bounded by.
+tokio = { workspace = true, features = ["io-util", "process", "sync", "time"] }
+# A quarantine, a conversion or a decode that lost a row is warned about,
+# never dropped in silence: the store has no other channel to a person.
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+# `#[tokio::test]` needs a runtime to spawn onto (`rt`, current-thread by
+# default) and the attribute macro itself (`macros`); the production
+# dependency above carries neither, since nothing outside a test starts one.
+tokio = { workspace = true, features = ["macros", "rt"] }
