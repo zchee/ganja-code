@@ -237,93 +237,69 @@ Load-bearing choices, all pinned in the workspace manifest — which is also whe
 
 <!-- MANUAL: Any manually added notes below this line are preserved on regeneration -->
 
-<!-- bv-agent-instructions-v3 -->
+<!-- br-agent-instructions-v1 -->
 
 ---
 
 ## Beads Workflow Integration
 
-This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`) for issue tracking and [beads_viewer_rust](https://github.com/Dicklesworthstone/beads_viewer_rust) (`bvr`) for graph-aware triage. Issues are stored in `.beads/` and are **local-only**: this clone deliberately keeps that directory out of the index through its own `.git/info/exclude`, so the JSONL export is a local artifact and a filed issue does not travel with a commit. Current `br` workspaces normally export `.beads/issues.jsonl`; older `bd`/legacy workspaces may use `.beads/beads.jsonl`. `bvr` auto-discovers the supported JSONL files, so agents should use `br`/`bvr` commands instead of hard-coding a single filename.
+This project uses [beads_rust](https://github.com/Dicklesworthstone/beads_rust) (`br`/`bd`) for issue tracking. Issues are stored in `.beads/` and tracked in git.
 
-### Using bvr as an AI sidecar
-
-bvr is a graph-aware triage engine for Beads projects. Instead of parsing .beads/issues.jsonl / .beads/beads.jsonl directly or hallucinating graph traversal, use robot flags for deterministic, dependency-aware outputs with precomputed metrics (PageRank, betweenness, critical path, cycles, HITS, eigenvector, k-core).
-
-**Scope boundary:** bvr handles *what to work on* (triage, priority, planning). `br` handles creating, modifying, and closing beads.
-
-**CRITICAL: Use ONLY --robot-* flags. Bare bvr launches an interactive TUI that blocks your session.**
-
-#### The Workflow: Start With Triage
-
-**`bvr --robot-triage` is your single entry point.** It returns everything you need in one call:
-- `quick_ref`: at-a-glance counts + top 3 picks
-- `recommendations`: ranked actionable items with scores, reasons, unblock info
-- `quick_wins`: low-effort high-impact items
-- `blockers_to_clear`: items that unblock the most downstream work
-- `project_health`: status/type/priority distributions, graph metrics
-- `commands`: copy-paste shell commands for next steps
+### Essential Commands
 
 ```bash
-bvr --robot-triage        # THE MEGA-COMMAND: start here
-bvr --robot-next          # Minimal: just the single top pick + claim command
+# View ready issues (open, unblocked, not deferred)
+br ready              # or: bd ready
 
-# Token-optimized output (TOON) for lower LLM context usage:
-bvr --robot-triage --format toon
-```
+# List and search
+br list --status=open # All open issues
+br show <id>          # Full issue details with dependencies
+br search "keyword"   # Full-text search
 
-Before claiming, verify current state with `br show <id> --json` or `br ready --json`. `recommendations` can include graph-important blocked or assigned work; only `quick_ref.top_picks` and non-empty `claim_command` fields represent claimable work.
+# Create and update
+br create --title="..." --description="..." --type=task --priority=2
+br update <id> --status=in_progress
+br close <id> --reason="Completed"
+br close <id1> <id2>  # Close multiple issues at once
 
-#### Other bvr Commands
-
-| Command | Returns |
-|---------|---------|
-| `--robot-plan` | Parallel execution tracks with unblocks lists |
-| `--robot-priority` | Priority misalignment detection with confidence |
-| `--robot-insights` | Full metrics: PageRank, betweenness, HITS, eigenvector, critical path, cycles, k-core |
-| `--robot-alerts` | Stale issues, blocking cascades, priority mismatches |
-| `--robot-suggest` | Hygiene: duplicates, missing deps, label suggestions, cycle breaks |
-| `--robot-diff --diff-since <ref>` | Changes since ref: new/closed/modified issues |
-| `--robot-graph [--graph-format=json\|dot\|mermaid]` | Dependency graph export |
-
-#### Scoping & Filtering
-
-```bash
-bvr --robot-plan --label backend              # Scope to label's subgraph
-bvr --robot-insights --as-of HEAD~30          # Historical point-in-time
-bvr --recipe actionable --robot-plan          # Pre-filter: ready to work (no blockers)
-bvr --recipe high-impact --robot-triage       # Pre-filter: top PageRank scores
-```
-
-### br Commands for Issue Management
-
-```bash
-br ready --json                       # Show issues ready to work (no blockers)
-br list --status=open --json          # All open issues
-br show <id> --json                   # Full issue details with dependencies
-br create --title="..." --type=task --priority=2 --json
-br update <id> --status=in_progress --json
-br close <id> --reason="Completed" --json
-br close <id1> <id2> --reason="Completed" --json
-br sync --flush-only                  # Export DB to JSONL after Beads mutations
+# Sync with git
+br sync --flush-only  # Export DB to JSONL
+br sync --status      # Check sync status
 ```
 
 ### Workflow Pattern
 
-1. **Triage**: Run `bvr --robot-triage` to find the highest-impact actionable work
-2. **Claim**: Use `br update <id> --status=in_progress --json`
+1. **Start**: Run `br ready` to find actionable work
+2. **Claim**: Use `br update <id> --status=in_progress`
 3. **Work**: Implement the task
-4. **Complete**: Use `br close <id> --reason="Completed" --json`
-5. **Sync**: Run `br sync --flush-only` after Beads mutations so the JSONL export is current
+4. **Complete**: Use `br close <id>`
+5. **Sync**: Always run `br sync --flush-only` at session end
 
 ### Key Concepts
 
-- **Dependencies**: Issues can block other issues. `br ready --json` shows only unblocked work.
+- **Dependencies**: Issues can block other issues. `br ready` shows only open, unblocked work.
 - **Priority**: P0=critical, P1=high, P2=medium, P3=low, P4=backlog (use numbers 0-4, not words)
 - **Types**: task, bug, feature, epic, chore, docs, question
 - **Blocking**: `br dep add <issue> <depends-on>` to add dependencies
 
-### Git Policy
+### Session Protocol
 
-`br` never commits or pushes. Follow this repository's own git instructions before staging, committing, or pushing. If the repository says "commit only when asked," that rule overrides any generic workflow advice.
+**Before ending any session, run this checklist:**
 
-<!-- end-bv-agent-instructions -->
+```bash
+git status              # Check what changed
+git add <files>         # Stage code changes
+br sync --flush-only    # Export beads changes to JSONL
+git commit -m "..."     # Commit everything
+git push                # Push to remote
+```
+
+### Best Practices
+
+- Check `br ready` at session start to find available work
+- Update status as you work (in_progress → closed)
+- Create new issues with `br create` when you discover tasks
+- Use descriptive titles and set appropriate priority/type
+- Always sync before ending session
+
+<!-- end-br-agent-instructions -->
