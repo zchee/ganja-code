@@ -11,10 +11,8 @@
 use buffa::Message as _;
 
 use super::{ID, connect, proto};
-use crate::{
-    protocol::FinishReason,
-    provider::{ProviderError, ProviderEvent},
-};
+use crate::protocol::FinishReason;
+use crate::provider::{ProviderError, ProviderEvent};
 
 /// The models the listing served, in the server's order.
 ///
@@ -190,19 +188,14 @@ impl Mapping {
             // as a refusal rather than as a turn-killing error: refused is
             // an outcome the server's agent loop can act on, and unanswered
             // is the silent hang this arm's modelling exists to end.
-            return Some(Ask::Refuse(ExecRefusal {
-                id: exec.id,
-                kind: exec_kind(exec),
-            }));
+            return Some(Ask::Refuse(ExecRefusal { id: exec.id, kind: exec_kind(exec) }));
         }
 
         if let Some(kv) = message.kv_request.as_option() {
             if let Some(get) = kv.get_blob_args.as_option() {
                 return Some(Ask::Kv(KvAsk {
                     id: kv.id,
-                    op: KvOp::Get {
-                        blob_id: get.blob_id.clone().unwrap_or_default(),
-                    },
+                    op: KvOp::Get { blob_id: get.blob_id.clone().unwrap_or_default() },
                 }));
             }
             if let Some(set) = kv.set_blob_args.as_option() {
@@ -241,9 +234,7 @@ impl Mapping {
         };
 
         if let Some(delta) = update.text_delta.as_option() {
-            events.push(ProviderEvent::TextDelta(
-                delta.text.clone().unwrap_or_default(),
-            ));
+            events.push(ProviderEvent::TextDelta(delta.text.clone().unwrap_or_default()));
         } else if let Some(delta) = update.thinking_delta.as_option() {
             // The plugin forwards thinking to its clients beside reply text,
             // marked as thinking (proxy.ts:1059-1061); here that mark is the
@@ -366,11 +357,7 @@ fn exec_kind(exec: &proto::ExecRequest) -> String {
         return kind.to_owned();
     }
 
-    match fields
-        .iter()
-        .map(|field| field.number)
-        .find(|number| *number != 19)
-    {
+    match fields.iter().map(|field| field.number).find(|number| *number != 19) {
         Some(number) => format!("field {number}"),
         None => "no recognizable kind".to_owned(),
     }
@@ -412,12 +399,7 @@ fn update_arm(number: u32) -> String {
 /// span_context (= 4, agent_pb.ts:7931) rides beside the oneof without
 /// being a kind, so it is passed over rather than blamed.
 fn kv_kind(kv: &proto::KvRequest) -> String {
-    match kv
-        .__buffa_unknown_fields
-        .iter()
-        .map(|field| field.number)
-        .find(|number| *number != 4)
-    {
+    match kv.__buffa_unknown_fields.iter().map(|field| field.number).find(|number| *number != 4) {
         Some(number) => format!("field {number}"),
         None => "no recognizable kind".to_owned(),
     }

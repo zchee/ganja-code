@@ -18,7 +18,8 @@
 
 use std::path::{Path, PathBuf};
 
-use etcetera::{BaseStrategy as _, base_strategy::Xdg};
+use etcetera::BaseStrategy as _;
+use etcetera::base_strategy::Xdg;
 use serde::{Deserialize, Serialize};
 
 /// The most entries kept on disk and in memory. Upstream's number.
@@ -67,11 +68,7 @@ impl PromptInfo {
     /// A plain text prompt, the shape a submission without attachments takes.
     #[must_use]
     pub fn text(input: impl Into<String>) -> Self {
-        Self {
-            input: input.into(),
-            mode: None,
-            parts: Vec::new(),
-        }
+        Self { input: input.into(), mode: None, parts: Vec::new() }
     }
 }
 
@@ -164,17 +161,10 @@ impl History {
             .and_then(|metadata| metadata.modified())
             .ok()
             .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
-            .map_or_else(now_ms, |elapsed| {
-                u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
-            });
+            .map_or_else(now_ms, |elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX));
         let times = vec![loaded_at; entries.len()];
 
-        let history = Self {
-            path: Some(path),
-            entries,
-            times,
-            index: 0,
-        };
+        let history = Self { path: Some(path), entries, times, index: 0 };
 
         if !history.entries.is_empty() {
             history.rewrite();
@@ -334,11 +324,7 @@ impl History {
             return;
         }
 
-        match std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
+        match std::fs::OpenOptions::new().create(true).append(true).open(path) {
             Ok(mut file) => {
                 if let Err(error) = writeln!(file, "{line}") {
                     tracing::warn!(path = %path.display(), %error, "a prompt history entry could not be appended");
@@ -359,9 +345,7 @@ impl History {
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| {
-            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
-        })
+        .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// `<XDG data>/ganja/prompt-history.jsonl`, or [`None`] when there is no home

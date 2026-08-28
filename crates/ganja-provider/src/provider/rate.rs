@@ -108,13 +108,12 @@
 //! is nothing session-shaped to clear — and staleness is answered by
 //! [`RateWindow::expired`] rather than by session identity.
 
-use std::{
-    borrow::Cow,
-    sync::{Arc, Mutex},
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::borrow::Cow;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use jiff::{Timestamp, fmt::friendly::SpanParser};
+use jiff::Timestamp;
+use jiff::fmt::friendly::SpanParser;
 use reqwest::header::HeaderMap;
 
 /// One vendor bucket: how much of one budget is left, and when it refills.
@@ -262,39 +261,27 @@ impl RateWindows {
 
         let windows = parse(headers, now);
         if !windows.is_empty() {
-            *self
-                .latest
-                .lock()
-                .expect("a rate-window store is never poisoned") = windows;
+            *self.latest.lock().expect("a rate-window store is never poisoned") = windows;
         }
 
         // Per family, for [`RateWindows`]'s own reason: a backend that sends
         // rate headers and no plan headers has said nothing about the plan.
         let plans = parse_plans(headers, now);
         if !plans.is_empty() {
-            *self
-                .plans
-                .lock()
-                .expect("a rate-window store is never poisoned") = plans;
+            *self.plans.lock().expect("a rate-window store is never poisoned") = plans;
         }
     }
 
     /// What the wire last heard, newest set first-hand.
     #[must_use]
     pub fn latest(&self) -> Vec<RateWindow> {
-        self.latest
-            .lock()
-            .expect("a rate-window store is never poisoned")
-            .clone()
+        self.latest.lock().expect("a rate-window store is never poisoned").clone()
     }
 
     /// The plan buckets the wire last heard (**D485**), the same way.
     #[must_use]
     pub fn latest_plans(&self) -> Vec<PlanWindow> {
-        self.plans
-            .lock()
-            .expect("a rate-window store is never poisoned")
-            .clone()
+        self.plans.lock().expect("a rate-window store is never poisoned").clone()
     }
 }
 
@@ -321,14 +308,8 @@ struct Family {
 /// nothing. That is the finding, not a gap: the table is prefix-driven, so a
 /// backend that starts sending one of these is picked up with no code change.
 const FAMILIES: [Family; 2] = [
-    Family {
-        prefix: "anthropic-ratelimit-",
-        field_first: false,
-    },
-    Family {
-        prefix: "x-ratelimit-",
-        field_first: true,
-    },
+    Family { prefix: "anthropic-ratelimit-", field_first: false },
+    Family { prefix: "x-ratelimit-", field_first: true },
 ];
 
 /// The three things a bucket needs, in the spelling both families use.
@@ -388,9 +369,7 @@ pub fn parse(headers: &HeaderMap, now: SystemTime) -> Vec<RateWindow> {
         seen.entry(kind.to_owned()).or_default()[field] = Some(value.trim());
     }
 
-    seen.into_iter()
-        .filter_map(|(kind, fields)| window(kind, fields, now))
-        .collect()
+    seen.into_iter().filter_map(|(kind, fields)| window(kind, fields, now)).collect()
 }
 
 impl Family {
@@ -442,12 +421,7 @@ fn window(kind: String, fields: [Option<&str>; 3], now: SystemTime) -> Option<Ra
         None => None,
     };
 
-    Some(RateWindow {
-        kind,
-        limit,
-        remaining,
-        reset,
-    })
+    Some(RateWindow { kind, limit, remaining, reset })
 }
 
 /// Every plan bucket `headers` describes, relative to `now` (**D485**).
@@ -575,17 +549,10 @@ fn codex_reset(
 /// own id, minus the `codex-` the vendor prefixes it with.
 fn codex_name(family: &str, window: &str) -> String {
     let family = family.strip_prefix("x-").unwrap_or(family);
-    let family = if family == "codex" {
-        ""
-    } else {
-        family.strip_prefix("codex-").unwrap_or(family)
-    };
+    let family =
+        if family == "codex" { "" } else { family.strip_prefix("codex-").unwrap_or(family) };
 
-    if family.is_empty() {
-        window.to_owned()
-    } else {
-        format!("{family} {window}")
-    }
+    if family.is_empty() { window.to_owned() } else { format!("{family} {window}") }
 }
 
 /// What every copilot quota header starts with; what follows is the kind of
@@ -753,9 +720,7 @@ fn rfc3339(value: &str) -> Option<SystemTime> {
         timestamp = timestamp.checked_add(Duration::from_secs(1)).ok()?;
     }
 
-    UNIX_EPOCH.checked_add(Duration::from_secs(
-        u64::try_from(timestamp.as_second()).ok()?,
-    ))
+    UNIX_EPOCH.checked_add(Duration::from_secs(u64::try_from(timestamp.as_second()).ok()?))
 }
 
 #[cfg(test)]

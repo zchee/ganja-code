@@ -4,21 +4,17 @@
 //! keeps the shell-facing contract isolated under the integration-suite rule
 //! in `tests/AGENTS.md` while the assertions observe the public engine seam.
 
-use std::{
-    collections::BTreeMap,
-    path::PathBuf,
-    sync::{Arc, LazyLock},
-};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::{Arc, LazyLock};
 
-use ganja_core::{
-    CommandConfig, Config, Engine, command,
-    config::CONFIG_HOME_ENV,
-    permission::Permissions,
-    project::Project,
-    protocol::{Command, Event, FinishReason, Role},
-    provider::{ChatRequest, Provider},
-    tool::Registry as ToolRegistry,
-};
+use ganja_core::config::CONFIG_HOME_ENV;
+use ganja_core::permission::Permissions;
+use ganja_core::project::Project;
+use ganja_core::protocol::{Command, Event, FinishReason, Role};
+use ganja_core::provider::{ChatRequest, Provider};
+use ganja_core::tool::Registry as ToolRegistry;
+use ganja_core::{CommandConfig, Config, Engine, command};
 use ganja_testkit::{ScriptedProvider, drain_allowing, says, temp_dir};
 
 const COMMAND: &str = "fixture";
@@ -73,21 +69,10 @@ fn configured_engine(
     let mut command = BTreeMap::new();
     command.insert(
         COMMAND.to_owned(),
-        CommandConfig {
-            template,
-            description: None,
-            agent: None,
-            model: None,
-        },
+        CommandConfig { template, description: None, agent: None, model: None },
     );
     pin_config_home();
-    let registry = command::Registry::build(
-        &Config {
-            command,
-            ..Config::default()
-        },
-        worktree,
-    );
+    let registry = command::Registry::build(&Config { command, ..Config::default() }, worktree);
 
     Engine::new(
         provider,
@@ -106,10 +91,7 @@ fn project_root() -> PathBuf {
 async fn run_configured_command(engine: &Engine) -> Vec<Event> {
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
     engine
-        .send(Command::RunCommand {
-            name: COMMAND.to_owned(),
-            args: String::new(),
-        })
+        .send(Command::RunCommand { name: COMMAND.to_owned(), args: String::new() })
         .await
         .expect("the configured command runs");
     drain_allowing(engine, &mut events).await
@@ -120,10 +102,7 @@ async fn run_configured_command(engine: &Engine) -> Vec<Event> {
 #[cfg(windows)]
 fn native(text: &str) -> PathBuf {
     let rest = text.strip_prefix('/').unwrap_or(text);
-    let rest = rest
-        .strip_prefix("cygdrive/")
-        .or_else(|| rest.strip_prefix("mnt/"))
-        .unwrap_or(rest);
+    let rest = rest.strip_prefix("cygdrive/").or_else(|| rest.strip_prefix("mnt/")).unwrap_or(rest);
     let (head, tail) = rest.split_once('/').unwrap_or((rest, ""));
 
     match head.strip_suffix(':').unwrap_or(head).as_bytes() {

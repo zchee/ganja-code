@@ -25,11 +25,8 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::{
-    Tool, ToolCtx, ToolError, ToolOutput,
-    anchor::{self, Anchor},
-    display, resolve,
-};
+use crate::anchor::{self, Anchor};
+use crate::{Tool, ToolCtx, ToolError, ToolOutput, display, resolve};
 
 /// What the model passes to `write`.
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -59,10 +56,7 @@ impl Tool for WriteTool {
     }
 
     fn describe(&self, args: &serde_json::Value) -> String {
-        let path = args
-            .get("filePath")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
+        let path = args.get("filePath").and_then(serde_json::Value::as_str).unwrap_or_default();
 
         format!("write {path}")
     }
@@ -92,8 +86,7 @@ impl Tool for WriteTool {
         // disk a stale read could have missed. Nothing has been truncated
         // yet: a refusal here leaves the file exactly as it was.
         if existed {
-            ctx.files
-                .check_fresh_stat(&filepath, anchor::stamp(&file))?;
+            ctx.files.check_fresh_stat(&filepath, anchor::stamp(&file))?;
             file.set_len(0).map_err(|error| {
                 ToolError::Failed(format!("could not write {}: {error}", filepath.display()))
             })?;

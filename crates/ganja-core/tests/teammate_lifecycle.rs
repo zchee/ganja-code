@@ -10,18 +10,15 @@
 //!
 //! Mutates `XDG_DATA_HOME`, so it holds exactly one test.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
-use ganja_core::{
-    Storage,
-    permission::Permissions,
-    protocol::{
-        Role,
-        team::{Frame, ShutdownRequest},
-    },
-    provider::FakeProvider,
-    tool::Registry,
-};
+use ganja_core::Storage;
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::Role;
+use ganja_core::protocol::team::{Frame, ShutdownRequest};
+use ganja_core::provider::FakeProvider;
+use ganja_core::tool::Registry;
 use ganja_team::{LEAD, MailboxMessage, MemberName, mailbox, record};
 use ganja_testkit::{AllowSpawn, TASK, caller, eventually, spawn, team_file, team_with};
 
@@ -67,12 +64,7 @@ async fn a_teammate_runs_from_a_spawn_through_idle_to_shutdown() {
     assert_eq!(member.prompt.as_deref(), Some(TASK));
     assert_eq!(member.tmux_pane_id, "in-process");
     assert_eq!(
-        registry
-            .view()
-            .members
-            .iter()
-            .filter(|view| view.is_lead)
-            .count(),
+        registry.view().members.iter().filter(|view| view.is_lead).count(),
         1,
         "a roster has exactly one lead, and it is not the teammate"
     );
@@ -80,75 +72,48 @@ async fn a_teammate_runs_from_a_spawn_through_idle_to_shutdown() {
     // §6.1's first pass: the seeded task leaves the inbox and becomes a turn.
     let worker = MemberName::parse("worker").expect("a member name");
     let inbox = root.inbox_path(&team, &worker);
-    eventually(
-        EVENTUALLY,
-        "the seeded task to be drained from the inbox",
-        async || {
-            mailbox::read(&inbox)
-                .expect("the inbox reads")
-                .valid
-                .is_empty()
-                .then_some(())
-        },
-    )
+    eventually(EVENTUALLY, "the seeded task to be drained from the inbox", async || {
+        mailbox::read(&inbox).expect("the inbox reads").valid.is_empty().then_some(())
+    })
     .await;
-    let session = eventually(
-        EVENTUALLY,
-        "the teammate's own session to exist",
-        async || {
-            storage
-                .list_sessions()
-                .expect("the store lists")
-                .first()
-                .map(|info| info.id.clone())
-        },
-    )
+    let session = eventually(EVENTUALLY, "the teammate's own session to exist", async || {
+        storage.list_sessions().expect("the store lists").first().map(|info| info.id.clone())
+    })
     .await;
-    eventually(
-        EVENTUALLY,
-        "the seeded task to reach the teammate's transcript",
-        async || {
-            storage
-                .load_transcript(&session)
-                .expect("the transcript reads")
-                .iter()
-                .any(|message| {
-                    message.role == Role::User
-                        && message
-                            .parts
-                            .iter()
-                            .filter_map(ganja_core::protocol::Part::as_text)
-                            .any(|text| text.contains(TASK))
-                })
-                .then_some(())
-        },
-    )
-    .await;
-
-    // A message written after the first turn reaches the next one.
-    mailbox::write(
-        &inbox,
-        MailboxMessage::new(LEAD, "and then the lexer", record::now_iso8601()),
-    )
-    .expect("the lead writes to the teammate's inbox");
-    eventually(
-        EVENTUALLY,
-        "the second message to reach the teammate's transcript",
-        async || {
-            storage
-                .load_transcript(&session)
-                .expect("the transcript reads")
-                .iter()
-                .any(|message| {
-                    message
+    eventually(EVENTUALLY, "the seeded task to reach the teammate's transcript", async || {
+        storage
+            .load_transcript(&session)
+            .expect("the transcript reads")
+            .iter()
+            .any(|message| {
+                message.role == Role::User
+                    && message
                         .parts
                         .iter()
                         .filter_map(ganja_core::protocol::Part::as_text)
-                        .any(|text| text.contains("and then the lexer"))
-                })
-                .then_some(())
-        },
-    )
+                        .any(|text| text.contains(TASK))
+            })
+            .then_some(())
+    })
+    .await;
+
+    // A message written after the first turn reaches the next one.
+    mailbox::write(&inbox, MailboxMessage::new(LEAD, "and then the lexer", record::now_iso8601()))
+        .expect("the lead writes to the teammate's inbox");
+    eventually(EVENTUALLY, "the second message to reach the teammate's transcript", async || {
+        storage
+            .load_transcript(&session)
+            .expect("the transcript reads")
+            .iter()
+            .any(|message| {
+                message
+                    .parts
+                    .iter()
+                    .filter_map(ganja_core::protocol::Part::as_text)
+                    .any(|text| text.contains("and then the lexer"))
+            })
+            .then_some(())
+    })
     .await;
 
     // §6.2: a shutdown request is answered to the lead's own inbox, and the
@@ -167,26 +132,16 @@ async fn a_teammate_runs_from_a_spawn_through_idle_to_shutdown() {
     .expect("the lead writes the shutdown request");
 
     let lead_inbox = registry.lead_inbox();
-    eventually(
-        EVENTUALLY,
-        "the teammate to answer the shutdown",
-        async || {
-            (!mailbox::read(&lead_inbox)
-                .expect("the lead's inbox reads")
-                .valid
-                .is_empty())
+    eventually(EVENTUALLY, "the teammate to answer the shutdown", async || {
+        (!mailbox::read(&lead_inbox).expect("the lead's inbox reads").valid.is_empty())
             .then_some(())
-        },
-    )
+    })
     .await;
 
     let answered = mailbox::read(&lead_inbox).expect("the lead's inbox reads");
     assert_eq!(answered.valid.len(), 1, "one answer, not a retry storm");
     let answer = &answered.valid[0];
-    assert_eq!(
-        answer.from, "worker",
-        "the answer is stamped with the teammate's own name"
-    );
+    assert_eq!(answer.from, "worker", "the answer is stamped with the teammate's own name");
     let Some(Frame::ShutdownApproved(approved)) = answer.frame() else {
         panic!("the lead was told something other than a shutdown answer");
     };
@@ -195,17 +150,12 @@ async fn a_teammate_runs_from_a_spawn_through_idle_to_shutdown() {
     assert_eq!(approved.pane_id.as_deref(), Some("in-process"));
     assert_eq!(approved.backend_type.as_deref(), Some("in-process"));
 
-    eventually(
-        EVENTUALLY,
-        "the teammate to stop being listed",
-        async || (registry.running() == 0).then_some(()),
-    )
+    eventually(EVENTUALLY, "the teammate to stop being listed", async || {
+        (registry.running() == 0).then_some(())
+    })
     .await;
     assert!(
-        mailbox::read(&inbox)
-            .expect("the inbox reads")
-            .valid
-            .is_empty(),
+        mailbox::read(&inbox).expect("the inbox reads").valid.is_empty(),
         "the request it answered is pruned, not answered again forever"
     );
 

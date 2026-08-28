@@ -1,4 +1,5 @@
-use std::{ffi::OsString, path::PathBuf};
+use std::ffi::OsString;
+use std::path::PathBuf;
 
 use ganja_protocol::team::MemberBackend;
 use ganja_team::{MemberName, TeamName, TeamsRoot, mailbox};
@@ -40,9 +41,7 @@ fn spec() -> SpawnSpec {
 }
 
 fn strings(argv: Vec<OsString>) -> Vec<String> {
-    argv.into_iter()
-        .map(|argument| argument.into_string().expect("ascii"))
-        .collect()
+    argv.into_iter().map(|argument| argument.into_string().expect("ascii")).collect()
 }
 
 /// §4.1's five, then plan mode only when the spawn asked for it — and
@@ -65,24 +64,15 @@ fn the_launch_line_is_the_spawn_flags_and_plan_mode_when_it_was_asked_for() {
 
     assert_eq!(strings(arguments(&spec())), five);
 
-    let posturing = strings(arguments(&SpawnSpec {
-        plan_mode_required: true,
-        ..spec()
-    }));
+    let posturing = strings(arguments(&SpawnSpec { plan_mode_required: true, ..spec() }));
     assert_eq!(posturing[..five.len()], five);
     assert_eq!(posturing[five.len()..], [PLAN_MODE_REQUIRED]);
 
     let line = posturing.join(" ");
-    assert!(
-        !line.contains("CANARY"),
-        "the prompt rides the mailbox: {line}"
-    );
+    assert!(!line.contains("CANARY"), "the prompt rides the mailbox: {line}");
     assert!(!line.contains("recorder-model"), "no model guess: {line}");
     assert!(!line.contains("general"), "no agent-type guess: {line}");
-    assert!(
-        !line.contains("--permission-mode"),
-        "no permission mode is composed (D513): {line}"
-    );
+    assert!(!line.contains("--permission-mode"), "no permission mode is composed (D513): {line}");
 }
 
 /// The composed line, as tmux is handed it: `exec`, the binary — bare,
@@ -103,10 +93,7 @@ fn the_composed_line_execs_the_binary_and_the_prompt_stays_off_it() {
     // The canary again, on the *composed* line rather than on `arguments`
     // alone: the line is what tmux is handed and what `ps`
     // would print, so it is the value the §4.1-step-5 rule is really about.
-    assert!(
-        !line.contains("CANARY"),
-        "the prompt rides the mailbox: {line}"
-    );
+    assert!(!line.contains("CANARY"), "the prompt rides the mailbox: {line}");
 }
 
 /// The carried set is the `ganja` pane's closed list plus the one variable
@@ -130,11 +117,9 @@ fn the_carried_environment_adds_the_claude_config_dir_and_nothing_else() {
 /// as unset.
 #[test]
 fn the_teams_root_follows_the_config_dir_and_falls_back_to_the_home() {
-    let named = root_under(
-        Some(OsString::from("/tmp/claude-home")),
-        Some(PathBuf::from("/home/somebody")),
-    )
-    .expect("a named config dir is a root");
+    let named =
+        root_under(Some(OsString::from("/tmp/claude-home")), Some(PathBuf::from("/home/somebody")))
+            .expect("a named config dir is a root");
     assert_eq!(
         named.inbox_path(
             &TeamName::parse("session-abcd1234").expect("a team name"),
@@ -236,9 +221,7 @@ async fn seeding_leaves_exactly_one_message_and_it_is_the_preamble() {
     let root = TeamsRoot::new(home.path().join(TEAMS_DIRECTORY));
     let spec = spec();
 
-    let seeded = ClaudePane::seed(&spec, &root)
-        .await
-        .expect("the seed lands");
+    let seeded = ClaudePane::seed(&spec, &root).await.expect("the seed lands");
 
     let inbox = root.inbox_path(&spec.team, &spec.name);
     let held = mailbox::read(&inbox).expect("the inbox reads").valid;
@@ -274,9 +257,7 @@ async fn a_refused_launch_takes_the_seeded_prompt_back_out() {
     let home = tempfile::tempdir().expect("a temporary claude config home");
     let root = TeamsRoot::new(home.path().join(TEAMS_DIRECTORY));
     let spec = spec();
-    let seeded = ClaudePane::seed(&spec, &root)
-        .await
-        .expect("the seed lands");
+    let seeded = ClaudePane::seed(&spec, &root).await.expect("the seed lands");
 
     crate::teammate::unseed_inbox(
         root.inbox_path(&spec.team, &spec.name),
@@ -287,10 +268,7 @@ async fn a_refused_launch_takes_the_seeded_prompt_back_out() {
 
     let inbox = root.inbox_path(&spec.team, &spec.name);
     assert!(
-        mailbox::read(&inbox)
-            .expect("the inbox reads")
-            .valid
-            .is_empty(),
+        mailbox::read(&inbox).expect("the inbox reads").valid.is_empty(),
         "a prompt nothing will read does not stay in a mailbox"
     );
     assert!(inbox.exists(), "the inbox itself is left where it was");
@@ -340,10 +318,7 @@ fn the_binary_is_the_first_path_entry_holding_something_runnable() {
     );
 
     let shadow_only = std::env::join_paths([shadow.as_path()]).expect("a PATH joins");
-    assert!(
-        resolve(&shadow_only, BINARY).is_none(),
-        "a directory is not a file"
-    );
+    assert!(resolve(&shadow_only, BINARY).is_none(), "a directory is not a file");
 
     let unrunnable_only = std::env::join_paths([unrunnable.as_path()]).expect("a PATH joins");
     assert!(
@@ -376,15 +351,9 @@ fn an_execute_bit_for_another_permission_class_does_not_make_the_binary_runnable
     std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o001))
         .expect("only another permission class may execute it");
 
-    let mode = std::fs::metadata(&candidate)
-        .expect("the candidate has metadata")
-        .permissions()
-        .mode();
-    assert_ne!(
-        mode & 0o111,
-        0,
-        "the old any-execute-bit check would accept this candidate"
-    );
+    let mode =
+        std::fs::metadata(&candidate).expect("the candidate has metadata").permissions().mode();
+    assert_ne!(mode & 0o111, 0, "the old any-execute-bit check would accept this candidate");
 
     let path = std::env::join_paths([home.path()]).expect("a PATH joins");
     assert!(

@@ -1,29 +1,22 @@
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ganja_protocol::Message;
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 
 use super::{Data, PlanWindow, RateWindow, TokenUsage, TurnUsage, Usage, compact_minutes};
-use crate::{component::status::Totals, theme::Theme};
+use crate::component::status::Totals;
+use crate::theme::Theme;
 
 /// Wide enough for the pinned per-model line to render whole, and two
 /// taller than [`super::MAX_HEIGHT`] so the modal is never the terminal's
 /// prisoner: what these tests assert is what the panel *chose* to draw,
 /// not what a short terminal cut off. Grown with that constant in P17.
-const AREA: Rect = Rect {
-    x: 0,
-    y: 0,
-    width: 100,
-    height: 32,
-};
+const AREA: Rect = Rect { x: 0, y: 0, width: 100, height: 32 };
 
 fn data() -> Data {
     Data {
-        totals: Totals {
-            input_tokens: 16,
-            output_tokens: 4,
-            cost_usd: Some(0.5),
-        },
+        totals: Totals { input_tokens: 16, output_tokens: 4, cost_usd: Some(0.5) },
         splits: TokenUsage {
             input_tokens: 3,
             output_tokens: 4,
@@ -66,11 +59,7 @@ fn plan(name: &str, used_percent: f64, minutes: Option<u64>, in_secs: Option<i64
         window_minutes: minutes,
         resets_at: in_secs.map(|seconds| {
             let offset = Duration::from_secs(seconds.unsigned_abs());
-            if seconds < 0 {
-                NOW - offset
-            } else {
-                NOW + offset
-            }
+            if seconds < 0 { NOW - offset } else { NOW + offset }
         }),
         limit_name: None,
     }
@@ -87,11 +76,7 @@ fn window(kind: &str, limit: u64, remaining: u64, in_secs: Option<i64>) -> RateW
         remaining,
         reset: in_secs.map(|seconds| {
             let offset = Duration::from_secs(seconds.unsigned_abs());
-            if seconds < 0 {
-                NOW - offset
-            } else {
-                NOW + offset
-            }
+            if seconds < 0 { NOW - offset } else { NOW + offset }
         }),
     }
 }
@@ -180,10 +165,7 @@ fn every_section_and_the_turn_table_are_shown() {
         assert!(screen.contains(section), "{section} missing:\n{screen}");
     }
     assert!(screen.contains("Usage by model:"), "got:\n{screen}");
-    assert!(
-        screen.contains("estimated"),
-        "the context sub-line says estimated:\n{screen}"
-    );
+    assert!(screen.contains("estimated"), "the context sub-line says estimated:\n{screen}");
 }
 
 /// The pinned block bar replaced the ASCII meter: filled cells, dim
@@ -206,9 +188,7 @@ fn the_context_bar_is_block_cells_followed_by_the_percentage() {
 /// Cache reads over everything that went in: 6 of 3+6+7 = 37.5%.
 #[test]
 fn the_cache_hit_rate_is_reads_over_all_input() {
-    let rate = Usage::new(data())
-        .cache_hit_rate()
-        .expect("the fixture sent input");
+    let rate = Usage::new(data()).cache_hit_rate().expect("the fixture sent input");
 
     assert!((rate - 0.375).abs() < f64::EPSILON, "got {rate}");
 }
@@ -225,13 +205,7 @@ fn the_duration_row_formats_compactly_and_only_over_a_measured_duration() {
         (Duration::from_secs(2 * 60), "2m"),
         (Duration::from_secs(45), "45s"),
     ] {
-        let screen = rendered(
-            &Usage::new(Data {
-                duration: Some(duration),
-                ..data()
-            }),
-            AREA,
-        );
+        let screen = rendered(&Usage::new(Data { duration: Some(duration), ..data() }), AREA);
         assert!(
             screen.contains(&format!("Total duration:  {spelled}")),
             "want {spelled} in:\n{screen}"
@@ -239,10 +213,7 @@ fn the_duration_row_formats_compactly_and_only_over_a_measured_duration() {
     }
 
     let unmeasured = rendered(&Usage::new(data()), AREA);
-    assert!(
-        !unmeasured.contains("Total duration"),
-        "no measured duration, no row:\n{unmeasured}"
-    );
+    assert!(!unmeasured.contains("Total duration"), "no measured duration, no row:\n{unmeasured}");
 }
 
 /// The plan-limit meters Claude Code leads with are explicitly absent on a
@@ -329,10 +300,7 @@ fn a_drawn_plan_meter_replaces_the_absence_line_rather_than_joining_it() {
         !screen.contains("plan limits unavailable"),
         "a panel that drew one may not deny having one:\n{screen}"
     );
-    assert!(
-        screen.contains("[Esc] close"),
-        "and the footer still fits:\n{screen}"
-    );
+    assert!(screen.contains("[Esc] close"), "and the footer still fits:\n{screen}");
 }
 
 /// A copilot snapshot arrives with no window length and may arrive with no
@@ -348,10 +316,7 @@ fn a_plan_window_the_vendor_never_dated_says_so_instead_of_counting_down() {
         AREA,
     );
 
-    assert!(
-        screen.contains("premium_interactions \u{b7} no reset reported"),
-        "got:\n{screen}"
-    );
+    assert!(screen.contains("premium_interactions \u{b7} no reset reported"), "got:\n{screen}");
     assert!(
         !screen.contains("resets in") && !screen.contains("window,"),
         "nothing may invent a clock or a window length:\n{screen}"
@@ -371,10 +336,7 @@ fn a_plan_window_past_its_reset_renders_as_expired() {
         AREA,
     );
 
-    assert!(
-        screen.contains("expired \u{2014} refreshes on the next request"),
-        "got:\n{screen}"
-    );
+    assert!(screen.contains("expired \u{2014} refreshes on the next request"), "got:\n{screen}");
 }
 
 /// More plan windows than the section draws are counted, never dropped in
@@ -407,13 +369,9 @@ fn plan_windows_past_the_sections_cap_are_counted_and_the_tightest_are_kept() {
 /// A window's own length reads in the unit a person thinks about it in.
 #[test]
 fn a_rolling_windows_length_reads_as_hours_or_days_rather_than_minutes() {
-    for (minutes, spelled) in [
-        (45, "45m"),
-        (300, "5h"),
-        (90, "1h 30m"),
-        (10_080, "7d"),
-        (1_500, "1d 1h"),
-    ] {
+    for (minutes, spelled) in
+        [(45, "45m"), (300, "5h"), (90, "1h 30m"), (10_080, "7d"), (1_500, "1d 1h")]
+    {
         assert_eq!(compact_minutes(minutes), spelled, "for {minutes} minutes");
     }
 }
@@ -445,10 +403,7 @@ fn the_current_window_section_meters_each_bucket_the_vendor_reported() {
     );
     // The honest tail still stands beside it: this fixture served no plan
     // window, so what is missing is the plan meters and only those.
-    assert!(
-        screen.contains("plan limits unavailable on this credential"),
-        "got:\n{screen}"
-    );
+    assert!(screen.contains("plan limits unavailable on this credential"), "got:\n{screen}");
 }
 
 /// P16 pre-mortem 4, on the panel: a window past its reset says so instead
@@ -464,10 +419,7 @@ fn a_window_past_its_reset_renders_as_expired_rather_than_as_a_live_number() {
         AREA,
     );
 
-    assert!(
-        screen.contains("expired \u{2014} refreshes on the next request"),
-        "got:\n{screen}"
-    );
+    assert!(screen.contains("expired \u{2014} refreshes on the next request"), "got:\n{screen}");
     assert!(
         !screen.contains("resets in"),
         "nothing may claim the window is still counting down:\n{screen}"
@@ -554,18 +506,9 @@ fn an_empty_session_names_its_own_empty_states() {
 
 #[test]
 fn an_unsized_model_meters_nothing_rather_than_inventing_a_window() {
-    let screen = rendered(
-        &Usage::new(Data {
-            context: None,
-            ..data()
-        }),
-        AREA,
-    );
+    let screen = rendered(&Usage::new(Data { context: None, ..data() }), AREA);
 
-    assert!(
-        screen.contains("unsized model \u{2014} no window to meter"),
-        "got:\n{screen}"
-    );
+    assert!(screen.contains("unsized model \u{2014} no window to meter"), "got:\n{screen}");
 }
 
 #[test]

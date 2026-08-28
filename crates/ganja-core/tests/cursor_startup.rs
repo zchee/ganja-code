@@ -14,10 +14,8 @@
 
 use std::env;
 
-use ganja_core::{
-    Config, Overrides,
-    provider::{self, ChatRequest, ProviderError},
-};
+use ganja_core::provider::{self, ChatRequest, ProviderError};
+use ganja_core::{Config, Overrides};
 use tokio_util::sync::CancellationToken;
 
 /// A config whose override names cursor and a model, the way `--model
@@ -44,10 +42,7 @@ async fn a_cursor_session_without_a_login_is_refused_naming_the_login() {
     let selection = provider::select(&config()).expect("selection reads nothing and succeeds");
     assert_eq!(selection.provider.id(), "cursor");
     assert_eq!(selection.model, "gpt-5.3-codex");
-    assert!(
-        selection.notice.is_none(),
-        "the provider was asked for by name, not defaulted"
-    );
+    assert!(selection.notice.is_none(), "the provider was asked for by name, not defaulted");
 
     let refused = selection
         .provider

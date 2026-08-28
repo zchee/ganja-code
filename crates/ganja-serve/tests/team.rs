@@ -13,16 +13,16 @@
 
 mod support;
 
-use std::{path::PathBuf, sync::Arc};
+use std::path::PathBuf;
+use std::sync::Arc;
 
-use ganja_core::{
-    Engine,
-    config::{DialogExpiry, InboundPolicy},
-    permission::Permissions,
-    teammate::TeammateRegistry,
-    tool::Registry,
-};
-use ganja_protocol::{PolicySource, team::TeamView};
+use ganja_core::Engine;
+use ganja_core::config::{DialogExpiry, InboundPolicy};
+use ganja_core::permission::Permissions;
+use ganja_core::teammate::TeammateRegistry;
+use ganja_core::tool::Registry;
+use ganja_protocol::PolicySource;
+use ganja_protocol::team::TeamView;
 use ganja_serve::Listen;
 use ganja_testkit::{ScriptedProvider, says};
 use support::{
@@ -46,10 +46,7 @@ fn led_engine(home: &std::path::Path) -> (Arc<Engine>, Arc<TeammateRegistry>) {
     );
     let registry = Arc::new(TeammateRegistry::for_session(home, SESSION, home));
 
-    (
-        Arc::new(engine.with_teammates(Arc::clone(&registry))),
-        registry,
-    )
+    (Arc::new(engine.with_teammates(Arc::clone(&registry))), registry)
 }
 
 /// The same lead with the admission gate dialled, for the two tests that
@@ -128,16 +125,12 @@ async fn get_team_answers_identically_on_tcp_and_socket() {
     let tcp = ganja_serve::serve(Arc::clone(&engine), loopback_config())
         .await
         .expect("the TCP server comes up");
-    let socket = ganja_serve::serve(
-        Arc::clone(&engine),
-        with_listen(Listen::Unix { path: path.clone() }),
-    )
-    .await
-    .expect("the socket server comes up");
+    let socket =
+        ganja_serve::serve(Arc::clone(&engine), with_listen(Listen::Unix { path: path.clone() }))
+            .await
+            .expect("the socket server comes up");
 
-    let over_tcp = reqwest::get(format!("{}/team", base_url(&tcp)))
-        .await
-        .expect("TCP answers");
+    let over_tcp = reqwest::get(format!("{}/team", base_url(&tcp))).await.expect("TCP answers");
     assert_eq!(over_tcp.status(), 200);
     let over_tcp = over_tcp.text().await.expect("a body");
 
@@ -151,11 +144,7 @@ async fn get_team_answers_identically_on_tcp_and_socket() {
 
     assert_eq!(over_tcp, over_socket, "one engine, one roster");
     let view: TeamView = serde_json::from_str(&over_tcp).expect("the body is a TeamView");
-    assert_eq!(
-        Some(view.clone()),
-        engine.team_view(),
-        "and it is the engine's own view"
-    );
+    assert_eq!(Some(view.clone()), engine.team_view(), "and it is the engine's own view");
     assert_eq!(view.lead, "team-lead");
     assert_eq!(view.members.len(), 1, "a fresh team is its lead alone");
 
@@ -180,12 +169,10 @@ async fn post_team_message_is_not_registered_on_tcp() {
     let tcp = ganja_serve::serve(Arc::clone(&engine), loopback_config())
         .await
         .expect("the TCP server comes up");
-    let socket = ganja_serve::serve(
-        Arc::clone(&engine),
-        with_listen(Listen::Unix { path: path.clone() }),
-    )
-    .await
-    .expect("the socket server comes up");
+    let socket =
+        ganja_serve::serve(Arc::clone(&engine), with_listen(Listen::Unix { path: path.clone() }))
+            .await
+            .expect("the socket server comes up");
 
     let over_tcp = reqwest::Client::new()
         .post(format!("{}/team/team-lead/message", base_url(&tcp)))
@@ -211,9 +198,7 @@ async fn post_team_message_is_not_registered_on_tcp() {
     let delivered: serde_json::Value = over_socket.json().await.expect("a JSON answer");
     assert_eq!(delivered["to"], "team-lead");
     assert!(
-        delivered["note"]
-            .as_str()
-            .is_some_and(|note| !note.is_empty()),
+        delivered["note"].as_str().is_some_and(|note| !note.is_empty()),
         "the answer says what became of it: {delivered}"
     );
 
@@ -246,23 +231,17 @@ async fn a_uds_request_needs_no_password_while_a_tcp_request_still_does() {
     let mut socket_config = with_listen(Listen::Unix { path: path.clone() });
     socket_config.credentials = Some(credentials());
 
-    let tcp = ganja_serve::serve(Arc::clone(&engine), tcp_config)
-        .await
-        .expect("the TCP server comes up");
+    let tcp =
+        ganja_serve::serve(Arc::clone(&engine), tcp_config).await.expect("the TCP server comes up");
     let socket = ganja_serve::serve(Arc::clone(&engine), socket_config)
         .await
         .expect("the socket server comes up");
     let base = base_url(&tcp);
 
     // TCP: the credential is required, and satisfied by the header.
-    let bare = reqwest::get(format!("{base}/team"))
-        .await
-        .expect("TCP answers");
+    let bare = reqwest::get(format!("{base}/team")).await.expect("TCP answers");
     assert_eq!(bare.status(), 401, "TCP still wants the password");
-    assert!(
-        bare.headers().contains_key("www-authenticate"),
-        "with the Basic challenge"
-    );
+    assert!(bare.headers().contains_key("www-authenticate"), "with the Basic challenge");
     let with = reqwest::Client::new()
         .get(format!("{base}/team"))
         .header("authorization", basic())
@@ -273,11 +252,7 @@ async fn a_uds_request_needs_no_password_while_a_tcp_request_still_does() {
 
     // The socket: no credential presented, and everything served.
     let client = socket_client(&path);
-    let read = client
-        .get(format!("{SOCKET_URL}/team"))
-        .send()
-        .await
-        .expect("the socket answers");
+    let read = client.get(format!("{SOCKET_URL}/team")).send().await.expect("the socket answers");
     assert_eq!(read.status(), 200, "the socket asks for no password");
     let write = client
         .post(format!("{SOCKET_URL}/team/team-lead/message"))
@@ -308,12 +283,10 @@ async fn a_structured_frame_is_refused_on_the_socket_post() {
     let home = ganja_testkit::temp_dir();
     let (engine, registry) = led_engine(home.path());
     let path = socket_path(&home, "s.sock");
-    let socket = ganja_serve::serve(
-        Arc::clone(&engine),
-        with_listen(Listen::Unix { path: path.clone() }),
-    )
-    .await
-    .expect("the socket server comes up");
+    let socket =
+        ganja_serve::serve(Arc::clone(&engine), with_listen(Listen::Unix { path: path.clone() }))
+            .await
+            .expect("the socket server comes up");
     let client = socket_client(&path);
 
     // A frame in the text — the JSON of a lead-only frame, as a peer might
@@ -352,10 +325,7 @@ async fn a_structured_frame_is_refused_on_the_socket_post() {
         .expect("the socket answers");
     assert_eq!(refused.status(), 400);
     let said = refused.text().await.expect("a body");
-    assert!(
-        said.contains("does not parse"),
-        "the body is not the route's: {said}"
-    );
+    assert!(said.contains("does not parse"), "the body is not the route's: {said}");
 
     // A sender that will not name itself as a peer.
     let refused = client
@@ -369,10 +339,7 @@ async fn a_structured_frame_is_refused_on_the_socket_post() {
         .expect("the socket answers");
     assert_eq!(refused.status(), 400);
     let said = refused.text().await.expect("a body");
-    assert!(
-        said.contains("<name>@<team>"),
-        "a bare name is refused as a peer identity: {said}"
-    );
+    assert!(said.contains("<name>@<team>"), "a bare name is refused as a peer identity: {said}");
 
     // And a name that is not the lead's — the socket delivers to the
     // session, which is its lead (M4), and says so.
@@ -392,10 +359,7 @@ async fn a_structured_frame_is_refused_on_the_socket_post() {
         "the refusal names the lead: {said}"
     );
 
-    assert!(
-        lead_inbox(&registry).is_empty(),
-        "every refusal left the inbox untouched"
-    );
+    assert!(lead_inbox(&registry).is_empty(), "every refusal left the inbox untouched");
 
     socket.shutdown().await.expect("the socket server stops");
 }
@@ -417,9 +381,8 @@ async fn the_socket_serves_four_routes_and_tcp_serves_the_rest_behind_its_creden
     tcp_config.credentials = Some(credentials());
     let mut socket_config = with_listen(Listen::Unix { path: path.clone() });
     socket_config.credentials = Some(credentials());
-    let tcp = ganja_serve::serve(Arc::clone(&engine), tcp_config)
-        .await
-        .expect("the TCP server comes up");
+    let tcp =
+        ganja_serve::serve(Arc::clone(&engine), tcp_config).await.expect("the TCP server comes up");
     let socket = ganja_serve::serve(Arc::clone(&engine), socket_config)
         .await
         .expect("the socket server comes up");
@@ -439,11 +402,7 @@ async fn the_socket_serves_four_routes_and_tcp_serves_the_rest_behind_its_creden
         ("GET", "/session".to_owned(), None),
         ("GET", format!("/session/{session}"), None),
         ("GET", format!("/session/{session}/message"), None),
-        (
-            "POST",
-            format!("/session/{session}/message"),
-            Some(serde_json::json!({"text": "hi"})),
-        ),
+        ("POST", format!("/session/{session}/message"), Some(serde_json::json!({"text": "hi"}))),
         (
             "POST",
             format!("/session/{session}/prompt_async"),
@@ -451,23 +410,11 @@ async fn the_socket_serves_four_routes_and_tcp_serves_the_rest_behind_its_creden
         ),
         ("POST", format!("/session/{session}/abort"), None),
         ("POST", format!("/session/{session}/summarize"), None),
-        (
-            "POST",
-            format!("/session/{session}/command"),
-            Some(serde_json::json!({"name": "init"})),
-        ),
-        (
-            "POST",
-            format!("/session/{session}/shell"),
-            Some(serde_json::json!({"command": "true"})),
-        ),
+        ("POST", format!("/session/{session}/command"), Some(serde_json::json!({"name": "init"}))),
+        ("POST", format!("/session/{session}/shell"), Some(serde_json::json!({"command": "true"}))),
         ("POST", format!("/session/{session}/revert"), None),
         ("POST", format!("/session/{session}/unrevert"), None),
-        (
-            "POST",
-            format!("/session/{session}/agent"),
-            Some(serde_json::json!({"name": "build"})),
-        ),
+        ("POST", format!("/session/{session}/agent"), Some(serde_json::json!({"name": "build"}))),
         (
             "POST",
             format!("/session/{session}/model"),
@@ -515,11 +462,7 @@ async fn the_socket_serves_four_routes_and_tcp_serves_the_rest_behind_its_creden
             .send()
             .await
             .expect("TCP answers");
-        assert_eq!(
-            bare.status(),
-            401,
-            "{method} {route} on TCP wants the credential"
-        );
+        assert_eq!(bare.status(), 401, "{method} {route} on TCP wants the credential");
     }
     // The stored-session reads are left out too: this engine is ephemeral,
     // and their honest answer over TCP is a `404` about the store.
@@ -551,19 +494,13 @@ async fn the_socket_serves_four_routes_and_tcp_serves_the_rest_behind_its_creden
     // And the two routes the socket serves that no other test here counts,
     // without a credential — the two `/team` routes are AC-26's own test,
     // above.
-    let health = client
-        .get(format!("{SOCKET_URL}/global/health"))
-        .send()
-        .await
-        .expect("the socket answers");
+    let health =
+        client.get(format!("{SOCKET_URL}/global/health")).send().await.expect("the socket answers");
     assert_eq!(health.status(), 200);
 
     let receipt = client
         .post(format!("{SOCKET_URL}/peer/receipt"))
-        .json(&receipt_body(
-            "01998ad0-0000-7000-8000-00000000d534",
-            "delivered",
-        ))
+        .json(&receipt_body("01998ad0-0000-7000-8000-00000000d534", "delivered"))
         .send()
         .await
         .expect("the socket answers");
@@ -586,12 +523,10 @@ async fn health_names_the_session_the_socket_serves() {
     let home = ganja_testkit::temp_dir();
     let (engine, _registry) = led_engine(home.path());
     let path = socket_path(&home, "s.sock");
-    let socket = ganja_serve::serve(
-        Arc::clone(&engine),
-        with_listen(Listen::Unix { path: path.clone() }),
-    )
-    .await
-    .expect("the socket server comes up");
+    let socket =
+        ganja_serve::serve(Arc::clone(&engine), with_listen(Listen::Unix { path: path.clone() }))
+            .await
+            .expect("the socket server comes up");
 
     let health: serde_json::Value = socket_client(&path)
         .get(format!("{SOCKET_URL}/global/health"))
@@ -621,23 +556,16 @@ async fn a_session_leading_no_team_answers_not_found_on_both_routes() {
     let tcp = ganja_serve::serve(Arc::clone(&engine), loopback_config())
         .await
         .expect("the TCP server comes up");
-    let socket = ganja_serve::serve(
-        Arc::clone(&engine),
-        with_listen(Listen::Unix { path: path.clone() }),
-    )
-    .await
-    .expect("the socket server comes up");
+    let socket =
+        ganja_serve::serve(Arc::clone(&engine), with_listen(Listen::Unix { path: path.clone() }))
+            .await
+            .expect("the socket server comes up");
 
-    let over_tcp = reqwest::get(format!("{}/team", base_url(&tcp)))
-        .await
-        .expect("TCP answers");
+    let over_tcp = reqwest::get(format!("{}/team", base_url(&tcp))).await.expect("TCP answers");
     assert_eq!(over_tcp.status(), 404);
     let client = socket_client(&path);
-    let over_socket = client
-        .get(format!("{SOCKET_URL}/team"))
-        .send()
-        .await
-        .expect("the socket answers");
+    let over_socket =
+        client.get(format!("{SOCKET_URL}/team")).send().await.expect("the socket answers");
     assert_eq!(over_socket.status(), 404);
     let posted = client
         .post(format!("{SOCKET_URL}/team/team-lead/message"))
@@ -649,13 +577,7 @@ async fn a_session_leading_no_team_answers_not_found_on_both_routes() {
         .await
         .expect("the socket answers");
     assert_eq!(posted.status(), 404);
-    assert!(
-        posted
-            .text()
-            .await
-            .expect("a body")
-            .contains("leads no team")
-    );
+    assert!(posted.text().await.expect("a body").contains("leads no team"));
 
     tcp.shutdown().await.expect("the TCP server stops");
     socket.shutdown().await.expect("the socket server stops");
@@ -678,12 +600,10 @@ async fn post_peer_receipt_is_not_registered_on_tcp() {
     let tcp = ganja_serve::serve(Arc::clone(&engine), loopback_config())
         .await
         .expect("the TCP server comes up");
-    let socket = ganja_serve::serve(
-        Arc::clone(&engine),
-        with_listen(Listen::Unix { path: path.clone() }),
-    )
-    .await
-    .expect("the socket server comes up");
+    let socket =
+        ganja_serve::serve(Arc::clone(&engine), with_listen(Listen::Unix { path: path.clone() }))
+            .await
+            .expect("the socket server comes up");
 
     let over_tcp = reqwest::Client::new()
         .post(format!("{}/peer/receipt", base_url(&tcp)))
@@ -705,10 +625,7 @@ async fn post_peer_receipt_is_not_registered_on_tcp() {
         .await
         .expect("the socket answers");
     assert_eq!(over_socket.status(), 204);
-    assert!(
-        over_socket.bytes().await.expect("a body").is_empty(),
-        "and says nothing at all"
-    );
+    assert!(over_socket.bytes().await.expect("a body").is_empty(), "and says nothing at all");
 
     tcp.shutdown().await.expect("the TCP server stops");
     socket.shutdown().await.expect("the socket server stops");
@@ -733,29 +650,18 @@ async fn a_receipt_answers_the_same_bytes_whatever_id_it_named() {
     let home = ganja_testkit::temp_dir();
     let (engine, _registry) = led_engine(home.path());
     let path = socket_path(&home, "s.sock");
-    let socket = ganja_serve::serve(
-        Arc::clone(&engine),
-        with_listen(Listen::Unix { path: path.clone() }),
-    )
-    .await
-    .expect("the socket server comes up");
+    let socket =
+        ganja_serve::serve(Arc::clone(&engine), with_listen(Listen::Unix { path: path.clone() }))
+            .await
+            .expect("the socket server comes up");
     let client = socket_client(&path);
     let known = "01998ad0-0000-7000-8000-0000000000a1";
 
     let mut answers = Vec::new();
     for (case, body) in [
-        (
-            "an id this session never minted",
-            receipt_body(known, "delivered"),
-        ),
-        (
-            "the very same receipt again",
-            receipt_body(known, "delivered"),
-        ),
-        (
-            "a second terminal for that id",
-            receipt_body(known, "denied"),
-        ),
+        ("an id this session never minted", receipt_body(known, "delivered")),
+        ("the very same receipt again", receipt_body(known, "delivered")),
+        ("a second terminal for that id", receipt_body(known, "denied")),
         (
             "another id nothing is waiting on",
             receipt_body("01998ad0-0000-7000-8000-0000000000a2", "expired"),
@@ -797,29 +703,20 @@ async fn a_receipt_naming_a_status_this_route_does_not_carry_is_refused() {
     let home = ganja_testkit::temp_dir();
     let (engine, _registry) = led_engine(home.path());
     let path = socket_path(&home, "s.sock");
-    let socket = ganja_serve::serve(
-        Arc::clone(&engine),
-        with_listen(Listen::Unix { path: path.clone() }),
-    )
-    .await
-    .expect("the socket server comes up");
+    let socket =
+        ganja_serve::serve(Arc::clone(&engine), with_listen(Listen::Unix { path: path.clone() }))
+            .await
+            .expect("the socket server comes up");
 
     let refused = socket_client(&path)
         .post(format!("{SOCKET_URL}/peer/receipt"))
-        .json(&receipt_body(
-            "01998ad0-0000-7000-8000-0000000000b1",
-            "held",
-        ))
+        .json(&receipt_body("01998ad0-0000-7000-8000-0000000000b1", "held"))
         .send()
         .await
         .expect("the socket answers");
     assert_eq!(refused.status(), 400);
     assert!(
-        refused
-            .text()
-            .await
-            .expect("a body")
-            .contains("does not parse"),
+        refused.text().await.expect("a body").contains("does not parse"),
         "and says so readably"
     );
 
@@ -844,27 +741,20 @@ async fn an_enveloped_body_and_a_bare_one_are_admitted_alike() {
     let bare_path = socket_path(&bare_home, "b.sock");
     let enveloped_server = ganja_serve::serve(
         Arc::clone(&enveloped_engine),
-        with_listen(Listen::Unix {
-            path: enveloped_path.clone(),
-        }),
+        with_listen(Listen::Unix { path: enveloped_path.clone() }),
     )
     .await
     .expect("the socket server comes up");
     let bare_server = ganja_serve::serve(
         Arc::clone(&bare_engine),
-        with_listen(Listen::Unix {
-            path: bare_path.clone(),
-        }),
+        with_listen(Listen::Unix { path: bare_path.clone() }),
     )
     .await
     .expect("the socket server comes up");
 
     let enveloped = socket_client(&enveloped_path)
         .post(format!("{SOCKET_URL}/team/team-lead/message"))
-        .json(&enveloped_message(
-            "did the envelope cross",
-            "01998ad0-0000-7000-8000-0000000000c1",
-        ))
+        .json(&enveloped_message("did the envelope cross", "01998ad0-0000-7000-8000-0000000000c1"))
         .send()
         .await
         .expect("the socket answers");
@@ -899,10 +789,7 @@ async fn an_enveloped_body_and_a_bare_one_are_admitted_alike() {
     assert_eq!(lead_inbox(&enveloped_registry).len(), 1, "both landed");
     assert_eq!(lead_inbox(&bare_registry).len(), 1);
 
-    enveloped_server
-        .shutdown()
-        .await
-        .expect("the enveloped server stops");
+    enveloped_server.shutdown().await.expect("the enveloped server stops");
     bare_server.shutdown().await.expect("the bare server stops");
 }
 
@@ -917,24 +804,18 @@ async fn a_hold_answers_its_typed_cause_while_accept_and_refuse_stay_identical()
     let refusing_home = ganja_testkit::temp_dir();
     let holding_home = ganja_testkit::temp_dir();
     let (accepting, _) = led_engine(accepting_home.path());
-    let (refusing, _) = led_engine_with_policy(
-        refusing_home.path(),
-        (InboundPolicy::Refuse, PolicySource::Global),
-    );
-    let (holding, holding_registry) = led_engine_with_policy(
-        holding_home.path(),
-        (InboundPolicy::Hold, PolicySource::Global),
-    );
+    let (refusing, _) =
+        led_engine_with_policy(refusing_home.path(), (InboundPolicy::Refuse, PolicySource::Global));
+    let (holding, holding_registry) =
+        led_engine_with_policy(holding_home.path(), (InboundPolicy::Hold, PolicySource::Global));
     let accepting_path = socket_path(&accepting_home, "a.sock");
     let refusing_path = socket_path(&refusing_home, "r.sock");
     let holding_path = socket_path(&holding_home, "h.sock");
 
     let mut servers = Vec::new();
-    for (engine, path) in [
-        (&accepting, &accepting_path),
-        (&refusing, &refusing_path),
-        (&holding, &holding_path),
-    ] {
+    for (engine, path) in
+        [(&accepting, &accepting_path), (&refusing, &refusing_path), (&holding, &holding_path)]
+    {
         servers.push(
             ganja_serve::serve(
                 Arc::clone(engine),
@@ -954,16 +835,11 @@ async fn a_hold_answers_its_typed_cause_while_accept_and_refuse_stay_identical()
             .send()
             .await
             .expect("the socket answers");
-        answered.push((
-            response.status().as_u16(),
-            response.bytes().await.expect("a body").to_vec(),
-        ));
+        answered
+            .push((response.status().as_u16(), response.bytes().await.expect("a body").to_vec()));
     }
-    let [
-        (accept_status, accept_body),
-        (refuse_status, refuse_body),
-        (hold_status, hold_body),
-    ] = <[_; 3]>::try_from(answered).expect("three answers");
+    let [(accept_status, accept_body), (refuse_status, refuse_body), (hold_status, hold_body)] =
+        <[_; 3]>::try_from(answered).expect("three answers");
 
     assert_eq!(accept_status, 200);
     assert_eq!(refuse_status, accept_status);
@@ -989,15 +865,10 @@ async fn a_hold_answers_its_typed_cause_while_accept_and_refuse_stay_identical()
         "the hold names its cause as a typed value: {held}"
     );
     assert!(
-        held["note"]
-            .as_str()
-            .is_some_and(|note| note.contains("held for a person's review")),
+        held["note"].as_str().is_some_and(|note| note.contains("held for a person's review")),
         "and the prose beside it still says so: {held}"
     );
-    assert!(
-        lead_inbox(&holding_registry).is_empty(),
-        "a held message reaches no inbox"
-    );
+    assert!(lead_inbox(&holding_registry).is_empty(), "a held message reaches no inbox");
 
     for server in servers {
         server.shutdown().await.expect("the socket server stops");

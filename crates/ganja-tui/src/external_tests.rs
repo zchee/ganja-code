@@ -12,11 +12,7 @@ fn the_editor_is_whatever_the_environment_names_and_vi_when_it_names_nothing() {
     ];
 
     for (configured, expected) in cases {
-        assert_eq!(
-            program(configured.map(str::to_owned)),
-            expected,
-            "{configured:?}"
-        );
+        assert_eq!(program(configured.map(str::to_owned)), expected, "{configured:?}");
     }
 }
 
@@ -46,21 +42,14 @@ fn one_trailing_newline_is_the_editors_and_is_dropped() {
     let directory = tempfile::tempdir().expect("a temporary directory is creatable");
     let cases = [
         ("what the editor wrote\n", "what the editor wrote"),
-        (
-            "a blank line the user left\n\n",
-            "a blank line the user left\n",
-        ),
+        ("a blank line the user left\n\n", "a blank line the user left\n"),
         ("no newline at all", "no newline at all"),
     ];
 
     for (written, expected) in cases {
         let path = seed(directory.path(), written).expect("the seed writes");
 
-        assert_eq!(
-            read_back(&path).expect("it reads back"),
-            expected,
-            "{written:?}"
-        );
+        assert_eq!(read_back(&path).expect("it reads back"), expected, "{written:?}");
     }
 }
 

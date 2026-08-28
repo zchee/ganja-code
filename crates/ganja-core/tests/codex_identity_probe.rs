@@ -120,25 +120,18 @@
 //! be satisfied by one run and housing them together would leave one silently
 //! inert with no visible reason.
 
-use std::{
-    collections::BTreeSet,
-    env, fmt, fs,
-    sync::{Arc, Mutex},
-};
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex};
+use std::{env, fmt, fs};
 
 use futures::StreamExt as _;
-use ganja_core::{
-    auth::openai::Login,
-    protocol::{Message, Usage},
-    provider::{
-        self, ChatRequest, Provider, ProviderError, ProviderEvent, ResponsesProvider, openai,
-        responses,
-    },
+use ganja_core::auth::openai::Login;
+use ganja_core::protocol::{Message, Usage};
+use ganja_core::provider::{
+    self, ChatRequest, Provider, ProviderError, ProviderEvent, ResponsesProvider, openai, responses,
 };
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::TcpListener,
-};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 /// Variable that has to be `1` before any of this talks to a vendor.
@@ -150,10 +143,8 @@ const NOTE_ENV: &str = "GANJA_PROBE_NOTE";
 
 /// Where the recording lands, beside the P27/P28 `*-probe.txt` fixtures whose
 /// convention it follows.
-const FIXTURE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/codex-identity-probe.txt"
-);
+const FIXTURE: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/codex-identity-probe.txt");
 
 /// The prompt, chosen so the reply is one cheap token and the recording is not
 /// a judgement about what a model felt like saying.
@@ -210,10 +201,7 @@ impl Redacted {
     fn prefix(&self) -> Option<&str> {
         let token = self.without_scheme();
 
-        token
-            .char_indices()
-            .nth(PREFIX_SEARCH)
-            .map(|(end, _)| &token[..end])
+        token.char_indices().nth(PREFIX_SEARCH).map(|(end, _)| &token[..end])
     }
 }
 
@@ -242,10 +230,7 @@ impl Recorded {
     fn header(&self, name: &str) -> Option<String> {
         self.head.lines().find_map(|line| {
             let (found, value) = line.split_once(':')?;
-            found
-                .trim()
-                .eq_ignore_ascii_case(name)
-                .then(|| value.trim().to_owned())
+            found.trim().eq_ignore_ascii_case(name).then(|| value.trim().to_owned())
         })
     }
 
@@ -280,10 +265,7 @@ impl Endpoint {
     /// arrived, because a probe that measured nothing must say so — the golden
     /// suite's hard-fail posture, for its reason.
     fn take_latest(&self) -> Recorded {
-        let mut seen = self
-            .seen
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut seen = self.seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let latest = seen.pop();
         seen.clear();
 
@@ -304,12 +286,8 @@ impl Endpoint {
 /// a turn that fails before its first byte is retried, and three identical
 /// recordings of one request would be noise in the count.
 async fn serve() -> Endpoint {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("loopback is bindable");
-    let address = listener
-        .local_addr()
-        .expect("a bound socket has an address");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("loopback is bindable");
+    let address = listener.local_addr().expect("a bound socket has an address");
     let seen: Arc<Mutex<Vec<Recorded>>> = Arc::new(Mutex::new(Vec::new()));
 
     let recorded = Arc::clone(&seen);
@@ -324,10 +302,7 @@ async fn serve() -> Endpoint {
                 let Some(request) = read_request(&mut socket).await else {
                     return;
                 };
-                recorded
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .push(request);
+                recorded.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(request);
 
                 let body = [
                     r#"data: {"type":"response.created","response":{"id":"resp_probe"}}"#,
@@ -350,11 +325,7 @@ async fn serve() -> Endpoint {
         }
     });
 
-    Endpoint {
-        base_url: format!("http://{address}/backend-api/codex"),
-        seen,
-        _server: server,
-    }
+    Endpoint { base_url: format!("http://{address}/backend-api/codex"), seen, _server: server }
 }
 
 /// Reads one whole request: head to the blank line, then whatever
@@ -375,9 +346,7 @@ async fn read_request(socket: &mut tokio::net::TcpStream) -> Option<Recorded> {
         .lines()
         .find_map(|line| {
             let (name, value) = line.split_once(':')?;
-            name.trim()
-                .eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse().ok())?
+            name.trim().eq_ignore_ascii_case("content-length").then(|| value.trim().parse().ok())?
         })
         .unwrap_or_default();
     // Drained rather than kept: the body is this build's own request shape,
@@ -529,10 +498,8 @@ async fn a_chatgpt_seat_records_the_identity_it_presents_and_the_models_it_is_se
     let _ = turn(&loopback, &model).await;
     let sent = endpoint.take_latest();
 
-    let bearer = Redacted(
-        sent.header("authorization")
-            .expect("a request to this backend authenticates"),
-    );
+    let bearer =
+        Redacted(sent.header("authorization").expect("a request to this backend authenticates"));
     let account = sent.header("chatgpt-account-id").map(Redacted);
 
     // ---- 2. One live turn, against the vendor. ----------------------------
@@ -568,15 +535,7 @@ async fn a_chatgpt_seat_records_the_identity_it_presents_and_the_models_it_is_se
     let _ = turn(&loopback, &model).await;
     let after = endpoint.take_latest();
 
-    let recording = render(
-        &bearer,
-        account.as_ref(),
-        &sent,
-        &model,
-        &taken,
-        &offered,
-        &ladder,
-    );
+    let recording = render(&bearer, account.as_ref(), &sent, &model, &taken, &offered, &ladder);
 
     // ---- The leak check, before a byte of this reaches the disk. ----------
     //
@@ -679,24 +638,13 @@ fn render(
         }
     }
 
-    let named: BTreeSet<String> = CREDENTIAL
-        .iter()
-        .chain(IDENTITY.iter())
-        .map(|name| (*name).to_owned())
-        .collect();
-    let others: Vec<String> = sent
-        .header_names()
-        .difference(&named)
-        .cloned()
-        .collect::<Vec<_>>();
+    let named: BTreeSet<String> =
+        CREDENTIAL.iter().chain(IDENTITY.iter()).map(|name| (*name).to_owned()).collect();
+    let others: Vec<String> = sent.header_names().difference(&named).cloned().collect::<Vec<_>>();
     out.push_str(&format!(
         "\n# Also sent, names only: a header set that dropped what it did not\n\
          # recognise would hide the next one somebody adds.\nalso sent: {}\n",
-        if others.is_empty() {
-            "<nothing else>".to_owned()
-        } else {
-            others.join(", ")
-        }
+        if others.is_empty() { "<nothing else>".to_owned() } else { others.join(", ") }
     ));
 
     out.push_str(&format!(
@@ -779,11 +727,7 @@ fn flattened(body: &str) -> String {
 /// The live turn's own rows, which a ladder row does not carry.
 fn detailed(taken: &Outcome) -> String {
     match taken {
-        Outcome::Served {
-            finish,
-            usage,
-            reply,
-        } => {
+        Outcome::Served { finish, usage, reply } => {
             let billed = usage.map_or_else(
                 || "not billed".to_owned(),
                 |usage| {

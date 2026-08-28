@@ -51,17 +51,13 @@
 //! module first shipped. Each shape says which documents settled it, and says
 //! plainly where the evidence is thin.
 
-use std::{
-    fmt,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::fmt;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use indexmap::IndexMap;
 use jiff::Timestamp;
-use serde::{
-    Deserialize, Serialize, Serializer,
-    ser::{self, SerializeMap as _},
-};
+use serde::ser::{self, SerializeMap as _};
+use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value;
 
 use crate::team::{LEAD, MemberName, TeamName};
@@ -455,13 +451,7 @@ const MEMBER_KEYS: [&str; 13] = [
 ];
 
 /// Every key a [`TeamFile`] emits (§2.2).
-const TEAM_FILE_KEYS: [&str; 5] = [
-    "name",
-    "createdAt",
-    "leadAgentId",
-    "leadSessionId",
-    "members",
-];
+const TEAM_FILE_KEYS: [&str; 5] = ["name", "createdAt", "leadAgentId", "leadSessionId", "members"];
 
 /// Every key a [`MailboxMessage`] emits (§2.3), and so the ones a message's
 /// passthrough map may not carry.
@@ -470,17 +460,8 @@ const TEAM_FILE_KEYS: [&str; 5] = [
 /// by `the_schema_key_list_is_exactly_what_a_message_serializes`, because all
 /// three are hand-written and a tenth field would otherwise be governed by none
 /// of them.
-pub(crate) const SCHEMA_KEYS: [&str; 9] = [
-    "type",
-    "from",
-    "text",
-    "timestamp",
-    "read",
-    "color",
-    "summary",
-    "msgV",
-    "msg_id",
-];
+pub(crate) const SCHEMA_KEYS: [&str; 9] =
+    ["type", "from", "text", "timestamp", "read", "color", "summary", "msgV", "msg_id"];
 
 /// The passthrough keys a declared field already spells, each as the sentence
 /// the refusal carries.
@@ -778,14 +759,7 @@ impl Serialize for TeamFile {
     where
         S: Serializer,
     {
-        let Self {
-            name,
-            created_at,
-            lead_agent_id,
-            lead_session_id,
-            members,
-            extra,
-        } = self;
+        let Self { name, created_at, lead_agent_id, lead_session_id, members, extra } = self;
         refuse_shadowed(extra, &TEAM_FILE_KEYS)?;
 
         let mut map = serializer.serialize_map(None)?;
@@ -1010,9 +984,7 @@ where
 pub fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| {
-            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
-        })
+        .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// The clock in a message timestamp's spelling.

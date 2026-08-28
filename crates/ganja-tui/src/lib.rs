@@ -23,40 +23,29 @@ pub mod notify;
 pub mod theme;
 pub mod transcript;
 
-use std::{
-    io::stdout,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::io::stdout;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
-use ganja_core::{
-    AgentRegistry, Engine, SessionId, Storage, catalog,
-    config::{Config, Overrides, ThemeMode},
-    instruction, provider,
-    teammate::{
-        TeammateRegistry,
-        pane::{PaneShare, PaneShell},
-    },
-};
+use ganja_core::config::{Config, Overrides, ThemeMode};
+use ganja_core::teammate::TeammateRegistry;
+use ganja_core::teammate::pane::{PaneShare, PaneShell};
+use ganja_core::{AgentRegistry, Engine, SessionId, Storage, catalog, instruction, provider};
 use ganja_permission::Project;
 use ganja_protocol::Message;
-use ratatui::crossterm::{
-    event::{
-        DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
-        EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
-    },
-    execute,
+use ratatui::crossterm::event::{
+    DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
+    EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
+use ratatui::crossterm::execute;
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    app::App,
-    history::History,
-    keybind::Keybinds,
-    theme::{Mode, Themes},
-};
+use crate::app::App;
+use crate::history::History;
+use crate::keybind::Keybinds;
+use crate::theme::{Mode, Themes};
 
 /// Directory the session store lives in, under the project's data directory.
 const STORAGE: &str = "storage";
@@ -178,10 +167,7 @@ pub async fn run(
         Some((_, record))
             if record.plan_mode_required.unwrap_or(false) && overrides.agent.is_none() =>
         {
-            Overrides {
-                agent: Some(ganja_core::agent::PLAN.to_owned()),
-                ..overrides
-            }
+            Overrides { agent: Some(ganja_core::agent::PLAN.to_owned()), ..overrides }
         }
         _ => overrides,
     };
@@ -196,10 +182,8 @@ pub async fn run(
     // id the lead's own engine was serving — over the provider this build's
     // config selects; `--model` is not on §4.1's line, and a record naming no
     // model leaves the selection's default standing.
-    let model = membership
-        .as_ref()
-        .and_then(|(_, record)| record.model.clone())
-        .unwrap_or(selection.model);
+    let model =
+        membership.as_ref().and_then(|(_, record)| record.model.clone()).unwrap_or(selection.model);
     // Sessions live per project, so opening `src/` and opening the repository
     // root reach the same history.
     let project = Project::resolve(&cwd);
@@ -208,17 +192,12 @@ pub async fn run(
     let agents = Arc::new(
         AgentRegistry::build(&config, project.root()).context("failed to resolve the agents")?,
     );
-    let data = project
-        .data_dir()
-        .context("failed to locate the project's data directory")?;
+    let data = project.data_dir().context("failed to locate the project's data directory")?;
     let storage = Storage::open(data.join(STORAGE));
     // `/init`'s template names the worktree it is being run in, so the roster
     // is resolved against the project root rather than against whichever
     // subdirectory the terminal happened to be opened in.
-    let commands = Arc::new(ganja_core::command::Registry::build(
-        &config,
-        project.root(),
-    ));
+    let commands = Arc::new(ganja_core::command::Registry::build(&config, project.root()));
     // Configured MCP servers, none of them dialled yet. The **project root**
     // is what a relative `cwd` in an entry resolves against, not the directory
     // this process happens to have been started in: a server configured once
@@ -233,10 +212,7 @@ pub async fn run(
     // Probed here, before the first frame: whether this project can be
     // snapshotted at all decides what the status bar has to say about `/undo`,
     // and the answer costs one synchronous `git` probe.
-    let snapshots = Arc::new(ganja_core::Snapshots::new(
-        &project,
-        config.snapshots_enabled(),
-    ));
+    let snapshots = Arc::new(ganja_core::Snapshots::new(&project, config.snapshots_enabled()));
     let snapshot_notice = snapshots.notice().map(str::to_owned);
     // The registry carries every builtin tool the agent loop can execute;
     // permission rules load for the project the terminal was opened in.
@@ -246,18 +222,14 @@ pub async fn run(
     // private network is a legitimate one to fetch is a question only the
     // person running the session can answer.
     if config.webfetch_allows_private() {
-        tools = tools.with(Arc::new(
-            ganja_tool::webfetch::WebfetchTool::allowing_private(),
-        ));
+        tools = tools.with(Arc::new(ganja_tool::webfetch::WebfetchTool::allowing_private()));
     }
     // Over the top of the roster's rootless one, out of the **same** value the
     // prompt's `<available_skills>` block is built from below: a session that
     // is offered a skill has to be able to load it, and only a caller holding
     // the config and the directory can resolve where either half looks.
     let skill_roots = instruction::skill_roots(&config, &cwd);
-    tools = tools.with(Arc::new(ganja_tool::skill::SkillTool::over(
-        skill_roots.clone(),
-    )));
+    tools = tools.with(Arc::new(ganja_tool::skill::SkillTool::over(skill_roots.clone())));
     let mut engine = Engine::persistent(
         selection.provider,
         model,
@@ -347,11 +319,7 @@ pub async fn run(
         }
         None => (
             ganja_core::tool::registry::sanitize(
-                project
-                    .root()
-                    .file_name()
-                    .and_then(std::ffi::OsStr::to_str)
-                    .unwrap_or_default(),
+                project.root().file_name().and_then(std::ffi::OsStr::to_str).unwrap_or_default(),
             ),
             ganja_core::tool::registry::NameSource::Derived,
         ),
@@ -370,11 +338,7 @@ pub async fn run(
     // override.
     let engine = if interactive {
         engine
-            .with_socket_directory(
-                socket_dir
-                    .clone()
-                    .unwrap_or_else(ganja_tool::socket::directory),
-            )
+            .with_socket_directory(socket_dir.clone().unwrap_or_else(ganja_tool::socket::directory))
             .with_teamless_send(config.teamless_send())
     } else {
         engine
@@ -566,11 +530,9 @@ pub async fn run(
                 membership.name().as_str(),
                 membership.team().as_str()
             ),
-            None => format!(
-                "teammate {} of {}",
-                membership.name().as_str(),
-                membership.team().as_str()
-            ),
+            None => {
+                format!("teammate {} of {}", membership.name().as_str(), membership.team().as_str())
+            }
         }
     });
     // The builtins, the user's own themes, and the theme they last picked —
@@ -615,12 +577,7 @@ pub async fn run(
             // session restores the one it was left on.
             let mut app = App::new(
                 engine,
-                notice(&[
-                    selection.notice,
-                    theme_notice,
-                    snapshot_notice,
-                    member_notice,
-                ]),
+                notice(&[selection.notice, theme_notice, snapshot_notice, member_notice]),
                 themes,
             )
             .with_provider(provider_id)
@@ -740,10 +697,7 @@ pub async fn run(
 fn system_parts(engine: &Engine, config: &Config, cwd: &Path) -> (Option<String>, Option<String>) {
     let model = engine.model();
 
-    (
-        Some(instruction::base_prompt(&model).to_owned()),
-        instruction::suffix(config, cwd, &model),
-    )
+    (Some(instruction::base_prompt(&model).to_owned()), instruction::suffix(config, cwd, &model))
 }
 
 /// Applies `config`'s theme and mode, answering with anything worth saying
@@ -765,10 +719,7 @@ fn configure_themes(themes: &mut Themes, config: &Config) -> Option<String> {
 
     let name = config.theme.as_deref()?;
     if themes.select(name).is_none() {
-        return Some(format!(
-            "no theme named {name:?}; using {}",
-            themes.active()
-        ));
+        return Some(format!("no theme named {name:?}; using {}", themes.active()));
     }
 
     None
@@ -806,10 +757,7 @@ async fn stored_transcript(engine: &Engine, resume: Resume) -> Result<Vec<Messag
         Resume::Session(id) => SessionId::from(id),
     };
 
-    engine
-        .resume(&id)
-        .await
-        .context("failed to resume the session")
+    engine.resume(&id).await.context("failed to resume the session")
 }
 
 /// Turns on wheel reporting, bracketed paste and focus reporting, and extends
@@ -889,10 +837,7 @@ fn capture_keys() -> bool {
     if disabled {
         return false;
     }
-    if !matches!(
-        ratatui::crossterm::terminal::supports_keyboard_enhancement(),
-        Ok(true)
-    ) {
+    if !matches!(ratatui::crossterm::terminal::supports_keyboard_enhancement(), Ok(true)) {
         return false;
     }
     match execute!(

@@ -24,10 +24,8 @@
 //! fragment always produces the same list.
 
 use ganja_core::teammate::{BACKENDS, DEFAULT_BACKEND, backend_name};
-use nucleo_matcher::{
-    Config, Matcher, Utf32Str,
-    pattern::{Atom, AtomKind, CaseMatching, Normalization},
-};
+use nucleo_matcher::pattern::{Atom, AtomKind, CaseMatching, Normalization};
+use nucleo_matcher::{Config, Matcher, Utf32Str};
 
 use crate::keybind;
 
@@ -469,9 +467,7 @@ pub fn is_bare_exit(text: &str) -> bool {
 pub fn lookup(name: &str) -> Option<&'static Entry> {
     let wanted = name.strip_prefix('/').unwrap_or(name);
 
-    COMMANDS
-        .iter()
-        .find(|entry| entry.name == wanted || entry.aliases.contains(&wanted))
+    COMMANDS.iter().find(|entry| entry.name == wanted || entry.aliases.contains(&wanted))
 }
 
 /// The UI command a submitted buffer names on its own, or nothing when the
@@ -597,10 +593,7 @@ pub fn inline_hint(text: &str, engine: &[EngineCommand]) -> Option<String> {
         return team_hint(tail);
     }
     let hint = builtin_hint(name).map(str::to_owned).or_else(|| {
-        engine
-            .iter()
-            .find(|command| command.name == name)
-            .and_then(|command| command.hint.clone())
+        engine.iter().find(|command| command.name == name).and_then(|command| command.hint.clone())
     })?;
     remaining(&hint, tail)
 }
@@ -679,11 +672,7 @@ fn slot(text: String) -> HintSlot {
             (None, false)
         }
     };
-    HintSlot {
-        text,
-        flag,
-        takes_value,
-    }
+    HintSlot { text, flag, takes_value }
 }
 
 /// What is left of `hint` once the words already typed have consumed their
@@ -709,11 +698,7 @@ fn remaining(hint: &str, typed: &str) -> Option<String> {
         if token.starts_with("--") {
             let matched = slots.iter().position(|slot| {
                 slot.flag.as_deref().is_some_and(|flag| {
-                    if complete {
-                        flag == *token
-                    } else {
-                        flag.starts_with(token)
-                    }
+                    if complete { flag == *token } else { flag.starts_with(token) }
                 })
             })?;
             let slot = slots.remove(matched);
@@ -726,13 +711,7 @@ fn remaining(hint: &str, typed: &str) -> Option<String> {
     if slots.is_empty() {
         return None;
     }
-    Some(
-        slots
-            .iter()
-            .map(|slot| slot.text.as_str())
-            .collect::<Vec<_>>()
-            .join(" "),
-    )
+    Some(slots.iter().map(|slot| slot.text.as_str()).collect::<Vec<_>>().join(" "))
 }
 
 /// What `--backend` reads when the line ends before its value. Which surfaces
@@ -828,11 +807,7 @@ pub fn rename(text: &str) -> Option<Rename> {
     }
 
     let rest = rest.trim();
-    Some(if rest.is_empty() {
-        Rename::Missing
-    } else {
-        Rename::To(rest.to_owned())
-    })
+    Some(if rest.is_empty() { Rename::Missing } else { Rename::To(rest.to_owned()) })
 }
 
 /// The arguments after `/team spawn`, parsed — the same grammar the dialog's
@@ -861,12 +836,8 @@ pub fn team_spawn(text: &str) -> Result<TeamSpawn, String> {
         ));
     }
 
-    let mut spawn = TeamSpawn {
-        name: name.to_owned(),
-        backend: None,
-        agent_type: None,
-        prompt: String::new(),
-    };
+    let mut spawn =
+        TeamSpawn { name: name.to_owned(), backend: None, agent_type: None, prompt: String::new() };
     loop {
         let (word, after) = split_word(rest);
         match word {
@@ -1060,12 +1031,7 @@ pub fn team_completion(text: &str, cursor: (usize, usize), agents: &[Completion]
         if candidates.iter().any(|candidate| candidate.text == partial) {
             return None;
         }
-        Some(Slot {
-            title,
-            start,
-            partial: partial.clone(),
-            candidates,
-        })
+        Some(Slot { title, start, partial: partial.clone(), candidates })
     };
     match words.as_slice() {
         [] => slot(" team ", subcommands()),
@@ -1083,17 +1049,11 @@ pub fn team_completion(text: &str, cursor: (usize, usize), agents: &[Completion]
 fn subcommands() -> Vec<Completion> {
     [
         ("spawn", "start a teammate"),
-        (
-            "shutdown",
-            "ask a member — or, unnamed, every member — to shut down",
-        ),
+        ("shutdown", "ask a member — or, unnamed, every member — to shut down"),
         ("list", "show the roster"),
     ]
     .into_iter()
-    .map(|(text, detail)| Completion {
-        text: text.to_owned(),
-        detail: detail.to_owned(),
-    })
+    .map(|(text, detail)| Completion { text: text.to_owned(), detail: detail.to_owned() })
     .collect()
 }
 
@@ -1114,17 +1074,11 @@ fn backends() -> Vec<Completion> {
 
 /// `spawn`'s flags, minus the ones the line already carries.
 fn flags(given: &[&str]) -> Vec<Completion> {
-    [
-        ("--backend", "the surface the teammate runs on"),
-        ("--agent", "the kind of agent it runs as"),
-    ]
-    .into_iter()
-    .filter(|(flag, _)| !given.contains(flag))
-    .map(|(text, detail)| Completion {
-        text: text.to_owned(),
-        detail: detail.to_owned(),
-    })
-    .collect()
+    [("--backend", "the surface the teammate runs on"), ("--agent", "the kind of agent it runs as")]
+        .into_iter()
+        .filter(|(flag, _)| !given.contains(flag))
+        .map(|(text, detail)| Completion { text: text.to_owned(), detail: detail.to_owned() })
+        .collect()
 }
 
 /// The rows `partial` narrows `candidates` to, best match first — every row in
@@ -1145,17 +1099,9 @@ pub fn value_matches(partial: &str, candidates: &[Completion]) -> Vec<Choice> {
                 .map(|score| (u32::from(score), candidate.clone()))
         })
         .collect();
-    scored.sort_by(|left, right| {
-        right
-            .0
-            .cmp(&left.0)
-            .then_with(|| left.1.text.cmp(&right.1.text))
-    });
+    scored.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.text.cmp(&right.1.text)));
 
-    scored
-        .into_iter()
-        .map(|(_, choice)| Choice::Value(choice))
-        .collect()
+    scored.into_iter().map(|(_, choice)| Choice::Value(choice)).collect()
 }
 
 /// The rows `query` narrows to across both populations, best match first.
@@ -1189,10 +1135,7 @@ pub fn dropdown_matches(query: &str, engine: &[EngineCommand]) -> Vec<Choice> {
             .map(|score| (score, Choice::Engine(command.clone())))
     }));
     scored.sort_by(|left, right| {
-        right
-            .0
-            .cmp(&left.0)
-            .then_with(|| left.1.name().cmp(right.1.name()))
+        right.0.cmp(&left.0).then_with(|| left.1.name().cmp(right.1.name()))
     });
 
     scored.into_iter().map(|(_, choice)| choice).collect()
@@ -1252,12 +1195,7 @@ pub fn matches(query: &str, surface: Surface) -> Vec<&'static Entry> {
     // Descending by score, then by name so that two commands scoring the same
     // always come out in the same order — the part of the ranking that is a
     // promise, where the score itself is the matcher's business (**D10**).
-    scored.sort_by(|left, right| {
-        right
-            .0
-            .cmp(&left.0)
-            .then_with(|| left.1.name.cmp(right.1.name))
-    });
+    scored.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.name.cmp(right.1.name)));
 
     scored.into_iter().map(|(_, entry)| entry).collect()
 }
@@ -1268,13 +1206,7 @@ pub fn matches(query: &str, surface: Surface) -> Vec<&'static Entry> {
 /// fragment, not a query language, so a leading `^` or a trailing `$` should
 /// narrow by those characters instead of changing the match mode.
 fn fragment(needle: &str) -> Atom {
-    Atom::new(
-        needle,
-        CaseMatching::Ignore,
-        Normalization::Smart,
-        AtomKind::Fuzzy,
-        false,
-    )
+    Atom::new(needle, CaseMatching::Ignore, Normalization::Smart, AtomKind::Fuzzy, false)
 }
 
 /// The best score `atom` gets against any of `entry`'s matchable fields.

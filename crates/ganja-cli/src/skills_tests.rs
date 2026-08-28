@@ -17,11 +17,7 @@ fn the_listing_aligns_names_and_tags_each_row_with_its_source() {
     let lines = super::rows(
         &roots,
         &[
-            skill(
-                "porting",
-                Some("How to port."),
-                "/home/skills/porting/SKILL.md",
-            ),
+            skill("porting", Some("How to port."), "/home/skills/porting/SKILL.md"),
             skill("tdd", None, "/home/skills/tdd/SKILL.md"),
         ],
     );

@@ -10,13 +10,12 @@
 //! rule: a version this build does not know is left alone rather than
 //! overwritten, so downgrading does not destroy what a newer build wrote.
 
-use std::{
-    fs, io,
-    path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::{fs, io};
 
-use etcetera::{BaseStrategy as _, base_strategy::Xdg};
+use etcetera::BaseStrategy as _;
+use etcetera::base_strategy::Xdg;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -119,35 +118,22 @@ pub fn write(path: &Path, theme: &str) -> Result<(), SelectionError> {
             "the file has no directory to be created in",
         ),
     })?;
-    fs::create_dir_all(parent).map_err(|source| SelectionError::Io {
-        path: parent.to_path_buf(),
-        source,
-    })?;
+    fs::create_dir_all(parent)
+        .map_err(|source| SelectionError::Io { path: parent.to_path_buf(), source })?;
 
-    let mut json = serde_json::to_vec(&Stored {
-        version: VERSION,
-        theme: theme.to_owned(),
-    })
-    .map_err(|source| SelectionError::Encode {
-        path: path.to_path_buf(),
-        source,
-    })?;
+    let mut json = serde_json::to_vec(&Stored { version: VERSION, theme: theme.to_owned() })
+        .map_err(|source| SelectionError::Encode { path: path.to_path_buf(), source })?;
     json.push(b'\n');
 
     let temporary = temporary_beside(path);
-    ganja_permission::write_new(&temporary, &json).map_err(|source| SelectionError::Io {
-        path: temporary.clone(),
-        source,
-    })?;
+    ganja_permission::write_new(&temporary, &json)
+        .map_err(|source| SelectionError::Io { path: temporary.clone(), source })?;
 
     fs::rename(&temporary, path).map_err(|source| {
         // A rename that failed leaves the sibling holding a copy of a pick
         // nobody asked to keep.
         let _ = fs::remove_file(&temporary);
-        SelectionError::Io {
-            path: path.to_path_buf(),
-            source,
-        }
+        SelectionError::Io { path: path.to_path_buf(), source }
     })
 }
 

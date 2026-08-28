@@ -1,11 +1,9 @@
 use std::sync::Arc;
 
 use super::{DEFAULT_BASE_URL, GrokProvider, ID};
-use crate::{
-    auth::{self, AuthError, OauthCredential, RefreshOauth},
-    catalog,
-    provider::{PROVIDERS, Provider as _, ProviderError},
-};
+use crate::auth::{self, AuthError, OauthCredential, RefreshOauth};
+use crate::catalog;
+use crate::provider::{PROVIDERS, Provider as _, ProviderError};
 
 /// A renewal that must never run, for the cases that are about construction
 /// rather than about a token endpoint.
@@ -30,10 +28,7 @@ fn ganja_calls_it_grok_everywhere_the_wire_can_see() {
         auth::grok::PROVIDER_ID,
         "one constant, or a login stores under a name the provider does not read"
     );
-    assert!(
-        PROVIDERS.contains(&ID),
-        "a provider nothing can select is a provider nobody has"
-    );
+    assert!(PROVIDERS.contains(&ID), "a provider nothing can select is a provider nobody has");
     // What the credential file calls this provider is deliberately not
     // written down anywhere in `provider/`, not even in an assertion:
     // `auth::storage_key` owns that translation and `auth::grok`'s own
@@ -64,10 +59,7 @@ fn the_endpoint_is_xais_own_and_speaks_chat_completions() {
     // never as what it authenticates with — this one has nothing to render
     // yet, because the token is not fetched until a request needs it.
     let rendered = format!("{provider:?}");
-    assert!(
-        rendered.contains("Oauth") && rendered.contains("grok"),
-        "{rendered}"
-    );
+    assert!(rendered.contains("Oauth") && rendered.contains("grok"), "{rendered}");
     assert!(
         rendered.contains("https://api.x.ai/v1"),
         "the endpoint is what tells one provider from another: {rendered}"
@@ -82,10 +74,7 @@ fn an_access_token_may_not_be_sent_anywhere_a_key_could_not_be() {
     let refused = GrokProvider::at("http://api.x.ai/v1", Arc::new(NeverRenews))
         .expect_err("plain http to a public host puts the token on the wire in the clear");
 
-    assert!(
-        matches!(refused, ProviderError::Transport(_)),
-        "{refused:?}"
-    );
+    assert!(matches!(refused, ProviderError::Transport(_)), "{refused:?}");
     assert!(
         GrokProvider::at("http://127.0.0.1:8080/v1", Arc::new(NeverRenews)).is_ok(),
         "loopback never reaches a network, which is what a test depends on"

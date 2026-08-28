@@ -11,7 +11,10 @@
 //! Run with:
 //! `TMUX_RS_SESSION=my-session cargo run -p tmux --example existing_session`.
 
-use std::{env, error::Error, io, path::PathBuf, time::Duration};
+use std::error::Error;
+use std::path::PathBuf;
+use std::time::Duration;
+use std::{env, io};
 
 use tmux::control_mode::{Arg, Client, Options};
 
@@ -38,13 +41,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .into());
     }
 
-    run_existing_session(ExistingSessionConfig {
-        session,
-        socket_path,
-        socket_name,
-        config_file,
-    })
-    .await
+    run_existing_session(ExistingSessionConfig { session, socket_path, socket_name, config_file })
+        .await
 }
 
 struct ExistingSessionConfig {
@@ -70,10 +68,7 @@ async fn run_existing_session(config: ExistingSessionConfig) -> Result<(), Box<d
     }
 
     let client = Client::new(options).await.map_err(|err| {
-        io::Error::other(format!(
-            "attach to existing tmux session {:?}: {err}",
-            config.session
-        ))
+        io::Error::other(format!("attach to existing tmux session {:?}: {err}", config.session))
     })?;
 
     let result = inspect_session(&client, &config.session).await;
@@ -83,10 +78,7 @@ async fn run_existing_session(config: ExistingSessionConfig) -> Result<(), Box<d
 
 async fn inspect_session(client: &Client, session: &str) -> Result<(), Box<dyn Error>> {
     let session_response = client
-        .exec(
-            tmux::control_mode::DISPLAY_MESSAGE,
-            [Arg::raw("-p"), Arg::string("#{session_name}")],
-        )
+        .exec(tmux::control_mode::DISPLAY_MESSAGE, [Arg::raw("-p"), Arg::string("#{session_name}")])
         .await
         .map_err(|err| io::Error::other(format!("read attached session name: {err}")))?;
     let attached_session = session_response.lines.join("\n");
@@ -98,10 +90,7 @@ async fn inspect_session(client: &Client, session: &str) -> Result<(), Box<dyn E
     }
 
     let pane_response = client
-        .exec(
-            tmux::control_mode::DISPLAY_MESSAGE,
-            [Arg::raw("-p"), Arg::string("#{pane_id}")],
-        )
+        .exec(tmux::control_mode::DISPLAY_MESSAGE, [Arg::raw("-p"), Arg::string("#{pane_id}")])
         .await
         .map_err(|err| io::Error::other(format!("read active pane id: {err}")))?;
     let pane_id = pane_response.lines.join("\n");
@@ -139,15 +128,12 @@ fn non_empty_utf8_env(name: &str) -> Result<Option<String>, io::Error> {
         Ok(value) if value.is_empty() => Ok(None),
         Ok(value) => Ok(Some(value)),
         Err(env::VarError::NotPresent) => Ok(None),
-        Err(env::VarError::NotUnicode(_)) => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("{name} must be valid UTF-8"),
-        )),
+        Err(env::VarError::NotUnicode(_)) => {
+            Err(io::Error::new(io::ErrorKind::InvalidData, format!("{name} must be valid UTF-8")))
+        }
     }
 }
 
 fn non_empty_path_env(name: &str) -> Option<PathBuf> {
-    env::var_os(name)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
+    env::var_os(name).filter(|value| !value.is_empty()).map(PathBuf::from)
 }

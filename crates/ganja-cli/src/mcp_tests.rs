@@ -28,9 +28,7 @@ fn args(name: &str) -> AddArgs {
 /// A document with `name` added to it, printed — the whole write path bar the
 /// disk.
 fn added(text: &str, name: &str, asked: &AddArgs) -> String {
-    let mut document = text
-        .parse::<DocumentMut>()
-        .expect("the fixture is a TOML document");
+    let mut document = text.parse::<DocumentMut>().expect("the fixture is a TOML document");
     let built = entry(asked).expect("the entry is buildable");
     validate(name, &built).expect("the loader would read it back");
     let table = servers(&mut document, Path::new("ganja.toml")).expect("the table is reachable");
@@ -46,10 +44,7 @@ fn a_local_entry_carries_its_command_and_nothing_it_was_not_given() {
 
     let built = entry(&asked).expect("the entry is buildable");
 
-    assert_eq!(
-        built,
-        json!({"type": "local", "command": ["bun", "server.ts"]})
-    );
+    assert_eq!(built, json!({"type": "local", "command": ["bun", "server.ts"]}));
     validate("docs", &built).expect("the loader would read it back");
 }
 
@@ -128,10 +123,7 @@ fn a_plain_http_remote_is_refused_and_loopback_is_not() {
     asked.url = Some("http://mcp.example/api".to_owned());
     let built = entry(&asked).expect("the entry is buildable");
     let refusal = validate("hosted", &built).expect_err("plain http elsewhere is refused");
-    assert!(
-        refusal.to_string().contains("https"),
-        "the refusal names the rule: {refusal}"
-    );
+    assert!(refusal.to_string().contains("https"), "the refusal names the rule: {refusal}");
     assert!(
         !refusal.to_string().contains("mcp.example"),
         "the refusal never quotes the URL: {refusal}"
@@ -191,10 +183,7 @@ fn a_zero_timeout_is_refused_by_the_config_type_itself() {
     let built = entry(&asked).expect("the entry is buildable");
 
     let refusal = validate("docs", &built).expect_err("a request budget of nothing is refused");
-    assert!(
-        refusal.to_string().contains("docs"),
-        "the refusal names the server: {refusal}"
-    );
+    assert!(refusal.to_string().contains("docs"), "the refusal names the server: {refusal}");
 }
 
 #[test]
@@ -203,10 +192,7 @@ fn a_pair_without_an_equals_sign_is_refused_by_the_flag_that_took_it() {
         .expect_err("a word with no value is not a pair");
 
     assert!(refusal.to_string().contains("--header"), "{refusal}");
-    assert!(
-        pairs(&["=value".to_owned()], "--env").is_err(),
-        "a value with no key names nothing"
-    );
+    assert!(pairs(&["=value".to_owned()], "--env").is_err(), "a value with no key names nothing");
 }
 
 #[test]
@@ -222,9 +208,7 @@ fn a_name_that_is_a_path_or_nothing_at_all_is_refused() {
 #[test]
 fn the_project_tier_writes_at_the_worktree_root() {
     let cwd = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let directory = Tier::Project
-        .directory(cwd)
-        .expect("a worktree always resolves");
+    let directory = Tier::Project.directory(cwd).expect("a worktree always resolves");
 
     assert!(
         cwd.starts_with(&directory),
@@ -236,19 +220,12 @@ fn the_project_tier_writes_at_the_worktree_root() {
 fn an_absent_file_reads_as_an_empty_document_and_a_broken_one_refuses() {
     let missing = Path::new("/nonexistent-ganja-mcp-test/ganja.toml");
     let empty = document(missing).expect("an absent file is nothing to merge");
-    assert_eq!(
-        empty.to_string(),
-        "",
-        "an absent file is an empty document, not an error"
-    );
+    assert_eq!(empty.to_string(), "", "an absent file is an empty document, not an error");
 
     let directory = tempfile::tempdir().expect("a temporary directory is creatable");
     let path = directory.path().join(super::CONFIG_FILE);
     std::fs::write(&path, "theme = ").expect("the fixture is writable");
-    assert!(
-        document(&path).is_err(),
-        "a file that does not parse is never treated as empty"
-    );
+    assert!(document(&path).is_err(), "a file that does not parse is never treated as empty");
 }
 
 #[test]
@@ -261,11 +238,7 @@ fn the_table_is_created_empty_and_a_non_table_mcp_key_is_refused() {
     let mut asked = args("docs");
     asked.command = vec!["bun".to_owned()];
     let built = entry(&asked).expect("the entry is buildable");
-    put(
-        table,
-        "docs",
-        shaped("docs", &built).expect("the entry shapes"),
-    );
+    put(table, "docs", shaped("docs", &built).expect("the entry shapes"));
     assert_eq!(
         document.to_string(),
         "[mcp.docs]\ncommand = [\"bun\"]\ntype = \"local\"\n",
@@ -274,9 +247,8 @@ fn the_table_is_created_empty_and_a_non_table_mcp_key_is_refused() {
     );
 
     // Whatever this is, it is not this command's to throw away.
-    let mut hostile = "mcp = [\"not\", \"a\", \"table\"]\n"
-        .parse::<DocumentMut>()
-        .expect("the fixture parses");
+    let mut hostile =
+        "mcp = [\"not\", \"a\", \"table\"]\n".parse::<DocumentMut>().expect("the fixture parses");
     assert!(servers(&mut hostile, path).is_err());
 }
 
@@ -376,10 +348,7 @@ struct NoFileMayGrow {
 #[cfg(unix)]
 impl NoFileMayGrow {
     fn take() -> Self {
-        let mut limit = libc::rlimit {
-            rlim_cur: 0,
-            rlim_max: 0,
-        };
+        let mut limit = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
         // SAFETY: each call is handed a pointer to a live local of the
         // type it documents, and nothing outlives this frame.
         unsafe {
@@ -389,10 +358,7 @@ impl NoFileMayGrow {
                 "the current file-size limit is readable"
             );
             let signal = libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
-            let forbidden = libc::rlimit {
-                rlim_cur: 0,
-                rlim_max: limit.rlim_max,
-            };
+            let forbidden = libc::rlimit { rlim_cur: 0, rlim_max: limit.rlim_max };
             assert_eq!(
                 libc::setrlimit(libc::RLIMIT_FSIZE, &raw const forbidden),
                 0,
@@ -463,10 +429,7 @@ fn a_fresh_config_is_private_to_its_owner() {
     super::write(&path, &parsed).expect("the config is writable");
 
     assert_eq!(
-        std::fs::symlink_metadata(&path)
-            .expect("the config has metadata")
-            .permissions()
-            .mode()
+        std::fs::symlink_metadata(&path).expect("the config has metadata").permissions().mode()
             & 0o777,
         0o600,
         "a newly staged config carries no group or other access"
@@ -486,10 +449,7 @@ fn a_config_rewrite_keeps_the_documents_existing_mode() {
     super::write(&path, &parsed).expect("the config is rewritable");
 
     assert_eq!(
-        std::fs::symlink_metadata(&path)
-            .expect("the config has metadata")
-            .permissions()
-            .mode()
+        std::fs::symlink_metadata(&path).expect("the config has metadata").permissions().mode()
             & 0o777,
         0o640,
         "rewriting a regular file preserves the access its owner chose"

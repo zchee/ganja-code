@@ -23,21 +23,17 @@
 //! analysing this crate, and what the clock sees is what a session sees: sync
 //! the file, wait for the fresh publish, format the block.
 
-use std::{
-    path::Path,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::path::Path;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
-use ganja_core::{
-    Engine, LspConfig,
-    lsp::{Lsp, lsp_types},
-    permission::{Action, Permissions, Rule},
-    protocol::{Command, Event, FinishReason, PartBody, ToolState},
-    provider::ProviderEvent,
-    tool::Registry,
-};
+use ganja_core::lsp::{Lsp, lsp_types};
+use ganja_core::permission::{Action, Permissions, Rule};
+use ganja_core::protocol::{Command, Event, FinishReason, PartBody, ToolState};
+use ganja_core::provider::ProviderEvent;
+use ganja_core::tool::Registry;
+use ganja_core::{Engine, LspConfig};
 use ganja_testkit::{ScriptedProvider, plant, tool_call};
 use tempfile::TempDir;
 
@@ -114,11 +110,7 @@ fn fixture() -> TempDir {
         "//! Wrong on purpose: the readiness signal the drill waits for.\n\
          pub fn seeded() -> i32 {\n    \"not an integer\"\n}\n",
     );
-    plant(
-        root,
-        FRESH,
-        &format!("pub fn fresh() -> i32 {{\n    {CORRECT_BODY}\n}}\n"),
-    );
+    plant(root, FRESH, &format!("pub fn fresh() -> i32 {{\n    {CORRECT_BODY}\n}}\n"));
 
     temp
 }
@@ -197,13 +189,7 @@ fn completed_edit(events: &[Event]) -> (String, u64, u64) {
         if tool != "edit" {
             continue;
         }
-        if let ToolState::Completed {
-            output,
-            started,
-            completed,
-            ..
-        } = state
-        {
+        if let ToolState::Completed { output, started, completed, .. } = state {
             return (output.clone(), *started, *completed);
         }
     }
@@ -224,10 +210,7 @@ async fn an_edit_that_breaks_a_type_comes_back_with_rust_analyzers_complaint_att
     // Canonicalized because a publish names a real path: on macOS the temp dir
     // is reached through `/var`, which is a link to `/private/var`, and a map
     // keyed on the un-canonicalized spelling would never match what comes back.
-    let root = temp
-        .path()
-        .canonicalize()
-        .expect("the fixture directory resolves");
+    let root = temp.path().canonicalize().expect("the fixture directory resolves");
     let seeded = root.join(SEEDED);
     let fresh = root.join(FRESH);
 
@@ -244,10 +227,7 @@ async fn an_edit_that_breaks_a_type_comes_back_with_rust_analyzers_complaint_att
     let (provider, _requests) = ScriptedProvider::strict(
         "lsp-drill",
         vec![
-            tool_call(
-                "read",
-                serde_json::json!({ "filePath": fresh.to_string_lossy() }),
-            ),
+            tool_call("read", serde_json::json!({ "filePath": fresh.to_string_lossy() })),
             tool_call(
                 "edit",
                 serde_json::json!({
@@ -267,13 +247,9 @@ async fn an_edit_that_breaks_a_type_comes_back_with_rust_analyzers_complaint_att
         pattern: "*".to_owned(),
         action: Action::Allow,
     }]);
-    let engine = Engine::new(
-        provider,
-        "scripted-model",
-        Arc::new(Registry::with_builtins()),
-        permissions,
-    )
-    .with_lsp(Arc::clone(&lsp));
+    let engine =
+        Engine::new(provider, "scripted-model", Arc::new(Registry::with_builtins()), permissions)
+            .with_lsp(Arc::clone(&lsp));
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
@@ -313,10 +289,7 @@ async fn an_edit_that_breaks_a_type_comes_back_with_rust_analyzers_complaint_att
         output.contains("LSP errors detected in this file, please fix:"),
         "under the heading the model is meant to act on: {output}"
     );
-    assert!(
-        output.contains("ERROR ["),
-        "with at least one error line in it: {output}"
-    );
+    assert!(output.contains("ERROR ["), "with at least one error line in it: {output}");
     assert!(
         output.contains(&fresh.to_string_lossy().to_string()),
         "naming the file that was edited: {output}"

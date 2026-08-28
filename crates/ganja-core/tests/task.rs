@@ -15,21 +15,18 @@
 //! parent's session — and the progress metadata on the parent's tool part,
 //! both asserted below.
 
-use std::{
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
-};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures::StreamExt as _;
-use ganja_core::{
-    AgentRegistry, Config, Engine, SessionId, SessionInfo, Storage,
-    permission::Permissions,
-    protocol::{Command, Event, FinishReason, PartBody, PermissionReply, Role, ToolState, Usage},
-    provider::{ChatRequest, Provider},
-    storage,
-    tool::{Registry, Tool, ToolCtx, ToolError, ToolOutput},
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{
+    Command, Event, FinishReason, PartBody, PermissionReply, Role, ToolState, Usage,
 };
+use ganja_core::provider::{ChatRequest, Provider};
+use ganja_core::tool::{Registry, Tool, ToolCtx, ToolError, ToolOutput};
+use ganja_core::{AgentRegistry, Config, Engine, SessionId, SessionInfo, Storage, storage};
 use ganja_testkit::{BlockingTool, ScriptedProvider, drain_answering, says, tool_call};
 use serde_json::json;
 
@@ -48,13 +45,7 @@ struct Canned {
 impl Canned {
     fn new(id: &'static str) -> (Arc<Self>, Arc<Mutex<usize>>) {
         let calls = Arc::new(Mutex::new(0));
-        (
-            Arc::new(Self {
-                id,
-                calls: Arc::clone(&calls),
-            }),
-            calls,
-        )
+        (Arc::new(Self { id, calls: Arc::clone(&calls) }), calls)
     }
 }
 
@@ -97,13 +88,8 @@ fn delegates(subagent: &str) -> Vec<ganja_core::provider::ProviderEvent> {
 
 /// An engine over `provider` offering `tools`, running the builtin agents.
 fn engine(provider: Arc<dyn Provider>, tools: Vec<Arc<dyn Tool>>, config: &Config) -> Engine {
-    Engine::new(
-        provider,
-        "recorder-model",
-        Arc::new(Registry::new(tools)),
-        Permissions::default(),
-    )
-    .with_agents(ganja_testkit::agent_registry(config))
+    Engine::new(provider, "recorder-model", Arc::new(Registry::new(tools)), Permissions::default())
+        .with_agents(ganja_testkit::agent_registry(config))
 }
 
 /// The task tool part as it finally stood, whatever it finally was.
@@ -135,10 +121,9 @@ fn published(event: &Event) -> Vec<String> {
     }
 
     match event {
-        Event::MessageStarted {
-            session_id: _,
-            message,
-        } => message.parts.iter().filter_map(render).collect(),
+        Event::MessageStarted { session_id: _, message } => {
+            message.parts.iter().filter_map(render).collect()
+        }
         Event::PartStarted { part, .. } | Event::PartUpdated { part, .. } => {
             render(part).into_iter().collect()
         }
@@ -282,10 +267,7 @@ async fn a_childs_own_messages_never_reach_the_subscribed_stream() {
     let seen = drain_answering(&engine, &mut events, PermissionReply::Once).await;
 
     assert_eq!(
-        requests
-            .lock()
-            .expect("the request log is never poisoned")
-            .len(),
+        requests.lock().expect("the request log is never poisoned").len(),
         4,
         "the child has to have really run, or there is nothing to leak"
     );
@@ -317,10 +299,7 @@ async fn a_childs_own_messages_never_reach_the_subscribed_stream() {
     let roles: Vec<Role> = seen
         .iter()
         .filter_map(|event| match event {
-            Event::MessageStarted {
-                session_id: _,
-                message,
-            } => Some(message.role),
+            Event::MessageStarted { session_id: _, message } => Some(message.role),
             _ => None,
         })
         .collect();
@@ -361,21 +340,18 @@ async fn a_running_child_reports_its_progress_on_the_parents_tool_part() {
         .iter()
         .filter_map(|event| match event {
             Event::PartUpdated { part, .. } => match &part.body {
-                PartBody::Tool {
-                    tool,
-                    state: ToolState::Running { metadata, .. },
-                    ..
-                } if tool == "task" && !metadata.is_null() => Some(metadata.clone()),
+                PartBody::Tool { tool, state: ToolState::Running { metadata, .. }, .. }
+                    if tool == "task" && !metadata.is_null() =>
+                {
+                    Some(metadata.clone())
+                }
                 _ => None,
             },
             _ => None,
         })
         .collect();
 
-    assert!(
-        !progress.is_empty(),
-        "the child's work has to show somewhere: {seen:?}"
-    );
+    assert!(!progress.is_empty(), "the child's work has to show somewhere: {seen:?}");
     let last = progress.last().expect("at least one update");
     assert_eq!(last["toolcalls"], json!(1), "one child call was counted");
     assert_eq!(
@@ -423,11 +399,7 @@ async fn a_subagent_is_never_offered_the_tool_that_spawned_it() {
 
     let requests = requests.lock().expect("the request log is never poisoned");
     let offered = |request: &ChatRequest| -> Vec<String> {
-        request
-            .tools
-            .iter()
-            .map(|definition| definition.name.clone())
-            .collect()
+        request.tools.iter().map(|definition| definition.name.clone()).collect()
     };
 
     assert!(
@@ -492,9 +464,7 @@ async fn delegating_asks_about_the_named_subagent_and_an_always_covers_the_tool(
         .gate("task", &json!({}))
         .rules;
     assert!(
-        stored
-            .iter()
-            .any(|rule| rule.permission == "task" && rule.pattern == "*"),
+        stored.iter().any(|rule| rule.permission == "task" && rule.pattern == "*"),
         "an always answer covers the tool: {stored:?}"
     );
 
@@ -511,9 +481,7 @@ async fn delegating_asks_about_the_named_subagent_and_an_always_covers_the_tool(
         .expect("a finished turn leaves the engine idle");
     let seen = drain_answering(&engine, &mut events, PermissionReply::Once).await;
     assert!(
-        !seen
-            .iter()
-            .any(|event| matches!(event, Event::PermissionRequested { .. })),
+        !seen.iter().any(|event| matches!(event, Event::PermissionRequested { .. })),
         "the remembered answer covers it: {seen:?}"
     );
 }
@@ -561,16 +529,10 @@ async fn an_always_the_parent_was_given_does_not_authorize_the_child() {
         .gate("webfetch", &json!({}))
         .rules;
     assert!(
-        stored
-            .iter()
-            .any(|rule| rule.permission == "webfetch" && rule.pattern == "*"),
+        stored.iter().any(|rule| rule.permission == "webfetch" && rule.pattern == "*"),
         "the parent really is holding an always-allow, or this proves nothing: {stored:?}"
     );
-    assert_eq!(
-        *fetches.lock().expect("the call log"),
-        1,
-        "the parent's own call ran"
-    );
+    assert_eq!(*fetches.lock().expect("the call log"), 1, "the parent's own call ran");
 
     engine
         .send(Command::SendPrompt {
@@ -634,11 +596,7 @@ async fn a_crossing_permission_dialog_carries_the_parents_session_id() {
             |event| matches!(event, Event::PermissionRequested { tool, .. } if tool == "webfetch"),
         )
         .collect();
-    assert_eq!(
-        crossed.len(),
-        1,
-        "the child's own call asked exactly once: {seen:?}"
-    );
+    assert_eq!(crossed.len(), 1, "the child's own call asked exactly once: {seen:?}");
     assert_eq!(
         crossed[0].session_id(),
         &parent,
@@ -649,10 +607,7 @@ async fn a_crossing_permission_dialog_carries_the_parents_session_id() {
     // parent's own `task` ask, the crossing ask, and both replies — belongs
     // to the parent's session, because the stream never shows another one.
     for event in seen.iter().filter(|event| {
-        matches!(
-            event,
-            Event::PermissionRequested { .. } | Event::PermissionReplied { .. }
-        )
+        matches!(event, Event::PermissionRequested { .. } | Event::PermissionReplied { .. })
     }) {
         assert_eq!(
             event.session_id(),
@@ -710,11 +665,7 @@ async fn a_refusal_the_parent_is_under_reaches_the_child() {
         .expect("an idle engine accepts a prompt");
     drain_answering(&engine, &mut events, PermissionReply::Once).await;
 
-    assert_eq!(
-        *fetches.lock().expect("the call log"),
-        0,
-        "the child's call must never have run"
-    );
+    assert_eq!(*fetches.lock().expect("the call log"), 0, "the child's call must never have run");
 
     // The child's own next request is where its refusal is visible: its events
     // never reach the frontend, but the request it built from them does.
@@ -724,10 +675,7 @@ async fn a_refusal_the_parent_is_under_reaches_the_child() {
         .iter()
         .flat_map(|message| message.parts.iter())
         .find_map(|part| match &part.body {
-            PartBody::Tool {
-                state: ToolState::Error { error, .. },
-                ..
-            } => Some(error.clone()),
+            PartBody::Tool { state: ToolState::Error { error, .. }, .. } => Some(error.clone()),
             _ => None,
         })
         .expect("the child read a refusal");
@@ -748,10 +696,7 @@ async fn cancelling_the_parent_turn_ends_the_child_promptly() {
     ]);
     let engine = engine(
         provider,
-        vec![BlockingTool::new(
-            "blocking",
-            "blocks until it is cancelled",
-        )],
+        vec![BlockingTool::new("blocking", "blocks until it is cancelled")],
         &Config::default(),
     );
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
@@ -774,10 +719,7 @@ async fn cancelling_the_parent_turn_ends_the_child_promptly() {
         let event = events.next().await.expect("the stream is live");
         if let Event::PermissionRequested { id, .. } = &event {
             engine
-                .send(Command::ReplyPermission {
-                    id: id.clone(),
-                    reply: PermissionReply::Once,
-                })
+                .send(Command::ReplyPermission { id: id.clone(), reply: PermissionReply::Once })
                 .await
                 .expect("a reply is never refused");
         }
@@ -796,10 +738,7 @@ async fn cancelling_the_parent_turn_ends_the_child_promptly() {
     }
 
     let started = Instant::now();
-    engine
-        .send(Command::CancelTurn)
-        .await
-        .expect("a cancel is never refused");
+    engine.send(Command::CancelTurn).await.expect("a cancel is never refused");
 
     let finished = loop {
         let event = events.next().await.expect("a turn always finishes");
@@ -962,20 +901,14 @@ async fn a_delegated_child_is_stored_as_a_session_of_its_own_naming_its_parent()
         .expect("the child got a record of its own")
         .id;
 
-    let stored = storage
-        .load_info(&child)
-        .expect("the child's record reads back")
-        .expect("and it is there");
+    let stored =
+        storage.load_info(&child).expect("the child's record reads back").expect("and it is there");
     assert_eq!(
         stored.parent,
         Some(parent.clone()),
         "the stored child names the conversation that delegated to it"
     );
-    assert_eq!(
-        stored.agent.as_deref(),
-        Some("general"),
-        "and the subagent it ran as"
-    );
+    assert_eq!(stored.agent.as_deref(), Some("general"), "and the subagent it ran as");
 
     let said: Vec<String> = storage
         .load_transcript(&child)
@@ -1026,10 +959,7 @@ async fn a_task_id_naming_a_root_session_starts_a_fresh_child_instead() {
         .expect("an idle engine accepts a prompt");
     drain_answering(&engine, &mut events, PermissionReply::Once).await;
 
-    let parent = engine
-        .current_session()
-        .expect("the first prompt minted a session")
-        .id;
+    let parent = engine.current_session().expect("the first prompt minted a session").id;
 
     // The model hands back the id of the conversation it is having.
     recorder.push(tool_call(
@@ -1071,13 +1001,9 @@ async fn a_task_id_naming_a_root_session_starts_a_fresh_child_instead() {
         "the child wrote into the conversation it was told to continue: {said:?}"
     );
 
-    let sessions = storage
-        .list_sessions()
-        .expect("the store lists what it holds");
+    let sessions = storage.list_sessions().expect("the store lists what it holds");
     assert!(
-        sessions
-            .iter()
-            .any(|info| info.parent.as_ref() == Some(&parent)),
+        sessions.iter().any(|info| info.parent.as_ref() == Some(&parent)),
         "the child got a session of its own, naming the turn that spawned it: {sessions:?}"
     );
 }

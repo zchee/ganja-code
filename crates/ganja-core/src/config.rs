@@ -42,19 +42,15 @@
 //! block carries `options.apiKey`, and ganja's entry carries `key_env`, the
 //! *name* of the variable holding it, instead.
 
-use std::{
-    collections::BTreeMap,
-    env, fmt, fs, io,
-    num::NonZeroU64,
-    ops::Range,
-    path::{Path, PathBuf},
-};
+use std::collections::BTreeMap;
+use std::num::NonZeroU64;
+use std::ops::Range;
+use std::path::{Path, PathBuf};
+use std::{env, fmt, fs, io};
 
 use etcetera::base_strategy::{BaseStrategy as _, Xdg};
-use serde::{
-    Deserialize, Serialize,
-    de::{self, MapAccess, SeqAccess, Visitor},
-};
+use serde::de::{self, MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::{
@@ -1191,10 +1187,7 @@ impl TeammateConfig {
     /// default alone.
     #[must_use]
     pub fn pane_shell(&self) -> Option<Vec<String>> {
-        self.shell
-            .as_deref()
-            .and_then(shlex::split)
-            .filter(|words| !words.is_empty())
+        self.shell.as_deref().and_then(shlex::split).filter(|words| !words.is_empty())
     }
 
     /// The teammates' column's share of the width, in percent, when the
@@ -1470,9 +1463,7 @@ impl TuiConfig {
     /// Whether this config asks for `event` to be announced.
     #[must_use]
     pub fn notifies(&self, event: NotificationEvent) -> bool {
-        self.notifications
-            .as_ref()
-            .is_some_and(|asked| asked.includes(event))
+        self.notifications.as_ref().is_some_and(|asked| asked.includes(event))
     }
 
     /// The method this config asked for, or OSC 9 when it asked for nothing.
@@ -1727,11 +1718,7 @@ impl Config {
                     Some(rest) => Xdg::new().ok()?.home_dir().join(rest),
                     None => PathBuf::from(entry),
                 };
-                let path = if expanded.is_absolute() {
-                    expanded
-                } else {
-                    cwd.join(expanded)
-                };
+                let path = if expanded.is_absolute() { expanded } else { cwd.join(expanded) };
 
                 if !path.is_dir() {
                     tracing::warn!(path = %path.display(), "a skills path names no directory");
@@ -1779,8 +1766,7 @@ impl Config {
     /// [`DEFAULT_TOOL_DEFER_THRESHOLD`].
     #[must_use]
     pub fn defer_threshold(&self) -> usize {
-        self.tool_defer_threshold
-            .unwrap_or(DEFAULT_TOOL_DEFER_THRESHOLD)
+        self.tool_defer_threshold.unwrap_or(DEFAULT_TOOL_DEFER_THRESHOLD)
     }
 
     /// Whether `webfetch` may reach a private address; see
@@ -1810,8 +1796,7 @@ impl Config {
     pub fn inbound_policy(&self) -> Option<(InboundPolicy, ganja_protocol::PolicySource)> {
         Some((
             self.cross_session_inbound?,
-            self.cross_session_inbound_source
-                .unwrap_or(ganja_protocol::PolicySource::Global),
+            self.cross_session_inbound_source.unwrap_or(ganja_protocol::PolicySource::Global),
         ))
     }
 
@@ -1862,9 +1847,7 @@ impl Config {
         // still is a tier (**D523**): the fold is the same sequential merge
         // either way, split exactly at the global/explicit boundary.
         let mut config = merge_files(&global_files()?)?;
-        let mut source = config
-            .cross_session_inbound
-            .map(|_| ganja_protocol::PolicySource::Global);
+        let mut source = config.cross_session_inbound.map(|_| ganja_protocol::PolicySource::Global);
         if let Some(path) = explicit
             && let Some(tier) = read(&path)?
         {
@@ -1928,10 +1911,7 @@ impl Config {
         overlay(&mut self.snapshot, other.snapshot);
         overlay(&mut self.tool_defer_threshold, other.tool_defer_threshold);
         overlay(&mut self.agents.concurrency, other.agents.concurrency);
-        overlay(
-            &mut self.teammates.shim_turn_timeout,
-            other.teammates.shim_turn_timeout,
-        );
+        overlay(&mut self.teammates.shim_turn_timeout, other.teammates.shim_turn_timeout);
         overlay(&mut self.teammates.shell, other.teammates.shell);
         overlay(&mut self.teammates.pane_share, other.teammates.pane_share);
         // The two D523 keys — and D531's sender-side sibling — ride this
@@ -1943,10 +1923,7 @@ impl Config {
         overlay(&mut self.dialog_expiry, other.dialog_expiry);
         overlay(&mut self.teamless_send, other.teamless_send);
         overlay(&mut self.tui.notifications, other.tui.notifications);
-        overlay(
-            &mut self.tui.notification_method,
-            other.tui.notification_method,
-        );
+        overlay(&mut self.tui.notification_method, other.tui.notification_method);
         // Field by field, like the rest of the `tui` table: a project that
         // only reorders `elements` keeps the global tier's `max_width`, and
         // the element list itself replaces wholesale — arrays replace, this
@@ -1961,10 +1938,7 @@ impl Config {
                 vacant => *vacant = Some(incoming),
             }
         }
-        overlay(
-            &mut self.webfetch.allow_private,
-            other.webfetch.allow_private,
-        );
+        overlay(&mut self.webfetch.allow_private, other.webfetch.allow_private);
         // Arrays replace, which is this file's rule everywhere but
         // `instructions`: a project that names its own skill directories means
         // those, and a global tier that keeps applying underneath would be a
@@ -2047,11 +2021,7 @@ impl Config {
             other.cross_session_inbound.take(),
             InboundPolicy::severity,
         );
-        tighten(
-            &mut self.teamless_send,
-            other.teamless_send.take(),
-            TeamlessSend::severity,
-        );
+        tighten(&mut self.teamless_send, other.teamless_send.take(), TeamlessSend::severity);
         self.merge(other);
 
         Ok(())
@@ -2230,10 +2200,7 @@ pub fn config_home() -> Option<PathBuf> {
             return None;
         }
     };
-    Some(discovered(
-        base.config_dir().join(DIRECTORY),
-        base.home_dir().join(HOME_DIRECTORY),
-    ))
+    Some(discovered(base.config_dir().join(DIRECTORY), base.home_dir().join(HOME_DIRECTORY)))
 }
 
 /// Which of [`config_home`]'s two *discovered* candidates answers, given what
@@ -2385,19 +2352,13 @@ fn project_files(cwd: &Path) -> Result<Vec<PathBuf>, ConfigError> {
 /// only honest moment to say otherwise is the launch that would have skipped
 /// it.
 fn existing(directory: &Path) -> Result<Vec<PathBuf>, ConfigError> {
-    if let Some(path) = LEGACY_FILES
-        .iter()
-        .map(|name| directory.join(name))
-        .find(|path| path.is_file())
+    if let Some(path) =
+        LEGACY_FILES.iter().map(|name| directory.join(name)).find(|path| path.is_file())
     {
         return Err(ConfigError::Legacy { path });
     }
 
-    Ok(FILES
-        .iter()
-        .map(|name| directory.join(name))
-        .filter(|path| path.is_file())
-        .collect())
+    Ok(FILES.iter().map(|name| directory.join(name)).filter(|path| path.is_file()).collect())
 }
 
 /// Whether `path` is read as a config file at all, rather than refused as one
@@ -2415,9 +2376,7 @@ fn existing(directory: &Path) -> Result<Vec<PathBuf>, ConfigError> {
 fn is_toml(path: &Path) -> bool {
     !path.extension().is_some_and(|extension| {
         LEGACY_FILES.iter().any(|name| {
-            Path::new(name)
-                .extension()
-                .is_some_and(|legacy| extension.eq_ignore_ascii_case(legacy))
+            Path::new(name).extension().is_some_and(|legacy| extension.eq_ignore_ascii_case(legacy))
         })
     })
 }
@@ -2436,19 +2395,14 @@ fn is_toml(path: &Path) -> bool {
 /// (`config_tests.rs` pins it, headers and dotted keys alike).
 fn read(path: &Path) -> Result<Option<Config>, ConfigError> {
     if !is_toml(path) {
-        return Err(ConfigError::Legacy {
-            path: path.to_owned(),
-        });
+        return Err(ConfigError::Legacy { path: path.to_owned() });
     }
 
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(source) => {
-            return Err(ConfigError::Read {
-                path: path.to_owned(),
-                source,
-            });
+            return Err(ConfigError::Read { path: path.to_owned(), source });
         }
     };
 
@@ -2521,10 +2475,7 @@ fn located(message: &str, span: Option<Range<usize>>, text: &str) -> String {
 /// converts it, instead of translating cleanly into a file the next launch
 /// refuses.
 fn checked(path: &Path, config: Config) -> Result<Config, ConfigError> {
-    let refused = |message: String| ConfigError::Parse {
-        path: path.to_owned(),
-        message,
-    };
+    let refused = |message: String| ConfigError::Parse { path: path.to_owned(), message };
 
     check_mcp(&config.mcp).map_err(refused)?;
     check_lsp(config.lsp.as_ref()).map_err(refused)?;
@@ -2607,11 +2558,7 @@ fn check_providers(providers: &BTreeMap<String, ProviderConfig>) -> Result<(), S
                  own base-URL variable instead"
             ));
         }
-        if entry
-            .key_env
-            .as_ref()
-            .is_some_and(|var| var.trim().is_empty())
-        {
+        if entry.key_env.as_ref().is_some_and(|var| var.trim().is_empty()) {
             return Err(format!(
                 "provider \"{id}\" has a blank `key_env`, which names no variable"
             ));
@@ -2636,9 +2583,7 @@ fn check_providers(providers: &BTreeMap<String, ProviderConfig>) -> Result<(), S
 /// This function is what makes them *per file*: the complaint names the file
 /// that said it, which a check run after the merge could not.
 fn check_mcp(servers: &BTreeMap<String, McpServer>) -> Result<(), String> {
-    servers
-        .iter()
-        .try_for_each(|(name, server)| server.check(name))
+    servers.iter().try_for_each(|(name, server)| server.check(name))
 }
 
 /// Refuses a `hooks` block that names an event nothing fires, a handler with
@@ -2657,11 +2602,7 @@ fn check_hooks(hooks: &BTreeMap<String, Vec<HookMatcher>>) -> Result<(), String>
         if crate::hook::HookEvent::from_name(event).is_none() {
             return Err(format!(
                 "hooks names no event \"{event}\"; this build fires {}",
-                crate::hook::EVENTS
-                    .iter()
-                    .map(|known| known.name())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                crate::hook::EVENTS.iter().map(|known| known.name()).collect::<Vec<_>>().join(", ")
             ));
         }
 
@@ -2677,9 +2618,7 @@ fn check_hooks(hooks: &BTreeMap<String, Vec<HookMatcher>>) -> Result<(), String>
             for handler in &group.hooks {
                 let HookHandler::Command(command) = handler;
                 if command.command.trim().is_empty() {
-                    return Err(format!(
-                        "hooks.{event} has a command handler with no command"
-                    ));
+                    return Err(format!("hooks.{event} has a command handler with no command"));
                 }
             }
         }
@@ -2696,11 +2635,9 @@ fn check_hooks(hooks: &BTreeMap<String, Vec<HookMatcher>>) -> Result<(), String>
 /// behavior — so the refusal is only about the value that means "never".
 fn check_agents(agents: &AgentsConfig) -> Result<(), String> {
     if agents.concurrency == Some(0) {
-        return Err(
-            "agents.concurrency must be at least 1; a cap of 0 is a session where every \
+        return Err("agents.concurrency must be at least 1; a cap of 0 is a session where every \
              delegation waits forever"
-                .to_owned(),
-        );
+            .to_owned());
     }
 
     Ok(())

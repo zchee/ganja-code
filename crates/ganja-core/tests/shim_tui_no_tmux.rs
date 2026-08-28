@@ -10,19 +10,18 @@
 
 mod shim_support;
 
-use std::{ffi::OsString, path::Path, sync::Arc, time::Duration};
+use std::ffi::OsString;
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
-use ganja_core::{
-    Backends, Storage, Teammates,
-    teammate::{
-        TeammateRegistry,
-        claude::ClaudePane,
-        codex::Codex,
-        pane::GanjaPane,
-        shim_tui::ShimTui,
-        tmux::{self, REFUSED_NO_TMUX},
-    },
-};
+use ganja_core::teammate::TeammateRegistry;
+use ganja_core::teammate::claude::ClaudePane;
+use ganja_core::teammate::codex::Codex;
+use ganja_core::teammate::pane::GanjaPane;
+use ganja_core::teammate::shim_tui::ShimTui;
+use ganja_core::teammate::tmux::{self, REFUSED_NO_TMUX};
+use ganja_core::{Backends, Storage, Teammates};
 use ganja_team::{MemberName, TeamName, TeamsRoot, mailbox};
 use ganja_testkit::AllowSpawn;
 use shim_support::{Fake, SESSION_ID};
@@ -48,10 +47,7 @@ fn lead(
     let storage = Storage::open(home.join("storage"));
     let backends = Backends {
         in_process: Arc::new(ganja_core::teammate::InProcess::new(
-            Arc::new(ganja_core::provider::FakeProvider::new(
-                "on it",
-                Duration::ZERO,
-            )),
+            Arc::new(ganja_core::provider::FakeProvider::new("on it", Duration::ZERO)),
             Arc::new(ganja_core::tool::Registry::new(Vec::new())),
             storage,
             |_: &ganja_core::teammate::SpawnSpec| ganja_core::permission::Permissions::default(),
@@ -113,11 +109,7 @@ async fn a_shim_tui_spawn_without_tmux_is_refused_by_name_and_runs_nothing() {
     }
 
     // No headless fallback and no pane: the stub on the path was never run.
-    assert!(
-        stub.received().is_empty(),
-        "the stub CLI was never started: {:?}",
-        stub.received()
-    );
+    assert!(stub.received().is_empty(), "the stub CLI was never started: {:?}", stub.received());
     // And nothing of ours is left behind: no member, no seeded task.
     assert!(
         ganja_testkit::team_file(&root, &team)
@@ -127,17 +119,9 @@ async fn a_shim_tui_spawn_without_tmux_is_refused_by_name_and_runs_nothing() {
     );
     let inbox = root.inbox_path(&team, &MemberName::parse("worker").expect("a name"));
     assert_eq!(
-        mailbox::read(&inbox)
-            .map(|contents| contents.valid.len())
-            .unwrap_or(0),
+        mailbox::read(&inbox).map(|contents| contents.valid.len()).unwrap_or(0),
         0,
         "the seeded prompt was taken back out"
     );
-    assert!(
-        registry
-            .view()
-            .members
-            .iter()
-            .all(|member| member.name != "worker")
-    );
+    assert!(registry.view().members.iter().all(|member| member.name != "worker"));
 }

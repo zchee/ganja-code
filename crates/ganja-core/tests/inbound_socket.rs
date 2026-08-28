@@ -12,18 +12,22 @@
 //! Every root is handed in and nothing here mutates the environment, so this
 //! binary may hold more than one test (the `teammate_engine.rs` rule).
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
-use futures::{StreamExt as _, stream::BoxStream};
-use ganja_core::{
-    Engine, Incoming, NotReceived,
-    config::{DialogExpiry, InboundPolicy},
-    permission::Permissions,
-    protocol::{Command, Event, HeldDecision, HeldId, HeldOutcome, HoldCause, PermissionMode},
-    provider::FakeProvider,
-    teammate::{TeammateRegistry, inbound::ResolvedInbound, lead_inbox::LeadInbox},
-    tool::Registry,
+use futures::StreamExt as _;
+use futures::stream::BoxStream;
+use ganja_core::config::{DialogExpiry, InboundPolicy};
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{
+    Command, Event, HeldDecision, HeldId, HeldOutcome, HoldCause, PermissionMode,
 };
+use ganja_core::provider::FakeProvider;
+use ganja_core::teammate::TeammateRegistry;
+use ganja_core::teammate::inbound::ResolvedInbound;
+use ganja_core::teammate::lead_inbox::LeadInbox;
+use ganja_core::tool::Registry;
+use ganja_core::{Engine, Incoming, NotReceived};
 use ganja_protocol::PolicySource;
 use ganja_team::mailbox;
 use ganja_testkit::{flooded_inbox, team};
@@ -67,18 +71,12 @@ impl Lead {
         .with_inbound_bypass(seeded)
         .with_teammates(Arc::clone(&registry));
 
-        Self {
-            engine: Arc::new(engine),
-            registry,
-            _home: home,
-        }
+        Self { engine: Arc::new(engine), registry, _home: home }
     }
 
     /// What the lead's inbox holds right now.
     fn inbox(&self) -> Vec<ganja_team::MailboxMessage> {
-        mailbox::read(&self.registry.lead_inbox())
-            .expect("the lead's inbox reads")
-            .valid
+        mailbox::read(&self.registry.lead_inbox()).expect("the lead's inbox reads").valid
     }
 
     /// The §6.2 pass over this lead's inbox, gated on this engine's own gate
@@ -87,9 +85,7 @@ impl Lead {
         let engine = Arc::clone(&self.engine);
 
         LeadInbox::reading(Arc::clone(&self.registry), None)
-            .gated(Arc::clone(self.engine.inbound()), move || {
-                engine.receiver_class()
-            })
+            .gated(Arc::clone(self.engine.inbound()), move || engine.receiver_class())
     }
 }
 
@@ -140,19 +136,9 @@ async fn a_refused_message_answers_byte_identically_to_an_accepted_one() {
         (refused.to.as_str(), refused.note.as_str()),
         "refuse must be byte-indistinguishable from accept"
     );
-    assert_eq!(
-        accepting.inbox().len(),
-        1,
-        "the accepted message is in the lead's inbox"
-    );
-    assert!(
-        refusing.inbox().is_empty(),
-        "the refused message wrote nothing"
-    );
-    assert!(
-        refusing.engine.held_messages().is_empty(),
-        "a refuse is a drop, not a hold"
-    );
+    assert_eq!(accepting.inbox().len(), 1, "the accepted message is in the lead's inbox");
+    assert!(refusing.inbox().is_empty(), "the refused message wrote nothing");
+    assert!(refusing.engine.held_messages().is_empty(), "a refuse is a drop, not a hold");
 }
 
 // D526: past the inbox's ceiling an *accepted* message still cannot land.
@@ -181,10 +167,7 @@ async fn a_full_inbox_refuses_the_accepted_write_on_the_failure_arm_and_changes_
         reason.contains("could not be written") && reason.contains("past its ceiling"),
         "the failure names the write and the ceiling, not the policy: {reason}"
     );
-    assert!(
-        !reason.contains("xxxx"),
-        "a refusal carries counts, never a body"
-    );
+    assert!(!reason.contains("xxxx"), "a refusal carries counts, never a body");
     assert_eq!(
         std::fs::read_to_string(&inbox).expect("the inbox is readable"),
         planted,
@@ -212,12 +195,7 @@ async fn a_held_message_names_its_cause_and_writes_nothing() {
     assert!(lead.inbox().is_empty(), "a held message touches no inbox");
     let held = lead.engine.held_messages();
     assert_eq!(held.len(), 1, "the entry is in the held list");
-    assert_eq!(
-        held[0].cause,
-        HoldCause::Explicit {
-            source: PolicySource::Global
-        }
-    );
+    assert_eq!(held[0].cause, HoldCause::Explicit { source: PolicySource::Global });
     assert_eq!(held[0].from, "team-lead@session-far");
     assert_eq!(
         held[0].expires_in, None,
@@ -253,10 +231,7 @@ async fn the_bypass_seed_turns_an_unset_policy_accept_into_a_hold() {
     let held = seeded.engine.held_messages();
     assert_eq!(held.len(), 1);
     assert_eq!(held[0].cause, HoldCause::NoModeAsserted);
-    assert!(
-        held[0].expires_in.is_some(),
-        "a parity hold carries the review deadline"
-    );
+    assert!(held[0].expires_in.is_some(), "a parity hold carries the review deadline");
 }
 
 // AC-14, the socket half: a release re-checks the policy of the moment, and
@@ -266,33 +241,20 @@ async fn a_release_recheck_turns_into_a_deny_under_a_policy_now_refusing() {
     let lead = Lead::new(Some((InboundPolicy::Hold, PolicySource::Global)), false);
     let mut events = lead.engine.subscribe().await.expect("a subscription");
 
-    lead.engine
-        .receive_peer_message(incoming("let me in"))
-        .await
-        .expect("held");
+    lead.engine.receive_peer_message(incoming("let me in")).await.expect("held");
     let id = lead.engine.held_messages()[0].id.clone();
 
     lead.engine
         .inbound()
-        .replace_policy(ResolvedInbound::new(Some((
-            InboundPolicy::Refuse,
-            PolicySource::Global,
-        ))));
+        .replace_policy(ResolvedInbound::new(Some((InboundPolicy::Refuse, PolicySource::Global))));
     lead.engine
-        .send(Command::SettleHeld {
-            id: id.clone(),
-            decision: HeldDecision::Release,
-        })
+        .send(Command::SettleHeld { id: id.clone(), decision: HeldDecision::Release })
         .await
         .expect("a settle is accepted");
 
     let (settled, outcome) = until_settled(&mut events).await;
     assert_eq!(settled, id);
-    assert_eq!(
-        outcome,
-        HeldOutcome::Denied,
-        "the approval was overridden by the policy re-check"
-    );
+    assert_eq!(outcome, HeldOutcome::Denied, "the approval was overridden by the policy re-check");
     assert!(lead.inbox().is_empty(), "nothing was written");
     assert!(lead.engine.held_messages().is_empty());
 }
@@ -312,18 +274,12 @@ async fn a_held_peer_message_never_reaches_the_model_until_released() {
 
     assert!(lead.inbox().is_empty(), "no inbox entry exists while held");
     let pass = inbox.poll().await;
-    assert!(
-        pass.messages.is_empty(),
-        "no delivery is handed to the frontend while held: {pass:?}"
-    );
+    assert!(pass.messages.is_empty(), "no delivery is handed to the frontend while held: {pass:?}");
     assert_eq!(lead.engine.held_messages().len(), 1);
 
     let id = lead.engine.held_messages()[0].id.clone();
     lead.engine
-        .send(Command::SettleHeld {
-            id: id.clone(),
-            decision: HeldDecision::Release,
-        })
+        .send(Command::SettleHeld { id: id.clone(), decision: HeldDecision::Release })
         .await
         .expect("a settle is accepted");
     let (settled, outcome) = until_settled(&mut events).await;
@@ -335,18 +291,11 @@ async fn a_held_peer_message_never_reaches_the_model_until_released() {
     assert_eq!(written[0].text, "the numbers you asked for");
 
     let pass = inbox.poll().await;
-    assert_eq!(
-        pass.messages.len(),
-        1,
-        "the released message is delivered exactly once: {pass:?}"
-    );
+    assert_eq!(pass.messages.len(), 1, "the released message is delivered exactly once: {pass:?}");
     assert_eq!(pass.messages[0].body, "the numbers you asked for");
     inbox.delivered(&pass.messages).await;
     let pass = inbox.poll().await;
-    assert!(
-        pass.messages.is_empty(),
-        "a delivered release is not re-offered: {pass:?}"
-    );
+    assert!(pass.messages.is_empty(), "a delivered release is not re-offered: {pass:?}");
 }
 
 // AC-16: a mode change re-evaluates what is held — the parity hold releases
@@ -357,9 +306,7 @@ async fn a_mode_change_releases_the_hold_it_now_accepts() {
     let mut events = lead.engine.subscribe().await.expect("a subscription");
 
     lead.engine
-        .send(Command::SetPermissionMode {
-            mode: PermissionMode::Bypass,
-        })
+        .send(Command::SetPermissionMode { mode: PermissionMode::Bypass })
         .await
         .expect("the mode is taken");
     lead.engine
@@ -370,9 +317,7 @@ async fn a_mode_change_releases_the_hold_it_now_accepts() {
     assert!(lead.inbox().is_empty());
 
     lead.engine
-        .send(Command::SetPermissionMode {
-            mode: PermissionMode::Ask,
-        })
+        .send(Command::SetPermissionMode { mode: PermissionMode::Ask })
         .await
         .expect("the mode is taken");
 
@@ -383,11 +328,7 @@ async fn a_mode_change_releases_the_hold_it_now_accepts() {
         "a prompting receiver accepts what the bypass held"
     );
     assert!(lead.engine.held_messages().is_empty());
-    assert_eq!(
-        lead.inbox().len(),
-        1,
-        "the released message reached the inbox"
-    );
+    assert_eq!(lead.inbox().len(), 1, "the released message reached the inbox");
 }
 
 // AC-16's other arm: an entry whose verdict still holds stays held, original
@@ -396,14 +337,9 @@ async fn a_mode_change_releases_the_hold_it_now_accepts() {
 async fn a_mode_change_leaves_an_explicit_hold_standing() {
     let lead = Lead::new(Some((InboundPolicy::Hold, PolicySource::Global)), true);
 
+    lead.engine.receive_peer_message(incoming("held on policy, not parity")).await.expect("held");
     lead.engine
-        .receive_peer_message(incoming("held on policy, not parity"))
-        .await
-        .expect("held");
-    lead.engine
-        .send(Command::SetPermissionMode {
-            mode: PermissionMode::Ask,
-        })
+        .send(Command::SetPermissionMode { mode: PermissionMode::Ask })
         .await
         .expect("the mode is taken");
 
@@ -411,9 +347,7 @@ async fn a_mode_change_leaves_an_explicit_hold_standing() {
     assert_eq!(held.len(), 1, "the explicit hold survived the mode change");
     assert_eq!(
         held[0].cause,
-        HoldCause::Explicit {
-            source: PolicySource::Global
-        },
+        HoldCause::Explicit { source: PolicySource::Global },
         "and keeps its original cause"
     );
     assert!(lead.inbox().is_empty(), "and still wrote nothing");
@@ -426,10 +360,7 @@ async fn a_parity_hold_expires_at_its_deadline_without_any_frontend() {
     let lead = Lead::with_expiry(None, true, DialogExpiry::OneMinute);
     let mut events = lead.engine.subscribe().await.expect("a subscription");
 
-    lead.engine
-        .receive_peer_message(incoming("nobody will answer this"))
-        .await
-        .expect("held");
+    lead.engine.receive_peer_message(incoming("nobody will answer this")).await.expect("held");
     assert_eq!(lead.engine.held_messages().len(), 1);
 
     // Paused time: the plain await is what advances the clock to the one
@@ -452,24 +383,14 @@ async fn a_parity_hold_expires_at_its_deadline_without_any_frontend() {
 #[tokio::test]
 async fn a_settle_naming_an_unknown_id_is_ignored_without_error() {
     let lead = Lead::new(Some((InboundPolicy::Hold, PolicySource::Global)), false);
-    lead.engine
-        .receive_peer_message(incoming("still here"))
-        .await
-        .expect("held");
+    lead.engine.receive_peer_message(incoming("still here")).await.expect("held");
 
     lead.engine
-        .send(Command::SettleHeld {
-            id: HeldId::ascending(),
-            decision: HeldDecision::Deny,
-        })
+        .send(Command::SettleHeld { id: HeldId::ascending(), decision: HeldDecision::Deny })
         .await
         .expect("an unknown id is ignored, not an error");
 
-    assert_eq!(
-        lead.engine.held_messages().len(),
-        1,
-        "the real hold is untouched"
-    );
+    assert_eq!(lead.engine.held_messages().len(), 1, "the real hold is untouched");
 }
 
 // AC-17: shutdown settles everything expired within the bounded flush, even
@@ -487,29 +408,16 @@ async fn shutdown_settles_every_hold_within_the_bound_despite_a_slow_subscriber(
     // message holds (one event), and each hold past the buffer's cap of 100
     // also evicts (a second event).
     for n in 0..600 {
-        lead.engine
-            .receive_peer_message(incoming(&format!("flood {n}")))
-            .await
-            .expect("held");
+        lead.engine.receive_peer_message(incoming(&format!("flood {n}"))).await.expect("held");
     }
-    assert_eq!(
-        lead.engine.held_messages().len(),
-        100,
-        "the buffer holds its cap, oldest evicted"
-    );
+    assert_eq!(lead.engine.held_messages().len(), 100, "the buffer holds its cap, oldest evicted");
 
     let started = std::time::Instant::now();
     lead.engine.shutdown_settle().await;
     let elapsed = started.elapsed();
 
-    assert!(
-        lead.engine.held_messages().is_empty(),
-        "every held entry settled expired"
-    );
-    assert!(
-        elapsed < Duration::from_secs(5),
-        "the flush is bounded, not a hang: {elapsed:?}"
-    );
+    assert!(lead.engine.held_messages().is_empty(), "every held entry settled expired");
+    assert!(elapsed < Duration::from_secs(5), "the flush is bounded, not a hang: {elapsed:?}");
     assert!(
         elapsed >= Duration::from_millis(700),
         "a wedged fanout spends the bound rather than skipping the flush: {elapsed:?}"

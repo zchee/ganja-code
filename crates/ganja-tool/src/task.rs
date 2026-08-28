@@ -280,9 +280,7 @@ pub trait Subagents: std::fmt::Debug + Send + Sync {
     async fn spawn_teammate(&self, request: TeammateSpawn) -> Result<Teammated, NotSpawned> {
         let _ = request;
 
-        Err(NotSpawned {
-            reason: NO_TEAM.to_owned(),
-        })
+        Err(NotSpawned { reason: NO_TEAM.to_owned() })
     }
 }
 
@@ -299,9 +297,7 @@ impl TaskTool {
     /// every agent in `roster`.
     #[must_use]
     pub fn new(roster: &[Offered]) -> Self {
-        Self {
-            description: describe(roster),
-        }
+        Self { description: describe(roster) }
     }
 }
 
@@ -341,14 +337,9 @@ impl Tool for TaskTool {
     }
 
     fn describe(&self, args: &serde_json::Value) -> String {
-        let agent = args
-            .get("subagent_type")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("subagent");
-        let what = args
-            .get("description")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
+        let agent =
+            args.get("subagent_type").and_then(serde_json::Value::as_str).unwrap_or("subagent");
+        let what = args.get("description").and_then(serde_json::Value::as_str).unwrap_or_default();
 
         // A teammate is named by the row rather than by its agent kind: the
         // name is what a person watching the team, and the next
@@ -459,12 +450,9 @@ async fn delegate(
             "Unknown agent type: {} is not a valid agent type",
             args.subagent_type
         ))),
-        Err(Unanswered::Failed { task_id, message }) => Err(ToolError::Failed(render(
-            &task_id,
-            "error",
-            "task_error",
-            &message,
-        ))),
+        Err(Unanswered::Failed { task_id, message }) => {
+            Err(ToolError::Failed(render(&task_id, "error", "task_error", &message)))
+        }
     }
 }
 

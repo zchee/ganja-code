@@ -55,19 +55,14 @@ fn the_launch_line_is_the_five_spawn_flags_and_nothing_else() {
         "01998ad0-0000-7000-8000-000000000000",
     ];
     let strings = |argv: Vec<std::ffi::OsString>| -> Vec<String> {
-        argv.into_iter()
-            .map(|argument| argument.into_string().expect("ascii"))
-            .collect()
+        argv.into_iter().map(|argument| argument.into_string().expect("ascii")).collect()
     };
 
     let argv = strings(arguments(&spec()));
     assert_eq!(argv, five);
 
     let line = argv.join(" ");
-    assert!(
-        !line.contains("CANARY"),
-        "the prompt rides the mailbox: {line}"
-    );
+    assert!(!line.contains("CANARY"), "the prompt rides the mailbox: {line}");
     assert!(!line.contains("recorder-model"), "no model guess: {line}");
     assert!(!line.contains("general"), "no agent flag: {line}");
     assert!(!line.contains("plan"), "no plan-mode flag: {line}");
@@ -85,10 +80,7 @@ fn the_idle_shell_is_two_words_so_no_login_shell_rereads_it() {
     assert!(SHELL.len() >= 2, "{SHELL:?}");
     assert!(PaneShell::default().argv().len() >= 2);
     assert!(
-        PaneShell::configured(vec!["/bin/zsh".to_owned()])
-            .argv()
-            .len()
-            >= 2,
+        PaneShell::configured(vec!["/bin/zsh".to_owned()]).argv().len() >= 2,
         "a lone program is made two words"
     );
 }
@@ -98,10 +90,7 @@ fn the_idle_shell_is_two_words_so_no_login_shell_rereads_it() {
 #[test]
 fn a_configured_shell_keeps_its_words_and_a_lone_program_gains_dash_s() {
     assert_eq!(PaneShell::default().words(), &SHELL[..]);
-    assert_eq!(
-        PaneShell::configured(vec!["/bin/zsh".to_owned()]).words(),
-        ["/bin/zsh", "-s"]
-    );
+    assert_eq!(PaneShell::configured(vec!["/bin/zsh".to_owned()]).words(), ["/bin/zsh", "-s"]);
     assert_eq!(
         PaneShell::configured(vec!["/bin/zsh".to_owned(), "-f".to_owned()]).words(),
         ["/bin/zsh", "-f"],

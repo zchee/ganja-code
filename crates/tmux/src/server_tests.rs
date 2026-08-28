@@ -36,14 +36,8 @@ fn an_empty_socket_field_addresses_nothing() {
 
 #[test]
 fn an_unset_or_empty_tmux_is_the_same_refusal() {
-    assert!(matches!(
-        Server::from_parts(None, None),
-        Err(Error::NotInTmux)
-    ));
-    assert!(matches!(
-        Server::from_parts(Some(OsString::new()), None),
-        Err(Error::NotInTmux)
-    ));
+    assert!(matches!(Server::from_parts(None, None), Err(Error::NotInTmux)));
+    assert!(matches!(Server::from_parts(Some(OsString::new()), None), Err(Error::NotInTmux)));
 }
 
 #[test]
@@ -131,9 +125,7 @@ fn a_word_outside_utf8_is_passed_through_byte_for_byte() {
 
 #[test]
 fn a_capture_reads_as_bytes_and_as_text() {
-    let captured = Captured {
-        bytes: b"%0 %1\n".to_vec(),
-    };
+    let captured = Captured { bytes: b"%0 %1\n".to_vec() };
     assert_eq!(captured.bytes(), b"%0 %1\n");
     assert_eq!(captured.text().expect("this capture is text"), "%0 %1\n");
     assert_eq!(captured.text_lossy(), "%0 %1\n");
@@ -142,17 +134,11 @@ fn a_capture_reads_as_bytes_and_as_text() {
 
 #[test]
 fn a_capture_that_is_not_text_is_refused_strictly_and_repaired_lossily() {
-    let captured = Captured {
-        bytes: b"pane \xff title".to_vec(),
-    };
+    let captured = Captured { bytes: b"pane \xff title".to_vec() };
     assert!(
         captured.text().is_err(),
         "a strict read must not invent a character tmux did not print"
     );
     assert_eq!(captured.text_lossy(), "pane \u{fffd} title");
-    assert_eq!(
-        captured.bytes()[5],
-        0xff,
-        "the bytes themselves are unharmed"
-    );
+    assert_eq!(captured.bytes()[5], 0xff, "the bytes themselves are unharmed");
 }

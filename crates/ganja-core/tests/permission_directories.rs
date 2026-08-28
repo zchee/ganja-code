@@ -11,17 +11,17 @@
 //! and a test that reached the real one could read or write a person's own
 //! answers. Everything in this file is therefore one test.
 
-use std::{fs, sync::Arc};
+use std::fs;
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::{StreamExt as _, stream::BoxStream};
-use ganja_core::{
-    Engine,
-    permission::Permissions,
-    protocol::{Command, Event, FinishReason, PermissionReply},
-    provider::ProviderEvent,
-    tool::{Registry, Tool, ToolCtx, ToolError, ToolOutput},
-};
+use futures::StreamExt as _;
+use futures::stream::BoxStream;
+use ganja_core::Engine;
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{Command, Event, FinishReason, PermissionReply};
+use ganja_core::provider::ProviderEvent;
+use ganja_core::tool::{Registry, Tool, ToolCtx, ToolError, ToolOutput};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -44,21 +44,14 @@ impl Tool for Shell {
     }
 
     async fn run(&self, _args: serde_json::Value, _ctx: &ToolCtx) -> Result<ToolOutput, ToolError> {
-        Ok(ToolOutput {
-            title: "bash".to_owned(),
-            output: String::new(),
-            metadata: json!({}),
-        })
+        Ok(ToolOutput { title: "bash".to_owned(), output: String::new(), metadata: json!({}) })
     }
 }
 
 /// One step calling `bash` with `command`.
 fn runs(command: &str) -> Vec<ProviderEvent> {
     vec![
-        ProviderEvent::ToolCallStart {
-            id: "call_1".to_owned(),
-            name: "bash".to_owned(),
-        },
+        ProviderEvent::ToolCallStart { id: "call_1".to_owned(), name: "bash".to_owned() },
         ProviderEvent::ToolCallDelta {
             id: "call_1".to_owned(),
             json: json!({ "command": command }).to_string(),
@@ -84,18 +77,12 @@ async fn a_request_discloses_the_directories_an_always_answer_would_cover() {
     // path spelled natively would be eaten by it and the argument would resolve
     // somewhere else entirely. Somebody driving ganja from Git Bash writes it
     // this way too. A no-op on unix, where there is nothing to translate.
-    let named = outside
-        .path()
-        .join("notes.txt")
-        .to_string_lossy()
-        .replace('\\', "/");
+    let named = outside.path().join("notes.txt").to_string_lossy().replace('\\', "/");
     // Asked through the gate's own resolver rather than `fs::canonicalize`:
     // Windows canonicalises to a verbatim path and the gate rewrites it, so a
     // fixture that skipped the rewrite would compare two spellings of one
     // directory and call them different.
-    let elsewhere = ganja_core::permission::resolve(outside.path())
-        .to_string_lossy()
-        .into_owned();
+    let elsewhere = ganja_core::permission::resolve(outside.path()).to_string_lossy().into_owned();
 
     // Two turns of two requests each: the call, then the step that reads its
     // refusal and says so. Without the second script the loop would take the
@@ -134,15 +121,10 @@ async fn a_request_discloses_the_directories_an_always_answer_would_cover() {
                 panic!("the stream ended before the turn did");
             };
             match event {
-                Event::PermissionRequested {
-                    id, directories, ..
-                } => {
+                Event::PermissionRequested { id, directories, .. } => {
                     disclosed.push(directories);
                     engine
-                        .send(Command::ReplyPermission {
-                            id,
-                            reply: PermissionReply::Reject,
-                        })
+                        .send(Command::ReplyPermission { id, reply: PermissionReply::Reject })
                         .await
                         .expect("a reply is always accepted");
                 }

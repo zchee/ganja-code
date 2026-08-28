@@ -54,31 +54,26 @@
 //! reason it is in `tests/credentials_env.rs`: nothing here may read or write
 //! the real user's stored permissions or spilled tool output.
 
-use std::{
-    collections::{BTreeMap, HashMap},
-    net::SocketAddr,
-    path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::Duration,
-};
+use std::collections::{BTreeMap, HashMap};
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
-use futures::{StreamExt as _, stream::BoxStream};
-use ganja_core::{
-    Engine,
-    permission::Permissions,
-    protocol::{Command, Event, FinishReason, PartBody, PartId, PermissionReply, ToolState},
-    provider::OpenAiProvider,
-    tool::Registry,
+use futures::StreamExt as _;
+use futures::stream::BoxStream;
+use ganja_core::Engine;
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{
+    Command, Event, FinishReason, PartBody, PartId, PermissionReply, ToolState,
 };
+use ganja_core::provider::OpenAiProvider;
+use ganja_core::tool::Registry;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::{TcpListener, TcpStream},
-};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::{TcpListener, TcpStream};
 
 /// Provider id the generated `opencode.json` declares, and the half of
 /// `--model provider/model` upstream resolves against it.
@@ -218,12 +213,8 @@ struct Replay {
 
 /// Serves `steps` to agent requests, in order, until dropped.
 async fn replay(steps: Vec<Step>) -> Replay {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("loopback is bindable");
-    let address: SocketAddr = listener
-        .local_addr()
-        .expect("a bound socket has an address");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("loopback is bindable");
+    let address: SocketAddr = listener.local_addr().expect("a bound socket has an address");
     let served = Arc::new(AtomicUsize::new(0));
 
     let steps = Arc::new(steps);
@@ -240,11 +231,7 @@ async fn replay(steps: Vec<Step>) -> Replay {
         }
     });
 
-    Replay {
-        url: format!("http://{address}/v1"),
-        served,
-        _server: server,
-    }
+    Replay { url: format!("http://{address}/v1"), served, _server: server }
 }
 
 /// Reads one request off `socket` and writes the answer it earns.
@@ -264,15 +251,12 @@ async fn answer(mut socket: TcpStream, steps: Arc<Vec<Step>>, cursor: Arc<Atomic
                 // Past the end the endpoint keeps ending the turn, so an agent
                 // that asks one more time than the script expects produces a
                 // length mismatch in the diff rather than a hang.
-                steps.get(index).cloned().unwrap_or_else(|| Step {
-                    text: "Done.".to_owned(),
-                    calls: Vec::new(),
-                })
+                steps
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(|| Step { text: "Done.".to_owned(), calls: Vec::new() })
             }
-            _ => Step {
-                text: "Golden Replay Session".to_owned(),
-                calls: Vec::new(),
-            },
+            _ => Step { text: "Golden Replay Session".to_owned(), calls: Vec::new() },
         };
 
         http("200 OK", "text/event-stream", &sse(&step))
@@ -354,10 +338,7 @@ fn sse(step: &Step) -> String {
     let mut out = String::new();
 
     if !step.text.is_empty() {
-        out.push_str(&frame(
-            json!({"role": "assistant", "content": step.text}),
-            None,
-        ));
+        out.push_str(&frame(json!({"role": "assistant", "content": step.text}), None));
     }
 
     for (index, call) in step.calls.iter().enumerate() {
@@ -382,11 +363,7 @@ fn sse(step: &Step) -> String {
         ));
     }
 
-    let finish = if step.calls.is_empty() {
-        "stop"
-    } else {
-        "tool_calls"
-    };
+    let finish = if step.calls.is_empty() { "stop" } else { "tool_calls" };
     out.push_str(&frame(json!({}), Some(finish)));
     out.push_str(&format!(
         "data: {}\n\n",
@@ -408,10 +385,7 @@ fn sse(step: &Step) -> String {
 fn split_point(text: &str) -> usize {
     let middle = text.len() / 2;
 
-    (0..=middle)
-        .rev()
-        .find(|index| text.is_char_boundary(*index))
-        .unwrap_or_default()
+    (0..=middle).rev().find(|index| text.is_char_boundary(*index)).unwrap_or_default()
 }
 
 /// Writes `task`'s seed files into `directory`.
@@ -432,9 +406,7 @@ fn seed(directory: &Path, task: &Task) {
 /// resolves against it.
 async fn ganja(task: &Task) -> Vec<Executed> {
     let endpoint = replay(task.steps.clone()).await;
-    let provider = OpenAiProvider::new(KEY)
-        .expect("a client builds")
-        .with_base_url(&endpoint.url);
+    let provider = OpenAiProvider::new(KEY).expect("a client builds").with_base_url(&endpoint.url);
     let engine = Engine::new(
         Arc::new(provider),
         MODEL,
@@ -484,18 +456,12 @@ async fn collect(engine: &Engine, events: &mut BoxStream<'static, Event>) -> Vec
     let mut at: HashMap<PartId, usize> = HashMap::new();
 
     loop {
-        let event = events
-            .next()
-            .await
-            .expect("the turn should finish before the stream ends");
+        let event = events.next().await.expect("the turn should finish before the stream ends");
 
         match event {
             Event::PermissionRequested { id, .. } => {
                 engine
-                    .send(Command::ReplyPermission {
-                        id,
-                        reply: PermissionReply::Once,
-                    })
+                    .send(Command::ReplyPermission { id, reply: PermissionReply::Once })
                     .await
                     .expect("a reply is always accepted");
             }
@@ -508,11 +474,7 @@ async fn collect(engine: &Engine, events: &mut BoxStream<'static, Event>) -> Vec
                     match state {
                         ToolState::Running { input, .. } => {
                             at.insert(id, executed.len());
-                            executed.push(Executed {
-                                tool,
-                                input,
-                                output: None,
-                            });
+                            executed.push(Executed { tool, input, output: None });
                         }
                         ToolState::Completed { output, .. } => {
                             if let Some(row) = at.get(&id) {
@@ -720,11 +682,7 @@ async fn upstream(directory: &Path, data_home: &Path, task: &Task) -> Vec<Execut
                 })
             };
 
-            Some(Executed {
-                tool,
-                input: state["input"].clone(),
-                output: Some(settled),
-            })
+            Some(Executed { tool, input: state["input"].clone(), output: Some(settled) })
         })
         .collect()
 }
@@ -739,17 +697,11 @@ async fn upstream(directory: &Path, data_home: &Path, task: &Task) -> Vec<Execut
 fn normalize(value: &Value, roots: &[String]) -> Value {
     match value {
         Value::String(text) => Value::String(normalize_text(text, roots)),
-        Value::Array(items) => Value::Array(
-            items
-                .iter()
-                .map(|item| normalize(item, roots))
-                .collect::<Vec<_>>(),
-        ),
+        Value::Array(items) => {
+            Value::Array(items.iter().map(|item| normalize(item, roots)).collect::<Vec<_>>())
+        }
         Value::Object(fields) => Value::Object(
-            fields
-                .iter()
-                .map(|(key, field)| (key.clone(), normalize(field, roots)))
-                .collect(),
+            fields.iter().map(|(key, field)| (key.clone(), normalize(field, roots))).collect(),
         ),
         other => other.clone(),
     }
@@ -850,10 +802,7 @@ fn roots(directory: &Path) -> Vec<String> {
 
 /// One executed call per line, for an assertion someone has to read.
 fn render(calls: &[Executed]) -> Vec<String> {
-    calls
-        .iter()
-        .map(|call| format!("{} {}", call.tool, call.input))
-        .collect()
+    calls.iter().map(|call| format!("{} {}", call.tool, call.input)).collect()
 }
 
 /// What each call settled as, one line per call, for the output comparison.
@@ -924,11 +873,7 @@ fn no_golden_fixture_asks_for_websearch() {
         checked += 1;
     }
 
-    assert!(
-        checked > 0,
-        "no golden fixtures were found in {}",
-        directory.display()
-    );
+    assert!(checked > 0, "no golden fixtures were found in {}", directory.display());
 }
 
 /// Loads the task in `tests/fixtures/golden/{name}.json`.
@@ -988,11 +933,7 @@ async fn differential(name: &str, home: &Path) -> (Vec<String>, Vec<Executed>, V
             .collect()
     };
 
-    (
-        scripted,
-        normalize_all(upstream_calls, &theirs),
-        normalize_all(ganja_calls, &ours),
-    )
+    (scripted, normalize_all(upstream_calls, &theirs), normalize_all(ganja_calls, &ours))
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1013,20 +954,14 @@ async fn ganja_executes_the_same_tool_calls_as_upstream_opencode() {
         let (scripted, upstream_calls, ganja_calls) = differential(name, home.path()).await;
 
         let (upstream_names, ganja_names): (Vec<&str>, Vec<&str>) = (
-            upstream_calls
-                .iter()
-                .map(|call| call.tool.as_str())
-                .collect(),
+            upstream_calls.iter().map(|call| call.tool.as_str()).collect(),
             ganja_calls.iter().map(|call| call.tool.as_str()).collect(),
         );
 
         // Against the fixture first. Two agents that both stopped after the
         // first step would agree with each other perfectly, and a comparison
         // that only ever looked at the two of them would call that a pass.
-        assert_eq!(
-            upstream_names, scripted,
-            "{name}: upstream did not run the whole script"
-        );
+        assert_eq!(upstream_names, scripted, "{name}: upstream did not run the whole script");
 
         assert_eq!(
             ganja_names, upstream_names,

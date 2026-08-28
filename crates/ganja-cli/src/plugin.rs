@@ -109,33 +109,21 @@ pub(crate) fn plugin_command(action: PluginAction) -> Result<()> {
 
     match action {
         PluginAction::List => list(&store),
-        PluginAction::Marketplace {
-            action: MarketplaceAction::Add { source },
-        } => {
+        PluginAction::Marketplace { action: MarketplaceAction::Add { source } } => {
             let name = store.add_marketplace(&source)?;
             println!("added marketplace {name} from {source}");
             Ok(())
         }
-        PluginAction::Marketplace {
-            action: MarketplaceAction::List,
-        } => marketplaces(&store),
-        PluginAction::Marketplace {
-            action: MarketplaceAction::Remove { name },
-        } => {
+        PluginAction::Marketplace { action: MarketplaceAction::List } => marketplaces(&store),
+        PluginAction::Marketplace { action: MarketplaceAction::Remove { name } } => {
             store.remove_marketplace(&name)?;
             println!("removed marketplace {name}");
             Ok(())
         }
-        PluginAction::Marketplace {
-            action: MarketplaceAction::Update { name },
-        } => {
+        PluginAction::Marketplace { action: MarketplaceAction::Update { name } } => {
             let names = match name {
                 Some(name) => vec![name],
-                None => store
-                    .marketplaces()?
-                    .into_iter()
-                    .map(|listing| listing.name)
-                    .collect(),
+                None => store.marketplaces()?.into_iter().map(|listing| listing.name).collect(),
             };
             if names.is_empty() {
                 println!(
@@ -186,22 +174,14 @@ pub(crate) fn plugin_command(action: PluginAction) -> Result<()> {
 fn details(store: &Store, plugin: &str) -> Result<()> {
     let details = store.details(plugin)?;
 
-    let version = details
-        .version
-        .as_deref()
-        .map(|version| format!(" {version}"))
-        .unwrap_or_default();
+    let version =
+        details.version.as_deref().map(|version| format!(" {version}")).unwrap_or_default();
     let state = if details.enabled { "" } else { " (disabled)" };
     println!("{}{version}{state}", details.name);
     if let Some(description) = &details.description {
         println!("{}{description}", crate::INDENT);
     }
-    println!(
-        "{}Source: {}@{}",
-        crate::INDENT,
-        details.name,
-        details.marketplace
-    );
+    println!("{}Source: {}@{}", crate::INDENT, details.name, details.marketplace);
 
     println!();
     println!("Component inventory");
@@ -209,19 +189,11 @@ fn details(store: &Store, plugin: &str) -> Result<()> {
         if names.is_empty() {
             println!("{}{label} (0)", crate::INDENT);
         } else {
-            println!(
-                "{}{label} ({})  {}",
-                crate::INDENT,
-                names.len(),
-                names.join(", ")
-            );
+            println!("{}{label} ({})  {}", crate::INDENT, names.len(), names.join(", "));
         }
     };
     let costed_names = |components: &[ganja_core::plugin::ComponentCost]| {
-        components
-            .iter()
-            .map(|component| component.name.clone())
-            .collect::<Vec<_>>()
+        components.iter().map(|component| component.name.clone()).collect::<Vec<_>>()
     };
     named("Skills", &costed_names(&details.skills));
     named("Agents", &costed_names(&details.agents));
@@ -268,14 +240,8 @@ fn details(store: &Store, plugin: &str) -> Result<()> {
             );
         }
         println!();
-        println!(
-            "{}On-invoke cost is paid each time a skill or agent fires.",
-            crate::INDENT
-        );
-        println!(
-            "{}Token counts are estimates and may differ from actual usage.",
-            crate::INDENT
-        );
+        println!("{}On-invoke cost is paid each time a skill or agent fires.", crate::INDENT);
+        println!("{}Token counts are estimates and may differ from actual usage.", crate::INDENT);
     }
 
     Ok(())
@@ -333,10 +299,9 @@ fn marketplaces(store: &Store) -> Result<()> {
                 offered.len(),
                 if offered.len() == 1 { "" } else { "s" },
             ),
-            Err(reason) => println!(
-                "{} (from {}, unreadable: {reason})",
-                listing.name, listing.origin
-            ),
+            Err(reason) => {
+                println!("{} (from {}, unreadable: {reason})", listing.name, listing.origin)
+            }
         }
         for plugin in listing.installed {
             println!("{}installed: {plugin}", crate::INDENT);
@@ -360,11 +325,7 @@ fn list(store: &Store) -> Result<()> {
     }
 
     for listing in listings {
-        let state = if listing.enabled {
-            "enabled"
-        } else {
-            "disabled"
-        };
+        let state = if listing.enabled { "enabled" } else { "disabled" };
         println!("{} ({state}, from {})", listing.name, listing.marketplace);
         if listing.components.is_empty() {
             println!("{}(no components)", crate::INDENT);

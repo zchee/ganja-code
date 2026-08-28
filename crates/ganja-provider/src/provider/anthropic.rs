@@ -15,7 +15,10 @@
 //! under a name a config chose is a wrapper rather than a fork. That is
 //! [`super::openai`]'s seam set, completed here for [`super::compat`]'s sake.
 
-use std::{borrow::Cow, collections::HashMap, fmt, sync::LazyLock};
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::fmt;
+use std::sync::LazyLock;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -24,17 +27,14 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    catalog,
-    protocol::{FinishReason, Part, PartBody, Role, ToolState, Usage},
-    provider::{
-        ChatRequest, CredentialSource, Mapper, NO_RESULT, Presented, Provider, ProviderError,
-        ProviderEvent, check_base_url, client, open, require_key, setting, shown_base_url,
-        splice_effort,
-        sse::Frame,
-        steps,
-        toolname::{ANTHROPIC_CAP, Aliases, alias},
-    },
+use crate::catalog;
+use crate::protocol::{FinishReason, Part, PartBody, Role, ToolState, Usage};
+use crate::provider::sse::Frame;
+use crate::provider::toolname::{ANTHROPIC_CAP, Aliases, alias};
+use crate::provider::{
+    ChatRequest, CredentialSource, Mapper, NO_RESULT, Presented, Provider, ProviderError,
+    ProviderEvent, check_base_url, client, open, require_key, setting, shown_base_url,
+    splice_effort, steps,
 };
 
 /// Value of [`PROVIDER_ENV`](super::PROVIDER_ENV) that selects this provider.
@@ -145,10 +145,7 @@ impl AnthropicProvider {
         let base_url = setting(BASE_URL_ENV).unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
         check_base_url(&base_url)?;
 
-        Self::with_credential(
-            CredentialSource::Key(require_key(ID, API_KEY_ENV)?),
-            base_url,
-        )
+        Self::with_credential(CredentialSource::Key(require_key(ID, API_KEY_ENV)?), base_url)
     }
 
     /// Builds a provider that authenticates however `credential` says.
@@ -226,10 +223,7 @@ impl Provider for AnthropicProvider {
     /// accepts — degrades to text at the engine rather than being sent as a
     /// block the API would refuse.
     fn accepts_attachment(&self, mime: &str) -> bool {
-        matches!(
-            mime,
-            "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "application/pdf"
-        )
+        matches!(mime, "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "application/pdf")
     }
 
     async fn stream(
@@ -257,10 +251,7 @@ impl Provider for AnthropicProvider {
         let aliases = Aliases::of(&request.tools, ANTHROPIC_CAP);
         let built = self
             .client
-            .post(format!(
-                "{}/v1/messages",
-                self.base_url.trim_end_matches('/')
-            ))
+            .post(format!("{}/v1/messages", self.base_url.trim_end_matches('/')))
             .header("x-api-key", presented.expose())
             .header("anthropic-version", API_VERSION)
             // After the credential, and never carrying one: these describe the
@@ -281,10 +272,7 @@ impl Provider for AnthropicProvider {
         );
 
         open(
-            move || Mapping {
-                aliases: aliases.clone(),
-                ..Mapping::default()
-            },
+            move || Mapping { aliases: aliases.clone(), ..Mapping::default() },
             &self.client,
             built,
             &self.base_url,
@@ -418,11 +406,7 @@ struct Source<'a> {
 impl<'a> Source<'a> {
     /// A base64 source carrying `data` as `media_type`.
     fn base64(media_type: &'a str, data: &'a str) -> Self {
-        Self {
-            kind: "base64",
-            media_type,
-            data,
-        }
+        Self { kind: "base64", media_type, data }
     }
 }
 
@@ -496,10 +480,7 @@ impl<'a> Body<'a> {
             system: request.system.as_deref(),
             messages: turns
                 .into_iter()
-                .map(|(role, blocks)| Turn {
-                    role,
-                    content: content(blocks),
-                })
+                .map(|(role, blocks)| Turn { role, content: content(blocks) })
                 .collect(),
             tools: request
                 .tools
@@ -546,11 +527,7 @@ fn split(parts: &[Part]) -> (Vec<Block<'_>>, Vec<Block<'_>>) {
                     blocks.push(Block::Text { text });
                 }
             }
-            PartBody::Tool {
-                call_id,
-                tool,
-                state,
-            } => {
+            PartBody::Tool { call_id, tool, state } => {
                 blocks.push(Block::ToolUse {
                     id: call_id,
                     name: alias(tool, ANTHROPIC_CAP),
@@ -558,21 +535,13 @@ fn split(parts: &[Part]) -> (Vec<Block<'_>>, Vec<Block<'_>>) {
                 });
 
                 let (content, is_error) = result(state);
-                results.push(Block::ToolResult {
-                    tool_use_id: call_id,
-                    content,
-                    is_error,
-                });
+                results.push(Block::ToolResult { tool_use_id: call_id, content, is_error });
             }
             // A binary attachment the engine read at send time: its base64
             // rides the request's own copy of the file part, and only for a
             // mime `accepts_attachment` said yes to, so the match below is by
             // payload shape rather than by allowlist.
-            PartBody::File {
-                mime,
-                content: Some(content),
-                ..
-            } => {
+            PartBody::File { mime, content: Some(content), .. } => {
                 let source = Source::base64(mime, content);
                 blocks.push(if mime == "application/pdf" {
                     Block::Document { source }
@@ -731,10 +700,7 @@ impl Mapping {
             ("input_tokens", &mut self.usage.input_tokens),
             ("output_tokens", &mut self.usage.output_tokens),
             ("cache_read_input_tokens", &mut self.usage.cache_read_tokens),
-            (
-                "cache_creation_input_tokens",
-                &mut self.usage.cache_write_tokens,
-            ),
+            ("cache_creation_input_tokens", &mut self.usage.cache_write_tokens),
         ] {
             if let Some(count) = usage[field].as_u64() {
                 *slot = count;
@@ -754,9 +720,7 @@ impl Mapping {
         // Back through this request's own map: what the engine executes, what
         // the permission rules match and what the transcript records is the
         // registry name, never the one the wire had to advertise.
-        let name = self
-            .aliases
-            .original(block["name"].as_str().unwrap_or_default().to_owned());
+        let name = self.aliases.original(block["name"].as_str().unwrap_or_default().to_owned());
 
         if let Some(index) = index(data) {
             self.tools.insert(index, id.clone());
@@ -786,10 +750,7 @@ impl Mapping {
 
                 events.push(ProviderEvent::ToolCallDelta {
                     id: id.clone(),
-                    json: delta["partial_json"]
-                        .as_str()
-                        .unwrap_or_default()
-                        .to_owned(),
+                    json: delta["partial_json"].as_str().unwrap_or_default().to_owned(),
                 });
             }
             // `signature_delta` and whatever comes next: the reply reads the
@@ -807,10 +768,7 @@ impl Mapping {
         // deterministic.
         let mut open: Vec<(u64, String)> = self.tools.drain().collect();
         open.sort_unstable();
-        events.extend(
-            open.into_iter()
-                .map(|(_index, id)| ProviderEvent::ToolCallEnd { id }),
-        );
+        events.extend(open.into_iter().map(|(_index, id)| ProviderEvent::ToolCallEnd { id }));
 
         events.push(ProviderEvent::Usage(self.usage));
         events.push(ProviderEvent::Finish(FinishReason::Completed));
@@ -834,35 +792,14 @@ fn failure(error: &Value) -> ProviderError {
     let message = super::reported(error);
 
     match kind {
-        "invalid_request_error" => ProviderError::Status {
-            status: 400,
-            message,
-        },
+        "invalid_request_error" => ProviderError::Status { status: 400, message },
         "authentication_error" => ProviderError::Auth(message),
-        "permission_error" => ProviderError::Status {
-            status: 403,
-            message,
-        },
-        "not_found_error" => ProviderError::Status {
-            status: 404,
-            message,
-        },
-        "request_too_large" => ProviderError::Status {
-            status: 413,
-            message,
-        },
-        "rate_limit_error" => ProviderError::Status {
-            status: 429,
-            message,
-        },
-        "overloaded_error" => ProviderError::Status {
-            status: 529,
-            message,
-        },
-        _ => ProviderError::Status {
-            status: 500,
-            message,
-        },
+        "permission_error" => ProviderError::Status { status: 403, message },
+        "not_found_error" => ProviderError::Status { status: 404, message },
+        "request_too_large" => ProviderError::Status { status: 413, message },
+        "rate_limit_error" => ProviderError::Status { status: 429, message },
+        "overloaded_error" => ProviderError::Status { status: 529, message },
+        _ => ProviderError::Status { status: 500, message },
     }
 }
 

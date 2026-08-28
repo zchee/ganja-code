@@ -43,7 +43,8 @@
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
-use jiff::{Timestamp, tz::TimeZone};
+use jiff::Timestamp;
+use jiff::tz::TimeZone;
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -98,11 +99,7 @@ const YEAR_TOKEN: &str = "{{year}}";
 /// wire, so the marks are taken back out — and the test
 /// `the_bytes_a_query_string_value_is_escaped_into_are_exactly_these` is what
 /// holds the two byte-identical.
-const ESCAPED: &AsciiSet = &NON_ALPHANUMERIC
-    .remove(b'-')
-    .remove(b'.')
-    .remove(b'_')
-    .remove(b'~');
+const ESCAPED: &AsciiSet = &NON_ALPHANUMERIC.remove(b'-').remove(b'.').remove(b'_').remove(b'~');
 
 /// Which service a search is asked of.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -242,16 +239,9 @@ impl Keys {
     /// An empty value is no value: a variable exported blank by a shell
     /// profile would otherwise select a service and then fail against it.
     fn from_env() -> Self {
-        let read = |name| {
-            std::env::var(name)
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-        };
+        let read = |name| std::env::var(name).ok().filter(|value| !value.trim().is_empty());
 
-        Self {
-            exa: read(EXA_KEY_ENV),
-            parallel: read(PARALLEL_KEY_ENV),
-        }
+        Self { exa: read(EXA_KEY_ENV), parallel: read(PARALLEL_KEY_ENV) }
     }
 
     /// The key for `service`, if it is held.
@@ -349,10 +339,7 @@ impl Tool for WebsearchTool {
     }
 
     fn describe(&self, args: &serde_json::Value) -> String {
-        let query = args
-            .get("query")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
+        let query = args.get("query").and_then(serde_json::Value::as_str).unwrap_or_default();
 
         format!("search {query}")
     }
@@ -418,20 +405,14 @@ async fn search(
         .post(&url)
         // Both are acceptable and which arrives is the service's choice, which
         // is why the reader below takes either (`mcp-websearch.ts:80`).
-        .header(
-            reqwest::header::ACCEPT,
-            "application/json, text/event-stream",
-        )
+        .header(reqwest::header::ACCEPT, "application/json, text/event-stream")
         // Ganja's own name: neither service involves a client registration
         // somebody else owns, so neither was ever told anything but what this
         // is. Spelled the way `ganja-provider`'s `GANJA_USER_AGENT` spells it
         // — a literal rather than that constant because this crate depends on
         // `ganja-permission` and nothing else of ours, and one product name is
         // not worth an edge in that graph.
-        .header(
-            reqwest::header::USER_AGENT,
-            concat!("ganja-code/", env!("CARGO_PKG_VERSION")),
-        )
+        .header(reqwest::header::USER_AGENT, concat!("ganja-code/", env!("CARGO_PKG_VERSION")))
         .json(&body(service, args));
     if service == Service::Parallel {
         request = request.header(reqwest::header::AUTHORIZATION, format!("Bearer {key}"));
@@ -521,9 +502,7 @@ fn parse(body: &str) -> Option<String> {
         return Some(text);
     }
 
-    body.lines()
-        .filter_map(|line| line.strip_prefix("data: "))
-        .find_map(payload)
+    body.lines().filter_map(|line| line.strip_prefix("data: ")).find_map(payload)
 }
 
 /// The first non-empty result text in one JSON payload, or nothing when the

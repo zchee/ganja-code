@@ -1,15 +1,13 @@
 use std::time::Duration;
 
-use ganja_core::{
-    team::{MemberName, TeamName, record},
-    teammate::posture::Posture,
+use ganja_core::team::{MemberName, TeamName, record};
+use ganja_core::teammate::posture::Posture;
+use ganja_protocol::team::{
+    Frame, IdleReason, ModeSetRequest, PermissionResponse, PermissionResponseBody,
+    PlanApprovalResponse, TaskAssignment,
 };
 use ganja_protocol::{
     Event, FinishReason, PermissionId, PermissionMode, PermissionReply, SessionId,
-    team::{
-        Frame, IdleReason, ModeSetRequest, PermissionResponse, PermissionResponseBody,
-        PlanApprovalResponse, TaskAssignment,
-    },
 };
 use tempfile::TempDir;
 
@@ -35,21 +33,12 @@ fn a_member_reads_the_directory_its_lead_wrote_into() {
     assert_eq!(member.lead_inbox(), lead.lead_inbox());
     assert_eq!(
         member.inbox(),
-        lead.root()
-            .inbox_path(lead.team(), &MemberName::parse("w1").expect("a name")),
+        lead.root().inbox_path(lead.team(), &MemberName::parse("w1").expect("a name")),
     );
-    assert_eq!(
-        member.team(),
-        &TeamName::parse("session-224cbeab").expect("a team")
-    );
+    assert_eq!(member.team(), &TeamName::parse("session-224cbeab").expect("a team"));
     assert_eq!(member.color(), Some("blue"));
     assert_eq!(member.parent_session_id(), PARENT);
-    assert_eq!(
-        member.surface(),
-        &ganja_core::team::Surface::Pane {
-            id: "%7".to_owned()
-        }
-    );
+    assert_eq!(member.surface(), &ganja_core::team::Surface::Pane { id: "%7".to_owned() });
 }
 
 /// The id the lead recorded has to be the one these flags describe.
@@ -68,10 +57,7 @@ fn an_agent_id_naming_another_member_is_refused_before_anything_runs() {
     );
     assert!(
         Membership::resolve(
-            Flags {
-                name: "main".to_owned(),
-                ..flags("main")
-            },
+            Flags { name: "main".to_owned(), ..flags("main") },
             home.path(),
             home.path(),
             None,
@@ -113,10 +99,7 @@ async fn a_shutdown_request_goes_ahead_of_everything_else() {
     let pass = inbox.poll().await;
 
     assert_eq!(pass.shutdown.as_deref(), Some("req-9"));
-    assert!(
-        pass.messages.is_empty(),
-        "nothing else is delivered: {pass:?}"
-    );
+    assert!(pass.messages.is_empty(), "nothing else is delivered: {pass:?}");
     assert_eq!(
         held(&inbox.inbox).len(),
         2,
@@ -172,9 +155,7 @@ async fn the_turns_end_maps_onto_the_three_idle_reasons() {
 
     inbox.report_idle(FinishReason::Completed, None).await;
     inbox.report_idle(FinishReason::Cancelled, None).await;
-    inbox
-        .report_idle(FinishReason::Failed, Some("the provider hung up"))
-        .await;
+    inbox.report_idle(FinishReason::Failed, Some("the provider hung up")).await;
 
     let reasons: Vec<_> = held(&inbox.lead_inbox)
         .iter()
@@ -195,10 +176,7 @@ async fn the_turns_end_maps_onto_the_three_idle_reasons() {
         [
             (Some(IdleReason::Available), None),
             (Some(IdleReason::Interrupted), None),
-            (
-                Some(IdleReason::Failed),
-                Some("the provider hung up".to_owned())
-            ),
+            (Some(IdleReason::Failed), Some("the provider hung up".to_owned())),
         ]
     );
 }
@@ -284,31 +262,14 @@ async fn a_task_assignment_from_the_lead_becomes_a_message_and_prunes_by_the_ren
 
     assert_eq!(pass.messages.len(), 1);
     assert_eq!(pass.messages[0].from, "team-lead");
-    assert_eq!(
-        pass.messages[0].summary.as_deref(),
-        Some("look at the parser")
-    );
-    assert_eq!(
-        pass.messages[0].body,
-        "look at the parser\n\nthe whole of it"
-    );
-    assert_eq!(
-        pass.dropped,
-        ["task_assignment"],
-        "a peer cannot assign work"
-    );
-    assert_eq!(
-        held(&inbox.inbox).len(),
-        1,
-        "the lead's stays until delivered"
-    );
+    assert_eq!(pass.messages[0].summary.as_deref(), Some("look at the parser"));
+    assert_eq!(pass.messages[0].body, "look at the parser\n\nthe whole of it");
+    assert_eq!(pass.dropped, ["task_assignment"], "a peer cannot assign work");
+    assert_eq!(held(&inbox.inbox).len(), 1, "the lead's stays until delivered");
 
     inbox.delivered(&pass.messages).await;
 
-    assert!(
-        held(&inbox.inbox).is_empty(),
-        "and the rendered identity found it"
-    );
+    assert!(held(&inbox.inbox).is_empty(), "and the rendered identity found it");
 }
 
 /// The other frames the harness may write are named and dropped, never
@@ -355,14 +316,8 @@ async fn a_member_waits_for_its_record_and_refuses_when_no_lead_writes_one() {
     let member = member(&home, None);
     assert_eq!(member.record().expect("no file is no record"), None);
 
-    let refused = member
-        .await_record(RECORD_POLL)
-        .await
-        .expect_err("nothing wrote a record");
-    assert!(
-        refused.to_string().contains("config.json"),
-        "the refusal names the file: {refused}"
-    );
+    let refused = member.await_record(RECORD_POLL).await.expect_err("nothing wrote a record");
+    assert!(refused.to_string().contains("config.json"), "the refusal names the file: {refused}");
 
     // A lead of the same session writes it a moment later, exactly as the
     // registry does — the record after the spawn — and the wait finds it.
@@ -384,9 +339,7 @@ async fn a_member_waits_for_its_record_and_refuses_when_no_lead_writes_one() {
             color: "blue".to_owned(),
             prompt: "start on the parser".to_owned(),
             plan_mode_required: false,
-            surface: ganja_core::team::Surface::Pane {
-                id: "%7".to_owned(),
-            },
+            surface: ganja_core::team::Surface::Pane { id: "%7".to_owned() },
             cwd: home.path().display().to_string(),
         },
         record::now_millis(),
@@ -394,11 +347,8 @@ async fn a_member_waits_for_its_record_and_refuses_when_no_lead_writes_one() {
     let writer = tokio::spawn(async move {
         tokio::time::sleep(RECORD_POLL * 2).await;
         std::fs::create_dir_all(path.parent().expect("a team dir")).expect("the dir");
-        std::fs::write(
-            &path,
-            ganja_core::team::record::document(&team).expect("the team encodes"),
-        )
-        .expect("the team file is written");
+        std::fs::write(&path, ganja_core::team::record::document(&team).expect("the team encodes"))
+            .expect("the team file is written");
     });
 
     let found = member
@@ -433,11 +383,7 @@ async fn a_forwarded_ask_reaches_the_lead_as_a_permission_request() {
     let home = tempfile::tempdir().expect("a temporary home");
     let inbox = Inbox::new(member(&home, None));
 
-    inbox
-        .asks()
-        .forward(&asked("perm-1"))
-        .await
-        .expect("the lead's inbox takes the ask");
+    inbox.asks().forward(&asked("perm-1")).await.expect("the lead's inbox takes the ask");
 
     assert_eq!(inbox.asks().waiting(), 1);
     let written = held(&inbox.lead_inbox);
@@ -449,9 +395,7 @@ async fn a_forwarded_ask_reaches_the_lead_as_a_permission_request() {
         written[0].frame()
     );
     assert!(
-        inbox
-            .asks()
-            .retire(&PermissionId::from("perm-1".to_owned())),
+        inbox.asks().retire(&PermissionId::from("perm-1".to_owned())),
         "an engine's own reply forgets the wait"
     );
     assert_eq!(inbox.asks().waiting(), 0);
@@ -466,16 +410,8 @@ async fn a_forwarded_ask_reaches_the_lead_as_a_permission_request() {
 async fn a_leads_answer_resolves_a_waiting_ask_and_a_peers_or_a_stale_one_does_not() {
     let home = tempfile::tempdir().expect("a temporary home");
     let inbox = Inbox::new(member(&home, None));
-    inbox
-        .asks()
-        .forward(&asked("perm-1"))
-        .await
-        .expect("the ask is forwarded");
-    inbox
-        .asks()
-        .forward(&asked("perm-2"))
-        .await
-        .expect("the ask is forwarded");
+    inbox.asks().forward(&asked("perm-1")).await.expect("the ask is forwarded");
+    inbox.asks().forward(&asked("perm-2")).await.expect("the ask is forwarded");
     let allowed = Frame::PermissionResponse(PermissionResponse::success(
         "perm-1",
         PermissionResponseBody {
@@ -500,21 +436,11 @@ async fn a_leads_answer_resolves_a_waiting_ask_and_a_peers_or_a_stale_one_does_n
     assert_eq!(
         pass.answers,
         [
-            (
-                PermissionId::from("perm-1".to_owned()),
-                PermissionReply::Always
-            ),
-            (
-                PermissionId::from("perm-2".to_owned()),
-                PermissionReply::Reject
-            ),
+            (PermissionId::from("perm-1".to_owned()), PermissionReply::Always),
+            (PermissionId::from("perm-2".to_owned()), PermissionReply::Reject),
         ]
     );
-    assert_eq!(
-        pass.dropped,
-        ["permission_response"],
-        "a peer cannot answer"
-    );
+    assert_eq!(pass.dropped, ["permission_response"], "a peer cannot answer");
     assert_eq!(pass.ignored, 1, "an answer to nothing waited on is stale");
     assert_eq!(inbox.asks().waiting(), 0);
     assert!(held(&inbox.inbox).is_empty());

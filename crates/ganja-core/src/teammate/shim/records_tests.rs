@@ -6,10 +6,7 @@ use super::{
 };
 
 fn identity(pid: i32, started: &str) -> Identity {
-    Identity {
-        pid,
-        started: started.to_owned(),
-    }
+    Identity { pid, started: started.to_owned() }
 }
 
 #[test]
@@ -37,10 +34,7 @@ fn a_records_file_round_trips_through_its_own_renderer() {
 
 #[test]
 fn a_file_with_no_children_still_names_its_owner() {
-    let records = Records {
-        owner: identity(1, "Wed Aug 19 14:54:57 2026"),
-        children: Vec::new(),
-    };
+    let records = Records { owner: identity(1, "Wed Aug 19 14:54:57 2026"), children: Vec::new() };
 
     assert_eq!(parse(&render(&records)), Ok(records));
 }
@@ -60,10 +54,7 @@ fn every_unreadable_shape_is_told_from_every_other() {
     assert_eq!(token, "ganja-shims-2");
 
     assert!(matches!(parse(VERSION), Err(Unreadable::Malformed { .. })));
-    assert!(matches!(
-        parse(&format!("{VERSION}\n4711\n")),
-        Err(Unreadable::Malformed { .. })
-    ));
+    assert!(matches!(parse(&format!("{VERSION}\n4711\n")), Err(Unreadable::Malformed { .. })));
     assert!(matches!(
         parse(&format!("{VERSION}\nnotapid\tWed Aug 19 14:54:57 2026\n")),
         Err(Unreadable::Malformed { .. })
@@ -87,12 +78,7 @@ fn every_unreadable_shape_is_told_from_every_other() {
 fn a_newer_leads_file_is_never_this_builds_to_remove() {
     assert!(Unreadable::Headerless.removable());
     assert!(Unreadable::Malformed { reason: "x" }.removable());
-    assert!(
-        !Unreadable::Version {
-            token: "ganja-shims-2".to_owned()
-        }
-        .removable()
-    );
+    assert!(!Unreadable::Version { token: "ganja-shims-2".to_owned() }.removable());
 }
 
 /// A pid alone is recycled and a start time alone identifies nothing, so
@@ -113,21 +99,14 @@ fn an_identity_matches_only_a_live_process_born_when_it_says() {
 fn a_records_name_carries_the_stem_and_the_leads_own_pid() {
     let directory = std::path::Path::new("/tmp/ganja-501");
 
-    assert_eq!(
-        path_for(directory, "0198c1a2", 4711),
-        directory.join("0198c1a2-4711.shims")
-    );
+    assert_eq!(path_for(directory, "0198c1a2", 4711), directory.join("0198c1a2-4711.shims"));
     // The staging name sits inside the sweep's own glob, so the sweep's
     // header-less arm removes one a crash left behind.
     assert_eq!(
         temp_path_for(directory, "0198c1a2", 4711),
         directory.join("0198c1a2-4711.tmp.shims")
     );
-    assert!(
-        temp_path_for(directory, "0198c1a2", 4711)
-            .to_string_lossy()
-            .ends_with(".shims")
-    );
+    assert!(temp_path_for(directory, "0198c1a2", 4711).to_string_lossy().ends_with(".shims"));
 }
 
 #[test]

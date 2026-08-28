@@ -79,9 +79,7 @@ fn every_variant() -> Vec<Frame> {
             task_subject: Some("port the frames".to_owned()),
             timestamp: Some(WHEN.to_owned()),
         }),
-        Frame::TeammateTerminated(TeammateTerminated {
-            message: "w1 is gone".to_owned(),
-        }),
+        Frame::TeammateTerminated(TeammateTerminated { message: "w1 is gone".to_owned() }),
         Frame::ModeSetRequest(ModeSetRequest {
             mode: "bypassPermissions".to_owned(),
             from: "team-lead".to_owned(),
@@ -107,9 +105,7 @@ fn every_variant() -> Vec<Frame> {
             worker_id: "w1@team-1".to_owned(),
             worker_name: "w1".to_owned(),
             worker_color: "blue".to_owned(),
-            host_pattern: HostPattern {
-                host: "crates.io".to_owned(),
-            },
+            host_pattern: HostPattern { host: "crates.io".to_owned() },
             created_at: WHEN.to_owned(),
         }),
         Frame::SandboxPermissionResponse(SandboxPermissionResponse {
@@ -131,12 +127,7 @@ fn every_variant() -> Vec<Frame> {
 /// same frame.
 fn golden(frame: &Frame, expected: &str) {
     let encoded = serde_json::to_string(frame).expect("a frame serializes");
-    assert_eq!(
-        encoded,
-        expected,
-        "the wire spelling of {} changed",
-        frame.kind()
-    );
+    assert_eq!(encoded, expected, "the wire spelling of {} changed", frame.kind());
 
     let decoded: Frame = serde_json::from_str(expected).expect("a frame deserializes");
     assert_eq!(&decoded, frame, "round trip changed {expected}");
@@ -168,11 +159,7 @@ fn every_frames_wire_spelling_is_pinned() {
         r#"{"type":"team_permission_update","rules":["allow bash"]}"#,
     ];
 
-    assert_eq!(
-        frames.len(),
-        expected.len(),
-        "every variant needs a golden of its own"
-    );
+    assert_eq!(frames.len(), expected.len(), "every variant needs a golden of its own");
     for (frame, expected) in frames.iter().zip(expected) {
         golden(frame, expected);
     }
@@ -214,10 +201,8 @@ fn an_absent_optional_writes_no_key_at_all() {
 fn the_two_reserved_sets_are_disjoint_and_total() {
     let frames = every_variant();
 
-    let (sendable, harness): (BTreeSet<&str>, BTreeSet<&str>) = frames
-        .iter()
-        .map(|frame| (frame.kind(), frame.is_agent_sendable()))
-        .fold(
+    let (sendable, harness): (BTreeSet<&str>, BTreeSet<&str>) =
+        frames.iter().map(|frame| (frame.kind(), frame.is_agent_sendable())).fold(
             (BTreeSet::new(), BTreeSet::new()),
             |(mut sendable, mut harness), (kind, may_send)| {
                 if may_send {
@@ -283,10 +268,7 @@ fn a_frame_shaped_text_is_recognized_by_its_tag_alone() {
 
     // A body no version of this build could decode — every field but the
     // tag is missing — is still a frame.
-    assert_eq!(
-        Frame::reserved_kind(r#"{"type":"shutdown_approved"}"#),
-        Some("shutdown_approved")
-    );
+    assert_eq!(Frame::reserved_kind(r#"{"type":"shutdown_approved"}"#), Some("shutdown_approved"));
     assert!(serde_json::from_str::<Frame>(r#"{"type":"shutdown_approved"}"#).is_err());
 
     // And everything that is not one of the fifteen is prose.
@@ -336,10 +318,7 @@ fn a_decoy_key_cannot_hide_a_reserved_tag() {
     );
 
     // Repetition alone is not a frame: what is repeated has to name one.
-    assert_eq!(
-        Frame::reserved_kind(r#"{"type":"noise","type":"also_noise"}"#),
-        None
-    );
+    assert_eq!(Frame::reserved_kind(r#"{"type":"noise","type":"also_noise"}"#), None);
 
     // A reserved name somewhere that is not a top-level `type` is prose,
     // as it was before: this reads one object, not a tree.
@@ -389,18 +368,13 @@ fn a_tagged_object_is_told_apart_from_prose_and_from_untagged_data() {
     // is a drop nobody can account for.
     assert_eq!(
         Frame::classify(r#"{"type":"not_a_kind_this_build_knows","from":"w1"}"#),
-        Tagged::Unknown {
-            name: Some("not_a_kind_this_build_knows".to_owned()),
-        }
+        Tagged::Unknown { name: Some("not_a_kind_this_build_knows".to_owned()) }
     );
 
     // A `type` that is not a string still *tags* the object — there is
     // simply no name to report. Answering `Untagged` here would tell a
     // guard the key was absent when it was not.
-    assert_eq!(
-        Frame::classify(r#"{"type":42}"#),
-        Tagged::Unknown { name: None }
-    );
+    assert_eq!(Frame::classify(r#"{"type":42}"#), Tagged::Unknown { name: None });
 
     // Mixed decoys: a nameless tag first, a named one after. The *first*
     // unknown is what is reported, so a decoy cannot choose which kind a
@@ -415,9 +389,7 @@ fn a_tagged_object_is_told_apart_from_prose_and_from_untagged_data() {
     // And the reverse order keeps the name, for the same reason.
     assert_eq!(
         Frame::classify(r#"{"type":"not_known","type":42}"#),
-        Tagged::Unknown {
-            name: Some("not_known".to_owned()),
-        }
+        Tagged::Unknown { name: Some("not_known".to_owned()) }
     );
     // A reserved tag still outranks both, from any position.
     assert_eq!(
@@ -457,9 +429,7 @@ fn classifying_and_reserved_kind_answer_the_same_walk() {
     // kind a refusal names.
     assert_eq!(
         Frame::classify(r#"{"type":"noise","type":"also_noise"}"#),
-        Tagged::Unknown {
-            name: Some("noise".to_owned()),
-        }
+        Tagged::Unknown { name: Some("noise".to_owned()) }
     );
 }
 
@@ -519,10 +489,7 @@ fn a_peer_frame_cannot_build_a_lead_frame() {
     // decides, so the claim buys nothing.
     assert_eq!(LeadFrame::parse("w2", "team-lead", frame.clone()), None);
     assert_eq!(LeadFrame::parse("", "team-lead", frame.clone()), None);
-    assert_eq!(
-        LeadFrame::parse("Team-Lead", "team-lead", frame.clone()),
-        None
-    );
+    assert_eq!(LeadFrame::parse("Team-Lead", "team-lead", frame.clone()), None);
 
     let lead = LeadFrame::parse("team-lead", "team-lead", frame.clone())
         .expect("the lead's own frame parses");
@@ -552,10 +519,7 @@ fn the_display_cap_cuts_on_a_character_boundary() {
 fn a_blank_summary_projects_to_nothing_and_a_long_one_is_capped() {
     assert_eq!(super::display_summary(None), None);
     assert_eq!(super::display_summary(Some("   ")), None);
-    assert_eq!(
-        super::display_summary(Some("picked up W2")),
-        Some("picked up W2")
-    );
+    assert_eq!(super::display_summary(Some("picked up W2")), Some("picked up W2"));
 
     let wide = "あ".repeat(DISPLAY_FIELD_CAP + 10);
     let capped = super::display_summary(Some(&wide)).expect("a non-blank summary survives");
@@ -664,10 +628,7 @@ fn a_team_view_round_trips_and_refuses_a_key_it_does_not_declare() {
         encoded,
         r#"{"team":"team-1","lead":"team-lead","members":[{"name":"team-lead","agent_id":"team-lead@team-1","backend":"in-process","is_lead":true},{"name":"w1","agent_id":"w1@team-1","backend":"claude","color":"blue","is_lead":false,"recent_calls":["read(src/lib.rs)"]}]}"#
     );
-    assert_eq!(
-        serde_json::from_str::<TeamView>(&encoded).expect("a view deserializes"),
-        view
-    );
+    assert_eq!(serde_json::from_str::<TeamView>(&encoded).expect("a view deserializes"), view);
 
     assert!(
         serde_json::from_str::<TeamView>(r#"{"team":"t","lead":"l","members":[],"extra":1}"#)
@@ -741,10 +702,7 @@ fn peer_receipt_status_pins_its_three_spellings_and_refuses_a_fourth() {
         (PeerReceiptStatus::Denied, "\"denied\""),
         (PeerReceiptStatus::Expired, "\"expired\""),
     ] {
-        assert_eq!(
-            serde_json::to_string(&status).expect("a status serializes"),
-            spelling
-        );
+        assert_eq!(serde_json::to_string(&status).expect("a status serializes"), spelling);
         assert_eq!(
             serde_json::from_str::<PeerReceiptStatus>(spelling)
                 .expect("a pinned spelling round-trips"),
@@ -753,10 +711,7 @@ fn peer_receipt_status_pins_its_three_spellings_and_refuses_a_fourth() {
     }
 
     let held = serde_json::from_str::<PeerReceiptStatus>("\"held\"");
-    assert!(
-        held.is_err(),
-        "held is answered synchronously and must never cross this route"
-    );
+    assert!(held.is_err(), "held is answered synchronously and must never cross this route");
 
     let unknown = serde_json::from_str::<PeerReceiptStatus>("\"delayed\"");
     assert!(unknown.is_err(), "an unrecognized status refuses readably");

@@ -1,8 +1,6 @@
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use super::{
     Collector, DEFAULT_TIMEOUT, KEEP, NoPosixShell, ShellTool, Spilled, accept_shell, posix_shell,
@@ -13,11 +11,8 @@ use super::{
 // than sit dead on windows.
 #[cfg(unix)]
 use super::{SPILL_THRESHOLD, Spill, assemble};
-use crate::{
-    Tool, ToolCtx, ToolError,
-    job::{JobRead, JobStatus, Jobs, JobsError, State},
-    truncate,
-};
+use crate::job::{JobRead, JobStatus, Jobs, JobsError, State};
+use crate::{Tool, ToolCtx, ToolError, truncate};
 
 /// `text`, which a shell printed, as this platform spells a path.
 ///
@@ -33,10 +28,7 @@ use crate::{
 #[cfg(windows)]
 fn native(text: &str) -> PathBuf {
     let rest = text.strip_prefix('/').unwrap_or(text);
-    let rest = rest
-        .strip_prefix("cygdrive/")
-        .or_else(|| rest.strip_prefix("mnt/"))
-        .unwrap_or(rest);
+    let rest = rest.strip_prefix("cygdrive/").or_else(|| rest.strip_prefix("mnt/")).unwrap_or(rest);
     let (head, tail) = rest.split_once('/').unwrap_or((rest, ""));
 
     match head.strip_suffix(':').unwrap_or(head).as_bytes() {
@@ -81,20 +73,15 @@ struct Recording {
 
 impl Recording {
     fn new() -> Self {
-        Self {
-            started: std::sync::Mutex::new(None),
-        }
+        Self { started: std::sync::Mutex::new(None) }
     }
 }
 
 #[async_trait::async_trait]
 impl Jobs for Recording {
     async fn start(&self, command: String, child: tokio::process::Child) -> JobStatus {
-        let status = JobStatus {
-            id: "bash_1".to_owned(),
-            command: command.clone(),
-            state: State::Running,
-        };
+        let status =
+            JobStatus { id: "bash_1".to_owned(), command: command.clone(), state: State::Running };
         *self.started.lock().expect("never poisoned") = Some((command, child));
 
         status
@@ -121,19 +108,12 @@ async fn run_in_background_returns_immediately_naming_the_job_id() {
     let out = ShellTool::new()
         .run(
             serde_json::json!({ "command": "sleep 30", "run_in_background": true }),
-            &ToolCtx {
-                jobs: Some(Arc::clone(&jobs)),
-                ..ctx(dir.path().to_owned())
-            },
+            &ToolCtx { jobs: Some(Arc::clone(&jobs)), ..ctx(dir.path().to_owned()) },
         )
         .await
         .expect("a background call still completes");
 
-    assert!(
-        out.output.contains("bash_1"),
-        "the reply should name the job id: {:?}",
-        out.output
-    );
+    assert!(out.output.contains("bash_1"), "the reply should name the job id: {:?}", out.output);
     assert_eq!(out.metadata["bash_id"], "bash_1");
     assert_eq!(out.metadata["status"], "running");
 }
@@ -171,15 +151,9 @@ async fn run_in_background_hands_over_a_real_running_child() {
         .take()
         .expect("the tool registered exactly one job")
         .1;
-    child
-        .wait()
-        .await
-        .expect("the backgrounded shell can still be waited on directly");
+    child.wait().await.expect("the backgrounded shell can still be waited on directly");
 
-    assert!(
-        marker.exists(),
-        "the process kept running after the tool call returned"
-    );
+    assert!(marker.exists(), "the process kept running after the tool call returned");
 }
 
 #[tokio::test]
@@ -288,10 +262,7 @@ async fn a_call_with_no_posix_shell_to_run_it_is_refused_with_the_remedy() {
         let tool = ShellTool::refusing(why.clone());
 
         let refused = tool
-            .run(
-                serde_json::json!({ "command": "echo hello" }),
-                &ctx(dir.path().to_owned()),
-            )
+            .run(serde_json::json!({ "command": "echo hello" }), &ctx(dir.path().to_owned()))
             .await
             .expect_err("a machine with no shell runs nothing");
 
@@ -299,10 +270,7 @@ async fn a_call_with_no_posix_shell_to_run_it_is_refused_with_the_remedy() {
             panic!("a missing shell is a failure the model reads, got {refused:?}");
         };
         assert_eq!(message, why.to_string());
-        assert!(
-            message.contains("Git Bash"),
-            "the refusal should name what to install: {message}"
-        );
+        assert!(message.contains("Git Bash"), "the refusal should name what to install: {message}");
     }
 }
 
@@ -338,10 +306,7 @@ async fn both_streams_are_captured_in_the_order_they_arrived() {
                        sleep 0.1; printf 'three\\n'; sleep 0.1; printf 'four\\n' >&2";
 
     let out = tool
-        .run(
-            serde_json::json!({ "command": command }),
-            &ctx(dir.path().to_owned()),
-        )
+        .run(serde_json::json!({ "command": command }), &ctx(dir.path().to_owned()))
         .await
         .expect("a command that runs has output");
 
@@ -352,10 +317,7 @@ async fn both_streams_are_captured_in_the_order_they_arrived() {
         out.output
     );
     assert_eq!(out.metadata["exit"], 0);
-    assert_eq!(
-        out.title, command,
-        "the title is the command, as upstream reports it"
-    );
+    assert_eq!(out.title, command, "the title is the command, as upstream reports it");
 }
 
 #[tokio::test]
@@ -363,10 +325,7 @@ async fn a_command_that_says_nothing_says_so() {
     let dir = tempfile::tempdir().expect("a scratch directory");
 
     let out = ShellTool::new()
-        .run(
-            serde_json::json!({ "command": "true" }),
-            &ctx(dir.path().to_owned()),
-        )
+        .run(serde_json::json!({ "command": "true" }), &ctx(dir.path().to_owned()))
         .await
         .expect("a silent command still succeeds");
 
@@ -413,10 +372,7 @@ async fn commands_run_where_the_call_asked_them_to() {
     const PWD: &str = "pwd";
 
     let rooted = tool
-        .run(
-            serde_json::json!({ "command": PWD }),
-            &ctx(dir.path().to_owned()),
-        )
+        .run(serde_json::json!({ "command": PWD }), &ctx(dir.path().to_owned()))
         .await
         .expect("pwd runs");
     let relative = tool
@@ -548,28 +504,18 @@ async fn a_flood_of_output_is_bounded_in_memory_and_the_tail_is_what_survives() 
     // ~230 KB over 40,000 lines: past the line budget, past the byte
     // budget, and past [`KEEP`], so the spill really opens mid-run.
     let out = ShellTool::spilling_into(&spill)
-        .run(
-            serde_json::json!({ "command": "seq 1 40000" }),
-            &ctx(dir.path().to_owned()),
-        )
+        .run(serde_json::json!({ "command": "seq 1 40000" }), &ctx(dir.path().to_owned()))
         .await
         .expect("a command that floods still completes");
 
     assert_eq!(out.metadata["truncated"], true);
     assert!(
-        out.output
-            .starts_with("...output truncated...\n\nFull output saved to: "),
+        out.output.starts_with("...output truncated...\n\nFull output saved to: "),
         "the model has to read why the output starts mid-stream, got {:?}",
         &out.output[..out.output.len().min(120)]
     );
-    assert!(
-        out.output.contains("\n40000"),
-        "the end of the output is what a shell result is for"
-    );
-    assert!(
-        !out.output.contains("\n1\n"),
-        "the head should have been cut, not the tail"
-    );
+    assert!(out.output.contains("\n40000"), "the end of the output is what a shell result is for");
+    assert!(!out.output.contains("\n1\n"), "the head should have been cut, not the tail");
     assert!(
         out.output.len() < truncate::MAX_CHARS + 1_024,
         "what the model reads must fit the budget, got {} bytes",
@@ -599,10 +545,7 @@ async fn output_that_fits_the_budget_names_no_file_and_says_it_was_not_truncated
     let spill = dir.path().join("tool-output");
 
     let out = ShellTool::spilling_into(&spill)
-        .run(
-            serde_json::json!({ "command": "seq 1 10" }),
-            &ctx(dir.path().to_owned()),
-        )
+        .run(serde_json::json!({ "command": "seq 1 10" }), &ctx(dir.path().to_owned()))
         .await
         .expect("a small command runs");
 
@@ -613,10 +556,7 @@ async fn output_that_fits_the_budget_names_no_file_and_says_it_was_not_truncated
         "a call that kept everything must not name a file: {:?}",
         out.metadata
     );
-    assert!(
-        !spill.exists(),
-        "nothing should have been written to disk at all"
-    );
+    assert!(!spill.exists(), "nothing should have been written to disk at all");
 }
 
 /// The window is what bounds memory, so it is worth proving directly:
@@ -648,10 +588,7 @@ fn the_collector_holds_a_bounded_window_however_much_is_pushed_through_it() {
         "every write succeeded, so the file holds the whole output"
     );
     assert_eq!(
-        std::fs::metadata(spilled.path())
-            .expect("the spill exists")
-            .len()
-            .try_into(),
+        std::fs::metadata(spilled.path()).expect("the spill exists").len().try_into(),
         Ok(pushes * chunk.len()),
         "the spill holds every byte that was pushed"
     );
@@ -731,9 +668,7 @@ fn a_spill_that_stops_accepting_writes_keeps_the_file_it_already_wrote() {
         "a second file was written, orphaning the first"
     );
     assert_eq!(
-        std::fs::metadata(&opened)
-            .expect("the spill still exists")
-            .len(),
+        std::fs::metadata(&opened).expect("the spill still exists").len(),
         written,
         "the partial file should be left exactly as the failure left it"
     );
@@ -762,10 +697,8 @@ fn the_tail_keeps_the_end_of_the_output_and_says_it_cut() {
     let short = "one\ntwo\nthree";
     assert_eq!(tail(short), (short.to_owned(), false));
 
-    let many = (1..=truncate::MAX_LINES + 10)
-        .map(|line| line.to_string())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let many =
+        (1..=truncate::MAX_LINES + 10).map(|line| line.to_string()).collect::<Vec<_>>().join("\n");
     let (kept, cut) = tail(&many);
 
     assert!(cut);
@@ -802,10 +735,7 @@ fn one_line_longer_than_the_budget_keeps_its_tail_without_splitting_a_character(
         kept.chars().all(|character| character == '\u{1F980}'),
         "a cut inside a character would have left a replacement behind"
     );
-    assert!(
-        line.ends_with(&kept),
-        "what survives is the end of the line"
-    );
+    assert!(line.ends_with(&kept), "what survives is the end of the line");
 }
 
 #[tokio::test]
@@ -813,10 +743,7 @@ async fn a_timeout_that_is_not_a_duration_is_refused_with_the_remedy() {
     let dir = tempfile::tempdir().expect("a scratch directory");
 
     let refused = ShellTool::new()
-        .run(
-            serde_json::json!({ "command": "true", "timeout": -1 }),
-            &ctx(dir.path().to_owned()),
-        )
+        .run(serde_json::json!({ "command": "true", "timeout": -1 }), &ctx(dir.path().to_owned()))
         .await
         .expect_err("a negative timeout is not a timeout");
 
@@ -835,20 +762,14 @@ async fn a_call_without_a_command_is_refused_before_anything_runs() {
         .await
         .expect_err("there is nothing to run");
 
-    assert!(
-        matches!(refused, ToolError::InvalidArgs(_)),
-        "got {refused:?}"
-    );
+    assert!(matches!(refused, ToolError::InvalidArgs(_)), "got {refused:?}");
 }
 
 #[test]
 fn the_one_line_description_names_the_command_without_pasting_it_whole() {
     let tool = ShellTool::new();
 
-    assert_eq!(
-        tool.describe(&serde_json::json!({ "command": "git status" })),
-        "shell: git status"
-    );
+    assert_eq!(tool.describe(&serde_json::json!({ "command": "git status" })), "shell: git status");
 
     let long = tool.describe(&serde_json::json!({ "command": "x".repeat(500) }));
     assert!(long.starts_with("shell: xxx") && long.ends_with("..."));
@@ -861,10 +782,7 @@ fn the_schema_asks_for_a_command_and_offers_the_optional_arguments() {
 
     assert_eq!(schema["required"], serde_json::json!(["command"]));
     for name in ["command", "timeout", "workdir"] {
-        assert!(
-            schema["properties"][name].is_object(),
-            "the schema should offer {name}: {schema}"
-        );
+        assert!(schema["properties"][name].is_object(), "the schema should offer {name}: {schema}");
     }
     assert!(
         schema["properties"]["command"]["description"]

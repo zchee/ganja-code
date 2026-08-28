@@ -11,17 +11,16 @@
 //! and consent to a command whose tail was cut without a word is not consent.
 
 use ganja_protocol::PermissionId;
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    style::Style,
-    text::{Line, Text},
-    widgets::{Block, Clear, Paragraph, Widget as _, Wrap},
-};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::style::Style;
+use ratatui::text::{Line, Text};
+use ratatui::widgets::{Block, Clear, Paragraph, Widget as _, Wrap};
 use unicode_width::UnicodeWidthStr as _;
 
 use super::chat::split_at_width;
-use crate::{component::modal, theme::Theme};
+use crate::component::modal;
+use crate::theme::Theme;
 
 /// Lines of pretty-printed JSON shown before the rest is clamped.
 const ARGS_PREVIEW_LINES: usize = 8;
@@ -68,13 +67,7 @@ impl Permission {
         args: serde_json::Value,
         directories: Vec<String>,
     ) -> Self {
-        Self {
-            id,
-            tool,
-            title,
-            args,
-            directories,
-        }
+        Self { id, tool, title, args, directories }
     }
 
     /// The request this dialog is showing, so a caller can tell whether an
@@ -115,10 +108,8 @@ impl Permission {
     /// rows, and spends its budget in priority order: the reply keys first,
     /// then a marker admitting the cut, then as much of the call as is left.
     fn lines(&self, inner: Rect, theme: &Theme) -> Vec<Line<'static>> {
-        let mut body = vec![
-            (format!("tool: {}", self.tool), theme.accent),
-            (self.title.clone(), theme.fg),
-        ];
+        let mut body =
+            vec![(format!("tool: {}", self.tool), theme.accent), (self.title.clone(), theme.fg)];
         // Inside the body, so these rows are spent out of the same budget the
         // call itself is and the overflow count stays true of the whole
         // dialog. A call that stays in the checkout adds nothing here, which is
@@ -127,21 +118,12 @@ impl Permission {
             body.push((String::new(), theme.fg));
             body.push((OUTSIDE.to_owned(), theme.warning));
             body.extend(
-                self.directories
-                    .iter()
-                    .map(|directory| (format!("  {directory}"), theme.dim)),
+                self.directories.iter().map(|directory| (format!("  {directory}"), theme.dim)),
             );
         }
         body.push((String::new(), theme.fg));
-        body.extend(
-            self.args_preview()
-                .into_iter()
-                .map(|text| (text, theme.dim)),
-        );
-        let tail = [
-            (String::new(), theme.fg),
-            (REPLY_KEYS.to_owned(), theme.dim),
-        ];
+        body.extend(self.args_preview().into_iter().map(|text| (text, theme.dim)));
+        let tail = [(String::new(), theme.fg), (REPLY_KEYS.to_owned(), theme.dim)];
 
         let width = usize::from(inner.width);
         let height = usize::from(inner.height);
@@ -170,9 +152,7 @@ impl Permission {
         }
 
         rows.extend(tail_rows);
-        rows.into_iter()
-            .map(|(text, style)| Line::styled(text, style))
-            .collect()
+        rows.into_iter().map(|(text, style)| Line::styled(text, style)).collect()
     }
 
     /// The call's arguments, pretty-printed and clamped to a few lines: the

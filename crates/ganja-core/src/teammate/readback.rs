@@ -69,12 +69,10 @@
 //! the lead hears the pane, and nothing the lead reads is written back into
 //! that CLI's session except through the paste door that was always there.
 
-use std::{
-    fs::File,
-    io::{BufRead as _, BufReader, Read as _, Seek as _, SeekFrom},
-    path::{Path, PathBuf},
-    time::SystemTime,
-};
+use std::fs::File;
+use std::io::{BufRead as _, BufReader, Read as _, Seek as _, SeekFrom};
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use ganja_protocol::team::MemberBackend;
 use ganja_team::ShimCli;
@@ -279,10 +277,7 @@ pub(crate) fn appended(path: &Path, cursor: &mut Cursor) -> Vec<String> {
     let whole = &fresh[..=end];
     cursor.bytes += whole.len() as u64;
 
-    String::from_utf8_lossy(whole)
-        .lines()
-        .map(str::to_owned)
-        .collect()
+    String::from_utf8_lossy(whole).lines().map(str::to_owned).collect()
 }
 
 /// Every line of `path`, for a transcript its CLI may rewrite.
@@ -335,16 +330,9 @@ pub(crate) fn matching(
             .and_then(|meta| meta.modified())
             .is_ok_and(|written| written >= since)
     });
-    candidates.sort_by_key(|path| {
-        std::fs::metadata(path)
-            .and_then(|meta| meta.modified())
-            .ok()
-    });
+    candidates.sort_by_key(|path| std::fs::metadata(path).and_then(|meta| meta.modified()).ok());
 
-    candidates
-        .into_iter()
-        .rev()
-        .find(|path| holds(path, mark, reader))
+    candidates.into_iter().rev().find(|path| holds(path, mark, reader))
 }
 
 /// The files directly under `directory` that `keep` accepts.
@@ -357,11 +345,7 @@ pub(crate) fn listing(directory: &Path, keep: impl Fn(&Path) -> bool) -> Vec<Pat
         return Vec::new();
     };
 
-    entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| keep(path))
-        .collect()
+    entries.flatten().map(|entry| entry.path()).filter(|path| keep(path)).collect()
 }
 
 #[cfg(test)]

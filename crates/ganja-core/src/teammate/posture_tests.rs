@@ -6,20 +6,14 @@ use super::{
     ANY, Arc, CancellationToken, Event, FOREIGN, Forwarded, Forwarding, Posture, SpawnGate,
     Teammate, backend_name, mpsc, oneshot, permissions_for, spawn_gate,
 };
-use crate::{
-    Storage,
-    permission::{Action, Decision, EXTERNAL_DIRECTORY, Permissions, Rule},
-    protocol::{Command, PermissionId, PermissionReply, SessionId},
-    provider::Provider,
-    tool::Registry,
-};
+use crate::Storage;
+use crate::permission::{Action, Decision, EXTERNAL_DIRECTORY, Permissions, Rule};
+use crate::protocol::{Command, PermissionId, PermissionReply, SessionId};
+use crate::provider::Provider;
+use crate::tool::Registry;
 
 fn rule(permission: &str, pattern: &str, action: Action) -> Rule {
-    Rule {
-        permission: permission.to_owned(),
-        pattern: pattern.to_owned(),
-        action,
-    }
+    Rule { permission: permission.to_owned(), pattern: pattern.to_owned(), action }
 }
 
 /// A lead whose rules are `rules` and whose project is nowhere in
@@ -43,14 +37,7 @@ fn teammate(
 
     (
         directory,
-        Arc::new(Teammate::new(
-            "worker",
-            provider,
-            "recorder-model",
-            tools,
-            permissions,
-            storage,
-        )),
+        Arc::new(Teammate::new("worker", provider, "recorder-model", tools, permissions, storage)),
     )
 }
 
@@ -76,9 +63,7 @@ fn what_the_leads_rules_deny_a_teammates_agent_cannot_allow() {
     let teammate = permissions_for(&lead, vec![rule("bash", ANY, Action::Allow)]);
 
     assert_eq!(
-        teammate
-            .gate("bash", &serde_json::json!({ "command": "cargo test" }))
-            .action,
+        teammate.gate("bash", &serde_json::json!({ "command": "cargo test" })).action,
         Decision::Deny,
         "an agent's allow must not outrank the lead's deny"
     );
@@ -127,33 +112,18 @@ fn a_teammate_working_outside_the_project_is_asked_about_before_it_starts() {
         &project.path().join("crates"),
         MemberBackend::InProcess,
     );
-    assert_eq!(
-        inside.directory, None,
-        "the project reaches it, so there is nothing to ask about"
-    );
+    assert_eq!(inside.directory, None, "the project reaches it, so there is nothing to ask about");
     assert!(inside.directories().is_empty());
 
-    let outside = spawn_gate(
-        &lead(Vec::new()),
-        project.path(),
-        elsewhere.path(),
-        MemberBackend::InProcess,
-    );
+    let outside =
+        spawn_gate(&lead(Vec::new()), project.path(), elsewhere.path(), MemberBackend::InProcess);
     let (named, decision) = outside.directory.clone().expect("somewhere else was named");
     assert_eq!(decision, Decision::Ask);
     assert_eq!(named, crate::permission::resolve(elsewhere.path()));
-    assert_eq!(
-        outside.directories(),
-        vec![named.clone()],
-        "a dialog has to say where"
-    );
+    assert_eq!(outside.directories(), vec![named.clone()], "a dialog has to say where");
 
     let answered = spawn_gate(
-        &lead(vec![rule(
-            EXTERNAL_DIRECTORY,
-            &named.join(ANY).to_string_lossy(),
-            Action::Allow,
-        )]),
+        &lead(vec![rule(EXTERNAL_DIRECTORY, &named.join(ANY).to_string_lossy(), Action::Allow)]),
         project.path(),
         elsewhere.path(),
         MemberBackend::InProcess,
@@ -172,9 +142,7 @@ fn a_teammate_working_outside_the_project_is_asked_about_before_it_starts() {
     );
     assert_eq!(refused.action(), Decision::Deny);
     assert!(
-        refused
-            .refusal()
-            .is_some_and(|why| why.contains("spawn it inside the project")),
+        refused.refusal().is_some_and(|why| why.contains("spawn it inside the project")),
         "a refused spawn says why: {:?}",
         refused.refusal()
     );
@@ -207,12 +175,8 @@ fn a_teammate_working_outside_the_project_is_asked_about_before_it_starts() {
 fn agy_raises_the_foreign_gate_because_it_now_spawns() {
     let directory = tempfile::tempdir().expect("a temporary directory");
 
-    let gate = spawn_gate(
-        &lead(Vec::new()),
-        directory.path(),
-        directory.path(),
-        MemberBackend::Agy,
-    );
+    let gate =
+        spawn_gate(&lead(Vec::new()), directory.path(), directory.path(), MemberBackend::Agy);
 
     assert_eq!(gate.foreign, Some((MemberBackend::Agy, Decision::Ask)));
     assert_eq!(gate.action(), Decision::Ask);
@@ -242,23 +206,14 @@ fn agy_raises_the_foreign_gate_because_it_now_spawns() {
 #[test]
 fn a_spawn_onto_a_foreign_cli_always_asks_and_only_a_deny_can_change_that() {
     let directory = tempfile::tempdir().expect("a temporary directory");
-    let shims = [
-        MemberBackend::Codex,
-        MemberBackend::Agy,
-        MemberBackend::Grok,
-    ];
+    let shims = [MemberBackend::Codex, MemberBackend::Agy, MemberBackend::Grok];
 
     for backend in shims {
         let name = backend_name(backend);
 
         // No stored rule at all: the spawn is asked about, and being asked
         // is not being refused.
-        let asked = spawn_gate(
-            &lead(Vec::new()),
-            directory.path(),
-            directory.path(),
-            backend,
-        );
+        let asked = spawn_gate(&lead(Vec::new()), directory.path(), directory.path(), backend);
         assert_eq!(asked.foreign, Some((backend, Decision::Ask)), "{name}");
         assert_eq!(asked.action(), Decision::Ask, "{name}");
         assert_eq!(asked.refusal(), None, "{name}: asking is not refusing");
@@ -300,22 +255,14 @@ fn a_spawn_onto_a_foreign_cli_always_asks_and_only_a_deny_can_change_that() {
             directory.path(),
             backend,
         );
-        let expected = if backend == MemberBackend::Codex {
-            Decision::Deny
-        } else {
-            Decision::Ask
-        };
+        let expected = if backend == MemberBackend::Codex { Decision::Deny } else { Decision::Ask };
         assert_eq!(other.action(), expected, "{name}");
     }
 
     // P25's three surfaces are untouched by any of it: an in-project
     // spawn still raises nothing at all, which is `posture.rs`'s own
     // `Allow` default and the thing this clause must not have moved.
-    for backend in [
-        MemberBackend::InProcess,
-        MemberBackend::Ganja,
-        MemberBackend::Claude,
-    ] {
+    for backend in [MemberBackend::InProcess, MemberBackend::Ganja, MemberBackend::Claude] {
         let gate = spawn_gate(
             // Even with a deny stored for every backend name there is:
             // the clause is not read for these surfaces at all.
@@ -355,19 +302,12 @@ async fn a_teammates_question_reaches_the_lead_and_its_answer_comes_back() {
     let forwarding = Forwarding::new(Arc::clone(&teammate), Some(sender));
     let cancel = CancellationToken::new();
     let carrying = tokio::spawn(forwarding.run(cancel.clone()));
-    let mut events = teammate
-        .engine()
-        .subscribe()
-        .await
-        .expect("the first subscriber wins");
+    let mut events = teammate.engine().subscribe().await.expect("the first subscriber wins");
 
     let lead_side = tokio::spawn(async move {
         let forwarded = inbox.recv().await.expect("the teammate asked something");
         let who = forwarded.teammate.clone();
-        forwarded
-            .reply
-            .send(PermissionReply::Once)
-            .expect("the forwarding is still waiting");
+        forwarded.reply.send(PermissionReply::Once).expect("the forwarding is still waiting");
 
         who
     });
@@ -414,11 +354,7 @@ async fn a_teammate_with_nowhere_to_ask_is_refused_rather_than_left_hanging() {
 
     let cancel = CancellationToken::new();
     let carrying = tokio::spawn(Forwarding::new(Arc::clone(&teammate), None).run(cancel.clone()));
-    let mut events = teammate
-        .engine()
-        .subscribe()
-        .await
-        .expect("the first subscriber wins");
+    let mut events = teammate.engine().subscribe().await.expect("the first subscriber wins");
     teammate
         .engine()
         .send(Command::SendPrompt {
@@ -433,10 +369,7 @@ async fn a_teammate_with_nowhere_to_ask_is_refused_rather_than_left_hanging() {
     ganja_testkit::drain(&mut events).await;
 
     assert!(
-        calls
-            .lock()
-            .expect("the call log is never poisoned")
-            .is_empty(),
+        calls.lock().expect("the call log is never poisoned").is_empty(),
         "a question nobody could see is a refusal"
     );
 
@@ -493,11 +426,7 @@ async fn a_teammate_whose_lead_never_reads_is_refused_rather_than_left_waiting()
     let cancel = CancellationToken::new();
     let carrying =
         tokio::spawn(Forwarding::new(Arc::clone(&teammate), Some(sender)).run(cancel.clone()));
-    let mut events = teammate
-        .engine()
-        .subscribe()
-        .await
-        .expect("the first subscriber wins");
+    let mut events = teammate.engine().subscribe().await.expect("the first subscriber wins");
     teammate
         .engine()
         .send(Command::SendPrompt {
@@ -512,10 +441,7 @@ async fn a_teammate_whose_lead_never_reads_is_refused_rather_than_left_waiting()
     ganja_testkit::drain(&mut events).await;
 
     assert!(
-        calls
-            .lock()
-            .expect("the call log is never poisoned")
-            .is_empty(),
+        calls.lock().expect("the call log is never poisoned").is_empty(),
         "a question that could not be handed over is a refusal"
     );
 

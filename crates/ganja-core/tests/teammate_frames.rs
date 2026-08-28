@@ -14,24 +14,19 @@
 //! which is exactly the sequence the two-process AC-8 binary runs across a
 //! real tmux server, minus the tmux.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 use futures::StreamExt as _;
-use ganja_core::{
-    Engine,
-    permission::Permissions,
-    protocol::{
-        Command, Event, PartBody, PermissionReply, ToolState,
-        team::{Frame, LeadFrame, PlanApprovalResponse, TeamPermissionUpdate},
-    },
-    teammate::{
-        TeammateRegistry,
-        lead_inbox::LeadInbox,
-        member::{Asks, MemberPostbox, Resolved},
-        runner::IGNORED_STALE,
-    },
-    tool::Registry,
-};
+use ganja_core::Engine;
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::team::{Frame, LeadFrame, PlanApprovalResponse, TeamPermissionUpdate};
+use ganja_core::protocol::{Command, Event, PartBody, PermissionReply, ToolState};
+use ganja_core::teammate::TeammateRegistry;
+use ganja_core::teammate::lead_inbox::LeadInbox;
+use ganja_core::teammate::member::{Asks, MemberPostbox, Resolved};
+use ganja_core::teammate::runner::IGNORED_STALE;
+use ganja_core::tool::Registry;
 use ganja_team::{LEAD, MemberName, TeamName, TeamsRoot, mailbox, record};
 use ganja_testkit::{
     AllowSpawn, LogCapture as Capture, RunnerHarness, ScriptedProvider, caller, drain, eventually,
@@ -110,11 +105,7 @@ async fn a_stale_plan_approval_response_is_ignored_and_logged() {
     harness.arrives(LEAD, &approval("nobody-asked-this", None));
 
     let logged = Capture::default();
-    let tick = harness
-        .runner
-        .tick()
-        .with_subscriber(subscriber(&logged))
-        .await;
+    let tick = harness.runner.tick().with_subscriber(subscriber(&logged)).await;
 
     assert_eq!(tick.ignored, 1, "{tick:?}");
     assert!(tick.applied.is_empty(), "{tick:?}");
@@ -134,19 +125,13 @@ async fn a_stale_plan_approval_response_is_ignored_and_logged() {
 
     assert_eq!(tick.applied, ["plan_approval_response"], "{tick:?}");
     assert_eq!(tick.ignored, 0, "{tick:?}");
-    assert_eq!(
-        tick.delivered, 1,
-        "an approval a teammate waited on is read"
-    );
+    assert_eq!(tick.delivered, 1, "an approval a teammate waited on is read");
     assert_eq!(harness.left(), 0);
 
     // And the wait is cleared, so the *next* copy of that answer is stale.
     harness.arrives(LEAD, &approval("req-7", None));
     let tick = harness.runner.tick().await;
-    assert_eq!(
-        tick.ignored, 1,
-        "an answer applied once is stale after: {tick:?}"
-    );
+    assert_eq!(tick.ignored, 1, "an answer applied once is stale after: {tick:?}");
 }
 
 /// A teammate cannot take the lead's name: the registry's construction rule
@@ -187,9 +172,7 @@ async fn a_teammate_cannot_send_as_the_lead() {
         "a roster has exactly one lead: {view:?}"
     );
     assert!(
-        view.members
-            .iter()
-            .any(|member| member.name == "team-lead-2" && !member.is_lead),
+        view.members.iter().any(|member| member.name == "team-lead-2" && !member.is_lead),
         "and the teammate is not it: {view:?}"
     );
 
@@ -239,11 +222,7 @@ async fn a_member_postbox_cannot_send_as_the_lead() {
         Arc::new(Registry::new(Vec::new())),
         Permissions::default(),
     )
-    .with_postbox(Arc::new(MemberPostbox::new(
-        worker.clone(),
-        team.clone(),
-        root.clone(),
-    )));
+    .with_postbox(Arc::new(MemberPostbox::new(worker.clone(), team.clone(), root.clone())));
     assert!(engine.teammates().is_none(), "a member leads no team");
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
@@ -260,14 +239,9 @@ async fn a_member_postbox_cannot_send_as_the_lead() {
     let seen = drain(&mut events).await;
 
     let lead_inbox = root.inbox_path(&team, &MemberName::lead());
-    let held = mailbox::read(&lead_inbox)
-        .expect("the lead's inbox reads")
-        .valid;
+    let held = mailbox::read(&lead_inbox).expect("the lead's inbox reads").valid;
     assert_eq!(held.len(), 1, "one message reached the lead: {held:?}");
-    assert_eq!(
-        held[0].from, "worker",
-        "the envelope says who really wrote it"
-    );
+    assert_eq!(held[0].from, "worker", "the envelope says who really wrote it");
     let Some(Frame::ShutdownApproved(approved)) = held[0].frame() else {
         panic!("the lead was handed something other than the frame the model composed");
     };
@@ -281,10 +255,7 @@ async fn a_member_postbox_cannot_send_as_the_lead() {
         .iter()
         .filter_map(|event| match event {
             Event::PartUpdated { part, .. } => match &part.body {
-                PartBody::Tool {
-                    state: ToolState::Error { error, .. },
-                    ..
-                } => Some(error.clone()),
+                PartBody::Tool { state: ToolState::Error { error, .. }, .. } => Some(error.clone()),
                 _ => None,
             },
             _ => None,
@@ -342,11 +313,7 @@ async fn a_pane_members_ask_is_answered_at_the_leads_dialog_and_the_call_runs() 
         Arc::new(Registry::with_builtins()),
         Permissions::default(),
     )
-    .with_postbox(Arc::new(MemberPostbox::new(
-        worker.clone(),
-        team.clone(),
-        root.clone(),
-    )));
+    .with_postbox(Arc::new(MemberPostbox::new(worker.clone(), team.clone(), root.clone())));
     let asks = Asks::new(worker.clone(), &team, &root);
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
@@ -363,17 +330,12 @@ async fn a_pane_members_ask_is_answered_at_the_leads_dialog_and_the_call_runs() 
 
     // 1. The member's engine asks; the frontend forwards instead of showing.
     let request = loop {
-        let event = events
-            .next()
-            .await
-            .expect("the turn is waiting on a dialog, not over");
+        let event = events.next().await.expect("the turn is waiting on a dialog, not over");
         if matches!(event, Event::PermissionRequested { .. }) {
             break event;
         }
     };
-    asks.forward(&request)
-        .await
-        .expect("the lead's inbox takes the ask");
+    asks.forward(&request).await.expect("the lead's inbox takes the ask");
     assert_eq!(asks.waiting(), 1);
 
     // 2. One lead pass routes it: exactly one dialog on the channel.
@@ -391,30 +353,18 @@ async fn a_pane_members_ask_is_answered_at_the_leads_dialog_and_the_call_runs() 
     let Event::PermissionRequested { id: asked_id, .. } = &request else {
         unreachable!("selected above");
     };
-    assert_ne!(
-        id, asked_id,
-        "the dialog id is the lead's own mint, never the member's request id"
-    );
+    assert_ne!(id, asked_id, "the dialog id is the lead's own mint, never the member's request id");
     assert_eq!(tool, "bash");
 
     // 3. The person answers at the lead's dialog.
-    forwarded
-        .reply
-        .send(PermissionReply::Once)
-        .expect("the answer task is waiting");
+    forwarded.reply.send(PermissionReply::Once).expect("the answer task is waiting");
 
     // 4. The answer lands in the member's inbox as one permission_response…
     let inbox = root.inbox_path(&team, &worker);
-    let held = eventually(
-        EVENTUALLY,
-        "the answer to land in the member's inbox",
-        async || {
-            let held = mailbox::read(&inbox)
-                .map(|contents| contents.valid)
-                .unwrap_or_default();
-            (!held.is_empty()).then_some(held)
-        },
-    )
+    let held = eventually(EVENTUALLY, "the answer to land in the member's inbox", async || {
+        let held = mailbox::read(&inbox).map(|contents| contents.valid).unwrap_or_default();
+        (!held.is_empty()).then_some(held)
+    })
     .await;
     assert_eq!(held.len(), 1, "one answer: {held:?}");
     assert_eq!(held[0].from, LEAD);
@@ -432,10 +382,7 @@ async fn a_pane_members_ask_is_answered_at_the_leads_dialog_and_the_call_runs() 
     );
     assert_eq!(reply, PermissionReply::Once);
     assert_eq!(asks.waiting(), 0);
-    engine
-        .send(Command::ReplyPermission { id, reply })
-        .await
-        .expect("a reply is never refused");
+    engine.send(Command::ReplyPermission { id, reply }).await.expect("a reply is never refused");
 
     // 6. The call ran and the turn finished.
     let seen = drain(&mut events).await;
@@ -449,8 +396,5 @@ async fn a_pane_members_ask_is_answered_at_the_leads_dialog_and_the_call_runs() 
         ),
         _ => false,
     });
-    assert!(
-        ran,
-        "the forwarded ask, once answered, let the call run: {seen:?}"
-    );
+    assert!(ran, "the forwarded ask, once answered, let the call run: {seen:?}");
 }

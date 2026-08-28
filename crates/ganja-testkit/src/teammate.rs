@@ -9,29 +9,28 @@
 //! permission gate never saw, and a fixture calling past the gate would be a
 //! fixture of a path production has not got.
 
-use std::{
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::{StreamExt as _, stream::BoxStream};
-use ganja_core::{
-    Backends, Caller, SpawnAsk, SpawnAsker, Storage, Teammates,
-    permission::Permissions,
-    provider::{FakeProvider, Provider},
-    team::{
-        MailboxMessage, MemberName, MemberRecord, Spawn, Surface, TeamFile, TeamName, TeamsRoot,
-        mailbox, record,
-    },
-    teammate::{
-        InProcess, SpawnSpec, Teammate, TeammateRegistry, claude::ClaudePane, pane::GanjaPane,
-        runner::Runner,
-    },
-    tool::{Registry, task::TeammateSpawn},
+use futures::StreamExt as _;
+use futures::stream::BoxStream;
+use ganja_core::permission::Permissions;
+use ganja_core::provider::{FakeProvider, Provider};
+use ganja_core::team::{
+    MailboxMessage, MemberName, MemberRecord, Spawn, Surface, TeamFile, TeamName, TeamsRoot,
+    mailbox, record,
 };
-use ganja_protocol::{Event, PermissionReply, team::Frame};
+use ganja_core::teammate::claude::ClaudePane;
+use ganja_core::teammate::pane::GanjaPane;
+use ganja_core::teammate::runner::Runner;
+use ganja_core::teammate::{InProcess, SpawnSpec, Teammate, TeammateRegistry};
+use ganja_core::tool::Registry;
+use ganja_core::tool::task::TeammateSpawn;
+use ganja_core::{Backends, Caller, SpawnAsk, SpawnAsker, Storage, Teammates};
+use ganja_protocol::team::Frame;
+use ganja_protocol::{Event, PermissionReply};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
@@ -75,10 +74,7 @@ impl RecordedSpawns {
     /// Fails naming what was asked, which is the whole diagnostic.
     pub fn asked_nobody(&self) {
         let asked = self.asked.lock().expect("the ask log is never poisoned");
-        assert!(
-            asked.is_empty(),
-            "a teammate working inside the project asks nobody: {asked:?}"
-        );
+        assert!(asked.is_empty(), "a teammate working inside the project asks nobody: {asked:?}");
     }
 
     /// Every ask that reached this person, in the order they arrived.
@@ -89,20 +85,14 @@ impl RecordedSpawns {
     /// run somebody did once by hand. A path where somebody **is** asked is as
     /// much a promise as one where nobody is.
     pub fn asked(&self) -> Vec<SpawnAsk> {
-        self.asked
-            .lock()
-            .expect("the ask log is never poisoned")
-            .clone()
+        self.asked.lock().expect("the ask log is never poisoned").clone()
     }
 }
 
 #[async_trait]
 impl SpawnAsker for RecordedSpawns {
     async fn ask(&self, request: SpawnAsk) -> PermissionReply {
-        self.asked
-            .lock()
-            .expect("the ask log is never poisoned")
-            .push(request);
+        self.asked.lock().expect("the ask log is never poisoned").push(request);
 
         PermissionReply::Once
     }
@@ -212,12 +202,8 @@ pub fn team_with(
 ) -> (TeamsRoot, TeamName, Arc<TeammateRegistry>, Arc<Teammates>) {
     let root = TeamsRoot::new(home.join("teams"));
     let team = TeamName::parse(TEAM).expect("a team name");
-    let registry = Arc::new(TeammateRegistry::new(
-        root.clone(),
-        team.clone(),
-        LEAD_SESSION_ID,
-        home,
-    ));
+    let registry =
+        Arc::new(TeammateRegistry::new(root.clone(), team.clone(), LEAD_SESSION_ID, home));
     let door = Arc::new(Teammates::new(
         Arc::clone(&registry),
         backends_with(provider, tools, storage, posture),
@@ -311,28 +297,16 @@ pub fn seed_team_file(
     cwd: &Path,
     members: &[(MemberName, Spawn)],
 ) -> PathBuf {
-    let mut file = TeamFile::new(
-        team,
-        lead_session,
-        cwd.to_string_lossy().into_owned(),
-        record::now_millis(),
-    );
+    let mut file =
+        TeamFile::new(team, lead_session, cwd.to_string_lossy().into_owned(), record::now_millis());
     for (name, spawn) in members {
-        file.members.push(MemberRecord::teammate(
-            name,
-            team,
-            spawn.clone(),
-            record::now_millis(),
-        ));
+        file.members.push(MemberRecord::teammate(name, team, spawn.clone(), record::now_millis()));
     }
     let path = root.config_path(team);
     std::fs::create_dir_all(path.parent().expect("a team file has a directory"))
         .expect("the team directory is made");
-    std::fs::write(
-        &path,
-        record::document(&file).expect("the team file encodes"),
-    )
-    .expect("the team file is written");
+    std::fs::write(&path, record::document(&file).expect("the team file encodes"))
+        .expect("the team file is written");
 
     path
 }
@@ -380,11 +354,7 @@ impl RunnerHarness {
             storage,
         ));
 
-        let mut events = teammate
-            .engine()
-            .subscribe()
-            .await
-            .expect("the first subscriber wins");
+        let mut events = teammate.engine().subscribe().await.expect("the first subscriber wins");
         let events = if drain {
             tokio::spawn(async move { while events.next().await.is_some() {} });
             None
@@ -424,10 +394,7 @@ impl RunnerHarness {
 
     /// What is still in the teammate's inbox.
     pub fn left(&self) -> usize {
-        mailbox::read(&self.inbox)
-            .expect("the inbox reads")
-            .valid
-            .len()
+        mailbox::read(&self.inbox).expect("the inbox reads").valid.len()
     }
 }
 
@@ -470,10 +437,7 @@ pub async fn eventually<T>(
         if let Some(found) = read().await {
             return found;
         }
-        assert!(
-            started.elapsed() < limit,
-            "waited {limit:?} for {what}, and it never happened"
-        );
+        assert!(started.elapsed() < limit, "waited {limit:?} for {what}, and it never happened");
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }

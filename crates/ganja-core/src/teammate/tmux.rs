@@ -102,12 +102,10 @@
 //! the server, in the same command as the kill, and leaves a live pane alone,
 //! so it can never become a second, unchecked kill.
 
-use std::{
-    ffi::{OsStr, OsString},
-    path::{Path, PathBuf},
-    process::Stdio,
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::teammate::reaper::Pane;
 
@@ -388,9 +386,7 @@ impl Server {
         if socket.as_os_str().is_empty() {
             return Err(TmuxError::NotHosted);
         }
-        let pane = std::env::var(TMUX_PANE)
-            .ok()
-            .filter(|value| !value.is_empty());
+        let pane = std::env::var(TMUX_PANE).ok().filter(|value| !value.is_empty());
 
         Ok(Self { socket, pane })
     }
@@ -401,10 +397,7 @@ impl Server {
     /// goes through [`Server::current`].
     #[must_use]
     pub fn at(socket: impl Into<PathBuf>, pane: Option<String>) -> Self {
-        Self {
-            socket: socket.into(),
-            pane,
-        }
+        Self { socket: socket.into(), pane }
     }
 
     /// The socket every call goes to.
@@ -467,23 +460,14 @@ impl Server {
                 command.arg("-v").arg("-t").arg(pane);
             }
         }
-        command
-            .arg("-d")
-            .arg("-P")
-            .arg("-F")
-            .arg(PANE_FORMAT)
-            .arg("-c")
-            .arg(launch.cwd);
+        command.arg("-d").arg("-P").arg("-F").arg(PANE_FORMAT).arg("-c").arg(launch.cwd);
         for pair in launch.environment {
             command.arg("-e").arg(pair);
         }
         command.arg("--").args(launch.argv);
 
         let output = run("split-window", command).await?;
-        parse_pane(output.trim()).ok_or(TmuxError::Unreadable {
-            command: "split-window",
-            output,
-        })
+        parse_pane(output.trim()).ok_or(TmuxError::Unreadable { command: "split-window", output })
     }
 
     /// Titles a pane with its teammate's name and makes the border that shows
@@ -500,20 +484,11 @@ impl Server {
     /// The client failing to start or tmux refusing.
     pub async fn title(&self, pane_id: &str, title: &str) -> Result<(), TmuxError> {
         let mut select = self.command();
-        select
-            .arg("select-pane")
-            .arg("-t")
-            .arg(pane_id)
-            .arg("-T")
-            .arg(title);
+        select.arg("select-pane").arg("-t").arg(pane_id).arg("-T").arg(title);
         run("select-pane", select).await?;
 
         let mut show = self.command();
-        show.arg("show-options")
-            .arg("-wqvA")
-            .arg("-t")
-            .arg(pane_id)
-            .arg("pane-border-status");
+        show.arg("show-options").arg("-wqvA").arg("-t").arg(pane_id).arg("pane-border-status");
         let current = run("show-options", show).await?;
         if matches!(current.trim(), "" | "off") {
             let mut set = self.command();
@@ -555,11 +530,7 @@ impl Server {
     /// [`LIVENESS_FORMAT`] — a live pane with no pid included.
     pub async fn panes(&self) -> Result<Vec<Pane>, TmuxError> {
         let mut command = self.command();
-        command
-            .arg("list-panes")
-            .arg("-a")
-            .arg("-F")
-            .arg(LIVENESS_FORMAT);
+        command.arg("list-panes").arg("-a").arg("-F").arg(LIVENESS_FORMAT);
         let output = run("list-panes", command).await?;
 
         output
@@ -610,12 +581,7 @@ impl Server {
             return Ok(None);
         };
         let mut command = self.command();
-        command
-            .arg("list-panes")
-            .arg("-t")
-            .arg(lead)
-            .arg("-F")
-            .arg(CORNER_FORMAT);
+        command.arg("list-panes").arg("-t").arg(lead).arg("-F").arg(CORNER_FORMAT);
         let output = run("list-panes", command).await?;
 
         let corners: Vec<Corner> = output
@@ -632,10 +598,7 @@ impl Server {
         // A window that does not list the pane this process is in is a
         // session that moved under us. Nothing here can place against it, so
         // the caller opens a column as though it were the first to.
-        let Some(edge) = corners
-            .iter()
-            .find(|corner| &corner.id == lead)
-            .map(|corner| corner.left)
+        let Some(edge) = corners.iter().find(|corner| &corner.id == lead).map(|corner| corner.left)
         else {
             return Ok(None);
         };
@@ -720,12 +683,7 @@ impl Server {
     /// The client failing to start or tmux refusing (a pane already gone).
     pub async fn type_line(&self, pane_id: &str, line: &OsStr) -> Result<(), TmuxError> {
         let mut text = self.command();
-        text.arg("send-keys")
-            .arg("-t")
-            .arg(pane_id)
-            .arg("-l")
-            .arg("--")
-            .arg(line);
+        text.arg("send-keys").arg("-t").arg(pane_id).arg("-l").arg("--").arg(line);
         run("send-keys", text).await?;
         self.press_enter(pane_id).await
     }
@@ -753,12 +711,7 @@ impl Server {
     /// which under [`Server::remain_on_exit`] a dead one is not.
     pub async fn capture(&self, pane_id: &str) -> Result<String, TmuxError> {
         let mut command = self.command();
-        command
-            .arg("capture-pane")
-            .arg("-p")
-            .arg("-J")
-            .arg("-t")
-            .arg(pane_id);
+        command.arg("capture-pane").arg("-p").arg("-J").arg("-t").arg(pane_id);
         run("capture-pane", command).await
     }
 
@@ -788,9 +741,7 @@ impl Server {
             .arg("-t")
             .arg(pane_id)
             .arg("#{pane_current_command}");
-        run("display-message", command)
-            .await
-            .map(|name| name.trim().to_owned())
+        run("display-message", command).await.map(|name| name.trim().to_owned())
     }
 
     /// Whether `pane_id` is where typing goes right now: the active pane of
@@ -817,9 +768,7 @@ impl Server {
             .arg("-t")
             .arg(pane_id)
             .arg("#{&&:#{pane_active},#{window_active}}");
-        run("display-message", command)
-            .await
-            .map(|answer| answer.trim() == "1")
+        run("display-message", command).await.map(|answer| answer.trim() == "1")
     }
 
     /// Lands `text` in `pane_id`'s composer as **one unsubmitted message** —
@@ -1033,22 +982,12 @@ impl Server {
     /// has ended — [`None`] for no such pane, [`Some`] of `#{pane_dead}`.
     async fn dead(&self, pane_id: &str) -> Result<Option<bool>, TmuxError> {
         let mut command = self.command();
-        command
-            .arg("list-panes")
-            .arg("-a")
-            .arg("-F")
-            .arg(DEAD_FORMAT);
+        command.arg("list-panes").arg("-a").arg("-F").arg(DEAD_FORMAT);
         let output = run("list-panes", command).await?;
 
-        for line in output
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-        {
-            let unreadable = || TmuxError::Unreadable {
-                command: "list-panes",
-                output: line.to_owned(),
-            };
+        for line in output.lines().map(str::trim).filter(|line| !line.is_empty()) {
+            let unreadable =
+                || TmuxError::Unreadable { command: "list-panes", output: line.to_owned() };
             let (id, dead) = line.split_once(' ').ok_or_else(unreadable)?;
             if id != pane_id {
                 continue;
@@ -1142,10 +1081,7 @@ pub fn shell_quote(arg: &OsStr) -> Result<OsString, TmuxError> {
 
         match shlex::bytes::try_quote(arg.as_bytes()) {
             Ok(quoted) => Ok(OsString::from_vec(quoted.into_owned())),
-            Err(source) => Err(TmuxError::Unquotable {
-                word: arg.to_owned(),
-                source,
-            }),
+            Err(source) => Err(TmuxError::Unquotable { word: arg.to_owned(), source }),
         }
     }
     #[cfg(not(unix))]
@@ -1153,10 +1089,7 @@ pub fn shell_quote(arg: &OsStr) -> Result<OsString, TmuxError> {
         let text = arg.to_string_lossy();
         match shlex::try_quote(&text) {
             Ok(quoted) => Ok(OsString::from(quoted.into_owned())),
-            Err(source) => Err(TmuxError::Unquotable {
-                word: arg.to_owned(),
-                source,
-            }),
+            Err(source) => Err(TmuxError::Unquotable { word: arg.to_owned(), source }),
         }
     }
 }
@@ -1169,10 +1102,7 @@ fn socket_of(raw: &OsStr) -> PathBuf {
         use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 
         let bytes = raw.as_bytes();
-        let end = bytes
-            .iter()
-            .position(|byte| *byte == b',')
-            .unwrap_or(bytes.len());
+        let end = bytes.iter().position(|byte| *byte == b',').unwrap_or(bytes.len());
 
         PathBuf::from(OsString::from_vec(bytes[..end].to_vec()))
     }
@@ -1203,11 +1133,7 @@ fn parse_corner(line: &str) -> Option<Corner> {
         return None;
     }
 
-    Some(Corner {
-        id: id.to_owned(),
-        left,
-        top,
-    })
+    Some(Corner { id: id.to_owned(), left, top })
 }
 
 /// One line of [`PANE_FORMAT`] as a [`Pane`], or [`None`] for anything else.
@@ -1218,10 +1144,7 @@ fn parse_pane(line: &str) -> Option<Pane> {
         return None;
     }
 
-    Some(Pane {
-        id: id.to_owned(),
-        birth: birth.to_owned(),
-    })
+    Some(Pane { id: id.to_owned(), birth: birth.to_owned() })
 }
 
 /// What one line of the liveness listing ([`LIVENESS_FORMAT`]) says about a
@@ -1289,10 +1212,8 @@ async fn run(
     name: &'static str,
     mut command: tokio::process::Command,
 ) -> Result<String, TmuxError> {
-    let output = command.output().await.map_err(|source| TmuxError::Start {
-        command: name,
-        source,
-    })?;
+    let output =
+        command.output().await.map_err(|source| TmuxError::Start { command: name, source })?;
 
     settle(name, output)
 }
@@ -1330,16 +1251,8 @@ async fn feed(
     let mut child = command
         .stdin(Stdio::piped())
         .spawn()
-        .map_err(|source| TmuxError::Start {
-            command: name,
-            source,
-        })?;
-    let mut stdin = Some(
-        child
-            .stdin
-            .take()
-            .expect("stdin was asked for as a pipe a line above"),
-    );
+        .map_err(|source| TmuxError::Start { command: name, source })?;
+    let mut stdin = Some(child.stdin.take().expect("stdin was asked for as a pipe a line above"));
     let (output, fed) = tokio::join!(child.wait_with_output(), async {
         let Some(pipe) = stdin.as_mut() else {
             unreachable!("the pipe is taken once, below, after this write");
@@ -1349,15 +1262,9 @@ async fn feed(
         drop(stdin.take());
         fed
     });
-    let output = output.map_err(|source| TmuxError::Start {
-        command: name,
-        source,
-    })?;
+    let output = output.map_err(|source| TmuxError::Start { command: name, source })?;
     let answer = settle(name, output)?;
-    fed.map_err(|source| TmuxError::Stdin {
-        command: name,
-        source,
-    })?;
+    fed.map_err(|source| TmuxError::Stdin { command: name, source })?;
 
     Ok(answer)
 }

@@ -30,28 +30,22 @@
 //! resolution and result rendering are unit-tested beside the module; this file
 //! is about the parts that need another process.
 
-use std::{
-    net::SocketAddr,
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use futures::stream::BoxStream;
-use ganja_core::{
-    Config, Engine, McpServers, McpStatus,
-    config::McpServer,
-    permission::Permissions,
-    protocol::{Command, Event, FinishReason, PartBody, PermissionReply, ToolState},
-    provider::{ChatRequest, Provider},
-    tool::Registry,
-};
+use ganja_core::config::McpServer;
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{Command, Event, FinishReason, PartBody, PermissionReply, ToolState};
+use ganja_core::provider::{ChatRequest, Provider};
+use ganja_core::tool::Registry;
+use ganja_core::{Config, Engine, McpServers, McpStatus};
 use ganja_testkit::{ScriptedProvider, drain_answering, says, tool_call};
 use serde_json::{Value, json};
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::TcpListener,
-};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::TcpListener;
 
 /// Environment variable naming the upstream checkout, shared with the golden
 /// suite so one vendored copy serves both.
@@ -67,9 +61,7 @@ fn tool_part(seen: &[Event], tool: &str) -> ToolState {
         .rev()
         .find_map(|event| match event {
             Event::PartUpdated { part, .. } => match &part.body {
-                PartBody::Tool {
-                    tool: named, state, ..
-                } if named == tool => Some(state.clone()),
+                PartBody::Tool { tool: named, state, .. } if named == tool => Some(state.clone()),
                 _ => None,
             },
             _ => None,
@@ -161,9 +153,7 @@ fn changing_server(name: &str) -> Config {
 
 /// One of the fixture servers under `tests/fixtures/mcp/` as a config entry.
 fn fixture_server(name: &str, file: &str) -> Config {
-    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/mcp")
-        .join(file);
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/mcp").join(file);
     assert!(script.is_file(), "{} is missing", script.display());
 
     let sdk = reference_sdk();
@@ -243,18 +233,14 @@ async fn engine_and_servers(
     let mut permissions = Permissions::default();
     permissions.set_baseline(config.permission.rules());
 
-    let engine = Engine::new(
-        provider,
-        "recorder-model",
-        Arc::new(Registry::with_builtins()),
-        permissions,
-    )
-    .with_system_parts(Some("you are a fixture".to_owned()), None)
-    // The same knob the real assembly wires, so a fixture config can opt a
-    // leg into deferral (D492); every config that says nothing keeps the
-    // default budget, under which these small fixtures never defer.
-    .with_defer_threshold(config.defer_threshold())
-    .with_mcp(servers);
+    let engine =
+        Engine::new(provider, "recorder-model", Arc::new(Registry::with_builtins()), permissions)
+            .with_system_parts(Some("you are a fixture".to_owned()), None)
+            // The same knob the real assembly wires, so a fixture config can opt a
+            // leg into deferral (D492); every config that says nothing keeps the
+            // default budget, under which these small fixtures never defer.
+            .with_defer_threshold(config.defer_threshold())
+            .with_mcp(servers);
     engine.connect_mcp();
 
     let deadline = tokio::time::Instant::now() + READY;
@@ -308,13 +294,7 @@ async fn the_reference_server_round_trips_a_call_the_model_made() {
         "the fixture server did not connect"
     );
 
-    let seen = turn(
-        &engine,
-        &mut events,
-        "echo something",
-        PermissionReply::Once,
-    )
-    .await;
+    let seen = turn(&engine, &mut events, "echo something", PermissionReply::Once).await;
 
     assert_eq!(
         completed(&tool_part(&seen, "mcp__reference__echo")),
@@ -330,11 +310,7 @@ async fn the_reference_server_round_trips_a_call_the_model_made() {
             .first()
             .expect("the turn asked the model something"),
     );
-    for name in [
-        "mcp__reference__echo",
-        "mcp__reference__explode",
-        "mcp__reference__odd_name",
-    ] {
+    for name in ["mcp__reference__echo", "mcp__reference__explode", "mcp__reference__odd_name"] {
         assert!(offered.contains(&name.to_owned()), "{name} in {offered:?}");
     }
 
@@ -349,10 +325,7 @@ async fn the_reference_server_round_trips_a_call_the_model_made() {
 #[tokio::test]
 async fn a_deferred_reference_server_is_searched_up_and_round_trips() {
     let (provider, requests) = ScriptedProvider::new(vec![
-        tool_call(
-            "tool_search",
-            json!({ "query": "select:mcp__reference__echo" }),
-        ),
+        tool_call("tool_search", json!({ "query": "select:mcp__reference__echo" })),
         tool_call("mcp__reference__echo", json!({ "text": "the argument" })),
         says("it came back"),
     ]);
@@ -367,18 +340,10 @@ async fn a_deferred_reference_server_is_searched_up_and_round_trips() {
         "the fixture server did not connect"
     );
 
-    let seen = turn(
-        &engine,
-        &mut events,
-        "echo through the deferred server",
-        PermissionReply::Once,
-    )
-    .await;
+    let seen =
+        turn(&engine, &mut events, "echo through the deferred server", PermissionReply::Once).await;
 
-    let log = requests
-        .lock()
-        .expect("the request log is never poisoned")
-        .clone();
+    let log = requests.lock().expect("the request log is never poisoned").clone();
     let first = offered(&log[0]);
     assert!(first.contains(&"tool_search".to_owned()), "{first:?}");
     assert!(
@@ -402,10 +367,7 @@ async fn a_deferred_reference_server_is_searched_up_and_round_trips() {
     assert!(listing.contains("mcp__reference__echo"), "{listing}");
 
     let search = completed(&tool_part(&seen, "tool_search"));
-    assert!(
-        search.contains("## mcp__reference__echo"),
-        "the real schema came back: {search}"
-    );
+    assert!(search.contains("## mcp__reference__echo"), "the real schema came back: {search}");
     assert!(
         offered(&log[1]).contains(&"mcp__reference__echo".to_owned()),
         "the next step advertises what the search activated: {:?}",
@@ -480,24 +442,17 @@ async fn an_mcp_call_asks_once_and_an_always_answer_is_not_asked_again() {
 
     let first = turn(&engine, &mut events, "echo first", PermissionReply::Always).await;
     assert!(
-        first.iter().any(
-            |event| matches!(event, Event::PermissionRequested { tool, .. }
-                if tool == "mcp__reference__echo")
-        ),
+        first.iter().any(|event| matches!(event, Event::PermissionRequested { tool, .. }
+                if tool == "mcp__reference__echo")),
         "an MCP tool nothing has a rule about must ask"
     );
 
     let second = turn(&engine, &mut events, "echo second", PermissionReply::Reject).await;
     assert!(
-        !second
-            .iter()
-            .any(|event| matches!(event, Event::PermissionRequested { .. })),
+        !second.iter().any(|event| matches!(event, Event::PermissionRequested { .. })),
         "an \"always\" answer must cover the next call to the same tool"
     );
-    assert_eq!(
-        completed(&tool_part(&second, "mcp__reference__echo")),
-        "echo: second"
-    );
+    assert_eq!(completed(&tool_part(&second, "mcp__reference__echo")), "echo: second");
 
     engine.shutdown_mcp().await;
 }
@@ -516,38 +471,18 @@ async fn a_config_wildcard_over_a_server_denies_its_tools_without_ending_the_tur
     let engine = engine_with(provider, &config).await;
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
-    let seen = turn(
-        &engine,
-        &mut events,
-        "echo something",
-        PermissionReply::Once,
-    )
-    .await;
+    let seen = turn(&engine, &mut events, "echo something", PermissionReply::Once).await;
 
     assert!(
-        !seen
-            .iter()
-            .any(|event| matches!(event, Event::PermissionRequested { .. })),
+        !seen.iter().any(|event| matches!(event, Event::PermissionRequested { .. })),
         "a rule already answered, so nothing may be put in front of anybody"
     );
     let refusal = errored(&tool_part(&seen, "mcp__reference__echo"));
-    assert!(
-        refusal.contains("prevents you from using this specific tool call"),
-        "{refusal}"
-    );
+    assert!(refusal.contains("prevents you from using this specific tool call"), "{refusal}");
     // The rule that decided is quoted back at the model, wildcard and all.
+    assert!(refusal.contains(r#""permission":"mcp__reference__*""#), "{refusal}");
     assert!(
-        refusal.contains(r#""permission":"mcp__reference__*""#),
-        "{refusal}"
-    );
-    assert!(
-        matches!(
-            seen.last(),
-            Some(Event::MessageFinished {
-                reason: FinishReason::Completed,
-                ..
-            })
-        ),
+        matches!(seen.last(), Some(Event::MessageFinished { reason: FinishReason::Completed, .. })),
         "a refusal is information, not the end of a turn"
     );
 
@@ -558,28 +493,17 @@ async fn a_config_wildcard_over_a_server_denies_its_tools_without_ending_the_tur
 /// the turn carries on.
 #[tokio::test]
 async fn an_error_result_becomes_error_text_the_model_reads() {
-    let (provider, _requests) = ScriptedProvider::new(vec![
-        tool_call("mcp__reference__explode", json!({})),
-        says("noted"),
-    ]);
+    let (provider, _requests) =
+        ScriptedProvider::new(vec![tool_call("mcp__reference__explode", json!({})), says("noted")]);
     let config = reference_server("reference");
     let engine = engine_with(provider, &config).await;
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     let seen = turn(&engine, &mut events, "make it fail", PermissionReply::Once).await;
 
-    assert_eq!(
-        errored(&tool_part(&seen, "mcp__reference__explode")),
-        "the fixture refused"
-    );
+    assert_eq!(errored(&tool_part(&seen, "mcp__reference__explode")), "the fixture refused");
     assert!(
-        matches!(
-            seen.last(),
-            Some(Event::MessageFinished {
-                reason: FinishReason::Completed,
-                ..
-            })
-        ),
+        matches!(seen.last(), Some(Event::MessageFinished { reason: FinishReason::Completed, .. })),
         "an errored tool is not a failed turn"
     );
 
@@ -635,10 +559,7 @@ async fn a_server_that_dies_mid_session_fails_and_loses_its_tools() {
     errored(&tool_part(&seen, "mcp__reference__vanish"));
     assert!(matches!(
         seen.last(),
-        Some(Event::MessageFinished {
-            reason: FinishReason::Completed,
-            ..
-        })
+        Some(Event::MessageFinished { reason: FinishReason::Completed, .. })
     ));
 
     // The next turn is where the withdrawal happens: a turn already holding a
@@ -646,10 +567,7 @@ async fn a_server_that_dies_mid_session_fails_and_loses_its_tools() {
     turn(&engine, &mut events, "anything else", PermissionReply::Once).await;
 
     assert!(
-        matches!(
-            engine.mcp_status().get("reference"),
-            Some(McpStatus::Failed { .. })
-        ),
+        matches!(engine.mcp_status().get("reference"), Some(McpStatus::Failed { .. })),
         "a closed connection is a failed server: {:?}",
         engine.mcp_status()
     );
@@ -662,9 +580,7 @@ async fn a_server_that_dies_mid_session_fails_and_loses_its_tools() {
             .expect("the second turn asked the model"),
     );
     assert!(
-        !offered
-            .iter()
-            .any(|name| name.starts_with("mcp__reference__")),
+        !offered.iter().any(|name| name.starts_with("mcp__reference__")),
         "a dead server's tools must not still be offered: {offered:?}"
     );
 
@@ -691,18 +607,12 @@ async fn reconnect_revives_a_killed_stdio_server_and_the_next_turn_re_registers_
     // the death test above.
     turn(&engine, &mut events, "anything else", PermissionReply::Once).await;
     assert!(
-        matches!(
-            engine.mcp_status().get("reference"),
-            Some(McpStatus::Failed { .. })
-        ),
+        matches!(engine.mcp_status().get("reference"), Some(McpStatus::Failed { .. })),
         "the server must be failed before a reconnect can mean anything: {:?}",
         engine.mcp_status()
     );
 
-    engine
-        .reconnect_mcp("reference")
-        .await
-        .expect("a failed server accepts a reconnect");
+    engine.reconnect_mcp("reference").await.expect("a failed server accepts a reconnect");
     assert_eq!(
         engine.mcp_status().get("reference"),
         Some(&McpStatus::Connected),
@@ -763,15 +673,10 @@ async fn reconnect_is_refused_for_a_server_it_does_not_mean_anything_about() {
         .reconnect_mcp("reference")
         .await
         .expect_err("a connected server refuses a reconnect");
-    assert!(
-        already_connected.contains("already connected"),
-        "{already_connected}"
-    );
+    assert!(already_connected.contains("already connected"), "{already_connected}");
 
-    let disabled = engine
-        .reconnect_mcp("off")
-        .await
-        .expect_err("a disabled server refuses a reconnect");
+    let disabled =
+        engine.reconnect_mcp("off").await.expect_err("a disabled server refuses a reconnect");
     assert!(disabled.contains("disabled"), "{disabled}");
 
     let unconfigured = engine
@@ -807,10 +712,7 @@ async fn reconnect_is_refused_while_a_server_is_still_on_its_first_dial() {
         .reconnect("fixture")
         .await
         .expect_err("a server on its first dial refuses a reconnect");
-    assert!(
-        still_dialling.contains("first connection attempt"),
-        "{still_dialling}"
-    );
+    assert!(still_dialling.contains("first connection attempt"), "{still_dialling}");
 
     connecting.await.expect("connect_all does not panic");
     servers.shutdown().await;
@@ -844,15 +746,8 @@ async fn a_server_whose_first_dial_failed_is_retried_automatically_exactly_once(
     let engine = engine_with(provider, &config).await;
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
-    assert_eq!(
-        attempts(&counter),
-        1,
-        "the startup dial is the first attempt"
-    );
-    assert!(matches!(
-        engine.mcp_status().get("flaky"),
-        Some(McpStatus::Failed { .. })
-    ));
+    assert_eq!(attempts(&counter), 1, "the startup dial is the first attempt");
+    assert!(matches!(engine.mcp_status().get("flaky"), Some(McpStatus::Failed { .. })));
 
     // The retry fires at this turn's `refresh_mcp` and is not awaited there;
     // give it a moment to land before counting.
@@ -861,11 +756,7 @@ async fn a_server_whose_first_dial_failed_is_retried_automatically_exactly_once(
     while tokio::time::Instant::now() < deadline && attempts(&counter) < 2 {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert_eq!(
-        attempts(&counter),
-        2,
-        "one turn start must spend the one automatic retry"
-    );
+    assert_eq!(attempts(&counter), 2, "one turn start must spend the one automatic retry");
 
     // A second, and a third, turn start must not spend a second one.
     turn(&engine, &mut events, "again", PermissionReply::Once).await;
@@ -884,10 +775,7 @@ async fn a_server_whose_first_dial_failed_is_retried_automatically_exactly_once(
 /// above, since `sh` never buffers a single `echo` across runs.
 #[cfg(unix)]
 fn attempts(counter: &Path) -> usize {
-    std::fs::read_to_string(counter)
-        .unwrap_or_default()
-        .lines()
-        .count()
+    std::fs::read_to_string(counter).unwrap_or_default().lines().count()
 }
 
 /// An MCP server's own `output_limit` clamps a result over its budget, with
@@ -902,24 +790,14 @@ async fn an_over_cap_result_is_clamped_with_the_spill_notice() {
         says("done"),
     ]);
     let mut config = reference_server("reference");
-    match config
-        .mcp
-        .get_mut("reference")
-        .expect("the fixture entry is present")
-    {
+    match config.mcp.get_mut("reference").expect("the fixture entry is present") {
         McpServer::Local(local) => local.output_limit = Some(100),
         McpServer::Remote(_) => unreachable!("the fixture entry is local"),
     }
     let engine = engine_with(provider, &config).await;
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
-    let seen = turn(
-        &engine,
-        &mut events,
-        "echo something huge",
-        PermissionReply::Once,
-    )
-    .await;
+    let seen = turn(&engine, &mut events, "echo something huge", PermissionReply::Once).await;
 
     let output = completed(&tool_part(&seen, "mcp__reference__echo"));
     assert!(output.contains("bytes truncated"), "{output}");
@@ -965,10 +843,7 @@ async fn a_server_that_announces_a_changed_tool_set_moves_what_the_next_turn_is_
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     let seen = turn(&engine, &mut events, "change it", PermissionReply::Once).await;
-    assert_eq!(
-        completed(&tool_part(&seen, "mcp__changing__change")),
-        "the tool set moved"
-    );
+    assert_eq!(completed(&tool_part(&seen, "mcp__changing__change")), "the tool set moved");
 
     // What the first turn was offered, which is the listing as it stood before
     // anything changed. Without this the test would pass against a fixture that
@@ -994,10 +869,7 @@ async fn a_server_that_announces_a_changed_tool_set_moves_what_the_next_turn_is_
     // below a question about the tool set and not about the clock.
     let deadline = tokio::time::Instant::now() + READY;
     while tokio::time::Instant::now() < deadline
-        && !servers
-            .tools()
-            .iter()
-            .any(|tool| tool.id() == "mcp__changing__added")
+        && !servers.tools().iter().any(|tool| tool.id() == "mcp__changing__added")
     {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -1061,15 +933,9 @@ async fn a_remote_server_is_reached_over_streamable_http() {
     );
 
     let seen = turn(&engine, &mut events, "ping it", PermissionReply::Once).await;
-    assert_eq!(
-        completed(&tool_part(&seen, "mcp__hub__ping")),
-        "pong: over http"
-    );
+    assert_eq!(completed(&tool_part(&seen, "mcp__hub__ping")), "pong: over http");
 
-    let headers = seen_headers
-        .lock()
-        .expect("the header log is never poisoned")
-        .clone();
+    let headers = seen_headers.lock().expect("the header log is never poisoned").clone();
     assert!(
         headers.iter().any(|header| header == "carried"),
         "the configured header never reached the server: {headers:?}"
@@ -1080,9 +946,7 @@ async fn a_remote_server_is_reached_over_streamable_http() {
 
 /// A loopback endpoint speaking streamable HTTP, returning its address.
 async fn streamable_http(headers: Arc<Mutex<Vec<String>>>) -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("a loopback port is available");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("a loopback port is available");
     let address = listener.local_addr().expect("the socket has an address");
 
     tokio::spawn(async move {
@@ -1159,8 +1023,7 @@ fn whole(buffer: &[u8]) -> Option<(String, String)> {
         .lines()
         .find_map(|line| {
             let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse().ok())?
+            name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse().ok())?
         })
         .unwrap_or(0);
     if rest.len() < length {
@@ -1228,11 +1091,7 @@ fn no_golden_fixture_asks_for_an_mcp_server() {
         checked += 1;
     }
 
-    assert!(
-        checked > 0,
-        "no golden fixtures were found in {}",
-        directory.display()
-    );
+    assert!(checked > 0, "no golden fixtures were found in {}", directory.display());
 }
 
 /// Whether `pid` names a process that is still running.

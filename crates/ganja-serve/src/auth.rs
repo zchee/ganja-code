@@ -57,10 +57,7 @@ impl Credentials {
         let password = std::env::var(PASSWORD_ENV).ok().filter(|p| !p.is_empty())?;
         let username = std::env::var(USERNAME_ENV).unwrap_or_else(|_| DEFAULT_USERNAME.to_owned());
 
-        Some(Self {
-            username,
-            password: SecretString::from(password),
-        })
+        Some(Self { username, password: SecretString::from(password) })
     }
 }
 
@@ -75,28 +72,18 @@ pub(crate) fn authorized(headers: &HeaderMap, query: Option<&str>, expected: &Cr
     // Both halves are folded whole rather than compared byte-for-byte with an
     // early exit, so a wrong guess costs the same time wherever it is wrong.
     let user_ok = eq_fold(username.as_bytes(), expected.username.as_bytes());
-    let pass_ok = eq_fold(
-        password.as_bytes(),
-        expected.password.expose_secret().as_bytes(),
-    );
+    let pass_ok = eq_fold(password.as_bytes(), expected.password.expose_secret().as_bytes());
 
     user_ok && pass_ok
 }
 
 /// The `user:password` pair the request carried, from wherever it carried it.
 fn presented(headers: &HeaderMap, query: Option<&str>) -> Option<(String, String)> {
-    let token = query
-        .and_then(|query| query_param(query, AUTH_TOKEN_QUERY))
-        .or_else(|| {
-            let header = headers
-                .get(axum::http::header::AUTHORIZATION)?
-                .to_str()
-                .ok()?;
-            let (scheme, value) = header.split_once(' ')?;
-            scheme
-                .eq_ignore_ascii_case("basic")
-                .then(|| value.trim().to_owned())
-        })?;
+    let token = query.and_then(|query| query_param(query, AUTH_TOKEN_QUERY)).or_else(|| {
+        let header = headers.get(axum::http::header::AUTHORIZATION)?.to_str().ok()?;
+        let (scheme, value) = header.split_once(' ')?;
+        scheme.eq_ignore_ascii_case("basic").then(|| value.trim().to_owned())
+    })?;
 
     decode_credential(&token)
 }
@@ -105,9 +92,7 @@ fn presented(headers: &HeaderMap, query: Option<&str>) -> Option<(String, String
 /// (`middleware/authorization.ts:57-71`): undecodable, or missing the colon,
 /// is an empty credential — which then simply fails the comparison.
 fn decode_credential(token: &str) -> Option<(String, String)> {
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(token)
-        .ok()?;
+    let decoded = base64::engine::general_purpose::STANDARD.decode(token).ok()?;
     let decoded = String::from_utf8(decoded).ok()?;
     let (username, password) = decoded.split_once(':')?;
 

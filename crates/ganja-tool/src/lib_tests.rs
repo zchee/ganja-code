@@ -1,9 +1,8 @@
-use std::{path::PathBuf, sync::Arc};
+use std::path::PathBuf;
+use std::sync::Arc;
 
-use super::{
-    Credentials, FileTimes, Registry, Tool, ToolCtx, ToolError, is_same_file,
-    skill::{Roots, SkillTool},
-};
+use super::skill::{Roots, SkillTool};
+use super::{Credentials, FileTimes, Registry, Tool, ToolCtx, ToolError, is_same_file};
 
 /// A call whose credential store is `store`, which is the only thing the
 /// guard tests below vary.
@@ -29,10 +28,7 @@ async fn the_three_background_tools_refuse_a_jobless_context_in_the_same_words()
 
     let mut refusals = Vec::new();
     for (id, arguments) in [
-        (
-            "bash",
-            serde_json::json!({ "command": "true", "run_in_background": true }),
-        ),
+        ("bash", serde_json::json!({ "command": "true", "run_in_background": true })),
         ("bash_output", serde_json::json!({ "bash_id": "bash_1" })),
         ("kill_shell", serde_json::json!({ "bash_id": "bash_1" })),
     ] {
@@ -70,17 +66,11 @@ fn with_all_replaces_a_tool_of_the_same_id_rather_than_offering_it_twice() {
 
     let after = registry.with_all([Arc::clone(&rooted)]);
 
-    let skills = after
-        .definitions()
-        .into_iter()
-        .filter(|definition| definition.name == "skill")
-        .count();
+    let skills =
+        after.definitions().into_iter().filter(|definition| definition.name == "skill").count();
     assert_eq!(skills, 1, "one `skill` is offered, not two");
     assert!(
-        Arc::ptr_eq(
-            after.get("skill").expect("the roster still holds one"),
-            &rooted
-        ),
+        Arc::ptr_eq(after.get("skill").expect("the roster still holds one"), &rooted),
         "and it is the one that was handed in"
     );
 }
@@ -101,18 +91,14 @@ fn a_file_must_be_read_before_it_may_be_touched() {
     let path = dir.path().join("a.txt");
     std::fs::write(&path, "one").expect("the fixture writes");
 
-    let refused = times
-        .check_fresh(&path)
-        .expect_err("an unread file is refused");
+    let refused = times.check_fresh(&path).expect_err("an unread file is refused");
     assert!(
         matches!(&refused, ToolError::Failed(message) if message.contains("read it first")),
         "got {refused:?}"
     );
 
     times.record(&path);
-    times
-        .check_fresh(&path)
-        .expect("a freshly read file is fresh");
+    times.check_fresh(&path).expect("a freshly read file is fresh");
 }
 
 #[test]
@@ -135,9 +121,7 @@ fn a_file_changed_after_its_read_goes_stale() {
         .and_then(|file| file.set_modified(stale))
         .expect("the fixture can move the stamp");
 
-    let refused = times
-        .check_fresh(&path)
-        .expect_err("a changed file is refused");
+    let refused = times.check_fresh(&path).expect_err("a changed file is refused");
     assert!(
         matches!(&refused, ToolError::Failed(message) if message.contains("read it again")),
         "got {refused:?}"
@@ -187,9 +171,7 @@ fn a_held_files_own_stamp_is_what_freshness_is_judged_on() {
         .check_fresh_stat(&path, crate::anchor::stamp(&held))
         .expect("the file this call holds open has not changed");
 
-    let refused = times
-        .check_fresh(&path)
-        .expect_err("the name now leads somewhere else");
+    let refused = times.check_fresh(&path).expect_err("the name now leads somewhere else");
     assert!(
         matches!(&refused, ToolError::Failed(message) if message.contains("read it again")),
         "the path form must really disagree, or the assertion above proves nothing: {refused:?}"
@@ -209,17 +191,13 @@ fn a_file_the_watcher_condemned_is_refused_until_it_is_read_again() {
     times.record(&path);
     let as_read = super::modification_stamp(&path);
     times.note_change(&path);
-    times
-        .check_fresh(&path)
-        .expect("nothing moved, so nothing is stale");
+    times.check_fresh(&path).expect("nothing moved, so nothing is stale");
 
     std::fs::write(&path, "somebody else's edit").expect("the fixture writes");
     age(&path, 0);
     times.note_change(&path);
 
-    let refused = times
-        .check_fresh(&path)
-        .expect_err("the file moved under the session");
+    let refused = times.check_fresh(&path).expect_err("the file moved under the session");
     assert!(
         matches!(&refused, ToolError::Failed(message) if message.contains("read it again")),
         "got {refused:?}"
@@ -240,9 +218,7 @@ fn a_file_the_watcher_condemned_is_refused_until_it_is_read_again() {
     );
 
     times.record(&path);
-    times
-        .check_fresh(&path)
-        .expect("reading it again is what repairs it");
+    times.check_fresh(&path).expect("reading it again is what repairs it");
 }
 
 #[test]
@@ -289,9 +265,7 @@ fn a_file_read_again_before_the_notice_goes_out_is_not_mentioned() {
     times.record(&path);
 
     assert!(times.take_stale().is_empty());
-    times
-        .check_fresh(&path)
-        .expect("the read that beat the notice also cleared the staleness");
+    times.check_fresh(&path).expect("the read that beat the notice also cleared the staleness");
 }
 
 #[test]
@@ -304,9 +278,7 @@ fn a_file_nobody_read_is_not_the_watchers_business() {
     times.note_change(&path);
 
     assert!(times.take_stale().is_empty());
-    let refused = times
-        .check_fresh(&path)
-        .expect_err("an unread file is unread, not stale");
+    let refused = times.check_fresh(&path).expect_err("an unread file is unread, not stale");
     assert!(
         matches!(&refused, ToolError::Failed(message) if message.contains("read it first")),
         "got {refused:?}"
@@ -353,9 +325,7 @@ fn the_file_log_is_shared_by_clone_not_copied() {
     std::fs::write(&path, "one").expect("the fixture writes");
 
     Arc::clone(&times).record(&path);
-    times
-        .check_fresh(&path)
-        .expect("both handles see the same log");
+    times.check_fresh(&path).expect("both handles see the same log");
 }
 
 #[test]
@@ -437,12 +407,6 @@ fn paths_that_cannot_be_canonicalized_are_compared_as_written() {
 
     assert!(is_same_file(&absent, &absent));
     assert!(is_same_file(&dir.path().join("./ganja/auth.json"), &absent));
-    assert!(!is_same_file(
-        &dir.path().join("ganja").join("other.json"),
-        &absent
-    ));
-    assert!(
-        !is_same_file(&present, &absent),
-        "a file that exists is not one that does not"
-    );
+    assert!(!is_same_file(&dir.path().join("ganja").join("other.json"), &absent));
+    assert!(!is_same_file(&present, &absent), "a file that exists is not one that does not");
 }

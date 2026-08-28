@@ -30,9 +30,7 @@ fn writing_twice_keeps_the_second_pick() {
 
     assert_eq!(read(&path).as_deref(), Some("tokyonight"));
     assert_eq!(
-        fs::read_dir(directory.path())
-            .expect("the directory lists")
-            .count(),
+        fs::read_dir(directory.path()).expect("the directory lists").count(),
         1,
         "no temporary file should be left behind"
     );
@@ -55,11 +53,7 @@ fn the_stored_shape_is_the_one_that_was_specified() {
 #[test]
 fn a_missing_directory_is_created_on_the_way() {
     let directory = temporary();
-    let path = directory
-        .path()
-        .join("nested")
-        .join("deeper")
-        .join("tui.json");
+    let path = directory.path().join("nested").join("deeper").join("tui.json");
 
     write(&path, "aura").expect("the pick writes");
 

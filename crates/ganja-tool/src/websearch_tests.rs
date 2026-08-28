@@ -1,10 +1,10 @@
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 use jiff::Timestamp;
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::TcpListener,
-};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::TcpListener;
 
 use super::{Keys, Service, WebsearchTool};
 use crate::{Tool, ToolCtx, ToolError};
@@ -26,24 +26,15 @@ struct Endpoint {
 
 impl Endpoint {
     fn seen(&self) -> String {
-        self.seen
-            .lock()
-            .expect("the request log is never poisoned")
-            .clone()
+        self.seen.lock().expect("the request log is never poisoned").clone()
     }
 }
 
 /// Serves `response`, or nothing at all when it is [`None`].
 async fn serve(response: Option<Vec<u8>>) -> Endpoint {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("loopback is bindable");
-    let url = format!(
-        "http://{}/mcp",
-        listener
-            .local_addr()
-            .expect("a bound socket has an address")
-    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("loopback is bindable");
+    let url =
+        format!("http://{}/mcp", listener.local_addr().expect("a bound socket has an address"));
     let seen = Arc::new(std::sync::Mutex::new(String::new()));
     let log = Arc::clone(&seen);
 
@@ -76,11 +67,7 @@ async fn serve(response: Option<Vec<u8>>) -> Endpoint {
         let _ = socket.flush().await;
     });
 
-    Endpoint {
-        url,
-        seen,
-        _server: server,
-    }
+    Endpoint { url, seen, _server: server }
 }
 
 /// Whether `request` holds a whole request: the headers, and as many body
@@ -199,15 +186,9 @@ async fn an_exa_search_carries_its_key_in_the_query_and_its_arguments_in_the_bod
         lowered.contains("accept: application/json, text/event-stream"),
         "either content type is acceptable and the request has to say so: {seen}"
     );
+    assert!(lowered.contains("content-type: application/json"), "the body is JSON: {seen}");
     assert!(
-        lowered.contains("content-type: application/json"),
-        "the body is JSON: {seen}"
-    );
-    assert!(
-        lowered.contains(&format!(
-            "user-agent: ganja-code/{}\r\n",
-            env!("CARGO_PKG_VERSION")
-        )),
+        lowered.contains(&format!("user-agent: ganja-code/{}\r\n", env!("CARGO_PKG_VERSION"))),
         "the request names this build by the project's name — the one \
              spelling every wire ganja speaks in its own voice carries, and \
              never a borrowed one, since no service here involves somebody \
@@ -246,14 +227,9 @@ async fn an_exa_search_carries_its_key_in_the_query_and_its_arguments_in_the_bod
 async fn a_search_that_names_no_options_sends_upstreams_defaults() {
     let endpoint = serve(Some(response("application/json", RESULT))).await;
 
-    search_with(
-        &endpoint,
-        Service::Exa,
-        "exa-key",
-        serde_json::json!({ "query": "ganja" }),
-    )
-    .await
-    .expect("the endpoint answers");
+    search_with(&endpoint, Service::Exa, "exa-key", serde_json::json!({ "query": "ganja" }))
+        .await
+        .expect("the endpoint answers");
 
     assert_eq!(
         sent(&endpoint)["params"]["arguments"],
@@ -284,13 +260,9 @@ async fn a_parallel_search_carries_a_bearer_token_and_parallels_own_arguments() 
     .expect("the endpoint answers");
 
     let seen = endpoint.seen();
+    assert!(seen.starts_with("POST /mcp HTTP/1.1"), "parallel takes no key in the query: {seen}");
     assert!(
-        seen.starts_with("POST /mcp HTTP/1.1"),
-        "parallel takes no key in the query: {seen}"
-    );
-    assert!(
-        seen.to_lowercase()
-            .contains("authorization: bearer parallel-key"),
+        seen.to_lowercase().contains("authorization: bearer parallel-key"),
         "the token travels in a header: {seen}"
     );
     assert_eq!(
@@ -314,14 +286,10 @@ async fn an_answer_arriving_as_an_event_stream_is_read_out_of_its_data_lines() {
     );
     let endpoint = serve(Some(response("text/event-stream", &stream))).await;
 
-    let out = search_with(
-        &endpoint,
-        Service::Exa,
-        "exa-key",
-        serde_json::json!({ "query": "ganja" }),
-    )
-    .await
-    .expect("the endpoint answers");
+    let out =
+        search_with(&endpoint, Service::Exa, "exa-key", serde_json::json!({ "query": "ganja" }))
+            .await
+            .expect("the endpoint answers");
 
     assert_eq!(out.output, "ganja is a rust port");
 }
@@ -333,10 +301,7 @@ fn the_first_result_text_that_says_anything_is_the_answer() {
     let empty = r#"{"result":{"content":[{"type":"text","text":""}]}}"#;
     let stream = format!("data: {empty}\n\ndata: {RESULT}\n\n");
 
-    assert_eq!(
-        super::parse(&stream).as_deref(),
-        Some("ganja is a rust port")
-    );
+    assert_eq!(super::parse(&stream).as_deref(), Some("ganja is a rust port"));
     assert_eq!(super::parse(""), None);
     assert_eq!(super::parse("data: not json\n\n"), None);
     assert_eq!(super::parse(r#"{"result":{"content":[]}}"#), None);
@@ -346,20 +311,12 @@ fn the_first_result_text_that_says_anything_is_the_answer() {
 /// is told to try another query, which is what upstream tells it.
 #[tokio::test]
 async fn a_search_that_found_nothing_says_so_rather_than_failing() {
-    let endpoint = serve(Some(response(
-        "application/json",
-        r#"{"result":{"content":[]}}"#,
-    )))
-    .await;
+    let endpoint = serve(Some(response("application/json", r#"{"result":{"content":[]}}"#))).await;
 
-    let out = search_with(
-        &endpoint,
-        Service::Exa,
-        "exa-key",
-        serde_json::json!({ "query": "ganja" }),
-    )
-    .await
-    .expect("an empty answer is still an answer");
+    let out =
+        search_with(&endpoint, Service::Exa, "exa-key", serde_json::json!({ "query": "ganja" }))
+            .await
+            .expect("an empty answer is still an answer");
 
     assert_eq!(out.output, super::NOTHING_FOUND);
 }
@@ -370,14 +327,10 @@ async fn a_search_that_found_nothing_says_so_rather_than_failing() {
 async fn a_service_that_refuses_the_search_is_reported_as_a_refusal() {
     let endpoint = serve(Some(status(401))).await;
 
-    let refused = search_with(
-        &endpoint,
-        Service::Exa,
-        "exa-key",
-        serde_json::json!({ "query": "ganja" }),
-    )
-    .await
-    .expect_err("401 is not an answer");
+    let refused =
+        search_with(&endpoint, Service::Exa, "exa-key", serde_json::json!({ "query": "ganja" }))
+            .await
+            .expect_err("401 is not an answer");
 
     assert!(
         matches!(&refused, ToolError::Failed(message)
@@ -414,15 +367,9 @@ async fn a_cancel_ends_a_search_that_is_still_waiting() {
 /// cases the module's divergence note is about.
 #[test]
 fn the_service_is_the_one_named_or_the_one_whose_key_is_held() {
-    let both = Keys {
-        exa: Some("e".to_owned()),
-        parallel: Some("p".to_owned()),
-    };
+    let both = Keys { exa: Some("e".to_owned()), parallel: Some("p".to_owned()) };
     let neither = Keys::default();
-    let only_parallel = Keys {
-        exa: None,
-        parallel: Some("p".to_owned()),
-    };
+    let only_parallel = Keys { exa: None, parallel: Some("p".to_owned()) };
 
     let chosen = |named, keys: &Keys| {
         super::select(named, keys).unwrap_or_else(|error| panic!("{named:?}: {error:?}"))
@@ -467,10 +414,7 @@ fn the_description_names_the_year_the_session_is_running_in() {
         tool.description()
     );
     assert!(
-        tool.description().contains(&format!(
-            "The current year is {}.",
-            super::current_utc_year()
-        )),
+        tool.description().contains(&format!("The current year is {}.", super::current_utc_year())),
         "and substituted with this year: {}",
         tool.description()
     );
@@ -502,20 +446,11 @@ fn the_prompt_and_schema_are_what_the_model_is_given() {
     let schema = serde_json::to_value(tool.schema()).expect("a schema is JSON");
 
     assert_eq!(tool.id(), "websearch");
-    assert_eq!(
-        tool.describe(&serde_json::json!({ "query": "rust ports" })),
-        "search rust ports"
-    );
+    assert_eq!(tool.describe(&serde_json::json!({ "query": "rust ports" })), "search rust ports");
     assert_eq!(schema["required"], serde_json::json!(["query"]));
     // Upstream's spellings, which the golden differential compares as
     // part of the contract.
-    for name in [
-        "query",
-        "numResults",
-        "livecrawl",
-        "type",
-        "contextMaxCharacters",
-    ] {
+    for name in ["query", "numResults", "livecrawl", "type", "contextMaxCharacters"] {
         assert!(
             schema["properties"].get(name).is_some(),
             "the schema should offer {name}: {schema}"
@@ -535,10 +470,7 @@ fn a_search_asks_before_it_runs() {
 
     assert_eq!(
         permissions
-            .gate(
-                WebsearchTool::new().id(),
-                &serde_json::json!({ "query": "rust ports" })
-            )
+            .gate(WebsearchTool::new().id(), &serde_json::json!({ "query": "rust ports" }))
             .action,
         ganja_permission::permission::Decision::Ask
     );

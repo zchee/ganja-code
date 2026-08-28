@@ -12,13 +12,12 @@
 //! variables, and `cargo test` runs the tests inside a binary on parallel
 //! threads.
 
-use std::{env, fs, time::Duration};
+use std::time::Duration;
+use std::{env, fs};
 
 use futures::StreamExt as _;
-use ganja_core::{
-    protocol::Message,
-    provider::{self, ChatRequest, FakeProvider, Provider, ProviderEvent, fake},
-};
+use ganja_core::protocol::Message;
+use ganja_core::provider::{self, ChatRequest, FakeProvider, Provider, ProviderEvent, fake};
 use tokio_util::sync::CancellationToken;
 
 /// A script whose first turn is unmistakably not the canned reply.
@@ -100,9 +99,7 @@ async fn an_exported_script_is_what_the_fake_provider_plays() {
     );
     assert_eq!(
         events.last(),
-        Some(&ProviderEvent::Finish(
-            ganja_core::protocol::FinishReason::Completed,
-        )),
+        Some(&ProviderEvent::Finish(ganja_core::protocol::FinishReason::Completed,)),
         "a scripted turn still ends like a turn, got {events:?}"
     );
 
@@ -117,9 +114,7 @@ async fn an_exported_script_is_what_the_fake_provider_plays() {
 
     assert_eq!(text(&canned), "one two three");
     assert!(
-        !canned
-            .iter()
-            .any(|event| matches!(event, ProviderEvent::ToolCallStart { .. })),
+        !canned.iter().any(|event| matches!(event, ProviderEvent::ToolCallStart { .. })),
         "an explicit reply must not pick up the exported script: {canned:?}"
     );
 }

@@ -12,18 +12,15 @@
 //! made on Enter, and the row already in use is marked so that the list says
 //! where the session currently stands.
 
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    text::{Line, Text},
-    widgets::{Block, Clear, Paragraph, Widget as _},
-};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::text::{Line, Text};
+use ratatui::widgets::{Block, Clear, Paragraph, Widget as _};
 use unicode_width::UnicodeWidthStr as _;
 
-use crate::{
-    component::{chat::clip, clamped, first_visible, modal},
-    theme::Theme,
-};
+use crate::component::chat::clip;
+use crate::component::{clamped, first_visible, modal};
+use crate::theme::Theme;
 
 /// What marks the row the cursor is on, and what pads every other row.
 const MARKER: &str = "> ";
@@ -84,11 +81,7 @@ impl ListDialog {
     pub fn new(title: impl Into<String>, rows: Vec<Row>) -> Self {
         let selected = rows.iter().position(|row| row.active).unwrap_or(0);
 
-        Self {
-            title: title.into(),
-            rows,
-            selected,
-        }
+        Self { title: title.into(), rows, selected }
     }
 
     /// Whether there is nothing to choose from.
@@ -138,12 +131,7 @@ impl ListDialog {
         let first = first_visible(self.selected, rows);
         // Labels padded to the widest, so the details beside them sit in one
         // column instead of stepping in and out per row.
-        let label_width = self
-            .rows
-            .iter()
-            .map(|row| row.label.width())
-            .max()
-            .unwrap_or(0);
+        let label_width = self.rows.iter().map(|row| row.label.width()).max().unwrap_or(0);
 
         self.rows
             .iter()
@@ -172,11 +160,7 @@ impl ListDialog {
 
                 Line::styled(
                     format!("{line:<width$}"),
-                    if index == self.selected {
-                        theme.selection
-                    } else {
-                        theme.fg
-                    },
+                    if index == self.selected { theme.selection } else { theme.fg },
                 )
             })
             .collect()

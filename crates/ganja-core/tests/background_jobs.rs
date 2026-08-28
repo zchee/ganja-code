@@ -15,23 +15,18 @@
 
 #![cfg(unix)]
 
-use std::{
-    path::Path,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::path::Path;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use futures::{StreamExt as _, stream::BoxStream};
-use ganja_core::{
-    Engine,
-    permission::Permissions,
-    protocol::{Command, Event, PartBody, PermissionReply, ToolState},
-    provider::{FakeProvider, fake},
-    tool::{
-        Registry,
-        job::{Jobs as _, State},
-    },
-};
+use futures::StreamExt as _;
+use futures::stream::BoxStream;
+use ganja_core::Engine;
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{Command, Event, PartBody, PermissionReply, ToolState};
+use ganja_core::provider::{FakeProvider, fake};
+use ganja_core::tool::Registry;
+use ganja_core::tool::job::{Jobs as _, State};
 
 /// How long a scripted permission ask and the tool's own completion are
 /// given to arrive. Generous, because it covers a whole turn's worth of
@@ -117,10 +112,7 @@ async fn run_prompt_and_await_bash_id(
         {
             Some(Event::PermissionRequested { id, .. }) => {
                 engine
-                    .send(Command::ReplyPermission {
-                        id,
-                        reply: PermissionReply::Once,
-                    })
+                    .send(Command::ReplyPermission { id, reply: PermissionReply::Once })
                     .await
                     .expect("a reply is always accepted");
                 break;
@@ -136,11 +128,8 @@ async fn run_prompt_and_await_bash_id(
             .expect("the background call should complete")
         {
             Some(Event::PartUpdated { part, .. }) => {
-                if let PartBody::Tool {
-                    tool,
-                    state: ToolState::Completed { output, .. },
-                    ..
-                } = part.body
+                if let PartBody::Tool { tool, state: ToolState::Completed { output, .. }, .. } =
+                    part.body
                     && tool == "bash"
                 {
                     let bash_id = output
@@ -213,10 +202,7 @@ async fn a_turns_cancel_leaves_a_background_job_running() {
     // it`).
     run_prompt_and_await_bash_id(&engine, &mut events).await;
 
-    engine
-        .send(Command::CancelTurn)
-        .await
-        .expect("a running engine accepts a cancel");
+    engine.send(Command::CancelTurn).await.expect("a running engine accepts a cancel");
 
     let deadline = Instant::now() + WITNESS_BUDGET;
     while !witness.exists() {
@@ -271,11 +257,7 @@ async fn output_is_delivered_once_and_then_only_whats_new() {
     // loaded machine.
     let deadline = Instant::now() + OUTPUT_BUDGET;
     let first = loop {
-        let read = engine
-            .jobs()
-            .output(&bash_id)
-            .await
-            .expect("a known id answers");
+        let read = engine.jobs().output(&bash_id).await.expect("a known id answers");
         if !read.chunk.is_empty() {
             break read;
         }
@@ -297,11 +279,7 @@ async fn output_is_delivered_once_and_then_only_whats_new() {
     let mut delivered = String::new();
     let mut exit = None;
     loop {
-        let read = engine
-            .jobs()
-            .output(&bash_id)
-            .await
-            .expect("a known id answers");
+        let read = engine.jobs().output(&bash_id).await.expect("a known id answers");
         delivered.push_str(&read.chunk);
         if let State::Exited { code } = read.status.state {
             exit = Some(code);
@@ -316,10 +294,7 @@ async fn output_is_delivered_once_and_then_only_whats_new() {
         );
         tokio::time::sleep(TICK).await;
     }
-    assert!(
-        !delivered.contains("one"),
-        "the first poll already delivered it: {delivered:?}"
-    );
+    assert!(!delivered.contains("one"), "the first poll already delivered it: {delivered:?}");
     assert_eq!(exit, Some(Some(0)));
 
     engine.shutdown_jobs().await;
@@ -349,18 +324,11 @@ async fn killing_a_registered_job_ends_its_whole_process_tree() {
         tokio::time::sleep(TICK).await;
     }
 
-    let killed = engine
-        .jobs()
-        .kill(&bash_id)
-        .await
-        .expect("a running job can be killed");
+    let killed = engine.jobs().kill(&bash_id).await.expect("a running job can be killed");
     assert_eq!(killed.state, State::Killed);
 
     tokio::time::sleep(Duration::from_secs(2)).await;
-    assert!(
-        !survived.exists(),
-        "the grandchild outlived the kill; the tree was not reached"
-    );
+    assert!(!survived.exists(), "the grandchild outlived the kill; the tree was not reached");
 
     engine.shutdown_jobs().await;
 }
@@ -389,8 +357,5 @@ async fn engine_shutdown_kills_a_running_background_job() {
     engine.shutdown_jobs().await;
 
     tokio::time::sleep(Duration::from_secs(2)).await;
-    assert!(
-        !survived.exists(),
-        "a job outlived engine shutdown; the tree was not reached"
-    );
+    assert!(!survived.exists(), "a job outlived engine shutdown; the tree was not reached");
 }

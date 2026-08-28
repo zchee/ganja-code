@@ -17,14 +17,10 @@
 //! variables, and `cargo test` runs the tests inside a binary on parallel
 //! threads.
 
-use std::{
-    env,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::Duration,
-};
+use std::env;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use ganja_core::auth::{self, AuthError, AuthErrorKind, OauthCredential, RefreshOauth, Refresher};
 use secrecy::{ExposeSecret as _, SecretString};
@@ -83,9 +79,7 @@ fn expiring() -> OauthCredential {
         1,
     );
     credential.account_id = Some("acct-42".to_owned());
-    credential
-        .extra
-        .insert("someFuturePluginField".to_owned(), serde_json::json!(true));
+    credential.extra.insert("someFuturePluginField".to_owned(), serde_json::json!(true));
 
     credential
 }
@@ -111,11 +105,7 @@ async fn a_renewal_happens_only_when_it_must_and_only_once() {
         .await
         .expect("a live credential needs nothing");
     assert_eq!(held.access.expose_secret(), "at-original-0002");
-    assert_eq!(
-        refresher.calls(),
-        0,
-        "a credential that is not due must not be renewed"
-    );
+    assert_eq!(refresher.calls(), 0, "a credential that is not due must not be renewed");
 
     // One that is due, discovered by everybody at once.
     auth::set_oauth(PROVIDER, &expiring()).expect("the expiring credential stores");
@@ -131,11 +121,7 @@ async fn a_renewal_happens_only_when_it_must_and_only_once() {
     let renewed: Vec<OauthCredential> = futures::future::join_all(callers)
         .await
         .into_iter()
-        .map(|joined| {
-            joined
-                .expect("no caller panicked")
-                .expect("the renewal ran")
-        })
+        .map(|joined| joined.expect("no caller panicked").expect("the renewal ran"))
         .collect();
 
     assert_eq!(
@@ -162,18 +148,15 @@ async fn a_renewal_happens_only_when_it_must_and_only_once() {
 
     // The renewed credential is on disk before any caller is given it, so the
     // next process does not start by renewing a token that has been replaced.
-    let persisted = auth::oauth_for(PROVIDER)
-        .expect("the store reads")
-        .expect("the credential is still there");
+    let persisted =
+        auth::oauth_for(PROVIDER).expect("the store reads").expect("the credential is still there");
     assert_eq!(persisted.access.expose_secret(), "at-renewed-0004");
     assert_eq!(persisted.account_id.as_deref(), Some("acct-42"));
 
     // And a later caller, arriving after the renewal has been retired, gets the
     // stored credential without a second renewal.
-    let after = shared
-        .usable(PROVIDER, refresher.clone())
-        .await
-        .expect("the renewed credential is good");
+    let after =
+        shared.usable(PROVIDER, refresher.clone()).await.expect("the renewed credential is good");
     assert_eq!(after.access.expose_secret(), "at-renewed-0004");
     assert_eq!(refresher.calls(), 1);
 

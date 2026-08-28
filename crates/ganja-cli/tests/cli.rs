@@ -4,16 +4,14 @@
 //! whole key would put it in CI output, which is the failure the redaction
 //! exists to prevent.
 
-use std::{
-    fs,
-    io::{Read as _, Write as _},
-    net::{TcpListener, TcpStream},
-    path::Path,
-    thread,
-};
+use std::io::{Read as _, Write as _};
+use std::net::{TcpListener, TcpStream};
+use std::path::Path;
+use std::{fs, thread};
 
 use assert_cmd::Command;
-use ganja_core::{SessionId, SessionInfo, Storage, storage::VERSION};
+use ganja_core::storage::VERSION;
+use ganja_core::{SessionId, SessionInfo, Storage};
 use ganja_permission::Project;
 use ganja_protocol::Usage;
 use predicates::prelude::*;
@@ -63,14 +61,9 @@ fn stored_at(data: &TempDir) -> std::path::PathBuf {
 
 #[test]
 fn version_flag_reports_the_binary_name_and_version() {
-    Command::new(env!("CARGO_BIN_EXE_ganja"))
-        .arg("--version")
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::contains("ganja")
-                .and(predicate::str::contains(env!("CARGO_PKG_VERSION"))),
-        );
+    Command::new(env!("CARGO_BIN_EXE_ganja")).arg("--version").assert().success().stdout(
+        predicate::str::contains("ganja").and(predicate::str::contains(env!("CARGO_PKG_VERSION"))),
+    );
 }
 
 #[test]
@@ -87,21 +80,14 @@ fn a_key_given_on_the_command_line_is_stored_and_reported_redacted() {
                 .and(predicate::str::contains(CANARY).not()),
         );
 
-    assert!(
-        stored_at(&data).is_file(),
-        "the key should have been stored"
-    );
+    assert!(stored_at(&data).is_file(), "the key should have been stored");
 
-    ganja(&data)
-        .args(["auth", "list"])
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::contains("anthropic")
-                .and(predicate::str::contains("****8842"))
-                .and(predicate::str::contains("auth.json"))
-                .and(predicate::str::contains(CANARY).not()),
-        );
+    ganja(&data).args(["auth", "list"]).assert().success().stdout(
+        predicate::str::contains("anthropic")
+            .and(predicate::str::contains("****8842"))
+            .and(predicate::str::contains("auth.json"))
+            .and(predicate::str::contains(CANARY).not()),
+    );
 }
 
 /// `pass show … | ganja auth login` has to work, which means a key arriving on
@@ -134,16 +120,10 @@ fn a_stored_key_is_written_where_only_its_owner_can_read_it() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let data = data();
-    ganja(&data)
-        .args(["auth", "login", "--key", CANARY])
-        .assert()
-        .success();
+    ganja(&data).args(["auth", "login", "--key", CANARY]).assert().success();
 
-    let mode = std::fs::metadata(stored_at(&data))
-        .expect("the file exists")
-        .permissions()
-        .mode()
-        & 0o777;
+    let mode =
+        std::fs::metadata(stored_at(&data)).expect("the file exists").permissions().mode() & 0o777;
 
     assert_eq!(mode, 0o600, "got {mode:04o}");
 }
@@ -158,10 +138,7 @@ fn an_empty_key_is_refused_rather_than_stored() {
         .failure()
         .stderr(predicate::str::contains("no key"));
 
-    assert!(
-        !stored_at(&data).exists(),
-        "a refused login should write nothing"
-    );
+    assert!(!stored_at(&data).exists(), "a refused login should write nothing");
 }
 
 #[test]
@@ -227,9 +204,8 @@ fn an_environment_variable_outranks_the_stored_key_and_is_pointed_out() {
         .assert()
         .success()
         .stderr(
-            predicate::str::contains("ANTHROPIC_API_KEY").and(predicate::str::contains(
-                "used in preference to the stored key",
-            )),
+            predicate::str::contains("ANTHROPIC_API_KEY")
+                .and(predicate::str::contains("used in preference to the stored key")),
         );
 }
 
@@ -244,14 +220,10 @@ fn the_listing_says_what_kind_of_credential_each_row_is() {
         .assert()
         .success();
 
-    ganja(&data)
-        .args(["auth", "list"])
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::contains("TYPE")
-                .and(predicate::str::is_match(r"anthropic\s+api\s+\*{4}8842").expect("a pattern")),
-        );
+    ganja(&data).args(["auth", "list"]).assert().success().stdout(
+        predicate::str::contains("TYPE")
+            .and(predicate::str::is_match(r"anthropic\s+api\s+\*{4}8842").expect("a pattern")),
+    );
 }
 
 /// The deferral's blanket refusal narrowed when the login landed ahead of the
@@ -268,14 +240,7 @@ fn a_cursor_key_is_refused_naming_the_login_cursor_has_and_stores_nothing() {
 
     for arguments in [
         vec!["auth", "login", "--provider", "cursor", "--method", "api"],
-        vec![
-            "auth",
-            "login",
-            "--provider",
-            "cursor",
-            "--key",
-            "not-a-real-key",
-        ],
+        vec!["auth", "login", "--provider", "cursor", "--key", "not-a-real-key"],
     ] {
         ganja(&data).args(&arguments).assert().failure().stderr(
             predicate::str::contains("cursor has no `api` login")
@@ -283,10 +248,7 @@ fn a_cursor_key_is_refused_naming_the_login_cursor_has_and_stores_nothing() {
         );
     }
 
-    assert!(
-        !stored_at(&data).exists(),
-        "a refused login must leave no credential file behind"
-    );
+    assert!(!stored_at(&data).exists(), "a refused login must leave no credential file behind");
 }
 
 #[test]
@@ -314,10 +276,7 @@ fn a_login_method_a_provider_does_not_have_is_refused_and_the_ones_it_has_are_na
             );
     }
 
-    assert!(
-        !stored_at(&data).exists(),
-        "a refused login should write nothing"
-    );
+    assert!(!stored_at(&data).exists(), "a refused login should write nothing");
 }
 
 /// ganja calls the provider `grok`; the credential file calls it `xai`, which
@@ -378,10 +337,7 @@ fn a_redirected_login_that_could_leave_the_machine_is_refused() {
             .stderr(predicate::str::contains("GANJA_AUTH_ISSUER"));
     }
 
-    assert!(
-        !stored_at(&data).exists(),
-        "a refused login should write nothing"
-    );
+    assert!(!stored_at(&data).exists(), "a refused login should write nothing");
 }
 
 /// A cache home of this test's own.
@@ -427,9 +383,7 @@ fn offline(cache: &TempDir) -> Command {
 /// endpoint — which this suite must never reach.
 fn online(cache: &TempDir, url: &str) -> Command {
     let mut command = offline(cache);
-    command
-        .env("GANJA_MODELS_URL", url)
-        .env_remove("GANJA_DISABLE_MODELS_FETCH");
+    command.env("GANJA_MODELS_URL", url).env_remove("GANJA_DISABLE_MODELS_FETCH");
 
     command
 }
@@ -475,12 +429,7 @@ const SERVED: [&str; 2] = [
 /// server is that there is one.
 fn serve(bodies: &'static [&'static str]) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback is bindable");
-    let url = format!(
-        "http://{}",
-        listener
-            .local_addr()
-            .expect("a bound socket has an address")
-    );
+    let url = format!("http://{}", listener.local_addr().expect("a bound socket has an address"));
 
     thread::spawn(move || {
         for (index, stream) in listener.incoming().enumerate() {
@@ -522,10 +471,7 @@ fn read_head(stream: &mut TcpStream) {
 fn closed_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback is bindable");
 
-    listener
-        .local_addr()
-        .expect("a bound socket has an address")
-        .port()
+    listener.local_addr().expect("a bound socket has an address").port()
 }
 
 #[test]
@@ -602,24 +548,16 @@ fn a_forced_refresh_fetches_past_the_cache_it_just_wrote() {
     let url = serve(&SERVED);
 
     // Nothing is cached yet, so these rows can only have come off the socket.
-    online(&cache, &url)
-        .args(["models", "--refresh"])
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::contains("alpha-one")
-                .and(predicate::str::contains("claude-sonnet-5").not()),
-        );
+    online(&cache, &url).args(["models", "--refresh"]).assert().success().stdout(
+        predicate::str::contains("alpha-one")
+            .and(predicate::str::contains("claude-sonnet-5").not()),
+    );
 
     // The cache that fetch wrote is far fresher than the debounce, so a second
     // fetch happened because this run forced one.
-    online(&cache, &url)
-        .args(["models", "--refresh"])
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::contains("beta-one").and(predicate::str::contains("alpha-one").not()),
-        );
+    online(&cache, &url).args(["models", "--refresh"]).assert().success().stdout(
+        predicate::str::contains("beta-one").and(predicate::str::contains("alpha-one").not()),
+    );
 
     // And with fetching off there is nowhere else the second catalog could be
     // read from: what the fetch wrote, the next run adopts.
@@ -635,15 +573,11 @@ fn a_forced_refresh_fetches_past_the_cache_it_just_wrote() {
 fn a_named_provider_is_the_only_one_the_listing_carries() {
     let cache = cache();
 
-    offline(&cache)
-        .args(["models", "anthropic"])
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::contains("PROVIDER")
-                .and(predicate::str::contains("claude-opus-4-8*"))
-                .and(predicate::str::contains("gpt-5.6").not()),
-        );
+    offline(&cache).args(["models", "anthropic"]).assert().success().stdout(
+        predicate::str::contains("PROVIDER")
+            .and(predicate::str::contains("claude-opus-4-8*"))
+            .and(predicate::str::contains("gpt-5.6").not()),
+    );
 
     offline(&cache)
         .args(["models", "openai"])
@@ -827,14 +761,7 @@ fn a_config_declared_provider_can_be_logged_into_and_out_of_by_its_own_name() {
 
     ganja(&data)
         .current_dir(project.path())
-        .args([
-            "auth",
-            "login",
-            "--provider",
-            "local-llama",
-            "--key",
-            CANARY,
-        ])
+        .args(["auth", "login", "--provider", "local-llama", "--key", CANARY])
         .assert()
         .success()
         .stdout(
@@ -855,14 +782,7 @@ fn a_config_declared_provider_can_be_logged_into_and_out_of_by_its_own_name() {
     // attempted against nothing.
     ganja(&data)
         .current_dir(project.path())
-        .args([
-            "auth",
-            "login",
-            "--provider",
-            "local-llama",
-            "--method",
-            "device",
-        ])
+        .args(["auth", "login", "--provider", "local-llama", "--method", "device"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("key"));
@@ -977,15 +897,10 @@ fn a_session_a_task_call_spawned_is_not_listed_beside_the_one_that_asked_for_it(
         Some("0198f2c4-a1b0-7000-8000-000000000001"),
     );
 
-    ganja(&data)
-        .current_dir(project.path())
-        .arg("sessions")
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::contains("0198f2c4-a1b0-7000-8000-000000000001")
-                .and(predicate::str::contains("0198f2c4-a1b0-7000-8000-000000000002").not()),
-        );
+    ganja(&data).current_dir(project.path()).arg("sessions").assert().success().stdout(
+        predicate::str::contains("0198f2c4-a1b0-7000-8000-000000000001")
+            .and(predicate::str::contains("0198f2c4-a1b0-7000-8000-000000000002").not()),
+    );
 }
 
 /// And a project holding nothing but delegated sessions has nothing to list,
@@ -1002,15 +917,10 @@ fn a_project_whose_every_session_is_delegated_reads_as_one_with_none() {
         Some("0198f2c4-a1b0-7000-8000-000000000001"),
     );
 
-    ganja(&data)
-        .current_dir(project.path())
-        .arg("sessions")
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::contains("no sessions here yet")
-                .and(predicate::str::contains("SESSION").not()),
-        );
+    ganja(&data).current_dir(project.path()).arg("sessions").assert().success().stdout(
+        predicate::str::contains("no sessions here yet")
+            .and(predicate::str::contains("SESSION").not()),
+    );
 }
 
 /// A first run has nothing to say on stderr.
@@ -1043,14 +953,10 @@ fn a_first_run_in_a_fresh_data_home_says_nothing_on_stderr() {
 fn an_unknown_provider_is_refused_before_the_terminal_is_taken_over() {
     let data = TempDir::new().expect("a temporary directory is creatable");
 
-    ganja(&data)
-        .env("GANJA_PROVIDER", "definitely-not-a-provider")
-        .assert()
-        .failure()
-        .stderr(
-            predicate::str::contains("GANJA_PROVIDER")
-                .and(predicate::str::contains("definitely-not-a-provider")),
-        );
+    ganja(&data).env("GANJA_PROVIDER", "definitely-not-a-provider").assert().failure().stderr(
+        predicate::str::contains("GANJA_PROVIDER")
+            .and(predicate::str::contains("definitely-not-a-provider")),
+    );
 }
 
 /// A provider with no credential anywhere is refused with the command that
@@ -1059,20 +965,13 @@ fn an_unknown_provider_is_refused_before_the_terminal_is_taken_over() {
 fn a_provider_without_a_credential_is_refused_and_says_how_to_fix_it() {
     let data = data();
 
-    ganja(&data)
-        .env("GANJA_PROVIDER", "anthropic")
-        .assert()
-        .failure()
-        .stderr(
-            predicate::str::contains("ANTHROPIC_API_KEY")
-                .and(predicate::str::contains("ganja auth login")),
-        );
+    ganja(&data).env("GANJA_PROVIDER", "anthropic").assert().failure().stderr(
+        predicate::str::contains("ANTHROPIC_API_KEY")
+            .and(predicate::str::contains("ganja auth login")),
+    );
 }
 
 #[test]
 fn an_unknown_subcommand_is_refused() {
-    Command::new(env!("CARGO_BIN_EXE_ganja"))
-        .arg("definitely-not-a-subcommand")
-        .assert()
-        .failure();
+    Command::new(env!("CARGO_BIN_EXE_ganja")).arg("definitely-not-a-subcommand").assert().failure();
 }

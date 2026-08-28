@@ -136,18 +136,11 @@ fn formatted(part: &Part) -> String {
                     rendered.push_str(&fenced("Input", "json", &pretty(input)));
                 }
                 ToolState::Pending { input: None } => {}
-                ToolState::Running {
-                    input, metadata, ..
-                } => {
+                ToolState::Running { input, metadata, .. } => {
                     rendered.push_str(&fenced("Input", "json", &pretty(input)));
                     rendered.push_str(&calls_fence(metadata));
                 }
-                ToolState::Completed {
-                    input,
-                    output,
-                    metadata,
-                    ..
-                } => {
+                ToolState::Completed { input, output, metadata, .. } => {
                     rendered.push_str(&fenced("Input", "json", &pretty(input)));
                     rendered.push_str(&calls_fence(metadata));
                     rendered.push_str(&fenced("Output", "", output));
@@ -175,11 +168,7 @@ fn formatted(part: &Part) -> String {
         // would be a copy of a reply with no visible source. `Tool:` rather
         // than a label of its own keeps upstream's vocabulary — the name it
         // carries already says whose tool it was.
-        PartBody::ServerTool {
-            tool,
-            input,
-            output,
-        } => {
+        PartBody::ServerTool { tool, input, output } => {
             let mut rendered = format!("**Tool: {tool}**\n");
             if !input.is_null() {
                 rendered.push_str(&fenced("Input", "json", &pretty(input)));
@@ -197,12 +186,7 @@ fn formatted(part: &Part) -> String {
         // see. The name leads it because this is the one part in a transcript
         // that neither of the two headings above wrote, and a copy that let a
         // peer's sentence pass for the session's own would misattribute it.
-        PartBody::Peer {
-            from,
-            summary,
-            body,
-            ..
-        } => {
+        PartBody::Peer { from, summary, body, .. } => {
             // `display_summary` owns the blank-dropped, capped projection
             // this formatter shares with the two renderers. The summary then
             // rides this heading as text and only text ([`inline_text`]) —
@@ -268,11 +252,7 @@ fn fenced(label: &str, language: &str, body: &str) -> String {
 /// at least as long as the one that opened it — so a fence one longer than
 /// anything in the body is a fence the body cannot end.
 fn fence_for(body: &str) -> String {
-    let longest = body
-        .split(|character| character != '`')
-        .map(str::len)
-        .max()
-        .unwrap_or(0);
+    let longest = body.split(|character| character != '`').map(str::len).max().unwrap_or(0);
 
     "`".repeat(longest.max(2) + 1)
 }
@@ -317,9 +297,7 @@ fn calls_fence(metadata: &serde_json::Value) -> String {
     let total = metadata
         .get("toolcalls")
         .and_then(serde_json::Value::as_u64)
-        .map_or(calls.len(), |total| {
-            usize::try_from(total).unwrap_or(usize::MAX)
-        });
+        .map_or(calls.len(), |total| usize::try_from(total).unwrap_or(usize::MAX));
     let mut body = String::new();
     let dropped = total.saturating_sub(calls.len());
     if dropped > 0 {

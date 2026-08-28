@@ -6,22 +6,16 @@
 //! buffered since the engine was born; and a later one joins from its
 //! registration on.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
-use futures::{
-    StreamExt as _,
-    stream::{self, BoxStream},
-};
-use ganja_core::{
-    Evicted, RevertState, SessionId, Storage,
-    engine::{EVENT_CAPACITY, Engine},
-    protocol::{Command, Event, FinishReason, Message, Part},
-    provider::{ChatRequest, Provider, ProviderError, ProviderEvent},
-};
+use futures::StreamExt as _;
+use futures::stream::{self, BoxStream};
+use ganja_core::engine::{EVENT_CAPACITY, Engine};
+use ganja_core::protocol::{Command, Event, FinishReason, Message, Part};
+use ganja_core::provider::{ChatRequest, Provider, ProviderError, ProviderEvent};
+use ganja_core::{Evicted, RevertState, SessionId, Storage};
 use ganja_testkit::{drain, seed_message, seed_session, seeded_session_info};
 use tokio_util::sync::CancellationToken;
 
@@ -82,10 +76,7 @@ impl Provider for FloodProvider {
 async fn a_slow_consumer_receives_every_event_in_order() {
     let produced = Arc::new(AtomicUsize::new(0));
     let engine = Engine::new(
-        Arc::new(FloodProvider {
-            count: EVENTS,
-            produced: Arc::clone(&produced),
-        }),
+        Arc::new(FloodProvider { count: EVENTS, produced: Arc::clone(&produced) }),
         "flood-model",
         Arc::new(ganja_core::tool::Registry::new(Vec::new())),
         ganja_core::permission::Permissions::default(),
@@ -118,14 +109,8 @@ async fn a_slow_consumer_receives_every_event_in_order() {
     // A turn opens with both message envelopes and the part the fragments land
     // in, before any fragment addresses it. The agent loop also brackets each
     // request with step-marker parts, which carry no fragments and are skipped.
-    assert!(matches!(
-        events.next().await,
-        Some(Event::MessageStarted { .. })
-    ));
-    assert!(matches!(
-        events.next().await,
-        Some(Event::MessageStarted { .. })
-    ));
+    assert!(matches!(events.next().await, Some(Event::MessageStarted { .. })));
+    assert!(matches!(events.next().await, Some(Event::MessageStarted { .. })));
     let part = loop {
         match events.next().await {
             Some(Event::PartStarted { part, .. }) if part.as_text().is_some() => break part,
@@ -151,10 +136,7 @@ async fn a_slow_consumer_receives_every_event_in_order() {
     loop {
         match events.next().await {
             Some(Event::PartStarted { .. }) => {}
-            Some(Event::MessageFinished {
-                reason: FinishReason::Completed,
-                ..
-            }) => break,
+            Some(Event::MessageFinished { reason: FinishReason::Completed, .. }) => break,
             other => panic!("the turn should end after the last fragment: {other:?}"),
         }
     }
@@ -170,10 +152,7 @@ async fn a_slow_consumer_receives_every_event_in_order() {
 /// loop.
 fn flood_engine(count: usize) -> Engine {
     Engine::new(
-        Arc::new(FloodProvider {
-            count,
-            produced: Arc::default(),
-        }),
+        Arc::new(FloodProvider { count, produced: Arc::default() }),
         "flood-model",
         Arc::new(ganja_core::tool::Registry::new(Vec::new())),
         ganja_core::permission::Permissions::default(),
@@ -197,19 +176,11 @@ async fn prompt(engine: &Engine, text: &str) {
 /// The text of the user message that opens a drained turn, for telling one
 /// turn's frames from another's.
 fn opening_prompt(seen: &[Event]) -> Option<String> {
-    let Some(Event::MessageStarted {
-        session_id: _,
-        message,
-    }) = seen.first()
-    else {
+    let Some(Event::MessageStarted { session_id: _, message }) = seen.first() else {
         return None;
     };
 
-    message
-        .parts
-        .first()
-        .and_then(Part::as_text)
-        .map(str::to_owned)
+    message.parts.first().and_then(Part::as_text).map(str::to_owned)
 }
 
 /// A droppable subscriber that never drains is evicted — its stream ends with
@@ -223,10 +194,8 @@ async fn a_wedged_droppable_subscriber_is_evicted_and_the_lossless_one_drains_th
     const FLOOD: usize = EVENT_CAPACITY + 16;
 
     let engine = flood_engine(FLOOD);
-    let mut lossless = engine
-        .subscribe()
-        .await
-        .expect("the first subscriber claims the birth queue");
+    let mut lossless =
+        engine.subscribe().await.expect("the first subscriber claims the birth queue");
     // Registered and then deliberately never polled until the turn is over.
     let droppable = engine.subscribe_droppable();
 
@@ -237,10 +206,7 @@ async fn a_wedged_droppable_subscriber_is_evicted_and_the_lossless_one_drains_th
         loop {
             match lossless.next().await {
                 Some(Event::PartDelta { .. }) => fragments += 1,
-                Some(Event::MessageFinished {
-                    reason: FinishReason::Completed,
-                    ..
-                }) => break,
+                Some(Event::MessageFinished { reason: FinishReason::Completed, .. }) => break,
                 Some(_) => {}
                 None => panic!("the lossless stream ended before the turn did"),
             }
@@ -276,10 +242,7 @@ async fn a_wedged_droppable_subscriber_is_evicted_and_the_lossless_one_drains_th
 #[tokio::test]
 async fn a_late_subscriber_sees_events_from_its_registration_on() {
     let engine = flood_engine(4);
-    let mut first = engine
-        .subscribe()
-        .await
-        .expect("the first subscriber claims the birth queue");
+    let mut first = engine.subscribe().await.expect("the first subscriber claims the birth queue");
 
     prompt(&engine, "first").await;
     let turn_one = tokio::time::timeout(DRAIN_PATIENCE, drain(&mut first))
@@ -287,10 +250,8 @@ async fn a_late_subscriber_sees_events_from_its_registration_on() {
         .expect("the first turn drains");
     assert_eq!(opening_prompt(&turn_one).as_deref(), Some("first"));
 
-    let mut second = engine
-        .subscribe()
-        .await
-        .expect("a later subscriber registers a queue of its own");
+    let mut second =
+        engine.subscribe().await.expect("a later subscriber registers a queue of its own");
     prompt(&engine, "second").await;
 
     let first_hears = tokio::time::timeout(DRAIN_PATIENCE, drain(&mut first))
@@ -342,10 +303,7 @@ async fn the_first_subscriber_inherits_the_events_queued_before_it_subscribed() 
     .await
     .expect("the unheard turn finishes");
 
-    let mut events = engine
-        .subscribe()
-        .await
-        .expect("the first subscriber claims the birth queue");
+    let mut events = engine.subscribe().await.expect("the first subscriber claims the birth queue");
     let seen = tokio::time::timeout(DRAIN_PATIENCE, drain(&mut events))
         .await
         .expect("the whole turn should be waiting in the birth queue");
@@ -362,19 +320,9 @@ async fn the_first_subscriber_inherits_the_events_queued_before_it_subscribed() 
             _ => None,
         })
         .collect();
-    assert_eq!(
-        fragments,
-        ["0", "1", "2", "3"],
-        "every fragment survived the wait, in order"
-    );
+    assert_eq!(fragments, ["0", "1", "2", "3"], "every fragment survived the wait, in order");
     assert!(
-        matches!(
-            seen.last(),
-            Some(Event::MessageFinished {
-                reason: FinishReason::Completed,
-                ..
-            })
-        ),
+        matches!(seen.last(), Some(Event::MessageFinished { reason: FinishReason::Completed, .. })),
         "and the finish is the last thing inherited: {seen:?}"
     );
 }
@@ -392,19 +340,13 @@ async fn a_resumes_revert_notice_waits_in_the_birth_queue_for_the_first_subscrib
     // one stored message.
     let anchor = Message::user("the prompt the undo took back");
     let mut info = seeded_session_info(SessionId::ascending(), 0);
-    info.revert = Some(RevertState {
-        message_id: anchor.id.clone(),
-        snapshot: None,
-        files: Vec::new(),
-    });
+    info.revert =
+        Some(RevertState { message_id: anchor.id.clone(), snapshot: None, files: Vec::new() });
     storage.save_info(&info).expect("the seeded record writes");
     seed_message(&storage, &info.id, &anchor);
 
     let engine = Engine::persistent(
-        Arc::new(FloodProvider {
-            count: 1,
-            produced: Arc::default(),
-        }),
+        Arc::new(FloodProvider { count: 1, produced: Arc::default() }),
         "flood-model",
         Arc::new(ganja_core::tool::Registry::new(Vec::new())),
         ganja_core::permission::Permissions::default(),
@@ -412,25 +354,16 @@ async fn a_resumes_revert_notice_waits_in_the_birth_queue_for_the_first_subscrib
     );
     engine.resume(&info.id).await.expect("the session loads");
 
-    let mut events = engine
-        .subscribe()
-        .await
-        .expect("the first subscriber claims the birth queue");
+    let mut events = engine.subscribe().await.expect("the first subscriber claims the birth queue");
     // The engine goes away first, so a first subscriber that was handed a
     // fresh queue instead of the birth one fails on an ended stream rather
     // than parking forever.
     drop(engine);
 
-    let event = events
-        .next()
-        .await
-        .expect("the resumed revert should be waiting in the birth queue");
+    let event =
+        events.next().await.expect("the resumed revert should be waiting in the birth queue");
     match event {
-        Event::RevertChanged {
-            session_id,
-            revert: Some(revert),
-            prompt: None,
-        } => {
+        Event::RevertChanged { session_id, revert: Some(revert), prompt: None } => {
             assert_eq!(
                 revert.message_id, anchor.id,
                 "the notice names the message the revert anchored on"
@@ -455,10 +388,7 @@ async fn after_a_resume_every_event_carries_the_resumed_sessions_id() {
     seed_message(&storage, &seeded, &Message::user("what came before"));
 
     let engine = Engine::persistent(
-        Arc::new(FloodProvider {
-            count: 3,
-            produced: Arc::default(),
-        }),
+        Arc::new(FloodProvider { count: 3, produced: Arc::default() }),
         "flood-model",
         Arc::new(ganja_core::tool::Registry::new(Vec::new())),
         ganja_core::permission::Permissions::default(),
@@ -471,10 +401,7 @@ async fn after_a_resume_every_event_carries_the_resumed_sessions_id() {
         "the pin is only a pin while the resumed id differs from the birth one"
     );
 
-    let mut events = engine
-        .subscribe()
-        .await
-        .expect("the first subscriber claims the birth queue");
+    let mut events = engine.subscribe().await.expect("the first subscriber claims the birth queue");
     prompt(&engine, "next").await;
     let seen = tokio::time::timeout(DRAIN_PATIENCE, drain(&mut events))
         .await

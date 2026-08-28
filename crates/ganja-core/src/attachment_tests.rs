@@ -35,14 +35,9 @@ fn svg_reads_as_text_and_the_other_attachments_as_bytes() {
     assert!(!is_binary("image/svg+xml"));
     assert!(!is_binary("text/plain"));
 
-    for mime in [
-        "image/avif",
-        "image/gif",
-        "image/jpeg",
-        "image/png",
-        "image/webp",
-        "application/pdf",
-    ] {
+    for mime in
+        ["image/avif", "image/gif", "image/jpeg", "image/png", "image/webp", "application/pdf"]
+    {
         assert!(is_binary(mime), "{mime}");
     }
 }

@@ -36,20 +36,14 @@ fn collected(text: &str) -> (BTreeMap<&'static str, Vec<Group>>, Report) {
 fn why(report: &Report, key: &str) -> Option<String> {
     let key = format!("{FIXTURE}:{key}");
 
-    report
-        .skipped
-        .iter()
-        .find(|(left, _)| *left == key)
-        .map(|(_, reason)| reason.clone())
+    report.skipped.iter().find(|(left, _)| *left == key).map(|(_, reason)| reason.clone())
 }
 
 /// Merges `text`'s hooks into `target`, and hands back what would be written.
 fn merged(target: &str, text: &str) -> String {
     let (groups, _) = collected(text);
 
-    merge(Path::new(TARGET), target, &groups)
-        .expect("the target takes the append")
-        .to_string()
+    merge(Path::new(TARGET), target, &groups).expect("the target takes the append").to_string()
 }
 
 /// The ordinary case, end to end: a group ganja fires travels whole, and the
@@ -79,11 +73,7 @@ fn a_group_for_an_event_this_build_fires_travels_whole() {
 
     let ganja_core::config::HookHandler::Command(handler) = &groups[0].hooks[0];
     assert_eq!(handler.command, "./check.sh");
-    assert_eq!(
-        handler.timeout,
-        Some(5),
-        "seconds on both sides, unconverted"
-    );
+    assert_eq!(handler.timeout, Some(5), "seconds on both sides, unconverted");
 }
 
 /// A group with no matcher matches everything, on both sides, so the absent
@@ -117,10 +107,8 @@ fn groups_are_appended_after_the_ones_already_there() {
     );
 
     let config = toml_edit::de::from_str::<Config>(&rendered).expect("it loads");
-    let matchers: Vec<_> = config.hooks["PreToolUse"]
-        .iter()
-        .map(|group| group.matcher.clone())
-        .collect();
+    let matchers: Vec<_> =
+        config.hooks["PreToolUse"].iter().map(|group| group.matcher.clone()).collect();
     assert_eq!(
         matchers,
         [Some("Edit".to_owned()), Some("Bash".to_owned())],
@@ -158,10 +146,7 @@ fn a_list_spelled_inline_is_appended_to_inline() {
     let config = toml_edit::de::from_str::<Config>(&rendered)
         .unwrap_or_else(|error| panic!("the merged document loads: {error}\n{rendered}"));
     assert_eq!(config.hooks["Stop"].len(), 2, "{rendered}");
-    assert!(
-        !rendered.contains("[[hooks.Stop]]"),
-        "the file's own spelling is kept:\n{rendered}"
-    );
+    assert!(!rendered.contains("[[hooks.Stop]]"), "the file's own spelling is kept:\n{rendered}");
 }
 
 /// An event this build fires nothing for is a row and not an error: the run is
@@ -204,15 +189,8 @@ fn a_handler_this_build_cannot_run_is_reported_and_the_rest_of_the_group_travels
            }"#,
     );
 
-    assert_eq!(
-        why(&report, "hooks.Stop[0].hooks[0]").as_deref(),
-        Some("unsupported")
-    );
-    assert_eq!(
-        groups["Stop"][0].handlers.len(),
-        1,
-        "the command handler beside it still travels"
-    );
+    assert_eq!(why(&report, "hooks.Stop[0].hooks[0]").as_deref(), Some("unsupported"));
+    assert_eq!(groups["Stop"][0].handlers.len(), 1, "the command handler beside it still travels");
 }
 
 /// A field neither side's shape names is reported by name, so a Claude release
@@ -232,14 +210,8 @@ fn a_field_neither_side_names_is_reported_by_name() {
            }"#,
     );
 
-    assert_eq!(
-        why(&report, "hooks.Stop[0].description").as_deref(),
-        Some("unknown")
-    );
-    assert_eq!(
-        why(&report, "hooks.Stop[0].hooks[0].retries").as_deref(),
-        Some("unknown")
-    );
+    assert_eq!(why(&report, "hooks.Stop[0].description").as_deref(), Some("unknown"));
+    assert_eq!(why(&report, "hooks.Stop[0].hooks[0].retries").as_deref(), Some("unknown"));
     assert_eq!(groups["Stop"].len(), 1, "the group itself still travels");
 }
 
@@ -262,16 +234,10 @@ fn a_group_this_build_would_refuse_to_load_is_left_out() {
     assert_eq!(why(&report, "hooks.Stop[0]").as_deref(), Some("refused"));
     assert_eq!(
         report.warnings,
-        [format!(
-            "{FIXTURE}:hooks.Stop[0] was left out — a command handler with no command"
-        )],
+        [format!("{FIXTURE}:hooks.Stop[0] was left out — a command handler with no command")],
         "the word in the column is not the reason; the sentence beside it is"
     );
-    assert_eq!(
-        groups["Stop"].len(),
-        1,
-        "the group beside it is still imported"
-    );
+    assert_eq!(groups["Stop"].len(), 1, "the group beside it is still imported");
 }
 
 /// The other half of `check_hooks`, judged by the same engine the loader
@@ -297,11 +263,7 @@ fn a_matcher_that_is_not_a_regular_expression_is_left_out() {
         "the sentence says which refusal it was: {:?}",
         report.warnings
     );
-    assert_eq!(
-        groups["Stop"].len(),
-        1,
-        "the group with a matcher that compiles is still imported"
-    );
+    assert_eq!(groups["Stop"].len(), 1, "the group with a matcher that compiles is still imported");
 }
 
 /// An empty matcher is not a pattern that failed to compile — it means
@@ -362,14 +324,8 @@ fn a_value_of_the_wrong_shape_is_reported_where_it_was_written() {
            }"#,
     );
 
-    assert_eq!(
-        why(&report, "hooks.Stop[0].matcher").as_deref(),
-        Some("malformed")
-    );
-    assert_eq!(
-        why(&report, "hooks.Stop[1].hooks[0].timeout").as_deref(),
-        Some("malformed")
-    );
+    assert_eq!(why(&report, "hooks.Stop[0].matcher").as_deref(), Some("malformed"));
+    assert_eq!(why(&report, "hooks.Stop[1].hooks[0].timeout").as_deref(), Some("malformed"));
     assert!(
         groups.is_empty(),
         "neither group is guessed at: one lost its matcher, the other its only handler"
@@ -396,18 +352,9 @@ fn a_group_that_travels_is_a_row_naming_where_it_lands_and_a_row_per_command() {
     assert_eq!(
         report.mapped,
         [
-            (
-                format!("{FIXTURE}:hooks.Stop[0]"),
-                "[[hooks.Stop]]".to_owned()
-            ),
-            (
-                format!("{FIXTURE}:hooks.Stop[0].hooks[0]"),
-                "./x.sh".to_owned()
-            ),
-            (
-                format!("{FIXTURE}:hooks.Stop[0].hooks[1]"),
-                "./y.sh --now".to_owned()
-            ),
+            (format!("{FIXTURE}:hooks.Stop[0]"), "[[hooks.Stop]]".to_owned()),
+            (format!("{FIXTURE}:hooks.Stop[0].hooks[0]"), "./x.sh".to_owned()),
+            (format!("{FIXTURE}:hooks.Stop[0].hooks[1]"), "./y.sh --now".to_owned()),
         ]
     );
 }
@@ -441,21 +388,12 @@ fn the_mapped_and_skipped_rows_number_the_same_array() {
             .filter(|(key, _)| key.contains(".hooks["))
             .cloned()
             .collect::<Vec<_>>(),
-        [
-            (at(0), "./zero.sh".to_owned()),
-            (at(2), "./two.sh".to_owned()),
-        ]
+        [(at(0), "./zero.sh".to_owned()), (at(2), "./two.sh".to_owned()),]
     );
 
     // The two that fell out, at the positions they actually sit at.
-    assert_eq!(
-        why(&report, "hooks.Stop[0].hooks[1]").as_deref(),
-        Some("unsupported")
-    );
-    assert_eq!(
-        why(&report, "hooks.Stop[0].hooks[3].timeout").as_deref(),
-        Some("malformed")
-    );
+    assert_eq!(why(&report, "hooks.Stop[0].hooks[1]").as_deref(), Some("unsupported"));
+    assert_eq!(why(&report, "hooks.Stop[0].hooks[3].timeout").as_deref(), Some("malformed"));
 
     // And the claim that makes the two lists one table: no path is used by
     // both sections, which is what a filtered index would have broken.
@@ -485,10 +423,7 @@ fn a_handler_that_was_left_out_gets_no_command_row() {
         .map(|(_, value)| value)
         .collect();
     assert_eq!(commands, ["./y.sh"]);
-    assert_eq!(
-        why(&report, "hooks.Stop[0].hooks[0]").as_deref(),
-        Some("unsupported")
-    );
+    assert_eq!(why(&report, "hooks.Stop[0].hooks[0]").as_deref(), Some("unsupported"));
 }
 
 /// A settings file with no hooks at all is not an error — it is a run that
@@ -508,15 +443,8 @@ fn a_target_whose_hooks_are_not_groups_is_refused() {
     let (groups, _) = collected(
         r#"{ "hooks": { "Stop": [{ "hooks": [{ "type": "command", "command": "./x.sh" }] }] } }"#,
     );
-    let error = merge(
-        Path::new(TARGET),
-        "[hooks]\nStop = \"every-one\"\n",
-        &groups,
-    )
-    .expect_err("a string is not a list of groups");
+    let error = merge(Path::new(TARGET), "[hooks]\nStop = \"every-one\"\n", &groups)
+        .expect_err("a string is not a list of groups");
 
-    assert!(
-        format!("{error}").contains("hooks.Stop"),
-        "the refusal names what it found: {error}"
-    );
+    assert!(format!("{error}").contains("hooks.Stop"), "the refusal names what it found: {error}");
 }

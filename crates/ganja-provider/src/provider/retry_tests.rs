@@ -7,11 +7,7 @@ use crate::provider::ProviderError;
 
 /// One `retry-after` case: what it is called, the headers a response
 /// carried, and how long they ask to be left alone for.
-type HeaderCase = (
-    &'static str,
-    Vec<(&'static str, &'static str)>,
-    Option<Duration>,
-);
+type HeaderCase = (&'static str, Vec<(&'static str, &'static str)>, Option<Duration>);
 
 fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
     let mut headers = HeaderMap::new();
@@ -52,10 +48,7 @@ fn the_backoff_doubles_from_two_seconds_and_stops_at_thirty() {
 
 #[test]
 fn a_requested_delay_wins_over_the_schedule_but_not_over_the_ceiling() {
-    assert_eq!(
-        delay(1, Some(Duration::from_secs(7))),
-        Duration::from_secs(7)
-    );
+    assert_eq!(delay(1, Some(Duration::from_secs(7))), Duration::from_secs(7));
     assert_eq!(delay(1, Some(Duration::from_secs(600))), MAX_DELAY);
 }
 
@@ -89,15 +82,8 @@ fn the_span_a_draw_walks_is_the_scheduled_quarter_and_no_more() {
         Duration::from_millis(12_500),
         "a draw at the top of the span adds the whole quarter"
     );
-    assert_eq!(
-        scattered(base, 2_501),
-        base,
-        "and the span wraps rather than spilling past it"
-    );
-    assert!(
-        scattered(MAX_DELAY, u64::MAX) <= MAX_DELAY,
-        "the ceiling outranks the scatter"
-    );
+    assert_eq!(scattered(base, 2_501), base, "and the span wraps rather than spilling past it");
+    assert!(scattered(MAX_DELAY, u64::MAX) <= MAX_DELAY, "the ceiling outranks the scatter");
 }
 
 /// The message classification ported from upstream's
@@ -118,10 +104,7 @@ fn a_message_naming_a_transient_condition_is_worth_another_attempt() {
         "Our servers are temporarily at capacity.",
         "Resource exhausted: out of quota for this minute",
     ] {
-        assert!(
-            super::transient_message(transient),
-            "upstream retries this: {transient}"
-        );
+        assert!(super::transient_message(transient), "upstream retries this: {transient}");
     }
 
     for lasting in [
@@ -133,10 +116,7 @@ fn a_message_naming_a_transient_condition_is_worth_another_attempt() {
         "set the timeout in your config",
         "do not try again with the same key",
     ] {
-        assert!(
-            !super::transient_message(lasting),
-            "no pattern should match: {lasting}"
-        );
+        assert!(!super::transient_message(lasting), "no pattern should match: {lasting}");
     }
 }
 
@@ -157,32 +137,16 @@ fn the_retry_after_headers_are_read_the_way_upstream_reads_them() {
             vec![("retry-after-ms", "1500.5")],
             Some(Duration::from_millis(1_501)),
         ),
-        (
-            "seconds",
-            vec![("retry-after", "3")],
-            Some(Duration::from_secs(3)),
-        ),
-        (
-            "fractional seconds",
-            vec![("retry-after", "0.25")],
-            Some(Duration::from_millis(250)),
-        ),
+        ("seconds", vec![("retry-after", "3")], Some(Duration::from_secs(3))),
+        ("fractional seconds", vec![("retry-after", "0.25")], Some(Duration::from_millis(250))),
         (
             "an http date in the future",
             vec![("retry-after", "Sun, 06 Nov 1994 08:49:37 GMT")],
             Some(Duration::from_secs(60)),
         ),
-        (
-            "an http date already past",
-            vec![("retry-after", "Sun, 06 Nov 1994 08:47:37 GMT")],
-            None,
-        ),
+        ("an http date already past", vec![("retry-after", "Sun, 06 Nov 1994 08:47:37 GMT")], None),
         ("nonsense", vec![("retry-after", "soon")], None),
-        (
-            "a negative count is not a delay",
-            vec![("retry-after", "-5")],
-            None,
-        ),
+        ("a negative count is not a delay", vec![("retry-after", "-5")], None),
     ];
 
     for (name, pairs, expected) in cases {
@@ -205,9 +169,7 @@ fn http_dates_parse_across_leap_years_and_centuries() {
 
     for (value, expected) in cases {
         let parsed = http_date(value).map(|time| {
-            time.duration_since(UNIX_EPOCH)
-                .expect("the fixtures are all after the epoch")
-                .as_secs()
+            time.duration_since(UNIX_EPOCH).expect("the fixtures are all after the epoch").as_secs()
         });
 
         assert_eq!(parsed, expected, "parsing {value:?}");
@@ -220,9 +182,7 @@ fn http_dates_parse_across_leap_years_and_centuries() {
 #[test]
 fn a_leap_second_names_the_instant_past_the_minute_rather_than_a_refusal() {
     let parsed = http_date("Sat, 31 Dec 2016 23:59:60 GMT").map(|time| {
-        time.duration_since(UNIX_EPOCH)
-            .expect("the fixture is after the epoch")
-            .as_secs()
+        time.duration_since(UNIX_EPOCH).expect("the fixture is after the epoch").as_secs()
     });
 
     assert_eq!(parsed, Some(1_483_228_800));
@@ -234,34 +194,10 @@ fn a_leap_second_names_the_instant_past_the_minute_rather_than_a_refusal() {
 
 #[test]
 fn only_transient_failures_are_worth_repeating() {
-    assert!(
-        ProviderError::Status {
-            status: 429,
-            message: String::new()
-        }
-        .is_retryable()
-    );
-    assert!(
-        ProviderError::Status {
-            status: 529,
-            message: String::new()
-        }
-        .is_retryable()
-    );
-    assert!(
-        !ProviderError::Status {
-            status: 400,
-            message: String::new()
-        }
-        .is_retryable()
-    );
-    assert!(
-        !ProviderError::Status {
-            status: 401,
-            message: String::new()
-        }
-        .is_retryable()
-    );
+    assert!(ProviderError::Status { status: 429, message: String::new() }.is_retryable());
+    assert!(ProviderError::Status { status: 529, message: String::new() }.is_retryable());
+    assert!(!ProviderError::Status { status: 400, message: String::new() }.is_retryable());
+    assert!(!ProviderError::Status { status: 401, message: String::new() }.is_retryable());
     assert!(ProviderError::Transport(String::new()).is_retryable());
     assert!(!ProviderError::Auth(String::new()).is_retryable());
     assert!(!ProviderError::Parse(String::new()).is_retryable());

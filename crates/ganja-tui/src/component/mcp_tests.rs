@@ -1,14 +1,10 @@
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 
 use super::{Action, Mcp, Row};
 use crate::theme::Theme;
 
-const AREA: Rect = Rect {
-    x: 0,
-    y: 0,
-    width: 76,
-    height: 20,
-};
+const AREA: Rect = Rect { x: 0, y: 0, width: 76, height: 20 };
 
 fn connected(name: &str, tools: usize) -> Row {
     Row {
@@ -61,11 +57,7 @@ fn rendered(dialog: &Mcp, area: Rect) -> String {
     dialog.render(area, &mut buffer, &Theme::default());
 
     (0..area.height)
-        .map(|row| {
-            (0..area.width)
-                .map(|column| buffer[(column, row)].symbol())
-                .collect::<String>()
-        })
+        .map(|row| (0..area.width).map(|column| buffer[(column, row)].symbol()).collect::<String>())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -87,16 +79,10 @@ fn every_server_lists_with_its_status_and_tool_count() {
 #[test]
 fn the_cursor_starts_on_the_first_row_and_clamps_at_both_ends() {
     let mut dialog = dialog();
-    assert_eq!(
-        dialog.selected().map(|row| row.name.as_str()),
-        Some("github")
-    );
+    assert_eq!(dialog.selected().map(|row| row.name.as_str()), Some("github"));
 
     dialog.move_selection(-9);
-    assert_eq!(
-        dialog.selected().map(|row| row.name.as_str()),
-        Some("github")
-    );
+    assert_eq!(dialog.selected().map(|row| row.name.as_str()), Some("github"));
 
     dialog.move_selection(9);
     assert_eq!(dialog.selected().map(|row| row.name.as_str()), Some("off"));
@@ -118,10 +104,7 @@ fn enter_on_a_row_with_no_actions_does_nothing() {
 fn enter_on_a_failed_row_opens_reconnect_and_answers_with_it() {
     let mut dialog = dialog();
     dialog.move_selection(1);
-    assert_eq!(
-        dialog.selected().map(|row| row.name.as_str()),
-        Some("flaky")
-    );
+    assert_eq!(dialog.selected().map(|row| row.name.as_str()), Some("flaky"));
 
     assert!(dialog.advance());
     assert!(dialog.is_choosing_action());
@@ -158,10 +141,7 @@ fn back_to_servers_leaves_the_action_step_and_keeps_the_selection() {
     dialog.back_to_servers();
 
     assert!(!dialog.is_choosing_action());
-    assert_eq!(
-        dialog.selected().map(|row| row.name.as_str()),
-        Some("flaky")
-    );
+    assert_eq!(dialog.selected().map(|row| row.name.as_str()), Some("flaky"));
 }
 
 /// A poll refresh keeps the cursor on the same position rather than
@@ -185,14 +165,8 @@ fn refreshing_keeps_the_cursor_where_it_was() {
         },
     ]);
 
-    assert_eq!(
-        dialog.selected().map(|row| row.name.as_str()),
-        Some("flaky")
-    );
-    assert_eq!(
-        dialog.selected().map(|row| row.status.as_str()),
-        Some("Connected")
-    );
+    assert_eq!(dialog.selected().map(|row| row.name.as_str()), Some("flaky"));
+    assert_eq!(dialog.selected().map(|row| row.status.as_str()), Some("Connected"));
 }
 
 #[test]
@@ -212,10 +186,7 @@ fn a_row_too_wide_for_the_column_is_cut_rather_than_wrapped() {
     let dialog = Mcp::new(vec![failed("x", &"very long error ".repeat(20))]);
 
     for line in rendered(&dialog, Rect::new(0, 0, 60, 20)).lines() {
-        assert!(
-            line.chars().count() <= 60,
-            "a row must not overflow the dialog: {line:?}"
-        );
+        assert!(line.chars().count() <= 60, "a row must not overflow the dialog: {line:?}");
     }
 }
 
@@ -233,8 +204,5 @@ fn a_tiny_area_draws_without_panicking() {
 fn a_zero_area_draws_nothing_and_does_not_panic() {
     let screen = rendered(&dialog(), Rect::new(0, 0, 0, 0));
 
-    assert!(
-        screen.is_empty(),
-        "a zero area has no cell to hold: {screen}"
-    );
+    assert!(screen.is_empty(), "a zero area has no cell to hold: {screen}");
 }

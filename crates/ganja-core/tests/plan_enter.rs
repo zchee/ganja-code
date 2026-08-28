@@ -24,17 +24,18 @@
 //! `mcp.rs` documents (`bun` plus the upstream checkout), and hard-fails
 //! without them for the same reason.
 
-use std::{path::Path, sync::Arc, time::Duration};
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
-use futures::{StreamExt as _, stream::BoxStream};
-use ganja_core::{
-    Config, Engine, McpServers, McpStatus, Storage,
-    agent::{BUILD_SWITCH_REMINDER, PLAN_REMINDER},
-    permission::Permissions,
-    protocol::{Command, Event, FinishReason, PartBody, QuestionId, ToolState},
-    provider::{ChatRequest, Provider},
-    tool::Registry,
-};
+use futures::StreamExt as _;
+use futures::stream::BoxStream;
+use ganja_core::agent::{BUILD_SWITCH_REMINDER, PLAN_REMINDER};
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{Command, Event, FinishReason, PartBody, QuestionId, ToolState};
+use ganja_core::provider::{ChatRequest, Provider};
+use ganja_core::tool::Registry;
+use ganja_core::{Config, Engine, McpServers, McpStatus, Storage};
 use ganja_testkit::{ScriptedProvider, drain, tool_call};
 use serde_json::json;
 
@@ -88,10 +89,7 @@ async fn persistent_over(
         storage,
     )
     .with_agents(ganja_testkit::agent_registry(&Config::default()));
-    engine
-        .resume(&session)
-        .await
-        .expect("the seeded session resumes");
+    engine.resume(&session).await.expect("the seeded session resumes");
 
     (engine, seen)
 }
@@ -142,10 +140,7 @@ async fn answered_turn(
         .expect("an idle engine accepts a prompt");
     let (id, mut seen) = until_question(events).await;
     engine
-        .send(Command::ReplyQuestion {
-            id,
-            answers: vec![vec![answer.to_owned()]],
-        })
+        .send(Command::ReplyQuestion { id, answers: vec![vec![answer.to_owned()]] })
         .await
         .expect("a reply is never refused");
     seen.extend(drain(events).await);
@@ -205,9 +200,7 @@ fn tool_part(seen: &[Event], tool: &str) -> ToolState {
         .rev()
         .find_map(|event| match event {
             Event::PartUpdated { part, .. } => match &part.body {
-                PartBody::Tool {
-                    tool: named, state, ..
-                } if named == tool => Some(state.clone()),
+                PartBody::Tool { tool: named, state, .. } if named == tool => Some(state.clone()),
                 _ => None,
             },
             _ => None,
@@ -235,11 +228,8 @@ fn finish(seen: &[Event]) -> FinishReason {
 #[tokio::test]
 async fn a_yes_answer_lands_the_switch_to_plan_when_the_turn_ends() {
     let dir = tempfile::tempdir().expect("a temporary directory");
-    let (engine, requests) = persistent_over(
-        vec![enter_call()],
-        Storage::open(dir.path().join("storage")),
-    )
-    .await;
+    let (engine, requests) =
+        persistent_over(vec![enter_call()], Storage::open(dir.path().join("storage"))).await;
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
     assert_eq!(
         engine.agent().as_deref(),
@@ -250,9 +240,8 @@ async fn a_yes_answer_lands_the_switch_to_plan_when_the_turn_ends() {
     let seen = answered_turn(&engine, &mut events, "add a cache layer", "Yes").await;
 
     // The synthesized question, pinned where a person would read it (**D477**).
-    let Some(Event::QuestionAsked { questions, .. }) = seen
-        .iter()
-        .find(|event| matches!(event, Event::QuestionAsked { .. }))
+    let Some(Event::QuestionAsked { questions, .. }) =
+        seen.iter().find(|event| matches!(event, Event::QuestionAsked { .. }))
     else {
         panic!("the tool asks, got {seen:?}");
     };
@@ -380,10 +369,7 @@ async fn an_edit_in_the_turn_that_asked_is_still_a_build_agents_edit() {
         .expect("an idle engine accepts a prompt");
     let (id, _) = until_question(&mut events).await;
     engine
-        .send(Command::ReplyQuestion {
-            id,
-            answers: vec![vec!["Yes".to_owned()]],
-        })
+        .send(Command::ReplyQuestion { id, answers: vec![vec!["Yes".to_owned()]] })
         .await
         .expect("a reply is never refused");
     let seen = ganja_testkit::drain_allowing(&engine, &mut events).await;
@@ -415,13 +401,7 @@ async fn a_manual_switch_after_yes_supersedes_the_plan_switch() {
     let (agent, _) = boundary_announcement(&mut events).await;
     assert_eq!(agent, "plan");
 
-    send_when_idle(
-        &engine,
-        Command::SwitchAgent {
-            name: "build".to_owned(),
-        },
-    )
-    .await;
+    send_when_idle(&engine, Command::SwitchAgent { name: "build".to_owned() }).await;
     match next_event(&mut events).await {
         Event::AgentChanged { agent, .. } => assert_eq!(agent, "build"),
         other => panic!("the manual supersede announces itself, got {other:?}"),
@@ -474,10 +454,7 @@ async fn a_restart_between_yes_and_the_prompt_resumes_as_plan() {
         storage,
     )
     .with_agents(ganja_testkit::agent_registry(&Config::default()));
-    engine
-        .resume(&session)
-        .await
-        .expect("the switched session resumes");
+    engine.resume(&session).await.expect("the switched session resumes");
     assert_eq!(
         engine.agent().as_deref(),
         Some("plan"),
@@ -499,9 +476,7 @@ async fn a_planning_session_reads_a_refusal_rather_than_a_missing_tool() {
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
-        .send(Command::SwitchAgent {
-            name: "plan".to_owned(),
-        })
+        .send(Command::SwitchAgent { name: "plan".to_owned() })
         .await
         .expect("plan is a builtin primary agent");
     match next_event(&mut events).await {
@@ -537,10 +512,7 @@ async fn a_planning_session_reads_a_refusal_rather_than_a_missing_tool() {
         .iter()
         .map(|tool| tool.name.as_str())
         .collect();
-    assert!(
-        offered.contains(&"plan_enter"),
-        "denied tools are not hidden: {offered:?}"
-    );
+    assert!(offered.contains(&"plan_enter"), "denied tools are not hidden: {offered:?}");
 }
 
 /// The registration gate, in both directions: the door is absent from the
@@ -549,10 +521,7 @@ async fn a_planning_session_reads_a_refusal_rather_than_a_missing_tool() {
 #[tokio::test]
 async fn the_enter_door_is_registered_only_where_a_plan_agent_exists() {
     assert!(
-        !Registry::with_builtins()
-            .definitions()
-            .iter()
-            .any(|tool| tool.name == "plan_enter"),
+        !Registry::with_builtins().definitions().iter().any(|tool| tool.name == "plan_enter"),
         "the builtin surface must not move"
     );
 
@@ -579,10 +548,7 @@ async fn the_enter_door_is_registered_only_where_a_plan_agent_exists() {
         .iter()
         .map(|tool| tool.name.clone())
         .collect();
-    assert!(
-        offered.iter().any(|name| name == "plan_enter"),
-        "{offered:?}"
-    );
+    assert!(offered.iter().any(|name| name == "plan_enter"), "{offered:?}");
 
     // And a roster with plan disabled: nothing to switch to, nothing offered.
     let config: Config = serde_json::from_value(json!({
@@ -618,10 +584,7 @@ async fn the_enter_door_is_registered_only_where_a_plan_agent_exists() {
         .iter()
         .map(|tool| tool.name.clone())
         .collect();
-    assert!(
-        !offered.iter().any(|name| name == "plan_enter"),
-        "presence is ability: {offered:?}"
-    );
+    assert!(!offered.iter().any(|name| name == "plan_enter"), "presence is ability: {offered:?}");
 }
 
 /// The rebuild clause, mirroring the exit door's: `plan_enter` is registered
@@ -691,10 +654,7 @@ async fn plan_enter_survives_the_mcp_dial_rebuild() {
     let deadline = tokio::time::Instant::now() + PATIENCE;
     loop {
         let status = engine.mcp_status();
-        if status
-            .get("ref")
-            .is_some_and(|status| matches!(status, McpStatus::Connected))
-        {
+        if status.get("ref").is_some_and(|status| matches!(status, McpStatus::Connected)) {
             break;
         }
         assert!(
@@ -722,10 +682,7 @@ async fn plan_enter_survives_the_mcp_dial_rebuild() {
             .map(|tool| tool.name.clone())
             .collect()
     };
-    assert!(
-        offered.iter().any(|name| name == "plan_enter"),
-        "got {offered:?}"
-    );
+    assert!(offered.iter().any(|name| name == "plan_enter"), "got {offered:?}");
     assert!(
         offered.iter().any(|name| name.starts_with("mcp__ref__")),
         "the rebuild really happened — the dialled server's tools are in the set: {offered:?}"

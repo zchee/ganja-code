@@ -41,21 +41,15 @@ fn fifty_one_submissions_keep_exactly_fifty() {
     );
     // The oldest fell off the front; the newest is still there.
     assert!(!on_disk.contains("\"prompt 0\""), "the oldest was dropped");
-    assert!(
-        on_disk.contains(&format!("\"prompt {MAX_HISTORY_ENTRIES}\"")),
-        "the newest was kept"
-    );
+    assert!(on_disk.contains(&format!("\"prompt {MAX_HISTORY_ENTRIES}\"")), "the newest was kept");
 }
 
 #[test]
 fn a_corrupt_line_is_dropped_and_the_file_self_heals() {
     let directory = temporary();
     let path = directory.path().join("prompt-history.jsonl");
-    std::fs::write(
-        &path,
-        "{\"input\":\"good one\"}\nnot json at all\n{\"input\":\"good two\"}\n",
-    )
-    .expect("the fixture writes");
+    std::fs::write(&path, "{\"input\":\"good one\"}\nnot json at all\n{\"input\":\"good two\"}\n")
+        .expect("the fixture writes");
 
     let mut history = History::load_from(path.clone());
 
@@ -134,11 +128,7 @@ fn up_restores_the_last_prompt_and_down_returns_to_empty() {
         Some(PromptInfo::text("older")),
         "the second Up is the one before it"
     );
-    assert_eq!(
-        history.step(Direction::Older, "older"),
-        None,
-        "there is nothing older to reach"
-    );
+    assert_eq!(history.step(Direction::Older, "older"), None, "there is nothing older to reach");
     assert_eq!(
         history.step(Direction::Newer, "older"),
         Some(PromptInfo::text("newer")),
@@ -167,16 +157,10 @@ fn the_mode_survives_the_round_trip_and_the_empty_parts_stay_off_the_file() {
 
     let on_disk = std::fs::read_to_string(&path).expect("the file reads");
     assert!(on_disk.contains("\"mode\":\"shell\""), "got:\n{on_disk}");
-    assert!(
-        !on_disk.contains("\"parts\""),
-        "an empty parts vector is not written:\n{on_disk}"
-    );
+    assert!(!on_disk.contains("\"parts\""), "an empty parts vector is not written:\n{on_disk}");
 
     let recalled = parse(&on_disk);
-    assert_eq!(
-        recalled.first().and_then(|e| e.mode),
-        Some(super::Mode::Shell)
-    );
+    assert_eq!(recalled.first().and_then(|e| e.mode), Some(super::Mode::Shell));
 }
 
 /// The search modal reads the whole store newest first — the opposite
@@ -190,11 +174,8 @@ fn entries_reads_back_newest_first() {
     history.append(PromptInfo::text("second"));
     history.append(PromptInfo::text("third"));
 
-    let inputs: Vec<String> = history
-        .entries()
-        .into_iter()
-        .map(|recalled| recalled.prompt.input)
-        .collect();
+    let inputs: Vec<String> =
+        history.entries().into_iter().map(|recalled| recalled.prompt.input).collect();
     assert_eq!(inputs, ["third", "second", "first"]);
 }
 
@@ -209,11 +190,7 @@ fn entries_loaded_from_disk_share_one_dated_instant() {
         .expect("the fixture writes");
 
     let history = History::load_from(path);
-    let ats: Vec<u64> = history
-        .entries()
-        .into_iter()
-        .map(|recalled| recalled.at)
-        .collect();
+    let ats: Vec<u64> = history.entries().into_iter().map(|recalled| recalled.at).collect();
 
     assert_eq!(ats.len(), 2);
     assert_eq!(ats[0], ats[1], "a load has one instant, not a spread");

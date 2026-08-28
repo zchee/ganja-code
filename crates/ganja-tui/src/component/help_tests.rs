@@ -1,9 +1,12 @@
 use std::collections::BTreeMap;
 
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 
 use super::Help;
-use crate::{command::COMMANDS, keybind::Keybinds, theme::Theme};
+use crate::command::COMMANDS;
+use crate::keybind::Keybinds;
+use crate::theme::Theme;
 
 /// Tall enough for every row the card holds at once, which is what makes
 /// this the area for "is it listed at all" questions. What a *stock*
@@ -24,23 +27,14 @@ const AREA: Rect = Rect {
 /// rows and the status bar's one. That is the area the card outgrew, and
 /// asserting against the whole 80×24 window here would test a size nothing
 /// ever renders into.
-const STOCK: Rect = Rect {
-    x: 0,
-    y: 0,
-    width: 80,
-    height: 18,
-};
+const STOCK: Rect = Rect { x: 0, y: 0, width: 80, height: 18 };
 
 fn drawn(help: &mut Help, area: Rect) -> String {
     let mut buffer = Buffer::empty(area);
     help.render(area, &mut buffer, &Theme::default());
 
     (0..area.height)
-        .map(|row| {
-            (0..area.width)
-                .map(|column| buffer[(column, row)].symbol())
-                .collect::<String>()
-        })
+        .map(|row| (0..area.width).map(|column| buffer[(column, row)].symbol()).collect::<String>())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -67,11 +61,7 @@ fn the_card_lists_every_command() {
     let screen = rendered(&mut Help::new(Keybinds::defaults()));
 
     for entry in COMMANDS {
-        assert!(
-            screen.contains(&entry.slash()),
-            "{} should be listed:\n{screen}",
-            entry.slash()
-        );
+        assert!(screen.contains(&entry.slash()), "{} should be listed:\n{screen}", entry.slash());
     }
 }
 
@@ -92,10 +82,7 @@ fn every_row_is_reachable_on_a_stock_terminal() {
         );
     }
     for name in ["keys", "palette_open", "agent_cycle"] {
-        assert!(
-            screen.contains(name),
-            "{name} should be reachable at 80x24:\n{screen}"
-        );
+        assert!(screen.contains(name), "{name} should be reachable at 80x24:\n{screen}");
     }
 }
 
@@ -106,14 +93,8 @@ fn a_card_that_does_not_fit_says_how_much_of_it_is_showing() {
     let mut help = Help::new(Keybinds::defaults());
 
     let first = drawn(&mut help, STOCK);
-    assert!(
-        first.contains("1-"),
-        "the counter should start at the first row:\n{first}"
-    );
-    assert!(
-        first.contains("[up/down] scroll"),
-        "and say which keys move it:\n{first}"
-    );
+    assert!(first.contains("1-"), "the counter should start at the first row:\n{first}");
+    assert!(first.contains("[up/down] scroll"), "and say which keys move it:\n{first}");
 
     help.scroll(1);
     let moved = drawn(&mut help, STOCK);
@@ -143,10 +124,7 @@ fn scrolling_past_the_end_settles_on_the_last_row_rather_than_running_away() {
     help.scroll(-1);
     let stepped_back = drawn(&mut help, STOCK);
 
-    assert_ne!(
-        bottom, stepped_back,
-        "one step up from the bottom should move the card"
-    );
+    assert_ne!(bottom, stepped_back, "one step up from the bottom should move the card");
     help.scroll(-isize::MAX);
     assert_eq!(
         drawn(&mut help, STOCK),

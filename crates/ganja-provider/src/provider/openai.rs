@@ -18,7 +18,9 @@
 //! Unlike Anthropic, the frames are unnamed — every one is a `data:` line
 //! holding a chunk object, and the stream ends with the literal `[DONE]`.
 
-use std::{borrow::Cow, collections::HashMap, fmt};
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::fmt;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -27,16 +29,13 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    protocol::{FinishReason, Part, PartBody, Role, ToolState, Usage},
-    provider::{
-        ChatRequest, CredentialSource, Mapper, NO_RESULT, Presented, Provider, ProviderError,
-        ProviderEvent, check_base_url, client, open, require_key, setting, shown_base_url,
-        splice_effort,
-        sse::Frame,
-        steps,
-        toolname::{Aliases, OPENAI_CAP, alias},
-    },
+use crate::protocol::{FinishReason, Part, PartBody, Role, ToolState, Usage};
+use crate::provider::sse::Frame;
+use crate::provider::toolname::{Aliases, OPENAI_CAP, alias};
+use crate::provider::{
+    ChatRequest, CredentialSource, Mapper, NO_RESULT, Presented, Provider, ProviderError,
+    ProviderEvent, check_base_url, client, open, require_key, setting, shown_base_url,
+    splice_effort, steps,
 };
 
 /// Value of [`PROVIDER_ENV`](super::PROVIDER_ENV) that selects this provider.
@@ -120,10 +119,7 @@ impl OpenAiProvider {
         let base_url = setting(BASE_URL_ENV).unwrap_or_else(|| DEFAULT_BASE_URL.to_owned());
         check_base_url(&base_url)?;
 
-        Self::with_credential(
-            CredentialSource::Key(require_key(ID, API_KEY_ENV)?),
-            base_url,
-        )
+        Self::with_credential(CredentialSource::Key(require_key(ID, API_KEY_ENV)?), base_url)
     }
 
     /// Builds a provider that authenticates however `credential` says.
@@ -203,10 +199,7 @@ impl Provider for OpenAiProvider {
         let aliases = Aliases::of(&request.tools, OPENAI_CAP);
         let built = self
             .client
-            .post(format!(
-                "{}/chat/completions",
-                self.base_url.trim_end_matches('/')
-            ))
+            .post(format!("{}/chat/completions", self.base_url.trim_end_matches('/')))
             .bearer_auth(presented.expose())
             // After the bearer, and never carrying one: these describe the
             // endpoint, and a credential put here would travel outside the
@@ -231,10 +224,7 @@ impl Provider for OpenAiProvider {
         );
 
         open(
-            move || Mapping {
-                aliases: aliases.clone(),
-                ..Mapping::default()
-            },
+            move || Mapping { aliases: aliases.clone(), ..Mapping::default() },
             &self.client,
             built,
             &self.base_url,
@@ -339,12 +329,7 @@ struct CallFunction<'a> {
 impl<'a> Turn<'a> {
     /// A message that is only text.
     fn said(role: &'static str, content: Cow<'a, str>) -> Self {
-        Self {
-            role,
-            content: Some(content),
-            tool_calls: Vec::new(),
-            tool_call_id: None,
-        }
+        Self { role, content: Some(content), tool_calls: Vec::new(), tool_call_id: None }
     }
 
     /// One call's result, which this API carries as a message of its own.
@@ -403,12 +388,7 @@ impl<'a> Body<'a> {
                     continue;
                 }
 
-                messages.push(Turn {
-                    role,
-                    content,
-                    tool_calls: calls,
-                    tool_call_id: None,
-                });
+                messages.push(Turn { role, content, tool_calls: calls, tool_call_id: None });
                 messages.extend(results);
             }
         }
@@ -416,9 +396,7 @@ impl<'a> Body<'a> {
         Self {
             model: &request.model,
             stream: true,
-            stream_options: StreamOptions {
-                include_usage: true,
-            },
+            stream_options: StreamOptions { include_usage: true },
             messages,
             tools: request
                 .tools
@@ -450,11 +428,7 @@ fn split(parts: &[Part]) -> (Option<Cow<'_, str>>, Vec<Call<'_>>, Vec<Turn<'_>>)
                     texts.push(text);
                 }
             }
-            PartBody::Tool {
-                call_id,
-                tool,
-                state,
-            } => {
+            PartBody::Tool { call_id, tool, state } => {
                 calls.push(Call {
                     id: call_id,
                     kind: "function",
@@ -666,9 +640,8 @@ impl Mapping {
                     // The identifier and the name arrive once, on the chunk
                     // that opens the call; everything after it is arguments.
                     // A server that sends neither still gets a stable id.
-                    let id = call["id"]
-                        .as_str()
-                        .map_or_else(|| format!("call_{index}"), str::to_owned);
+                    let id =
+                        call["id"].as_str().map_or_else(|| format!("call_{index}"), str::to_owned);
                     self.tools.insert(index, id.clone());
 
                     events.push(ProviderEvent::ToolCallStart {
@@ -688,10 +661,7 @@ impl Mapping {
             if let Some(json) = function["arguments"].as_str()
                 && !json.is_empty()
             {
-                events.push(ProviderEvent::ToolCallDelta {
-                    id,
-                    json: json.to_owned(),
-                });
+                events.push(ProviderEvent::ToolCallDelta { id, json: json.to_owned() });
             }
         }
     }
@@ -702,10 +672,7 @@ impl Mapping {
         // the stream is. Ordered so that a replay is deterministic.
         let mut open: Vec<(u64, String)> = self.tools.drain().collect();
         open.sort_unstable();
-        events.extend(
-            open.into_iter()
-                .map(|(_index, id)| ProviderEvent::ToolCallEnd { id }),
-        );
+        events.extend(open.into_iter().map(|(_index, id)| ProviderEvent::ToolCallEnd { id }));
 
         // `prompt_tokens` counts the cached tokens as well, and `Usage` keeps
         // its five counters disjoint so that each can be billed at its own
@@ -721,9 +688,7 @@ impl Mapping {
         // Saturating rather than wrapping: an endpoint claiming more cached
         // tokens than prompt tokens must read as nothing fresh, not as a bill
         // for eighteen quintillion tokens.
-        self.usage.input_tokens = self
-            .prompt_tokens
-            .saturating_sub(self.usage.cache_read_tokens);
+        self.usage.input_tokens = self.prompt_tokens.saturating_sub(self.usage.cache_read_tokens);
 
         events.push(ProviderEvent::Usage(self.usage));
         events.push(ProviderEvent::Finish(FinishReason::Completed));
@@ -741,17 +706,11 @@ fn failure(error: &Value) -> ProviderError {
     // `provider::shielded`, the seam that holds the credential to mask with.
     let message = super::reported(error);
 
-    match error["code"]
-        .as_u64()
-        .and_then(|code| u16::try_from(code).ok())
-    {
+    match error["code"].as_u64().and_then(|code| u16::try_from(code).ok()) {
         Some(status) => ProviderError::Status { status, message },
         // `code` is usually a slug rather than a number, and the HTTP status
         // was 200 by the time this arrived, so there is nothing truer to say.
-        None => ProviderError::Status {
-            status: 500,
-            message,
-        },
+        None => ProviderError::Status { status: 500, message },
     }
 }
 

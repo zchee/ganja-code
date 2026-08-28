@@ -11,7 +11,8 @@
 use std::path::Path;
 
 use anyhow::{Context as _, Result};
-use ganja_core::{instruction, tool::skill};
+use ganja_core::instruction;
+use ganja_core::tool::skill;
 
 /// Prints the discovered skills, or says honestly that there are none.
 pub fn skills_command(cwd: &Path) -> Result<()> {
@@ -44,11 +45,7 @@ fn rows(roots: &skill::Roots, found: &[skill::Skill]) -> Vec<String> {
         ];
     }
 
-    let name_width = found
-        .iter()
-        .map(|skill| skill.name.chars().count())
-        .max()
-        .unwrap_or(0);
+    let name_width = found.iter().map(|skill| skill.name.chars().count()).max().unwrap_or(0);
     let mut lines = vec![format!("{:<name_width$}  (SOURCE) DESCRIPTION", "NAME")];
     lines.extend(found.iter().map(|skill| {
         let source = skill::origin(roots, skill)

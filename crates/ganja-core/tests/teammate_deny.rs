@@ -19,16 +19,16 @@
 //! resolves the project's stored answers beneath it), so it holds exactly one
 //! test.
 
-use std::{path::Path, sync::Arc, time::Duration};
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
-use ganja_core::{
-    Storage,
-    permission::{self, Permissions},
-    project::Project,
-    protocol::{Part, PartBody, Role, ToolState},
-    teammate::posture,
-    tool::Registry,
-};
+use ganja_core::Storage;
+use ganja_core::permission::{self, Permissions};
+use ganja_core::project::Project;
+use ganja_core::protocol::{Part, PartBody, Role, ToolState};
+use ganja_core::teammate::posture;
+use ganja_core::tool::Registry;
 use ganja_testkit::{RecordedSpawns, caller_with, eventually, spawn_with_prompt, team_with};
 
 /// How long a claim about the runner is waited for before it is a failure. The
@@ -43,9 +43,8 @@ const NOTHING_ARRIVES: Duration = Duration::from_millis(200);
 /// Writes the project's stored ruleset — the tier a person's own answers land
 /// in, and the one a spawn must not be able to step around.
 fn store_deny(project: &Path, rule: serde_json::Value) {
-    let directory = Project::resolve(project)
-        .data_dir()
-        .expect("the redirected data home is writable");
+    let directory =
+        Project::resolve(project).data_dir().expect("the redirected data home is writable");
     std::fs::create_dir_all(&directory).expect("the store directory is creatable");
     std::fs::write(
         directory.join(permission::FILE),
@@ -121,9 +120,7 @@ async fn a_teammate_cannot_do_what_the_leads_rules_deny() {
             let lead = Arc::clone(&lead);
             move |_| {
                 posture::permissions_for(
-                    &lead
-                        .lock()
-                        .expect("the permission rules are never poisoned"),
+                    &lead.lock().expect("the permission rules are never poisoned"),
                     Vec::new(),
                 )
             }
@@ -151,37 +148,25 @@ async fn a_teammate_cannot_do_what_the_leads_rules_deny() {
     .expect("an in-process teammate spawns");
     spawn_asks.asked_nobody();
 
-    let session = eventually(
-        EVENTUALLY,
-        "the teammate's own session to exist",
-        async || {
-            storage
-                .list_sessions()
-                .expect("the store lists")
-                .first()
-                .map(|info| info.id.clone())
-        },
-    )
+    let session = eventually(EVENTUALLY, "the teammate's own session to exist", async || {
+        storage.list_sessions().expect("the store lists").first().map(|info| info.id.clone())
+    })
     .await;
-    eventually(
-        EVENTUALLY,
-        "the teammate to read the refusal and answer it",
-        async || {
-            storage
-                .load_transcript(&session)
-                .expect("the transcript reads")
-                .iter()
-                .any(|message| {
-                    message.role == Role::Assistant
-                        && message
-                            .parts
-                            .iter()
-                            .filter_map(Part::as_text)
-                            .any(|text| text.contains("the rules refuse that"))
-                })
-                .then_some(())
-        },
-    )
+    eventually(EVENTUALLY, "the teammate to read the refusal and answer it", async || {
+        storage
+            .load_transcript(&session)
+            .expect("the transcript reads")
+            .iter()
+            .any(|message| {
+                message.role == Role::Assistant
+                    && message
+                        .parts
+                        .iter()
+                        .filter_map(Part::as_text)
+                        .any(|text| text.contains("the rules refuse that"))
+            })
+            .then_some(())
+    })
     .await;
 
     let recorded = calls(&storage, &session);
@@ -194,14 +179,9 @@ async fn a_teammate_cannot_do_what_the_leads_rules_deny() {
         "the model is told a rule refused it: {error}"
     );
 
+    assert!(!forbidden.exists(), "a refused write leaves the file it named untouched");
     assert!(
-        !forbidden.exists(),
-        "a refused write leaves the file it named untouched"
-    );
-    assert!(
-        tokio::time::timeout(NOTHING_ARRIVES, asked.recv())
-            .await
-            .is_err(),
+        tokio::time::timeout(NOTHING_ARRIVES, asked.recv()).await.is_err(),
         "a deny is not a question, so nobody is asked one"
     );
 

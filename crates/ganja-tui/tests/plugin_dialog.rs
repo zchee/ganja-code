@@ -9,20 +9,19 @@
 //! one move the homes out from under it. Everything in this file is
 //! therefore one test, the `theme_paths` discipline.
 
-use std::{fs, sync::Arc};
+use std::fs;
+use std::sync::Arc;
 
-use ganja_core::{
-    Engine,
-    plugin::Store,
-    provider::{FakeProvider, fake},
-};
+use ganja_core::Engine;
+use ganja_core::plugin::Store;
+use ganja_core::provider::{FakeProvider, fake};
 use ganja_testkit::plant;
-use ganja_tui::{app::App, event::AppEvent, theme::Themes};
-use ratatui::{
-    Terminal,
-    backend::TestBackend,
-    crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyModifiers},
-};
+use ganja_tui::app::App;
+use ganja_tui::event::AppEvent;
+use ganja_tui::theme::Themes;
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
+use ratatui::crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyModifiers};
 use tempfile::TempDir;
 
 /// One keypress, as the event loop would deliver it.
@@ -36,11 +35,7 @@ fn screen(terminal: &Terminal<TestBackend>) -> String {
     let area = buffer.area;
 
     (0..area.height)
-        .map(|row| {
-            (0..area.width)
-                .map(|column| buffer[(column, row)].symbol())
-                .collect::<String>()
-        })
+        .map(|row| (0..area.width).map(|column| buffer[(column, row)].symbol()).collect::<String>())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -83,9 +78,7 @@ async fn the_dialog_discovers_the_store_under_the_config_home_and_reload_reports
     store
         .add_marketplace(market.to_str().expect("the fixture path is unicode"))
         .expect("the fixture marketplace adds");
-    store
-        .install("formatter", "company-tools")
-        .expect("the fixture plugin installs");
+    store.install("formatter", "company-tools").expect("the fixture plugin installs");
 
     let engine = Engine::new(
         Arc::new(FakeProvider::default()),
@@ -93,20 +86,14 @@ async fn the_dialog_discovers_the_store_under_the_config_home_and_reload_reports
         Arc::new(ganja_tool::Registry::new(Vec::new())),
         ganja_permission::Permissions::default(),
     );
-    let mut app = App::new(engine, None, Themes::builtin())
-        .with_cwd(&project)
-        .with_root(&project);
+    let mut app = App::new(engine, None, Themes::builtin()).with_cwd(&project).with_root(&project);
 
     // `/plugin` typed at the composer, dispatched on Enter — no builder store
     // was handed in, so the dialog's rows prove the discovery path.
     for character in "/plugin".chars() {
-        app.handle(key(KeyCode::Char(character)))
-            .await
-            .expect("the key is handled");
+        app.handle(key(KeyCode::Char(character))).await.expect("the key is handled");
     }
-    app.handle(key(KeyCode::Enter))
-        .await
-        .expect("the submit is handled");
+    app.handle(key(KeyCode::Enter)).await.expect("the submit is handled");
 
     let mut terminal =
         Terminal::new(TestBackend::new(100, 30)).expect("a test terminal is creatable");
@@ -122,13 +109,9 @@ async fn the_dialog_discovers_the_store_under_the_config_home_and_reload_reports
 
     // One plugin row, then Add, Install, Reload: three Downs land on Reload.
     for _ in 0..3 {
-        app.handle(key(KeyCode::Down))
-            .await
-            .expect("the key is handled");
+        app.handle(key(KeyCode::Down)).await.expect("the key is handled");
     }
-    app.handle(key(KeyCode::Enter))
-        .await
-        .expect("the reload is handled");
+    app.handle(key(KeyCode::Enter)).await.expect("the reload is handled");
 
     app.draw(&mut terminal).expect("a frame draws");
     let reloaded = screen(&terminal);

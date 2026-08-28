@@ -16,18 +16,19 @@
 
 #![cfg(unix)]
 
-use std::{collections::BTreeMap, path::Path, sync::Arc};
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::sync::Arc;
 
-use futures::{StreamExt as _, stream::BoxStream};
-use ganja_core::{
-    Engine, EngineError, Storage,
-    config::{HookCommand, HookHandler, HookMatcher},
-    hook::{HookEvent, Hooks},
-    permission::Permissions,
-    protocol::{Command, Event, FinishReason, Message, PartBody, ToolState},
-    provider::{ChatRequest, ProviderEvent},
-    tool::Registry,
-};
+use futures::StreamExt as _;
+use futures::stream::BoxStream;
+use ganja_core::config::{HookCommand, HookHandler, HookMatcher};
+use ganja_core::hook::{HookEvent, Hooks};
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{Command, Event, FinishReason, Message, PartBody, ToolState};
+use ganja_core::provider::{ChatRequest, ProviderEvent};
+use ganja_core::tool::Registry;
+use ganja_core::{Engine, EngineError, Storage};
 use ganja_testkit::{RecorderTool, ScriptedProvider, drain, says};
 use serde_json::Value;
 
@@ -43,10 +44,7 @@ fn block(
         event.name().to_owned(),
         vec![HookMatcher {
             matcher: matcher.map(str::to_owned),
-            hooks: vec![HookHandler::Command(HookCommand {
-                command: command.to_owned(),
-                timeout,
-            })],
+            hooks: vec![HookHandler::Command(HookCommand { command: command.to_owned(), timeout })],
         }],
     );
 
@@ -92,36 +90,22 @@ async fn awaited(ledger: &Path, count: usize) -> Vec<Value> {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 
-    panic!(
-        "waited for {count} hook envelopes and saw {:?}",
-        events_recorded(ledger)
-    );
+    panic!("waited for {count} hook envelopes and saw {:?}", events_recorded(ledger));
 }
 
 /// The `hook_event_name` of every envelope in `ledger`.
 fn events_recorded(ledger: &Path) -> Vec<String> {
     recorded(ledger)
         .into_iter()
-        .map(|envelope| {
-            envelope["hook_event_name"]
-                .as_str()
-                .unwrap_or("?")
-                .to_owned()
-        })
+        .map(|envelope| envelope["hook_event_name"].as_str().unwrap_or("?").to_owned())
         .collect()
 }
 
 /// A tool-call script fragment, arguments in one piece.
 fn call(id: &str, tool: &str, args: Value) -> Vec<ProviderEvent> {
     vec![
-        ProviderEvent::ToolCallStart {
-            id: id.to_owned(),
-            name: tool.to_owned(),
-        },
-        ProviderEvent::ToolCallDelta {
-            id: id.to_owned(),
-            json: args.to_string(),
-        },
+        ProviderEvent::ToolCallStart { id: id.to_owned(), name: tool.to_owned() },
+        ProviderEvent::ToolCallDelta { id: id.to_owned(), json: args.to_string() },
         ProviderEvent::ToolCallEnd { id: id.to_owned() },
         ProviderEvent::Finish(FinishReason::Completed),
     ]
@@ -160,11 +144,9 @@ fn errors(seen: &[Event]) -> Vec<(String, String)> {
     seen.iter()
         .filter_map(|event| match event {
             Event::PartUpdated { part, .. } => match &part.body {
-                PartBody::Tool {
-                    tool,
-                    state: ToolState::Error { error, .. },
-                    ..
-                } => Some((tool.clone(), error.clone())),
+                PartBody::Tool { tool, state: ToolState::Error { error, .. }, .. } => {
+                    Some((tool.clone(), error.clone()))
+                }
                 _ => None,
             },
             _ => None,
@@ -177,11 +159,9 @@ fn completions(seen: &[Event]) -> Vec<(String, String)> {
     seen.iter()
         .filter_map(|event| match event {
             Event::PartUpdated { part, .. } => match &part.body {
-                PartBody::Tool {
-                    tool,
-                    state: ToolState::Completed { output, .. },
-                    ..
-                } => Some((tool.clone(), output.clone())),
+                PartBody::Tool { tool, state: ToolState::Completed { output, .. }, .. } => {
+                    Some((tool.clone(), output.clone()))
+                }
                 _ => None,
             },
             _ => None,
@@ -221,17 +201,11 @@ async fn a_matcher_refuses_the_calls_it_names_and_lets_the_others_through() {
     )
     .with_hooks(hooks);
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
-    engine
-        .send(prompt("edit it"))
-        .await
-        .expect("an idle engine accepts a prompt");
+    engine.send(prompt("edit it")).await.expect("an idle engine accepts a prompt");
     let seen = drain(&mut events).await;
 
     assert!(
-        edits
-            .lock()
-            .expect("the call log is never poisoned")
-            .is_empty(),
+        edits.lock().expect("the call log is never poisoned").is_empty(),
         "the refused call must never have run"
     );
     assert_eq!(
@@ -248,13 +222,7 @@ async fn a_matcher_refuses_the_calls_it_names_and_lets_the_others_through() {
         errors[0].1
     );
     assert!(
-        matches!(
-            seen.last(),
-            Some(Event::MessageFinished {
-                reason: FinishReason::Completed,
-                ..
-            })
-        ),
+        matches!(seen.last(), Some(Event::MessageFinished { reason: FinishReason::Completed, .. })),
         "a refused call is information, not the end of the turn: {:?}",
         seen.last()
     );
@@ -289,18 +257,13 @@ async fn an_allow_decision_skips_the_dialog_for_an_ask_gated_call() {
     )
     .with_hooks(hooks);
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
-    engine
-        .send(prompt("run it"))
-        .await
-        .expect("an idle engine accepts a prompt");
+    engine.send(prompt("run it")).await.expect("an idle engine accepts a prompt");
     // Nothing answers a dialog here: if one were raised, this drain would hang
     // rather than return, which is the strongest form the assertion has.
     let seen = drain(&mut events).await;
 
     assert!(
-        !seen
-            .iter()
-            .any(|event| matches!(event, Event::PermissionRequested { .. })),
+        !seen.iter().any(|event| matches!(event, Event::PermissionRequested { .. })),
         "the hook answered, so nobody is asked: {seen:#?}"
     );
     assert_eq!(
@@ -327,10 +290,7 @@ async fn the_same_call_without_a_hook_still_asks() {
         Permissions::default(),
     );
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
-    engine
-        .send(prompt("run it"))
-        .await
-        .expect("an idle engine accepts a prompt");
+    engine.send(prompt("run it")).await.expect("an idle engine accepts a prompt");
 
     let asked = loop {
         match events.next().await {
@@ -349,12 +309,7 @@ async fn a_user_prompt_submit_hooks_stdout_reaches_the_model() {
     let dir = ganja_testkit::temp_dir();
     let (provider, requests) = ScriptedProvider::new(vec![says("noted")]);
     let hooks = Hooks::new(
-        &block(
-            HookEvent::UserPromptSubmit,
-            None,
-            "echo 'the build is red on main'",
-            None,
-        ),
+        &block(HookEvent::UserPromptSubmit, None, "echo 'the build is red on main'", None),
         dir.path(),
     )
     .expect("the block describes hooks");
@@ -367,10 +322,7 @@ async fn a_user_prompt_submit_hooks_stdout_reaches_the_model() {
     )
     .with_hooks(hooks);
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
-    engine
-        .send(prompt("what is going on"))
-        .await
-        .expect("an idle engine accepts a prompt");
+    engine.send(prompt("what is going on")).await.expect("an idle engine accepts a prompt");
     drain(&mut events).await;
 
     let requests = requests.lock().expect("the request log is never poisoned");
@@ -406,20 +358,14 @@ async fn a_user_prompt_submit_hook_that_exits_two_refuses_the_prompt() {
     )
     .with_hooks(hooks);
 
-    let refused = engine
-        .send(prompt("ship it"))
-        .await
-        .expect_err("the hook refused the prompt");
+    let refused = engine.send(prompt("ship it")).await.expect_err("the hook refused the prompt");
     let EngineError::HookRefused { event, reason } = &refused else {
         panic!("expected a typed hook refusal, got {refused:?}");
     };
     assert_eq!(*event, "UserPromptSubmit");
     assert_eq!(reason, "not while the release is out");
     assert!(
-        requests
-            .lock()
-            .expect("the request log is never poisoned")
-            .is_empty(),
+        requests.lock().expect("the request log is never poisoned").is_empty(),
         "the model never heard the prompt"
     );
 
@@ -443,11 +389,9 @@ async fn session_start_names_startup_and_resume_only_on_a_resume() {
     ganja_testkit::seed_message(&storage, &session, &Message::user("the objective"));
 
     let (provider, _requests) = ScriptedProvider::new(vec![says("hello")]);
-    let hooks = Hooks::new(
-        &block(HookEvent::SessionStart, None, &records_into(&ledger), None),
-        dir.path(),
-    )
-    .expect("the block describes hooks");
+    let hooks =
+        Hooks::new(&block(HookEvent::SessionStart, None, &records_into(&ledger), None), dir.path())
+            .expect("the block describes hooks");
     let engine = Engine::persistent(
         provider,
         ganja_core::catalog::default_model("anthropic").expect("the catalog has a default"),
@@ -474,10 +418,7 @@ async fn session_start_names_startup_and_resume_only_on_a_resume() {
     assert_eq!(sources, vec!["startup".to_owned(), "resume".to_owned()]);
     // The resumed fire names the session that was resumed, not the one the
     // engine minted at birth.
-    assert_eq!(
-        recorded(&ledger)[1]["session_id"].as_str(),
-        Some(session.as_str())
-    );
+    assert_eq!(recorded(&ledger)[1]["session_id"].as_str(), Some(session.as_str()));
 }
 
 /// **D460**: what a `SessionStart` hook said reaches the model once, on the
@@ -487,12 +428,7 @@ async fn session_start_context_rides_exactly_one_turn() {
     let dir = ganja_testkit::temp_dir();
     let (provider, requests) = ScriptedProvider::new(vec![says("one"), says("two")]);
     let hooks = Hooks::new(
-        &block(
-            HookEvent::SessionStart,
-            None,
-            "echo 'the migration is half applied'",
-            None,
-        ),
+        &block(HookEvent::SessionStart, None, "echo 'the migration is half applied'", None),
         dir.path(),
     )
     .expect("the block describes hooks");
@@ -508,10 +444,7 @@ async fn session_start_context_rides_exactly_one_turn() {
 
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
     for text in ["first", "second"] {
-        engine
-            .send(prompt(text))
-            .await
-            .expect("an idle engine accepts a prompt");
+        engine.send(prompt(text)).await.expect("an idle engine accepts a prompt");
         drain(&mut events).await;
     }
 
@@ -547,22 +480,14 @@ async fn pre_compact_names_the_trigger_that_asked_for_it() {
     )
     .with_hooks(
         Hooks::new(
-            &block(
-                HookEvent::PreCompact,
-                None,
-                &records_into(&manual_ledger),
-                None,
-            ),
+            &block(HookEvent::PreCompact, None, &records_into(&manual_ledger), None),
             manual_dir.path(),
         )
         .expect("the block describes hooks"),
     );
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
     engine.resume(&session).await.expect("the session loads");
-    engine
-        .send(Command::Compact)
-        .await
-        .expect("an idle engine accepts a compaction");
+    engine.send(Command::Compact).await.expect("an idle engine accepts a compaction");
     drain(&mut events).await;
 
     assert_eq!(
@@ -591,22 +516,14 @@ async fn pre_compact_names_the_trigger_that_asked_for_it() {
     )
     .with_hooks(
         Hooks::new(
-            &block(
-                HookEvent::PreCompact,
-                None,
-                &records_into(&auto_ledger),
-                None,
-            ),
+            &block(HookEvent::PreCompact, None, &records_into(&auto_ledger), None),
             auto_dir.path(),
         )
         .expect("the block describes hooks"),
     );
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
     engine.resume(&session).await.expect("the session loads");
-    engine
-        .send(prompt("next step please"))
-        .await
-        .expect("an idle engine accepts a prompt");
+    engine.send(prompt("next step please")).await.expect("an idle engine accepts a prompt");
     drain(&mut events).await;
 
     assert_eq!(
@@ -630,11 +547,8 @@ async fn a_hook_that_outlives_its_timeout_costs_the_turn_nothing() {
         call("call_1", "lookup", serde_json::json!({ "key": "a" })),
         says("done"),
     ]);
-    let hooks = Hooks::new(
-        &block(HookEvent::PreToolUse, None, "sleep 30", Some(1)),
-        dir.path(),
-    )
-    .expect("the block describes hooks");
+    let hooks = Hooks::new(&block(HookEvent::PreToolUse, None, "sleep 30", Some(1)), dir.path())
+        .expect("the block describes hooks");
 
     let engine = Engine::new(
         provider,
@@ -644,10 +558,7 @@ async fn a_hook_that_outlives_its_timeout_costs_the_turn_nothing() {
     )
     .with_hooks(hooks);
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
-    engine
-        .send(prompt("look it up"))
-        .await
-        .expect("an idle engine accepts a prompt");
+    engine.send(prompt("look it up")).await.expect("an idle engine accepts a prompt");
     let seen = drain(&mut events).await;
 
     assert_eq!(
@@ -658,10 +569,7 @@ async fn a_hook_that_outlives_its_timeout_costs_the_turn_nothing() {
     assert!(errors(&seen).is_empty(), "and nothing failed: {seen:#?}");
     assert!(matches!(
         seen.last(),
-        Some(Event::MessageFinished {
-            reason: FinishReason::Completed,
-            ..
-        })
+        Some(Event::MessageFinished { reason: FinishReason::Completed, .. })
     ));
 }
 
@@ -696,10 +604,7 @@ async fn a_post_tool_use_hooks_context_rides_the_calls_result() {
     )
     .with_hooks(hooks);
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
-    engine
-        .send(prompt("edit it"))
-        .await
-        .expect("an idle engine accepts a prompt");
+    engine.send(prompt("edit it")).await.expect("an idle engine accepts a prompt");
     let seen = drain(&mut events).await;
 
     let completions = completions(&seen);
@@ -719,12 +624,7 @@ async fn stop_fires_at_the_turn_boundary_and_session_end_at_the_close() {
     let dir = ganja_testkit::temp_dir();
     let ledger = dir.path().join("ledger");
     let mut config = block(HookEvent::Stop, None, &records_into(&ledger), None);
-    config.extend(block(
-        HookEvent::SessionEnd,
-        None,
-        &records_into(&ledger),
-        None,
-    ));
+    config.extend(block(HookEvent::SessionEnd, None, &records_into(&ledger), None));
     let (provider, _requests) = ScriptedProvider::new(vec![says("done")]);
     let engine = Engine::new(
         provider,
@@ -735,10 +635,7 @@ async fn stop_fires_at_the_turn_boundary_and_session_end_at_the_close() {
     .with_hooks(Hooks::new(&config, dir.path()).expect("the block describes hooks"));
 
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
-    engine
-        .send(prompt("hello"))
-        .await
-        .expect("an idle engine accepts a prompt");
+    engine.send(prompt("hello")).await.expect("an idle engine accepts a prompt");
     drain(&mut events).await;
     // The turn's own hook first — it runs inside the tail, after the finish
     // event this drain returned on — then the close.
@@ -776,10 +673,7 @@ async fn a_stop_hook_finishes_before_the_next_turn_can_start() {
     );
 
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
-    engine
-        .send(prompt("first"))
-        .await
-        .expect("an idle engine accepts a prompt");
+    engine.send(prompt("first")).await.expect("an idle engine accepts a prompt");
     drain(&mut events).await;
 
     // The finish event has been seen; the slot may still be held by the hook,
@@ -807,12 +701,7 @@ async fn a_stop_hook_finishes_before_the_next_turn_can_start() {
 async fn hooks_add_nothing_to_the_event_stream() {
     let dir = ganja_testkit::temp_dir();
     let ledger = dir.path().join("ledger");
-    let mut config = block(
-        HookEvent::UserPromptSubmit,
-        None,
-        &records_into(&ledger),
-        None,
-    );
+    let mut config = block(HookEvent::UserPromptSubmit, None, &records_into(&ledger), None);
     config.extend(block(HookEvent::Stop, None, &records_into(&ledger), None));
 
     let with_hooks: Vec<String> = {
@@ -850,10 +739,7 @@ async fn hooks_add_nothing_to_the_event_stream() {
 async fn shapes(engine: &Engine) -> Vec<String> {
     let mut events: BoxStream<'static, Event> =
         engine.subscribe().await.expect("the first subscriber wins");
-    engine
-        .send(prompt("hello"))
-        .await
-        .expect("an idle engine accepts a prompt");
+    engine.send(prompt("hello")).await.expect("an idle engine accepts a prompt");
 
     drain(&mut events)
         .await
@@ -888,18 +774,12 @@ async fn a_notification_hook_fires_when_a_dialog_asks_for_a_person() {
         Permissions::default(),
     )
     .with_hooks(
-        Hooks::new(
-            &block(HookEvent::Notification, None, &records_into(&ledger), None),
-            dir.path(),
-        )
-        .expect("the block describes hooks"),
+        Hooks::new(&block(HookEvent::Notification, None, &records_into(&ledger), None), dir.path())
+            .expect("the block describes hooks"),
     );
 
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
-    engine
-        .send(prompt("run it"))
-        .await
-        .expect("an idle engine accepts a prompt");
+    engine.send(prompt("run it")).await.expect("an idle engine accepts a prompt");
     ganja_testkit::drain_answering(&engine, &mut events, ganja_protocol::PermissionReply::Once)
         .await;
 

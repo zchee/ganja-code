@@ -23,10 +23,7 @@ fn an_anchor_addresses_the_file_it_was_given() {
 
     let anchor = Anchor::open(&path, false).expect("the parent exists");
 
-    assert_eq!(
-        anchor.path(),
-        std::fs::canonicalize(&path).expect("the file exists")
-    );
+    assert_eq!(anchor.path(), std::fs::canonicalize(&path).expect("the file exists"));
 }
 
 /// Unix paths are byte strings, so anchoring must not make UTF-8 a hidden
@@ -40,11 +37,7 @@ fn a_non_utf8_path_survives_the_anchor_byte_for_byte() {
 
     let anchor = Anchor::open(&path, false).expect("the parent is an ordinary directory");
     assert_eq!(
-        anchor
-            .path()
-            .file_name()
-            .expect("the file has a name")
-            .as_bytes(),
+        anchor.path().file_name().expect("the file has a name").as_bytes(),
         name.as_os_str().as_bytes(),
     );
 }
@@ -60,9 +53,7 @@ fn a_nul_byte_in_a_name_is_refused_instead_of_truncated() {
     let path = dir.path().join(name);
     let anchor = Anchor::open(&path, false).expect("the parent is an ordinary directory");
 
-    let refused = anchor
-        .read()
-        .expect_err("a NUL-bearing name is never opened");
+    let refused = anchor.read().expect_err("a NUL-bearing name is never opened");
 
     let AnchorError::Io(refused_path, error) = refused else {
         panic!("the refusal must remain an I/O argument error: {refused:?}");
@@ -107,10 +98,7 @@ fn a_link_at_the_name_is_refused_by_the_open_itself() {
         "a read through a planted link must be refused by the open"
     );
     assert!(matches!(anchor.write(), Err(AnchorError::Link(_))));
-    assert_eq!(
-        std::fs::read_to_string(&target).expect("the target still exists"),
-        "before"
-    );
+    assert_eq!(std::fs::read_to_string(&target).expect("the target still exists"), "before");
 }
 
 /// The same refusal, recovered on the platform that has no `O_NOFOLLOW`:
@@ -165,10 +153,7 @@ fn a_directory_at_the_name_is_refused_as_a_directory() {
     let anchor = Anchor::open(&path, false).expect("the parent is an ordinary directory");
     let refused = anchor.read().expect_err("a directory is not a file");
 
-    assert!(
-        matches!(refused, AnchorError::Directory(_)),
-        "got {refused:?}"
-    );
+    assert!(matches!(refused, AnchorError::Directory(_)), "got {refused:?}");
     assert!(
         refused.to_string().contains("directory"),
         "the refusal has to name what was wrong: {refused}"
@@ -191,17 +176,12 @@ fn a_linked_directory_is_resolved_once_and_then_held() {
 
     assert_eq!(
         anchor.path(),
-        std::fs::canonicalize(&real)
-            .expect("the directory exists")
-            .join("notes.txt"),
+        std::fs::canonicalize(&real).expect("the directory exists").join("notes.txt"),
         "the anchor names where the link really led"
     );
 }
 
 #[test]
 fn a_path_with_no_final_name_is_refused() {
-    assert!(matches!(
-        Anchor::open(Path::new("/"), false),
-        Err(AnchorError::Nameless(_))
-    ));
+    assert!(matches!(Anchor::open(Path::new("/"), false), Err(AnchorError::Nameless(_))));
 }

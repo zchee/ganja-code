@@ -2,21 +2,16 @@ use std::sync::Arc;
 
 use ganja_protocol::{MemberBackend, MemberView, TeamView};
 use ganja_testkit::RecordingSpawner;
-use ganja_tool::{
-    Tool as _,
-    task::{Offered, Subagents, TaskTool, TeammateSpawn, Teammated},
-};
-use ratatui::{buffer::Buffer, layout::Rect};
+use ganja_tool::Tool as _;
+use ganja_tool::task::{Offered, Subagents, TaskTool, TeammateSpawn, Teammated};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 
 use super::{BUSY, Effect, Row, Spawned, Team, rows, spawn_request};
-use crate::{command, theme::Theme};
+use crate::command;
+use crate::theme::Theme;
 
-const AREA: Rect = Rect {
-    x: 0,
-    y: 0,
-    width: 76,
-    height: 20,
-};
+const AREA: Rect = Rect { x: 0, y: 0, width: 76, height: 20 };
 
 fn row(name: &str, backend: MemberBackend, recent: &[&str]) -> Row {
     Row {
@@ -41,11 +36,7 @@ fn lead() -> Row {
 fn dialog() -> Team {
     Team::new(vec![
         lead(),
-        row(
-            "w1",
-            MemberBackend::InProcess,
-            &["read(src/lib.rs)", "grep(fn spawn)"],
-        ),
+        row("w1", MemberBackend::InProcess, &["read(src/lib.rs)", "grep(fn spawn)"]),
         row("w2", MemberBackend::Claude, &[]),
     ])
 }
@@ -56,9 +47,7 @@ fn rendered(dialog: &Team, area: Rect) -> String {
 
     (0..area.height)
         .map(|line| {
-            (0..area.width)
-                .map(|column| buffer[(column, line)].symbol())
-                .collect::<String>()
+            (0..area.width).map(|column| buffer[(column, line)].symbol()).collect::<String>()
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -103,19 +92,12 @@ async fn spawn_through_the_task_door(args: serde_json::Value) -> TeammateSpawn {
         note: "it reads this through its mailbox".to_owned(),
     });
     let ctx = ganja_testkit::tool_ctx(Arc::clone(&recorder) as Arc<dyn Subagents>);
-    TaskTool::new(&[Offered {
-        name: "general".to_owned(),
-        description: None,
-    }])
-    .run(args, &ctx)
-    .await
-    .expect("a teammate starts");
+    TaskTool::new(&[Offered { name: "general".to_owned(), description: None }])
+        .run(args, &ctx)
+        .await
+        .expect("a teammate starts");
 
-    recorder
-        .started()
-        .into_iter()
-        .next()
-        .expect("one spawn was recorded")
+    recorder.started().into_iter().next().expect("one spawn was recorded")
 }
 
 /// **AC-14**, the `/team spawn` half: the two doors are one sequence
@@ -189,21 +171,12 @@ async fn the_dialog_builds_the_same_spawn_request_the_task_door_does() {
 #[test]
 fn a_spawn_says_where_the_prompt_came_to_rest() {
     let mut dialog = dialog();
-    dialog.spawned(&Spawned {
-        name: "w3".to_owned(),
-        prompt_path: "/t/teams/t1.json".to_owned(),
-    });
+    dialog.spawned(&Spawned { name: "w3".to_owned(), prompt_path: "/t/teams/t1.json".to_owned() });
 
     let screen = rendered(&dialog, AREA);
-    assert!(
-        screen.contains("prompt persisted in cleartext at"),
-        "got:\n{screen}"
-    );
+    assert!(screen.contains("prompt persisted in cleartext at"), "got:\n{screen}");
     assert!(screen.contains("/t/teams/t1.json"), "got:\n{screen}");
-    assert!(
-        screen.contains("w3 started"),
-        "and which spawn it is about:\n{screen}"
-    );
+    assert!(screen.contains("w3 started"), "and which spawn it is about:\n{screen}");
 }
 
 /// A spawn already starting refuses a second one at the keypress rather
@@ -220,9 +193,7 @@ fn a_second_spawn_during_the_first_is_refused_before_anything_is_typed() {
     assert!(!dialog.is_typing(), "the input step must not even open");
     let screen = rendered(&dialog, AREA);
     assert!(
-        BUSY.split(" \u{b7} ")
-            .next()
-            .is_some_and(|head| screen.contains(head)),
+        BUSY.split(" \u{b7} ").next().is_some_and(|head| screen.contains(head)),
         "the refusal is the dialog's own sentence:\n{screen}"
     );
 
@@ -250,20 +221,11 @@ fn every_member_lists_with_its_backend_and_its_recent_calls() {
 #[test]
 fn a_ring_longer_than_the_row_shows_admits_the_cut() {
     let calls: Vec<&str> = vec!["a", "b", "c", "d", "e", "f"];
-    let screen = rendered(
-        &Team::new(vec![row("w1", MemberBackend::InProcess, &calls)]),
-        AREA,
-    );
+    let screen = rendered(&Team::new(vec![row("w1", MemberBackend::InProcess, &calls)]), AREA);
 
     assert!(screen.contains("+2 earlier calls"), "got:\n{screen}");
-    assert!(
-        screen.contains("\u{23bf} f"),
-        "the newest is shown:\n{screen}"
-    );
-    assert!(
-        !screen.contains("\u{23bf} a"),
-        "the oldest is cut:\n{screen}"
-    );
+    assert!(screen.contains("\u{23bf} f"), "the newest is shown:\n{screen}");
+    assert!(!screen.contains("\u{23bf} a"), "the oldest is cut:\n{screen}");
 }
 
 /// Enter on a teammate opens Message and Shutdown; the lead's row offers
@@ -271,10 +233,7 @@ fn a_ring_longer_than_the_row_shows_admits_the_cut() {
 #[test]
 fn a_teammate_row_offers_message_and_shutdown_and_the_leads_offers_nothing() {
     let mut dialog = dialog();
-    assert_eq!(
-        dialog.selected_member().map(|row| row.name.as_str()),
-        Some("team-lead")
-    );
+    assert_eq!(dialog.selected_member().map(|row| row.name.as_str()), Some("team-lead"));
     assert_eq!(dialog.submit(), None, "the lead's row has nothing to open");
     assert!(!dialog.is_choosing_action());
 
@@ -307,10 +266,7 @@ fn messaging_a_member_takes_the_text_in_the_dialog_itself() {
 
     assert_eq!(
         dialog.submit(),
-        Some(Effect::Message {
-            to: "w1".to_owned(),
-            text: "status?".to_owned(),
-        })
+        Some(Effect::Message { to: "w1".to_owned(), text: "status?".to_owned() })
     );
     assert!(!dialog.is_typing());
 }
@@ -374,10 +330,7 @@ fn refreshing_keeps_the_cursor_where_it_was_and_reclamps_a_shrink() {
         row("w1", MemberBackend::InProcess, &["write(src/main.rs)"]),
         row("w2", MemberBackend::Claude, &[]),
     ]);
-    assert_eq!(
-        dialog.selected_member().map(|row| row.name.as_str()),
-        Some("w1")
-    );
+    assert_eq!(dialog.selected_member().map(|row| row.name.as_str()), Some("w1"));
     assert_eq!(
         dialog.selected_member().map(|row| row.recent.len()),
         Some(1),
@@ -386,10 +339,7 @@ fn refreshing_keeps_the_cursor_where_it_was_and_reclamps_a_shrink() {
 
     dialog.move_selection(2);
     dialog.refresh(vec![lead()]);
-    assert!(
-        dialog.selected_member().is_none(),
-        "the cursor reclamps onto the Spawn row"
-    );
+    assert!(dialog.selected_member().is_none(), "the cursor reclamps onto the Spawn row");
 }
 
 /// A poll that found the same roster changed nothing, and says so — which
@@ -402,11 +352,7 @@ fn a_refresh_that_found_the_same_roster_reports_nothing_moved() {
     assert!(
         !dialog.refresh(vec![
             lead(),
-            row(
-                "w1",
-                MemberBackend::InProcess,
-                &["read(src/lib.rs)", "grep(fn spawn)"],
-            ),
+            row("w1", MemberBackend::InProcess, &["read(src/lib.rs)", "grep(fn spawn)"],),
             row("w2", MemberBackend::Claude, &[]),
         ]),
         "an identical poll is not a reason to redraw"
@@ -512,10 +458,7 @@ fn the_spawn_prompt_shows_the_grammar_the_refusal_names() {
     let screen = rendered(&dialog, AREA);
     // The dialog is narrower than the whole grammar, so what the screen
     // shows is its head; the tie to the refusal is the shared constant.
-    assert!(
-        screen.contains(&command::SPAWN_GRAMMAR[..40]),
-        "got:\n{screen}"
-    );
+    assert!(screen.contains(&command::SPAWN_GRAMMAR[..40]), "got:\n{screen}");
     assert!(
         command::team_spawn("")
             .expect_err("a nameless spawn is refused")
@@ -591,17 +534,10 @@ fn a_team_with_nobody_in_it_says_so_and_still_offers_a_spawn() {
 #[test]
 fn a_row_too_wide_for_the_column_is_cut_rather_than_wrapped() {
     let long = "very long call ".repeat(20);
-    let dialog = Team::new(vec![row(
-        &"w".repeat(90),
-        MemberBackend::InProcess,
-        &[long.as_str()],
-    )]);
+    let dialog = Team::new(vec![row(&"w".repeat(90), MemberBackend::InProcess, &[long.as_str()])]);
 
     for line in rendered(&dialog, Rect::new(0, 0, 60, 20)).lines() {
-        assert!(
-            line.chars().count() <= 60,
-            "a row must not overflow the dialog: {line:?}"
-        );
+        assert!(line.chars().count() <= 60, "a row must not overflow the dialog: {line:?}");
     }
 }
 
@@ -619,8 +555,5 @@ fn a_tiny_area_draws_without_panicking() {
 fn a_zero_area_draws_nothing_and_does_not_panic() {
     let screen = rendered(&dialog(), Rect::new(0, 0, 0, 0));
 
-    assert!(
-        screen.is_empty(),
-        "a zero area has no cell to hold: {screen}"
-    );
+    assert!(screen.is_empty(), "a zero area has no cell to hold: {screen}");
 }

@@ -39,17 +39,17 @@
 //! Esc closes it; [`crate::app::App`] owns that key, the same split every
 //! other dialog keeps.
 
-use ganja_core::{catalog::compact_tokens, engine::ContextBreakdown};
-use ratatui::{
-    buffer::Buffer,
-    layout::{Constraint, Rect},
-    style::{Modifier, Style},
-    text::{Line, Span, Text},
-    widgets::{Block, Clear, Paragraph, Widget as _},
-};
+use ganja_core::catalog::compact_tokens;
+use ganja_core::engine::ContextBreakdown;
+use ratatui::buffer::Buffer;
+use ratatui::layout::{Constraint, Rect};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{Block, Clear, Paragraph, Widget as _};
 use unicode_width::UnicodeWidthStr as _;
 
-use crate::{component::chat::clip, theme::Theme};
+use crate::component::chat::clip;
+use crate::theme::Theme;
 
 /// Widest the modal grows. Wider than the house 76: the pinned side-by-side
 /// layout — a [`GRID_WIDTH`]-column grid beside legend rows that run to ~46
@@ -101,17 +101,9 @@ impl Row {
     /// `Name: <count> tokens (N.N%)`.
     fn legend_text(&self, window: u64) -> String {
         let share = (self.tokens as f64) * 100.0 / (window.max(1) as f64);
-        let unit = if self.counted_in_tokens {
-            " tokens"
-        } else {
-            ""
-        };
+        let unit = if self.counted_in_tokens { " tokens" } else { "" };
 
-        format!(
-            "{}: {}{unit} ({share:.1}%)",
-            self.label,
-            compact_tokens(self.tokens)
-        )
+        format!("{}: {}{unit} ({share:.1}%)", self.label, compact_tokens(self.tokens))
     }
 }
 
@@ -356,11 +348,7 @@ impl Context {
             style: bold,
         }];
         if pair {
-            beside.push(Beside {
-                bullet: None,
-                text: id,
-                style: theme.dim,
-            });
+            beside.push(Beside { bullet: None, text: id, style: theme.dim });
         }
         beside.extend([
             Beside {
@@ -372,11 +360,7 @@ impl Context {
                 ),
                 style: theme.fg,
             },
-            Beside {
-                bullet: None,
-                text: String::new(),
-                style: theme.fg,
-            },
+            Beside { bullet: None, text: String::new(), style: theme.fg },
             Beside {
                 bullet: None,
                 text: "Estimated usage by category".to_owned(),
@@ -472,12 +456,7 @@ impl Context {
                 self.breakdown.tools_builtin_count,
                 self.breakdown.tools_builtin,
             ),
-            (
-                "MCP tools",
-                "/mcp",
-                self.breakdown.tools_mcp_count,
-                self.breakdown.tools_mcp,
-            ),
+            ("MCP tools", "/mcp", self.breakdown.tools_mcp_count, self.breakdown.tools_mcp),
         ];
 
         let mut lines = Vec::new();
@@ -489,20 +468,14 @@ impl Context {
             lines.push(Line::from(vec![
                 Span::styled(clip(name, width), bold),
                 Span::styled(
-                    clip(
-                        &format!(" \u{b7} {hint}"),
-                        width.saturating_sub(name.width()),
-                    ),
+                    clip(&format!(" \u{b7} {hint}"), width.saturating_sub(name.width())),
                     theme.dim,
                 ),
             ]));
             let unit = if count == 1 { "tool" } else { "tools" };
             lines.push(Line::styled(
                 clip(
-                    &format!(
-                        "\u{2514} {count} {unit} \u{b7} {} tokens",
-                        compact_tokens(tokens)
-                    ),
+                    &format!("\u{2514} {count} {unit} \u{b7} {} tokens", compact_tokens(tokens)),
                     width,
                 ),
                 theme.dim,
@@ -529,10 +502,7 @@ impl Context {
                 ),
                 theme.fg,
             ),
-            Line::styled(
-                clip("unsized model \u{2014} percentages unavailable", width),
-                theme.dim,
-            ),
+            Line::styled(clip("unsized model \u{2014} percentages unavailable", width), theme.dim),
             Line::raw(""),
         ];
 
@@ -550,11 +520,7 @@ impl Context {
         }
         lines.push(Line::styled(
             clip(
-                &format!(
-                    "  {:<22} {:>8} tokens",
-                    "total",
-                    compact_tokens(self.breakdown.total())
-                ),
+                &format!("  {:<22} {:>8} tokens", "total", compact_tokens(self.breakdown.total())),
                 width,
             ),
             theme.accent,

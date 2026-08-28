@@ -32,22 +32,19 @@
 //!   that the next launch will not read is the failure the round trip exists to
 //!   prevent.
 
-use std::{
-    fs::{self, OpenOptions},
-    io::{self, Write as _},
-    net::{Ipv4Addr, Ipv6Addr},
-    path::{Path, PathBuf},
-};
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write as _};
+use std::net::{Ipv4Addr, Ipv6Addr};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use ganja_core::{config::Config, lsp::server::BUILTIN_IDS};
+use ganja_core::config::Config;
+use ganja_core::lsp::server::BUILTIN_IDS;
 use ganja_permission::Project;
 use toml_edit::{DocumentMut, InlineTable, Item, Table, Value};
 
-use crate::{
-    position::located,
-    report::{Report, print_table, print_warnings},
-};
+use crate::position::located;
+use crate::report::{Report, print_table, print_warnings};
 
 /// Directory opencode keeps its global config in, under the XDG config home.
 const OPENCODE_DIRECTORY: &str = "opencode";
@@ -249,10 +246,7 @@ pub fn import_opencode(file: Option<PathBuf>, global: bool, dry_run: bool) -> Re
     if let Some(destination) = &destination
         && let Some(occupied) = occupied(destination)
     {
-        bail!(
-            "{} already exists; move it aside and run this again",
-            occupied.display()
-        );
+        bail!("{} already exists; move it aside and run this again", occupied.display());
     }
 
     let sources = discover(file, global, &cwd)?;
@@ -380,10 +374,7 @@ impl Json {
     }
 
     fn get(&self, key: &str) -> Option<&Json> {
-        self.as_object()?
-            .iter()
-            .find(|(name, _)| name == key)
-            .map(|(_, value)| value)
+        self.as_object()?.iter().find(|(name, _)| name == key).map(|(_, value)| value)
     }
 }
 
@@ -528,9 +519,7 @@ fn merge(target: &mut Json, source: Json) {
 /// replace, because that tier merges with `mergeConfig` and not with
 /// `mergeConfigConcatArrays` (`config.ts:258-260` against `:398-410`).
 fn merge_document(target: &mut Json, source: Json, concat_instructions: bool) {
-    let union = concat_instructions
-        .then(|| instruction_union(target, &source))
-        .flatten();
+    let union = concat_instructions.then(|| instruction_union(target, &source)).flatten();
 
     merge(target, source);
 
@@ -570,41 +559,25 @@ struct At {
 impl At {
     /// The document itself; its children are spelled without a prefix.
     fn root() -> Self {
-        Self {
-            from: String::new(),
-            to: String::new(),
-        }
+        Self { from: String::new(), to: String::new() }
     }
 
     /// A branch ganja spells differently from opencode.
     fn renamed(from: &str, to: &str) -> Self {
-        Self {
-            from: from.to_owned(),
-            to: to.to_owned(),
-        }
+        Self { from: from.to_owned(), to: to.to_owned() }
     }
 
     fn child(&self, key: &str) -> Self {
-        Self {
-            from: join(&self.from, key),
-            to: join(&self.to, key),
-        }
+        Self { from: join(&self.from, key), to: join(&self.to, key) }
     }
 
     fn index(&self, index: usize) -> Self {
-        Self {
-            from: format!("{}[{index}]", self.from),
-            to: format!("{}[{index}]", self.to),
-        }
+        Self { from: format!("{}[{index}]", self.from), to: format!("{}[{index}]", self.to) }
     }
 }
 
 fn join(prefix: &str, key: &str) -> String {
-    if prefix.is_empty() {
-        key.to_owned()
-    } else {
-        format!("{prefix}.{key}")
-    }
+    if prefix.is_empty() { key.to_owned() } else { format!("{prefix}.{key}") }
 }
 
 /// The two ways one entry's [`Report`] is folded into the run's.
@@ -630,12 +603,8 @@ impl Report {
     /// was written — and it is the row somebody has to see whatever else the
     /// import did with the entry around it.
     fn adopt_warnings(&mut self, other: Self) {
-        self.skipped.extend(
-            other
-                .skipped
-                .into_iter()
-                .filter(|(_, reason)| reason == reason::CREDENTIAL),
-        );
+        self.skipped
+            .extend(other.skipped.into_iter().filter(|(_, reason)| reason == reason::CREDENTIAL));
         self.warnings.extend(other.warnings);
     }
 }
@@ -678,15 +647,11 @@ fn present<const N: usize>(pairs: [(&str, Option<Json>); N]) -> Vec<(String, Jso
 /// value that would not read.
 fn carried_command(collected: &mut Report, child: &At, field: &Json) -> Result<Json, Refusal> {
     match string_array(collected, child, field) {
-        Ok(command) if command.is_empty() => Err((
-            reason::MALFORMED,
-            format!("`{}` names no program", child.from),
-        )),
+        Ok(command) if command.is_empty() => {
+            Err((reason::MALFORMED, format!("`{}` names no program", child.from)))
+        }
         Ok(command) => Ok(Json::Array(command)),
-        Err(reason) => Err((
-            reason,
-            format!("`{}` could not be carried across", child.from),
-        )),
+        Err(reason) => Err((reason, format!("`{}` could not be carried across", child.from))),
     }
 }
 
@@ -841,12 +806,8 @@ fn map_config(source: &Json) -> (Built, Report) {
             "instructions" => built.instructions = instructions(&mut report, &at, value),
             "permission" | "tools" if !folded => {
                 folded = true;
-                built.permission = permission(
-                    &mut report,
-                    &root,
-                    source.get("tools"),
-                    source.get("permission"),
-                );
+                built.permission =
+                    permission(&mut report, &root, source.get("tools"), source.get("permission"));
             }
             "permission" | "tools" => {}
             "agent" => {
@@ -944,10 +905,7 @@ fn positive_integer(report: &mut Report, at: &At, value: &Json) -> Option<Json> 
     };
     // Re-emitted as the digits that were read, so the value that lands is the
     // one the source wrote.
-    if spelled
-        .parse::<i64>()
-        .is_ok_and(|milliseconds| milliseconds > 0)
-    {
+    if spelled.parse::<i64>().is_ok_and(|milliseconds| milliseconds > 0) {
         report.map(&at.from, &at.to);
 
         return Some(Json::Number(spelled.clone()));
@@ -1531,10 +1489,7 @@ fn mcp_server(report: &mut Report, at: &At, value: &Json) -> Option<Json> {
             fields.url.is_none().then_some("url")
         };
         if let Some(missing) = missing {
-            refused = Some((
-                reason::MALFORMED,
-                format!("a {kind} server needs a `{missing}`"),
-            ));
+            refused = Some((reason::MALFORMED, format!("a {kind} server needs a `{missing}`")));
         }
     }
 
@@ -1559,10 +1514,7 @@ fn url(report: &mut Report, at: &At, value: &Json) -> Result<Json, Refusal> {
     let Some(text) = guard(report, &at.from, text) else {
         return Err((
             reason::TOKEN,
-            format!(
-                "`{}` is nothing but a token opencode would have expanded",
-                at.from
-            ),
+            format!("`{}` is nothing but a token opencode would have expanded", at.from),
         ));
     };
     if !reachable_in_the_clear(&text) {
@@ -1605,9 +1557,7 @@ fn reachable_in_the_clear(url: &str) -> bool {
 fn host(rest: &str) -> &str {
     let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
     // Userinfo runs to the *last* `@`: a password may hold one.
-    let authority = authority
-        .rsplit_once('@')
-        .map_or(authority, |(_, host)| host);
+    let authority = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
 
     // The colons inside a bracketed IPv6 literal are the address, not a port.
     if let Some(address) = authority
@@ -1632,12 +1582,8 @@ fn host(rest: &str) -> &str {
 /// by one.
 fn is_loopback(host: &str) -> bool {
     host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<Ipv4Addr>()
-            .is_ok_and(|address| address.is_loopback())
-        || host
-            .parse::<Ipv6Addr>()
-            .is_ok_and(|address| address.is_loopback())
+        || host.parse::<Ipv4Addr>().is_ok_and(|address| address.is_loopback())
+        || host.parse::<Ipv6Addr>().is_ok_and(|address| address.is_loopback())
 }
 
 /// Maps an `lsp` value: the boolean, or the map of entries.
@@ -1780,10 +1726,8 @@ fn lsp_entry(report: &mut Report, at: &At, name: &str, value: &Json) -> Option<J
             "extensions" => match string_array(&mut collected, &child, field) {
                 Ok(extensions) => fields.extensions = Some(Json::Array(extensions)),
                 Err(reason) => {
-                    refused = Some((
-                        reason,
-                        format!("`{}` could not be carried across", child.from),
-                    ));
+                    refused =
+                        Some((reason, format!("`{}` could not be carried across", child.from)));
                 }
             },
             "disabled" => fields.disabled = boolean(&mut collected, &child, field).map(Json::Bool),
@@ -1950,10 +1894,7 @@ fn provider_entry(report: &mut Report, at: &At, id: &str, value: &Json) -> Optio
             // The one key that changes name on the way across: upstream says
             // which SDK loads the provider, ganja says which wire it speaks.
             "npm" => {
-                let named = At {
-                    from: child.from.clone(),
-                    to: join(&at.to, "dialect"),
-                };
+                let named = At { from: child.from.clone(), to: join(&at.to, "dialect") };
                 match dialect(&mut collected, &named, field) {
                     Ok(spelled) => fields.dialect = Some(Json::String(spelled.to_owned())),
                     Err(refusal) => refused = refused.or(Some(refusal)),
@@ -2011,19 +1952,13 @@ fn provider_entry(report: &mut Report, at: &At, id: &str, value: &Json) -> Optio
 /// The dialect an entry's `npm` package names.
 fn dialect(report: &mut Report, at: &At, value: &Json) -> Result<&'static str, Refusal> {
     let Some(package) = value.as_str() else {
-        return Err((
-            reason::MALFORMED,
-            format!("`{}` is not a package name", at.from),
-        ));
+        return Err((reason::MALFORMED, format!("`{}` is not a package name", at.from)));
     };
 
     let Some((_, spelled)) = DIALECTS.iter().find(|(named, _)| *named == package) else {
         return Err((
             reason::UNSUPPORTED,
-            format!(
-                "`{}` loads {package}, which this build has no wire for",
-                at.from
-            ),
+            format!("`{}` loads {package}, which this build has no wire for", at.from),
         ));
     };
     report.map(&at.from, &at.to);
@@ -2063,10 +1998,7 @@ fn options(
     // rows to write after a bad endpoint, and the `apiKey` row is one of them.
     let mut refused: Option<Refusal> = None;
     for (key, field) in entries {
-        let at = |ganja: &str| At {
-            from: join(&from, key),
-            to: join(&entry.to, ganja),
-        };
+        let at = |ganja: &str| At { from: join(&from, key), to: join(&entry.to, ganja) };
         match key.as_str() {
             // The one value in an opencode config that must never travel. Its
             // row survives the entry being refused — see
@@ -2149,11 +2081,8 @@ struct Sources {
 }
 
 fn discover(file: Option<PathBuf>, global: bool, cwd: &Path) -> Result<Sources> {
-    let mut sources = Sources {
-        paths: Vec::new(),
-        searched: Vec::new(),
-        config: Json::Object(Vec::new()),
-    };
+    let mut sources =
+        Sources { paths: Vec::new(), searched: Vec::new(), config: Json::Object(Vec::new()) };
 
     // A named file is the whole import: a caller who said which file to read
     // did not ask what else is lying around.
@@ -2189,10 +2118,9 @@ fn discover(file: Option<PathBuf>, global: bool, cwd: &Path) -> Result<Sources> 
             merge_document(&mut sources.config, read(&path)?, true);
             sources.paths.push(path);
         }
-        sources.searched.push(format!(
-            "{} and every directory above it up to the project root",
-            cwd.display()
-        ));
+        sources
+            .searched
+            .push(format!("{} and every directory above it up to the project root", cwd.display()));
     }
 
     Ok(sources)
@@ -2212,10 +2140,7 @@ fn project_files(cwd: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     for directory in start.ancestors() {
         found.extend(
-            PROJECT_FILES
-                .iter()
-                .map(|name| directory.join(name))
-                .filter(|path| path.is_file()),
+            PROJECT_FILES.iter().map(|name| directory.join(name)).filter(|path| path.is_file()),
         );
         if directory == stop {
             break;
@@ -2310,10 +2235,7 @@ fn write(path: &Path, document: &str) -> Result<()> {
     let mut file = match OpenOptions::new().write(true).create_new(true).open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            bail!(
-                "{} already exists; move it aside and run this again",
-                path.display()
-            )
+            bail!("{} already exists; move it aside and run this again", path.display())
         }
         Err(error) => {
             return Err(error).with_context(|| format!("{} could not be written", path.display()));

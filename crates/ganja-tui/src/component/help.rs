@@ -20,20 +20,16 @@
 //! Escape closes it and the arrow keys move it; both are
 //! [`crate::app::App`]'s, like every other modal's keys.
 
-use ratatui::{
-    buffer::Buffer,
-    layout::{Constraint, Rect},
-    text::{Line, Text},
-    widgets::{Block, Clear, Paragraph, Widget as _},
-};
+use ratatui::buffer::Buffer;
+use ratatui::layout::{Constraint, Rect};
+use ratatui::text::{Line, Text};
+use ratatui::widgets::{Block, Clear, Paragraph, Widget as _};
 use unicode_width::UnicodeWidthStr as _;
 
-use crate::{
-    command::COMMANDS,
-    component::chat::clip,
-    keybind::{self, Keybinds},
-    theme::Theme,
-};
+use crate::command::COMMANDS;
+use crate::component::chat::clip;
+use crate::keybind::{self, Keybinds};
+use crate::theme::Theme;
 
 /// Rows the dialog spends on something other than the table.
 const CHROME: usize = 2;
@@ -111,10 +107,7 @@ impl Help {
 
         Clear.render(popup, buffer);
 
-        let rows = usize::from(height)
-            .saturating_sub(2)
-            .saturating_sub(CHROME)
-            .max(1);
+        let rows = usize::from(height).saturating_sub(2).saturating_sub(CHROME).max(1);
         // Written back so the offset never runs away past the end: the next
         // scroll up starts from the last row actually shown.
         self.offset = self.offset.min(total.saturating_sub(rows));
@@ -144,24 +137,14 @@ impl Help {
         let hints: Vec<String> = COMMANDS
             .iter()
             .map(|entry| {
-                entry
-                    .action
-                    .keybind()
-                    .and_then(|action| self.keys.hint(action))
-                    .unwrap_or_default()
+                entry.action.keybind().and_then(|action| self.keys.hint(action)).unwrap_or_default()
             })
             .collect();
         // Both side columns are as wide as their widest value, so the
         // descriptions between them line up instead of jittering per row.
-        let name_width = COMMANDS
-            .iter()
-            .map(|entry| entry.slash().width())
-            .max()
-            .unwrap_or(0);
+        let name_width = COMMANDS.iter().map(|entry| entry.slash().width()).max().unwrap_or(0);
         let hint_width = hints.iter().map(|hint| hint.width()).max().unwrap_or(0);
-        let title_width = width
-            .saturating_sub(name_width + hint_width + GAP * 2)
-            .max(1);
+        let title_width = width.saturating_sub(name_width + hint_width + GAP * 2).max(1);
 
         COMMANDS
             .iter()
@@ -185,10 +168,8 @@ impl Help {
     /// the reference for that too — the alternative is a user who can see that
     /// Tab cycles agents and has nowhere to learn what to call it.
     fn unlisted_keys(&self, width: usize, theme: &Theme) -> Vec<Line<'static>> {
-        let listed: Vec<keybind::Action> = COMMANDS
-            .iter()
-            .filter_map(|entry| entry.action.keybind())
-            .collect();
+        let listed: Vec<keybind::Action> =
+            COMMANDS.iter().filter_map(|entry| entry.action.keybind()).collect();
         let rows: Vec<(&'static str, String)> = keybind::Action::all()
             .filter(|action| !listed.contains(action))
             .filter_map(|action| self.keys.hint(action).map(|hint| (action.key(), hint)))
@@ -198,16 +179,10 @@ impl Help {
         }
 
         let name_width = rows.iter().map(|(name, _)| name.width()).max().unwrap_or(0);
-        let mut lines = vec![
-            Line::raw(""),
-            Line::styled(clip("keys", width), theme.accent),
-        ];
+        let mut lines = vec![Line::raw(""), Line::styled(clip("keys", width), theme.accent)];
         lines.extend(rows.into_iter().map(|(name, hint)| {
             Line::styled(
-                clip(
-                    &format!("{name:<name_width$}{gap}{hint}", gap = " ".repeat(GAP)),
-                    width,
-                ),
+                clip(&format!("{name:<name_width$}{gap}{hint}", gap = " ".repeat(GAP)), width),
                 theme.fg,
             )
         }));
@@ -229,9 +204,7 @@ fn footer(offset: usize, rows: usize, total: usize, width: usize) -> String {
 
     let last = (offset + rows).min(total);
     let counter = format!("{first}-{last} of {total}", first = offset + 1);
-    let room = width
-        .saturating_sub(SCROLL_HINTS.width())
-        .saturating_sub(counter.width());
+    let room = width.saturating_sub(SCROLL_HINTS.width()).saturating_sub(counter.width());
     if room == 0 {
         // Too narrow to say both; the counter is the half that cannot be
         // guessed from the keys.

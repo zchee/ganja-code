@@ -47,12 +47,10 @@
 //! treatment: it is written by this module alone, so one that cannot be read
 //! back is a hard error, exactly like a config file that stopped parsing.
 
-use std::{
-    collections::BTreeMap,
-    fs, io,
-    path::{Path, PathBuf},
-    process::{Command, Stdio},
-};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::{fs, io};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -327,10 +325,7 @@ fn check_relative_source(plugin: &str, path: &str) -> Result<(), PluginError> {
             ),
         });
     }
-    if as_path
-        .components()
-        .any(|part| matches!(part, std::path::Component::ParentDir))
-    {
+    if as_path.components().any(|part| matches!(part, std::path::Component::ParentDir)) {
         return Err(PluginError::Parse {
             what: MARKETPLACE_FILE.to_owned(),
             message: format!(
@@ -444,15 +439,11 @@ fn collect_skill_costs(root: &Path, into: &mut Vec<ComponentCost>) {
         // The shared reader answers a valueless key as present-and-empty, so
         // the fallback has to be told an empty name is no name — the same
         // guard the skill loader itself pairs with that reader.
-        let name = fields
-            .get("name")
-            .cloned()
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| {
-                path.parent().and_then(Path::file_name).map_or_else(
-                    || "skill".to_owned(),
-                    |dir| dir.to_string_lossy().into_owned(),
-                )
+        let name =
+            fields.get("name").cloned().filter(|name| !name.is_empty()).unwrap_or_else(|| {
+                path.parent()
+                    .and_then(Path::file_name)
+                    .map_or_else(|| "skill".to_owned(), |dir| dir.to_string_lossy().into_owned())
             });
         let description = fields.get("description").map_or("", String::as_str);
         into.push(ComponentCost {
@@ -572,9 +563,7 @@ pub struct Listing {
 /// temporary roots match no store at all.
 #[must_use]
 pub fn skill_source(origin: &Path) -> String {
-    Store::discover()
-        .and_then(|store| store.plugin_of(origin))
-        .unwrap_or_else(|| "user".to_owned())
+    Store::discover().and_then(|store| store.plugin_of(origin)).unwrap_or_else(|| "user".to_owned())
 }
 
 /// The install store: everything under `<config home>/plugins/`.
@@ -646,10 +635,7 @@ impl Store {
             Ok(text) => text,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(State::default()),
             Err(source) => {
-                return Err(PluginError::Io {
-                    what: path.display().to_string(),
-                    source,
-                });
+                return Err(PluginError::Io { what: path.display().to_string(), source });
             }
         };
 
@@ -666,18 +652,12 @@ impl Store {
         let staged = self.root.join(format!("{STATE_FILE}.tmp"));
         let text = serde_json::to_string_pretty(state).expect("the state shape serializes");
 
-        fs::create_dir_all(&self.root).map_err(|source| PluginError::Io {
-            what: self.root.display().to_string(),
-            source,
-        })?;
-        fs::write(&staged, text).map_err(|source| PluginError::Io {
-            what: staged.display().to_string(),
-            source,
-        })?;
-        fs::rename(&staged, &path).map_err(|source| PluginError::Io {
-            what: path.display().to_string(),
-            source,
-        })
+        fs::create_dir_all(&self.root)
+            .map_err(|source| PluginError::Io { what: self.root.display().to_string(), source })?;
+        fs::write(&staged, text)
+            .map_err(|source| PluginError::Io { what: staged.display().to_string(), source })?;
+        fs::rename(&staged, &path)
+            .map_err(|source| PluginError::Io { what: path.display().to_string(), source })
     }
 
     /// Adds a marketplace: clones a git URL or copies a local directory into
@@ -703,12 +683,9 @@ impl Store {
         drop(staging);
 
         let mut state = self.state()?;
-        state.marketplaces.insert(
-            market.name.clone(),
-            MarketplaceState {
-                origin: origin.to_owned(),
-            },
-        );
+        state
+            .marketplaces
+            .insert(market.name.clone(), MarketplaceState { origin: origin.to_owned() });
         self.write_state(&state)?;
 
         Ok(market.name)
@@ -768,13 +745,7 @@ impl Store {
                 let offered = fs::read_to_string(&manifest)
                     .map_err(|error| error.to_string())
                     .and_then(|text| Marketplace::parse(&text).map_err(|error| error.to_string()))
-                    .map(|market| {
-                        market
-                            .plugins
-                            .into_iter()
-                            .map(|plugin| plugin.name)
-                            .collect()
-                    });
+                    .map(|market| market.plugins.into_iter().map(|plugin| plugin.name).collect());
                 let installed = state
                     .plugins
                     .iter()
@@ -825,10 +796,8 @@ impl Store {
 
         let dir = self.marketplaces_dir().join(name);
         if dir.exists() {
-            fs::remove_dir_all(&dir).map_err(|source| PluginError::Io {
-                what: dir.display().to_string(),
-                source,
-            })?;
+            fs::remove_dir_all(&dir)
+                .map_err(|source| PluginError::Io { what: dir.display().to_string(), source })?;
         }
         state.marketplaces.remove(name);
         self.write_state(&state)
@@ -892,10 +861,8 @@ impl Store {
             .and_then(|text| Manifest::parse(&text).ok());
         // The marketplace entry's description stands in where the manifest
         // says nothing — it is what the person chose the plugin by.
-        let description = manifest
-            .as_ref()
-            .and_then(|manifest| manifest.description.clone())
-            .or_else(|| {
+        let description =
+            manifest.as_ref().and_then(|manifest| manifest.description.clone()).or_else(|| {
                 let manifest = self
                     .marketplaces_dir()
                     .join(&installed.marketplace)
@@ -903,11 +870,7 @@ impl Store {
                     .join(MARKETPLACE_FILE);
                 let market = Marketplace::parse(&fs::read_to_string(manifest).ok()?).ok()?;
 
-                market
-                    .plugins
-                    .into_iter()
-                    .find(|entry| entry.name == plugin)?
-                    .description
+                market.plugins.into_iter().find(|entry| entry.name == plugin)?.description
             });
 
         let contribution = collect(&root, plugin);
@@ -953,17 +916,10 @@ impl Store {
 
     /// The refusal for a marketplace nobody added, naming what was.
     fn no_such_marketplace(&self, state: &State, name: &str) -> PluginError {
-        let added = state
-            .marketplaces
-            .keys()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .join(", ");
+        let added = state.marketplaces.keys().map(String::as_str).collect::<Vec<_>>().join(", ");
         let added = if added.is_empty() { "none" } else { &added };
 
-        PluginError::Unknown(format!(
-            "no marketplace \"{name}\" has been added; added: {added}"
-        ))
+        PluginError::Unknown(format!("no marketplace \"{name}\" has been added; added: {added}"))
     }
 
     /// Installs one plugin from an added marketplace: resolves the entry's
@@ -1062,10 +1018,7 @@ impl Store {
         let mut state = self.state()?;
         state.plugins.insert(
             plugin.to_owned(),
-            PluginState {
-                marketplace: marketplace.to_owned(),
-                enabled: true,
-            },
+            PluginState { marketplace: marketplace.to_owned(), enabled: true },
         );
         self.write_state(&state)
     }
@@ -1100,10 +1053,8 @@ impl Store {
 
         let dir = self.plugin_root(plugin);
         if dir.is_dir() {
-            fs::remove_dir_all(&dir).map_err(|source| PluginError::Io {
-                what: dir.display().to_string(),
-                source,
-            })?;
+            fs::remove_dir_all(&dir)
+                .map_err(|source| PluginError::Io { what: dir.display().to_string(), source })?;
         }
 
         self.write_state(&state)
@@ -1135,12 +1086,7 @@ impl Store {
     /// does — the same courtesy every unknown-name refusal in the config
     /// gives.
     fn no_such_plugin(&self, state: &State, plugin: &str) -> PluginError {
-        let installed = state
-            .plugins
-            .keys()
-            .map(String::as_str)
-            .collect::<Vec<_>>()
-            .join(", ");
+        let installed = state.plugins.keys().map(String::as_str).collect::<Vec<_>>().join(", ");
         PluginError::Unknown(if installed.is_empty() {
             format!("no plugin \"{plugin}\" is installed; none are")
         } else {
@@ -1161,10 +1107,8 @@ impl Store {
             std::process::id(),
             COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
-        fs::create_dir_all(&dir).map_err(|source| PluginError::Io {
-            what: dir.display().to_string(),
-            source,
-        })?;
+        fs::create_dir_all(&dir)
+            .map_err(|source| PluginError::Io { what: dir.display().to_string(), source })?;
 
         Ok(Staging { keep: dir })
     }
@@ -1212,10 +1156,7 @@ where
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .map_err(|source| PluginError::Io {
-            what: "spawning git".to_owned(),
-            source,
-        })?;
+        .map_err(|source| PluginError::Io { what: "spawning git".to_owned(), source })?;
     if !output.status.success() {
         return Err(PluginError::Git {
             verb: verb.to_owned(),
@@ -1333,10 +1274,7 @@ fn fetch_pinned(origin: &str, pin: Option<&str>, into: &Path) -> Result<(), Plug
 /// a kind this build cannot fetch, a missing URL, or a `path` that walks
 /// out of the clone is a refusal by name.
 fn fetch_remote(plugin: &str, object: &Value, into: &Path) -> Result<PathBuf, PluginError> {
-    let kind = object
-        .get("source")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
+    let kind = object.get("source").and_then(Value::as_str).unwrap_or_default();
     let url = match kind {
         "url" | "git" | "git-subdir" => {
             object.get("url").and_then(Value::as_str).map(str::to_owned)
@@ -1356,10 +1294,7 @@ fn fetch_remote(plugin: &str, object: &Value, into: &Path) -> Result<PathBuf, Pl
 
     // The sha outranks the ref when the entry carries both: the sha is what
     // was reviewed, the ref is where it happened to live.
-    let pin = object
-        .get("sha")
-        .or_else(|| object.get("ref"))
-        .and_then(Value::as_str);
+    let pin = object.get("sha").or_else(|| object.get("ref")).and_then(Value::as_str);
     fetch_pinned(&url, pin, into)?;
 
     match object.get("path").and_then(Value::as_str) {
@@ -1367,9 +1302,7 @@ fn fetch_remote(plugin: &str, object: &Value, into: &Path) -> Result<PathBuf, Pl
         Some(path) => {
             let relative = Path::new(path);
             if relative.is_absolute()
-                || relative
-                    .components()
-                    .any(|part| matches!(part, std::path::Component::ParentDir))
+                || relative.components().any(|part| matches!(part, std::path::Component::ParentDir))
             {
                 return Err(PluginError::Unknown(format!(
                     "plugin \"{plugin}\" names a path that leaves its own repository: {path}"
@@ -1391,10 +1324,7 @@ fn fetch_remote(plugin: &str, object: &Value, into: &Path) -> Result<PathBuf, Pl
 /// Copies a directory tree, skipping `.git` — a marketplace copy is the
 /// files, not the history — and following what `fs::copy` follows.
 fn copy_tree(from: &Path, to: &Path) -> Result<(), PluginError> {
-    let failed = |what: &Path, source| PluginError::Io {
-        what: what.display().to_string(),
-        source,
-    };
+    let failed = |what: &Path, source| PluginError::Io { what: what.display().to_string(), source };
 
     fs::create_dir_all(to).map_err(|source| failed(to, source))?;
     let entries = fs::read_dir(from).map_err(|source| failed(from, source))?;
@@ -1420,10 +1350,7 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), PluginError> {
 /// halves (delete, rename) ordered so the worst crash leaves an absent
 /// directory rather than a half-written one.
 fn replace_dir(from: &Path, to: &Path) -> Result<(), PluginError> {
-    let failed = |what: &Path, source| PluginError::Io {
-        what: what.display().to_string(),
-        source,
-    };
+    let failed = |what: &Path, source| PluginError::Io { what: what.display().to_string(), source };
 
     if let Some(parent) = to.parent() {
         fs::create_dir_all(parent).map_err(|source| failed(parent, source))?;
@@ -1497,11 +1424,7 @@ fn collect_hooks(
     let mut hooks: BTreeMap<String, Vec<HookMatcher>> = BTreeMap::new();
     for (event, groups) in events {
         if crate::hook::HookEvent::from_name(event).is_none() {
-            tracing::warn!(
-                plugin,
-                event,
-                "skipping hooks for an event this build does not fire"
-            );
+            tracing::warn!(plugin, event, "skipping hooks for an event this build does not fire");
             continue;
         }
         let Some(groups) = groups.as_array() else {
@@ -1509,10 +1432,7 @@ fn collect_hooks(
             continue;
         };
         for group in groups {
-            let matcher = group
-                .get("matcher")
-                .and_then(Value::as_str)
-                .map(str::to_owned);
+            let matcher = group.get("matcher").and_then(Value::as_str).map(str::to_owned);
             if let Some(pattern) = &matcher
                 && !pattern.is_empty()
                 && regex::Regex::new(pattern).is_err()
@@ -1527,12 +1447,7 @@ fn collect_hooks(
             }
 
             let mut handlers = Vec::new();
-            for handler in group
-                .get("hooks")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-            {
+            for handler in group.get("hooks").and_then(Value::as_array).into_iter().flatten() {
                 if handler.get("type").and_then(Value::as_str) != Some("command") {
                     tracing::warn!(
                         plugin,
@@ -1556,10 +1471,10 @@ fn collect_hooks(
                 }));
             }
             if !handlers.is_empty() {
-                hooks.entry(event.clone()).or_default().push(HookMatcher {
-                    matcher,
-                    hooks: handlers,
-                });
+                hooks
+                    .entry(event.clone())
+                    .or_default()
+                    .push(HookMatcher { matcher, hooks: handlers });
             }
         }
     }
@@ -1724,11 +1639,7 @@ fn collect_agents(root: &Path, plugin: &str) -> BTreeMap<String, AgentConfig> {
             .get("name")
             .cloned()
             .filter(|name| !name.is_empty())
-            .or_else(|| {
-                path.file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .map(str::to_owned)
-            })
+            .or_else(|| path.file_stem().and_then(|stem| stem.to_str()).map(str::to_owned))
             .filter(|name| check_name("agent", name).is_ok());
         let Some(name) = name else {
             tracing::warn!(plugin, file = %path.display(), "skipping an agent with no usable name");
@@ -1738,10 +1649,7 @@ fn collect_agents(root: &Path, plugin: &str) -> BTreeMap<String, AgentConfig> {
         agents.insert(
             name,
             AgentConfig {
-                model: front
-                    .get("model")
-                    .cloned()
-                    .filter(|model| !model.is_empty()),
+                model: front.get("model").cloned().filter(|model| !model.is_empty()),
                 prompt: Some(body.trim().to_owned()).filter(|prompt| !prompt.is_empty()),
                 description: front
                     .get("description")
@@ -1781,11 +1689,7 @@ fn collect_lsp(root: &Path, plugin: &str, plugin_root: &str) -> BTreeMap<String,
     let mut servers = BTreeMap::new();
     for (name, entry) in entries {
         let Some(command) = entry.get("command").and_then(Value::as_str) else {
-            tracing::warn!(
-                plugin,
-                server = name,
-                "skipping an lsp entry with no command"
-            );
+            tracing::warn!(plugin, server = name, "skipping an lsp entry with no command");
             continue;
         };
         let Some(extensions) = entry.get("extensionToLanguage").and_then(Value::as_object) else {

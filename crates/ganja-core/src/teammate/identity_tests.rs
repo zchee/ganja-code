@@ -13,14 +13,7 @@ fn id_for(stem: &str) -> String {
     let rest = "0".repeat(32 - stem.len());
     let hex = format!("{stem}{rest}");
 
-    format!(
-        "{}-{}-7{}-8{}-{}",
-        &hex[..8],
-        &hex[8..12],
-        &hex[13..16],
-        &hex[17..20],
-        &hex[20..32]
-    )
+    format!("{}-{}-7{}-8{}-{}", &hex[..8], &hex[8..12], &hex[13..16], &hex[17..20], &hex[20..32])
 }
 
 /// Writes `stem`'s record under `directory`, naming `name`.
@@ -79,9 +72,7 @@ fn a_name_no_live_session_holds_resolves_to_nobody() {
 
     assert_eq!(
         identity.resolve("frontend", "0198ffff-0000-7000-8000-000000000000"),
-        Resolution::NoneSuch {
-            name: "frontend".to_owned()
-        }
+        Resolution::NoneSuch { name: "frontend".to_owned() }
     );
 }
 
@@ -93,9 +84,8 @@ fn a_name_asked_in_another_case_finds_the_same_session() {
     let identity = Identity::new(dir.path());
     let (id, _held) = live(dir.path(), "0198c1a2", "Backend");
 
-    let Resolution::Session {
-        name, id: found, ..
-    } = identity.resolve("bAcKeNd", "0198ffff-0000-7000-8000-000000000000")
+    let Resolution::Session { name, id: found, .. } =
+        identity.resolve("bAcKeNd", "0198ffff-0000-7000-8000-000000000000")
     else {
         panic!("one live holder resolves");
     };
@@ -120,16 +110,10 @@ fn two_live_sessions_sharing_a_name_refuse_as_ambiguous_and_pin_nothing() {
     assert_eq!(name, "worker");
     assert_eq!(candidates.len(), 2);
     assert_eq!(
-        candidates
-            .iter()
-            .map(|it| it.stem.as_str())
-            .collect::<Vec<_>>(),
+        candidates.iter().map(|it| it.stem.as_str()).collect::<Vec<_>>(),
         ["0198c1a2", "0198c1b7"]
     );
-    assert_eq!(
-        candidates[0].address,
-        address_of(&socket_of(dir.path(), "0198c1a2"))
-    );
+    assert_eq!(candidates[0].address, address_of(&socket_of(dir.path(), "0198c1a2")));
     assert_eq!(identity.pinned("worker"), None, "refusing pins nothing");
 }
 
@@ -166,9 +150,7 @@ fn a_record_carrying_this_sessions_own_id_never_resolves() {
 
     assert_eq!(
         identity.resolve("backend", &own),
-        Resolution::NoneSuch {
-            name: "backend".to_owned()
-        }
+        Resolution::NoneSuch { name: "backend".to_owned() }
     );
     assert!(matches!(
         identity.resolve_address(&socket_of(dir.path(), "0198c1a2"), &own),
@@ -187,9 +169,8 @@ fn a_stale_record_sharing_a_name_does_not_make_the_live_one_ambiguous() {
     seed(dir.path(), "0198c1b7", "worker");
     let (id, _held) = live(dir.path(), "0198c1a2", "worker");
 
-    let Resolution::Session {
-        id: found, stem, ..
-    } = identity.resolve("worker", "0198ffff-0000-7000-8000-000000000000")
+    let Resolution::Session { id: found, stem, .. } =
+        identity.resolve("worker", "0198ffff-0000-7000-8000-000000000000")
     else {
         panic!("the one live holder resolves");
     };
@@ -230,11 +211,8 @@ fn a_name_whose_live_holder_changed_since_the_pin_halts_as_moved() {
     let (second, _held) = live(dir.path(), "0198c1f0", "backend");
     assert_ne!(first, second);
 
-    let Resolution::Moved {
-        name,
-        pinned_stem,
-        candidates,
-    } = identity.resolve("backend", "0198ffff-0000-7000-8000-000000000000")
+    let Resolution::Moved { name, pinned_stem, candidates } =
+        identity.resolve("backend", "0198ffff-0000-7000-8000-000000000000")
     else {
         panic!("a name whose holder changed halts");
     };
@@ -276,11 +254,7 @@ fn clearing_the_pins_lets_a_moved_name_resolve_again() {
     let dir = tempfile::tempdir().expect("a scratch directory");
     let identity = Identity::new(dir.path());
     let (id, _held) = live(dir.path(), "0198c1f0", "backend");
-    identity.pin(
-        "backend",
-        "0198c1a2-0000-7000-8000-000000000000",
-        "0198c1a2",
-    );
+    identity.pin("backend", "0198c1a2-0000-7000-8000-000000000000", "0198c1a2");
 
     assert!(matches!(
         identity.resolve("backend", "0198ffff-0000-7000-8000-000000000000"),
@@ -305,9 +279,8 @@ fn a_socket_address_resolves_to_the_session_that_bound_it() {
     let (id, _held) = live(dir.path(), "0198c1a2", "backend");
     let own = "0198ffff-0000-7000-8000-000000000000";
 
-    let Resolution::Session {
-        id: found, name, ..
-    } = identity.resolve_address(&socket_of(dir.path(), "0198c1a2"), own)
+    let Resolution::Session { id: found, name, .. } =
+        identity.resolve_address(&socket_of(dir.path(), "0198c1a2"), own)
     else {
         panic!("the bound socket resolves");
     };
@@ -327,11 +300,7 @@ fn a_socket_whose_session_is_gone_is_no_address_and_touches_no_pin() {
     let dir = tempfile::tempdir().expect("a scratch directory");
     let identity = Identity::new(dir.path());
     seed(dir.path(), "0198c1a2", "backend");
-    identity.pin(
-        "backend",
-        "0198c1a2-0000-7000-8000-000000000000",
-        "0198c1a2",
-    );
+    identity.pin("backend", "0198c1a2-0000-7000-8000-000000000000", "0198c1a2");
 
     assert!(matches!(
         identity.resolve_address(
@@ -340,10 +309,7 @@ fn a_socket_whose_session_is_gone_is_no_address_and_touches_no_pin() {
         ),
         Resolution::NoneSuch { .. }
     ));
-    assert_eq!(
-        identity.pinned("backend").expect("the pin stands").stem,
-        "0198c1a2"
-    );
+    assert_eq!(identity.pinned("backend").expect("the pin stands").stem, "0198c1a2");
 }
 
 /// The scheme's two halves agree: what [`address_of`] writes,
@@ -373,10 +339,7 @@ fn candidate(stem: &str, name: &str, cwd: &str) -> Candidate {
 #[test]
 fn a_roster_mention_renders_the_lead_assigned_label() {
     assert_eq!(
-        reminder(&Mentioned::Teammate {
-            name: "w1".to_owned(),
-            lead: false
-        }),
+        reminder(&Mentioned::Teammate { name: "w1".to_owned(), lead: false }),
         "<session_mention token=\"@w1\">\n\
              @w1 names a teammate on this session's roster. That name is lead-assigned — it was \
              given at the spawn door this session opened — so it identifies exactly one teammate, \
@@ -387,11 +350,8 @@ fn a_roster_mention_renders_the_lead_assigned_label() {
              </session_mention>"
     );
     assert!(
-        reminder(&Mentioned::Teammate {
-            name: "w1".to_owned(),
-            lead: true
-        })
-        .contains("@w1 names this team's lead on this session's roster."),
+        reminder(&Mentioned::Teammate { name: "w1".to_owned(), lead: true })
+            .contains("@w1 names this team's lead on this session's roster."),
         "the lead's row says which one it is"
     );
 }
@@ -478,9 +438,7 @@ fn a_moved_pin_mention_names_the_stem_it_used_to_reach() {
 /// of anybody the person did not point at.
 #[test]
 fn a_vanished_mention_renders_the_not_found_sentence_and_lists_nobody() {
-    let rendered = reminder(&Mentioned::Vanished {
-        token: "ghost".to_owned(),
-    });
+    let rendered = reminder(&Mentioned::Vanished { token: "ghost".to_owned() });
 
     assert_eq!(
         rendered,
@@ -489,10 +447,7 @@ fn a_vanished_mention_renders_the_not_found_sentence_and_lists_nobody() {
              sent nothing, and there is nothing to address under that name.\n\
              </session_mention>"
     );
-    assert!(
-        !rendered.contains("uds:"),
-        "a miss offers no roster of other sessions to try"
-    );
+    assert!(!rendered.contains("uds:"), "a miss offers no roster of other sessions to try");
 }
 
 /// AC-24(6), the hit: a `uds:` token renders the address as the one
@@ -609,21 +564,11 @@ fn every_resolution_lands_in_the_reminders_vocabulary() {
         Mentioned::Moved { .. }
     ));
     assert!(matches!(
-        Mentioned::of_name(
-            "ghost",
-            Resolution::NoneSuch {
-                name: "ghost".to_owned()
-            }
-        ),
+        Mentioned::of_name("ghost", Resolution::NoneSuch { name: "ghost".to_owned() }),
         Mentioned::Vanished { .. }
     ));
     assert!(matches!(
-        Mentioned::of_name(
-            "backend",
-            Resolution::ListingFailed {
-                error: "broke".to_owned()
-            }
-        ),
+        Mentioned::of_name("backend", Resolution::ListingFailed { error: "broke".to_owned() }),
         Mentioned::Unchecked { .. }
     ));
 
@@ -637,28 +582,21 @@ fn every_resolution_lands_in_the_reminders_vocabulary() {
     assert!(matches!(
         Mentioned::of_address(
             "uds:/tmp/ganja-501/0198c1a2.sock",
-            Resolution::NoneSuch {
-                name: "/tmp/ganja-501/0198c1a2.sock".to_owned()
-            }
+            Resolution::NoneSuch { name: "/tmp/ganja-501/0198c1a2.sock".to_owned() }
         ),
         Mentioned::AddressMiss { .. }
     ));
     assert!(matches!(
         Mentioned::of_address(
             "uds:/tmp/ganja-501/0198c1a2.sock",
-            Resolution::ListingFailed {
-                error: "broke".to_owned()
-            }
+            Resolution::ListingFailed { error: "broke".to_owned() }
         ),
         Mentioned::Unchecked { .. }
     ));
     assert!(matches!(
         Mentioned::of_address(
             "uds:/tmp/ganja-501/0198c1a2.sock",
-            Resolution::Ambiguous {
-                name: "worker".to_owned(),
-                candidates: Vec::new(),
-            }
+            Resolution::Ambiguous { name: "worker".to_owned(), candidates: Vec::new() }
         ),
         Mentioned::AddressMiss { .. }
     ));
@@ -670,14 +608,8 @@ fn every_resolution_lands_in_the_reminders_vocabulary() {
 #[test]
 fn no_reminder_names_a_reply_channel() {
     let renderings = [
-        Mentioned::Teammate {
-            name: "w1".to_owned(),
-            lead: false,
-        },
-        Mentioned::Teammate {
-            name: "w1".to_owned(),
-            lead: true,
-        },
+        Mentioned::Teammate { name: "w1".to_owned(), lead: false },
+        Mentioned::Teammate { name: "w1".to_owned(), lead: true },
         Mentioned::Session {
             token: "backend".to_owned(),
             name: "backend".to_owned(),
@@ -694,22 +626,15 @@ fn no_reminder_names_a_reply_channel() {
             pinned_stem: "0198c1a2".to_owned(),
             candidates: vec![candidate("0198c1f0", "backend", "/work/other")],
         },
-        Mentioned::Vanished {
-            token: "ghost".to_owned(),
-        },
+        Mentioned::Vanished { token: "ghost".to_owned() },
         Mentioned::Addressed {
             address: "uds:/tmp/ganja-501/0198c1a2.sock".to_owned(),
             name: "backend".to_owned(),
             stem: "0198c1a2".to_owned(),
             cwd: PathBuf::from("/work/backend"),
         },
-        Mentioned::AddressMiss {
-            address: "uds:/tmp/ganja-501/0198c1a2.sock".to_owned(),
-        },
-        Mentioned::Unchecked {
-            token: "backend".to_owned(),
-            error: "broke".to_owned(),
-        },
+        Mentioned::AddressMiss { address: "uds:/tmp/ganja-501/0198c1a2.sock".to_owned() },
+        Mentioned::Unchecked { token: "backend".to_owned(), error: "broke".to_owned() },
     ];
 
     for mentioned in &renderings {
@@ -757,10 +682,8 @@ fn a_hostile_record_name_cannot_break_out_of_its_reminder_block() {
 /// nothing was sent.
 #[test]
 fn the_deliver_arms_refusals_hand_back_addresses_that_work() {
-    let candidates = [
-        candidate("0198c1a2", "worker", "/work/a"),
-        candidate("0198c1b7", "worker", "/work/b"),
-    ];
+    let candidates =
+        [candidate("0198c1a2", "worker", "/work/a"), candidate("0198c1b7", "worker", "/work/b")];
 
     let ambiguous = ambiguous_refusal("worker", &candidates);
     assert!(ambiguous.starts_with("More than one live session goes by \"worker\","));

@@ -18,16 +18,12 @@
 //! part that needs a real config home: which directories are read, and which
 //! tier wins a name.
 
-use std::{
-    fs,
-    io::{self, Write as _},
-};
+use std::fs;
+use std::io::{self, Write as _};
 
-use ganja_core::{
-    Config,
-    command::{INIT, Registry},
-    config::{CONFIG_ENV, CONFIG_HOME_ENV},
-};
+use ganja_core::Config;
+use ganja_core::command::{INIT, Registry};
+use ganja_core::config::{CONFIG_ENV, CONFIG_HOME_ENV};
 use ganja_testkit::{LogCapture as Capture, plant};
 use serde_json::json;
 
@@ -65,11 +61,7 @@ fn command_files_join_the_roster_under_the_precedence_their_home_gives_them() {
         "commands/greet.md",
         "---\ndescription: say hello\nargument-hint: <name>\n---\ngreet $1\n",
     );
-    plant(
-        &config_home,
-        "commands/init.md",
-        "this is not the init anybody means\n",
-    );
+    plant(&config_home, "commands/init.md", "this is not the init anybody means\n");
     plant(&config_home, "commands/shared.md", "the global one\n");
 
     // The worktree: the shadowing file, one of its own, and one the config
@@ -107,8 +99,7 @@ fn command_files_join_the_roster_under_the_precedence_their_home_gives_them() {
     // builtin's name, so `/init` is still the one this build ships.
     let init = registry.get(INIT).expect("the builtin survives");
     assert!(
-        init.template
-            .starts_with("Create or update `AGENTS.md` for this repository."),
+        init.template.starts_with("Create or update `AGENTS.md` for this repository."),
         "a file named after a builtin never replaces it: {}",
         init.template
     );
@@ -120,10 +111,7 @@ fn command_files_join_the_roster_under_the_precedence_their_home_gives_them() {
 
     // global file < project file.
     assert_eq!(
-        registry
-            .get("shared")
-            .expect("the shadowed name is still a command")
-            .template,
+        registry.get("shared").expect("the shadowed name is still a command").template,
         "the project one\n",
         "the worktree's file wins the name"
     );
@@ -147,19 +135,14 @@ fn command_files_join_the_roster_under_the_precedence_their_home_gives_them() {
     .expect("the fixture is a config");
     let registry = Registry::build(&overriding, &project);
     assert_eq!(
-        registry
-            .get(INIT)
-            .expect("init is still a command")
-            .template,
+        registry.get(INIT).expect("init is still a command").template,
         "mine instead",
         "a config command replaces the builtin it names"
     );
     assert!(registry.get("nope").is_none());
 
     let logged = capture.logged();
-    io::stdout()
-        .write_all(logged.as_bytes())
-        .expect("the captured log is printable");
+    io::stdout().write_all(logged.as_bytes()).expect("the captured log is printable");
     assert!(
         logged.contains("a command file names a builtin command and was skipped")
             && logged.contains("command=init"),

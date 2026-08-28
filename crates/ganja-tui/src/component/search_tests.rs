@@ -1,14 +1,11 @@
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 
 use super::HistorySearch;
-use crate::{history::Recalled, theme::Theme};
+use crate::history::Recalled;
+use crate::theme::Theme;
 
-const AREA: Rect = Rect {
-    x: 0,
-    y: 0,
-    width: 76,
-    height: 24,
-};
+const AREA: Rect = Rect { x: 0, y: 0, width: 76, height: 24 };
 
 const HOUR: u64 = 60 * 60 * 1_000;
 
@@ -18,10 +15,7 @@ const HOUR: u64 = 60 * 60 * 1_000;
 const NOW: u64 = 4 * HOUR;
 
 fn recalled(input: &str, at: u64) -> Recalled {
-    Recalled {
-        prompt: crate::history::PromptInfo::text(input),
-        at,
-    }
+    Recalled { prompt: crate::history::PromptInfo::text(input), at }
 }
 
 /// Three entries, already newest-first — the shape `History::entries`
@@ -49,11 +43,7 @@ fn rendered(search: &HistorySearch, area: Rect) -> String {
     search.render(area, &mut buffer, &Theme::default());
 
     (0..area.height)
-        .map(|row| {
-            (0..area.width)
-                .map(|column| buffer[(column, row)].symbol())
-                .collect::<String>()
-        })
+        .map(|row| (0..area.width).map(|column| buffer[(column, row)].symbol()).collect::<String>())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -62,10 +52,7 @@ fn rendered(search: &HistorySearch, area: Rect) -> String {
 fn an_empty_query_lists_everything_newest_first() {
     let search = search(entries());
 
-    assert_eq!(
-        search.selected().map(|p| p.input.as_str()),
-        Some("commit the fix")
-    );
+    assert_eq!(search.selected().map(|p| p.input.as_str()), Some("commit the fix"));
     let screen = rendered(&search, AREA);
     assert!(screen.contains("commit the fix"), "got:\n{screen}");
     assert!(screen.contains("git status"), "got:\n{screen}");
@@ -79,17 +66,11 @@ fn fuzzy_narrowing_keeps_the_newest_first_order() {
 
     typing(&mut search, "ommi");
 
-    assert_eq!(
-        search.selected().map(|p| p.input.as_str()),
-        Some("commit the fix")
-    );
+    assert_eq!(search.selected().map(|p| p.input.as_str()), Some("commit the fix"));
     let screen = rendered(&search, AREA);
     assert!(screen.contains("commit the fix"), "got:\n{screen}");
     assert!(!screen.contains("git status"), "got:\n{screen}");
-    assert!(
-        !screen.contains("what does this crate do"),
-        "got:\n{screen}"
-    );
+    assert!(!screen.contains("what does this crate do"), "got:\n{screen}");
 }
 
 /// Each row carries a relative age, the sessions picker's own bucketing.
@@ -107,10 +88,7 @@ fn each_row_carries_a_relative_age() {
 /// up on screen can only have come from the preview.
 #[test]
 fn the_preview_shows_the_selected_entry_whole_when_it_fits() {
-    let search = search(vec![recalled(
-        "first line\nsecond line\nthird line",
-        NOW - HOUR,
-    )]);
+    let search = search(vec![recalled("first line\nsecond line\nthird line", NOW - HOUR)]);
 
     let screen = rendered(&search, AREA);
     assert!(screen.contains("first line"), "got:\n{screen}");
@@ -122,25 +100,16 @@ fn the_preview_shows_the_selected_entry_whole_when_it_fits() {
 /// instead of overflowing.
 #[test]
 fn a_tall_preview_truncates_with_a_line_count() {
-    let long = (0..40)
-        .map(|line| format!("line {line}"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let long = (0..40).map(|line| format!("line {line}")).collect::<Vec<_>>().join("\n");
     let search = search(vec![recalled(&long, NOW - HOUR)]);
 
     let screen = rendered(&search, AREA);
-    assert!(
-        screen.contains("line 0"),
-        "the top of the entry should still show:\n{screen}"
-    );
+    assert!(screen.contains("line 0"), "the top of the entry should still show:\n{screen}");
     assert!(
         screen.contains(" lines"),
         "a truncated preview should say how much more there is:\n{screen}"
     );
-    assert!(
-        !screen.contains("line 39"),
-        "the tail should not fit alongside the marker:\n{screen}"
-    );
+    assert!(!screen.contains("line 39"), "the tail should not fit alongside the marker:\n{screen}");
 }
 
 /// Moving the cursor changes what the preview shows.
@@ -149,10 +118,7 @@ fn moving_the_cursor_changes_the_preview() {
     let mut search = search(entries());
     search.move_selection(1);
 
-    assert_eq!(
-        search.selected().map(|p| p.input.as_str()),
-        Some("git status")
-    );
+    assert_eq!(search.selected().map(|p| p.input.as_str()), Some("git status"));
 }
 
 /// An empty store renders an honest empty state rather than a blank list.
@@ -212,8 +178,5 @@ fn a_one_column_area_draws_without_panicking() {
 fn a_zero_area_draws_nothing_and_does_not_panic() {
     let screen = rendered(&search(entries()), Rect::new(0, 0, 0, 0));
 
-    assert!(
-        screen.is_empty(),
-        "a zero area has no cell to hold: {screen}"
-    );
+    assert!(screen.is_empty(), "a zero area has no cell to hold: {screen}");
 }

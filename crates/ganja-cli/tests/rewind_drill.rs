@@ -47,16 +47,14 @@
 //! being broken.
 #![cfg(unix)]
 
-use std::{
-    fs,
-    ops::{Deref, DerefMut},
-    process::Command,
-    time::Duration,
-};
+use std::fs;
+use std::ops::{Deref, DerefMut};
+use std::process::Command;
+use std::time::Duration;
 
-use expectrl::{
-    ControlCode, Eof, Expect as _, Session, process::unix::WaitStatus, session::OsSession,
-};
+use expectrl::process::unix::WaitStatus;
+use expectrl::session::OsSession;
+use expectrl::{ControlCode, Eof, Expect as _, Session};
 use ganja_testkit::temp_dir as temporary;
 use serde_json::json;
 use tempfile::TempDir;
@@ -132,35 +130,19 @@ impl Ganja {
 
         let mut session = Session::spawn(command).expect("failed to spawn `ganja` in a pty");
         session.set_expect_timeout(Some(EXIT_DEADLINE));
-        session
-            .get_process_mut()
-            .set_window_size(COLUMNS, ROWS)
-            .expect("failed to size the pty");
-        session
-            .expect(ALT_SCREEN)
-            .expect("`ganja` never took the terminal over");
+        session.get_process_mut().set_window_size(COLUMNS, ROWS).expect("failed to size the pty");
+        session.expect(ALT_SCREEN).expect("`ganja` never took the terminal over");
 
-        Self {
-            session: Some(session),
-        }
+        Self { session: Some(session) }
     }
 
     fn quit_and_assert_clean_exit(mut self) {
-        self.send(ControlCode::EndOfText)
-            .expect("failed to send Ctrl-C");
+        self.send(ControlCode::EndOfText).expect("failed to send Ctrl-C");
 
-        let mut session = self
-            .session
-            .take()
-            .expect("a session is only ever taken once");
-        session
-            .expect(Eof)
-            .expect("`ganja` did not exit within the deadline");
+        let mut session = self.session.take().expect("a session is only ever taken once");
+        session.expect(Eof).expect("`ganja` did not exit within the deadline");
 
-        let status = session
-            .get_process()
-            .wait()
-            .expect("failed to reap the `ganja` process");
+        let status = session.get_process().wait().expect("failed to reap the `ganja` process");
         assert!(
             matches!(status, WaitStatus::Exited(_, 0)),
             "expected a clean exit, got {status:?}"
@@ -210,11 +192,8 @@ fn script() -> serde_json::Value {
 
 fn scripted(project: &TempDir, data: &TempDir) -> Ganja {
     let path = project.path().join("script.json");
-    fs::write(
-        &path,
-        serde_json::to_vec_pretty(&script()).expect("a script serializes"),
-    )
-    .expect("the script is writable");
+    fs::write(&path, serde_json::to_vec_pretty(&script()).expect("a script serializes"))
+        .expect("the script is writable");
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_ganja"));
     command
@@ -282,18 +261,13 @@ fn esc_esc_walks_back_only_at_an_idle_composer_and_rewind_keeps_the_picker() {
 
     session.send(PROMPT).expect("failed to type the prompt");
     session.send("\r").expect("failed to send Enter");
-    session
-        .expect(OPENING)
-        .expect("the scripted reply never started streaming");
+    session.expect(OPENING).expect("the scripted reply never started streaming");
 
     gesture(&mut session);
     session.set_expect_timeout(Some(ABSENCE_DEADLINE));
     let walked = session.expect(WALK_HINT);
     session.set_expect_timeout(Some(EXIT_DEADLINE));
-    assert!(
-        walked.is_err(),
-        "no walk may open over a turn the user is still watching"
-    );
+    assert!(walked.is_err(), "no walk may open over a turn the user is still watching");
 
     // ---- idle again, which is also what says the Esc really cancelled ----
 
@@ -318,9 +292,7 @@ fn esc_esc_walks_back_only_at_an_idle_composer_and_rewind_keeps_the_picker() {
         "the picker lists the cancelled prompt as a checkpoint that changed \
          no file",
     );
-    session
-        .expect(PICKER_HINTS)
-        .expect("/rewind should still open the two-step picker");
+    session.expect(PICKER_HINTS).expect("/rewind should still open the two-step picker");
 
     escape(&mut session);
     session.quit_and_assert_clean_exit();

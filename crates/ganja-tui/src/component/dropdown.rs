@@ -16,19 +16,16 @@
 //! away what was typed. Ganja closes the menu and keeps the text (**D11**) —
 //! the destructive half of that behavior has no upside a person would ask for.
 
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    text::{Line, Text},
-    widgets::{Block, Clear, Paragraph, Widget as _},
-};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::text::{Line, Text};
+use ratatui::widgets::{Block, Clear, Paragraph, Widget as _};
 use unicode_width::UnicodeWidthStr as _;
 
-use crate::{
-    command::{self, Choice, EngineCommand, Slot},
-    component::{chat::clip, clamped, first_visible},
-    theme::Theme,
-};
+use crate::command::{self, Choice, EngineCommand, Slot};
+use crate::component::chat::clip;
+use crate::component::{clamped, first_visible};
+use crate::theme::Theme;
 
 /// What marks the row the cursor is on, and what pads every other row.
 const MARKER: &str = "> ";
@@ -64,10 +61,7 @@ pub fn triggered(text: &str, cursor: (usize, usize)) -> bool {
 
     let first = text.lines().next().unwrap_or_default();
 
-    first
-        .chars()
-        .take(column)
-        .all(|character| !character.is_whitespace())
+    first.chars().take(column).all(|character| !character.is_whitespace())
 }
 
 /// The commands a typed fragment narrows to, and which one is under the
@@ -92,13 +86,8 @@ impl Dropdown {
     /// commands to.
     #[must_use]
     pub fn new(text: &str, engine: Vec<EngineCommand>) -> Self {
-        let mut dropdown = Self {
-            engine,
-            matched: Vec::new(),
-            selected: 0,
-            title: TITLE,
-            empty: EMPTY,
-        };
+        let mut dropdown =
+            Self { engine, matched: Vec::new(), selected: 0, title: TITLE, empty: EMPTY };
         dropdown.refresh(text);
 
         dropdown
@@ -184,11 +173,7 @@ impl Dropdown {
 
         menu_lines(
             &names,
-            &self
-                .matched
-                .iter()
-                .map(Choice::description)
-                .collect::<Vec<_>>(),
+            &self.matched.iter().map(Choice::description).collect::<Vec<_>>(),
             self.selected,
             width,
             rows,
@@ -213,12 +198,7 @@ pub(crate) fn menu_area(anchor: Rect, rows: usize) -> Option<Rect> {
         return None;
     }
 
-    Some(Rect {
-        x: anchor.x,
-        y: anchor.y.saturating_sub(height),
-        width: anchor.width,
-        height,
-    })
+    Some(Rect { x: anchor.x, y: anchor.y.saturating_sub(height), width: anchor.width, height })
 }
 
 /// One row per name, each padded into a name column with its detail beside it,
@@ -256,11 +236,7 @@ pub(crate) fn menu_lines(
 
             Line::styled(
                 format!("{row:<width$}"),
-                if index == selected {
-                    theme.selection
-                } else {
-                    theme.fg
-                },
+                if index == selected { theme.selection } else { theme.fg },
             )
         })
         .collect()

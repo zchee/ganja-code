@@ -28,18 +28,12 @@ fn the_field_name_that_was_refused_becomes_one_the_pattern_accepts() {
     let aliased = alias(FIELD, OPENAI_CAP);
 
     assert_eq!(aliased.len(), OPENAI_CAP);
-    assert!(
-        aliased.bytes().all(conforming),
-        "{aliased} is outside [A-Za-z0-9_-]"
-    );
+    assert!(aliased.bytes().all(conforming), "{aliased} is outside [A-Za-z0-9_-]");
     // Pinned rather than merely described: determinism is what lets an
     // encoder and a decoder recompute the same string, and what lets a
     // transcript replayed on a later turn name what that turn advertises.
     // A change to this literal is a change to both, never one of them.
-    assert_eq!(
-        aliased,
-        "mcp__plugin_mcp-gemini-search_mcp-gemini-search__deep_r_6bb398bf"
-    );
+    assert_eq!(aliased, "mcp__plugin_mcp-gemini-search_mcp-gemini-search__deep_r_6bb398bf");
 }
 
 /// Anthropic's own cap is wide enough that the same name only loses its
@@ -62,10 +56,7 @@ fn aliasing_the_same_name_twice_gives_the_same_string() {
 #[test]
 fn two_long_names_sharing_a_prefix_never_alias_equal() {
     let stem = "mcp__plugin:some-very-long-marketplace-name:some-server__";
-    let (first, second) = (
-        format!("{stem}first_tool_here"),
-        format!("{stem}second_tool"),
-    );
+    let (first, second) = (format!("{stem}first_tool_here"), format!("{stem}second_tool"));
     let one = alias(&first, OPENAI_CAP);
     let two = alias(&second, OPENAI_CAP);
 
@@ -104,8 +95,5 @@ fn an_aliased_call_comes_back_out_under_the_name_the_engine_registered() {
 fn a_name_the_map_never_saw_passes_through_unchanged() {
     let aliases = Aliases::of(&[definition(FIELD)], OPENAI_CAP);
 
-    assert_eq!(
-        aliases.original("invented_tool".to_owned()),
-        "invented_tool"
-    );
+    assert_eq!(aliases.original("invented_tool".to_owned()), "invented_tool");
 }

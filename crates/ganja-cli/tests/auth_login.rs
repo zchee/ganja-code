@@ -12,18 +12,14 @@
 //! standard error. A build that printed the code afterwards would deadlock
 //! against its own login, which is what the deadline turns into a failure.
 
-use std::{
-    io::{BufRead as _, BufReader, Read as _, Write as _},
-    net::{TcpListener, TcpStream},
-    path::PathBuf,
-    process::{Child, Command, Stdio},
-    sync::{
-        Arc, Condvar, Mutex,
-        mpsc::{self, Receiver},
-    },
-    thread,
-    time::{Duration, Instant},
-};
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::net::{TcpListener, TcpStream};
+use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
@@ -58,10 +54,7 @@ struct Gate {
 
 impl Gate {
     fn closed() -> Arc<Self> {
-        Arc::new(Self {
-            open: Mutex::new(false),
-            changed: Condvar::new(),
-        })
+        Arc::new(Self { open: Mutex::new(false), changed: Condvar::new() })
     }
 
     /// Blocks the answer until [`Self::open`] has been called.
@@ -87,12 +80,7 @@ impl Gate {
 /// time.
 fn serve(gate: &Arc<Gate>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback is bindable");
-    let url = format!(
-        "http://{}",
-        listener
-            .local_addr()
-            .expect("a bound socket has an address")
-    );
+    let url = format!("http://{}", listener.local_addr().expect("a bound socket has an address"));
     let gate = Arc::clone(gate);
 
     thread::spawn(move || {
@@ -146,10 +134,7 @@ fn answer(path: &str, gate: &Gate) -> (u16, String) {
         }
         "/api/accounts/deviceauth/token" => {
             gate.hold();
-            (
-                200,
-                r#"{"authorization_code":"ac-1","code_verifier":"cv-1"}"#.to_owned(),
-            )
+            (200, r#"{"authorization_code":"ac-1","code_verifier":"cv-1"}"#.to_owned())
         }
         // The exchange the ChatGPT device grant ends in, already past the gate.
         "/oauth/token" => (
@@ -164,10 +149,7 @@ fn answer(path: &str, gate: &Gate) -> (u16, String) {
         // before the login blocked on it.
         "/auth/poll" => {
             gate.hold();
-            (
-                200,
-                format!(r#"{{"accessToken":"{ACCESS}","refreshToken":"{REFRESH}"}}"#),
-            )
+            (200, format!(r#"{{"accessToken":"{ACCESS}","refreshToken":"{REFRESH}"}}"#))
         }
         _ => (404, "{}".to_owned()),
     }
@@ -261,10 +243,7 @@ fn unblocked() -> String {
 /// `pass show … | ganja auth login` arrives in — and the shape every defect in
 /// this half of the file was found in.
 fn fed(command: &mut Command, input: &str) -> std::process::Output {
-    let mut child = command
-        .stdin(Stdio::piped())
-        .spawn()
-        .expect("the binary runs");
+    let mut child = command.stdin(Stdio::piped()).spawn().expect("the binary runs");
     child
         .stdin
         .take()
@@ -346,11 +325,7 @@ fn finish(mut child: Child, lines: &Receiver<String>, mut seen: Vec<String>) -> 
         seen.push(line);
     }
 
-    Finished {
-        stdout,
-        stderr: seen.join("\n"),
-        ok,
-    }
+    Finished { stdout, stderr: seen.join("\n"), ok }
 }
 
 /// The stored credential file, parsed.
@@ -454,42 +429,20 @@ fn the_listing_names_a_login_oauth_and_a_pasted_key_api() {
     assert!(finish(child, &lines, seen).ok, "the login should succeed");
 
     let keyed = ganja(&data, &issuer)
-        .args([
-            "auth",
-            "login",
-            "--provider",
-            "anthropic",
-            "--key",
-            "sk-listing-4242",
-        ])
+        .args(["auth", "login", "--provider", "anthropic", "--key", "sk-listing-4242"])
         .output()
         .expect("the binary runs");
     assert!(keyed.status.success(), "storing a key should succeed");
 
-    let listed = ganja(&data, &issuer)
-        .args(["auth", "list"])
-        .output()
-        .expect("the binary runs");
+    let listed = ganja(&data, &issuer).args(["auth", "list"]).output().expect("the binary runs");
     let table = String::from_utf8_lossy(&listed.stdout).into_owned();
 
-    assert!(
-        table.contains("TYPE"),
-        "the listing needs the column: {table}"
-    );
+    assert!(table.contains("TYPE"), "the listing needs the column: {table}");
     let anthropic = row(&table, "anthropic");
     let xai = row(&table, "xai");
-    assert!(
-        anthropic.contains("api"),
-        "a pasted key is an `api` credential: {anthropic:?}"
-    );
-    assert!(
-        xai.contains("oauth"),
-        "a login is an `oauth` credential: {xai:?}"
-    );
-    assert!(
-        !anthropic.contains("oauth"),
-        "the two must not read the same: {anthropic:?}"
-    );
+    assert!(anthropic.contains("api"), "a pasted key is an `api` credential: {anthropic:?}");
+    assert!(xai.contains("oauth"), "a login is an `oauth` credential: {xai:?}");
+    assert!(!anthropic.contains("oauth"), "the two must not read the same: {anthropic:?}");
 }
 
 /// The row a listing gives `provider`, so an assertion cannot be satisfied by
@@ -539,23 +492,14 @@ fn logging_out_of_grok_forgets_the_credential_filed_under_xai() {
 /// first one's answer needs it (`copilot.ts:208`).
 #[test]
 fn the_enterprise_address_is_asked_for_only_when_the_deployment_is_one() {
-    for (answers, enterprise) in [
-        ("1\n", None),
-        ("2\ncompany.ghe.com\n", Some("company.ghe.com")),
-    ] {
+    for (answers, enterprise) in [("1\n", None), ("2\ncompany.ghe.com\n", Some("company.ghe.com"))]
+    {
         let gate = Gate::closed();
         let issuer = serve(&gate);
         let data = data();
 
         let mut child = ganja(&data, &issuer)
-            .args([
-                "auth",
-                "login",
-                "--provider",
-                "github-copilot",
-                "--method",
-                "device",
-            ])
+            .args(["auth", "login", "--provider", "github-copilot", "--method", "device"])
             .stdin(Stdio::piped())
             .spawn()
             .expect("the binary runs");
@@ -628,10 +572,7 @@ fn naming_the_enterprise_deployment_up_front_asks_nothing() {
         "a deployment given up front is not asked about: {:?}",
         finished.stderr
     );
-    assert_eq!(
-        stored(&data)["github-copilot"]["enterpriseUrl"],
-        "company.ghe.com"
-    );
+    assert_eq!(stored(&data)["github-copilot"]["enterpriseUrl"], "company.ghe.com");
 }
 
 /// ChatGPT's device flow is not RFC 8628 — the pending signal is a status and
@@ -643,14 +584,7 @@ fn a_chatgpt_device_login_stores_an_oauth_credential_under_openai() {
     let data = data();
 
     let mut child = ganja(&data, &issuer)
-        .args([
-            "auth",
-            "login",
-            "--provider",
-            "openai",
-            "--method",
-            "device",
-        ])
+        .args(["auth", "login", "--provider", "openai", "--method", "device"])
         .spawn()
         .expect("the binary runs");
     let lines = watching(&mut child);
@@ -688,15 +622,9 @@ fn a_cursor_login_shows_the_deep_link_before_it_polls_and_stores_under_cursor() 
         .iter()
         .find(|line| line.contains("Go to: "))
         .unwrap_or_else(|| panic!("the deep link has to be shown before the wait: {seen:#?}"));
-    assert!(
-        link.contains("/loginDeepControl?"),
-        "the browser goes to the login page: {link}"
-    );
+    assert!(link.contains("/loginDeepControl?"), "the browser goes to the login page: {link}");
     for parameter in ["challenge=", "uuid=", "mode=login", "redirectTarget=cli"] {
-        assert!(
-            link.contains(parameter),
-            "{parameter} is missing from the deep link: {link}"
-        );
+        assert!(link.contains(parameter), "{parameter} is missing from the deep link: {link}");
     }
 
     gate.open();
@@ -714,28 +642,19 @@ fn a_cursor_login_shows_the_deep_link_before_it_polls_and_stores_under_cursor() 
     assert_eq!(store["cursor"]["refresh"], REFRESH);
     // The fixture's token is no JWT, so the expiry is the one-hour fallback
     // rather than a zero nothing would ever renew.
-    assert!(
-        store["cursor"]["expires"].as_u64().expect("a number") > 0,
-        "{store}"
-    );
+    assert!(store["cursor"]["expires"].as_u64().expect("a number") > 0, "{store}");
     // The stamp sidecar records the login like every other login's.
     let stamps: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(data.path().join("ganja").join("auth-stamps.json"))
             .expect("a fresh login mints a stamp"),
     )
     .expect("the stamps are JSON");
-    assert!(
-        stamps.get("cursor").is_some(),
-        "the stamp is filed under the storage key: {stamps}"
-    );
+    assert!(stamps.get("cursor").is_some(), "the stamp is filed under the storage key: {stamps}");
     leaks_nothing(&finished);
 
     // And the credential round-trips: listed as the login it is, forgotten
     // under the name it was typed as.
-    let listed = ganja(&data, &issuer)
-        .args(["auth", "list"])
-        .output()
-        .expect("the binary runs");
+    let listed = ganja(&data, &issuer).args(["auth", "list"]).output().expect("the binary runs");
     let table = String::from_utf8_lossy(&listed.stdout).into_owned();
     assert!(
         row(&table, "cursor").contains("oauth"),
@@ -762,20 +681,10 @@ fn a_cursor_key_is_refused_naming_the_login_cursor_does_have() {
     let data = data();
 
     for arguments in [
-        &[
-            "auth",
-            "login",
-            "--provider",
-            "cursor",
-            "--key",
-            "sk-cursor-1",
-        ][..],
+        &["auth", "login", "--provider", "cursor", "--key", "sk-cursor-1"][..],
         &["auth", "login", "--provider", "cursor", "--method", "api"],
     ] {
-        let refused = ganja(&data, "")
-            .args(arguments)
-            .output()
-            .expect("the binary runs");
+        let refused = ganja(&data, "").args(arguments).output().expect("the binary runs");
         let said = String::from_utf8_lossy(&refused.stderr).into_owned();
 
         assert!(!refused.status.success(), "{arguments:?} stored a key");
@@ -785,10 +694,7 @@ fn a_cursor_key_is_refused_naming_the_login_cursor_does_have() {
         );
     }
 
-    assert!(
-        !stored_at(&data).exists(),
-        "no refused invocation may leave a credential behind"
-    );
+    assert!(!stored_at(&data).exists(), "no refused invocation may leave a credential behind");
 }
 
 /// A login replacing a credential of the other kind is the hazard the shared
@@ -801,27 +707,13 @@ fn a_chatgpt_login_says_what_the_stored_key_it_replaces_was() {
     let data = data();
 
     let keyed = ganja(&data, &issuer)
-        .args([
-            "auth",
-            "login",
-            "--provider",
-            "openai",
-            "--key",
-            "sk-replaced-1177",
-        ])
+        .args(["auth", "login", "--provider", "openai", "--key", "sk-replaced-1177"])
         .output()
         .expect("the binary runs");
     assert!(keyed.status.success());
 
     let mut child = ganja(&data, &issuer)
-        .args([
-            "auth",
-            "login",
-            "--provider",
-            "openai",
-            "--method",
-            "device",
-        ])
+        .args(["auth", "login", "--provider", "openai", "--method", "device"])
         .spawn()
         .expect("the binary runs");
     let lines = watching(&mut child);
@@ -848,14 +740,7 @@ fn a_pasted_key_says_what_the_stored_login_it_replaces_was() {
     let data = data();
 
     let mut child = ganja(&data, &issuer)
-        .args([
-            "auth",
-            "login",
-            "--provider",
-            "openai",
-            "--method",
-            "device",
-        ])
+        .args(["auth", "login", "--provider", "openai", "--method", "device"])
         .spawn()
         .expect("the binary runs");
     let lines = watching(&mut child);
@@ -864,14 +749,7 @@ fn a_pasted_key_says_what_the_stored_login_it_replaces_was() {
     assert!(finish(child, &lines, seen).ok, "the login should succeed");
 
     let keyed = ganja(&data, &issuer)
-        .args([
-            "auth",
-            "login",
-            "--provider",
-            "openai",
-            "--key",
-            "sk-replacing-3355",
-        ])
+        .args(["auth", "login", "--provider", "openai", "--key", "sk-replacing-3355"])
         .output()
         .expect("the binary runs");
     let said = String::from_utf8_lossy(&keyed.stderr).into_owned();
@@ -920,14 +798,7 @@ fn grok_takes_a_browser_login_where_a_provider_without_one_refuses_it() {
     );
 
     let refused = ganja(&data, "https://auth.x.ai")
-        .args([
-            "auth",
-            "login",
-            "--provider",
-            "anthropic",
-            "--method",
-            "browser",
-        ])
+        .args(["auth", "login", "--provider", "anthropic", "--method", "browser"])
         .output()
         .expect("the binary runs");
     let said = String::from_utf8_lossy(&refused.stderr).into_owned();
@@ -938,10 +809,7 @@ fn grok_takes_a_browser_login_where_a_provider_without_one_refuses_it() {
         "a method a provider lacks is refused with the ones it has named: {said:?}"
     );
 
-    assert!(
-        !stored_at(&data).exists(),
-        "neither invocation may leave a credential behind"
-    );
+    assert!(!stored_at(&data).exists(), "neither invocation may leave a credential behind");
 }
 
 /// The rule a menu could have swallowed: standard input that is not a terminal
@@ -998,22 +866,12 @@ fn a_copilot_login_with_no_terminal_runs_its_device_flow_rather_than_asking_for_
     let data = data();
 
     let finished = ganja(&data, &issuer)
-        .args([
-            "auth",
-            "login",
-            "--provider",
-            "github-copilot",
-            "--deployment",
-            "public",
-        ])
+        .args(["auth", "login", "--provider", "github-copilot", "--deployment", "public"])
         .output()
         .expect("the binary runs");
     let stderr = String::from_utf8_lossy(&finished.stderr).into_owned();
 
-    assert!(
-        finished.status.success(),
-        "a headless Copilot login should have run: {stderr}"
-    );
+    assert!(finished.status.success(), "a headless Copilot login should have run: {stderr}");
     assert!(
         !stderr.contains("no key was given"),
         "the pipe rule must not have claimed this invocation: {stderr}"
@@ -1132,22 +990,8 @@ fn no_invocation_shape_stores_a_deployment_menu_answer_as_a_credential() {
     for arguments in [
         // The shape D349 was found in: no flags at all.
         &["auth", "login", "--provider", "github-copilot"][..],
-        &[
-            "auth",
-            "login",
-            "--provider",
-            "github-copilot",
-            "--method",
-            "device",
-        ],
-        &[
-            "auth",
-            "login",
-            "--provider",
-            "github-copilot",
-            "--deployment",
-            "public",
-        ],
+        &["auth", "login", "--provider", "github-copilot", "--method", "device"],
+        &["auth", "login", "--provider", "github-copilot", "--deployment", "public"],
     ] {
         let issuer = unblocked();
         let data = data();
@@ -1189,14 +1033,7 @@ fn a_stored_login_is_listed_beside_the_environment_key_that_outranks_it() {
     let data = data();
 
     let login = ganja(&data, &issuer)
-        .args([
-            "auth",
-            "login",
-            "--provider",
-            "openai",
-            "--method",
-            "device",
-        ])
+        .args(["auth", "login", "--provider", "openai", "--method", "device"])
         .output()
         .expect("the binary runs");
     assert!(
@@ -1211,16 +1048,9 @@ fn a_stored_login_is_listed_beside_the_environment_key_that_outranks_it() {
         .output()
         .expect("the binary runs");
     let table = String::from_utf8_lossy(&listed.stdout).into_owned();
-    let rows: Vec<&str> = table
-        .lines()
-        .filter(|line| line.starts_with("openai"))
-        .collect();
+    let rows: Vec<&str> = table.lines().filter(|line| line.starts_with("openai")).collect();
 
-    assert_eq!(
-        rows.len(),
-        2,
-        "both credentials for openai have a row: {table}"
-    );
+    assert_eq!(rows.len(), 2, "both credentials for openai have a row: {table}");
     assert!(
         rows[0].contains("api")
             && rows[0].contains("****4242")
@@ -1260,26 +1090,18 @@ fn an_interrupted_login_says_it_was_cancelled_and_stores_nothing() {
     let lines = watching(&mut child);
     let seen = printed_before(&lines, GROK_CODE);
 
-    let sent = Command::new("kill")
-        .args(["-INT", &child.id().to_string()])
-        .status()
-        .expect("kill runs");
+    let sent =
+        Command::new("kill").args(["-INT", &child.id().to_string()]).status().expect("kill runs");
     assert!(sent.success(), "the interrupt should have been delivered");
 
     let finished = finish(child, &lines, seen);
-    assert!(
-        !finished.ok,
-        "a cancelled login is not a successful one: {finished:?}"
-    );
+    assert!(!finished.ok, "a cancelled login is not a successful one: {finished:?}");
     assert!(
         finished.stderr.contains("cancelled") && finished.stderr.contains("nothing was stored"),
         "a cancelled login has to say both: {:?}",
         finished.stderr
     );
-    assert!(
-        !stored_at(&data).exists(),
-        "a cancelled login must leave no credential file behind"
-    );
+    assert!(!stored_at(&data).exists(), "a cancelled login must leave no credential file behind");
 }
 
 impl std::fmt::Debug for Finished {

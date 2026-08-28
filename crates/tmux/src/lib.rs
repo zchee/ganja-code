@@ -94,21 +94,15 @@
 //!
 //! ```no_run
 //! # async fn run() -> Result<(), tmux::Error> {
-//! use tmux::{
-//!     Server,
-//!     commands::{ListPanes, NewSession},
-//! };
+//! use tmux::Server;
+//! use tmux::commands::{ListPanes, NewSession};
 //!
 //! // A server of this caller's own, addressed by its socket; `Server::current()`
 //! // instead reads the `$TMUX` of a process tmux itself started.
 //! let server = Server::at("/tmp/example.sock", None);
-//! server
-//!     .run(NewSession::new().detached().session_name("work").args())
-//!     .await?;
+//! server.run(NewSession::new().detached().session_name("work").args()).await?;
 //!
-//! let panes = server
-//!     .run(ListPanes::new().all().format("#{pane_id}").args())
-//!     .await?;
+//! let panes = server.run(ListPanes::new().all().format("#{pane_id}").args()).await?;
 //! for pane in panes.text_lossy().lines() {
 //!     println!("{pane}");
 //! }
@@ -135,9 +129,7 @@
 //! use tmux::control_mode::{Arg, Client, Command, Options};
 //!
 //! let client = Client::new(Options::new().with_session_name("work")).await?;
-//! let response = client
-//!     .exec(Command::from_static("display-message"), [Arg::raw("-p")])
-//!     .await?;
+//! let response = client.exec(Command::from_static("display-message"), [Arg::raw("-p")]).await?;
 //! println!("{}", response.lines.join("\n"));
 //! client.close().await?;
 //! # Ok(())

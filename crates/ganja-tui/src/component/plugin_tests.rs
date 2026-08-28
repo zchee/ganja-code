@@ -1,14 +1,10 @@
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 
 use super::{Effect, Plugin, Row, summarize};
 use crate::theme::Theme;
 
-const AREA: Rect = Rect {
-    x: 0,
-    y: 0,
-    width: 76,
-    height: 20,
-};
+const AREA: Rect = Rect { x: 0, y: 0, width: 76, height: 20 };
 
 fn row(name: &str, enabled: bool) -> Row {
     Row {
@@ -28,11 +24,7 @@ fn rendered(dialog: &Plugin, area: Rect) -> String {
     dialog.render(area, &mut buffer, &Theme::default());
 
     (0..area.height)
-        .map(|row| {
-            (0..area.width)
-                .map(|column| buffer[(column, row)].symbol())
-                .collect::<String>()
-        })
+        .map(|row| (0..area.width).map(|column| buffer[(column, row)].symbol()).collect::<String>())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -82,10 +74,7 @@ fn enter_on_a_plugin_row_offers_the_applicable_toggle_and_remove() {
         Some(Effect::Disable("formatter".to_owned())),
         "Enter on the toggle answers with it"
     );
-    assert!(
-        !dialog.is_choosing_action(),
-        "running an action returns to the list"
-    );
+    assert!(!dialog.is_choosing_action(), "running an action returns to the list");
 }
 
 #[test]
@@ -103,10 +92,7 @@ fn remove_is_the_action_after_the_toggle() {
     dialog.submit();
     dialog.move_selection(1);
 
-    assert_eq!(
-        dialog.submit(),
-        Some(Effect::Remove("formatter".to_owned()))
-    );
+    assert_eq!(dialog.submit(), Some(Effect::Remove("formatter".to_owned())));
 }
 
 /// The free-text step is TUI-local: Enter with text answers with an
@@ -124,10 +110,7 @@ fn the_add_input_takes_text_and_submits_it_on_enter() {
     dialog.backspace();
     assert_eq!(dialog.input(), Some("/tmp/marke"));
 
-    assert_eq!(
-        dialog.submit(),
-        Some(Effect::AddMarketplace("/tmp/marke".to_owned()))
-    );
+    assert_eq!(dialog.submit(), Some(Effect::AddMarketplace("/tmp/marke".to_owned())));
     assert!(!dialog.is_typing(), "a submit leaves the input step");
 }
 
@@ -145,10 +128,7 @@ fn the_install_input_spells_the_claude_spec_spelling() {
     for character in "formatter@company-tools".chars() {
         dialog.push(character);
     }
-    assert_eq!(
-        dialog.submit(),
-        Some(Effect::Install("formatter@company-tools".to_owned()))
-    );
+    assert_eq!(dialog.submit(), Some(Effect::Install("formatter@company-tools".to_owned())));
 }
 
 /// Esc on the input step cancels the edit and keeps the dialog open;
@@ -168,10 +148,7 @@ fn esc_cancels_the_input_step_and_closes_from_anywhere_else() {
     dialog.move_selection(-2);
     dialog.submit();
     assert!(dialog.is_choosing_action());
-    assert!(
-        !dialog.cancel(),
-        "the action step leaves Esc to the app too"
-    );
+    assert!(!dialog.cancel(), "the action step leaves Esc to the app too");
 }
 
 #[test]
@@ -219,21 +196,14 @@ fn a_running_store_action_refuses_the_two_that_would_race_it() {
         dialog.move_selection(2 + offset);
 
         assert_eq!(dialog.submit(), None, "the store action is refused");
-        assert!(
-            !dialog.is_typing(),
-            "and the input step it would have opened stays shut"
-        );
+        assert!(!dialog.is_typing(), "and the input step it would have opened stays shut");
         let screen = rendered(&dialog, AREA);
         assert!(screen.contains("already running"), "got:\n{screen}");
     }
 
     let mut reload = dialog.clone();
     reload.move_selection(4);
-    assert_eq!(
-        reload.submit(),
-        Some(Effect::Reload),
-        "the reload races nothing and stays live"
-    );
+    assert_eq!(reload.submit(), Some(Effect::Reload), "the reload races nothing and stays live");
 }
 
 /// The refusal lasts exactly as long as the action does: the app clears
@@ -249,10 +219,7 @@ fn clearing_the_running_flag_opens_the_add_again() {
     assert_eq!(dialog.submit(), None, "Add marketplace opens the input");
     assert!(dialog.is_typing());
     dialog.push('x');
-    assert_eq!(
-        dialog.submit(),
-        Some(Effect::AddMarketplace("x".to_owned()))
-    );
+    assert_eq!(dialog.submit(), Some(Effect::AddMarketplace("x".to_owned())));
 }
 
 #[test]

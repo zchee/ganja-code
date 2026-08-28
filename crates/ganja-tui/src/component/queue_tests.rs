@@ -1,4 +1,5 @@
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 
 use super::{HINT, Queue};
 use crate::theme::Theme;
@@ -145,11 +146,7 @@ fn a_requeued_entry_goes_back_in_front_of_what_came_after_it() {
     queue.requeue_front(taken);
 
     assert_eq!(
-        queue
-            .entries()
-            .iter()
-            .map(|entry| entry.text.as_str())
-            .collect::<Vec<_>>(),
+        queue.entries().iter().map(|entry| entry.text.as_str()).collect::<Vec<_>>(),
         ["first", "second"]
     );
 }
@@ -203,10 +200,7 @@ fn stranding_leaves_a_peers_row_out_of_the_replay_lane() {
 
     let taken = queue.take_next_fallback().expect("the person's own entry");
     assert_eq!(taken.text, "mine");
-    assert!(
-        !queue.has_fallback(),
-        "and the peer's row is nothing the lane may replay"
-    );
+    assert!(!queue.has_fallback(), "and the peer's row is nothing the lane may replay");
     assert_eq!(queue.depth(), 1);
 }
 

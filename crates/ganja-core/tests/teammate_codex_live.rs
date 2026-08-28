@@ -40,7 +40,8 @@
 
 mod shim_support;
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 use ganja_core::teammate::codex::Codex;
 use ganja_team::{MailboxMessage, MemberName, mailbox, record};
@@ -70,13 +71,7 @@ fn enabled() -> bool {
 fn lead_mail(root: &ganja_team::TeamsRoot, team: &ganja_team::TeamName) -> Vec<String> {
     let path = root.inbox_path(team, &MemberName::lead());
     mailbox::read(&path)
-        .map(|contents| {
-            contents
-                .valid
-                .into_iter()
-                .map(|message| message.text)
-                .collect()
-        })
+        .map(|contents| contents.valid.into_iter().map(|message| message.text).collect())
         .unwrap_or_default()
 }
 
@@ -146,10 +141,7 @@ async fn a_resumed_codex_turn_is_still_bounded_by_the_posture_this_build_compose
     )
     .await
     .expect("a real codex spawns");
-    assert!(
-        until(TURN, || !lead_mail(&root, &team).is_empty()).await,
-        "the first turn answered"
-    );
+    assert!(until(TURN, || !lead_mail(&root, &team).is_empty()).await, "the first turn answered");
     let first = first.elapsed();
     let opening = lead_mail(&root, &team).join("\n");
     assert!(

@@ -19,7 +19,8 @@
 
 mod shim_support;
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 use ganja_core::teammate::shim;
 use ganja_testkit::AllowSpawn;
@@ -33,11 +34,8 @@ const CANARY: &str = "ANTHROPIC_API_KEY";
 /// The one grok variable that would silently undo the pinned sandbox profile,
 /// and two more beside it, so the assertion is about the class rather than
 /// about the one name somebody happened to think of.
-const GROK_DOORS: [&str; 3] = [
-    "GROK_SANDBOX",
-    "GROK_SANDBOX_AUTO_ALLOW_BASH",
-    "GROK_SANDBOX_PROFILE",
-];
+const GROK_DOORS: [&str; 3] =
+    ["GROK_SANDBOX", "GROK_SANDBOX_AUTO_ALLOW_BASH", "GROK_SANDBOX_PROFILE"];
 
 /// How long the fake gets to be started and report.
 const ANSWERS: Duration = Duration::from_secs(20);
@@ -75,10 +73,8 @@ async fn a_lead_holding_a_credential_hands_none_of_it_to_a_foreign_cli() {
         cli.received()
     );
 
-    let names: Vec<String> = cli.records("env")[0]
-        .split_ascii_whitespace()
-        .map(str::to_owned)
-        .collect();
+    let names: Vec<String> =
+        cli.records("env")[0].split_ascii_whitespace().map(str::to_owned).collect();
     assert!(
         names.contains(&"HOME".to_owned()),
         "the enumeration really did travel, so an absence below means something: {names:?}"
@@ -96,10 +92,7 @@ async fn a_lead_holding_a_credential_hands_none_of_it_to_a_foreign_cli() {
         );
     }
     for name in &names {
-        assert!(
-            !name.starts_with("GROK_"),
-            "and the rule is the class, not the three: {name}"
-        );
+        assert!(!name.starts_with("GROK_"), "and the rule is the class, not the three: {name}");
     }
     // Which is a property of the enumeration itself, not of this driver's
     // additions list: nothing may put such a name on one.

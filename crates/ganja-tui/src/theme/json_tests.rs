@@ -35,9 +35,8 @@ fn a_schema_key_is_accepted_and_ignored() {
 
 #[test]
 fn hex_values_resolve_to_their_channels() {
-    let palette = theme("", "\"text\": \"#1e2a3b\"")
-        .resolve(Mode::Dark)
-        .expect("a hex value resolves");
+    let palette =
+        theme("", "\"text\": \"#1e2a3b\"").resolve(Mode::Dark).expect("a hex value resolves");
 
     assert_eq!(palette.get("text"), Some(Rgba::rgb(0x1e, 0x2a, 0x3b)));
 }
@@ -78,18 +77,12 @@ fn a_bare_reference_resolves_through_defs() {
 /// happens to name a def after a color key.
 #[test]
 fn defs_win_over_theme_keys_of_the_same_name() {
-    let palette = theme(
-        "\"accent\": \"#111111\"",
-        "\"accent\": \"#222222\", \"primary\": \"accent\"",
-    )
-    .resolve(Mode::Dark)
-    .expect("it resolves");
+    let palette =
+        theme("\"accent\": \"#111111\"", "\"accent\": \"#222222\", \"primary\": \"accent\"")
+            .resolve(Mode::Dark)
+            .expect("it resolves");
 
-    assert_eq!(
-        palette.get("primary"),
-        Some(Rgba::rgb(0x11, 0x11, 0x11)),
-        "the def should win"
-    );
+    assert_eq!(palette.get("primary"), Some(Rgba::rgb(0x11, 0x11, 0x11)), "the def should win");
     assert_eq!(
         palette.get("accent"),
         Some(Rgba::rgb(0x22, 0x22, 0x22)),
@@ -105,10 +98,7 @@ fn a_reference_falls_back_to_the_theme_block() {
         .resolve(Mode::Dark)
         .expect("it resolves");
 
-    assert_eq!(
-        palette.get("markdownText"),
-        Some(Rgba::rgb(0xab, 0xcd, 0xef))
-    );
+    assert_eq!(palette.get("markdownText"), Some(Rgba::rgb(0xab, 0xcd, 0xef)));
 }
 
 #[test]
@@ -129,12 +119,9 @@ fn a_reference_to_nothing_is_refused_by_name() {
 /// which paints half a screen before it gives up.
 #[test]
 fn a_reference_cycle_is_refused_with_the_chain_that_closed_it() {
-    let refusal = theme(
-        "\"a\": \"b\", \"b\": \"c\", \"c\": \"a\"",
-        "\"primary\": \"a\"",
-    )
-    .resolve(Mode::Dark)
-    .expect_err("a cycle cannot resolve");
+    let refusal = theme("\"a\": \"b\", \"b\": \"c\", \"c\": \"a\"", "\"primary\": \"a\"")
+        .resolve(Mode::Dark)
+        .expect_err("a cycle cannot resolve");
 
     let message = refusal.to_string();
     assert!(
@@ -162,12 +149,9 @@ fn a_self_reference_is_a_cycle_too() {
 /// had ever seen would reject most real themes.
 #[test]
 fn a_name_reused_by_two_keys_is_not_a_cycle() {
-    let palette = theme(
-        "\"gray\": \"#808080\"",
-        "\"text\": \"gray\", \"textMuted\": \"gray\"",
-    )
-    .resolve(Mode::Dark)
-    .expect("sharing a def is not a cycle");
+    let palette = theme("\"gray\": \"#808080\"", "\"text\": \"gray\", \"textMuted\": \"gray\"")
+        .resolve(Mode::Dark)
+        .expect("sharing a def is not a cycle");
 
     assert_eq!(palette.get("text"), palette.get("textMuted"));
 }
@@ -184,9 +168,7 @@ fn a_variant_resolves_the_arm_the_mode_names() {
         Some(Rgba::rgb(0xee, 0xee, 0xee))
     );
     assert_eq!(
-        file.resolve(Mode::Light)
-            .expect("light resolves")
-            .get("text"),
+        file.resolve(Mode::Light).expect("light resolves").get("text"),
         Some(Rgba::rgb(0x11, 0x11, 0x11))
     );
 }
@@ -198,15 +180,11 @@ fn a_variant_arm_may_be_a_keyword_or_an_ansi_code() {
     let file = theme("", "\"background\": {\"dark\": \"none\", \"light\": 15}");
 
     assert_eq!(
-        file.resolve(Mode::Dark)
-            .expect("dark resolves")
-            .get("background"),
+        file.resolve(Mode::Dark).expect("dark resolves").get("background"),
         Some(Rgba::TRANSPARENT)
     );
     assert_eq!(
-        file.resolve(Mode::Light)
-            .expect("light resolves")
-            .get("background"),
+        file.resolve(Mode::Light).expect("light resolves").get("background"),
         Some(Rgba::rgb(0xff, 0xff, 0xff))
     );
 }
@@ -229,14 +207,9 @@ fn a_value_that_is_not_a_color_is_refused_by_kind() {
     ];
 
     for (body, expected) in cases {
-        let refusal = theme("", body)
-            .resolve(Mode::Dark)
-            .expect_err("{body} is not a color");
+        let refusal = theme("", body).resolve(Mode::Dark).expect_err("{body} is not a color");
 
-        assert!(
-            refusal.to_string().contains(expected),
-            "{body}: got {refusal}"
-        );
+        assert!(refusal.to_string().contains(expected), "{body}: got {refusal}");
     }
 }
 
@@ -261,12 +234,9 @@ fn six_hex_digits_parse_case_insensitively() {
 /// The absent optional keys upstream fills in after the loop.
 #[test]
 fn the_optional_keys_fall_back_the_way_upstream_fills_them_in() {
-    let palette = theme(
-        "",
-        "\"background\": \"#0a0a0a\", \"backgroundElement\": \"#1e1e1e\"",
-    )
-    .resolve(Mode::Dark)
-    .expect("it resolves");
+    let palette = theme("", "\"background\": \"#0a0a0a\", \"backgroundElement\": \"#1e1e1e\"")
+        .resolve(Mode::Dark)
+        .expect("it resolves");
 
     assert_eq!(
         palette.get("selectedListItemText"),
@@ -291,18 +261,9 @@ fn a_theme_that_sets_the_optional_keys_keeps_its_own_values() {
     .resolve(Mode::Dark)
     .expect("it resolves");
 
-    assert_eq!(
-        palette.get("selectedListItemText"),
-        Some(Rgba::rgb(0xff, 0x00, 0x00))
-    );
-    assert_eq!(
-        palette.get("backgroundMenu"),
-        Some(Rgba::rgb(0x00, 0xff, 0x00))
-    );
-    assert!(
-        palette.has_explicit_selected_text(),
-        "the contrast helper branches on this"
-    );
+    assert_eq!(palette.get("selectedListItemText"), Some(Rgba::rgb(0xff, 0x00, 0x00)));
+    assert_eq!(palette.get("backgroundMenu"), Some(Rgba::rgb(0x00, 0xff, 0x00)));
+    assert!(palette.has_explicit_selected_text(), "the contrast helper branches on this");
 }
 
 /// Keys the UI does not read still have to survive resolution, because the
@@ -317,14 +278,8 @@ fn keys_the_ui_does_not_consume_are_resolved_and_kept() {
     .resolve(Mode::Dark)
     .expect("it resolves");
 
-    assert_eq!(
-        palette.get("syntaxKeyword"),
-        Some(Rgba::rgb(0xff, 0x00, 0xff))
-    );
-    assert_eq!(
-        palette.get("markdownHeading"),
-        Some(Rgba::rgb(0x00, 0xff, 0xff))
-    );
+    assert_eq!(palette.get("syntaxKeyword"), Some(Rgba::rgb(0xff, 0x00, 0xff)));
+    assert_eq!(palette.get("markdownHeading"), Some(Rgba::rgb(0x00, 0xff, 0xff)));
     assert_eq!(
         palette.get("thinkingOpacity"),
         None,

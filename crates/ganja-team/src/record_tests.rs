@@ -41,9 +41,7 @@ fn worker() -> MemberRecord {
             color: "blue".to_owned(),
             prompt: "do the thing".to_owned(),
             plan_mode_required: false,
-            surface: Surface::Pane {
-                id: "%142".to_owned(),
-            },
+            surface: Surface::Pane { id: "%142".to_owned() },
             cwd: "/w".to_owned(),
         },
         1_786_734_154_864,
@@ -71,12 +69,7 @@ fn a_teammate_record_is_written_in_the_other_order_entirely() {
     let record = worker();
 
     assert_eq!(document(&record).expect("a record encodes"), TEAMMATE_ORDER);
-    assert_eq!(
-        record.surface(),
-        Surface::Pane {
-            id: "%142".to_owned()
-        }
-    );
+    assert_eq!(record.surface(), Surface::Pane { id: "%142".to_owned() });
 }
 
 /// A shim member writes both fields, and reads back as **in-process** —
@@ -149,10 +142,7 @@ fn a_shim_record_with_a_pane_writes_the_real_pane_id_and_reads_back_as_a_pane() 
         (ShimCli::Agy, BACKEND_AGY),
         (ShimCli::Grok, BACKEND_GROK),
     ] {
-        let surface = Surface::Shim {
-            cli,
-            pane: Some("%7".to_owned()),
-        };
+        let surface = Surface::Shim { cli, pane: Some("%7".to_owned()) };
         assert_eq!(surface.tmux_pane_id(), "%7");
         assert_eq!(surface.backend_type(), backend_type);
 
@@ -178,9 +168,7 @@ fn a_shim_record_with_a_pane_writes_the_real_pane_id_and_reads_back_as_a_pane() 
         // surface that exists and that every pane-acting reader handles.
         assert_eq!(
             record.surface(),
-            Surface::Pane {
-                id: "%7".to_owned()
-            },
+            Surface::Pane { id: "%7".to_owned() },
             "the read is lossy towards the pane; `backendType` says which CLI"
         );
         assert_eq!(ShimCli::read(backend_type), Some(cli));
@@ -355,39 +343,21 @@ fn a_passthrough_key_that_shadows_a_declared_one_is_refused() {
     // never meant. Unreachable from a decode — a declared key is captured by
     // its field first — so a hand-built value is what this pins.
     let mut record = MemberRecord::lead(&team(), "/w", 1);
-    record
-        .extra
-        .insert("name".to_owned(), Value::String("impostor".to_owned()));
+    record.extra.insert("name".to_owned(), Value::String("impostor".to_owned()));
     let refusal = document(&record).expect_err("a shadowed key is refused");
-    assert!(
-        refusal
-            .to_string()
-            .contains("name: the shape declares this"),
-        "{refusal}",
-    );
+    assert!(refusal.to_string().contains("name: the shape declares this"), "{refusal}",);
 
     // Including a key this record's own order would not have emitted:
     // `isActive` is declared, so it may not arrive from the map either.
     let mut record = MemberRecord::lead(&team(), "/w", 1);
-    record
-        .extra
-        .insert("isActive".to_owned(), Value::Bool(true));
-    assert!(
-        document(&record).is_err(),
-        "a lead record declares isActive"
-    );
+    record.extra.insert("isActive".to_owned(), Value::Bool(true));
+    assert!(document(&record).is_err(), "a lead record declares isActive");
 
     // And a team file, whose declared list is a different one.
     let mut file = TeamFile::new(&team(), "s", "/w", 1);
-    file.extra
-        .insert("members".to_owned(), Value::Array(Vec::new()));
+    file.extra.insert("members".to_owned(), Value::Array(Vec::new()));
     let refusal = document(&file).expect_err("a shadowed key is refused");
-    assert!(
-        refusal
-            .to_string()
-            .contains("members: the shape declares this"),
-        "{refusal}",
-    );
+    assert!(refusal.to_string().contains("members: the shape declares this"), "{refusal}",);
 
     // A key that shadows nothing is exactly what the passthrough is for, and
     // still rides along.
@@ -423,10 +393,7 @@ fn a_frame_body_reads_back_as_a_frame_and_prose_does_not() {
         .expect("a frame encodes");
 
     assert_eq!(carried.frame(), Some(frame));
-    assert_eq!(
-        MailboxMessage::new("w", "just words", "2026-08-17T00:00:00.000Z").frame(),
-        None
-    );
+    assert_eq!(MailboxMessage::new("w", "just words", "2026-08-17T00:00:00.000Z").frame(), None);
 }
 
 #[test]

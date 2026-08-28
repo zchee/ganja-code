@@ -27,14 +27,13 @@
 //! rather than something a caller remembers, and [`Queue::withdraw_newest`]
 //! answers with the newest row this person really wrote.
 
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    text::{Line, Text},
-    widgets::{Clear, Paragraph, Widget as _},
-};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::text::{Line, Text};
+use ratatui::widgets::{Clear, Paragraph, Widget as _};
 
-use crate::{component::chat::clip, theme::Theme};
+use crate::component::chat::clip;
+use crate::theme::Theme;
 
 /// The line under the list, in Claude Code's own words.
 const HINT: &str = "press up to edit queued messages";
@@ -104,12 +103,7 @@ pub struct Queue {
 impl Queue {
     /// Records a message the engine accepted as a steer.
     pub fn push_steered(&mut self, id: String, text: String) {
-        self.entries.push(Entry {
-            id,
-            text,
-            steered: true,
-            lane: Lane::Typed,
-        });
+        self.entries.push(Entry { id, text, steered: true, lane: Lane::Typed });
     }
 
     /// Records a teammate's message the engine accepted as a steer (**D503**).
@@ -118,12 +112,7 @@ impl Queue {
     /// see — the words are what they are looking for — and a different one in
     /// the only way that matters: Up will not hand it back to them.
     pub fn push_peer(&mut self, id: String, text: String) {
-        self.entries.push(Entry {
-            id,
-            text,
-            steered: true,
-            lane: Lane::Peer,
-        });
+        self.entries.push(Entry { id, text, steered: true, lane: Lane::Peer });
     }
 
     /// Records a message nothing is going to steer, to be replayed as a prompt
@@ -133,12 +122,7 @@ impl Queue {
     /// command names, which a peer's words consent to none of, so a peer's
     /// message is given back to its mailbox instead (§7-5).
     pub fn push_fallback(&mut self, id: String, text: String) {
-        self.entries.push(Entry {
-            id,
-            text,
-            steered: false,
-            lane: Lane::Typed,
-        });
+        self.entries.push(Entry { id, text, steered: false, lane: Lane::Typed });
     }
 
     /// Puts `entry` back at the front, for a replay the engine refused because
@@ -203,10 +187,7 @@ impl Queue {
     /// to the history walk exactly as an empty strip does. Whoever wrote the
     /// peer row keeps its id, so a withdrawal can never orphan one either.
     pub fn withdraw_newest(&mut self) -> Option<Entry> {
-        let index = self
-            .entries
-            .iter()
-            .rposition(|entry| entry.lane == Lane::Typed)?;
+        let index = self.entries.iter().rposition(|entry| entry.lane == Lane::Typed)?;
 
         Some(self.entries.remove(index))
     }
@@ -254,22 +235,14 @@ impl Queue {
             return;
         }
 
-        let area = Rect {
-            x: anchor.x,
-            y: anchor.y.saturating_sub(height),
-            width: anchor.width,
-            height,
-        };
+        let area =
+            Rect { x: anchor.x, y: anchor.y.saturating_sub(height), width: anchor.width, height };
         Clear.render(area, buffer);
 
         let shown = usize::from(height).saturating_sub(1);
-        Paragraph::new(Text::from(self.lines(
-            usize::from(area.width),
-            shown,
-            theme,
-        )))
-        .style(theme.background_panel)
-        .render(area, buffer);
+        Paragraph::new(Text::from(self.lines(usize::from(area.width), shown, theme)))
+            .style(theme.background_panel)
+            .render(area, buffer);
     }
 
     /// The visible rows: the newest `rows` entries, then the hint.

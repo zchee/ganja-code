@@ -21,10 +21,8 @@
 
 mod support;
 
-use std::{
-    fs, io,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
+use std::{fs, io};
 
 use ganja_team::{MailboxMessage, MemberName, MemberRecord, Surface, mailbox, record};
 use tracing_subscriber::fmt::MakeWriter;
@@ -57,10 +55,7 @@ impl Capture {
 
 impl io::Write for Capture {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .expect("the log is never poisoned")
-            .extend_from_slice(buffer);
+        self.0.lock().expect("the log is never poisoned").extend_from_slice(buffer);
 
         Ok(buffer.len())
     }
@@ -146,10 +141,7 @@ fn a_message_body_never_reaches_a_log_line() {
         ("a spawn", &spawn_debug),
         ("a member record", &record_debug),
     ] {
-        assert!(
-            rendered.contains(" bytes>"),
-            "{what} renders its words as a size: {rendered}"
-        );
+        assert!(rendered.contains(" bytes>"), "{what} renders its words as a size: {rendered}");
     }
     assert!(
         message_debug.contains("from: \"w\""),
@@ -177,16 +169,8 @@ fn a_message_body_never_reaches_a_log_line() {
         );
     }
 
-    for body in [
-        DELIVERED_CANARY,
-        DROPPED_CANARY,
-        PROMPT_CANARY,
-        SUMMARY_CANARY,
-    ] {
-        assert!(
-            !logged.contains(body),
-            "a message body reached the log:\n{logged}"
-        );
+    for body in [DELIVERED_CANARY, DROPPED_CANARY, PROMPT_CANARY, SUMMARY_CANARY] {
+        assert!(!logged.contains(body), "a message body reached the log:\n{logged}");
 
         for (what, rendered) in [
             ("an identity", &rendered),
@@ -206,9 +190,7 @@ fn a_message_body_never_reaches_a_log_line() {
     // one because nothing ever held one would prove nothing at all.
     mailbox::write(&inbox, support::message(DELIVERED_CANARY)).expect("a message writes");
     assert!(
-        fs::read_to_string(&inbox)
-            .expect("the inbox is readable")
-            .contains(DELIVERED_CANARY),
+        fs::read_to_string(&inbox).expect("the inbox is readable").contains(DELIVERED_CANARY),
         "an inbox is exactly where a message body is supposed to be"
     );
 }

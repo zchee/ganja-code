@@ -18,13 +18,12 @@
 //! machine running the suite cannot contribute a config of its own, and so
 //! nothing here can read or write a real user's state.
 
-use std::{env, fs, path::Path};
+use std::path::Path;
+use std::{env, fs};
 
-use ganja_core::{
-    Config, Overrides,
-    config::{CONFIG_ENV, CONFIG_HOME_ENV},
-    provider::{self, fake},
-};
+use ganja_core::config::{CONFIG_ENV, CONFIG_HOME_ENV};
+use ganja_core::provider::{self, fake};
+use ganja_core::{Config, Overrides};
 
 /// Writes a config file naming `model` and one instruction file.
 ///

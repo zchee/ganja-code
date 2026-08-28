@@ -5,10 +5,7 @@ use secrecy::SecretString;
 use super::{Credentials, authorized, eq_fold, query_param};
 
 fn expected() -> Credentials {
-    Credentials {
-        username: "ganja".to_owned(),
-        password: SecretString::from("hunter2"),
-    }
+    Credentials { username: "ganja".to_owned(), password: SecretString::from("hunter2") }
 }
 
 fn basic(user: &str, password: &str) -> HeaderMap {
@@ -37,19 +34,11 @@ fn the_wrong_password_the_wrong_user_and_no_credential_are_all_refused() {
     assert!(!authorized(&basic("ganja", "hunter3"), None, &expected()));
     assert!(!authorized(&basic("admin", "hunter2"), None, &expected()));
     assert!(!authorized(&HeaderMap::new(), None, &expected()));
-    assert!(!authorized(
-        &HeaderMap::new(),
-        Some("auth_token=%%%broken"),
-        &expected()
-    ));
+    assert!(!authorized(&HeaderMap::new(), Some("auth_token=%%%broken"), &expected()));
     // Base64 that decodes but carries no colon is upstream's empty
     // credential: refused, not crashed on.
     let colonless = base64::engine::general_purpose::STANDARD.encode("no-separator");
-    assert!(!authorized(
-        &HeaderMap::new(),
-        Some(&format!("auth_token={colonless}")),
-        &expected()
-    ));
+    assert!(!authorized(&HeaderMap::new(), Some(&format!("auth_token={colonless}")), &expected()));
 }
 
 #[test]

@@ -6,10 +6,8 @@
 //! does with an answer needs none of that, and paying for it would mean
 //! scripting a whole child conversation to assert on four lines of rendering.
 
-use std::{
-    collections::VecDeque,
-    sync::{Arc, Mutex},
-};
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use ganja_tool::task::{
@@ -37,13 +35,7 @@ impl ScriptedSubagents {
         answers: Vec<Result<Delegated, Unanswered>>,
     ) -> (Arc<Self>, Arc<Mutex<Vec<Delegation>>>) {
         let asked: Arc<Mutex<Vec<Delegation>>> = Arc::default();
-        (
-            Arc::new(Self {
-                answers: Mutex::new(answers.into()),
-                asked: Arc::clone(&asked),
-            }),
-            asked,
-        )
+        (Arc::new(Self { answers: Mutex::new(answers.into()), asked: Arc::clone(&asked) }), asked)
     }
 }
 
@@ -54,10 +46,7 @@ impl Subagents for ScriptedSubagents {
         request: Delegation,
         _cancel: CancellationToken,
     ) -> Result<Delegated, Unanswered> {
-        self.asked
-            .lock()
-            .expect("the delegation log is never poisoned")
-            .push(request);
+        self.asked.lock().expect("the delegation log is never poisoned").push(request);
 
         self.answers
             .lock()
@@ -95,19 +84,13 @@ impl RecordingSpawner {
     /// A double answering every spawn with `answer`.
     #[must_use]
     pub fn new(answer: Teammated) -> Arc<Self> {
-        Arc::new(Self {
-            answer,
-            started: Mutex::new(Vec::new()),
-        })
+        Arc::new(Self { answer, started: Mutex::new(Vec::new()) })
     }
 
     /// Every spawn recorded so far, in call order.
     #[must_use]
     pub fn started(&self) -> Vec<TeammateSpawn> {
-        self.started
-            .lock()
-            .expect("the spawn log is never poisoned")
-            .clone()
+        self.started.lock().expect("the spawn log is never poisoned").clone()
     }
 }
 
@@ -122,10 +105,7 @@ impl Subagents for RecordingSpawner {
     }
 
     async fn spawn_teammate(&self, request: TeammateSpawn) -> Result<Teammated, NotSpawned> {
-        self.started
-            .lock()
-            .expect("the spawn log is never poisoned")
-            .push(request);
+        self.started.lock().expect("the spawn log is never poisoned").push(request);
 
         Ok(self.answer.clone())
     }

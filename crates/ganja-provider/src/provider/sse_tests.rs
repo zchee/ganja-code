@@ -27,31 +27,20 @@ fn decode_byte_by_byte(input: &str) -> Vec<Frame> {
 }
 
 fn frame(event: Option<&str>, data: &str) -> Frame {
-    Frame {
-        event: event.map(str::to_owned),
-        data: data.to_owned(),
-    }
+    Frame { event: event.map(str::to_owned), data: data.to_owned() }
 }
 
 #[test]
 fn the_shapes_a_provider_can_send_all_decode() {
     let cases: Vec<(&str, &str, Vec<Frame>)> = vec![
         ("empty input", "", vec![]),
-        (
-            "a named frame",
-            "event: ping\ndata: {}\n\n",
-            vec![frame(Some("ping"), "{}")],
-        ),
+        ("a named frame", "event: ping\ndata: {}\n\n", vec![frame(Some("ping"), "{}")]),
         (
             "an unnamed frame, which is all OpenAI sends",
             "data: {\"a\":1}\n\n",
             vec![frame(None, "{\"a\":1}")],
         ),
-        (
-            "crlf terminators",
-            "event: ping\r\ndata: {}\r\n\r\n",
-            vec![frame(Some("ping"), "{}")],
-        ),
+        ("crlf terminators", "event: ping\r\ndata: {}\r\n\r\n", vec![frame(Some("ping"), "{}")]),
         (
             // A `\r` that ends the input is held rather than dispatched:
             // mid-stream it could still become a `\r\n`, and at the end of
@@ -75,11 +64,7 @@ fn the_shapes_a_provider_can_send_all_decode() {
             ": keep-alive\nid: 7\nretry: 1000\nfuture: whatever\ndata: hi\n\n",
             vec![frame(None, "hi")],
         ),
-        (
-            "a field with no colon has an empty value",
-            "data\n\n",
-            vec![frame(None, "")],
-        ),
+        ("a field with no colon has an empty value", "data\n\n", vec![frame(None, "")]),
         (
             "exactly one leading space is stripped",
             "data:  padded\n\n",
@@ -109,11 +94,7 @@ fn the_shapes_a_provider_can_send_all_decode() {
 
     for (name, input, expected) in cases {
         assert_eq!(decode(input), expected, "{name}: whole-input decode");
-        assert_eq!(
-            decode_byte_by_byte(input),
-            expected,
-            "{name}: byte-by-byte decode"
-        );
+        assert_eq!(decode_byte_by_byte(input), expected, "{name}: byte-by-byte decode");
     }
 }
 
@@ -136,10 +117,7 @@ fn a_transcript_decodes_the_same_however_it_is_chunked() {
         decoder.push(&transcript.as_bytes()[..split], &mut frames);
         decoder.push(&transcript.as_bytes()[split..], &mut frames);
 
-        assert_eq!(
-            frames, whole,
-            "splitting at byte {split} changed the frames"
-        );
+        assert_eq!(frames, whole, "splitting at byte {split} changed the frames");
     }
 }
 
@@ -165,19 +143,14 @@ async fn the_adapter_yields_frames_and_then_the_transport_error() {
 
     assert_eq!(
         seen,
-        vec![
-            Ok(frame(Some("a"), "1")),
-            Ok(frame(Some("b"), "2")),
-            Err("connection reset"),
-        ]
+        vec![Ok(frame(Some("a"), "1")), Ok(frame(Some("b"), "2")), Err("connection reset"),]
     );
 }
 
 #[tokio::test]
 async fn the_adapter_drops_what_a_truncated_body_left_half_written() {
-    let chunks = stream::iter(vec![Ok::<&[u8], Infallible>(
-        b"data: kept\n\ndata: half".as_slice(),
-    )]);
+    let chunks =
+        stream::iter(vec![Ok::<&[u8], Infallible>(b"data: kept\n\ndata: half".as_slice())]);
 
     let seen: Vec<Result<Frame, Infallible>> = frames(chunks).collect().await;
 

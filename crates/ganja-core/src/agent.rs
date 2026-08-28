@@ -77,17 +77,13 @@
 //!   logged by name. A config `disable: true` removes a file agent outright,
 //!   which is the escape hatch that keeps the config the last word.
 
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use ganja_tool::frontmatter::{fields, split};
 
-use crate::{
-    config::{AgentConfig, AgentMode, Config},
-    permission::{Action, EXTERNAL_DIRECTORY, MCP_PREFIX, Rule},
-};
+use crate::config::{AgentConfig, AgentMode, Config};
+use crate::permission::{Action, EXTERNAL_DIRECTORY, MCP_PREFIX, Rule};
 
 /// The pattern that covers every call to a permission.
 const ANY: &str = "*";
@@ -579,10 +575,7 @@ fn memory_rules(directory: &Path) -> Vec<Rule> {
     // about (`permission`'s own `covering`), because a rule written in another
     // spelling of the same place answers nothing. `*` spans separators here,
     // so one pattern covers the topic files as well as the index.
-    let pattern = crate::permission::resolve(directory)
-        .join(ANY)
-        .to_string_lossy()
-        .into_owned();
+    let pattern = crate::permission::resolve(directory).join(ANY).to_string_lossy().into_owned();
 
     vec![
         rule(EXTERNAL_DIRECTORY, &pattern, Action::Allow),
@@ -593,11 +586,7 @@ fn memory_rules(directory: &Path) -> Vec<Rule> {
 
 /// One rule, spelled out.
 fn rule(permission: &str, pattern: &str, action: Action) -> Rule {
-    Rule {
-        permission: permission.to_owned(),
-        pattern: pattern.to_owned(),
-        action,
-    }
+    Rule { permission: permission.to_owned(), pattern: pattern.to_owned(), action }
 }
 
 /// Applies `config.agent` to `agents`, upstream's overlay loop
@@ -730,8 +719,7 @@ fn definitions_in(directory: &Path) -> Vec<Definition> {
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| {
-            path.extension()
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+            path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
                 && path.is_file()
         })
         .collect();
@@ -772,10 +760,7 @@ fn definitions_in(directory: &Path) -> Vec<Definition> {
 /// Applies one definition to the roster, over whatever already answers to its
 /// name.
 fn apply_definition(agents: &mut Vec<Agent>, definition: &Definition, config: &Config) {
-    let position = match agents
-        .iter()
-        .position(|agent| agent.name == definition.name)
-    {
+    let position = match agents.iter().position(|agent| agent.name == definition.name) {
         Some(position) => position,
         None => {
             agents.push(fresh(&definition.name, config));
@@ -789,9 +774,7 @@ fn apply_definition(agents: &mut Vec<Agent>, definition: &Definition, config: &C
     // and under its `agent.<name>` one — the specific answer beating the
     // general one, in both directions.
     if let Some(tools) = &definition.tools {
-        agents[position]
-            .rules
-            .extend(tool_rules(tools, &definition.name));
+        agents[position].rules.extend(tool_rules(tools, &definition.name));
     }
 }
 
@@ -827,10 +810,8 @@ impl Definition {
         let (frontmatter, body) = split(text).unwrap_or(("", text));
         let fields = fields(frontmatter);
 
-        let stem = file
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().into_owned())
-            .unwrap_or_default();
+        let stem =
+            file.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
         let name = fields
             .get("name")
             .map(|name| name.trim().to_owned())
@@ -987,11 +968,7 @@ fn tool_rules(listed: &[String], agent: &str) -> Vec<Rule> {
 /// is an error rather than a fallback: silently starting on a different agent
 /// than the one named would be a different session than the one asked for.
 fn resolve_default(agents: &[Agent], config: &Config) -> Result<String, AgentError> {
-    let named = config
-        .overrides
-        .agent
-        .as_deref()
-        .or(config.default_agent.as_deref());
+    let named = config.overrides.agent.as_deref().or(config.default_agent.as_deref());
 
     let Some(name) = named else {
         return agents
@@ -1002,19 +979,13 @@ fn resolve_default(agents: &[Agent], config: &Config) -> Result<String, AgentErr
     };
 
     let Some(agent) = agents.iter().find(|agent| agent.name == name) else {
-        return Err(AgentError::Unknown {
-            name: name.to_owned(),
-        });
+        return Err(AgentError::Unknown { name: name.to_owned() });
     };
     if agent.mode == AgentMode::Subagent {
-        return Err(AgentError::Subagent {
-            name: name.to_owned(),
-        });
+        return Err(AgentError::Subagent { name: name.to_owned() });
     }
     if agent.hidden {
-        return Err(AgentError::Hidden {
-            name: name.to_owned(),
-        });
+        return Err(AgentError::Hidden { name: name.to_owned() });
     }
 
     Ok(agent.name.clone())

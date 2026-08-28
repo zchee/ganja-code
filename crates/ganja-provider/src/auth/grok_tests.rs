@@ -2,21 +2,18 @@ use std::time::Duration;
 
 use secrecy::{ExposeSecret as _, SecretString};
 use serde_json::Value;
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::TcpStream,
-};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 
+use super::super::device::harness::{Reply, TestClock, serve};
+use super::super::loopback::LoopbackError;
+use super::super::pkce::challenge_for;
+use super::super::{
+    AuthError, AuthErrorKind, OauthCredential, REFRESH_SKEW_MS, RefreshOauth as _, now_ms,
+    storage_key,
+};
 use super::{
-    super::{
-        AuthError, AuthErrorKind, OauthCredential, REFRESH_SKEW_MS, RefreshOauth as _,
-        device::harness::{Reply, TestClock, serve},
-        loopback::LoopbackError,
-        now_ms,
-        pkce::challenge_for,
-        storage_key,
-    },
     BrowserError, CALLBACK_PORT, CLIENT_ID, PROVIDER_ID, Refresh, SCOPE, XAI_USER_AGENT,
     browser_flow_at, credential_from, device_flow_at,
 };
@@ -54,9 +51,7 @@ fn published(url: &str, name: &str) -> String {
 /// is the status: a client that hid it behind an error type would not check
 /// it.
 async fn callback(port: u16, query: &str) -> String {
-    let mut socket = TcpStream::connect(("127.0.0.1", port))
-        .await
-        .expect("the login is listening");
+    let mut socket = TcpStream::connect(("127.0.0.1", port)).await.expect("the login is listening");
     socket
         .write_all(
             format!(
@@ -69,10 +64,7 @@ async fn callback(port: u16, query: &str) -> String {
         .expect("the redirect is written");
 
     let mut response = String::new();
-    socket
-        .read_to_string(&mut response)
-        .await
-        .expect("the response is read");
+    socket.read_to_string(&mut response).await.expect("the response is read");
 
     response
 }
@@ -86,10 +78,7 @@ async fn callback(port: u16, query: &str) -> String {
 /// instants and comparing those would be comparing the scheduler.
 fn on_disk(credential: &OauthCredential) -> Value {
     let mut entry = credential.to_value();
-    entry
-        .as_object_mut()
-        .expect("an entry is a JSON object")
-        .remove("expires");
+    entry.as_object_mut().expect("an entry is a JSON object").remove("expires");
 
     entry
 }
@@ -110,10 +99,7 @@ fn a_login_goes_to_xais_own_endpoints_with_neither_swapped_for_the_other() {
     // Not the constants asserted against themselves: what this catches is
     // the two being handed to `DeviceFlow::new` the wrong way round, which
     // compiles cleanly and fails only against the live provider.
-    assert_eq!(
-        flow.device_code_url(),
-        "https://auth.x.ai/oauth2/device/code"
-    );
+    assert_eq!(flow.device_code_url(), "https://auth.x.ai/oauth2/device/code");
     assert_eq!(flow.token_url(), "https://auth.x.ai/oauth2/token");
 }
 
@@ -136,17 +122,13 @@ async fn a_login_asks_for_a_code_with_the_client_and_scope_xai_expects() {
                 "interval":5,"expires_in":600}"#,
     )])
     .await;
-    let flow = device_flow_at(
-        format!("{}/device", endpoint.url),
-        format!("{}/token", endpoint.url),
-    )
-    .expect("a client builds")
-    .with_clock(TestClock::at(0));
+    let flow =
+        device_flow_at(format!("{}/device", endpoint.url), format!("{}/token", endpoint.url))
+            .expect("a client builds")
+            .with_clock(TestClock::at(0));
 
-    let started = flow
-        .start(&tokio_util::sync::CancellationToken::new())
-        .await
-        .expect("the code is issued");
+    let started =
+        flow.start(&tokio_util::sync::CancellationToken::new()).await.expect("the code is issued");
 
     let request = endpoint.request(0);
     assert_eq!(request.path(), "/device");
@@ -164,15 +146,11 @@ async fn a_login_asks_for_a_code_with_the_client_and_scope_xai_expects() {
     // moves with every release of this crate, and pinning it here would
     // turn an ordinary version bump into a red test about identity.
     assert!(request.has_header("user-agent", XAI_USER_AGENT));
-    let names_ganja = request.head.lines().any(|line| {
-        line.to_ascii_lowercase()
-            .starts_with("user-agent: ganja-code/")
-    });
-    assert!(
-        names_ganja,
-        "x.ai is told ganja's own name, not a borrowed one: {}",
-        request.head
-    );
+    let names_ganja = request
+        .head
+        .lines()
+        .any(|line| line.to_ascii_lowercase().starts_with("user-agent: ganja-code/"));
+    assert!(names_ganja, "x.ai is told ganja's own name, not a borrowed one: {}", request.head);
 
     let fields = request.form();
     assert_eq!(fields.get("client_id").map(String::as_str), Some(CLIENT_ID));
@@ -204,11 +182,9 @@ async fn a_completed_login_becomes_a_credential_that_expires_when_xai_said() {
         ),
     ])
     .await;
-    let flow = device_flow_at(
-        format!("{}/device", endpoint.url),
-        format!("{}/token", endpoint.url),
-    )
-    .expect("a client builds");
+    let flow =
+        device_flow_at(format!("{}/device", endpoint.url), format!("{}/token", endpoint.url))
+            .expect("a client builds");
     let cancel = tokio_util::sync::CancellationToken::new();
 
     let started = flow.start(&cancel).await.expect("the code is issued");
@@ -261,10 +237,7 @@ async fn a_renewal_stores_the_rotated_refresh_token() {
     .await;
     let refresher = Refresh::at(format!("{}/token", endpoint.url)).expect("a client builds");
 
-    let renewed = refresher
-        .refresh(PROVIDER_ID, &stored())
-        .await
-        .expect("the endpoint renewed it");
+    let renewed = refresher.refresh(PROVIDER_ID, &stored()).await.expect("the endpoint renewed it");
 
     assert_eq!(renewed.access.expose_secret(), "at-2");
     assert_eq!(
@@ -274,29 +247,17 @@ async fn a_renewal_stores_the_rotated_refresh_token() {
     );
 
     let sent = endpoint.request(0).form();
-    assert_eq!(
-        sent.get("grant_type").map(String::as_str),
-        Some("refresh_token")
-    );
-    assert_eq!(
-        sent.get("refresh_token").map(String::as_str),
-        Some(REFRESH_CANARY)
-    );
+    assert_eq!(sent.get("grant_type").map(String::as_str), Some("refresh_token"));
+    assert_eq!(sent.get("refresh_token").map(String::as_str), Some(REFRESH_CANARY));
     assert_eq!(sent.get("client_id").map(String::as_str), Some(CLIENT_ID));
 }
 
 #[tokio::test]
 async fn a_renewal_that_rotates_nothing_keeps_the_token_it_presented() {
-    let endpoint = serve(vec![Reply::ok(
-        r#"{"access_token":"at-2","expires_in":3600}"#,
-    )])
-    .await;
+    let endpoint = serve(vec![Reply::ok(r#"{"access_token":"at-2","expires_in":3600}"#)]).await;
     let refresher = Refresh::at(format!("{}/token", endpoint.url)).expect("a client builds");
 
-    let renewed = refresher
-        .refresh(PROVIDER_ID, &stored())
-        .await
-        .expect("the endpoint renewed it");
+    let renewed = refresher.refresh(PROVIDER_ID, &stored()).await.expect("the endpoint renewed it");
 
     assert_eq!(
         renewed.refresh.expose_secret(),
@@ -330,10 +291,7 @@ async fn a_refused_refresh_token_asks_for_a_new_login() {
         rendered.contains("401") && rendered.contains("invalid_grant"),
         "the status and the code are what a person acts on: {rendered}"
     );
-    assert!(
-        !rendered.contains(REFRESH_CANARY),
-        "the echoed token reached the message: {rendered}"
-    );
+    assert!(!rendered.contains(REFRESH_CANARY), "the echoed token reached the message: {rendered}");
     assert!(
         !rendered.contains("error_description") && !rendered.contains("not valid"),
         "the body must not travel into a message that will be logged: {rendered}"
@@ -366,10 +324,7 @@ async fn a_token_endpoint_that_cannot_be_reached_leaves_the_credential_alone() {
     let endpoint = serve(Vec::new()).await;
     let refresher = Refresh::at(format!("{}/token", endpoint.url)).expect("a client builds");
 
-    let failure = refresher
-        .refresh(PROVIDER_ID, &stored())
-        .await
-        .expect_err("nothing answered");
+    let failure = refresher.refresh(PROVIDER_ID, &stored()).await.expect_err("nothing answered");
 
     assert_eq!(failure.kind(), AuthErrorKind::RefreshUnavailable);
     let rendered = format!("{failure} {failure:?}");
@@ -384,16 +339,11 @@ async fn a_token_endpoint_that_cannot_be_reached_leaves_the_credential_alone() {
 async fn a_credential_with_no_refresh_token_says_so_without_a_round_trip() {
     let endpoint = serve(vec![Reply::ok(r#"{"access_token":"never"}"#)]).await;
     let refresher = Refresh::at(format!("{}/token", endpoint.url)).expect("a client builds");
-    let credential = OauthCredential::new(
-        SecretString::from("   "),
-        SecretString::from("at-1"),
-        now_ms(),
-    );
+    let credential =
+        OauthCredential::new(SecretString::from("   "), SecretString::from("at-1"), now_ms());
 
-    let failure = refresher
-        .refresh(PROVIDER_ID, &credential)
-        .await
-        .expect_err("there is nothing to present");
+    let failure =
+        refresher.refresh(PROVIDER_ID, &credential).await.expect_err("there is nothing to present");
 
     assert_eq!(failure.kind(), AuthErrorKind::ReauthRequired);
     assert_eq!(
@@ -406,11 +356,9 @@ async fn a_credential_with_no_refresh_token_says_so_without_a_round_trip() {
 
 #[tokio::test]
 async fn an_authorize_url_carries_every_parameter_xai_requires() {
-    let flow = browser_flow_at(
-        "https://authorize.invalid/oauth2/authorize",
-        "https://token.invalid",
-    )
-    .expect("a client builds");
+    let flow =
+        browser_flow_at("https://authorize.invalid/oauth2/authorize", "https://token.invalid")
+            .expect("a client builds");
     let url = flow.authorize_url(
         "http://127.0.0.1:56121/callback",
         "the-challenge",
@@ -423,10 +371,7 @@ async fn an_authorize_url_carries_every_parameter_xai_requires() {
         .map(|(key, value)| (key.into_owned(), value.into_owned()))
         .collect();
 
-    assert!(
-        url.starts_with("https://authorize.invalid/oauth2/authorize?"),
-        "{url}"
-    );
+    assert!(url.starts_with("https://authorize.invalid/oauth2/authorize?"), "{url}");
     // The whole list, in upstream's own insertion order (`xai.ts:129-141`).
     // Asserted as a vector rather than pair by pair so that a parameter
     // going missing is a failure rather than an assertion nobody wrote:
@@ -437,14 +382,8 @@ async fn an_authorize_url_carries_every_parameter_xai_requires() {
         query,
         vec![
             ("response_type".to_owned(), "code".to_owned()),
-            (
-                "client_id".to_owned(),
-                "b1a00492-073a-47ea-816f-4c329264a828".to_owned()
-            ),
-            (
-                "redirect_uri".to_owned(),
-                "http://127.0.0.1:56121/callback".to_owned()
-            ),
+            ("client_id".to_owned(), "b1a00492-073a-47ea-816f-4c329264a828".to_owned()),
+            ("redirect_uri".to_owned(), "http://127.0.0.1:56121/callback".to_owned()),
             (
                 "scope".to_owned(),
                 "openid profile email offline_access grok-cli:access api:access".to_owned()
@@ -470,10 +409,7 @@ async fn a_browser_login_asks_xai_to_redirect_to_the_address_it_registered() {
     let flow = super::browser_flow().expect("a client builds");
     let url = flow.authorize_url("http://127.0.0.1:56121/callback", "c", "s", "n");
 
-    assert!(
-        url.starts_with("https://auth.x.ai/oauth2/authorize?"),
-        "xai.ts:11, got {url}"
-    );
+    assert!(url.starts_with("https://auth.x.ai/oauth2/authorize?"), "xai.ts:11, got {url}");
 }
 
 #[tokio::test]
@@ -527,11 +463,9 @@ async fn a_browser_login_draws_a_state_and_a_nonce_that_are_not_the_same_value()
 #[tokio::test]
 async fn a_browser_login_stores_the_credential_a_device_login_stores() {
     let exchange = serve(vec![Reply::ok(TOKENS)]).await;
-    let flow = browser_flow_at(
-        format!("{}/authorize", exchange.url),
-        format!("{}/token", exchange.url),
-    )
-    .expect("a client builds");
+    let flow =
+        browser_flow_at(format!("{}/authorize", exchange.url), format!("{}/token", exchange.url))
+            .expect("a client builds");
     let browser = flow.start_on(0).await.expect("loopback is bindable");
     let port = browser.port();
     let state = published(browser.url(), "state");
@@ -544,10 +478,8 @@ async fn a_browser_login_stores_the_credential_a_device_login_stores() {
     });
 
     let response = callback(port, &format!("code={CODE}&state={state}")).await;
-    let tokens = driven
-        .await
-        .expect("the wait finished")
-        .expect("the callback was accepted and exchanged");
+    let tokens =
+        driven.await.expect("the wait finished").expect("the callback was accepted and exchanged");
 
     assert_eq!(response.lines().next(), Some("HTTP/1.1 200 OK"));
 
@@ -562,10 +494,7 @@ async fn a_browser_login_stores_the_credential_a_device_login_stores() {
     assert!(sent.has_header("user-agent", XAI_USER_AGENT));
 
     let fields = sent.form();
-    assert_eq!(
-        fields.get("grant_type").map(String::as_str),
-        Some("authorization_code")
-    );
+    assert_eq!(fields.get("grant_type").map(String::as_str), Some("authorization_code"));
     assert_eq!(fields.get("code").map(String::as_str), Some(CODE));
     assert_eq!(
         fields.get("redirect_uri").map(String::as_str),
@@ -579,11 +508,7 @@ async fn a_browser_login_stores_the_credential_a_device_login_stores() {
     // place both halves exist at once.
     assert_eq!(
         challenge,
-        challenge_for(
-            fields
-                .get("code_verifier")
-                .expect("the exchange presents a verifier")
-        ),
+        challenge_for(fields.get("code_verifier").expect("the exchange presents a verifier")),
         "a verifier that is not the preimage of the published challenge is refused \
              by the token endpoint, not by anything here"
     );
@@ -638,11 +563,9 @@ async fn the_state_a_login_publishes_is_the_one_its_callback_must_echo() {
     // value and validated another would refuse its own callback, minutes
     // into a flow somebody already finished in a browser.
     let exchange = serve(vec![Reply::ok(TOKENS)]).await;
-    let flow = browser_flow_at(
-        format!("{}/authorize", exchange.url),
-        format!("{}/token", exchange.url),
-    )
-    .expect("a client builds");
+    let flow =
+        browser_flow_at(format!("{}/authorize", exchange.url), format!("{}/token", exchange.url))
+            .expect("a client builds");
     let browser = flow.start_on(0).await.expect("loopback is bindable");
     let port = browser.port();
     let state = published(browser.url(), "state");
@@ -671,11 +594,9 @@ async fn a_forged_callback_is_refused_before_its_error_parameter_is_read() {
     // `loopback` rather than re-decided here, and asserted through this flow
     // so the inheritance is a fact rather than an assumption.
     let exchange = serve(Vec::new()).await;
-    let flow = browser_flow_at(
-        format!("{}/authorize", exchange.url),
-        format!("{}/token", exchange.url),
-    )
-    .expect("a client builds");
+    let flow =
+        browser_flow_at(format!("{}/authorize", exchange.url), format!("{}/token", exchange.url))
+            .expect("a client builds");
     let browser = flow.start_on(0).await.expect("loopback is bindable");
     let port = browser.port();
 
@@ -693,12 +614,7 @@ async fn a_forged_callback_is_refused_before_its_error_parameter_is_read() {
         .expect_err("a callback that proves nothing must not be accepted");
 
     assert!(
-        matches!(
-            &refused,
-            BrowserError::Callback {
-                source: LoopbackError::Forged
-            }
-        ),
+        matches!(&refused, BrowserError::Callback { source: LoopbackError::Forged }),
         "{refused:?}"
     );
     let message = format!("{refused} {refused:?}");
@@ -718,11 +634,9 @@ async fn a_forged_callback_is_refused_before_its_error_parameter_is_read() {
 #[tokio::test]
 async fn a_callback_that_gives_the_state_twice_is_refused() {
     let exchange = serve(Vec::new()).await;
-    let flow = browser_flow_at(
-        format!("{}/authorize", exchange.url),
-        format!("{}/token", exchange.url),
-    )
-    .expect("a client builds");
+    let flow =
+        browser_flow_at(format!("{}/authorize", exchange.url), format!("{}/token", exchange.url))
+            .expect("a client builds");
     let browser = flow.start_on(0).await.expect("loopback is bindable");
     let port = browser.port();
     let state = published(browser.url(), "state");
@@ -739,12 +653,7 @@ async fn a_callback_that_gives_the_state_twice_is_refused() {
         .expect_err("a value two parties disagree about was not given");
 
     assert!(
-        matches!(
-            &refused,
-            BrowserError::Callback {
-                source: LoopbackError::Forged
-            }
-        ),
+        matches!(&refused, BrowserError::Callback { source: LoopbackError::Forged }),
         "{refused:?}"
     );
     assert_eq!(response.lines().next(), Some("HTTP/1.1 400 Bad Request"));
@@ -757,20 +666,12 @@ async fn a_browser_login_whose_port_is_taken_names_the_two_ways_out() {
     // is which two things a person can do about it. Bound here on an
     // OS-assigned port rather than on 56121, so the test neither contends
     // with a parallel runner nor with whatever is running on this machine.
-    let holder = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("loopback is bindable");
-    let taken = holder
-        .local_addr()
-        .expect("a bound socket has an address")
-        .port();
+    let holder = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("loopback is bindable");
+    let taken = holder.local_addr().expect("a bound socket has an address").port();
     let flow = browser_flow_at("https://authorize.invalid", "https://token.invalid")
         .expect("a client builds");
 
-    let refused = flow
-        .start_on(taken)
-        .await
-        .expect_err("the port is already held");
+    let refused = flow.start_on(taken).await.expect_err("the port is already held");
 
     assert!(
         matches!(&refused, BrowserError::PortTaken { port, .. } if *port == taken),
@@ -782,10 +683,7 @@ async fn a_browser_login_whose_port_is_taken_names_the_two_ways_out() {
         message.contains("device method"),
         "the other login is the way out that always works: {message}"
     );
-    assert!(
-        message.contains("close"),
-        "and freeing the port is the other: {message}"
-    );
+    assert!(message.contains("close"), "and freeing the port is the other: {message}");
 }
 
 #[tokio::test]
@@ -803,10 +701,7 @@ async fn nothing_renders_a_state_or_a_verifier_out_of_a_browser_login() {
         !rendered.contains(&published(browser.url(), "state")),
         "the value that decides whose callback is accepted reached a Debug: {rendered}"
     );
-    assert!(
-        !rendered.contains(&published(browser.url(), "nonce")),
-        "{rendered}"
-    );
+    assert!(!rendered.contains(&published(browser.url(), "nonce")), "{rendered}");
     assert!(
         !rendered.contains(browser.pkce.verifier().expose_secret()),
         "a verifier reached a Debug: {rendered}"

@@ -1,7 +1,9 @@
 use std::time::Duration;
 
 use ganja_protocol::{Message, MessageId, Part, PartBody, PartId, ToolState};
-use ratatui::{buffer::Buffer, layout::Rect, style::Modifier};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::style::Modifier;
 
 use super::{
     BULLET, COMPACT_BLUE, COMPACT_PERIWINKLE, Chat, Compaction, Instant, RESULT,
@@ -17,11 +19,7 @@ fn tool_call(tool: &str, state: ToolState) -> Vec<String> {
     let mut reply = Message::assistant("canned");
     reply.parts.push(Part {
         id: PartId::from("prt_1".to_owned()),
-        body: PartBody::Tool {
-            call_id: "call_1".to_owned(),
-            tool: tool.to_owned(),
-            state,
-        },
+        body: PartBody::Tool { call_id: "call_1".to_owned(), tool: tool.to_owned(), state },
     });
     chat.start_message(reply);
 
@@ -65,12 +63,7 @@ fn a_provider_run_tool_draws_in_the_same_grammar_a_local_call_does() {
     );
 }
 
-const VIEWPORT: Rect = Rect {
-    x: 0,
-    y: 0,
-    width: 20,
-    height: 6,
-};
+const VIEWPORT: Rect = Rect { x: 0, y: 0, width: 20, height: 6 };
 
 /// Fills a transcript the way the engine does: one complete user message
 /// per entry.
@@ -144,10 +137,7 @@ fn an_attached_file_renders_as_its_token_with_range_and_mime() {
 
     let screen = rendered(&mut chat, Rect::new(0, 0, 40, 8)).join("\n");
     assert!(screen.contains("@src/lib.rs#5-9"), "{screen}");
-    assert!(
-        !screen.contains("@src/lib.rs#5-9 ("),
-        "a text mention needs no mime label:\n{screen}"
-    );
+    assert!(!screen.contains("@src/lib.rs#5-9 ("), "a text mention needs no mime label:\n{screen}");
     assert!(screen.contains("@shot.png (image/png)"), "{screen}");
 }
 
@@ -186,10 +176,7 @@ fn with_graphics_an_attached_image_asks_for_cells_and_then_draws_them() {
 
     let area = Rect::new(0, 0, 40, 12);
     let screen = rendered(&mut chat, area).join("\n");
-    assert!(
-        !screen.contains("shot.png"),
-        "the image's path is off the screen:\n{screen}"
-    );
+    assert!(!screen.contains("shot.png"), "the image's path is off the screen:\n{screen}");
     assert!(screen.contains("@src/lib.rs"), "{screen}");
     assert_eq!(
         chat.images_wanting_cells(),
@@ -206,24 +193,13 @@ fn with_graphics_an_attached_image_asks_for_cells_and_then_draws_them() {
         "the box holds placeholder cells, got {:?}",
         cell.symbol()
     );
-    assert_eq!(
-        cell.style().fg,
-        Some(crate::graphics::id_color(7)),
-        "and the id rides the color"
-    );
-    assert!(
-        chat.images_wanting_cells().is_empty(),
-        "an answered image is not asked for again"
-    );
+    assert_eq!(cell.style().fg, Some(crate::graphics::id_color(7)), "and the id rides the color");
+    assert!(chat.images_wanting_cells().is_empty(), "an answered image is not asked for again");
 
     chat.set_image_cell("shot.png", 0, 0);
     let mut blank = Buffer::empty(area);
     chat.render(area, &mut blank, &Theme::default());
-    assert_eq!(
-        blank[(2, 1)].symbol(),
-        " ",
-        "a decode failure keeps the box blank"
-    );
+    assert_eq!(blank[(2, 1)].symbol(), " ", "a decode failure keeps the box blank");
     assert!(chat.images_wanting_cells().is_empty(), "and never re-asks");
 }
 
@@ -237,28 +213,19 @@ fn wrapping_breaks_on_word_boundaries() {
 
 #[test]
 fn wrapping_preserves_blank_lines_between_paragraphs() {
-    assert_eq!(
-        wrap("one\n\ntwo", 10),
-        vec!["one".to_owned(), String::new(), "two".to_owned()]
-    );
+    assert_eq!(wrap("one\n\ntwo", 10), vec!["one".to_owned(), String::new(), "two".to_owned()]);
 }
 
 #[test]
 fn a_word_wider_than_the_viewport_is_chopped_not_dropped() {
-    assert_eq!(
-        wrap("abcdefghij", 4),
-        vec!["abcd".to_owned(), "efgh".to_owned(), "ij".to_owned()]
-    );
+    assert_eq!(wrap("abcdefghij", 4), vec!["abcd".to_owned(), "efgh".to_owned(), "ij".to_owned()]);
 }
 
 #[test]
 fn wrapping_measures_display_width_not_bytes() {
     // Each of these is two columns wide, so only two fit on a five-column
     // line.
-    assert_eq!(
-        wrap("ああ ああ", 5),
-        vec!["ああ".to_owned(), "ああ".to_owned()]
-    );
+    assert_eq!(wrap("ああ ああ", 5), vec!["ああ".to_owned(), "ああ".to_owned()]);
 }
 
 #[test]
@@ -394,32 +361,19 @@ fn a_message_renders_all_of_its_parts() {
 fn a_prompt_carrying_a_peers_words_draws_one_caret_for_the_whole_entry() {
     // Wider and taller than `VIEWPORT`: this entry is four rows and the
     // question is which glyph leads each of them, so none may scroll off.
-    const AREA: Rect = Rect {
-        x: 0,
-        y: 0,
-        width: 30,
-        height: 12,
-    };
+    const AREA: Rect = Rect { x: 0, y: 0, width: 30, height: 12 };
 
     let mut chat = Chat::default();
     let prompt = Message::user("what did w1 say");
     chat.start_message(prompt.clone());
     chat.start_part(
         &prompt.id,
-        Part::peer(
-            "w1",
-            Some("picked up W2".to_owned()),
-            None,
-            "on the protocol",
-        ),
+        Part::peer("w1", Some("picked up W2".to_owned()), None, "on the protocol"),
     );
     chat.start_part(&prompt.id, Part::peer("w2", None, None, "and I have it"));
 
     let lines = rendered(&mut chat, AREA);
-    let carets = lines
-        .iter()
-        .filter(|line| line.starts_with("\u{3e} "))
-        .count();
+    let carets = lines.iter().filter(|line| line.starts_with("\u{3e} ")).count();
 
     assert_eq!(carets, 1, "one entry, one caret, got {lines:?}");
     assert!(
@@ -450,9 +404,7 @@ fn a_peers_words_on_a_reply_take_their_own_head_and_not_the_bullet() {
         "a peer part on a reply heads its own block, got {lines:?}"
     );
     assert!(
-        lines
-            .iter()
-            .all(|line| !line.starts_with("\u{3e} ") && !line.starts_with("\u{25cf} ")),
+        lines.iter().all(|line| !line.starts_with("\u{3e} ") && !line.starts_with("\u{25cf} ")),
         "neither the caret nor the bullet claims these words, got {lines:?}"
     );
 }
@@ -474,12 +426,7 @@ fn a_peers_words_on_a_reply_take_their_own_head_and_not_the_bullet() {
 fn snapshot_teammate_message() {
     // Wide and tall enough for the whole entry: what this pins is which
     // glyph and which style leads each row, so no row may scroll off.
-    const AREA: Rect = Rect {
-        x: 0,
-        y: 0,
-        width: 46,
-        height: 10,
-    };
+    const AREA: Rect = Rect { x: 0, y: 0, width: 46, height: 10 };
 
     let mut chat = Chat::default();
     let prompt = Message::user("what did w1 say");
@@ -577,9 +524,7 @@ fn a_running_tool_call_shows_a_title_derived_from_its_input() {
     let lines = rendered(&mut chat, Rect::new(0, 0, 60, 20));
 
     assert!(
-        lines
-            .iter()
-            .any(|line| line == "\u{25cf} Shell(command: \"cargo test\")"),
+        lines.iter().any(|line| line == "\u{25cf} Shell(command: \"cargo test\")"),
         "got {lines:?}"
     );
 }
@@ -633,21 +578,14 @@ fn an_in_flight_calls_point_winks_and_its_words_hold_still() {
     // 1600 ms into the wink: past the drop, flat at the bottom.
     chat.blink_epoch = Instant::now().checked_sub(Duration::from_millis(1_600));
     let (dim, lead) = frame(&mut chat);
-    assert_eq!(
-        dim[0], "\u{b7} Shell(command: \"cargo test\")",
-        "the trough wears the small dot"
-    );
+    assert_eq!(dim[0], "\u{b7} Shell(command: \"cargo test\")", "the trough wears the small dot");
     assert_eq!(
         bright[0].chars().skip(2).collect::<String>(),
         dim[0].chars().skip(2).collect::<String>(),
         "past the lead the words hold still"
     );
     assert_eq!(bright[1..], dim[1..], "and every other row holds still");
-    assert_eq!(
-        lead,
-        Theme::default().dim.fg,
-        "the chrome's own dim at the bottom"
-    );
+    assert_eq!(lead, Theme::default().dim.fg, "the chrome's own dim at the bottom");
 }
 
 /// The wink's envelope, measured off the reference recording: bright
@@ -660,20 +598,13 @@ fn the_points_wink_holds_drops_rests_and_rises() {
     assert_eq!(at(0), super::POINT_BRIGHT);
     assert_eq!(at(1_399), super::POINT_BRIGHT, "the hold runs long");
     let falling = at(1_470);
-    assert!(
-        falling > 0 && falling < super::POINT_BRIGHT,
-        "down fast past the hold, got {falling}"
-    );
+    assert!(falling > 0 && falling < super::POINT_BRIGHT, "down fast past the hold, got {falling}");
     assert_eq!(at(1_600), 0, "flat at the bottom");
     assert_eq!(at(1_850), 2, "easing back");
     assert_eq!(at(2_000), at(0), "one wink in, it starts over");
 
     let glyph = super::point_glyph;
-    assert_eq!(
-        glyph(super::POINT_BRIGHT),
-        "\u{25cf} ",
-        "biggest at the crest"
-    );
+    assert_eq!(glyph(super::POINT_BRIGHT), "\u{25cf} ", "biggest at the crest");
     assert_eq!(glyph(2), "\u{2022} ");
     assert_eq!(glyph(1), "\u{2219} ");
     assert_eq!(glyph(0), "\u{b7} ", "smallest at the trough");
@@ -694,10 +625,7 @@ fn the_points_way_between_blends_where_the_theme_is_rgb() {
         Some(Color::Rgb(100, 50, 20)),
         "halfway up is halfway between"
     );
-    assert_eq!(
-        super::point_style(&theme, super::POINT_BRIGHT).fg,
-        theme.fg.fg
-    );
+    assert_eq!(super::point_style(&theme, super::POINT_BRIGHT).fg, theme.fg.fg);
     assert_eq!(super::point_style(&theme, 0).fg, theme.dim.fg);
 
     let terminal = Theme::default();
@@ -706,11 +634,7 @@ fn the_points_way_between_blends_where_the_theme_is_rgb() {
         terminal.fg.fg,
         "a named palette's upper middle collapses to bright"
     );
-    assert_eq!(
-        super::point_style(&terminal, 1).fg,
-        terminal.dim.fg,
-        "and its lower middle to dim"
-    );
+    assert_eq!(super::point_style(&terminal, 1).fg, terminal.dim.fg, "and its lower middle to dim");
 }
 
 /// A thought renders its own markdown, folded into the thinking tone
@@ -744,15 +668,9 @@ fn a_thought_renders_its_markdown_bold_in_the_thinking_tone() {
 
     let theme = Theme::default();
     let bold = buffer[(2, 0)].style();
-    assert!(
-        bold.add_modifier.contains(Modifier::BOLD),
-        "the heading keeps its bold"
-    );
+    assert!(bold.add_modifier.contains(Modifier::BOLD), "the heading keeps its bold");
     assert_eq!(bold.fg, theme.dim.fg, "and comes home to the dim");
-    assert!(
-        bold.add_modifier.contains(Modifier::ITALIC),
-        "inside the block's own italic"
-    );
+    assert!(bold.add_modifier.contains(Modifier::ITALIC), "inside the block's own italic");
     let plain = buffer[(30, 0)].style();
     assert!(
         !plain.add_modifier.contains(Modifier::BOLD),
@@ -787,11 +705,8 @@ fn a_completed_tool_call_renders_as_a_bullet_a_result_marker_and_a_hanging_previ
     chat.start_message(reply);
 
     let lines = rendered(&mut chat, Rect::new(0, 0, 60, 20));
-    let drawn: Vec<&str> = lines
-        .iter()
-        .map(String::as_str)
-        .filter(|line| !line.is_empty())
-        .collect();
+    let drawn: Vec<&str> =
+        lines.iter().map(String::as_str).filter(|line| !line.is_empty()).collect();
 
     assert_eq!(
         drawn,
@@ -833,18 +748,12 @@ fn a_settled_read_is_a_path_and_a_count_and_nothing_else() {
             completed: 1,
         },
     );
-    let drawn: Vec<&str> = lines
-        .iter()
-        .map(String::as_str)
-        .filter(|line| !line.is_empty())
-        .collect();
+    let drawn: Vec<&str> =
+        lines.iter().map(String::as_str).filter(|line| !line.is_empty()).collect();
 
     assert_eq!(
         drawn,
-        vec![
-            "\u{25cf} Read(/repo/src/lib.rs)",
-            "  \u{23bf} Read 77 lines"
-        ],
+        vec!["\u{25cf} Read(/repo/src/lib.rs)", "  \u{23bf} Read 77 lines"],
         "got {lines:?}"
     );
 }
@@ -860,11 +769,7 @@ fn a_read_of_a_range_names_it_and_names_it_the_same_while_running() {
     });
     let running = tool_call(
         "read",
-        ToolState::Running {
-            input: input.clone(),
-            metadata: serde_json::Value::Null,
-            started: 0,
-        },
+        ToolState::Running { input: input.clone(), metadata: serde_json::Value::Null, started: 0 },
     );
     let settled = tool_call(
         "read",
@@ -885,27 +790,11 @@ fn a_read_of_a_range_names_it_and_names_it_the_same_while_running() {
         },
     );
 
-    let header = |lines: &[String]| {
-        lines
-            .iter()
-            .find(|line| !line.is_empty())
-            .cloned()
-            .unwrap_or_default()
-    };
-    assert_eq!(
-        header(&running),
-        "\u{25cf} Read(/repo/src/lib.rs \u{b7} lines 1158-1217)"
-    );
-    assert_eq!(
-        header(&settled),
-        "\u{25cf} Read(/repo/src/lib.rs \u{b7} lines 1158-1217)"
-    );
-    assert!(
-        settled
-            .iter()
-            .any(|line| line == "  \u{23bf} Read 60 lines"),
-        "got {settled:?}"
-    );
+    let header =
+        |lines: &[String]| lines.iter().find(|line| !line.is_empty()).cloned().unwrap_or_default();
+    assert_eq!(header(&running), "\u{25cf} Read(/repo/src/lib.rs \u{b7} lines 1158-1217)");
+    assert_eq!(header(&settled), "\u{25cf} Read(/repo/src/lib.rs \u{b7} lines 1158-1217)");
+    assert!(settled.iter().any(|line| line == "  \u{23bf} Read 60 lines"), "got {settled:?}");
     assert!(
         !settled.iter().any(|line| line.contains("envelope")),
         "the tool's output is the model's, not the transcript's: {settled:?}"
@@ -925,10 +814,7 @@ fn a_read_from_a_line_to_the_end_of_the_file_claims_no_range() {
         },
     );
 
-    assert!(
-        lines.iter().any(|line| line == "\u{25cf} Read(/repo/a.rs)"),
-        "got {lines:?}"
-    );
+    assert!(lines.iter().any(|line| line == "\u{25cf} Read(/repo/a.rs)"), "got {lines:?}");
 }
 
 /// The count is of what was read, so an empty file reports none — and a
@@ -949,10 +835,7 @@ fn a_read_that_is_not_of_a_files_lines_keeps_the_ordinary_shape() {
             completed: 1,
         },
     );
-    assert!(
-        empty.iter().any(|line| line == "  \u{23bf} Read 0 lines"),
-        "got {empty:?}"
-    );
+    assert!(empty.iter().any(|line| line == "  \u{23bf} Read 0 lines"), "got {empty:?}");
 
     // A PDF is the kind of read that is neither a file's lines nor a
     // directory's entries: `ganja_tool::read` publishes no `display` block
@@ -975,9 +858,7 @@ fn a_read_that_is_not_of_a_files_lines_keeps_the_ordinary_shape() {
     );
     assert!(
         pdf.iter().any(|line| line == "  \u{23bf} paper.pdf")
-            && pdf
-                .iter()
-                .any(|line| line.contains("PDF read successfully")),
+            && pdf.iter().any(|line| line.contains("PDF read successfully")),
         "a read that counted nothing keeps the ordinary shape, got {pdf:?}"
     );
 }
@@ -1009,11 +890,8 @@ fn a_settled_read_of_a_directory_is_a_count_and_no_envelope() {
             completed: 1,
         },
     );
-    let drawn: Vec<&str> = lines
-        .iter()
-        .map(String::as_str)
-        .filter(|line| !line.is_empty())
-        .collect();
+    let drawn: Vec<&str> =
+        lines.iter().map(String::as_str).filter(|line| !line.is_empty()).collect();
 
     assert_eq!(
         drawn,
@@ -1056,12 +934,8 @@ fn a_read_of_a_range_of_a_directory_keeps_the_range_it_asked_for() {
     );
 
     assert!(
-        lines
-            .iter()
-            .any(|line| line == "\u{25cf} Read(/repo/src \u{b7} lines 3-4)")
-            && lines
-                .iter()
-                .any(|line| line == "  \u{23bf} Listed 2 entries"),
+        lines.iter().any(|line| line == "\u{25cf} Read(/repo/src \u{b7} lines 3-4)")
+            && lines.iter().any(|line| line == "  \u{23bf} Listed 2 entries"),
         "got {lines:?}"
     );
     assert!(
@@ -1099,11 +973,8 @@ fn todos() -> serde_json::Value {
 #[test]
 fn a_settled_todowrite_draws_its_list_as_a_checklist() {
     let lines = tool_call("todowrite", todo_call(todos()));
-    let drawn: Vec<&str> = lines
-        .iter()
-        .map(String::as_str)
-        .filter(|line| !line.is_empty())
-        .collect();
+    let drawn: Vec<&str> =
+        lines.iter().map(String::as_str).filter(|line| !line.is_empty()).collect();
 
     assert_eq!(
         drawn,
@@ -1154,10 +1025,7 @@ fn a_checklist_paints_the_task_in_hand_and_strikes_the_ones_that_are_done() {
         "a finished task is struck through, got {done:?} and {cancelled:?}"
     );
     assert!(
-        !buffer[(0, 1)]
-            .style()
-            .add_modifier
-            .contains(Modifier::CROSSED_OUT),
+        !buffer[(0, 1)].style().add_modifier.contains(Modifier::CROSSED_OUT),
         "the strike stays off the margin rather than ruling a line out to the left"
     );
     assert!(
@@ -1235,22 +1103,12 @@ fn the_working_line_carries_this_turns_checklist_and_drops_it_on_settle() {
         !transcript.iter().any(|line| line.contains("\u{2026} (")),
         "the transcript itself no longer carries the line: {transcript:?}"
     );
-    assert_eq!(
-        boxes(&transcript),
-        4,
-        "the call's own rows stay in the transcript: {transcript:?}"
-    );
+    assert_eq!(boxes(&transcript), 4, "the call's own rows stay in the transcript: {transcript:?}");
     assert!(
-        running
-            .first()
-            .is_some_and(|line| line.contains("\u{2026} (")),
+        running.first().is_some_and(|line| line.contains("\u{2026} (")),
         "the strip opens on the working line, got {running:?}"
     );
-    assert_eq!(
-        boxes(&running),
-        4,
-        "and carries this turn's list: {running:?}"
-    );
+    assert_eq!(boxes(&running), 4, "and carries this turn's list: {running:?}");
     assert_eq!(
         running[1], "  \u{23bf} \u{2612} port cell.slang",
         "the copy hangs off the working line's own elbow: {running:?}"
@@ -1259,10 +1117,7 @@ fn the_working_line_carries_this_turns_checklist_and_drops_it_on_settle() {
     chat.set_working(None);
     let settled = strip(&mut chat, 60);
 
-    assert!(
-        settled.is_empty(),
-        "a settled turn leaves no strip: {settled:?}"
-    );
+    assert!(settled.is_empty(), "a settled turn leaves no strip: {settled:?}");
     assert_eq!(
         boxes(&rendered(&mut chat, area)),
         4,
@@ -1298,9 +1153,7 @@ fn the_working_line_carries_no_checklist_from_a_turn_that_is_over() {
     let lines = strip(&mut chat, 60);
 
     assert!(
-        lines
-            .first()
-            .is_some_and(|line| line.contains("\u{2026} (")),
+        lines.first().is_some_and(|line| line.contains("\u{2026} (")),
         "the strip opens on the working line: {lines:?}"
     );
     assert_eq!(
@@ -1320,11 +1173,7 @@ fn a_running_call_and_its_settled_self_share_their_header_words() {
     let input = serde_json::json!({"command": "cargo test"});
     let running = tool_call(
         "shell",
-        ToolState::Running {
-            input: input.clone(),
-            metadata: serde_json::Value::Null,
-            started: 0,
-        },
+        ToolState::Running { input: input.clone(), metadata: serde_json::Value::Null, started: 0 },
     );
     let completed = tool_call(
         "shell",
@@ -1339,21 +1188,11 @@ fn a_running_call_and_its_settled_self_share_their_header_words() {
     );
     let failed = tool_call(
         "shell",
-        ToolState::Error {
-            input,
-            error: "no such command".to_owned(),
-            started: 0,
-            completed: 1,
-        },
+        ToolState::Error { input, error: "no such command".to_owned(), started: 0, completed: 1 },
     );
 
-    let header = |lines: &[String]| {
-        lines
-            .iter()
-            .find(|line| !line.is_empty())
-            .cloned()
-            .unwrap_or_default()
-    };
+    let header =
+        |lines: &[String]| lines.iter().find(|line| !line.is_empty()).cloned().unwrap_or_default();
     assert_eq!(header(&running), "\u{25cf} Shell(command: \"cargo test\")");
     assert_eq!(header(&running), header(&completed));
     assert_eq!(header(&completed), header(&failed));
@@ -1426,9 +1265,7 @@ fn a_header_names_a_nested_argument_by_its_shape() {
     );
 
     assert!(
-        lines
-            .iter()
-            .any(|line| line == "\u{25cf} Todowrite(todos: [\u{2026}])"),
+        lines.iter().any(|line| line == "\u{25cf} Todowrite(todos: [\u{2026}])"),
         "got {lines:?}"
     );
 }
@@ -1458,19 +1295,12 @@ fn a_wrapped_preview_line_keeps_hanging_under_its_own_marker() {
     chat.start_message(reply);
 
     let lines = rendered(&mut chat, Rect::new(0, 0, 18, 10));
-    let drawn: Vec<&str> = lines
-        .iter()
-        .map(String::as_str)
-        .filter(|line| !line.is_empty())
-        .collect();
+    let drawn: Vec<&str> =
+        lines.iter().map(String::as_str).filter(|line| !line.is_empty()).collect();
 
     assert_eq!(
         drawn,
-        vec![
-            "\u{25cf} Read",
-            "  \u{23bf} alpha bravo",
-            "    charlie delta",
-        ],
+        vec!["\u{25cf} Read", "  \u{23bf} alpha bravo", "    charlie delta",],
         "the wrapped remainder sits under what the marker introduced, got {lines:?}"
     );
 }
@@ -1499,19 +1329,12 @@ fn a_completed_tool_call_shows_its_title_and_a_clamped_output_preview() {
     let lines = rendered(&mut chat, Rect::new(0, 0, 60, 20));
 
     assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("\u{25cf} Grep(pattern: \"fn main\")")),
+        lines.iter().any(|line| line.contains("\u{25cf} Grep(pattern: \"fn main\")")),
         "got {lines:?}"
     );
+    assert!(lines.iter().any(|line| line.contains("one")), "got {lines:?}");
     assert!(
-        lines.iter().any(|line| line.contains("one")),
-        "got {lines:?}"
-    );
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("\u{2026} +1 line (ctrl+t to expand)")),
+        lines.iter().any(|line| line.contains("\u{2026} +1 line (ctrl+t to expand)")),
         "five lines should clamp to four plus a hint naming the one cut, got {lines:?}"
     );
     assert!(
@@ -1546,15 +1369,9 @@ fn a_completed_tool_call_prefers_its_diff_over_plain_output() {
     let lines = rendered(&mut chat, Rect::new(0, 0, 60, 20));
 
     assert!(lines.iter().any(|line| line.contains("DIFF_ADDED_MARKER")));
+    assert!(lines.iter().any(|line| line.contains("DIFF_REMOVED_MARKER")));
     assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("DIFF_REMOVED_MARKER"))
-    );
-    assert!(
-        !lines
-            .iter()
-            .any(|line| line.contains("PLAIN_OUTPUT_MARKER")),
+        !lines.iter().any(|line| line.contains("PLAIN_OUTPUT_MARKER")),
         "a diff should be shown instead of the plain output, got {lines:?}"
     );
 }
@@ -1582,15 +1399,11 @@ fn an_errored_tool_call_shows_only_the_first_line_of_the_error() {
     let lines = rendered(&mut chat, Rect::new(0, 0, 60, 20));
 
     assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("\u{25cf} Shell(command: \"rm -rf /\")")),
+        lines.iter().any(|line| line.contains("\u{25cf} Shell(command: \"rm -rf /\")")),
         "got {lines:?}"
     );
     assert!(
-        lines
-            .iter()
-            .any(|line| line == "  \u{23bf} [error] refused: destructive command"),
+        lines.iter().any(|line| line == "  \u{23bf} [error] refused: destructive command"),
         "got {lines:?}"
     );
     assert!(
@@ -1640,9 +1453,7 @@ fn update_part_replaces_a_known_id_and_appends_an_unknown_one() {
     let lines = rendered(&mut chat, Rect::new(0, 0, 60, 20));
 
     assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("\u{25cf} Shell(command: \"echo hi\")")),
+        lines.iter().any(|line| line.contains("\u{25cf} Shell(command: \"echo hi\")")),
         "the known id should be replaced in place, got {lines:?}"
     );
     assert!(
@@ -1665,17 +1476,12 @@ fn a_failed_turns_error_is_painted_under_its_reply() {
     chat.start_message(reply.clone());
 
     assert!(
-        chat.set_error(
-            &reply.id,
-            "Our servers are currently overloaded.".to_owned()
-        ),
+        chat.set_error(&reply.id, "Our servers are currently overloaded.".to_owned()),
         "the reply is on the transcript, so the error has a home"
     );
     let lines = rendered(&mut chat, Rect::new(0, 0, 60, 20));
     assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("[error] Our servers are currently overloaded.")),
+        lines.iter().any(|line| line.contains("[error] Our servers are currently overloaded.")),
         "the error paints under the reply, got {lines:?}"
     );
 
@@ -1754,10 +1560,7 @@ fn a_resumed_prompt_is_never_marked_interrupted() {
 
     let lines = rendered(&mut chat, Rect::new(0, 0, 70, 20));
 
-    assert!(
-        !lines.iter().any(|line| line.contains("[interrupted]")),
-        "got {lines:?}"
-    );
+    assert!(!lines.iter().any(|line| line.contains("[interrupted]")), "got {lines:?}");
 }
 
 #[test]
@@ -1797,9 +1600,7 @@ fn a_running_call_that_reports_as_it_goes_shows_the_newest_of_it() {
         "the oldest lines are the ones that scroll off, got {lines:?}"
     );
     assert!(
-        lines
-            .iter()
-            .any(|line| line == "  \u{23bf} \u{2026} +2 lines (ctrl+t to expand)"),
+        lines.iter().any(|line| line == "  \u{23bf} \u{2026} +2 lines (ctrl+t to expand)"),
         "and the cut has to be admitted, above what it cut, got {lines:?}"
     );
 }
@@ -1817,11 +1618,7 @@ fn a_running_call_that_reports_nothing_is_one_line_as_it_always_was() {
     );
     let drawn: Vec<&String> = lines.iter().filter(|line| !line.is_empty()).collect();
 
-    assert_eq!(
-        drawn,
-        vec![&"\u{25cf} Read(a.rs)".to_owned()],
-        "got {lines:?}"
-    );
+    assert_eq!(drawn, vec![&"\u{25cf} Read(a.rs)".to_owned()], "got {lines:?}");
 }
 
 /// A call waiting its turn behind the step's earlier calls names its
@@ -1831,22 +1628,15 @@ fn a_running_call_that_reports_nothing_is_one_line_as_it_always_was() {
 fn a_waiting_call_names_its_arguments_once_they_have_settled() {
     let named = tool_call(
         "shell",
-        ToolState::Pending {
-            input: Some(serde_json::json!({"command": "cargo test"})),
-        },
+        ToolState::Pending { input: Some(serde_json::json!({"command": "cargo test"})) },
     );
     assert!(
-        named
-            .iter()
-            .any(|line| line == "\u{25cf} Shell(command: \"cargo test\")"),
+        named.iter().any(|line| line == "\u{25cf} Shell(command: \"cargo test\")"),
         "got {named:?}"
     );
 
     let streaming = tool_call("shell", ToolState::Pending { input: None });
-    assert!(
-        streaming.iter().any(|line| line == "\u{25cf} Shell"),
-        "got {streaming:?}"
-    );
+    assert!(streaming.iter().any(|line| line == "\u{25cf} Shell"), "got {streaming:?}");
 }
 
 /// A delegated turn is one row: an icon, who is doing it, what they were
@@ -1872,10 +1662,7 @@ fn a_running_task_names_the_agent_the_ask_and_the_tool_it_is_in() {
                 == "\u{25cf} Task(agent: \"explore\", description: \"find the parser\")"),
         "got {lines:?}"
     );
-    assert!(
-        lines.iter().any(|line| line == "  \u{23bf} grep parser"),
-        "got {lines:?}"
-    );
+    assert!(lines.iter().any(|line| line == "  \u{23bf} grep parser"), "got {lines:?}");
 }
 
 /// Between tools there is no current one, so the count is what the row has
@@ -1891,14 +1678,9 @@ fn a_running_task_between_tools_counts_them_instead() {
         },
     );
 
+    assert!(lines.iter().any(|line| line == "  \u{23bf} 3 toolcalls"), "got {lines:?}");
     assert!(
-        lines.iter().any(|line| line == "  \u{23bf} 3 toolcalls"),
-        "got {lines:?}"
-    );
-    assert!(
-        lines
-            .iter()
-            .any(|line| line == "\u{25cf} Task(description: \"find the parser\")"),
+        lines.iter().any(|line| line == "\u{25cf} Task(description: \"find the parser\")"),
         "an agent nobody named is left off rather than invented, got {lines:?}"
     );
 }
@@ -1926,9 +1708,7 @@ fn a_running_task_expands_the_childs_recent_calls_and_admits_the_cut() {
     );
 
     assert!(
-        lines
-            .iter()
-            .any(|line| line == "  \u{23bf} \u{2026} +3 lines (ctrl+t to expand)"),
+        lines.iter().any(|line| line == "  \u{23bf} \u{2026} +3 lines (ctrl+t to expand)"),
         "three of seven calls are off the row and said to be: {lines:?}"
     );
     let two = lines
@@ -1940,10 +1720,7 @@ fn a_running_task_expands_the_childs_recent_calls_and_admits_the_cut() {
         "    grep five",
         "the newest call ends the block in call order: {lines:?}"
     );
-    assert!(
-        !lines.iter().any(|line| line.contains("grep one")),
-        "the cut call is cut: {lines:?}"
-    );
+    assert!(!lines.iter().any(|line| line.contains("grep one")), "the cut call is cut: {lines:?}");
 }
 
 /// What the child actually said is inside the tool result the model reads.
@@ -1981,15 +1758,11 @@ fn a_finished_task_reports_its_shape_and_never_the_childs_answer() {
         "got {lines:?}"
     );
     assert!(
-        lines
-            .iter()
-            .any(|line| line == "  \u{23bf} 7 toolcalls \u{b7} 12.4s"),
+        lines.iter().any(|line| line == "  \u{23bf} 7 toolcalls \u{b7} 12.4s"),
         "got {lines:?}"
     );
     assert!(
-        !lines
-            .iter()
-            .any(|line| line.contains("THE CHILD'S OWN ANSWER")),
+        !lines.iter().any(|line| line.contains("THE CHILD'S OWN ANSWER")),
         "the child's answer belongs to the model, not to the row, got {lines:?}"
     );
     assert!(
@@ -2012,15 +1785,11 @@ fn a_failed_task_keeps_the_shape_every_other_failure_has() {
     );
 
     assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("\u{25cf} Task(description: \"find the parser\")")),
+        lines.iter().any(|line| line.contains("\u{25cf} Task(description: \"find the parser\")")),
         "got {lines:?}"
     );
     assert!(
-        lines
-            .iter()
-            .any(|line| line == "  \u{23bf} [error] no agent named parser-hunter"),
+        lines.iter().any(|line| line == "  \u{23bf} [error] no agent named parser-hunter"),
         "got {lines:?}"
     );
 }
@@ -2040,11 +1809,7 @@ fn a_duration_is_reported_in_whatever_unit_reads_as_one() {
     ];
 
     for (started, completed, expected) in cases {
-        assert_eq!(
-            elapsed(started, completed),
-            expected,
-            "{started}..{completed}"
-        );
+        assert_eq!(elapsed(started, completed), expected, "{started}..{completed}");
     }
 }
 
@@ -2053,9 +1818,7 @@ fn a_duration_is_reported_in_whatever_unit_reads_as_one() {
 fn an_assistant_reply_is_rendered_as_markdown() {
     let mut chat = Chat::default();
     let mut reply = Message::assistant("canned");
-    reply
-        .parts
-        .push(Part::text("# Heading\n\nand **loud** text"));
+    reply.parts.push(Part::text("# Heading\n\nand **loud** text"));
     chat.start_message(reply);
 
     let lines = rendered(&mut chat, Rect::new(0, 0, 40, 10));
@@ -2080,12 +1843,7 @@ fn a_user_message_is_left_exactly_as_it_was_typed() {
 
     let lines = rendered(&mut chat, Rect::new(0, 0, 40, 10));
 
-    assert!(
-        lines
-            .iter()
-            .any(|line| line == "> # Heading and **loud** text"),
-        "got {lines:?}"
-    );
+    assert!(lines.iter().any(|line| line == "> # Heading and **loud** text"), "got {lines:?}");
 }
 
 /// A prompt is one block however many parts it was built from: the caret
@@ -2109,17 +1867,10 @@ fn a_prompt_carries_one_caret_and_hangs_the_rest_of_itself_under_it() {
     chat.start_message(message);
 
     let lines = rendered(&mut chat, Rect::new(0, 0, 40, 8));
-    let drawn: Vec<&str> = lines
-        .iter()
-        .map(String::as_str)
-        .filter(|line| !line.is_empty())
-        .collect();
+    let drawn: Vec<&str> =
+        lines.iter().map(String::as_str).filter(|line| !line.is_empty()).collect();
 
-    assert_eq!(
-        drawn,
-        vec!["> look at this", "  @src/lib.rs"],
-        "got {lines:?}"
-    );
+    assert_eq!(drawn, vec!["> look at this", "  @src/lib.rs"], "got {lines:?}");
 }
 
 /// The wrap cache holds styled lines, so it is as stale after a theme
@@ -2145,11 +1896,7 @@ fn a_theme_switch_restyles_the_lines_the_cache_already_holds() {
     );
     chat.render(area, &mut buffer, &second);
 
-    assert_ne!(
-        before,
-        buffer[(0, 0)].fg,
-        "the cached line kept the old palette"
-    );
+    assert_ne!(before, buffer[(0, 0)].fg, "the cached line kept the old palette");
 }
 
 /// A transcript of four entries, and the id of the third — which is what
@@ -2185,10 +1932,7 @@ fn a_revert_hides_the_anchor_and_everything_after_it() {
 
     assert!(screen.contains("the first question"), "{screen}");
     assert!(screen.contains("the first answer"), "{screen}");
-    assert!(
-        !screen.contains("the second question"),
-        "the anchor itself is hidden too:\n{screen}"
-    );
+    assert!(!screen.contains("the second question"), "the anchor itself is hidden too:\n{screen}");
     assert!(!screen.contains("the second answer"), "{screen}");
 }
 
@@ -2197,16 +1941,11 @@ fn a_revert_hides_the_anchor_and_everything_after_it() {
 fn the_marker_row_counts_what_it_hides_and_names_the_files() {
     let (mut chat, anchor) = reverted_transcript();
 
-    chat.revert(
-        anchor,
-        vec!["src/lib.rs".to_owned(), "src/app.rs".to_owned()],
-    );
+    chat.revert(anchor, vec!["src/lib.rs".to_owned(), "src/app.rs".to_owned()]);
     let lines = rendered(&mut chat, Rect::new(0, 0, 60, 20));
 
     assert!(
-        lines
-            .iter()
-            .any(|line| line == "2 messages reverted \u{2014} /redo to restore"),
+        lines.iter().any(|line| line == "2 messages reverted \u{2014} /redo to restore"),
         "got {lines:?}"
     );
     for file in ["src/lib.rs", "src/app.rs"] {
@@ -2229,9 +1968,7 @@ fn the_marker_row_counts_a_single_message_in_the_singular() {
     let lines = rendered(&mut chat, Rect::new(0, 0, 60, 20));
 
     assert!(
-        lines
-            .iter()
-            .any(|line| line == "1 message reverted \u{2014} /redo to restore"),
+        lines.iter().any(|line| line == "1 message reverted \u{2014} /redo to restore"),
         "got {lines:?}"
     );
 }
@@ -2246,9 +1983,7 @@ fn a_revert_that_moved_no_files_still_draws_its_row() {
     let lines = rendered(&mut chat, Rect::new(0, 0, 60, 20));
 
     assert!(
-        lines
-            .iter()
-            .any(|line| line == "2 messages reverted \u{2014} /redo to restore"),
+        lines.iter().any(|line| line == "2 messages reverted \u{2014} /redo to restore"),
         "got {lines:?}"
     );
 }
@@ -2363,10 +2098,7 @@ fn checkpoints_are_the_prompts_newest_first_with_their_spans_file_counts() {
     assert_eq!(checkpoints[0].title, "now just explain it");
     assert_eq!(checkpoints[0].files, 0, "that turn changed nothing");
     assert_eq!(checkpoints[1].title, "change two files");
-    assert_eq!(
-        checkpoints[1].files, 2,
-        "two distinct files, however many patches named them"
-    );
+    assert_eq!(checkpoints[1].files, 2, "two distinct files, however many patches named them");
     assert_eq!(checkpoints[1].message_id, chat.entries[0].id);
 }
 
@@ -2417,11 +2149,7 @@ fn working(turn: u64, seconds: u64, output_tokens: u64) -> Working {
 /// into a `budget`.
 fn compacting(seconds: u64, tokens: u64, budget: u64) -> Working {
     Working {
-        compaction: Some(Compaction {
-            tokens,
-            budget,
-            done: false,
-        }),
+        compaction: Some(Compaction { tokens, budget, done: false }),
         ..working(0, seconds, 0)
     }
 }
@@ -2444,16 +2172,10 @@ fn a_finished_compaction_snaps_full_and_lingers_before_settling() {
     );
 
     chat.settle_working();
-    assert!(
-        !strip(&mut chat, 60).is_empty(),
-        "the full gauge is held past the turn's end"
-    );
+    assert!(!strip(&mut chat, 60).is_empty(), "the full gauge is held past the turn's end");
 
     chat.settling = Instant::now().checked_sub(super::COMPACT_SETTLE);
-    assert!(
-        strip(&mut chat, 60).is_empty(),
-        "and a layout past the hold takes the strip back"
-    );
+    assert!(strip(&mut chat, 60).is_empty(), "and a layout past the hold takes the strip back");
 }
 
 /// Only an arrival is held: a turn that ends mid-stream — a cancel, a
@@ -2463,21 +2185,12 @@ fn settling_holds_nothing_that_never_finished() {
     let mut chat = Chat::default();
     chat.set_compacting(500, 4_096);
     chat.settle_working();
-    assert!(
-        strip(&mut chat, 60).is_empty(),
-        "an unfinished compaction has no arrival to show"
-    );
+    assert!(strip(&mut chat, 60).is_empty(), "an unfinished compaction has no arrival to show");
 
     chat.set_working(Some(working(1, 3, 0)));
-    assert!(
-        !chat.finish_compacting(),
-        "no compaction, nothing to finish"
-    );
+    assert!(!chat.finish_compacting(), "no compaction, nothing to finish");
     chat.settle_working();
-    assert!(
-        strip(&mut chat, 60).is_empty(),
-        "an ordinary turn settles the way it always did"
-    );
+    assert!(strip(&mut chat, 60).is_empty(), "an ordinary turn settles the way it always did");
 }
 
 /// The strip in its compacting dress (the 2026-08-25 reference
@@ -2517,10 +2230,7 @@ fn the_compacting_gauge_opens_bare_and_clamps_at_ninety_nine() {
     let opened = strip(&mut chat, 60);
     assert_eq!(
         opened[0],
-        format!(
-            "{} Compacting conversation\u{2026} (3s)",
-            working_frame(Duration::from_secs(3))
-        ),
+        format!("{} Compacting conversation\u{2026} (3s)", working_frame(Duration::from_secs(3))),
         "no token clause before anything streamed"
     );
     assert_eq!(opened[2], format!("  {} 0%", "\u{25b1}".repeat(40)));
@@ -2544,9 +2254,7 @@ fn compaction_progress_arms_the_strip_and_updates_it_in_place() {
 
     let armed = strip(&mut chat, 60);
     assert!(
-        armed
-            .first()
-            .is_some_and(|line| line.contains("Compacting conversation\u{2026}")),
+        armed.first().is_some_and(|line| line.contains("Compacting conversation\u{2026}")),
         "the first event arms the strip: {armed:?}"
     );
 
@@ -2558,10 +2266,7 @@ fn compaction_progress_arms_the_strip_and_updates_it_in_place() {
     );
 
     chat.set_working(None);
-    assert!(
-        strip(&mut chat, 60).is_empty(),
-        "the strip settles the way every turn's does"
-    );
+    assert!(strip(&mut chat, 60).is_empty(), "the strip settles the way every turn's does");
 }
 
 /// The headline's paint rides the glyph's own clock — blue at the
@@ -2616,18 +2321,11 @@ fn the_strip_says_a_turn_is_working_and_takes_it_back_when_the_turn_settles() {
         }),
         "got {lines:?}"
     );
-    assert_eq!(
-        chat.line_count(),
-        settled,
-        "the strip is not the transcript's to scroll"
-    );
+    assert_eq!(chat.line_count(), settled, "the strip is not the transcript's to scroll");
 
     chat.set_working(None);
 
-    assert!(
-        strip(&mut chat, 60).is_empty(),
-        "a settled turn leaves no strip"
-    );
+    assert!(strip(&mut chat, 60).is_empty(), "a settled turn leaves no strip");
     assert_eq!(chat.line_count(), settled);
 }
 
@@ -2642,11 +2340,7 @@ fn a_working_line_with_nothing_spent_yet_draws_no_token_segment() {
 
     assert!(
         lines.iter().any(|line| {
-            *line
-                == format!(
-                    "{} Thinking\u{2026} (3s)",
-                    working_frame(Duration::from_secs(3))
-                )
+            *line == format!("{} Thinking\u{2026} (3s)", working_frame(Duration::from_secs(3)))
         }),
         "got {lines:?}"
     );
@@ -2666,10 +2360,7 @@ fn the_working_glyph_turns_through_the_frames_and_back_on_the_turns_clock() {
     assert_eq!(at(6), "\u{273b}", "and back the way it came");
     assert_eq!(at(10), at(0), "the whole cycle in, it starts over");
     // Within a step the frame holds: the same instant read twice.
-    assert_eq!(
-        working_frame(Duration::from_millis(step * 3 + step / 2)),
-        at(3)
-    );
+    assert_eq!(working_frame(Duration::from_millis(step * 3 + step / 2)), at(3));
     let forward: Vec<&str> = WORKING_FRAMES[..6].to_vec();
     let mut back = WORKING_FRAMES[6..].to_vec();
     back.reverse();
@@ -2687,21 +2378,14 @@ fn the_working_verb_rotates_with_the_turn_and_wraps_around() {
     let verb = |turn: u64| {
         let mut chat = Chat::default();
         chat.set_working(Some(working(turn, 0, 0)));
-        strip(&mut chat, 40)
-            .into_iter()
-            .find(|line| !line.is_empty())
-            .unwrap_or_default()
+        strip(&mut chat, 40).into_iter().find(|line| !line.is_empty()).unwrap_or_default()
     };
 
     assert_eq!(verb(0), "\u{b7} Working\u{2026} (0s)");
     assert_eq!(verb(1), "\u{b7} Thinking\u{2026} (0s)");
     assert_ne!(verb(1), verb(2));
     let len = u64::try_from(WORKING_VERBS.len()).expect("verb count fits in u64");
-    assert_eq!(
-        verb(len),
-        verb(0),
-        "the whole list in, it starts over rather than running out"
-    );
+    assert_eq!(verb(len), verb(0), "the whole list in, it starts over rather than running out");
 }
 
 /// **Pre-mortem 2.** The working block lives outside the scroll entirely
@@ -2716,11 +2400,7 @@ fn the_working_line_disturbs_neither_the_tail_nor_a_pinned_viewport() {
     assert!(chat.is_following_tail());
 
     chat.set_working(Some(working(1, 5, 0)));
-    assert_eq!(
-        rendered(&mut chat, VIEWPORT),
-        tail,
-        "the strip is not the viewport's to show"
-    );
+    assert_eq!(rendered(&mut chat, VIEWPORT), tail, "the strip is not the viewport's to show");
     assert!(chat.is_following_tail(), "the tail is still followed");
 
     chat.set_working(None);
@@ -2745,27 +2425,18 @@ fn readable_thinking_renders_dim_and_italic_behind_its_own_marker() {
     let theme = Theme::default();
     let mut chat = Chat::default();
     let mut reply = Message::assistant("canned");
-    reply.parts.push(Part::reasoning_text(
-        "A greeting is enough, so keep it short",
-    ));
+    reply.parts.push(Part::reasoning_text("A greeting is enough, so keep it short"));
     reply.parts.push(Part::text("Hello, world!"));
     chat.start_message(reply);
 
     let area = Rect::new(0, 0, 24, 10);
     let lines = rendered(&mut chat, area);
-    let drawn: Vec<&str> = lines
-        .iter()
-        .map(String::as_str)
-        .filter(|line| !line.is_empty())
-        .collect();
+    let drawn: Vec<&str> =
+        lines.iter().map(String::as_str).filter(|line| !line.is_empty()).collect();
 
     assert_eq!(
         drawn,
-        vec![
-            "\u{2234} A greeting is enough,",
-            "  so keep it short",
-            "\u{25cf} Hello, world!",
-        ],
+        vec!["\u{2234} A greeting is enough,", "  so keep it short", "\u{25cf} Hello, world!",],
         "got {lines:?}"
     );
 
@@ -2787,9 +2458,7 @@ fn readable_thinking_renders_dim_and_italic_behind_its_own_marker() {
 fn a_long_think_renders_whole_with_its_paragraphs() {
     let mut chat = Chat::default();
     let mut reply = Message::assistant("canned");
-    reply.parts.push(Part::reasoning_text(
-        "one\ntwo\nthree\nfour\n\nfive\nsix\nseven",
-    ));
+    reply.parts.push(Part::reasoning_text("one\ntwo\nthree\nfour\n\nfive\nsix\nseven"));
     chat.start_message(reply);
 
     let lines = rendered(&mut chat, Rect::new(0, 0, 60, 14));
@@ -2797,16 +2466,7 @@ fn a_long_think_renders_whole_with_its_paragraphs() {
 
     assert_eq!(
         think_and_gap,
-        [
-            "\u{2234} one",
-            "  two",
-            "  three",
-            "  four",
-            "",
-            "  five",
-            "  six",
-            "  seven",
-        ],
+        ["\u{2234} one", "  two", "  three", "  four", "", "  five", "  six", "  seven",],
         "got {lines:?}"
     );
 }
@@ -2822,9 +2482,7 @@ fn an_empty_thinking_part_draws_nothing_at_all() {
     chat.start_part(&reply.id, part.clone());
 
     assert!(
-        rendered(&mut chat, Rect::new(0, 0, 40, 6))
-            .iter()
-            .all(String::is_empty),
+        rendered(&mut chat, Rect::new(0, 0, 40, 6)).iter().all(String::is_empty),
         "an unfilled part is a marker about nothing"
     );
 
@@ -2832,10 +2490,7 @@ fn an_empty_thinking_part_draws_nothing_at_all() {
     // the event names an id and a fragment, never which kind of text.
     chat.append_delta(&reply.id, &part.id, "now there is a thought");
     let screen = rendered(&mut chat, Rect::new(0, 0, 40, 6)).join("\n");
-    assert!(
-        screen.contains("\u{2234} now there is a thought"),
-        "got:\n{screen}"
-    );
+    assert!(screen.contains("\u{2234} now there is a thought"), "got:\n{screen}");
 }
 
 /// **AC3, the half this build can answer.** Sealed reasoning is a blob only
@@ -2845,20 +2500,13 @@ fn an_empty_thinking_part_draws_nothing_at_all() {
 fn sealed_reasoning_draws_nothing_and_leaves_the_reply_alone() {
     let mut chat = Chat::default();
     let mut reply = Message::assistant("canned");
-    reply.parts.push(Part::reasoning(
-        "anthropic",
-        "rs_1",
-        Some("OPAQUE".to_owned()),
-    ));
+    reply.parts.push(Part::reasoning("anthropic", "rs_1", Some("OPAQUE".to_owned())));
     reply.parts.push(Part::text("the answer itself"));
     chat.start_message(reply);
 
     let lines = rendered(&mut chat, Rect::new(0, 0, 60, 10));
-    let drawn: Vec<&str> = lines
-        .iter()
-        .map(String::as_str)
-        .filter(|line| !line.is_empty())
-        .collect();
+    let drawn: Vec<&str> =
+        lines.iter().map(String::as_str).filter(|line| !line.is_empty()).collect();
 
     assert_eq!(
         drawn,
@@ -2911,15 +2559,9 @@ fn the_backtrack_highlight_scrolls_into_view_once() {
 
     chat.set_backtrack(Some(anchor));
     let screen = rendered(&mut chat, VIEWPORT).join("\n");
-    assert!(
-        screen.contains("the oldest prompt"),
-        "the highlight is brought into view:\n{screen}"
-    );
+    assert!(screen.contains("the oldest prompt"), "the highlight is brought into view:\n{screen}");
 
     chat.scroll_lines(isize::try_from(chat.line_count()).unwrap_or(isize::MAX));
     let screen = rendered(&mut chat, VIEWPORT).join("\n");
-    assert!(
-        !screen.contains("the oldest prompt"),
-        "a later scroll is not snapped back:\n{screen}"
-    );
+    assert!(!screen.contains("the oldest prompt"), "a later scroll is not snapped back:\n{screen}");
 }

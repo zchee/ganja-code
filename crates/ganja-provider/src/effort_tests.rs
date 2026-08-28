@@ -18,12 +18,7 @@ fn model(provider_id: &str, id: &str, max_output: u64) -> ModelInfo {
         context_window: 200_000,
         max_output,
         input_limit: None,
-        pricing: Pricing {
-            input: 1.0,
-            output: 2.0,
-            cache_read: 0.1,
-            cache_write: None,
-        },
+        pricing: Pricing { input: 1.0, output: 2.0, cache_read: 0.1, cache_write: None },
         family: None,
         release_date: None,
         tool_call: true,
@@ -38,10 +33,7 @@ fn model(provider_id: &str, id: &str, max_output: u64) -> ModelInfo {
 /// The published-option shapes the real api.json carries.
 fn efforts(values: &[Option<&str>]) -> ReasoningOption {
     ReasoningOption::Effort {
-        values: values
-            .iter()
-            .map(|value| value.map(str::to_owned))
-            .collect(),
+        values: values.iter().map(|value| value.map(str::to_owned)).collect(),
     }
 }
 
@@ -49,10 +41,8 @@ fn efforts(values: &[Option<&str>]) -> ReasoningOption {
 fn an_anthropic_budget_model_gets_thinking_budgets_in_the_messages_shape() {
     // claude-haiku-4-5 as published: a budget floor and no ceiling.
     let mut haiku = model("anthropic", "claude-haiku-4-5", 64_000);
-    haiku.reasoning_options = Some(vec![ReasoningOption::BudgetTokens {
-        min: Some(1024.0),
-        max: None,
-    }]);
+    haiku.reasoning_options =
+        Some(vec![ReasoningOption::BudgetTokens { min: Some(1024.0), max: None }]);
 
     let roster = roster(&haiku);
     assert_eq!(
@@ -196,16 +186,11 @@ fn a_published_openrouter_row_outranks_the_authored_table() {
     // documented budget field — so it falls through to the table, exactly
     // as a chat-wire row does.
     let mut budgeted = model("openrouter", "anthropic/claude-sonnet-5", 64_000);
-    budgeted.reasoning_options = Some(vec![ReasoningOption::BudgetTokens {
-        min: Some(1024.0),
-        max: Some(32_000.0),
-    }]);
+    budgeted.reasoning_options =
+        Some(vec![ReasoningOption::BudgetTokens { min: Some(1024.0), max: Some(32_000.0) }]);
     let fallen_through = roster(&budgeted);
     assert_eq!(
-        fallen_through
-            .keys()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
+        fallen_through.keys().map(String::as_str).collect::<Vec<_>>(),
         ["high", "low", "medium", "minimal"],
     );
 }
@@ -233,10 +218,8 @@ fn copilot_claude_rides_reasoning_effort_and_gemini_stays_empty() {
     // A budget-only row encodes nothing on the chat wire, which is the
     // fall-through to the table — and the table gives Claude the three.
     let mut claude = model("github-copilot", "claude-opus-4.5", 32_000);
-    claude.reasoning_options = Some(vec![ReasoningOption::BudgetTokens {
-        min: Some(1024.0),
-        max: Some(32_000.0),
-    }]);
+    claude.reasoning_options =
+        Some(vec![ReasoningOption::BudgetTokens { min: Some(1024.0), max: Some(32_000.0) }]);
     assert_eq!(
         serde_json::to_value(roster(&claude)).expect("a roster serializes"),
         json!({
@@ -288,10 +271,7 @@ fn a_toggle_alone_falls_through_to_the_table() {
     let mut toggled = model("anthropic", "claude-haiku-4-5", 64_000);
     toggled.reasoning_options = Some(vec![ReasoningOption::Toggle]);
 
-    assert_eq!(
-        roster(&toggled),
-        roster(&model("anthropic", "claude-haiku-4-5", 64_000))
-    );
+    assert_eq!(roster(&toggled), roster(&model("anthropic", "claude-haiku-4-5", 64_000)));
 }
 
 #[test]
@@ -304,23 +284,14 @@ fn budget_boundaries_clamp_to_the_output_limit_and_vanish_at_zero() {
         serde_json::Value::from(4_000),
         "half of the capped ceiling: floor((7999 + 1) / 2)"
     );
-    assert_eq!(
-        efforts["max"]["thinking"]["budget_tokens"],
-        serde_json::Value::from(7_999)
-    );
+    assert_eq!(efforts["max"]["thinking"]["budget_tokens"], serde_json::Value::from(7_999));
 
     // A published floor above the halfway point raises `high`…
     let raised = budget_efforts(&capped, Some(6_000.0), Some(32_000.0));
-    assert_eq!(
-        raised["high"]["thinking"]["budget_tokens"],
-        serde_json::Value::from(6_000)
-    );
+    assert_eq!(raised["high"]["thinking"]["budget_tokens"], serde_json::Value::from(6_000));
     // …but never past the ceiling.
     let pinned = budget_efforts(&capped, Some(9_000.0), Some(32_000.0));
-    assert_eq!(
-        pinned["high"]["thinking"]["budget_tokens"],
-        serde_json::Value::from(7_999)
-    );
+    assert_eq!(pinned["high"]["thinking"]["budget_tokens"], serde_json::Value::from(7_999));
 
     // An output limit of one token leaves no room at all.
     let empty = budget_efforts(&model("anthropic", "claude-haiku-4-5", 1), None, None);
@@ -400,10 +371,7 @@ fn the_id_matchers_read_versions_the_way_upstreams_regexes_do() {
 
     // The pro and codex tiers, straight off the model pages.
     assert_eq!(openai_reasoning_efforts("gpt-5-pro", ""), ["high"]);
-    assert_eq!(
-        openai_reasoning_efforts("gpt-5.2-pro", ""),
-        ["medium", "high", "xhigh"]
-    );
+    assert_eq!(openai_reasoning_efforts("gpt-5.2-pro", ""), ["medium", "high", "xhigh"]);
     assert_eq!(
         openai_reasoning_efforts("gpt-5.3-codex", ""),
         ["none", "low", "medium", "high", "xhigh"]

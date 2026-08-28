@@ -18,24 +18,19 @@
 //! this file's job is the seam those tests cannot reach, the credential
 //! store and a real dial.
 
-use std::{
-    collections::BTreeMap,
-    env,
-    net::SocketAddr,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::Duration,
-};
+use std::collections::BTreeMap;
+use std::env;
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use ganja_core::{McpServers, McpStatus, config::McpServer};
+use ganja_core::config::McpServer;
+use ganja_core::{McpServers, McpStatus};
 use secrecy::ExposeSecret as _;
 use serde_json::{Value, json};
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::{TcpListener, TcpStream},
-};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::{TcpListener, TcpStream};
 
 /// A token that must never appear in anything a person or a log reads.
 const CANARY: &str = "sk-canary-DO-NOT-PRINT-6620";
@@ -59,9 +54,7 @@ struct FixtureState {
 /// A loopback endpoint answering all three of an OAuth-gated MCP server's
 /// parts. Returns its address; the fixture runs until the process ends.
 async fn fixture() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("a loopback port is available");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("a loopback port is available");
     let address = listener.local_addr().expect("the socket has an address");
     let state = Arc::new(Mutex::new(FixtureState::default()));
     let generation = Arc::new(AtomicUsize::new(0));
@@ -104,13 +97,7 @@ async fn serve(
         };
         buffer.drain(..head.len() + 4 + body.len());
 
-        let path = head
-            .lines()
-            .next()
-            .unwrap_or("")
-            .split(' ')
-            .nth(1)
-            .unwrap_or("");
+        let path = head.lines().next().unwrap_or("").split(' ').nth(1).unwrap_or("");
         let authorization = header(&head, "authorization");
 
         let response = match path {
@@ -172,10 +159,7 @@ fn token_response(body: &str, state: &Mutex<FixtureState>, generation: &AtomicUs
 /// last issued, `initialize`/`tools/list` otherwise — enough for
 /// [`McpStatus::Connected`] to mean the bearer was both sent and accepted.
 fn mcp_response(body: &str, authorization: Option<&str>, state: &Mutex<FixtureState>) -> String {
-    let expected = format!(
-        "Bearer {}",
-        state.lock().expect("never poisoned").valid_access
-    );
+    let expected = format!("Bearer {}", state.lock().expect("never poisoned").valid_access);
     if authorization != Some(expected.as_str()) {
         // RFC 6750 §3 requires this header on a bearer-auth 401, and it is
         // what `rmcp`'s own client reads to tell a real authorization
@@ -201,10 +185,7 @@ fn mcp_response(body: &str, authorization: Option<&str>, state: &Mutex<FixtureSt
         _ => json!({}),
     };
 
-    json_response(
-        200,
-        &json!({ "jsonrpc": "2.0", "id": id, "result": result }),
-    )
+    json_response(200, &json!({ "jsonrpc": "2.0", "id": id, "result": result }))
 }
 
 fn json_response(status: u16, body: &Value) -> String {
@@ -237,9 +218,7 @@ fn form_decode(body: &str) -> BTreeMap<String, String> {
 fn header(head: &str, name: &str) -> Option<String> {
     head.lines().find_map(|line| {
         let (key, value) = line.split_once(':')?;
-        key.trim()
-            .eq_ignore_ascii_case(name)
-            .then(|| value.trim().to_owned())
+        key.trim().eq_ignore_ascii_case(name).then(|| value.trim().to_owned())
     })
 }
 
@@ -251,8 +230,7 @@ fn whole(buffer: &[u8]) -> Option<(String, String)> {
         .lines()
         .find_map(|line| {
             let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse().ok())?
+            name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse().ok())?
         })
         .unwrap_or(0);
     if rest.len() < length {
@@ -362,10 +340,7 @@ async fn oauth_discovers_logs_in_stores_sends_the_bearer_and_refreshes_on_a_401(
         .expect("the store reads")
         .expect("a login stored a credential");
     assert_eq!(stored.access.expose_secret(), &format!("{CANARY}-access-1"));
-    assert_eq!(
-        stored.refresh.expose_secret(),
-        &format!("{CANARY}-refresh-1")
-    );
+    assert_eq!(stored.refresh.expose_secret(), &format!("{CANARY}-refresh-1"));
     assert_eq!(
         stored.extra.get("token_endpoint").and_then(Value::as_str),
         Some(format!("http://{address}/token").as_str()),
@@ -375,10 +350,7 @@ async fn oauth_discovers_logs_in_stores_sends_the_bearer_and_refreshes_on_a_401(
     // this test just stored — not a synthetic one, unlike `ganja-provider`'s
     // own canary test.
     let rendered = format!("{stored:?}");
-    assert!(
-        !rendered.contains(CANARY),
-        "a secret reached a Debug: {rendered}"
-    );
+    assert!(!rendered.contains(CANARY), "a secret reached a Debug: {rendered}");
 
     servers.shutdown().await;
 

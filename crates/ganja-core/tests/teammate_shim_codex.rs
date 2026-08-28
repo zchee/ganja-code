@@ -14,9 +14,11 @@
 
 mod shim_support;
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
-use ganja_core::teammate::{codex::Codex, shim};
+use ganja_core::teammate::codex::Codex;
+use ganja_core::teammate::shim;
 use ganja_team::{MailboxMessage, MemberName, mailbox, record};
 use ganja_testkit::AllowSpawn;
 use shim_support::{FakeCodex, Mode, until};
@@ -36,13 +38,7 @@ const PROBE: &str = include_str!("fixtures/codex-posture-probe.txt");
 fn lead_mail(root: &ganja_team::TeamsRoot, team: &ganja_team::TeamName) -> Vec<String> {
     let path = root.inbox_path(team, &MemberName::lead());
     mailbox::read(&path)
-        .map(|contents| {
-            contents
-                .valid
-                .into_iter()
-                .map(|message| message.text)
-                .collect()
-        })
+        .map(|contents| contents.valid.into_iter().map(|message| message.text).collect())
         .unwrap_or_default()
 }
 
@@ -50,11 +46,8 @@ fn lead_mail(root: &ganja_team::TeamsRoot, team: &ganja_team::TeamName) -> Vec<S
 fn send(root: &ganja_team::TeamsRoot, team: &ganja_team::TeamName, to: &str, text: &str) {
     let member = MemberName::parse(to).expect("a member name");
     let path = root.inbox_path(team, &member);
-    mailbox::write(
-        &path,
-        MailboxMessage::new("team-lead", text.to_owned(), record::now_iso8601()),
-    )
-    .expect("the message is written");
+    mailbox::write(&path, MailboxMessage::new("team-lead", text.to_owned(), record::now_iso8601()))
+        .expect("the message is written");
 }
 
 /// The lead, the fake and the team, wired to the real driver.
@@ -114,30 +107,18 @@ async fn every_agent_message_in_one_turn_becomes_one_lead_mail_in_arrival_order(
     );
     let mail = lead_mail(&root, &team);
     assert_eq!(
-        mail.iter()
-            .filter(|text| text.contains("starting on it") || text.contains("done"))
-            .count(),
+        mail.iter().filter(|text| text.contains("starting on it") || text.contains("done")).count(),
         2,
         "{mail:?}"
     );
-    let started = mail
-        .iter()
-        .position(|text| text.contains("starting on it"))
-        .expect("the mid-turn message");
-    let done = mail
-        .iter()
-        .position(|text| text.contains("done"))
-        .expect("the final message");
+    let started =
+        mail.iter().position(|text| text.contains("starting on it")).expect("the mid-turn message");
+    let done = mail.iter().position(|text| text.contains("done")).expect("the final message");
     assert!(started < done, "arrival order is preserved: {mail:?}");
     // The item that was not a teammate talking is not mail: a `reasoning` item
     // is the model thinking, and a lead reading it as a peer's words would be
     // reading something nobody said to it.
-    assert!(
-        !mail
-            .iter()
-            .any(|text| text.contains("thinking is not mail")),
-        "{mail:?}"
-    );
+    assert!(!mail.iter().any(|text| text.contains("thinking is not mail")), "{mail:?}");
 
     registry.shutdown().await;
 }
@@ -277,25 +258,16 @@ async fn two_codex_teammates_hold_conversation_ids_of_their_own() {
         .into_iter()
         .filter(|argv| argv.starts_with("exec resume "))
         .map(|argv| {
-            argv.split(' ')
-                .nth(2)
-                .expect("the id is the resume's own positional")
-                .to_owned()
+            argv.split(' ').nth(2).expect("the id is the resume's own positional").to_owned()
         })
         .collect();
     assert_eq!(resumes.len(), 2, "{:?}", cli.turns());
-    assert_ne!(
-        resumes[0], resumes[1],
-        "two members, two threads: {resumes:?}"
-    );
+    assert_ne!(resumes[0], resumes[1], "two members, two threads: {resumes:?}");
     // Neither ever asks for "the most recent" — the failure `--last` and
     // `--all` would introduce is exactly a member resuming somebody else's.
     for argv in cli.turns() {
         for refused in ["--last", "--all"] {
-            assert!(
-                !argv.split(' ').any(|token| token == refused),
-                "{refused}: {argv}"
-            );
+            assert!(!argv.split(' ').any(|token| token == refused), "{refused}: {argv}");
         }
     }
 
@@ -326,13 +298,7 @@ async fn a_spawn_refuses_by_name_when_codex_has_no_usable_login() {
         "the refusal names the command that said so: {sentence}"
     );
     // The pre-check ran, and nothing else did: a refused spawn takes no turn.
-    assert!(
-        cli.records("argv")
-            .iter()
-            .any(|argv| argv == "login status"),
-        "{:?}",
-        cli.received()
-    );
+    assert!(cli.records("argv").iter().any(|argv| argv == "login status"), "{:?}", cli.received());
     assert!(cli.turns().is_empty(), "{:?}", cli.turns());
 
     registry.shutdown().await;
@@ -399,10 +365,7 @@ async fn a_failed_codex_turn_becomes_structured_mail_and_the_member_survives() {
             cli.received()
         );
         let mail = lead_mail(&root, &team).join("\n");
-        assert!(
-            mail.contains(expected),
-            "{mode:?}: the mail says what happened: {mail}"
-        );
+        assert!(mail.contains(expected), "{mode:?}: the mail says what happened: {mail}");
         assert!(mail.contains("codex"), "{mode:?}: and which CLI: {mail}");
 
         // The member is still there, and the next message is a fresh attempt.
@@ -444,10 +407,7 @@ async fn a_codex_turn_that_never_answers_is_ended_by_the_shims_own_deadline() {
     );
     let mail = lead_mail(&root, &team).join("\n");
     assert!(mail.contains("2s"), "the deadline that fired: {mail}");
-    assert!(
-        mail.contains(shim::TIMEOUT_KEY),
-        "and the key that moves it: {mail}"
-    );
+    assert!(mail.contains(shim::TIMEOUT_KEY), "and the key that moves it: {mail}");
 
     registry.shutdown().await;
 }

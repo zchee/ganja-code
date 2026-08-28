@@ -28,20 +28,25 @@
 //! nothing can reach a spawn the permission gate never saw, and a test calling
 //! past the gate would be a test of a path production has not got.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
-use ganja_core::{
-    Storage,
-    permission::Permissions,
-    protocol::team::MemberBackend,
-    provider::FakeProvider,
-    teammate::{
-        BACKENDS, DEFAULT_BACKEND, Delivery, InProcess, SpawnSpec, TeammateBackend, agy::Agy,
-        backend_name, claude::ClaudePane, codex::Codex, grok::Grok, pane::GanjaPane, parse_backend,
-        posture_line, shim::ShimBackend, shim_tui::ShimTui,
-    },
-    tool::Registry,
+use ganja_core::Storage;
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::team::MemberBackend;
+use ganja_core::provider::FakeProvider;
+use ganja_core::teammate::agy::Agy;
+use ganja_core::teammate::claude::ClaudePane;
+use ganja_core::teammate::codex::Codex;
+use ganja_core::teammate::grok::Grok;
+use ganja_core::teammate::pane::GanjaPane;
+use ganja_core::teammate::shim::ShimBackend;
+use ganja_core::teammate::shim_tui::ShimTui;
+use ganja_core::teammate::{
+    BACKENDS, DEFAULT_BACKEND, Delivery, InProcess, SpawnSpec, TeammateBackend, backend_name,
+    parse_backend, posture_line,
 };
+use ganja_core::tool::Registry;
 use ganja_team::{MemberName, TeamName, TeamsRoot};
 use ganja_testkit::{AllowSpawn, caller, spawn, team, teammates_recorded};
 
@@ -60,10 +65,7 @@ fn an_unknown_backend_value_is_refused_naming_the_six() {
     let sentence = refused.to_string();
     assert!(sentence.contains("tmux"), "{sentence}");
     for backend in BACKENDS {
-        assert!(
-            sentence.contains(backend),
-            "the refusal must list {backend}: {sentence}"
-        );
+        assert!(sentence.contains(backend), "the refusal must list {backend}: {sentence}");
     }
 
     // A near-miss is refused too: the argument is a value, not a prefix.
@@ -150,18 +152,9 @@ async fn each_backend_says_what_it_can_promise_about_a_delivery() {
     // children themselves. All three are one `ShimBackend` over one driver
     // now — agy's slot stopped being the exception when it stopped refusing.
     let shims: [(MemberBackend, Arc<dyn TeammateBackend>); 3] = [
-        (
-            MemberBackend::Codex,
-            Arc::new(ShimBackend::new(Arc::new(Codex::new()))),
-        ),
-        (
-            MemberBackend::Agy,
-            Arc::new(ShimBackend::new(Arc::new(Agy::new()))),
-        ),
-        (
-            MemberBackend::Grok,
-            Arc::new(ShimBackend::new(Arc::new(Grok::new()))),
-        ),
+        (MemberBackend::Codex, Arc::new(ShimBackend::new(Arc::new(Codex::new())))),
+        (MemberBackend::Agy, Arc::new(ShimBackend::new(Arc::new(Agy::new())))),
+        (MemberBackend::Grok, Arc::new(ShimBackend::new(Arc::new(Grok::new())))),
     ];
     for (backend, shim) in shims {
         assert_eq!(shim.backend(), backend);
@@ -209,11 +202,7 @@ fn each_backend_tells_its_teammate_how_it_answers_before_the_task() {
     let channels: Vec<(&str, Arc<dyn TeammateBackend>, &str)> = vec![
         ("in-process", Arc::new(in_process), "`send_message`"),
         ("ganja", Arc::new(GanjaPane), "`send_message`"),
-        (
-            "claude",
-            Arc::new(ClaudePane),
-            "`SendMessage(to: \"team-lead\")`",
-        ),
+        ("claude", Arc::new(ClaudePane), "`SendMessage(to: \"team-lead\")`"),
         (
             "codex (pane)",
             Arc::new(ShimTui::new(Arc::new(Codex::new()))),
@@ -294,15 +283,9 @@ async fn every_shim_backend_refuses_with_something_it_measured() {
             .await
             .expect_err("this fixture's lead has no such binary on its PATH");
 
+        assert!(refused.reason.contains(cli), "the refusal names the binary: {}", refused.reason);
         assert!(
-            refused.reason.contains(cli),
-            "the refusal names the binary: {}",
-            refused.reason
-        );
-        assert!(
-            refused
-                .reason
-                .contains(ganja_core::teammate::shim::REFUSED_NO_BINARY),
+            refused.reason.contains(ganja_core::teammate::shim::REFUSED_NO_BINARY),
             "and says what about it: {}",
             refused.reason
         );
@@ -310,9 +293,7 @@ async fn every_shim_backend_refuses_with_something_it_measured() {
         // there is no unbuilt backend left, so a build claiming one would be
         // claiming a state it cannot be in.
         assert!(
-            !refused
-                .reason
-                .contains("cannot run a teammate on another vendor's CLI yet"),
+            !refused.reason.contains("cannot run a teammate on another vendor's CLI yet"),
             "no backend is unbuilt any more: {}",
             refused.reason
         );
@@ -320,10 +301,7 @@ async fn every_shim_backend_refuses_with_something_it_measured() {
 
     // A refused spawn leaves nothing behind: no member on disk and nothing the
     // registry would have to shut down.
-    assert!(
-        teammates_recorded(&root, &team).is_empty(),
-        "a refused spawn records no member"
-    );
+    assert!(teammates_recorded(&root, &team).is_empty(), "a refused spawn records no member");
     assert_eq!(registry.running(), 0);
 }
 
@@ -346,11 +324,7 @@ fn each_backend_discloses_the_posture_it_pins_or_says_it_pins_none() {
     // The P25 surfaces answer nothing, and the absence is the honest answer:
     // they forward their dialogs to the lead, so a person stays in the loop
     // for every call rather than consenting to a posture once at spawn.
-    for backend in [
-        MemberBackend::InProcess,
-        MemberBackend::Ganja,
-        MemberBackend::Claude,
-    ] {
+    for backend in [MemberBackend::InProcess, MemberBackend::Ganja, MemberBackend::Claude] {
         assert_eq!(posture_line(backend), None, "{}", backend_name(backend));
     }
 
@@ -402,10 +376,8 @@ fn each_backend_discloses_the_posture_it_pins_or_says_it_pins_none() {
     // sentence.
     for name in BACKENDS {
         let backend = parse_backend(name).expect("a listed value parses");
-        let discloses = matches!(
-            backend,
-            MemberBackend::Codex | MemberBackend::Agy | MemberBackend::Grok
-        );
+        let discloses =
+            matches!(backend, MemberBackend::Codex | MemberBackend::Agy | MemberBackend::Grok);
 
         assert_eq!(posture_line(backend).is_some(), discloses, "{name}");
     }
@@ -443,8 +415,7 @@ async fn two_spawns_of_one_name_at_once_get_two_teammates() {
         let door = Arc::clone(&door);
         let caller = caller.clone();
         spawning.spawn(async move {
-            door.start(spawn("worker", Some("in-process")), &caller, &AllowSpawn)
-                .await
+            door.start(spawn("worker", Some("in-process")), &caller, &AllowSpawn).await
         });
     }
 
@@ -458,10 +429,7 @@ async fn two_spawns_of_one_name_at_once_get_two_teammates() {
     names.sort();
 
     assert_eq!(names.len(), 2);
-    assert_ne!(
-        names[0], names[1],
-        "two teammates cannot answer to one name: {names:?}"
-    );
+    assert_ne!(names[0], names[1], "two teammates cannot answer to one name: {names:?}");
     assert!(
         names.contains(&"worker".to_owned()),
         "one of them is still the name that was asked for: {names:?}"
@@ -476,10 +444,7 @@ async fn two_spawns_of_one_name_at_once_get_two_teammates() {
     );
     for name in &names {
         let member = MemberName::parse(name).expect("a resolved name is a member name");
-        assert!(
-            root.inbox_path(&team, &member).exists(),
-            "{name} was given a mailbox of its own"
-        );
+        assert!(root.inbox_path(&team, &member).exists(), "{name} was given a mailbox of its own");
     }
     assert_eq!(
         registry.running(),
@@ -488,11 +453,7 @@ async fn two_spawns_of_one_name_at_once_get_two_teammates() {
     );
 
     registry.shutdown().await;
-    assert_eq!(
-        registry.running(),
-        0,
-        "and both of them really went when the team did"
-    );
+    assert_eq!(registry.running(), 0, "and both of them really went when the team did");
 }
 
 /// The plan-approval wait is a seam something can actually reach.
@@ -509,11 +470,7 @@ async fn a_running_teammate_can_be_told_which_plan_approval_it_is_waiting_on() {
     let (_root, _team, registry, door) = team(home.path());
 
     let started = door
-        .start(
-            spawn("worker", Some("in-process")),
-            &caller(home.path()),
-            &AllowSpawn,
-        )
+        .start(spawn("worker", Some("in-process")), &caller(home.path()), &AllowSpawn)
         .await
         .expect("an in-process teammate starts");
 

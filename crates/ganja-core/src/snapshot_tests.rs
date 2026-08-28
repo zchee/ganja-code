@@ -1,14 +1,13 @@
-use std::{path::Path, time::Duration};
+use std::path::Path;
+use std::time::Duration;
 
 use tempfile::TempDir;
 
 use super::{
     Patch, Snapshots, dedupe, patches_from, pathspecs, redo_anchor, split_nul, undo_anchor,
 };
-use crate::{
-    project::Project,
-    protocol::{Message, MessageId, Part, PartBody, Role},
-};
+use crate::project::Project;
+use crate::protocol::{Message, MessageId, Part, PartBody, Role};
 
 fn temporary() -> TempDir {
     TempDir::new().expect("a temporary directory is creatable")
@@ -47,10 +46,7 @@ fn a_directory_that_is_not_a_checkout_takes_no_snapshots() {
     let snapshots = Snapshots::new(&Project::resolve(directory.path()), true);
 
     assert!(!snapshots.enabled());
-    assert!(
-        snapshots.notice().is_some(),
-        "a session that cannot undo has to say so"
-    );
+    assert!(snapshots.notice().is_some(), "a session that cannot undo has to say so");
 }
 
 #[test]
@@ -77,9 +73,7 @@ fn a_checkout_keeps_its_snapshots_beside_the_project_state_and_creates_nothing()
 
     assert!(snapshots.enabled(), "git is a test prerequisite");
     assert!(
-        snapshots
-            .gitdir
-            .starts_with(crate::project::data_home().expect("the data home resolves")),
+        snapshots.gitdir.starts_with(crate::project::data_home().expect("the data home resolves")),
         "{}",
         snapshots.gitdir.display()
     );
@@ -92,10 +86,7 @@ fn a_checkout_keeps_its_snapshots_beside_the_project_state_and_creates_nothing()
         "{}",
         snapshots.gitdir.display()
     );
-    assert!(
-        !snapshots.gitdir.exists(),
-        "asking where snapshots go must not create anything"
-    );
+    assert!(!snapshots.gitdir.exists(), "asking where snapshots go must not create anything");
 }
 
 #[test]
@@ -138,27 +129,16 @@ fn a_walk_forwards_steps_one_prompt_at_a_time_and_then_runs_out() {
 fn a_revert_collects_the_patches_from_the_anchor_on_and_leaves_the_earlier_ones() {
     let history = vec![
         message("msg_1", Role::User, Vec::new()),
-        message(
-            "msg_2",
-            Role::Assistant,
-            vec![patch("older", &["kept.txt"])],
-        ),
+        message("msg_2", Role::Assistant, vec![patch("older", &["kept.txt"])]),
         message("msg_3", Role::User, Vec::new()),
-        message(
-            "msg_4",
-            Role::Assistant,
-            vec![patch("newer", &["changed.txt"])],
-        ),
+        message("msg_4", Role::Assistant, vec![patch("newer", &["changed.txt"])]),
     ];
 
     let patches = patches_from(&history, &MessageId::from("msg_3".to_owned()));
 
     assert_eq!(
         patches,
-        vec![Patch {
-            hash: "newer".to_owned(),
-            files: vec!["changed.txt".to_owned()],
-        }]
+        vec![Patch { hash: "newer".to_owned(), files: vec!["changed.txt".to_owned()] }]
     );
 }
 
@@ -168,14 +148,8 @@ fn a_revert_collects_the_patches_from_the_anchor_on_and_leaves_the_earlier_ones(
 #[test]
 fn the_oldest_patch_naming_a_file_is_the_one_that_restores_it() {
     let patches = vec![
-        Patch {
-            hash: "before".to_owned(),
-            files: vec!["a.txt".to_owned(), "b.txt".to_owned()],
-        },
-        Patch {
-            hash: "midway".to_owned(),
-            files: vec!["a.txt".to_owned(), "c.txt".to_owned()],
-        },
+        Patch { hash: "before".to_owned(), files: vec!["a.txt".to_owned(), "b.txt".to_owned()] },
+        Patch { hash: "midway".to_owned(), files: vec!["a.txt".to_owned(), "c.txt".to_owned()] },
     ];
 
     assert_eq!(
@@ -198,10 +172,7 @@ fn a_pathspec_is_literal_from_the_top_and_terminated_rather_than_separated() {
 
 #[test]
 fn a_terminated_listing_does_not_end_in_an_empty_name() {
-    assert_eq!(
-        split_nul("one\0two\0"),
-        vec!["one".to_owned(), "two".to_owned()]
-    );
+    assert_eq!(split_nul("one\0two\0"), vec!["one".to_owned(), "two".to_owned()]);
     assert!(split_nul("").is_empty());
 }
 
@@ -214,11 +185,7 @@ fn the_snapshot_repository_is_never_the_project_one() {
     std::fs::create_dir(directory.path().join(".git")).expect("the marker is creatable");
     let snapshots = Snapshots::new(&Project::resolve(directory.path()), true);
 
-    assert!(
-        !snapshots.gitdir.starts_with(directory.path()),
-        "{}",
-        snapshots.gitdir.display()
-    );
+    assert!(!snapshots.gitdir.starts_with(directory.path()), "{}", snapshots.gitdir.display());
     assert_ne!(snapshots.gitdir, Path::new(".git"));
 }
 
@@ -267,16 +234,11 @@ async fn a_huge_check_ignore_reply_does_not_deadlock_the_stdin_write_that_asked_
         })
         .collect();
 
-    let ignored = tokio::time::timeout(Duration::from_secs(30), snapshots.ignored(&candidates))
-        .await
-        .expect(
+    let ignored =
+        tokio::time::timeout(Duration::from_secs(30), snapshots.ignored(&candidates)).await.expect(
             "check-ignore answers well within this drill's patience; a hang here is the \
                  deadlock this test exists to catch",
         );
 
-    assert_eq!(
-        ignored.len(),
-        candidates.len(),
-        "every candidate matches the blanket .gitignore"
-    );
+    assert_eq!(ignored.len(), candidates.len(), "every candidate matches the blanket .gitignore");
 }

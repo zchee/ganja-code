@@ -43,18 +43,9 @@ fn the_background_slots_carry_a_background_not_a_foreground() {
              \"backgroundElement\": \"#1e1e1e\"",
     );
 
-    assert_eq!(
-        theme.background,
-        Style::new().bg(Color::Rgb(0x0a, 0x0a, 0x0a))
-    );
-    assert_eq!(
-        theme.background_panel,
-        Style::new().bg(Color::Rgb(0x14, 0x14, 0x14))
-    );
-    assert_eq!(
-        theme.background_element,
-        Style::new().bg(Color::Rgb(0x1e, 0x1e, 0x1e))
-    );
+    assert_eq!(theme.background, Style::new().bg(Color::Rgb(0x0a, 0x0a, 0x0a)));
+    assert_eq!(theme.background_panel, Style::new().bg(Color::Rgb(0x14, 0x14, 0x14)));
+    assert_eq!(theme.background_element, Style::new().bg(Color::Rgb(0x1e, 0x1e, 0x1e)));
 }
 
 /// The ruling R11 turns on: alpha zero is an unset color, so the terminal
@@ -81,10 +72,7 @@ fn a_key_the_theme_never_names_leaves_its_slot_unset() {
 fn unconsumed_keys_are_carried_on_the_theme() {
     let theme = theme("\"text\": \"#ffffff\", \"syntaxKeyword\": \"#ff00ff\"");
 
-    assert_eq!(
-        theme.color("syntaxKeyword"),
-        Some(Rgba::rgb(0xff, 0x00, 0xff))
-    );
+    assert_eq!(theme.color("syntaxKeyword"), Some(Rgba::rgb(0xff, 0x00, 0xff)));
     assert_eq!(theme.color("syntaxString"), None);
 }
 
@@ -115,15 +103,9 @@ fn a_transparent_background_picks_black_or_white_by_brightness() {
     let theme = theme("\"background\": \"none\", \"primary\": \"#fab283\"");
 
     // Bright fills take black text.
-    assert_eq!(
-        theme.selected_fg(Some(Rgba::rgb(0xff, 0xff, 0xff))),
-        Color::Black
-    );
+    assert_eq!(theme.selected_fg(Some(Rgba::rgb(0xff, 0xff, 0xff))), Color::Black);
     // Dark fills take white.
-    assert_eq!(
-        theme.selected_fg(Some(Rgba::rgb(0x1e, 0x1e, 0x1e))),
-        Color::White
-    );
+    assert_eq!(theme.selected_fg(Some(Rgba::rgb(0x1e, 0x1e, 0x1e))), Color::White);
     // With no fill named, the theme's own primary is what is measured;
     // #fab283 is bright, so black.
     assert_eq!(theme.selected_fg(None), Color::Black);
@@ -159,10 +141,7 @@ fn the_default_theme_is_the_terminal_one_and_still_has_p1s_colors() {
     assert_eq!(theme.revision(), 0);
     assert_eq!(theme.fg, Style::new().fg(Color::Reset));
     assert_eq!(theme.dim, Style::new().fg(Color::DarkGray));
-    assert_eq!(
-        theme.accent,
-        Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-    );
+    assert_eq!(theme.accent, Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD));
     assert_eq!(theme.add, Style::new().fg(Color::Green));
     assert_eq!(theme.remove, Style::new().fg(Color::Red));
     assert_eq!(theme.error, Style::new().fg(Color::Red));
@@ -185,10 +164,7 @@ fn the_terminal_theme_paints_no_surfaces() {
 fn the_terminal_theme_still_answers_the_contrast_rule() {
     let theme = Theme::default();
 
-    assert_eq!(
-        theme.selected_fg(Some(Rgba::rgb(0xff, 0xff, 0xff))),
-        Color::Black
-    );
+    assert_eq!(theme.selected_fg(Some(Rgba::rgb(0xff, 0xff, 0xff))), Color::Black);
     assert_eq!(theme.selected_fg(None), Color::White, "ANSI cyan is dark");
 }
 

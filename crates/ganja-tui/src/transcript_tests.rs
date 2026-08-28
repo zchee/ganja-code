@@ -112,10 +112,7 @@ fn a_peers_words_cannot_forge_an_attribution_in_the_copy() {
 fn a_session_nothing_has_named_is_still_headed() {
     let rendered = format(&session(None), &[]);
 
-    assert!(
-        rendered.starts_with("# Untitled session\n\n"),
-        "got: {rendered}"
-    );
+    assert!(rendered.starts_with("# Untitled session\n\n"), "got: {rendered}");
 }
 
 /// A task part's call log is the expansion the chat row's clamp hint
@@ -124,11 +121,7 @@ fn a_session_nothing_has_named_is_still_headed() {
 #[test]
 fn a_task_call_prints_the_childs_calls_with_the_cap_admitted() {
     let mut part = completed("task", serde_json::json!({"description": "map it"}), "done");
-    if let PartBody::Tool {
-        state: ToolState::Completed { metadata, .. },
-        ..
-    } = &mut part.body
-    {
+    if let PartBody::Tool { state: ToolState::Completed { metadata, .. }, .. } = &mut part.body {
         *metadata = serde_json::json!({"toolcalls": 3, "calls": ["grep a", "read b"]});
     }
     let parts = [part];
@@ -136,21 +129,14 @@ fn a_task_call_prints_the_childs_calls_with_the_cap_admitted() {
     let rendered = format(&session(None), &[(Role::Assistant, &parts[..])]);
 
     assert!(rendered.contains("**Calls:**"), "got: {rendered}");
-    assert!(
-        rendered.contains("\u{2026} +1 earlier\ngrep a\nread b"),
-        "got: {rendered}"
-    );
+    assert!(rendered.contains("\u{2026} +1 earlier\ngrep a\nread b"), "got: {rendered}");
 }
 
 /// Tool details are the one upstream toggle this port keeps on, so a call
 /// carries its arguments and its result into the copy.
 #[test]
 fn a_tool_call_carries_its_input_and_output() {
-    let parts = [completed(
-        "read",
-        serde_json::json!({ "file_path": "src/lib.rs" }),
-        "one line",
-    )];
+    let parts = [completed("read", serde_json::json!({ "file_path": "src/lib.rs" }), "one line")];
 
     let rendered = format(&session(None), &[(Role::Assistant, &parts[..])]);
 
@@ -159,10 +145,7 @@ fn a_tool_call_carries_its_input_and_output() {
         rendered.contains("\n**Input:**\n```json\n{\n  \"file_path\": \"src/lib.rs\"\n}\n```\n"),
         "the arguments render pretty-printed: {rendered}"
     );
-    assert!(
-        rendered.contains("\n**Output:**\n```\none line\n```\n"),
-        "got: {rendered}"
-    );
+    assert!(rendered.contains("\n**Output:**\n```\none line\n```\n"), "got: {rendered}");
 }
 
 /// A tool the *provider* ran belongs in a copy of the conversation too
@@ -189,10 +172,7 @@ fn a_provider_run_tool_is_copied_in_the_tool_shape() {
         rendered.contains("\n**Input:**\n```json\n{\n  \"query\": \"rust 2024\"\n}\n```\n"),
         "got: {rendered}"
     );
-    assert!(
-        rendered.contains("\n**Output:**\n```\n3 results\n```\n"),
-        "got: {rendered}"
-    );
+    assert!(rendered.contains("\n**Output:**\n```\n3 results\n```\n"), "got: {rendered}");
 
     // A row the gateway reported nothing for draws no empty fences.
     let bare = [Part {
@@ -204,10 +184,7 @@ fn a_provider_run_tool_is_copied_in_the_tool_shape() {
         },
     }];
     let rendered = format(&session(None), &[(Role::Assistant, &bare[..])]);
-    assert!(
-        rendered.contains("**Tool: openrouter:datetime**"),
-        "{rendered}"
-    );
+    assert!(rendered.contains("**Tool: openrouter:datetime**"), "{rendered}");
     assert!(
         !rendered.contains("**Input:**") && !rendered.contains("**Output:**"),
         "an absent field is absent rather than an empty block: {rendered}"
@@ -245,10 +222,7 @@ fn a_failed_call_carries_what_went_wrong() {
 fn the_parts_upstream_has_no_arm_for_render_as_nothing() {
     let parts = [
         Part::file("src/lib.rs", "text/plain"),
-        Part {
-            id: ganja_protocol::PartId::ascending(),
-            body: PartBody::StepStart,
-        },
+        Part { id: ganja_protocol::PartId::ascending(), body: PartBody::StepStart },
     ];
 
     let rendered = format(&session(None), &[(Role::User, &parts[..])]);
@@ -262,10 +236,7 @@ fn the_parts_upstream_has_no_arm_for_render_as_nothing() {
 /// which is also why `last_reply` cannot be answered by one.
 #[test]
 fn thinking_is_on_the_screen_and_never_on_the_clipboard() {
-    let parts = [
-        Part::reasoning_text("weighing a greeting"),
-        Part::text("Hello, world!"),
-    ];
+    let parts = [Part::reasoning_text("weighing a greeting"), Part::text("Hello, world!")];
 
     let rendered = format(&session(None), &[(Role::Assistant, &parts[..])]);
 
@@ -319,14 +290,8 @@ fn each_way_a_reply_comes_to_nothing_says_which_it_was() {
 fn the_refusals_are_spelled_the_way_upstream_spells_them() {
     let cases = [
         (Missing::Assistant, "No assistant messages found"),
-        (
-            Missing::TextParts,
-            "No text parts found in last assistant message",
-        ),
-        (
-            Missing::Text,
-            "No text content found in last assistant message",
-        ),
+        (Missing::TextParts, "No text parts found in last assistant message"),
+        (Missing::Text, "No text content found in last assistant message"),
     ];
 
     for (missing, expected) in cases {

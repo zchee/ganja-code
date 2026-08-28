@@ -1,14 +1,10 @@
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 
 use super::ThemeList;
 use crate::theme::{Theme, Themes};
 
-const AREA: Rect = Rect {
-    x: 0,
-    y: 0,
-    width: 40,
-    height: 16,
-};
+const AREA: Rect = Rect { x: 0, y: 0, width: 40, height: 16 };
 
 fn list() -> ThemeList {
     ThemeList::new(Themes::builtin().names(), "opencode")
@@ -19,11 +15,7 @@ fn rendered(list: &ThemeList, area: Rect, theme: &Theme) -> String {
     list.render(area, &mut buffer, theme);
 
     (0..area.height)
-        .map(|row| {
-            (0..area.width)
-                .map(|column| buffer[(column, row)].symbol())
-                .collect::<String>()
-        })
+        .map(|row| (0..area.width).map(|column| buffer[(column, row)].symbol()).collect::<String>())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -42,10 +34,7 @@ fn the_list_shows_every_theme_this_run_has() {
 #[test]
 fn the_cursor_opens_on_the_active_theme() {
     assert_eq!(list().selected(), Some("opencode"));
-    assert_eq!(
-        ThemeList::new(Themes::builtin().names(), "gruvbox").selected(),
-        Some("gruvbox")
-    );
+    assert_eq!(ThemeList::new(Themes::builtin().names(), "gruvbox").selected(), Some("gruvbox"));
 }
 
 #[test]
@@ -53,11 +42,7 @@ fn an_active_theme_that_is_not_in_the_list_starts_at_the_top() {
     let list = ThemeList::new(Themes::builtin().names(), "gone");
 
     assert_eq!(list.selected(), Some("aura"));
-    assert_eq!(
-        list.initial(),
-        "gone",
-        "cancelling still puts back what was"
-    );
+    assert_eq!(list.initial(), "gone", "cancelling still puts back what was");
 }
 
 #[test]
@@ -83,10 +68,7 @@ fn the_marker_follows_the_selection() {
 
     assert!(first.contains("> opencode"), "got:\n{first}");
     assert!(second.contains("> gruvbox"), "got:\n{second}");
-    assert!(
-        !second.contains("> opencode"),
-        "only one row is selected:\n{second}"
-    );
+    assert!(!second.contains("> opencode"), "only one row is selected:\n{second}");
 }
 
 /// More themes than rows: a user with a directory of their own has to be
@@ -115,10 +97,7 @@ fn a_name_too_wide_for_the_dialog_is_cut_rather_than_wrapped() {
     let screen = rendered(&list, Rect::new(0, 0, 30, 10), &Theme::default());
 
     for line in screen.lines() {
-        assert!(
-            line.chars().count() <= 30,
-            "a row must not overflow the dialog: {line:?}"
-        );
+        assert!(line.chars().count() <= 30, "a row must not overflow the dialog: {line:?}");
     }
 }
 
@@ -134,10 +113,7 @@ fn an_empty_list_has_nothing_selected_and_does_not_panic() {
 fn a_zero_area_draws_nothing_and_does_not_panic() {
     let screen = rendered(&list(), Rect::new(0, 0, 0, 0), &Theme::default());
 
-    assert!(
-        screen.is_empty(),
-        "a zero area has no cell to hold: {screen}"
-    );
+    assert!(screen.is_empty(), "a zero area has no cell to hold: {screen}");
 }
 
 /// The dialog is drawn with the theme it is previewing, so the same list
@@ -149,18 +125,10 @@ fn the_dialog_is_drawn_in_the_theme_it_is_previewing() {
     let area = Rect::new(0, 0, 40, 16);
 
     let mut first = Buffer::empty(area);
-    list.render(
-        area,
-        &mut first,
-        &themes.select("aura").expect("aura is builtin"),
-    );
+    list.render(area, &mut first, &themes.select("aura").expect("aura is builtin"));
 
     let mut second = Buffer::empty(area);
-    list.render(
-        area,
-        &mut second,
-        &themes.select("gruvbox").expect("gruvbox is builtin"),
-    );
+    list.render(area, &mut second, &themes.select("gruvbox").expect("gruvbox is builtin"));
 
     assert_ne!(first, second, "the two themes rendered identically");
 }

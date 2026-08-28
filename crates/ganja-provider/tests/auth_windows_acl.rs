@@ -1,31 +1,29 @@
 #![cfg(windows)]
 
-use std::{
-    env,
-    ffi::{OsString, c_void},
-    fs, io,
-    mem::size_of,
-    os::windows::{fs::OpenOptionsExt as _, io::AsRawHandle as _},
-    ptr,
-};
+use std::ffi::{OsString, c_void};
+use std::mem::size_of;
+use std::os::windows::fs::OpenOptionsExt as _;
+use std::os::windows::io::AsRawHandle as _;
+use std::{env, fs, io, ptr};
 
 use ganja_provider::auth::{AuthError, credential_for, set_credential, store_path};
 use tempfile::TempDir;
-use windows_sys::Win32::{
-    Foundation::{
-        CloseHandle, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, HANDLE, LocalFree, WIN32_ERROR,
-    },
-    Security::{
-        ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAceEx,
-        Authorization::{GetSecurityInfo, SE_FILE_OBJECT, SetSecurityInfo},
-        CopySid, CreateWellKnownSid, DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetLengthSid,
-        GetSecurityDescriptorControl, GetTokenInformation, InitializeAcl, IsValidSid,
-        PROTECTED_DACL_SECURITY_INFORMATION, PSID, SE_DACL_PROTECTED, SECURITY_MAX_SID_SIZE,
-        TOKEN_QUERY, TOKEN_USER, TokenUser, WinWorldSid,
-    },
-    Storage::FileSystem::{FILE_ALL_ACCESS, FILE_GENERIC_READ, READ_CONTROL, WRITE_DAC},
-    System::Threading::{GetCurrentProcess, OpenProcessToken},
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, HANDLE, LocalFree, WIN32_ERROR,
 };
+use windows_sys::Win32::Security::Authorization::{
+    GetSecurityInfo, SE_FILE_OBJECT, SetSecurityInfo,
+};
+use windows_sys::Win32::Security::{
+    ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAceEx, CopySid, CreateWellKnownSid,
+    DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetLengthSid, GetSecurityDescriptorControl,
+    GetTokenInformation, InitializeAcl, IsValidSid, PROTECTED_DACL_SECURITY_INFORMATION, PSID,
+    SE_DACL_PROTECTED, SECURITY_MAX_SID_SIZE, TOKEN_QUERY, TOKEN_USER, TokenUser, WinWorldSid,
+};
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_ALL_ACCESS, FILE_GENERIC_READ, READ_CONTROL, WRITE_DAC,
+};
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 const CANARY: &str = "sk-windows-acl-canary-8842";
 
@@ -98,9 +96,7 @@ struct OwnedSid {
 impl OwnedSid {
     fn zeroed(bytes: u32) -> Self {
         let words = (bytes as usize).div_ceil(size_of::<usize>());
-        Self {
-            words: vec![0; words].into_boxed_slice(),
-        }
+        Self { words: vec![0; words].into_boxed_slice() }
     }
 
     fn as_psid(&self) -> PSID {
@@ -170,9 +166,7 @@ fn process_user() -> io::Result<OwnedSid> {
     let queried =
         unsafe { GetTokenInformation(token.0, TokenUser, ptr::null_mut(), 0, &mut length) };
     if queried != 0 {
-        return Err(io::Error::other(
-            "Windows returned token-user data without a buffer",
-        ));
+        return Err(io::Error::other("Windows returned token-user data without a buffer"));
     }
     let source = io::Error::last_os_error();
     if source.raw_os_error() != Some(ERROR_INSUFFICIENT_BUFFER as i32) {
@@ -203,9 +197,7 @@ fn exposed_acl(user: &OwnedSid, everyone: &OwnedSid) -> io::Result<OwnedAcl> {
     let ace = size_of::<ACCESS_ALLOWED_ACE>() - size_of::<u32>();
     let bytes = size_of::<ACL>() + ace * 2 + user.len() as usize + everyone.len() as usize;
     let words = bytes.div_ceil(size_of::<usize>());
-    let mut acl = OwnedAcl {
-        words: vec![0; words].into_boxed_slice(),
-    };
+    let mut acl = OwnedAcl { words: vec![0; words].into_boxed_slice() };
     // SAFETY: the aligned allocation is bytes bytes long.
     if unsafe { InitializeAcl(acl.as_mut_ptr(), bytes as u32, ACL_REVISION) } == 0 {
         return Err(io::Error::last_os_error());
@@ -251,11 +243,7 @@ fn assert_owner_only(file: &fs::File, user: &OwnedSid) {
         "the descriptor control reads: {}",
         io::Error::last_os_error()
     );
-    assert_ne!(
-        control & SE_DACL_PROTECTED,
-        0,
-        "the store DACL must sever inheritance"
-    );
+    assert_ne!(control & SE_DACL_PROTECTED, 0, "the store DACL must sever inheritance");
 
     // SAFETY: GetSecurityInfo returned a valid ACL header.
     let header = unsafe { &*dacl };
@@ -277,11 +265,7 @@ fn assert_owner_only(file: &fs::File, user: &OwnedSid) {
 }
 
 fn win32(status: WIN32_ERROR) -> io::Result<()> {
-    if status == ERROR_SUCCESS {
-        Ok(())
-    } else {
-        Err(io::Error::from_raw_os_error(status as i32))
-    }
+    if status == ERROR_SUCCESS { Ok(()) } else { Err(io::Error::from_raw_os_error(status as i32)) }
 }
 
 #[test]

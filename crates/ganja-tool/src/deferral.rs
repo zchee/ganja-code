@@ -18,18 +18,14 @@
 //! transcript keys never change, and a call that resolves in the registry
 //! executes through the code path it always had.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fmt::Write as _,
-    sync::{Arc, Mutex, MutexGuard},
-};
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use ganja_permission::permission::MCP_PREFIX;
-use nucleo_matcher::{
-    Config, Matcher, Utf32Str,
-    pattern::{CaseMatching, Normalization, Pattern},
-};
+use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo_matcher::{Config, Matcher, Utf32Str};
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::json;
@@ -116,13 +112,8 @@ pub fn candidates<'a>(
     }
 
     let mut ordered: Vec<(&str, Vec<&str>)> = groups.into_iter().collect();
-    ordered.sort_by(|left, right| {
-        right
-            .1
-            .len()
-            .cmp(&left.1.len())
-            .then_with(|| left.0.cmp(right.0))
-    });
+    ordered
+        .sort_by(|left, right| right.1.len().cmp(&left.1.len()).then_with(|| left.0.cmp(right.0)));
 
     let mut deferred = BTreeSet::new();
     for (server, members) in ordered {
@@ -174,10 +165,7 @@ impl Deferral {
     /// through any clone is read by every other.
     #[must_use]
     pub fn over(candidates: BTreeSet<String>, activated: Arc<Mutex<BTreeSet<String>>>) -> Self {
-        Self {
-            candidates,
-            activated,
-        }
+        Self { candidates, activated }
     }
 
     /// Whether anything at all defers — what decides that `tool_search`
@@ -247,12 +235,7 @@ impl Deferral {
              and activates the tool.\n",
         );
         for definition in deferred {
-            let _ = writeln!(
-                block,
-                "- {}: {}",
-                definition.name,
-                clamped(&definition.description)
-            );
+            let _ = writeln!(block, "- {}: {}", definition.name, clamped(&definition.description));
         }
         block.push_str("</deferred_tools>");
 
@@ -260,9 +243,7 @@ impl Deferral {
     }
 
     fn lock(&self) -> MutexGuard<'_, BTreeSet<String>> {
-        self.activated
-            .lock()
-            .expect("the activated set is never poisoned")
+        self.activated.lock().expect("the activated set is never poisoned")
     }
 }
 
@@ -338,11 +319,8 @@ impl Tool for ToolSearchTool {
         let args: Args = serde_json::from_value(args)
             .map_err(|error| ToolError::InvalidArgs(error.to_string()))?;
 
-        let catalog = self
-            .catalog
-            .lock()
-            .expect("the definitions snapshot is never poisoned")
-            .clone();
+        let catalog =
+            self.catalog.lock().expect("the definitions snapshot is never poisoned").clone();
         let deferred: Vec<ToolDefinition> = catalog
             .iter()
             .filter(|definition| !self.deferral.advertised(&definition.name))
@@ -361,10 +339,7 @@ impl Tool for ToolSearchTool {
 
         let (matches, mut notes) = match args.query.strip_prefix("select:") {
             Some(named) => selected(named, &catalog, &deferred),
-            None => (
-                keyword_matches(&args.query, &deferred, cap(args.max_results)),
-                Vec::new(),
-            ),
+            None => (keyword_matches(&args.query, &deferred, cap(args.max_results)), Vec::new()),
         };
         if matches.is_empty() && notes.is_empty() {
             notes.push(format!(
@@ -437,11 +412,7 @@ fn selected(
 ) -> (Vec<ToolDefinition>, Vec<String>) {
     let mut matches = Vec::new();
     let mut notes = Vec::new();
-    for name in named
-        .split(',')
-        .map(str::trim)
-        .filter(|name| !name.is_empty())
-    {
+    for name in named.split(',').map(str::trim).filter(|name| !name.is_empty()) {
         if let Some(definition) = deferred.iter().find(|definition| definition.name == name) {
             matches.push(definition.clone());
         } else if catalog.iter().any(|definition| definition.name == name) {
@@ -477,11 +448,7 @@ fn near_misses(name: &str, deferred: &[ToolDefinition]) -> Vec<String> {
         .collect();
     scored.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(right.1)));
 
-    scored
-        .into_iter()
-        .take(NEAR_MISSES)
-        .map(|(_, name)| name.to_owned())
-        .collect()
+    scored.into_iter().take(NEAR_MISSES).map(|(_, name)| name.to_owned()).collect()
 }
 
 /// The deferred tools ranked against a keyword query, best first, at most
@@ -500,18 +467,9 @@ fn keyword_matches(query: &str, deferred: &[ToolDefinition], cap: usize) -> Vec<
                 .map(|score| (score, definition))
         })
         .collect();
-    scored.sort_by(|left, right| {
-        right
-            .0
-            .cmp(&left.0)
-            .then_with(|| left.1.name.cmp(&right.1.name))
-    });
+    scored.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.name.cmp(&right.1.name)));
 
-    scored
-        .into_iter()
-        .take(cap)
-        .map(|(_, definition)| definition.clone())
-        .collect()
+    scored.into_iter().take(cap).map(|(_, definition)| definition.clone()).collect()
 }
 
 #[cfg(test)]

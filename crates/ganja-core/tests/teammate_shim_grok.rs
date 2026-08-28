@@ -15,9 +15,11 @@
 
 mod shim_support;
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
-use ganja_core::teammate::{grok::Grok, shim};
+use ganja_core::teammate::grok::Grok;
+use ganja_core::teammate::shim;
 use ganja_team::{MailboxMessage, MemberName, mailbox, record};
 use ganja_testkit::AllowSpawn;
 use shim_support::{FakeGrok, Mode, until};
@@ -37,13 +39,7 @@ const PROBE: &str = include_str!("fixtures/grok-posture-probe.txt");
 fn lead_mail(root: &ganja_team::TeamsRoot, team: &ganja_team::TeamName) -> Vec<String> {
     let path = root.inbox_path(team, &MemberName::lead());
     mailbox::read(&path)
-        .map(|contents| {
-            contents
-                .valid
-                .into_iter()
-                .map(|message| message.text)
-                .collect()
-        })
+        .map(|contents| contents.valid.into_iter().map(|message| message.text).collect())
         .unwrap_or_default()
 }
 
@@ -51,11 +47,8 @@ fn lead_mail(root: &ganja_team::TeamsRoot, team: &ganja_team::TeamName) -> Vec<S
 fn send(root: &ganja_team::TeamsRoot, team: &ganja_team::TeamName, to: &str, text: &str) {
     let member = MemberName::parse(to).expect("a member name");
     let path = root.inbox_path(team, &member);
-    mailbox::write(
-        &path,
-        MailboxMessage::new("team-lead", text.to_owned(), record::now_iso8601()),
-    )
-    .expect("the message is written");
+    mailbox::write(&path, MailboxMessage::new("team-lead", text.to_owned(), record::now_iso8601()))
+        .expect("the message is written");
 }
 
 /// The lead, the fake and the team, wired to the real driver.
@@ -131,17 +124,9 @@ async fn a_first_turn_mints_a_uuid_and_the_second_resumes_that_same_one() {
         "the first turn names the conversation it creates: {}",
         turns[0]
     );
-    assert!(
-        !turns[0].contains("--resume"),
-        "and resumes nothing: {}",
-        turns[0]
-    );
+    assert!(!turns[0].contains("--resume"), "and resumes nothing: {}", turns[0]);
     let ids = cli.sessions();
-    assert!(
-        ganja_protocol::is_uuidv7(&ids[0]),
-        "the minted id is this tree's own v7: {}",
-        ids[0]
-    );
+    assert!(ganja_protocol::is_uuidv7(&ids[0]), "the minted id is this tree's own v7: {}", ids[0]);
     assert!(
         turns[1].contains(&format!("--resume {}", ids[0])),
         "the second turn resumes the first's conversation: {}",
@@ -159,18 +144,11 @@ async fn a_first_turn_mints_a_uuid_and_the_second_resumes_that_same_one() {
     for argv in &turns {
         assert!(argv.contains("--prompt-file "), "{argv}");
         assert!(!argv.contains(TASK), "argv is for flags: {argv}");
-        assert!(
-            !argv.split(' ').any(|token| token == "w1"),
-            "never a title: {argv}"
-        );
+        assert!(!argv.split(' ').any(|token| token == "w1"), "never a title: {argv}");
     }
     // The prompt did reach the child — through the file, which is the half that
     // makes the assertion above mean something rather than "nothing arrived".
-    assert!(
-        cli.records("file").iter().any(|text| text.contains(TASK)),
-        "{:?}",
-        cli.received()
-    );
+    assert!(cli.records("file").iter().any(|text| text.contains(TASK)), "{:?}", cli.received());
 
     registry.shutdown().await;
 }
@@ -197,27 +175,17 @@ async fn every_turn_carries_the_pinned_posture_and_none_carries_an_escape() {
     .expect("the fake grok spawns");
     assert!(until(ANSWERS, || cli.records("argv").len() == 1).await);
     send(&root, &team, "w1", "and now the other thing");
-    assert!(
-        until(ANSWERS, || cli.records("argv").len() == 2).await,
-        "{:?}",
-        cli.received()
-    );
+    assert!(until(ANSWERS, || cli.records("argv").len() == 2).await, "{:?}", cli.received());
 
     let turns = cli.records("argv");
     assert_eq!(turns.len(), 2, "a first turn and a resume: {turns:?}");
     for argv in &turns {
-        assert!(
-            argv.contains("--sandbox read-only"),
-            "the bound, spelled exactly: {argv}"
-        );
+        assert!(argv.contains("--sandbox read-only"), "the bound, spelled exactly: {argv}");
         assert!(
             !argv.contains("--sandbox read_only"),
             "the spelling that would become a custom profile: {argv}"
         );
-        assert!(
-            argv.contains("--permission-mode dontAsk"),
-            "and the mode beside it: {argv}"
-        );
+        assert!(argv.contains("--permission-mode dontAsk"), "and the mode beside it: {argv}");
         assert!(
             argv.contains("--output-format streaming-messages-json"),
             "on the wire this build reads: {argv}"
@@ -248,10 +216,7 @@ fn the_composed_permission_mode_is_labelled_with_what_it_actually_does() {
     let line = shim::GROK_MODE_LINE;
 
     assert!(line.contains("dontAsk composed"), "{line}");
-    assert!(
-        line.contains("selects neither yolo nor auto"),
-        "what it does: {line}"
-    );
+    assert!(line.contains("selects neither yolo nor auto"), "what it does: {line}");
     assert!(
         line.contains("suppresses a config-level always-approve for this launch"),
         "and against what: {line}"
@@ -292,11 +257,8 @@ async fn a_grok_spawn_writes_its_posture_onto_the_members_ring() {
     .expect("the fake grok spawns");
 
     let view = registry.view();
-    let member = view
-        .members
-        .iter()
-        .find(|member| member.name == "w1")
-        .expect("the member is in the view");
+    let member =
+        view.members.iter().find(|member| member.name == "w1").expect("the member is in the view");
     let posture = ganja_core::teammate::posture_line(ganja_protocol::team::MemberBackend::Grok)
         .expect("grok states its posture");
     assert!(
@@ -352,19 +314,13 @@ async fn two_grok_teammates_mint_conversations_of_their_own() {
     );
     let minted = cli.sessions();
     assert_eq!(minted.len(), 2, "{:?}", cli.records("argv"));
-    assert_ne!(
-        minted[0], minted[1],
-        "two members, two conversations: {minted:?}"
-    );
+    assert_ne!(minted[0], minted[1], "two members, two conversations: {minted:?}");
     // Which id is whose, read off the prompt each turn actually carried: two
     // members' turns interleave in one log and nothing else tells them apart.
-    let ours = cli
-        .session_for("w2 minted this one")
-        .expect("w2's own first turn");
+    let ours = cli.session_for("w2 minted this one").expect("w2's own first turn");
     assert_ne!(
         ours,
-        cli.session_for("w1 minted this one")
-            .expect("w1's own first turn"),
+        cli.session_for("w1 minted this one").expect("w1's own first turn"),
         "the two prompts went to two conversations"
     );
 
@@ -389,10 +345,7 @@ async fn two_grok_teammates_mint_conversations_of_their_own() {
     // the exact door through which a member would inherit somebody else's.
     for argv in cli.records("argv") {
         for refused in ["--continue", "-c"] {
-            assert!(
-                !argv.split(' ').any(|token| token == refused),
-                "{refused}: {argv}"
-            );
+            assert!(!argv.split(' ').any(|token| token == refused), "{refused}: {argv}");
         }
     }
 
@@ -415,10 +368,7 @@ async fn a_failed_grok_turn_becomes_structured_mail_and_the_member_survives() {
     for (mode, expected) in [
         (Mode::Fail, "exited"),
         (Mode::Garbage, "streaming-messages-json"),
-        (
-            Mode::Refuse,
-            "could not apply the 'read-only' sandbox profile",
-        ),
+        (Mode::Refuse, "could not apply the 'read-only' sandbox profile"),
     ] {
         let home = ganja_testkit::temp_dir();
         let cli = FakeGrok::install(mode);
@@ -438,10 +388,7 @@ async fn a_failed_grok_turn_becomes_structured_mail_and_the_member_survives() {
             cli.received()
         );
         let mail = lead_mail(&root, &team).join("\n");
-        assert!(
-            mail.contains(expected),
-            "{mode:?}: the mail says what happened: {mail}"
-        );
+        assert!(mail.contains(expected), "{mode:?}: the mail says what happened: {mail}");
         assert!(mail.contains("grok"), "{mode:?}: and which CLI: {mail}");
 
         // The member is still there, and the next message is a fresh attempt.
@@ -490,14 +437,8 @@ async fn an_unapproved_tool_ask_ends_the_turn_with_mail_naming_the_tool() {
         mail.contains("grok cancelled this turn on an unapproved tool request"),
         "in the words the plan decided this consequence ships in: {mail}"
     );
-    assert!(
-        mail.contains("`write`"),
-        "and which tool it stopped on: {mail}"
-    );
-    assert!(
-        mail.contains("still running"),
-        "and that the teammate is still there: {mail}"
-    );
+    assert!(mail.contains("`write`"), "and which tool it stopped on: {mail}");
+    assert!(mail.contains("still running"), "and that the teammate is still there: {mail}");
     // And never the sentence a parse failure gets: this build read the stream
     // exactly, and a refusal that reads as garbage output is a refusal nobody
     // acts on.
@@ -510,11 +451,7 @@ async fn an_unapproved_tool_ask_ends_the_turn_with_mail_naming_the_tool() {
     // death: the next message starts a fresh turn.
     let before = cli.records("argv").len();
     send(&root, &team, "w1", "try something that needs no tool");
-    assert!(
-        until(ANSWERS, || cli.records("argv").len() > before).await,
-        "{:?}",
-        cli.received()
-    );
+    assert!(until(ANSWERS, || cli.records("argv").len() > before).await, "{:?}", cli.received());
     // And it **resumes** rather than starting a second conversation: a
     // cancelled turn is a live conversation the CLI created, and a fresh mint
     // here would silently drop everything said before the cancel.
@@ -553,10 +490,7 @@ async fn a_grok_turn_that_never_answers_is_ended_by_the_shims_own_deadline() {
     );
     let mail = lead_mail(&root, &team).join("\n");
     assert!(mail.contains("2s"), "the deadline that fired: {mail}");
-    assert!(
-        mail.contains(shim::TIMEOUT_KEY),
-        "and the key that moves it: {mail}"
-    );
+    assert!(mail.contains(shim::TIMEOUT_KEY), "and the key that moves it: {mail}");
 
     registry.shutdown().await;
 }
@@ -626,20 +560,14 @@ async fn a_grok_spawn_dialog_carries_the_posture_the_ring_and_the_table_carry() 
     let asked = spawn_asks.asked();
     assert_eq!(asked.len(), 1, "one spawn, one dialog: {asked:?}");
     assert_eq!(
-        asked[0]
-            .args
-            .get("backend")
-            .and_then(|value| value.as_str()),
+        asked[0].args.get("backend").and_then(|value| value.as_str()),
         Some("grok"),
         "it names the surface the person is being asked about: {asked:?}"
     );
     let table = ganja_core::teammate::posture_line(ganja_protocol::team::MemberBackend::Grok)
         .expect("grok states its posture");
     assert_eq!(
-        asked[0]
-            .args
-            .get("posture")
-            .and_then(|value| value.as_str()),
+        asked[0].args.get("posture").and_then(|value| value.as_str()),
         Some(table),
         "the dialog carries the posture the ring carries: {asked:?}"
     );
@@ -675,17 +603,10 @@ async fn no_grok_environment_door_reaches_a_grok_child() {
     )
     .await
     .expect("the fake grok spawns");
-    assert!(
-        until(ANSWERS, || !cli.records("env").is_empty()).await,
-        "{:?}",
-        cli.received()
-    );
+    assert!(until(ANSWERS, || !cli.records("env").is_empty()).await, "{:?}", cli.received());
 
     let names = cli.records("env").join(" ");
-    assert!(
-        !names.contains("GROK_"),
-        "no door onto the posture travels: {names}"
-    );
+    assert!(!names.contains("GROK_"), "no door onto the posture travels: {names}");
     assert!(
         names.contains("HOME") && names.contains("PATH"),
         "and the enumeration is what does: {names}"
@@ -728,10 +649,7 @@ async fn a_spawn_refuses_by_name_when_no_grok_is_on_this_path() {
         .expect_err("a PATH without grok refuses the spawn");
 
     assert!(refusal.reason.contains("grok"), "{refusal:?}");
-    assert!(
-        refusal.reason.contains(shim::REFUSED_NO_BINARY),
-        "{refusal:?}"
-    );
+    assert!(refusal.reason.contains(shim::REFUSED_NO_BINARY), "{refusal:?}");
 
     registry.shutdown().await;
 }
@@ -773,10 +691,7 @@ fn the_grok_deadline_is_the_value_its_own_probes_derived() {
         .filter_map(|line| line.strip_prefix("wall-clock: "))
         .filter_map(|value| value.trim().trim_end_matches('s').parse().ok())
         .collect();
-    assert!(
-        !recorded.is_empty(),
-        "the recording names the turns it timed"
-    );
+    assert!(!recorded.is_empty(), "the recording names the turns it timed");
     let longest = recorded.iter().copied().fold(0.0_f64, f64::max);
     let derived = Duration::from_secs_f64((2.0 * longest).max(15.0 * 60.0));
 

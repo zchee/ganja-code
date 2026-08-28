@@ -12,14 +12,8 @@ fn no_rendering_of_a_client_or_its_credential_shows_the_password() {
         .expect("a loopback address is usable");
 
     for rendered in [format!("{credentials:?}"), format!("{client:?}")] {
-        assert!(
-            !rendered.contains("hunter2"),
-            "a password reached a formatter: {rendered}"
-        );
-        assert!(
-            rendered.contains("redacted"),
-            "and the redaction is visible: {rendered}"
-        );
+        assert!(!rendered.contains("hunter2"), "a password reached a formatter: {rendered}");
+        assert!(rendered.contains("redacted"), "and the redaction is visible: {rendered}");
     }
 }
 
@@ -52,10 +46,7 @@ fn a_socket_client_is_shown_as_uds_and_spells_its_requests_under_the_socket_base
     let client = Client::on_socket("/tmp/ganja/abcd1234.sock").expect("a socket path is usable");
     assert_eq!(client.address(), "uds:/tmp/ganja/abcd1234.sock");
     assert_eq!(client.base, super::SOCKET_URL);
-    assert!(
-        client.credentials.is_none(),
-        "a same-uid socket presents no credential"
-    );
+    assert!(client.credentials.is_none(), "a same-uid socket presents no credential");
     assert!(
         format!("{client:?}").contains("uds:/tmp/ganja/abcd1234.sock"),
         "and Debug shows the socket, not the label"

@@ -2,10 +2,9 @@ use super::{
     API_KEY_ENV, CHAT, Dialect, GO_BASE_URL, GO_ID, GOOGLE, MESSAGES, OpencodeProvider, RESPONSES,
     ZEN_BASE_URL, ZEN_ID, messages_base,
 };
-use crate::{
-    auth,
-    provider::{PROVIDERS, Provider as _, ProviderError, responses::Backend},
-};
+use crate::auth;
+use crate::provider::responses::Backend;
+use crate::provider::{PROVIDERS, Provider as _, ProviderError};
 
 /// A key no other value in this module could be mistaken for.
 const KEY: &str = "sk-zen-canary-5150";
@@ -22,10 +21,7 @@ fn two_ids_one_variable_and_both_spelled_the_way_the_catalog_files_them() {
     assert_eq!(GO_BASE_URL, "https://opencode.ai/zen/go/v1");
 
     for id in [ZEN_ID, GO_ID] {
-        assert!(
-            PROVIDERS.contains(&id),
-            "{id} ships, or nothing can select it"
-        );
+        assert!(PROVIDERS.contains(&id), "{id} ships, or nothing can select it");
         assert_eq!(
             auth::key_var(id),
             Some(API_KEY_ENV),
@@ -48,14 +44,8 @@ fn two_ids_one_variable_and_both_spelled_the_way_the_catalog_files_them() {
 fn a_transport_this_build_has_no_wire_for_is_refused_by_name() {
     assert_eq!(Dialect::of(None, ZEN_ID, "glm-5"), Ok(Dialect::Chat));
     assert_eq!(Dialect::of(Some(CHAT), ZEN_ID, "glm-5"), Ok(Dialect::Chat));
-    assert_eq!(
-        Dialect::of(Some(RESPONSES), ZEN_ID, "gpt-5.6-luna"),
-        Ok(Dialect::Responses)
-    );
-    assert_eq!(
-        Dialect::of(Some(MESSAGES), ZEN_ID, "qwen3.6-plus"),
-        Ok(Dialect::Messages)
-    );
+    assert_eq!(Dialect::of(Some(RESPONSES), ZEN_ID, "gpt-5.6-luna"), Ok(Dialect::Responses));
+    assert_eq!(Dialect::of(Some(MESSAGES), ZEN_ID, "qwen3.6-plus"), Ok(Dialect::Messages));
 
     let refused = Dialect::of(Some(GOOGLE), ZEN_ID, "gemini-3-pro")
         .expect_err("this build has no Google wire and will not invent one");
@@ -67,10 +57,7 @@ fn a_transport_this_build_has_no_wire_for_is_refused_by_name() {
         message.contains(GOOGLE),
         "the refusal names the transport, or nobody can act on it: {message}"
     );
-    assert!(
-        message.contains("the vendor's own client"),
-        "parity, not a gap — say so: {message}"
-    );
+    assert!(message.contains("the vendor's own client"), "parity, not a gap — say so: {message}");
 
     let unknown = Dialect::of(Some("@ai-sdk/something-new"), GO_ID, "future-model")
         .expect_err("an allowlist, not a fallthrough");
@@ -92,10 +79,7 @@ fn a_transport_this_build_has_no_wire_for_is_refused_by_name() {
 fn no_wire_behind_the_gateway_renders_the_key_it_holds() {
     let provider = gateway(ZEN_ID);
 
-    let rendered = format!(
-        "{:?}{:?}{:?}",
-        provider.chat, provider.responses, provider.messages
-    );
+    let rendered = format!("{:?}{:?}{:?}", provider.chat, provider.responses, provider.messages);
     assert!(!rendered.contains(KEY), "{rendered}");
     assert!(
         rendered.contains("Key"),
@@ -123,10 +107,7 @@ fn the_gateways_responses_rows_guess_nothing_about_sealed_reasoning() {
 fn a_model_the_table_has_never_heard_of_falls_back_to_the_published_default() {
     // Both ids declare `@ai-sdk/openai-compatible` at the provider level,
     // so this is the vendor's own fallback rather than a house choice.
-    assert_eq!(
-        Dialect::of(None, ZEN_ID, "a-model-added-since-this-cache"),
-        Ok(Dialect::Chat)
-    );
+    assert_eq!(Dialect::of(None, ZEN_ID, "a-model-added-since-this-cache"), Ok(Dialect::Chat));
     assert_eq!(
         gateway(GO_ID)
             .dialect("a-model-added-since-this-cache")
@@ -170,8 +151,5 @@ fn every_wire_behind_one_gateway_is_held_to_the_same_endpoint_rule() {
     let refused = OpencodeProvider::at(ZEN_ID, "http://opencode.ai/zen/v1", KEY)
         .expect_err("plain http to a public host puts the key on the wire in the clear");
 
-    assert!(
-        matches!(refused, ProviderError::Transport(_)),
-        "{refused:?}"
-    );
+    assert!(matches!(refused, ProviderError::Transport(_)), "{refused:?}");
 }

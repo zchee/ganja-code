@@ -14,17 +14,14 @@
 //! was taken would be caught by that stat rather than by an event, and a test
 //! that did not wait could pass on a platform where watching does nothing.
 
-use std::{
-    collections::BTreeSet,
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::{Duration, Instant, SystemTime},
-};
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime};
 
-use ganja_core::{
-    tool::{Credentials, FileTimes, Tool as _, ToolCtx, ToolError, write::WriteTool},
-    watch::Watcher,
-};
+use ganja_core::tool::write::WriteTool;
+use ganja_core::tool::{Credentials, FileTimes, Tool as _, ToolCtx, ToolError};
+use ganja_core::watch::Watcher;
 use tokio_util::sync::CancellationToken;
 
 /// How long a platform gets to report a change before the test calls it a
@@ -84,14 +81,10 @@ async fn a_file_edited_outside_the_session_is_refused_and_named_to_the_model() {
     files.record(&watched);
     let as_read = stamp(&watched);
     assert!(
-        wait_for_watch(&watcher, dir.path())
-            .await
-            .contains(dir.path()),
+        wait_for_watch(&watcher, dir.path()).await.contains(dir.path()),
         "the directory holding a read file is what gets watched, and nothing happens until it is"
     );
-    files
-        .check_fresh(&watched)
-        .expect("a file just read is fresh");
+    files.check_fresh(&watched).expect("a file just read is fresh");
     assert!(
         files.take_stale().is_empty(),
         "registering a file nobody has touched condemns nothing"
@@ -118,18 +111,14 @@ async fn a_file_edited_outside_the_session_is_refused_and_named_to_the_model() {
         .open(&watched)
         .and_then(|file| file.set_modified(as_read))
         .expect("the fixture can move the stamp");
-    let refused = files
-        .check_fresh(&watched)
-        .expect_err("a condemned file is refused");
+    let refused = files.check_fresh(&watched).expect_err("a condemned file is refused");
     assert!(
         matches!(&refused, ToolError::Failed(message) if message.contains("read it again")),
         "got {refused:?}"
     );
 
     files.record(&watched);
-    files
-        .check_fresh(&watched)
-        .expect("reading it again is what repairs it");
+    files.check_fresh(&watched).expect("reading it again is what repairs it");
 }
 
 /// The self-write invariant the ordering comments in `write.rs` and `edit.rs`
@@ -168,10 +157,7 @@ async fn a_files_own_write_does_not_condemn_it() {
     };
     for content in ["what the agent wrote", "and then wrote again"] {
         WriteTool
-            .run(
-                serde_json::json!({ "filePath": "written.txt", "content": content }),
-                &ctx,
-            )
+            .run(serde_json::json!({ "filePath": "written.txt", "content": content }), &ctx)
             .await
             .expect("the tool writes");
     }
@@ -184,9 +170,7 @@ async fn a_files_own_write_does_not_condemn_it() {
         "only the change from outside is worth telling the model about, and the fence \
          arriving alone is what says the writes before it were applied and did nothing"
     );
-    files
-        .check_fresh(&written)
-        .expect("a session must not condemn the file it just wrote");
+    files.check_fresh(&written).expect("a session must not condemn the file it just wrote");
 }
 
 /// **The structural guard on a real `Watcher`.** Registering follows the read
@@ -205,11 +189,8 @@ async fn a_subtree_the_session_never_reads_is_never_watched() {
     // it ever read.
     let mut heavy = Vec::new();
     for package in 0..40 {
-        let nested = dir
-            .path()
-            .join("node_modules")
-            .join(format!("package-{package}"))
-            .join("dist");
+        let nested =
+            dir.path().join("node_modules").join(format!("package-{package}")).join("dist");
         std::fs::create_dir_all(&nested).expect("the fixture nests");
         std::fs::write(nested.join("index.js"), "module.exports = {}").expect("the fixture writes");
         heavy.push(nested);

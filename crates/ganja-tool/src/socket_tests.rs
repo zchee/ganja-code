@@ -14,28 +14,16 @@ fn a_session_stem_is_eight_to_thirty_two_hex_digits() {
         !is_session_stem("0198c1a23b4c7d5e8f60718293a4b5c67"),
         "thirty-three is longer than any id"
     );
-    assert!(
-        !is_session_stem("agent.12"),
-        "an ssh agent's name is not hex"
-    );
-    assert!(
-        !is_session_stem("docker00"),
-        "nor is a word padded to eight"
-    );
+    assert!(!is_session_stem("agent.12"), "an ssh agent's name is not hex");
+    assert!(!is_session_stem("docker00"), "nor is a word padded to eight");
     assert!(!is_session_stem(""));
 }
 
 #[test]
 fn a_session_socket_name_is_a_session_stem_with_the_extension() {
-    assert!(is_session_socket_name(Path::new(
-        "/tmp/ganja-501/0198c1a2.sock"
-    )));
-    assert!(!is_session_socket_name(Path::new(
-        "/tmp/ganja-501/0198c1a2.lock"
-    )));
-    assert!(!is_session_socket_name(Path::new(
-        "/tmp/ganja-501/0198c1a2"
-    )));
+    assert!(is_session_socket_name(Path::new("/tmp/ganja-501/0198c1a2.sock")));
+    assert!(!is_session_socket_name(Path::new("/tmp/ganja-501/0198c1a2.lock")));
+    assert!(!is_session_socket_name(Path::new("/tmp/ganja-501/0198c1a2")));
     assert!(!is_session_socket_name(Path::new("/var/run/docker.sock")));
     assert!(!is_session_socket_name(Path::new("/tmp/tmux-501/default")));
     assert!(!is_session_socket_name(Path::new("/tmp/ssh-abc/agent.123")));
@@ -43,54 +31,33 @@ fn a_session_socket_name_is_a_session_stem_with_the_extension() {
 
 #[test]
 fn a_directory_is_ours_at_0700_or_refused_by_the_first_thing_wrong_with_it() {
-    assert!(
-        vet(501, 0o040_700, 501).is_ok(),
-        "the type bits are not the mode"
-    );
+    assert!(vet(501, 0o040_700, 501).is_ok(), "the type bits are not the mode");
 
     assert!(
-        matches!(
-            vet(0, 0o700, 501),
-            Err(DirectoryRefusal::ForeignOwner { owner: 0, uid: 501 })
-        ),
+        matches!(vet(0, 0o700, 501), Err(DirectoryRefusal::ForeignOwner { owner: 0, uid: 501 })),
         "root's directory is somebody else's — the /tmp squat"
     );
     assert!(
         matches!(
             vet(502, 0o700, 501),
-            Err(DirectoryRefusal::ForeignOwner {
-                owner: 502,
-                uid: 501
-            })
+            Err(DirectoryRefusal::ForeignOwner { owner: 502, uid: 501 })
         ),
         "so is another user's, however private they made it"
     );
     assert!(
-        matches!(
-            vet(501, 0o755, 501),
-            Err(DirectoryRefusal::Permissions { mode: 0o755 })
-        ),
+        matches!(vet(501, 0o755, 501), Err(DirectoryRefusal::Permissions { mode: 0o755 })),
         "world-readable"
     );
     assert!(
-        matches!(
-            vet(501, 0o770, 501),
-            Err(DirectoryRefusal::Permissions { mode: 0o770 })
-        ),
+        matches!(vet(501, 0o770, 501), Err(DirectoryRefusal::Permissions { mode: 0o770 })),
         "group-readable"
     );
     assert!(
-        matches!(
-            vet(501, 0o600, 501),
-            Err(DirectoryRefusal::Permissions { mode: 0o600 })
-        ),
+        matches!(vet(501, 0o600, 501), Err(DirectoryRefusal::Permissions { mode: 0o600 })),
         "tighter than 0700 is refused too: the owner could not enter it"
     );
     assert!(
-        matches!(
-            vet(0, 0o755, 501),
-            Err(DirectoryRefusal::ForeignOwner { .. })
-        ),
+        matches!(vet(0, 0o755, 501), Err(DirectoryRefusal::ForeignOwner { .. })),
         "ownership is judged before mode: whose it is comes first"
     );
 
@@ -101,9 +68,7 @@ fn a_directory_is_ours_at_0700_or_refused_by_the_first_thing_wrong_with_it() {
         DirectoryRefusal::NotADirectory,
         DirectoryRefusal::ForeignOwner { owner: 0, uid: 501 },
         DirectoryRefusal::Permissions { mode: 0o755 },
-        DirectoryRefusal::ParentNotSticky {
-            parent: "/tmp".into(),
-        },
+        DirectoryRefusal::ParentNotSticky { parent: "/tmp".into() },
     ] {
         let sentence = refusal.to_string();
         assert!(!sentence.contains("  "), "single-spaced: {sentence:?}");
@@ -142,17 +107,9 @@ fn a_uds_address_is_a_session_socket_of_ours_or_refused_by_the_clause_it_fails()
     use super::{AddressRefusal, vet_address};
 
     let socket = super::SessionSocket::new();
-    let private = socket
-        .path
-        .parent()
-        .expect("the socket sits in its directory")
-        .to_path_buf();
+    let private = socket.path.parent().expect("the socket sits in its directory").to_path_buf();
 
-    assert_eq!(
-        vet_address(&socket.path),
-        Ok(()),
-        "a session socket of ours"
-    );
+    assert_eq!(vet_address(&socket.path), Ok(()), "a session socket of ours");
 
     // The string clauses.
     assert_eq!(
@@ -164,10 +121,7 @@ fn a_uds_address_is_a_session_socket_of_ours_or_refused_by_the_clause_it_fails()
         Err(AddressRefusal::NotPlainAbsolute),
         "a step through .. is refused before anything is inspected"
     );
-    assert_eq!(
-        vet_address(&private.join("agent.123")),
-        Err(AddressRefusal::NotASessionName)
-    );
+    assert_eq!(vet_address(&private.join("agent.123")), Err(AddressRefusal::NotASessionName));
     assert_eq!(
         vet_address(Path::new("/var/run/docker.sock")),
         Err(AddressRefusal::NotASessionName),
@@ -193,10 +147,7 @@ fn a_uds_address_is_a_session_socket_of_ours_or_refused_by_the_clause_it_fails()
     );
 
     // The file clauses, inside a good directory.
-    assert_eq!(
-        vet_address(&private.join("deadbeef.sock")),
-        Err(AddressRefusal::Absent)
-    );
+    assert_eq!(vet_address(&private.join("deadbeef.sock")), Err(AddressRefusal::Absent));
     let plain = private.join("cafebabe.sock");
     std::fs::write(&plain, b"").expect("a plain file writes");
     assert_eq!(vet_address(&plain), Err(AddressRefusal::NotASocket));

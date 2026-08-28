@@ -10,28 +10,18 @@ use super::{
     STRUCTURED_OVER_SOCKET, SendMessageTool, UNKNOWN_RECIPIENT, UNSUPPORTED_SCHEME, WHITESPACE,
     cap_summary, lead_of,
 };
-use crate::{
-    Tool as _, ToolCtx, ToolError,
-    socket::{AddressRefusal, SessionSocket},
-    team::{Address, Body, Peer, Postbox, Reserved, Sent, Undelivered},
-};
+use crate::socket::{AddressRefusal, SessionSocket};
+use crate::team::{Address, Body, Peer, Postbox, Reserved, Sent, Undelivered};
+use crate::{Tool as _, ToolCtx, ToolError};
 
 /// A handful of §5.1's ten, which is all any test here needs: the real
 /// answer is one `Frame::is_agent_sendable` call on the engine's side.
-const SENDABLE: &[&str] = &[
-    "shutdown_approved",
-    "shutdown_request",
-    "plan_approval_response",
-    "mode_set_request",
-];
+const SENDABLE: &[&str] =
+    &["shutdown_approved", "shutdown_request", "plan_approval_response", "mode_set_request"];
 
 /// A handful of §5.1's five.
-const HARNESS_ONLY: &[&str] = &[
-    "shutdown_rejected",
-    "idle_notification",
-    "task_completed",
-    "teammate_terminated",
-];
+const HARNESS_ONLY: &[&str] =
+    &["shutdown_rejected", "idle_notification", "task_completed", "teammate_terminated"];
 
 /// A postbox that classifies by a small table and reports whatever outcome
 /// the test handed it, recording what reached it.
@@ -51,11 +41,7 @@ impl Fake {
                     description: Some("runs the team".to_owned()),
                     lead: true,
                 },
-                Peer {
-                    name: "worker-1".to_owned(),
-                    description: None,
-                    lead: false,
-                },
+                Peer { name: "worker-1".to_owned(), description: None, lead: false },
             ],
             outcome: Ok(Sent {
                 to: "worker-1".to_owned(),
@@ -66,10 +52,7 @@ impl Fake {
     }
 
     fn answering(outcome: Result<Sent, Undelivered>) -> Self {
-        Self {
-            outcome,
-            ..Self::new()
-        }
+        Self { outcome, ..Self::new() }
     }
 }
 
@@ -93,10 +76,7 @@ impl Postbox for Fake {
     }
 
     async fn deliver(&self, to: Address, body: Body) -> Result<Sent, Undelivered> {
-        self.delivered
-            .lock()
-            .expect("no test panics while holding this")
-            .push((to, body));
+        self.delivered.lock().expect("no test panics while holding this").push((to, body));
 
         self.outcome.clone()
     }
@@ -135,20 +115,14 @@ async fn the_validation_ladder_refuses_in_order() {
 
     // 1 before 8: a broadcast is refused before its structured body is
     // ever looked at.
-    assert_eq!(
-        validate(&postbox, "*", json!(frame.clone()), None),
-        Err(Refused::Broadcast)
-    );
+    assert_eq!(validate(&postbox, "*", json!(frame.clone()), None), Err(Refused::Broadcast));
     // 2 before 4: the scheme names the refusal, not the `@` it carries.
     assert_eq!(
         validate(&postbox, "bridge:host@box", json!("hello"), None),
         Err(Refused::UnsupportedScheme { scheme: "bridge:" })
     );
     // 3 before 5: the address is settled before the body is judged.
-    assert_eq!(
-        validate(&postbox, "uds:", json!("   "), None),
-        Err(Refused::InvalidSocketPath)
-    );
+    assert_eq!(validate(&postbox, "uds:", json!("   "), None), Err(Refused::InvalidSocketPath));
     // 4 before 5, for the same reason.
     assert_eq!(
         validate(&postbox, "worker-1@other", json!("   "), None),
@@ -158,23 +132,13 @@ async fn the_validation_ladder_refuses_in_order() {
     // so 5 and 7 cannot both be failed by one text and have no order
     // between them. What this asserts is that blank text is refused as
     // blank.
-    assert_eq!(
-        validate(&postbox, "worker-1", json!("   "), None),
-        Err(Refused::Whitespace)
-    );
+    assert_eq!(validate(&postbox, "worker-1", json!("   "), None), Err(Refused::Whitespace));
     // 3 before 6: an address that is not a session socket of ours is
     // refused before its structured body is looked at — the clause that
     // keeps an unasked call off every other listener on this machine.
     assert_eq!(
-        validate(
-            &postbox,
-            "uds:/var/run/docker.sock",
-            json!(frame.clone()),
-            None
-        ),
-        Err(Refused::NotASessionSocket {
-            why: AddressRefusal::NotASessionName
-        })
+        validate(&postbox, "uds:/var/run/docker.sock", json!(frame.clone()), None),
+        Err(Refused::NotASessionSocket { why: AddressRefusal::NotASessionName })
     );
     // 6 before 8: a socket refuses structure before the frame's own
     // clauses are reached.
@@ -186,9 +150,7 @@ async fn the_validation_ladder_refuses_in_order() {
     // 7, the ten and the five, each naming the frame it read.
     assert_eq!(
         validate(&postbox, "worker-1", json!(frame.to_string()), None),
-        Err(Refused::ProtocolFrame {
-            kind: "shutdown_approved"
-        })
+        Err(Refused::ProtocolFrame { kind: "shutdown_approved" })
     );
     assert_eq!(
         validate(
@@ -197,9 +159,7 @@ async fn the_validation_ladder_refuses_in_order() {
             json!(json!({"type": "idle_notification"}).to_string()),
             None
         ),
-        Err(Refused::LifecycleFrame {
-            kind: "idle_notification"
-        })
+        Err(Refused::LifecycleFrame { kind: "idle_notification" })
     );
     // 8, all three clauses, and all three classified rather than ordered:
     // the clauses key on disjoint verdicts — no frame is both unclassified
@@ -215,15 +175,8 @@ async fn the_validation_ladder_refuses_in_order() {
     // Addressed to a non-lead, so the refusal is visibly the frame's own
     // and not something the recipient earned (D499's second clause).
     assert_eq!(
-        validate(
-            &postbox,
-            "worker-1",
-            json!({"type": "shutdown_rejected", "reason": "no"}),
-            None
-        ),
-        Err(Refused::HarnessOnlyFrame {
-            kind: "shutdown_rejected"
-        })
+        validate(&postbox, "worker-1", json!({"type": "shutdown_rejected", "reason": "no"}), None),
+        Err(Refused::HarnessOnlyFrame { kind: "shutdown_rejected" })
     );
     assert_eq!(
         validate(&postbox, "worker-1", json!(frame), None),
@@ -254,11 +207,7 @@ fn validate(
 #[tokio::test]
 async fn a_did_address_is_refused_by_name() {
     let postbox = Arc::new(Fake::new());
-    let message = refusal(
-        &postbox,
-        json!({"to": "did:example:123", "message": "hello"}),
-    )
-    .await;
+    let message = refusal(&postbox, json!({"to": "did:example:123", "message": "hello"})).await;
 
     assert!(message.starts_with(UNSUPPORTED_SCHEME), "got {message}");
     assert!(message.contains("did:"), "the scheme is named: {message}");
@@ -274,15 +223,8 @@ async fn a_shutdown_approved_must_be_addressed_to_the_lead() {
     let postbox = Arc::new(Fake::new());
     let frame = json!({"type": "shutdown_approved", "requestId": "r1"});
 
-    let message = refusal(
-        &postbox,
-        json!({"to": "worker-1", "message": frame.clone()}),
-    )
-    .await;
-    assert!(
-        message.starts_with(SHUTDOWN_APPROVED_NOT_TO_LEAD),
-        "got {message}"
-    );
+    let message = refusal(&postbox, json!({"to": "worker-1", "message": frame.clone()})).await;
+    assert!(message.starts_with(SHUTDOWN_APPROVED_NOT_TO_LEAD), "got {message}");
     assert!(
         message.contains("team-lead"),
         "the lead is named where the roster knows it: {message}"
@@ -316,11 +258,7 @@ async fn a_structured_harness_only_frame_is_refused_regardless_of_recipient() {
 
     // And the same frame as plain text is the other of §5.1's two
     // sentences: the one that names no escape hatch.
-    let message = refusal(
-        &postbox,
-        json!({"to": "worker-1", "message": frame.to_string()}),
-    )
-    .await;
+    let message = refusal(&postbox, json!({"to": "worker-1", "message": frame.to_string()})).await;
     assert!(message.starts_with(LIFECYCLE_FRAME), "got {message}");
     assert!(
         !message.contains("object form of `message`"),
@@ -336,26 +274,16 @@ async fn a_structured_harness_only_frame_is_refused_regardless_of_recipient() {
 async fn a_socket_address_reaches_delivery_and_reads_back_the_deliverers_sentence() {
     let socket = SessionSocket::new();
     let absence = "This postbox does not speak the socket.";
-    let postbox = Arc::new(Fake::answering(Err(Undelivered::NoTransport {
-        reason: absence.to_owned(),
-    })));
+    let postbox =
+        Arc::new(Fake::answering(Err(Undelivered::NoTransport { reason: absence.to_owned() })));
 
-    let message = refusal(
-        &postbox,
-        json!({"to": socket.address(), "message": "hello"}),
-    )
-    .await;
+    let message = refusal(&postbox, json!({"to": socket.address(), "message": "hello"})).await;
 
-    assert_eq!(
-        message, absence,
-        "the deliverer's sentence is passed through"
-    );
+    assert_eq!(message, absence, "the deliverer's sentence is passed through");
     let delivered = postbox.delivered.lock().expect("no panic");
     assert_eq!(
         delivered.first().map(|(to, _)| to.clone()),
-        Some(Address::Uds {
-            path: socket.path.clone()
-        }),
+        Some(Address::Uds { path: socket.path.clone() }),
         "the address was validated here and handed over whole"
     );
 }
@@ -376,20 +304,14 @@ async fn a_uds_address_that_is_not_a_session_socket_of_ours_is_refused_by_name()
 
     for (to, clause) in [
         ("uds:/var/run/docker.sock", AddressRefusal::NotASessionName),
-        (
-            "uds:/nonexistent-ganja-dir/0198c1a2.sock",
-            AddressRefusal::DirectoryUnreadable,
-        ),
+        ("uds:/nonexistent-ganja-dir/0198c1a2.sock", AddressRefusal::DirectoryUnreadable),
     ] {
         let message = refusal(&postbox, json!({"to": to, "message": "hello"})).await;
         assert!(
             message.starts_with(NOT_A_SESSION_SOCKET),
             "{to}: the refusal is rung 3's own: {message}"
         );
-        assert!(
-            message.contains(&clause.to_string()),
-            "{to}: and it names the clause: {message}"
-        );
+        assert!(message.contains(&clause.to_string()), "{to}: and it names the clause: {message}");
         assert_eq!(
             validate(&postbox, to, json!("hello"), None),
             Err(Refused::NotASessionSocket { why: clause }),
@@ -426,10 +348,7 @@ async fn an_unknown_recipient_is_reported_in_words() {
         message.contains("no teammate") && message.contains("no live session"),
         "the sentence names both misses: {message}"
     );
-    assert!(
-        !message.contains("this team"),
-        "the sentence claims no team (F6): {message}"
-    );
+    assert!(!message.contains("this team"), "the sentence claims no team (F6): {message}");
 }
 
 /// D528's two resolver refusals cross the seam like the transport's own:
@@ -441,18 +360,8 @@ async fn a_resolver_refusal_is_passed_through_in_the_deliverers_words() {
     let ambiguous = "Two live sessions answer to that name.";
     let moved = "That name now belongs to a different session.";
     for (undelivered, said) in [
-        (
-            Undelivered::Ambiguous {
-                reason: ambiguous.to_owned(),
-            },
-            ambiguous,
-        ),
-        (
-            Undelivered::NameMoved {
-                reason: moved.to_owned(),
-            },
-            moved,
-        ),
+        (Undelivered::Ambiguous { reason: ambiguous.to_owned() }, ambiguous),
+        (Undelivered::NameMoved { reason: moved.to_owned() }, moved),
     ] {
         let postbox = Arc::new(Fake::answering(Err(undelivered)));
 
@@ -470,10 +379,7 @@ fn the_teamless_description_claims_no_roster_and_names_no_reply_channel() {
     let tool = SendMessageTool::teamless();
     let described = tool.description();
 
-    assert!(
-        !described.contains(ROSTER_HEADER),
-        "no roster is claimed: {described}"
-    );
+    assert!(!described.contains(ROSTER_HEADER), "no roster is claimed: {described}");
     assert!(
         described.contains("chose for itself") && described.contains("nothing verifies"),
         "a registry name is labeled self-asserted: {described}"
@@ -484,10 +390,7 @@ fn the_teamless_description_claims_no_roster_and_names_no_reply_channel() {
     // denial — "there is no teammate roster" — legitimately carries it.
     let lowered = described.to_lowercase();
     for claim in ["reply", "back"] {
-        assert!(
-            !lowered.contains(claim),
-            "no {claim:?} in the teamless description: {described}"
-        );
+        assert!(!lowered.contains(claim), "no {claim:?} in the teamless description: {described}");
     }
 
     // Distinct from a team of one, whose empty roster is listed as such.
@@ -577,22 +480,14 @@ fn every_refusal_is_a_declared_constant() {
         Refused::Broadcast,
         Refused::UnsupportedScheme { scheme: "did:" },
         Refused::InvalidSocketPath,
-        Refused::NotASessionSocket {
-            why: AddressRefusal::NotASessionName,
-        },
+        Refused::NotASessionSocket { why: AddressRefusal::NotASessionName },
         Refused::ScopedRecipient,
         Refused::Whitespace,
         Refused::StructuredOverSocket,
-        Refused::ProtocolFrame {
-            kind: "mode_set_request",
-        },
-        Refused::LifecycleFrame {
-            kind: "task_completed",
-        },
+        Refused::ProtocolFrame { kind: "mode_set_request" },
+        Refused::LifecycleFrame { kind: "task_completed" },
         Refused::StructuredNotAFrame,
-        Refused::HarnessOnlyFrame {
-            kind: "shutdown_rejected",
-        },
+        Refused::HarnessOnlyFrame { kind: "shutdown_rejected" },
         Refused::ShutdownApprovedNotToLead,
     ];
 
@@ -612,10 +507,7 @@ fn every_refusal_is_a_declared_constant() {
 #[tokio::test]
 async fn a_call_without_a_team_is_refused_readably() {
     let tool = SendMessageTool::new(&[]);
-    let message = match tool
-        .run(json!({"to": "worker-1", "message": "hello"}), &ctx(None))
-        .await
-    {
+    let message = match tool.run(json!({"to": "worker-1", "message": "hello"}), &ctx(None)).await {
         Err(ToolError::Failed(message)) => message,
         other => panic!("expected a refusal, got {other:?}"),
     };
@@ -631,13 +523,8 @@ fn the_description_lists_the_team_with_its_lead_marked() {
     let described = tool.description();
 
     assert!(described.starts_with(DESCRIPTION), "got {described}");
-    let (_, listed) = described
-        .split_once(ROSTER_HEADER)
-        .expect("the roster header is appended");
-    let roster: Vec<&str> = listed
-        .lines()
-        .filter(|line| line.starts_with("- "))
-        .collect();
+    let (_, listed) = described.split_once(ROSTER_HEADER).expect("the roster header is appended");
+    let roster: Vec<&str> = listed.lines().filter(|line| line.starts_with("- ")).collect();
     assert_eq!(
         roster,
         vec![

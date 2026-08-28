@@ -28,7 +28,9 @@
 //! those types rather than `&str` so there is no door left that accepts an
 //! unchecked name.
 
-use std::{collections::HashSet, fmt, path::PathBuf};
+use std::collections::HashSet;
+use std::fmt;
+use std::path::PathBuf;
 
 /// The lead's canonical member name (§1.1's `LEAD`).
 pub const LEAD: &str = "team-lead";
@@ -109,11 +111,7 @@ pub enum NameError {
 /// be read as a flag. So "cannot escape the teams root" is not a second check
 /// somewhere below — it is a property of having passed this one.
 fn shaped(name: &str) -> Result<(), NameError> {
-    let refuse = || {
-        Err(NameError::Shape {
-            name: name.to_owned(),
-        })
-    };
+    let refuse = || Err(NameError::Shape { name: name.to_owned() });
     // Byte length is character length here: every character the grammar admits
     // is ASCII, so a name that is not fails the character test below anyway.
     if name.is_empty() || name.len() > NAME_MAX {
@@ -261,9 +259,7 @@ pub fn resolve_unique<'a>(
     // most `n` names, so `n + 1` candidates cannot all be taken. Falling out of
     // the loop therefore means every candidate was too long, never that the
     // search gave up.
-    let ceiling = u32::try_from(taken.len())
-        .unwrap_or(u32::MAX)
-        .saturating_add(2);
+    let ceiling = u32::try_from(taken.len()).unwrap_or(u32::MAX).saturating_add(2);
     for counter in 2..=ceiling {
         let candidate = format!("{}{COLLISION_SEPARATOR}{counter}", desired.0);
         if candidate.len() > NAME_MAX {
@@ -274,9 +270,7 @@ pub fn resolve_unique<'a>(
         }
     }
 
-    Err(NameError::NoFreeCounter {
-        desired: desired.into_inner(),
-    })
+    Err(NameError::NoFreeCounter { desired: desired.into_inner() })
 }
 
 /// The directory a build keeps its teams in — a value somebody handed over,

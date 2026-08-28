@@ -1,15 +1,11 @@
-use std::{
-    net::SocketAddr,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use secrecy::ExposeSecret as _;
 use serde_json::{Value, json};
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::TcpListener,
-};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 use super::{Login, LoginError, RefreshOauth as _, Refresher};
@@ -40,9 +36,7 @@ async fn authorization_server(
     with_registration: bool,
     poison: Option<(&'static str, String)>,
 ) -> (SocketAddr, Arc<Mutex<Vec<String>>>, Arc<Mutex<Vec<String>>>) {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("a loopback port is available");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("a loopback port is available");
     let address = listener.local_addr().expect("the socket has an address");
     let seen_client_ids: Arc<Mutex<Vec<String>>> = Arc::default();
     let seen_paths: Arc<Mutex<Vec<String>>> = Arc::default();
@@ -70,17 +64,8 @@ async fn authorization_server(
                     }
                 };
 
-                let path = head
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .split(' ')
-                    .nth(1)
-                    .unwrap_or("");
-                all_paths
-                    .lock()
-                    .expect("never poisoned")
-                    .push(path.to_owned());
+                let path = head.lines().next().unwrap_or("").split(' ').nth(1).unwrap_or("");
+                all_paths.lock().expect("never poisoned").push(path.to_owned());
                 let response = if path == "/.well-known/oauth-authorization-server" {
                     let mut metadata = json!({
                         "issuer": format!("http://{address}"),
@@ -101,10 +86,7 @@ async fn authorization_server(
                     let request: Value =
                         serde_json::from_str(&body).unwrap_or_else(|_| form_decode(&body));
                     if let Some(client_id) = request.get("client_id").and_then(Value::as_str) {
-                        recorded
-                            .lock()
-                            .expect("never poisoned")
-                            .push(client_id.to_owned());
+                        recorded.lock().expect("never poisoned").push(client_id.to_owned());
                     }
                     json_response(
                         200,
@@ -157,8 +139,7 @@ fn whole(buffer: &[u8]) -> Option<(String, String)> {
         .lines()
         .find_map(|line| {
             let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse().ok())?
+            name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse().ok())?
         })
         .unwrap_or(0);
     if rest.len() < length {
@@ -206,32 +187,17 @@ async fn answer_callback(url: &str, code: &str) {
 async fn discovery_registration_and_the_exchange_complete_end_to_end() {
     let (address, seen_client_ids, _seen_paths) = authorization_server(true, None).await;
     let login = Login::new(&format!("http://{address}/mcp")).expect("a loopback origin logs in");
-    let browser = login
-        .browser()
-        .await
-        .expect("discovery and registration succeed");
+    let browser = login.browser().await.expect("discovery and registration succeed");
     let url = browser.url().to_owned();
 
     let waited = tokio::spawn(async move { browser.wait(AMPLE, &CancellationToken::new()).await });
     answer_callback(&url, "the-code").await;
-    let credential = waited
-        .await
-        .expect("the wait finished")
-        .expect("the exchange succeeds");
+    let credential = waited.await.expect("the wait finished").expect("the exchange succeeds");
 
+    assert_eq!(credential.access.expose_secret(), &format!("{CANARY}-access"));
+    assert_eq!(credential.refresh.expose_secret(), &format!("{CANARY}-refresh"));
     assert_eq!(
-        credential.access.expose_secret(),
-        &format!("{CANARY}-access")
-    );
-    assert_eq!(
-        credential.refresh.expose_secret(),
-        &format!("{CANARY}-refresh")
-    );
-    assert_eq!(
-        credential
-            .extra
-            .get("token_endpoint")
-            .and_then(Value::as_str),
+        credential.extra.get("token_endpoint").and_then(Value::as_str),
         Some(format!("http://{address}/token").as_str())
     );
     assert_eq!(
@@ -249,25 +215,16 @@ async fn discovery_registration_and_the_exchange_complete_end_to_end() {
 async fn a_server_with_no_registration_endpoint_gets_the_fixed_fallback_id() {
     let (address, seen_client_ids, _seen_paths) = authorization_server(false, None).await;
     let login = Login::new(&format!("http://{address}/mcp")).expect("a loopback origin logs in");
-    let browser = login
-        .browser()
-        .await
-        .expect("discovery succeeds without registration");
+    let browser = login.browser().await.expect("discovery succeeds without registration");
     let url = browser.url().to_owned();
 
     assert!(url.contains("client_id=ganja-mcp-client"), "{url}");
 
     let waited = tokio::spawn(async move { browser.wait(AMPLE, &CancellationToken::new()).await });
     answer_callback(&url, "the-code").await;
-    waited
-        .await
-        .expect("the wait finished")
-        .expect("the exchange still succeeds");
+    waited.await.expect("the wait finished").expect("the exchange still succeeds");
 
-    assert_eq!(
-        seen_client_ids.lock().expect("never poisoned").as_slice(),
-        ["ganja-mcp-client"]
-    );
+    assert_eq!(seen_client_ids.lock().expect("never poisoned").as_slice(), ["ganja-mcp-client"]);
 }
 
 #[tokio::test]
@@ -278,13 +235,10 @@ async fn a_refresh_reads_the_endpoint_and_client_id_the_login_stored() {
         secrecy::SecretString::from(format!("{CANARY}-old-access")),
         0,
     );
-    stored.extra.insert(
-        "token_endpoint".to_owned(),
-        Value::from(format!("http://{address}/token")),
-    );
     stored
         .extra
-        .insert("client_id".to_owned(), Value::from("dcr-registered-client"));
+        .insert("token_endpoint".to_owned(), Value::from(format!("http://{address}/token")));
+    stored.extra.insert("client_id".to_owned(), Value::from("dcr-registered-client"));
 
     let renewed = Refresher
         .refresh("mcp:fixture", &stored)
@@ -306,11 +260,8 @@ async fn a_refresh_reads_the_endpoint_and_client_id_the_login_stored() {
 
 #[tokio::test]
 async fn a_credential_this_login_never_wrote_cannot_be_refreshed() {
-    let bare = OauthCredential::new(
-        secrecy::SecretString::from("r"),
-        secrecy::SecretString::from("a"),
-        0,
-    );
+    let bare =
+        OauthCredential::new(secrecy::SecretString::from("r"), secrecy::SecretString::from("a"), 0);
 
     let error = Refresher
         .refresh("mcp:fixture", &bare)
@@ -323,10 +274,7 @@ async fn a_credential_this_login_never_wrote_cannot_be_refreshed() {
 async fn discovery_naming_an_unsafe_token_endpoint_is_refused_before_any_request_reaches_it() {
     let (address, seen_client_ids, seen_paths) = authorization_server(
         true,
-        Some((
-            "token_endpoint",
-            "http://mcp-attacker.example/token".to_owned(),
-        )),
+        Some(("token_endpoint", "http://mcp-attacker.example/token".to_owned())),
     )
     .await;
     let login = Login::new(&format!("http://{address}/mcp")).expect("a loopback origin logs in");
@@ -334,12 +282,7 @@ async fn discovery_naming_an_unsafe_token_endpoint_is_refused_before_any_request
     let result = login.browser().await;
 
     assert!(
-        matches!(
-            result,
-            Err(LoginError::UnsafeEndpoint {
-                field: "token_endpoint"
-            })
-        ),
+        matches!(result, Err(LoginError::UnsafeEndpoint { field: "token_endpoint" })),
         "{result:?}"
     );
     assert!(
@@ -385,24 +328,19 @@ async fn a_stored_unsafe_token_endpoint_refuses_a_renewal_without_sending_the_re
         secrecy::SecretString::from(format!("{CANARY}-old-access")),
         0,
     );
-    stored.extra.insert(
-        "token_endpoint".to_owned(),
-        Value::from("http://mcp-attacker.example/token"),
-    );
     stored
         .extra
-        .insert("client_id".to_owned(), Value::from("dcr-registered-client"));
+        .insert("token_endpoint".to_owned(), Value::from("http://mcp-attacker.example/token"));
+    stored.extra.insert("client_id".to_owned(), Value::from("dcr-registered-client"));
 
     // The refusal happens before any HTTP client is even built for the
     // renewal — a real attempt at "mcp-attacker.example" would need at
     // least a DNS lookup and a connect, neither of which finishes in
     // milliseconds; this bounds the call tightly enough that only the
     // synchronous validation path could possibly answer in time.
-    let outcome = tokio::time::timeout(
-        Duration::from_millis(500),
-        Refresher.refresh("mcp:fixture", &stored),
-    )
-    .await;
+    let outcome =
+        tokio::time::timeout(Duration::from_millis(500), Refresher.refresh("mcp:fixture", &stored))
+            .await;
 
     let error = outcome
         .expect("a refused endpoint is caught well before any network attempt")
@@ -412,19 +350,14 @@ async fn a_stored_unsafe_token_endpoint_refuses_a_renewal_without_sending_the_re
         error.to_string().contains("token_endpoint"),
         "the refusal must name the field: {error}"
     );
-    assert!(
-        !error.to_string().contains(CANARY),
-        "a secret reached a message: {error}"
-    );
+    assert!(!error.to_string().contains(CANARY), "a secret reached a message: {error}");
 }
 
 #[test]
 fn an_origin_that_would_put_the_tokens_in_the_clear_is_refused() {
-    for allowed in [
-        "https://mcp.example/mcp",
-        "http://127.0.0.1:8080/mcp",
-        "http://localhost:9/sse",
-    ] {
+    for allowed in
+        ["https://mcp.example/mcp", "http://127.0.0.1:8080/mcp", "http://localhost:9/sse"]
+    {
         assert!(Login::new(allowed).is_ok(), "{allowed}");
     }
     for refused in [
@@ -433,37 +366,23 @@ fn an_origin_that_would_put_the_tokens_in_the_clear_is_refused() {
         "ftp://mcp.example/mcp",
         "not a url",
     ] {
-        assert!(
-            matches!(Login::new(refused), Err(LoginError::Origin)),
-            "{refused}"
-        );
+        assert!(matches!(Login::new(refused), Err(LoginError::Origin)), "{refused}");
     }
 }
 
 #[test]
 fn no_failure_message_or_debug_renders_a_token() {
     let messages = [
-        LoginError::Refused {
-            step: "renewing the credential",
-            status: 401,
-        }
-        .into_auth("mcp:fixture")
-        .to_string(),
-        LoginError::Malformed {
-            step: "exchanging the authorization code",
-        }
-        .into_auth("mcp:fixture")
-        .to_string(),
-        format!(
-            "{:?}",
-            Login::new("https://mcp.example/mcp").expect("https is allowed")
-        ),
+        LoginError::Refused { step: "renewing the credential", status: 401 }
+            .into_auth("mcp:fixture")
+            .to_string(),
+        LoginError::Malformed { step: "exchanging the authorization code" }
+            .into_auth("mcp:fixture")
+            .to_string(),
+        format!("{:?}", Login::new("https://mcp.example/mcp").expect("https is allowed")),
     ];
 
     for message in messages {
-        assert!(
-            !message.contains(CANARY),
-            "a secret reached a message: {message}"
-        );
+        assert!(!message.contains(CANARY), "a secret reached a message: {message}");
     }
 }

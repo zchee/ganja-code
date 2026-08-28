@@ -9,10 +9,8 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::{
-    Tool, ToolCtx, ToolError, ToolOutput, job,
-    job::{JobsError, State},
-};
+use crate::job::{JobsError, State};
+use crate::{Tool, ToolCtx, ToolError, ToolOutput, job};
 
 /// The tool id, and the permission key.
 pub const ID: &str = "bash_output";
@@ -64,10 +62,7 @@ impl Tool for BashOutputTool {
     }
 
     fn describe(&self, args: &serde_json::Value) -> String {
-        let id = args
-            .get("bash_id")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("?");
+        let id = args.get("bash_id").and_then(serde_json::Value::as_str).unwrap_or("?");
 
         format!("bash_output {id}")
     }
@@ -84,18 +79,11 @@ impl Tool for BashOutputTool {
             Some(pattern) => filter_lines(&read.chunk, pattern)?,
             None => read.chunk,
         };
-        let body = if chunk.is_empty() {
-            "(no new output)".to_owned()
-        } else {
-            chunk
-        };
+        let body = if chunk.is_empty() { "(no new output)".to_owned() } else { chunk };
 
         Ok(ToolOutput {
             title: format!("bash_output {}", args.bash_id),
-            output: format!(
-                "{body}\n\n<status>{}</status>",
-                state_word(&read.status.state)
-            ),
+            output: format!("{body}\n\n<status>{}</status>", state_word(&read.status.state)),
             metadata: serde_json::json!({
                 "bash_id": read.status.id,
                 "status": state_word(&read.status.state),
@@ -134,10 +122,8 @@ fn filter_lines(text: &str, pattern: &str) -> Result<String, ToolError> {
     let matcher = grep_regex::RegexMatcher::new(pattern)
         .map_err(|error| ToolError::InvalidArgs(format!("invalid filter {pattern:?}: {error}")))?;
 
-    let kept: Vec<&str> = text
-        .lines()
-        .filter(|line| matcher.is_match(line.as_bytes()).unwrap_or(false))
-        .collect();
+    let kept: Vec<&str> =
+        text.lines().filter(|line| matcher.is_match(line.as_bytes()).unwrap_or(false)).collect();
 
     Ok(kept.join("\n"))
 }

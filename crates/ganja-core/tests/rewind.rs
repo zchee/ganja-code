@@ -25,22 +25,19 @@
 //! a prerequisite rather than a skip, for the golden suite's reason: a run
 //! that snapshotted nothing would prove nothing.
 
-use std::{
-    path::{Path, PathBuf},
-    process::Command as Process,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::path::{Path, PathBuf};
+use std::process::Command as Process;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use futures::{StreamExt as _, stream::BoxStream};
-use ganja_core::{
-    Engine, EngineError, Snapshots,
-    permission::{Action, Permissions, Rule},
-    project::Project,
-    protocol::{Command, Event, MessageId, RevertScope, Role},
-    provider::FakeProvider,
-    tool::Registry,
-};
+use futures::StreamExt as _;
+use futures::stream::BoxStream;
+use ganja_core::permission::{Action, Permissions, Rule};
+use ganja_core::project::Project;
+use ganja_core::protocol::{Command, Event, MessageId, RevertScope, Role};
+use ganja_core::provider::FakeProvider;
+use ganja_core::tool::Registry;
+use ganja_core::{Engine, EngineError, Snapshots};
 
 /// What the tracked file holds before the turn edits it.
 ///
@@ -97,15 +94,9 @@ async fn both() {
     let first_file = root.join("first.txt");
     let second_file = root.join("second.txt");
 
-    settled(
-        &engine,
-        Command::RevertTo {
-            message_id: second.clone(),
-            scope: RevertScope::Both,
-        },
-    )
-    .await
-    .expect("the second prompt is a checkpoint");
+    settled(&engine, Command::RevertTo { message_id: second.clone(), scope: RevertScope::Both })
+        .await
+        .expect("the second prompt is a checkpoint");
 
     let (revert, prompt) = revert_changed(&mut events).await;
     let revert = revert.expect("a rewind that hides messages announces where it stands");
@@ -124,33 +115,18 @@ async fn both() {
         !second_file.exists(),
         "a file the rewound turn created is not in the tree it is restored from"
     );
-    assert_eq!(
-        read(&first_file),
-        CREATED,
-        "the turn before the checkpoint is untouched"
-    );
+    assert_eq!(read(&first_file), CREATED, "the turn before the checkpoint is untouched");
 
     // Hidden, not deleted: a redo steps back forward and the file returns.
-    settled(&engine, Command::Redo)
-        .await
-        .expect("there is a rewind to redo");
+    settled(&engine, Command::Redo).await.expect("there is a rewind to redo");
     let (revert, _) = revert_changed(&mut events).await;
-    assert!(
-        revert.is_none(),
-        "stepping past the newest reverted prompt clears the revert"
-    );
+    assert!(revert.is_none(), "stepping past the newest reverted prompt clears the revert");
     assert_eq!(read(&second_file), CREATED, "and puts its file back");
 
     // ...and a prompt after a rewind is the user keeping what it did.
-    settled(
-        &engine,
-        Command::RevertTo {
-            message_id: second,
-            scope: RevertScope::Both,
-        },
-    )
-    .await
-    .expect("the checkpoint is still there");
+    settled(&engine, Command::RevertTo { message_id: second, scope: RevertScope::Both })
+        .await
+        .expect("the checkpoint is still there");
     revert_changed(&mut events).await;
     settled(
         &engine,
@@ -167,10 +143,7 @@ async fn both() {
     finish(&mut events).await;
 
     assert!(
-        matches!(
-            settled(&engine, Command::Redo).await,
-            Err(EngineError::NothingToRedo)
-        ),
+        matches!(settled(&engine, Command::Redo).await, Err(EngineError::NothingToRedo)),
         "a prompt after a rewind makes the rewind permanent"
     );
 }
@@ -186,10 +159,7 @@ async fn conversation_only() {
 
     settled(
         &engine,
-        Command::RevertTo {
-            message_id: second.clone(),
-            scope: RevertScope::Conversation,
-        },
+        Command::RevertTo { message_id: second.clone(), scope: RevertScope::Conversation },
     )
     .await
     .expect("the second prompt is a checkpoint");
@@ -203,16 +173,10 @@ async fn conversation_only() {
         revert.files
     );
     assert_eq!(prompt.as_deref(), Some(SECOND));
-    assert_eq!(
-        read(&second_file),
-        CREATED,
-        "the file that turn wrote is exactly where it was"
-    );
+    assert_eq!(read(&second_file), CREATED, "the file that turn wrote is exactly where it was");
 
     // The messages really are hidden: a redo has something to step forward to.
-    settled(&engine, Command::Redo)
-        .await
-        .expect("there is a rewind to redo");
+    settled(&engine, Command::Redo).await.expect("there is a rewind to redo");
     let (revert, _) = revert_changed(&mut events).await;
     assert!(revert.is_none(), "and stepping past it clears the revert");
 }
@@ -227,31 +191,19 @@ async fn files_only() {
     let (engine, mut events, _, second) = seeded(root).await;
     let second_file = root.join("second.txt");
 
-    settled(
-        &engine,
-        Command::RevertTo {
-            message_id: second.clone(),
-            scope: RevertScope::Files,
-        },
-    )
-    .await
-    .expect("the second prompt is a checkpoint");
+    settled(&engine, Command::RevertTo { message_id: second.clone(), scope: RevertScope::Files })
+        .await
+        .expect("the second prompt is a checkpoint");
 
     let (revert, prompt) = revert_changed(&mut events).await;
     let revert = revert.expect("a code-only rewind names the files it put back");
     assert_eq!(revert.message_id, second);
     assert_eq!(revert.files, vec!["second.txt".to_owned()]);
-    assert_eq!(
-        prompt, None,
-        "nothing was taken back, so there is nothing to offer the editor"
-    );
+    assert_eq!(prompt, None, "nothing was taken back, so there is nothing to offer the editor");
     assert!(!second_file.exists(), "the file it created is gone");
 
     assert!(
-        matches!(
-            settled(&engine, Command::Redo).await,
-            Err(EngineError::NothingToRedo)
-        ),
+        matches!(settled(&engine, Command::Redo).await, Err(EngineError::NothingToRedo)),
         "nothing was hidden, so there is nothing to step forward through"
     );
 
@@ -263,9 +215,7 @@ async fn files_only() {
         .expect("the transcript is whole, so there is something to undo");
     let (revert, _) = revert_changed(&mut events).await;
     assert_eq!(
-        revert
-            .expect("an undo announces where the revert stands")
-            .message_id,
+        revert.expect("an undo announces where the revert stands").message_id,
         second,
         "a code-only rewind moved no message"
     );
@@ -312,11 +262,7 @@ async fn achieved_files() {
     .expect("an idle engine accepts a prompt");
     let anchor = drain_turn(&mut events).await;
     assert_eq!(read(&kept), AFTER, "the scripted turn edited the file");
-    assert_eq!(
-        read(&root.join("invented.txt")),
-        CREATED,
-        "and wrote another"
-    );
+    assert_eq!(read(&root.join("invented.txt")), CREATED, "and wrote another");
 
     // Nothing may be written in there any more, so the file the patch names
     // cannot be put back — while the file beside it, which the turn created
@@ -333,15 +279,9 @@ async fn achieved_files() {
         return;
     }
 
-    settled(
-        &engine,
-        Command::RevertTo {
-            message_id: anchor,
-            scope: RevertScope::Files,
-        },
-    )
-    .await
-    .expect("the prompt is a checkpoint");
+    settled(&engine, Command::RevertTo { message_id: anchor, scope: RevertScope::Files })
+        .await
+        .expect("the prompt is a checkpoint");
 
     let (revert, _) = revert_changed(&mut events).await;
     let revert = revert.expect("the rewind announces what it restored");
@@ -392,10 +332,7 @@ async fn a_rewind_to_something_that_is_not_a_checkpoint_is_refused_by_name() {
     let unknown = MessageId::from("msg_nobody".to_owned());
     match settled(
         &engine,
-        Command::RevertTo {
-            message_id: unknown.clone(),
-            scope: RevertScope::Conversation,
-        },
+        Command::RevertTo { message_id: unknown.clone(), scope: RevertScope::Conversation },
     )
     .await
     {
@@ -409,10 +346,7 @@ async fn a_rewind_to_something_that_is_not_a_checkpoint_is_refused_by_name() {
         matches!(
             settled(
                 &engine,
-                Command::RevertTo {
-                    message_id: reply,
-                    scope: RevertScope::Conversation,
-                },
+                Command::RevertTo { message_id: reply, scope: RevertScope::Conversation },
             )
             .await,
             Err(EngineError::NoSuchCheckpoint { .. })
@@ -422,15 +356,9 @@ async fn a_rewind_to_something_that_is_not_a_checkpoint_is_refused_by_name() {
 
     // And the prompt itself is, on a session that takes no snapshots at all —
     // which is exactly what a conversation-only rewind does not need.
-    settled(
-        &engine,
-        Command::RevertTo {
-            message_id: anchor,
-            scope: RevertScope::Conversation,
-        },
-    )
-    .await
-    .expect("a conversation rewind needs no snapshots");
+    settled(&engine, Command::RevertTo { message_id: anchor, scope: RevertScope::Conversation })
+        .await
+        .expect("a conversation rewind needs no snapshots");
 }
 
 /// **The other half of that refusal.** A scope that moves files on a session
@@ -463,14 +391,7 @@ async fn a_scope_that_moves_files_is_refused_without_snapshots() {
     for scope in [RevertScope::Both, RevertScope::Files] {
         assert!(
             matches!(
-                settled(
-                    &engine,
-                    Command::RevertTo {
-                        message_id: anchor.clone(),
-                        scope,
-                    },
-                )
-                .await,
+                settled(&engine, Command::RevertTo { message_id: anchor.clone(), scope },).await,
                 Err(EngineError::NoSnapshots)
             ),
             "{scope:?} has nowhere to restore from"
@@ -486,11 +407,8 @@ async fn seeded(root: &Path) -> (Engine, BoxStream<'static, Event>, MessageId, M
     seed_repository(root);
 
     let script = root.join("script.json");
-    std::fs::write(
-        &script,
-        writing_turns(&root.join("first.txt"), &root.join("second.txt")),
-    )
-    .expect("the script is writable");
+    std::fs::write(&script, writing_turns(&root.join("first.txt"), &root.join("second.txt")))
+        .expect("the script is writable");
     let (engine, mut events) = built(root, &script).await;
 
     let mut prompts = Vec::new();
@@ -632,11 +550,9 @@ fn seed_repository(root: &Path) {
         "init.defaultBranch=main",
     ];
 
-    for arguments in [
-        vec!["init"],
-        vec!["add", "-A"],
-        vec!["commit", "-m", "the state before anything"],
-    ] {
+    for arguments in
+        [vec!["init"], vec!["add", "-A"], vec!["commit", "-m", "the state before anything"]]
+    {
         let status = Process::new("git")
             .args(common)
             .args(&arguments)
@@ -707,10 +623,7 @@ async fn turn_ids(events: &mut BoxStream<'static, Event>) -> (MessageId, Message
                 }
             },
             Event::MessageFinished { reason, error, .. } => {
-                assert!(
-                    error.is_none(),
-                    "the scripted turn finished {reason:?}: {error:?}"
-                );
+                assert!(error.is_none(), "the scripted turn finished {reason:?}: {error:?}");
 
                 return (
                     prompt.expect("a turn starts with the message that asked for it"),

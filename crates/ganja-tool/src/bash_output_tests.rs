@@ -3,10 +3,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use super::{BashOutputTool, ID};
-use crate::{
-    Tool as _, ToolCtx, ToolError,
-    job::{JobRead, JobStatus, Jobs, JobsError, State},
-};
+use crate::job::{JobRead, JobStatus, Jobs, JobsError, State};
+use crate::{Tool as _, ToolCtx, ToolError};
 
 /// A [`Jobs`] whose every answer is scripted, so this module's tests
 /// exercise the tool's own shaping without a real process anywhere.
@@ -22,9 +20,7 @@ impl Jobs for Scripted {
     }
 
     async fn output(&self, bash_id: &str) -> Result<JobRead, JobsError> {
-        self.read
-            .clone()
-            .ok_or_else(|| JobsError::NotFound(bash_id.to_owned()))
+        self.read.clone().ok_or_else(|| JobsError::NotFound(bash_id.to_owned()))
     }
 
     async fn kill(&self, _bash_id: &str) -> Result<JobStatus, JobsError> {
@@ -111,11 +107,7 @@ async fn no_new_output_says_so_rather_than_printing_nothing() {
         .await
         .expect("a known id answers");
 
-    assert!(
-        out.output.starts_with("(no new output)"),
-        "got {:?}",
-        out.output
-    );
+    assert!(out.output.starts_with("(no new output)"), "got {:?}", out.output);
 }
 
 #[tokio::test]
@@ -132,10 +124,7 @@ async fn a_filter_keeps_only_matching_lines() {
     });
 
     let out = BashOutputTool
-        .run(
-            serde_json::json!({ "bash_id": "bash_1", "filter": "^error" }),
-            &ctx(Some(jobs)),
-        )
+        .run(serde_json::json!({ "bash_id": "bash_1", "filter": "^error" }), &ctx(Some(jobs)))
         .await
         .expect("a known id answers");
 
@@ -158,17 +147,11 @@ async fn an_invalid_filter_is_refused_as_a_bad_argument() {
     });
 
     let refused = BashOutputTool
-        .run(
-            serde_json::json!({ "bash_id": "bash_1", "filter": "(" }),
-            &ctx(Some(jobs)),
-        )
+        .run(serde_json::json!({ "bash_id": "bash_1", "filter": "(" }), &ctx(Some(jobs)))
         .await
         .expect_err("an unparseable pattern cannot filter anything");
 
-    assert!(
-        matches!(refused, ToolError::InvalidArgs(_)),
-        "got {refused:?}"
-    );
+    assert!(matches!(refused, ToolError::InvalidArgs(_)), "got {refused:?}");
 }
 
 #[test]

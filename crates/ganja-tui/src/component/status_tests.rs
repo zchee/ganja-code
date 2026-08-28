@@ -1,7 +1,10 @@
-use std::{cell::RefCell, fs};
+use std::cell::RefCell;
+use std::fs;
 
 use ganja_core::config::StatuslineElement;
-use ratatui::{buffer::Buffer, layout::Rect, text::Span};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::text::Span;
 use unicode_width::UnicodeWidthStr as _;
 
 use super::{
@@ -15,11 +18,7 @@ fn rendered(status: &Status, width: u16) -> String {
     let mut buffer = Buffer::empty(area);
     status.render(area, &mut buffer, &Theme::default());
 
-    (0..width)
-        .map(|column| buffer[(column, 0)].symbol())
-        .collect::<String>()
-        .trim_end()
-        .to_owned()
+    (0..width).map(|column| buffer[(column, 0)].symbol()).collect::<String>().trim_end().to_owned()
 }
 
 /// Every row of a taller render, for the rosters that earn extra lines.
@@ -60,11 +59,7 @@ fn window(kind: &str, limit: u64, remaining: u64, in_secs: Option<i64>) -> RateW
         remaining,
         reset: in_secs.map(|seconds| {
             let offset = Duration::from_secs(seconds.unsigned_abs());
-            if seconds < 0 {
-                now - offset
-            } else {
-                now + offset
-            }
+            if seconds < 0 { now - offset } else { now + offset }
         }),
     }
 }
@@ -81,11 +76,7 @@ fn plan(name: &str, used_percent: f64, in_secs: Option<i64>) -> PlanWindow {
         window_minutes: None,
         resets_at: in_secs.map(|seconds| {
             let offset = Duration::from_secs(seconds.unsigned_abs());
-            if seconds < 0 {
-                now - offset
-            } else {
-                now + offset
-            }
+            if seconds < 0 { now - offset } else { now + offset }
         }),
         limit_name: None,
     }
@@ -123,11 +114,7 @@ fn the_bar_names_the_agent_only_once_there_is_one() {
 
     status.set_agent(Some("plan".to_owned()));
 
-    assert!(
-        rendered(&status, 100).starts_with("plan"),
-        "got {:?}",
-        rendered(&status, 100)
-    );
+    assert!(rendered(&status, 100).starts_with("plan"), "got {:?}", rendered(&status, 100));
 }
 
 /// The bypass is standing, so its marker is too (**D479**) — and a
@@ -142,17 +129,10 @@ fn the_bar_carries_the_yolo_marker_only_in_a_bypassed_session() {
     status.set_yolo(true);
 
     let bypassed = rendered(&status, 100);
-    assert!(
-        bypassed.starts_with("yolo"),
-        "the marker is the first thing on the bar: {bypassed:?}"
-    );
+    assert!(bypassed.starts_with("yolo"), "the marker is the first thing on the bar: {bypassed:?}");
 
     status.set_yolo(false);
-    assert_eq!(
-        rendered(&status, 100),
-        gated,
-        "turning it off restores the bar cell for cell"
-    );
+    assert_eq!(rendered(&status, 100), gated, "turning it off restores the bar cell for cell");
 }
 
 /// The marker is not a roster element, so it does not depend on a config
@@ -167,10 +147,7 @@ fn a_configured_roster_carries_the_marker_too() {
 
     let line = rendered(&status, 100);
     assert!(line.starts_with("yolo"), "got {line:?}");
-    assert!(
-        line.contains("ready"),
-        "and the roster it was prepended to is untouched: {line:?}"
-    );
+    assert!(line.contains("ready"), "and the roster it was prepended to is untouched: {line:?}");
 }
 
 /// The depth appears only while something is waiting, so a session that
@@ -326,10 +303,7 @@ fn the_bar_names_the_model_and_effort_only_while_one_is_selected() {
 fn a_notice_sits_next_to_the_state() {
     let status = Status::new(Some("provider defaulted".to_owned()));
 
-    assert!(
-        rendered(&status, 100).contains("provider defaulted"),
-        "the notice should be visible"
-    );
+    assert!(rendered(&status, 100).contains("provider defaulted"), "the notice should be visible");
 }
 
 /// The state is what a bar too narrow for everything keeps — with the
@@ -382,11 +356,7 @@ fn spend_is_shown_compactly_next_to_the_state() {
 #[test]
 fn an_unpriced_model_shows_tokens_without_a_price() {
     let mut status = Status::new(None);
-    status.set_totals(Totals {
-        input_tokens: 40,
-        output_tokens: 7,
-        cost_usd: None,
-    });
+    status.set_totals(Totals { input_tokens: 40, output_tokens: 7, cost_usd: None });
 
     let line = rendered(&status, 100);
 
@@ -400,11 +370,7 @@ fn an_unpriced_model_shows_tokens_without_a_price() {
 #[test]
 fn a_sub_cent_session_still_shows_a_number() {
     let mut status = Status::new(None);
-    status.set_totals(Totals {
-        input_tokens: 0,
-        output_tokens: 0,
-        cost_usd: Some(0.000_7),
-    });
+    status.set_totals(Totals { input_tokens: 0, output_tokens: 0, cost_usd: Some(0.000_7) });
 
     let line = rendered(&status, 100);
 
@@ -416,11 +382,7 @@ fn a_sub_cent_session_still_shows_a_number() {
 fn a_notice_survives_beside_the_spend() {
     let mut status = Status::new(Some("no usable credentials".to_owned()));
     status.set_activity(Activity::Failed);
-    status.set_totals(Totals {
-        input_tokens: 1_000,
-        output_tokens: 0,
-        cost_usd: Some(0.5),
-    });
+    status.set_totals(Totals { input_tokens: 1_000, output_tokens: 0, cost_usd: Some(0.5) });
 
     let line = rendered(&status, 120);
 
@@ -482,18 +444,11 @@ fn shell_mode_reminds_the_user_of_the_way_out() {
 /// on its own.
 #[test]
 fn a_configured_roster_renders_exactly_what_it_names_in_its_order() {
-    let mut status = roster(&[
-        StatuslineElement::Model,
-        StatuslineElement::Context,
-        StatuslineElement::Tokens,
-    ]);
+    let mut status =
+        roster(&[StatuslineElement::Model, StatuslineElement::Context, StatuslineElement::Tokens]);
     status.set_model(Some("claude-opus-5".to_owned()));
     status.set_context(Some((12_000, 100_000)));
-    status.set_totals(Totals {
-        input_tokens: 40,
-        output_tokens: 7,
-        cost_usd: None,
-    });
+    status.set_totals(Totals { input_tokens: 40, output_tokens: 7, cost_usd: None });
 
     let line = rendered(&status, 120);
 
@@ -601,10 +556,8 @@ fn the_rate_element_draws_a_plan_bucket_alone_when_no_rate_window_was_heard() {
 #[test]
 fn the_plan_bucket_shown_is_the_one_that_runs_out_first() {
     let mut status = roster(&[StatuslineElement::Rate]);
-    status.set_plans(vec![
-        plan("primary", 12.0, Some(3_600)),
-        plan("secondary", 75.0, Some(86_400)),
-    ]);
+    status
+        .set_plans(vec![plan("primary", 12.0, Some(3_600)), plan("secondary", 75.0, Some(86_400))]);
 
     assert_eq!(rendered(&status, 60), "plan:[######--]75%");
 }
@@ -748,11 +701,7 @@ fn the_effort_segment_wears_the_model_values_own_style() {
     let model_value = buffer[(column_of("Model: ") + 7, 0)].style();
     let effort = buffer[(column_of("claude-opus-5 (max)"), 0)].style();
     assert_eq!(effort, model_value, "on {line:?}");
-    assert_ne!(
-        effort,
-        buffer[(column_of("Model: "), 0)].style(),
-        "and not the label's dim"
-    );
+    assert_ne!(effort, buffer[(column_of("Model: "), 0)].style(), "and not the label's dim");
 }
 
 /// `max_width` caps the bar below the terminal's width, OMC's `maxWidth`.
@@ -773,15 +722,8 @@ fn a_width_cap_truncates_before_the_terminal_edge_does() {
 #[test]
 fn truncation_never_splits_a_zwj_family() {
     let family = "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}\u{200d}\u{1f466}";
-    let spans = truncate_spans(
-        vec![Span::raw(format!("{family}xxxx"))],
-        5,
-        &Theme::default(),
-    );
-    let text = spans
-        .iter()
-        .map(|span| span.content.as_ref())
-        .collect::<String>();
+    let spans = truncate_spans(vec![Span::raw(format!("{family}xxxx"))], 5, &Theme::default());
+    let text = spans.iter().map(|span| span.content.as_ref()).collect::<String>();
 
     assert_eq!(text, format!("{family}..."));
 }
@@ -810,10 +752,7 @@ fn a_detached_head_reads_as_a_short_hash() {
         head_name("f0e1d2c3b4a5968778695a4b3c2d1e0f11223344\n").as_deref(),
         Some("f0e1d2c3")
     );
-    assert_eq!(
-        head_name("ref: refs/heads/feature/x\n").as_deref(),
-        Some("feature/x")
-    );
+    assert_eq!(head_name("ref: refs/heads/feature/x\n").as_deref(), Some("feature/x"));
     assert_eq!(head_name(""), None);
 }
 
@@ -858,11 +797,8 @@ fn a_linked_worktree_resolves_head_through_its_gitdir_pointer() {
     fs::write(gitdir.join("HEAD"), "ref: refs/heads/hotfix\n").expect("HEAD writes");
     let worktree = directory.path().join("wt");
     fs::create_dir_all(&worktree).expect("the fixture worktree is creatable");
-    fs::write(
-        worktree.join(".git"),
-        format!("gitdir: {}\n", gitdir.display()),
-    )
-    .expect("the pointer writes");
+    fs::write(worktree.join(".git"), format!("gitdir: {}\n", gitdir.display()))
+        .expect("the pointer writes");
 
     let mut status = roster(&[StatuslineElement::Git]);
     status.git = RefCell::new(discover_git(&worktree));
@@ -891,11 +827,7 @@ fn a_short_area_keeps_the_main_line_over_the_extra_ones() {
 #[test]
 fn todos_move_their_title_to_the_detail_line_when_detail_is_on() {
     let mut status = roster(&[StatuslineElement::Todos]);
-    status.set_todos(Some(Todos {
-        done: 2,
-        total: 5,
-        current: Some("wire the meter".to_owned()),
-    }));
+    status.set_todos(Some(Todos { done: 2, total: 5, current: Some("wire the meter".to_owned()) }));
 
     assert_eq!(rendered(&status, 80), "todos:2/5 (working: wire the meter)");
 

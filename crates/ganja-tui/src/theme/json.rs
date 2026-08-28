@@ -133,10 +133,7 @@ impl Palette {
     /// is what the built-in terminal theme is.
     pub(crate) fn from_pairs(pairs: impl IntoIterator<Item = (&'static str, Rgba)>) -> Self {
         Self {
-            colors: pairs
-                .into_iter()
-                .map(|(key, color)| (key.to_owned(), color))
-                .collect(),
+            colors: pairs.into_iter().map(|(key, color)| (key.to_owned(), color)).collect(),
             explicit_selected_text: false,
         }
     }
@@ -171,10 +168,7 @@ impl ThemeJson {
             // present; their absence is what the post-pass below fills in.
             let color = self
                 .resolve_value(value, mode, &mut Vec::new())
-                .map_err(|source| ThemeError::Key {
-                    key: key.clone(),
-                    source: Box::new(source),
-                })?;
+                .map_err(|source| ThemeError::Key { key: key.clone(), source: Box::new(source) })?;
             colors.insert(key.clone(), color);
         }
 
@@ -190,10 +184,7 @@ impl ThemeJson {
             colors.insert(BACKGROUND_MENU.to_owned(), element);
         }
 
-        Ok(Palette {
-            colors,
-            explicit_selected_text,
-        })
+        Ok(Palette { colors, explicit_selected_text })
     }
 
     /// One value, resolved the way upstream's `resolveColor` resolves it.
@@ -213,9 +204,7 @@ impl ThemeJson {
             // ANSI slot instead of an RGB value.
             Value::Number(number) => Ok(ansi_to_rgba(number.as_i64().unwrap_or(-1))),
             Value::Object(arms) => {
-                let arm = arms
-                    .get(mode.key())
-                    .ok_or(ThemeError::MissingArm { mode })?;
+                let arm = arms.get(mode.key()).ok_or(ThemeError::MissingArm { mode })?;
                 // The arm goes back through the same dispatch, so it may itself
                 // be a reference, a hex value, "none", or an ANSI code.
                 self.resolve_value(arm, mode, chain)
@@ -239,9 +228,7 @@ impl ThemeJson {
             return Ok(Rgba::TRANSPARENT);
         }
         if let Some(digits) = text.strip_prefix('#') {
-            return from_hex(digits).ok_or_else(|| ThemeError::Hex {
-                value: text.to_owned(),
-            });
+            return from_hex(digits).ok_or_else(|| ThemeError::Hex { value: text.to_owned() });
         }
 
         if chain.iter().any(|link| link == text) {
@@ -256,9 +243,7 @@ impl ThemeJson {
             .defs
             .get(text)
             .or_else(|| self.theme.get(text))
-            .ok_or_else(|| ThemeError::UnknownReference {
-                name: text.to_owned(),
-            })?;
+            .ok_or_else(|| ThemeError::UnknownReference { name: text.to_owned() })?;
 
         chain.push(text.to_owned());
         let resolved = self.resolve_value(next, mode, chain);

@@ -1,25 +1,16 @@
 use ganja_core::engine::ContextBreakdown;
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 
 use super::{CELLS, Context};
 use crate::theme::Theme;
 
 /// Wide enough to seat the legend beside the grid, the pinned layout.
-const WIDE: Rect = Rect {
-    x: 0,
-    y: 0,
-    width: 120,
-    height: 40,
-};
+const WIDE: Rect = Rect { x: 0, y: 0, width: 120, height: 40 };
 
 /// An 80-column terminal: the house width cannot seat the column beside
 /// the grid, so the panel stacks it below.
-const NARROW: Rect = Rect {
-    x: 0,
-    y: 0,
-    width: 80,
-    height: 36,
-};
+const NARROW: Rect = Rect { x: 0, y: 0, width: 80, height: 36 };
 
 /// A breakdown with something in every category over a small round
 /// window, so shares are easy to reason about by hand.
@@ -41,11 +32,7 @@ fn sized() -> ContextBreakdown {
 }
 
 fn unsized_model() -> ContextBreakdown {
-    ContextBreakdown {
-        window: None,
-        reserve: None,
-        ..sized()
-    }
+    ContextBreakdown { window: None, reserve: None, ..sized() }
 }
 
 fn rendered(dialog: &Context, area: Rect) -> String {
@@ -102,10 +89,8 @@ fn the_grid_always_paints_exactly_two_hundred_cells() {
         },
     ] {
         let dialog = Context::new(None, breakdown.clone());
-        let cells: usize = dialog
-            .cells(breakdown.window.expect("both fixtures are sized"))
-            .iter()
-            .sum();
+        let cells: usize =
+            dialog.cells(breakdown.window.expect("both fixtures are sized")).iter().sum();
         assert_eq!(cells, CELLS, "{breakdown:?}");
     }
 }
@@ -116,10 +101,7 @@ fn the_grid_always_paints_exactly_two_hundred_cells() {
 #[test]
 fn both_renderings_say_estimated() {
     let sized = rendered(&Context::new(None, sized()), WIDE);
-    assert!(
-        sized.contains("Estimated usage by category"),
-        "got:\n{sized}"
-    );
+    assert!(sized.contains("Estimated usage by category"), "got:\n{sized}");
 
     let degraded = rendered(&Context::new(None, unsized_model()), NARROW);
     assert!(degraded.contains("estimated"), "got:\n{degraded}");
@@ -142,10 +124,7 @@ fn a_sized_window_renders_the_title_the_grid_and_every_legend_row() {
     ] {
         assert!(screen.contains(label), "{label} missing:\n{screen}");
     }
-    assert!(
-        screen.contains('\u{26c1}'),
-        "the grid draws used cells:\n{screen}"
-    );
+    assert!(screen.contains('\u{26c1}'), "the grid draws used cells:\n{screen}");
     assert!(screen.contains('\u{26f6}'), "and free ones:\n{screen}");
     assert!(
         screen.contains("30.0k/100.0k tokens (30%)"),
@@ -159,18 +138,12 @@ fn a_sized_window_renders_the_title_the_grid_and_every_legend_row() {
 fn the_free_row_drops_the_word_tokens_and_the_reserve_row_keeps_it() {
     let screen = rendered(&Context::new(None, sized()), WIDE);
 
-    assert!(
-        screen.contains("Free space: 60.0k (60.0%)"),
-        "got:\n{screen}"
-    );
+    assert!(screen.contains("Free space: 60.0k (60.0%)"), "got:\n{screen}");
     assert!(
         !screen.contains("Free space: 60.0k tokens"),
         "the free row carries no unit:\n{screen}"
     );
-    assert!(
-        screen.contains("Autocompact reserve: 10.0k tokens (10.0%)"),
-        "got:\n{screen}"
-    );
+    assert!(screen.contains("Autocompact reserve: 10.0k tokens (10.0%)"), "got:\n{screen}");
 }
 
 /// The pinned layout seats the legend beside the grid where the panel is
@@ -204,23 +177,13 @@ fn the_legend_sits_beside_the_grid_only_when_it_fits() {
 /// once — no fake display name is invented.
 #[test]
 fn a_display_name_renders_over_the_id_and_its_absence_renders_the_id_once() {
-    let paired = rendered(
-        &Context::new(Some("Claude Sonnet 5".to_owned()), sized()),
-        WIDE,
-    );
+    let paired = rendered(&Context::new(Some("Claude Sonnet 5".to_owned()), sized()), WIDE);
     assert!(paired.contains("Claude Sonnet 5"), "got:\n{paired}");
     assert!(paired.contains("claude-sonnet-5"), "got:\n{paired}");
 
     let bare = rendered(&Context::new(None, sized()), WIDE);
-    assert_eq!(
-        bare.matches("claude-sonnet-5").count(),
-        1,
-        "the id renders exactly once:\n{bare}"
-    );
-    let collapsed = rendered(
-        &Context::new(Some("claude-sonnet-5".to_owned()), sized()),
-        WIDE,
-    );
+    assert_eq!(bare.matches("claude-sonnet-5").count(), 1, "the id renders exactly once:\n{bare}");
+    let collapsed = rendered(&Context::new(Some("claude-sonnet-5".to_owned()), sized()), WIDE);
     assert_eq!(
         collapsed.matches("claude-sonnet-5").count(),
         1,
@@ -238,32 +201,19 @@ fn detail_sections_render_exactly_the_categories_whose_counts_exist() {
         screen.contains("\u{2514} 12 tools \u{b7} 11.0k tokens"),
         "the builtin section:\n{screen}"
     );
-    assert!(
-        screen.contains("\u{2514} 3 tools \u{b7} 1.0k tokens"),
-        "the MCP section:\n{screen}"
-    );
-    assert!(
-        screen.contains("MCP tools \u{b7} /mcp"),
-        "the hint names ganja's own door:\n{screen}"
-    );
+    assert!(screen.contains("\u{2514} 3 tools \u{b7} 1.0k tokens"), "the MCP section:\n{screen}");
+    assert!(screen.contains("MCP tools \u{b7} /mcp"), "the hint names ganja's own door:\n{screen}");
 
     let uncounted = rendered(
         &Context::new(
             None,
-            ContextBreakdown {
-                tools_builtin_count: 0,
-                tools_mcp_count: 0,
-                ..sized()
-            },
+            ContextBreakdown { tools_builtin_count: 0, tools_mcp_count: 0, ..sized() },
         ),
         WIDE,
     );
     // Corner-plus-space: the bare corner is also the dialog border's
     // bottom-left glyph, which every rendering carries.
-    assert!(
-        !uncounted.contains("\u{2514} "),
-        "no count, no section:\n{uncounted}"
-    );
+    assert!(!uncounted.contains("\u{2514} "), "no count, no section:\n{uncounted}");
 }
 
 /// A panel too short for everything drops the detail sections first and
@@ -272,10 +222,7 @@ fn detail_sections_render_exactly_the_categories_whose_counts_exist() {
 #[test]
 fn the_details_and_the_id_line_yield_before_the_close_hint_does() {
     let short = Rect::new(0, 0, 80, 30);
-    let screen = rendered(
-        &Context::new(Some("Claude Sonnet 5".to_owned()), sized()),
-        short,
-    );
+    let screen = rendered(&Context::new(Some("Claude Sonnet 5".to_owned()), sized()), short);
 
     assert!(screen.contains("[Esc] close"), "got:\n{screen}");
     // Corner-plus-space, not the bare corner the border also draws.
@@ -284,10 +231,7 @@ fn the_details_and_the_id_line_yield_before_the_close_hint_does() {
         screen.contains("Claude Sonnet 5") && !screen.contains("claude-sonnet-5"),
         "the pair collapsed to the display name:\n{screen}"
     );
-    assert!(
-        screen.contains("Free space"),
-        "the legend survived whole:\n{screen}"
-    );
+    assert!(screen.contains("Free space"), "the legend survived whole:\n{screen}");
 }
 
 /// The degraded panel: totals, the honest sentence, and no invented
@@ -296,19 +240,10 @@ fn the_details_and_the_id_line_yield_before_the_close_hint_does() {
 fn an_unsized_model_renders_totals_and_the_honest_sentence() {
     let screen = rendered(&Context::new(None, unsized_model()), NARROW);
 
-    assert!(
-        screen.contains("unsized model \u{2014} percentages unavailable"),
-        "got:\n{screen}"
-    );
+    assert!(screen.contains("unsized model \u{2014} percentages unavailable"), "got:\n{screen}");
     assert!(screen.contains("total"), "got:\n{screen}");
-    assert!(
-        !screen.contains('%'),
-        "no denominator, no percentages:\n{screen}"
-    );
-    assert!(
-        !screen.contains("Free space"),
-        "free space needs a window:\n{screen}"
-    );
+    assert!(!screen.contains('%'), "no denominator, no percentages:\n{screen}");
+    assert!(!screen.contains("Free space"), "free space needs a window:\n{screen}");
 }
 
 #[test]

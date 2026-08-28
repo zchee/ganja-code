@@ -61,11 +61,8 @@ const MODEL: &str = "skills-model";
 fn plant(root: &std::path::Path, name: &str, frontmatter: &str, body: &str) -> std::path::PathBuf {
     let dir = root.join(name);
     std::fs::create_dir_all(&dir).expect("the fixture's directories are creatable");
-    std::fs::write(
-        dir.join("SKILL.md"),
-        format!("---\n{frontmatter}\n---\n{body}"),
-    )
-    .expect("the fixture is writable");
+    std::fs::write(dir.join("SKILL.md"), format!("---\n{frontmatter}\n---\n{body}"))
+        .expect("the fixture is writable");
 
     dir
 }
@@ -147,18 +144,12 @@ async fn a_session_reads_ganjas_own_two_homes_and_whatever_its_config_named() {
         (ganja_project.clone(), "from-ganja-project"),
         // Foreign, and the generic project-root names — never read.
         (claude_home.clone(), "from-home-claude"),
-        (
-            home.path().join(".agents").join("skills"),
-            "from-home-agents",
-        ),
+        (home.path().join(".agents").join("skills"), "from-home-agents"),
         (cwd.join(".claude").join("skills"), "from-project-claude"),
         (cwd.join(".agents").join("skills"), "from-project-agents"),
         // The singular spelling upstream also accepts, under ganja's own global
         // home: one name, not two, so this one stays unread.
-        (
-            home.path().join("config").join("ganja").join("skill"),
-            "from-ganja-global-singular",
-        ),
+        (home.path().join("config").join("ganja").join("skill"), "from-ganja-global-singular"),
         (cwd.join("skills"), "from-project-root"),
     ] {
         plant(
@@ -183,10 +174,7 @@ async fn a_session_reads_ganjas_own_two_homes_and_whatever_its_config_named() {
     let canonical_cwd = std::fs::canonicalize(&cwd).expect("the fixture checkout canonicalises");
     assert_eq!(
         bare_roots.dirs(),
-        [
-            ganja_global.clone(),
-            canonical_cwd.join(".ganja").join("skills")
-        ],
+        [ganja_global.clone(), canonical_cwd.join(".ganja").join("skills")],
         "the global home first, the checkout's second"
     );
 
@@ -196,10 +184,7 @@ async fn a_session_reads_ganjas_own_two_homes_and_whatever_its_config_named() {
         .collect();
     assert_eq!(
         discovered,
-        vec![
-            "from-ganja-global".to_owned(),
-            "from-ganja-project".to_owned()
-        ],
+        vec!["from-ganja-global".to_owned(), "from-ganja-project".to_owned()],
         "both of ganja's own and neither the foreign ones nor the singular spelling"
     );
 
@@ -235,10 +220,7 @@ async fn a_session_reads_ganjas_own_two_homes_and_whatever_its_config_named() {
         "a session that configured nothing is still offered ganja's own: {default_prompt}"
     );
     for foreign in FOREIGN {
-        assert!(
-            !default_prompt.contains(foreign),
-            "and never {foreign}: {default_prompt}"
-        );
+        assert!(!default_prompt.contains(foreign), "and never {foreign}: {default_prompt}");
     }
     assert!(
         !default_prompt.contains("from-ganja-global-singular"),
@@ -263,12 +245,8 @@ async fn a_session_reads_ganjas_own_two_homes_and_whatever_its_config_named() {
         tool_call("skill", serde_json::json!({ "name": "from-ganja-project" })),
         says("nothing to load"),
     ]);
-    let engine = Engine::new(
-        provider,
-        MODEL,
-        Arc::new(Registry::with_builtins()),
-        Permissions::default(),
-    );
+    let engine =
+        Engine::new(provider, MODEL, Arc::new(Registry::with_builtins()), Permissions::default());
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
     engine
         .send(Command::SendPrompt {
@@ -298,10 +276,7 @@ async fn a_session_reads_ganjas_own_two_homes_and_whatever_its_config_named() {
     // --- Phase 2. A config naming a directory of its own: it is read on top of
     // the two defaults, and it ranks above them.
     let config = Config {
-        skills: SkillsConfig {
-            paths: vec![elsewhere.display().to_string()],
-            urls: Vec::new(),
-        },
+        skills: SkillsConfig { paths: vec![elsewhere.display().to_string()], urls: Vec::new() },
         ..Config::default()
     };
     let roots: Roots = instruction::skill_roots(&config, &cwd);
@@ -339,9 +314,7 @@ async fn a_session_reads_ganjas_own_two_homes_and_whatever_its_config_named() {
         "the skill the config pointed at is offered: {prompt}"
     );
     assert!(
-        prompt
-            .find("Working directory")
-            .expect("the environment block")
+        prompt.find("Working directory").expect("the environment block")
             < prompt.find("<available_skills>").expect("the skills block"),
         "and last, where upstream puts it: {prompt}"
     );
@@ -392,10 +365,7 @@ async fn a_session_reads_ganjas_own_two_homes_and_whatever_its_config_named() {
     // is one line of config away, and the tilde resolves against the home
     // directory the way upstream resolves it.
     let claude_config = Config {
-        skills: SkillsConfig {
-            paths: vec!["~/.claude/skills".to_owned()],
-            urls: Vec::new(),
-        },
+        skills: SkillsConfig { paths: vec!["~/.claude/skills".to_owned()], urls: Vec::new() },
         ..Config::default()
     };
     let claude_roots: Roots = instruction::skill_roots(&claude_config, &cwd);

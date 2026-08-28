@@ -1,17 +1,42 @@
-# rustfmt configuration. The toolchain is nightly (see rust-toolchain.toml), so
-# the unstable options below are available; on a stable toolchain rustfmt would
-# ignore them with a warning rather than erroring.
+# rustfmt configuration. The toolchain is the floating non-dated nightly (see
+# rust-toolchain.toml), so the unstable options below are available; on a
+# stable toolchain rustfmt would ignore them with a warning rather than
+# erroring. Three options here are unstable — group_imports,
+# imports_granularity, format_code_in_doc_comments — and a nightly bump can
+# change what any of them emits with no code change, which is the accepted
+# cost of floating the channel.
 
-# Match the workspace edition so rustfmt applies 2024 idioms (e.g. the reordered
-# `use` prelude rules) rather than an older default.
+# Match the workspace edition so rustfmt parses 2024 syntax.
 edition = "2024"
+
+# Pin the formatting style itself, separately from the parse edition. On this
+# tree the pin is a byte-for-byte no-op (measured 2026-08-28); it exists so a
+# future nightly moving the default style cannot reformat the tree overnight.
+style_edition = "2024"
+
+# rustfmt's own default, restated so the width every option below leans on is
+# stated here rather than remembered.
+max_width = 100
+
+# Every width heuristic (fn_call_width, chain_width, struct_lit_width, …)
+# follows max_width: whatever fits in 100 columns stays on one line. The
+# accepted cost is layout flips at the threshold — adding one argument can
+# re-flow a whole call between one line and many — so diffs run larger than
+# the edits that caused them.
+use_small_heuristics = "Max"
 
 # Group `use` blocks as standard library, then external crates, then this
 # crate's own modules, each separated by a blank line — the ordering the code
 # is already written in, now enforced instead of maintained by hand.
 group_imports = "StdExternalCrate"
 
-# Merge imports from the same crate into one nested `use` (`use std::{...}`),
-# which is the shape already used throughout; keeps a file's import surface to
-# one block per crate rather than a line per path.
-imports_granularity = "Crate"
+# One `use` statement per module rather than one nested block per crate.
+# Chosen for the multi-agent workflow: two worktree lanes adding imports from
+# different modules touch different lines and merge cleanly, where the old
+# `Crate` shape funneled every import into a single `use std::{...}` block —
+# a shared merge-conflict hotspot.
+imports_granularity = "Module"
+
+# Reformat the ```rust blocks inside doc comments, so doctest code holds to
+# the same style as the code beside it.
+format_code_in_doc_comments = true

@@ -26,21 +26,14 @@ use support::{HEALTHY, Reply, Stub};
 async fn health_rides_the_socket_form() {
     let stub = Stub::on_socket(|_| Reply::ok(HEALTHY)).await;
 
-    let health = stub
-        .client()
-        .health()
-        .await
-        .expect("health answers over the socket");
+    let health = stub.client().health().await.expect("health answers over the socket");
     assert!(health.healthy);
     assert_eq!(health.version, "0.1.0");
 
     let request = stub.only_request();
     assert_eq!(request.method, "GET");
     assert_eq!(request.path, "/global/health");
-    assert_eq!(
-        request.authorization, None,
-        "a same-uid socket presents no credential"
-    );
+    assert_eq!(request.authorization, None, "a same-uid socket presents no credential");
 }
 
 // ---------------------------------------------------------------------------

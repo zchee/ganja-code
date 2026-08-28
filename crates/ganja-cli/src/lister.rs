@@ -18,9 +18,11 @@
 //! its caller's session id would be a second place that rule could drift
 //! from the identity resolver's own copy of it.
 
-use std::{path::PathBuf, time::Duration};
+use std::path::PathBuf;
+use std::time::Duration;
 
-use futures::{FutureExt as _, future::BoxFuture};
+use futures::FutureExt as _;
+use futures::future::BoxFuture;
 use ganja_core::tool::registry;
 use ganja_tui::lister::{Health, Listing, LiveSession};
 
@@ -62,10 +64,7 @@ async fn list(directory: &std::path::Path) -> Listing {
     let registered = match registry::list(directory) {
         Ok(registered) => registered,
         Err(error) => {
-            return Listing::Partial {
-                rows: Vec::new(),
-                error: error.to_string(),
-            };
+            return Listing::Partial { rows: Vec::new(), error: error.to_string() };
         }
     };
 

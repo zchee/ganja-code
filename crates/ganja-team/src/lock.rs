@@ -59,14 +59,12 @@
 //! Nothing here logs a message body: a lock line carries a path, an age and a
 //! count. `tests/no_bodies_in_logs.rs` is the canary that keeps it true.
 
-use std::{
-    collections::HashSet,
-    ffi::OsString,
-    fs, io,
-    path::{Path, PathBuf},
-    sync::{Condvar, LazyLock, Mutex, PoisonError},
-    time::{Duration, SystemTime},
-};
+use std::collections::HashSet;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::sync::{Condvar, LazyLock, Mutex, PoisonError};
+use std::time::{Duration, SystemTime};
+use std::{fs, io};
 
 use backon::{BlockingRetryable as _, ExponentialBuilder};
 
@@ -226,10 +224,7 @@ pub fn acquire(target: &Path) -> Result<Guard, LockError> {
     // this binding's own `Drop` on every error path below — including the `?`.
     let local = Local::hold(key);
 
-    (|| take(&dir))
-        .retry(schedule())
-        .when(LockError::is_contention)
-        .call()?;
+    (|| take(&dir)).retry(schedule()).when(LockError::is_contention).call()?;
     tracing::debug!(lock = %dir.display(), "took an inbox lock");
 
     Ok(Guard { dir, _local: local })
@@ -309,9 +304,7 @@ fn make(dir: &Path) -> Result<bool, LockError> {
 fn age_of(dir: &Path) -> io::Result<Duration> {
     let modified = fs::metadata(dir)?.modified()?;
 
-    Ok(SystemTime::now()
-        .duration_since(modified)
-        .unwrap_or(Duration::ZERO))
+    Ok(SystemTime::now().duration_since(modified).unwrap_or(Duration::ZERO))
 }
 
 /// Removes a lock whose holder is gone, and says so.
@@ -334,18 +327,14 @@ fn break_stale(dir: &Path, age: Duration) -> Result<(), LockError> {
         // the module doc names; a directory that will not go is something else
         // (`ENOTEMPTY` — somebody wrote inside a lock, which is the failure a
         // pid file would cause) and travels as itself.
-        Err(_) if !dir.is_dir() => Err(LockError::NotADirectory {
-            path: dir.to_path_buf(),
-        }),
+        Err(_) if !dir.is_dir() => Err(LockError::NotADirectory { path: dir.to_path_buf() }),
         Err(error) => Err(error.into()),
     }
 }
 
 /// The refusal a contended attempt reports, and the one the ladder retries.
 fn held(dir: &Path) -> LockError {
-    LockError::Held {
-        path: dir.to_path_buf(),
-    }
+    LockError::Held { path: dir.to_path_buf() }
 }
 
 /// `${path}.lock`, built on the bytes rather than through `Path::set_extension`
@@ -402,9 +391,7 @@ impl Local {
 impl Drop for Local {
     fn drop(&mut self) {
         let (held, free) = &*IN_PROCESS;
-        held.lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&self.key);
+        held.lock().unwrap_or_else(PoisonError::into_inner).remove(&self.key);
         free.notify_all();
     }
 }

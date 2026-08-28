@@ -10,11 +10,9 @@
 //! and refusing them would break the large fraction of the web that answers
 //! `http` with a 301 to `https`.
 
-use std::{
-    net::{IpAddr, SocketAddr, ToSocketAddrs as _},
-    rc::Rc,
-    time::Duration,
-};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs as _};
+use std::rc::Rc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt as _;
@@ -148,9 +146,7 @@ impl WebfetchTool {
     /// `webfetch-refuses-private-addresses`).
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            allow_private: false,
-        }
+        Self { allow_private: false }
     }
 
     /// The tool with that refusal lifted, for a session whose config asked for
@@ -162,9 +158,7 @@ impl WebfetchTool {
     /// session can answer.
     #[must_use]
     pub fn allowing_private() -> Self {
-        Self {
-            allow_private: true,
-        }
+        Self { allow_private: true }
     }
 }
 
@@ -189,10 +183,7 @@ impl Tool for WebfetchTool {
     }
 
     fn describe(&self, args: &serde_json::Value) -> String {
-        let url = args
-            .get("url")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
+        let url = args.get("url").and_then(serde_json::Value::as_str).unwrap_or_default();
 
         format!("fetch {url}")
     }
@@ -210,9 +201,9 @@ impl Tool for WebfetchTool {
             ));
         }
 
-        let timeout = args.timeout.map_or(DEFAULT_TIMEOUT, |seconds| {
-            Duration::from_secs(seconds).min(MAX_TIMEOUT)
-        });
+        let timeout = args
+            .timeout
+            .map_or(DEFAULT_TIMEOUT, |seconds| Duration::from_secs(seconds).min(MAX_TIMEOUT));
 
         tokio::select! {
             fetched = fetch(&args, timeout, self.allow_private) => fetched,
@@ -305,15 +296,10 @@ fn refusal(host: &str) -> ToolError {
 
 /// `url`'s host, without the brackets a URL writes an IPv6 literal in.
 fn host_of(url: &reqwest::Url) -> Result<String, ToolError> {
-    let host = url
-        .host_str()
-        .ok_or_else(|| ToolError::Failed("the URL names no host".to_owned()))?;
+    let host =
+        url.host_str().ok_or_else(|| ToolError::Failed("the URL names no host".to_owned()))?;
 
-    Ok(host
-        .strip_prefix('[')
-        .and_then(|host| host.strip_suffix(']'))
-        .unwrap_or(host)
-        .to_owned())
+    Ok(host.strip_prefix('[').and_then(|host| host.strip_suffix(']')).unwrap_or(host).to_owned())
 }
 
 /// Gets the URL and renders the body in the format the call asked for.
@@ -349,12 +335,7 @@ async fn fetch(
             .unwrap_or_default()
             .to_owned();
         let body = collect(response).await?;
-        let mime = content_type
-            .split(';')
-            .next()
-            .unwrap_or_default()
-            .trim()
-            .to_ascii_lowercase();
+        let mime = content_type.split(';').next().unwrap_or_default().trim().to_ascii_lowercase();
         let title = format!("{} ({content_type})", args.url);
 
         // The protocol carries no attachments yet, so an image is reported
@@ -451,11 +432,9 @@ async fn client(url: &str, allow_private: bool) -> Result<reqwest::Client, ToolE
     // request is in flight, where a thread is affordable.
     let checked = {
         let parsed = parsed.clone();
-        tokio::task::spawn_blocking(move || resolved_and_allowed(&parsed))
-            .await
-            .map_err(|error| {
-                ToolError::Failed(format!("the address check did not run: {error}"))
-            })??
+        tokio::task::spawn_blocking(move || resolved_and_allowed(&parsed)).await.map_err(
+            |error| ToolError::Failed(format!("the address check did not run: {error}")),
+        )??
     };
 
     // Only a name can be pinned; an address written into the URL is already
@@ -467,9 +446,7 @@ async fn client(url: &str, allow_private: bool) -> Result<reqwest::Client, ToolE
         builder.resolve_to_addrs(&host, &checked)
     };
 
-    builder
-        .build()
-        .map_err(|error| ToolError::Failed(format!("no HTTP client: {error}")))
+    builder.build().map_err(|error| ToolError::Failed(format!("no HTTP client: {error}")))
 }
 
 /// Reads the body, refusing one too big to be worth holding.
@@ -481,10 +458,7 @@ async fn client(url: &str, allow_private: bool) -> Result<reqwest::Client, ToolE
 async fn collect(response: reqwest::Response) -> Result<Vec<u8>, ToolError> {
     let too_large = || ToolError::Failed("Response too large (exceeds 5MB limit)".to_owned());
 
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_RESPONSE_SIZE as u64)
-    {
+    if response.content_length().is_some_and(|length| length > MAX_RESPONSE_SIZE as u64) {
         return Err(too_large());
     }
 
@@ -587,13 +561,7 @@ fn push_text(node: &Rc<Node>, out: &mut String) {
 
     // Children go on the stack reversed, so popping visits them in order.
     fn enter_children(work: &mut Vec<Work>, node: &Rc<Node>) {
-        work.extend(
-            node.children
-                .borrow()
-                .iter()
-                .rev()
-                .map(|child| Work::Enter(Rc::clone(child))),
-        );
+        work.extend(node.children.borrow().iter().rev().map(|child| Work::Enter(Rc::clone(child))));
     }
 
     let mut work = vec![Work::Enter(Rc::clone(node))];
@@ -640,9 +608,7 @@ fn drop_tree_iteratively(root: Rc<Node>) {
     let mut work = vec![root];
     while let Some(node) = work.pop() {
         work.extend(std::mem::take(&mut *node.children.borrow_mut()));
-        if let NodeData::Element {
-            template_contents, ..
-        } = &node.data
+        if let NodeData::Element { template_contents, .. } = &node.data
             && let Some(contents) = template_contents.borrow_mut().take()
         {
             work.push(contents);

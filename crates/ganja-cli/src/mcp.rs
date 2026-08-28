@@ -47,11 +47,9 @@
 //! printed on success says exactly when it takes effect — `/mcp` Reconnect,
 //! or the next start.
 
-use std::{
-    collections::BTreeMap,
-    fs, io,
-    path::{Path, PathBuf},
-};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::{fs, io};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use clap::Args;
@@ -60,7 +58,8 @@ use ganja_permission::Project;
 use serde_json::{Map, Value};
 use toml_edit::{DocumentMut, Item, Table};
 
-use crate::{position::located, staging::stage};
+use crate::position::located;
+use crate::staging::stage;
 
 /// The config file this edits, in every tier — the one name ganja reads.
 const CONFIG_FILE: &str = "ganja.toml";
@@ -249,11 +248,7 @@ pub(crate) fn remove(args: &RemoveArgs) -> Result<()> {
     }
     write(&path, &document)?;
 
-    println!(
-        "removed mcp server \"{}\" from {}",
-        args.name,
-        path.display()
-    );
+    println!("removed mcp server \"{}\" from {}", args.name, path.display());
     // The other tier, because a `ganja.toml` there is a file whose entry is
     // still merged, and saying nothing about it would read as "it is gone now".
     if let Some(file) = tier_file(tier.other(), &cwd)
@@ -343,9 +338,7 @@ fn servers<'a>(document: &'a mut DocumentMut, path: &Path) -> Result<&'a mut Ite
         root.insert(TABLE, Item::Table(created));
     }
 
-    let table = root
-        .get_mut(TABLE)
-        .expect("the table was just created if it was not there");
+    let table = root.get_mut(TABLE).expect("the table was just created if it was not there");
     if table.as_table_like().is_none() {
         bail!("{}'s `{TABLE}` is not a table", path.display());
     }
@@ -355,9 +348,7 @@ fn servers<'a>(document: &'a mut DocumentMut, path: &Path) -> Result<&'a mut Ite
 
 /// Whether the `mcp` table already declares `name`.
 fn held(servers: &Item, name: &str) -> bool {
-    servers
-        .as_table_like()
-        .is_some_and(|table| table.contains_key(name))
+    servers.as_table_like().is_some_and(|table| table.contains_key(name))
 }
 
 /// Puts `entry` under the `mcp` table, and says whether it replaced one that
@@ -377,16 +368,10 @@ fn put(servers: &mut Item, name: &str, entry: Table) -> bool {
     // An `mcp` the file spelled inline can hold nothing but values, so an
     // entry appended to one has to be a value as well.
     let inline = servers.is_value();
-    let table = servers
-        .as_table_like_mut()
-        .expect("`servers` refuses anything else");
+    let table = servers.as_table_like_mut().expect("`servers` refuses anything else");
 
     let Some(slot) = table.get_mut(name) else {
-        let fresh = if inline {
-            inline_value(entry)
-        } else {
-            Item::Table(entry)
-        };
+        let fresh = if inline { inline_value(entry) } else { Item::Table(entry) };
         table.insert(name, fresh);
 
         return false;
@@ -408,10 +393,7 @@ fn put(servers: &mut Item, name: &str, entry: Table) -> bool {
 
 /// Deletes `name` from the `mcp` table, or says it was not there.
 fn take(servers: &mut Item, name: &str) -> Option<Item> {
-    servers
-        .as_table_like_mut()
-        .expect("`servers` refuses anything else")
-        .remove(name)
+    servers.as_table_like_mut().expect("`servers` refuses anything else").remove(name)
 }
 
 /// One entry as an inline value, for a table that can hold nothing else.
@@ -585,11 +567,7 @@ fn shadow(written: Tier, name: &str, cwd: &Path) {
     }
 
     // The project tier is merged last, so it wins.
-    let winner = if written == Tier::Project {
-        written
-    } else {
-        other
-    };
+    let winner = if written == Tier::Project { written } else { other };
     eprintln!(
         "warning: mcp server \"{name}\" is also in {}; {}'s entry wins at load",
         file.display(),
@@ -619,11 +597,7 @@ fn origin(name: &str, cwd: &Path) -> String {
         [only] => only.display().to_string(),
         [earlier @ .., last] => format!(
             "{} (overridden by {})",
-            earlier
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", "),
+            earlier.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join(", "),
             last.display()
         ),
     }
@@ -649,10 +623,7 @@ fn holds(path: &Path, name: &str) -> bool {
         return false;
     };
 
-    document
-        .get(TABLE)
-        .and_then(Item::as_table_like)
-        .is_some_and(|table| table.contains_key(name))
+    document.get(TABLE).and_then(Item::as_table_like).is_some_and(|table| table.contains_key(name))
 }
 
 /// One entry's fields, in the order somebody reads them.

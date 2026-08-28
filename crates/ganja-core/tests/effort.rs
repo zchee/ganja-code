@@ -15,14 +15,13 @@
 
 use std::sync::{Arc, Once, OnceLock};
 
-use futures::{StreamExt as _, stream::BoxStream};
-use ganja_core::{
-    Engine, catalog,
-    permission::Permissions,
-    protocol::{Command, Event},
-    provider::{FakeProvider, fake},
-    tool::Registry,
-};
+use futures::StreamExt as _;
+use futures::stream::BoxStream;
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{Command, Event};
+use ganja_core::provider::{FakeProvider, fake};
+use ganja_core::tool::Registry;
+use ganja_core::{Engine, catalog};
 use tempfile::TempDir;
 
 /// The options the fixture publishes under `canned`'s `max` effort, spelled
@@ -111,9 +110,7 @@ async fn selecting_an_effort_lands_its_option_map_in_the_next_request() {
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
-        .send(Command::SwitchEffort {
-            effort: Some("max".to_owned()),
-        })
+        .send(Command::SwitchEffort { effort: Some("max".to_owned()) })
         .await
         .expect("the fixture catalog carries max");
     assert_eq!(engine.effort().as_deref(), Some("max"));
@@ -153,15 +150,11 @@ async fn switching_to_a_model_without_the_effort_clears_it_and_announces_the_cle
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
-        .send(Command::SwitchEffort {
-            effort: Some("mini".to_owned()),
-        })
+        .send(Command::SwitchEffort { effort: Some("mini".to_owned()) })
         .await
         .expect("the fixture catalog carries mini");
     engine
-        .send(Command::SwitchModel {
-            model: "plain".to_owned(),
-        })
+        .send(Command::SwitchModel { model: "plain".to_owned() })
         .await
         .expect("the fixture catalog carries plain");
 
@@ -188,9 +181,7 @@ async fn a_wrong_name_is_refused_listing_the_real_names() {
     let engine = engine_over(FakeProvider::new("hi", std::time::Duration::from_millis(1)));
 
     let refusal = engine
-        .send(Command::SwitchEffort {
-            effort: Some("nope".to_owned()),
-        })
+        .send(Command::SwitchEffort { effort: Some("nope".to_owned()) })
         .await
         .expect_err("the fixture catalog has no such name")
         .to_string();
@@ -210,10 +201,7 @@ async fn the_stored_effort_survives_a_resume() {
     let storage = || ganja_core::Storage::open(directory.path().join("storage"));
 
     let first = Engine::persistent(
-        Arc::new(FakeProvider::new(
-            "hello",
-            std::time::Duration::from_millis(1),
-        )),
+        Arc::new(FakeProvider::new("hello", std::time::Duration::from_millis(1))),
         fake::MODEL,
         Arc::new(Registry::new(Vec::new())),
         Permissions::default(),
@@ -221,9 +209,7 @@ async fn the_stored_effort_survives_a_resume() {
     );
     let mut events = first.subscribe().await.expect("the first subscriber wins");
     first
-        .send(Command::SwitchEffort {
-            effort: Some("max".to_owned()),
-        })
+        .send(Command::SwitchEffort { effort: Some("max".to_owned()) })
         .await
         .expect("the fixture catalog carries max");
     first
@@ -237,27 +223,18 @@ async fn the_stored_effort_survives_a_resume() {
         .await
         .expect("an idle engine accepts a prompt");
     until_finished(&mut events).await;
-    let session = first
-        .current_session()
-        .expect("the prompt minted a session")
-        .id;
+    let session = first.current_session().expect("the prompt minted a session").id;
     drop(events);
     drop(first);
 
     let second = Engine::persistent(
-        Arc::new(FakeProvider::new(
-            "hello",
-            std::time::Duration::from_millis(1),
-        )),
+        Arc::new(FakeProvider::new("hello", std::time::Duration::from_millis(1))),
         fake::MODEL,
         Arc::new(Registry::new(Vec::new())),
         Permissions::default(),
         storage(),
     );
-    second
-        .resume(&session)
-        .await
-        .expect("the stored session resumes");
+    second.resume(&session).await.expect("the stored session resumes");
 
     assert_eq!(
         second.effort().as_deref(),
@@ -317,11 +294,7 @@ async fn a_configured_effort_the_model_does_not_serve_clears_instead_of_refusing
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine.seed_effort(Some("nope".to_owned())).await;
-    assert_eq!(
-        engine.effort(),
-        None,
-        "the session starts in the state it always starts in"
-    );
+    assert_eq!(engine.effort(), None, "the session starts in the state it always starts in");
 
     engine
         .send(Command::SendPrompt {
@@ -335,9 +308,7 @@ async fn a_configured_effort_the_model_does_not_serve_clears_instead_of_refusing
         .expect("the session still starts");
     let seen = until_finished(&mut events).await;
     assert!(
-        !seen
-            .iter()
-            .any(|event| matches!(event, Event::EffortChanged { .. })),
+        !seen.iter().any(|event| matches!(event, Event::EffortChanged { .. })),
         "nothing was adopted, so nothing was announced: {seen:?}"
     );
     assert!(
@@ -355,10 +326,7 @@ async fn a_resumed_session_keeps_its_stored_effort_over_the_configured_one() {
     let storage = || ganja_core::Storage::open(directory.path().join("storage"));
     let persistent = || {
         Engine::persistent(
-            Arc::new(FakeProvider::new(
-                "hello",
-                std::time::Duration::from_millis(1),
-            )),
+            Arc::new(FakeProvider::new("hello", std::time::Duration::from_millis(1))),
             fake::MODEL,
             Arc::new(Registry::new(Vec::new())),
             Permissions::default(),
@@ -369,9 +337,7 @@ async fn a_resumed_session_keeps_its_stored_effort_over_the_configured_one() {
     let first = persistent();
     let mut events = first.subscribe().await.expect("the first subscriber wins");
     first
-        .send(Command::SwitchEffort {
-            effort: Some("mini".to_owned()),
-        })
+        .send(Command::SwitchEffort { effort: Some("mini".to_owned()) })
         .await
         .expect("the fixture catalog carries mini");
     first
@@ -385,10 +351,7 @@ async fn a_resumed_session_keeps_its_stored_effort_over_the_configured_one() {
         .await
         .expect("an idle engine accepts a prompt");
     until_finished(&mut events).await;
-    let chosen = first
-        .current_session()
-        .expect("the prompt minted a session")
-        .id;
+    let chosen = first.current_session().expect("the prompt minted a session").id;
     drop(events);
     drop(first);
 
@@ -406,18 +369,12 @@ async fn a_resumed_session_keeps_its_stored_effort_over_the_configured_one() {
     .await
     .expect("an idle engine accepts a prompt");
     until_finished(&mut events).await;
-    let unchosen = bare
-        .current_session()
-        .expect("the prompt minted a session")
-        .id;
+    let unchosen = bare.current_session().expect("the prompt minted a session").id;
     drop(events);
     drop(bare);
 
     let resumed = persistent();
-    resumed
-        .resume(&chosen)
-        .await
-        .expect("the stored session resumes");
+    resumed.resume(&chosen).await.expect("the stored session resumes");
     resumed.seed_effort(Some("max".to_owned())).await;
     assert_eq!(
         resumed.effort().as_deref(),
@@ -426,14 +383,7 @@ async fn a_resumed_session_keeps_its_stored_effort_over_the_configured_one() {
     );
 
     let seeded = persistent();
-    seeded
-        .resume(&unchosen)
-        .await
-        .expect("the stored session resumes");
+    seeded.resume(&unchosen).await.expect("the stored session resumes");
     seeded.seed_effort(Some("max".to_owned())).await;
-    assert_eq!(
-        seeded.effort().as_deref(),
-        Some("max"),
-        "and a row carrying none falls back to it"
-    );
+    assert_eq!(seeded.effort().as_deref(), Some("max"), "and a row carrying none falls back to it");
 }

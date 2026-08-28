@@ -18,19 +18,18 @@
 
 #![cfg(unix)]
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 use futures::stream::BoxStream;
-use ganja_core::{
-    Engine, Incoming, NotReceived,
-    config::{DialogExpiry, InboundPolicy},
-    engine::{PeerEnvelope, SenderMode},
-    permission::Permissions,
-    protocol::{Command, Event, HoldCause, PermissionMode},
-    provider::{ChatRequest, FakeProvider},
-    teammate::TeammateRegistry,
-    tool::Registry,
-};
+use ganja_core::config::{DialogExpiry, InboundPolicy};
+use ganja_core::engine::{PeerEnvelope, SenderMode};
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{Command, Event, HoldCause, PermissionMode};
+use ganja_core::provider::{ChatRequest, FakeProvider};
+use ganja_core::teammate::TeammateRegistry;
+use ganja_core::tool::Registry;
+use ganja_core::{Engine, Incoming, NotReceived};
 use ganja_protocol::PolicySource;
 use ganja_testkit::{ScriptedProvider, team, tool_call};
 
@@ -77,21 +76,14 @@ impl Sender {
         .with_inbound_bypass(seeded)
         .with_teammates(Arc::clone(&registry));
 
-        Self {
-            engine: Arc::new(engine),
-            provider,
-            requests,
-            _home: home,
-        }
+        Self { engine: Arc::new(engine), provider, requests, _home: home }
     }
 
     /// Queues the step that makes the next turn call `send_message` at
     /// `address`.
     fn will_send_to(&self, address: &str, text: &str) {
-        self.provider.push(tool_call(
-            "send_message",
-            serde_json::json!({"to": address, "message": text}),
-        ));
+        self.provider
+            .push(tool_call("send_message", serde_json::json!({"to": address, "message": text})));
     }
 
     /// Takes one turn and drains it.
@@ -110,10 +102,7 @@ impl Sender {
     }
 
     async fn events(&self) -> BoxStream<'static, Event> {
-        self.engine
-            .subscribe()
-            .await
-            .expect("the first subscriber wins")
+        self.engine.subscribe().await.expect("the first subscriber wins")
     }
 }
 
@@ -145,11 +134,7 @@ impl Receiver {
         .with_inbound_bypass(seeded)
         .with_teammates(Arc::clone(&registry));
 
-        Self {
-            engine: Arc::new(engine),
-            registry,
-            _home: home,
-        }
+        Self { engine: Arc::new(engine), registry, _home: home }
     }
 
     /// What the lead's inbox holds right now.
@@ -172,10 +157,7 @@ fn incoming(text: &str) -> Incoming {
 
 /// An envelope carrying only an asserted class.
 fn asserting(mode: Option<SenderMode>) -> PeerEnvelope {
-    PeerEnvelope {
-        from_mode: mode,
-        ..PeerEnvelope::none()
-    }
+    PeerEnvelope { from_mode: mode, ..PeerEnvelope::none() }
 }
 
 // ---------------------------------------------------------------------
@@ -202,17 +184,12 @@ async fn the_class_this_session_asserts_equals_the_class_it_enforces() {
                     .await
                     .expect("a mode switch is never refused");
             }
-            let expected = sender
-                .engine
-                .receiver_class()
-                .expect("the receiver class is total");
+            let expected = sender.engine.receiver_class().expect("the receiver class is total");
 
             send_once(&sender, &far, TEXT).await;
 
-            let asserted = far.message()["from_mode"]
-                .as_str()
-                .expect("every send asserts a class")
-                .to_owned();
+            let asserted =
+                far.message()["from_mode"].as_str().expect("every send asserts a class").to_owned();
             let enforced = match expected {
                 ganja_core::teammate::inbound::ReceiverClass::Prompting => "prompting",
                 ganja_core::teammate::inbound::ReceiverClass::Bypass => "bypass",
@@ -265,21 +242,9 @@ async fn from_mode_reaches_the_matrix_and_can_only_tighten() {
     // delivery) — the rows a production call site can now reach.
     let rows: Vec<(bool, Option<SenderMode>, Option<HoldCause>)> = vec![
         (false, Some(SenderMode::Prompting), None),
-        (
-            false,
-            Some(SenderMode::Bypass),
-            Some(HoldCause::ModeMismatch),
-        ),
-        (
-            true,
-            Some(SenderMode::Bypass),
-            Some(HoldCause::NoModeAsserted),
-        ),
-        (
-            true,
-            Some(SenderMode::Prompting),
-            Some(HoldCause::ModeMismatch),
-        ),
+        (false, Some(SenderMode::Bypass), Some(HoldCause::ModeMismatch)),
+        (true, Some(SenderMode::Bypass), Some(HoldCause::NoModeAsserted)),
+        (true, Some(SenderMode::Prompting), Some(HoldCause::ModeMismatch)),
         (false, None, None),
         (true, None, Some(HoldCause::NoModeAsserted)),
     ];
@@ -370,9 +335,7 @@ async fn an_explicit_policy_wins_over_every_matrix_row() {
 async fn a_send_carries_this_sessions_marker_after_whatever_it_admitted() {
     let far = FarSide::accepting();
     let sender = Sender::new();
-    sender
-        .engine
-        .set_peer_address(Some(&far.directory().join(format!("{OWN_STEM}.sock"))));
+    sender.engine.set_peer_address(Some(&far.directory().join(format!("{OWN_STEM}.sock"))));
 
     let mut events = sender.events().await;
     sender.will_send_to(&far.address(), TEXT);
@@ -405,11 +368,7 @@ async fn a_send_carries_this_sessions_marker_after_whatever_it_admitted() {
     );
 
     // AC-7: the same door that clears the pin map.
-    sender
-        .engine
-        .send(Command::NewSession)
-        .await
-        .expect("a new session is never refused");
+    sender.engine.send(Command::NewSession).await.expect("a new session is never refused");
     sender.will_send_to(&far.address(), TEXT);
     sender.turn(&mut events).await;
     assert_eq!(
@@ -436,17 +395,12 @@ async fn a_chain_grows_oldest_first_and_an_unbound_sender_appends_nothing() {
     let sender = Sender::new();
 
     let inherited: Vec<String> = (0..28).map(|index| format!("0198c{index:03}")).collect();
-    sender
-        .engine
-        .set_peer_address(Some(&far.directory().join(format!("{OWN_STEM}.sock"))));
+    sender.engine.set_peer_address(Some(&far.directory().join(format!("{OWN_STEM}.sock"))));
     sender
         .engine
         .receive_peer_envelope(
             incoming("a long way round"),
-            PeerEnvelope {
-                hop_chain: inherited.clone(),
-                ..PeerEnvelope::none()
-            },
+            PeerEnvelope { hop_chain: inherited.clone(), ..PeerEnvelope::none() },
         )
         .await
         .expect("a 28-entry chain is the most the receiver's own check admits");
@@ -459,15 +413,8 @@ async fn a_chain_grows_oldest_first_and_an_unbound_sender_appends_nothing() {
         .as_array()
         .expect("a chain is an array")
         .clone();
-    assert_eq!(
-        carried.len(),
-        28,
-        "the adoption left room for this session's own marker"
-    );
-    assert_eq!(
-        carried[0], inherited[1],
-        "the oldest inherited entry is the one the clamp dropped"
-    );
+    assert_eq!(carried.len(), 28, "the adoption left room for this session's own marker");
+    assert_eq!(carried[0], inherited[1], "the oldest inherited entry is the one the clamp dropped");
     assert_eq!(carried[27], OWN_STEM, "and this session is the newest");
 
     // Unbound: the address cell cleared, so no marker and no reply address.
@@ -488,10 +435,7 @@ async fn a_chain_grows_oldest_first_and_an_unbound_sender_appends_nothing() {
             .contains(&serde_json::json!(OWN_STEM)),
         "and its own marker is not in it: {second}"
     );
-    assert!(
-        second.get("reply_to").is_none(),
-        "nor does it name anywhere to answer: {second}"
-    );
+    assert!(second.get("reply_to").is_none(), "nor does it name anywhere to answer: {second}");
 }
 
 // ---------------------------------------------------------------------
@@ -523,10 +467,7 @@ async fn a_looping_or_runaway_chain_is_dropped_and_the_sender_cannot_tell() {
         .engine
         .receive_peer_envelope(
             incoming("round and round"),
-            PeerEnvelope {
-                hop_chain: vec![OWN_STEM.to_owned(); 11],
-                ..PeerEnvelope::none()
-            },
+            PeerEnvelope { hop_chain: vec![OWN_STEM.to_owned(); 11], ..PeerEnvelope::none() },
         )
         .await
         .expect("a dropped message still answers success");
@@ -544,15 +485,8 @@ async fn a_looping_or_runaway_chain_is_dropped_and_the_sender_cannot_tell() {
         .await
         .expect("a dropped message still answers success");
 
-    assert_eq!(
-        receiver.inbox().len(),
-        1,
-        "neither drop reached the lead's inbox"
-    );
-    assert!(
-        receiver.engine.held_messages().is_empty(),
-        "a guard drop is a drop, not a hold"
-    );
+    assert_eq!(receiver.inbox().len(), 1, "neither drop reached the lead's inbox");
+    assert!(receiver.engine.held_messages().is_empty(), "a guard drop is a drop, not a hold");
     assert_eq!(
         (accepted.sent.to.as_str(), accepted.sent.note.as_str()),
         (looping.sent.to.as_str(), looping.sent.note.as_str()),
@@ -564,11 +498,7 @@ async fn a_looping_or_runaway_chain_is_dropped_and_the_sender_cannot_tell() {
         "a runaway drop must be byte-indistinguishable from an accept"
     );
     assert_eq!(
-        (
-            accepted.held.as_ref(),
-            looping.held.as_ref(),
-            runaway.held.as_ref()
-        ),
+        (accepted.held.as_ref(), looping.held.as_ref(), runaway.held.as_ref()),
         (None, None, None),
         "and none of the three names a hold"
     );
@@ -597,9 +527,7 @@ async fn a_looping_or_runaway_chain_is_dropped_and_the_sender_cannot_tell() {
 async fn a_chain_at_the_limit_does_not_cost_the_victim_its_next_send() {
     let far = FarSide::accepting();
     let victim = Sender::new();
-    victim
-        .engine
-        .set_peer_address(Some(&far.directory().join(format!("{OWN_STEM}.sock"))));
+    victim.engine.set_peer_address(Some(&far.directory().join(format!("{OWN_STEM}.sock"))));
 
     // The most a chain can carry through an admission — one more is
     // `HopRunaway`, so this is the worst case a peer can actually deliver.
@@ -634,10 +562,7 @@ async fn a_chain_at_the_limit_does_not_cost_the_victim_its_next_send() {
         .engine
         .receive_peer_envelope(
             incoming("the victim's own next word"),
-            PeerEnvelope {
-                hop_chain: forwarded.clone(),
-                ..PeerEnvelope::none()
-            },
+            PeerEnvelope { hop_chain: forwarded.clone(), ..PeerEnvelope::none() },
         )
         .await
         .expect("a dropped message would still answer success");
@@ -657,9 +582,7 @@ async fn a_chain_at_the_limit_does_not_cost_the_victim_its_next_send() {
 async fn a_malformed_hop_never_reaches_the_wire_through_a_forward() {
     let far = FarSide::accepting();
     let victim = Sender::new();
-    victim
-        .engine
-        .set_peer_address(Some(&far.directory().join(format!("{OWN_STEM}.sock"))));
+    victim.engine.set_peer_address(Some(&far.directory().join(format!("{OWN_STEM}.sock"))));
 
     victim
         .engine
@@ -777,25 +700,19 @@ async fn the_sender_takes_no_branch_on_what_the_far_side_is() {
 
         rosters.push(far.team_answer().to_owned());
         let taken = far.taken();
-        traces.push((
-            taken
-                .iter()
-                .map(|one| one.route.clone())
-                .collect::<Vec<_>>(),
-            {
-                // Everything a branch could reach is compared by value —
-                // which fields are there at all, the identity, the text, the
-                // asserted class, the chain, the reply address. Only
-                // `message_id` is dropped, and only because it names this
-                // send rather than anything about the far side.
-                let mut body = taken[1].body.clone();
-                body.as_object_mut()
-                    .expect("a message body is an object")
-                    .remove("message_id")
-                    .expect("every send mints one");
-                body
-            },
-        ));
+        traces.push((taken.iter().map(|one| one.route.clone()).collect::<Vec<_>>(), {
+            // Everything a branch could reach is compared by value —
+            // which fields are there at all, the identity, the text, the
+            // asserted class, the chain, the reply address. Only
+            // `message_id` is dropped, and only because it names this
+            // send rather than anything about the far side.
+            let mut body = taken[1].body.clone();
+            body.as_object_mut()
+                .expect("a message body is an object")
+                .remove("message_id")
+                .expect("every send mints one");
+            body
+        }));
     }
 
     assert_ne!(
@@ -901,10 +818,7 @@ async fn no_new_path_logs_a_body_a_reply_address_or_a_chain() {
         .await;
 
     let logged = capture.logged();
-    assert!(
-        !logged.contains(SECRET_BODY),
-        "a body reached a log line: {logged}"
-    );
+    assert!(!logged.contains(SECRET_BODY), "a body reached a log line: {logged}");
     assert!(
         !logged.contains(SECRET_ID_TAIL),
         "an unknown receipt's id reached a log line whole: {logged}"
@@ -913,18 +827,12 @@ async fn no_new_path_logs_a_body_a_reply_address_or_a_chain() {
         !logged.contains("\u{1b}[2J"),
         "an unknown receipt's id carried a control sequence into one: {logged}"
     );
-    assert!(
-        logged.contains("01234567"),
-        "and the cut is what it should be, not silence: {logged}"
-    );
+    assert!(logged.contains("01234567"), "and the cut is what it should be, not silence: {logged}");
     assert!(
         !logged.contains(SECRET_STEM),
         "a chain's contents or a reply path reached a log line: {logged}"
     );
-    assert!(
-        !logged.contains("/nowhere/"),
-        "a reply address's path reached a log line: {logged}"
-    );
+    assert!(!logged.contains("/nowhere/"), "a reply address's path reached a log line: {logged}");
 }
 
 // ---------------------------------------------------------------------

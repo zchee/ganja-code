@@ -2,26 +2,17 @@ use super::*;
 
 #[test]
 fn carriage_return_and_newline_decode() {
-    assert_eq!(
-        decode_output_value(r"hello\015\012").unwrap(),
-        b"hello\r\n".to_vec()
-    );
+    assert_eq!(decode_output_value(r"hello\015\012").unwrap(), b"hello\r\n".to_vec());
 }
 
 #[test]
 fn escaped_backslash_decodes() {
-    assert_eq!(
-        decode_output_value(r"path\134name").unwrap(),
-        b"path\\name".to_vec()
-    );
+    assert_eq!(decode_output_value(r"path\134name").unwrap(), b"path\\name".to_vec());
 }
 
 #[test]
 fn terminal_escape_bytes_decode() {
-    assert_eq!(
-        decode_output_value(r"\033[31mred\033[0m").unwrap(),
-        b"\x1b[31mred\x1b[0m".to_vec()
-    );
+    assert_eq!(decode_output_value(r"\033[31mred\033[0m").unwrap(), b"\x1b[31mred\x1b[0m".to_vec());
 }
 
 #[test]

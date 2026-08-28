@@ -45,20 +45,17 @@ use std::collections::VecDeque;
 
 use ganja_core::{SessionInfo, catalog};
 use ganja_protocol::{Event as CoreEvent, MessageId, Usage};
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    style::Modifier,
-    text::{Line, Span, Text},
-    widgets::{Clear, Paragraph, Widget as _},
-};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::style::Modifier;
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{Clear, Paragraph, Widget as _};
 use unicode_width::UnicodeWidthStr as _;
 
-use crate::{
-    component::{chat::clip, status::Totals},
-    theme::Theme,
-    transcript,
-};
+use crate::component::chat::clip;
+use crate::component::status::Totals;
+use crate::theme::Theme;
+use crate::transcript;
 
 /// Rows spent on the header (the banner and the tab strip) and the one-line
 /// footer, none of which scroll. No border and no centering margin to budget
@@ -197,12 +194,7 @@ impl Inspector {
     /// Opens on the transcript tab, pinned to the tail.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            tab: Tab::Transcript,
-            offset: None,
-            total: 0,
-            rows: 0,
-        }
+        Self { tab: Tab::Transcript, offset: None, total: 0, rows: 0 }
     }
 
     /// Switches to `tab`, and back to its tail: a scroll position from one
@@ -308,10 +300,8 @@ impl Inspector {
         self.offset = self.offset.filter(|offset| *offset < max);
         let offset = self.offset.unwrap_or(max);
 
-        let mut lines: Vec<Line<'static>> = vec![
-            banner_line(self.tab, theme, width),
-            tab_strip(self.tab, theme),
-        ];
+        let mut lines: Vec<Line<'static>> =
+            vec![banner_line(self.tab, theme, width), tab_strip(self.tab, theme)];
         lines.extend(
             content
                 .into_iter()
@@ -340,16 +330,12 @@ impl Default for Inspector {
 /// [`transcript_lines`]/[`log_lines`]/[`token_lines`] produce, so re-clipping
 /// after windowing never has to reason about more than one.
 fn text_of(line: &Line<'static>) -> String {
-    line.spans
-        .first()
-        .map_or_else(String::new, |span| span.content.to_string())
+    line.spans.first().map_or_else(String::new, |span| span.content.to_string())
 }
 
 /// The style that one-span line carries.
 fn style_of(line: &Line<'static>) -> ratatui::style::Style {
-    line.spans
-        .first()
-        .map_or_else(Default::default, |span| span.style)
+    line.spans.first().map_or_else(Default::default, |span| span.style)
 }
 
 /// The header's first line: Codex's `/`-and-space-filled banner, spelling out
@@ -380,11 +366,7 @@ fn tab_strip(active: Tab, theme: &Theme) -> Line<'static> {
         if index > 0 {
             spans.push(Span::raw("   "));
         }
-        let style = if *tab == active {
-            theme.fg.add_modifier(Modifier::BOLD)
-        } else {
-            theme.dim
-        };
+        let style = if *tab == active { theme.fg.add_modifier(Modifier::BOLD) } else { theme.dim };
         spans.push(Span::styled(tab.label(), style));
     }
 
@@ -432,10 +414,7 @@ fn log_lines(events: &VecDeque<CoreEvent>, theme: &Theme) -> Vec<Line<'static>> 
         return vec![Line::styled("no events yet".to_owned(), theme.dim)];
     }
 
-    events
-        .iter()
-        .map(|event| Line::styled(format!("{event:?}"), theme.fg))
-        .collect()
+    events.iter().map(|event| Line::styled(format!("{event:?}"), theme.fg)).collect()
 }
 
 /// Column widths the token table's header and every row share, so the
@@ -498,9 +477,7 @@ fn token_lines(usages: &VecDeque<TurnUsage>, totals: Totals, theme: &Theme) -> V
 pub(crate) fn short_id(id: &MessageId) -> String {
     let raw = id.as_str();
 
-    raw.get(raw.len().saturating_sub(8)..)
-        .unwrap_or(raw)
-        .to_owned()
+    raw.get(raw.len().saturating_sub(8)..).unwrap_or(raw).to_owned()
 }
 
 /// A turn row's cost cell: catalog-priced, `-` when the model is uncataloged.
@@ -545,9 +522,7 @@ fn footer(tab: Tab, offset: usize, rows: usize, total: usize, width: usize) -> S
     // only that fits, and the position alone on a row too narrow for either.
     for hints in [HINTS, HINTS_NARROW] {
         let left = format!("Showing {mode} \u{b7} {hints}");
-        let room = width
-            .saturating_sub(left.width())
-            .saturating_sub(right.width());
+        let room = width.saturating_sub(left.width()).saturating_sub(right.width());
         if room > 0 {
             return format!("{left}{gap}{right}", gap = " ".repeat(room));
         }

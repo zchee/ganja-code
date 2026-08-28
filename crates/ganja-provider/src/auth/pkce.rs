@@ -24,7 +24,8 @@
 //! party holding it and an intercepted code can complete the exchange. It is
 //! kept in a [`SecretString`] for that reason, and nothing here renders one.
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use secrecy::{ExposeSecret as _, SecretString};
 use sha2::{Digest as _, Sha256};
 
@@ -73,10 +74,7 @@ impl Pkce {
         let verifier = unguessable()?;
         let challenge = challenge_for(verifier.expose_secret());
 
-        Ok(Self {
-            verifier,
-            challenge,
-        })
+        Ok(Self { verifier, challenge })
     }
 
     /// The verifier, for the one request that presents it.
@@ -114,9 +112,7 @@ pub fn challenge_for(verifier: &str) -> String {
 ///
 /// Returns [`EntropyError`] when the platform's random source fails.
 pub fn unguessable() -> Result<SecretString, EntropyError> {
-    Ok(SecretString::from(
-        URL_SAFE_NO_PAD.encode(random_bytes::<BYTES>()?),
-    ))
+    Ok(SecretString::from(URL_SAFE_NO_PAD.encode(random_bytes::<BYTES>()?)))
 }
 
 /// `N` bytes of the operating system's entropy, raw.

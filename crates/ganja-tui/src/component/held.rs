@@ -25,23 +25,21 @@
 
 use std::time::{Duration, Instant};
 
-use ganja_protocol::{HeldDecision, HeldId, HoldCause, PolicySource, team::cap_for_display};
-use ratatui::{
-    buffer::Buffer,
-    layout::{Constraint, Rect},
-    text::{Line, Text},
-    widgets::{Block, Clear, Paragraph, Widget as _},
-};
+use ganja_protocol::team::cap_for_display;
+use ganja_protocol::{HeldDecision, HeldId, HoldCause, PolicySource};
+use ratatui::buffer::Buffer;
+use ratatui::layout::{Constraint, Rect};
+use ratatui::text::{Line, Text};
+use ratatui::widgets::{Block, Clear, Paragraph, Widget as _};
 use unicode_width::UnicodeWidthStr as _;
 
 use super::permission::{overflow_marker, wrap_all};
-use crate::{
-    component::{
-        ACTION_HINTS, CHROME, LIST_HINTS, MARKER, MAX_HEIGHT, MAX_WIDTH, action_row, body_rows,
-        chat::clip, clamped, first_visible, modal,
-    },
-    theme::Theme,
+use crate::component::chat::clip;
+use crate::component::{
+    ACTION_HINTS, CHROME, LIST_HINTS, MARKER, MAX_HEIGHT, MAX_WIDTH, action_row, body_rows,
+    clamped, first_visible, modal,
 };
+use crate::theme::Theme;
 
 /// What the reply-address row says: ganja's `from` is an identity, not a road
 /// back, so the row states the absence instead of fabricating an address.
@@ -114,11 +112,7 @@ pub fn cause_label(cause: HoldCause) -> &'static str {
 /// not "4m" one frame later.
 fn coarse(duration: Duration) -> String {
     let seconds = duration.as_millis().div_ceil(1000);
-    if seconds >= 60 {
-        format!("{}m", seconds.div_ceil(60))
-    } else {
-        format!("{seconds}s")
-    }
+    if seconds >= 60 { format!("{}m", seconds.div_ceil(60)) } else { format!("{seconds}s") }
 }
 
 /// One held message under a person's review: the approval modal's state.
@@ -203,26 +197,16 @@ impl HeldApproval {
         // identity's header row; the trust labels are the row text itself.
         let mut body = vec![
             (format!("from (claimed): {}", self.from), theme.accent),
-            (
-                format!("cause: {}", cause_sentence(self.cause)),
-                theme.warning,
-            ),
+            (format!("cause: {}", cause_sentence(self.cause)), theme.warning),
             (String::new(), theme.fg),
             (REPLY_ADDRESS.to_owned(), theme.dim),
             (VERIFIED_PID.to_owned(), theme.dim),
             (format!("preview: {}", self.one_line()), theme.fg),
             (String::new(), theme.fg),
         ];
-        body.extend(
-            self.preview
-                .lines()
-                .map(|line| (line.to_owned(), theme.dim)),
-        );
+        body.extend(self.preview.lines().map(|line| (line.to_owned(), theme.dim)));
 
-        let mut tail = vec![
-            (String::new(), theme.fg),
-            (NOT_DELIVERED.to_owned(), theme.warning),
-        ];
+        let mut tail = vec![(String::new(), theme.fg), (NOT_DELIVERED.to_owned(), theme.warning)];
         if let Some(deadline) = self.deadline {
             tail.push((
                 format!(
@@ -245,9 +229,8 @@ impl HeldApproval {
         if width > 0 && height > 0 {
             let room = height.saturating_sub(tail_rows.len());
             if rows.len() > room {
-                let reserved = wrap_all(&[(overflow_marker(rows.len()), theme.accent)], width)
-                    .len()
-                    .min(room);
+                let reserved =
+                    wrap_all(&[(overflow_marker(rows.len()), theme.accent)], width).len().min(room);
                 let kept = room - reserved;
                 let hidden = rows.len() - kept;
                 rows.truncate(kept);
@@ -259,9 +242,7 @@ impl HeldApproval {
         }
 
         rows.extend(tail_rows);
-        rows.into_iter()
-            .map(|(text, style)| Line::styled(text, style))
-            .collect()
+        rows.into_iter().map(|(text, style)| Line::styled(text, style)).collect()
     }
 }
 
@@ -362,11 +343,7 @@ impl HeldList {
     /// Opens the listing over `rows`, cursor on the first one.
     #[must_use]
     pub fn new(rows: Vec<Row>) -> Self {
-        Self {
-            rows,
-            selected: 0,
-            step: Step::Rows,
-        }
+        Self { rows, selected: 0, step: Step::Rows }
     }
 
     /// Replaces the rows with a fresh poll, keeping the cursor where it was.
@@ -457,9 +434,9 @@ impl HeldList {
         // answers — the `/mcp` dialog's own two-height scheme.
         let height = match self.step {
             Step::Rows => available,
-            Step::Actions(_) => u16::try_from(lines.len().saturating_add(2))
-                .unwrap_or(available)
-                .min(available),
+            Step::Actions(_) => {
+                u16::try_from(lines.len().saturating_add(2)).unwrap_or(available).min(available)
+            }
         };
         let popup = area.centered(Constraint::Length(width), Constraint::Length(height));
 
@@ -477,18 +454,8 @@ impl HeldList {
         }
 
         let first = first_visible(self.selected, rows);
-        let from_width = self
-            .rows
-            .iter()
-            .map(|row| row.from.width())
-            .max()
-            .unwrap_or(0);
-        let cause_width = self
-            .rows
-            .iter()
-            .map(|row| row.cause.width())
-            .max()
-            .unwrap_or(0);
+        let from_width = self.rows.iter().map(|row| row.from.width()).max().unwrap_or(0);
+        let cause_width = self.rows.iter().map(|row| row.cause.width()).max().unwrap_or(0);
 
         self.rows
             .iter()
@@ -517,11 +484,7 @@ impl HeldList {
 
                 Line::styled(
                     format!("{line:<width$}"),
-                    if index == self.selected {
-                        theme.selection
-                    } else {
-                        theme.fg
-                    },
+                    if index == self.selected { theme.selection } else { theme.fg },
                 )
             })
             .collect()
@@ -533,10 +496,8 @@ impl HeldList {
             return vec![Line::styled(clip(EMPTY, width), theme.dim)];
         };
 
-        let mut lines = vec![Line::styled(
-            clip(&format!("{} ({})", row.from, row.cause), width),
-            theme.fg,
-        )];
+        let mut lines =
+            vec![Line::styled(clip(&format!("{} ({})", row.from, row.cause), width), theme.fg)];
         for (index, action) in ACTIONS.iter().enumerate() {
             lines.push(action_row(index, option, action.label(), width, theme));
         }

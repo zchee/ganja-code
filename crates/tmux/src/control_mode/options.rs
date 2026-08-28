@@ -41,7 +41,9 @@
 //! port's field is `usize`, so a negative value is unrepresentable and that
 //! whole check has no Rust counterpart (AC-4 waiver).
 
-use std::{ffi::OsString, path::PathBuf, time::Duration};
+use std::ffi::OsString;
+use std::path::PathBuf;
+use std::time::Duration;
 
 use crate::error::Error;
 
@@ -145,8 +147,7 @@ impl Options {
         mut self,
         entries: impl IntoIterator<Item = (impl Into<OsString>, impl Into<OsString>)>,
     ) -> Self {
-        self.env
-            .extend(entries.into_iter().map(|(k, v)| (k.into(), v.into())));
+        self.env.extend(entries.into_iter().map(|(k, v)| (k.into(), v.into())));
         self
     }
 
@@ -250,9 +251,7 @@ impl Options {
     /// newline.
     pub fn validate(&self) -> Result<(), Error> {
         if self.socket_name.is_some() && self.socket_path.is_some() {
-            return Err(invalid(
-                "socket_name and socket_path are mutually exclusive",
-            ));
+            return Err(invalid("socket_name and socket_path are mutually exclusive"));
         }
         if self.event_buffer == 0 {
             return Err(invalid("event_buffer must be > 0"));
@@ -266,9 +265,7 @@ impl Options {
             ));
         }
         if !self.initial_command.is_empty() && self.session_name.is_some() {
-            return Err(invalid(
-                "initial_command and session_name are mutually exclusive",
-            ));
+            return Err(invalid("initial_command and session_name are mutually exclusive"));
         }
         for arg in &self.initial_command {
             if arg.contains(['\r', '\n']) {
@@ -339,9 +336,7 @@ impl Options {
 }
 
 fn invalid(message: impl Into<String>) -> Error {
-    Error::InvalidOptions {
-        message: message.into(),
-    }
+    Error::InvalidOptions { message: message.into() }
 }
 
 #[cfg(test)]

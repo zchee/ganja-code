@@ -1,11 +1,10 @@
-use std::{net::IpAddr, time::Duration};
+use std::net::IpAddr;
+use std::time::Duration;
 
 use secrecy::{ExposeSecret as _, SecretString};
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::TcpStream,
-    task::JoinHandle,
-};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::TcpStream;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::{Listener, LoopbackError, error_code};
@@ -36,9 +35,7 @@ fn waiting(
     let port = listener.port();
     let cancel = cancel.clone();
     let served = tokio::spawn(async move {
-        listener
-            .wait(PATH, &SecretString::from(STATE), AMPLE, &cancel)
-            .await
+        listener.wait(PATH, &SecretString::from(STATE), AMPLE, &cancel).await
     });
 
     (port, served)
@@ -50,9 +47,7 @@ fn waiting(
 /// of what is being asserted: "answered 400" is a claim about the wire, and
 /// a client that hid the status behind an error type would not check it.
 async fn request(port: u16, target: &str) -> String {
-    let mut socket = TcpStream::connect(("127.0.0.1", port))
-        .await
-        .expect("the listener is bound");
+    let mut socket = TcpStream::connect(("127.0.0.1", port)).await.expect("the listener is bound");
     socket
         .write_all(
             format!("GET {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
@@ -62,10 +57,7 @@ async fn request(port: u16, target: &str) -> String {
         .expect("the request is written");
 
     let mut response = String::new();
-    socket
-        .read_to_string(&mut response)
-        .await
-        .expect("the response is read");
+    socket.read_to_string(&mut response).await.expect("the response is read");
 
     response
 }
@@ -78,10 +70,7 @@ fn status(response: &str) -> &str {
 #[tokio::test]
 async fn the_listener_binds_loopback_and_nothing_else() {
     let listener = Listener::bind(0).await.expect("loopback is bindable");
-    let bound = listener
-        .socket
-        .local_addr()
-        .expect("a bound socket has an address");
+    let bound = listener.socket.local_addr().expect("a bound socket has an address");
 
     assert_eq!(
         bound.ip(),
@@ -97,10 +86,7 @@ async fn a_callback_that_echoes_the_state_hands_back_its_code() {
     let (port, served) = waiting(Listener::bind(0).await.expect("bindable"), &cancel);
 
     let response = request(port, &format!("{PATH}?code={CODE}&state={STATE}")).await;
-    let code = served
-        .await
-        .expect("the wait finished")
-        .expect("the callback was accepted");
+    let code = served.await.expect("the wait finished").expect("the callback was accepted");
 
     assert_eq!(code.expose_secret(), CODE);
     assert_eq!(status(&response), "HTTP/1.1 200 OK");
@@ -143,11 +129,8 @@ async fn a_callback_that_gives_the_state_twice_is_refused() {
 
     // One of the two is the real login's, so a parser that took either end
     // of the query would accept this.
-    let response = request(
-        port,
-        &format!("{PATH}?code={CODE}&state={STATE}&state=not-the-one"),
-    )
-    .await;
+    let response =
+        request(port, &format!("{PATH}?code={CODE}&state={STATE}&state=not-the-one")).await;
     let refused = served
         .await
         .expect("the wait finished")
@@ -163,10 +146,8 @@ async fn a_callback_that_belongs_here_and_carries_no_code_is_refused() {
     let (port, served) = waiting(Listener::bind(0).await.expect("bindable"), &cancel);
 
     let response = request(port, &format!("{PATH}?state={STATE}")).await;
-    let refused = served
-        .await
-        .expect("the wait finished")
-        .expect_err("there is nothing to exchange");
+    let refused =
+        served.await.expect("the wait finished").expect_err("there is nothing to exchange");
 
     assert!(matches!(refused, LoopbackError::NoCode), "{refused:?}");
     assert_eq!(status(&response), "HTTP/1.1 400 Bad Request");
@@ -182,10 +163,7 @@ async fn a_redirect_carrying_the_providers_refusal_ends_the_login_with_it() {
         &format!("{PATH}?error=access_denied&error_description=user+said+no&state={STATE}"),
     )
     .await;
-    let refused = served
-        .await
-        .expect("the wait finished")
-        .expect_err("the provider refused");
+    let refused = served.await.expect("the wait finished").expect_err("the provider refused");
 
     assert!(
         matches!(&refused, LoopbackError::Denied { error } if error == "access_denied"),
@@ -201,15 +179,8 @@ async fn a_refusal_that_is_not_a_code_is_reported_without_repeating_it() {
     let cancel = CancellationToken::new();
     let (port, served) = waiting(Listener::bind(0).await.expect("bindable"), &cancel);
 
-    request(
-        port,
-        &format!("{PATH}?error=%3Cscript%3Ealert(1)%3C%2Fscript%3E&state={STATE}"),
-    )
-    .await;
-    let refused = served
-        .await
-        .expect("the wait finished")
-        .expect_err("the provider refused");
+    request(port, &format!("{PATH}?error=%3Cscript%3Ealert(1)%3C%2Fscript%3E&state={STATE}")).await;
+    let refused = served.await.expect("the wait finished").expect_err("the provider refused");
 
     let message = refused.to_string();
     assert!(!message.contains("script"), "{message}");
@@ -226,10 +197,7 @@ async fn a_request_for_another_path_is_404_and_the_login_keeps_waiting() {
     assert_eq!(status(&ignored), "HTTP/1.1 404 Not Found");
 
     let response = request(port, &format!("{PATH}?code={CODE}&state={STATE}")).await;
-    let code = served
-        .await
-        .expect("the wait finished")
-        .expect("the callback still arrived");
+    let code = served.await.expect("the wait finished").expect("the callback still arrived");
 
     assert_eq!(code.expose_secret(), CODE);
     assert_eq!(status(&response), "HTTP/1.1 200 OK");
@@ -241,10 +209,7 @@ async fn the_cancel_path_ends_the_wait_without_a_code() {
     let (port, served) = waiting(Listener::bind(0).await.expect("bindable"), &cancel);
 
     let response = request(port, "/cancel").await;
-    let ended = served
-        .await
-        .expect("the wait finished")
-        .expect_err("cancelling yields no code");
+    let ended = served.await.expect("the wait finished").expect_err("cancelling yields no code");
 
     assert!(matches!(ended, LoopbackError::Cancelled), "{ended:?}");
     assert_eq!(status(&response), "HTTP/1.1 200 OK");
@@ -255,19 +220,11 @@ async fn a_wait_nobody_answers_ends_at_its_deadline() {
     let listener = Listener::bind(0).await.expect("bindable");
 
     let ended = listener
-        .wait(
-            PATH,
-            &SecretString::from(STATE),
-            BRIEF,
-            &CancellationToken::new(),
-        )
+        .wait(PATH, &SecretString::from(STATE), BRIEF, &CancellationToken::new())
         .await
         .expect_err("nobody completed the authorization");
 
-    assert!(
-        matches!(ended, LoopbackError::TimedOut { after } if after == BRIEF),
-        "{ended:?}"
-    );
+    assert!(matches!(ended, LoopbackError::TimedOut { after } if after == BRIEF), "{ended:?}");
 }
 
 #[tokio::test]
@@ -298,11 +255,7 @@ async fn no_page_ever_contains_the_code_or_the_state() {
     let (accepted_port, accepted_wait) =
         waiting(Listener::bind(0).await.expect("bindable"), &cancel);
 
-    let refused = request(
-        refused_port,
-        &format!("{PATH}?code={CODE}&state=not-the-one"),
-    )
-    .await;
+    let refused = request(refused_port, &format!("{PATH}?code={CODE}&state=not-the-one")).await;
     let accepted = request(accepted_port, &format!("{PATH}?code={CODE}&state={STATE}")).await;
     refused_wait.await.expect("the wait finished").ok();
     accepted_wait.await.expect("the wait finished").ok();
@@ -318,17 +271,10 @@ async fn a_connection_that_says_nothing_costs_the_login_nothing() {
     let cancel = CancellationToken::new();
     let (port, served) = waiting(Listener::bind(0).await.expect("bindable"), &cancel);
 
-    drop(
-        TcpStream::connect(("127.0.0.1", port))
-            .await
-            .expect("the listener is bound"),
-    );
+    drop(TcpStream::connect(("127.0.0.1", port)).await.expect("the listener is bound"));
 
     let response = request(port, &format!("{PATH}?code={CODE}&state={STATE}")).await;
-    let code = served
-        .await
-        .expect("the wait finished")
-        .expect("the callback still arrived");
+    let code = served.await.expect("the wait finished").expect("the callback still arrived");
 
     assert_eq!(code.expose_secret(), CODE);
     assert_eq!(status(&response), "HTTP/1.1 200 OK");
@@ -339,13 +285,9 @@ fn only_a_code_shaped_refusal_is_worth_repeating() {
     for code in ["access_denied", "invalid-request", "server_error", "x"] {
         assert_eq!(error_code(code).as_deref(), Some(code));
     }
-    for not_a_code in [
-        "",
-        "user said no",
-        "<script>alert(1)</script>",
-        "sk-ant-\"quoted\"",
-        &"a".repeat(65),
-    ] {
+    for not_a_code in
+        ["", "user said no", "<script>alert(1)</script>", "sk-ant-\"quoted\"", &"a".repeat(65)]
+    {
         assert_eq!(error_code(not_a_code), None, "{not_a_code:?}");
     }
 }

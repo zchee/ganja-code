@@ -3,11 +3,9 @@
 //! stored state resolves beneath, and the project/data-home pair the suites
 //! that drive the shipped binary build first.
 
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use tempfile::TempDir;
 
@@ -74,10 +72,7 @@ impl Homes {
         // temporary directory happens to sit inside.
         fs::create_dir(project.path().join(".git")).expect("the checkout marker is creatable");
 
-        Self {
-            project,
-            data: temp_dir(),
-        }
+        Self { project, data: temp_dir() }
     }
 
     /// The project directory a run works in.
@@ -103,11 +98,8 @@ impl Homes {
     /// Writes a fake-provider script under the project and answers its path.
     pub fn script(&self, name: &str, turns: serde_json::Value) -> PathBuf {
         let path = self.project.path().join(name);
-        fs::write(
-            &path,
-            serde_json::json!({"cadence_ms": 1, "turns": turns}).to_string(),
-        )
-        .expect("the script is writable");
+        fs::write(&path, serde_json::json!({"cadence_ms": 1, "turns": turns}).to_string())
+            .expect("the script is writable");
 
         path
     }
@@ -126,11 +118,7 @@ impl Homes {
             .map(|entry| entry.path())
             .collect();
         roots.sort();
-        assert_eq!(
-            roots.len(),
-            1,
-            "one working directory is one project, got {roots:?}"
-        );
+        assert_eq!(roots.len(), 1, "one working directory is one project, got {roots:?}");
 
         ganja_core::Storage::open(roots.remove(0).join("storage"))
     }

@@ -28,21 +28,18 @@
 //! to open while it is, because a second writer would race the first over
 //! the same `plugins.json`.
 
-use ratatui::{
-    buffer::Buffer,
-    layout::{Constraint, Rect},
-    text::{Line, Text},
-    widgets::{Block, Clear, Paragraph, Widget as _},
-};
+use ratatui::buffer::Buffer;
+use ratatui::layout::{Constraint, Rect};
+use ratatui::text::{Line, Text};
+use ratatui::widgets::{Block, Clear, Paragraph, Widget as _};
 use unicode_width::UnicodeWidthStr as _;
 
-use crate::{
-    component::{
-        ACTION_HINTS, CHROME, INPUT_HINTS, LIST_HINTS, MARKER, MAX_HEIGHT, MAX_WIDTH, TwoStep,
-        action_row, body_rows, chat::clip, clamped, first_visible,
-    },
-    theme::Theme,
+use crate::component::chat::clip;
+use crate::component::{
+    ACTION_HINTS, CHROME, INPUT_HINTS, LIST_HINTS, MARKER, MAX_HEIGHT, MAX_WIDTH, TwoStep,
+    action_row, body_rows, clamped, first_visible,
 };
+use crate::theme::Theme;
 
 /// Columns between a row's fixed columns.
 const GAP: usize = 2;
@@ -64,11 +61,8 @@ pub const BUSY: &str =
 
 /// The row-independent actions, in the order the list shows them beneath the
 /// plugin rows.
-const TOP_ACTIONS: [TopAction; 3] = [
-    TopAction::AddMarketplace,
-    TopAction::Install,
-    TopAction::Reload,
-];
+const TOP_ACTIONS: [TopAction; 3] =
+    [TopAction::AddMarketplace, TopAction::Install, TopAction::Reload];
 
 /// One installed plugin, as the dialog shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -186,13 +180,7 @@ impl Plugin {
     /// first top-level action when nothing is installed.
     #[must_use]
     pub fn new(rows: Vec<Row>) -> Self {
-        Self {
-            rows,
-            selected: 0,
-            step: Step::List,
-            notice: None,
-            busy: false,
-        }
+        Self { rows, selected: 0, step: Step::List, notice: None, busy: false }
     }
 
     /// Replaces the rows with a fresh store read, keeping the cursor where
@@ -264,9 +252,7 @@ impl Plugin {
         match &self.step {
             Step::List => self.selected = clamped(self.selected, delta, self.total_rows()),
             Step::Actions(option) => {
-                let count = self
-                    .selected_plugin()
-                    .map_or(0, |row| Self::plugin_actions(row).len());
+                let count = self.selected_plugin().map_or(0, |row| Self::plugin_actions(row).len());
                 self.step = Step::Actions(clamped(*option, delta, count));
             }
             Step::Input { .. } => {}
@@ -326,10 +312,7 @@ impl Plugin {
                 match action {
                     TopAction::Reload => Some(Effect::Reload),
                     TopAction::AddMarketplace | TopAction::Install => {
-                        self.step = Step::Input {
-                            action,
-                            buffer: String::new(),
-                        };
+                        self.step = Step::Input { action, buffer: String::new() };
                         None
                     }
                 }
@@ -401,9 +384,9 @@ impl Plugin {
         // need — the `/mcp` dialog's own two-height scheme.
         let height = match &self.step {
             Step::List => available,
-            Step::Actions(_) | Step::Input { .. } => u16::try_from(lines.len().saturating_add(2))
-                .unwrap_or(available)
-                .min(available),
+            Step::Actions(_) | Step::Input { .. } => {
+                u16::try_from(lines.len().saturating_add(2)).unwrap_or(available).min(available)
+            }
         };
         let popup = area.centered(Constraint::Length(width), Constraint::Length(height));
 
@@ -417,18 +400,8 @@ impl Plugin {
     /// The list step: one line per installed plugin, then the top-level
     /// actions.
     fn list_rows(&self, width: usize, rows: usize, theme: &Theme) -> Vec<Line<'static>> {
-        let name_width = self
-            .rows
-            .iter()
-            .map(|row| row.name.width())
-            .max()
-            .unwrap_or(0);
-        let market_width = self
-            .rows
-            .iter()
-            .map(|row| row.marketplace.width())
-            .max()
-            .unwrap_or(0);
+        let name_width = self.rows.iter().map(|row| row.name.width()).max().unwrap_or(0);
+        let market_width = self.rows.iter().map(|row| row.marketplace.width()).max().unwrap_or(0);
 
         let mut lines: Vec<Line<'static>> = Vec::new();
         if self.rows.is_empty() {
@@ -453,11 +426,7 @@ impl Plugin {
             );
             lines.push(Line::styled(
                 format!("{line:<width$}"),
-                if index == self.selected {
-                    theme.selection
-                } else {
-                    theme.fg
-                },
+                if index == self.selected { theme.selection } else { theme.fg },
             ));
         }
         lines.push(Line::raw(""));
@@ -523,10 +492,7 @@ impl Plugin {
         vec![
             Line::styled(clip(action.prompt(), width), theme.fg),
             Line::styled(
-                clip(
-                    &format!("{MARKER}{buffer}\u{2588}"),
-                    width.saturating_sub(1).max(1),
-                ),
+                clip(&format!("{MARKER}{buffer}\u{2588}"), width.saturating_sub(1).max(1)),
                 theme.selection,
             ),
         ]
@@ -600,20 +566,13 @@ pub fn summarize(components: &[String]) -> String {
         parts.push("skills".to_owned());
     }
     if agents > 0 {
-        parts.push(format!(
-            "{agents} agent{}",
-            if agents == 1 { "" } else { "s" }
-        ));
+        parts.push(format!("{agents} agent{}", if agents == 1 { "" } else { "s" }));
     }
     if lsp > 0 {
         parts.push(format!("{lsp} lsp"));
     }
 
-    if parts.is_empty() {
-        NO_COMPONENTS.to_owned()
-    } else {
-        parts.join(" \u{b7} ")
-    }
+    if parts.is_empty() { NO_COMPONENTS.to_owned() } else { parts.join(" \u{b7} ") }
 }
 
 #[cfg(test)]

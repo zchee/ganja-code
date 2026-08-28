@@ -107,12 +107,10 @@
 //! rung 6, the outbound arm refuses it again, and the inbound arm classifies
 //! the text before anything is written.
 
-use std::{
-    fmt,
-    path::{Path, PathBuf},
-    sync::{Arc, Weak},
-    time::Duration,
-};
+use std::fmt;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Weak};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use ganja_protocol::team::{
@@ -123,31 +121,28 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    agent::{self, Agent},
-    engine::{EVENT_CAPACITY, Fanout},
-    permission::{Action, Decision, Permissions, Rule, TASK},
-    protocol::{
-        Event, FinishReason, MessageId, Part, PartBody, PartId, PeerMessageId, PermissionId,
-        PermissionReply, Role, ToolState, Usage,
-    },
-    provider::Provider,
-    session::{ChildParts, Persist, SessionState, Turn, TurnKind, run_turn},
-    storage::{self, SessionId, SessionInfo},
-    teammate::{
-        DEFAULT_BACKEND, SpawnRequest, Teammate, TeammateBackend, TeammateRegistry, backend_name,
-        identity, parse_backend, postbox::LEADS, posture, posture_line,
-    },
-    tool::{
-        Credentials, Registry,
-        send_message::NOT_A_SESSION_SOCKET,
-        task::{
-            Delegated, Delegation, NO_TEAM, NotSpawned, Offered, Subagents, TeammateSpawn,
-            Teammated, Unanswered,
-        },
-        team::{self, Address, Body, Peer, Reserved, Sent, Undelivered},
-    },
+use crate::agent::{self, Agent};
+use crate::engine::{EVENT_CAPACITY, Fanout};
+use crate::permission::{Action, Decision, Permissions, Rule, TASK};
+use crate::protocol::{
+    Event, FinishReason, MessageId, Part, PartBody, PartId, PeerMessageId, PermissionId,
+    PermissionReply, Role, ToolState, Usage,
 };
+use crate::provider::Provider;
+use crate::session::{ChildParts, Persist, SessionState, Turn, TurnKind, run_turn};
+use crate::storage::{self, SessionId, SessionInfo};
+use crate::teammate::postbox::LEADS;
+use crate::teammate::{
+    DEFAULT_BACKEND, SpawnRequest, Teammate, TeammateBackend, TeammateRegistry, backend_name,
+    identity, parse_backend, posture, posture_line,
+};
+use crate::tool::send_message::NOT_A_SESSION_SOCKET;
+use crate::tool::task::{
+    Delegated, Delegation, NO_TEAM, NotSpawned, Offered, Subagents, TeammateSpawn, Teammated,
+    Unanswered,
+};
+use crate::tool::team::{self, Address, Body, Peer, Reserved, Sent, Undelivered};
+use crate::tool::{Credentials, Registry};
 
 /// The second permission a subagent's ruleset gets denied unless it says
 /// otherwise: an unattended child keeps no todo list, because nobody is
@@ -317,11 +312,8 @@ impl Subagents for Spawn {
         // business naming, and running a *primary* agent unattended is the one
         // thing subagent mode exists to prevent
         // (deviation: task-spawns-subagents-only).
-        let Some(agent) = self
-            .host
-            .agents
-            .get(&request.subagent_type)
-            .filter(|agent| agent.spawnable())
+        let Some(agent) =
+            self.host.agents.get(&request.subagent_type).filter(|agent| agent.spawnable())
         else {
             return Err(Unanswered::Unknown);
         };
@@ -346,9 +338,7 @@ impl Subagents for Spawn {
 
     async fn spawn_teammate(&self, request: TeammateSpawn) -> Result<Teammated, NotSpawned> {
         let Some(teammates) = self.host.teammates.as_ref() else {
-            return Err(NotSpawned {
-                reason: NO_TEAM.to_owned(),
-            });
+            return Err(NotSpawned { reason: NO_TEAM.to_owned() });
         };
 
         teammates.start(request, &self.caller(), self).await
@@ -456,11 +446,7 @@ impl SpawnAsker for Spawn {
         // keeps.
         let _ = self
             .events
-            .send(Event::PermissionReplied {
-                session_id: self.session_id.clone(),
-                id,
-                reply,
-            })
+            .send(Event::PermissionReplied { session_id: self.session_id.clone(), id, reply })
             .await;
 
         reply
@@ -652,10 +638,7 @@ impl Teammates {
         // early costs no second sentence.
         let name = MemberName::parse(&request.name).map_err(refused)?;
         let gate = posture::spawn_gate(
-            &caller
-                .permissions
-                .lock()
-                .expect("the lead's rules are never poisoned"),
+            &caller.permissions.lock().expect("the lead's rules are never poisoned"),
             &caller.project_root,
             &caller.cwd,
             backend,
@@ -719,9 +702,7 @@ impl Teammates {
                     })
                     .await;
                 if reply == PermissionReply::Reject {
-                    return Err(NotSpawned {
-                        reason: REFUSED_BY_HAND.to_owned(),
-                    });
+                    return Err(NotSpawned { reason: REFUSED_BY_HAND.to_owned() });
                 }
                 // `Always` is taken as the yes it is and remembered nowhere.
                 // `Permissions::remember` takes a `CallDecision`, and this gate
@@ -806,9 +787,8 @@ impl Teammates {
             reason: Some(SHUTDOWN_ASKED.to_owned()),
             timestamp: record::now_iso8601(),
         });
-        let document = serde_json::to_value(&request).map_err(|error| Undelivered::Failed {
-            reason: format!("{UNENCODABLE} {error}"),
-        })?;
+        let document = serde_json::to_value(&request)
+            .map_err(|error| Undelivered::Failed { reason: format!("{UNENCODABLE} {error}") })?;
 
         Postbox::lead(&self.registry, None)
             .deliver(Address::Local(member.to_owned()), Body::Frame(document))
@@ -984,10 +964,7 @@ impl Postbox {
     /// installed values, borrowed together, so no arm can pass one and
     /// forget the other.
     fn sender_side(&self) -> SenderSide<'_> {
-        SenderSide {
-            facts: self.peer_facts.as_ref(),
-            receipts: self.receipts.as_deref(),
-        }
+        SenderSide { facts: self.peer_facts.as_ref(), receipts: self.receipts.as_deref() }
     }
 
     /// The team as this caller may address it, once somebody holding the team
@@ -1026,9 +1003,7 @@ impl Postbox {
     /// canonical spelling comes back from the roster rather than from the
     /// arguments, and [`Sent::to`] reports what was really written to.
     fn recipient(&self, registry: &TeammateRegistry, name: &str) -> Option<Peer> {
-        self.peers(registry)
-            .into_iter()
-            .find(|peer| peer.name.eq_ignore_ascii_case(name))
+        self.peers(registry).into_iter().find(|peer| peer.name.eq_ignore_ascii_case(name))
     }
 
     /// A postbox speaking for **another session**, stamped with the identity
@@ -1071,9 +1046,7 @@ impl Postbox {
         let plain = !identity.chars().any(char::is_control);
         let bounded = identity.chars().count() <= DISPLAY_FIELD_CAP;
         if !derived || !plain || !bounded {
-            return Err(NotReceived::NotAPeerIdentity {
-                identity: reflected(identity),
-            });
+            return Err(NotReceived::NotAPeerIdentity { identity: reflected(identity) });
         }
 
         Ok(Self {
@@ -1113,9 +1086,7 @@ impl Postbox {
     /// socket, under a deadline, never a hang.
     async fn deliver_over_socket(&self, path: &Path, body: Body) -> Result<Sent, Undelivered> {
         let Some(registry) = self.registry.upgrade() else {
-            return Err(Undelivered::Failed {
-                reason: TEAM_GONE.to_owned(),
-            });
+            return Err(Undelivered::Failed { reason: TEAM_GONE.to_owned() });
         };
         let from = format!("{}@{}", self.sender, registry.team());
         drop(registry);
@@ -1160,9 +1131,7 @@ async fn deliver_over_socket(
     sender: SenderSide<'_>,
 ) -> Result<Sent, Undelivered> {
     let Body::Text { text, summary } = body else {
-        return Err(Undelivered::Failed {
-            reason: frame_refusal.to_owned(),
-        });
+        return Err(Undelivered::Failed { reason: frame_refusal.to_owned() });
     };
 
     // The tool's rung 3 has already judged the address; it is judged
@@ -1186,11 +1155,7 @@ async fn deliver_over_socket(
     // and the name is the peer's word — `reflected` is the one place it
     // is allowed to appear, cut.
     let lead = MemberName::parse(&view.lead).map_err(|_| Undelivered::Failed {
-        reason: format!(
-            "{SOCKET_LEAD_UNNAMED} {}: {:?}.",
-            path.display(),
-            reflected(&view.lead)
-        ),
+        reason: format!("{SOCKET_LEAD_UNNAMED} {}: {:?}.", path.display(), reflected(&view.lead)),
     })?;
     let message_id = PeerMessageId::ascending();
     let reply_to = sender.facts.reply_to();
@@ -1204,9 +1169,7 @@ async fn deliver_over_socket(
                 message_id: Some(message_id.clone()),
                 from_mode: sender.facts.sender_mode(),
                 hop_chain: sender.facts.hop_chain(),
-                reply_to: reply_to
-                    .as_ref()
-                    .map(|path| format!("uds:{}", path.display())),
+                reply_to: reply_to.as_ref().map(|path| format!("uds:{}", path.display())),
             },
         )
         .await?;
@@ -1277,9 +1240,7 @@ async fn deliver_resolved(
     sender: SenderSide<'_>,
 ) -> Result<Sent, Undelivered> {
     match resolution {
-        identity::Resolution::Session {
-            id, stem, socket, ..
-        } => {
+        identity::Resolution::Session { id, stem, socket, .. } => {
             // A frame is refused by `deliver_over_socket`'s own guard before
             // anything is pinned — checked here, ahead of the move, because
             // pinning is the choice this arm accepted, not the connect's own
@@ -1294,20 +1255,18 @@ async fn deliver_resolved(
                 note: inner.note,
             })
         }
-        identity::Resolution::Ambiguous { candidates, .. } => Err(Undelivered::Ambiguous {
-            reason: identity::ambiguous_refusal(name, &candidates),
-        }),
-        identity::Resolution::Moved {
-            pinned_stem,
-            candidates,
-            ..
-        } => Err(Undelivered::NameMoved {
-            reason: identity::moved_refusal(name, &pinned_stem, &candidates),
-        }),
+        identity::Resolution::Ambiguous { candidates, .. } => {
+            Err(Undelivered::Ambiguous { reason: identity::ambiguous_refusal(name, &candidates) })
+        }
+        identity::Resolution::Moved { pinned_stem, candidates, .. } => {
+            Err(Undelivered::NameMoved {
+                reason: identity::moved_refusal(name, &pinned_stem, &candidates),
+            })
+        }
         identity::Resolution::NoneSuch { .. } => Err(Undelivered::Unknown),
-        identity::Resolution::ListingFailed { error } => Err(Undelivered::Failed {
-            reason: identity::listing_refusal(name, &error),
-        }),
+        identity::Resolution::ListingFailed { error } => {
+            Err(Undelivered::Failed { reason: identity::listing_refusal(name, &error) })
+        }
     }
 }
 
@@ -1702,18 +1661,14 @@ impl Socket {
     /// Binds a client to `path`. Nothing is connected yet — a socket that is
     /// not there fails the first request, in that request's words.
     fn open(path: &Path) -> Result<Self, Undelivered> {
-        let http = reqwest::Client::builder()
-            .unix_socket(path)
-            .timeout(SOCKET_DEADLINE)
-            .build()
-            .map_err(|error| Undelivered::Failed {
-                reason: format!("{SOCKET_CLIENT_FAILED} {}: {error}", path.display()),
-            })?;
+        let http =
+            reqwest::Client::builder().unix_socket(path).timeout(SOCKET_DEADLINE).build().map_err(
+                |error| Undelivered::Failed {
+                    reason: format!("{SOCKET_CLIENT_FAILED} {}: {error}", path.display()),
+                },
+            )?;
 
-        Ok(Self {
-            http,
-            path: path.to_path_buf(),
-        })
+        Ok(Self { http, path: path.to_path_buf() })
     }
 
     async fn get<T: serde::de::DeserializeOwned>(&self, route: &str) -> Result<T, Undelivered> {
@@ -1758,18 +1713,11 @@ impl Socket {
         };
         // A declared length past the cap is refused before a byte is read;
         // an undeclared or lying one is refused the moment the cap is passed.
-        if response
-            .content_length()
-            .is_some_and(|length| length > SOCKET_BODY_CAP as u64)
-        {
+        if response.content_length().is_some_and(|length| length > SOCKET_BODY_CAP as u64) {
             return Err(oversized());
         }
         let mut body: Vec<u8> = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|error| self.unreachable(error))?
-        {
+        while let Some(chunk) = response.chunk().await.map_err(|error| self.unreachable(error))? {
             if body.len() + chunk.len() > SOCKET_BODY_CAP {
                 return Err(oversized());
             }
@@ -1970,12 +1918,7 @@ pub(crate) fn receive_ladder(
         .filter(|summary| !summary.trim().is_empty())
         .map(|summary| cap_for_display(&summary).to_owned());
 
-    Ok(PeerMessage {
-        from: incoming.from,
-        text: incoming.text,
-        summary,
-        lead: lead.to_owned(),
-    })
+    Ok(PeerMessage { from: incoming.from, text: incoming.text, summary, lead: lead.to_owned() })
 }
 
 /// The receiving end of the socket route, second half: the write every local
@@ -2007,10 +1950,7 @@ pub(crate) async fn deliver_to_lead(
         registry.root(),
         registry.team(),
         &recipient,
-        Body::Text {
-            text: message.text,
-            summary: message.summary,
-        },
+        Body::Text { text: message.text, summary: message.summary },
     )
     .await
     .map_err(|undelivered| match undelivered {
@@ -2091,9 +2031,7 @@ impl team::Postbox for Postbox {
         // team it belonged to has been shut down — and a model told that
         // nobody answers to it would go looking for a name that does.
         let Some(registry) = self.registry.upgrade() else {
-            return Err(Undelivered::Failed {
-                reason: TEAM_GONE.to_owned(),
-            });
+            return Err(Undelivered::Failed { reason: TEAM_GONE.to_owned() });
         };
         if let Some(recipient) = self.recipient(&registry, &name) {
             return crate::teammate::postbox::write_to_peer(
@@ -2117,11 +2055,7 @@ impl team::Postbox for Postbox {
         let Some((identity, own_session)) = self.resolver.clone() else {
             return Err(Undelivered::Unknown);
         };
-        let own = own_session
-            .lock()
-            .expect("the session id is never poisoned")
-            .as_str()
-            .to_owned();
+        let own = own_session.lock().expect("the session id is never poisoned").as_str().to_owned();
         let from = format!("{}@{}", self.sender, registry.team());
         drop(registry);
 
@@ -2144,9 +2078,7 @@ impl team::Postbox for Postbox {
         // answers "who may I address", and the honest answer is nobody. The
         // sentence explaining why belongs to the call that tried to send —
         // `deliver` — where there is something to explain.
-        self.registry
-            .upgrade()
-            .map_or_else(Vec::new, |registry| self.peers(&registry))
+        self.registry.upgrade().map_or_else(Vec::new, |registry| self.peers(&registry))
     }
 }
 
@@ -2157,9 +2089,7 @@ impl team::Postbox for Postbox {
 /// are the engine's own types and stay so on this side of the seam; what
 /// crosses is what the model reads and may retry on.
 fn refused(error: impl fmt::Display) -> NotSpawned {
-    NotSpawned {
-        reason: error.to_string(),
-    }
+    NotSpawned { reason: error.to_string() }
 }
 
 /// Why a spawn a rule denied was refused, when the gate names no clause of its
@@ -2264,13 +2194,7 @@ impl SoloPostbox {
         identity: Arc<identity::Identity>,
         own_session: Arc<std::sync::Mutex<SessionId>>,
     ) -> Self {
-        Self {
-            self_name,
-            identity,
-            own_session,
-            peer_facts: Arc::new(Unbound),
-            receipts: None,
-        }
+        Self { self_name, identity, own_session, peer_facts: Arc::new(Unbound), receipts: None }
     }
 
     /// Installs the engine's own [`PeerFacts`] (**D532**); see
@@ -2291,10 +2215,7 @@ impl SoloPostbox {
 
     /// See [`Postbox::sender_side`], this postbox's twin.
     fn sender_side(&self) -> SenderSide<'_> {
-        SenderSide {
-            facts: self.peer_facts.as_ref(),
-            receipts: self.receipts.as_deref(),
-        }
+        SenderSide { facts: self.peer_facts.as_ref(), receipts: self.receipts.as_deref() }
     }
 
     /// The derived identity every send through this stamps `from` with:
@@ -2303,18 +2224,12 @@ impl SoloPostbox {
     fn from(&self) -> String {
         format!(
             "{}@{SOLO_TEAM}",
-            self.self_name
-                .lock()
-                .expect("the self-name cell is never poisoned")
+            self.self_name.lock().expect("the self-name cell is never poisoned")
         )
     }
 
     fn own_session(&self) -> String {
-        self.own_session
-            .lock()
-            .expect("the session id is never poisoned")
-            .as_str()
-            .to_owned()
+        self.own_session.lock().expect("the session id is never poisoned").as_str().to_owned()
     }
 }
 
@@ -2352,10 +2267,7 @@ impl team::Postbox for SoloPostbox {
             }
         };
 
-        Ok(Sent {
-            note: format!("{}{ONE_WAY_NOTE}", sent.note),
-            ..sent
-        })
+        Ok(Sent { note: format!("{}{ONE_WAY_NOTE}", sent.note), ..sent })
     }
 
     fn roster(&self) -> Vec<Peer> {
@@ -2391,10 +2303,7 @@ pub(crate) fn roster(agents: &agent::Registry, caller: &Agent) -> Vec<Offered> {
         .agents()
         .iter()
         .filter(|agent| agent.spawnable() && !denies_task(&caller.rules, &agent.name))
-        .map(|agent| Offered {
-            name: agent.name.clone(),
-            description: agent.description.clone(),
-        })
+        .map(|agent| Offered { name: agent.name.clone(), description: agent.description.clone() })
         .collect()
 }
 
@@ -2439,12 +2348,7 @@ impl Child {
                 // transcript somebody is having, and appending a child's turns
                 // into it would interleave two conversations in one record;
                 // the unanswerable id starts a fresh child instead.
-                state
-                    .storage
-                    .load_info(&id)
-                    .ok()
-                    .flatten()
-                    .filter(|info| info.parent.is_some())?;
+                state.storage.load_info(&id).ok().flatten().filter(|info| info.parent.is_some())?;
                 let transcript = state.storage.load_transcript(&id).unwrap_or_default();
 
                 Some((id, transcript))
@@ -2452,22 +2356,14 @@ impl Child {
         );
 
         match resumed {
-            Some((session, history)) => Self {
-                session,
-                model,
-                history,
-                fresh: false,
-            },
+            Some((session, history)) => Self { session, model, history, fresh: false },
             // A `task_id` the store cannot answer for starts a fresh session
             // rather than failing the call: the model asked for work to happen,
             // and the id was a hint about where to continue it
             // (deviation: task-id-miss-starts-fresh).
-            None => Self {
-                session: SessionId::ascending(),
-                model,
-                history: Vec::new(),
-                fresh: true,
-            },
+            None => {
+                Self { session: SessionId::ascending(), model, history: Vec::new(), fresh: true }
+            }
         }
     }
 
@@ -2482,22 +2378,13 @@ impl Child {
         let host = &spawn.host;
         let persist = host.persistence.as_ref().map(|state| {
             if self.fresh {
-                create(
-                    state,
-                    &self.session,
-                    agent,
-                    &request.description,
-                    &self.model,
-                );
+                create(state, &self.session, agent, &request.description, &self.model);
             }
             Persist::new(Arc::clone(state), self.session.clone())
         });
 
         let permissions = {
-            let parent = host
-                .permissions
-                .lock()
-                .expect("the permission rules are never poisoned");
+            let parent = host.permissions.lock().expect("the permission rules are never poisoned");
             parent.derive_subagent(subagent_rules(agent, &parent))
         };
 
@@ -2840,10 +2727,7 @@ async fn watch(mut receiver: mpsc::Receiver<Event>, watched: Watched) -> Outcome
                     report(&watched, current.as_deref(), &outcome).await;
                 }
             }
-            Event::MessageStarted {
-                session_id: _,
-                message,
-            } => {
+            Event::MessageStarted { session_id: _, message } => {
                 // A compaction summary arrives as a complete assistant message
                 // rather than a streamed one; it is not the child's answer.
                 if message.role == Role::User {
@@ -2851,12 +2735,7 @@ async fn watch(mut receiver: mpsc::Receiver<Event>, watched: Watched) -> Outcome
                     open = None;
                 }
             }
-            Event::MessageFinished {
-                reason,
-                usage,
-                error,
-                ..
-            } => {
+            Event::MessageFinished { reason, usage, error, .. } => {
                 if let Some(usage) = usage {
                     outcome.usage = usage;
                 }
@@ -2909,9 +2788,7 @@ async fn watch(mut receiver: mpsc::Receiver<Event>, watched: Watched) -> Outcome
 /// D503 ring ([`crate::teammate`]'s `fold_calls`) both name calls through
 /// this.
 pub(crate) fn describe_call(tools: &Registry, tool: &str, input: &serde_json::Value) -> String {
-    tools
-        .get(tool)
-        .map_or_else(|| tool.to_owned(), |found| found.describe(input))
+    tools.get(tool).map_or_else(|| tool.to_owned(), |found| found.describe(input))
 }
 
 /// Rewrites the parent's tool part with what the child is doing now — and the

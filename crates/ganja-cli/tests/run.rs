@@ -12,7 +12,8 @@
 //! Spec: upstream `packages/opencode/src/cli/cmd/run.ts`. Line numbers cited on
 //! the tests that pin one of its rules.
 
-use std::{fs, path::Path};
+use std::fs;
+use std::path::Path;
 
 use assert_cmd::Command;
 use ganja_testkit::temp_dir as temporary;
@@ -23,14 +24,7 @@ use tempfile::TempDir;
 /// The six `type` names an nd-JSON object may carry, spelled here rather than
 /// imported: this is what a consumer of the stream has, and the point of the
 /// assertion is that the binary agrees with it.
-const TYPES: [&str; 6] = [
-    "tool_use",
-    "step_start",
-    "step_finish",
-    "text",
-    "reasoning",
-    "error",
-];
+const TYPES: [&str; 6] = ["tool_use", "step_start", "step_finish", "text", "reasoning", "error"];
 
 /// What the last turn of every script says. One word, and one that appears
 /// nowhere else, so finding it means the whole script ran.
@@ -48,10 +42,7 @@ impl Run {
     /// `GANJA_FAKE_SCRIPT` names, whose format `ganja_core::provider::fake`
     /// documents.
     fn playing(script: &Value) -> Self {
-        let run = Self {
-            project: temporary(),
-            data: temporary(),
-        };
+        let run = Self { project: temporary(), data: temporary() };
         fs::write(run.script(), script.to_string()).expect("the script is writable");
 
         run
@@ -165,9 +156,7 @@ fn a_run_with_neither_a_message_nor_a_command_is_refused() {
         .arg("run")
         .assert()
         .code(1)
-        .stderr(predicate::str::contains(
-            "You must provide a message or a command",
-        ));
+        .stderr(predicate::str::contains("You must provide a message or a command"));
 }
 
 /// Whitespace is not a message. Upstream trims before it decides
@@ -180,9 +169,7 @@ fn a_message_of_nothing_but_whitespace_is_no_message() {
         .args(["run", "   ", "\t"])
         .assert()
         .code(1)
-        .stderr(predicate::str::contains(
-            "You must provide a message or a command",
-        ));
+        .stderr(predicate::str::contains("You must provide a message or a command"));
 }
 
 #[test]
@@ -192,9 +179,7 @@ fn forking_with_no_session_to_fork_names_what_is_missing() {
         .args(["run", "--fork", "hello"])
         .assert()
         .code(1)
-        .stderr(predicate::str::contains(
-            "--fork requires --continue or --session",
-        ));
+        .stderr(predicate::str::contains("--fork requires --continue or --session"));
 }
 
 /// The validation above is upstream's and is ported whole; the fork itself is
@@ -365,11 +350,7 @@ fn a_failed_turn_emits_an_error_object_before_it_exits_one() {
     let run = Run::playing(&one_word());
     fs::remove_file(run.script()).expect("the script is removable");
 
-    let failed = run
-        .ganja()
-        .args(["run", "--format", "json", "hello"])
-        .assert()
-        .code(1);
+    let failed = run.ganja().args(["run", "--format", "json", "hello"]).assert().code(1);
     let stdout = String::from_utf8(failed.get_output().stdout.clone()).expect("text");
 
     assert!(
@@ -413,11 +394,8 @@ fn every_object_of_the_stream_carries_one_of_the_six_type_names() {
     let run = Run::playing(&a_turn_with_a_call());
     fs::write(run.path().join("target.txt"), "seeded\n").expect("the target is writable");
 
-    let ran = run
-        .ganja()
-        .args(["run", "--format", "json", "what is in the file"])
-        .assert()
-        .success();
+    let ran =
+        run.ganja().args(["run", "--format", "json", "what is in the file"]).assert().success();
     let stdout = String::from_utf8(ran.get_output().stdout.clone()).expect("text");
     let emitted = types(&objects(&stdout));
 
@@ -431,10 +409,7 @@ fn every_object_of_the_stream_carries_one_of_the_six_type_names() {
     // Not merely a subset by accident of emitting nothing interesting: the
     // turn ran a tool and said two things, so four of the six have a source.
     for expected in ["step_start", "step_finish", "text", "tool_use"] {
-        assert!(
-            emitted.iter().any(|kind| kind == expected),
-            "no {expected} object in {stdout:?}"
-        );
+        assert!(emitted.iter().any(|kind| kind == expected), "no {expected} object in {stdout:?}");
     }
 }
 
@@ -445,11 +420,7 @@ fn every_object_of_the_stream_carries_one_of_the_six_type_names() {
 fn every_object_carries_the_session_this_run_created() {
     let run = Run::playing(&one_word());
 
-    let ran = run
-        .ganja()
-        .args(["run", "--format", "json", "hello"])
-        .assert()
-        .success();
+    let ran = run.ganja().args(["run", "--format", "json", "hello"]).assert().success();
     let stdout = String::from_utf8(ran.get_output().stdout.clone()).expect("text");
 
     let sessions = run.sessions();
@@ -466,10 +437,7 @@ fn every_object_carries_the_session_this_run_created() {
 
     assert!(!stamped.is_empty(), "a turn has to emit something");
     for id in stamped {
-        assert_eq!(
-            id, sessions[0],
-            "an object named a session that is not this run's: {stdout:?}"
-        );
+        assert_eq!(id, sessions[0], "an object named a session that is not this run's: {stdout:?}");
     }
 }
 
@@ -512,19 +480,10 @@ fn a_delegating_turn_emits_nothing_attributable_to_a_child_session() {
     let stdout = String::from_utf8(ran.get_output().stdout.clone()).expect("text");
     let emitted = objects(&stdout);
 
-    assert!(
-        stdout.contains("\"task\""),
-        "the turn has to have delegated: {stdout:?}"
-    );
-    let named: std::collections::BTreeSet<&str> = emitted
-        .iter()
-        .filter_map(|object| object["sessionID"].as_str())
-        .collect();
-    assert_eq!(
-        named.len(),
-        1,
-        "more than one session reached the stream: {named:?}"
-    );
+    assert!(stdout.contains("\"task\""), "the turn has to have delegated: {stdout:?}");
+    let named: std::collections::BTreeSet<&str> =
+        emitted.iter().filter_map(|object| object["sessionID"].as_str()).collect();
+    assert_eq!(named.len(), 1, "more than one session reached the stream: {named:?}");
     // And it is the parent — the one a listing of this project's roots shows.
     let sessions = run.sessions();
     assert_eq!(
@@ -544,11 +503,8 @@ fn the_stream_opens_on_the_turns_first_step() {
     let run = Run::playing(&a_turn_with_a_call());
     fs::write(run.path().join("target.txt"), "seeded\n").expect("the target is writable");
 
-    let ran = run
-        .ganja()
-        .args(["run", "--format", "json", "what is in the file"])
-        .assert()
-        .success();
+    let ran =
+        run.ganja().args(["run", "--format", "json", "what is in the file"]).assert().success();
     let stdout = String::from_utf8(ran.get_output().stdout.clone()).expect("text");
 
     assert_eq!(
@@ -594,10 +550,7 @@ fn a_permission_request_is_rejected_with_a_warning_rather_than_waited_on() {
         // model reads, never a turn abort — so the script reaches its end.
         .stdout(predicate::str::contains(CLOSING));
 
-    assert!(
-        !run.path().join("marker.txt").exists(),
-        "a rejected call must not have run"
-    );
+    assert!(!run.path().join("marker.txt").exists(), "a rejected call must not have run");
 }
 
 /// The warning is a diagnostic, so it must not land in the middle of a stream
@@ -606,19 +559,12 @@ fn a_permission_request_is_rejected_with_a_warning_rather_than_waited_on() {
 fn the_rejection_warning_never_reaches_the_nd_json_stream() {
     let run = Run::playing(&a_turn_that_asks());
 
-    let ran = run
-        .ganja()
-        .args(["run", "--format", "json", "write a marker"])
-        .assert()
-        .success();
+    let ran = run.ganja().args(["run", "--format", "json", "write a marker"]).assert().success();
     let stdout = String::from_utf8(ran.get_output().stdout.clone()).expect("text");
     let stderr = String::from_utf8(ran.get_output().stderr.clone()).expect("text");
 
     assert!(stderr.contains("auto-rejecting"), "no warning: {stderr:?}");
-    assert!(
-        !stdout.contains("auto-rejecting"),
-        "the warning corrupted the stream: {stdout:?}"
-    );
+    assert!(!stdout.contains("auto-rejecting"), "the warning corrupted the stream: {stdout:?}");
     // Every line still parses, which is the assertion the one above only
     // approximates.
     let _ = objects(&stdout);
@@ -734,10 +680,7 @@ fn auto_allows_the_call_a_default_run_refuses() {
         .success()
         .stdout(predicate::str::contains(CLOSING));
 
-    assert!(
-        run.path().join("marker.txt").exists(),
-        "an allowed call has to have run"
-    );
+    assert!(run.path().join("marker.txt").exists(), "an allowed call has to have run");
 }
 
 /// Upstream's two hidden spellings of the same switch (`run.ts:247-256`), kept
@@ -747,14 +690,8 @@ fn the_hidden_spellings_of_auto_mean_what_auto_means() {
     for flag in ["--yolo", "--dangerously-skip-permissions"] {
         let run = Run::playing(&a_turn_that_asks());
 
-        run.ganja()
-            .args(["run", flag, "write a marker"])
-            .assert()
-            .success();
-        assert!(
-            run.path().join("marker.txt").exists(),
-            "{flag} did not allow the call"
-        );
+        run.ganja().args(["run", flag, "write a marker"]).assert().success();
+        assert!(run.path().join("marker.txt").exists(), "{flag} did not allow the call");
     }
 }
 
@@ -763,10 +700,7 @@ fn the_hidden_spellings_of_auto_mean_what_auto_means() {
 #[test]
 fn a_rejected_run_stores_no_answer_for_the_next_one() {
     let run = Run::playing(&a_turn_that_asks());
-    run.ganja()
-        .args(["run", "write a marker"])
-        .assert()
-        .success();
+    run.ganja().args(["run", "write a marker"]).assert().success();
 
     // Wherever under the data home the store lands — the layout is
     // `ganja_permission::project`'s business, not this test's.
@@ -777,10 +711,7 @@ fn a_rejected_run_stores_no_answer_for_the_next_one() {
         .collect();
 
     for answers in stored {
-        assert!(
-            !answers.contains("allow"),
-            "a headless run left an allow behind: {answers}"
-        );
+        assert!(!answers.contains("allow"), "a headless run left an allow behind: {answers}");
     }
 }
 
@@ -816,19 +747,13 @@ fn asked(run: &Run) -> String {
 
     // The listing is `SESSION UPDATED TOKENS TITLE`, and the title is the rest
     // of the row after the three fixed columns.
-    row.split_whitespace()
-        .skip(4)
-        .collect::<Vec<&str>>()
-        .join(" ")
+    row.split_whitespace().skip(4).collect::<Vec<&str>>().join(" ")
 }
 
 #[test]
 fn the_message_arguments_are_joined_with_spaces() {
     let run = Run::playing(&one_word());
-    run.ganja()
-        .args(["run", "alpha", "bravo", "charlie"])
-        .assert()
-        .success();
+    run.ganja().args(["run", "alpha", "bravo", "charlie"]).assert().success();
 
     assert_eq!(asked(&run), "alpha bravo charlie");
 }
@@ -838,10 +763,7 @@ fn the_message_arguments_are_joined_with_spaces() {
 #[test]
 fn everything_after_the_separator_is_part_of_the_message() {
     let run = Run::playing(&one_word());
-    run.ganja()
-        .args(["run", "--", "alpha", "--format"])
-        .assert()
-        .success();
+    run.ganja().args(["run", "--", "alpha", "--format"]).assert().success();
 
     assert_eq!(asked(&run), "alpha --format");
 }
@@ -853,11 +775,7 @@ fn everything_after_the_separator_is_part_of_the_message() {
 #[test]
 fn piped_text_joins_the_typed_message_and_comes_last() {
     let run = Run::playing(&one_word());
-    run.ganja()
-        .args(["run", "alpha-typed"])
-        .write_stdin("bravo-piped")
-        .assert()
-        .success();
+    run.ganja().args(["run", "alpha-typed"]).write_stdin("bravo-piped").assert().success();
 
     assert_eq!(asked(&run), "alpha-typed bravo-piped");
 }
@@ -913,10 +831,7 @@ fn a_skill_in_the_projects_own_tier_loads_through_a_headless_turn() {
         .success();
     let stdout = String::from_utf8(ran.get_output().stdout.clone()).expect("text");
 
-    assert!(
-        stdout.contains(CLOSING),
-        "the whole script has to have run: {stdout:?}"
-    );
+    assert!(stdout.contains(CLOSING), "the whole script has to have run: {stdout:?}");
     assert!(
         stdout.contains("<skill_content name=\\\"porting\\\">")
             && stdout.contains("Read the upstream file first."),
@@ -944,17 +859,11 @@ fn continuing_lands_in_the_session_the_last_run_created() {
         "turns": [{"text": "first"}, {"text": CLOSING}],
     }));
 
-    run.ganja()
-        .args(["run", "the first thing"])
-        .assert()
-        .success();
+    run.ganja().args(["run", "the first thing"]).assert().success();
     let first = run.sessions();
     assert_eq!(first.len(), 1);
 
-    run.ganja()
-        .args(["run", "--continue", "the second thing"])
-        .assert()
-        .success();
+    run.ganja().args(["run", "--continue", "the second thing"]).assert().success();
     assert_eq!(
         run.sessions(),
         first,
@@ -971,16 +880,10 @@ fn naming_a_session_lands_in_that_one() {
         "turns": [{"text": "first"}, {"text": CLOSING}],
     }));
 
-    run.ganja()
-        .args(["run", "the first thing"])
-        .assert()
-        .success();
+    run.ganja().args(["run", "the first thing"]).assert().success();
     let first = run.sessions();
 
-    run.ganja()
-        .args(["run", "--session", &first[0], "the second thing"])
-        .assert()
-        .success();
+    run.ganja().args(["run", "--session", &first[0], "the second thing"]).assert().success();
     assert_eq!(run.sessions(), first);
 }
 
@@ -1053,15 +956,11 @@ fn hooks_fire_for_a_headless_run_exactly_as_they_would_for_a_screen() {
     assert_eq!(envelopes[0]["source"].as_str(), Some("startup"));
     assert_eq!(envelopes[1]["prompt"].as_str(), Some("hello"));
     assert!(
-        envelopes
-            .iter()
-            .all(|envelope| envelope["session_id"] == envelopes[0]["session_id"]),
+        envelopes.iter().all(|envelope| envelope["session_id"] == envelopes[0]["session_id"]),
         "every fire names the one session the run had: {written}"
     );
     assert!(
-        envelopes
-            .iter()
-            .all(|envelope| envelope.get("transcript_path").is_none()),
+        envelopes.iter().all(|envelope| envelope.get("transcript_path").is_none()),
         "D457: this build has no JSONL transcript to name"
     );
 }

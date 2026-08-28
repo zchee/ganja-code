@@ -49,11 +49,9 @@ mod shim_support;
 
 use std::time::Duration;
 
-use ganja_core::teammate::{
-    SpawnSpec,
-    agy::Agy,
-    shim::{self, Driver as _, Turn},
-};
+use ganja_core::teammate::SpawnSpec;
+use ganja_core::teammate::agy::Agy;
+use ganja_core::teammate::shim::{self, Driver as _, Turn};
 use ganja_protocol::team::MemberBackend;
 use ganja_team::{MemberName, TeamName, TeamsRoot};
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
@@ -95,14 +93,8 @@ fn spec(cwd: &std::path::Path) -> SpawnSpec {
 
 /// One NDJSON line, as the shipped driver encodes it.
 fn line(spec: &SpawnSpec, text: &str) -> String {
-    Agy.line(&Turn {
-        spec,
-        text,
-        prompt: None,
-        session: None,
-        deadline: TURN,
-    })
-    .expect("a turn encodes")
+    Agy.line(&Turn { spec, text, prompt: None, session: None, deadline: TURN })
+        .expect("a turn encodes")
 }
 
 /// One turn: read until the shipped driver says it is over.
@@ -161,17 +153,10 @@ async fn a_real_agy_teammate_takes_two_turns_on_one_child_and_writes_where_it_wa
 
     // The shipped launch line, composed by the shipped driver — not a line
     // this test wrote, which is the whole point of driving the real one.
-    let argv = Agy.argv(&Turn {
-        spec: &spec,
-        text: "",
-        prompt: None,
-        session: None,
-        deadline: TURN,
-    });
-    let rendered: Vec<String> = argv
-        .iter()
-        .map(|token| token.to_string_lossy().into_owned())
-        .collect();
+    let argv =
+        Agy.argv(&Turn { spec: &spec, text: "", prompt: None, session: None, deadline: TURN });
+    let rendered: Vec<String> =
+        argv.iter().map(|token| token.to_string_lossy().into_owned()).collect();
     eprintln!("argv: {}", rendered.join(" "));
 
     let mut child = launch
@@ -221,10 +206,7 @@ async fn a_real_agy_teammate_takes_two_turns_on_one_child_and_writes_where_it_wa
                 .contains("AGY-SHIP-PROBE-OK")
         );
     } else {
-        let why = first
-            .refused
-            .as_deref()
-            .expect("a write that did not land was refused out loud");
+        let why = first.refused.as_deref().expect("a write that did not land was refused out loud");
         assert!(
             why.contains("artifact path"),
             "the only thing that ever stops this write is agy's own argument \
@@ -238,23 +220,14 @@ async fn a_real_agy_teammate_takes_two_turns_on_one_child_and_writes_where_it_wa
         !first.messages.is_empty() || first.refused.is_some(),
         "a turn says something or says why not"
     );
-    let conversation = first
-        .session
-        .clone()
-        .expect("the turn named its conversation");
+    let conversation = first.session.clone().expect("the turn named its conversation");
 
     // Question 1: the same child takes another turn. A per-message CLI would
     // need a second process for this, and the conversation id would change.
     stdin
         .write_all(
-            format!(
-                "{}\n",
-                line(
-                    &spec,
-                    "Reply with exactly the word SECOND and nothing else."
-                )
-            )
-            .as_bytes(),
+            format!("{}\n", line(&spec, "Reply with exactly the word SECOND and nothing else."))
+                .as_bytes(),
         )
         .await
         .expect("the second turn is written");

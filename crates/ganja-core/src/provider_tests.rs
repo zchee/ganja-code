@@ -35,10 +35,7 @@ fn a_config_named_provider_is_selectable_and_a_builtin_is_not_always_cataloged()
         !PROVIDERS.contains(&"local-llama"),
         "the config tier is what makes it selectable, not the shipped list"
     );
-    assert!(
-        !catalog::carries("local-llama"),
-        "no published catalog knows a private endpoint"
-    );
+    assert!(!catalog::carries("local-llama"), "no published catalog knows a private endpoint");
 
     for builtin in PROVIDERS {
         assert!(
@@ -120,10 +117,7 @@ fn the_refusal_for_an_unknown_provider_names_both_tiers_and_who_asked() {
         "the tier that named the id is the thing to fix: {rendered}"
     );
     for builtin in PROVIDERS {
-        assert!(
-            rendered.contains(builtin),
-            "{builtin} is missing: {rendered}"
-        );
+        assert!(rendered.contains(builtin), "{builtin} is missing: {rendered}");
     }
     assert!(
         rendered.contains("local-llama") && rendered.contains("gateway"),
@@ -138,10 +132,7 @@ fn the_refusal_for_an_unknown_provider_names_both_tiers_and_who_asked() {
         configured: Vec::new(),
     }
     .to_string();
-    assert!(
-        bare.contains(PROVIDER_ENV),
-        "the environment tier is named as itself: {bare}"
-    );
+    assert!(bare.contains(PROVIDER_ENV), "the environment tier is named as itself: {bare}");
     assert!(
         !bare.contains("this config names"),
         "nothing was configured, so nothing should be listed: {bare}"
@@ -176,10 +167,7 @@ fn the_oldest_login_that_wins_is_the_oldest_one_this_session_can_run_as() {
 
     // A credential filed under the fake id is not a login to anything,
     // and the fake fallback must keep its notice.
-    assert_eq!(
-        adoptable_login(&Config::default(), stored(&[fake::ID])),
-        None
-    );
+    assert_eq!(adoptable_login(&Config::default(), stored(&[fake::ID])), None);
     assert_eq!(adoptable_login(&Config::default(), stored(&[])), None);
 }
 
@@ -203,10 +191,7 @@ fn a_cursor_login_adopts_like_any_other_stored_login() {
         adoptable_login(&Config::default(), stored(&["anthropic", "cursor"])).as_deref(),
         Some("anthropic")
     );
-    assert_eq!(
-        adoptable_login(&Config::default(), stored(&["cursor"])).as_deref(),
-        Some("cursor")
-    );
+    assert_eq!(adoptable_login(&Config::default(), stored(&["cursor"])).as_deref(), Some("cursor"));
     // Adopted or named, the id answers the same way everywhere else.
     assert!(selectable(&Config::default(), cursor::ID));
 }
@@ -228,10 +213,7 @@ fn an_explicitly_named_cursor_is_answered_not_filtered() {
     let selection = select(&config).expect("an explicit cursor selection is not filtered");
     assert_eq!(selection.provider.id(), cursor::ID);
     assert_eq!(selection.model, "gpt-5.3-codex");
-    assert!(
-        selection.notice.is_none(),
-        "the provider was asked for by name, not defaulted"
-    );
+    assert!(selection.notice.is_none(), "the provider was asked for by name, not defaulted");
 }
 
 /// The listing seam's whole credential-independent negative half: for
@@ -247,13 +229,7 @@ fn an_explicitly_named_cursor_is_answered_not_filtered() {
 /// cursor's positive half lives in `tests/cursor_models_listing.rs`.
 #[tokio::test]
 async fn the_wire_listing_answers_none_where_the_catalog_is_the_source_of_truth() {
-    for provider in [
-        "anthropic",
-        grok::ID,
-        fake::ID,
-        "local-llama",
-        "a-provider-nothing-ships",
-    ] {
+    for provider in ["anthropic", grok::ID, fake::ID, "local-llama", "a-provider-nothing-ships"] {
         assert!(
             wire_model_listing(provider).await.is_none(),
             "{provider} is the catalog's to describe, not a wire's"

@@ -1,12 +1,12 @@
-use std::sync::{Arc, atomic::Ordering};
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
-use ganja_core::{Engine, provider::FakeProvider};
+use ganja_core::Engine;
+use ganja_core::provider::FakeProvider;
 use ganja_protocol::Command;
 
-use super::{
-    SessionSocket, Synced,
-    fake::{Recording, served},
-};
+use super::fake::{Recording, served};
+use super::{SessionSocket, Synced};
 
 fn engine() -> Arc<Engine> {
     Arc::new(Engine::new(
@@ -37,10 +37,7 @@ async fn the_socket_follows_the_session_slot_and_is_bound_once_per_id() {
         "a pass over an unmoved slot binds nothing"
     );
 
-    engine
-        .send(Command::NewSession)
-        .await
-        .expect("a fresh session");
+    engine.send(Command::NewSession).await.expect("a fresh session");
     let second = engine.session_id();
     assert_ne!(first, second, "NewSession re-mints the id");
     assert_eq!(
@@ -85,11 +82,7 @@ async fn a_refused_bind_is_a_sentence_not_retried_until_the_slot_moves() {
         Synced::Refused("no session socket: the directory is not ours".to_owned())
     );
     assert_eq!(socket.sync(&engine).await, Synced::Unchanged);
-    assert_eq!(
-        recording.binds.load(Ordering::SeqCst),
-        1,
-        "the same id is not asked for again"
-    );
+    assert_eq!(recording.binds.load(Ordering::SeqCst), 1, "the same id is not asked for again");
     assert_eq!(socket.path(), None, "nothing is bound");
 
     recording.refuse.store(false, Ordering::SeqCst);
@@ -98,10 +91,7 @@ async fn a_refused_bind_is_a_sentence_not_retried_until_the_slot_moves() {
         Synced::Unchanged,
         "and still not, while the slot stands"
     );
-    engine
-        .send(Command::NewSession)
-        .await
-        .expect("a fresh session");
+    engine.send(Command::NewSession).await.expect("a fresh session");
     assert!(
         matches!(socket.sync(&engine).await, Synced::Bound(_)),
         "a moved slot is a new question"

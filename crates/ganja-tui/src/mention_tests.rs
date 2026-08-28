@@ -83,11 +83,7 @@ fn the_menu_opens_only_for_an_at_that_starts_a_word() {
 fn the_trigger_reports_where_the_at_sits_so_a_choice_can_replace_it() {
     assert_eq!(
         trigger("look at @src", (0, 12)),
-        Some(Fragment {
-            row: 0,
-            start: 8,
-            text: "src".to_owned(),
-        })
+        Some(Fragment { row: 0, start: 8, text: "src".to_owned() })
     );
     assert_eq!(
         trigger("look at @src", (0, 12)).map(|fragment| fragment.width()),
@@ -101,10 +97,7 @@ fn the_trigger_reports_where_the_at_sits_so_a_choice_can_replace_it() {
 #[test]
 fn a_cursor_off_the_end_of_the_buffer_triggers_nothing() {
     assert_eq!(trigger("one line", (4, 0)), None);
-    assert_eq!(
-        trigger("@src", (0, 99)).map(|fragment| fragment.text),
-        Some("src".to_owned())
-    );
+    assert_eq!(trigger("@src", (0, 99)).map(|fragment| fragment.text), Some("src".to_owned()));
 }
 
 #[test]
@@ -112,10 +105,7 @@ fn a_submitted_buffer_carries_every_file_it_mentions() {
     let mentions = scan("compare @src/lib.rs with @src/app.rs and say why");
 
     assert_eq!(
-        mentions
-            .iter()
-            .map(|mention| mention.path.as_str())
-            .collect::<Vec<_>>(),
+        mentions.iter().map(|mention| mention.path.as_str()).collect::<Vec<_>>(),
         vec!["src/lib.rs", "src/app.rs"]
     );
 }
@@ -125,10 +115,7 @@ fn a_scan_reads_every_line_of_a_multi_line_prompt() {
     let mentions = scan("first @a.rs\nsecond @b.rs");
 
     assert_eq!(
-        mentions
-            .iter()
-            .map(|mention| mention.path.as_str())
-            .collect::<Vec<_>>(),
+        mentions.iter().map(|mention| mention.path.as_str()).collect::<Vec<_>>(),
         vec!["a.rs", "b.rs"]
     );
 }
@@ -143,12 +130,7 @@ fn a_file_mentioned_twice_is_carried_once() {
 /// What the trigger refuses to open on, a scan has to refuse to read.
 #[test]
 fn a_scan_skips_what_the_trigger_would_never_have_opened() {
-    for text in [
-        "mail me@example.com about it",
-        "an @ on its own",
-        "no mentions here",
-        "",
-    ] {
+    for text in ["mail me@example.com about it", "an @ on its own", "no mentions here", ""] {
         assert!(scan(text).is_empty(), "{text:?} mentions nothing");
     }
 }
@@ -208,10 +190,7 @@ fn a_mistyped_path_rides_as_text_beside_the_one_that_resolved() {
     let mentions = attachable("compare @src/lib.rs with @src/libb.rs", root.path());
 
     assert_eq!(
-        mentions
-            .iter()
-            .map(|mention| mention.path.as_str())
-            .collect::<Vec<_>>(),
+        mentions.iter().map(|mention| mention.path.as_str()).collect::<Vec<_>>(),
         vec!["src/lib.rs"],
         "only the file that exists attaches"
     );
@@ -275,10 +254,7 @@ fn a_range_suffix_is_split_only_when_it_parses() {
         ("a.rs#+5", ("a.rs#+5", None, None)),
         // A line number past `u32` is not a line number (the narrowing
         // named at `split_range`).
-        (
-            "a.rs#99999999999999999999",
-            ("a.rs#99999999999999999999", None, None),
-        ),
+        ("a.rs#99999999999999999999", ("a.rs#99999999999999999999", None, None)),
     ];
 
     for (mentioned, (path, start, end)) in cases {
@@ -291,25 +267,13 @@ fn a_range_suffix_is_split_only_when_it_parses() {
 /// grammar.
 #[test]
 fn a_rendered_mention_scans_back_to_itself() {
-    for text in [
-        "@a.rs",
-        "@src/lib.rs#5",
-        "@src/lib.rs#5-9",
-        "@we#ird.rs#12-40",
-    ] {
+    for text in ["@a.rs", "@src/lib.rs#5", "@src/lib.rs#5-9", "@we#ird.rs#12-40"] {
         let scanned = scan(text);
         assert_eq!(scanned.len(), 1, "{text:?}");
         let mention = &scanned[0];
         let rendered = token(&mention.path, mention.start, mention.end);
-        assert_eq!(
-            rendered, text,
-            "the render is the token it was scanned from"
-        );
-        assert_eq!(
-            scan(&rendered),
-            scanned,
-            "{rendered:?} scans back unchanged"
-        );
+        assert_eq!(rendered, text, "the render is the token it was scanned from");
+        assert_eq!(scan(&rendered), scanned, "{rendered:?} scans back unchanged");
     }
 }
 
@@ -358,10 +322,7 @@ fn a_range_with_no_path_mentions_nothing() {
 fn a_dropped_path_resolves_to_a_project_relative_mention() {
     let root = project(&["src/lib.rs"]);
 
-    assert_eq!(
-        classify_drop("src/lib.rs", root.path()),
-        Some(vec!["src/lib.rs".to_owned()])
-    );
+    assert_eq!(classify_drop("src/lib.rs", root.path()), Some(vec!["src/lib.rs".to_owned()]));
 }
 
 /// Several files dragged in at once arrive whitespace-separated in one
@@ -393,10 +354,7 @@ fn a_file_url_percent_decodes_and_resolves() {
     let root = project(&["a b.png"]);
     let url = format!("file://{}/a%20b.png", root.path().display());
 
-    assert_eq!(
-        classify_drop(&url, root.path()),
-        Some(vec!["a b.png".to_owned()])
-    );
+    assert_eq!(classify_drop(&url, root.path()), Some(vec!["a b.png".to_owned()]));
 }
 
 /// A terminal that quotes a dropped path because it has a space in it —
@@ -405,10 +363,7 @@ fn a_file_url_percent_decodes_and_resolves() {
 fn a_quoted_path_with_a_space_resolves_as_one_token() {
     let root = project(&["my file.txt"]);
 
-    assert_eq!(
-        classify_drop("'my file.txt'", root.path()),
-        Some(vec!["my file.txt".to_owned()])
-    );
+    assert_eq!(classify_drop("'my file.txt'", root.path()), Some(vec!["my file.txt".to_owned()]));
 }
 
 /// The shell-escaped equivalent of the quoted case above, off Windows
@@ -418,30 +373,21 @@ fn a_quoted_path_with_a_space_resolves_as_one_token() {
 fn a_backslash_escaped_space_resolves_as_one_token() {
     let root = project(&["my file.txt"]);
 
-    assert_eq!(
-        classify_drop(r"my\ file.txt", root.path()),
-        Some(vec!["my file.txt".to_owned()])
-    );
+    assert_eq!(classify_drop(r"my\ file.txt", root.path()), Some(vec!["my file.txt".to_owned()]));
 }
 
 #[test]
 fn a_relative_dot_path_resolves() {
     let root = project(&["src/lib.rs"]);
 
-    assert_eq!(
-        classify_drop("./src/lib.rs", root.path()),
-        Some(vec!["src/lib.rs".to_owned()])
-    );
+    assert_eq!(classify_drop("./src/lib.rs", root.path()), Some(vec!["src/lib.rs".to_owned()]));
 }
 
 #[test]
 fn a_unicode_named_file_resolves() {
     let root = project(&["日本語.txt"]);
 
-    assert_eq!(
-        classify_drop("日本語.txt", root.path()),
-        Some(vec!["日本語.txt".to_owned()])
-    );
+    assert_eq!(classify_drop("日本語.txt", root.path()), Some(vec!["日本語.txt".to_owned()]));
 }
 
 /// A path outside the project keeps its absolute form — the display
@@ -452,10 +398,7 @@ fn an_absolute_path_outside_root_stays_absolute() {
     let outside = project(&["b.rs"]);
     let absolute = outside.path().join("b.rs").display().to_string();
 
-    assert_eq!(
-        classify_drop(&absolute, root.path()),
-        Some(vec![absolute.clone()])
-    );
+    assert_eq!(classify_drop(&absolute, root.path()), Some(vec![absolute.clone()]));
 }
 
 #[test]

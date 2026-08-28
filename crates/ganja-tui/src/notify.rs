@@ -75,10 +75,7 @@ impl Notifier {
             NotificationMethod::Osc9 => format!("\x1b]9;{}\x07", body(summary)),
             NotificationMethod::Bel => "\x07".to_owned(),
         };
-        if let Err(error) = self
-            .sink
-            .write_all(escape.as_bytes())
-            .and_then(|()| self.sink.flush())
+        if let Err(error) = self.sink.write_all(escape.as_bytes()).and_then(|()| self.sink.flush())
         {
             tracing::warn!(%error, "a terminal notification could not be written");
         }
@@ -123,10 +120,7 @@ impl Capture {
 #[cfg(test)]
 impl Write for Capture {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.written
-            .lock()
-            .expect("the capture lock is never poisoned")
-            .extend_from_slice(buf);
+        self.written.lock().expect("the capture lock is never poisoned").extend_from_slice(buf);
 
         Ok(buf.len())
     }

@@ -72,21 +72,18 @@
 //! [`HumanAttended`]: crate::teammate::posture::Posture::HumanAttended
 //! [`Forwarding`]: crate::teammate::posture::Forwarding
 
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use futures::StreamExt as _;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    engine::Evicted,
-    permission::{Decision, EXTERNAL_DIRECTORY, Permissions, Rule, matches, resolve},
-    protocol::{Command, Event, PermissionId, PermissionReply, team::MemberBackend},
-    teammate::{Teammate, backend_name, posture_line},
-};
+use crate::engine::Evicted;
+use crate::permission::{Decision, EXTERNAL_DIRECTORY, Permissions, Rule, matches, resolve};
+use crate::protocol::team::MemberBackend;
+use crate::protocol::{Command, Event, PermissionId, PermissionReply};
+use crate::teammate::{Teammate, backend_name, posture_line};
 
 /// The permission a spawn onto a foreign CLI is judged under (**D508(c)**).
 ///
@@ -218,10 +215,7 @@ impl SpawnGate {
     /// "where", the same reason a call's own dialog discloses them.
     #[must_use]
     pub fn directories(&self) -> Vec<PathBuf> {
-        self.directory
-            .iter()
-            .map(|(directory, _)| directory.clone())
-            .collect()
+        self.directory.iter().map(|(directory, _)| directory.clone()).collect()
     }
 
     /// Why a refused spawn was refused, in the words whoever asked reads next.
@@ -309,12 +303,8 @@ pub fn spawn_gate(
     // Never below `Ask`, though here that floor is belt and braces rather
     // than the mechanism — `inherited_by_subagent` has already dropped any
     // allow that could have lowered it (see [`FOREIGN`]).
-    let foreign = posture_line(backend).map(|_| {
-        (
-            backend,
-            decide(&rules, FOREIGN, backend_name(backend)).max(Decision::Ask),
-        )
-    });
+    let foreign = posture_line(backend)
+        .map(|_| (backend, decide(&rules, FOREIGN, backend_name(backend)).max(Decision::Ask)));
 
     SpawnGate { directory, foreign }
 }
@@ -435,11 +425,7 @@ impl Forwarding {
     pub fn new(teammate: Arc<Teammate>, lead: Option<mpsc::Sender<Forwarded>>) -> Self {
         let events = teammate.engine().subscribe_droppable();
 
-        Self {
-            teammate,
-            lead,
-            events,
-        }
+        Self { teammate, lead, events }
     }
 
     /// Carries dialogs until `cancel` fires or the teammate's stream ends.
@@ -448,11 +434,7 @@ impl Forwarding {
     /// is [`Send`] and not [`Sync`], so a loop that held `&self` across one of
     /// its own awaits would be a future nothing could spawn.
     pub async fn run(self, cancel: CancellationToken) {
-        let Self {
-            teammate,
-            lead,
-            mut events,
-        } = self;
+        let Self { teammate, lead, mut events } = self;
 
         loop {
             let next = tokio::select! {
@@ -552,11 +534,7 @@ async fn hand_over(
 
 /// Answers one of `teammate`'s open dialogs by the id it was published with.
 async fn answer(teammate: &Teammate, id: PermissionId, reply: PermissionReply) {
-    if let Err(error) = teammate
-        .engine()
-        .send(Command::ReplyPermission { id, reply })
-        .await
-    {
+    if let Err(error) = teammate.engine().send(Command::ReplyPermission { id, reply }).await {
         tracing::warn!(
             teammate = teammate.name(),
             %error,

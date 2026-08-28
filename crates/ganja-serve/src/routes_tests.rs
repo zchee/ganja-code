@@ -23,11 +23,8 @@ fn socket_routes_doc() -> String {
         .split_once("\nfn socket_routes()")
         .expect("routes.rs declares `fn socket_routes()`");
 
-    let mut block: Vec<&str> = before
-        .lines()
-        .rev()
-        .take_while(|line| line.trim_start().starts_with("///"))
-        .collect();
+    let mut block: Vec<&str> =
+        before.lines().rev().take_while(|line| line.trim_start().starts_with("///")).collect();
     block.reverse();
 
     block.join("\n")
@@ -43,18 +40,9 @@ fn the_socket_tables_doc_argues_for_the_receipt_route_it_added() {
 
     for (clause, why) in [
         ("/peer/receipt", "the route the argument is about is named"),
-        (
-            "no write API without a credential",
-            "the posture the argument has to preserve is named",
-        ),
-        (
-            "volatile",
-            "what the route settles — a volatile in-memory map — is stated",
-        ),
-        (
-            "the whole capability",
-            "the id, and only the id, is what a poster must already hold",
-        ),
+        ("no write API without a credential", "the posture the argument has to preserve is named"),
+        ("volatile", "what the route settles — a volatile in-memory map — is stated"),
+        ("the whole capability", "the id, and only the id, is what a poster must already hold"),
         (
             "answers identically",
             "the route cannot be used to enumerate what a session is waiting on",
@@ -75,10 +63,7 @@ fn the_socket_table_registers_exactly_the_four_routes_its_doc_claims() {
     let (_, body) = ROUTES_SOURCE
         .split_once("\nfn socket_routes()")
         .expect("routes.rs declares `fn socket_routes()`");
-    let body = body
-        .split_once("\n}")
-        .expect("the function has a closing brace")
-        .0;
+    let body = body.split_once("\n}").expect("the function has a closing brace").0;
 
     let registered: Vec<&str> = body
         .lines()
@@ -89,16 +74,8 @@ fn the_socket_table_registers_exactly_the_four_routes_its_doc_claims() {
 
     assert_eq!(
         registered,
-        vec![
-            "/global/health",
-            "/team",
-            "/team/{name}/message",
-            "/peer/receipt",
-        ],
+        vec!["/global/health", "/team", "/team/{name}/message", "/peer/receipt",],
         "the socket's table is the four routes `socket_routes`' doc argues for"
     );
-    assert!(
-        socket_routes_doc().contains("**exactly four**"),
-        "and the doc still counts them"
-    );
+    assert!(socket_routes_doc().contains("**exactly four**"), "and the doc still counts them");
 }

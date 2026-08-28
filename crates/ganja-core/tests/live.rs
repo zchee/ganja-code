@@ -15,13 +15,12 @@
 use std::env;
 
 use futures::StreamExt as _;
-use ganja_core::{
-    catalog,
-    protocol::{FinishReason, Message, Usage},
-    provider::{
-        AnthropicProvider, ChatRequest, OpenAiProvider, OpencodeProvider, Provider, ProviderEvent,
-        opencode, openrouter, retry::MAX_ATTEMPTS,
-    },
+use ganja_core::catalog;
+use ganja_core::protocol::{FinishReason, Message, Usage};
+use ganja_core::provider::retry::MAX_ATTEMPTS;
+use ganja_core::provider::{
+    AnthropicProvider, ChatRequest, OpenAiProvider, OpencodeProvider, Provider, ProviderEvent,
+    opencode, openrouter,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -79,15 +78,10 @@ async fn smoke(provider: &dyn Provider, model: &str) {
     });
 
     assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event, ProviderEvent::Failed(_))),
+        !events.iter().any(|event| matches!(event, ProviderEvent::Failed(_))),
         "a live turn should not fail: {events:?}"
     );
-    assert!(
-        !text.trim().is_empty(),
-        "the model streamed no text at all: {events:?}"
-    );
+    assert!(!text.trim().is_empty(), "the model streamed no text at all: {events:?}");
     assert_eq!(
         events.last(),
         Some(&ProviderEvent::Finish(FinishReason::Completed)),
@@ -113,16 +107,10 @@ async fn anthropic_answers_a_live_prompt() {
         return;
     };
     let model = env::var("GANJA_MODEL").ok().unwrap_or_else(|| {
-        catalog::default_model("anthropic")
-            .expect("the catalog has a default")
-            .to_owned()
+        catalog::default_model("anthropic").expect("the catalog has a default").to_owned()
     });
 
-    smoke(
-        &AnthropicProvider::new(key).expect("a client builds"),
-        &model,
-    )
-    .await;
+    smoke(&AnthropicProvider::new(key).expect("a client builds"), &model).await;
 }
 
 #[tokio::test]
@@ -132,14 +120,12 @@ async fn openai_answers_a_live_prompt() {
         return;
     };
     let model = env::var("GANJA_MODEL").ok().unwrap_or_else(|| {
-        catalog::default_model("openai")
-            .expect("the catalog has a default")
-            .to_owned()
+        catalog::default_model("openai").expect("the catalog has a default").to_owned()
     });
     let provider = match env::var("OPENAI_BASE_URL") {
-        Ok(base) if !base.trim().is_empty() => OpenAiProvider::new(key)
-            .expect("a client builds")
-            .with_base_url(base),
+        Ok(base) if !base.trim().is_empty() => {
+            OpenAiProvider::new(key).expect("a client builds").with_base_url(base)
+        }
         _ => OpenAiProvider::new(key).expect("a client builds"),
     };
 
@@ -228,9 +214,7 @@ async fn openrouter_accepts_the_effort_its_reference_publishes() {
         .await;
 
     assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event, ProviderEvent::Failed(_))),
+        !events.iter().any(|event| matches!(event, ProviderEvent::Failed(_))),
         "the effort field was refused mid-stream: {events:?}"
     );
     assert_eq!(
@@ -292,11 +276,7 @@ async fn opencode_go_answers_on_the_same_key_and_a_different_dialect() {
         return;
     }
 
-    smoke(
-        &OpencodeProvider::go().expect("one key serves both gateways"),
-        "minimax-m3",
-    )
-    .await;
+    smoke(&OpencodeProvider::go().expect("one key serves both gateways"), "minimax-m3").await;
 }
 
 /// Not a network test: it pins the retry budget a live turn is willing to spend
@@ -304,8 +284,5 @@ async fn opencode_go_answers_on_the_same_key_and_a_different_dialect() {
 /// while tuning a delay.
 #[test]
 fn a_live_turn_gives_up_after_a_bounded_number_of_attempts() {
-    assert_eq!(
-        MAX_ATTEMPTS, 6,
-        "upstream's RETRY_MAX_RETRIES, plus the first"
-    );
+    assert_eq!(MAX_ATTEMPTS, 6, "upstream's RETRY_MAX_RETRIES, plus the first");
 }

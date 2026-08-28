@@ -22,14 +22,12 @@
 
 use std::sync::Arc;
 
-use ganja_core::{
-    Config, Engine, Storage,
-    permission::Permissions,
-    protocol::{Command, Event, PartBody, PermissionReply, ToolState},
-    team::{TeamName, TeamsRoot},
-    teammate::{TeammateRegistry, tmux},
-    tool::Registry,
-};
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{Command, Event, PartBody, PermissionReply, ToolState};
+use ganja_core::team::{TeamName, TeamsRoot};
+use ganja_core::teammate::{TeammateRegistry, tmux};
+use ganja_core::tool::Registry;
+use ganja_core::{Config, Engine, Storage};
 use ganja_testkit::{ScriptedProvider, drain_answering, says, tool_call};
 use serde_json::json;
 
@@ -110,9 +108,9 @@ async fn a_scripted_task_name_call_starts_a_teammate_through_the_engine() {
     let dialogs: Vec<_> = seen
         .iter()
         .filter_map(|event| match event {
-            Event::PermissionRequested {
-                tool, directories, ..
-            } => Some((tool.clone(), directories.clone())),
+            Event::PermissionRequested { tool, directories, .. } => {
+                Some((tool.clone(), directories.clone()))
+            }
             _ => None,
         })
         .collect();
@@ -149,11 +147,7 @@ async fn a_scripted_task_name_call_starts_a_teammate_through_the_engine() {
         "and the surface it really runs on: {metadata:?}"
     );
     assert_eq!(
-        engine
-            .teammates()
-            .expect("this session leads a team")
-            .registry()
-            .running(),
+        engine.teammates().expect("this session leads a team").registry().running(),
         1,
         "and the teammate is running under the engine's own registry"
     );

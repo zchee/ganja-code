@@ -16,7 +16,8 @@
 //! variables, and `cargo test` runs the tests inside a binary on parallel
 //! threads.
 
-use std::{collections::BTreeSet, env, fs};
+use std::collections::BTreeSet;
+use std::{env, fs};
 
 use ganja_core::auth::{self, CredentialKind, OauthCredential, Source};
 use secrecy::{ExposeSecret as _, SecretString};
@@ -65,11 +66,8 @@ fn every_entry_survives_a_save_including_the_fields_this_build_cannot_read() {
     let path = auth::store_path().expect("the store has a path");
     fs::create_dir_all(path.parent().expect("the store is in a directory"))
         .expect("the directory is creatable");
-    fs::write(
-        &path,
-        serde_json::to_vec_pretty(&fixture()).expect("the fixture serializes"),
-    )
-    .expect("the fixture writes");
+    fs::write(&path, serde_json::to_vec_pretty(&fixture()).expect("the fixture serializes"))
+        .expect("the fixture writes");
     #[cfg(unix)]
     std::fs::set_permissions(
         &path,
@@ -101,12 +99,9 @@ fn every_entry_survives_a_save_including_the_fields_this_build_cannot_read() {
     assert_eq!(credential.account_id.as_deref(), Some("acct-42"));
     assert_eq!(
         credential.extra.keys().collect::<BTreeSet<_>>(),
-        [
-            "chatgptPlanType".to_owned(),
-            "someFuturePluginField".to_owned()
-        ]
-        .iter()
-        .collect::<BTreeSet<_>>(),
+        ["chatgptPlanType".to_owned(), "someFuturePluginField".to_owned()]
+            .iter()
+            .collect::<BTreeSet<_>>(),
         "the fields this build does not model are the ones it must not lose"
     );
 

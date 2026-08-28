@@ -25,19 +25,18 @@
 //!
 //! Prices are US dollars per million tokens, the unit models.dev publishes.
 
-use std::{
-    collections::BTreeMap,
-    fs, io,
-    path::{Path, PathBuf},
-    sync::{Arc, OnceLock, PoisonError, RwLock},
-    time::Duration,
-};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock, PoisonError, RwLock};
+use std::time::Duration;
+use std::{fs, io};
 
 use etcetera::base_strategy::{BaseStrategy as _, Xdg};
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::{atomic, protocol::Usage};
+use crate::atomic;
+use crate::protocol::Usage;
 
 /// Tokens a price is quoted per.
 const PER: f64 = 1_000_000.0;
@@ -341,12 +340,7 @@ const SNAPSHOT: &[Row] = &[
         name: "Claude Sonnet 5",
         context_window: 1_000_000,
         max_output: 128_000,
-        pricing: Pricing {
-            input: 2.0,
-            output: 10.0,
-            cache_read: 0.2,
-            cache_write: Some(2.5),
-        },
+        pricing: Pricing { input: 2.0, output: 10.0, cache_read: 0.2, cache_write: Some(2.5) },
     },
     Row {
         id: "claude-opus-5",
@@ -354,12 +348,7 @@ const SNAPSHOT: &[Row] = &[
         name: "Claude Opus 5",
         context_window: 1_000_000,
         max_output: 128_000,
-        pricing: Pricing {
-            input: 5.0,
-            output: 25.0,
-            cache_read: 0.5,
-            cache_write: Some(6.25),
-        },
+        pricing: Pricing { input: 5.0, output: 25.0, cache_read: 0.5, cache_write: Some(6.25) },
     },
     Row {
         id: "claude-opus-4-8",
@@ -367,12 +356,7 @@ const SNAPSHOT: &[Row] = &[
         name: "Claude Opus 4.8",
         context_window: 1_000_000,
         max_output: 128_000,
-        pricing: Pricing {
-            input: 5.0,
-            output: 25.0,
-            cache_read: 0.5,
-            cache_write: Some(6.25),
-        },
+        pricing: Pricing { input: 5.0, output: 25.0, cache_read: 0.5, cache_write: Some(6.25) },
     },
     Row {
         id: "claude-sonnet-4-6",
@@ -380,12 +364,7 @@ const SNAPSHOT: &[Row] = &[
         name: "Claude Sonnet 4.6",
         context_window: 1_000_000,
         max_output: 128_000,
-        pricing: Pricing {
-            input: 3.0,
-            output: 15.0,
-            cache_read: 0.3,
-            cache_write: Some(3.75),
-        },
+        pricing: Pricing { input: 3.0, output: 15.0, cache_read: 0.3, cache_write: Some(3.75) },
     },
     Row {
         id: "claude-haiku-4-5",
@@ -393,12 +372,7 @@ const SNAPSHOT: &[Row] = &[
         name: "Claude Haiku 4.5",
         context_window: 200_000,
         max_output: 64_000,
-        pricing: Pricing {
-            input: 1.0,
-            output: 5.0,
-            cache_read: 0.1,
-            cache_write: Some(1.25),
-        },
+        pricing: Pricing { input: 1.0, output: 5.0, cache_read: 0.1, cache_write: Some(1.25) },
     },
     Row {
         id: "gpt-5.6",
@@ -406,12 +380,7 @@ const SNAPSHOT: &[Row] = &[
         name: "GPT-5.6",
         context_window: 1_050_000,
         max_output: 128_000,
-        pricing: Pricing {
-            input: 5.0,
-            output: 30.0,
-            cache_read: 0.5,
-            cache_write: Some(6.25),
-        },
+        pricing: Pricing { input: 5.0, output: 30.0, cache_read: 0.5, cache_write: Some(6.25) },
     },
     Row {
         id: "gpt-5.4",
@@ -419,12 +388,7 @@ const SNAPSHOT: &[Row] = &[
         name: "GPT-5.4",
         context_window: 1_050_000,
         max_output: 128_000,
-        pricing: Pricing {
-            input: 2.5,
-            output: 15.0,
-            cache_read: 0.25,
-            cache_write: None,
-        },
+        pricing: Pricing { input: 2.5, output: 15.0, cache_read: 0.25, cache_write: None },
     },
     Row {
         id: "gpt-5.4-mini",
@@ -432,12 +396,7 @@ const SNAPSHOT: &[Row] = &[
         name: "GPT-5.4 mini",
         context_window: 400_000,
         max_output: 128_000,
-        pricing: Pricing {
-            input: 0.75,
-            output: 4.5,
-            cache_read: 0.075,
-            cache_write: None,
-        },
+        pricing: Pricing { input: 0.75, output: 4.5, cache_read: 0.075, cache_write: None },
     },
     Row {
         id: "gpt-5.4-nano",
@@ -445,12 +404,7 @@ const SNAPSHOT: &[Row] = &[
         name: "GPT-5.4 nano",
         context_window: 400_000,
         max_output: 128_000,
-        pricing: Pricing {
-            input: 0.2,
-            output: 1.25,
-            cache_read: 0.02,
-            cache_write: None,
-        },
+        pricing: Pricing { input: 0.2, output: 1.25, cache_read: 0.02, cache_write: None },
     },
     Row {
         id: "gpt-5.3-codex",
@@ -458,12 +412,7 @@ const SNAPSHOT: &[Row] = &[
         name: "GPT-5.3 Codex",
         context_window: 400_000,
         max_output: 128_000,
-        pricing: Pricing {
-            input: 1.75,
-            output: 14.0,
-            cache_read: 0.175,
-            cache_write: None,
-        },
+        pricing: Pricing { input: 1.75, output: 14.0, cache_read: 0.175, cache_write: None },
     },
     // `provider_id` is `grok` and not `xai`: the file a credential is stored in
     // uses upstream's name for this provider and everything else uses ganja's,
@@ -549,12 +498,7 @@ const SNAPSHOT: &[Row] = &[
         name: "Claude Sonnet 4.6 (Copilot)",
         context_window: 200_000,
         max_output: 32_000,
-        pricing: Pricing {
-            input: 0.0,
-            output: 0.0,
-            cache_read: 0.0,
-            cache_write: None,
-        },
+        pricing: Pricing { input: 0.0, output: 0.0, cache_read: 0.0, cache_write: None },
     },
     // The default's row: sized from the published catalog's GitHub limits
     // (window 200k, output 64k) and priced at the seat's honest zero, both
@@ -565,12 +509,7 @@ const SNAPSHOT: &[Row] = &[
         name: "Claude Opus 4.8 (Copilot)",
         context_window: 200_000,
         max_output: 64_000,
-        pricing: Pricing {
-            input: 0.0,
-            output: 0.0,
-            cache_read: 0.0,
-            cache_write: None,
-        },
+        pricing: Pricing { input: 0.0, output: 0.0, cache_read: 0.0, cache_write: None },
     },
 ];
 
@@ -654,11 +593,7 @@ fn snapshot() -> Catalog {
 /// from somewhere truer than the model id.
 #[must_use]
 pub fn model(id: &str) -> Option<Arc<ModelInfo>> {
-    current()
-        .models
-        .iter()
-        .find(|model| model.id == id)
-        .cloned()
+    current().models.iter().find(|model| model.id == id).cloned()
 }
 
 /// Looks up the row `provider_id` serves under `id`.
@@ -678,11 +613,7 @@ pub fn model_for(provider_id: &str, id: &str) -> Option<Arc<ModelInfo>> {
 /// tested on a parsed catalog without installing it over the process-global
 /// one every other test reads.
 fn scoped(catalog: &Catalog, provider_id: &str, id: &str) -> Option<Arc<ModelInfo>> {
-    catalog
-        .models
-        .iter()
-        .find(|model| model.provider_id == provider_id && model.id == id)
-        .cloned()
+    catalog.models.iter().find(|model| model.provider_id == provider_id && model.id == id).cloned()
 }
 
 /// Every model in the table.
@@ -711,10 +642,7 @@ pub fn models() -> impl Iterator<Item = Arc<ModelInfo>> {
 /// which is why this is a predicate rather than a list.
 #[must_use]
 pub fn carries(provider_id: &str) -> bool {
-    current()
-        .models
-        .iter()
-        .any(|model| model.provider_id == provider_id)
+    current().models.iter().any(|model| model.provider_id == provider_id)
 }
 
 /// The model `provider_id` is asked for when the user names none.
@@ -725,10 +653,7 @@ pub fn carries(provider_id: &str) -> bool {
 /// because the published catalog does not carry the concept.
 #[must_use]
 pub fn default_model(provider_id: &str) -> Option<&'static str> {
-    DEFAULTS
-        .iter()
-        .find(|(provider, _)| *provider == provider_id)
-        .map(|(_, model)| *model)
+    DEFAULTS.iter().find(|(provider, _)| *provider == provider_id).map(|(_, model)| *model)
 }
 
 /// Renders a token count for somewhere there is no room to spell it out.
@@ -773,17 +698,10 @@ pub fn cost(usage: &Usage, model: &ModelInfo) -> Cost {
 
     let input_usd = priced(pricing.input, usage.input_tokens)
         + priced(pricing.cache_read, usage.cache_read_tokens)
-        + priced(
-            pricing.cache_write.unwrap_or(pricing.input),
-            usage.cache_write_tokens,
-        );
+        + priced(pricing.cache_write.unwrap_or(pricing.input), usage.cache_write_tokens);
     let output_usd = priced(pricing.output, usage.output_tokens);
 
-    Cost {
-        input_usd,
-        output_usd,
-        total_usd: input_usd + output_usd,
-    }
+    Cost { input_usd, output_usd, total_usd: input_usd + output_usd }
 }
 
 /// Adopts whatever catalog is cached on disk, at any age.
@@ -906,12 +824,7 @@ fn source() -> Result<Source, CatalogError> {
         None => (cache.clone(), false),
     };
 
-    Ok(Source {
-        url,
-        cache,
-        read,
-        overridden,
-    })
+    Ok(Source { url, cache, read, overridden })
 }
 
 /// What the cache file for `url` is called.
@@ -1022,10 +935,7 @@ fn parse(body: &str) -> Result<Catalog, CatalogError> {
 
     let mut models = Vec::new();
     for (published_under, provider) in root {
-        let Some(published) = provider
-            .get("models")
-            .and_then(serde_json::Value::as_object)
-        else {
+        let Some(published) = provider.get("models").and_then(serde_json::Value::as_object) else {
             continue;
         };
         let provider_id = crate::auth::provider_id_for_storage_key(&published_under);
@@ -1218,27 +1128,21 @@ async fn fetch(base: &str) -> Result<String, CatalogError> {
 
     let mut attempt = 0;
     loop {
-        let outcome = match client
-            .get(&url)
-            .header(reqwest::header::USER_AGENT, USER_AGENT)
-            .send()
-            .await
-        {
-            Ok(response) => {
-                let status = response.status();
-                if status.is_success() {
-                    response
-                        .text()
-                        .await
-                        .map_err(|error| CatalogError::Request(error.to_string()))
-                } else {
-                    Err(CatalogError::Status {
-                        status: status.as_u16(),
-                    })
+        let outcome =
+            match client.get(&url).header(reqwest::header::USER_AGENT, USER_AGENT).send().await {
+                Ok(response) => {
+                    let status = response.status();
+                    if status.is_success() {
+                        response
+                            .text()
+                            .await
+                            .map_err(|error| CatalogError::Request(error.to_string()))
+                    } else {
+                        Err(CatalogError::Status { status: status.as_u16() })
+                    }
                 }
-            }
-            Err(error) => Err(CatalogError::Request(error.to_string())),
-        };
+                Err(error) => Err(CatalogError::Request(error.to_string())),
+            };
 
         match outcome {
             Ok(body) => return Ok(body),
@@ -1286,10 +1190,8 @@ fn scattered(attempt: u32, entropy: u64) -> Duration {
 /// A write that fails at either step takes the sibling with it, so a failure
 /// cannot leave a file nobody will ever read.
 fn write_cache(path: &Path, body: &str) -> Result<(), CatalogError> {
-    let cache = |path: &Path, source: io::Error| CatalogError::Cache {
-        path: path.to_path_buf(),
-        source,
-    };
+    let cache =
+        |path: &Path, source: io::Error| CatalogError::Cache { path: path.to_path_buf(), source };
     let parent = path.parent().ok_or_else(|| {
         cache(
             path,

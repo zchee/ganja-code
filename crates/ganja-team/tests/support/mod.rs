@@ -30,10 +30,7 @@ pub fn root(team: &str) -> (tempfile::TempDir, TeamsRoot, TeamName) {
 /// One member's inbox path under `root`. The inbox itself is made by the
 /// first write, which is what seeds it.
 pub fn inbox_of(root: &TeamsRoot, team: &TeamName, member: &str) -> PathBuf {
-    root.inbox_path(
-        team,
-        &MemberName::parse(member).expect("a valid member name"),
-    )
+    root.inbox_path(team, &MemberName::parse(member).expect("a valid member name"))
 }
 
 /// `${path}.lock`, spelled the way a peer that never canonicalized anything

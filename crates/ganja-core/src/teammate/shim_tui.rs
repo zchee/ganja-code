@@ -147,33 +147,27 @@
 //! answers is pinned against that CLI's own recording under
 //! `tests/fixtures/*-tui-probe.txt`, beside the driver.
 
-use std::{
-    collections::VecDeque,
-    ffi::{OsStr, OsString},
-    path::PathBuf,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::{Duration, SystemTime},
-};
+use std::collections::VecDeque;
+use std::ffi::{OsStr, OsString};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use ganja_protocol::team::{Frame, MemberBackend, ShutdownApproved, ShutdownRequest, Tagged};
 use ganja_team::{MailboxMessage, MemberName, ShimCli, Surface, mailbox, record};
 use tokio_util::sync::CancellationToken;
 
+use crate::teammate::agy::Agy;
+use crate::teammate::codex::Codex;
+use crate::teammate::grok::Grok;
+use crate::teammate::reaper::Pane;
+use crate::teammate::shim::{self, Driver};
+use crate::teammate::tmux::{self, Closed, Killed, Server, TmuxError};
 use crate::teammate::{
-    Delivery, Handle, SETTLE, SpawnSpec, TeammateBackend, Unsupported,
-    agy::Agy,
-    backend_name,
-    codex::Codex,
-    grok::Grok,
-    pane, readback,
-    reaper::Pane,
-    runner,
-    shim::{self, Driver},
-    tmux::{self, Closed, Killed, Server, TmuxError},
+    Delivery, Handle, SETTLE, SpawnSpec, TeammateBackend, Unsupported, backend_name, pane,
+    readback, runner,
 };
 
 /// How long a spawn waits for the CLI's composer to show before it proceeds
@@ -781,11 +775,7 @@ impl TuiPane {
                 return self.kill_pane().await;
             }
         }
-        tracing::info!(
-            cli,
-            pane = pane.id,
-            "a TUI teammate's process group was ended"
-        );
+        tracing::info!(cli, pane = pane.id, "a TUI teammate's process group was ended");
 
         self.close_corpse().await
     }
@@ -818,11 +808,7 @@ impl TuiPane {
                 PaneFate::Closed
             }
             Ok(Closed::AlreadyGone) => {
-                tracing::debug!(
-                    cli,
-                    pane = self.pane.id,
-                    "a TUI teammate's pane was already gone"
-                );
+                tracing::debug!(cli, pane = self.pane.id, "a TUI teammate's pane was already gone");
                 PaneFate::Closed
             }
             Ok(Closed::Alive) => {
@@ -858,11 +844,7 @@ impl TuiPane {
                 PaneFate::Closed
             }
             Ok(Killed::AlreadyGone) => {
-                tracing::debug!(
-                    cli,
-                    pane = self.pane.id,
-                    "a TUI teammate's pane was already gone"
-                );
+                tracing::debug!(cli, pane = self.pane.id, "a TUI teammate's pane was already gone");
                 PaneFate::Closed
             }
             Ok(Killed::Recycled) => {
@@ -918,10 +900,7 @@ pub struct ShimTui {
 
 impl std::fmt::Debug for ShimTui {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ShimTui")
-            .field("driver", &self.driver)
-            .finish_non_exhaustive()
+        formatter.debug_struct("ShimTui").field("driver", &self.driver).finish_non_exhaustive()
     }
 }
 
@@ -930,11 +909,7 @@ impl ShimTui {
     /// and resolving the binary on this process's own `PATH`.
     #[must_use]
     pub fn new(driver: Arc<dyn TuiDriver>) -> Self {
-        Self {
-            driver,
-            server: None,
-            path: None,
-        }
+        Self { driver, server: None, path: None }
     }
 
     /// The same backend against an explicit server.
@@ -957,10 +932,7 @@ impl ShimTui {
     /// surface, and here is why. For [`TmuxError::NotHosted`] the reason is
     /// exactly [`tmux::REFUSED_NO_TMUX`], the **D501** sentence.
     fn refused(&self, error: &TmuxError) -> Unsupported {
-        Unsupported {
-            backend: self.driver.backend(),
-            reason: error.to_string(),
-        }
+        Unsupported { backend: self.driver.backend(), reason: error.to_string() }
     }
 
     /// The server a spawn splits on.
@@ -1095,11 +1067,7 @@ impl TeammateBackend for ShimTui {
 
     /// The pane channel, in this CLI's name: read on screen, and mailed back.
     fn preamble(&self, spec: &SpawnSpec) -> String {
-        preamble(
-            crate::teammate::preamble::Names::of(spec),
-            self.driver.backend(),
-            &spec.prompt,
-        )
+        preamble(crate::teammate::preamble::Names::of(spec), self.driver.backend(), &spec.prompt)
     }
 
     async fn spawn(&self, spec: &SpawnSpec) -> Result<Handle, Unsupported> {
@@ -1611,10 +1579,7 @@ impl TuiRunner {
             ),
         )
         .await;
-        self.exited
-            .lock()
-            .expect("the exited list is never poisoned")
-            .push(exited);
+        self.exited.lock().expect("the exited list is never poisoned").push(exited);
     }
 
     /// Answers every message still in this member's inbox, now that nothing
@@ -1750,20 +1715,13 @@ impl TuiRunner {
         let cli = backend_name(self.handle.backend);
         let reader = readback::of(self.handle.cli());
         let (transcript, cursor, spawned) = {
-            let mut reading = self
-                .reading
-                .lock()
-                .expect("the reading state is never poisoned");
+            let mut reading = self.reading.lock().expect("the reading state is never poisoned");
             reading.since.get_or_insert_with(tokio::time::Instant::now);
             // A transcript that is no longer there is a transcript to look
             // for again: a CLI that rotated or replaced its own file would
             // otherwise leave this member reading nothing, for ever, in
             // silence — the one failure the complaint below cannot reach.
-            if reading
-                .transcript
-                .as_ref()
-                .is_some_and(|path| !path.exists())
-            {
+            if reading.transcript.as_ref().is_some_and(|path| !path.exists()) {
                 tracing::info!(
                     teammate = self.spec.name.as_str(),
                     cli,
@@ -1794,10 +1752,8 @@ impl TuiRunner {
                         "a TUI teammate's own transcript was found; its answers are being carried"
                     );
                     self.remember(RING_READING.to_owned());
-                    self.reading
-                        .lock()
-                        .expect("the reading state is never poisoned")
-                        .transcript = Some(path);
+                    self.reading.lock().expect("the reading state is never poisoned").transcript =
+                        Some(path);
                 }
                 None => self.wait_for_transcript(cli),
             }
@@ -1810,10 +1766,7 @@ impl TuiRunner {
         };
         // Written back whatever was found, since the cursor moved past what
         // was read even where nothing in it was an answer.
-        self.reading
-            .lock()
-            .expect("the reading state is never poisoned")
-            .cursor = cursor;
+        self.reading.lock().expect("the reading state is never poisoned").cursor = cursor;
         if answers.is_empty() {
             return;
         }
@@ -1840,14 +1793,8 @@ impl TuiRunner {
     /// The one complaint a member makes about a CLI that has written no
     /// session this side can find, once [`READBACK_WAIT`] has passed.
     fn wait_for_transcript(&self, cli: &str) {
-        let mut reading = self
-            .reading
-            .lock()
-            .expect("the reading state is never poisoned");
-        let waited = reading
-            .since
-            .map(|since| since.elapsed())
-            .unwrap_or_default();
+        let mut reading = self.reading.lock().expect("the reading state is never poisoned");
+        let waited = reading.since.map(|since| since.elapsed()).unwrap_or_default();
         if reading.complained || waited < READBACK_WAIT {
             return;
         }
@@ -1889,11 +1836,7 @@ impl TuiRunner {
         };
         match outcome {
             Ok(()) => {
-                let ring = if submit {
-                    RING_DELIVERED
-                } else {
-                    RING_PASTED_UNSUBMITTED
-                };
+                let ring = if submit { RING_DELIVERED } else { RING_PASTED_UNSUBMITTED };
                 self.remember(format!("{ring} · {} bytes", body.len()));
                 true
             }
@@ -1960,9 +1903,7 @@ impl TuiRunner {
 
     /// A reserved frame, which a pane member has no engine to apply.
     async fn drop_reserved(&self, kind: &'static str, from: &str) {
-        self.remember(format!(
-            "dropped frame {kind} · a TUI member has no engine to apply it to"
-        ));
+        self.remember(format!("dropped frame {kind} · a TUI member has no engine to apply it to"));
         tracing::info!(
             teammate = self.spec.name.as_str(),
             from,
@@ -2018,10 +1959,8 @@ impl TuiRunner {
     /// name.
     async fn tear_down(&self, request: &ShutdownRequest) {
         self.handle.end().await;
-        let surface = Surface::Shim {
-            cli: self.handle.cli(),
-            pane: Some(self.handle.pane().id.clone()),
-        };
+        let surface =
+            Surface::Shim { cli: self.handle.cli(), pane: Some(self.handle.pane().id.clone()) };
         let approved = Frame::ShutdownApproved(ShutdownApproved {
             request_id: request.request_id.clone(),
             from: self.spec.name.as_str().to_owned(),

@@ -16,14 +16,13 @@
 //! `GANJA_CONFIG_HOME` cleared — so the machine running the suite cannot
 //! contribute a config of its own.
 
-use std::{env, fs, num::NonZeroU64};
+use std::num::NonZeroU64;
+use std::{env, fs};
 
 use assert_cmd::Command;
-use ganja_core::{
-    Config,
-    config::{AgentMode, CONFIG_ENV, CONFIG_HOME_ENV, LspConfig, McpServer},
-    provider::Dialect,
-};
+use ganja_core::Config;
+use ganja_core::config::{AgentMode, CONFIG_ENV, CONFIG_HOME_ENV, LspConfig, McpServer};
+use ganja_core::provider::Dialect;
 use ganja_permission::Action;
 
 /// An imported `deny` is a rule this build carries out: it refuses the call
@@ -39,11 +38,8 @@ fn an_imported_config_is_one_the_next_launch_reads_back_whole() {
     // A checkout, so the project walk stops here rather than climbing out of
     // the fixture and into whatever the temporary directory sits under.
     fs::create_dir_all(project.join(".git")).expect("the fixture repository is creatable");
-    fs::write(
-        project.join("opencode.jsonc"),
-        include_str!("fixtures/opencode.jsonc"),
-    )
-    .expect("the fixture file is writable");
+    fs::write(project.join("opencode.jsonc"), include_str!("fixtures/opencode.jsonc"))
+        .expect("the fixture file is writable");
 
     // SAFETY: this binary holds one test, so nothing else in the process is
     // reading the environment while it is being written.
@@ -70,10 +66,7 @@ fn an_imported_config_is_one_the_next_launch_reads_back_whole() {
     // neither name it used to.
     let written = fs::read_to_string(project.join("ganja.toml")).expect("the import wrote a file");
     for retired in ["ganja.jsonc", "ganja.json"] {
-        assert!(
-            !project.join(retired).exists(),
-            "{retired} was written beside it"
-        );
+        assert!(!project.join(retired).exists(), "{retired} was written beside it");
     }
 
     // Order read off the bytes, before any reader has had a chance to hand
@@ -97,10 +90,7 @@ fn an_imported_config_is_one_the_next_launch_reads_back_whole() {
     let config = Config::load(&project).expect("the imported config is one ganja loads");
 
     assert_eq!(config.model.as_deref(), Some("anthropic/claude-sonnet-5"));
-    assert_eq!(
-        config.small_model, None,
-        "the model that was only an {{env:}} token stays out"
-    );
+    assert_eq!(config.small_model, None, "the model that was only an {{env:}} token stays out");
     assert_eq!(config.default_agent.as_deref(), Some("plan"));
     assert_eq!(config.theme.as_deref(), Some("tokyonight"));
     assert_eq!(config.shell.as_deref(), Some("/bin/zsh"));
@@ -134,10 +124,7 @@ fn an_imported_config_is_one_the_next_launch_reads_back_whole() {
 
     let review = &config.agent["review"];
     assert_eq!(review.model.as_deref(), Some("anthropic/claude-haiku-4-5"));
-    assert_eq!(
-        review.description.as_deref(),
-        Some("reads a diff and complains")
-    );
+    assert_eq!(review.description.as_deref(), Some("reads a diff and complains"));
     assert_eq!(review.mode, Some(AgentMode::Subagent));
     assert_eq!(
         review
@@ -146,18 +133,12 @@ fn an_imported_config_is_one_the_next_launch_reads_back_whole() {
             .into_iter()
             .map(|rule| (rule.permission, rule.action))
             .collect::<Vec<_>>(),
-        vec![
-            ("edit".to_owned(), deny()),
-            ("webfetch".to_owned(), Action::Allow),
-        ]
+        vec![("edit".to_owned(), deny()), ("webfetch".to_owned(), Action::Allow),]
     );
 
     // A `mode` entry is an agent only the user can pick.
     let ship = &config.agent["ship"];
-    assert_eq!(
-        ship.prompt.as_deref(),
-        Some("You ship what is already green.")
-    );
+    assert_eq!(ship.prompt.as_deref(), Some("You ship what is already green."));
     assert_eq!(ship.mode, Some(AgentMode::Primary));
     assert_eq!(ship.hidden, Some(false));
 
@@ -190,24 +171,15 @@ fn an_imported_config_is_one_the_next_launch_reads_back_whole() {
         docs.headers["Authorization"], "Bearer {env:DOCS_TOKEN}",
         "a header holding a token is carried verbatim, never expanded"
     );
-    assert!(
-        !config.mcp.contains_key("legacy"),
-        "an entry naming no type described no server"
-    );
+    assert!(!config.mcp.contains_key("legacy"), "an entry naming no type described no server");
 
     let Some(LspConfig::Servers(servers)) = &config.lsp else {
         panic!("the lsp map survived as a map: {:?}", config.lsp);
     };
     assert!(servers["rust"].disabled);
     assert_eq!(servers["rust"].command, None);
-    assert_eq!(
-        servers["nickel"].command.as_deref(),
-        Some(&["nls".to_owned()][..])
-    );
-    assert_eq!(
-        servers["nickel"].extensions.as_deref(),
-        Some(&[".ncl".to_owned()][..])
-    );
+    assert_eq!(servers["nickel"].command.as_deref(), Some(&["nls".to_owned()][..]));
+    assert_eq!(servers["nickel"].extensions.as_deref(), Some(&[".ncl".to_owned()][..]));
     assert_eq!(servers["nickel"].env["NICKEL_LOG"], "info");
     assert_eq!(
         servers["nickel"].initialization,

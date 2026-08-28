@@ -15,7 +15,8 @@
 mod support;
 
 use base64::Engine as _;
-use ganja_core::{permission::Permissions, tool::Registry};
+use ganja_core::permission::Permissions;
+use ganja_core::tool::Registry;
 use ganja_serve::Credentials;
 use ganja_testkit::{LogCapture as Capture, says};
 use secrecy::SecretString;
@@ -36,25 +37,16 @@ async fn the_password_and_the_query_that_carries_it_reach_no_log_line() {
     )
     .expect("this binary installs the only subscriber");
 
-    let credentials = Credentials {
-        username: "ganja".to_owned(),
-        password: SecretString::from(CANARY),
-    };
+    let credentials =
+        Credentials { username: "ganja".to_owned(), password: SecretString::from(CANARY) };
     // The Debug path: a credential rendered through `{:?}` shows a redaction.
     let debugged = format!("{credentials:?}");
-    assert!(
-        !debugged.contains(CANARY),
-        "a Debug rendering leaked the password: {debugged}"
-    );
+    assert!(!debugged.contains(CANARY), "a Debug rendering leaked the password: {debugged}");
 
     let mut config = loopback_config();
     config.credentials = Some(credentials);
     let handle = ganja_serve::serve(
-        scripted_engine(
-            vec![says("hi")],
-            Registry::new(Vec::new()),
-            Permissions::default(),
-        ),
+        scripted_engine(vec![says("hi")], Registry::new(Vec::new()), Permissions::default()),
         config,
     )
     .await
@@ -83,10 +75,7 @@ async fn the_password_and_the_query_that_carries_it_reach_no_log_line() {
         .expect("the route answers");
     assert_eq!(refused.status(), 401);
     let refusal_body = refused.bytes().await.expect("a body");
-    assert!(
-        refusal_body.is_empty(),
-        "the 401 is empty-bodied, echoing nothing: {refusal_body:?}"
-    );
+    assert!(refusal_body.is_empty(), "the 401 is empty-bodied, echoing nothing: {refusal_body:?}");
 
     handle.shutdown().await.expect("a clean stop");
 
@@ -97,16 +86,7 @@ async fn the_password_and_the_query_that_carries_it_reach_no_log_line() {
         logged.contains("/global/health"),
         "the capture holds the serve layer's own request lines: {logged}"
     );
-    assert!(
-        !logged.contains(CANARY),
-        "the password reached a log line: {logged}"
-    );
-    assert!(
-        !logged.contains(&token),
-        "the encoded credential reached a log line: {logged}"
-    );
-    assert!(
-        !logged.contains("auth_token"),
-        "a query string reached a log line: {logged}"
-    );
+    assert!(!logged.contains(CANARY), "the password reached a log line: {logged}");
+    assert!(!logged.contains(&token), "the encoded credential reached a log line: {logged}");
+    assert!(!logged.contains("auth_token"), "a query string reached a log line: {logged}");
 }

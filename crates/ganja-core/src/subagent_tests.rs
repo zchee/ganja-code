@@ -15,17 +15,15 @@ use super::{
     deliver_to_lead, denies_task, held_note, identity, receive_ladder, roster, subagent_rules,
     team, watch,
 };
-use crate::{
-    agent::{self, Registry},
-    config::Config,
-    engine::Fanout,
-    permission::{Action, Permissions, Rule},
-    protocol::{Event, MessageId, Part, PartBody, PartId, PeerMessageId, SessionId, ToolState},
-    tool::{
-        Tool as _,
-        task::{DESCRIPTION, ROSTER_HEADER, Subagents as _, TaskTool},
-    },
+use crate::agent::{self, Registry};
+use crate::config::Config;
+use crate::engine::Fanout;
+use crate::permission::{Action, Permissions, Rule};
+use crate::protocol::{
+    Event, MessageId, Part, PartBody, PartId, PeerMessageId, SessionId, ToolState,
 };
+use crate::tool::Tool as _;
+use crate::tool::task::{DESCRIPTION, ROSTER_HEADER, Subagents as _, TaskTool};
 
 fn registry() -> Registry {
     Registry::from_config(&Config::default()).expect("the default config resolves agents")
@@ -52,10 +50,7 @@ fn the_team_routes_this_side_speaks_match_the_server_and_client_twins() {
     let client = include_str!("../../ganja-client/src/lib.rs");
 
     assert_eq!(TEAM_ROUTE, "/team");
-    assert_eq!(
-        format!("{TEAM_ROUTE}/{}{MESSAGE_ROUTE}", "some-lead"),
-        "/team/some-lead/message"
-    );
+    assert_eq!(format!("{TEAM_ROUTE}/{}{MESSAGE_ROUTE}", "some-lead"), "/team/some-lead/message");
     assert!(server.contains("/team/{name}/message"));
     assert!(client.contains("/team/{name}/message"));
 }
@@ -196,11 +191,7 @@ async fn the_watcher_logs_the_childs_calls_in_order_and_keeps_the_newest() {
     let outcome = watch(received, watched).await;
 
     assert_eq!(outcome.toolcalls, 105, "the count is the true total");
-    assert_eq!(
-        outcome.calls.len(),
-        super::CALL_LOG,
-        "the log holds exactly the cap"
-    );
+    assert_eq!(outcome.calls.len(), super::CALL_LOG, "the log holds exactly the cap");
     assert_eq!(
         outcome.calls.first().map(String::as_str),
         Some("tool-5"),
@@ -220,19 +211,11 @@ fn the_description_is_upstreams_text_followed_by_the_callers_roster() {
     let tool = TaskTool::new(&roster(&agents, build));
     let described = tool.description();
 
-    assert!(
-        described.starts_with(DESCRIPTION),
-        "upstream's text comes first, unedited"
-    );
+    assert!(described.starts_with(DESCRIPTION), "upstream's text comes first, unedited");
     // Only the tail past the header is the roster: upstream's own text
     // carries `- ` bullets of its own.
-    let (_, listed) = described
-        .split_once(ROSTER_HEADER)
-        .expect("the roster header is appended");
-    let roster: Vec<&str> = listed
-        .lines()
-        .filter(|line| line.starts_with("- "))
-        .collect();
+    let (_, listed) = described.split_once(ROSTER_HEADER).expect("the roster header is appended");
+    let roster: Vec<&str> = listed.lines().filter(|line| line.starts_with("- ")).collect();
     assert_eq!(roster.len(), 2, "two subagents ship: {roster:?}");
     assert!(roster[0].starts_with("- explore: "), "sorted by name");
     assert!(roster[1].starts_with("- general: "));
@@ -248,10 +231,7 @@ fn an_agent_that_denies_a_subagent_is_not_offered_it() {
     let described = tool.description();
 
     assert!(described.contains("- explore: "));
-    assert!(
-        !described.contains("- general: "),
-        "plan denies task:general: {described}"
-    );
+    assert!(!described.contains("- general: "), "plan denies task:general: {described}");
 }
 
 #[test]
@@ -280,10 +260,7 @@ fn a_subagent_that_already_rules_on_todowrite_keeps_its_own_rule() {
     let rules = subagent_rules(general, &Permissions::default());
 
     assert_eq!(
-        rules
-            .iter()
-            .filter(|rule| rule.permission == "todowrite")
-            .count(),
+        rules.iter().filter(|rule| rule.permission == "todowrite").count(),
         1,
         "the appended denial would be a second one: {rules:?}"
     );
@@ -293,11 +270,7 @@ fn a_subagent_that_already_rules_on_todowrite_keeps_its_own_rule() {
 fn a_parents_denial_reaches_the_child_and_a_parents_allowance_does_not() {
     let mut parent = Permissions::default();
     parent.set_baseline(vec![
-        Rule {
-            permission: "webfetch".to_owned(),
-            pattern: "*".to_owned(),
-            action: Action::Deny,
-        },
+        Rule { permission: "webfetch".to_owned(), pattern: "*".to_owned(), action: Action::Deny },
         Rule {
             permission: "bash".to_owned(),
             pattern: "cargo *".to_owned(),
@@ -310,9 +283,7 @@ fn a_parents_denial_reaches_the_child_and_a_parents_allowance_does_not() {
     let rules = subagent_rules(general, &parent);
 
     assert!(
-        rules
-            .iter()
-            .any(|rule| rule.permission == "webfetch" && rule.action == Action::Deny),
+        rules.iter().any(|rule| rule.permission == "webfetch" && rule.action == Action::Deny),
         "a denial travels down: {rules:?}"
     );
     assert!(
@@ -375,10 +346,7 @@ impl Team {
         // `Postbox::of` binds.
         let teammate = Teammate::new(
             "worker",
-            Arc::new(crate::provider::FakeProvider::new(
-                "on it",
-                std::time::Duration::ZERO,
-            )),
+            Arc::new(crate::provider::FakeProvider::new("on it", std::time::Duration::ZERO)),
             "recorder-model",
             Arc::new(crate::tool::Registry::new(Vec::new())),
             Permissions::default(),
@@ -386,13 +354,7 @@ impl Team {
         );
         let worker = Postbox::of(&registry, &teammate);
 
-        Self {
-            _home: home,
-            root,
-            team,
-            registry,
-            worker,
-        }
+        Self { _home: home, root, team, registry, worker }
     }
 
     /// A session-named socket path in a private (`0700`) directory under
@@ -418,9 +380,7 @@ impl Team {
     fn inbox(&self, name: &str) -> Vec<MailboxMessage> {
         let member = MemberName::parse(name).expect("a member name");
 
-        mailbox::read(&self.root.inbox_path(&self.team, &member))
-            .expect("an inbox reads")
-            .valid
+        mailbox::read(&self.root.inbox_path(&self.team, &member)).expect("an inbox reads").valid
     }
 }
 
@@ -433,10 +393,7 @@ struct Asked {
 
 impl Asked {
     fn answering(answer: PermissionReply) -> Self {
-        Self {
-            seen: std::sync::Mutex::new(Vec::new()),
-            answer,
-        }
+        Self { seen: std::sync::Mutex::new(Vec::new()), answer }
     }
 
     fn seen(&self) -> Vec<SpawnAsk> {
@@ -512,18 +469,11 @@ async fn a_spawn_outside_the_project_is_asked_about_and_discloses_the_directory(
     let asked = Asked::answering(PermissionReply::Once);
 
     let refused = door(home.path())
-        .start(
-            wanted(),
-            &caller(Vec::new(), elsewhere.path(), home.path()),
-            &asked,
-        )
+        .start(wanted(), &caller(Vec::new(), elsewhere.path(), home.path()), &asked)
         .await
         .expect_err("the backend under this door spawns nothing");
 
-    assert!(
-        refused.reason.contains(NEVER),
-        "an approved spawn reaches the backend: {refused:?}"
-    );
+    assert!(refused.reason.contains(NEVER), "an approved spawn reaches the backend: {refused:?}");
     let seen = asked.seen();
     let ask = seen.first().expect("somebody was asked: {seen:?}");
     assert_eq!(
@@ -531,10 +481,7 @@ async fn a_spawn_outside_the_project_is_asked_about_and_discloses_the_directory(
         vec![crate::permission::resolve(elsewhere.path())],
         "and shown where it would work: {ask:?}"
     );
-    assert!(
-        ask.title.contains("worker"),
-        "the dialog names the teammate: {ask:?}"
-    );
+    assert!(ask.title.contains("worker"), "the dialog names the teammate: {ask:?}");
     assert_eq!(
         ask.args.get("cwd").and_then(|cwd| cwd.as_str()),
         Some(elsewhere.path().to_string_lossy().as_ref())
@@ -560,11 +507,7 @@ async fn a_spawn_a_rule_denies_is_refused_without_anybody_being_asked() {
     }];
 
     let refused = door(home.path())
-        .start(
-            wanted(),
-            &caller(denied, elsewhere.path(), home.path()),
-            &asked,
-        )
+        .start(wanted(), &caller(denied, elsewhere.path(), home.path()), &asked)
         .await
         .expect_err("a denied spawn does not happen");
 
@@ -572,15 +515,8 @@ async fn a_spawn_a_rule_denies_is_refused_without_anybody_being_asked() {
         refused.reason.contains("a rule refuses work in"),
         "the gate's own sentence reaches the model: {refused:?}"
     );
-    assert!(
-        !refused.reason.contains(NEVER),
-        "and the backend was never reached: {refused:?}"
-    );
-    assert!(
-        asked.seen().is_empty(),
-        "a deny raises no dialog: {:?}",
-        asked.seen()
-    );
+    assert!(!refused.reason.contains(NEVER), "and the backend was never reached: {refused:?}");
+    assert!(asked.seen().is_empty(), "a deny raises no dialog: {:?}", asked.seen());
 }
 
 /// A person who says no is answered by not starting anything, in a sentence
@@ -592,11 +528,7 @@ async fn a_spawn_refused_at_the_dialog_starts_nothing() {
     let asked = Asked::answering(PermissionReply::Reject);
 
     let refused = door(home.path())
-        .start(
-            wanted(),
-            &caller(Vec::new(), elsewhere.path(), home.path()),
-            &asked,
-        )
+        .start(wanted(), &caller(Vec::new(), elsewhere.path(), home.path()), &asked)
         .await
         .expect_err("a refused spawn does not happen");
 
@@ -609,10 +541,7 @@ async fn a_spawn_refused_at_the_dialog_starts_nothing() {
 /// so the gate asks. Everything else is the least the type will hold.
 fn host_at(cwd: &std::path::Path, root: &std::path::Path, teammates: Arc<Teammates>) -> Arc<Host> {
     Arc::new(Host {
-        provider: Arc::new(crate::provider::FakeProvider::new(
-            "on it",
-            std::time::Duration::ZERO,
-        )),
+        provider: Arc::new(crate::provider::FakeProvider::new("on it", std::time::Duration::ZERO)),
         model: "recorder-model".to_owned(),
         small_model: None,
         agents: Arc::new(registry()),
@@ -661,20 +590,12 @@ fn spawn_over(host: Arc<Host>) -> (Spawn, mpsc::Receiver<Event>) {
 async fn raised_dialog(
     spawn: &Spawn,
     received: &mut mpsc::Receiver<Event>,
-) -> (
-    tokio::task::JoinHandle<Result<Teammated, NotSpawned>>,
-    crate::protocol::PermissionId,
-) {
+) -> (tokio::task::JoinHandle<Result<Teammated, NotSpawned>>, crate::protocol::PermissionId) {
     let door = spawn.clone();
     let handle = tokio::spawn(async move { door.spawn_teammate(wanted()).await });
 
-    let Some(Event::PermissionRequested {
-        session_id,
-        id,
-        call_id,
-        tool,
-        ..
-    }) = received.recv().await
+    let Some(Event::PermissionRequested { session_id, id, call_id, tool, .. }) =
+        received.recv().await
     else {
         panic!("the gate's question crosses the calling turn's fanout");
     };
@@ -684,10 +605,7 @@ async fn raised_dialog(
         spawn.part_id.as_str(),
         "and the part the call reports on, so a frontend can say which"
     );
-    assert_eq!(
-        session_id, spawn.session_id,
-        "addressed to the caller's own session"
-    );
+    assert_eq!(session_id, spawn.session_id, "addressed to the caller's own session");
 
     (handle, id)
 }
@@ -700,19 +618,12 @@ async fn raised_dialog(
 async fn the_task_doors_dialog_is_answered_by_id_and_a_yes_reaches_the_backend() {
     let home = ganja_testkit::temp_dir();
     let elsewhere = ganja_testkit::temp_dir();
-    let (spawn, mut received) = spawn_over(host_at(
-        elsewhere.path(),
-        home.path(),
-        Arc::new(door(home.path())),
-    ));
+    let (spawn, mut received) =
+        spawn_over(host_at(elsewhere.path(), home.path(), Arc::new(door(home.path()))));
 
     let (handle, id) = raised_dialog(&spawn, &mut received).await;
     assert!(
-        spawn
-            .pending
-            .lock()
-            .expect("no panic")
-            .answer_permission(&id, PermissionReply::Once),
+        spawn.pending.lock().expect("no panic").answer_permission(&id, PermissionReply::Once),
         "the reply routes by the id the request carried"
     );
 
@@ -720,24 +631,14 @@ async fn the_task_doors_dialog_is_answered_by_id_and_a_yes_reaches_the_backend()
         .await
         .expect("the door settles")
         .expect_err("the backend under this door spawns nothing");
-    assert!(
-        refused.reason.contains(NEVER),
-        "an approved spawn reaches the backend: {refused:?}"
-    );
-    let Some(Event::PermissionReplied {
-        id: replied, reply, ..
-    }) = received.recv().await
-    else {
+    assert!(refused.reason.contains(NEVER), "an approved spawn reaches the backend: {refused:?}");
+    let Some(Event::PermissionReplied { id: replied, reply, .. }) = received.recv().await else {
         panic!("the wait ends in the terminal reply every other permission wait sends");
     };
     assert_eq!(replied, id);
     assert_eq!(reply, PermissionReply::Once);
     assert!(
-        !spawn
-            .pending
-            .lock()
-            .expect("no panic")
-            .answer_permission(&id, PermissionReply::Once),
+        !spawn.pending.lock().expect("no panic").answer_permission(&id, PermissionReply::Once),
         "and the entry is closed behind it"
     );
 }
@@ -749,25 +650,16 @@ async fn the_task_doors_dialog_is_answered_by_id_and_a_yes_reaches_the_backend()
 async fn a_rejected_task_door_dialog_reads_refused_by_hand() {
     let home = ganja_testkit::temp_dir();
     let elsewhere = ganja_testkit::temp_dir();
-    let (spawn, mut received) = spawn_over(host_at(
-        elsewhere.path(),
-        home.path(),
-        Arc::new(door(home.path())),
-    ));
+    let (spawn, mut received) =
+        spawn_over(host_at(elsewhere.path(), home.path(), Arc::new(door(home.path()))));
 
     let (handle, id) = raised_dialog(&spawn, &mut received).await;
     assert!(
-        spawn
-            .pending
-            .lock()
-            .expect("no panic")
-            .answer_permission(&id, PermissionReply::Reject)
+        spawn.pending.lock().expect("no panic").answer_permission(&id, PermissionReply::Reject)
     );
 
-    let refused = handle
-        .await
-        .expect("the door settles")
-        .expect_err("a refused spawn does not happen");
+    let refused =
+        handle.await.expect("the door settles").expect_err("a refused spawn does not happen");
     assert_eq!(refused.reason, super::REFUSED_BY_HAND);
     let Some(Event::PermissionReplied { reply, .. }) = received.recv().await else {
         panic!("a no is still answered terminally");
@@ -783,11 +675,8 @@ async fn a_rejected_task_door_dialog_reads_refused_by_hand() {
 async fn a_cancelled_turn_closes_the_task_doors_open_dialog() {
     let home = ganja_testkit::temp_dir();
     let elsewhere = ganja_testkit::temp_dir();
-    let (spawn, mut received) = spawn_over(host_at(
-        elsewhere.path(),
-        home.path(),
-        Arc::new(door(home.path())),
-    ));
+    let (spawn, mut received) =
+        spawn_over(host_at(elsewhere.path(), home.path(), Arc::new(door(home.path()))));
 
     let (handle, id) = raised_dialog(&spawn, &mut received).await;
     spawn.cancel.cancel();
@@ -797,20 +686,13 @@ async fn a_cancelled_turn_closes_the_task_doors_open_dialog() {
         .expect("the door settles")
         .expect_err("a spawn nobody could be asked about is one nobody approved");
     assert_eq!(refused.reason, super::REFUSED_BY_HAND);
-    let Some(Event::PermissionReplied {
-        id: replied, reply, ..
-    }) = received.recv().await
-    else {
+    let Some(Event::PermissionReplied { id: replied, reply, .. }) = received.recv().await else {
         panic!("the frontend is told to retire its dialog");
     };
     assert_eq!(replied, id);
     assert_eq!(reply, PermissionReply::Reject);
     assert!(
-        !spawn
-            .pending
-            .lock()
-            .expect("no panic")
-            .answer_permission(&id, PermissionReply::Once),
+        !spawn.pending.lock().expect("no panic").answer_permission(&id, PermissionReply::Once),
         "the pending entry is closed, not stranded"
     );
 }
@@ -826,16 +708,12 @@ async fn a_texts_reserved_kind_is_read_by_one_parse_of_the_frame_vocabulary() {
     assert_eq!(postbox.classify("just a message"), Reserved::No);
     assert_eq!(
         postbox.classify(r#"{"type":"shutdown_approved","requestId":"r1"}"#),
-        Reserved::AgentSendable {
-            kind: "shutdown_approved"
-        },
+        Reserved::AgentSendable { kind: "shutdown_approved" },
         "one of the ten, which has a structured door"
     );
     assert_eq!(
         postbox.classify(r#"{"type":"shutdown_rejected"}"#),
-        Reserved::HarnessOnly {
-            kind: "shutdown_rejected"
-        },
+        Reserved::HarnessOnly { kind: "shutdown_rejected" },
         "one of the five, which has none"
     );
 }
@@ -861,10 +739,7 @@ async fn a_delivered_message_carries_the_name_the_postbox_was_built_with() {
     assert_eq!(sent.to, "team-lead");
     let inbox = team.inbox("team-lead");
     let message = inbox.last().expect("the lead was written to");
-    assert_eq!(
-        message.from, "worker",
-        "the sender is a field of the postbox, not of the body"
-    );
+    assert_eq!(message.from, "worker", "the sender is a field of the postbox, not of the body");
     assert_eq!(message.summary.as_deref(), Some("the build"));
 }
 
@@ -879,19 +754,14 @@ async fn a_recipient_is_matched_without_regard_to_case_and_reported_in_the_teams
     let sent = lead
         .deliver(
             Address::Local("WORKER".to_owned()),
-            Body::Text {
-                text: "carry on".to_owned(),
-                summary: None,
-            },
+            Body::Text { text: "carry on".to_owned(), summary: None },
         )
         .await
         .expect("the teammate is reachable under either spelling");
 
     assert_eq!(sent.to, "worker");
     assert_eq!(
-        team.inbox("worker")
-            .last()
-            .map(|message| message.from.clone()),
+        team.inbox("worker").last().map(|message| message.from.clone()),
         Some("team-lead".to_owned()),
         "and the lead's own postbox stamps the lead"
     );
@@ -907,18 +777,12 @@ async fn a_message_to_a_name_nobody_answers_to_is_undelivered() {
         postbox
             .deliver(
                 Address::Local("nobody".to_owned()),
-                Body::Text {
-                    text: "hello".to_owned(),
-                    summary: None,
-                },
+                Body::Text { text: "hello".to_owned(), summary: None },
             )
             .await,
         Err(Undelivered::Unknown)
     );
-    assert!(
-        team.inbox("team-lead").is_empty(),
-        "and no inbox grew an entry"
-    );
+    assert!(team.inbox("team-lead").is_empty(), "and no inbox grew an entry");
 }
 
 /// The socket arm carries prose and nothing else (§5.2-6): a frame is
@@ -932,18 +796,14 @@ async fn a_frame_addressed_to_a_socket_is_refused_before_anything_is_sent() {
 
     let refused = postbox
         .deliver(
-            Address::Uds {
-                path: "/nonexistent/ganja.sock".into(),
-            },
+            Address::Uds { path: "/nonexistent/ganja.sock".into() },
             Body::Frame(serde_json::json!({"type": "idle_notification"})),
         )
         .await;
 
     assert_eq!(
         refused,
-        Err(Undelivered::Failed {
-            reason: FRAME_OVER_SOCKET.to_owned(),
-        }),
+        Err(Undelivered::Failed { reason: FRAME_OVER_SOCKET.to_owned() }),
         "the frame is refused as a rule, not as a dead socket"
     );
 }
@@ -958,18 +818,12 @@ async fn an_address_that_is_not_a_session_socket_of_ours_is_refused_before_anyth
     let team = Team::new().await;
     let postbox: &dyn team::Postbox = &team.worker;
 
-    for to in [
-        "/var/run/docker.sock",
-        "/tmp/tmux-501/default",
-        "/nonexistent-ganja/0198c1a2.sock",
-    ] {
+    for to in ["/var/run/docker.sock", "/tmp/tmux-501/default", "/nonexistent-ganja/0198c1a2.sock"]
+    {
         let refused = postbox
             .deliver(
                 Address::Uds { path: to.into() },
-                Body::Text {
-                    text: "anyone".to_owned(),
-                    summary: None,
-                },
+                Body::Text { text: "anyone".to_owned(), summary: None },
             )
             .await;
         let Err(Undelivered::Failed { reason }) = refused else {
@@ -998,10 +852,7 @@ async fn a_dead_socket_is_a_typed_failure_naming_the_socket() {
         std::time::Duration::from_secs(5),
         postbox.deliver(
             Address::Uds { path: path.clone() },
-            Body::Text {
-                text: "anyone there".to_owned(),
-                summary: None,
-            },
+            Body::Text { text: "anyone there".to_owned(), summary: None },
         ),
     )
     .await
@@ -1014,14 +865,8 @@ async fn a_dead_socket_is_a_typed_failure_naming_the_socket() {
         reason.starts_with(SOCKET_UNREACHABLE),
         "the sentence says the session may be gone: {reason}"
     );
-    assert!(
-        reason.contains(&path.display().to_string()),
-        "and names the socket: {reason}"
-    );
-    assert!(
-        team.inbox("team-lead").is_empty(),
-        "and nothing local was written"
-    );
+    assert!(reason.contains(&path.display().to_string()), "and names the socket: {reason}");
+    assert!(team.inbox("team-lead").is_empty(), "and nothing local was written");
 }
 
 /// **Contract-level**, not end to end: the far end here is a hand-rolled
@@ -1059,10 +904,7 @@ async fn a_socket_delivery_asks_who_leads_and_posts_to_them_stamped_with_its_ide
 
     let requests = peer.requests();
     assert_eq!(
-        requests
-            .iter()
-            .map(|(method, route, _)| format!("{method} {route}"))
-            .collect::<Vec<_>>(),
+        requests.iter().map(|(method, route, _)| format!("{method} {route}")).collect::<Vec<_>>(),
         vec!["GET /team", "POST /team/team-lead/message"],
         "who leads is asked before anything is posted"
     );
@@ -1098,10 +940,7 @@ async fn a_peers_refusal_reaches_the_sender_in_the_peers_words() {
     let failed = postbox
         .deliver(
             Address::Uds { path: path.clone() },
-            Body::Text {
-                text: "hello".to_owned(),
-                summary: None,
-            },
+            Body::Text { text: "hello".to_owned(), summary: None },
         )
         .await;
 
@@ -1110,10 +949,7 @@ async fn a_peers_refusal_reaches_the_sender_in_the_peers_words() {
     };
     assert!(reason.starts_with(SOCKET_REFUSED), "{reason}");
     assert!(reason.contains("(404)"), "the status is there: {reason}");
-    assert!(
-        reason.contains("This session leads no team"),
-        "and the peer's own sentence: {reason}"
-    );
+    assert!(reason.contains("This session leads no team"), "and the peer's own sentence: {reason}");
 }
 
 /// What a peer answers is read under a cap and refused past
@@ -1132,10 +968,7 @@ async fn an_oversized_answer_is_refused_unread_and_nothing_is_posted() {
         std::time::Duration::from_secs(10),
         postbox.deliver(
             Address::Uds { path: path.clone() },
-            Body::Text {
-                text: "hello".to_owned(),
-                summary: None,
-            },
+            Body::Text { text: "hello".to_owned(), summary: None },
         ),
     )
     .await
@@ -1170,10 +1003,7 @@ async fn a_peers_sentence_is_cut_to_a_line_before_the_model_reads_it() {
     let failed = postbox
         .deliver(
             Address::Uds { path: path.clone() },
-            Body::Text {
-                text: "hello".to_owned(),
-                summary: None,
-            },
+            Body::Text { text: "hello".to_owned(), summary: None },
         )
         .await;
 
@@ -1186,10 +1016,7 @@ async fn a_peers_sentence_is_cut_to_a_line_before_the_model_reads_it() {
         "the peer's sentence was cut: {} chars",
         reason.chars().count()
     );
-    assert!(
-        reason.contains(&"no ".repeat(100)),
-        "and what is left is the head of it: {reason}"
-    );
+    assert!(reason.contains(&"no ".repeat(100)), "and what is left is the head of it: {reason}");
 }
 
 /// The lead's name a peer answers goes into a URL, so it is held
@@ -1203,12 +1030,7 @@ async fn a_peers_sentence_is_cut_to_a_line_before_the_model_reads_it() {
 #[tokio::test]
 async fn a_lead_name_the_grammar_refuses_forms_no_post() {
     let too_long = "a".repeat(ganja_protocol::team::DISPLAY_FIELD_CAP + 1);
-    for hostile in [
-        "../../global/health",
-        "team-lead?x=1",
-        "team-lead#f",
-        too_long.as_str(),
-    ] {
+    for hostile in ["../../global/health", "team-lead?x=1", "team-lead#f", too_long.as_str()] {
         let team = Team::new().await;
         let postbox: &dyn team::Postbox = &team.worker;
         let path = team.session_socket_path("0198c1a2");
@@ -1225,10 +1047,7 @@ async fn a_lead_name_the_grammar_refuses_forms_no_post() {
                     .to_string(),
                 )
             } else {
-                (
-                    200,
-                    serde_json::json!({"to": "x", "note": "must not be reached"}).to_string(),
-                )
+                (200, serde_json::json!({"to": "x", "note": "must not be reached"}).to_string())
             }
         })
         .await;
@@ -1236,10 +1055,7 @@ async fn a_lead_name_the_grammar_refuses_forms_no_post() {
         let failed = postbox
             .deliver(
                 Address::Uds { path: path.clone() },
-                Body::Text {
-                    text: "hello".to_owned(),
-                    summary: None,
-                },
+                Body::Text { text: "hello".to_owned(), summary: None },
             )
             .await;
         let Err(Undelivered::Failed { reason }) = failed else {
@@ -1322,10 +1138,7 @@ async fn a_received_peer_message_reaches_the_lead_stamped_as_a_peer() {
             },
         )
         .await,
-        Err(NotReceived::NotTheLead {
-            name: "worker".to_owned(),
-            lead: "team-lead".to_owned(),
-        })
+        Err(NotReceived::NotTheLead { name: "worker".to_owned(), lead: "team-lead".to_owned() })
     );
     assert_eq!(team.inbox("worker"), seeded, "nothing reached the member");
 }
@@ -1360,29 +1173,20 @@ async fn a_peers_identity_is_plain_and_bounded_and_its_summary_is_capped() {
     assert!(team.inbox("team-lead").is_empty(), "and nothing landed");
 
     let long = "w".repeat(1_000);
-    receive(
-        &team.registry,
-        peer("team-lead@session-feedbeef", Some(&long)),
-    )
-    .await
-    .expect("a peer with a long summary is delivered");
+    receive(&team.registry, peer("team-lead@session-feedbeef", Some(&long)))
+        .await
+        .expect("a peer with a long summary is delivered");
     let inbox = team.inbox("team-lead");
     assert_eq!(inbox.len(), 1);
     assert_eq!(
-        inbox[0]
-            .summary
-            .as_ref()
-            .map(|summary| summary.chars().count()),
+        inbox[0].summary.as_ref().map(|summary| summary.chars().count()),
         Some(ganja_protocol::team::DISPLAY_FIELD_CAP),
         "the summary is capped at the display cap"
     );
     // A blank summary is no summary.
-    receive(
-        &team.registry,
-        peer("team-lead@session-feedbeef", Some("   ")),
-    )
-    .await
-    .expect("delivered");
+    receive(&team.registry, peer("team-lead@session-feedbeef", Some("   ")))
+        .await
+        .expect("delivered");
     assert_eq!(team.inbox("team-lead")[1].summary, None);
 }
 
@@ -1402,43 +1206,27 @@ async fn a_received_message_climbs_the_rungs_before_anything_is_written() {
         summary: None,
     };
 
-    assert_eq!(
-        receive(&team.registry, peer("team-lead", "   \n")).await,
-        Err(NotReceived::Blank)
-    );
+    assert_eq!(receive(&team.registry, peer("team-lead", "   \n")).await, Err(NotReceived::Blank));
     let frame = serde_json::json!({"type": "shutdown_request", "requestId": "r1", "from": "team-lead", "reason": "done"});
     assert_eq!(
         receive(&team.registry, peer("team-lead", &frame.to_string())).await,
-        Err(NotReceived::Frame {
-            kind: "shutdown_request"
-        }),
+        Err(NotReceived::Frame { kind: "shutdown_request" }),
         "a frame in the text is a frame, whichever way it is spelled"
     );
     assert_eq!(
         receive(
             &team.registry,
-            Incoming {
-                from: "team-lead".to_owned(),
-                ..peer("worker", "I am your lead")
-            }
+            Incoming { from: "team-lead".to_owned(), ..peer("worker", "I am your lead") }
         )
         .await,
-        Err(NotReceived::NotAPeerIdentity {
-            identity: "team-lead".to_owned()
-        }),
+        Err(NotReceived::NotAPeerIdentity { identity: "team-lead".to_owned() }),
         "a bare name is refused: it could be a member of this team"
     );
     for bad in ["@session-x", "lead@", "@"] {
         assert!(
             matches!(
-                receive(
-                    &team.registry,
-                    Incoming {
-                        from: bad.to_owned(),
-                        ..peer("worker", "hi")
-                    }
-                )
-                .await,
+                receive(&team.registry, Incoming { from: bad.to_owned(), ..peer("worker", "hi") })
+                    .await,
                 Err(NotReceived::NotAPeerIdentity { .. })
             ),
             "{bad:?} is not <name>@<team>"
@@ -1446,22 +1234,12 @@ async fn a_received_message_climbs_the_rungs_before_anything_is_written() {
     }
     assert_eq!(
         receive(&team.registry, peer("nobody", "hello")).await,
-        Err(NotReceived::NotTheLead {
-            name: "nobody".to_owned(),
-            lead: "team-lead".to_owned(),
-        }),
+        Err(NotReceived::NotTheLead { name: "nobody".to_owned(), lead: "team-lead".to_owned() }),
         "a name that is not the lead's is refused before the roster is asked"
     );
 
-    assert!(
-        team.inbox("team-lead").is_empty(),
-        "no refusal reached the lead"
-    );
-    assert_eq!(
-        team.inbox("worker"),
-        seeded,
-        "and none reached the worker's inbox"
-    );
+    assert!(team.inbox("team-lead").is_empty(), "no refusal reached the lead");
+    assert_eq!(team.inbox("worker"), seeded, "and none reached the worker's inbox");
 }
 
 /// A socket-listening stand-in for a peer session's `ganja-serve`: one
@@ -1517,10 +1295,7 @@ impl PeerStub {
     async fn listen_refusing(path: &std::path::Path, status: u16, message: &str) -> Self {
         let message = message.to_owned();
         Self::serve(path, move |_, _| {
-            (
-                status,
-                serde_json::json!({"type": "not_found", "message": message}).to_string(),
-            )
+            (status, serde_json::json!({"type": "not_found", "message": message}).to_string())
         })
         .await
     }
@@ -1577,9 +1352,7 @@ impl PeerStub {
                 }
                 let body = String::from_utf8_lossy(&body).into_owned();
                 let (status, answer) = answer(&method, &route);
-                seen.lock()
-                    .expect("the request log is never poisoned")
-                    .push((method, route, body));
+                seen.lock().expect("the request log is never poisoned").push((method, route, body));
                 let response = format!(
                     "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\n\
                          content-length: {}\r\nconnection: close\r\n\r\n{answer}",
@@ -1594,10 +1367,7 @@ impl PeerStub {
     }
 
     fn requests(&self) -> Vec<(String, String, String)> {
-        self.requests
-            .lock()
-            .expect("the request log is never poisoned")
-            .clone()
+        self.requests.lock().expect("the request log is never poisoned").clone()
     }
 }
 
@@ -1609,9 +1379,7 @@ async fn a_caller_is_not_in_its_own_roster_and_exactly_one_row_leads() {
 
     let seen = team::Postbox::roster(&team.worker);
     assert_eq!(
-        seen.iter()
-            .map(|peer| peer.name.as_str())
-            .collect::<Vec<_>>(),
+        seen.iter().map(|peer| peer.name.as_str()).collect::<Vec<_>>(),
         vec!["team-lead"],
         "a teammate sees the lead and not itself: {seen:?}"
     );
@@ -1619,9 +1387,7 @@ async fn a_caller_is_not_in_its_own_roster_and_exactly_one_row_leads() {
 
     let seen = team::Postbox::roster(&Postbox::lead(&team.registry, None));
     assert_eq!(
-        seen.iter()
-            .map(|peer| peer.name.as_str())
-            .collect::<Vec<_>>(),
+        seen.iter().map(|peer| peer.name.as_str()).collect::<Vec<_>>(),
         vec!["worker"],
         "and the lead sees the teammate and not itself: {seen:?}"
     );
@@ -1648,13 +1414,7 @@ async fn a_caller_is_not_in_its_own_roster_and_exactly_one_row_leads() {
 /// the name it was given.
 #[tokio::test]
 async fn a_postbox_outliving_its_team_answers_that_the_team_has_gone() {
-    let Team {
-        _home,
-        root: _root,
-        team: _team,
-        registry,
-        worker,
-    } = Team::new().await;
+    let Team { _home, root: _root, team: _team, registry, worker } = Team::new().await;
 
     // Non-vacuous: there is a team to lose, and this postbox can see it.
     assert!(
@@ -1673,15 +1433,10 @@ async fn a_postbox_outliving_its_team_answers_that_the_team_has_gone() {
         team::Postbox::deliver(
             &worker,
             Address::Local("team-lead".to_owned()),
-            Body::Text {
-                text: "anyone there?".to_owned(),
-                summary: None,
-            },
+            Body::Text { text: "anyone there?".to_owned(), summary: None },
         )
         .await,
-        Err(Undelivered::Failed {
-            reason: TEAM_GONE.to_owned(),
-        }),
+        Err(Undelivered::Failed { reason: TEAM_GONE.to_owned() }),
         "and says so, rather than reporting a name nobody answers to"
     );
 }
@@ -1693,14 +1448,7 @@ fn id_for(stem: &str) -> String {
     let rest = "0".repeat(32 - stem.len());
     let hex = format!("{stem}{rest}");
 
-    format!(
-        "{}-{}-7{}-8{}-{}",
-        &hex[..8],
-        &hex[8..12],
-        &hex[13..16],
-        &hex[17..20],
-        &hex[20..32]
-    )
+    format!("{}-{}-7{}-8{}-{}", &hex[..8], &hex[8..12], &hex[13..16], &hex[17..20], &hex[20..32])
 }
 
 /// A tempdir at the `0700` mode [`crate::tool::socket::vet_address`]
@@ -1756,9 +1504,7 @@ async fn a_resolved_name_delivers_moves_and_still_answers_by_address() {
     let team = Team::new().await;
     let registry_dir = private_dir();
     let identity = Arc::new(identity::Identity::new(registry_dir.path()));
-    let own_session = Arc::new(std::sync::Mutex::new(SessionId::from(
-        "ses-lead-own".to_owned(),
-    )));
+    let own_session = Arc::new(std::sync::Mutex::new(SessionId::from("ses-lead-own".to_owned())));
     let lead = Postbox::lead(&team.registry, Some((&identity, Arc::clone(&own_session))));
 
     let (_id_a, held_a) = live_record(registry_dir.path(), "01110001", "backend");
@@ -1768,25 +1514,16 @@ async fn a_resolved_name_delivers_moves_and_still_answers_by_address() {
     let sent = team::Postbox::deliver(
         &lead,
         Address::Local("backend".to_owned()),
-        Body::Text {
-            text: "hi".to_owned(),
-            summary: None,
-        },
+        Body::Text { text: "hi".to_owned(), summary: None },
     )
     .await
     .expect("a unique live session resolves and delivers");
     assert_eq!(
         sent.to,
-        format!(
-            "backend (uds:{} \u{2192} team-lead@session-feedbeef)",
-            socket_a.display()
-        ),
+        format!("backend (uds:{} \u{2192} team-lead@session-feedbeef)", socket_a.display()),
         "the transcript can audit all three identities (N6)"
     );
-    assert_eq!(
-        identity.pinned("backend").expect("the pin stands").stem,
-        "01110001"
-    );
+    assert_eq!(identity.pinned("backend").expect("the pin stands").stem, "01110001");
 
     // A different session claims the name.
     drop(held_a);
@@ -1798,21 +1535,12 @@ async fn a_resolved_name_delivers_moves_and_still_answers_by_address() {
     let moved = team::Postbox::deliver(
         &lead,
         Address::Local("backend".to_owned()),
-        Body::Text {
-            text: "hi again".to_owned(),
-            summary: None,
-        },
+        Body::Text { text: "hi again".to_owned(), summary: None },
     )
     .await;
-    assert!(
-        matches!(moved, Err(Undelivered::NameMoved { .. })),
-        "got {moved:?}"
-    );
+    assert!(matches!(moved, Err(Undelivered::NameMoved { .. })), "got {moved:?}");
     assert_eq!(
-        identity
-            .pinned("backend")
-            .expect("the pin still stands")
-            .stem,
+        identity.pinned("backend").expect("the pin still stands").stem,
         "01110001",
         "a halted resolution never re-pins"
     );
@@ -1821,13 +1549,8 @@ async fn a_resolved_name_delivers_moves_and_still_answers_by_address() {
     // address neither consults nor creates a pin.
     let by_address = team::Postbox::deliver(
         &lead,
-        Address::Uds {
-            path: socket_b.clone(),
-        },
-        Body::Text {
-            text: "direct".to_owned(),
-            summary: None,
-        },
+        Address::Uds { path: socket_b.clone() },
+        Body::Text { text: "direct".to_owned(), summary: None },
     )
     .await
     .expect("a uds: address bypasses the name and its pin entirely");
@@ -1850,9 +1573,7 @@ async fn a_roster_hit_outranks_a_same_named_live_record() {
     let team = Team::new().await;
     let registry_dir = private_dir();
     let identity = Arc::new(identity::Identity::new(registry_dir.path()));
-    let own_session = Arc::new(std::sync::Mutex::new(SessionId::from(
-        "ses-lead-own".to_owned(),
-    )));
+    let own_session = Arc::new(std::sync::Mutex::new(SessionId::from("ses-lead-own".to_owned())));
     let lead = Postbox::lead(&team.registry, Some((&identity, Arc::clone(&own_session))));
 
     // Nothing listens at this socket — the roster-hit arm must never
@@ -1863,10 +1584,7 @@ async fn a_roster_hit_outranks_a_same_named_live_record() {
     let sent = team::Postbox::deliver(
         &lead,
         Address::Local("worker".to_owned()),
-        Body::Text {
-            text: "for the roster member".to_owned(),
-            summary: None,
-        },
+        Body::Text { text: "for the roster member".to_owned(), summary: None },
     )
     .await
     .expect("the roster answers before any socket is touched");
@@ -1889,13 +1607,8 @@ async fn a_roster_hit_outranks_a_same_named_live_record() {
     let _peer = PeerStub::listen(&socket).await;
     let by_address = team::Postbox::deliver(
         &lead,
-        Address::Uds {
-            path: socket.clone(),
-        },
-        Body::Text {
-            text: "for the shadowed session".to_owned(),
-            summary: None,
-        },
+        Address::Uds { path: socket.clone() },
+        Body::Text { text: "for the shadowed session".to_owned(), summary: None },
     )
     .await
     .expect("a uds: address reaches the record the roster shadowed");
@@ -1910,19 +1623,14 @@ async fn a_lead_postbox_refuses_ambiguity_a_miss_and_an_unreadable_registry() {
     let team = Team::new().await;
     let registry_dir = private_dir();
     let identity = Arc::new(identity::Identity::new(registry_dir.path()));
-    let own_session = Arc::new(std::sync::Mutex::new(SessionId::from(
-        "ses-lead-own".to_owned(),
-    )));
+    let own_session = Arc::new(std::sync::Mutex::new(SessionId::from("ses-lead-own".to_owned())));
     let lead = Postbox::lead(&team.registry, Some((&identity, Arc::clone(&own_session))));
 
     // A miss: nothing this session may address goes by that name.
     let missed = team::Postbox::deliver(
         &lead,
         Address::Local("nobody".to_owned()),
-        Body::Text {
-            text: "hi".to_owned(),
-            summary: None,
-        },
+        Body::Text { text: "hi".to_owned(), summary: None },
     )
     .await;
     assert_eq!(missed, Err(Undelivered::Unknown));
@@ -1934,36 +1642,22 @@ async fn a_lead_postbox_refuses_ambiguity_a_miss_and_an_unreadable_registry() {
     let ambiguous = team::Postbox::deliver(
         &lead,
         Address::Local("gateway".to_owned()),
-        Body::Text {
-            text: "hi".to_owned(),
-            summary: None,
-        },
+        Body::Text { text: "hi".to_owned(), summary: None },
     )
     .await;
-    assert!(
-        matches!(ambiguous, Err(Undelivered::Ambiguous { .. })),
-        "got {ambiguous:?}"
-    );
+    assert!(matches!(ambiguous, Err(Undelivered::Ambiguous { .. })), "got {ambiguous:?}");
     assert_eq!(identity.pinned("gateway"), None, "refusing pins nothing");
 
     // An unreadable registry: a failure to search, never a verdict.
-    let missing = Arc::new(identity::Identity::new(
-        registry_dir.path().join("was-never-there"),
-    ));
+    let missing = Arc::new(identity::Identity::new(registry_dir.path().join("was-never-there")));
     let lead_missing = Postbox::lead(&team.registry, Some((&missing, own_session)));
     let failed = team::Postbox::deliver(
         &lead_missing,
         Address::Local("gateway".to_owned()),
-        Body::Text {
-            text: "hi".to_owned(),
-            summary: None,
-        },
+        Body::Text { text: "hi".to_owned(), summary: None },
     )
     .await;
-    assert!(
-        matches!(failed, Err(Undelivered::Failed { .. })),
-        "got {failed:?}"
-    );
+    assert!(matches!(failed, Err(Undelivered::Failed { .. })), "got {failed:?}");
 }
 
 /// The D528 table's frame-body row: a structured body to a resolved name
@@ -1975,9 +1669,7 @@ async fn a_frame_body_to_a_resolved_name_is_refused_and_pins_nothing() {
     let team = Team::new().await;
     let registry_dir = private_dir();
     let identity = Arc::new(identity::Identity::new(registry_dir.path()));
-    let own_session = Arc::new(std::sync::Mutex::new(SessionId::from(
-        "ses-lead-own".to_owned(),
-    )));
+    let own_session = Arc::new(std::sync::Mutex::new(SessionId::from("ses-lead-own".to_owned())));
     let lead = Postbox::lead(&team.registry, Some((&identity, own_session)));
     let (_id, _held) = live_record(registry_dir.path(), "05550005", "relay");
     let socket = registry_dir.path().join("05550005.sock");
@@ -1989,17 +1681,8 @@ async fn a_frame_body_to_a_resolved_name_is_refused_and_pins_nothing() {
         Body::Frame(serde_json::json!({"type": "shutdown_approved", "requestId": "r1"})),
     )
     .await;
-    assert_eq!(
-        refused,
-        Err(Undelivered::Failed {
-            reason: FRAME_OVER_SOCKET.to_owned(),
-        })
-    );
-    assert_eq!(
-        identity.pinned("relay"),
-        None,
-        "a refused frame body pins nothing"
-    );
+    assert_eq!(refused, Err(Undelivered::Failed { reason: FRAME_OVER_SOCKET.to_owned() }));
+    assert_eq!(identity.pinned("relay"), None, "a refused frame body pins nothing");
 }
 
 /// **D530**: the solo postbox has no roster to consult first, resolves
@@ -2011,20 +1694,12 @@ async fn a_frame_body_to_a_resolved_name_is_refused_and_pins_nothing() {
 async fn the_solo_postbox_resolves_directly_stamps_solo_and_appends_the_one_way_note() {
     let registry_dir = private_dir();
     let identity = Arc::new(identity::Identity::new(registry_dir.path()));
-    let own_session = Arc::new(std::sync::Mutex::new(SessionId::from(
-        "ses-solo-own".to_owned(),
-    )));
+    let own_session = Arc::new(std::sync::Mutex::new(SessionId::from("ses-solo-own".to_owned())));
     let self_name = Arc::new(std::sync::Mutex::new("frank".to_owned()));
-    let solo = SoloPostbox::new(
-        Arc::clone(&self_name),
-        Arc::clone(&identity),
-        Arc::clone(&own_session),
-    );
+    let solo =
+        SoloPostbox::new(Arc::clone(&self_name), Arc::clone(&identity), Arc::clone(&own_session));
 
-    assert!(
-        team::Postbox::roster(&solo).is_empty(),
-        "a teamless session has no roster"
-    );
+    assert!(team::Postbox::roster(&solo).is_empty(), "a teamless session has no roster");
 
     let (_id, _held) = live_record(registry_dir.path(), "06660006", "backend");
     let socket = registry_dir.path().join("06660006.sock");
@@ -2033,10 +1708,7 @@ async fn the_solo_postbox_resolves_directly_stamps_solo_and_appends_the_one_way_
     let sent = team::Postbox::deliver(
         &solo,
         Address::Local("backend".to_owned()),
-        Body::Text {
-            text: "hi".to_owned(),
-            summary: None,
-        },
+        Body::Text { text: "hi".to_owned(), summary: None },
     )
     .await
     .expect("a unique live session resolves");
@@ -2045,10 +1717,7 @@ async fn the_solo_postbox_resolves_directly_stamps_solo_and_appends_the_one_way_
         "the not-addressable-back clause is appended: {:?}",
         sent.note
     );
-    assert_eq!(
-        identity.pinned("backend").expect("the pin stands").stem,
-        "06660006"
-    );
+    assert_eq!(identity.pinned("backend").expect("the pin stands").stem, "06660006");
 
     let posted: Vec<_> = peer
         .requests()
@@ -2065,18 +1734,11 @@ async fn the_solo_postbox_resolves_directly_stamps_solo_and_appends_the_one_way_
     // A frame body earns the solo-worded refusal, not the team-worded one.
     let refused = team::Postbox::deliver(
         &solo,
-        Address::Uds {
-            path: socket.clone(),
-        },
+        Address::Uds { path: socket.clone() },
         Body::Frame(serde_json::json!({"anything": "goes"})),
     )
     .await;
-    assert_eq!(
-        refused,
-        Err(Undelivered::Failed {
-            reason: FRAME_OVER_SOCKET_SOLO.to_owned(),
-        })
-    );
+    assert_eq!(refused, Err(Undelivered::Failed { reason: FRAME_OVER_SOCKET_SOLO.to_owned() }));
 }
 
 // D532/D534's own wire types and the `PeerFacts` composition seam
@@ -2161,9 +1823,8 @@ impl PeerFacts for StubFacts {
 async fn the_sender_side_composition_reads_only_what_peer_facts_answers() {
     let registry_dir = private_dir();
     let identity = Arc::new(identity::Identity::new(registry_dir.path()));
-    let own_session = Arc::new(std::sync::Mutex::new(SessionId::from(
-        "ses-composed-own".to_owned(),
-    )));
+    let own_session =
+        Arc::new(std::sync::Mutex::new(SessionId::from("ses-composed-own".to_owned())));
     let self_name = Arc::new(std::sync::Mutex::new("composer".to_owned()));
     let solo = SoloPostbox::new(Arc::clone(&self_name), identity, own_session).with_peer_facts(
         Arc::new(StubFacts {
@@ -2178,13 +1839,8 @@ async fn the_sender_side_composition_reads_only_what_peer_facts_answers() {
 
     let _sent = team::Postbox::deliver(
         &solo,
-        Address::Uds {
-            path: socket.clone(),
-        },
-        Body::Text {
-            text: "carrying a chain".to_owned(),
-            summary: None,
-        },
+        Address::Uds { path: socket.clone() },
+        Body::Text { text: "carrying a chain".to_owned(), summary: None },
     )
     .await
     .expect("a listening peer takes the message");
@@ -2196,11 +1852,7 @@ async fn the_sender_side_composition_reads_only_what_peer_facts_answers() {
         .map(|(_, _, body)| serde_json::from_str(&body).expect("the body is the wire shape"))
         .expect("exactly one message posted");
 
-    assert_eq!(
-        posted.from_mode,
-        Some(SenderMode::Bypass),
-        "read straight off the facts"
-    );
+    assert_eq!(posted.from_mode, Some(SenderMode::Bypass), "read straight off the facts");
     assert_eq!(
         posted.reply_to.as_deref(),
         Some("uds:/tmp/ganja-501/deadbeef.sock"),
@@ -2258,15 +1910,8 @@ fn an_old_receiver_refuses_a_new_body_readably() {
 /// this route actually carries.
 #[test]
 fn a_socket_receipt_round_trips_with_each_status() {
-    for status in [
-        ReceiptStatus::Delivered,
-        ReceiptStatus::Denied,
-        ReceiptStatus::Expired,
-    ] {
-        let receipt = SocketReceipt {
-            message_id: PeerMessageId::ascending(),
-            status,
-        };
+    for status in [ReceiptStatus::Delivered, ReceiptStatus::Denied, ReceiptStatus::Expired] {
+        let receipt = SocketReceipt { message_id: PeerMessageId::ascending(), status };
         let encoded = serde_json::to_string(&receipt).expect("a receipt serializes");
         let decoded: SocketReceipt =
             serde_json::from_str(&encoded).expect("and a receipt this crate wrote parses back");
@@ -2300,9 +1945,8 @@ fn an_unknown_receipt_status_is_refused_by_name_including_held() {
 #[test]
 fn the_receipt_status_doc_states_the_synchronous_held_divergence() {
     let source = include_str!("subagent.rs");
-    let enum_at = source
-        .find("pub enum ReceiptStatus")
-        .expect("ReceiptStatus is declared in this file");
+    let enum_at =
+        source.find("pub enum ReceiptStatus").expect("ReceiptStatus is declared in this file");
     let preceding_doc = &source[..enum_at];
     let doc_start = preceding_doc
         .rfind("/// How a held entry")
@@ -2334,9 +1978,7 @@ fn a_hop_chain_past_the_sender_cap_is_refused_at_parse_and_the_cap_itself_parses
     let refused: Result<SocketMessage, _> = serde_json::from_str(&body);
     let error = refused.expect_err("one more entry than the sender cap is refused");
     assert!(
-        error
-            .to_string()
-            .contains(&MAX_HOP_CHAIN_ENTRIES.to_string()),
+        error.to_string().contains(&MAX_HOP_CHAIN_ENTRIES.to_string()),
         "the refusal names the cap it exceeded: {error}"
     );
 
@@ -2356,11 +1998,8 @@ fn a_hop_chain_past_the_sender_cap_is_refused_at_parse_and_the_cap_itself_parses
 /// has always had.
 #[test]
 fn socket_delivered_with_held_absent_is_byte_identical_to_before_d534() {
-    let delivered = SocketDelivered {
-        to: "team-lead".to_owned(),
-        note: RECEIVED.to_owned(),
-        held: None,
-    };
+    let delivered =
+        SocketDelivered { to: "team-lead".to_owned(), note: RECEIVED.to_owned(), held: None };
     let encoded = serde_json::to_string(&delivered).expect("an accept answer serializes");
     // A literal, field-order-sensitive string rather than `serde_json::json!`
     // — that macro's own `Value::Object` sorts keys alphabetically without
@@ -2381,16 +2020,10 @@ fn socket_delivered_with_held_absent_is_byte_identical_to_before_d534() {
 /// reopen the enumeration channel D523 closed.
 #[test]
 fn an_accept_and_a_refuse_answer_are_byte_identical_with_held_absent_from_both() {
-    let accept = SocketDelivered {
-        to: "team-lead".to_owned(),
-        note: RECEIVED.to_owned(),
-        held: None,
-    };
-    let refuse = SocketDelivered {
-        to: "team-lead".to_owned(),
-        note: RECEIVED.to_owned(),
-        held: None,
-    };
+    let accept =
+        SocketDelivered { to: "team-lead".to_owned(), note: RECEIVED.to_owned(), held: None };
+    let refuse =
+        SocketDelivered { to: "team-lead".to_owned(), note: RECEIVED.to_owned(), held: None };
     assert_eq!(
         serde_json::to_string(&accept).expect("an accept serializes"),
         serde_json::to_string(&refuse).expect("a refuse serializes"),
@@ -2404,19 +2037,12 @@ fn a_holds_answer_carries_the_typed_cause() {
     let delivered = SocketDelivered {
         to: "team-lead".to_owned(),
         note: held_note(ganja_protocol::HoldCause::NoModeAsserted),
-        held: Some(HeldWire {
-            cause: ganja_protocol::HoldCause::NoModeAsserted,
-        }),
+        held: Some(HeldWire { cause: ganja_protocol::HoldCause::NoModeAsserted }),
     };
     let encoded = serde_json::to_string(&delivered).expect("a held answer serializes");
     let decoded: SocketDelivered =
         serde_json::from_str(&encoded).expect("and a held answer this crate wrote parses back");
-    assert_eq!(
-        decoded.held,
-        Some(HeldWire {
-            cause: ganja_protocol::HoldCause::NoModeAsserted,
-        })
-    );
+    assert_eq!(decoded.held, Some(HeldWire { cause: ganja_protocol::HoldCause::NoModeAsserted }));
 }
 
 /// **AC-52**: a new sender reading an old receiver's answer never sees
@@ -2450,9 +2076,7 @@ fn an_old_senders_answer_type_refuses_a_new_receivers_held_answer() {
     let held_answer = serde_json::to_string(&SocketDelivered {
         to: "team-lead".to_owned(),
         note: held_note(ganja_protocol::HoldCause::ModeMismatch),
-        held: Some(HeldWire {
-            cause: ganja_protocol::HoldCause::ModeMismatch,
-        }),
+        held: Some(HeldWire { cause: ganja_protocol::HoldCause::ModeMismatch }),
     })
     .expect("a held answer serializes");
 

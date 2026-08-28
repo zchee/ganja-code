@@ -32,19 +32,15 @@
 //! resume and revert tests below true by construction rather than by
 //! bookkeeping. See `instruction::nested_suffix` for the carrier's reasoning.
 
-use std::{
-    path::{Path, PathBuf},
-    sync::{Arc, LazyLock, Mutex},
-};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use futures::stream::BoxStream;
-use ganja_core::{
-    Engine, Storage,
-    permission::{Action, Permissions, Rule},
-    protocol::{Command, Event, MessageId, RevertScope, Role},
-    provider::ChatRequest,
-    tool::Registry,
-};
+use ganja_core::permission::{Action, Permissions, Rule};
+use ganja_core::protocol::{Command, Event, MessageId, RevertScope, Role};
+use ganja_core::provider::ChatRequest;
+use ganja_core::tool::Registry;
+use ganja_core::{Engine, Storage};
 use ganja_testkit::{ScriptedProvider, drain, says, tool_call};
 use serde_json::json;
 use tokio::sync::{Mutex as AsyncMutex, MutexGuard};
@@ -141,11 +137,9 @@ fn completed_calls(requests: &Mutex<Vec<ChatRequest>>) -> Vec<String> {
                 .iter()
                 .flat_map(|message| &message.parts)
                 .filter_map(|part| match &part.body {
-                    PartBody::Tool {
-                        tool,
-                        state: ToolState::Completed { .. },
-                        ..
-                    } => Some(tool.clone()),
+                    PartBody::Tool { tool, state: ToolState::Completed { .. }, .. } => {
+                        Some(tool.clone())
+                    }
                     _ => None,
                 })
                 .collect()
@@ -171,35 +165,24 @@ async fn ask(
         .await
         .expect("an idle engine accepts a prompt");
 
-    drain(events)
-        .await
-        .into_iter()
-        .find_map(|event| match event {
-            Event::MessageStarted { message, .. } if message.role == Role::User => Some(message.id),
-            _ => None,
-        })
+    drain(events).await.into_iter().find_map(|event| match event {
+        Event::MessageStarted { message, .. } if message.role == Role::User => Some(message.id),
+        _ => None,
+    })
 }
 
 /// An engine over the entered fixture, playing `script`, with the file tools
 /// allowed and a system prompt of its own so the injection has something to be
 /// appended to.
 fn engine(provider: Arc<ScriptedProvider>) -> Engine {
-    Engine::new(
-        provider,
-        "fake-1",
-        Arc::new(Registry::with_builtins()),
-        permissive(),
-    )
-    .with_system_parts(Some("the composed prompt".to_owned()), None)
+    Engine::new(provider, "fake-1", Arc::new(Registry::with_builtins()), permissive())
+        .with_system_parts(Some("the composed prompt".to_owned()), None)
 }
 
 /// A script that reads `path` and then says it is done: two requests, the
 /// second of which is the one under test.
 fn reads(path: &Path) -> Vec<Vec<ganja_core::provider::ProviderEvent>> {
-    vec![
-        tool_call("read", json!({ "filePath": path.to_string_lossy() })),
-        says("done"),
-    ]
+    vec![tool_call("read", json!({ "filePath": path.to_string_lossy() })), says("done")]
 }
 
 /// The defect D480 closes: a session working inside `sub/` was never told what
@@ -231,11 +214,7 @@ async fn a_read_below_the_root_puts_that_directorys_instructions_in_the_next_req
         "the read walked it in, once: {}",
         systems[1]
     );
-    assert!(
-        systems[1].contains("sub rules"),
-        "and its contents came with it: {}",
-        systems[1]
-    );
+    assert!(systems[1].contains("sub rules"), "and its contents came with it: {}", systems[1]);
     assert!(
         systems[1].starts_with("the composed prompt"),
         "appended to the prompt rather than replacing it: {}",
@@ -254,14 +233,8 @@ async fn a_second_touch_in_the_same_directory_adds_nothing() {
     plant(&sub.join("two.rs"), "fn two() {}");
 
     let (provider, requests) = ScriptedProvider::new(vec![
-        tool_call(
-            "read",
-            json!({ "filePath": sub.join("one.rs").to_string_lossy() }),
-        ),
-        tool_call(
-            "read",
-            json!({ "filePath": sub.join("two.rs").to_string_lossy() }),
-        ),
+        tool_call("read", json!({ "filePath": sub.join("one.rs").to_string_lossy() })),
+        tool_call("read", json!({ "filePath": sub.join("two.rs").to_string_lossy() })),
         says("done"),
     ]);
     let engine = engine(provider);
@@ -300,11 +273,7 @@ async fn a_touch_at_the_root_adds_nothing() {
         "the read really ran, so the assertion below is about a touch"
     );
     let systems = systems(&requests);
-    assert_eq!(
-        systems[1], systems[0],
-        "a root-level read moves nothing: {}",
-        systems[1]
-    );
+    assert_eq!(systems[1], systems[0], "a root-level read moves nothing: {}", systems[1]);
 }
 
 /// Closest-last, the same order the up-walk tier stacks in: the most specific
@@ -324,12 +293,10 @@ async fn a_deeper_instruction_file_is_read_after_the_shallower_one() {
     ask(&engine, &mut events, "look deep").await;
 
     let system = systems(&requests).remove(1);
-    let shallow = system
-        .find(&format!("{HEADER}sub/AGENTS.md"))
-        .expect("the shallower file is there");
-    let deeper = system
-        .find(&format!("{HEADER}sub/nested/AGENTS.md"))
-        .expect("and so is the deeper one");
+    let shallow =
+        system.find(&format!("{HEADER}sub/AGENTS.md")).expect("the shallower file is there");
+    let deeper =
+        system.find(&format!("{HEADER}sub/nested/AGENTS.md")).expect("and so is the deeper one");
     assert!(shallow < deeper, "closest last: {system}");
 }
 
@@ -350,10 +317,7 @@ async fn a_subdirectory_carrying_only_a_claude_file_is_honoured() {
 
     let system = systems(&requests).remove(1);
     assert_eq!(named(&system, "claude/CLAUDE.md"), 1, "{system}");
-    assert!(
-        system.contains("claude rules"),
-        "with its contents: {system}"
-    );
+    assert!(system.contains("claude rules"), "with its contents: {system}");
 }
 
 /// Pre-mortem 2, pinned: a listing is not a touch. One unanchored glob over a
@@ -362,14 +326,8 @@ async fn a_subdirectory_carrying_only_a_claude_file_is_honoured() {
 async fn a_glob_over_the_tree_walks_nothing_in() {
     let (_directory, root, _guard) = checkout().await;
     for vendor in ["one", "two", "three"] {
-        plant(
-            &root.join("third_party").join(vendor).join("AGENTS.md"),
-            "vendored rules",
-        );
-        plant(
-            &root.join("third_party").join(vendor).join("lib.rs"),
-            "fn vendored() {}",
-        );
+        plant(&root.join("third_party").join(vendor).join("AGENTS.md"), "vendored rules");
+        plant(&root.join("third_party").join(vendor).join("lib.rs"), "fn vendored() {}");
     }
 
     let (provider, requests) = ScriptedProvider::new(vec![
@@ -417,10 +375,7 @@ async fn an_oversized_nested_file_is_clamped_and_says_so() {
         system.contains(&format!("...{budget} bytes truncated...")),
         "the clamp says how much it cut"
     );
-    assert!(
-        system.contains("Read sub/AGENTS.md for the rest."),
-        "and where the rest is"
-    );
+    assert!(system.contains("Read sub/AGENTS.md for the rest."), "and where the rest is");
 }
 
 /// AC5: whatever weight the walk adds is weight `/context` reports, in the
@@ -519,10 +474,7 @@ async fn a_revert_that_hides_the_touch_forgets_what_it_walked_in() {
     plant(&sub.join("AGENTS.md"), "sub rules");
     plant(&sub.join("file.rs"), "fn main() {}");
 
-    let read = tool_call(
-        "read",
-        json!({ "filePath": sub.join("file.rs").to_string_lossy() }),
-    );
+    let read = tool_call("read", json!({ "filePath": sub.join("file.rs").to_string_lossy() }));
     let (provider, requests) = ScriptedProvider::new(vec![
         read.clone(),
         says("done"),
@@ -538,18 +490,13 @@ async fn a_revert_that_hides_the_touch_forgets_what_it_walked_in() {
         .expect("a turn starts with the message that asked for it");
 
     engine
-        .send(Command::RevertTo {
-            message_id: anchor,
-            scope: RevertScope::Conversation,
-        })
+        .send(Command::RevertTo { message_id: anchor, scope: RevertScope::Conversation })
         .await
         .expect("the prompt is a checkpoint");
     // The revert announces itself before the next prompt is accepted.
     loop {
-        if matches!(
-            futures::StreamExt::next(&mut events).await,
-            Some(Event::RevertChanged { .. })
-        ) {
+        if matches!(futures::StreamExt::next(&mut events).await, Some(Event::RevertChanged { .. }))
+        {
             break;
         }
     }
@@ -565,10 +512,7 @@ async fn a_revert_that_hides_the_touch_forgets_what_it_walked_in() {
         systems[2]
     );
     assert_eq!(
-        named(
-            systems.last().expect("five requests were scripted"),
-            "sub/AGENTS.md"
-        ),
+        named(systems.last().expect("five requests were scripted"), "sub/AGENTS.md"),
         1,
         "and touching again brings it back: {}",
         systems.last().expect("five requests were scripted")

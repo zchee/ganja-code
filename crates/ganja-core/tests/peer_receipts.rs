@@ -17,19 +17,19 @@
 
 #![cfg(unix)]
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
-use futures::{StreamExt as _, stream::BoxStream};
-use ganja_core::{
-    Engine, Incoming, ReceiptStatus, SocketReceipt,
-    config::{DialogExpiry, InboundPolicy},
-    engine::PeerEnvelope,
-    permission::Permissions,
-    protocol::{Command, Event, HeldDecision, HeldOutcome, HoldCause},
-    provider::{ChatRequest, FakeProvider},
-    teammate::{TeammateRegistry, receipts},
-    tool::Registry,
-};
+use futures::StreamExt as _;
+use futures::stream::BoxStream;
+use ganja_core::config::{DialogExpiry, InboundPolicy};
+use ganja_core::engine::PeerEnvelope;
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{Command, Event, HeldDecision, HeldOutcome, HoldCause};
+use ganja_core::provider::{ChatRequest, FakeProvider};
+use ganja_core::teammate::{TeammateRegistry, receipts};
+use ganja_core::tool::Registry;
+use ganja_core::{Engine, Incoming, ReceiptStatus, SocketReceipt};
 use ganja_protocol::{PeerMessageId, PeerReceiptStatus, PolicySource};
 use ganja_testkit::{ScriptedProvider, team, tool_call};
 
@@ -73,27 +73,17 @@ impl Sender {
         )
         .with_teammates(Arc::clone(&registry));
 
-        Self {
-            engine: Arc::new(engine),
-            provider,
-            requests,
-            _home: home,
-        }
+        Self { engine: Arc::new(engine), provider, requests, _home: home }
     }
 
     async fn events(&self) -> BoxStream<'static, Event> {
-        self.engine
-            .subscribe()
-            .await
-            .expect("the first subscriber wins")
+        self.engine.subscribe().await.expect("the first subscriber wins")
     }
 
     /// One turn whose only act is a `send_message` at `address`.
     async fn send_to(&self, events: &mut BoxStream<'static, Event>, address: &str) {
-        self.provider.push(tool_call(
-            "send_message",
-            serde_json::json!({"to": address, "message": TEXT}),
-        ));
+        self.provider
+            .push(tool_call("send_message", serde_json::json!({"to": address, "message": TEXT})));
         self.engine
             .send(Command::SendPrompt {
                 text: "say it".to_owned(),
@@ -173,11 +163,7 @@ impl Receiver {
         .with_inbound_bypass(seeded)
         .with_teammates(Arc::clone(&registry));
 
-        Self {
-            engine: Arc::new(engine),
-            registry,
-            _home: home,
-        }
+        Self { engine: Arc::new(engine), registry, _home: home }
     }
 
     /// Takes one arrival in, answering `reply_to` where one is given.
@@ -274,10 +260,7 @@ async fn only_a_held_and_reply_capable_send_registers_an_outstanding_id() {
         let mut events = sender.events().await;
         sender.send_to(&mut events, &far.address()).await;
 
-        let id = far.message()["message_id"]
-            .as_str()
-            .expect("every send mints an id")
-            .to_owned();
+        let id = far.message()["message_id"].as_str().expect("every send mints an id").to_owned();
         sender
             .engine
             .apply_receipt(SocketReceipt {
@@ -326,11 +309,7 @@ async fn an_accept_and_a_refuse_still_answer_byte_identically() {
         .expect("an answer serializes")
     };
 
-    assert_eq!(
-        wire(&accepted),
-        wire(&refused),
-        "the two answers must stay one string"
-    );
+    assert_eq!(wire(&accepted), wire(&refused), "the two answers must stay one string");
     assert!(
         !wire(&accepted).contains("held"),
         "and neither carries the hold field: {}",
@@ -359,11 +338,7 @@ async fn an_accept_a_refuse_and_a_guard_drop_all_post_nothing() {
     let deduping = Receiver::new(None, false);
     deduping.takes("the duplicated one", Some(&spy)).await;
     deduping.takes("the duplicated one", Some(&spy)).await;
-    assert_eq!(
-        deduping.inbox().len(),
-        1,
-        "the second arrival really was dropped"
-    );
+    assert_eq!(deduping.inbox().len(), 1, "the second arrival really was dropped");
 
     assert!(
         receipts_after_grace(&spy).await.is_empty(),
@@ -390,9 +365,7 @@ async fn a_hold_answers_its_cause_at_once_and_its_settlement_follows() {
         let held = receiver.takes(TEXT, Some(&spy)).await;
         assert_eq!(
             held.held.as_ref().map(|held| held.cause),
-            Some(HoldCause::Explicit {
-                source: PolicySource::Global
-            }),
+            Some(HoldCause::Explicit { source: PolicySource::Global }),
             "the typed cause rides the very answer that was held"
         );
         assert!(
@@ -442,14 +415,10 @@ async fn the_model_reads_one_peer_receipt_part_per_batch() {
     let route = format!("/team/{FAR_LEAD}/message");
     let sent = far.taken_on(&route);
     let mut expected = Vec::new();
-    for (index, status) in [
-        (0usize, PeerReceiptStatus::Delivered),
-        (1, PeerReceiptStatus::Denied),
-    ] {
-        let id = sent[index].body["message_id"]
-            .as_str()
-            .expect("every send mints an id")
-            .to_owned();
+    for (index, status) in [(0usize, PeerReceiptStatus::Delivered), (1, PeerReceiptStatus::Denied)]
+    {
+        let id =
+            sent[index].body["message_id"].as_str().expect("every send mints an id").to_owned();
         sender
             .engine
             .apply_receipt(SocketReceipt {
@@ -484,10 +453,7 @@ async fn the_model_reads_one_peer_receipt_part_per_batch() {
 
     // And the batch is drained: a second turn carries nothing.
     sender.plain_turn(&mut events).await;
-    assert!(
-        !sender.last_intake().contains("<peer_receipt>"),
-        "a settlement is news once"
-    );
+    assert!(!sender.last_intake().contains("<peer_receipt>"), "a settlement is news once");
 }
 
 // ---------------------------------------------------------------------
@@ -506,10 +472,7 @@ async fn a_receipt_grants_nothing() {
     let mut events = sender.events().await;
     sender.send_to(&mut events, &far.address()).await;
 
-    let id = far.message()["message_id"]
-        .as_str()
-        .expect("every send mints an id")
-        .to_owned();
+    let id = far.message()["message_id"].as_str().expect("every send mints an id").to_owned();
     let before = far.taken().len();
 
     sender
@@ -537,16 +500,8 @@ async fn a_receipt_grants_nothing() {
     .expect("the announcement is prompt");
     assert_eq!(announced, Some(PeerReceiptStatus::Denied));
 
-    assert_eq!(
-        far.taken().len(),
-        before,
-        "and it sent nothing anywhere: {:?}",
-        far.taken()
-    );
-    assert!(
-        sender.engine.held_messages().is_empty(),
-        "nor did it park anything for review"
-    );
+    assert_eq!(far.taken().len(), before, "and it sent nothing anywhere: {:?}", far.taken());
+    assert!(sender.engine.held_messages().is_empty(), "nor did it park anything for review");
 }
 
 // ---------------------------------------------------------------------
@@ -584,14 +539,8 @@ async fn a_capacity_eviction_and_the_shutdown_drain_are_both_silent() {
     );
 
     receiver.engine.shutdown_settle().await;
-    assert!(
-        receiver.engine.held_messages().is_empty(),
-        "the drain really settled everything"
-    );
-    assert!(
-        receipts_after_grace(&spy).await.is_empty(),
-        "and it, too, posted nothing"
-    );
+    assert!(receiver.engine.held_messages().is_empty(), "the drain really settled everything");
+    assert!(receipts_after_grace(&spy).await.is_empty(), "and it, too, posted nothing");
 }
 
 /// **AC-51**'s emitting half: the `dialog_expiry` timer **does** post
@@ -604,11 +553,7 @@ async fn a_capacity_eviction_and_the_shutdown_drain_are_both_silent() {
 async fn the_review_clock_posts_expired() {
     let spy = FarSide::accepting();
     let receiver = Receiver::with_expiry(None, true, DialogExpiry::OneMinute);
-    let mut events = receiver
-        .engine
-        .subscribe()
-        .await
-        .expect("the first subscriber wins");
+    let mut events = receiver.engine.subscribe().await.expect("the first subscriber wins");
 
     let held = receiver.takes(TEXT, Some(&spy)).await;
     assert_eq!(
@@ -663,11 +608,7 @@ async fn a_reply_to_naming_a_third_session_is_a_bounded_reflection() {
 
     // And the one that must, exactly once.
     let holding = Receiver::with_expiry(None, true, DialogExpiry::OneMinute);
-    let mut events = holding
-        .engine
-        .subscribe()
-        .await
-        .expect("the first subscriber wins");
+    let mut events = holding.engine.subscribe().await.expect("the first subscriber wins");
     holding.takes(TEXT, Some(&third)).await;
 
     wait_for_held(&mut events).await;
@@ -681,11 +622,7 @@ async fn a_reply_to_naming_a_third_session_is_a_bounded_reflection() {
     }
 
     let taken = receipts_reach(&third, 1).await;
-    assert_eq!(
-        taken.len(),
-        1,
-        "one settlement, one attempt — and never a retry: {taken:?}"
-    );
+    assert_eq!(taken.len(), 1, "one settlement, one attempt — and never a retry: {taken:?}");
 
     // C answered it exactly as it answers any receipt, and nothing followed.
     tokio::time::sleep(GRACE).await;
@@ -740,9 +677,7 @@ async fn a_reply_to_that_fails_vetting_is_never_kept() {
         .expect("a hold still answers success");
     assert!(held.held.is_some(), "it is held all the same");
     assert!(
-        capture
-            .logged()
-            .contains("an arrival's reply_to failed vetting; no receipt is kept"),
+        capture.logged().contains("an arrival's reply_to failed vetting; no receipt is kept"),
         "the refusal happens at admission, before anything is associated: {}",
         capture.logged()
     );
@@ -750,10 +685,7 @@ async fn a_reply_to_that_fails_vetting_is_never_kept() {
     let id = receiver.engine.held_messages()[0].id.clone();
     receiver
         .engine
-        .send(Command::SettleHeld {
-            id,
-            decision: HeldDecision::Release,
-        })
+        .send(Command::SettleHeld { id, decision: HeldDecision::Release })
         .await
         .expect("a settle is never refused");
 
@@ -771,9 +703,7 @@ async fn a_reply_to_that_fails_vetting_is_never_kept() {
     // thread-local capture would have seen it.
     tokio::time::sleep(GRACE).await;
     assert!(
-        !capture
-            .logged()
-            .contains("a receipt's reply_to failed vetting; not opened"),
+        !capture.logged().contains("a receipt's reply_to failed vetting; not opened"),
         "nothing was kept for the settlement to vet again: {}",
         capture.logged()
     );

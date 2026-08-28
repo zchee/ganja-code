@@ -14,11 +14,9 @@
 //! root — and it is why the split cost no caller a rewrite. New code wanting
 //! only a wire should depend on `ganja-provider` directly.
 
-use std::{
-    env::{self, VarError},
-    fmt,
-    sync::Arc,
-};
+use std::env::{self, VarError};
+use std::fmt;
+use std::sync::Arc;
 
 // The facade, and the only import this half needs of the other: a glob rather
 // than a list because the promise is that every path a caller already writes
@@ -26,10 +24,8 @@ use std::{
 // grows a type.
 pub use ganja_provider::provider::*;
 
-use crate::{
-    auth, catalog,
-    config::{Config, ProviderConfig, model_bound_to, split_model},
-};
+use crate::config::{Config, ProviderConfig, model_bound_to, split_model};
+use crate::{auth, catalog};
 
 /// A provider together with the model to ask, and anything the user should be
 /// told about how the two were picked.
@@ -294,10 +290,7 @@ impl Wire {
     /// A provider whose default is the catalog's — every provider but the
     /// ChatGPT subscription backend.
     fn catalog(provider: impl Provider + 'static) -> Self {
-        Self {
-            provider: Arc::new(provider),
-            default_model: None,
-        }
+        Self { provider: Arc::new(provider), default_model: None }
     }
 }
 
@@ -481,9 +474,7 @@ pub fn select(config: &Config) -> Result<Selection, SelectionError> {
         });
     // The two tiers that name a model and no provider, so neither can be
     // bound to one: both are bare ids for whichever provider won above.
-    let overriding_model = flag
-        .map(|(_, model)| model.to_owned())
-        .or_else(|| setting(MODEL_ENV));
+    let overriding_model = flag.map(|(_, model)| model.to_owned()).or_else(|| setting(MODEL_ENV));
     // And the tier that can: the config's key carries a provider of its own,
     // and its model half is that provider's model rather than a name to hand
     // to whoever was selected.
@@ -586,11 +577,7 @@ pub fn select(config: &Config) -> Result<Selection, SelectionError> {
         None => defaulted_model(&requested, wire.default_model)?,
     };
 
-    Ok(Selection {
-        provider: wire.provider,
-        model,
-        notice: None,
-    })
+    Ok(Selection { provider: wire.provider, model, notice: None })
 }
 
 /// The provider a session defaults to when nothing named one: the oldest
@@ -668,9 +655,7 @@ fn defaulted_model(requested: &str, wire: Option<&'static str>) -> Result<String
     }
 
     Ok(catalog::default_model(requested)
-        .ok_or_else(|| SelectionError::NoDefaultModel {
-            provider: requested.to_owned(),
-        })?
+        .ok_or_else(|| SelectionError::NoDefaultModel { provider: requested.to_owned() })?
         .to_owned())
 }
 

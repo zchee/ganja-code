@@ -8,20 +8,14 @@
 //! Nothing here mocks the HTTP client: the request that is asserted on is the
 //! request that was actually built and sent.
 
-use std::{
-    fs,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::Duration,
-};
+use std::fs;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use ganja_core::catalog;
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::{TcpListener, TcpStream},
-};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
 /// A catalog in the shape the endpoint publishes: providers keyed by id, each
@@ -88,15 +82,8 @@ impl Endpoint {
 
 /// Serves `body` to every connection, recording what was asked for.
 async fn serve(body: &'static str) -> Endpoint {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("loopback is bindable");
-    let url = format!(
-        "http://{}",
-        listener
-            .local_addr()
-            .expect("a bound socket has an address")
-    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("loopback is bindable");
+    let url = format!("http://{}", listener.local_addr().expect("a bound socket has an address"));
     let served = Arc::new(AtomicUsize::new(0));
     let requests = Arc::new(Mutex::new(Vec::new()));
 
@@ -110,10 +97,7 @@ async fn serve(body: &'static str) -> Endpoint {
                 };
 
                 let head = head(&mut socket).await;
-                requests
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(head);
+                requests.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(head);
 
                 let response = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: \
@@ -127,12 +111,7 @@ async fn serve(body: &'static str) -> Endpoint {
         }
     });
 
-    Endpoint {
-        url,
-        served,
-        requests,
-        _server: server,
-    }
+    Endpoint { url, served, requests, _server: server }
 }
 
 /// Reads a request up to the blank line that ends its head.
@@ -186,10 +165,9 @@ async fn a_fetched_catalog_is_cached_verbatim_and_replaces_the_table() {
     let cancel = CancellationToken::new();
     catalog::spawn_refresh_loop(cancel.clone());
 
-    let large = eventually("the fetched catalog to reach the table", || {
-        catalog::model("fixture-large")
-    })
-    .await;
+    let large =
+        eventually("the fetched catalog to reach the table", || catalog::model("fixture-large"))
+            .await;
     assert_eq!(endpoint.served(), 1, "the loop fetched exactly once");
 
     // What the endpoint was actually asked.
@@ -199,10 +177,7 @@ async fn a_fetched_catalog_is_cached_verbatim_and_replaces_the_table() {
         "the catalog hangs off the source URL: {request}"
     );
     assert!(
-        request.contains(&format!(
-            "user-agent: ganja-code/{}\r\n",
-            env!("CARGO_PKG_VERSION")
-        )),
+        request.contains(&format!("user-agent: ganja-code/{}\r\n", env!("CARGO_PKG_VERSION"))),
         "the request names this build, by the project's name rather than the \
          binary's — one product name across every wire ganja speaks in its \
          own voice: {request}"
@@ -215,10 +190,7 @@ async fn a_fetched_catalog_is_cached_verbatim_and_replaces_the_table() {
     // What the payload turned into. The fields this build reads are read; the
     // ones it has never heard of cost nothing; the ones the row left out take
     // their defaults.
-    assert_eq!(
-        large.provider_id, "fixture",
-        "the provider is the outer key"
-    );
+    assert_eq!(large.provider_id, "fixture", "the provider is the outer key");
     assert_eq!(large.name, "Fixture Large");
     assert_eq!(large.context_window, 500_000);
     assert_eq!(large.max_output, 32_000);

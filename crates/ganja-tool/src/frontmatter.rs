@@ -33,9 +33,7 @@ pub fn split(text: &str) -> Option<(&str, &str)> {
     // A byte-order mark ahead of the fence is what an editor on another
     // platform leaves behind, and it must not cost somebody their file.
     let text = text.trim_start_matches('\u{feff}');
-    let rest = text
-        .strip_prefix("---\n")
-        .or_else(|| text.strip_prefix("---\r\n"))?;
+    let rest = text.strip_prefix("---\n").or_else(|| text.strip_prefix("---\r\n"))?;
 
     for (index, _) in rest.match_indices("\n---") {
         let after = &rest[index + 4..];
@@ -43,9 +41,7 @@ pub fn split(text: &str) -> Option<(&str, &str)> {
         // the end of the block.
         if after.is_empty() || after.starts_with('\n') || after.starts_with("\r\n") {
             let frontmatter = &rest[..index];
-            let body = after
-                .strip_prefix("\r\n")
-                .or_else(|| after.strip_prefix('\n'));
+            let body = after.strip_prefix("\r\n").or_else(|| after.strip_prefix('\n'));
 
             return Some((frontmatter, body.unwrap_or(after)));
         }
@@ -107,10 +103,7 @@ pub fn fields(frontmatter: &str) -> BTreeMap<String, String> {
 /// `value` without the quotes it may be wrapped in.
 fn unquote(value: &str) -> &str {
     for quote in ['"', '\''] {
-        if let Some(inner) = value
-            .strip_prefix(quote)
-            .and_then(|rest| rest.strip_suffix(quote))
-        {
+        if let Some(inner) = value.strip_prefix(quote).and_then(|rest| rest.strip_suffix(quote)) {
             return inner;
         }
     }

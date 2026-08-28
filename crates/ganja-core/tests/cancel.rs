@@ -1,18 +1,14 @@
 //! Proves a cancelled turn stops promptly and stays stopped.
 
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
-use ganja_core::{
-    Engine,
-    permission::Permissions,
-    protocol::{Command, Event, FinishReason},
-    provider::{FakeProvider, fake},
-    tool::Registry,
-};
+use ganja_core::Engine;
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{Command, Event, FinishReason};
+use ganja_core::provider::{FakeProvider, fake};
+use ganja_core::tool::Registry;
 
 /// The plan's budget: a cancel is visible within a tenth of a second.
 const CANCEL_BUDGET: Duration = Duration::from_millis(100);
@@ -54,10 +50,7 @@ async fn cancelling_mid_stream_finishes_the_turn_inside_the_budget() {
     }
 
     let issued = Instant::now();
-    engine
-        .send(Command::CancelTurn)
-        .await
-        .expect("a streaming engine accepts a cancel");
+    engine.send(Command::CancelTurn).await.expect("a streaming engine accepts a cancel");
 
     let reason = loop {
         match events.next().await {

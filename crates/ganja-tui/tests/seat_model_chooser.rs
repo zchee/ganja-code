@@ -12,18 +12,17 @@
 //! process-wide state, so this file is one test in a process of its own, the
 //! `plugin_dialog` discipline.
 
-use std::{fs, sync::Arc};
+use std::fs;
+use std::sync::Arc;
 
-use ganja_core::{
-    Engine,
-    provider::{FakeProvider, fake},
-};
-use ganja_tui::{app::App, event::AppEvent, theme::Themes};
-use ratatui::{
-    Terminal,
-    backend::TestBackend,
-    crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyModifiers},
-};
+use ganja_core::Engine;
+use ganja_core::provider::{FakeProvider, fake};
+use ganja_tui::app::App;
+use ganja_tui::event::AppEvent;
+use ganja_tui::theme::Themes;
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
+use ratatui::crossterm::event::{Event as TermEvent, KeyCode, KeyEvent, KeyModifiers};
 use tempfile::TempDir;
 
 /// One keypress, as the event loop would deliver it.
@@ -37,11 +36,7 @@ fn screen(terminal: &Terminal<TestBackend>) -> String {
     let area = buffer.area;
 
     (0..area.height)
-        .map(|row| {
-            (0..area.width)
-                .map(|column| buffer[(column, row)].symbol())
-                .collect::<String>()
-        })
+        .map(|row| (0..area.width).map(|column| buffer[(column, row)].symbol()).collect::<String>())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -89,13 +84,9 @@ async fn the_model_chooser_on_a_chatgpt_seat_offers_the_pinned_roster_rather_tha
     let mut app = App::new(engine, None, Themes::builtin()).with_provider("openai");
 
     for character in "/models".chars() {
-        app.handle(key(KeyCode::Char(character)))
-            .await
-            .expect("the key is handled");
+        app.handle(key(KeyCode::Char(character))).await.expect("the key is handled");
     }
-    app.handle(key(KeyCode::Enter))
-        .await
-        .expect("the submit is handled");
+    app.handle(key(KeyCode::Enter)).await.expect("the submit is handled");
 
     // The listing runs off the render loop, so the tick that reaps it is what
     // opens the dialog — instant answer or not, the seat rides the one lane.
@@ -112,17 +103,9 @@ async fn the_model_chooser_on_a_chatgpt_seat_offers_the_pinned_roster_rather_tha
         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
     }
 
-    for model in [
-        "gpt-5.5",
-        "gpt-5.6-sol",
-        "gpt-5.6-terra",
-        "gpt-5.6-luna",
-        "gpt-5.3-codex-spark",
-    ] {
-        assert!(
-            offered.contains(model),
-            "the seat is offered `{model}`:\n{offered}"
-        );
+    for model in ["gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.3-codex-spark"]
+    {
+        assert!(offered.contains(model), "the seat is offered `{model}`:\n{offered}");
     }
     assert!(
         !offered.contains("gpt-5.4"),

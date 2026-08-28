@@ -46,10 +46,8 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::{
-    Tool, ToolCtx, ToolError, ToolOutput,
-    question::{self, Choice, Prompt},
-};
+use crate::question::{self, Choice, Prompt};
+use crate::{Tool, ToolCtx, ToolError, ToolOutput};
 
 /// The exit tool's id, which is also its permission key. Both are a permanent
 /// commitment: a rule stored under this name has to keep meaning what it meant.
@@ -175,14 +173,8 @@ fn prompt(door: &Door) -> Prompt {
         question: door.question.to_owned(),
         header: door.header.to_owned(),
         options: vec![
-            Choice {
-                label: YES_LABEL.to_owned(),
-                description: door.yes_description.to_owned(),
-            },
-            Choice {
-                label: NO_LABEL.to_owned(),
-                description: door.no_description.to_owned(),
-            },
+            Choice { label: YES_LABEL.to_owned(), description: door.yes_description.to_owned() },
+            Choice { label: NO_LABEL.to_owned(), description: door.no_description.to_owned() },
         ],
         multiple: None,
     }
@@ -212,11 +204,7 @@ async fn run_door(
         Err(question::Unanswered::Cancelled) => return Err(ToolError::Cancelled),
     };
 
-    if answers
-        .first()
-        .and_then(|answer| answer.first())
-        .is_some_and(|answer| answer == NO_LABEL)
-    {
+    if answers.first().and_then(|answer| answer.first()).is_some_and(|answer| answer == NO_LABEL) {
         return Err(ToolError::Failed(question::DISMISSED.to_owned()));
     }
 

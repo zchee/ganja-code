@@ -79,10 +79,7 @@ impl Tool for ReadTool {
     }
 
     fn describe(&self, args: &serde_json::Value) -> String {
-        let path = args
-            .get("filePath")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
+        let path = args.get("filePath").and_then(serde_json::Value::as_str).unwrap_or_default();
 
         format!("read {path}")
     }
@@ -161,11 +158,8 @@ fn miss(filepath: &Path) -> ToolError {
         return ToolError::Failed(format!("File not found: {}", filepath.display()));
     }
 
-    let list = suggestions
-        .iter()
-        .map(|path| path.display().to_string())
-        .collect::<Vec<_>>()
-        .join("\n");
+    let list =
+        suggestions.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join("\n");
     ToolError::Failed(format!(
         "File not found: {}\n\nDid you mean one of these?\n{list}",
         filepath.display()
@@ -219,12 +213,7 @@ fn read_directory(filepath: &Path, title: &str, args: &Args) -> ToolOutput {
     let limit = effective_limit(args.limit) as usize;
     let start = offset.saturating_sub(1);
 
-    let sliced: Vec<&str> = entries
-        .iter()
-        .skip(start)
-        .take(limit)
-        .map(String::as_str)
-        .collect();
+    let sliced: Vec<&str> = entries.iter().skip(start).take(limit).map(String::as_str).collect();
     let truncated = start + sliced.len() < entries.len();
 
     let status = if truncated {
@@ -289,10 +278,7 @@ fn read_file(
                 metadata: serde_json::json!({ "preview": "PDF read successfully", "truncated": false, "mime": mime }),
             });
         }
-        if matches!(
-            mime,
-            "image/png" | "image/jpeg" | "image/gif" | "image/webp"
-        ) {
+        if matches!(mime, "image/png" | "image/jpeg" | "image/gif" | "image/webp") {
             return Ok(ToolOutput {
                 title: title.to_owned(),
                 output: format!(
@@ -304,10 +290,7 @@ fn read_file(
     }
 
     if is_binary_file(filepath, &sample) {
-        return Err(ToolError::Failed(format!(
-            "Cannot read binary file: {}",
-            filepath.display()
-        )));
+        return Err(ToolError::Failed(format!("Cannot read binary file: {}", filepath.display())));
     }
 
     let file = std::fs::File::open(filepath).map_err(|error| {
@@ -360,10 +343,7 @@ fn read_file(
     let next = last + 1;
     let truncated = more || cut;
 
-    let mut output = format!(
-        "<path>{}</path>\n<type>file</type>\n<content>\n",
-        filepath.display()
-    );
+    let mut output = format!("<path>{}</path>\n<type>file</type>\n<content>\n", filepath.display());
     output.push_str(
         &raw.iter()
             .enumerate()

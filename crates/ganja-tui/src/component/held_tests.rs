@@ -1,17 +1,13 @@
 use std::time::Duration;
 
 use ganja_protocol::{HeldId, HoldCause, PolicySource};
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 
 use super::{Action, HeldApproval, HeldList, Row, cause_label, cause_sentence, coarse};
 use crate::theme::Theme;
 
-const AREA: Rect = Rect {
-    x: 0,
-    y: 0,
-    width: 76,
-    height: 20,
-};
+const AREA: Rect = Rect { x: 0, y: 0, width: 76, height: 20 };
 
 fn approval() -> HeldApproval {
     HeldApproval::new(
@@ -51,11 +47,7 @@ fn rendered_list(dialog: &HeldList, area: Rect) -> String {
 
 fn screen(buffer: &Buffer, area: Rect) -> String {
     (0..area.height)
-        .map(|row| {
-            (0..area.width)
-                .map(|column| buffer[(column, row)].symbol())
-                .collect::<String>()
-        })
+        .map(|row| (0..area.width).map(|column| buffer[(column, row)].symbol()).collect::<String>())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -66,30 +58,15 @@ fn screen(buffer: &Buffer, area: Rect) -> String {
 fn the_approval_modal_renders_the_five_items_the_statement_and_the_cause() {
     let screen = rendered_approval(&approval(), AREA);
 
-    assert!(
-        screen.contains("reply address: none exists on this transport"),
-        "got:\n{screen}"
-    );
-    assert!(
-        screen.contains("from (claimed): w1@ganja-team"),
-        "got:\n{screen}"
-    );
+    assert!(screen.contains("reply address: none exists on this transport"), "got:\n{screen}");
+    assert!(screen.contains("from (claimed): w1@ganja-team"), "got:\n{screen}");
     assert!(
         screen.contains("verified pid: same-user socket, no process identity"),
         "got:\n{screen}"
     );
-    assert!(
-        screen.contains("preview: a finding worth a look"),
-        "got:\n{screen}"
-    );
-    assert!(
-        screen.contains("the full body of the finding"),
-        "got:\n{screen}"
-    );
-    assert!(
-        screen.contains("This message has not been delivered to the model."),
-        "got:\n{screen}"
-    );
+    assert!(screen.contains("preview: a finding worth a look"), "got:\n{screen}");
+    assert!(screen.contains("the full body of the finding"), "got:\n{screen}");
+    assert!(screen.contains("This message has not been delivered to the model."), "got:\n{screen}");
     assert!(screen.contains("missing sender mode"), "got:\n{screen}");
     assert!(screen.contains("expires in 5m"), "got:\n{screen}");
     assert!(screen.contains("[y] deliver"), "got:\n{screen}");
@@ -111,10 +88,7 @@ fn a_missing_summary_falls_back_to_the_bodys_first_line() {
 
     let screen = rendered_approval(&dialog, AREA);
 
-    assert!(
-        screen.contains("preview: first line of the body"),
-        "got:\n{screen}"
-    );
+    assert!(screen.contains("preview: first line of the body"), "got:\n{screen}");
     assert!(screen.contains("mode mismatch"), "got:\n{screen}");
 }
 
@@ -155,10 +129,7 @@ fn a_modal_without_a_deadline_draws_no_countdown() {
         None,
     );
 
-    assert!(
-        !rendered_approval(&dialog, AREA).contains("expires in"),
-        "no deadline, no countdown"
-    );
+    assert!(!rendered_approval(&dialog, AREA).contains("expires in"), "no deadline, no countdown");
 }
 
 /// The modal renders a foreign sender's own prose; a control sequence in
@@ -177,14 +148,9 @@ fn an_escape_sequence_in_a_held_body_never_reaches_the_buffer() {
 
     let screen = rendered_approval(&dialog, AREA);
 
-    let leaked: Vec<char> = screen
-        .chars()
-        .filter(|character| *character != '\n' && character.is_control())
-        .collect();
-    assert!(
-        leaked.is_empty(),
-        "control characters reached the buffer: {leaked:?}\n{screen}"
-    );
+    let leaked: Vec<char> =
+        screen.chars().filter(|character| *character != '\n' && character.is_control()).collect();
+    assert!(leaked.is_empty(), "control characters reached the buffer: {leaked:?}\n{screen}");
     assert!(screen.contains("rm -rf /"), "got:\n{screen}");
 }
 
@@ -198,13 +164,7 @@ fn a_zero_area_draws_nothing_and_does_not_panic() {
 fn every_held_entry_lists_with_its_sender_cause_age_and_preview() {
     let dialog = HeldList::new(vec![
         row("held_1", "w1@team", HoldCause::NoModeAsserted),
-        row(
-            "held_2",
-            "scribbler@nowhere",
-            HoldCause::Explicit {
-                source: PolicySource::Global,
-            },
-        ),
+        row("held_2", "scribbler@nowhere", HoldCause::Explicit { source: PolicySource::Global }),
     ]);
 
     let screen = rendered_list(&dialog, AREA);
@@ -221,10 +181,7 @@ fn every_held_entry_lists_with_its_sender_cause_age_and_preview() {
 fn an_empty_buffer_says_so_instead_of_drawing_an_empty_box() {
     let screen = rendered_list(&HeldList::new(Vec::new()), AREA);
 
-    assert!(
-        screen.contains("nothing is held for review"),
-        "got:\n{screen}"
-    );
+    assert!(screen.contains("nothing is held for review"), "got:\n{screen}");
 }
 
 /// Enter on a row opens Release and Deny, and answers with the chosen
@@ -269,17 +226,11 @@ fn refreshing_keeps_the_cursor_and_survives_a_shrink() {
     dialog.move_selection(1);
 
     dialog.refresh(vec![row("held_1", "w1@team", HoldCause::NoModeAsserted)]);
-    assert_eq!(
-        dialog.selected().map(|row| row.from.as_str()),
-        Some("w1@team")
-    );
+    assert_eq!(dialog.selected().map(|row| row.from.as_str()), Some("w1@team"));
 
     dialog.refresh(Vec::new());
     assert!(dialog.selected().is_none());
-    assert!(
-        !dialog.is_choosing_action(),
-        "an emptied buffer leaves no action step to stand on"
-    );
+    assert!(!dialog.is_choosing_action(), "an emptied buffer leaves no action step to stand on");
 }
 
 /// The action step follows the cursor's row, so a settle lands on the
@@ -307,31 +258,15 @@ fn the_action_step_names_the_row_it_is_about() {
 #[test]
 fn cause_words_cover_every_cause() {
     for (cause, label, fragment) in [
+        (HoldCause::Explicit { source: PolicySource::Global }, "explicit", "explicit settings"),
         (
-            HoldCause::Explicit {
-                source: PolicySource::Global,
-            },
-            "explicit",
-            "explicit settings",
-        ),
-        (
-            HoldCause::Explicit {
-                source: PolicySource::Project,
-            },
+            HoldCause::Explicit { source: PolicySource::Project },
             "explicit",
             "repository tightening",
         ),
         (HoldCause::ModeMismatch, "mode mismatch", "mode mismatch"),
-        (
-            HoldCause::NoModeAsserted,
-            "no sender mode",
-            "missing sender mode",
-        ),
-        (
-            HoldCause::ModeUnknown,
-            "mode unknown",
-            "startup mode uncertainty",
-        ),
+        (HoldCause::NoModeAsserted, "no sender mode", "missing sender mode"),
+        (HoldCause::ModeUnknown, "mode unknown", "startup mode uncertainty"),
     ] {
         assert_eq!(cause_label(cause), label);
         assert!(

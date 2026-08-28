@@ -24,12 +24,10 @@
 //! also arrive as a **Markdown file** in one of ganja's own two homes — see
 //! `command_dirs`, where that tier and its ledger number are declared.
 
-use std::{
-    collections::BTreeMap,
-    fs, io,
-    ops::Range,
-    path::{Path, PathBuf},
-};
+use std::collections::BTreeMap;
+use std::ops::Range;
+use std::path::{Path, PathBuf};
+use std::{fs, io};
 
 use ganja_tool::frontmatter::{fields, split};
 
@@ -125,9 +123,8 @@ impl Definition {
             // template declared by the user's own config is the user typing,
             // exactly like the ungated `!` passthrough (D13), and upstream
             // gates neither surface.
-            let result = shell
-                .run_reporting(serde_json::json!({ "command": command }), ctx, None)
-                .await;
+            let result =
+                shell.run_reporting(serde_json::json!({ "command": command }), ctx, None).await;
             let output = match result {
                 Ok(output) => {
                     // A non-zero exit still lands here with whatever it wrote,
@@ -226,20 +223,13 @@ impl Registry {
             insert(&mut commands, Tier::Config, configured(name, definition));
         }
 
-        Self {
-            commands: commands
-                .into_values()
-                .map(|(_, definition)| definition)
-                .collect(),
-        }
+        Self { commands: commands.into_values().map(|(_, definition)| definition).collect() }
     }
 
     /// The builtins alone, for an engine nobody configured.
     #[must_use]
     pub fn builtin(worktree: &Path) -> Self {
-        Self {
-            commands: builtins(worktree),
-        }
+        Self { commands: builtins(worktree) }
     }
 
     /// The command named `name`, or nothing.
@@ -258,10 +248,7 @@ impl Registry {
     /// worked.
     #[must_use]
     pub fn names(&self) -> Vec<String> {
-        self.commands
-            .iter()
-            .map(|command| command.name.clone())
-            .collect()
+        self.commands.iter().map(|command| command.name.clone()).collect()
     }
 
     /// Drops every command **file** whose `agent:` names nobody `agents`
@@ -415,11 +402,8 @@ fn command_dirs(worktree: &Path) -> Vec<(Tier, PathBuf)> {
     crate::config::home_dirs(worktree, COMMANDS_SUBDIR)
         .into_iter()
         .map(|dir| {
-            let tier = if Some(&dir) == global.as_ref() {
-                Tier::GlobalFile
-            } else {
-                Tier::ProjectFile
-            };
+            let tier =
+                if Some(&dir) == global.as_ref() { Tier::GlobalFile } else { Tier::ProjectFile };
 
             (tier, dir)
         })
@@ -471,9 +455,7 @@ pub(crate) fn file_commands(dir: &Path) -> Vec<Definition> {
             // A subdirectory is not a command yet (see `command_dirs`), and a
             // file that is not Markdown was not meant for this directory.
             path.is_file()
-                && path
-                    .extension()
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+                && path.extension().is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
         })
         .collect();
     paths.sort();
@@ -554,10 +536,7 @@ fn read_command(path: &Path) -> Option<Definition> {
         None
     })?;
 
-    Some(Definition {
-        source: Some(path.to_owned()),
-        ..definition
-    })
+    Some(Definition { source: Some(path.to_owned()), ..definition })
 }
 
 /// The command `text` describes under `name`, or nothing when its frontmatter
@@ -572,12 +551,7 @@ fn parse_command(name: &str, text: &str) -> Option<Definition> {
     // with `---` as far as its author is concerned.
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let (front, body) = split_frontmatter(text)?;
-    let Frontmatter {
-        description,
-        agent,
-        model,
-        argument_hint,
-    } = front;
+    let Frontmatter { description, agent, model, argument_hint } = front;
 
     Some(Definition {
         name: name.to_owned(),
@@ -794,11 +768,7 @@ pub fn mentions(text: &str) -> Vec<crate::protocol::Mention> {
             if path.is_empty() {
                 continue;
             }
-            let mention = crate::protocol::Mention {
-                path: path.to_owned(),
-                start,
-                end,
-            };
+            let mention = crate::protocol::Mention { path: path.to_owned(), start, end };
             if !found.contains(&mention) {
                 found.push(mention);
             }
@@ -911,11 +881,7 @@ fn fill(tokens: &[String], index: usize, greedy: bool) -> String {
         return String::new();
     }
 
-    if greedy {
-        tokens[first..].join(" ")
-    } else {
-        tokens[first].clone()
-    }
+    if greedy { tokens[first..].join(" ") } else { tokens[first].clone() }
 }
 
 /// Every `$N` position the template names, in the order they appear.

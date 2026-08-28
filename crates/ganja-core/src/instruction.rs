@@ -66,17 +66,17 @@
 //!   every request, and a paragraph announcing an empty list is a paragraph
 //!   about nothing. A session **with** skills gets upstream's block verbatim.
 
-use std::{
-    collections::BTreeSet,
-    fmt::Write as _,
-    path::{Path, PathBuf},
-    time::SystemTime,
-};
+use std::collections::BTreeSet;
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use etcetera::base_strategy::{BaseStrategy as _, Xdg};
 use jiff::Timestamp;
 
-use crate::{config::Config, project::Project, tool::skill};
+use crate::config::Config;
+use crate::project::Project;
+use crate::tool::skill;
 
 /// Base prompt for Anthropic's models, derived from upstream with ganja's
 /// identity substituted (**D522**; MIT, see `THIRD_PARTY_NOTICES.md`).
@@ -193,13 +193,7 @@ pub fn skill_roots(config: &Config, cwd: &Path) -> skill::Roots {
 /// but typed to match its consumer.
 #[must_use]
 pub fn suffix(config: &Config, cwd: &Path, model_id: &str) -> Option<String> {
-    suffix_from(
-        &global_files(),
-        &skill_roots(config, cwd),
-        config,
-        cwd,
-        model_id,
-    )
+    suffix_from(&global_files(), &skill_roots(config, cwd), config, cwd, model_id)
 }
 
 /// Puts the two halves of a system prompt together: the half an agent replaces,
@@ -317,11 +311,8 @@ pub(crate) fn suffix_measure(suffix: &str) -> SuffixMeasure {
     let memory = suffix.find(&format!("\n{MEMORY_HEAD}"));
     let skills = suffix.find(&format!("\n{SKILLS_HEAD}"));
 
-    let environment_end = [files, memory, skills]
-        .into_iter()
-        .flatten()
-        .min()
-        .unwrap_or(suffix.len());
+    let environment_end =
+        [files, memory, skills].into_iter().flatten().min().unwrap_or(suffix.len());
     let instructions_end = skills.unwrap_or(suffix.len());
 
     SuffixMeasure {
@@ -383,10 +374,8 @@ pub(crate) fn nested_files(root: &Path, cwd: &Path, touched: &[PathBuf]) -> Vec<
     let root = resolved(root);
     // The directories the up-walk tier already reached. Canonical, because
     // that is what the walk below compares against.
-    let covered: BTreeSet<PathBuf> = resolved(cwd)
-        .ancestors()
-        .map(Path::to_path_buf)
-        .collect::<BTreeSet<_>>();
+    let covered: BTreeSet<PathBuf> =
+        resolved(cwd).ancestors().map(Path::to_path_buf).collect::<BTreeSet<_>>();
 
     let mut directories = BTreeSet::new();
     for path in touched {
@@ -414,10 +403,7 @@ pub(crate) fn nested_files(root: &Path, cwd: &Path, touched: &[PathBuf]) -> Vec<
     let mut found: Vec<PathBuf> = directories
         .iter()
         .filter_map(|directory| {
-            PROJECT
-                .iter()
-                .map(|name| directory.join(name))
-                .find(|candidate| candidate.is_file())
+            PROJECT.iter().map(|name| directory.join(name)).find(|candidate| candidate.is_file())
         })
         .collect();
 
@@ -425,10 +411,7 @@ pub(crate) fn nested_files(root: &Path, cwd: &Path, touched: &[PathBuf]) -> Vec<
     // last, and the tie-break keeps two unrelated subtrees in one stable order
     // rather than in whatever order they were touched.
     found.sort_by(|left, right| {
-        left.components()
-            .count()
-            .cmp(&right.components().count())
-            .then_with(|| left.cmp(right))
+        left.components().count().cmp(&right.components().count()).then_with(|| left.cmp(right))
     });
 
     found
@@ -508,10 +491,7 @@ pub(crate) fn nested_suffix(root: &Path, cwd: &Path, touched: &[PathBuf]) -> Str
 /// text on every machine it is checked out on — and keeps the header short
 /// enough to read.
 fn relative(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
+    path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/")
 }
 
 /// `content` held to [`NESTED_MAX`], and whether anything was cut.
@@ -648,9 +628,7 @@ not record it instead.";
 fn memory_section(directory: &Path) -> String {
     let index = directory.join(MEMORY_INDEX);
     let named = index.display().to_string();
-    let content = std::fs::read_to_string(&index)
-        .ok()
-        .filter(|content| !content.is_empty());
+    let content = std::fs::read_to_string(&index).ok().filter(|content| !content.is_empty());
 
     let (mut present, mut clamped_index) = (false, false);
     let mut block = format!(
@@ -693,10 +671,8 @@ fn memory_section(directory: &Path) -> String {
 /// with nothing beside it gives the model nothing to choose by. It stays
 /// loadable, which is why this is a filter and not a refusal.
 fn skills_block(skills: &[skill::Skill]) -> Option<String> {
-    let described: Vec<&skill::Skill> = skills
-        .iter()
-        .filter(|skill| skill.description.is_some())
-        .collect();
+    let described: Vec<&skill::Skill> =
+        skills.iter().filter(|skill| skill.description.is_some()).collect();
     if described.is_empty() {
         return None;
     }
@@ -737,11 +713,7 @@ fn escaped(text: &str) -> String {
 /// The environment block, ported from upstream's `SystemPrompt.environment`.
 fn environment(cwd: &Path, model_id: &str) -> String {
     let project = Project::resolve(cwd);
-    let git = if project.root().join(".git").exists() {
-        "yes"
-    } else {
-        "no"
-    };
+    let git = if project.root().join(".git").exists() { "yes" } else { "no" };
 
     let mut block = String::new();
     // Writing to a `String` cannot fail; the result is discarded rather than
@@ -837,9 +809,7 @@ fn global_files() -> Vec<PathBuf> {
     // the seam's to move.
     if let Ok(base) = Xdg::new() {
         found.push(
-            CLAUDE_GLOBAL
-                .iter()
-                .fold(base.home_dir().to_owned(), |path, part| path.join(part)),
+            CLAUDE_GLOBAL.iter().fold(base.home_dir().to_owned(), |path, part| path.join(part)),
         );
     }
 
@@ -936,11 +906,7 @@ fn glob(directory: &Path, pattern: &str) -> Vec<PathBuf> {
         .overrides(overrides)
         .build()
         .filter_map(Result::ok)
-        .filter(|entry| {
-            entry
-                .file_type()
-                .is_some_and(|file_type| file_type.is_file())
-        })
+        .filter(|entry| entry.file_type().is_some_and(|file_type| file_type.is_file()))
         .map(|entry| entry.into_path())
         .collect();
 

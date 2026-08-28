@@ -1,8 +1,6 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    path::PathBuf,
-    sync::Arc,
-};
+use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 use serde_json::json;
@@ -24,14 +22,8 @@ fn service(root: &std::path::Path) -> Arc<Lsp> {
 fn error(message: &str) -> Diagnostic {
     Diagnostic {
         range: Range {
-            start: Position {
-                line: 0,
-                character: 0,
-            },
-            end: Position {
-                line: 0,
-                character: 1,
-            },
+            start: Position { line: 0, character: 0 },
+            end: Position { line: 0, character: 1 },
         },
         severity: Some(DiagnosticSeverity::ERROR),
         message: message.to_owned(),
@@ -60,18 +52,10 @@ fn an_lsp_set_to_true_is_the_builtins() {
 
 #[test]
 fn a_config_that_disables_every_builtin_is_no_language_servers() {
-    let entries = BTreeMap::from([
-        ("rust".to_owned(), disabled()),
-        ("gopls".to_owned(), disabled()),
-    ]);
+    let entries =
+        BTreeMap::from([("rust".to_owned(), disabled()), ("gopls".to_owned(), disabled())]);
 
-    assert!(
-        Lsp::new(
-            Some(&LspConfig::Servers(entries)),
-            std::path::Path::new("/p")
-        )
-        .is_none()
-    );
+    assert!(Lsp::new(Some(&LspConfig::Servers(entries)), std::path::Path::new("/p")).is_none());
 }
 
 fn disabled() -> LspEntry {
@@ -101,10 +85,7 @@ fn a_file_argument_is_read_off_the_wire_name_the_tools_use() {
 
 #[test]
 fn a_relative_file_argument_resolves_against_the_working_directory() {
-    assert_eq!(
-        resolve(std::path::Path::new("/p"), "src/main.rs"),
-        PathBuf::from("/p/src/main.rs")
-    );
+    assert_eq!(resolve(std::path::Path::new("/p"), "src/main.rs"), PathBuf::from("/p/src/main.rs"));
     assert_eq!(
         resolve(std::path::Path::new("/p"), "/elsewhere/main.rs"),
         PathBuf::from("/elsewhere/main.rs")
@@ -145,15 +126,11 @@ fn a_write_reports_its_own_file_first_and_then_the_others() {
 
     let appended = append("write", &written, &diagnostics);
 
-    let own = appended
-        .find(OWN_FILE)
-        .expect("the written file is reported");
+    let own = appended.find(OWN_FILE).expect("the written file is reported");
     let first_other = appended.find(OTHER_FILES).expect("the others are reported");
     assert!(own < first_other, "the written file leads: {appended}");
     assert_eq!(
-        appended
-            .matches("LSP errors detected in other files")
-            .count(),
+        appended.matches("LSP errors detected in other files").count(),
         2,
         "the header repeats per file, as upstream repeats it: {appended}"
     );
@@ -169,30 +146,20 @@ fn a_write_reports_at_most_five_other_files() {
     let written = PathBuf::from("/p/src/main.rs");
     let mut diagnostics = HashMap::from([(written.clone(), vec![error("mine")])]);
     for index in 0..MAX_PROJECT_FILES + 4 {
-        diagnostics.insert(
-            PathBuf::from(format!("/p/src/f{index}.rs")),
-            vec![error("broken")],
-        );
+        diagnostics.insert(PathBuf::from(format!("/p/src/f{index}.rs")), vec![error("broken")]);
     }
 
     let appended = append("write", &written, &diagnostics);
 
-    assert_eq!(
-        appended
-            .matches("LSP errors detected in other files")
-            .count(),
-        MAX_PROJECT_FILES
-    );
+    assert_eq!(appended.matches("LSP errors detected in other files").count(), MAX_PROJECT_FILES);
     assert_eq!(appended.matches(OWN_FILE).count(), 1);
 }
 
 #[test]
 fn a_file_whose_only_diagnostics_are_warnings_adds_no_section() {
     let written = PathBuf::from("/p/src/main.rs");
-    let warning = Diagnostic {
-        severity: Some(DiagnosticSeverity::WARNING),
-        ..error("unused import")
-    };
+    let warning =
+        Diagnostic { severity: Some(DiagnosticSeverity::WARNING), ..error("unused import") };
     let diagnostics = HashMap::from([
         (written.clone(), vec![warning.clone()]),
         (PathBuf::from("/p/src/other.rs"), vec![warning]),
@@ -215,11 +182,7 @@ async fn a_read_warms_a_server_up_without_waiting_or_appending() {
     let lsp = service(std::path::Path::new("/p"));
 
     let appended = lsp
-        .annotate(
-            "read",
-            &json!({ "filePath": "/p/src/main.rs" }),
-            std::path::Path::new("/p"),
-        )
+        .annotate("read", &json!({ "filePath": "/p/src/main.rs" }), std::path::Path::new("/p"))
         .await;
 
     assert_eq!(appended, "", "a read never carries diagnostics");
@@ -231,11 +194,7 @@ async fn a_tool_with_no_lsp_interest_is_never_annotated() {
 
     for tool in ["bash", "glob", "grep", "todowrite", "webfetch", "task"] {
         let appended = lsp
-            .annotate(
-                tool,
-                &json!({ "file_path": "/p/src/main.rs" }),
-                std::path::Path::new("/p"),
-            )
+            .annotate(tool, &json!({ "file_path": "/p/src/main.rs" }), std::path::Path::new("/p"))
             .await;
 
         assert_eq!(appended, "", "{tool} appends nothing");
@@ -246,13 +205,8 @@ async fn a_tool_with_no_lsp_interest_is_never_annotated() {
 async fn a_call_with_no_file_argument_is_never_annotated() {
     let lsp = service(std::path::Path::new("/p"));
 
-    let appended = lsp
-        .annotate(
-            "edit",
-            &json!({ "pattern": "*.rs" }),
-            std::path::Path::new("/p"),
-        )
-        .await;
+    let appended =
+        lsp.annotate("edit", &json!({ "pattern": "*.rs" }), std::path::Path::new("/p")).await;
 
     assert_eq!(appended, "");
 }
@@ -280,10 +234,7 @@ async fn a_server_that_will_not_start_is_never_started_again() {
         let script = root.join("pretend-server");
         std::fs::write(
             &script,
-            format!(
-                "#!/bin/sh\necho attempt >> {}\nexit 1\n",
-                attempts.display()
-            ),
+            format!("#!/bin/sh\necho attempt >> {}\nexit 1\n", attempts.display()),
         )
         .expect("the script is written");
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))

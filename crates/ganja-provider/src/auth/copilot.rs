@@ -27,10 +27,8 @@
 //! Nothing here writes a credential either: a login hands back an
 //! [`OauthCredential`] and the caller stores it.
 
-use super::{
-    OauthCredential,
-    device::{BodyEncoding, DeviceError, DeviceFlow, Tokens, UPSTREAM_USER_AGENT},
-};
+use super::OauthCredential;
+use super::device::{BodyEncoding, DeviceError, DeviceFlow, Tokens, UPSTREAM_USER_AGENT};
 
 /// What this provider is called, on the command line and in the credential
 /// file alike — upstream uses the same string (`copilot.ts:61`, `:95`), so

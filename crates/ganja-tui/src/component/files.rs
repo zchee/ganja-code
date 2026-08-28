@@ -18,22 +18,16 @@
 
 use std::path::PathBuf;
 
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    text::{Line, Text},
-    widgets::{Block, Clear, Paragraph, Widget as _},
-};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::text::{Line, Text};
+use ratatui::widgets::{Block, Clear, Paragraph, Widget as _};
 
-use crate::{
-    component::{
-        chat::clip,
-        clamped,
-        dropdown::{menu_area, menu_lines},
-    },
-    mention::Fragment,
-    theme::Theme,
-};
+use crate::component::chat::clip;
+use crate::component::clamped;
+use crate::component::dropdown::{menu_area, menu_lines};
+use crate::mention::Fragment;
+use crate::theme::Theme;
 
 /// What is shown when the fragment matches no file, no teammate and no live
 /// session.
@@ -102,13 +96,7 @@ impl Row {
             Row::File(_) => String::new(),
             Row::Teammate { lead: true, .. } => "(teammate, lead)".to_owned(),
             Row::Teammate { lead: false, .. } => "(teammate)".to_owned(),
-            Row::Session {
-                cwd,
-                stem,
-                colliding,
-                shadowed,
-                ..
-            } => {
+            Row::Session { cwd, stem, colliding, shadowed, .. } => {
                 let mut detail = if *colliding {
                     format!("(session · {stem}) {}", cwd.display())
                 } else {
@@ -149,12 +137,7 @@ impl Files {
     /// partly (**AC-28**).
     #[must_use]
     pub fn new(fragment: Fragment, rows: Vec<Row>, incomplete: Option<String>) -> Self {
-        Self {
-            fragment,
-            rows,
-            selected: 0,
-            incomplete,
-        }
+        Self { fragment, rows, selected: 0, incomplete }
     }
 
     /// The mention this list is completing.
@@ -209,11 +192,7 @@ impl Files {
         // Titled generically rather than "files": since D529 this box lists
         // roster teammates and live sessions beside files, and a name row
         // under a "files" heading would be its own small dishonesty.
-        let title = if self.incomplete.is_some() {
-            " mentions (partial) "
-        } else {
-            " mentions "
-        };
+        let title = if self.incomplete.is_some() { " mentions (partial) " } else { " mentions " };
         Paragraph::new(Text::from(self.lines(inner_width, visible, theme)))
             .block(Block::bordered().title(title))
             .style(theme.fg.patch(theme.background_panel))

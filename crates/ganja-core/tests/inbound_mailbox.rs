@@ -10,21 +10,20 @@
 //! the environment, so this binary may hold more than one test (the
 //! `teammate_engine.rs` rule).
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
-use ganja_core::{
-    Engine,
-    config::{DialogExpiry, InboundPolicy},
-    permission::Permissions,
-    protocol::{Command, HeldDecision, HoldCause},
-    provider::FakeProvider,
-    teammate::{TeammateRegistry, inbound::ResolvedInbound, lead_inbox::LeadInbox},
-    tool::Registry,
-};
-use ganja_protocol::{
-    PolicySource,
-    team::{Frame, PermissionRequest},
-};
+use ganja_core::Engine;
+use ganja_core::config::{DialogExpiry, InboundPolicy};
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{Command, HeldDecision, HoldCause};
+use ganja_core::provider::FakeProvider;
+use ganja_core::teammate::TeammateRegistry;
+use ganja_core::teammate::inbound::ResolvedInbound;
+use ganja_core::teammate::lead_inbox::LeadInbox;
+use ganja_core::tool::Registry;
+use ganja_protocol::PolicySource;
+use ganja_protocol::team::{Frame, PermissionRequest};
 use ganja_team::{MailboxMessage, mailbox, record};
 use ganja_testkit::{AllowSpawn, caller, spawn, team};
 
@@ -57,12 +56,7 @@ impl Lead {
         let inbox = LeadInbox::reading(Arc::clone(&registry), None)
             .gated(Arc::clone(engine.inbound()), move || gate.receiver_class());
 
-        Self {
-            engine,
-            registry,
-            inbox,
-            door,
-        }
+        Self { engine, registry, inbox, door }
     }
 
     /// Plants one plain entry in the lead's inbox, as any same-uid writer
@@ -78,9 +72,7 @@ impl Lead {
 
     /// What the lead's inbox holds right now.
     fn entries(&self) -> Vec<MailboxMessage> {
-        mailbox::read(&self.registry.lead_inbox())
-            .expect("the lead's inbox reads")
-            .valid
+        mailbox::read(&self.registry.lead_inbox()).expect("the lead's inbox reads").valid
     }
 }
 
@@ -102,17 +94,10 @@ fn fabricated_ask() -> Frame {
 #[tokio::test]
 async fn a_roster_members_plain_mail_delivers_with_no_gate_consulted() {
     let home = tempfile::tempdir().expect("a temporary home");
-    let lead = Lead::over(
-        home.path(),
-        Some((InboundPolicy::Refuse, PolicySource::Global)),
-    );
+    let lead = Lead::over(home.path(), Some((InboundPolicy::Refuse, PolicySource::Global)));
     let project = tempfile::tempdir().expect("a project directory");
     lead.door
-        .start(
-            spawn("worker", Some("in-process")),
-            &caller(project.path()),
-            &AllowSpawn,
-        )
+        .start(spawn("worker", Some("in-process")), &caller(project.path()), &AllowSpawn)
         .await
         .expect("an in-process teammate spawns");
     ganja_testkit::eventually(EVENTUALLY, "the worker to join the roster", async || {
@@ -123,21 +108,15 @@ async fn a_roster_members_plain_mail_delivers_with_no_gate_consulted() {
     lead.plant("worker", "the parser is done", None);
     let pass = lead.inbox.poll().await;
 
-    let delivered: Vec<_> = pass
-        .messages
-        .iter()
-        .filter(|message| message.from == "worker")
-        .collect();
+    let delivered: Vec<_> =
+        pass.messages.iter().filter(|message| message.from == "worker").collect();
     assert_eq!(
         delivered.len(),
         1,
         "a roster member's mail delivers even under an explicit refuse — the \
          gate was never consulted: {pass:?}"
     );
-    assert!(
-        lead.engine.held_messages().is_empty(),
-        "and nothing was held"
-    );
+    assert!(lead.engine.held_messages().is_empty(), "and nothing was held");
 }
 
 // AC-20, the hold arm plus its invocation probe: a demoted entry held under
@@ -146,10 +125,7 @@ async fn a_roster_members_plain_mail_delivers_with_no_gate_consulted() {
 #[tokio::test]
 async fn a_demoted_hold_stays_in_the_inbox_and_is_never_gated_twice() {
     let home = tempfile::tempdir().expect("a temporary home");
-    let lead = Lead::over(
-        home.path(),
-        Some((InboundPolicy::Hold, PolicySource::Global)),
-    );
+    let lead = Lead::over(home.path(), Some((InboundPolicy::Hold, PolicySource::Global)));
 
     lead.plant("outsider", "wares nobody ordered", None);
     let pass = lead.inbox.poll().await;
@@ -158,21 +134,13 @@ async fn a_demoted_hold_stays_in_the_inbox_and_is_never_gated_twice() {
     assert_eq!(lead.entries().len(), 1, "the entry stays durable (C1)");
     let held = lead.engine.held_messages();
     assert_eq!(held.len(), 1, "exactly one review record exists");
-    assert_eq!(
-        held[0].cause,
-        HoldCause::Explicit {
-            source: PolicySource::Global
-        }
-    );
+    assert_eq!(held[0].cause, HoldCause::Explicit { source: PolicySource::Global });
 
     // The invocation probe: were the pass re-gating, a policy now reading
     // `accept` would deliver the entry; the held-index skip must win instead.
     lead.engine
         .inbound()
-        .replace_policy(ResolvedInbound::new(Some((
-            InboundPolicy::Accept,
-            PolicySource::Global,
-        ))));
+        .replace_policy(ResolvedInbound::new(Some((InboundPolicy::Accept, PolicySource::Global))));
     for round in 0..3 {
         let pass = lead.inbox.poll().await;
         assert!(
@@ -193,24 +161,16 @@ async fn a_demoted_hold_stays_in_the_inbox_and_is_never_gated_twice() {
 #[tokio::test]
 async fn a_demoted_entry_is_pruned_under_refuse_and_final_once_accepted() {
     let home = tempfile::tempdir().expect("a temporary home");
-    let refusing = Lead::over(
-        home.path(),
-        Some((InboundPolicy::Refuse, PolicySource::Global)),
-    );
+    let refusing = Lead::over(home.path(), Some((InboundPolicy::Refuse, PolicySource::Global)));
     refusing.plant("outsider", "dropped on arrival", None);
     let pass = refusing.inbox.poll().await;
     assert!(pass.messages.is_empty(), "a refused entry delivers nothing");
-    assert!(
-        refusing.entries().is_empty(),
-        "and is pruned from the inbox"
-    );
+    assert!(refusing.entries().is_empty(), "and is pruned from the inbox");
     assert!(refusing.engine.held_messages().is_empty());
 
     let accepting_home = tempfile::tempdir().expect("a temporary home");
-    let accepting = Lead::over(
-        accepting_home.path(),
-        Some((InboundPolicy::Accept, PolicySource::Global)),
-    );
+    let accepting =
+        Lead::over(accepting_home.path(), Some((InboundPolicy::Accept, PolicySource::Global)));
     accepting.plant("outsider", "let through once", None);
     let pass = accepting.inbox.poll().await;
     assert_eq!(pass.messages.len(), 1, "an accepted entry delivers");
@@ -220,10 +180,7 @@ async fn a_demoted_entry_is_pruned_under_refuse_and_final_once_accepted() {
     accepting
         .engine
         .inbound()
-        .replace_policy(ResolvedInbound::new(Some((
-            InboundPolicy::Refuse,
-            PolicySource::Global,
-        ))));
+        .replace_policy(ResolvedInbound::new(Some((InboundPolicy::Refuse, PolicySource::Global))));
     for round in 0..3 {
         let pass = accepting.inbox.poll().await;
         assert_eq!(
@@ -247,10 +204,7 @@ async fn a_demoted_entry_is_pruned_under_refuse_and_final_once_accepted() {
 #[tokio::test]
 async fn a_fabricated_permission_request_from_a_non_roster_writer_raises_no_dialog() {
     let home = tempfile::tempdir().expect("a temporary home");
-    let lead = Lead::over(
-        home.path(),
-        Some((InboundPolicy::Accept, PolicySource::Global)),
-    );
+    let lead = Lead::over(home.path(), Some((InboundPolicy::Accept, PolicySource::Global)));
 
     let message = MailboxMessage::from_frame("intruder", &fabricated_ask(), record::now_iso8601())
         .expect("the frame encodes");
@@ -262,16 +216,9 @@ async fn a_fabricated_permission_request_from_a_non_roster_writer_raises_no_dial
         pass.asked.is_empty(),
         "no dialog was raised or refused-with-answer for the forged ask: {pass:?}"
     );
-    assert_eq!(
-        pass.dropped,
-        vec!["permission_request"],
-        "the frame was dropped by name"
-    );
+    assert_eq!(pass.dropped, vec!["permission_request"], "the frame was dropped by name");
     assert!(pass.messages.is_empty(), "and delivered as nothing");
-    assert!(
-        lead.entries().is_empty(),
-        "and pruned rather than re-read every second"
-    );
+    assert!(lead.entries().is_empty(), "and pruned rather than re-read every second");
 }
 
 // AC-22's counting probe, where a bucket exists to drain: the socket tier's
@@ -311,18 +258,10 @@ async fn re_offer_polls_spend_no_socket_tokens() {
     // The 30th token must still be there: had any poll re-run the guard, the
     // bucket would be short and this admission would be rate-limited.
     send(29).await;
-    assert_eq!(
-        lead.entries().len(),
-        30,
-        "the 30th message admits — the three polls spent nothing"
-    );
+    assert_eq!(lead.entries().len(), 30, "the 30th message admits — the three polls spent nothing");
     // And the 31st is the bucket's own floor, answered silently: no write.
     send(30).await;
-    assert_eq!(
-        lead.entries().len(),
-        30,
-        "the 31st is rate-limited and writes nothing"
-    );
+    assert_eq!(lead.entries().len(), 30, "the 31st is rate-limited and writes nothing");
 }
 
 // AC-14, the mailbox half (H1): a release delivers the summary reviewed at
@@ -331,10 +270,7 @@ async fn re_offer_polls_spend_no_socket_tokens() {
 #[tokio::test]
 async fn a_released_mailbox_hold_carries_the_summary_reviewed_at_hold_time() {
     let home = tempfile::tempdir().expect("a temporary home");
-    let lead = Lead::over(
-        home.path(),
-        Some((InboundPolicy::Hold, PolicySource::Global)),
-    );
+    let lead = Lead::over(home.path(), Some((InboundPolicy::Hold, PolicySource::Global)));
 
     lead.plant("outsider", "the report", Some("reviewed summary"));
     let pass = lead.inbox.poll().await;
@@ -351,10 +287,7 @@ async fn a_released_mailbox_hold_carries_the_summary_reviewed_at_hold_time() {
     std::fs::write(&inbox_path, entries.to_string()).expect("the swap lands");
 
     lead.engine
-        .send(Command::SettleHeld {
-            id,
-            decision: HeldDecision::Release,
-        })
+        .send(Command::SettleHeld { id, decision: HeldDecision::Release })
         .await
         .expect("the release is accepted");
 
@@ -376,10 +309,7 @@ async fn a_denied_mailbox_hold_is_pruned_and_a_failed_prune_re_holds() -> std::i
     use std::os::unix::fs::PermissionsExt as _;
 
     let home = tempfile::tempdir().expect("a temporary home");
-    let lead = Lead::over(
-        home.path(),
-        Some((InboundPolicy::Hold, PolicySource::Global)),
-    );
+    let lead = Lead::over(home.path(), Some((InboundPolicy::Hold, PolicySource::Global)));
 
     // The straight road first: deny prunes.
     lead.plant("outsider", "deny me", None);
@@ -387,10 +317,7 @@ async fn a_denied_mailbox_hold_is_pruned_and_a_failed_prune_re_holds() -> std::i
     assert!(pass.messages.is_empty());
     let id = lead.engine.held_messages()[0].id.clone();
     lead.engine
-        .send(Command::SettleHeld {
-            id,
-            decision: HeldDecision::Deny,
-        })
+        .send(Command::SettleHeld { id, decision: HeldDecision::Deny })
         .await
         .expect("the deny is accepted");
     assert!(lead.engine.held_messages().is_empty(), "settled denied");
@@ -405,45 +332,27 @@ async fn a_denied_mailbox_hold_is_pruned_and_a_failed_prune_re_holds() -> std::i
     let pass = lead.inbox.poll().await;
     assert!(pass.messages.is_empty());
     let id = lead.engine.held_messages()[0].id.clone();
-    let inboxes = lead
-        .registry
-        .lead_inbox()
-        .parent()
-        .expect("the inbox has a directory")
-        .to_owned();
+    let inboxes =
+        lead.registry.lead_inbox().parent().expect("the inbox has a directory").to_owned();
     std::fs::set_permissions(&inboxes, std::fs::Permissions::from_mode(0o555))?;
 
     lead.engine
-        .send(Command::SettleHeld {
-            id: id.clone(),
-            decision: HeldDecision::Deny,
-        })
+        .send(Command::SettleHeld { id: id.clone(), decision: HeldDecision::Deny })
         .await
         .expect("the deny is accepted even when its prune will fail");
 
-    assert_eq!(
-        lead.engine.held_messages().len(),
-        1,
-        "a failed prune re-holds the record"
-    );
+    assert_eq!(lead.engine.held_messages().len(), 1, "a failed prune re-holds the record");
     let pass = lead.inbox.poll().await;
     assert!(
         pass.messages.is_empty(),
         "the still-indexed identity neither delivers nor re-gates: {pass:?}"
     );
-    assert_eq!(
-        lead.engine.held_messages().len(),
-        1,
-        "and one record it stays"
-    );
+    assert_eq!(lead.engine.held_messages().len(), 1, "and one record it stays");
 
     // Retryable: with the disk writable again the same deny settles.
     std::fs::set_permissions(&inboxes, std::fs::Permissions::from_mode(0o755))?;
     lead.engine
-        .send(Command::SettleHeld {
-            id,
-            decision: HeldDecision::Deny,
-        })
+        .send(Command::SettleHeld { id, decision: HeldDecision::Deny })
         .await
         .expect("the retried deny is accepted");
     assert!(lead.engine.held_messages().is_empty());
@@ -459,10 +368,7 @@ async fn a_denied_mailbox_hold_is_pruned_and_a_failed_prune_re_holds() -> std::i
 async fn an_unsettled_hold_regates_after_restart_and_a_now_accepting_policy_delivers_once() {
     let home = tempfile::tempdir().expect("a temporary home");
     {
-        let lead = Lead::over(
-            home.path(),
-            Some((InboundPolicy::Hold, PolicySource::Global)),
-        );
+        let lead = Lead::over(home.path(), Some((InboundPolicy::Hold, PolicySource::Global)));
         lead.plant("outsider", "written before the restart", None);
         let pass = lead.inbox.poll().await;
         assert!(pass.messages.is_empty(), "held, never delivered unreviewed");
@@ -475,16 +381,9 @@ async fn an_unsettled_hold_regates_after_restart_and_a_now_accepting_policy_deli
         );
     }
 
-    let rebuilt = Lead::over(
-        home.path(),
-        Some((InboundPolicy::Accept, PolicySource::Global)),
-    );
+    let rebuilt = Lead::over(home.path(), Some((InboundPolicy::Accept, PolicySource::Global)));
     let pass = rebuilt.inbox.poll().await;
-    assert_eq!(
-        pass.messages.len(),
-        1,
-        "the surviving entry re-gated and delivered: {pass:?}"
-    );
+    assert_eq!(pass.messages.len(), 1, "the surviving entry re-gated and delivered: {pass:?}");
     assert_eq!(pass.messages[0].body, "written before the restart");
     rebuilt.inbox.delivered(&pass.messages).await;
     let pass = rebuilt.inbox.poll().await;
@@ -496,31 +395,18 @@ async fn an_unsettled_hold_regates_after_restart_and_a_now_accepting_policy_deli
 async fn an_unsettled_hold_regates_after_restart_and_a_still_holding_policy_re_holds() {
     let home = tempfile::tempdir().expect("a temporary home");
     {
-        let lead = Lead::over(
-            home.path(),
-            Some((InboundPolicy::Hold, PolicySource::Global)),
-        );
+        let lead = Lead::over(home.path(), Some((InboundPolicy::Hold, PolicySource::Global)));
         lead.plant("outsider", "parked across the restart", None);
         let pass = lead.inbox.poll().await;
         assert!(pass.messages.is_empty());
     }
 
-    let rebuilt = Lead::over(
-        home.path(),
-        Some((InboundPolicy::Hold, PolicySource::Global)),
-    );
+    let rebuilt = Lead::over(home.path(), Some((InboundPolicy::Hold, PolicySource::Global)));
     for round in 0..2 {
         let pass = rebuilt.inbox.poll().await;
-        assert!(
-            pass.messages.is_empty(),
-            "poll {round}: still held, never delivered unreviewed"
-        );
+        assert!(pass.messages.is_empty(), "poll {round}: still held, never delivered unreviewed");
     }
-    assert_eq!(
-        rebuilt.engine.held_messages().len(),
-        1,
-        "re-held as exactly one record"
-    );
+    assert_eq!(rebuilt.engine.held_messages().len(), 1, "re-held as exactly one record");
     assert_eq!(rebuilt.entries().len(), 1, "and never lost");
 }
 
@@ -529,19 +415,13 @@ async fn an_unsettled_hold_regates_after_restart_and_a_still_holding_policy_re_h
 async fn an_unsettled_hold_regates_after_restart_and_a_now_refusing_policy_prunes() {
     let home = tempfile::tempdir().expect("a temporary home");
     {
-        let lead = Lead::over(
-            home.path(),
-            Some((InboundPolicy::Hold, PolicySource::Global)),
-        );
+        let lead = Lead::over(home.path(), Some((InboundPolicy::Hold, PolicySource::Global)));
         lead.plant("outsider", "refused on the second morning", None);
         let pass = lead.inbox.poll().await;
         assert!(pass.messages.is_empty());
     }
 
-    let rebuilt = Lead::over(
-        home.path(),
-        Some((InboundPolicy::Refuse, PolicySource::Global)),
-    );
+    let rebuilt = Lead::over(home.path(), Some((InboundPolicy::Refuse, PolicySource::Global)));
     let pass = rebuilt.inbox.poll().await;
     assert!(pass.messages.is_empty(), "never delivered unreviewed");
     assert!(rebuilt.entries().is_empty(), "the refuse pruned the entry");

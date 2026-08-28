@@ -13,10 +13,8 @@
 use ganja_protocol::team::Frame;
 use ganja_team::{MailboxMessage, MemberName, TeamName, TeamsRoot, mailbox, record};
 
-use crate::{
-    teammate::blocking_io,
-    tool::team::{Body, Peer, Reserved, Sent, Undelivered},
-};
+use crate::teammate::blocking_io;
+use crate::tool::team::{Body, Peer, Reserved, Sent, Undelivered};
 
 /// What one inbox file may hold before a ganja writer is refused (**D526**).
 ///
@@ -31,10 +29,8 @@ use crate::{
 /// draining, and growing the file further buys nobody anything. A refusal
 /// is [`mailbox::MailboxError::Full`] naming the counts, the file left
 /// byte-identical, surfaced on the write-failure arm each door already has.
-pub(crate) const INBOX_CEILING: mailbox::Ceiling = mailbox::Ceiling {
-    max_messages: 256,
-    max_bytes: 1 << 20,
-};
+pub(crate) const INBOX_CEILING: mailbox::Ceiling =
+    mailbox::Ceiling { max_messages: 256, max_bytes: 1 << 20 };
 
 /// A member of the team whose name the name grammar refuses — impossible
 /// through this build's own registration, and answered rather than trusted.
@@ -125,15 +121,7 @@ pub(crate) async fn write_to_peer(
 
     let path = root.inbox_path(team, &member);
     match blocking_io(move || mailbox::write_bounded(&path, message, Some(INBOX_CEILING))).await {
-        Ok(_) => Ok((
-            Sent {
-                to: member.into_inner(),
-                note: WRITTEN.to_owned(),
-            },
-            identity,
-        )),
-        Err(reason) => Err(Undelivered::Failed {
-            reason: format!("{UNWRITTEN} {reason}"),
-        }),
+        Ok(_) => Ok((Sent { to: member.into_inner(), note: WRITTEN.to_owned() }, identity)),
+        Err(reason) => Err(Undelivered::Failed { reason: format!("{UNWRITTEN} {reason}") }),
     }
 }

@@ -25,11 +25,9 @@
 //! the model's. It is pinned **by name** below, so making `Prompt` carry it
 //! would redden here rather than pass quietly.
 
-use ganja_core::{
-    protocol::{QuestionInfo, QuestionOption},
-    session::{question_choice, question_info, question_option, question_prompt},
-    tool::question::{Choice, Prompt},
-};
+use ganja_core::protocol::{QuestionInfo, QuestionOption};
+use ganja_core::session::{question_choice, question_info, question_option, question_prompt};
+use ganja_core::tool::question::{Choice, Prompt};
 
 /// Every question shape worth pinning, including the ones whose optional
 /// fields are absent — the case a corpus of fully-populated values would miss
@@ -74,10 +72,7 @@ fn corpus() -> Vec<Prompt> {
         Prompt {
             question: "Which one?".to_owned(),
             header: "Pick".to_owned(),
-            options: vec![Choice {
-                label: "This".to_owned(),
-                description: "The first".to_owned(),
-            }],
+            options: vec![Choice { label: "This".to_owned(), description: "The first".to_owned() }],
             multiple: Some(false),
         },
         // Text the model really sends: quotes, newlines and non-ASCII all
@@ -171,20 +166,14 @@ fn custom_is_the_one_field_the_models_copy_does_not_carry() {
 
         assert_eq!(
             back,
-            QuestionInfo {
-                custom: None,
-                ..info.clone()
-            },
+            QuestionInfo { custom: None, ..info.clone() },
             "only `custom` may be lost, and it must be lost the same way every time"
         );
         // Everything else is byte-identical, which is the check that would
         // redden if a *second* field started being dropped here.
         assert_eq!(
-            serde_json::to_value(QuestionInfo {
-                custom: None,
-                ..info
-            })
-            .expect("a question is JSON"),
+            serde_json::to_value(QuestionInfo { custom: None, ..info })
+                .expect("a question is JSON"),
             serde_json::to_value(&back).expect("a question is JSON"),
         );
     }
@@ -223,14 +212,8 @@ fn a_question_the_model_sent_carries_no_custom_field_on_the_wire() {
 #[test]
 fn a_choice_round_trips_and_serializes_identically_on_both_sides() {
     let choices = [
-        Choice {
-            label: "Postgres".to_owned(),
-            description: "Relational".to_owned(),
-        },
-        Choice {
-            label: String::new(),
-            description: String::new(),
-        },
+        Choice { label: "Postgres".to_owned(), description: "Relational".to_owned() },
+        Choice { label: String::new(), description: String::new() },
         Choice {
             label: "既定".to_owned(),
             description: "quotes: \" and a backslash: \\".to_owned(),

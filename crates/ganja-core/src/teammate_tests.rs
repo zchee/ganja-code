@@ -1,4 +1,7 @@
-use std::{collections::BTreeSet, path::Path, sync::Arc, time::Duration};
+use std::collections::BTreeSet;
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
 use ganja_team::{MemberName, TeamName, TeamsRoot, mailbox};
 
@@ -6,7 +9,10 @@ use super::{
     Delivery, Handle, InProcess, MemberBackend, SpawnRequest, SpawnSpec, TeammateBackend,
     TeammateRegistry, Unsupported, session_team,
 };
-use crate::{Storage, permission::Permissions, provider::FakeProvider, tool::Registry as Tools};
+use crate::Storage;
+use crate::permission::Permissions;
+use crate::provider::FakeProvider;
+use crate::tool::Registry as Tools;
 
 /// Why [`Never`] refuses.
 pub(crate) const NEVER: &str = "this door spawns nothing";
@@ -28,10 +34,7 @@ impl TeammateBackend for Never {
     }
 
     async fn spawn(&self, _spec: &SpawnSpec) -> Result<Handle, Unsupported> {
-        Err(Unsupported {
-            backend: self.0,
-            reason: NEVER.to_owned(),
-        })
+        Err(Unsupported { backend: self.0, reason: NEVER.to_owned() })
     }
 
     // Never seeded, since nothing is ever spawned; the native words, so a
@@ -83,11 +86,7 @@ fn request(name: &str, backend: MemberBackend, home: &Path) -> SpawnRequest {
 
 /// What the registry is still holding names for.
 fn reserved(registry: &TeammateRegistry) -> BTreeSet<String> {
-    registry
-        .reserved
-        .lock()
-        .expect("the reserved names are never poisoned")
-        .clone()
+    registry.reserved.lock().expect("the reserved names are never poisoned").clone()
 }
 
 /// **A name a completed spawn took is claimed for good.**
@@ -113,10 +112,7 @@ async fn a_name_a_completed_spawn_took_stays_claimed() {
     let registry = registry(home.path());
 
     let started = registry
-        .spawn(
-            in_process(home.path()),
-            request("worker", MemberBackend::InProcess, home.path()),
-        )
+        .spawn(in_process(home.path()), request("worker", MemberBackend::InProcess, home.path()))
         .await
         .expect("a teammate joins");
     assert_eq!(started.name.as_str(), "worker");
@@ -178,10 +174,7 @@ async fn the_view_starts_at_the_lead_and_no_other_row_ever_leads() {
     assert!(fresh.members[0].recent_calls.is_empty());
 
     registry
-        .spawn(
-            in_process(home.path()),
-            request("w1", MemberBackend::InProcess, home.path()),
-        )
+        .spawn(in_process(home.path()), request("w1", MemberBackend::InProcess, home.path()))
         .await
         .expect("a teammate joins");
     let led = registry.view();
@@ -234,21 +227,9 @@ async fn the_ring_keeps_distinct_running_calls_in_order_deduped_and_capped() {
 
     // One call republishing as it streams, then a second call whose line
     // reads the same: one row carries both.
-    fold(
-        vec![
-            part("prt_a", "read"),
-            part("prt_a", "read"),
-            part("prt_b", "read"),
-        ],
-        &ring,
-    )
-    .await;
+    fold(vec![part("prt_a", "read"), part("prt_a", "read"), part("prt_b", "read")], &ring).await;
     assert_eq!(
-        ring.lock()
-            .expect("the ring")
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>(),
+        ring.lock().expect("the ring").iter().cloned().collect::<Vec<_>>(),
         ["read"],
         "a republished part and an identical line are one row"
     );
@@ -256,9 +237,7 @@ async fn the_ring_keeps_distinct_running_calls_in_order_deduped_and_capped() {
     // More distinct calls than the ring holds: the newest win, in order.
     let over = super::RECENT_CALLS + 2;
     fold(
-        (0..over)
-            .map(|index| part(&format!("prt_{index}"), &format!("tool-{index}")))
-            .collect(),
+        (0..over).map(|index| part(&format!("prt_{index}"), &format!("tool-{index}"))).collect(),
         &ring,
     )
     .await;
@@ -276,10 +255,7 @@ async fn the_ring_keeps_distinct_running_calls_in_order_deduped_and_capped() {
 /// id always names one team, so a resume rejoins rather than orphans.
 #[test]
 fn a_session_names_its_own_team_and_a_pre_uuid_id_falls_back_to_the_default() {
-    assert_eq!(
-        session_team("224cbeab-4e62-497c-aa8f-d05cc33ce7ba").as_str(),
-        "session-224cbeab"
-    );
+    assert_eq!(session_team("224cbeab-4e62-497c-aa8f-d05cc33ce7ba").as_str(), "session-224cbeab");
     assert_eq!(
         session_team("224CBEAB-4e62-497c-aa8f-d05cc33ce7ba").as_str(),
         "session-224cbeab",
@@ -298,21 +274,14 @@ async fn retiring_a_teammate_forgets_it_and_rewrites_the_team_file_without_it() 
     let home = tempfile::tempdir().expect("a temporary home");
     let registry = registry(home.path());
     registry
-        .spawn(
-            in_process(home.path()),
-            request("w1", MemberBackend::InProcess, home.path()),
-        )
+        .spawn(in_process(home.path()), request("w1", MemberBackend::InProcess, home.path()))
         .await
         .expect("the teammate starts");
 
     assert_eq!(registry.view().members.len(), 2, "the lead and w1");
     assert!(registry.retire("w1").await.expect("the team file rewrites"));
 
-    assert_eq!(
-        registry.view().members.len(),
-        1,
-        "only the lead is left in the roster"
-    );
+    assert_eq!(registry.view().members.len(), 1, "only the lead is left in the roster");
     let document = std::fs::read_to_string(registry.root().config_path(registry.team()))
         .expect("the team file is on disk");
     assert!(
@@ -320,10 +289,7 @@ async fn retiring_a_teammate_forgets_it_and_rewrites_the_team_file_without_it() 
         "a retired member is out of the document too:\n{document}"
     );
     assert!(
-        !registry
-            .retire("w1")
-            .await
-            .expect("a second retire is fine"),
+        !registry.retire("w1").await.expect("a second retire is fine"),
         "a shutdown read twice is ordinary rather than an error"
     );
 }
@@ -363,13 +329,7 @@ async fn a_team_file_write_that_cannot_rename_leaves_nothing_behind() {
     };
 
     assert!(
-        matches!(
-            refused,
-            super::SpawnError::TeamFile {
-                doing: "written",
-                ..
-            }
-        ),
+        matches!(refused, super::SpawnError::TeamFile { doing: "written", .. }),
         "the failure is the write it was: {refused}"
     );
     let left: Vec<_> = std::fs::read_dir(path.parent().expect("the team has a directory"))
@@ -404,19 +364,12 @@ async fn a_team_file_rewrite_keeps_the_documents_existing_mode() {
         let writing = registry.team_file.lock().await;
         let file = ganja_team::TeamFile::new(registry.team(), "01998ad0", "/tmp", 1);
 
-        registry
-            .write_team(file, &writing)
-            .await
-            .expect("the team file writes");
+        registry.write_team(file, &writing).await.expect("the team file writes");
     };
 
     write().await;
     assert_eq!(
-        std::fs::metadata(&path)
-            .expect("the team file is there")
-            .permissions()
-            .mode()
-            & 0o777,
+        std::fs::metadata(&path).expect("the team file is there").permissions().mode() & 0o777,
         0o600,
         "a document this created is private, whatever the umask would have said"
     );
@@ -426,11 +379,7 @@ async fn a_team_file_rewrite_keeps_the_documents_existing_mode() {
     write().await;
 
     assert_eq!(
-        std::fs::metadata(&path)
-            .expect("the team file is there")
-            .permissions()
-            .mode()
-            & 0o777,
+        std::fs::metadata(&path).expect("the team file is there").permissions().mode() & 0o777,
         0o640,
         "a rewrite neither tightens nor loosens what the owner set"
     );
@@ -458,20 +407,12 @@ fn the_team_file_is_synced_before_it_is_renamed_into_place() {
         .split_once("    async fn write_team(")
         .expect("the writer is still called that")
         .1;
-    let body = body
-        .split_once("\n    }\n")
-        .expect("the writer still ends")
-        .0;
+    let body = body.split_once("\n    }\n").expect("the writer still ends").0;
 
-    let synced = body
-        .find(".sync_all()")
-        .expect("the bytes are still synced");
+    let synced = body.find(".sync_all()").expect("the bytes are still synced");
     let renamed = body.find(".persist(").expect("the file is still renamed");
 
-    assert!(
-        synced < renamed,
-        "the sync is what the rename publishes, so it comes first"
-    );
+    assert!(synced < renamed, "the sync is what the rename publishes, so it comes first");
 }
 
 /// A backend that hands out a pane-shaped handle and remembers every
@@ -493,17 +434,11 @@ const UNLAUNCHABLE: &str = "the launch line could not be typed";
 
 impl Recording {
     fn killed(&self) -> Vec<(String, String)> {
-        self.killed
-            .lock()
-            .expect("the kill log is never poisoned")
-            .clone()
+        self.killed.lock().expect("the kill log is never poisoned").clone()
     }
 
     fn launched(&self) -> Vec<(String, bool)> {
-        self.launched
-            .lock()
-            .expect("the launch log is never poisoned")
-            .clone()
+        self.launched.lock().expect("the launch log is never poisoned").clone()
     }
 }
 
@@ -638,12 +573,7 @@ async fn retiring_a_teammate_ends_its_surface_through_the_recorded_handle_once()
         "the recorded pair, through the backend that minted it"
     );
 
-    assert!(
-        !registry
-            .retire("w1")
-            .await
-            .expect("a second retire is fine")
-    );
+    assert!(!registry.retire("w1").await.expect("a second retire is fine"));
     registry.shutdown().await;
     assert_eq!(
         backend.killed().len(),
@@ -676,15 +606,9 @@ async fn a_surface_is_launched_after_its_record_exists_and_a_refused_launch_unwi
         "launched once, and the team file already named it"
     );
     assert!(backend.killed().is_empty());
-    assert!(
-        reserved(&registry).contains("w1"),
-        "a launched spawn spends its name"
-    );
+    assert!(reserved(&registry).contains("w1"), "a launched spawn spends its name");
 
-    let refusing = Arc::new(Recording {
-        refuse_launch: true,
-        ..Recording::default()
-    });
+    let refusing = Arc::new(Recording { refuse_launch: true, ..Recording::default() });
     let refused = registry
         .spawn(
             Arc::clone(&refusing) as Arc<dyn TeammateBackend>,
@@ -721,19 +645,12 @@ async fn a_surface_is_launched_after_its_record_exists_and_a_refused_launch_unwi
         document.contains("\"w1\""),
         "without touching the member that did launch:\n{document}"
     );
-    let inbox = registry.root().inbox_path(
-        registry.team(),
-        &MemberName::parse("w2").expect("a member name"),
-    );
+    let inbox = registry
+        .root()
+        .inbox_path(registry.team(), &MemberName::parse("w2").expect("a member name"));
     assert!(
-        mailbox::read(&inbox)
-            .map(|held| held.valid.is_empty())
-            .unwrap_or(true),
+        mailbox::read(&inbox).map(|held| held.valid.is_empty()).unwrap_or(true),
         "and the seeded prompt is gone from an inbox nothing will read"
     );
-    assert_eq!(
-        registry.view().members.len(),
-        2,
-        "the roster holds the lead and w1, never w2"
-    );
+    assert_eq!(registry.view().members.len(), 2, "the roster holds the lead and w1, never w2");
 }

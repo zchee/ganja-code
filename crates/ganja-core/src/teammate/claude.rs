@@ -150,7 +150,8 @@
 //! such a queue entry at write time; without the split a claude peer's message
 //! sits pending in the lead's UI forever.
 
-use std::{ffi::OsString, path::PathBuf};
+use std::ffi::OsString;
+use std::path::PathBuf;
 
 use async_trait::async_trait;
 use etcetera::base_strategy::{BaseStrategy as _, Xdg};
@@ -236,9 +237,7 @@ pub fn teams_root() -> Option<TeamsRoot> {
 /// `CLAUDE_CONFIG_DIR=` in a shell profile means "I did not set this" far more
 /// often than it means "the root directory".
 fn root_under(config_dir: Option<OsString>, home: Option<PathBuf>) -> Option<TeamsRoot> {
-    let named = config_dir
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from);
+    let named = config_dir.filter(|value| !value.is_empty()).map(PathBuf::from);
 
     named
         .or_else(|| home.map(|home| home.join(CONFIG_HOME_DIRECTORY)))
@@ -252,11 +251,7 @@ fn root_under(config_dir: Option<OsString>, home: Option<PathBuf>) -> Option<Tea
 /// not spelled here does not travel, however harmless it looks.
 #[must_use]
 pub fn carried_env() -> Vec<&'static str> {
-    pane::CARRIED_ENV
-        .iter()
-        .copied()
-        .chain([CONFIG_DIR_ENV])
-        .collect()
+    pane::CARRIED_ENV.iter().copied().chain([CONFIG_DIR_ENV]).collect()
 }
 
 /// What the teammate is told before its task, in ganja's own words (**D497**).
@@ -318,18 +313,12 @@ impl ClaudePane {
     /// [`crate::teammate::pane`] refuses in, because one door must not say two
     /// things about one missing session.
     fn refused(error: &TmuxError) -> Unsupported {
-        Unsupported {
-            backend: MemberBackend::Claude,
-            reason: error.to_string(),
-        }
+        Unsupported { backend: MemberBackend::Claude, reason: error.to_string() }
     }
 
     /// Anything else this backend cannot do, in one sentence.
     fn cannot(reason: impl Into<String>) -> Unsupported {
-        Unsupported {
-            backend: MemberBackend::Claude,
-            reason: reason.into(),
-        }
+        Unsupported { backend: MemberBackend::Claude, reason: reason.into() }
     }
 
     /// §4.1 steps 4 and 5, under **claude's** root: the inboxes exist, and the
@@ -439,9 +428,7 @@ impl TeammateBackend for ClaudePane {
             // Two other shapes since P27, and a refusal is right for both: a
             // shim child has no pane to type a launch line into any more than
             // an in-process teammate does.
-            return Err(Self::cannot(
-                "this backend was asked to launch something it did not make",
-            ));
+            return Err(Self::cannot("this backend was asked to launch something it did not make"));
         };
         let server = Server::current().map_err(|error| Self::refused(&error))?;
         let binary = on_path(BINARY).ok_or_else(|| Self::cannot(REFUSED_NO_BINARY))?;

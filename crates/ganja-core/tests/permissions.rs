@@ -9,12 +9,11 @@
 //! its own, so the credential tests cannot see this one move the data home out
 //! from under them. Everything in this file is therefore one test.
 
-use std::{fs, sync::Arc, thread};
+use std::sync::Arc;
+use std::{fs, thread};
 
-use ganja_core::{
-    permission::{Action, Decision, FILE, Permissions, Rule, VERSION},
-    project::Project,
-};
+use ganja_core::permission::{Action, Decision, FILE, Permissions, Rule, VERSION};
+use ganja_core::project::Project;
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -48,15 +47,9 @@ fn an_answer_is_stored_per_project_under_the_data_home() {
     drop(permissions);
 
     // The answer landed where the project says its state belongs.
-    let store = Project::resolve(&nested)
-        .data_dir()
-        .expect("the data directory resolves")
-        .join(FILE);
-    assert!(
-        store.starts_with(home.path().join("ganja").join("project")),
-        "{}",
-        store.display()
-    );
+    let store =
+        Project::resolve(&nested).data_dir().expect("the data directory resolves").join(FILE);
+    assert!(store.starts_with(home.path().join("ganja").join("project")), "{}", store.display());
     let written: serde_json::Value =
         serde_json::from_slice(&fs::read(&store).expect("the store exists"))
             .expect("the store is JSON");
@@ -112,9 +105,7 @@ fn an_answer_is_stored_per_project_under_the_data_home() {
         serde_json::from_value(after["rules"].clone()).expect("every stored rule is still a rule");
     assert!(rules.iter().all(|rule| rule.action == Action::Allow));
     assert!(
-        rules
-            .iter()
-            .any(|rule| rule.pattern == "cargo test *" && rule.permission == "shell"),
+        rules.iter().any(|rule| rule.pattern == "cargo test *" && rule.permission == "shell"),
         "the answer from before the crowd is still there"
     );
     assert!(

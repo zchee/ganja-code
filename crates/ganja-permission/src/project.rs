@@ -34,10 +34,8 @@
 //! for projects that never store anything; whoever writes creates the parents
 //! it needs on the way.
 
-use std::{
-    fs, io,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
+use std::{fs, io};
 
 use etcetera::base_strategy::{BaseStrategy as _, Xdg};
 
@@ -151,9 +149,8 @@ impl Project {
 /// Returns [`ProjectError::Home`] when there is no home directory to resolve
 /// the path against.
 pub fn data_home() -> Result<PathBuf, ProjectError> {
-    let base = Xdg::new().map_err(|source| ProjectError::Home {
-        source: io::Error::other(source),
-    })?;
+    let base =
+        Xdg::new().map_err(|source| ProjectError::Home { source: io::Error::other(source) })?;
 
     Ok(base.data_dir().join(DIRECTORY))
 }
@@ -186,17 +183,10 @@ pub fn data_home() -> Result<PathBuf, ProjectError> {
 pub fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
     use std::io::Write as _;
 
-    let mut file = match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-    {
+    let mut file = match fs::OpenOptions::new().write(true).create_new(true).open(path) {
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
             fs::remove_file(path)?;
-            fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(path)?
+            fs::OpenOptions::new().write(true).create_new(true).open(path)?
         }
         result => result?,
     };

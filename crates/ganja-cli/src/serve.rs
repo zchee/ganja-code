@@ -21,7 +21,8 @@
 //! `POST /permission/{id}/reply` (deviation:
 //! serve-keeps-interactive-permissions).
 
-use std::{io::Write as _, sync::Arc};
+use std::io::Write as _;
+use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
 use clap::Args;
@@ -63,18 +64,12 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
     // And it starts under the configured effort the same way, for the session
     // this process minted; a route that resumes another one restores that
     // row's own effort and this yields to it.
-    assembled
-        .engine
-        .seed_effort(assembled.config.effort.clone())
-        .await;
+    assembled.engine.seed_effort(assembled.config.effort.clone()).await;
 
     let credentials = ganja_serve::Credentials::from_env();
     if credentials.is_none() {
         // Upstream's sentence (`serve.ts:16`) naming this build's variable.
-        eprintln!(
-            "Warning: {} is not set; server is unsecured.",
-            ganja_serve::PASSWORD_ENV
-        );
+        eprintln!("Warning: {} is not set; server is unsecured.", ganja_serve::PASSWORD_ENV);
     }
 
     let engine = Arc::new(assembled.engine);
@@ -86,10 +81,7 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
     let handle = ganja_serve::serve(
         Arc::clone(&engine),
         ganja_serve::ServeConfig {
-            listen: ganja_serve::Listen::Tcp {
-                hostname: args.hostname.clone(),
-                port: args.port,
-            },
+            listen: ganja_serve::Listen::Tcp { hostname: args.hostname.clone(), port: args.port },
             credentials,
             directory: cwd,
             root: assembled.root,
@@ -107,24 +99,15 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
     // ask ever be one, is named as itself rather than dressed as a URL.
     match handle.address() {
         ganja_serve::Address::Tcp(bound) => {
-            println!(
-                "ganja server listening on http://{}:{}",
-                args.hostname,
-                bound.port()
-            );
+            println!("ganja server listening on http://{}:{}", args.hostname, bound.port());
         }
         socket => println!("ganja server listening on {socket}"),
     }
-    std::io::stdout()
-        .flush()
-        .context("failed to write the address line")?;
+    std::io::stdout().flush().context("failed to write the address line")?;
 
     wait_for_shutdown().await;
 
-    handle
-        .shutdown()
-        .await
-        .context("the server did not stop cleanly")?;
+    handle.shutdown().await.context("the server did not stop cleanly")?;
     engine.session_end(ganja_core::hook::EXIT_REASON).await;
     assembled.servers.shutdown().await;
     engine.shutdown_lsp();

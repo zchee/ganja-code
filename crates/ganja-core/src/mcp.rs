@@ -117,37 +117,29 @@
 //! Prompts and resources are not ported: neither the `mcp.prompts()` surface
 //! nor upstream's three built-in resource tools.
 
-use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    path::{Path, PathBuf},
-    sync::{
-        Arc, Mutex, Weak,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::Duration,
-};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::future;
 use ganja_provider::auth::RefreshOauth as _;
-use rmcp::{
-    ClientHandler, RoleClient, ServiceExt as _,
-    model::{
-        CallToolRequestParams, CallToolResult, ClientCapabilities, ClientInfo, ContentBlock,
-        Implementation, PaginatedRequestParams, ResourceContents,
-    },
-    service::{NotificationContext, RunningService},
-    transport::{StreamableHttpClientTransport, TokioChildProcess},
+use rmcp::model::{
+    CallToolRequestParams, CallToolResult, ClientCapabilities, ClientInfo, ContentBlock,
+    Implementation, PaginatedRequestParams, ResourceContents,
 };
+use rmcp::service::{NotificationContext, RunningService};
+use rmcp::transport::{StreamableHttpClientTransport, TokioChildProcess};
+use rmcp::{ClientHandler, RoleClient, ServiceExt as _};
 use secrecy::ExposeSecret as _;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncBufReadExt as _;
 
-use crate::{
-    config::{MCP_CALL_TIMEOUT, MCP_CONNECT_TIMEOUT, MCP_LIST_TIMEOUT, McpServer},
-    permission::MCP_PREFIX,
-    tool::{Tool, ToolCtx, ToolError, ToolOutput},
-};
+use crate::config::{MCP_CALL_TIMEOUT, MCP_CONNECT_TIMEOUT, MCP_LIST_TIMEOUT, McpServer};
+use crate::permission::MCP_PREFIX;
+use crate::tool::{Tool, ToolCtx, ToolError, ToolOutput};
 
 /// A live connection to one server.
 type Client = RunningService<RoleClient, Handler>;
@@ -257,13 +249,7 @@ impl Servers {
             .map(|(name, server)| {
                 let status = (!server.enabled()).then_some(Status::Disabled);
 
-                (
-                    name.clone(),
-                    Server {
-                        status,
-                        ..Server::default()
-                    },
-                )
+                (name.clone(), Server { status, ..Server::default() })
             })
             .collect();
 
@@ -395,10 +381,7 @@ impl Servers {
         name: &str,
         server: &McpServer,
     ) -> Result<(Client, Option<u32>), String> {
-        let handler = Handler {
-            servers: Arc::downgrade(self),
-            name: name.to_owned(),
-        };
+        let handler = Handler { servers: Arc::downgrade(self), name: name.to_owned() };
 
         match server {
             McpServer::Local(local) => {
@@ -407,20 +390,14 @@ impl Servers {
                     drain(name.to_owned(), stderr);
                 }
 
-                let client = handler
-                    .serve(transport)
-                    .await
-                    .map_err(|error| error.to_string())?;
+                let client = handler.serve(transport).await.map_err(|error| error.to_string())?;
 
                 Ok((client, group))
             }
             McpServer::Remote(remote) => {
                 let mut headers = Self::static_headers(remote)?;
                 if remote.oauth.is_some() {
-                    headers.insert(
-                        reqwest::header::AUTHORIZATION,
-                        self.bearer_header(name).await?,
-                    );
+                    headers.insert(reqwest::header::AUTHORIZATION, self.bearer_header(name).await?);
                 }
 
                 let url = remote.url.clone();
@@ -489,10 +466,7 @@ impl Servers {
         let refresher: std::sync::Arc<dyn ganja_provider::auth::RefreshOauth> =
             std::sync::Arc::new(ganja_provider::auth::mcp_oauth::Refresher);
 
-        match ganja_provider::auth::Refresher::shared()
-            .usable(&key, refresher)
-            .await
-        {
+        match ganja_provider::auth::Refresher::shared().usable(&key, refresher).await {
             Ok(credential) => bearer_value(&credential),
             Err(error) if error.kind() == ganja_provider::auth::AuthErrorKind::NotOauth => {
                 Err(needs_login(name))
@@ -531,18 +505,9 @@ impl Servers {
         &self,
         name: &str,
         local: &crate::config::McpLocal,
-    ) -> Result<
-        (
-            TokioChildProcess,
-            Option<tokio::process::ChildStderr>,
-            Option<u32>,
-        ),
-        String,
-    > {
-        let (program, args) = local
-            .command
-            .split_first()
-            .ok_or_else(|| "the command is empty".to_owned())?;
+    ) -> Result<(TokioChildProcess, Option<tokio::process::ChildStderr>, Option<u32>), String> {
+        let (program, args) =
+            local.command.split_first().ok_or_else(|| "the command is empty".to_owned())?;
 
         let mut command = tokio::process::Command::new(program);
         command.args(args);
@@ -619,10 +584,7 @@ impl Servers {
             cursor = Some(next);
         }
 
-        tracing::warn!(
-            server = name,
-            "an MCP server's tool listing exceeded {MAX_PAGES} pages"
-        );
+        tracing::warn!(server = name, "an MCP server's tool listing exceeded {MAX_PAGES} pages");
 
         Err(format!("tools/list exceeded {MAX_PAGES} pages"))
     }
@@ -647,10 +609,7 @@ impl Servers {
     /// asks, and a frontend has no use for a pid it must not signal.
     #[must_use]
     pub fn process_groups(&self) -> Vec<u32> {
-        self.state()
-            .values()
-            .filter_map(|server| server.group)
-            .collect()
+        self.state().values().filter_map(|server| server.group).collect()
     }
 
     /// How many times the tool surface has changed.
@@ -670,17 +629,13 @@ impl Servers {
         {
             let mut state = self.state();
             for (name, server) in state.iter_mut() {
-                let closed = server
-                    .client
-                    .as_ref()
-                    .is_some_and(|client| client.is_transport_closed());
+                let closed =
+                    server.client.as_ref().is_some_and(|client| client.is_transport_closed());
                 if !closed {
                     continue;
                 }
 
-                server.status = Some(Status::Failed {
-                    error: CLOSED.to_owned(),
-                });
+                server.status = Some(Status::Failed { error: CLOSED.to_owned() });
                 server.client = None;
                 server.defs.clear();
                 server.instructions = None;
@@ -709,7 +664,6 @@ impl Servers {
     /// itself never fails outward, so the outcome — connected again, or
     /// failed again with a fresh reason — is read back through
     /// [`Servers::status`], exactly as a first connect is.
-    ///
     pub async fn reconnect(self: &Arc<Self>, name: &str) -> Result<(), String> {
         let Some(server) = self.config.get(name) else {
             return Err(format!("mcp server \"{name}\" is not configured"));
@@ -752,10 +706,7 @@ impl Servers {
     pub fn retry_once(self: &Arc<Self>) {
         let candidates: Vec<String> = {
             let state = self.state();
-            let mut retried = self
-                .retried
-                .lock()
-                .expect("the MCP retry set is never poisoned");
+            let mut retried = self.retried.lock().expect("the MCP retry set is never poisoned");
 
             state
                 .iter()
@@ -843,10 +794,8 @@ impl Servers {
     /// Bytes one call to `server`'s tools may return before the result is
     /// clamped; see [`crate::config::McpServer::output_limit`].
     fn output_limit(&self, server: &str) -> usize {
-        let bytes = self
-            .config
-            .get(server)
-            .map_or(crate::tool::truncate::MAX_CHARS as u64, |entry| {
+        let bytes =
+            self.config.get(server).map_or(crate::tool::truncate::MAX_CHARS as u64, |entry| {
                 entry.output_limit(crate::tool::truncate::MAX_CHARS as u64)
             });
 
@@ -944,10 +893,9 @@ impl Servers {
 
     /// Re-lists `name`'s tools after it said its list changed.
     async fn refresh(self: &Arc<Self>, name: &str) {
-        let (Some(client), Some(server)) = (
-            self.state().get(name).and_then(|held| held.client.clone()),
-            self.config.get(name),
-        ) else {
+        let (Some(client), Some(server)) =
+            (self.state().get(name).and_then(|held| held.client.clone()), self.config.get(name))
+        else {
             return;
         };
 
@@ -958,11 +906,7 @@ impl Servers {
                     // Only if this is still the same connection: a re-list that
                     // finished after the server was replaced would install a
                     // dead server's tools.
-                    if held
-                        .client
-                        .as_ref()
-                        .is_some_and(|held| Arc::ptr_eq(held, &client))
-                    {
+                    if held.client.as_ref().is_some_and(|held| Arc::ptr_eq(held, &client)) {
                         held.defs = defs;
                     }
                 }
@@ -1004,11 +948,7 @@ impl Servers {
     /// success or failure.
     #[must_use]
     pub fn login_url(&self, name: &str) -> Option<String> {
-        self.logins
-            .lock()
-            .expect("the MCP login map is never poisoned")
-            .get(name)
-            .cloned()
+        self.logins.lock().expect("the MCP login map is never poisoned").get(name).cloned()
     }
 
     /// Starts a login for `name`: discovery and registration run here, so
@@ -1040,10 +980,7 @@ impl Servers {
             return Err(format!("mcp server \"{name}\" has no oauth configured"));
         }
         {
-            let mut logins = self
-                .logins
-                .lock()
-                .expect("the MCP login map is never poisoned");
+            let mut logins = self.logins.lock().expect("the MCP login map is never poisoned");
             if logins.contains_key(name) {
                 return Err(format!("a login for \"{name}\" is already in progress"));
             }
@@ -1054,11 +991,7 @@ impl Servers {
             logins.insert(name.to_owned(), String::new());
         }
         let forget = |servers: &Self| {
-            servers
-                .logins
-                .lock()
-                .expect("the MCP login map is never poisoned")
-                .remove(name);
+            servers.logins.lock().expect("the MCP login map is never poisoned").remove(name);
         };
 
         let browser = match ganja_provider::auth::mcp_oauth::Login::new(&remote.url)
@@ -1085,25 +1018,16 @@ impl Servers {
         let name = name.to_owned();
         tokio::spawn(async move {
             let cancel = tokio_util::sync::CancellationToken::new();
-            let result = browser
-                .wait(ganja_provider::auth::mcp_oauth::CALLBACK_DEADLINE, &cancel)
-                .await;
-            this.logins
-                .lock()
-                .expect("the MCP login map is never poisoned")
-                .remove(&name);
+            let result =
+                browser.wait(ganja_provider::auth::mcp_oauth::CALLBACK_DEADLINE, &cancel).await;
+            this.logins.lock().expect("the MCP login map is never poisoned").remove(&name);
 
             match result {
                 Ok(credential) => {
                     let key = storage_key(&name);
                     if let Err(error) = ganja_provider::auth::set_oauth(&key, &credential) {
                         tracing::warn!(server = %name, %error, "an MCP login could not be stored");
-                        this.mark(
-                            &name,
-                            Status::Failed {
-                                error: error.to_string(),
-                            },
-                        );
+                        this.mark(&name, Status::Failed { error: error.to_string() });
                         return;
                     }
                     if let Some(server) = this.config.get(&name).cloned() {
@@ -1112,12 +1036,7 @@ impl Servers {
                 }
                 Err(error) => {
                     tracing::warn!(server = %name, %error, "an MCP login did not complete");
-                    this.mark(
-                        &name,
-                        Status::Failed {
-                            error: error.to_string(),
-                        },
-                    );
+                    this.mark(&name, Status::Failed { error: error.to_string() });
                 }
             }
         });
@@ -1307,12 +1226,9 @@ fn block(block: &ContentBlock) -> String {
         ContentBlock::Audio(audio) => omitted(&audio.mime_type, &audio.data),
         ContentBlock::Resource(resource) => match &resource.resource {
             ResourceContents::TextResourceContents { text, .. } => text.clone(),
-            ResourceContents::BlobResourceContents {
-                blob, mime_type, ..
-            } => omitted(
-                mime_type.as_deref().unwrap_or("application/octet-stream"),
-                blob,
-            ),
+            ResourceContents::BlobResourceContents { blob, mime_type, .. } => {
+                omitted(mime_type.as_deref().unwrap_or("application/octet-stream"), blob)
+            }
             _ => String::new(),
         },
         // Not a payload, a pointer — and there is no `resources/read` here to
@@ -1329,10 +1245,7 @@ fn block(block: &ContentBlock) -> String {
 /// something came back and what shape it was (deviation:
 /// mcp-binary-content-described-not-carried).
 fn omitted(mime: &str, base64: &str) -> String {
-    format!(
-        "[binary MCP content omitted: {mime}, {} bytes]",
-        decoded_len(base64)
-    )
+    format!("[binary MCP content omitted: {mime}, {} bytes]", decoded_len(base64))
 }
 
 /// How many bytes a base64 payload holds, without decoding it.
@@ -1350,11 +1263,7 @@ fn omitted(mime: &str, base64: &str) -> String {
 /// as before.
 fn decoded_len(base64: &str) -> usize {
     let length = base64.len();
-    let padding = base64
-        .bytes()
-        .rev()
-        .take_while(|byte| *byte == b'=')
-        .count();
+    let padding = base64.bytes().rev().take_while(|byte| *byte == b'=').count();
     let extra = match length % 4 {
         2 => 1,
         3 => 2,
@@ -1442,17 +1351,9 @@ fn sanitize(value: &str) -> String {
 /// schema has to be and a server is free to send something else.
 fn force_object(schema: &rmcp::model::JsonObject) -> rmcp::model::JsonObject {
     let mut schema = schema.clone();
-    schema.insert(
-        "type".to_owned(),
-        serde_json::Value::String("object".to_owned()),
-    );
-    schema
-        .entry("properties")
-        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-    schema.insert(
-        "additionalProperties".to_owned(),
-        serde_json::Value::Bool(false),
-    );
+    schema.insert("type".to_owned(), serde_json::Value::String("object".to_owned()));
+    schema.entry("properties").or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    schema.insert("additionalProperties".to_owned(), serde_json::Value::Bool(false));
 
     schema
 }

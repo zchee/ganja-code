@@ -1,12 +1,11 @@
-use std::{collections::BTreeMap, path::Path};
+use std::collections::BTreeMap;
+use std::path::Path;
 
 use serde_json::json;
 
 use super::{AgentError, BUILD, EXPLORE, EXPLORE_PROMPT, GENERAL, PLAN, Registry};
-use crate::{
-    config::{AgentConfig, AgentMode, Config, Overrides},
-    permission::{Action, PermissionConfig, Permissions, Rule},
-};
+use crate::config::{AgentConfig, AgentMode, Config, Overrides};
+use crate::permission::{Action, PermissionConfig, Permissions, Rule};
 
 /// The agents a config defines, by name — the type [`Config::agent`] holds,
 /// spelled once so a case can build one without naming the map type.
@@ -43,11 +42,7 @@ fn registry(config: &Config) -> Registry {
 #[test]
 fn the_builtins_are_the_four_upstream_agents_this_build_can_run() {
     let registry = registry(&Config::default());
-    let names: Vec<&str> = registry
-        .agents()
-        .iter()
-        .map(|agent| agent.name.as_str())
-        .collect();
+    let names: Vec<&str> = registry.agents().iter().map(|agent| agent.name.as_str()).collect();
 
     assert_eq!(names, vec![BUILD, PLAN, GENERAL, EXPLORE]);
     assert_eq!(registry.default_agent(), BUILD);
@@ -80,13 +75,7 @@ fn the_search_agent_carries_upstreams_prompt_verbatim() {
 
     assert_eq!(explore.prompt.as_deref(), Some(EXPLORE_PROMPT));
     assert!(EXPLORE_PROMPT.starts_with("You are a file search specialist."));
-    assert!(
-        registry
-            .get(BUILD)
-            .expect("build is builtin")
-            .prompt
-            .is_none()
-    );
+    assert!(registry.get(BUILD).expect("build is builtin").prompt.is_none());
 }
 
 /// The `.env` rules are the shared default every agent inherits, and the
@@ -98,16 +87,8 @@ fn every_agent_stops_to_ask_before_reading_a_dotenv_file() {
     for name in [BUILD, PLAN, GENERAL] {
         let rules = &registry.get(name).expect("a builtin").rules;
         assert_eq!(decides(rules, "read", ".env"), Some(Action::Ask), "{name}");
-        assert_eq!(
-            decides(rules, "read", "config/.env.local"),
-            Some(Action::Ask),
-            "{name}"
-        );
-        assert_eq!(
-            decides(rules, "read", ".env.example"),
-            Some(Action::Allow),
-            "{name}"
-        );
+        assert_eq!(decides(rules, "read", "config/.env.local"), Some(Action::Ask), "{name}");
+        assert_eq!(decides(rules, "read", ".env.example"), Some(Action::Allow), "{name}");
         assert_eq!(decides(rules, "read", "src/main.rs"), None, "{name}");
     }
 }
@@ -124,11 +105,7 @@ fn the_memory_door_opens_that_one_directory_and_nothing_around_it() {
     rules.extend(super::memory_rules(&directory));
 
     let index = directory.join("MEMORY.md").display().to_string();
-    let topic = directory
-        .join("topics")
-        .join("style.md")
-        .display()
-        .to_string();
+    let topic = directory.join("topics").join("style.md").display().to_string();
     for pattern in [index.as_str(), topic.as_str()] {
         assert_eq!(
             decides(&rules, "write", pattern),
@@ -137,11 +114,7 @@ fn the_memory_door_opens_that_one_directory_and_nothing_around_it() {
         );
         assert_eq!(decides(&rules, "edit", pattern), Some(Action::Allow));
         assert_eq!(
-            decides(
-                &rules,
-                crate::permission::EXTERNAL_DIRECTORY,
-                &format!("{pattern}/*")
-            ),
+            decides(&rules, crate::permission::EXTERNAL_DIRECTORY, &format!("{pattern}/*")),
             Some(Action::Allow),
             "and neither must the location gate raised beside it"
         );
@@ -151,11 +124,7 @@ fn the_memory_door_opens_that_one_directory_and_nothing_around_it() {
     let sibling = "/data/ganja/project/api-1/permissions.json";
     assert_eq!(decides(&rules, "write", sibling), None, "{sibling}");
     assert_eq!(
-        decides(
-            &rules,
-            crate::permission::EXTERNAL_DIRECTORY,
-            "/data/ganja/project/api-1/*"
-        ),
+        decides(&rules, crate::permission::EXTERNAL_DIRECTORY, "/data/ganja/project/api-1/*"),
         Some(Action::Ask),
         "the shared default still governs everywhere else outside"
     );
@@ -183,10 +152,7 @@ fn a_config_that_says_nothing_about_memory_opens_no_door() {
 /// it — which is why it is not there.
 #[test]
 fn only_the_agents_a_person_runs_carry_the_memory_door() {
-    let registry = registry(&Config {
-        memory: Some(true),
-        ..Config::default()
-    });
+    let registry = registry(&Config { memory: Some(true), ..Config::default() });
     let holds_a_door = |name: &str| {
         registry
             .get(name)
@@ -227,17 +193,9 @@ fn a_subagent_does_not_inherit_the_door_that_lets_memory_be_written() {
         None,
         "the write allow must not travel: {child:?}"
     );
+    assert_eq!(decides(&child, "edit", &index), None, "nor the edit allow: {child:?}");
     assert_eq!(
-        decides(&child, "edit", &index),
-        None,
-        "nor the edit allow: {child:?}"
-    );
-    assert_eq!(
-        decides(
-            &child,
-            crate::permission::EXTERNAL_DIRECTORY,
-            &format!("{index}/*")
-        ),
+        decides(&child, crate::permission::EXTERNAL_DIRECTORY, &format!("{index}/*")),
         Some(Action::Allow),
         "the location gate travels, which is what lets a child read it"
     );
@@ -265,10 +223,7 @@ fn the_search_agent_allows_only_what_a_search_needs() {
     }
     // Shell access is undenied, not ungated.
     assert_eq!(decides(rules, "bash", "ls"), Some(Action::Ask));
-    assert_eq!(
-        decides(rules, crate::permission::EXTERNAL_DIRECTORY, "/tmp/*"),
-        Some(Action::Ask)
-    );
+    assert_eq!(decides(rules, crate::permission::EXTERNAL_DIRECTORY, "/tmp/*"), Some(Action::Ask));
     for denied in ["edit", "write", "todowrite"] {
         assert_eq!(decides(rules, denied, ANY_CALL), Some(Action::Deny));
     }
@@ -286,11 +241,7 @@ fn the_search_agent_may_not_load_a_skill() {
     let registry = registry(&Config::default());
 
     assert_eq!(
-        decides(
-            &registry.get(EXPLORE).expect("explore is builtin").rules,
-            "skill",
-            "porting"
-        ),
+        decides(&registry.get(EXPLORE).expect("explore is builtin").rules, "skill", "porting"),
         Some(Action::Deny)
     );
     // And the agents upstream leaves at its `"*": "allow"` default say
@@ -298,11 +249,7 @@ fn the_search_agent_may_not_load_a_skill() {
     // therefore allowed — is what decides.
     for name in [BUILD, PLAN, GENERAL] {
         assert_eq!(
-            decides(
-                &registry.get(name).expect("a builtin").rules,
-                "skill",
-                "porting"
-            ),
+            decides(&registry.get(name).expect("a builtin").rules, "skill", "porting"),
             None,
             "{name}"
         );
@@ -319,11 +266,7 @@ fn the_planning_agent_alone_may_leave_planning() {
     let registry = registry(&Config::default());
 
     assert_eq!(
-        decides(
-            &registry.get(PLAN).expect("plan is builtin").rules,
-            "plan_exit",
-            ANY_CALL
-        ),
+        decides(&registry.get(PLAN).expect("plan is builtin").rules, "plan_exit", ANY_CALL),
         Some(Action::Allow)
     );
 }
@@ -333,11 +276,7 @@ fn the_build_agent_is_refused_the_exit_it_does_not_need() {
     let registry = registry(&Config::default());
 
     assert_eq!(
-        decides(
-            &registry.get(BUILD).expect("build is builtin").rules,
-            "plan_exit",
-            ANY_CALL
-        ),
+        decides(&registry.get(BUILD).expect("build is builtin").rules, "plan_exit", ANY_CALL),
         Some(Action::Deny)
     );
 }
@@ -349,11 +288,7 @@ fn the_build_agent_alone_may_ask_to_start_planning() {
     let registry = registry(&Config::default());
 
     assert_eq!(
-        decides(
-            &registry.get(BUILD).expect("build is builtin").rules,
-            "plan_enter",
-            ANY_CALL
-        ),
+        decides(&registry.get(BUILD).expect("build is builtin").rules, "plan_enter", ANY_CALL),
         Some(Action::Allow)
     );
 }
@@ -367,11 +302,7 @@ fn the_planning_agent_is_refused_the_entrance_it_is_already_through() {
 
     for name in [PLAN, GENERAL, EXPLORE] {
         assert_eq!(
-            decides(
-                &registry.get(name).expect("a builtin").rules,
-                "plan_enter",
-                ANY_CALL
-            ),
+            decides(&registry.get(name).expect("a builtin").rules, "plan_enter", ANY_CALL),
             Some(Action::Deny),
             "{name}"
         );
@@ -388,18 +319,10 @@ fn a_subagent_inherits_the_refusal_and_not_the_plan_agents_allow() {
     parent.set_baseline(registry.get(PLAN).expect("plan is builtin").rules.clone());
 
     for name in [GENERAL, EXPLORE] {
-        let mut child = registry
-            .get(name)
-            .expect("a builtin subagent")
-            .rules
-            .clone();
+        let mut child = registry.get(name).expect("a builtin subagent").rules.clone();
         child.extend(parent.inherited_by_subagent());
 
-        assert_eq!(
-            decides(&child, "plan_exit", ANY_CALL),
-            Some(Action::Deny),
-            "{name}"
-        );
+        assert_eq!(decides(&child, "plan_exit", ANY_CALL), Some(Action::Deny), "{name}");
     }
 }
 
@@ -414,27 +337,16 @@ fn a_subagent_inherits_the_refusal_and_not_the_build_agents_allow() {
     parent.set_baseline(registry.get(BUILD).expect("build is builtin").rules.clone());
 
     for name in [GENERAL, EXPLORE] {
-        let mut child = registry
-            .get(name)
-            .expect("a builtin subagent")
-            .rules
-            .clone();
+        let mut child = registry.get(name).expect("a builtin subagent").rules.clone();
         child.extend(parent.inherited_by_subagent());
 
-        assert_eq!(
-            decides(&child, "plan_enter", ANY_CALL),
-            Some(Action::Deny),
-            "{name}"
-        );
+        assert_eq!(decides(&child, "plan_enter", ANY_CALL), Some(Action::Deny), "{name}");
     }
 }
 
 #[test]
 fn a_config_rule_is_appended_after_the_agents_own() {
-    let config = Config {
-        permission: permission(json!({ "edit": "allow" })),
-        ..Config::default()
-    };
+    let config = Config { permission: permission(json!({ "edit": "allow" })), ..Config::default() };
     let registry = registry(&config);
 
     assert_eq!(
@@ -449,23 +361,13 @@ fn a_per_agent_config_rule_comes_after_the_global_one() {
     let mut agent = Definitions::new();
     agent.insert(
         PLAN.to_owned(),
-        AgentConfig {
-            permission: permission(json!({ "edit": "deny" })),
-            ..AgentConfig::default()
-        },
+        AgentConfig { permission: permission(json!({ "edit": "deny" })), ..AgentConfig::default() },
     );
-    let config = Config {
-        permission: permission(json!({ "edit": "allow" })),
-        agent,
-        ..Config::default()
-    };
+    let config =
+        Config { permission: permission(json!({ "edit": "allow" })), agent, ..Config::default() };
 
     assert_eq!(
-        decides(
-            &registry(&config).get(PLAN).expect("plan").rules,
-            "edit",
-            "a.rs"
-        ),
+        decides(&registry(&config).get(PLAN).expect("plan").rules, "edit", "a.rs"),
         Some(Action::Deny)
     );
 }
@@ -473,24 +375,12 @@ fn a_per_agent_config_rule_comes_after_the_global_one() {
 #[test]
 fn a_disabled_agent_is_gone_and_an_unknown_name_becomes_a_new_one() {
     let mut agent = Definitions::new();
-    agent.insert(
-        PLAN.to_owned(),
-        AgentConfig {
-            disable: Some(true),
-            ..AgentConfig::default()
-        },
-    );
+    agent.insert(PLAN.to_owned(), AgentConfig { disable: Some(true), ..AgentConfig::default() });
     agent.insert(
         "reviewer".to_owned(),
-        AgentConfig {
-            prompt: Some("you review".to_owned()),
-            ..AgentConfig::default()
-        },
+        AgentConfig { prompt: Some("you review".to_owned()), ..AgentConfig::default() },
     );
-    let config = Config {
-        agent,
-        ..Config::default()
-    };
+    let config = Config { agent, ..Config::default() };
     let registry = registry(&config);
 
     assert!(registry.get(PLAN).is_none());
@@ -513,10 +403,7 @@ fn a_config_definition_replaces_field_by_field() {
             ..AgentConfig::default()
         },
     );
-    let config = Config {
-        agent,
-        ..Config::default()
-    };
+    let config = Config { agent, ..Config::default() };
     let registry = registry(&config);
     let build = registry.get(BUILD).expect("build survives being redefined");
 
@@ -528,55 +415,30 @@ fn a_config_definition_replaces_field_by_field() {
         Some("The default agent. Executes tools based on configured permissions."),
         "a field the config left out keeps what it had"
     );
-    assert_eq!(
-        registry.default_agent(),
-        PLAN,
-        "a hidden build is not what a session starts on"
-    );
+    assert_eq!(registry.default_agent(), PLAN, "a hidden build is not what a session starts on");
 }
 
 #[test]
 fn a_named_default_agent_that_cannot_be_honoured_is_an_error() {
     let hidden = {
         let mut agent = Definitions::new();
-        agent.insert(
-            BUILD.to_owned(),
-            AgentConfig {
-                hidden: Some(true),
-                ..AgentConfig::default()
-            },
-        );
+        agent
+            .insert(BUILD.to_owned(), AgentConfig { hidden: Some(true), ..AgentConfig::default() });
         agent
     };
 
     let cases = [
         (
-            Config {
-                default_agent: Some("nope".to_owned()),
-                ..Config::default()
-            },
-            AgentError::Unknown {
-                name: "nope".to_owned(),
-            },
+            Config { default_agent: Some("nope".to_owned()), ..Config::default() },
+            AgentError::Unknown { name: "nope".to_owned() },
         ),
         (
-            Config {
-                default_agent: Some(EXPLORE.to_owned()),
-                ..Config::default()
-            },
-            AgentError::Subagent {
-                name: EXPLORE.to_owned(),
-            },
+            Config { default_agent: Some(EXPLORE.to_owned()), ..Config::default() },
+            AgentError::Subagent { name: EXPLORE.to_owned() },
         ),
         (
-            Config {
-                default_agent: Some(BUILD.to_owned()),
-                agent: hidden,
-                ..Config::default()
-            },
-            AgentError::Hidden {
-                name: BUILD.to_owned(),
-            },
+            Config { default_agent: Some(BUILD.to_owned()), agent: hidden, ..Config::default() },
+            AgentError::Hidden { name: BUILD.to_owned() },
         ),
     ];
 
@@ -589,10 +451,7 @@ fn a_named_default_agent_that_cannot_be_honoured_is_an_error() {
 fn the_agent_flag_outranks_the_configured_default() {
     let config = Config {
         default_agent: Some(BUILD.to_owned()),
-        overrides: Overrides {
-            agent: Some(PLAN.to_owned()),
-            ..Overrides::default()
-        },
+        overrides: Overrides { agent: Some(PLAN.to_owned()), ..Overrides::default() },
         ..Config::default()
     };
 
@@ -600,17 +459,12 @@ fn the_agent_flag_outranks_the_configured_default() {
 
     // And it is validated the same way the config key is.
     let config = Config {
-        overrides: Overrides {
-            agent: Some("nope".to_owned()),
-            ..Overrides::default()
-        },
+        overrides: Overrides { agent: Some("nope".to_owned()), ..Overrides::default() },
         ..Config::default()
     };
     assert_eq!(
         Registry::from_dirs(&config, &[]).err(),
-        Some(AgentError::Unknown {
-            name: "nope".to_owned()
-        })
+        Some(AgentError::Unknown { name: "nope".to_owned() })
     );
 }
 
@@ -618,23 +472,12 @@ fn the_agent_flag_outranks_the_configured_default() {
 fn a_config_that_leaves_nothing_visible_refuses_to_resolve() {
     let mut agent = Definitions::new();
     for name in [BUILD, PLAN] {
-        agent.insert(
-            name.to_owned(),
-            AgentConfig {
-                disable: Some(true),
-                ..AgentConfig::default()
-            },
-        );
+        agent
+            .insert(name.to_owned(), AgentConfig { disable: Some(true), ..AgentConfig::default() });
     }
-    let config = Config {
-        agent,
-        ..Config::default()
-    };
+    let config = Config { agent, ..Config::default() };
 
-    assert_eq!(
-        Registry::from_dirs(&config, &[]).err(),
-        Some(AgentError::NoneVisible)
-    );
+    assert_eq!(Registry::from_dirs(&config, &[]).err(), Some(AgentError::NoneVisible));
 }
 
 // ---- Agent definition files (**D482**) ------------------------------
@@ -680,20 +523,13 @@ fn a_definition_file_is_an_agent_named_after_it() {
     let reviewer = registry.get("reviewer").expect("the file defines an agent");
 
     assert_eq!(reviewer.description.as_deref(), Some("Reviews a diff."));
-    assert_eq!(
-        reviewer.model.as_deref(),
-        Some("anthropic/claude-haiku-4.5")
-    );
+    assert_eq!(reviewer.model.as_deref(), Some("anthropic/claude-haiku-4.5"));
     assert_eq!(
         reviewer.prompt.as_deref(),
         Some("You review changes and say what is wrong with them."),
         "the body is the prompt, and a prompt replaces the base one"
     );
-    assert_eq!(
-        reviewer.mode,
-        AgentMode::All,
-        "the same default a config-defined agent gets"
-    );
+    assert_eq!(reviewer.mode, AgentMode::All, "the same default a config-defined agent gets");
     assert!(reviewer.selectable(), "so a person may switch to it");
     assert!(reviewer.spawnable(), "and the task tool may spawn it");
 }
@@ -711,32 +547,18 @@ fn a_definition_files_block_scalar_description_keeps_its_whole_text() {
     let (_directory, registry) = with_files(
         &Config::default(),
         &[
-            (
-                "literal.md",
-                "---\ndescription: |\n  first\n  second\n---\nBe brief.\n",
-            ),
-            (
-                "folded.md",
-                "---\ndescription: >-\n  first\n  second\n---\nBe brief.\n",
-            ),
+            ("literal.md", "---\ndescription: |\n  first\n  second\n---\nBe brief.\n"),
+            ("folded.md", "---\ndescription: >-\n  first\n  second\n---\nBe brief.\n"),
         ],
     );
 
     assert_eq!(
-        registry
-            .get("literal")
-            .expect("the file defines an agent")
-            .description
-            .as_deref(),
+        registry.get("literal").expect("the file defines an agent").description.as_deref(),
         Some("first\nsecond"),
         "a literal block keeps its line breaks"
     );
     assert_eq!(
-        registry
-            .get("folded")
-            .expect("the file defines an agent")
-            .description
-            .as_deref(),
+        registry.get("folded").expect("the file defines an agent").description.as_deref(),
         Some("first second"),
         "and a folded one joins them with a space"
     );
@@ -748,10 +570,7 @@ fn a_definition_files_block_scalar_description_keeps_its_whole_text() {
 fn a_stated_name_outranks_the_file_name() {
     let (_directory, registry) = with_files(
         &Config::default(),
-        &[(
-            "any-file-name.md",
-            "---\nname: auditor\nmode: subagent\nhidden: true\n---\nAudit.\n",
-        )],
+        &[("any-file-name.md", "---\nname: auditor\nmode: subagent\nhidden: true\n---\nAudit.\n")],
     );
     let auditor = registry.get("auditor").expect("the frontmatter named it");
 
@@ -765,21 +584,9 @@ fn a_stated_name_outranks_the_file_name() {
 #[test]
 fn a_definition_nobody_could_act_on_is_skipped_with_a_reason() {
     let cases = [
-        (
-            "---\nname: team/reviewer\n---\nbody",
-            "path separator",
-            "holds a path separator",
-        ),
-        (
-            "---\nmode: occasionally\n---\nbody",
-            "an unknown mode",
-            "`primary`, `subagent`, `all`",
-        ),
-        (
-            "---\nhidden: sometimes\n---\nbody",
-            "an unknown hidden",
-            "`true` or `false`",
-        ),
+        ("---\nname: team/reviewer\n---\nbody", "path separator", "holds a path separator"),
+        ("---\nmode: occasionally\n---\nbody", "an unknown mode", "`primary`, `subagent`, `all`"),
+        ("---\nhidden: sometimes\n---\nbody", "an unknown hidden", "`true` or `false`"),
     ];
 
     for (text, what, expected) in cases {
@@ -795,21 +602,17 @@ fn a_definition_nobody_could_act_on_is_skipped_with_a_reason() {
 /// here.
 #[test]
 fn a_model_alias_is_refused_and_the_full_form_is_named() {
-    let reason = super::Definition::parse(
-        Path::new("/agents/reviewer.md"),
-        "---\nmodel: opus\n---\nbody",
-    )
-    .expect_err("an alias is not a model id");
+    let reason =
+        super::Definition::parse(Path::new("/agents/reviewer.md"), "---\nmodel: opus\n---\nbody")
+            .expect_err("an alias is not a model id");
 
     assert!(reason.contains("opus"), "{reason}");
     assert!(reason.contains("provider/model"), "{reason}");
     assert!(reason.contains("anthropic/"), "{reason}");
 
     // And the session still starts: the file is skipped, nothing else is.
-    let (_directory, registry) = with_files(
-        &Config::default(),
-        &[("reviewer.md", "---\nmodel: opus\n---\nbody")],
-    );
+    let (_directory, registry) =
+        with_files(&Config::default(), &[("reviewer.md", "---\nmodel: opus\n---\nbody")]);
     assert!(registry.get("reviewer").is_none());
     assert_eq!(registry.default_agent(), BUILD);
 }
@@ -827,10 +630,7 @@ fn a_second_file_claiming_a_name_in_one_directory_is_skipped() {
         ],
     );
 
-    assert_eq!(
-        registry.get("reviewer").expect("one of them won").prompt,
-        Some("first".to_owned())
-    );
+    assert_eq!(registry.get("reviewer").expect("one of them won").prompt, Some("first".to_owned()));
 }
 
 /// **AC4, at the rules.** A listed tool is allowed, an unlisted one is
@@ -839,10 +639,7 @@ fn a_second_file_claiming_a_name_in_one_directory_is_skipped() {
 fn a_tools_list_allows_what_it_names_and_denies_the_rest() {
     let (_directory, registry) = with_files(
         &Config::default(),
-        &[(
-            "searcher.md",
-            "---\ntools: read, grep\n---\nYou search and report.\n",
-        )],
+        &[("searcher.md", "---\ntools: read, grep\n---\nYou search and report.\n")],
     );
     let rules = &registry.get("searcher").expect("the file defines it").rules;
 
@@ -850,11 +647,7 @@ fn a_tools_list_allows_what_it_names_and_denies_the_rest() {
         assert_eq!(decides(rules, allowed, ANY_CALL), Some(Action::Allow));
     }
     for denied in ["edit", "write", "bash", "task", "todowrite", "skill"] {
-        assert_eq!(
-            decides(rules, denied, ANY_CALL),
-            Some(Action::Deny),
-            "{denied}"
-        );
+        assert_eq!(decides(rules, denied, ANY_CALL), Some(Action::Deny), "{denied}");
     }
     assert_eq!(
         decides(rules, "mcp__docs__search", ANY_CALL),
@@ -875,15 +668,9 @@ fn a_tools_list_allows_what_it_names_and_denies_the_rest() {
 fn a_tools_list_leaves_the_conversation_tools_where_it_found_them() {
     let (_directory, registry) = with_files(
         &Config::default(),
-        &[(
-            "build.md",
-            "---\ntools: read, plan_exit\n---\nYou build carefully.\n",
-        )],
+        &[("build.md", "---\ntools: read, plan_exit\n---\nYou build carefully.\n")],
     );
-    let rules = &registry
-        .get(BUILD)
-        .expect("the file overlaid a builtin")
-        .rules;
+    let rules = &registry.get(BUILD).expect("the file overlaid a builtin").rules;
 
     assert_eq!(
         decides(rules, "plan_enter", ANY_CALL),
@@ -907,10 +694,8 @@ fn a_tools_list_leaves_the_conversation_tools_where_it_found_them() {
 /// the whole roster and not one rule about it.
 #[test]
 fn a_file_that_states_no_tools_builds_no_wall() {
-    let (_directory, registry) = with_files(
-        &Config::default(),
-        &[("reviewer.md", "---\ndescription: r\n---\nReview.\n")],
-    );
+    let (_directory, registry) =
+        with_files(&Config::default(), &[("reviewer.md", "---\ndescription: r\n---\nReview.\n")]);
     let rules = &registry.get("reviewer").expect("the file defines it").rules;
 
     for tool in ["edit", "write", "bash", "task", "read"] {
@@ -926,24 +711,12 @@ fn a_file_that_states_no_tools_builds_no_wall() {
 /// under the parent's refusals: the wall travels down, the allows do not.
 #[test]
 fn a_subagent_inherits_the_wall_a_tools_list_built() {
-    let (_directory, registry) = with_files(
-        &Config::default(),
-        &[("searcher.md", "---\ntools: read\n---\nSearch.\n")],
-    );
+    let (_directory, registry) =
+        with_files(&Config::default(), &[("searcher.md", "---\ntools: read\n---\nSearch.\n")]);
     let mut parent = Permissions::default();
-    parent.set_baseline(
-        registry
-            .get("searcher")
-            .expect("the file defines it")
-            .rules
-            .clone(),
-    );
+    parent.set_baseline(registry.get("searcher").expect("the file defines it").rules.clone());
 
-    let mut child = registry
-        .get(GENERAL)
-        .expect("general is a builtin subagent")
-        .rules
-        .clone();
+    let mut child = registry.get(GENERAL).expect("general is a builtin subagent").rules.clone();
     child.extend(parent.inherited_by_subagent());
 
     assert_eq!(
@@ -995,10 +768,7 @@ fn a_project_file_outranks_a_global_one_and_the_config_outranks_both() {
             ..AgentConfig::default()
         },
     );
-    let config = Config {
-        agent,
-        ..Config::default()
-    };
+    let config = Config { agent, ..Config::default() };
     let reviewer = Registry::from_dirs(&config, &dirs)
         .expect("the fixture resolves an agent")
         .get("reviewer")
@@ -1019,15 +789,9 @@ fn a_config_disable_removes_a_file_agent() {
     let mut agent = Definitions::new();
     agent.insert(
         "reviewer".to_owned(),
-        AgentConfig {
-            disable: Some(true),
-            ..AgentConfig::default()
-        },
+        AgentConfig { disable: Some(true), ..AgentConfig::default() },
     );
-    let config = Config {
-        agent,
-        ..Config::default()
-    };
+    let config = Config { agent, ..Config::default() };
     let (_directory, dirs) = homes(&[("reviewer.md", "---\ndescription: r\n---\nReview.")]);
 
     let registry = Registry::from_dirs(&config, &dirs).expect("the builtins are still there");
@@ -1042,24 +806,15 @@ fn a_directory_of_unreadable_files_leaves_the_session_startable() {
         &Config::default(),
         &[
             ("empty.md", ""),
-            (
-                "unterminated.md",
-                "---\nname: nope\ndescription: no closing fence\n",
-            ),
+            ("unterminated.md", "---\nname: nope\ndescription: no closing fence\n"),
             ("binary.md", "\u{0}\u{1}\u{2}not markdown"),
             ("not-markdown.txt", "---\nname: ignored\n---\nbody"),
             ("good.md", "---\ndescription: fine\n---\nWork.\n"),
         ],
     );
 
-    assert!(
-        registry.get("good").is_some(),
-        "the readable one still lands"
-    );
-    assert!(
-        registry.get("ignored").is_none(),
-        "a file that is not `.md` is not a definition"
-    );
+    assert!(registry.get("good").is_some(), "the readable one still lands");
+    assert!(registry.get("ignored").is_none(), "a file that is not `.md` is not a definition");
     // A file with no frontmatter at all is not hostile, only terse: it is
     // an agent named after itself whose whole text is its prompt.
     for name in ["empty", "unterminated", "binary"] {
@@ -1073,18 +828,8 @@ fn a_directory_of_unreadable_files_leaves_the_session_startable() {
 /// split, in every spelling a person or an editor writes it in.
 #[test]
 fn a_tools_value_is_read_in_every_spelling_it_is_written_in() {
-    for value in [
-        "read, grep",
-        "read grep",
-        "read,grep",
-        "[read, grep]",
-        "\"read\", 'grep'",
-    ] {
-        assert_eq!(
-            super::tool_names(value),
-            vec!["read".to_owned(), "grep".to_owned()],
-            "{value}"
-        );
+    for value in ["read, grep", "read grep", "read,grep", "[read, grep]", "\"read\", 'grep'"] {
+        assert_eq!(super::tool_names(value), vec!["read".to_owned(), "grep".to_owned()], "{value}");
     }
     assert!(super::tool_names("  ").is_empty());
 }

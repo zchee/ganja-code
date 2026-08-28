@@ -20,12 +20,10 @@
 
 use std::sync::Arc;
 
-use ganja_core::{
-    AgentConfig, Config, Engine, instruction,
-    permission::Permissions,
-    protocol::{Command, Event, PermissionReply},
-    tool::Registry,
-};
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{Command, Event, PermissionReply};
+use ganja_core::tool::Registry;
+use ganja_core::{AgentConfig, Config, Engine, instruction};
 use ganja_testkit::{ScriptedProvider, agent_registry, drain, drain_answering, says, tool_call};
 use serde_json::json;
 
@@ -40,13 +38,8 @@ const GPT: &str = "gpt-fixture";
 /// The engine under test: no tools, no environment half, and the base half
 /// composed for whatever model is active.
 fn engine(provider: Arc<ScriptedProvider>, model: &str) -> Engine {
-    Engine::new(
-        provider,
-        model,
-        Arc::new(Registry::new(Vec::new())),
-        Permissions::default(),
-    )
-    .with_base_for_model()
+    Engine::new(provider, model, Arc::new(Registry::new(Vec::new())), Permissions::default())
+        .with_base_for_model()
 }
 
 /// Sends `text` and waits for the turn it starts to finish.
@@ -71,10 +64,7 @@ fn systems(requests: &std::sync::Mutex<Vec<ganja_core::provider::ChatRequest>>) 
         .expect("the request log is never poisoned")
         .iter()
         .map(|request| {
-            request
-                .system
-                .clone()
-                .expect("every request carries the prompt it was built with")
+            request.system.clone().expect("every request carries the prompt it was built with")
         })
         .collect()
 }
@@ -104,9 +94,7 @@ async fn switching_to_a_model_of_another_family_recomposes_the_base_prompt() {
     ask(&engine, &mut events).await;
 
     engine
-        .send(Command::SwitchModel {
-            model: GPT.to_owned(),
-        })
+        .send(Command::SwitchModel { model: GPT.to_owned() })
         .await
         .expect("a provider the catalog does not cover takes the model at its word");
 
@@ -135,33 +123,21 @@ async fn switching_to_an_agent_that_prefers_another_familys_model_recomposes_the
     let mut agent = std::collections::BTreeMap::new();
     agent.insert(
         "scribe".to_owned(),
-        AgentConfig {
-            model: Some(format!("recorder/{GPT}")),
-            ..AgentConfig::default()
-        },
+        AgentConfig { model: Some(format!("recorder/{GPT}")), ..AgentConfig::default() },
     );
-    let config = Config {
-        agent,
-        ..Config::default()
-    };
+    let config = Config { agent, ..Config::default() };
 
     let (provider, seen) = ScriptedProvider::new(vec![says("one"), says("two")]);
-    let engine = Engine::new(
-        provider,
-        CLAUDE,
-        Arc::new(Registry::new(Vec::new())),
-        Permissions::default(),
-    )
-    .with_agents(agent_registry(&config))
-    .with_base_for_model();
+    let engine =
+        Engine::new(provider, CLAUDE, Arc::new(Registry::new(Vec::new())), Permissions::default())
+            .with_agents(agent_registry(&config))
+            .with_base_for_model();
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     ask(&engine, &mut events).await;
 
     engine
-        .send(Command::SwitchAgent {
-            name: "scribe".to_owned(),
-        })
+        .send(Command::SwitchAgent { name: "scribe".to_owned() })
         .await
         .expect("a config agent is selectable");
     assert_eq!(
@@ -203,16 +179,9 @@ async fn a_default_agent_that_prefers_another_familys_model_decides_the_launch_p
     let mut agent = std::collections::BTreeMap::new();
     agent.insert(
         "scribe".to_owned(),
-        AgentConfig {
-            model: Some(format!("recorder/{GPT}")),
-            ..AgentConfig::default()
-        },
+        AgentConfig { model: Some(format!("recorder/{GPT}")), ..AgentConfig::default() },
     );
-    let config = Config {
-        agent,
-        default_agent: Some("scribe".to_owned()),
-        ..Config::default()
-    };
+    let config = Config { agent, default_agent: Some("scribe".to_owned()), ..Config::default() };
 
     for agents_first in [true, false] {
         let (provider, seen) = ScriptedProvider::new(vec![says("one")]);
@@ -223,11 +192,9 @@ async fn a_default_agent_that_prefers_another_familys_model_decides_the_launch_p
             Permissions::default(),
         );
         let engine = if agents_first {
-            bare.with_agents(agent_registry(&config))
-                .with_base_for_model()
+            bare.with_agents(agent_registry(&config)).with_base_for_model()
         } else {
-            bare.with_base_for_model()
-                .with_agents(agent_registry(&config))
+            bare.with_base_for_model().with_agents(agent_registry(&config))
         };
         assert_eq!(
             engine.model(),
@@ -272,20 +239,14 @@ async fn a_subagent_is_handed_the_base_prompt_of_the_family_in_force() {
         // And the parent's answer, once the delegation came back.
         says("what the parent made of it"),
     ]);
-    let engine = Engine::new(
-        provider,
-        CLAUDE,
-        Arc::new(Registry::new(Vec::new())),
-        Permissions::default(),
-    )
-    .with_agents(agent_registry(&Config::default()))
-    .with_base_for_model();
+    let engine =
+        Engine::new(provider, CLAUDE, Arc::new(Registry::new(Vec::new())), Permissions::default())
+            .with_agents(agent_registry(&Config::default()))
+            .with_base_for_model();
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
-        .send(Command::SwitchModel {
-            model: GPT.to_owned(),
-        })
+        .send(Command::SwitchModel { model: GPT.to_owned() })
         .await
         .expect("a provider the catalog does not cover takes the model at its word");
 
@@ -310,13 +271,7 @@ async fn a_subagent_is_handed_the_base_prompt_of_the_family_in_force() {
         let requests = seen.lock().expect("the request log is never poisoned");
         let offered: Vec<Vec<&str>> = requests
             .iter()
-            .map(|request| {
-                request
-                    .tools
-                    .iter()
-                    .map(|tool| tool.name.as_str())
-                    .collect()
-            })
+            .map(|request| request.tools.iter().map(|tool| tool.name.as_str()).collect())
             .collect();
         assert_eq!(
             offered,
@@ -330,11 +285,7 @@ async fn a_subagent_is_handed_the_base_prompt_of_the_family_in_force() {
     }
 
     let systems = systems(&seen);
-    assert_eq!(
-        systems.len(),
-        3,
-        "one ordered script drives both loops: parent, child, parent"
-    );
+    assert_eq!(systems.len(), 3, "one ordered script drives both loops: parent, child, parent");
     // `general` deliberately has no prompt of its own, which is what makes the
     // child fall through to the base half this test is about.
     assert_eq!(
@@ -362,9 +313,7 @@ async fn a_switch_within_one_family_leaves_the_base_prompt_exactly_as_it_was() {
     ask(&engine, &mut events).await;
 
     engine
-        .send(Command::SwitchModel {
-            model: OTHER_CLAUDE.to_owned(),
-        })
+        .send(Command::SwitchModel { model: OTHER_CLAUDE.to_owned() })
         .await
         .expect("a provider the catalog does not cover takes the model at its word");
 
@@ -372,11 +321,7 @@ async fn a_switch_within_one_family_leaves_the_base_prompt_exactly_as_it_was() {
 
     let systems = systems(&seen);
     assert_eq!(systems.len(), 2, "one request per prompt");
-    assert_eq!(
-        systems[0],
-        instruction::base_prompt(CLAUDE),
-        "the launch model's family"
-    );
+    assert_eq!(systems[0], instruction::base_prompt(CLAUDE), "the launch model's family");
     assert_eq!(
         systems[1], systems[0],
         "and a sibling of that family is told exactly the same thing"
@@ -391,21 +336,15 @@ async fn a_base_nobody_asked_to_follow_the_model_survives_a_cross_family_switch(
     const FIXED: &str = "you are a fixture";
 
     let (provider, seen) = ScriptedProvider::new(vec![says("one"), says("two")]);
-    let engine = Engine::new(
-        provider,
-        CLAUDE,
-        Arc::new(Registry::new(Vec::new())),
-        Permissions::default(),
-    )
-    .with_system_parts(Some(FIXED.to_owned()), None);
+    let engine =
+        Engine::new(provider, CLAUDE, Arc::new(Registry::new(Vec::new())), Permissions::default())
+            .with_system_parts(Some(FIXED.to_owned()), None);
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     ask(&engine, &mut events).await;
 
     engine
-        .send(Command::SwitchModel {
-            model: GPT.to_owned(),
-        })
+        .send(Command::SwitchModel { model: GPT.to_owned() })
         .await
         .expect("a provider the catalog does not cover takes the model at its word");
 

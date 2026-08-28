@@ -17,10 +17,7 @@ fn a_key_carrying_control_characters_renders_as_replacements() {
 /// row early.
 #[test]
 fn a_row_cannot_return_to_the_start_of_its_own_line() {
-    assert_eq!(
-        printable("safe\rrewritten\nnext"),
-        "safe\u{fffd}rewritten\u{fffd}next"
-    );
+    assert_eq!(printable("safe\rrewritten\nnext"), "safe\u{fffd}rewritten\u{fffd}next");
 }
 
 /// Accepted, and said so out loud: the columns are space-aligned, so a tab was
@@ -34,10 +31,7 @@ fn a_tab_in_ordinary_text_is_replaced_too() {
 /// included — the filter is about control characters and not about ASCII.
 #[test]
 fn text_with_no_control_characters_is_returned_unchanged() {
-    assert_eq!(
-        printable("[[hooks.PreToolUse]] 日本語"),
-        "[[hooks.PreToolUse]] 日本語"
-    );
+    assert_eq!(printable("[[hooks.PreToolUse]] 日本語"), "[[hooks.PreToolUse]] 日本語");
 }
 
 /// One character in, one character out, which is what keeps the width

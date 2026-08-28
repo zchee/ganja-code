@@ -16,11 +16,9 @@
 //! pinned against a real socket beside the engine, in the same shape this
 //! endpoint is written in.
 
-use std::{
-    io::{Read as _, Write as _},
-    net::{TcpListener, TcpStream},
-    thread,
-};
+use std::io::{Read as _, Write as _};
+use std::net::{TcpListener, TcpStream};
+use std::thread;
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -116,25 +114,22 @@ fn the_listing_names_each_server_its_standing_and_the_tools_it_lends() {
     let url = endpoint();
     let path = config_file(&project, &servers(&url));
 
-    listing(&project, &data, Some(&path))
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::contains("SERVER")
-                .and(predicate::str::contains("STATUS"))
-                .and(predicate::str::contains("ADDRESS"))
-                // Reached, and lending the tool it advertised under the name
-                // the model would call it by.
-                .and(predicate::str::contains("hub"))
-                .and(predicate::str::contains("connected"))
-                .and(predicate::str::contains(&url))
-                .and(predicate::str::contains("mcp__hub__ping"))
-                // Not reached, and the reason is quoted rather than swallowed.
-                .and(predicate::str::contains("failed"))
-                .and(predicate::str::contains("ganja-no-such-program-8842"))
-                // Never dialled, which is not an error.
-                .and(predicate::str::contains("disabled")),
-        );
+    listing(&project, &data, Some(&path)).assert().success().stdout(
+        predicate::str::contains("SERVER")
+            .and(predicate::str::contains("STATUS"))
+            .and(predicate::str::contains("ADDRESS"))
+            // Reached, and lending the tool it advertised under the name
+            // the model would call it by.
+            .and(predicate::str::contains("hub"))
+            .and(predicate::str::contains("connected"))
+            .and(predicate::str::contains(&url))
+            .and(predicate::str::contains("mcp__hub__ping"))
+            // Not reached, and the reason is quoted rather than swallowed.
+            .and(predicate::str::contains("failed"))
+            .and(predicate::str::contains("ganja-no-such-program-8842"))
+            // Never dialled, which is not an error.
+            .and(predicate::str::contains("disabled")),
+    );
 }
 
 /// The TOOLS column names how many tools a connected server lends, and says
@@ -146,16 +141,13 @@ fn the_listing_names_a_tool_count_beside_each_servers_standing() {
     let url = endpoint();
     let path = config_file(&project, &servers(&url));
 
-    listing(&project, &data, Some(&path))
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::contains("TOOLS")
-                // The one server that lent a tool (`hub`, the endpoint above
-                // advertises exactly one: `ping`) is the only row that can
-                // print a count of "1".
-                .and(predicate::str::is_match(r"hub\s+connected\s+1\s+").unwrap()),
-        );
+    listing(&project, &data, Some(&path)).assert().success().stdout(
+        predicate::str::contains("TOOLS")
+            // The one server that lent a tool (`hub`, the endpoint above
+            // advertises exactly one: `ping`) is the only row that can
+            // print a count of "1".
+            .and(predicate::str::is_match(r"hub\s+connected\s+1\s+").unwrap()),
+    );
 }
 
 /// Each server's standing is its own, which is the whole claim of the listing.
@@ -171,12 +163,8 @@ fn a_standing_is_reported_per_server_and_not_once_for_all_of_them() {
     let url = endpoint();
     let path = config_file(&project, &servers(&url));
 
-    let output = listing(&project, &data, Some(&path))
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
+    let output =
+        listing(&project, &data, Some(&path)).assert().success().get_output().stdout.clone();
     let listed = String::from_utf8(output).expect("the listing is UTF-8");
 
     let counted = |word: &str| listed.matches(word).count();
@@ -278,12 +266,8 @@ fn a_login_is_refused_by_name_before_it_reaches_a_network() {
 /// able to tell apart from success.
 fn endpoint() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback is bindable");
-    let url = format!(
-        "http://{}/mcp",
-        listener
-            .local_addr()
-            .expect("a bound socket has an address")
-    );
+    let url =
+        format!("http://{}/mcp", listener.local_addr().expect("a bound socket has an address"));
 
     thread::spawn(move || {
         for stream in listener.incoming() {
@@ -343,8 +327,7 @@ fn whole(buffer: &[u8]) -> Option<(String, String)> {
         .lines()
         .find_map(|line| {
             let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse().ok())?
+            name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse().ok())?
         })
         .unwrap_or(0);
     if rest.len() < length {

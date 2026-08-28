@@ -86,19 +86,15 @@
 //! binary that refuses the witness performs the registration itself, observed
 //! directly. See [`ganja_team::COLLISION_SEPARATOR`], which records what it does.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
-use ganja_core::{
-    Storage, Teammates,
-    teammate::{
-        TeammateRegistry,
-        claude::{self, CONFIG_DIR_ENV},
-    },
-};
+use ganja_core::teammate::TeammateRegistry;
+use ganja_core::teammate::claude::{self, CONFIG_DIR_ENV};
+use ganja_core::{Storage, Teammates};
 use ganja_team::{MemberName, TeamName, TeamsRoot, mailbox};
-use ganja_testkit::{
-    AllowSpawn, LEAD_SESSION_ID, caller, eventually, spawn_with_prompt, tmux::PrivateServer,
-};
+use ganja_testkit::tmux::PrivateServer;
+use ganja_testkit::{AllowSpawn, LEAD_SESSION_ID, caller, eventually, spawn_with_prompt};
 
 /// The opt-in every live test in this workspace shares.
 const LIVE: &str = "GANJA_LIVE_TEST";
@@ -199,12 +195,8 @@ async fn a_real_claude_pane_round_trips_over_the_shared_inbox() {
     let worker = MemberName::parse(WORKER).expect("a member name");
     let lead_inbox = root.inbox_path(&team, &MemberName::lead());
 
-    let registry = Arc::new(TeammateRegistry::new(
-        root.clone(),
-        team.clone(),
-        LEAD_SESSION_ID,
-        home.path(),
-    ));
+    let registry =
+        Arc::new(TeammateRegistry::new(root.clone(), team.clone(), LEAD_SESSION_ID, home.path()));
     // The in-process slot is never reached: every spawn below names `claude`.
     // Present because the door takes all three, and the default backends'
     // fake provider is what keeps it from needing a credential.
@@ -226,10 +218,7 @@ async fn a_real_claude_pane_round_trips_over_the_shared_inbox() {
         .await
         .unwrap_or_else(|refused| panic!("a claude pane could not be started: {}", refused.reason));
     assert_eq!(started.backend, "claude");
-    assert_eq!(
-        started.name, WORKER,
-        "the spawn keeps the name it asked for"
-    );
+    assert_eq!(started.name, WORKER, "the spawn keeps the name it asked for");
 
     // §4.1 step 5, from the pane's side of the directory: the task is in the
     // inbox the pane reads, and it was never on the command line.
@@ -262,11 +251,7 @@ async fn a_real_claude_pane_round_trips_over_the_shared_inbox() {
             .find(|message| message.text.contains(TOKEN))
     })
     .await;
-    assert_eq!(
-        answer.from, WORKER,
-        "a teammate answers as itself: {:?}",
-        answer.from
-    );
+    assert_eq!(answer.from, WORKER, "a teammate answers as itself: {:?}", answer.from);
 
     registry.shutdown().await;
     // Explicit rather than left to `Drop` order, so the panes are gone before

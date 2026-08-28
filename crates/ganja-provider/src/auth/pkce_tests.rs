@@ -31,7 +31,8 @@ fn a_verifier_is_the_base64url_of_the_bytes_it_was_drawn_from() {
     // the octets are the entropy, and the verifier is how they are spelled.
     // Checking this pins that the 43 characters are an *encoding* of 32
     // bytes rather than 43 characters sampled from an alphabet.
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
     assert_eq!(URL_SAFE_NO_PAD.encode(RFC_OCTETS), RFC_VERIFIER);
 }
@@ -82,10 +83,7 @@ fn raw_bytes_are_fresh_entropy_and_not_a_repeated_buffer() {
     let mut seen = HashSet::new();
     for _ in 0..DRAWS {
         let bytes = super::random_bytes::<16>().expect("the platform has a random source");
-        assert!(
-            seen.insert(bytes),
-            "a 16-byte draw repeated within {DRAWS} draws"
-        );
+        assert!(seen.insert(bytes), "a 16-byte draw repeated within {DRAWS} draws");
     }
 }
 

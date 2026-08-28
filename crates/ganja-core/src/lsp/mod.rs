@@ -44,11 +44,9 @@ pub mod server;
 // this crate that reads one has to be able to name it. Re-exported rather than
 // wrapped: the protocol's own type is the honest one, and a parallel struct
 // would be a second thing to keep in step with the specification.
-use std::{
-    collections::{BTreeMap, HashMap},
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use client::Client;
 use futures::future;
@@ -56,7 +54,8 @@ pub use lsp_types;
 use lsp_types::Diagnostic;
 use serde_json::Value;
 use server::Spec;
-use tokio::{sync::OnceCell, time::Instant};
+use tokio::sync::OnceCell;
+use tokio::time::Instant;
 
 use crate::config::LspConfig;
 
@@ -185,10 +184,8 @@ impl Lsp {
     /// cached: the next caller gets the same [`None`] without another attempt.
     async fn client(&self, spec: &Spec, root: PathBuf) -> Option<Arc<Client>> {
         let slot = {
-            let mut clients = self
-                .clients
-                .lock()
-                .expect("the language server clients are never poisoned");
+            let mut clients =
+                self.clients.lock().expect("the language server clients are never poisoned");
 
             Arc::clone(clients.entry((root.clone(), spec.id.clone())).or_default())
         };
@@ -355,19 +352,13 @@ impl Drop for Lsp {
 /// the raw arguments rather than by re-parsing each tool's struct: this seam
 /// knows the three tool ids and one field name, and nothing else about them.
 fn file_argument(args: &Value) -> Option<String> {
-    args.get("filePath")
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
+    args.get("filePath").and_then(Value::as_str).map(ToOwned::to_owned)
 }
 
 /// `named` against `cwd` when it is relative, which the tools also do.
 fn resolve(cwd: &Path, named: &str) -> PathBuf {
     let path = Path::new(named);
-    if path.is_absolute() {
-        path.to_owned()
-    } else {
-        cwd.join(path)
-    }
+    if path.is_absolute() { path.to_owned() } else { cwd.join(path) }
 }
 
 #[cfg(test)]

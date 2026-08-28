@@ -16,18 +16,9 @@ fn a_provider_accepts_exactly_the_logins_this_build_has_for_it() {
         "the login landed ahead of the wire, and it is OAuth-only: a \
              stored key would be a credential nothing ever sends"
     );
-    assert_eq!(
-        ProviderId::OpenAi.methods(),
-        [Method::Browser, Method::Device, Method::Api]
-    );
-    assert_eq!(
-        ProviderId::Grok.methods(),
-        [Method::Browser, Method::Device, Method::Api]
-    );
-    assert_eq!(
-        ProviderId::GithubCopilot.methods(),
-        [Method::Device, Method::Api]
-    );
+    assert_eq!(ProviderId::OpenAi.methods(), [Method::Browser, Method::Device, Method::Api]);
+    assert_eq!(ProviderId::Grok.methods(), [Method::Browser, Method::Device, Method::Api]);
+    assert_eq!(ProviderId::GithubCopilot.methods(), [Method::Device, Method::Api]);
 }
 
 /// A menu is only worth drawing when there is something to choose, and
@@ -76,10 +67,7 @@ fn a_cursor_login_runs_its_browser_flow_and_a_key_for_it_is_refused() {
         let refused = chosen(ProviderId::Cursor, has_key, method)
             .expect_err("cursor has no key to store")
             .to_string();
-        assert!(
-            refused.contains("no `api` login") && refused.contains("`browser`"),
-            "{refused}"
-        );
+        assert!(refused.contains("no `api` login") && refused.contains("`browser`"), "{refused}");
     }
 
     let refused = chosen(ProviderId::Cursor, false, Some(Method::Device))
@@ -93,11 +81,8 @@ fn a_cursor_login_runs_its_browser_flow_and_a_key_for_it_is_refused() {
 /// recognisable to anybody who arrived from its documentation.
 #[test]
 fn groks_menu_offers_upstreams_two_oauth_logins_by_upstreams_names() {
-    let offered: Vec<String> = ProviderId::Grok
-        .methods()
-        .iter()
-        .map(|method| label(ProviderId::Grok, *method))
-        .collect();
+    let offered: Vec<String> =
+        ProviderId::Grok.methods().iter().map(|method| label(ProviderId::Grok, *method)).collect();
 
     assert_eq!(
         offered,
@@ -122,10 +107,7 @@ fn grok_accepts_a_browser_login_and_says_so_when_asked_for_one_it_lacks() {
     let refused = accepted(ProviderId::Anthropic, Method::Browser)
         .expect_err("anthropic has no OAuth flow in the pin")
         .to_string();
-    assert!(
-        refused.contains("`browser`") && refused.contains("`api`"),
-        "{refused}"
-    );
+    assert!(refused.contains("`browser`") && refused.contains("`api`"), "{refused}");
 }
 
 /// The variable decides where a device code and then a pair of tokens are
@@ -133,11 +115,7 @@ fn grok_accepts_a_browser_login_and_says_so_when_asked_for_one_it_lacks() {
 /// refused by the shape rather than by a check somebody remembered.
 #[test]
 fn only_a_whole_loopback_origin_may_redirect_a_login() {
-    for origin in [
-        "http://127.0.0.1:8080",
-        "http://localhost:1",
-        "http://[::1]:65535",
-    ] {
+    for origin in ["http://127.0.0.1:8080", "http://localhost:1", "http://[::1]:65535"] {
         assert_eq!(loopback_origin(origin), Some(origin), "{origin}");
     }
 
@@ -175,21 +153,14 @@ fn only_a_whole_loopback_origin_may_redirect_a_login() {
 fn a_named_deployment_answers_both_questions_without_asking_either() {
     for (kind, enterprise_url, expected) in [
         (Some(DeploymentKind::Public), None, Deployment::Public),
-        (
-            None,
-            Some("https://company.ghe.com/"),
-            Deployment::enterprise("company.ghe.com"),
-        ),
+        (None, Some("https://company.ghe.com/"), Deployment::enterprise("company.ghe.com")),
         (
             Some(DeploymentKind::Enterprise),
             Some("company.ghe.com"),
             Deployment::enterprise("company.ghe.com"),
         ),
     ] {
-        let answer = DeploymentAnswer {
-            kind,
-            enterprise_url: enterprise_url.map(str::to_owned),
-        };
+        let answer = DeploymentAnswer { kind, enterprise_url: enterprise_url.map(str::to_owned) };
         assert_eq!(
             deployment(answer).expect("a named deployment needs nothing else"),
             expected,

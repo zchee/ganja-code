@@ -1,9 +1,7 @@
 //! The `tracing` capture every suite that reads its own log back shares.
 
-use std::{
-    io,
-    sync::{Arc, Mutex},
-};
+use std::io;
+use std::sync::{Arc, Mutex};
 
 /// A `tracing` writer a test can read back.
 ///
@@ -24,10 +22,7 @@ impl LogCapture {
 
 impl io::Write for LogCapture {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .expect("the log is never poisoned")
-            .extend_from_slice(buffer);
+        self.0.lock().expect("the log is never poisoned").extend_from_slice(buffer);
 
         Ok(buffer.len())
     }

@@ -8,10 +8,7 @@ fn a_frames_head_is_cut_on_a_character_boundary() {
     assert_eq!(cut.chars().count(), FRAME_HEAD);
     assert!(wide.starts_with(cut));
     // A frame shorter than the cap is not touched at all.
-    assert_eq!(
-        head("{\"type\":\"idle_notification\"}"),
-        "{\"type\":\"idle_notification\"}"
-    );
+    assert_eq!(head("{\"type\":\"idle_notification\"}"), "{\"type\":\"idle_notification\"}");
 }
 
 #[test]

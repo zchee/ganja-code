@@ -39,9 +39,7 @@ impl Emitter {
     pub fn detect() -> Option<Self> {
         std::env::var_os("KITTY_WINDOW_ID")?;
 
-        Some(Self {
-            tmux: std::env::var_os("TMUX").is_some(),
-        })
+        Some(Self { tmux: std::env::var_os("TMUX").is_some() })
     }
 
     /// An emitter for tests, reaching the terminal directly.
@@ -86,9 +84,7 @@ impl Emitter {
     /// placements the first cut used).
     #[must_use]
     pub fn virtual_placement(&self, id: u32, columns: u16, rows: u16) -> String {
-        self.wrapped(&format!(
-            "\x1b_Ga=p,U=1,i={id},c={columns},r={rows},q=2\x1b\\"
-        ))
+        self.wrapped(&format!("\x1b_Ga=p,U=1,i={id},c={columns},r={rows},q=2\x1b\\"))
     }
 
     /// Deletes every placement this program made — the teardown broom.
@@ -130,12 +126,7 @@ const MAX_EDGE: u32 = 512;
 /// exactly as it does on a terminal with no graphics at all.
 #[must_use]
 pub fn load(path: &str) -> Option<Preview> {
-    let decoded = image::ImageReader::open(path)
-        .ok()?
-        .with_guessed_format()
-        .ok()?
-        .decode()
-        .ok()?;
+    let decoded = image::ImageReader::open(path).ok()?.with_guessed_format().ok()?.decode().ok()?;
     // `thumbnail` fits the box in both directions — it would inflate a small
     // image too, and an upscaled preview is worse than the original pixels.
     let bounded = if decoded.width() > MAX_EDGE || decoded.height() > MAX_EDGE {

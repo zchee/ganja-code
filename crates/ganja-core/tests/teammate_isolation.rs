@@ -16,17 +16,16 @@
 //! The provider claims `"fake"` so that a first completed turn takes the
 //! fallback title instead of spending a request the scripts do not carry.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 use futures::StreamExt as _;
-use ganja_core::{
-    Engine, EngineError, SessionId, Storage,
-    permission::Permissions,
-    protocol::{Command, Event, PartBody, Role, ToolState},
-    provider::{FakeProvider, Provider},
-    teammate::Teammate,
-    tool::Registry,
-};
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{Command, Event, PartBody, Role, ToolState};
+use ganja_core::provider::{FakeProvider, Provider};
+use ganja_core::teammate::Teammate;
+use ganja_core::tool::Registry;
+use ganja_core::{Engine, EngineError, SessionId, Storage};
 use ganja_testkit::{ScriptedProvider, drain, drain_allowing, says, tool_call};
 
 /// How long the lead's stream is watched for an event it must never receive.
@@ -84,10 +83,7 @@ async fn prompt(engine: &Engine, text: &str) {
 fn tool_error(seen: &[Event]) -> Option<String> {
     seen.iter().rev().find_map(|event| match event {
         Event::PartUpdated { part, .. } => match &part.body {
-            PartBody::Tool {
-                state: ToolState::Error { error, .. },
-                ..
-            } => Some(error.clone()),
+            PartBody::Tool { state: ToolState::Error { error, .. }, .. } => Some(error.clone()),
             _ => None,
         },
         _ => None,
@@ -128,10 +124,7 @@ async fn a_teammates_read_does_not_unlock_the_leads_write() {
     let (teammate_provider, _) = ScriptedProvider::named(
         "fake",
         vec![
-            tool_call(
-                "read",
-                serde_json::json!({"filePath": shared.to_string_lossy()}),
-            ),
+            tool_call("read", serde_json::json!({"filePath": shared.to_string_lossy()})),
             says("read it"),
             tool_call(
                 "write",
@@ -147,19 +140,11 @@ async fn a_teammates_read_does_not_unlock_the_leads_write() {
     let lead = lead(lead_provider, &tools, storage.clone());
     let worker = teammate(teammate_provider, &tools, storage.clone());
     let mut lead_events = lead.subscribe().await.expect("the first subscriber wins");
-    let mut worker_events = worker
-        .engine()
-        .subscribe()
-        .await
-        .expect("the first subscriber wins");
+    let mut worker_events = worker.engine().subscribe().await.expect("the first subscriber wins");
 
     prompt(worker.engine(), "read the notes").await;
     let read = drain_allowing(worker.engine(), &mut worker_events).await;
-    assert_eq!(
-        tool_error(&read),
-        None,
-        "the teammate's own read should have succeeded"
-    );
+    assert_eq!(tool_error(&read), None, "the teammate's own read should have succeeded");
 
     prompt(&lead, "overwrite the notes").await;
     let refused = drain_allowing(&lead, &mut lead_events).await;
@@ -204,17 +189,11 @@ async fn a_teammate_engine_refuses_undo() {
     );
 
     assert!(
-        matches!(
-            worker.engine().send(Command::Undo).await,
-            Err(EngineError::NoSnapshots)
-        ),
+        matches!(worker.engine().send(Command::Undo).await, Err(EngineError::NoSnapshots)),
         "a teammate that takes no snapshots must say so rather than move its transcript"
     );
     assert!(
-        matches!(
-            worker.engine().send(Command::Redo).await,
-            Err(EngineError::NoSnapshots)
-        ),
+        matches!(worker.engine().send(Command::Redo).await, Err(EngineError::NoSnapshots)),
         "and the same for the other direction"
     );
 }
@@ -254,17 +233,9 @@ async fn a_teammate_session_runs_one_turn_against_the_fake_provider_and_settles(
         &tools,
         storage.clone(),
     );
-    let mut worker_events = worker
-        .engine()
-        .subscribe()
-        .await
-        .expect("the first subscriber wins");
+    let mut worker_events = worker.engine().subscribe().await.expect("the first subscriber wins");
     let worker_session = worker.engine().session_id();
-    assert_ne!(
-        worker_session,
-        lead.session_id(),
-        "two engines must not name one session"
-    );
+    assert_ne!(worker_session, lead.session_id(), "two engines must not name one session");
 
     prompt(worker.engine(), "the teammate's own turn").await;
     let worker_seen = drain(&mut worker_events).await;
@@ -290,19 +261,13 @@ async fn a_teammate_session_runs_one_turn_against_the_fake_provider_and_settles(
     // The teammate's whole turn is behind us, so anything that crossed engines
     // is already queued: what this waits for is the absence itself.
     assert!(
-        tokio::time::timeout(NOTHING_ARRIVES, lead_events.next())
-            .await
-            .is_err(),
+        tokio::time::timeout(NOTHING_ARRIVES, lead_events.next()).await.is_err(),
         "the lead's stream received something after the teammate's turn"
     );
 
     let sessions = storage.list_sessions().expect("the shared store lists");
     let ids: Vec<&SessionId> = sessions.iter().map(|info| &info.id).collect();
-    assert_eq!(
-        sessions.len(),
-        2,
-        "one store, two conversations, two rows: {ids:?}"
-    );
+    assert_eq!(sessions.len(), 2, "one store, two conversations, two rows: {ids:?}");
     assert!(
         sessions.iter().all(|info| info.parent.is_none()),
         "a teammate is a conversation somebody may resume, so both rows are roots"
@@ -312,9 +277,8 @@ async fn a_teammate_session_runs_one_turn_against_the_fake_provider_and_settles(
         "the rows are the two engines' own sessions: {ids:?}"
     );
 
-    let transcript = storage
-        .load_transcript(&worker_session)
-        .expect("the teammate's transcript reads back");
+    let transcript =
+        storage.load_transcript(&worker_session).expect("the teammate's transcript reads back");
     assert!(
         transcript.iter().any(|message| message.role == Role::User
             && message

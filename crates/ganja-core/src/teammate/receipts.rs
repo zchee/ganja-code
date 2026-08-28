@@ -134,12 +134,10 @@
 //! crate's, and the crates-registry standing rule is satisfied by that
 //! reuse rather than a fresh search.
 
-use std::{
-    collections::VecDeque,
-    path::{Path, PathBuf},
-    sync::{Mutex, MutexGuard},
-    time::Duration,
-};
+use std::collections::VecDeque;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 use ganja_protocol::{HeldId, HeldOutcome, PeerMessageId, PeerReceiptStatus};
 
@@ -323,13 +321,7 @@ impl Receipts {
         if state.associations.len() >= ASSOCIATION_CAP {
             state.associations.pop_front();
         }
-        state.associations.push_back((
-            held_id,
-            Association {
-                message_id,
-                reply_to,
-            },
-        ));
+        state.associations.push_back((held_id, Association { message_id, reply_to }));
     }
 
     /// Settles one held entry's receipt, best-effort. Meant to be called
@@ -353,24 +345,15 @@ impl Receipts {
         let Some(association) = association else {
             return;
         };
-        post(
-            &association.reply_to,
-            association.message_id,
-            wire_status_of(outcome),
-        )
-        .await;
+        post(&association.reply_to, association.message_id, wire_status_of(outcome)).await;
     }
 
     fn lock_sender(&self) -> MutexGuard<'_, SenderState> {
-        self.sender
-            .lock()
-            .expect("the receipts registry's sender lock is never poisoned")
+        self.sender.lock().expect("the receipts registry's sender lock is never poisoned")
     }
 
     fn lock_receiver(&self) -> MutexGuard<'_, ReceiverState> {
-        self.receiver
-            .lock()
-            .expect("the receipts registry's receiver lock is never poisoned")
+        self.receiver.lock().expect("the receipts registry's receiver lock is never poisoned")
     }
 }
 
@@ -420,29 +403,23 @@ async fn post(reply_to: &Path, message_id: PeerMessageId, status: ReceiptStatus)
         return;
     }
 
-    let client = match reqwest::Client::builder()
-        .unix_socket(reply_to)
-        .timeout(RECEIPT_DEADLINE)
-        .build()
-    {
-        Ok(client) => client,
-        Err(error) => {
-            tracing::debug!(
-                id = ?short,
-                ?status,
-                %error,
-                "a receipt client could not be built"
-            );
-            return;
-        }
-    };
+    let client =
+        match reqwest::Client::builder().unix_socket(reply_to).timeout(RECEIPT_DEADLINE).build() {
+            Ok(client) => client,
+            Err(error) => {
+                tracing::debug!(
+                    id = ?short,
+                    ?status,
+                    %error,
+                    "a receipt client could not be built"
+                );
+                return;
+            }
+        };
 
     let body = SocketReceipt { message_id, status };
-    if let Err(error) = client
-        .post(format!("{RECEIPT_URL}{RECEIPT_ROUTE}"))
-        .json(&body)
-        .send()
-        .await
+    if let Err(error) =
+        client.post(format!("{RECEIPT_URL}{RECEIPT_ROUTE}")).json(&body).send().await
     {
         tracing::debug!(
             id = ?short,
@@ -513,11 +490,7 @@ fn sentence(status: PeerReceiptStatus) -> &'static str {
 fn neutralized(value: &str) -> String {
     let admits = |point: &char| !point.is_control() && *point != '<' && *point != '>';
     let kept: String = value.chars().filter(admits).take(SHOWN_CAP).collect();
-    if value.chars().filter(admits).count() > SHOWN_CAP {
-        format!("{kept}…")
-    } else {
-        kept
-    }
+    if value.chars().filter(admits).count() > SHOWN_CAP { format!("{kept}…") } else { kept }
 }
 
 #[cfg(test)]

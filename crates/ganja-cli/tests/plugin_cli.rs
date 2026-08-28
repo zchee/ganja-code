@@ -7,7 +7,9 @@
 //! or write the plugins of whoever runs the suite. The git lane clones from
 //! a bare repository the test itself creates — the network is never asked.
 
-use std::{fs, path::Path, process::Command as Process};
+use std::fs;
+use std::path::Path;
+use std::process::Command as Process;
 
 use assert_cmd::Command;
 use ganja_testkit::plant;
@@ -56,21 +58,13 @@ fn plant_marketplace(market: &Path) {
         "plugins/walker/hooks/hooks.json",
         r#"{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo done"}]}]}}"#,
     );
-    plant(
-        market,
-        "plugins/walker/skills/hello/SKILL.md",
-        "Say hello.\n",
-    );
+    plant(market, "plugins/walker/skills/hello/SKILL.md", "Say hello.\n");
 }
 
 /// The store's state file, parsed — what add/install/enable/disable/remove
 /// are asserted against.
 fn state(home: &TempDir) -> Value {
-    let path = home
-        .path()
-        .join("ganja-home")
-        .join("plugins")
-        .join("plugins.json");
+    let path = home.path().join("ganja-home").join("plugins").join("plugins.json");
     let text = fs::read_to_string(&path).expect("the state file exists");
     serde_json::from_str(&text).expect("the state file is JSON")
 }
@@ -104,39 +98,24 @@ fn the_full_walk_moves_the_state_file_through_every_transition() {
     assert_eq!(installed["plugins"]["walker"]["marketplace"], "walk-market");
     assert_eq!(installed["plugins"]["walker"]["enabled"], true);
 
-    ganja(&home)
-        .args(["plugin", "list"])
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::contains("walker (enabled, from walk-market)")
-                .and(predicate::str::contains("hook Stop"))
-                .and(predicate::str::contains("skills")),
-        );
+    ganja(&home).args(["plugin", "list"]).assert().success().stdout(
+        predicate::str::contains("walker (enabled, from walk-market)")
+            .and(predicate::str::contains("hook Stop"))
+            .and(predicate::str::contains("skills")),
+    );
 
-    ganja(&home)
-        .args(["plugin", "disable", "walker"])
-        .assert()
-        .success();
+    ganja(&home).args(["plugin", "disable", "walker"]).assert().success();
     assert_eq!(state(&home)["plugins"]["walker"]["enabled"], false);
     ganja(&home)
         .args(["plugin", "list"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            "walker (disabled, from walk-market)",
-        ));
+        .stdout(predicate::str::contains("walker (disabled, from walk-market)"));
 
-    ganja(&home)
-        .args(["plugin", "enable", "walker"])
-        .assert()
-        .success();
+    ganja(&home).args(["plugin", "enable", "walker"]).assert().success();
     assert_eq!(state(&home)["plugins"]["walker"]["enabled"], true);
 
-    ganja(&home)
-        .args(["plugin", "remove", "walker"])
-        .assert()
-        .success();
+    ganja(&home).args(["plugin", "remove", "walker"]).assert().success();
     let removed = state(&home);
     assert!(removed["plugins"].as_object().expect("a map").is_empty());
     assert!(
@@ -144,10 +123,7 @@ fn the_full_walk_moves_the_state_file_through_every_transition() {
         "removing a plugin keeps the marketplace added"
     );
     assert!(
-        !home
-            .path()
-            .join("ganja-home/plugins/installed/walker")
-            .exists(),
+        !home.path().join("ganja-home/plugins/installed/walker").exists(),
         "the installed copy is deleted"
     );
 }
@@ -206,10 +182,7 @@ fn a_marketplace_adds_from_a_git_url_cloned_locally() {
         .success()
         .stdout(predicate::str::contains("added marketplace walk-market"));
 
-    ganja(&home)
-        .args(["plugin", "install", "walker@walk-market"])
-        .assert()
-        .success();
+    ganja(&home).args(["plugin", "install", "walker@walk-market"]).assert().success();
     assert_eq!(state(&home)["plugins"]["walker"]["enabled"], true);
 }
 
@@ -227,19 +200,11 @@ fn every_refusal_names_what_it_is_refusing() {
         .stderr(predicate::str::contains("<plugin>@<marketplace>"));
 
     // Installing from a marketplace never added names the missing step.
-    ganja(&home)
-        .args(["plugin", "install", "walker@nowhere"])
-        .assert()
-        .failure()
-        .stderr(
-            predicate::str::contains("nowhere").and(predicate::str::contains("marketplace add")),
-        );
+    ganja(&home).args(["plugin", "install", "walker@nowhere"]).assert().failure().stderr(
+        predicate::str::contains("nowhere").and(predicate::str::contains("marketplace add")),
+    );
 
-    ganja(&home)
-        .args(["plugin", "marketplace", "add"])
-        .arg(&market)
-        .assert()
-        .success();
+    ganja(&home).args(["plugin", "marketplace", "add"]).arg(&market).assert().success();
 
     // A plugin the marketplace does not list is refused with what it does.
     ganja(&home)
@@ -268,11 +233,7 @@ fn every_refusal_names_what_it_is_refusing() {
         .failure()
         .stderr(predicate::str::contains("marketplace.json"));
     assert!(
-        !home
-            .path()
-            .join("ganja-home/plugins/marketplaces")
-            .join("empty")
-            .exists(),
+        !home.path().join("ganja-home/plugins/marketplaces").join("empty").exists(),
         "a failed add keeps nothing"
     );
 }

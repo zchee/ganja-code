@@ -26,13 +26,8 @@ use ganja_core::provider;
 /// imported from the constant: a test that read the same array it is checking
 /// would pass however that array was reordered, and the order is half of what
 /// was pinned.
-const OFFERED: [&str; 5] = [
-    "gpt-5.5",
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-    "gpt-5.6-luna",
-    "gpt-5.3-codex-spark",
-];
+const OFFERED: [&str; 5] =
+    ["gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.3-codex-spark"];
 
 #[tokio::test]
 async fn a_chatgpt_login_is_offered_the_pinned_five_and_no_other_credential_is_offered_anything() {
@@ -62,11 +57,7 @@ async fn a_chatgpt_login_is_offered_the_pinned_five_and_no_other_credential_is_o
         .expect("a stored ChatGPT login is a seat, and a seat has its own roster")
         .expect("the seat arm reaches nothing that could fail");
 
-    let offered: Vec<&str> = listed
-        .models
-        .iter()
-        .map(|model| model.id.as_str())
-        .collect();
+    let offered: Vec<&str> = listed.models.iter().map(|model| model.id.as_str()).collect();
     assert_eq!(
         offered, OFFERED,
         "the seat is offered exactly the pinned five, in the pinned order"

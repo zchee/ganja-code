@@ -1,13 +1,9 @@
 use secrecy::{ExposeSecret as _, SecretString};
 
+use super::super::REFRESH_SKEW_MS;
+use super::super::device::harness::{Reply, TestClock, serve};
+use super::super::device::{Tokens, UPSTREAM_USER_AGENT};
 use super::{
-    super::{
-        REFRESH_SKEW_MS,
-        device::{
-            Tokens, UPSTREAM_USER_AGENT,
-            harness::{Reply, TestClock, serve},
-        },
-    },
     API_VERSION, CLIENT_ID, DEFAULT_API_BASE, Deployment, api_base_for, credential_from,
     device_flow, device_flow_at, normalize_domain,
 };
@@ -64,28 +60,16 @@ fn the_public_deployment_reaches_githubs_own_api_base() {
 #[test]
 fn a_login_goes_to_the_deployment_it_is_for() {
     let public = device_flow(&Deployment::Public).expect("a client builds");
-    assert_eq!(
-        public.device_code_url(),
-        "https://github.com/login/device/code"
-    );
-    assert_eq!(
-        public.token_url(),
-        "https://github.com/login/oauth/access_token"
-    );
+    assert_eq!(public.device_code_url(), "https://github.com/login/device/code");
+    assert_eq!(public.token_url(), "https://github.com/login/oauth/access_token");
 
     // The enterprise login talks to the enterprise host, not to
     // github.com — the API base is derived separately (`copilot.ts:19-28`)
     // and the two must not be confused for each other.
     let enterprise =
         device_flow(&Deployment::enterprise("https://company.ghe.com/")).expect("it builds");
-    assert_eq!(
-        enterprise.device_code_url(),
-        "https://company.ghe.com/login/device/code"
-    );
-    assert_eq!(
-        enterprise.token_url(),
-        "https://company.ghe.com/login/oauth/access_token"
-    );
+    assert_eq!(enterprise.device_code_url(), "https://company.ghe.com/login/device/code");
+    assert_eq!(enterprise.token_url(), "https://company.ghe.com/login/oauth/access_token");
 }
 
 #[tokio::test]
@@ -102,10 +86,8 @@ async fn a_login_asks_github_for_a_code_in_the_json_body_it_wants() {
     .expect("a client builds")
     .with_clock(TestClock::at(0));
 
-    let started = flow
-        .start(&tokio_util::sync::CancellationToken::new())
-        .await
-        .expect("the code is issued");
+    let started =
+        flow.start(&tokio_util::sync::CancellationToken::new()).await.expect("the code is issued");
 
     let request = endpoint.request(0);
     assert_eq!(request.path(), "/login/device/code");
@@ -160,10 +142,8 @@ async fn a_completed_login_stores_one_token_twice_and_never_expires() {
     let cancel = tokio_util::sync::CancellationToken::new();
 
     let started = flow.start(&cancel).await.expect("the code is issued");
-    let credential = credential_from(
-        &flow.poll(&started, &cancel).await.expect("the login lands"),
-        &deployment,
-    );
+    let credential =
+        credential_from(&flow.poll(&started, &cancel).await.expect("the login lands"), &deployment);
 
     assert_eq!(credential.access.expose_secret(), TOKEN_CANARY);
     assert_eq!(
@@ -171,10 +151,7 @@ async fn a_completed_login_stores_one_token_twice_and_never_expires() {
         TOKEN_CANARY,
         "there is one token, and every request reads it out of `refresh`"
     );
-    assert_eq!(
-        credential.enterprise_url.as_deref(),
-        Some("company.ghe.com")
-    );
+    assert_eq!(credential.enterprise_url.as_deref(), Some("company.ghe.com"));
 
     let poll = endpoint.request(2).json();
     assert_eq!(
@@ -194,29 +171,16 @@ async fn a_completed_login_stores_one_token_twice_and_never_expires() {
 #[test]
 fn a_copilot_credential_is_never_due_for_a_renewal_it_has_no_way_to_do() {
     let credential = credential_from(
-        &Tokens {
-            access: SecretString::from(TOKEN_CANARY),
-            refresh: None,
-            expires_in: None,
-        },
+        &Tokens { access: SecretString::from(TOKEN_CANARY), refresh: None, expires_in: None },
         &Deployment::Public,
     );
 
-    assert_eq!(
-        credential.expires, 0,
-        "`expires: 0` is upstream's `never` (`copilot.ts:299`)"
-    );
+    assert_eq!(credential.expires, 0, "`expires: 0` is upstream's `never` (`copilot.ts:299`)");
     // Every clock a caller could ask with, including one long past any
     // plausible expiry. Nothing in this module implements `RefreshOauth`,
     // so a credential that ever reported itself due would have no way to
     // stop being due.
-    for now_ms in [
-        0,
-        1,
-        super::super::now_ms(),
-        u64::MAX - REFRESH_SKEW_MS,
-        u64::MAX,
-    ] {
+    for now_ms in [0, 1, super::super::now_ms(), u64::MAX - REFRESH_SKEW_MS, u64::MAX] {
         assert!(
             !credential.needs_refresh(now_ms, REFRESH_SKEW_MS),
             "a Copilot credential must never be due, and was at {now_ms}"

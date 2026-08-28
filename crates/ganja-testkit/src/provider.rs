@@ -8,16 +8,12 @@
 //! itself: the provider id it answers to, and what it does once the script
 //! runs dry. Both are parameters here rather than forks.
 
-use std::{
-    collections::VecDeque,
-    sync::{Arc, Mutex},
-};
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use futures::{
-    StreamExt as _,
-    stream::{self, BoxStream},
-};
+use futures::StreamExt as _;
+use futures::stream::{self, BoxStream};
 use ganja_core::provider::{ChatRequest, Provider, ProviderError, ProviderEvent};
 use ganja_protocol::FinishReason;
 use tokio_util::sync::CancellationToken;
@@ -54,9 +50,8 @@ impl ScriptedProvider {
     /// ```
     /// use ganja_core::provider::ProviderEvent;
     ///
-    /// let (provider, requests) = ganja_testkit::ScriptedProvider::new(vec![
-    ///     ganja_testkit::says("hello"),
-    /// ]);
+    /// let (provider, requests) =
+    ///     ganja_testkit::ScriptedProvider::new(vec![ganja_testkit::says("hello")]);
     /// assert!(requests.lock().unwrap().is_empty(), "nothing asked yet");
     /// let _ = provider;
     /// ```
@@ -117,10 +112,7 @@ impl ScriptedProvider {
     /// Appends a step to the end of the script, for a test whose next answer
     /// depends on what an earlier turn produced.
     pub fn push(&self, script: Vec<ProviderEvent>) {
-        self.scripts
-            .lock()
-            .expect("the scripts are never poisoned")
-            .push_back(script);
+        self.scripts.lock().expect("the scripts are never poisoned").push_back(script);
     }
 }
 
@@ -139,16 +131,9 @@ impl Provider for ScriptedProvider {
         request: ChatRequest,
         _cancel: CancellationToken,
     ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
-        self.seen
-            .lock()
-            .expect("the request log is never poisoned")
-            .push(request);
+        self.seen.lock().expect("the request log is never poisoned").push(request);
 
-        let next = self
-            .scripts
-            .lock()
-            .expect("the scripts are never poisoned")
-            .pop_front();
+        let next = self.scripts.lock().expect("the scripts are never poisoned").pop_front();
 
         let script = match (next, self.on_exhausted) {
             (Some(script), _) => script,
@@ -172,10 +157,7 @@ impl Provider for ScriptedProvider {
 /// assert!(matches!(script[1], ProviderEvent::Finish(_)));
 /// ```
 pub fn says(text: &str) -> Vec<ProviderEvent> {
-    vec![
-        ProviderEvent::TextDelta(text.to_owned()),
-        ProviderEvent::Finish(FinishReason::Completed),
-    ]
+    vec![ProviderEvent::TextDelta(text.to_owned()), ProviderEvent::Finish(FinishReason::Completed)]
 }
 
 /// A step that calls `tool` with `args`, under the fixed id `"call"`, and
@@ -194,17 +176,9 @@ pub fn says(text: &str) -> Vec<ProviderEvent> {
 /// ```
 pub fn tool_call(tool: &str, args: serde_json::Value) -> Vec<ProviderEvent> {
     vec![
-        ProviderEvent::ToolCallStart {
-            id: "call".to_owned(),
-            name: tool.to_owned(),
-        },
-        ProviderEvent::ToolCallDelta {
-            id: "call".to_owned(),
-            json: args.to_string(),
-        },
-        ProviderEvent::ToolCallEnd {
-            id: "call".to_owned(),
-        },
+        ProviderEvent::ToolCallStart { id: "call".to_owned(), name: tool.to_owned() },
+        ProviderEvent::ToolCallDelta { id: "call".to_owned(), json: args.to_string() },
+        ProviderEvent::ToolCallEnd { id: "call".to_owned() },
         ProviderEvent::Finish(FinishReason::Completed),
     ]
 }

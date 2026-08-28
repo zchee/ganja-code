@@ -21,11 +21,7 @@ fn scripted_client(options: Options) -> Scripted {
     let (client_end, peer) = tokio::io::duplex(8192);
     let client = Client::from_duplex(&options, client_end, None);
     let (peer_read, peer_write) = tokio::io::split(peer);
-    Scripted {
-        client,
-        peer_read,
-        peer_write,
-    }
+    Scripted { client, peer_read, peer_write }
 }
 
 /// Writes `line + "\n"` on the peer end, as if tmux had sent it.
@@ -40,31 +36,20 @@ async fn peer_send(write: &mut PeerWrite, line: &str) {
 async fn peer_recv_written(read: &mut PeerRead) -> String {
     let mut reader = tokio::io::BufReader::new(read);
     let mut buf = String::new();
-    tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut buf)
-        .await
-        .unwrap();
+    tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut buf).await.unwrap();
     trim_line_ending(&buf).to_string()
 }
 
 fn default_options() -> Options {
-    Options::new()
-        .with_session_name("test")
-        .with_shutdown_timeout(Duration::from_millis(200))
+    Options::new().with_session_name("test").with_shutdown_timeout(Duration::from_millis(200))
 }
 
 #[tokio::test]
 async fn exec_serializes_and_routes_responses_by_writing_then_answering() {
-    let Scripted {
-        client,
-        mut peer_read,
-        mut peer_write,
-    } = scripted_client(default_options());
+    let Scripted { client, mut peer_read, mut peer_write } = scripted_client(default_options());
     let exec = async {
         client
-            .exec(
-                Command::from_static("display-message"),
-                [Arg::raw("-p"), Arg::string("hello")],
-            )
+            .exec(Command::from_static("display-message"), [Arg::raw("-p"), Arg::string("hello")])
             .await
     };
     let answer = async {
@@ -81,11 +66,7 @@ async fn exec_serializes_and_routes_responses_by_writing_then_answering() {
 
 #[tokio::test]
 async fn a_percent_error_response_becomes_a_command_error() {
-    let Scripted {
-        client,
-        mut peer_read,
-        mut peer_write,
-    } = scripted_client(default_options());
+    let Scripted { client, mut peer_read, mut peer_write } = scripted_client(default_options());
     let exec = async { client.exec_raw("bad-command").await };
     let answer = async {
         let written = peer_recv_written(&mut peer_read).await;
@@ -105,11 +86,7 @@ async fn a_percent_error_response_becomes_a_command_error() {
 
 #[tokio::test]
 async fn concurrent_execs_are_serialized_onto_one_pending_slot() {
-    let Scripted {
-        client,
-        peer_read,
-        peer_write,
-    } = scripted_client(default_options());
+    let Scripted { client, peer_read, peer_write } = scripted_client(default_options());
     let client = std::sync::Arc::new(client);
 
     let responder = tokio::spawn(async move {
@@ -117,16 +94,9 @@ async fn concurrent_execs_are_serialized_onto_one_pending_slot() {
         let mut writer = peer_write;
         for id in 1..=8i64 {
             let mut buf = String::new();
-            tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut buf)
-                .await
-                .unwrap();
-            let reply = format!(
-                "%begin 1 {id} 1\n{}\n%end 1 {id} 1\n",
-                trim_line_ending(&buf)
-            );
-            tokio::io::AsyncWriteExt::write_all(&mut writer, reply.as_bytes())
-                .await
-                .unwrap();
+            tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut buf).await.unwrap();
+            let reply = format!("%begin 1 {id} 1\n{}\n%end 1 {id} 1\n", trim_line_ending(&buf));
+            tokio::io::AsyncWriteExt::write_all(&mut writer, reply.as_bytes()).await.unwrap();
             tokio::io::AsyncWriteExt::flush(&mut writer).await.unwrap();
         }
     });
@@ -156,11 +126,8 @@ async fn concurrent_execs_are_serialized_onto_one_pending_slot() {
 
 #[tokio::test]
 async fn dropping_the_exec_future_after_a_successful_write_poisons_the_client() {
-    let Scripted {
-        client,
-        mut peer_read,
-        peer_write: _peer_write,
-    } = scripted_client(default_options());
+    let Scripted { client, mut peer_read, peer_write: _peer_write } =
+        scripted_client(default_options());
     let client = std::sync::Arc::new(client);
 
     let exec_client = std::sync::Arc::clone(&client);
@@ -180,10 +147,7 @@ async fn dropping_the_exec_future_after_a_successful_write_poisons_the_client() 
     let _ = handle.await;
     tokio::time::sleep(Duration::from_millis(20)).await;
 
-    let err = client
-        .exec_raw("display-message -p after")
-        .await
-        .unwrap_err();
+    let err = client.exec_raw("display-message -p after").await.unwrap_err();
     assert!(matches!(err, Error::Closed));
 }
 
@@ -207,29 +171,20 @@ async fn a_drop_while_blocked_mid_write_poisons_the_client() {
     // now holds undelivered bytes and is parked inside `write_all`'s
     // own `.await`, not merely scheduled to run it.
     let mut sink = [0u8; 4];
-    tokio::io::AsyncReadExt::read_exact(&mut peer, &mut sink)
-        .await
-        .unwrap();
+    tokio::io::AsyncReadExt::read_exact(&mut peer, &mut sink).await.unwrap();
 
     // Abort the task without ever draining further — the exec future
     // is dropped while genuinely suspended inside the write itself.
     handle.abort();
     let _ = handle.await;
 
-    let err = client
-        .exec_raw("display-message -p after")
-        .await
-        .unwrap_err();
+    let err = client.exec_raw("display-message -p after").await.unwrap_err();
     assert!(matches!(err, Error::Closed));
 }
 
 #[tokio::test]
 async fn a_second_exec_after_a_completed_one_still_works() {
-    let Scripted {
-        client,
-        mut peer_read,
-        mut peer_write,
-    } = scripted_client(default_options());
+    let Scripted { client, mut peer_read, mut peer_write } = scripted_client(default_options());
     {
         let exec = async { client.exec_raw("display-message -p one").await };
         let answer = async {
@@ -253,11 +208,8 @@ async fn a_second_exec_after_a_completed_one_still_works() {
 
 #[tokio::test]
 async fn notifications_beyond_the_buffer_drop_the_oldest_and_count() {
-    let Scripted {
-        client,
-        peer_read: _peer_read,
-        mut peer_write,
-    } = scripted_client(default_options().with_event_buffer(1));
+    let Scripted { client, peer_read: _peer_read, mut peer_write } =
+        scripted_client(default_options().with_event_buffer(1));
     peer_send(&mut peer_write, "%message first").await;
     peer_send(&mut peer_write, "%message second").await;
     peer_send(&mut peer_write, "%message third").await;
@@ -268,20 +220,14 @@ async fn notifications_beyond_the_buffer_drop_the_oldest_and_count() {
     }
     assert_eq!(client.dropped_notifications(), 2);
 
-    let got = tokio::time::timeout(Duration::from_secs(1), client.recv())
-        .await
-        .unwrap()
-        .unwrap();
+    let got = tokio::time::timeout(Duration::from_secs(1), client.recv()).await.unwrap().unwrap();
     assert_eq!(got.raw, "%message third");
 }
 
 #[tokio::test]
 async fn an_exit_notification_ends_the_read_loop_and_the_event_stream() {
-    let Scripted {
-        client,
-        peer_read: _peer_read,
-        mut peer_write,
-    } = scripted_client(default_options());
+    let Scripted { client, peer_read: _peer_read, mut peer_write } =
+        scripted_client(default_options());
     peer_send(&mut peer_write, "%exit detached").await;
     peer_send(&mut peer_write, "%message stray after exit").await;
 
@@ -299,17 +245,12 @@ async fn an_exit_notification_ends_the_read_loop_and_the_event_stream() {
 
 #[tokio::test]
 async fn a_parser_error_synthesizes_a_protocol_error_notification_before_aborting() {
-    let Scripted {
-        client,
-        peer_read: _peer_read,
-        mut peer_write,
-    } = scripted_client(default_options());
+    let Scripted { client, peer_read: _peer_read, mut peer_write } =
+        scripted_client(default_options());
     peer_send(&mut peer_write, "stray line outside any block").await;
 
-    let notification = tokio::time::timeout(Duration::from_secs(1), client.recv())
-        .await
-        .unwrap()
-        .unwrap();
+    let notification =
+        tokio::time::timeout(Duration::from_secs(1), client.recv()).await.unwrap().unwrap();
     assert_eq!(notification.kind, NotificationKind::ProtocolError);
     assert_eq!(notification.raw, "stray line outside any block");
 
@@ -345,20 +286,13 @@ async fn detach_is_skipped_and_reported_when_the_write_lock_is_held() {
     let Err(Error::Close { errors }) = close_result else {
         panic!("expected Error::Close, got {close_result:?}");
     };
-    assert!(
-        errors
-            .iter()
-            .any(|e| matches!(e, Error::DetachSkippedWriteLocked))
-    );
+    assert!(errors.iter().any(|e| matches!(e, Error::DetachSkippedWriteLocked)));
 }
 
 #[tokio::test]
 async fn close_unblocks_a_pending_exec_holding_the_write_lock() {
-    let Scripted {
-        client,
-        mut peer_read,
-        peer_write: _peer_write,
-    } = scripted_client(default_options());
+    let Scripted { client, mut peer_read, peer_write: _peer_write } =
+        scripted_client(default_options());
     let client = std::sync::Arc::new(client);
 
     let exec_client = std::sync::Arc::clone(&client);
@@ -374,11 +308,7 @@ async fn close_unblocks_a_pending_exec_holding_the_write_lock() {
     let Err(Error::Close { errors }) = close_result else {
         panic!("expected Error::Close, got {close_result:?}");
     };
-    assert!(
-        errors
-            .iter()
-            .any(|e| matches!(e, Error::DetachSkippedWriteLocked))
-    );
+    assert!(errors.iter().any(|e| matches!(e, Error::DetachSkippedWriteLocked)));
 
     // `close`'s `abort` fails the pending registration before it ever
     // attempts the write lock, so the blocked exec unblocks with
@@ -413,19 +343,13 @@ async fn close_unblocks_an_exec_blocked_inside_write_all() {
     // now genuinely blocked inside `write_all`, holding the write
     // lock, rather than merely registered as pending.
     let mut sink = [0u8; 4];
-    tokio::io::AsyncReadExt::read_exact(&mut peer, &mut sink)
-        .await
-        .unwrap();
+    tokio::io::AsyncReadExt::read_exact(&mut peer, &mut sink).await.unwrap();
 
     let close_result = client.close().await;
     let Err(Error::Close { errors }) = close_result else {
         panic!("expected Error::Close, got {close_result:?}");
     };
-    assert!(
-        errors
-            .iter()
-            .any(|e| matches!(e, Error::DetachSkippedWriteLocked))
-    );
+    assert!(errors.iter().any(|e| matches!(e, Error::DetachSkippedWriteLocked)));
 
     let exec_result = tokio::time::timeout(Duration::from_secs(1), exec)
         .await
@@ -489,10 +413,7 @@ async fn stderr_tail_is_bounded_and_populated() {
     while client.stderr_tail().len() < 2 && tokio::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
-    assert_eq!(
-        client.stderr_tail(),
-        vec!["two".to_string(), "three".to_string()]
-    );
+    assert_eq!(client.stderr_tail(), vec!["two".to_string(), "three".to_string()]);
 }
 
 #[tokio::test]

@@ -18,13 +18,13 @@
 //! the arrangement `tests/memory.rs` and `tests/config_schema.rs` already use,
 //! for the same reason.
 
-use std::{fs, path::Path, sync::Arc};
+use std::fs;
+use std::path::Path;
+use std::sync::Arc;
 
-use ganja_core::{
-    AgentRegistry, Config, Engine,
-    protocol::{Command, Event, PartBody, ToolState},
-    tool::Registry,
-};
+use ganja_core::protocol::{Command, Event, PartBody, ToolState};
+use ganja_core::tool::Registry;
+use ganja_core::{AgentRegistry, Config, Engine};
 use ganja_testkit::{RecorderTool, ScriptedProvider, drain, says};
 use serde_json::json;
 use tempfile::TempDir;
@@ -76,26 +76,15 @@ fn both_homes_are_scanned_and_the_project_one_wins_the_name(config_home: &Path, 
         .expect("the builtins resolve whatever the files say");
 
     assert_eq!(
-        registry
-            .get("researcher")
-            .expect("the config home is scanned")
-            .description
-            .as_deref(),
+        registry.get("researcher").expect("the config home is scanned").description.as_deref(),
         Some("only in the config home")
     );
     assert_eq!(
-        registry
-            .get("librarian")
-            .expect("both homes define it")
-            .description
-            .as_deref(),
+        registry.get("librarian").expect("both homes define it").description.as_deref(),
         Some("the project one"),
         "the checkout wins a name the two homes both claim"
     );
-    assert!(
-        registry.get("build").is_some(),
-        "and the builtins are still underneath all of it"
-    );
+    assert!(registry.get("build").is_some(), "and the builtins are still underneath all of it");
 }
 
 /// The body of the file is the system prompt of the turn — it **replaces** the
@@ -177,20 +166,14 @@ async fn a_tool_its_roster_leaves_out_is_refused_at_the_gate(project: &Path) {
     let seen = drain(&mut events).await;
 
     assert!(
-        !seen
-            .iter()
-            .any(|event| matches!(event, Event::PermissionRequested { .. })),
+        !seen.iter().any(|event| matches!(event, Event::PermissionRequested { .. })),
         "a rule decided it, so nobody was asked: {seen:?}"
     );
     assert!(
         edits.lock().expect("the call log").is_empty(),
         "the tool the roster left out must never have run"
     );
-    assert_eq!(
-        reads.lock().expect("the call log").len(),
-        1,
-        "and the one it named runs unasked"
-    );
+    assert_eq!(reads.lock().expect("the call log").len(), 1, "and the one it named runs unasked");
 
     let refused = refusals(&seen);
     assert_eq!(refused.len(), 1, "{refused:?}");
@@ -202,10 +185,7 @@ async fn a_tool_its_roster_leaves_out_is_refused_at_the_gate(project: &Path) {
 
 /// The registry `project`'s files resolve, started on `default_agent`.
 fn agents(project: &Path, default_agent: &str) -> Arc<AgentRegistry> {
-    let config = Config {
-        default_agent: Some(default_agent.to_owned()),
-        ..Config::default()
-    };
+    let config = Config { default_agent: Some(default_agent.to_owned()), ..Config::default() };
 
     Arc::new(AgentRegistry::build(&config, project).expect("the definition file resolves an agent"))
 }
@@ -226,10 +206,7 @@ fn refusals(seen: &[Event]) -> Vec<String> {
     seen.iter()
         .filter_map(|event| match event {
             Event::PartUpdated { part, .. } => match &part.body {
-                PartBody::Tool {
-                    state: ToolState::Error { error, .. },
-                    ..
-                } => Some(error.clone()),
+                PartBody::Tool { state: ToolState::Error { error, .. }, .. } => Some(error.clone()),
                 _ => None,
             },
             _ => None,

@@ -18,11 +18,9 @@ mod selection;
 
 use ratatui::style::{Color, Modifier, Style};
 
-pub use self::{
-    json::{Palette, ThemeError, ThemeJson},
-    registry::{DEFAULT_THEME, TERMINAL_THEME, Themes},
-    selection::SelectionError,
-};
+pub use self::json::{Palette, ThemeError, ThemeJson};
+pub use self::registry::{DEFAULT_THEME, TERMINAL_THEME, Themes};
+pub use self::selection::SelectionError;
 
 /// Theme keys the UI reads. The rest resolve and are carried on [`Theme`]
 /// untouched, for the markdown and syntax renderers that will read them.
@@ -87,12 +85,7 @@ pub struct Rgba {
 
 impl Rgba {
     /// What `"none"` and `"transparent"` resolve to.
-    pub const TRANSPARENT: Self = Self {
-        r: 0,
-        g: 0,
-        b: 0,
-        a: 0,
-    };
+    pub const TRANSPARENT: Self = Self { r: 0, g: 0, b: 0, a: 0 };
 
     /// An opaque color.
     #[must_use]

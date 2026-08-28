@@ -26,16 +26,14 @@
 use std::sync::Arc;
 
 use futures::StreamExt as _;
-use ganja_core::{
-    Config, Engine,
-    permission::Permissions,
-    protocol::{
-        Command, Event, FinishReason, PartBody, PermissionId, PermissionReply, QuestionId,
-        ToolState,
-    },
-    provider::Provider,
-    tool::{Registry, question::QuestionTool},
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{
+    Command, Event, FinishReason, PartBody, PermissionId, PermissionReply, QuestionId, ToolState,
 };
+use ganja_core::provider::Provider;
+use ganja_core::tool::Registry;
+use ganja_core::tool::question::QuestionTool;
+use ganja_core::{Config, Engine};
 use ganja_testkit::{ScriptedProvider, drain, says, tool_call};
 use serde_json::json;
 
@@ -90,10 +88,7 @@ async fn until_question(
             Event::QuestionAsked { id, .. } => Some(id.clone()),
             Event::PermissionRequested { id, .. } => {
                 engine
-                    .send(Command::ReplyPermission {
-                        id: id.clone(),
-                        reply: PermissionReply::Once,
-                    })
+                    .send(Command::ReplyPermission { id: id.clone(), reply: PermissionReply::Once })
                     .await
                     .expect("a permission reply is never refused");
                 None
@@ -114,9 +109,9 @@ async fn until_question(
 fn terminals(seen: &[Event], id: &QuestionId) -> Vec<String> {
     seen.iter()
         .filter_map(|event| match event {
-            Event::QuestionReplied {
-                id: named, answers, ..
-            } if named == id => Some(format!("replied:{}", answers.len())),
+            Event::QuestionReplied { id: named, answers, .. } if named == id => {
+                Some(format!("replied:{}", answers.len()))
+            }
             Event::QuestionRejected { id: named, .. } if named == id => Some("rejected".to_owned()),
             _ => None,
         })
@@ -170,13 +165,7 @@ async fn an_answered_question_produces_one_reply_and_the_model_reads_the_labels(
 
     // The request names the session the turn is running in, and the call it
     // came from, so a dialog can be attributed and correlated.
-    let Some(Event::QuestionAsked {
-        session_id,
-        questions,
-        source,
-        ..
-    }) = before.last()
-    else {
+    let Some(Event::QuestionAsked { session_id, questions, source, .. }) = before.last() else {
         panic!("the last thing seen is the question, got {before:?}");
     };
     assert_eq!(*session_id, engine.session_id());
@@ -189,10 +178,7 @@ async fn an_answered_question_produces_one_reply_and_the_model_reads_the_labels(
     assert!(!source.call_id.is_empty());
 
     engine
-        .send(Command::ReplyQuestion {
-            id: id.clone(),
-            answers: vec![vec!["Postgres".to_owned()]],
-        })
+        .send(Command::ReplyQuestion { id: id.clone(), answers: vec![vec!["Postgres".to_owned()]] })
         .await
         .expect("a reply is never refused");
     let mut seen = before;
@@ -209,9 +195,7 @@ async fn an_answered_question_produces_one_reply_and_the_model_reads_the_labels(
     );
     assert_eq!(finish(&seen), FinishReason::Completed);
     assert!(
-        !seen
-            .iter()
-            .any(|event| matches!(event, Event::PermissionRequested { .. })),
+        !seen.iter().any(|event| matches!(event, Event::PermissionRequested { .. })),
         "asking is the interaction; it must not also raise a dialog: {seen:?}"
     );
 }
@@ -275,10 +259,7 @@ async fn a_cancel_refuses_the_open_question_with_exactly_one_rejection() {
         .expect("an idle engine accepts a prompt");
     let (id, before) = until_question(&engine, &mut events).await;
 
-    engine
-        .send(Command::CancelTurn)
-        .await
-        .expect("a cancel is never refused");
+    engine.send(Command::CancelTurn).await.expect("a cancel is never refused");
     let mut seen = before;
     seen.extend(drain(&mut events).await);
 
@@ -306,18 +287,12 @@ async fn an_answer_that_arrives_after_the_cancel_adds_no_second_terminal() {
         .expect("an idle engine accepts a prompt");
     let (id, before) = until_question(&engine, &mut events).await;
 
-    engine
-        .send(Command::CancelTurn)
-        .await
-        .expect("a cancel is never refused");
+    engine.send(Command::CancelTurn).await.expect("a cancel is never refused");
     let mut seen = before;
     seen.extend(drain(&mut events).await);
 
     engine
-        .send(Command::ReplyQuestion {
-            id: id.clone(),
-            answers: vec![vec!["Postgres".to_owned()]],
-        })
+        .send(Command::ReplyQuestion { id: id.clone(), answers: vec![vec!["Postgres".to_owned()]] })
         .await
         .expect("a late reply is ignored rather than refused");
 
@@ -362,10 +337,7 @@ async fn a_permission_reply_cannot_answer_an_open_question() {
 
     // The question is still open, and a real answer still reaches it.
     engine
-        .send(Command::ReplyQuestion {
-            id: id.clone(),
-            answers: vec![vec!["SQLite".to_owned()]],
-        })
+        .send(Command::ReplyQuestion { id: id.clone(), answers: vec![vec!["SQLite".to_owned()]] })
         .await
         .expect("a reply is never refused");
     let mut seen = before;
@@ -404,21 +376,13 @@ async fn an_answer_naming_an_unknown_question_is_ignored() {
             id: QuestionId::from("que_nothing".to_owned()),
             answers: vec![vec!["Postgres".to_owned()]],
         },
-        Command::RejectQuestion {
-            id: QuestionId::from("que_nothing".to_owned()),
-        },
+        Command::RejectQuestion { id: QuestionId::from("que_nothing".to_owned()) },
     ] {
-        engine
-            .send(stray)
-            .await
-            .expect("a stray answer is ignored rather than refused");
+        engine.send(stray).await.expect("a stray answer is ignored rather than refused");
     }
 
     engine
-        .send(Command::ReplyQuestion {
-            id: id.clone(),
-            answers: vec![vec!["Postgres".to_owned()]],
-        })
+        .send(Command::ReplyQuestion { id: id.clone(), answers: vec![vec!["Postgres".to_owned()]] })
         .await
         .expect("a reply is never refused");
     let mut seen = before;
@@ -454,10 +418,7 @@ async fn a_skipped_question_is_named_to_the_model_as_unanswered() {
     let (id, before) = until_question(&engine, &mut events).await;
 
     engine
-        .send(Command::ReplyQuestion {
-            id: id.clone(),
-            answers: vec![Vec::new()],
-        })
+        .send(Command::ReplyQuestion { id: id.clone(), answers: vec![Vec::new()] })
         .await
         .expect("a reply is never refused");
     let mut seen = before;
@@ -516,10 +477,8 @@ async fn a_crossing_question_carries_the_parents_session_id() {
         .expect("an idle engine accepts a prompt");
     let (id, before) = until_question(&engine, &mut events).await;
 
-    let crossing: Vec<&Event> = before
-        .iter()
-        .filter(|event| matches!(event, Event::QuestionAsked { .. }))
-        .collect();
+    let crossing: Vec<&Event> =
+        before.iter().filter(|event| matches!(event, Event::QuestionAsked { .. })).collect();
     assert_eq!(crossing.len(), 1, "{crossing:?}");
     assert_eq!(
         *crossing[0].session_id(),
@@ -528,20 +487,14 @@ async fn a_crossing_question_carries_the_parents_session_id() {
     );
 
     engine
-        .send(Command::ReplyQuestion {
-            id: id.clone(),
-            answers: vec![vec!["Postgres".to_owned()]],
-        })
+        .send(Command::ReplyQuestion { id: id.clone(), answers: vec![vec!["Postgres".to_owned()]] })
         .await
         .expect("a reply routed to the parent reaches the child");
     let mut seen = before;
     seen.extend(drain(&mut events).await);
 
     assert_eq!(terminals(&seen, &id), ["replied:1"]);
-    for event in seen
-        .iter()
-        .filter(|event| matches!(event, Event::QuestionReplied { .. }))
-    {
+    for event in seen.iter().filter(|event| matches!(event, Event::QuestionReplied { .. })) {
         assert_eq!(*event.session_id(), parent, "{event:?}");
     }
     assert_eq!(finish(&seen), FinishReason::Completed);
@@ -580,18 +533,12 @@ async fn a_cancel_during_a_childs_question_still_produces_one_rejection() {
         .expect("an idle engine accepts a prompt");
     let (id, before) = until_question(&engine, &mut events).await;
 
-    engine
-        .send(Command::CancelTurn)
-        .await
-        .expect("a cancel is never refused");
+    engine.send(Command::CancelTurn).await.expect("a cancel is never refused");
     let mut seen = before;
     seen.extend(drain(&mut events).await);
 
     assert_eq!(terminals(&seen, &id), ["rejected"]);
-    for event in seen
-        .iter()
-        .filter(|event| matches!(event, Event::QuestionRejected { .. }))
-    {
+    for event in seen.iter().filter(|event| matches!(event, Event::QuestionRejected { .. })) {
         assert_eq!(*event.session_id(), parent, "{event:?}");
     }
     assert_eq!(finish(&seen), FinishReason::Cancelled);
@@ -638,10 +585,7 @@ async fn several_questions_are_answered_together_and_read_back_in_order() {
     engine
         .send(Command::ReplyQuestion {
             id: id.clone(),
-            answers: vec![
-                vec!["Postgres".to_owned()],
-                vec!["tokio".to_owned(), "smol".to_owned()],
-            ],
+            answers: vec![vec!["Postgres".to_owned()], vec!["tokio".to_owned(), "smol".to_owned()]],
         })
         .await
         .expect("a reply is never refused");
@@ -652,12 +596,6 @@ async fn several_questions_are_answered_together_and_read_back_in_order() {
     let Some(Ok(output)) = call_outcome(&seen) else {
         panic!("the call completed, got {:?}", call_outcome(&seen));
     };
-    assert!(
-        output.contains("\"Which database?\"=\"Postgres\""),
-        "{output}"
-    );
-    assert!(
-        output.contains("\"Which runtime?\"=\"tokio, smol\""),
-        "{output}"
-    );
+    assert!(output.contains("\"Which database?\"=\"Postgres\""), "{output}");
+    assert!(output.contains("\"Which runtime?\"=\"tokio, smol\""), "{output}");
 }

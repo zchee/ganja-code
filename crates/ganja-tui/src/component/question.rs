@@ -6,18 +6,15 @@
 //! upstream `packages/tui/src/routes/session/question.tsx`.
 
 use ganja_protocol::{QuestionId, QuestionInfo};
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    text::{Line, Text},
-    widgets::{Block, Clear, Paragraph, Widget as _},
-};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::text::{Line, Text};
+use ratatui::widgets::{Block, Clear, Paragraph, Widget as _};
 use unicode_width::UnicodeWidthStr as _;
 
-use crate::{
-    component::{chat::clip, clamped, modal},
-    theme::Theme,
-};
+use crate::component::chat::clip;
+use crate::component::{clamped, modal};
+use crate::theme::Theme;
 
 /// What marks the answer row the cursor is on, and what pads every other row.
 const MARKER: &str = "> ";
@@ -117,9 +114,7 @@ impl Question {
     /// free-text row or there are no answer rows.
     #[must_use]
     pub fn selected_label(&self) -> Option<&str> {
-        self.options
-            .get(self.selected)
-            .map(|option| option.label.as_str())
+        self.options.get(self.selected).map(|option| option.label.as_str())
     }
 
     /// Moves the cursor by `delta` answer rows, clamped at both ends.
@@ -227,18 +222,11 @@ impl Question {
                 } else {
                     clip(&self.input, detail_width)
                 };
-                let line = clip(
-                    &format!("{head}{gap}{detail}", gap = " ".repeat(GAP),),
-                    width,
-                );
+                let line = clip(&format!("{head}{gap}{detail}", gap = " ".repeat(GAP),), width);
 
                 Line::styled(
                     format!("{line:<width$}"),
-                    if index == self.selected {
-                        theme.selection
-                    } else {
-                        theme.fg
-                    },
+                    if index == self.selected { theme.selection } else { theme.fg },
                 )
             })
             .collect()

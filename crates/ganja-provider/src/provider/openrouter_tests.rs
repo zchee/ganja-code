@@ -1,8 +1,7 @@
 use super::{API_KEY_ENV, CHAT_COMPLETIONS_ONLY, DEFAULT_BASE_URL, ID, from_env};
-use crate::{
-    auth, catalog,
-    provider::{PROVIDERS, Provider as _, ResponsesProvider, responses::Backend},
-};
+use crate::provider::responses::Backend;
+use crate::provider::{PROVIDERS, Provider as _, ResponsesProvider};
+use crate::{auth, catalog};
 
 /// A provider pointed at loopback, which is the only endpoint a unit test
 /// may put a credential on. Built through the crate-internal constructor
@@ -23,10 +22,7 @@ fn keyed(base_url: &str) -> ResponsesProvider {
 #[test]
 fn ganja_calls_it_openrouter_everywhere_the_catalog_can_see() {
     assert_eq!(ID, "openrouter");
-    assert!(
-        PROVIDERS.contains(&ID),
-        "a provider nothing can select is a provider nobody has"
-    );
+    assert!(PROVIDERS.contains(&ID), "a provider nothing can select is a provider nobody has");
     assert_eq!(
         auth::storage_key(ID),
         ID,
@@ -75,10 +71,7 @@ fn a_key_may_not_be_sent_anywhere_the_other_wires_keys_could_not_be() {
     )
     .expect_err("plain http to a public host puts the key on the wire in the clear");
 
-    assert!(
-        matches!(refused, crate::provider::ProviderError::Transport(_)),
-        "{refused:?}"
-    );
+    assert!(matches!(refused, crate::provider::ProviderError::Transport(_)), "{refused:?}");
 }
 
 /// The one thing that decides whether this vendor's rows resolve at all:
@@ -143,9 +136,7 @@ fn a_gateway_of_many_vendors_is_not_pinned_to_one_of_them() {
 fn upstreams_openrouter_chat_alias_is_refused_rather_than_hidden() {
     assert_eq!(CHAT_COMPLETIONS_ONLY, ["openai/gpt-5-chat"]);
     assert!(
-        keyed("http://127.0.0.1:8080/api/v1")
-            .refuses("openai/gpt-5-chat")
-            .is_some(),
+        keyed("http://127.0.0.1:8080/api/v1").refuses("openai/gpt-5-chat").is_some(),
         "a chat-completions-only alias cannot ride a Responses request, \
              which is why upstream deletes it from this provider's roster"
     );

@@ -63,36 +63,23 @@ fn the_frontmatter_shapes_other_agents_write_are_read_as_written() {
             "---\nname: a\ndescription: >-\n  first\n  second\n---\nbody",
             Some(("a", Some("first second"))),
         ),
-        (
-            "comments and blank lines",
-            "---\n# a comment\n\nname: a\n---\nbody",
-            Some(("a", None)),
-        ),
+        ("comments and blank lines", "---\n# a comment\n\nname: a\n---\nbody", Some(("a", None))),
         (
             "keys this port does not read",
             "---\nname: a\nallowed-tools:\n  - read\n  - grep\nlicense: MIT\n---\nbody",
             Some(("a", None)),
         ),
-        (
-            "carriage returns",
-            "---\r\nname: a\r\n---\r\nbody",
-            Some(("a", None)),
-        ),
+        ("carriage returns", "---\r\nname: a\r\n---\r\nbody", Some(("a", None))),
         ("no frontmatter at all", "# just markdown\n", None),
-        (
-            "frontmatter naming no name",
-            "---\ndescription: b\n---\nbody",
-            None,
-        ),
+        ("frontmatter naming no name", "---\ndescription: b\n---\nbody", None),
         ("an empty name", "---\nname:   \n---\nbody", None),
         ("an unterminated fence", "---\nname: a\nbody", None),
     ];
 
     for (what, text, expected) in cases {
         let parsed = super::parse(std::path::Path::new("SKILL.md"), text);
-        let actual = parsed
-            .as_ref()
-            .map(|skill| (skill.name.as_str(), skill.description.as_deref()));
+        let actual =
+            parsed.as_ref().map(|skill| (skill.name.as_str(), skill.description.as_deref()));
 
         assert_eq!(actual, expected, "{what}: {text:?}");
     }
@@ -124,22 +111,10 @@ fn roots_that_name_nowhere_discover_nothing() {
 #[test]
 fn every_skill_under_a_root_is_found_and_sorted_by_name() {
     let dir = tempfile::tempdir().expect("a scratch directory");
-    write(
-        dir.path(),
-        "beta",
-        "---\nname: beta\ndescription: second\n---\nb",
-    );
-    write(
-        dir.path(),
-        "alpha",
-        "---\nname: alpha\ndescription: first\n---\na",
-    );
+    write(dir.path(), "beta", "---\nname: beta\ndescription: second\n---\nb");
+    write(dir.path(), "alpha", "---\nname: alpha\ndescription: first\n---\na");
     // Nested one deeper, which upstream's `**/SKILL.md` also reaches.
-    write(
-        &dir.path().join("nested"),
-        "gamma",
-        "---\nname: gamma\n---\ng",
-    );
+    write(&dir.path().join("nested"), "gamma", "---\nname: gamma\n---\ng");
     // Not a skill, and not a reason to fail the rest.
     std::fs::write(dir.path().join("beta").join("notes.md"), "x").expect("writable");
     write(dir.path(), "broken", "no frontmatter here");
@@ -157,16 +132,8 @@ fn every_skill_under_a_root_is_found_and_sorted_by_name() {
 fn the_last_root_to_claim_a_name_is_the_one_that_answers_to_it() {
     let first = tempfile::tempdir().expect("a scratch directory");
     let second = tempfile::tempdir().expect("a scratch directory");
-    write(
-        first.path(),
-        "porting",
-        "---\nname: porting\n---\nthe first",
-    );
-    write(
-        second.path(),
-        "porting",
-        "---\nname: porting\n---\nthe second",
-    );
+    write(first.path(), "porting", "---\nname: porting\n---\nthe first");
+    write(second.path(), "porting", "---\nname: porting\n---\nthe second");
 
     let found = super::discover(
         &Roots::none().with_paths([first.path().to_path_buf(), second.path().to_path_buf()]),
@@ -201,16 +168,10 @@ fn a_dollar_token_invokes_only_a_name_something_answers_to() {
         ("$", &[]),
         ("no tokens at all", &[]),
         ("$portingfoo is a different word, never a prefix match", &[]),
-        (
-            "use $porting. then $my-skill: done",
-            &["porting", "my-skill"],
-        ),
+        ("use $porting. then $my-skill: done", &["porting", "my-skill"]),
         ("a dot the name owns survives the trim: $v1.2.", &["v1.2"]),
         ("$my-skill-", &["my-skill"]),
-        (
-            "$my-skill then $porting then $my-skill again",
-            &["my-skill", "porting"],
-        ),
+        ("$my-skill then $porting then $my-skill again", &["my-skill", "porting"]),
         ("日本語の中の$porting。も見つかる", &["porting"]),
     ];
 
@@ -228,16 +189,10 @@ fn a_skills_origin_is_the_root_that_serves_it() {
     let inner = PathBuf::from("/skills/nested");
     let roots = super::Roots::none().with_paths([outer.clone(), inner.clone()]);
 
-    let nested = Skill {
-        location: inner.join("porting").join("SKILL.md"),
-        ..named("porting")
-    };
+    let nested = Skill { location: inner.join("porting").join("SKILL.md"), ..named("porting") };
     assert_eq!(super::origin(&roots, &nested), Some(inner.as_path()));
 
-    let outer_only = Skill {
-        location: outer.join("tdd").join("SKILL.md"),
-        ..named("tdd")
-    };
+    let outer_only = Skill { location: outer.join("tdd").join("SKILL.md"), ..named("tdd") };
     assert_eq!(super::origin(&roots, &outer_only), Some(outer.as_path()));
 
     assert_eq!(super::origin(&roots, &named("floating")), None);
@@ -279,8 +234,7 @@ async fn a_loaded_skill_hands_over_its_body_its_base_directory_and_its_files() {
 
     assert_eq!(out.title, "Loaded skill: porting");
     assert!(
-        out.output
-            .starts_with("<skill_content name=\"porting\">\n# Skill: porting\n"),
+        out.output.starts_with("<skill_content name=\"porting\">\n# Skill: porting\n"),
         "the output opens the way upstream opens it: {}",
         out.output
     );
@@ -290,21 +244,16 @@ async fn a_loaded_skill_hands_over_its_body_its_base_directory_and_its_files() {
         out.output
     );
     assert!(
-        out.output.contains(&format!(
-            "Base directory for this skill: {}",
-            base.display()
-        )),
+        out.output.contains(&format!("Base directory for this skill: {}", base.display())),
         "a relative path in a skill needs the directory it is relative to: {}",
         out.output
     );
     assert!(
-        out.output.contains(&format!(
-            "<file>{}</file>",
-            base.join("reference.md").display()
-        )) && out.output.contains(&format!(
-            "<file>{}</file>",
-            base.join("scripts").join("run.sh").display()
-        )),
+        out.output.contains(&format!("<file>{}</file>", base.join("reference.md").display()))
+            && out.output.contains(&format!(
+                "<file>{}</file>",
+                base.join("scripts").join("run.sh").display()
+            )),
         "the files beside it are listed absolute: {}",
         out.output
     );
@@ -358,10 +307,7 @@ async fn a_call_without_a_name_is_refused() {
         .await
         .expect_err("there is nothing to load");
 
-    assert!(
-        matches!(refused, ToolError::InvalidArgs(_)),
-        "got {refused:?}"
-    );
+    assert!(matches!(refused, ToolError::InvalidArgs(_)), "got {refused:?}");
 }
 
 /// Loading a skill runs unasked, which is upstream's answer too: its
@@ -374,12 +320,7 @@ fn loading_a_skill_runs_unasked_the_way_upstream_leaves_it() {
     let permissions = ganja_permission::permission::Permissions::default();
 
     assert_eq!(
-        permissions
-            .gate(
-                SkillTool::new().id(),
-                &serde_json::json!({ "name": "porting" })
-            )
-            .action,
+        permissions.gate(SkillTool::new().id(), &serde_json::json!({ "name": "porting" })).action,
         ganja_permission::permission::Decision::Allow
     );
     assert!(
@@ -394,13 +335,9 @@ fn the_prompt_and_schema_are_what_the_model_is_given() {
     let schema = serde_json::to_value(tool.schema()).expect("a schema is JSON");
 
     assert_eq!(tool.id(), "skill");
-    assert_eq!(
-        tool.describe(&serde_json::json!({ "name": "porting" })),
-        "skill porting"
-    );
+    assert_eq!(tool.describe(&serde_json::json!({ "name": "porting" })), "skill porting");
     assert!(
-        tool.description()
-            .starts_with("Load a specialized skill when the task at hand matches")
+        tool.description().starts_with("Load a specialized skill when the task at hand matches")
     );
     assert_eq!(schema["required"], serde_json::json!(["name"]));
 }
@@ -430,17 +367,10 @@ async fn the_shipped_tool_scans_only_the_directories_it_was_handed() {
         cwd.join("skills"),
         cwd.join(".ganja").join("skills"),
     ] {
-        write(
-            &tier,
-            "ambient",
-            "---\nname: ambient\ndescription: found by convention.\n---\nb",
-        );
+        write(&tier, "ambient", "---\nname: ambient\ndescription: found by convention.\n---\nb");
     }
 
-    assert!(
-        Roots::none().dirs().is_empty(),
-        "the floor every set is built from names nowhere"
-    );
+    assert!(Roots::none().dirs().is_empty(), "the floor every set is built from names nowhere");
     assert!(
         super::discover(&Roots::none()).is_empty(),
         "so a scan of it finds nothing, with five candidate directories on the disk"
@@ -473,11 +403,7 @@ async fn upstreams_own_tier_is_reachable_by_naming_it() {
     );
 
     let roots = Roots::none().with_paths([claude.clone()]);
-    assert_eq!(
-        roots.dirs(),
-        [claude],
-        "the named directory is the whole of the set"
-    );
+    assert_eq!(roots.dirs(), [claude], "the named directory is the whole of the set");
 
     let found = super::discover(&roots);
     let names: Vec<&str> = found.iter().map(|skill| skill.name.as_str()).collect();

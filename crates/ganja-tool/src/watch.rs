@@ -39,12 +39,10 @@
 //! warning and no more. A subagent is untouched — it runs on a [`FileTimes`]
 //! of its own, and nobody watches on its behalf.
 
-use std::{
-    borrow::Cow,
-    collections::BTreeSet,
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-};
+use std::borrow::Cow;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use notify::RecursiveMode;
 use tokio::sync::mpsc;
@@ -92,10 +90,7 @@ impl Watcher {
             stop.clone(),
         ));
 
-        Self {
-            _stop: stop.drop_guard(),
-            watched,
-        }
+        Self { _stop: stop.drop_guard(), watched }
     }
 
     /// The directories under watch, in the spelling the read log uses.
@@ -104,10 +99,7 @@ impl Watcher {
     /// one file has one directory here, whatever else the project contains.
     #[must_use]
     pub fn watched(&self) -> BTreeSet<PathBuf> {
-        self.watched
-            .lock()
-            .expect("the watched set is never poisoned")
-            .clone()
+        self.watched.lock().expect("the watched set is never poisoned").clone()
     }
 }
 
@@ -152,17 +144,7 @@ async fn run(
 
     // Returning drops the registrar, and with it the platform watcher, which
     // closes the channel the bridge above is draining and ends that task too.
-    register_reads(
-        reads,
-        Registrar {
-            watcher,
-            root,
-            watched,
-        },
-        files,
-        stop,
-    )
-    .await;
+    register_reads(reads, Registrar { watcher, root, watched }, files, stop).await;
 }
 
 /// Registers the directory of every path on `reads`, until the session ends.
@@ -229,12 +211,7 @@ impl<W: notify::Watcher> Registrar<W> {
         if !parent.starts_with(&self.root) {
             return;
         }
-        if self
-            .watched
-            .lock()
-            .expect("the watched set is never poisoned")
-            .contains(parent)
-        {
+        if self.watched.lock().expect("the watched set is never poisoned").contains(parent) {
             return;
         }
 
@@ -251,10 +228,7 @@ impl<W: notify::Watcher> Registrar<W> {
 
             return;
         }
-        self.watched
-            .lock()
-            .expect("the watched set is never poisoned")
-            .insert(parent.to_owned());
+        self.watched.lock().expect("the watched set is never poisoned").insert(parent.to_owned());
 
         // The window lazy registration opens, closed on the spot: between the
         // read and the watch above, a change would have produced no event

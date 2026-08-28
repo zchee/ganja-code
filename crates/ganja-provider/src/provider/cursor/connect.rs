@@ -59,11 +59,7 @@ pub(super) fn envelope(message: &[u8]) -> Vec<u8> {
     framed.push(0);
     // The message is an in-memory encoding whose size buffa already bounded
     // below the protobuf 2 GiB ceiling, so the cast cannot truncate.
-    framed.extend_from_slice(
-        &u32::try_from(message.len())
-            .unwrap_or(u32::MAX)
-            .to_be_bytes(),
-    );
+    framed.extend_from_slice(&u32::try_from(message.len()).unwrap_or(u32::MAX).to_be_bytes());
     framed.extend_from_slice(message);
 
     framed
@@ -129,10 +125,7 @@ impl Splitter {
             return Ok(None);
         };
 
-        let frame = Frame {
-            flags: prefix[0],
-            payload: payload.to_vec(),
-        };
+        let frame = Frame { flags: prefix[0], payload: payload.to_vec() };
         self.read += PREFIX + declared;
         self.ended = frame.is_end_stream();
 
@@ -159,19 +152,12 @@ pub(super) fn end_stream_error(payload: &[u8]) -> Result<Option<(String, String)
         ProviderError::Parse(format!("the EndStream frame is not JSON: {error}"))
     })?;
     if !parsed.is_object() {
-        return Err(ProviderError::Parse(
-            "the EndStream frame is not a JSON object".to_owned(),
-        ));
+        return Err(ProviderError::Parse("the EndStream frame is not a JSON object".to_owned()));
     }
 
     Ok(parsed.get("error").map(|error| {
-        let field = |name: &str| {
-            error
-                .get(name)
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned()
-        };
+        let field =
+            |name: &str| error.get(name).and_then(Value::as_str).unwrap_or_default().to_owned();
 
         (field("code"), field("message"))
     }))

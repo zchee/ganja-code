@@ -55,32 +55,25 @@
 //! `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `GANJA_PROVIDER` and `GANJA_MODEL`, and
 //! a plain `cargo test` runs the tests inside a binary on parallel threads.
 
-use std::{
-    collections::VecDeque,
-    env,
-    sync::{Arc, Mutex},
-};
+use std::collections::VecDeque;
+use std::env;
+use std::sync::{Arc, Mutex};
 
 use futures::StreamExt as _;
-use ganja_core::{
-    Engine,
-    auth::{self, AuthError, OauthCredential, RefreshOauth},
-    catalog,
-    config::Config,
-    permission::Permissions,
-    protocol::{Command, Event, PartBody, PartId, Role},
-    provider::{
-        ChatRequest, Provider as _, ProviderError, ProviderEvent, ResponsesProvider, openai, select,
-    },
-    tool::Registry,
+use ganja_core::auth::{self, AuthError, OauthCredential, RefreshOauth};
+use ganja_core::config::Config;
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{Command, Event, PartBody, PartId, Role};
+use ganja_core::provider::{
+    ChatRequest, Provider as _, ProviderError, ProviderEvent, ResponsesProvider, openai, select,
 };
+use ganja_core::tool::Registry;
+use ganja_core::{Engine, catalog};
 use ganja_testkit::{RecorderTool, drain};
 use secrecy::SecretString;
 use serde_json::json;
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::TcpListener,
-};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 /// Where a Responses turn goes, under the endpoint's base URL.
@@ -133,12 +126,8 @@ const KEY_MODEL: &str = "gpt-5.6";
 /// client registration the stored access token was minted against; a key is the
 /// caller's own credential against the platform, and upstream sends such a
 /// request through the unwrapped `fetch` (`codex.ts:356`) with none of them.
-const SUBSCRIPTION_HEADERS: [&str; 4] = [
-    "chatgpt-account-id",
-    "originator",
-    "openai-beta",
-    "user-agent",
-];
+const SUBSCRIPTION_HEADERS: [&str; 4] =
+    ["chatgpt-account-id", "originator", "openai-beta", "user-agent"];
 
 /// One request the endpoint was asked to serve.
 #[derive(Clone)]
@@ -207,11 +196,7 @@ struct Endpoint {
 impl Endpoint {
     /// Every request served so far, oldest first.
     fn seen(&self) -> Vec<Recorded> {
-        self.state
-            .seen
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+        self.state.seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
     }
 
     /// The one request this phase produced.
@@ -226,41 +211,26 @@ impl Endpoint {
 
     /// Forgets what has been served, so a phase counts only its own traffic.
     fn forget(&self) {
-        self.state
-            .seen
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
+        self.state.seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
     }
 
     /// Sets the event-stream body every turn is answered with from now on.
     fn answers_turns_with(&self, body: impl Into<String>) {
-        *self
-            .state
-            .reply
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = body.into();
+        *self.state.reply.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = body.into();
     }
 
     /// Queues one body per request, consumed in order before the standing one.
     fn answers_the_next_requests_with(&self, bodies: impl IntoIterator<Item = String>) {
-        *self
-            .state
-            .scripted
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = bodies.into_iter().collect();
+        *self.state.scripted.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            bodies.into_iter().collect();
     }
 }
 
 /// Starts an endpoint that answers every connection for as long as the test
 /// holds it.
 async fn serve() -> Endpoint {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("loopback is bindable");
-    let address = listener
-        .local_addr()
-        .expect("a bound socket has an address");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("loopback is bindable");
+    let address = listener.local_addr().expect("a bound socket has an address");
     let state = Arc::new(State {
         seen: Mutex::new(Vec::new()),
         reply: Mutex::new(responses_transcript()),
@@ -285,17 +255,9 @@ async fn serve() -> Endpoint {
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .pop_front()
                     .unwrap_or_else(|| {
-                        state
-                            .reply
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .clone()
+                        state.reply.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
                     });
-                state
-                    .seen
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .push(request);
+                state.seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(request);
 
                 let _ = socket
                     .write_all(
@@ -312,11 +274,7 @@ async fn serve() -> Endpoint {
         }
     });
 
-    Endpoint {
-        base_url: format!("http://{address}/backend-api/codex"),
-        state,
-        _server: server,
-    }
+    Endpoint { base_url: format!("http://{address}/backend-api/codex"), state, _server: server }
 }
 
 /// Reads one whole request: head to the blank line, then whatever
@@ -337,9 +295,7 @@ async fn read_request(socket: &mut tokio::net::TcpStream) -> Option<Recorded> {
         .lines()
         .find_map(|line| {
             let (name, value) = line.split_once(':')?;
-            name.trim()
-                .eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse().ok())?
+            name.trim().eq_ignore_ascii_case("content-length").then(|| value.trim().parse().ok())?
         })
         .unwrap_or(0);
     let mut body = vec![0_u8; length];
@@ -347,10 +303,7 @@ async fn read_request(socket: &mut tokio::net::TcpStream) -> Option<Recorded> {
         return None;
     }
 
-    Some(Recorded {
-        head,
-        body: String::from_utf8_lossy(&body).into_owned(),
-    })
+    Some(Recorded { head, body: String::from_utf8_lossy(&body).into_owned() })
 }
 
 /// A whole Responses turn: a thought, two fragments of reply, and the bill.
@@ -495,10 +448,7 @@ async fn either_openai_credential_drives_a_responses_turn_against_the_backend_it
     .with_system_parts(Some("be brief".to_owned()), None);
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
-    engine
-        .send(prompt("say hello"))
-        .await
-        .expect("an idle engine accepts");
+    engine.send(prompt("say hello")).await.expect("an idle engine accepts");
     let seen = drain(&mut events).await;
 
     let sent = endpoint.only();
@@ -517,10 +467,7 @@ async fn either_openai_credential_drives_a_responses_turn_against_the_backend_it
         "the backend cannot tell which of a person's accounts to serve without it"
     );
     assert_eq!(sent.header("originator").as_deref(), Some("ganja-code"));
-    assert_eq!(
-        sent.header("openai-beta").as_deref(),
-        Some("responses=experimental")
-    );
+    assert_eq!(sent.header("openai-beta").as_deref(), Some("responses=experimental"));
     assert_eq!(
         sent.header("user-agent").as_deref(),
         Some(auth::device::GANJA_USER_AGENT),
@@ -565,10 +512,7 @@ async fn either_openai_credential_drives_a_responses_turn_against_the_backend_it
         "chat completions' nesting would leave the model offered nothing: {body}"
     );
     assert!(
-        calls
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_empty(),
+        calls.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).is_empty(),
         "the transcript calls nothing, so nothing should have run"
     );
 
@@ -627,20 +571,15 @@ async fn either_openai_credential_drives_a_responses_turn_against_the_backend_it
     );
     assert_eq!((billed.output_tokens, billed.reasoning_tokens), (9, 4));
     assert!(
-        seen.iter().any(
-            |event| matches!(event, Event::MessageStarted { message, .. }
-                if message.role == Role::Assistant)
-        ),
+        seen.iter().any(|event| matches!(event, Event::MessageStarted { message, .. }
+                if message.role == Role::Assistant)),
         "the turn should have reached the event stream as a message: {seen:?}"
     );
 
     // ---- 2. The credential is read per request, not captured. -------------
     endpoint.forget();
     store(SECOND_ACCESS, SECOND_ACCOUNT);
-    engine
-        .send(prompt("again"))
-        .await
-        .expect("an idle engine accepts");
+    engine.send(prompt("again")).await.expect("an idle engine accepts");
     drain(&mut events).await;
 
     let sent = endpoint.only();
@@ -737,10 +676,7 @@ async fn either_openai_credential_drives_a_responses_turn_against_the_backend_it
 
     let sent = endpoint.only();
     assert_eq!(sent.path(), COMPLETIONS);
-    assert_eq!(
-        sent.header("authorization").as_deref(),
-        Some(format!("Bearer {KEY}").as_str())
-    );
+    assert_eq!(sent.header("authorization").as_deref(), Some(format!("Bearer {KEY}").as_str()));
     assert_eq!(
         sent.body,
         // What this build has always sent, spelled out rather than derived, so
@@ -790,11 +726,7 @@ async fn either_openai_credential_drives_a_responses_turn_against_the_backend_it
     assert_eq!(chosen.provider.id(), openai::ID);
     turn(chosen.provider.as_ref(), SUBSCRIPTION_MODEL).await;
     let sent = endpoint.only();
-    assert_eq!(
-        sent.path(),
-        RESPONSES,
-        "the credential with no consumer now has one"
-    );
+    assert_eq!(sent.path(), RESPONSES, "the credential with no consumer now has one");
     assert_eq!(
         sent.header("authorization").as_deref(),
         Some(format!("Bearer {SECOND_ACCESS}").as_str()),
@@ -859,14 +791,9 @@ async fn either_openai_credential_drives_a_responses_turn_against_the_backend_it
         env::set_var("GANJA_MODEL", KEY_MODEL);
     }
     let named = select(&Config::default()).expect("a stored login is a session");
-    assert_eq!(
-        named.model, KEY_MODEL,
-        "the seat's default must not overwrite an explicit choice"
-    );
-    let Err(refused_model) = named
-        .provider
-        .stream(ask(&named.model), CancellationToken::new())
-        .await
+    assert_eq!(named.model, KEY_MODEL, "the seat's default must not overwrite an explicit choice");
+    let Err(refused_model) =
+        named.provider.stream(ask(&named.model), CancellationToken::new()).await
     else {
         panic!("the seat does not serve {KEY_MODEL}, so there is no turn to take");
     };
@@ -874,10 +801,7 @@ async fn either_openai_credential_drives_a_responses_turn_against_the_backend_it
         refused_model.to_string().contains(KEY_MODEL),
         "the refusal names what was asked for: {refused_model}"
     );
-    assert!(
-        endpoint.seen().is_empty(),
-        "and it costs no request to say so"
-    );
+    assert!(endpoint.seen().is_empty(), "and it costs no request to say so");
     // SAFETY: as above.
     unsafe {
         env::remove_var("GANJA_MODEL");
@@ -912,9 +836,8 @@ async fn either_openai_credential_drives_a_responses_turn_against_the_backend_it
     let provider = responses(&endpoint);
     // `expect_err` would need the success arm to render, and a boxed stream has
     // no `Debug`; the match is the same assertion said a way that compiles.
-    let Err(refused_credential) = provider
-        .stream(ask(SUBSCRIPTION_MODEL), CancellationToken::new())
-        .await
+    let Err(refused_credential) =
+        provider.stream(ask(SUBSCRIPTION_MODEL), CancellationToken::new()).await
     else {
         panic!("the credential was removed above, so there is no turn to take");
     };
@@ -927,10 +850,7 @@ async fn either_openai_credential_drives_a_responses_turn_against_the_backend_it
     let rendered =
         format!("{provider:?} {refused:?} {refused} {refused_credential:?} {refused_credential}");
     for secret in [FIRST_ACCESS, SECOND_ACCESS, REFRESH, KEY] {
-        assert!(
-            !rendered.contains(secret),
-            "a credential reached a rendering: {rendered}"
-        );
+        assert!(!rendered.contains(secret), "a credential reached a rendering: {rendered}");
     }
 
     // ---- 9. A model this seat cannot run is refused before a turn is spent. --
@@ -941,10 +861,7 @@ async fn either_openai_credential_drives_a_responses_turn_against_the_backend_it
     // model is not supported when using Codex with a ChatGPT account."}` — a
     // round trip and somebody else's JSON to learn something `codex.ts:15` has
     // written down.
-    let Err(unsupported) = provider
-        .stream(ask(KEY_MODEL), CancellationToken::new())
-        .await
-    else {
+    let Err(unsupported) = provider.stream(ask(KEY_MODEL), CancellationToken::new()).await else {
         panic!("a model the backend refuses is not a turn to take");
     };
     let said = unsupported.to_string();
@@ -984,32 +901,22 @@ async fn either_openai_credential_drives_a_responses_turn_against_the_backend_it
         Permissions::default(),
     );
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
-    engine
-        .send(prompt("what is the weather"))
-        .await
-        .expect("an idle engine accepts");
+    engine.send(prompt("what is the weather")).await.expect("an idle engine accepts");
     let seen = drain(&mut events).await;
 
     assert_eq!(
-        ran.lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .len(),
+        ran.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).len(),
         1,
         "the turn is two requests because the model called a tool between them"
     );
     let requests = endpoint.seen();
     let [first, second] = requests.as_slice() else {
-        panic!(
-            "a tool call makes a turn two requests, got {}",
-            requests.len()
-        );
+        panic!("a tool call makes a turn two requests, got {}", requests.len());
     };
 
     let opening = first.json();
     assert!(
-        opening["input"]
-            .as_array()
-            .is_some_and(|input| input.len() == 1),
+        opening["input"].as_array().is_some_and(|input| input.len() == 1),
         "the first request is the prompt and nothing else: {opening}"
     );
 

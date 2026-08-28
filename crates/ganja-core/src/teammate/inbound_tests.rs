@@ -9,12 +9,7 @@ fn explicit(policy: InboundPolicy) -> ResolvedInbound {
 }
 
 fn qualified<'a>(sender: &'a str, body: &'a str) -> Origin<'a> {
-    Origin {
-        tier: Tier::Qualified { sender },
-        hop_chain: &[],
-        own_marker: None,
-        body,
-    }
+    Origin { tier: Tier::Qualified { sender }, hop_chain: &[], own_marker: None, body }
 }
 
 fn message(text: &str) -> MailboxMessage {
@@ -36,29 +31,14 @@ fn the_full_matrix_reproduces_all_eight_rows() {
     use SenderClass as S;
     let decide = |r, s| decide_unset(r, s, false, true);
 
-    assert_eq!(
-        decide(Some(R::Prompting), Some(S::Prompting)),
-        Verdict::Accept
-    );
-    assert_eq!(
-        decide(Some(R::Prompting), Some(S::Bypass)),
-        Verdict::Hold(HoldCause::ModeMismatch)
-    );
+    assert_eq!(decide(Some(R::Prompting), Some(S::Prompting)), Verdict::Accept);
+    assert_eq!(decide(Some(R::Prompting), Some(S::Bypass)), Verdict::Hold(HoldCause::ModeMismatch));
     assert_eq!(decide(Some(R::Bypass), Some(S::Bypass)), Verdict::Accept);
-    assert_eq!(
-        decide(Some(R::Bypass), Some(S::Prompting)),
-        Verdict::Hold(HoldCause::ModeMismatch)
-    );
+    assert_eq!(decide(Some(R::Bypass), Some(S::Prompting)), Verdict::Hold(HoldCause::ModeMismatch));
     assert_eq!(decide(Some(R::Prompting), None), Verdict::Accept);
-    assert_eq!(
-        decide(Some(R::Bypass), None),
-        Verdict::Hold(HoldCause::NoModeAsserted)
-    );
+    assert_eq!(decide(Some(R::Bypass), None), Verdict::Hold(HoldCause::NoModeAsserted));
     assert_eq!(decide(None, None), Verdict::Hold(HoldCause::ModeUnknown));
-    assert_eq!(
-        decide_unset(Some(R::Bypass), None, true, true),
-        Verdict::Accept
-    );
+    assert_eq!(decide_unset(Some(R::Bypass), None, true, true), Verdict::Accept);
 }
 
 // AC-5: under `false` the sender class is never consulted — every sender
@@ -69,10 +49,7 @@ fn the_collapsed_path_never_reads_the_sender() {
     use ReceiverClass as R;
     use SenderClass as S;
     for sender in [None, Some(S::Prompting), Some(S::Bypass)] {
-        assert_eq!(
-            decide_unset(Some(R::Prompting), sender, false, false),
-            Verdict::Accept
-        );
+        assert_eq!(decide_unset(Some(R::Prompting), sender, false, false), Verdict::Accept);
         assert_eq!(
             decide_unset(Some(R::Bypass), sender, false, false),
             Verdict::Hold(HoldCause::NoModeAsserted)
@@ -80,10 +57,7 @@ fn the_collapsed_path_never_reads_the_sender() {
     }
     // The proof point: bypass/bypass accepts under the full matrix, and
     // still holds under the collapsed path.
-    assert_eq!(
-        decide_unset(Some(R::Bypass), Some(S::Bypass), false, true),
-        Verdict::Accept
-    );
+    assert_eq!(decide_unset(Some(R::Bypass), Some(S::Bypass), false, true), Verdict::Accept);
     assert_eq!(
         decide_unset(Some(R::Bypass), Some(S::Bypass), false, false),
         Verdict::Hold(HoldCause::NoModeAsserted)
@@ -92,22 +66,13 @@ fn the_collapsed_path_never_reads_the_sender() {
 
 #[test]
 fn an_unreadable_receiver_holds_even_a_self_sent_message() {
-    assert_eq!(
-        decide_unset(None, None, true, false),
-        Verdict::Hold(HoldCause::ModeUnknown)
-    );
-    assert_eq!(
-        decide_unset(None, None, true, true),
-        Verdict::Hold(HoldCause::ModeUnknown)
-    );
+    assert_eq!(decide_unset(None, None, true, false), Verdict::Hold(HoldCause::ModeUnknown));
+    assert_eq!(decide_unset(None, None, true, true), Verdict::Hold(HoldCause::ModeUnknown));
 }
 
 #[test]
 fn self_sent_accepts_on_the_collapsed_path_too() {
-    assert_eq!(
-        decide_unset(Some(ReceiverClass::Bypass), None, true, false),
-        Verdict::Accept
-    );
+    assert_eq!(decide_unset(Some(ReceiverClass::Bypass), None, true, false), Verdict::Accept);
 }
 
 // AC-6: the explicit branch comes first, so nothing the matrix reads —
@@ -117,16 +82,12 @@ fn an_explicit_policy_wins_over_parity_even_when_self_sent() {
     let refuse = explicit(InboundPolicy::Refuse);
     assert_eq!(
         refuse.decide(Some(ReceiverClass::Prompting), None, true, false),
-        Verdict::Refuse(RefuseCause::Explicit {
-            source: PolicySource::Global
-        })
+        Verdict::Refuse(RefuseCause::Explicit { source: PolicySource::Global })
     );
     let hold = explicit(InboundPolicy::Hold);
     assert_eq!(
         hold.decide(Some(ReceiverClass::Prompting), None, true, false),
-        Verdict::Hold(HoldCause::Explicit {
-            source: PolicySource::Global
-        })
+        Verdict::Hold(HoldCause::Explicit { source: PolicySource::Global })
     );
     // Explicit wins over the fail-closed arm as well: a configured
     // accept delivers even where the mode is unreadable.
@@ -138,26 +99,11 @@ fn an_explicit_policy_wins_over_parity_even_when_self_sent() {
 // is exercised directly through the resolver's `None`.
 #[test]
 fn receiver_classification_is_total_including_the_mode_unknown_arm() {
-    assert_eq!(
-        classify_receiver(PermissionMode::Ask, false),
-        ReceiverClass::Prompting
-    );
-    assert_eq!(
-        classify_receiver(PermissionMode::Ask, true),
-        ReceiverClass::Bypass
-    );
-    assert_eq!(
-        classify_receiver(PermissionMode::Bypass, false),
-        ReceiverClass::Bypass
-    );
-    assert_eq!(
-        classify_receiver(PermissionMode::Bypass, true),
-        ReceiverClass::Bypass
-    );
-    assert_eq!(
-        unset().decide(None, None, false, false),
-        Verdict::Hold(HoldCause::ModeUnknown)
-    );
+    assert_eq!(classify_receiver(PermissionMode::Ask, false), ReceiverClass::Prompting);
+    assert_eq!(classify_receiver(PermissionMode::Ask, true), ReceiverClass::Bypass);
+    assert_eq!(classify_receiver(PermissionMode::Bypass, false), ReceiverClass::Bypass);
+    assert_eq!(classify_receiver(PermissionMode::Bypass, true), ReceiverClass::Bypass);
+    assert_eq!(unset().decide(None, None, false, false), Verdict::Hold(HoldCause::ModeUnknown));
 }
 
 // AC-23: the four reasons are `admit`'s whole vocabulary, and the queue
@@ -196,16 +142,10 @@ async fn the_thirty_first_message_in_a_burst_is_rate_limited_and_refills_after_t
     for i in 0..30 {
         assert_eq!(guard.admit(&qualified("w1@t", &format!("m{i}"))), Ok(()));
     }
-    assert_eq!(
-        guard.admit(&qualified("w1@t", "m30")),
-        Err(Dropped::RateLimited)
-    );
+    assert_eq!(guard.admit(&qualified("w1@t", "m30")), Err(Dropped::RateLimited));
     tokio::time::advance(Duration::from_secs(2)).await;
     assert_eq!(guard.admit(&qualified("w1@t", "m31")), Ok(()));
-    assert_eq!(
-        guard.admit(&qualified("w1@t", "m32")),
-        Err(Dropped::RateLimited)
-    );
+    assert_eq!(guard.admit(&qualified("w1@t", "m32")), Err(Dropped::RateLimited));
 }
 
 // AC-24, the dedup half: same key and body inside the window drops,
@@ -214,10 +154,7 @@ async fn the_thirty_first_message_in_a_burst_is_rate_limited_and_refills_after_t
 async fn an_identical_body_within_thirty_seconds_is_a_duplicate_and_another_key_is_not() {
     let mut guard = PeerGuard::new();
     assert_eq!(guard.admit(&qualified("w1@t", "same body")), Ok(()));
-    assert_eq!(
-        guard.admit(&qualified("w1@t", "same body")),
-        Err(Dropped::Duplicate)
-    );
+    assert_eq!(guard.admit(&qualified("w1@t", "same body")), Err(Dropped::Duplicate));
     assert_eq!(guard.admit(&qualified("w2@t", "same body")), Ok(()));
     tokio::time::advance(DEDUP_WINDOW).await;
     assert_eq!(guard.admit(&qualified("w1@t", "same body")), Ok(()));
@@ -271,12 +208,8 @@ async fn an_eleventh_own_marker_is_hop_loop_and_ten_pass() {
 #[tokio::test(start_paused = true)]
 async fn the_demoted_tier_skips_bucket_and_dedup_but_is_still_queue_capped() {
     let mut guard = PeerGuard::new();
-    let unidentified = Origin {
-        tier: Tier::Unidentified,
-        hop_chain: &[],
-        own_marker: None,
-        body: "same",
-    };
+    let unidentified =
+        Origin { tier: Tier::Unidentified, hop_chain: &[], own_marker: None, body: "same" };
     for _ in 0..40 {
         assert_eq!(guard.admit(&unidentified), Ok(()));
     }
@@ -301,10 +234,7 @@ async fn the_two_hundred_fifty_seventh_sender_evicts_the_least_recently_used() {
     }
     // Touch s0 again — a duplicate drop still refreshes recency, so s1
     // becomes the least recently used.
-    assert_eq!(
-        guard.admit(&qualified("s0@t", "b")),
-        Err(Dropped::Duplicate)
-    );
+    assert_eq!(guard.admit(&qualified("s0@t", "b")), Err(Dropped::Duplicate));
     assert_eq!(guard.admit(&qualified("new@t", "b")), Ok(()));
     assert_eq!(guard.senders.len(), TRACKED_SENDERS);
     // s1's state went with the eviction: its identical body admits
@@ -312,10 +242,7 @@ async fn the_two_hundred_fifty_seventh_sender_evicts_the_least_recently_used() {
     // while s0, the recently touched entry the order protected, still
     // remembers the body and drops it.
     assert_eq!(guard.admit(&qualified("s1@t", "b")), Ok(()));
-    assert_eq!(
-        guard.admit(&qualified("s0@t", "b")),
-        Err(Dropped::Duplicate)
-    );
+    assert_eq!(guard.admit(&qualified("s0@t", "b")), Err(Dropped::Duplicate));
     assert_eq!(guard.senders.len(), TRACKED_SENDERS);
 }
 
@@ -329,10 +256,7 @@ async fn the_hundred_and_first_hold_evicts_the_oldest_settled_expired() {
     let first_identity = mailbox::identity(&first);
     assert!(matches!(
         gate.admit_mailbox(Some(ReceiverClass::Prompting), &first),
-        MailboxAdmission::Held {
-            evicted_prune: None,
-            ..
-        }
+        MailboxAdmission::Held { evicted_prune: None, .. }
     ));
     for i in 1..HELD_CAP {
         assert!(matches!(
@@ -343,10 +267,7 @@ async fn the_hundred_and_first_hold_evicts_the_oldest_settled_expired() {
                 None,
                 WireFacts::none(),
             ),
-            SocketAdmission::Held {
-                evicted_prune: None,
-                ..
-            }
+            SocketAdmission::Held { evicted_prune: None, .. }
         ));
     }
     let oldest_id = gate.held_messages()[0].id.clone();
@@ -379,29 +300,12 @@ async fn the_hundred_and_first_hold_evicts_the_oldest_settled_expired() {
 #[test]
 fn only_the_parity_causes_earn_a_deadline() {
     let expiry = DialogExpiry::default();
-    assert_eq!(
-        deadline_for(HoldCause::ModeMismatch, expiry),
-        Some(Duration::from_secs(300))
-    );
-    assert_eq!(
-        deadline_for(HoldCause::NoModeAsserted, expiry),
-        Some(Duration::from_secs(300))
-    );
-    assert_eq!(
-        deadline_for(
-            HoldCause::Explicit {
-                source: PolicySource::Project
-            },
-            expiry
-        ),
-        None
-    );
+    assert_eq!(deadline_for(HoldCause::ModeMismatch, expiry), Some(Duration::from_secs(300)));
+    assert_eq!(deadline_for(HoldCause::NoModeAsserted, expiry), Some(Duration::from_secs(300)));
+    assert_eq!(deadline_for(HoldCause::Explicit { source: PolicySource::Project }, expiry), None);
     assert_eq!(deadline_for(HoldCause::ModeUnknown, expiry), None);
     // `never` is no deadline even for a parity cause.
-    assert_eq!(
-        deadline_for(HoldCause::NoModeAsserted, DialogExpiry::Never),
-        None
-    );
+    assert_eq!(deadline_for(HoldCause::NoModeAsserted, DialogExpiry::Never), None);
 }
 
 #[tokio::test(start_paused = true)]
@@ -416,20 +320,11 @@ async fn an_explicit_hold_installs_no_timer_and_a_parity_hold_counts_down() {
             None,
             WireFacts::none()
         ),
-        SocketAdmission::Held {
-            cause: HoldCause::Explicit { .. },
-            ..
-        }
+        SocketAdmission::Held { cause: HoldCause::Explicit { .. }, .. }
     ));
     assert_eq!(explicit_gate.held_messages()[0].expires_in, None);
     let transitions = drained(&mut explicit_drain);
-    assert!(matches!(
-        &transitions[0],
-        HoldTransition::Held {
-            expires_in_ms: None,
-            ..
-        }
-    ));
+    assert!(matches!(&transitions[0], HoldTransition::Held { expires_in_ms: None, .. }));
 
     let (parity_gate, mut parity_drain) = Inbound::new(unset(), DialogExpiry::default());
     assert!(matches!(
@@ -440,31 +335,16 @@ async fn an_explicit_hold_installs_no_timer_and_a_parity_hold_counts_down() {
             None,
             WireFacts::none()
         ),
-        SocketAdmission::Held {
-            cause: HoldCause::NoModeAsserted,
-            ..
-        }
+        SocketAdmission::Held { cause: HoldCause::NoModeAsserted, .. }
     ));
-    assert_eq!(
-        parity_gate.held_messages()[0].expires_in,
-        Some(Duration::from_secs(300))
-    );
+    assert_eq!(parity_gate.held_messages()[0].expires_in, Some(Duration::from_secs(300)));
     let transitions = drained(&mut parity_drain);
-    assert!(matches!(
-        &transitions[0],
-        HoldTransition::Held {
-            expires_in_ms: Some(300_000),
-            ..
-        }
-    ));
+    assert!(matches!(&transitions[0], HoldTransition::Held { expires_in_ms: Some(300_000), .. }));
 
     // A mode-unknown hold sits deadline-free like an explicit one.
     assert!(matches!(
         parity_gate.admit_socket(None, "w@t", "unknown", None, WireFacts::none()),
-        SocketAdmission::Held {
-            cause: HoldCause::ModeUnknown,
-            ..
-        }
+        SocketAdmission::Held { cause: HoldCause::ModeUnknown, .. }
     ));
     assert_eq!(parity_gate.held_messages()[1].expires_in, None);
 }
@@ -475,22 +355,13 @@ async fn an_explicit_hold_installs_no_timer_and_a_parity_hold_counts_down() {
 async fn the_first_settler_wins_when_approve_and_expiry_race() {
     let (gate, mut drain) = Inbound::new(unset(), DialogExpiry::default());
     assert!(matches!(
-        gate.admit_socket(
-            Some(ReceiverClass::Bypass),
-            "w@t",
-            "raced",
-            None,
-            WireFacts::none()
-        ),
+        gate.admit_socket(Some(ReceiverClass::Bypass), "w@t", "raced", None, WireFacts::none()),
         SocketAdmission::Held { .. }
     ));
     let id = gate.held_messages()[0].id.clone();
 
     let released = gate.release(&id);
-    assert!(
-        matches!(released, Some(Settlement::Deliver(_))),
-        "{released:?}"
-    );
+    assert!(matches!(released, Some(Settlement::Deliver(_))), "{released:?}");
     assert_eq!(gate.expire(&id), None);
     assert_eq!(gate.deny(&id), None);
 
@@ -498,13 +369,7 @@ async fn the_first_settler_wins_when_approve_and_expiry_race() {
         .into_iter()
         .filter(|transition| matches!(transition, HoldTransition::Settled { .. }))
         .collect();
-    assert_eq!(
-        settlements,
-        vec![HoldTransition::Settled {
-            id,
-            outcome: HeldOutcome::Delivered
-        }]
-    );
+    assert_eq!(settlements, vec![HoldTransition::Settled { id, outcome: HeldOutcome::Delivered }]);
 }
 
 // H2: a mailbox-door drop claims the record and waits for its prune; a
@@ -521,12 +386,7 @@ async fn a_mailbox_deny_prunes_first_and_a_failed_prune_re_holds() {
     let id = gate.held_messages()[0].id.clone();
 
     let step = gate.deny(&id);
-    assert_eq!(
-        step,
-        Some(Settlement::PruneFirst {
-            identity: identity.clone()
-        })
-    );
+    assert_eq!(step, Some(Settlement::PruneFirst { identity: identity.clone() }));
     // Claimed: still held, still indexed, and no second settler lands.
     assert_eq!(gate.held_messages().len(), 1);
     assert_eq!(gate.disposition(&identity), PassDisposition::Skip);
@@ -535,12 +395,7 @@ async fn a_mailbox_deny_prunes_first_and_a_failed_prune_re_holds() {
 
     gate.prune_failed(&id);
     // Re-held and retryable: the same deny claims again.
-    assert_eq!(
-        gate.deny(&id),
-        Some(Settlement::PruneFirst {
-            identity: identity.clone()
-        })
-    );
+    assert_eq!(gate.deny(&id), Some(Settlement::PruneFirst { identity: identity.clone() }));
     assert_eq!(gate.pruned(&id), Some(HeldOutcome::Denied));
     assert!(gate.held_messages().is_empty());
     assert_eq!(gate.disposition(&identity), PassDisposition::Classify);
@@ -548,13 +403,7 @@ async fn a_mailbox_deny_prunes_first_and_a_failed_prune_re_holds() {
         .into_iter()
         .filter(|transition| matches!(transition, HoldTransition::Settled { .. }))
         .collect();
-    assert_eq!(
-        settled,
-        vec![HoldTransition::Settled {
-            id,
-            outcome: HeldOutcome::Denied
-        }]
-    );
+    assert_eq!(settled, vec![HoldTransition::Settled { id, outcome: HeldOutcome::Denied }]);
 }
 
 // The release re-check: an approval cannot override a policy that has
@@ -576,19 +425,10 @@ async fn a_release_re_checks_policy_and_a_now_refusing_one_denies() {
     let id = gate.held_messages()[0].id.clone();
 
     gate.replace_policy(explicit(InboundPolicy::Refuse));
-    assert_eq!(
-        gate.release(&id),
-        Some(Settlement::Done(HeldOutcome::Denied))
-    );
+    assert_eq!(gate.release(&id), Some(Settlement::Done(HeldOutcome::Denied)));
     assert!(gate.held_messages().is_empty());
     let last = drained(&mut drain).pop();
-    assert_eq!(
-        last,
-        Some(HoldTransition::Settled {
-            id,
-            outcome: HeldOutcome::Denied
-        })
-    );
+    assert_eq!(last, Some(HoldTransition::Settled { id, outcome: HeldOutcome::Denied }));
 }
 
 // H1: a mailbox-door release moves the identity held-index → admitted
@@ -606,10 +446,7 @@ async fn a_mailbox_release_delivers_the_hold_time_summary_snapshot() {
     ));
     let id = gate.held_messages()[0].id.clone();
 
-    assert_eq!(
-        gate.release(&id),
-        Some(Settlement::Done(HeldOutcome::Delivered))
-    );
+    assert_eq!(gate.release(&id), Some(Settlement::Done(HeldOutcome::Delivered)));
     assert_eq!(
         gate.disposition(&identity),
         PassDisposition::DeliverReviewed {
@@ -678,15 +515,9 @@ async fn a_mode_change_reevaluation_releases_parity_holds_and_leaves_explicit_on
     assert!(
         matches!(&actions[0].settlement, Settlement::Deliver(released) if released.text == "socket held")
     );
-    assert_eq!(
-        actions[1].settlement,
-        Settlement::Done(HeldOutcome::Delivered)
-    );
+    assert_eq!(actions[1].settlement, Settlement::Done(HeldOutcome::Delivered));
     assert!(gate.held_messages().is_empty());
-    assert!(matches!(
-        gate.disposition(&identity),
-        PassDisposition::DeliverReviewed { .. }
-    ));
+    assert!(matches!(gate.disposition(&identity), PassDisposition::DeliverReviewed { .. }));
 
     let (explicit_gate, _drain) =
         Inbound::new(explicit(InboundPolicy::Hold), DialogExpiry::default());
@@ -701,11 +532,7 @@ async fn a_mode_change_reevaluation_releases_parity_holds_and_leaves_explicit_on
         SocketAdmission::Held { .. }
     ));
     let before = explicit_gate.held_messages();
-    assert!(
-        explicit_gate
-            .reevaluate(Some(ReceiverClass::Prompting))
-            .is_empty()
-    );
+    assert!(explicit_gate.reevaluate(Some(ReceiverClass::Prompting)).is_empty());
     assert_eq!(explicit_gate.held_messages(), before);
 }
 
@@ -725,10 +552,7 @@ async fn a_mode_change_cannot_release_a_bypass_asserted_hold() {
             None,
             WireFacts::none()
         ),
-        SocketAdmission::Held {
-            cause: HoldCause::NoModeAsserted,
-            ..
-        }
+        SocketAdmission::Held { cause: HoldCause::NoModeAsserted, .. }
     ));
     assert!(matches!(
         gate.admit_socket(
@@ -736,16 +560,9 @@ async fn a_mode_change_cannot_release_a_bypass_asserted_hold() {
             "asserted@t",
             "bypass asserted",
             None,
-            WireFacts {
-                sender: Some(SenderClass::Bypass),
-                hop_chain: &[],
-                own_marker: None,
-            }
+            WireFacts { sender: Some(SenderClass::Bypass), hop_chain: &[], own_marker: None }
         ),
-        SocketAdmission::Held {
-            cause: HoldCause::ModeMismatch,
-            ..
-        }
+        SocketAdmission::Held { cause: HoldCause::ModeMismatch, .. }
     ));
 
     // The unasserted hold releases under a prompting receiver; the asserted
@@ -785,44 +602,25 @@ async fn reconcile_expires_vanished_holds_and_forgets_consumed_admissions() {
     gate.admit_identity(admitted_identity.clone());
 
     // Both still present: nothing moves.
-    let present: HashSet<_> = [held_identity.clone(), admitted_identity.clone()]
-        .into_iter()
-        .collect();
+    let present: HashSet<_> =
+        [held_identity.clone(), admitted_identity.clone()].into_iter().collect();
     gate.reconcile(&present);
     assert_eq!(gate.held_messages().len(), 1);
-    assert_eq!(
-        gate.disposition(&admitted_identity),
-        PassDisposition::Deliver
-    );
+    assert_eq!(gate.disposition(&admitted_identity), PassDisposition::Deliver);
 
     gate.reconcile(&HashSet::new());
     assert!(gate.held_messages().is_empty());
     assert_eq!(gate.disposition(&held_identity), PassDisposition::Classify);
-    assert_eq!(
-        gate.disposition(&admitted_identity),
-        PassDisposition::Classify
-    );
+    assert_eq!(gate.disposition(&admitted_identity), PassDisposition::Classify);
     let last = drained(&mut drain).pop();
-    assert_eq!(
-        last,
-        Some(HoldTransition::Settled {
-            id,
-            outcome: HeldOutcome::Expired
-        })
-    );
+    assert_eq!(last, Some(HoldTransition::Settled { id, outcome: HeldOutcome::Expired }));
 }
 
 #[tokio::test(start_paused = true)]
 async fn shutdown_settles_everything_expired_and_is_idempotent() {
     let (gate, mut drain) = Inbound::new(explicit(InboundPolicy::Hold), DialogExpiry::default());
     assert!(matches!(
-        gate.admit_socket(
-            Some(ReceiverClass::Prompting),
-            "w@t",
-            "one",
-            None,
-            WireFacts::none()
-        ),
+        gate.admit_socket(Some(ReceiverClass::Prompting), "w@t", "one", None, WireFacts::none()),
         SocketAdmission::Held { .. }
     ));
     assert!(matches!(
@@ -834,13 +632,7 @@ async fn shutdown_settles_everything_expired_and_is_idempotent() {
     let expired = drained(&mut drain)
         .into_iter()
         .filter(|transition| {
-            matches!(
-                transition,
-                HoldTransition::Settled {
-                    outcome: HeldOutcome::Expired,
-                    ..
-                }
-            )
+            matches!(transition, HoldTransition::Settled { outcome: HeldOutcome::Expired, .. })
         })
         .count();
     assert_eq!(expired, 2);
@@ -855,23 +647,11 @@ async fn shutdown_settles_everything_expired_and_is_idempotent() {
 async fn a_socket_guard_drop_is_silent_with_its_typed_reason() {
     let (gate, _drain) = Inbound::new(explicit(InboundPolicy::Accept), DialogExpiry::default());
     assert_eq!(
-        gate.admit_socket(
-            Some(ReceiverClass::Prompting),
-            "w@t",
-            "same",
-            None,
-            WireFacts::none()
-        ),
+        gate.admit_socket(Some(ReceiverClass::Prompting), "w@t", "same", None, WireFacts::none()),
         SocketAdmission::Deliver
     );
     assert_eq!(
-        gate.admit_socket(
-            Some(ReceiverClass::Prompting),
-            "w@t",
-            "same",
-            None,
-            WireFacts::none()
-        ),
+        gate.admit_socket(Some(ReceiverClass::Prompting), "w@t", "same", None, WireFacts::none()),
         SocketAdmission::Silent(DropReason::Guard(Dropped::Duplicate))
     );
     let (unset_gate, _drain) = Inbound::new(unset(), DialogExpiry::default());
@@ -893,17 +673,9 @@ async fn an_explicit_refuse_drops_on_both_doors_naming_its_tier() {
         ResolvedInbound::new(Some((InboundPolicy::Refuse, PolicySource::Project))),
         DialogExpiry::default(),
     );
-    let refused = RefuseCause::Explicit {
-        source: PolicySource::Project,
-    };
+    let refused = RefuseCause::Explicit { source: PolicySource::Project };
     assert_eq!(
-        gate.admit_socket(
-            Some(ReceiverClass::Prompting),
-            "w@t",
-            "no",
-            None,
-            WireFacts::none()
-        ),
+        gate.admit_socket(Some(ReceiverClass::Prompting), "w@t", "no", None, WireFacts::none()),
         SocketAdmission::Silent(DropReason::Refused(refused))
     );
     assert_eq!(
@@ -932,29 +704,17 @@ fn a_transition_stamps_into_its_event_and_debugs_no_bodies() {
 
     let session = SessionId::from("s1".to_owned());
     match transition.into_event(session.clone()) {
-        Event::PeerHeld {
-            session_id,
-            id: event_id,
-            cause,
-            ..
-        } => {
+        Event::PeerHeld { session_id, id: event_id, cause, .. } => {
             assert_eq!(session_id, session);
             assert_eq!(event_id, id);
             assert_eq!(cause, HoldCause::NoModeAsserted);
         }
         other => panic!("a hold stamps into PeerHeld: {other:?}"),
     }
-    match (HoldTransition::Settled {
-        id: id.clone(),
-        outcome: HeldOutcome::Expired,
-    })
-    .into_event(session.clone())
+    match (HoldTransition::Settled { id: id.clone(), outcome: HeldOutcome::Expired })
+        .into_event(session.clone())
     {
-        Event::PeerHoldSettled {
-            session_id,
-            id: event_id,
-            outcome,
-        } => {
+        Event::PeerHoldSettled { session_id, id: event_id, outcome } => {
             assert_eq!(session_id, session);
             assert_eq!(event_id, id);
             assert_eq!(outcome, HeldOutcome::Expired);
@@ -1018,11 +778,7 @@ async fn a_looping_chain_is_dropped_through_admit_socket_itself() {
             "w@t",
             "looping",
             None,
-            WireFacts {
-                sender: None,
-                hop_chain: &eleven,
-                own_marker: Some("me"),
-            }
+            WireFacts { sender: None, hop_chain: &eleven, own_marker: Some("me") }
         ),
         SocketAdmission::Silent(DropReason::Guard(Dropped::HopLoop))
     );
@@ -1033,11 +789,7 @@ async fn a_looping_chain_is_dropped_through_admit_socket_itself() {
             "w@t",
             "not looping",
             None,
-            WireFacts {
-                sender: None,
-                hop_chain: ten,
-                own_marker: Some("me"),
-            }
+            WireFacts { sender: None, hop_chain: ten, own_marker: Some("me") }
         ),
         SocketAdmission::Deliver
     );
@@ -1133,23 +885,14 @@ async fn a_parity_hold_is_guarded_like_an_accept() {
                     None,
                     WireFacts::none()
                 ),
-                SocketAdmission::Held {
-                    cause: HoldCause::NoModeAsserted,
-                    ..
-                }
+                SocketAdmission::Held { cause: HoldCause::NoModeAsserted, .. }
             ),
             "message {i} of the burst should still hold"
         );
     }
     // The 31st exceeds the bucket: a would-be hold is dropped, not held.
     assert_eq!(
-        gate.admit_socket(
-            Some(ReceiverClass::Bypass),
-            "flooder@t",
-            "m30",
-            None,
-            WireFacts::none()
-        ),
+        gate.admit_socket(Some(ReceiverClass::Bypass), "flooder@t", "m30", None, WireFacts::none()),
         SocketAdmission::Silent(DropReason::Guard(Dropped::RateLimited))
     );
     assert_eq!(gate.held_messages().len(), 30);
@@ -1221,10 +964,7 @@ async fn an_explicitly_configured_hold_is_never_guard_dropped() {
                     None,
                     WireFacts::none()
                 ),
-                SocketAdmission::Held {
-                    cause: HoldCause::Explicit { .. },
-                    ..
-                }
+                SocketAdmission::Held { cause: HoldCause::Explicit { .. }, .. }
             ),
             "message {i} was guard-dropped despite an explicit hold policy"
         );
@@ -1241,10 +981,7 @@ async fn the_four_byte_untouched_promises_still_hold() {
     use ReceiverClass as R;
     use SenderClass as S;
 
-    assert_eq!(
-        decide_unset(Some(R::Bypass), Some(S::Bypass), false, true),
-        Verdict::Accept
-    );
+    assert_eq!(decide_unset(Some(R::Bypass), Some(S::Bypass), false, true), Verdict::Accept);
     assert_eq!(
         decide_unset(Some(R::Prompting), Some(S::Bypass), false, true),
         Verdict::Hold(HoldCause::ModeMismatch)
@@ -1254,10 +991,7 @@ async fn the_four_byte_untouched_promises_still_hold() {
     for i in 0..30 {
         assert_eq!(guard.admit(&qualified("w1@t", &format!("m{i}"))), Ok(()));
     }
-    assert_eq!(
-        guard.admit(&qualified("w1@t", "m30")),
-        Err(Dropped::RateLimited)
-    );
+    assert_eq!(guard.admit(&qualified("w1@t", "m30")), Err(Dropped::RateLimited));
 
     let (gate, _drain) = Inbound::new(unset(), DialogExpiry::default());
     assert!(matches!(
@@ -1271,10 +1005,7 @@ async fn the_four_byte_untouched_promises_still_hold() {
         SocketAdmission::Held { .. }
     ));
     let entry = &gate.held_messages()[0];
-    assert_eq!(
-        entry.summary,
-        Some(RedactedText::from("held summary".to_owned()))
-    );
+    assert_eq!(entry.summary, Some(RedactedText::from("held summary".to_owned())));
     assert_eq!(entry.preview, RedactedText::from("held body".to_owned()));
 
     assert_eq!(HELD_CAP, 100);
@@ -1320,10 +1051,7 @@ async fn rotating_the_claimed_sender_cannot_re_key_the_hold_flood() {
         burst,
         "the review surface stopped filling well short of HELD_CAP"
     );
-    assert!(
-        burst < HELD_CAP,
-        "and short is what makes that worth saying"
-    );
+    assert!(burst < HELD_CAP, "and short is what makes that worth saying");
 
     // It refills on the clock and on nothing else.
     tokio::time::advance(Duration::from_secs(2)).await;
@@ -1392,15 +1120,11 @@ fn an_adopted_chain_keeps_only_stems_and_leaves_room_for_this_session() {
 
     // Clause 2: oldest-first, to one below the receiver's own cap, so a
     // forward's appended marker still lands inside it.
-    let arriving: Vec<String> = (0..MAX_CHAIN_LENGTH)
-        .map(|index| format!("0198c{index:03}"))
-        .collect();
+    let arriving: Vec<String> =
+        (0..MAX_CHAIN_LENGTH).map(|index| format!("0198c{index:03}")).collect();
     let adopted = adoptable_chain(arriving.clone());
     assert_eq!(adopted.len(), MAX_CHAIN_LENGTH - 1);
-    assert_eq!(
-        adopted[0], arriving[1],
-        "the oldest entry is the one that goes"
-    );
+    assert_eq!(adopted[0], arriving[1], "the oldest entry is the one that goes");
     assert_eq!(
         adopted[MAX_CHAIN_LENGTH - 2],
         arriving[MAX_CHAIN_LENGTH - 1],

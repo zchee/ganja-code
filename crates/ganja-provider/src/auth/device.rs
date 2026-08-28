@@ -34,7 +34,9 @@
 //! caller is a test pointing at `127.0.0.1`. A guard would add a failure mode
 //! and close no gap.
 
-use std::{fmt, sync::Arc, time::Duration};
+use std::fmt;
+use std::sync::Arc;
+use std::time::Duration;
 
 use secrecy::{ExposeSecret as _, SecretString};
 use serde_json::{Map, Value};
@@ -268,9 +270,7 @@ impl DeviceAuthorization {
     /// the plain one otherwise (`xai.ts:598`).
     #[must_use]
     pub fn browser_url(&self) -> &str {
-        self.verification_uri_complete
-            .as_deref()
-            .unwrap_or(&self.verification_uri)
+        self.verification_uri_complete.as_deref().unwrap_or(&self.verification_uri)
     }
 
     /// How long the poll will wait between attempts, before the safety margin.
@@ -328,10 +328,7 @@ impl fmt::Debug for Tokens {
         formatter
             .debug_struct("Tokens")
             .field("access", &RedactedTail::of_secret(&self.access))
-            .field(
-                "refresh",
-                &self.refresh.as_ref().map(RedactedTail::of_secret),
-            )
+            .field("refresh", &self.refresh.as_ref().map(RedactedTail::of_secret))
             .field("expires_in", &self.expires_in)
             .finish()
     }
@@ -461,17 +458,12 @@ impl DeviceFlow {
             )
             .await?;
         if !(200..300).contains(&status) {
-            return Err(DeviceError::Status {
-                context: CONTEXT,
-                status,
-            });
+            return Err(DeviceError::Status { context: CONTEXT, status });
         }
 
-        let (Some(device_code), Some(user_code), Some(verification_uri)) = (
-            text(&body, "device_code"),
-            text(&body, "user_code"),
-            text(&body, "verification_uri"),
-        ) else {
+        let (Some(device_code), Some(user_code), Some(verification_uri)) =
+            (text(&body, "device_code"), text(&body, "user_code"), text(&body, "verification_uri"))
+        else {
             return Err(DeviceError::Malformed {
                 context: CONTEXT,
                 detail: "no device_code, user_code and verification_uri in it",
@@ -488,10 +480,10 @@ impl DeviceFlow {
             // (`xai.ts:245-248`).
             interval_ms: positive_seconds_to_ms(body.get("interval"), DEFAULT_INTERVAL_MS)
                 .max(MIN_INTERVAL_MS),
-            deadline_ms: self.clock.now_ms().saturating_add(positive_seconds_to_ms(
-                body.get("expires_in"),
-                DEFAULT_EXPIRES_MS,
-            )),
+            deadline_ms: self
+                .clock
+                .now_ms()
+                .saturating_add(positive_seconds_to_ms(body.get("expires_in"), DEFAULT_EXPIRES_MS)),
         })
     }
 
@@ -570,19 +562,14 @@ impl DeviceFlow {
                 Some("access_denied" | "authorization_denied") => return Err(DeviceError::Denied),
                 Some("expired_token") => return Err(DeviceError::CodeExpired),
                 Some(other) => {
-                    return Err(DeviceError::Refused {
-                        code: reportable_code(other),
-                    });
+                    return Err(DeviceError::Refused { code: reportable_code(other) });
                 }
                 // No token and no error. A non-2xx is the end of it
                 // (`copilot.ts:278`, `xai.ts:283`); a 2xx that said nothing is
                 // a provider still making up its mind, which upstream waits
                 // out rather than failing on (`copilot.ts:331-332`).
                 None if !(200..300).contains(&status) => {
-                    return Err(DeviceError::Status {
-                        context: CONTEXT,
-                        status,
-                    });
+                    return Err(DeviceError::Status { context: CONTEXT, status });
                 }
                 None => {}
             }
@@ -592,12 +579,8 @@ impl DeviceFlow {
             // (`xai.ts:263`, `:268`). `saturating_sub` because the request
             // itself takes time, and a request that outlived the deadline
             // leaves nothing to wait for.
-            let remaining = authorization
-                .deadline_ms
-                .saturating_sub(self.clock.now_ms());
-            let wait = interval_ms
-                .saturating_add(POLLING_SAFETY_MARGIN_MS)
-                .min(remaining);
+            let remaining = authorization.deadline_ms.saturating_sub(self.clock.now_ms());
+            let wait = interval_ms.saturating_add(POLLING_SAFETY_MARGIN_MS).min(remaining);
 
             tokio::select! {
                 () = cancel.cancelled() => return Err(DeviceError::Cancelled),
@@ -627,10 +610,7 @@ impl DeviceFlow {
             .header(reqwest::header::USER_AGENT, self.user_agent);
         let request = match self.encoding {
             BodyEncoding::Form => request
-                .header(
-                    reqwest::header::CONTENT_TYPE,
-                    "application/x-www-form-urlencoded",
-                )
+                .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .body(form(fields)),
             BodyEncoding::Json => request.json(&object(fields)),
         };
@@ -745,19 +725,12 @@ pub(super) fn reportable_code(code: &str) -> String {
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'));
 
-    if shaped {
-        code.to_owned()
-    } else {
-        UNREPEATABLE.to_owned()
-    }
+    if shaped { code.to_owned() } else { UNREPEATABLE.to_owned() }
 }
 
 /// The fields as a JSON object, for the encoding that wants one.
 fn object(fields: &[(&str, &str)]) -> Map<String, Value> {
-    fields
-        .iter()
-        .map(|(field, value)| ((*field).to_owned(), Value::from(*value)))
-        .collect()
+    fields.iter().map(|(field, value)| ((*field).to_owned(), Value::from(*value))).collect()
 }
 
 /// The fields percent-encoded as `application/x-www-form-urlencoded`.
@@ -784,16 +757,12 @@ pub(super) mod harness {
     //! built. The clock is the opposite of real, and deliberately — see
     //! [`Clock`](super::Clock).
 
-    use std::{
-        collections::HashMap,
-        sync::{Arc, Mutex},
-        time::Duration,
-    };
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
-    use tokio::{
-        io::{AsyncReadExt as _, AsyncWriteExt as _},
-        net::{TcpListener, TcpStream},
-    };
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::net::{TcpListener, TcpStream};
 
     /// One canned answer.
     pub(in crate::auth) struct Reply {
@@ -804,10 +773,7 @@ pub(super) mod harness {
     impl Reply {
         /// An answer with `status` and `body`.
         pub(in crate::auth) fn new(status: u16, body: impl Into<String>) -> Self {
-            Self {
-                status,
-                body: body.into(),
-            }
+            Self { status, body: body.into() }
         }
 
         /// A `200` carrying `body`.
@@ -854,10 +820,7 @@ pub(super) mod harness {
 
         /// The path the request line names.
         pub(in crate::auth) fn path(&self) -> &str {
-            self.head
-                .split_whitespace()
-                .nth(1)
-                .expect("a request line has a path")
+            self.head.split_whitespace().nth(1).expect("a request line has a path")
         }
     }
 
@@ -872,18 +835,12 @@ pub(super) mod harness {
     impl Endpoint {
         /// Every request that arrived, in order.
         pub(in crate::auth) fn requests(&self) -> Vec<Request> {
-            self.requests
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone()
+            self.requests.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
         }
 
         /// How many arrived.
         pub(in crate::auth) fn count(&self) -> usize {
-            self.requests
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .len()
+            self.requests.lock().unwrap_or_else(std::sync::PoisonError::into_inner).len()
         }
 
         /// The `index`-th one.
@@ -901,15 +858,9 @@ pub(super) mod harness {
     /// more times than a test allowed for then meets a refused connection and
     /// says so, instead of quietly being served the first answer again.
     pub(in crate::auth) async fn serve(replies: Vec<Reply>) -> Endpoint {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("loopback is bindable");
-        let url = format!(
-            "http://{}",
-            listener
-                .local_addr()
-                .expect("a bound socket has an address")
-        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("loopback is bindable");
+        let url =
+            format!("http://{}", listener.local_addr().expect("a bound socket has an address"));
         let requests = Arc::new(Mutex::new(Vec::new()));
 
         let server = tokio::spawn({
@@ -939,11 +890,7 @@ pub(super) mod harness {
             }
         });
 
-        Endpoint {
-            url,
-            requests,
-            _server: server,
-        }
+        Endpoint { url, requests, _server: server }
     }
 
     /// Reads a whole request: head to the blank line, then `content-length`
@@ -972,10 +919,7 @@ pub(super) mod harness {
             let _ = socket.read_exact(&mut body).await;
         }
 
-        Request {
-            head,
-            body: String::from_utf8_lossy(&body).into_owned(),
-        }
+        Request { head, body: String::from_utf8_lossy(&body).into_owned() }
     }
 
     /// A clock a test drives: nothing waits, and `now` advances by exactly
@@ -991,38 +935,25 @@ pub(super) mod harness {
     impl TestClock {
         /// A clock reading `now_ms`, having waited for nothing.
         pub(in crate::auth) fn at(now_ms: u64) -> Arc<Self> {
-            Arc::new(Self {
-                state: Mutex::new((now_ms, Vec::new())),
-            })
+            Arc::new(Self { state: Mutex::new((now_ms, Vec::new())) })
         }
 
         /// Every wait that was asked for, in order.
         pub(in crate::auth) fn waits(&self) -> Vec<Duration> {
-            self.state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .1
-                .clone()
+            self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).1.clone()
         }
     }
 
     #[async_trait::async_trait]
     impl super::Clock for TestClock {
         fn now_ms(&self) -> u64 {
-            self.state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .0
+            self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner).0
         }
 
         async fn sleep(&self, duration: Duration) {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            state.0 = state
-                .0
-                .saturating_add(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
+            let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.0 =
+                state.0.saturating_add(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
             state.1.push(duration);
         }
     }

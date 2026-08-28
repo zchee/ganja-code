@@ -51,25 +51,19 @@
 //! the target survives — the same contract `ganja mcp add` keeps (**D483**),
 //! for the same reason: the file being edited is one somebody wrote by hand.
 
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use ganja_core::{
-    config::Config,
-    hook::{EVENTS, HookEvent},
-};
+use ganja_core::config::Config;
+use ganja_core::hook::{EVENTS, HookEvent};
 use ganja_permission::Project;
 use serde_json::Value;
 use toml_edit::{ArrayOfTables, DocumentMut, InlineTable, Item, Table};
 
-use crate::{
-    position::located,
-    report::{Report, print_table, print_warnings},
-};
+use crate::position::located;
+use crate::report::{Report, print_table, print_warnings};
 
 /// The directory Claude keeps its settings in, under a home or a project root.
 const CLAUDE_DIRECTORY: &str = ".claude";
@@ -170,11 +164,7 @@ pub fn import_claude_hooks(file: Option<PathBuf>, global: bool, dry_run: bool) -
     // wording follows `migrate.rs`: a `--dry-run` says "would write", because a
     // preview that announced a write and then said nothing was written would be
     // contradicting itself in the one mode somebody runs to be told the truth.
-    println!(
-        "{} {}",
-        if dry_run { "would write" } else { "writing" },
-        target.display()
-    );
+    println!("{} {}", if dry_run { "would write" } else { "writing" }, target.display());
 
     let existing = existing(&target)?;
     // Decoded before the merge as well as after, so a target that was already
@@ -234,10 +224,7 @@ fn sources(file: Option<PathBuf>, global: bool, cwd: &Path) -> Result<Sources> {
             bail!("{} does not exist", file.display());
         }
 
-        return Ok(Sources {
-            paths: vec![file],
-            searched: Vec::new(),
-        });
+        return Ok(Sources { paths: vec![file], searched: Vec::new() });
     }
 
     let directory = if global {
@@ -248,11 +235,7 @@ fn sources(file: Option<PathBuf>, global: bool, cwd: &Path) -> Result<Sources> {
 
     // Both, in Claude's own order: the committed file first and the local one
     // after it, so a machine-specific override is what the append sees last.
-    let names: &[&str] = if global {
-        &[SETTINGS]
-    } else {
-        &[SETTINGS, LOCAL_SETTINGS]
-    };
+    let names: &[&str] = if global { &[SETTINGS] } else { &[SETTINGS, LOCAL_SETTINGS] };
 
     Ok(Sources {
         paths: names
@@ -342,11 +325,7 @@ fn collect(
     // Every row this file produces is prefixed with its name: the project
     // tier reads two settings files, both of which have a `hooks.Stop[0]`,
     // and a row that could be either is a row nobody can act on.
-    let label = path
-        .file_name()
-        .unwrap_or(path.as_os_str())
-        .to_string_lossy()
-        .into_owned();
+    let label = path.file_name().unwrap_or(path.as_os_str()).to_string_lossy().into_owned();
 
     let text = fs::read_to_string(path)
         .with_context(|| format!("{} could not be read", path.display()))?;
@@ -355,10 +334,7 @@ fn collect(
     let document: Value =
         serde_json::from_str(&text).map_err(|error| anyhow!("{}: {error}", path.display()))?;
     let Value::Object(settings) = document else {
-        bail!(
-            "{}: a settings file has to hold a JSON object",
-            path.display()
-        );
+        bail!("{}: a settings file has to hold a JSON object", path.display());
     };
 
     for key in settings.keys() {
@@ -404,10 +380,7 @@ fn collect(
                 // covered by one choke point rather than by each caller
                 // remembering.
                 for handler in &group.handlers {
-                    report.map(
-                        &format!("{at}.{TABLE}[{}]", handler.index),
-                        &handler.command,
-                    );
+                    report.map(&format!("{at}.{TABLE}[{}]", handler.index), &handler.command);
                 }
                 into.entry(known.name()).or_default().push(group);
             }
@@ -533,11 +506,7 @@ fn handler(array: &str, index: usize, value: &Value, report: &mut Report) -> Opt
         return None;
     };
 
-    Some(Handler {
-        index,
-        command,
-        timeout,
-    })
+    Some(Handler { index, command, timeout })
 }
 
 /// The refusals `ganja_core::config`'s `check_hooks` makes, applied before
@@ -563,23 +532,14 @@ fn handler(array: &str, index: usize, value: &Value, report: &mut Report) -> Opt
 /// pattern at all — it means "everything", on both sides — so it is not put
 /// to the engine, exactly as `check_hooks` does not.
 fn refusal(group: &Group) -> Option<String> {
-    if group
-        .handlers
-        .iter()
-        .any(|handler| handler.command.trim().is_empty())
-    {
+    if group.handlers.iter().any(|handler| handler.command.trim().is_empty()) {
         return Some("a command handler with no command".to_owned());
     }
 
-    if let Some(matcher) = group
-        .matcher
-        .as_deref()
-        .filter(|matcher| !matcher.is_empty())
+    if let Some(matcher) = group.matcher.as_deref().filter(|matcher| !matcher.is_empty())
         && let Err(error) = regex::Regex::new(matcher)
     {
-        return Some(format!(
-            "a matcher that is not a regular expression: {error}"
-        ));
+        return Some(format!("a matcher that is not a regular expression: {error}"));
     }
 
     None
@@ -632,9 +592,8 @@ fn merge(
             continue;
         };
 
-        let entry = table
-            .entry(event.name())
-            .or_insert_with(|| Item::ArrayOfTables(ArrayOfTables::new()));
+        let entry =
+            table.entry(event.name()).or_insert_with(|| Item::ArrayOfTables(ArrayOfTables::new()));
         match entry {
             // Appended, never merged into and never replacing: two tiers
             // naming one event both fire, which is the config system's own
@@ -651,11 +610,7 @@ fn merge(
                     array.push(inline(group));
                 }
             }
-            _ => bail!(
-                "{}'s `{TABLE}.{}` is not a list of groups",
-                target.display(),
-                event.name()
-            ),
+            _ => bail!("{}'s `{TABLE}.{}` is not a list of groups", target.display(), event.name()),
         }
     }
 

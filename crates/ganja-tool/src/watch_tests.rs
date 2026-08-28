@@ -1,14 +1,10 @@
-use std::{
-    collections::BTreeSet,
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-    time::SystemTime,
-};
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
-use notify::{
-    EventKind,
-    event::{DataChange, ModifyKind},
-};
+use notify::EventKind;
+use notify::event::{DataChange, ModifyKind};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -47,12 +43,7 @@ fn age(path: &Path) {
 /// the real windows one blocks on an ack its server thread may take
 /// arbitrarily long to send. What the real registration asks of its
 /// backend is pinned by `the_watch_taken_is_never_recursive` instead.
-fn registrar(
-    root: &Path,
-) -> (
-    Registrar<notify::NullWatcher>,
-    Arc<Mutex<BTreeSet<PathBuf>>>,
-) {
+fn registrar(root: &Path) -> (Registrar<notify::NullWatcher>, Arc<Mutex<BTreeSet<PathBuf>>>) {
     let watched = Arc::new(Mutex::new(BTreeSet::new()));
 
     (
@@ -83,17 +74,13 @@ async fn the_bridge_condemns_a_read_file_that_changed_and_ignores_one_nobody_rea
     age(&unread);
 
     let (sender, receiver) = mpsc::unbounded_channel();
-    sender
-        .send(changed(vec![read.clone(), unread.clone()]))
-        .expect("the bridge is listening");
+    sender.send(changed(vec![read.clone(), unread.clone()])).expect("the bridge is listening");
     // The loop ends when the last sender goes, so awaiting it is awaiting
     // every event already queued — no sleeping, no polling.
     drop(sender);
     bridge(receiver, Roots::new(dir.path()), Arc::clone(&files)).await;
 
-    let refused = files
-        .check_fresh(&read)
-        .expect_err("the file changed under the session");
+    let refused = files.check_fresh(&read).expect_err("the file changed under the session");
     assert!(
         matches!(&refused, ToolError::Failed(message) if message.contains("read it again")),
         "got {refused:?}"
@@ -103,9 +90,7 @@ async fn the_bridge_condemns_a_read_file_that_changed_and_ignores_one_nobody_rea
         vec![read],
         "only a file this session read is any of the watcher's business"
     );
-    let never_read = files
-        .check_fresh(&unread)
-        .expect_err("an unread file is still unread");
+    let never_read = files.check_fresh(&unread).expect_err("an unread file is still unread");
     assert!(
         matches!(&never_read, ToolError::Failed(message) if message.contains("read it first")),
         "got {never_read:?}"
@@ -123,16 +108,12 @@ async fn a_file_that_did_not_move_is_left_alone_however_many_events_name_it() {
 
     let (sender, receiver) = mpsc::unbounded_channel();
     for _ in 0..3 {
-        sender
-            .send(changed(vec![path.clone()]))
-            .expect("the bridge is listening");
+        sender.send(changed(vec![path.clone()])).expect("the bridge is listening");
     }
     drop(sender);
     bridge(receiver, Roots::new(dir.path()), Arc::clone(&files)).await;
 
-    files
-        .check_fresh(&path)
-        .expect("an event is not a change; the stamp decides");
+    files.check_fresh(&path).expect("an event is not a change; the stamp decides");
     assert!(files.take_stale().is_empty());
 }
 
@@ -147,9 +128,7 @@ async fn a_file_that_went_away_is_stale() {
     std::fs::remove_file(&path).expect("the fixture can delete it");
 
     let (sender, receiver) = mpsc::unbounded_channel();
-    sender
-        .send(changed(vec![path.clone()]))
-        .expect("the bridge is listening");
+    sender.send(changed(vec![path.clone()])).expect("the bridge is listening");
     drop(sender);
     bridge(receiver, Roots::new(dir.path()), Arc::clone(&files)).await;
 
@@ -212,10 +191,7 @@ fn a_file_read_outside_the_project_is_not_watched() {
     registrar.register(&outside, &files);
 
     assert!(
-        watched
-            .lock()
-            .expect("the watched set is never poisoned")
-            .is_empty(),
+        watched.lock().expect("the watched set is never poisoned").is_empty(),
         "the session answers for its project, not for wherever else it read"
     );
 }
@@ -258,13 +234,7 @@ async fn the_registration_loop_ends_when_the_session_stops_announcing() {
 
     sender.send(read.clone()).expect("the loop is listening");
     drop(sender);
-    register_reads(
-        receiver,
-        registrar,
-        Arc::clone(&files),
-        CancellationToken::new(),
-    )
-    .await;
+    register_reads(receiver, registrar, Arc::clone(&files), CancellationToken::new()).await;
 
     assert_eq!(
         *watched.lock().expect("the watched set is never poisoned"),
@@ -283,17 +253,10 @@ async fn a_stopped_session_stops_registering() {
     stop.cancel();
 
     // Queued before the loop runs, and never registered: the stop wins.
-    sender
-        .send(dir.path().join("src/main.rs"))
-        .expect("the loop is listening");
+    sender.send(dir.path().join("src/main.rs")).expect("the loop is listening");
     register_reads(receiver, registrar, Arc::clone(&files), stop).await;
 
-    assert!(
-        watched
-            .lock()
-            .expect("the watched set is never poisoned")
-            .is_empty()
-    );
+    assert!(watched.lock().expect("the watched set is never poisoned").is_empty());
 }
 
 #[test]

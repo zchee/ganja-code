@@ -163,20 +163,16 @@
 //! a `result` record carrying `is_error` and the vendor's own 401 text, which
 //! this file's parser turns into exactly that mail.
 
-use std::{
-    ffi::OsString,
-    path::{Path, PathBuf},
-};
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use ganja_protocol::team::MemberBackend;
 use ganja_team::ShimCli;
 use serde::Deserialize;
 
-use crate::teammate::{
-    readback,
-    shim::{Door, Driver, Reply, Shape, Turn},
-};
+use crate::teammate::readback;
+use crate::teammate::shim::{Door, Driver, Reply, Shape, Turn};
 
 /// The executable a spawn looks for on `PATH`.
 pub const BINARY: &str = "grok";
@@ -225,12 +221,7 @@ pub const OUTPUT_FORMAT: &str = "streaming-messages-json";
 /// directory the same argv reaches the composer under `sandbox:read-only`.
 /// The test compares this table against the recorded launch line rather than
 /// against a second literal.
-pub const TUI_ARGV: [&str; 4] = [
-    "--sandbox",
-    SANDBOX_VALUE,
-    "--permission-mode",
-    PERMISSION_MODE,
-];
+pub const TUI_ARGV: [&str; 4] = ["--sandbox", SANDBOX_VALUE, "--permission-mode", PERMISSION_MODE];
 
 /// What a readiness poll looks for in a captured pane: the composer's prompt
 /// glyph, **measured** (`tests/fixtures/grok-tui-probe.txt`, the 1.0.7
@@ -511,15 +502,11 @@ impl Seen {
     /// answered; the last whole `assistant` message; and the text deltas, which
     /// are all that a turn cut off before its message completed leaves behind.
     fn answer(&self) -> Option<&str> {
-        [
-            self.result.as_deref(),
-            self.message.as_deref(),
-            Some(self.streamed.as_str()),
-        ]
-        .into_iter()
-        .flatten()
-        .map(str::trim)
-        .find(|text| !text.is_empty())
+        [self.result.as_deref(), self.message.as_deref(), Some(self.streamed.as_str())]
+            .into_iter()
+            .flatten()
+            .map(str::trim)
+            .find(|text| !text.is_empty())
     }
 
     /// Whether the CLI itself ended this turn on an unapproved tool request.
@@ -647,15 +634,9 @@ impl Driver for Grok {
                 seen.on_tool()
             ))
         } else if seen.failed {
-            let said = seen
-                .errors
-                .first()
-                .map_or("the vendor named no reason", String::as_str);
+            let said = seen.errors.first().map_or("the vendor named no reason", String::as_str);
 
-            Some(format!(
-                "grok ended the turn as failed: {said}{}",
-                seen.on_tool()
-            ))
+            Some(format!("grok ended the turn as failed: {said}{}", seen.on_tool()))
         } else if messages.is_empty() {
             // Neither an answer nor a reason: the turn ran and said nothing
             // either way. Reported rather than passed off as an empty answer,
@@ -674,11 +655,7 @@ impl Driver for Grok {
             None
         };
 
-        Ok(Reply {
-            messages,
-            session: seen.session,
-            refused,
-        })
+        Ok(Reply { messages, session: seen.session, refused })
     }
 }
 
@@ -907,9 +884,7 @@ impl readback::Transcript for Transcript {
     fn user_said(&self, record: &serde_json::Value, mark: &str) -> bool {
         let update = &record["params"]["update"];
         update["sessionUpdate"] == "user_message_chunk"
-            && update["content"]["text"]
-                .as_str()
-                .is_some_and(|text| text.contains(mark))
+            && update["content"]["text"].as_str().is_some_and(|text| text.contains(mark))
     }
 
     fn answers(&self, path: &Path, cursor: &mut readback::Cursor) -> Vec<String> {

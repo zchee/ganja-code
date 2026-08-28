@@ -52,28 +52,20 @@
 //! rather than tidied away — a builtin or a `self`/`super` reads as `error`, an
 //! attribute as `warning`, an HTML tag name as `error`.
 
-use std::{
-    collections::hash_map::DefaultHasher,
-    hash::{Hash as _, Hasher as _},
-    ops::Range,
-    sync::OnceLock,
-};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash as _, Hasher as _};
+use std::ops::Range;
+use std::sync::OnceLock;
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-use ratatui::{
-    style::{Modifier, Style},
-    text::{Line, Span},
-};
-use syntect::{
-    easy::ScopeRegionIterator,
-    parsing::{ParseState, Scope, ScopeStack, SyntaxSet},
-};
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
+use syntect::easy::ScopeRegionIterator;
+use syntect::parsing::{ParseState, Scope, ScopeStack, SyntaxSet};
 use unicode_width::UnicodeWidthStr as _;
 
-use crate::{
-    component::chat::split_at_width,
-    theme::{Rgba, Theme},
-};
+use crate::component::chat::split_at_width;
+use crate::theme::{Rgba, Theme};
 
 /// What draws a blockquote's left edge (upstream draws a one-sided border
 /// box, `index.bun.js:9646-9658`; a cell renderer draws the glyph).
@@ -235,12 +227,7 @@ pub(crate) struct MdLine {
 
 impl MdLine {
     fn new(spans: Vec<Span<'static>>, kind: LineKind) -> Self {
-        Self {
-            prefix: Vec::new(),
-            spans,
-            hang: 0,
-            kind,
-        }
+        Self { prefix: Vec::new(), spans, hang: 0, kind }
     }
 
     /// The blank line that separates two blocks.
@@ -252,18 +239,11 @@ impl MdLine {
     /// does the wrap when it measures.
     #[cfg(test)]
     fn text(&self) -> String {
-        self.prefix
-            .iter()
-            .chain(self.spans.iter())
-            .map(|span| span.content.as_ref())
-            .collect()
+        self.prefix.iter().chain(self.spans.iter()).map(|span| span.content.as_ref()).collect()
     }
 
     fn prefix_width(&self) -> usize {
-        self.prefix
-            .iter()
-            .map(|span| span.content.as_ref().width())
-            .sum()
+        self.prefix.iter().map(|span| span.content.as_ref().width()).sum()
     }
 }
 
@@ -339,10 +319,7 @@ impl Styles {
 /// The foreground a theme key resolves to, or [`None`] when it names nothing
 /// or names something transparent.
 fn fg(theme: &Theme, key: &str) -> Option<Style> {
-    theme
-        .color(key)
-        .and_then(Rgba::color)
-        .map(|color| Style::new().fg(color))
+    theme.color(key).and_then(Rgba::color).map(|color| Style::new().fg(color))
 }
 
 /// One top-level block's rendered lines, and the key they were rendered under.
@@ -411,10 +388,8 @@ impl Document {
             ranges.push(range);
         }
 
-        let mut previous: Vec<Option<Cached>> = std::mem::take(&mut self.blocks)
-            .into_iter()
-            .map(Some)
-            .collect();
+        let mut previous: Vec<Option<Cached>> =
+            std::mem::take(&mut self.blocks).into_iter().map(Some).collect();
 
         for (index, span) in segment(&events).into_iter().enumerate() {
             let key = hash(&source[block_source(&ranges, &span, source)]);
@@ -422,8 +397,7 @@ impl Document {
             if let Some(slot) = previous.get_mut(index)
                 && slot.as_ref().is_some_and(|cached| cached.source == key)
             {
-                self.blocks
-                    .push(slot.take().expect("the slot was just checked"));
+                self.blocks.push(slot.take().expect("the slot was just checked"));
                 continue;
             }
 
@@ -447,10 +421,7 @@ impl Document {
     /// plain text.
     pub(crate) fn lines(&self) -> impl Iterator<Item = &MdLine> {
         self.blocks.iter().enumerate().flat_map(|(index, block)| {
-            (index > 0)
-                .then_some(&self.separator)
-                .into_iter()
-                .chain(block.lines.iter())
+            (index > 0).then_some(&self.separator).into_iter().chain(block.lines.iter())
         })
     }
 
@@ -541,11 +512,7 @@ impl Walker<'_, '_> {
                 self.at += 1;
                 let lines = self.inline();
                 self.at += 1;
-                out.extend(
-                    lines
-                        .into_iter()
-                        .map(|spans| MdLine::new(spans, LineKind::Flow)),
-                );
+                out.extend(lines.into_iter().map(|spans| MdLine::new(spans, LineKind::Flow)));
             }
             Event::Start(Tag::Heading { level, .. }) => {
                 let level = *level;
@@ -555,11 +522,7 @@ impl Walker<'_, '_> {
                 let lines = self.inline();
                 self.at += 1;
                 self.body = saved;
-                out.extend(
-                    lines
-                        .into_iter()
-                        .map(|spans| MdLine::new(spans, LineKind::Flow)),
-                );
+                out.extend(lines.into_iter().map(|spans| MdLine::new(spans, LineKind::Flow)));
             }
             Event::Start(Tag::BlockQuote(_)) => {
                 self.at += 1;
@@ -641,10 +604,7 @@ impl Walker<'_, '_> {
                 let html = html.to_string();
                 self.at += 1;
                 out.extend(html.trim_end_matches('\n').split('\n').map(|line| {
-                    MdLine::new(
-                        vec![Span::styled(line.to_owned(), self.body)],
-                        LineKind::Flow,
-                    )
+                    MdLine::new(vec![Span::styled(line.to_owned(), self.body)], LineKind::Flow)
                 }));
             }
             // A tight list item's text, which pulldown-cmark emits without a
@@ -653,11 +613,7 @@ impl Walker<'_, '_> {
             _ => {
                 let before = self.at;
                 let lines = self.inline();
-                out.extend(
-                    lines
-                        .into_iter()
-                        .map(|spans| MdLine::new(spans, LineKind::Flow)),
-                );
+                out.extend(lines.into_iter().map(|spans| MdLine::new(spans, LineKind::Flow)));
                 // [`Walker::inline`] leaves its terminator in place; if it
                 // consumed nothing at all, stepping over the event is what
                 // keeps the caller's loop moving.
@@ -700,11 +656,7 @@ impl Walker<'_, '_> {
 
         if let Some(Event::TaskListMarker(checked)) = self.events.get(self.at) {
             let mark = if *checked { "[x] " } else { "[ ] " };
-            let style = if *checked {
-                self.styles.list_item
-            } else {
-                self.styles.muted
-            };
+            let style = if *checked { self.styles.list_item } else { self.styles.muted };
             self.at += 1;
             let mut inner = Vec::new();
             self.children(&mut inner, true);
@@ -713,8 +665,7 @@ impl Walker<'_, '_> {
                 line.hang += mark.width();
             }
             for line in inner.iter_mut().skip(1) {
-                line.prefix
-                    .push(Span::styled(" ".repeat(mark.width()), Style::new()));
+                line.prefix.push(Span::styled(" ".repeat(mark.width()), Style::new()));
             }
             out.append(&mut inner);
 
@@ -732,10 +683,7 @@ impl Walker<'_, '_> {
         if let Some(number) = number {
             let delimiter = self
                 .item_source()
-                .and_then(|text| {
-                    text.chars()
-                        .find(|character| matches!(character, '.' | ')'))
-                })
+                .and_then(|text| text.chars().find(|character| matches!(character, '.' | ')')))
                 .unwrap_or('.');
 
             return format!("{number}{delimiter} ");
@@ -950,8 +898,7 @@ fn indent(lines: &mut [MdLine], marker: &str, style: Style) {
             line.spans.insert(0, Span::styled(marker.to_owned(), style));
             line.hang += width;
         } else {
-            line.prefix
-                .insert(0, Span::styled(" ".repeat(width), Style::new()));
+            line.prefix.insert(0, Span::styled(" ".repeat(width), Style::new()));
         }
     }
 }
@@ -978,10 +925,7 @@ fn highlight(code: &str, info: Option<&str>, styles: &Styles) -> Vec<MdLine> {
         code.trim_end_matches('\n')
             .split('\n')
             .map(|line| {
-                MdLine::new(
-                    vec![Span::styled(line.to_owned(), styles.code)],
-                    LineKind::Chop,
-                )
+                MdLine::new(vec![Span::styled(line.to_owned(), styles.code)], LineKind::Chop)
             })
             .collect::<Vec<_>>()
     };
@@ -1025,10 +969,7 @@ fn highlight(code: &str, info: Option<&str>, styles: &Styles) -> Vec<MdLine> {
 /// that any rule matches. See [`SCOPE_RULES`].
 fn style_for(stack: &ScopeStack, styles: &Styles) -> Style {
     for scope in stack.as_slice().iter().rev() {
-        if let Some((_, slot)) = scope_rules()
-            .iter()
-            .find(|(rule, _)| rule.is_prefix_of(*scope))
-        {
+        if let Some((_, slot)) = scope_rules().iter().find(|(rule, _)| rule.is_prefix_of(*scope)) {
             return styles.scoped(*slot);
         }
     }
@@ -1105,10 +1046,7 @@ fn grid_row(row: &[Vec<Span<'static>>], widths: &[usize], styles: &Styles) -> Md
             used += head_width;
             spans.push(Span::styled(head.to_owned(), span.style));
         }
-        spans.push(Span::styled(
-            " ".repeat(width.saturating_sub(used) + 1),
-            styles.chrome,
-        ));
+        spans.push(Span::styled(" ".repeat(width.saturating_sub(used) + 1), styles.chrome));
     }
     spans.push(Span::styled("\u{2502}".to_owned(), styles.chrome));
 
@@ -1323,10 +1261,7 @@ fn clip(line: &MdLine, width: usize) -> Vec<Span<'static>> {
 /// rule that needs to know how wide the screen is.
 fn rule(line: &MdLine, width: usize) -> Vec<Span<'static>> {
     let (mut spans, used) = opening(line, true);
-    let style = line
-        .spans
-        .first()
-        .map_or_else(Style::new, |span| span.style);
+    let style = line.spans.first().map_or_else(Style::new, |span| span.style);
 
     spans.push(Span::styled(
         std::iter::repeat_n(RULE_GLYPH, width.saturating_sub(used)).collect::<String>(),

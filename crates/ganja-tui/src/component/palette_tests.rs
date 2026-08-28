@@ -1,14 +1,12 @@
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 
 use super::{Palette, Row, SUGGESTED};
-use crate::{command::Action, keybind::Keybinds, theme::Theme};
+use crate::command::Action;
+use crate::keybind::Keybinds;
+use crate::theme::Theme;
 
-const AREA: Rect = Rect {
-    x: 0,
-    y: 0,
-    width: 64,
-    height: 20,
-};
+const AREA: Rect = Rect { x: 0, y: 0, width: 64, height: 20 };
 
 fn palette() -> Palette {
     Palette::new(Keybinds::defaults())
@@ -25,11 +23,7 @@ fn rendered(palette: &Palette) -> String {
     palette.render(AREA, &mut buffer, &Theme::default());
 
     (0..AREA.height)
-        .map(|row| {
-            (0..AREA.width)
-                .map(|column| buffer[(column, row)].symbol())
-                .collect::<String>()
-        })
+        .map(|row| (0..AREA.width).map(|column| buffer[(column, row)].symbol()).collect::<String>())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -105,11 +99,7 @@ fn a_fragment_nothing_matches_says_so_instead_of_drawing_an_empty_box() {
     typing(&mut palette, "zzzz");
 
     assert_eq!(palette.selected(), None);
-    assert!(
-        rendered(&palette).contains("no commands match"),
-        "{}",
-        rendered(&palette)
-    );
+    assert!(rendered(&palette).contains("no commands match"), "{}", rendered(&palette));
 }
 
 #[test]
@@ -128,14 +118,8 @@ fn a_command_with_a_binding_shows_it_and_one_without_shows_nothing() {
     let screen = rendered(&palette());
 
     assert!(screen.contains("ctrl+s"), "/sessions has a key:\n{screen}");
-    let models = screen
-        .lines()
-        .find(|line| line.contains("/models"))
-        .unwrap_or_default();
-    assert!(
-        !models.contains("ctrl"),
-        "/models has no key of its own: {models}"
-    );
+    let models = screen.lines().find(|line| line.contains("/models")).unwrap_or_default();
+    assert!(!models.contains("ctrl"), "/models has no key of its own: {models}");
 }
 
 #[test]

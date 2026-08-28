@@ -21,10 +21,7 @@ struct Fake {
 
 impl Fake {
     fn answering(answer: Result<Teammated, NotSpawned>) -> Arc<Self> {
-        Arc::new(Self {
-            started: Mutex::new(Vec::new()),
-            answer,
-        })
+        Arc::new(Self { started: Mutex::new(Vec::new()), answer })
     }
 
     fn spawning() -> Arc<Self> {
@@ -48,10 +45,7 @@ impl Subagents for Fake {
     }
 
     async fn spawn_teammate(&self, request: TeammateSpawn) -> Result<Teammated, NotSpawned> {
-        self.started
-            .lock()
-            .expect("the spawn log is never poisoned")
-            .push(request);
+        self.started.lock().expect("the spawn log is never poisoned").push(request);
 
         self.answer.clone()
     }
@@ -65,10 +59,7 @@ fn ctx(spawn: Option<Arc<dyn Subagents>>) -> ToolCtx {
 }
 
 fn tool() -> TaskTool {
-    TaskTool::new(&[Offered {
-        name: "general".to_owned(),
-        description: None,
-    }])
+    TaskTool::new(&[Offered { name: "general".to_owned(), description: None }])
 }
 
 /// Runs one call against `spawn` and reports what the model would read of
@@ -124,9 +115,7 @@ async fn a_call_that_names_a_teammate_starts_one_and_says_so() {
 /// A refusal is the far side's sentence, unwrapped.
 #[tokio::test]
 async fn a_refused_spawn_reads_back_the_far_sides_own_sentence() {
-    let spawn = Fake::answering(Err(NotSpawned {
-        reason: "no backend named \"tmux\"".to_owned(),
-    }));
+    let spawn = Fake::answering(Err(NotSpawned { reason: "no backend named \"tmux\"".to_owned() }));
     let read = refusal(
         spawn as Arc<dyn Subagents>,
         serde_json::json!({
@@ -159,10 +148,7 @@ async fn a_surface_named_without_a_teammate_is_refused() {
     .await;
 
     assert_eq!(read, BACKEND_WITHOUT_NAME);
-    assert!(
-        spawn.started.lock().expect("no panic").is_empty(),
-        "and nothing was started"
-    );
+    assert!(spawn.started.lock().expect("no panic").is_empty(), "and nothing was started");
 }
 
 /// Continuing a delegation and starting a teammate are two calls, not one.
@@ -271,43 +257,23 @@ fn a_roster_is_listed_in_name_order_however_it_was_handed_over() {
             name: "general".to_owned(),
             description: Some("does the general thing".to_owned()),
         },
-        Offered {
-            name: "explore".to_owned(),
-            description: Some("finds things".to_owned()),
-        },
+        Offered { name: "explore".to_owned(), description: Some("finds things".to_owned()) },
     ]);
     let described = tool.description();
 
-    assert!(
-        described.starts_with(DESCRIPTION),
-        "upstream's text comes first, unedited"
-    );
+    assert!(described.starts_with(DESCRIPTION), "upstream's text comes first, unedited");
     // Only the tail past the header is the roster: upstream's own text
     // carries `- ` bullets of its own.
-    let (_, listed) = described
-        .split_once(ROSTER_HEADER)
-        .expect("the roster header is appended");
-    let roster: Vec<&str> = listed
-        .lines()
-        .filter(|line| line.starts_with("- "))
-        .collect();
-    assert_eq!(
-        roster,
-        vec![
-            "- explore: finds things",
-            "- general: does the general thing"
-        ]
-    );
+    let (_, listed) = described.split_once(ROSTER_HEADER).expect("the roster header is appended");
+    let roster: Vec<&str> = listed.lines().filter(|line| line.starts_with("- ")).collect();
+    assert_eq!(roster, vec!["- explore: finds things", "- general: does the general thing"]);
 }
 
 /// An agent that describes itself nowhere is still offered, under
 /// upstream's stand-in line.
 #[test]
 fn a_subagent_with_nothing_to_say_for_itself_gets_upstreams_line() {
-    let tool = TaskTool::new(&[Offered {
-        name: "quiet".to_owned(),
-        description: None,
-    }]);
+    let tool = TaskTool::new(&[Offered { name: "quiet".to_owned(), description: None }]);
 
     assert!(
         tool.description()

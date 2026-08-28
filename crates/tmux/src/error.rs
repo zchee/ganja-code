@@ -291,11 +291,7 @@ fn client_refusal(
 }
 
 fn join_close_errors(errors: &[Error]) -> String {
-    errors
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("; ")
+    errors.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")
 }
 
 #[cfg(test)]

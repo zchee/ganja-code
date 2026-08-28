@@ -25,11 +25,7 @@ fn an_osc52_payload_matches_the_standard_encoding_including_padding() {
     ];
 
     for (input, expected) in cases {
-        assert_eq!(
-            payload(&osc52::sequence(input)),
-            expected,
-            "encoding {input:?}"
-        );
+        assert_eq!(payload(&osc52::sequence(input)), expected, "encoding {input:?}");
     }
 }
 
@@ -51,20 +47,14 @@ fn a_copy_emits_one_osc52_sequence_whose_base64_is_the_text() {
     // not a false failure.
     let sequence = osc52::sequence("copy me");
 
-    assert!(
-        sequence.contains("\x1b]52;c;"),
-        "the OSC 52 opener: {sequence:?}"
-    );
+    assert!(sequence.contains("\x1b]52;c;"), "the OSC 52 opener: {sequence:?}");
     assert!(
         // The literal rather than a re-encode: a pin that computes its own
         // expectation is a pin against nothing.
         sequence.contains("Y29weSBtZQ=="),
         "the payload is the text's base64: {sequence:?}"
     );
-    assert!(
-        sequence.ends_with('\u{7}') || sequence.ends_with('\\'),
-        "a terminator: {sequence:?}"
-    );
+    assert!(sequence.ends_with('\u{7}') || sequence.ends_with('\\'), "a terminator: {sequence:?}");
 }
 
 #[test]
@@ -75,10 +65,7 @@ fn a_recording_clipboard_keeps_every_write_in_order() {
     clipboard.write("first").expect("the write is accepted");
     clipboard.write("second").expect("the write is accepted");
 
-    assert_eq!(
-        *log.lock().expect("the lock holds"),
-        vec!["first".to_owned(), "second".to_owned()]
-    );
+    assert_eq!(*log.lock().expect("the lock holds"), vec!["first".to_owned(), "second".to_owned()]);
 }
 
 #[test]
@@ -114,14 +101,7 @@ fn a_clipboard_holding_an_image_reads_it_and_has_no_text() {
     let rgba = vec![255, 0, 0, 255, 0, 255, 0, 255];
     let mut clipboard = Recording::holding_image(2, 1, rgba.clone());
 
-    assert_eq!(
-        clipboard.read_image(),
-        Ok(Image {
-            width: 2,
-            height: 1,
-            rgba,
-        })
-    );
+    assert_eq!(clipboard.read_image(), Ok(Image { width: 2, height: 1, rgba }));
     assert_eq!(clipboard.read(), Err(Error::NotText));
 }
 

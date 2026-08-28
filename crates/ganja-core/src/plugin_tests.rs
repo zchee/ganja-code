@@ -20,9 +20,7 @@ fn a_skills_origin_inside_the_store_names_its_plugin() {
         "ganja's own home is the user's, not a plugin's"
     );
     assert_eq!(
-        store.plugin_of(std::path::Path::new(
-            "/home/.config/ganja/plugins/installed"
-        )),
+        store.plugin_of(std::path::Path::new("/home/.config/ganja/plugins/installed")),
         None,
         "the installed directory itself belongs to no plugin"
     );
@@ -49,20 +47,11 @@ fn fixture_git(dir: &std::path::Path, args: &[&str]) -> String {
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(dir)
-        .args([
-            "-c",
-            "user.email=fixture@example.invalid",
-            "-c",
-            "user.name=Fixture",
-        ])
+        .args(["-c", "user.email=fixture@example.invalid", "-c", "user.name=Fixture"])
         .args(args)
         .output()
         .expect("git spawns");
-    assert!(
-        output.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
 
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
@@ -103,9 +92,7 @@ fn details_prices_the_prompt_bearing_components() {
     plant(&market, "priced/commands/go.md", "run everything now");
 
     let store = Store::at(home.path().join("store"));
-    store
-        .add_marketplace(&market.display().to_string())
-        .expect("the marketplace adds");
+    store.add_marketplace(&market.display().to_string()).expect("the marketplace adds");
     store.install("priced", "m").expect("the plugin installs");
 
     let details = store.details("priced").expect("the details read");
@@ -140,9 +127,7 @@ fn details_prices_the_prompt_bearing_components() {
     );
     assert!(details.hooks.is_empty());
 
-    let missing = store
-        .details("nothing")
-        .expect_err("an unknown plugin refuses");
+    let missing = store.details("nothing").expect_err("an unknown plugin refuses");
     assert!(missing.to_string().contains("nothing"), "{missing}");
 }
 
@@ -163,16 +148,10 @@ fn marketplaces_list_remove_and_update_from_their_recorded_origins() {
         ".claude-plugin/marketplace.json",
         &manifest(r#"{ "name": "one", "source": "./one" }"#),
     );
-    plant(
-        &market,
-        "one/skills/one/SKILL.md",
-        "---\nname: one\ndescription: d\n---\nx",
-    );
+    plant(&market, "one/skills/one/SKILL.md", "---\nname: one\ndescription: d\n---\nx");
 
     let store = Store::at(home.path().join("store"));
-    store
-        .add_marketplace(&market.display().to_string())
-        .expect("the marketplace adds");
+    store.add_marketplace(&market.display().to_string()).expect("the marketplace adds");
     store.install("one", "verbs").expect("its plugin installs");
 
     let listings = store.marketplaces().expect("the listing reads");
@@ -186,13 +165,9 @@ fn marketplaces_list_remove_and_update_from_their_recorded_origins() {
     );
     assert_eq!(listings[0].installed, vec!["one".to_owned()]);
 
-    let refused = store
-        .remove_marketplace("verbs")
-        .expect_err("installed plugins hold the marketplace");
-    assert!(
-        refused.to_string().contains("one"),
-        "the refusal names the dependents: {refused}"
-    );
+    let refused =
+        store.remove_marketplace("verbs").expect_err("installed plugins hold the marketplace");
+    assert!(refused.to_string().contains("one"), "the refusal names the dependents: {refused}");
 
     // The origin grows a second plugin; update picks it up in place.
     plant(
@@ -200,9 +175,7 @@ fn marketplaces_list_remove_and_update_from_their_recorded_origins() {
         ".claude-plugin/marketplace.json",
         &manifest(r#"{ "name": "one", "source": "./one" }, { "name": "two", "source": "./one" }"#),
     );
-    let origin = store
-        .update_marketplace("verbs")
-        .expect("the update fetches");
+    let origin = store.update_marketplace("verbs").expect("the update fetches");
     assert_eq!(origin, market.display().to_string());
     let updated = store.marketplaces().expect("the listing reads");
     assert_eq!(
@@ -217,22 +190,13 @@ fn marketplaces_list_remove_and_update_from_their_recorded_origins() {
         ".claude-plugin/marketplace.json",
         r#"{ "name": "renamed", "owner": { "name": "t" }, "plugins": [] }"#,
     );
-    let forked = store
-        .update_marketplace("verbs")
-        .expect_err("a rename refuses");
-    assert!(
-        forked.to_string().contains("renamed"),
-        "the refusal names both: {forked}"
-    );
+    let forked = store.update_marketplace("verbs").expect_err("a rename refuses");
+    assert!(forked.to_string().contains("renamed"), "the refusal names both: {forked}");
 
     store.remove("one").expect("the plugin removes");
-    store
-        .remove_marketplace("verbs")
-        .expect("with no dependents the marketplace removes");
+    store.remove_marketplace("verbs").expect("with no dependents the marketplace removes");
     assert!(store.marketplaces().expect("the listing reads").is_empty());
-    let unknown = store
-        .remove_marketplace("verbs")
-        .expect_err("a second remove refuses");
+    let unknown = store.remove_marketplace("verbs").expect_err("a second remove refuses");
     assert!(unknown.to_string().contains("added: none"), "{unknown}");
 }
 
@@ -289,12 +253,8 @@ fn a_remote_source_installs_the_pinned_commit_and_unknown_kinds_refuse() {
     );
 
     let store = Store::at(home.path().join("store"));
-    store
-        .add_marketplace(&market.display().to_string())
-        .expect("the marketplace adds");
-    store
-        .install("hello", "remote-market")
-        .expect("the remote source installs");
+    store.add_marketplace(&market.display().to_string()).expect("the marketplace adds");
+    store.install("hello", "remote-market").expect("the remote source installs");
 
     let installed = fs::read_to_string(store.plugin_root("hello").join("skills/hello/SKILL.md"))
         .expect("the pinned skill landed");
@@ -303,13 +263,9 @@ fn a_remote_source_installs_the_pinned_commit_and_unknown_kinds_refuse() {
         "the pin outranks the branch tip: {installed}"
     );
 
-    let refused = store
-        .install("unfetchable", "remote-market")
-        .expect_err("an unfetchable kind refuses");
-    assert!(
-        refused.to_string().contains("cannot fetch"),
-        "the refusal names the limit: {refused}"
-    );
+    let refused =
+        store.install("unfetchable", "remote-market").expect_err("an unfetchable kind refuses");
+    assert!(refused.to_string().contains("cannot fetch"), "the refusal names the limit: {refused}");
 }
 
 #[test]
@@ -329,14 +285,7 @@ fn a_manifest_with_keys_this_build_never_heard_of_still_loads() {
 
     assert_eq!(manifest.name, "deployment-tools");
     assert_eq!(manifest.version.as_deref(), Some("1.2.0"));
-    assert_eq!(
-        manifest
-            .author
-            .expect("the author was written")
-            .name
-            .as_deref(),
-        Some("A Person")
-    );
+    assert_eq!(manifest.author.expect("the author was written").name.as_deref(), Some("A Person"));
 }
 
 #[test]
@@ -347,10 +296,7 @@ fn a_plugin_name_that_traverses_is_refused_by_name() {
         let PluginError::Parse { message, .. } = &error else {
             panic!("expected a parse refusal, got {error:?}");
         };
-        assert!(
-            !message.is_empty(),
-            "the refusal for {hostile:?} says something"
-        );
+        assert!(!message.is_empty(), "the refusal for {hostile:?} says something");
     }
 }
 
@@ -370,10 +316,7 @@ fn a_marketplace_lists_its_plugins_with_their_sources() {
 
     assert_eq!(market.name, "company-tools");
     assert_eq!(market.plugins.len(), 2);
-    assert_eq!(
-        market.plugins[0].source,
-        Source::Path("./plugins/formatter".to_owned())
-    );
+    assert_eq!(market.plugins[0].source, Source::Path("./plugins/formatter".to_owned()));
     assert!(matches!(market.plugins[1].source, Source::Remote(_)));
 }
 
@@ -411,10 +354,7 @@ fn an_absolute_or_traversing_source_is_refused_by_name() {
         let PluginError::Parse { message, .. } = &error else {
             panic!("expected a parse refusal, got {error:?}");
         };
-        assert!(
-            message.contains('p'),
-            "the refusal names the plugin: {message}"
-        );
+        assert!(message.contains('p'), "the refusal names the plugin: {message}");
     }
 }
 
@@ -491,33 +431,17 @@ fn a_plugin_file_reads_through_the_same_grammar_as_a_projects() {
 fn an_empty_name_falls_back_to_the_stem_instead_of_dropping_the_component() {
     let plugin = TempDir::new().expect("a temporary directory");
     let root = plugin.path();
-    plant(
-        root,
-        "agents/stemmed.md",
-        "---\nname:\nmodel:\n---\nYou review.",
-    );
-    plant(
-        root,
-        "skills/pricing/SKILL.md",
-        "---\nname:\ndescription: Prices things\n---\nBody.",
-    );
+    plant(root, "agents/stemmed.md", "---\nname:\nmodel:\n---\nYou review.");
+    plant(root, "skills/pricing/SKILL.md", "---\nname:\ndescription: Prices things\n---\nBody.");
 
     let agents = collect_agents(root, "demo");
-    let config = agents
-        .get("stemmed")
-        .expect("the agent loads under its file stem");
-    assert_eq!(
-        config.model, None,
-        "an empty model is no model, as agent.rs answers it"
-    );
+    let config = agents.get("stemmed").expect("the agent loads under its file stem");
+    assert_eq!(config.model, None, "an empty model is no model, as agent.rs answers it");
 
     let mut costs = Vec::new();
     collect_skill_costs(&root.join("skills"), &mut costs);
     assert_eq!(costs.len(), 1);
-    assert_eq!(
-        costs[0].name, "pricing",
-        "an empty name prices under the directory"
-    );
+    assert_eq!(costs[0].name, "pricing", "an empty name prices under the directory");
 }
 
 /// The collector is one function on purpose — `ganja plugin list` and the
@@ -576,11 +500,7 @@ fn a_full_plugin_directory_yields_all_six_surfaces() {
     let found: Contribution = collect(root, "fixture");
 
     let pre = &found.hooks["PreToolUse"];
-    assert_eq!(
-        pre.len(),
-        1,
-        "the Setup event this build does not fire is skipped"
-    );
+    assert_eq!(pre.len(), 1, "the Setup event this build does not fire is skipped");
     assert!(!found.hooks.contains_key("Setup"));
     let HookHandler::Command(command) = &pre[0].hooks[0];
     assert!(
@@ -602,10 +522,7 @@ fn a_full_plugin_directory_yields_all_six_surfaces() {
     assert_eq!(db.environment["P"], format!("{}/data", root.display()));
     assert!(matches!(&found.mcp["hub"], McpServer::Remote(_)));
 
-    assert_eq!(
-        found.skills_root.as_deref(),
-        Some(root.join("skills").as_path())
-    );
+    assert_eq!(found.skills_root.as_deref(), Some(root.join("skills").as_path()));
 
     assert_eq!(
         found.commands.keys().collect::<Vec<_>>(),
@@ -625,20 +542,10 @@ fn a_full_plugin_directory_yields_all_six_surfaces() {
     assert_eq!(reviewer.description.as_deref(), Some("Reviews"));
     assert_eq!(reviewer.prompt.as_deref(), Some("You review."));
 
-    assert_eq!(
-        found.lsp.len(),
-        1,
-        "an entry with no extensionToLanguage is skipped"
-    );
+    assert_eq!(found.lsp.len(), 1, "an entry with no extensionToLanguage is skipped");
     let go = &found.lsp["go"];
-    assert_eq!(
-        go.command.as_deref(),
-        Some(["gopls".to_owned(), "serve".to_owned()].as_slice())
-    );
-    assert_eq!(
-        go.extensions.as_deref(),
-        Some([".go".to_owned()].as_slice())
-    );
+    assert_eq!(go.command.as_deref(), Some(["gopls".to_owned(), "serve".to_owned()].as_slice()));
+    assert_eq!(go.extensions.as_deref(), Some([".go".to_owned()].as_slice()));
 }
 
 #[test]

@@ -18,19 +18,15 @@
 //! [`Permissions::default`] has no store to put an answer in. One thing is read
 //! from outside the fixture, and [`pin_config_home`] is what moves it.
 
-use std::{
-    path::PathBuf,
-    sync::{Arc, LazyLock},
-};
+use std::path::PathBuf;
+use std::sync::{Arc, LazyLock};
 
-use ganja_core::{
-    Config, Engine,
-    config::CONFIG_HOME_ENV,
-    permission::{Action, Permissions, Rule},
-    protocol::{Command, Event, FinishReason, PartBody, ToolState},
-    provider::ProviderEvent,
-    tool::Registry,
-};
+use ganja_core::config::CONFIG_HOME_ENV;
+use ganja_core::permission::{Action, Permissions, Rule};
+use ganja_core::protocol::{Command, Event, FinishReason, PartBody, ToolState};
+use ganja_core::provider::ProviderEvent;
+use ganja_core::tool::Registry;
+use ganja_core::{Config, Engine};
 use ganja_testkit::{RecorderTool, ScriptedProvider, agent_registry, drain, says};
 use serde_json::json;
 
@@ -71,24 +67,14 @@ fn pin_config_home() {
 /// The same shape `ganja run` installs (`ganja-cli`'s `run::REFUSED`), reduced
 /// to the one permission these tests need.
 fn refuse_question() -> Vec<Rule> {
-    vec![Rule {
-        permission: "question".to_owned(),
-        pattern: "*".to_owned(),
-        action: Action::Deny,
-    }]
+    vec![Rule { permission: "question".to_owned(), pattern: "*".to_owned(), action: Action::Deny }]
 }
 
 /// A step that calls `tool` once and stops.
 fn calls(tool: &str, args: serde_json::Value) -> Vec<ProviderEvent> {
     vec![
-        ProviderEvent::ToolCallStart {
-            id: format!("call_{tool}"),
-            name: tool.to_owned(),
-        },
-        ProviderEvent::ToolCallDelta {
-            id: format!("call_{tool}"),
-            json: args.to_string(),
-        },
+        ProviderEvent::ToolCallStart { id: format!("call_{tool}"), name: tool.to_owned() },
+        ProviderEvent::ToolCallDelta { id: format!("call_{tool}"), json: args.to_string() },
         ProviderEvent::Finish(FinishReason::Completed),
     ]
 }
@@ -98,10 +84,7 @@ fn refusals(seen: &[Event]) -> Vec<String> {
     seen.iter()
         .filter_map(|event| match event {
             Event::PartUpdated { part, .. } => match &part.body {
-                PartBody::Tool {
-                    state: ToolState::Error { error, .. },
-                    ..
-                } => Some(error.clone()),
+                PartBody::Tool { state: ToolState::Error { error, .. }, .. } => Some(error.clone()),
                 _ => None,
             },
             _ => None,
@@ -175,18 +158,12 @@ fn engine(config: &Config, script: Vec<Vec<ProviderEvent>>) -> (Engine, Calls, C
 async fn a_command_running_as_another_agent_is_still_bound_by_the_standing_refusal() {
     let (engine, questions, _) = engine(
         &reviewer(),
-        vec![
-            calls("question", json!({ "text": "which one?" })),
-            says("never mind"),
-        ],
+        vec![calls("question", json!({ "text": "which one?" })), says("never mind")],
     );
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
-        .send(Command::RunCommand {
-            name: "review".to_owned(),
-            args: String::new(),
-        })
+        .send(Command::RunCommand { name: "review".to_owned(), args: String::new() })
         .await
         .expect("the configured command runs");
     let seen = drain(&mut events).await;
@@ -196,9 +173,7 @@ async fn a_command_running_as_another_agent_is_still_bound_by_the_standing_refus
         "the refused tool must never have run"
     );
     assert!(
-        !seen
-            .iter()
-            .any(|event| matches!(event, Event::PermissionRequested { .. })),
+        !seen.iter().any(|event| matches!(event, Event::PermissionRequested { .. })),
         "and a headless refusal is never a dialog, got {seen:?}"
     );
 
@@ -212,11 +187,7 @@ async fn a_command_running_as_another_agent_is_still_bound_by_the_standing_refus
     let Some(Event::MessageFinished { reason, .. }) = seen.last() else {
         panic!("a turn always ends with a finish, got {seen:?}");
     };
-    assert_eq!(
-        *reason,
-        FinishReason::Completed,
-        "a refusal is information, not a turn abort"
-    );
+    assert_eq!(*reason, FinishReason::Completed, "a refusal is information, not a turn abort");
 }
 
 /// The inverse, so the fix is a layering and not a replacement: the command
@@ -229,18 +200,12 @@ async fn a_command_running_as_another_agent_is_still_bound_by_the_standing_refus
 async fn a_command_agents_own_rules_still_decide_inside_the_derived_turn() {
     let (engine, _, edits) = engine(
         &reviewer(),
-        vec![
-            calls("edit", json!({ "filePath": "src/main.rs" })),
-            says("I will not"),
-        ],
+        vec![calls("edit", json!({ "filePath": "src/main.rs" })), says("I will not")],
     );
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
-        .send(Command::RunCommand {
-            name: "review".to_owned(),
-            args: String::new(),
-        })
+        .send(Command::RunCommand { name: "review".to_owned(), args: String::new() })
         .await
         .expect("the configured command runs");
     let seen = drain(&mut events).await;
@@ -270,17 +235,12 @@ async fn a_command_agents_own_rules_still_decide_inside_the_derived_turn() {
 async fn switching_the_session_agent_does_not_drop_the_standing_refusal() {
     let (engine, questions, _) = engine(
         &reviewer(),
-        vec![
-            calls("question", json!({ "text": "which one?" })),
-            says("never mind"),
-        ],
+        vec![calls("question", json!({ "text": "which one?" })), says("never mind")],
     );
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
-        .send(Command::SwitchAgent {
-            name: "reviewer".to_owned(),
-        })
+        .send(Command::SwitchAgent { name: "reviewer".to_owned() })
         .await
         .expect("reviewer is a primary agent");
     engine
@@ -379,20 +339,12 @@ async fn a_tool_no_standing_rule_names_still_runs_under_the_agent_that_allows_it
         "command": { "review": { "template": "review it", "agent": "reviewer" } }
     }))
     .expect("the fixture is a config");
-    let (engine, _, edits) = engine(
-        &config,
-        vec![
-            calls("edit", json!({ "filePath": "src/main.rs" })),
-            says("done"),
-        ],
-    );
+    let (engine, _, edits) =
+        engine(&config, vec![calls("edit", json!({ "filePath": "src/main.rs" })), says("done")]);
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
-        .send(Command::RunCommand {
-            name: "review".to_owned(),
-            args: String::new(),
-        })
+        .send(Command::RunCommand { name: "review".to_owned(), args: String::new() })
         .await
         .expect("the configured command runs");
     let seen = drain(&mut events).await;

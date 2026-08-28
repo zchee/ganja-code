@@ -1,8 +1,6 @@
-use std::{
-    ffi::{OsStr, OsString},
-    path::Path,
-    time::Duration,
-};
+use std::ffi::{OsStr, OsString};
+use std::path::Path;
+use std::time::Duration;
 
 use ganja_testkit::tmux::PrivateServer;
 
@@ -35,10 +33,7 @@ fn the_socket_is_the_value_up_to_the_first_comma() {
         socket_of(OsStr::new("/private/tmp/tmux-501/default,4242,0")),
         std::path::Path::new("/private/tmp/tmux-501/default")
     );
-    assert_eq!(
-        socket_of(OsStr::new("/tmp/sock")),
-        std::path::Path::new("/tmp/sock")
-    );
+    assert_eq!(socket_of(OsStr::new("/tmp/sock")), std::path::Path::new("/tmp/sock"));
     assert!(socket_of(OsStr::new(",1,2")).as_os_str().is_empty());
 }
 
@@ -164,26 +159,16 @@ fn a_listing_line_is_live_dead_or_unreadable_on_tmuxs_own_verdict() {
 
     assert_eq!(
         parse_listing("0 %2 48213"),
-        Some(Listed::Live(Pane {
-            id: "%2".to_owned(),
-            birth: "48213".to_owned(),
-        }))
+        Some(Listed::Live(Pane { id: "%2".to_owned(), birth: "48213".to_owned() }))
     );
-    assert_eq!(
-        parse_listing("1 %2"),
-        Some(Listed::Dead),
-        "the measured shape"
-    );
+    assert_eq!(parse_listing("1 %2"), Some(Listed::Dead), "the measured shape");
     assert_eq!(
         parse_listing("1 %2 48213"),
         Some(Listed::Dead),
         "tmux's word, not the tail, says dead"
     );
 
-    assert!(
-        parse_listing("0 %2").is_none(),
-        "a live pane with no pid stays loud"
-    );
+    assert!(parse_listing("0 %2").is_none(), "a live pane with no pid stays loud");
     assert!(parse_listing("0 %2 forty").is_none(), "not a pid");
     assert!(parse_listing("%2 48213").is_none(), "no verdict");
     assert!(parse_listing("2 %2 48213").is_none(), "not a verdict");
@@ -238,9 +223,7 @@ async fn split(at: &Server, cwd: &Path, argv: &[&str]) -> Pane {
         cwd,
         environment: &[],
         argv: &argv,
-        placement: Placement::Beside {
-            share: crate::teammate::pane::DEFAULT_SHARE,
-        },
+        placement: Placement::Beside { share: crate::teammate::pane::DEFAULT_SHARE },
     })
     .await
     .expect("the private server splits a pane")
@@ -327,15 +310,8 @@ async fn a_capture_reads_what_the_pane_shows_with_wrapped_lines_rejoined() {
     );
 
     eventually("the sentence to show in the pane, whole", async || {
-        let shown = at
-            .capture(&pane.id)
-            .await
-            .map_err(|error| error.to_string())?;
-        if shown.lines().any(|line| line == sentence) {
-            Ok(())
-        } else {
-            Err(format!("{shown:?}"))
-        }
+        let shown = at.capture(&pane.id).await.map_err(|error| error.to_string())?;
+        if shown.lines().any(|line| line == sentence) { Ok(()) } else { Err(format!("{shown:?}")) }
     })
     .await;
 }
@@ -360,49 +336,28 @@ async fn a_pasted_text_reaches_the_pane_whole_with_its_newlines_and_is_submitted
     let pane = split(
         &at,
         dir.path(),
-        &[
-            "sh",
-            "-c",
-            "exec cat > \"$0\"",
-            received.to_str().expect("a utf-8 temp path"),
-        ],
+        &["sh", "-c", "exec cat > \"$0\"", received.to_str().expect("a utf-8 temp path")],
     )
     .await;
     // The redirection opens the file before `cat` runs: the stub is
     // listening once the file exists.
     eventually("the stub to open its file", async || {
-        if received.exists() {
-            Ok(())
-        } else {
-            Err("no file yet".to_owned())
-        }
+        if received.exists() { Ok(()) } else { Err("no file yet".to_owned()) }
     })
     .await;
 
-    at.paste_submit(&pane.id, "")
-        .await
-        .expect("an empty text is no message, and no error");
-    at.paste_submit(&pane.id, TEXT)
-        .await
-        .expect("the text is delivered");
+    at.paste_submit(&pane.id, "").await.expect("an empty text is no message, and no error");
+    at.paste_submit(&pane.id, TEXT).await.expect("the text is delivered");
 
     // Exactly the text and the one Enter after it: had the empty paste
     // pressed Enter, the file would open with a newline of its own.
     let expected = format!("{TEXT}\n");
     eventually("the pasted text to reach the stub's file", async || {
         let got = std::fs::read_to_string(&received).map_err(|error| error.to_string())?;
-        if got == expected {
-            Ok(())
-        } else {
-            Err(format!("{got:?}"))
-        }
+        if got == expected { Ok(()) } else { Err(format!("{got:?}")) }
     })
     .await;
-    assert_eq!(
-        server.run(&["list-buffers"]).trim(),
-        "",
-        "the buffer was freed by the paste"
-    );
+    assert_eq!(server.run(&["list-buffers"]).trim(), "", "the buffer was freed by the paste");
 }
 
 /// A delivery dropped mid-flight — the shim runtime's `select!` letting
@@ -429,20 +384,11 @@ async fn a_delivery_dropped_mid_flight_leaves_no_buffer_and_presses_no_enter() {
     let pane = split(
         &at,
         dir.path(),
-        &[
-            "sh",
-            "-c",
-            "exec cat > \"$0\"",
-            received.to_str().expect("a utf-8 temp path"),
-        ],
+        &["sh", "-c", "exec cat > \"$0\"", received.to_str().expect("a utf-8 temp path")],
     )
     .await;
     eventually("the stub to open its file", async || {
-        if received.exists() {
-            Ok(())
-        } else {
-            Err("no file yet".to_owned())
-        }
+        if received.exists() { Ok(()) } else { Err("no file yet".to_owned()) }
     })
     .await;
 
@@ -470,9 +416,7 @@ async fn a_delivery_dropped_mid_flight_leaves_no_buffer_and_presses_no_enter() {
     // The pane is untouched, and the next delivery is the first thing it
     // hears: had the dropped one pasted, the file would open with its
     // text; had it pressed Enter, with a newline.
-    at.paste_submit(&pane.id, "after\n")
-        .await
-        .expect("the next delivery lands");
+    at.paste_submit(&pane.id, "after\n").await.expect("the next delivery lands");
     eventually("the next delivery to reach the stub's file", async || {
         let got = std::fs::read_to_string(&received).map_err(|error| error.to_string())?;
         if got == "after\n\n" {
@@ -508,21 +452,11 @@ async fn a_large_text_is_handed_to_tmux_through_stdin_whole() {
 
     let mut load = at.command();
     load.arg("load-buffer").arg("-b").arg(&buffer).arg("-");
-    super::feed("load-buffer", load, text.as_bytes())
-        .await
-        .expect("tmux takes the whole text");
+    super::feed("load-buffer", load, text.as_bytes()).await.expect("tmux takes the whole text");
 
     let saved = dir.path().join("buffer.txt");
-    server.run(&[
-        "save-buffer",
-        "-b",
-        &buffer,
-        saved.to_str().expect("a utf-8 temp path"),
-    ]);
-    assert_eq!(
-        std::fs::read_to_string(&saved).expect("the saved buffer reads"),
-        text
-    );
+    server.run(&["save-buffer", "-b", &buffer, saved.to_str().expect("a utf-8 temp path")]);
+    assert_eq!(std::fs::read_to_string(&saved).expect("the saved buffer reads"), text);
 
     server.run(&["delete-buffer", "-b", &buffer]);
     assert_eq!(
@@ -548,21 +482,13 @@ async fn a_pane_kept_on_exit_stays_readable_after_its_process_dies() {
     let pane = split(
         &at,
         dir.path(),
-        &[
-            "sh",
-            "-c",
-            "read line; printf 'last words: %s\\n' \"$line\"; exit 1",
-        ],
+        &["sh", "-c", "read line; printf 'last words: %s\\n' \"$line\"; exit 1"],
     )
     .await;
 
-    at.remain_on_exit(&pane.id, true)
-        .await
-        .expect("the pane option is set");
+    at.remain_on_exit(&pane.id, true).await.expect("the pane option is set");
     assert_eq!(
-        server
-            .run(&["show-options", "-p", "-v", "-t", &pane.id, "remain-on-exit"])
-            .trim(),
+        server.run(&["show-options", "-p", "-v", "-t", &pane.id, "remain-on-exit"]).trim(),
         "on"
     );
 
@@ -571,45 +497,24 @@ async fn a_pane_kept_on_exit_stays_readable_after_its_process_dies() {
         .expect("the stub hears its line");
     eventually("the pane's process to die", async || {
         let dead = server.run(&["display-message", "-p", "-t", &pane.id, "#{pane_dead}"]);
-        if dead.trim() == "1" {
-            Ok(())
-        } else {
-            Err(format!("pane_dead={}", dead.trim()))
-        }
+        if dead.trim() == "1" { Ok(()) } else { Err(format!("pane_dead={}", dead.trim())) }
     })
     .await;
 
+    assert!(server.panes().contains(&pane.id), "the dead pane is still on the server");
+    let shown = at.capture(&pane.id).await.expect("a dead pane still captures");
     assert!(
-        server.panes().contains(&pane.id),
-        "the dead pane is still on the server"
-    );
-    let shown = at
-        .capture(&pane.id)
-        .await
-        .expect("a dead pane still captures");
-    assert!(
-        shown
-            .lines()
-            .any(|line| line == "last words: refused by the vendor"),
+        shown.lines().any(|line| line == "last words: refused by the vendor"),
         "its last words are readable: {shown:?}"
     );
 
-    let live = at
-        .panes()
-        .await
-        .expect("a dead pane does not make the listing unreadable");
+    let live = at.panes().await.expect("a dead pane does not make the listing unreadable");
     assert!(
         !live.iter().any(|listed| listed.id == pane.id),
         "and it is not in the liveness listing: {live:?}"
     );
-    assert_eq!(
-        at.kill(&pane).await.expect("the kill reads the listing"),
-        Killed::AlreadyGone
-    );
-    assert!(
-        server.panes().contains(&pane.id),
-        "the kill left the dead pane where it was"
-    );
+    assert_eq!(at.kill(&pane).await.expect("the kill reads the listing"), Killed::AlreadyGone);
+    assert!(server.panes().contains(&pane.id), "the kill left the dead pane where it was");
 }
 
 /// Turned back off, the option is really off: the pane closes with its
@@ -622,29 +527,18 @@ async fn a_pane_no_longer_kept_on_exit_closes_with_its_process() {
     let pane = split(&at, dir.path(), &["sh", "-c", "read line; exit 1"]).await;
 
     at.remain_on_exit(&pane.id, true).await.expect("on");
-    at.remain_on_exit(&pane.id, false)
-        .await
-        .expect("and off again");
-    at.type_line(&pane.id, OsStr::new("bye"))
-        .await
-        .expect("the stub hears its line");
+    at.remain_on_exit(&pane.id, false).await.expect("and off again");
+    at.type_line(&pane.id, OsStr::new("bye")).await.expect("the stub hears its line");
 
     eventually("the pane to close", async || {
         let listed = server.panes();
-        if listed.contains(&pane.id) {
-            Err(format!("still listed: {listed:?}"))
-        } else {
-            Ok(())
-        }
+        if listed.contains(&pane.id) { Err(format!("still listed: {listed:?}")) } else { Ok(()) }
     })
     .await;
     assert!(
         matches!(
             at.capture(&pane.id).await,
-            Err(TmuxError::Failed {
-                command: "capture-pane",
-                ..
-            })
+            Err(TmuxError::Failed { command: "capture-pane", .. })
         ),
         "a closed pane has nothing to capture"
     );
@@ -665,54 +559,30 @@ async fn close_dead_closes_a_dead_pane_and_leaves_a_live_one_alone() {
     let server = PrivateServer::start(&["sleep", "3600"], &[], &[]);
     let at = Server::at(server.socket(), Some(server.first_pane().to_owned()));
     let pane = split(&at, dir.path(), &["sh", "-c", "read line; exit 1"]).await;
-    at.remain_on_exit(&pane.id, true)
-        .await
-        .expect("kept on exit");
+    at.remain_on_exit(&pane.id, true).await.expect("kept on exit");
 
     assert_eq!(
-        at.close_dead(&pane.id)
-            .await
-            .expect("a live pane is classified, not an error"),
+        at.close_dead(&pane.id).await.expect("a live pane is classified, not an error"),
         Closed::Alive
     );
-    assert!(
-        server.panes().contains(&pane.id),
-        "and was left where it was"
-    );
+    assert!(server.panes().contains(&pane.id), "and was left where it was");
     assert_eq!(
-        server
-            .run(&["display-message", "-p", "-t", &pane.id, "#{pane_dead}"])
-            .trim(),
+        server.run(&["display-message", "-p", "-t", &pane.id, "#{pane_dead}"]).trim(),
         "0",
         "with its process still running"
     );
 
-    at.type_line(&pane.id, OsStr::new("bye"))
-        .await
-        .expect("the stub hears its line");
+    at.type_line(&pane.id, OsStr::new("bye")).await.expect("the stub hears its line");
     eventually("the pane's process to die", async || {
         let dead = server.run(&["display-message", "-p", "-t", &pane.id, "#{pane_dead}"]);
-        if dead.trim() == "1" {
-            Ok(())
-        } else {
-            Err(format!("pane_dead={}", dead.trim()))
-        }
+        if dead.trim() == "1" { Ok(()) } else { Err(format!("pane_dead={}", dead.trim())) }
     })
     .await;
 
+    assert_eq!(at.close_dead(&pane.id).await.expect("a dead pane closes"), Closed::Yes);
+    assert!(!server.panes().contains(&pane.id), "the dead pane is gone: {:?}", server.panes());
     assert_eq!(
-        at.close_dead(&pane.id).await.expect("a dead pane closes"),
-        Closed::Yes
-    );
-    assert!(
-        !server.panes().contains(&pane.id),
-        "the dead pane is gone: {:?}",
-        server.panes()
-    );
-    assert_eq!(
-        at.close_dead(&pane.id)
-            .await
-            .expect("nothing by that id is not an error"),
+        at.close_dead(&pane.id).await.expect("nothing by that id is not an error"),
         Closed::AlreadyGone
     );
 
@@ -721,9 +591,7 @@ async fn close_dead_closes_a_dead_pane_and_leaves_a_live_one_alone() {
     // listing alone, and the server is still standing afterwards.
     let forged = format!("{}; kill-server", server.first_pane());
     assert_eq!(
-        at.close_dead(&forged)
-            .await
-            .expect("an unknown id is not an error"),
+        at.close_dead(&forged).await.expect("an unknown id is not an error"),
         Closed::AlreadyGone
     );
     assert!(

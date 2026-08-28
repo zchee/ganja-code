@@ -1,4 +1,5 @@
-use std::{collections::BTreeSet, path::PathBuf};
+use std::collections::BTreeSet;
+use std::path::PathBuf;
 
 use ganja_team::{MemberName, TeamName, TeamsRoot};
 
@@ -60,19 +61,15 @@ fn recorded_launch() -> Vec<&'static str> {
 
 /// What the driver composes for a pane, as strings.
 fn tui() -> Vec<String> {
-    Agy.tui_argv()
-        .iter()
-        .map(|token| token.to_string_lossy().into_owned())
-        .collect()
+    Agy.tui_argv().iter().map(|token| token.to_string_lossy().into_owned()).collect()
 }
 
 #[test]
 fn the_tui_argv_is_the_launch_line_the_pane_probe_ran() {
     // Byte for byte against the recording, binary included.
     let recorded = recorded_launch();
-    let (binary, floors) = recorded
-        .split_first()
-        .expect("a binary, then the floor it was launched with");
+    let (binary, floors) =
+        recorded.split_first().expect("a binary, then the floor it was launched with");
 
     assert_eq!(*binary, BINARY);
     assert_eq!(tui(), floors);
@@ -118,22 +115,11 @@ fn the_tui_argv_carries_the_terminal_bound_and_none_of_the_print_mode_flags() {
     // pane whose whole point is that a person can see it. Compared as
     // whole tokens, for the `-c`/`--conversation` reason the headless
     // suite states.
-    const PRINT_MODE: [&str; 5] = [
-        "-p",
-        "--print-timeout",
-        "--input-format",
-        "--output-format",
-        "--disable-slash-commands",
-    ];
+    const PRINT_MODE: [&str; 5] =
+        ["-p", "--print-timeout", "--input-format", "--output-format", "--disable-slash-commands"];
     for flag in PRINT_MODE {
-        assert!(
-            headless_words.contains(flag),
-            "{flag} is no longer a headless word: {headless:?}"
-        );
-        assert!(
-            !tui_words.contains(flag),
-            "{flag} is print mode's, and is in {tui:?}"
-        );
+        assert!(headless_words.contains(flag), "{flag} is no longer a headless word: {headless:?}");
+        assert!(!tui_words.contains(flag), "{flag} is print mode's, and is in {tui:?}");
     }
     // And the list is complete: every flag the headless line carries and
     // the pane does not is one of the five, so a new print-mode flag has
@@ -145,10 +131,7 @@ fn the_tui_argv_carries_the_terminal_bound_and_none_of_the_print_mode_flags() {
         .copied()
         .filter(|word| word.starts_with('-') && !PRINT_MODE.contains(word))
         .collect();
-    assert!(
-        unnamed.is_empty(),
-        "headless-only flags this test does not name: {unnamed:?}"
-    );
+    assert!(unnamed.is_empty(), "headless-only flags this test does not name: {unnamed:?}");
 }
 
 #[test]

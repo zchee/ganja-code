@@ -18,12 +18,7 @@ fn a_switch_asked_for_twice_is_still_one_flag() {
 #[test]
 fn a_value_set_twice_keeps_the_last_in_the_first_position() {
     assert_eq!(
-        words(
-            &SplitWindow::new()
-                .start_directory("/one")
-                .detached()
-                .start_directory("/two")
-        ),
+        words(&SplitWindow::new().start_directory("/one").detached().start_directory("/two")),
         ["split-window", "-c", "/two", "-d"],
         "a caller who sets -c twice is correcting themselves, not asking for two directories"
     );
@@ -63,11 +58,7 @@ fn a_value_outside_utf8_survives_into_argv_byte_for_byte() {
 #[test]
 fn a_trailing_command_is_fenced_off_from_the_flags() {
     assert_eq!(
-        words(
-            &SplitWindow::new()
-                .detached()
-                .command(["sh", "-c", "sleep 1"])
-        ),
+        words(&SplitWindow::new().detached().command(["sh", "-c", "sleep 1"])),
         ["split-window", "-d", "--", "sh", "-c", "sleep 1"],
         "without the fence, a program named like a flag would be read as one"
     );
@@ -128,37 +119,23 @@ fn the_register_carries_every_family_entry_and_no_filler() {
 
 #[test]
 fn a_commands_flags_reach_the_register_with_their_arity() {
-    let split = REGISTRY
-        .iter()
-        .find(|entry| entry.name == "split-window")
-        .expect("split-window is typed");
+    let split =
+        REGISTRY.iter().find(|entry| entry.name == "split-window").expect("split-window is typed");
     assert!(
-        split.flags.contains(&Flag {
-            letter: "-d",
-            argument: false,
-        }),
+        split.flags.contains(&Flag { letter: "-d", argument: false }),
         "-d takes nothing, and a register claiming otherwise would send the inventory test \
              looking for an argument tmux does not want"
     );
     assert!(
-        split.flags.contains(&Flag {
-            letter: "-c",
-            argument: true,
-        }),
+        split.flags.contains(&Flag { letter: "-c", argument: true }),
         "-c takes a working directory"
     );
     assert!(
-        split
-            .flags
-            .iter()
-            .all(|flag| flag.letter.starts_with('-') && flag.letter.len() >= 2),
+        split.flags.iter().all(|flag| flag.letter.starts_with('-') && flag.letter.len() >= 2),
         "a flag is carried the way tmux reads it in argv, leading dash and all"
     );
     assert_eq!(
-        REGISTRY
-            .iter()
-            .find(|entry| entry.name == "kill-server")
-            .map(|entry| entry.flags.len()),
+        REGISTRY.iter().find(|entry| entry.name == "kill-server").map(|entry| entry.flags.len()),
         Some(0),
         "kill-server takes no flags, so its entry must declare none rather than inherit a \
              neighbour's"
@@ -183,10 +160,7 @@ fn a_letter_is_served_or_shelved_but_never_both() {
             );
         }
         assert!(
-            entry
-                .ahead
-                .iter()
-                .all(|flag| flag.letter.starts_with('-') && flag.letter.len() >= 2),
+            entry.ahead.iter().all(|flag| flag.letter.starts_with('-') && flag.letter.len() >= 2),
             "a shelved flag is carried the way tmux reads it in argv, leading dash and all, \
                  or the day it is unshelved the probes ask about a different word"
         );

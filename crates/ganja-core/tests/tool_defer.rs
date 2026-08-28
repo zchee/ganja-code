@@ -13,19 +13,17 @@
 //! asserted over what deferral could possibly touch: the tools array exactly
 //! (definitions compare whole), and every message's role and text content.
 
-use std::{
-    collections::BTreeSet,
-    sync::{Arc, Mutex},
-};
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ganja_core::{
-    Config, Engine, SessionId, Storage,
-    permission::{Action, Permissions, Rule},
-    protocol::{Command, Event, Message, Part, PartBody, PermissionReply, Role, ToolState},
-    provider::{ChatRequest, Provider},
-    tool::{Registry, Tool, ToolCtx, ToolError, ToolOutput},
+use ganja_core::permission::{Action, Permissions, Rule};
+use ganja_core::protocol::{
+    Command, Event, Message, Part, PartBody, PermissionReply, Role, ToolState,
 };
+use ganja_core::provider::{ChatRequest, Provider};
+use ganja_core::tool::{Registry, Tool, ToolCtx, ToolError, ToolOutput};
+use ganja_core::{Config, Engine, SessionId, Storage};
 use ganja_testkit::{BlockingTool, RecorderTool, drain, drain_answering, says, tool_call};
 use serde_json::json;
 
@@ -54,15 +52,10 @@ impl Tool for FailingMcp {
 /// Two fake servers' worth of `mcp__`-named base tools: `big` lends three,
 /// `small` lends one. Registration order is this order.
 fn server_tools() -> Vec<Arc<dyn Tool>> {
-    [
-        "mcp__big__alpha",
-        "mcp__big__beta",
-        "mcp__big__gamma",
-        "mcp__small__solo",
-    ]
-    .into_iter()
-    .map(|name| RecorderTool::new(name, name, "answered").0 as Arc<dyn Tool>)
-    .collect()
+    ["mcp__big__alpha", "mcp__big__beta", "mcp__big__gamma", "mcp__small__solo"]
+        .into_iter()
+        .map(|name| RecorderTool::new(name, name, "answered").0 as Arc<dyn Tool>)
+        .collect()
 }
 
 /// Rules that let an `mcp__*` call run unasked, so a suite about deferral is
@@ -101,39 +94,25 @@ fn steps(requests: &Arc<Mutex<Vec<ChatRequest>>>) -> Vec<ChatRequest> {
 }
 
 fn tool_names(request: &ChatRequest) -> Vec<String> {
-    request
-        .tools
-        .iter()
-        .map(|definition| definition.name.clone())
-        .collect()
+    request.tools.iter().map(|definition| definition.name.clone()).collect()
 }
 
 /// The `<deferred_tools>` block on the request's last user message, if one
 /// rode along.
 fn listing_text(request: &ChatRequest) -> Option<String> {
-    request
-        .messages
-        .iter()
-        .rev()
-        .find(|message| message.role == Role::User)
-        .and_then(|message| {
-            message.parts.iter().find_map(|part| match &part.body {
-                PartBody::Text { text } if text.starts_with("<deferred_tools>") => {
-                    Some(text.clone())
-                }
-                _ => None,
-            })
+    request.messages.iter().rev().find(|message| message.role == Role::User).and_then(|message| {
+        message.parts.iter().find_map(|part| match &part.body {
+            PartBody::Text { text } if text.starts_with("<deferred_tools>") => Some(text.clone()),
+            _ => None,
         })
+    })
 }
 
 /// What deferral could possibly touch, per request: the tools array whole,
 /// and every message's role and text content.
 fn comparable(
     request: &ChatRequest,
-) -> (
-    Vec<ganja_core::tool::ToolDefinition>,
-    Vec<(Role, Vec<String>)>,
-) {
+) -> (Vec<ganja_core::tool::ToolDefinition>, Vec<(Role, Vec<String>)>) {
     let messages = request
         .messages
         .iter()
@@ -160,9 +139,7 @@ fn final_state(seen: &[Event], tool: &str) -> ToolState {
         .rev()
         .find_map(|event| match event {
             Event::PartUpdated { part, .. } => match &part.body {
-                PartBody::Tool {
-                    tool: name, state, ..
-                } if name == tool => Some(state.clone()),
+                PartBody::Tool { tool: name, state, .. } if name == tool => Some(state.clone()),
                 _ => None,
             },
             _ => None,
@@ -212,12 +189,7 @@ async fn below_the_threshold_the_requests_are_what_they_always_were() {
     assert!(!names.contains(&"tool_search".to_owned()));
     assert_eq!(
         names,
-        [
-            "mcp__big__alpha",
-            "mcp__big__beta",
-            "mcp__big__gamma",
-            "mcp__small__solo"
-        ],
+        ["mcp__big__alpha", "mcp__big__beta", "mcp__big__gamma", "mcp__small__solo"],
         "every schema is advertised, in registration order"
     );
     assert!(listing_text(&default_steps[0]).is_none());
@@ -256,43 +228,28 @@ async fn a_search_hit_is_advertised_on_the_very_next_step() {
     let (steps, seen) = run_turn_at(
         0,
         vec![
-            tool_call(
-                "tool_search",
-                json!({ "query": "select:mcp__big__alpha, mcp__big__beta" }),
-            ),
+            tool_call("tool_search", json!({ "query": "select:mcp__big__alpha, mcp__big__beta" })),
             says("done"),
         ],
     )
     .await;
 
-    assert_eq!(
-        tool_names(&steps[0]),
-        ["tool_search"],
-        "a threshold of zero defers every server"
-    );
+    assert_eq!(tool_names(&steps[0]), ["tool_search"], "a threshold of zero defers every server");
 
     let next = tool_names(&steps[1]);
     for name in ["mcp__big__alpha", "mcp__big__beta"] {
-        assert!(
-            next.contains(&name.to_owned()),
-            "{name} rides step two: {next:?}"
-        );
+        assert!(next.contains(&name.to_owned()), "{name} rides step two: {next:?}");
     }
     assert!(!next.contains(&"mcp__big__gamma".to_owned()));
     assert!(!next.contains(&"mcp__small__solo".to_owned()));
 
     let listing = listing_text(&steps[1]).expect("two servers still have deferred tools");
-    assert!(
-        !listing.contains("mcp__big__alpha"),
-        "activated entries drop out"
-    );
+    assert!(!listing.contains("mcp__big__alpha"), "activated entries drop out");
     assert!(listing.contains("mcp__big__gamma"));
     assert!(listing.contains("mcp__small__solo"));
 
     assert!(
-        !seen
-            .iter()
-            .any(|event| matches!(event, Event::PermissionRequested { .. })),
+        !seen.iter().any(|event| matches!(event, Event::PermissionRequested { .. })),
         "tool_search runs unasked"
     );
     if let ToolState::Completed { output, .. } = final_state(&seen, "tool_search") {
@@ -308,18 +265,12 @@ async fn a_search_hit_is_advertised_on_the_very_next_step() {
 /// request advertises its schema.
 #[tokio::test]
 async fn a_direct_call_to_a_deferred_tool_executes_and_activates() {
-    let (steps, seen) = run_turn_at(
-        0,
-        vec![tool_call("mcp__big__alpha", json!({})), says("done")],
-    )
-    .await;
+    let (steps, seen) =
+        run_turn_at(0, vec![tool_call("mcp__big__alpha", json!({})), says("done")]).await;
 
     assert_eq!(tool_names(&steps[0]), ["tool_search"]);
     assert!(
-        matches!(
-            final_state(&seen, "mcp__big__alpha"),
-            ToolState::Completed { .. }
-        ),
+        matches!(final_state(&seen, "mcp__big__alpha"), ToolState::Completed { .. }),
         "the call resolved in the complete registry and ran"
     );
     assert!(
@@ -339,13 +290,9 @@ async fn a_failed_direct_call_activates_all_the_same() {
         tool_call("mcp__big__fail", json!({})),
         says("done"),
     ]);
-    let engine = Engine::new(
-        provider,
-        "scripted-model",
-        Arc::new(Registry::new(tools)),
-        allow_mcp(),
-    )
-    .with_defer_threshold(0);
+    let engine =
+        Engine::new(provider, "scripted-model", Arc::new(Registry::new(tools)), allow_mcp())
+            .with_defer_threshold(0);
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine.send(prompt()).await.expect("an idle engine accepts");
@@ -372,22 +319,13 @@ async fn a_failed_direct_call_activates_all_the_same() {
 async fn a_failed_select_answers_with_near_misses_and_the_turn_continues() {
     let (_, seen) = run_turn_at(
         0,
-        vec![
-            tool_call("tool_search", json!({ "query": "select:mcp__big__alphaa" })),
-            says("done"),
-        ],
+        vec![tool_call("tool_search", json!({ "query": "select:mcp__big__alphaa" })), says("done")],
     )
     .await;
 
     if let ToolState::Completed { output, .. } = final_state(&seen, "tool_search") {
-        assert!(
-            output.contains("No deferred tool is named `mcp__big__alphaa`"),
-            "{output}"
-        );
-        assert!(
-            output.contains("mcp__big__alpha"),
-            "the near-misses name the neighbours"
-        );
+        assert!(output.contains("No deferred tool is named `mcp__big__alphaa`"), "{output}");
+        assert!(output.contains("mcp__big__alpha"), "the near-misses name the neighbours");
     } else {
         panic!("a miss is information, never a failed call");
     }
@@ -423,9 +361,7 @@ async fn a_permission_rule_gates_a_deferred_call_exactly_as_an_advertised_one() 
         let seen = drain(&mut events).await;
 
         assert!(
-            !seen
-                .iter()
-                .any(|event| matches!(event, Event::PermissionRequested { .. })),
+            !seen.iter().any(|event| matches!(event, Event::PermissionRequested { .. })),
             "a deny rule refuses without a dialog"
         );
         let ToolState::Error { error, .. } = final_state(&seen, "mcp__big__alpha") else {
@@ -440,14 +376,8 @@ async fn a_permission_rule_gates_a_deferred_call_exactly_as_an_advertised_one() 
     let (deferred_text, deferred_activated) = denied(0).await;
     let (advertised_text, _) = denied(usize::MAX).await;
 
-    assert_eq!(
-        deferred_text, advertised_text,
-        "the rule speaks the same key either way"
-    );
-    assert!(
-        !deferred_activated,
-        "a refused call never executed, so it never activated"
-    );
+    assert_eq!(deferred_text, advertised_text, "the rule speaks the same key either way");
+    assert!(!deferred_activated, "a refused call never executed, so it never activated");
 }
 
 /// Criterion 10's constructible half: deferral filters what is *advertised*
@@ -464,13 +394,9 @@ async fn the_registry_and_the_mcp_counts_stay_whole_under_deferral() {
     ]);
     let mut tools = server_tools();
     tools.push(Arc::new(ganja_core::tool::read::ReadTool));
-    let engine = Engine::new(
-        provider,
-        "scripted-model",
-        Arc::new(Registry::new(tools)),
-        allow_mcp(),
-    )
-    .with_defer_threshold(0);
+    let engine =
+        Engine::new(provider, "scripted-model", Arc::new(Registry::new(tools)), allow_mcp())
+            .with_defer_threshold(0);
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine.send(prompt()).await.expect("an idle engine accepts");
@@ -505,19 +431,12 @@ async fn the_registry_and_the_mcp_counts_stay_whole_under_deferral() {
 async fn the_listing_shrinks_and_the_refusal_names_only_the_advertised() {
     let (steps, seen) = run_turn_at(
         0,
-        vec![
-            tool_call("mcp__big__alpha", json!({})),
-            tool_call("nope", json!({})),
-            says("done"),
-        ],
+        vec![tool_call("mcp__big__alpha", json!({})), tool_call("nope", json!({})), says("done")],
     )
     .await;
 
     let listing = listing_text(&steps[1]).expect("plenty is still deferred");
-    assert!(
-        !listing.contains("mcp__big__alpha"),
-        "activated by call, dropped: {listing}"
-    );
+    assert!(!listing.contains("mcp__big__alpha"), "activated by call, dropped: {listing}");
     assert!(listing.contains("mcp__big__beta"));
 
     let ToolState::Error { error, .. } = final_state(&seen, "nope") else {
@@ -570,14 +489,8 @@ async fn an_activation_survives_a_resume_and_the_union_recovers_a_cleared_row() 
     engine.send(prompt()).await.expect("an idle engine accepts");
     drain(&mut events).await;
 
-    let id = engine
-        .current_session()
-        .expect("the first prompt creates a session")
-        .id;
-    let row = storage
-        .load_info(&id)
-        .expect("the row loads")
-        .expect("it exists");
+    let id = engine.current_session().expect("the first prompt creates a session").id;
+    let row = storage.load_info(&id).expect("the row loads").expect("it exists");
     assert!(
         row.activated_tools.contains("mcp__big__alpha"),
         "the executed-call activation was flushed: {:?}",
@@ -594,10 +507,7 @@ async fn an_activation_survives_a_resume_and_the_union_recovers_a_cleared_row() 
 
     // Drill (c): clear the field through the public door, transcript intact —
     // the crash-equivalent state — and the transcript union alone recovers it.
-    let mut cleared = storage
-        .load_info(&id)
-        .expect("the row loads")
-        .expect("it exists");
+    let mut cleared = storage.load_info(&id).expect("the row loads").expect("it exists");
     cleared.activated_tools = BTreeSet::new();
     storage.save_info(&cleared).expect("the cleared row writes");
 
@@ -645,10 +555,7 @@ async fn a_pre_feature_row_is_seeded_from_its_transcript() {
         names.contains(&"mcp__big__beta".to_owned()),
         "the transcript's call seeds the set: {names:?}"
     );
-    assert!(
-        !names.contains(&"mcp__big__alpha".to_owned()),
-        "nothing else was touched: {names:?}"
-    );
+    assert!(!names.contains(&"mcp__big__alpha".to_owned()), "nothing else was touched: {names:?}");
 }
 
 /// Criterion 8, drill (d): once the ScriptedProvider log holds the step
@@ -667,11 +574,7 @@ async fn a_search_activation_is_on_the_row_before_the_turn_ends() {
         tool_call("hold", json!({})),
     ]);
     let mut tools = server_tools();
-    tools.push(BlockingTool::with_entry_signal(
-        "hold",
-        "blocks until cancelled",
-        entered_tx,
-    ));
+    tools.push(BlockingTool::with_entry_signal("hold", "blocks until cancelled", entered_tx));
     let engine = Arc::new(
         Engine::persistent(
             provider,
@@ -694,20 +597,14 @@ async fn a_search_activation_is_on_the_row_before_the_turn_ends() {
                 steps(&requests).len() >= 2,
                 "the next step's request was built before its call ran"
             );
-            let id = engine
-                .current_session()
-                .expect("the first prompt creates a session")
-                .id;
+            let id = engine.current_session().expect("the first prompt creates a session").id;
             let carried = storage
                 .load_info(&id)
                 .expect("the row loads")
                 .expect("it exists")
                 .activated_tools
                 .contains("mcp__big__alpha");
-            engine
-                .send(Command::CancelTurn)
-                .await
-                .expect("a cancel lands");
+            engine.send(Command::CancelTurn).await.expect("a cancel lands");
 
             carried
         }
@@ -745,10 +642,7 @@ async fn a_new_session_starts_with_nothing_activated() {
         "the first conversation activated it"
     );
 
-    engine
-        .send(Command::NewSession)
-        .await
-        .expect("a clear lands");
+    engine.send(Command::NewSession).await.expect("a clear lands");
     engine.send(prompt()).await.expect("an idle engine accepts");
     drain(&mut events).await;
 
@@ -792,11 +686,7 @@ async fn a_childs_activation_reaches_the_parent_and_the_root_row_at_fan_in() {
         tool_call("hold", json!({})),
     ]);
     let mut tools = server_tools();
-    tools.push(BlockingTool::with_entry_signal(
-        "hold",
-        "blocks until cancelled",
-        entered_tx,
-    ));
+    tools.push(BlockingTool::with_entry_signal("hold", "blocks until cancelled", entered_tx));
     let engine = Arc::new(
         Engine::persistent(
             provider,
@@ -816,24 +706,15 @@ async fn a_childs_activation_reaches_the_parent_and_the_root_row_at_fan_in() {
         let engine = Arc::clone(&engine);
         let storage = storage.clone();
         async move {
-            entered
-                .recv()
-                .await
-                .expect("the hold tool runs after fan-in");
-            let id = engine
-                .current_session()
-                .expect("the first prompt creates a session")
-                .id;
+            entered.recv().await.expect("the hold tool runs after fan-in");
+            let id = engine.current_session().expect("the first prompt creates a session").id;
             let carried = storage
                 .load_info(&id)
                 .expect("the row loads")
                 .expect("it exists")
                 .activated_tools
                 .contains("mcp__big__alpha");
-            engine
-                .send(Command::CancelTurn)
-                .await
-                .expect("a cancel lands");
+            engine.send(Command::CancelTurn).await.expect("a cancel lands");
 
             (carried, steps(&requests_for_watch))
         }
@@ -849,10 +730,8 @@ async fn a_childs_activation_reaches_the_parent_and_the_root_row_at_fan_in() {
     );
 
     let is_parent = |request: &ChatRequest| tool_names(request).contains(&"task".to_owned());
-    let child_first = mid_turn_steps
-        .iter()
-        .find(|request| !is_parent(request))
-        .expect("the child asked");
+    let child_first =
+        mid_turn_steps.iter().find(|request| !is_parent(request)).expect("the child asked");
     let child_names = tool_names(child_first);
     assert!(
         child_names.contains(&"tool_search".to_owned()),
@@ -901,13 +780,9 @@ async fn a_recompute_survives_reload_and_never_defers_an_activated_name() {
             .map(|name| RecorderTool::new(name, name, "answered").0 as Arc<dyn Tool>)
             .collect()
     };
-    let engine = Engine::new(
-        provider,
-        "scripted-model",
-        Arc::new(Registry::new(big_only())),
-        allow_mcp(),
-    )
-    .with_defer_threshold(2);
+    let engine =
+        Engine::new(provider, "scripted-model", Arc::new(Registry::new(big_only())), allow_mcp())
+            .with_defer_threshold(2);
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine.send(prompt()).await.expect("an idle engine accepts");

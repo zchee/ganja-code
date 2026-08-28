@@ -34,24 +34,19 @@
 
 use ganja_protocol::{MemberBackend, MemberView, TeamView};
 use ganja_tool::task::TeammateSpawn;
-use ratatui::{
-    buffer::Buffer,
-    layout::{Constraint, Rect},
-    text::{Line, Text},
-    widgets::{Block, Clear, Paragraph, Widget as _},
-};
+use ratatui::buffer::Buffer;
+use ratatui::layout::{Constraint, Rect};
+use ratatui::text::{Line, Text};
+use ratatui::widgets::{Block, Clear, Paragraph, Widget as _};
 use unicode_width::UnicodeWidthStr as _;
 
-use crate::{
-    command::TeamSpawn,
-    component::{
-        ACTION_HINTS, CHROME, INPUT_HINTS, LIST_HINTS, MARKER, MAX_HEIGHT, MAX_WIDTH, TwoStep,
-        action_row, body_rows,
-        chat::{RESULT, clip},
-        clamped, first_visible,
-    },
-    theme::Theme,
+use crate::command::TeamSpawn;
+use crate::component::chat::{RESULT, clip};
+use crate::component::{
+    ACTION_HINTS, CHROME, INPUT_HINTS, LIST_HINTS, MARKER, MAX_HEIGHT, MAX_WIDTH, TwoStep,
+    action_row, body_rows, clamped, first_visible,
 };
+use crate::theme::Theme;
 
 /// How many of a member's recent calls a row shows. The registry's own ring
 /// holds `ganja_core::teammate::RECENT_CALLS` of them, which is more than a
@@ -308,13 +303,7 @@ impl Team {
     /// Spawn row when the team holds nobody.
     #[must_use]
     pub fn new(rows: Vec<Row>) -> Self {
-        Self {
-            rows,
-            selected: 0,
-            step: Step::Members,
-            notice: None,
-            busy: false,
-        }
+        Self { rows, selected: 0, step: Step::Members, notice: None, busy: false }
     }
 
     /// Replaces the rows with a fresh poll, keeping the cursor and the step
@@ -426,11 +415,7 @@ impl Team {
     /// would be talking to oneself, so its row offers nothing and Enter on it
     /// leaves the dialog where it was.
     fn actions(row: &Row) -> &'static [RowAction] {
-        if row.is_lead {
-            &[]
-        } else {
-            &[RowAction::Message, RowAction::Shutdown]
-        }
+        if row.is_lead { &[] } else { &[RowAction::Message, RowAction::Shutdown] }
     }
 
     /// Moves whichever list is showing by `delta` rows. The free-text step
@@ -439,14 +424,9 @@ impl Team {
         match &self.step {
             Step::Members => self.selected = clamped(self.selected, delta, self.total_rows()),
             Step::Actions { member, option } => {
-                let count = self
-                    .row_named(member)
-                    .map_or(0, |row| Self::actions(row).len());
+                let count = self.row_named(member).map_or(0, |row| Self::actions(row).len());
                 let moved = clamped(*option, delta, count);
-                self.step = Step::Actions {
-                    member: member.clone(),
-                    option: moved,
-                };
+                self.step = Step::Actions { member: member.clone(), option: moved };
             }
             Step::Input { .. } => {}
         }
@@ -502,20 +482,14 @@ impl Team {
                     // The name is taken here, at the keypress a person made
                     // while looking at this row, and is what every later step
                     // resolves against.
-                    self.step = Step::Actions {
-                        member: row.name.clone(),
-                        option: 0,
-                    };
+                    self.step = Step::Actions { member: row.name.clone(), option: 0 };
                     return None;
                 }
                 if self.busy {
                     self.notice = Some(BUSY.to_owned());
                     return None;
                 }
-                self.step = Step::Input {
-                    asking: Asking::Spawn,
-                    buffer: String::new(),
-                };
+                self.step = Step::Input { asking: Asking::Spawn, buffer: String::new() };
 
                 None
             }
@@ -530,10 +504,8 @@ impl Team {
                 let effect = match *Self::actions(row).get(option)? {
                     RowAction::Shutdown => Effect::Shutdown(member),
                     RowAction::Message => {
-                        self.step = Step::Input {
-                            asking: Asking::Message(member),
-                            buffer: String::new(),
-                        };
+                        self.step =
+                            Step::Input { asking: Asking::Message(member), buffer: String::new() };
 
                         return None;
                     }
@@ -552,20 +524,14 @@ impl Team {
                 }
                 match asking {
                     Asking::Message(member) => {
-                        let effect = Effect::Message {
-                            to: member.clone(),
-                            text: typed,
-                        };
+                        let effect = Effect::Message { to: member.clone(), text: typed };
                         self.step = Step::Members;
 
                         Some(effect)
                     }
                     Asking::Spawn => match crate::command::team_spawn(&typed) {
                         Ok(line) => {
-                            let effect = Effect::Spawn {
-                                request: spawn_request(&line),
-                                typed,
-                            };
+                            let effect = Effect::Spawn { request: spawn_request(&line), typed };
                             self.step = Step::Members;
 
                             Some(effect)
@@ -620,9 +586,7 @@ impl Team {
         let height = match &self.step {
             Step::Members => available,
             Step::Actions { .. } | Step::Input { .. } => {
-                u16::try_from(lines.len().saturating_add(2))
-                    .unwrap_or(available)
-                    .min(available)
+                u16::try_from(lines.len().saturating_add(2)).unwrap_or(available).min(available)
             }
         };
         let popup = area.centered(Constraint::Length(width), Constraint::Length(height));
@@ -637,18 +601,9 @@ impl Team {
     /// The member step: one line per member with its ring hanging under it,
     /// then the Spawn row.
     fn member_rows(&self, width: usize, rows: usize, theme: &Theme) -> Vec<Line<'static>> {
-        let name_width = self
-            .rows
-            .iter()
-            .map(|row| row.name.width())
-            .max()
-            .unwrap_or(0);
-        let backend_width = self
-            .rows
-            .iter()
-            .map(|row| backend_label(row.backend).width())
-            .max()
-            .unwrap_or(0);
+        let name_width = self.rows.iter().map(|row| row.name.width()).max().unwrap_or(0);
+        let backend_width =
+            self.rows.iter().map(|row| backend_label(row.backend).width()).max().unwrap_or(0);
 
         let mut lines: Vec<Line<'static>> = Vec::new();
         // Where the cursor's own line ends up once the rings have pushed the
@@ -671,11 +626,7 @@ impl Team {
             let line = clip(head.trim_end(), width);
             lines.push(Line::styled(
                 format!("{line:<width$}"),
-                if index == self.selected {
-                    theme.selection
-                } else {
-                    theme.fg
-                },
+                if index == self.selected { theme.selection } else { theme.fg },
             ));
             lines.extend(ring_rows(&row.recent, width, theme));
         }
@@ -695,10 +646,7 @@ impl Team {
         };
         lines.push(Line::styled(
             clip(
-                &format!(
-                    "{marker}{SPAWN_LABEL}",
-                    marker = if on_spawn { MARKER } else { "  " },
-                ),
+                &format!("{marker}{SPAWN_LABEL}", marker = if on_spawn { MARKER } else { "  " },),
                 width,
             ),
             style,
@@ -755,10 +703,7 @@ impl Team {
         vec![
             Line::styled(clip(&prompt, width), theme.fg),
             Line::styled(
-                clip(
-                    &format!("{MARKER}{buffer}\u{2588}"),
-                    width.saturating_sub(1).max(1),
-                ),
+                clip(&format!("{MARKER}{buffer}\u{2588}"), width.saturating_sub(1).max(1)),
                 theme.selection,
             ),
         ]

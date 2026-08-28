@@ -17,10 +17,7 @@ async fn matching_files_are_returned_as_absolute_paths_sorted_by_relative_path()
     std::fs::write(dir.path().join("c.txt"), "").unwrap();
 
     let out = GlobTool
-        .run(
-            serde_json::json!({ "pattern": "**/*.rs" }),
-            &ctx(dir.path().to_owned()),
-        )
+        .run(serde_json::json!({ "pattern": "**/*.rs" }), &ctx(dir.path().to_owned()))
         .await
         .expect("a glob over a real directory succeeds");
 
@@ -39,10 +36,7 @@ async fn no_matches_says_so_plainly() {
     let dir = tempfile::tempdir().expect("a scratch directory");
 
     let out = GlobTool
-        .run(
-            serde_json::json!({ "pattern": "*.nonexistent" }),
-            &ctx(dir.path().to_owned()),
-        )
+        .run(serde_json::json!({ "pattern": "*.nonexistent" }), &ctx(dir.path().to_owned()))
         .await
         .expect("an empty match set is still a successful call");
 
@@ -63,10 +57,7 @@ async fn a_pattern_matching_a_gitignored_file_includes_it_even_inside_a_real_rep
     std::fs::write(dir.path().join("kept.rs"), "").unwrap();
 
     let out = GlobTool
-        .run(
-            serde_json::json!({ "pattern": "*.rs" }),
-            &ctx(dir.path().to_owned()),
-        )
+        .run(serde_json::json!({ "pattern": "*.rs" }), &ctx(dir.path().to_owned()))
         .await
         .expect("a glob inside a git repository succeeds");
 
@@ -88,10 +79,7 @@ async fn a_pattern_matching_a_hidden_file_includes_it_despite_no_hidden_flag() {
     std::fs::write(dir.path().join("visible.rs"), "").unwrap();
 
     let out = GlobTool
-        .run(
-            serde_json::json!({ "pattern": "*.rs" }),
-            &ctx(dir.path().to_owned()),
-        )
+        .run(serde_json::json!({ "pattern": "*.rs" }), &ctx(dir.path().to_owned()))
         .await
         .expect("a glob over a directory with dotfiles succeeds");
 
@@ -113,10 +101,7 @@ async fn a_hidden_file_not_matching_the_pattern_stays_excluded() {
     std::fs::write(dir.path().join("visible.rs"), "").unwrap();
 
     let out = GlobTool
-        .run(
-            serde_json::json!({ "pattern": "*.rs" }),
-            &ctx(dir.path().to_owned()),
-        )
+        .run(serde_json::json!({ "pattern": "*.rs" }), &ctx(dir.path().to_owned()))
         .await
         .expect("a glob over a directory with a non-matching dotfile succeeds");
 
@@ -152,19 +137,13 @@ async fn more_than_the_limit_is_capped_and_reported_truncated() {
     }
 
     let out = GlobTool
-        .run(
-            serde_json::json!({ "pattern": "*.rs" }),
-            &ctx(dir.path().to_owned()),
-        )
+        .run(serde_json::json!({ "pattern": "*.rs" }), &ctx(dir.path().to_owned()))
         .await
         .expect("a glob over many files still succeeds, capped");
 
     assert_eq!(out.metadata["count"], 100);
     assert_eq!(out.metadata["truncated"], true);
-    assert!(
-        out.output
-            .contains("Results are truncated: showing first 100 results")
-    );
+    assert!(out.output.contains("Results are truncated: showing first 100 results"));
 }
 
 #[tokio::test]
@@ -172,17 +151,11 @@ async fn an_invalid_pattern_is_refused_as_a_bad_argument() {
     let dir = tempfile::tempdir().expect("a scratch directory");
 
     let refused = GlobTool
-        .run(
-            serde_json::json!({ "pattern": "[" }),
-            &ctx(dir.path().to_owned()),
-        )
+        .run(serde_json::json!({ "pattern": "[" }), &ctx(dir.path().to_owned()))
         .await
         .expect_err("an unclosed character class is not a valid glob");
 
-    assert!(
-        matches!(refused, ToolError::InvalidArgs(_)),
-        "got {refused:?}"
-    );
+    assert!(matches!(refused, ToolError::InvalidArgs(_)), "got {refused:?}");
 }
 
 #[tokio::test]

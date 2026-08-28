@@ -42,14 +42,12 @@
 
 #![cfg(unix)]
 
-use std::{
-    cell::Cell,
-    fs::{self, File},
-    path::{Path, PathBuf},
-    process::{Child, Command, ExitStatus, Stdio},
-    thread,
-    time::{Duration, Instant},
-};
+use std::cell::Cell;
+use std::fs::{self, File};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use ganja_core::{SessionId, Storage};
 use ganja_protocol::is_uuidv7;
@@ -118,10 +116,7 @@ impl Drill {
         homes.script(SCRIPT, json!([{"text": CLOSING}]));
         fs::create_dir(homes.project().join(BARRIER)).expect("the barrier directory is creatable");
 
-        Self {
-            homes,
-            releases: Cell::new(0),
-        }
+        Self { homes, releases: Cell::new(0) }
     }
 
     fn path(&self) -> &Path {
@@ -267,9 +262,7 @@ fn kill_all(children: &mut [Child]) {
 
 /// Whether `haystack` holds `needle` anywhere in it.
 fn carries(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack
-        .windows(needle.len())
-        .any(|window| window == needle)
+    haystack.windows(needle.len()).any(|window| window == needle)
 }
 
 // ---------------------------------------------------------------------------
@@ -287,10 +280,7 @@ fn n_processes_started_together_mint_n_sessions() {
         let drill = Drill::new();
         drill.released_together(PROCESSES);
 
-        let sessions = drill
-            .store()
-            .list_sessions()
-            .expect("the store lists its sessions");
+        let sessions = drill.store().list_sessions().expect("the store lists its sessions");
         let ids: Vec<&str> = sessions.iter().map(|info| info.id.as_str()).collect();
 
         // A count, not a distinctness check: `id` is the `session` table's key,
@@ -331,19 +321,14 @@ fn two_processes_racing_the_quarantine_leave_one_aside_file() {
             .pop()
             .expect("the first run stored a session");
         info.id = SessionId::from(OLD_ID.to_owned());
-        store
-            .save_info(&info)
-            .expect("the old-format row is writable");
+        store.save_info(&info).expect("the old-format row is writable");
 
         // Read back through the same handle rather than trusted: a race
         // against a store that never held an old id would find nothing set
         // aside and would say so in exactly the words a working quarantine
         // earns.
         assert!(
-            store
-                .load_info(&info.id)
-                .expect("the store answers about the planted row")
-                .is_some(),
+            store.load_info(&info.id).expect("the store answers about the planted row").is_some(),
             "the pre-UUIDv7 row is not in the store the race is about to open",
         );
 
@@ -354,11 +339,8 @@ fn two_processes_racing_the_quarantine_leave_one_aside_file() {
     drill.released_together(2);
 
     let directory = database.parent().expect("the database has a directory");
-    let name = database
-        .file_name()
-        .expect("the database has a name")
-        .to_string_lossy()
-        .into_owned();
+    let name =
+        database.file_name().expect("the database has a name").to_string_lossy().into_owned();
     let marker = format!("{name}.{PREUUID}-");
 
     // `set_aside` stamps before it suffixes — `sessions.db.preuuid-<millis>`,
@@ -383,10 +365,7 @@ fn two_processes_racing_the_quarantine_leave_one_aside_file() {
         aside.len(),
     );
 
-    let sessions = drill
-        .store()
-        .list_sessions()
-        .expect("the fresh store lists its sessions");
+    let sessions = drill.store().list_sessions().expect("the fresh store lists its sessions");
     let ids: Vec<&str> = sessions.iter().map(|info| info.id.as_str()).collect();
 
     assert_eq!(
@@ -423,8 +402,5 @@ fn two_processes_racing_the_quarantine_leave_one_aside_file() {
         kept = scan();
     }
 
-    assert!(
-        kept,
-        "the set-aside store no longer carries the row it was set aside for: {base}",
-    );
+    assert!(kept, "the set-aside store no longer carries the row it was set aside for: {base}",);
 }

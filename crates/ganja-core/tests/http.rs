@@ -7,24 +7,18 @@
 //! wherever the kernel happens to put it, which is the condition the splitter
 //! exists to survive.
 
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use futures::StreamExt as _;
-use ganja_core::{
-    Engine,
-    protocol::{Command, Event, FinishReason},
-    provider::{
-        AnthropicProvider, ChatRequest, OpenAiProvider, Provider, ProviderError, ProviderEvent,
-    },
+use ganja_core::Engine;
+use ganja_core::protocol::{Command, Event, FinishReason};
+use ganja_core::provider::{
+    AnthropicProvider, ChatRequest, OpenAiProvider, Provider, ProviderError, ProviderEvent,
 };
 use ganja_testkit::drain;
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::{TcpListener, TcpStream},
-};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
 /// The credential every test authenticates with. A key that never leaves the
@@ -47,15 +41,8 @@ struct Endpoint {
 
 /// Serves `responses`, one per connection, pausing `pace` between writes.
 async fn serve(responses: Vec<Vec<u8>>, pace: Duration) -> Endpoint {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("loopback is bindable");
-    let url = format!(
-        "http://{}",
-        listener
-            .local_addr()
-            .expect("a bound socket has an address")
-    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("loopback is bindable");
+    let url = format!("http://{}", listener.local_addr().expect("a bound socket has an address"));
 
     let server = tokio::spawn(async move {
         for response in responses {
@@ -84,10 +71,7 @@ async fn serve(responses: Vec<Vec<u8>>, pace: Duration) -> Endpoint {
         }
     });
 
-    Endpoint {
-        url,
-        _server: server,
-    }
+    Endpoint { url, _server: server }
 }
 
 /// A loopback endpoint that records everything it is sent.
@@ -122,24 +106,14 @@ fn header(request: &str, name: &str) -> Option<String> {
     request.lines().find_map(|line| {
         let (field, value) = line.split_once(':')?;
 
-        field
-            .trim()
-            .eq_ignore_ascii_case(name)
-            .then(|| value.trim().to_owned())
+        field.trim().eq_ignore_ascii_case(name).then(|| value.trim().to_owned())
     })
 }
 
 /// Serves `responses`, one per connection, keeping what it was asked.
 async fn record(responses: Vec<Vec<u8>>) -> Recorder {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("loopback is bindable");
-    let url = format!(
-        "http://{}",
-        listener
-            .local_addr()
-            .expect("a bound socket has an address")
-    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("loopback is bindable");
+    let url = format!("http://{}", listener.local_addr().expect("a bound socket has an address"));
     let seen = Arc::new(Mutex::new(Vec::new()));
     let log = Arc::clone(&seen);
 
@@ -159,11 +133,7 @@ async fn record(responses: Vec<Vec<u8>>) -> Recorder {
         }
     });
 
-    Recorder {
-        url,
-        seen,
-        _server: server,
-    }
+    Recorder { url, seen, _server: server }
 }
 
 /// Reads one whole HTTP request: head, then as many body bytes as it declared.
@@ -220,10 +190,7 @@ fn cut_short(body: &str) -> Vec<u8> {
 
     response(
         "200 OK",
-        &[
-            ("content-type", "text/event-stream"),
-            ("content-length", &promised),
-        ],
+        &[("content-type", "text/event-stream"), ("content-length", &promised)],
         body,
     )
 }
@@ -243,9 +210,7 @@ fn prompt() -> ChatRequest {
 /// offered, and a call it already made whose result it has to be shown again.
 fn tool_prompt() -> ChatRequest {
     let mut assistant = ganja_core::protocol::Message::assistant("test-model");
-    assistant
-        .parts
-        .push(ganja_core::protocol::Part::text("Reading the file first."));
+    assistant.parts.push(ganja_core::protocol::Part::text("Reading the file first."));
     assistant.parts.push(ganja_core::protocol::Part {
         id: ganja_core::protocol::PartId::ascending(),
         body: ganja_core::protocol::PartBody::Tool {
@@ -293,18 +258,13 @@ async fn ask(
     provider: &dyn Provider,
     request: ChatRequest,
 ) -> Result<Vec<ProviderEvent>, ProviderError> {
-    Ok(provider
-        .stream(request, CancellationToken::new())
-        .await?
-        .collect()
-        .await)
+    Ok(provider.stream(request, CancellationToken::new()).await?.collect().await)
 }
 
 /// The JSON body of a request an endpoint was sent.
 fn sent(request: &str) -> serde_json::Value {
-    let (_head, body) = request
-        .split_once("\r\n\r\n")
-        .expect("a request with a body has a blank line before it");
+    let (_head, body) =
+        request.split_once("\r\n\r\n").expect("a request with a body has a blank line before it");
 
     serde_json::from_str(body).expect("a provider sends JSON")
 }
@@ -329,39 +289,29 @@ async fn anthropic_streams_a_reply_over_a_real_socket() {
         Duration::ZERO,
     )
     .await;
-    let provider = AnthropicProvider::new(CANARY)
-        .expect("a client builds")
-        .with_base_url(&endpoint.url);
+    let provider =
+        AnthropicProvider::new(CANARY).expect("a client builds").with_base_url(&endpoint.url);
 
     let events = turn(&provider).await.expect("the endpoint answers");
 
     assert_eq!(text(&events), "Hello, world!");
-    assert_eq!(
-        events.last(),
-        Some(&ProviderEvent::Finish(FinishReason::Completed))
-    );
+    assert_eq!(events.last(), Some(&ProviderEvent::Finish(FinishReason::Completed)));
 }
 
 #[tokio::test]
 async fn openai_streams_a_reply_over_a_real_socket() {
     let endpoint = serve(
-        vec![streamed(include_str!(
-            "../../ganja-provider/tests/fixtures/openai_happy_path.sse"
-        ))],
+        vec![streamed(include_str!("../../ganja-provider/tests/fixtures/openai_happy_path.sse"))],
         Duration::ZERO,
     )
     .await;
-    let provider = OpenAiProvider::new(CANARY)
-        .expect("a client builds")
-        .with_base_url(&endpoint.url);
+    let provider =
+        OpenAiProvider::new(CANARY).expect("a client builds").with_base_url(&endpoint.url);
 
     let events = turn(&provider).await.expect("the endpoint answers");
 
     assert_eq!(text(&events), "Hello, world!");
-    assert_eq!(
-        events.last(),
-        Some(&ProviderEvent::Finish(FinishReason::Completed))
-    );
+    assert_eq!(events.last(), Some(&ProviderEvent::Finish(FinishReason::Completed)));
 }
 
 /// What the model is offered and what it is shown of its own calls are decided
@@ -373,17 +323,11 @@ async fn anthropic_puts_its_tools_and_its_call_history_on_the_wire() {
         "../../ganja-provider/tests/fixtures/anthropic_happy_path.sse"
     ))])
     .await;
-    let provider = AnthropicProvider::new(CANARY)
-        .expect("a client builds")
-        .with_base_url(&endpoint.url);
+    let provider =
+        AnthropicProvider::new(CANARY).expect("a client builds").with_base_url(&endpoint.url);
 
-    let events = ask(&provider, tool_prompt())
-        .await
-        .expect("the endpoint answers");
-    assert_eq!(
-        events.last(),
-        Some(&ProviderEvent::Finish(FinishReason::Completed))
-    );
+    let events = ask(&provider, tool_prompt()).await.expect("the endpoint answers");
+    assert_eq!(events.last(), Some(&ProviderEvent::Finish(FinishReason::Completed)));
 
     let seen = endpoint.seen();
     let [request] = seen.as_slice() else {
@@ -436,17 +380,11 @@ async fn openai_puts_its_tools_and_its_call_history_on_the_wire() {
         "../../ganja-provider/tests/fixtures/openai_happy_path.sse"
     ))])
     .await;
-    let provider = OpenAiProvider::new(CANARY)
-        .expect("a client builds")
-        .with_base_url(&endpoint.url);
+    let provider =
+        OpenAiProvider::new(CANARY).expect("a client builds").with_base_url(&endpoint.url);
 
-    let events = ask(&provider, tool_prompt())
-        .await
-        .expect("the endpoint answers");
-    assert_eq!(
-        events.last(),
-        Some(&ProviderEvent::Finish(FinishReason::Completed))
-    );
+    let events = ask(&provider, tool_prompt()).await.expect("the endpoint answers");
+    assert_eq!(events.last(), Some(&ProviderEvent::Finish(FinishReason::Completed)));
 
     let seen = endpoint.seen();
     let [request] = seen.as_slice() else {
@@ -499,18 +437,10 @@ async fn a_redirect_is_reported_rather_than_followed_to_wherever_it_points() {
     // Answers with a stream, so that following the redirect would look like a
     // perfectly successful turn rather than an error anyone would notice.
     let bait = record(vec![
-        streamed(include_str!(
-            "../../ganja-provider/tests/fixtures/anthropic_happy_path.sse"
-        )),
-        streamed(include_str!(
-            "../../ganja-provider/tests/fixtures/openai_happy_path.sse"
-        )),
-        streamed(include_str!(
-            "../../ganja-provider/tests/fixtures/anthropic_happy_path.sse"
-        )),
-        streamed(include_str!(
-            "../../ganja-provider/tests/fixtures/openai_happy_path.sse"
-        )),
+        streamed(include_str!("../../ganja-provider/tests/fixtures/anthropic_happy_path.sse")),
+        streamed(include_str!("../../ganja-provider/tests/fixtures/openai_happy_path.sse")),
+        streamed(include_str!("../../ganja-provider/tests/fixtures/anthropic_happy_path.sse")),
+        streamed(include_str!("../../ganja-provider/tests/fixtures/openai_happy_path.sse")),
     ])
     .await;
 
@@ -520,28 +450,21 @@ async fn a_redirect_is_reported_rather_than_followed_to_wherever_it_points() {
     // stopped sending one — an empty log proves nothing until something has
     // shown the log can fill.
     {
-        let anthropic = AnthropicProvider::new(CANARY)
-            .expect("a client builds")
-            .with_base_url(&bait.url);
-        let openai = OpenAiProvider::new(CANARY)
-            .expect("a client builds")
-            .with_base_url(&bait.url);
+        let anthropic =
+            AnthropicProvider::new(CANARY).expect("a client builds").with_base_url(&bait.url);
+        let openai = OpenAiProvider::new(CANARY).expect("a client builds").with_base_url(&bait.url);
 
         turn(&anthropic).await.expect("the endpoint answers");
         turn(&openai).await.expect("the endpoint answers");
 
         let seen = bait.seen();
         assert_eq!(
-            seen.iter()
-                .filter_map(|request| header(request, "x-api-key"))
-                .collect::<Vec<_>>(),
+            seen.iter().filter_map(|request| header(request, "x-api-key")).collect::<Vec<_>>(),
             vec![CANARY],
             "the recorder should see Anthropic's key header when it is sent one: {seen:?}"
         );
         assert_eq!(
-            seen.iter()
-                .filter_map(|request| header(request, "authorization"))
-                .collect::<Vec<_>>(),
+            seen.iter().filter_map(|request| header(request, "authorization")).collect::<Vec<_>>(),
             vec![format!("Bearer {CANARY}")],
             "the recorder should see OpenAI's bearer token when it is sent one: {seen:?}"
         );
@@ -551,27 +474,17 @@ async fn a_redirect_is_reported_rather_than_followed_to_wherever_it_points() {
 
     let redirector = serve(
         vec![
-            response(
-                "302 Found",
-                &[("location", &format!("{}/v1/messages", bait.url))],
-                "",
-            ),
-            response(
-                "302 Found",
-                &[("location", &format!("{}/chat/completions", bait.url))],
-                "",
-            ),
+            response("302 Found", &[("location", &format!("{}/v1/messages", bait.url))], ""),
+            response("302 Found", &[("location", &format!("{}/chat/completions", bait.url))], ""),
         ],
         Duration::ZERO,
     )
     .await;
 
-    let anthropic = AnthropicProvider::new(CANARY)
-        .expect("a client builds")
-        .with_base_url(&redirector.url);
-    let openai = OpenAiProvider::new(CANARY)
-        .expect("a client builds")
-        .with_base_url(&redirector.url);
+    let anthropic =
+        AnthropicProvider::new(CANARY).expect("a client builds").with_base_url(&redirector.url);
+    let openai =
+        OpenAiProvider::new(CANARY).expect("a client builds").with_base_url(&redirector.url);
 
     for error in [
         turn(&anthropic).await.expect_err("a 302 is not an answer"),
@@ -615,17 +528,12 @@ async fn a_loopback_endpoint_cannot_redirect_the_key_off_the_machine() {
     // `.invalid` is reserved by RFC 2606 and never resolves, so a followed
     // redirect fails as a transport error rather than reaching anyone.
     let redirector = serve(
-        vec![response(
-            "302 Found",
-            &[("location", "http://elsewhere.invalid/v1/messages")],
-            "",
-        )],
+        vec![response("302 Found", &[("location", "http://elsewhere.invalid/v1/messages")], "")],
         Duration::ZERO,
     )
     .await;
-    let provider = AnthropicProvider::new(CANARY)
-        .expect("a client builds")
-        .with_base_url(&redirector.url);
+    let provider =
+        AnthropicProvider::new(CANARY).expect("a client builds").with_base_url(&redirector.url);
 
     let error = turn(&provider).await.expect_err("a 302 is not an answer");
 
@@ -644,15 +552,10 @@ async fn a_plain_http_endpoint_off_the_machine_is_refused_before_anything_is_sen
         .expect("a client builds")
         .with_base_url("http://ganja:sk-test-canary-XYZ@api.anthropic.example");
 
-    let error = turn(&provider)
-        .await
-        .expect_err("a plain-http endpoint is refused");
+    let error = turn(&provider).await.expect_err("a plain-http endpoint is refused");
     let rendered = format!("{error} / {error:?}");
 
-    assert!(
-        matches!(error, ProviderError::Transport(_)),
-        "got {error:?}"
-    );
+    assert!(matches!(error, ProviderError::Transport(_)), "got {error:?}");
     assert!(
         rendered.contains("https"),
         "the refusal should say what would have been acceptable: {rendered}"
@@ -667,24 +570,18 @@ async fn a_plain_http_endpoint_off_the_machine_is_refused_before_anything_is_sen
 #[tokio::test]
 async fn a_body_that_stops_early_fails_the_turn_rather_than_finishing_it() {
     let endpoint = serve(
-        vec![streamed(include_str!(
-            "../../ganja-provider/tests/fixtures/anthropic_truncated.sse"
-        ))],
+        vec![streamed(include_str!("../../ganja-provider/tests/fixtures/anthropic_truncated.sse"))],
         Duration::ZERO,
     )
     .await;
-    let provider = AnthropicProvider::new(CANARY)
-        .expect("a client builds")
-        .with_base_url(&endpoint.url);
+    let provider =
+        AnthropicProvider::new(CANARY).expect("a client builds").with_base_url(&endpoint.url);
 
     let events = turn(&provider).await.expect("the endpoint answers");
 
     assert_eq!(text(&events), "The connection drops right");
     assert!(
-        matches!(
-            events.last(),
-            Some(ProviderEvent::Failed(ProviderError::Transport(_)))
-        ),
+        matches!(events.last(), Some(ProviderEvent::Failed(ProviderError::Transport(_)))),
         "a dropped body must never read as a completed turn, got {events:?}"
     );
 }
@@ -707,20 +604,13 @@ async fn a_body_that_dies_mid_message_reports_why_without_echoing_the_base_url()
     .await;
     let provider = AnthropicProvider::new(CANARY)
         .expect("a client builds")
-        .with_base_url(
-            endpoint
-                .url
-                .replace("http://", &format!("http://ganja:{CANARY}@")),
-        );
+        .with_base_url(endpoint.url.replace("http://", &format!("http://ganja:{CANARY}@")));
 
     let events = turn(&provider).await.expect("the endpoint answers");
     let rendered = format!("{events:?}");
 
     assert!(
-        matches!(
-            events.last(),
-            Some(ProviderEvent::Failed(ProviderError::Transport(_)))
-        ),
+        matches!(events.last(), Some(ProviderEvent::Failed(ProviderError::Transport(_)))),
         "a body that died must not read as a finished turn, got {events:?}"
     );
     assert!(
@@ -740,16 +630,13 @@ async fn a_rate_limit_is_retried_and_the_retry_is_what_answers() {
                 &[("retry-after", "0")],
                 r#"{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}"#,
             ),
-            streamed(include_str!(
-                "../../ganja-provider/tests/fixtures/anthropic_happy_path.sse"
-            )),
+            streamed(include_str!("../../ganja-provider/tests/fixtures/anthropic_happy_path.sse")),
         ],
         Duration::ZERO,
     )
     .await;
-    let provider = AnthropicProvider::new(CANARY)
-        .expect("a client builds")
-        .with_base_url(&endpoint.url);
+    let provider =
+        AnthropicProvider::new(CANARY).expect("a client builds").with_base_url(&endpoint.url);
 
     let events = turn(&provider).await.expect("the retry answers");
 
@@ -771,17 +658,13 @@ async fn a_rejected_credential_is_reported_without_being_echoed() {
         Duration::ZERO,
     )
     .await;
-    let provider = OpenAiProvider::new(CANARY)
-        .expect("a client builds")
-        .with_base_url(&endpoint.url);
+    let provider =
+        OpenAiProvider::new(CANARY).expect("a client builds").with_base_url(&endpoint.url);
 
     let error = turn(&provider).await.expect_err("a 401 is not answerable");
     let rendered = format!("{error} / {error:?}");
 
-    assert!(
-        !rendered.contains(CANARY),
-        "the key came back out in an error: {rendered}"
-    );
+    assert!(!rendered.contains(CANARY), "the key came back out in an error: {rendered}");
     assert!(
         rendered.contains("[redacted]"),
         "the echo should be masked rather than dropped: {rendered}"
@@ -799,25 +682,13 @@ async fn a_transport_failure_explains_itself_without_echoing_the_base_url() {
         .expect("a client builds")
         // A base URL is configuration, and configuration is allowed to carry
         // credentials in its userinfo, so it must not reach an error either.
-        .with_base_url(
-            endpoint
-                .url
-                .replace("http://", &format!("http://ganja:{CANARY}@")),
-        );
+        .with_base_url(endpoint.url.replace("http://", &format!("http://ganja:{CANARY}@")));
 
-    let error = turn(&provider)
-        .await
-        .expect_err("an empty response is not an answer");
+    let error = turn(&provider).await.expect_err("an empty response is not an answer");
     let rendered = format!("{error} / {error:?}");
 
-    assert!(
-        matches!(error, ProviderError::Transport(_)),
-        "got {error:?}"
-    );
-    assert!(
-        !rendered.contains(CANARY),
-        "the base URL's userinfo reached an error: {rendered}"
-    );
+    assert!(matches!(error, ProviderError::Transport(_)), "got {error:?}");
+    assert!(!rendered.contains(CANARY), "the base URL's userinfo reached an error: {rendered}");
     assert!(
         rendered.len() > "the request did not complete: ".len(),
         "the error should say what went wrong, got {rendered}"
@@ -827,22 +698,13 @@ async fn a_transport_failure_explains_itself_without_echoing_the_base_url() {
 #[tokio::test]
 async fn a_server_error_is_retried_until_the_budget_runs_out() {
     let refusals = (0..ganja_core::provider::retry::MAX_ATTEMPTS)
-        .map(|_| {
-            response(
-                "503 Service Unavailable",
-                &[("retry-after", "0")],
-                "upstream is down",
-            )
-        })
+        .map(|_| response("503 Service Unavailable", &[("retry-after", "0")], "upstream is down"))
         .collect();
     let endpoint = serve(refusals, Duration::ZERO).await;
-    let provider = AnthropicProvider::new(CANARY)
-        .expect("a client builds")
-        .with_base_url(&endpoint.url);
+    let provider =
+        AnthropicProvider::new(CANARY).expect("a client builds").with_base_url(&endpoint.url);
 
-    let error = turn(&provider)
-        .await
-        .expect_err("every attempt was refused");
+    let error = turn(&provider).await.expect_err("every attempt was refused");
 
     assert!(
         matches!(
@@ -862,9 +724,8 @@ async fn a_failure_mid_stream_finishes_the_turn_as_failed_and_keeps_the_text() {
         Duration::ZERO,
     )
     .await;
-    let provider = AnthropicProvider::new(CANARY)
-        .expect("a client builds")
-        .with_base_url(&endpoint.url);
+    let provider =
+        AnthropicProvider::new(CANARY).expect("a client builds").with_base_url(&endpoint.url);
     let engine = Engine::new(
         Arc::new(provider),
         "test-model",
@@ -889,15 +750,9 @@ async fn a_failure_mid_stream_finishes_the_turn_as_failed_and_keeps_the_text() {
         panic!("a turn always ends with a finish, got {seen:?}");
     };
 
-    assert_eq!(
-        *reason,
-        FinishReason::Failed,
-        "a stream that died must not report Completed"
-    );
+    assert_eq!(*reason, FinishReason::Failed, "a stream that died must not report Completed");
     assert!(
-        error
-            .as_deref()
-            .is_some_and(|error| error.contains("Overloaded")),
+        error.as_deref().is_some_and(|error| error.contains("Overloaded")),
         "the failure should explain itself, got {error:?}"
     );
     assert_eq!(
@@ -917,9 +772,8 @@ async fn a_cancel_mid_stream_finishes_the_turn_as_cancelled() {
         Duration::from_millis(5),
     )
     .await;
-    let provider = AnthropicProvider::new(CANARY)
-        .expect("a client builds")
-        .with_base_url(&endpoint.url);
+    let provider =
+        AnthropicProvider::new(CANARY).expect("a client builds").with_base_url(&endpoint.url);
     let engine = Engine::new(
         Arc::new(provider),
         "test-model",
@@ -947,10 +801,7 @@ async fn a_cancel_mid_stream_finishes_the_turn_as_cancelled() {
             None => panic!("the stream ended before the reply started"),
         }
     }
-    engine
-        .send(Command::CancelTurn)
-        .await
-        .expect("a cancel is always accepted");
+    engine.send(Command::CancelTurn).await.expect("a cancel is always accepted");
 
     let seen = drain(&mut events).await;
     let Some(Event::MessageFinished { reason, error, .. }) = seen.last() else {
@@ -966,10 +817,7 @@ fn replay(events: &[Event]) -> String {
     events
         .iter()
         .filter_map(|event| match event {
-            Event::MessageStarted {
-                session_id: _,
-                message,
-            } => Some(
+            Event::MessageStarted { session_id: _, message } => Some(
                 message
                     .parts
                     .iter()

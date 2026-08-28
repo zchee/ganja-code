@@ -1,6 +1,8 @@
-use ganja_core::{SessionId, SessionInfo, storage::VERSION};
+use ganja_core::storage::VERSION;
+use ganja_core::{SessionId, SessionInfo};
 use ganja_protocol::Usage;
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 
 use super::{DAY, HOUR, MINUTE, Sessions, age};
 use crate::theme::Theme;
@@ -17,10 +19,7 @@ fn info(id: &str, title: Option<&str>, updated: u64, tokens: u64) -> SessionInfo
         title: title.map(str::to_owned),
         created: 0,
         updated,
-        usage: Usage {
-            input_tokens: tokens,
-            ..Usage::default()
-        },
+        usage: Usage { input_tokens: tokens, ..Usage::default() },
         context_tokens: 0,
         summary: None,
         agent: None,
@@ -35,12 +34,7 @@ fn info(id: &str, title: Option<&str>, updated: u64, tokens: u64) -> SessionInfo
 fn sessions() -> Sessions {
     Sessions::new(
         vec![
-            info(
-                "ses_newer",
-                Some("porting storage"),
-                NOW - 5 * MINUTE,
-                1_234,
-            ),
+            info("ses_newer", Some("porting storage"), NOW - 5 * MINUTE, 1_234),
             info("ses_older", None, NOW - 3 * HOUR, 42),
         ],
         NOW,
@@ -52,11 +46,7 @@ fn rendered(sessions: &Sessions, area: Rect) -> String {
     sessions.render(area, &mut buffer, &Theme::default());
 
     (0..area.height)
-        .map(|row| {
-            (0..area.width)
-                .map(|column| buffer[(column, row)].symbol())
-                .collect::<String>()
-        })
+        .map(|row| (0..area.width).map(|column| buffer[(column, row)].symbol()).collect::<String>())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -94,28 +84,16 @@ fn a_title_of_only_whitespace_falls_back_to_the_id_too() {
 #[test]
 fn the_selection_starts_on_the_newest_and_moves_within_the_list() {
     let mut sessions = sessions();
-    assert_eq!(
-        sessions.selected().map(|info| info.id.as_str()),
-        Some("ses_newer")
-    );
+    assert_eq!(sessions.selected().map(|info| info.id.as_str()), Some("ses_newer"));
 
     sessions.move_selection(1);
-    assert_eq!(
-        sessions.selected().map(|info| info.id.as_str()),
-        Some("ses_older")
-    );
+    assert_eq!(sessions.selected().map(|info| info.id.as_str()), Some("ses_older"));
 
     // Clamped at both ends rather than wrapping around.
     sessions.move_selection(9);
-    assert_eq!(
-        sessions.selected().map(|info| info.id.as_str()),
-        Some("ses_older")
-    );
+    assert_eq!(sessions.selected().map(|info| info.id.as_str()), Some("ses_older"));
     sessions.move_selection(-9);
-    assert_eq!(
-        sessions.selected().map(|info| info.id.as_str()),
-        Some("ses_newer")
-    );
+    assert_eq!(sessions.selected().map(|info| info.id.as_str()), Some("ses_newer"));
 }
 
 #[test]
@@ -127,10 +105,7 @@ fn the_marker_follows_the_selection() {
 
     assert!(first.contains("> porting storage"), "got:\n{first}");
     assert!(second.contains("> ses_older"), "got:\n{second}");
-    assert!(
-        !second.contains("> porting storage"),
-        "only one row is selected:\n{second}"
-    );
+    assert!(!second.contains("> porting storage"), "only one row is selected:\n{second}");
 }
 
 /// More sessions than rows: the list has to move under the selection, or
@@ -157,14 +132,8 @@ fn a_selection_below_the_fold_scrolls_the_list_to_it() {
     sessions.move_selection(39);
     let bottom = rendered(&sessions, area);
 
-    assert!(
-        bottom.contains("> session number 39"),
-        "the selection must be on screen:\n{bottom}"
-    );
-    assert!(
-        !bottom.contains("session number 00"),
-        "the list should have scrolled:\n{bottom}"
-    );
+    assert!(bottom.contains("> session number 39"), "the selection must be on screen:\n{bottom}");
+    assert!(!bottom.contains("session number 00"), "the list should have scrolled:\n{bottom}");
 }
 
 #[test]
@@ -174,10 +143,7 @@ fn a_title_too_wide_for_the_column_is_cut_rather_than_wrapped() {
     let screen = rendered(&sessions, Rect::new(0, 0, 60, 20));
 
     for line in screen.lines() {
-        assert!(
-            line.chars().count() <= 60,
-            "a row must not overflow the dialog: {line:?}"
-        );
+        assert!(line.chars().count() <= 60, "a row must not overflow the dialog: {line:?}");
     }
     assert!(screen.contains("wide"), "got:\n{screen}");
 }
@@ -206,10 +172,7 @@ fn an_empty_list_has_nothing_selected_and_does_not_panic() {
 fn a_zero_area_draws_nothing_and_does_not_panic() {
     let screen = rendered(&sessions(), Rect::new(0, 0, 0, 0));
 
-    assert!(
-        screen.is_empty(),
-        "a zero area has no cell to hold: {screen}"
-    );
+    assert!(screen.is_empty(), "a zero area has no cell to hold: {screen}");
 }
 
 /// The same protection the permission dialog is pinned for, on the other
@@ -218,28 +181,13 @@ fn a_zero_area_draws_nothing_and_does_not_panic() {
 /// screen the user is choosing from.
 #[test]
 fn an_escape_sequence_in_a_title_never_reaches_the_buffer() {
-    let sessions = Sessions::new(
-        vec![info(
-            "ses_1",
-            Some("\u{1b}[2J\u{1b}[31mchoose me\u{7}"),
-            NOW,
-            0,
-        )],
-        NOW,
-    );
+    let sessions =
+        Sessions::new(vec![info("ses_1", Some("\u{1b}[2J\u{1b}[31mchoose me\u{7}"), NOW, 0)], NOW);
 
     let screen = rendered(&sessions, Rect::new(0, 0, 80, 20));
-    let leaked: Vec<char> = screen
-        .chars()
-        .filter(|character| *character != '\n' && character.is_control())
-        .collect();
+    let leaked: Vec<char> =
+        screen.chars().filter(|character| *character != '\n' && character.is_control()).collect();
 
-    assert!(
-        leaked.is_empty(),
-        "control characters reached the buffer: {leaked:?}\n{screen}"
-    );
-    assert!(
-        screen.contains("choose me"),
-        "the printable remainder still has to render:\n{screen}"
-    );
+    assert!(leaked.is_empty(), "control characters reached the buffer: {leaked:?}\n{screen}");
+    assert!(screen.contains("choose me"), "the printable remainder still has to render:\n{screen}");
 }

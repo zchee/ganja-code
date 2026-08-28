@@ -16,17 +16,18 @@
 //! the reference-server prerequisites `mcp.rs` documents (`bun` plus the
 //! upstream checkout), and hard-fails without them for the same reason.
 
-use std::{path::Path, sync::Arc, time::Duration};
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
-use futures::{StreamExt as _, stream::BoxStream};
-use ganja_core::{
-    Config, Engine, EngineError, McpServers, McpStatus, Storage,
-    agent::{BUILD_SWITCH_REMINDER, PLAN_REMINDER},
-    permission::Permissions,
-    protocol::{Command, Event, FinishReason, PartBody, QuestionId, ToolState},
-    provider::{ChatRequest, Provider},
-    tool::{Registry, Tool},
-};
+use futures::StreamExt as _;
+use futures::stream::BoxStream;
+use ganja_core::agent::{BUILD_SWITCH_REMINDER, PLAN_REMINDER};
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{Command, Event, FinishReason, PartBody, QuestionId, ToolState};
+use ganja_core::provider::{ChatRequest, Provider};
+use ganja_core::tool::{Registry, Tool};
+use ganja_core::{Config, Engine, EngineError, McpServers, McpStatus, Storage};
 use ganja_testkit::{BlockingTool, RecorderTool, ScriptedProvider, drain, says, tool_call};
 use serde_json::json;
 
@@ -80,10 +81,7 @@ async fn persistent_over(
         storage,
     )
     .with_agents(ganja_testkit::agent_registry(&Config::default()));
-    engine
-        .resume(&session)
-        .await
-        .expect("the seeded session resumes");
+    engine.resume(&session).await.expect("the seeded session resumes");
 
     (engine, seen)
 }
@@ -100,9 +98,7 @@ async fn next_event(events: &mut BoxStream<'static, Event>) -> Event {
 /// path announces, so later counts see only the events of the drill itself.
 async fn switch_to_plan(engine: &Engine, events: &mut BoxStream<'static, Event>) {
     engine
-        .send(Command::SwitchAgent {
-            name: "plan".to_owned(),
-        })
+        .send(Command::SwitchAgent { name: "plan".to_owned() })
         .await
         .expect("plan is a builtin primary agent");
     match next_event(events).await {
@@ -149,10 +145,7 @@ async fn answered_turn(
         .expect("an idle engine accepts a prompt");
     let (id, mut seen) = until_question(events).await;
     engine
-        .send(Command::ReplyQuestion {
-            id,
-            answers: vec![vec![answer.to_owned()]],
-        })
+        .send(Command::ReplyQuestion { id, answers: vec![vec![answer.to_owned()]] })
         .await
         .expect("a reply is never refused");
     seen.extend(drain(events).await);
@@ -210,9 +203,7 @@ fn tool_part(seen: &[Event], tool: &str) -> ToolState {
         .rev()
         .find_map(|event| match event {
             Event::PartUpdated { part, .. } => match &part.body {
-                PartBody::Tool {
-                    tool: named, state, ..
-                } if named == tool => Some(state.clone()),
+                PartBody::Tool { tool: named, state, .. } if named == tool => Some(state.clone()),
                 _ => None,
             },
             _ => None,
@@ -248,9 +239,8 @@ async fn a_yes_answer_lands_the_switch_when_the_turn_ends() {
     let seen = answered_turn(&engine, &mut events, "here is the plan", "Yes").await;
 
     // The question is upstream's, verbatim but for the plan-file clause.
-    let Some(Event::QuestionAsked { questions, .. }) = seen
-        .iter()
-        .find(|event| matches!(event, Event::QuestionAsked { .. }))
+    let Some(Event::QuestionAsked { questions, .. }) =
+        seen.iter().find(|event| matches!(event, Event::QuestionAsked { .. }))
     else {
         panic!("the tool asks, got {seen:?}");
     };
@@ -371,10 +361,7 @@ async fn an_edit_in_the_turn_that_asked_is_still_a_plan_agents_edit() {
 
     let seen = answered_turn(&engine, &mut events, "here is the plan", "Yes").await;
 
-    assert!(
-        edits.lock().expect("the call log").is_empty(),
-        "the edit must never have run"
-    );
+    assert!(edits.lock().expect("the call log").is_empty(), "the edit must never have run");
     assert!(
         matches!(tool_part(&seen, "edit"), ToolState::Error { error, .. }
             if error.contains(r#""permission":"edit""#)),
@@ -423,10 +410,7 @@ async fn a_cancel_after_yes_still_switches() {
         .expect("an idle engine accepts a prompt");
     let (id, _) = until_question(&mut events).await;
     engine
-        .send(Command::ReplyQuestion {
-            id,
-            answers: vec![vec!["Yes".to_owned()]],
-        })
+        .send(Command::ReplyQuestion { id, answers: vec![vec!["Yes".to_owned()]] })
         .await
         .expect("a reply is never refused");
 
@@ -436,10 +420,7 @@ async fn a_cancel_after_yes_still_switches() {
         .await
         .expect("the blocking call starts")
         .expect("the entry signal arrives");
-    engine
-        .send(Command::CancelTurn)
-        .await
-        .expect("a cancel is never refused");
+    engine.send(Command::CancelTurn).await.expect("a cancel is never refused");
 
     let seen = drain(&mut events).await;
     assert_eq!(finish(&seen), FinishReason::Cancelled);
@@ -478,13 +459,7 @@ async fn a_manual_switch_after_yes_supersedes_the_approval() {
     let (agent, _) = boundary_announcement(&mut events).await;
     assert_eq!(agent, "build");
 
-    send_when_idle(
-        &engine,
-        Command::SwitchAgent {
-            name: "plan".to_owned(),
-        },
-    )
-    .await;
+    send_when_idle(&engine, Command::SwitchAgent { name: "plan".to_owned() }).await;
     match next_event(&mut events).await {
         Event::AgentChanged { agent, .. } => assert_eq!(agent, "plan"),
         other => panic!("the manual supersede announces itself, got {other:?}"),
@@ -541,10 +516,7 @@ async fn a_restart_between_yes_and_the_prompt_resumes_as_build_without_the_sente
         storage,
     )
     .with_agents(ganja_testkit::agent_registry(&Config::default()));
-    engine
-        .resume(&session)
-        .await
-        .expect("the approved session resumes");
+    engine.resume(&session).await.expect("the approved session resumes");
     assert_eq!(
         engine.agent().as_deref(),
         Some("build"),
@@ -565,14 +537,8 @@ async fn a_restart_between_yes_and_the_prompt_resumes_as_build_without_the_sente
     drain(&mut events).await;
 
     let requests = requests.lock().expect("the request log is never poisoned");
-    let next = requests
-        .last()
-        .expect("the resumed turn asked the provider");
-    assert_eq!(
-        parts_saying(next, APPROVAL),
-        0,
-        "the sentence did not survive"
-    );
+    let next = requests.last().expect("the resumed turn asked the provider");
+    assert_eq!(parts_saying(next, APPROVAL), 0, "the sentence did not survive");
     assert_eq!(parts_saying(next, BUILD_SWITCH_REMINDER), 0);
 }
 
@@ -601,10 +567,8 @@ async fn the_approval_sentence_rides_one_request_and_never_returns() {
     }
 
     let requests = requests.lock().expect("the request log is never poisoned");
-    let counts: Vec<usize> = requests
-        .iter()
-        .map(|request| parts_saying(request, APPROVAL))
-        .collect();
+    let counts: Vec<usize> =
+        requests.iter().map(|request| parts_saying(request, APPROVAL)).collect();
     assert_eq!(
         counts.iter().sum::<usize>(),
         1,
@@ -637,17 +601,12 @@ async fn a_manual_switch_mid_turn_is_still_refused_busy() {
 
     // The question is open, so the turn is in flight and a switch must wait.
     let refused = engine
-        .send(Command::SwitchAgent {
-            name: "build".to_owned(),
-        })
+        .send(Command::SwitchAgent { name: "build".to_owned() })
         .await
         .expect_err("a mid-turn switch is refused");
     assert!(matches!(refused, EngineError::Busy), "got {refused:?}");
 
-    engine
-        .send(Command::RejectQuestion { id })
-        .await
-        .expect("a rejection is never refused");
+    engine.send(Command::RejectQuestion { id }).await.expect("a rejection is never refused");
     let seen = drain(&mut events).await;
     assert_eq!(finish(&seen), FinishReason::Completed);
     assert_eq!(engine.agent().as_deref(), Some("plan"));
@@ -669,23 +628,11 @@ async fn a_yes_then_a_shell_turn_keeps_the_sentence_for_the_next_asking_prompt()
     answered_turn(&engine, &mut events, "here is the plan", "Yes").await;
     boundary_announcement(&mut events).await;
 
-    let asked_before = requests
-        .lock()
-        .expect("the request log is never poisoned")
-        .len();
-    send_when_idle(
-        &engine,
-        Command::RunShell {
-            command: "echo ok".to_owned(),
-        },
-    )
-    .await;
+    let asked_before = requests.lock().expect("the request log is never poisoned").len();
+    send_when_idle(&engine, Command::RunShell { command: "echo ok".to_owned() }).await;
     drain(&mut events).await;
     assert_eq!(
-        requests
-            .lock()
-            .expect("the request log is never poisoned")
-            .len(),
+        requests.lock().expect("the request log is never poisoned").len(),
         asked_before,
         "a shell turn asks the model nothing"
     );
@@ -725,20 +672,10 @@ async fn a_yes_then_a_model_switch_keeps_the_row_on_build() {
     answered_turn(&engine, &mut events, "here is the plan", "Yes").await;
     boundary_announcement(&mut events).await;
 
-    send_when_idle(
-        &engine,
-        Command::SwitchModel {
-            model: "recorder-two".to_owned(),
-        },
-    )
-    .await;
+    send_when_idle(&engine, Command::SwitchModel { model: "recorder-two".to_owned() }).await;
 
     let row = engine.current_session().expect("the session has a row");
-    assert_eq!(
-        row.agent.as_deref(),
-        Some("build"),
-        "the row stays on build"
-    );
+    assert_eq!(row.agent.as_deref(), Some("build"), "the row stays on build");
     assert_eq!(row.model.as_deref(), Some("recorder-two"));
     assert_eq!(engine.agent().as_deref(), Some("build"));
 
@@ -809,17 +746,11 @@ async fn a_manual_switch_announces_itself_on_the_event_stream() {
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
-        .send(Command::SwitchAgent {
-            name: "plan".to_owned(),
-        })
+        .send(Command::SwitchAgent { name: "plan".to_owned() })
         .await
         .expect("plan is a builtin primary agent");
     match next_event(&mut events).await {
-        Event::AgentChanged {
-            agent,
-            model,
-            session_id,
-        } => {
+        Event::AgentChanged { agent, model, session_id } => {
             assert_eq!(agent, "plan");
             assert_eq!(model, "recorder-model");
             assert_eq!(session_id, engine.session_id());
@@ -854,10 +785,7 @@ async fn a_manual_switch_announces_itself_on_the_event_stream() {
 #[tokio::test]
 async fn plan_exit_survives_the_mcp_dial_rebuild() {
     assert!(
-        !Registry::with_builtins()
-            .definitions()
-            .iter()
-            .any(|tool| tool.name == "plan_exit"),
+        !Registry::with_builtins().definitions().iter().any(|tool| tool.name == "plan_exit"),
         "the builtin surface must not move"
     );
 
@@ -920,10 +848,7 @@ async fn plan_exit_survives_the_mcp_dial_rebuild() {
     let deadline = tokio::time::Instant::now() + PATIENCE;
     loop {
         let status = engine.mcp_status();
-        if status
-            .get("ref")
-            .is_some_and(|status| matches!(status, McpStatus::Connected))
-        {
+        if status.get("ref").is_some_and(|status| matches!(status, McpStatus::Connected)) {
             break;
         }
         assert!(
@@ -951,10 +876,7 @@ async fn plan_exit_survives_the_mcp_dial_rebuild() {
             .map(|tool| tool.name.clone())
             .collect()
     };
-    assert!(
-        offered.iter().any(|name| name == "plan_exit"),
-        "got {offered:?}"
-    );
+    assert!(offered.iter().any(|name| name == "plan_exit"), "got {offered:?}");
     assert!(
         offered.iter().any(|name| name.starts_with("mcp__ref__")),
         "the rebuild really happened — the dialled server's tools are in the set: {offered:?}"

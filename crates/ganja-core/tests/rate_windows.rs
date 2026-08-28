@@ -23,17 +23,14 @@
 //! socket is not, so a header only counts once it has survived being written,
 //! read and parsed by the same client a real turn uses.
 
-use std::{sync::Arc, time::SystemTime};
+use std::sync::Arc;
+use std::time::SystemTime;
 
-use ganja_core::{
-    Engine,
-    protocol::Command,
-    provider::{AnthropicProvider, Provider as _},
-};
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::{TcpListener, TcpStream},
-};
+use ganja_core::Engine;
+use ganja_core::protocol::Command;
+use ganja_core::provider::{AnthropicProvider, Provider as _};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::{TcpListener, TcpStream};
 
 /// The credential every test authenticates with, which nothing may render.
 const CANARY: &str = "sk-test-canary-XYZ";
@@ -64,15 +61,8 @@ struct Endpoint {
 
 /// Serves `turns` responses, each carrying `headers` beside the happy stream.
 async fn serve(headers: Vec<Vec<(String, String)>>) -> Endpoint {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("loopback is bindable");
-    let url = format!(
-        "http://{}",
-        listener
-            .local_addr()
-            .expect("a bound socket has an address")
-    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("loopback is bindable");
+    let url = format!("http://{}", listener.local_addr().expect("a bound socket has an address"));
 
     let server = tokio::spawn(async move {
         for set in headers {
@@ -96,10 +86,7 @@ async fn serve(headers: Vec<Vec<(String, String)>>) -> Endpoint {
         }
     });
 
-    Endpoint {
-        url,
-        _server: server,
-    }
+    Endpoint { url, _server: server }
 }
 
 /// Reads one whole HTTP request, so the client sees an answer rather than a
@@ -134,9 +121,7 @@ async fn drain(socket: &mut TcpStream) {
 fn engine(endpoint: &Endpoint) -> Engine {
     Engine::new(
         Arc::new(
-            AnthropicProvider::new(CANARY)
-                .expect("a client builds")
-                .with_base_url(&endpoint.url),
+            AnthropicProvider::new(CANARY).expect("a client builds").with_base_url(&endpoint.url),
         ),
         "test-model",
         Arc::new(ganja_core::tool::Registry::new(Vec::new())),
@@ -164,9 +149,7 @@ async fn turn(engine: &Engine, prompt: &str) {
 }
 
 fn pairs(raw: &[(&str, &str)]) -> Vec<(String, String)> {
-    raw.iter()
-        .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
-        .collect()
+    raw.iter().map(|(name, value)| ((*name).to_owned(), (*value).to_owned())).collect()
 }
 
 /// AC7's first clause: real headers on a real response reach the engine's
@@ -230,9 +213,7 @@ async fn a_response_whose_buckets_carry_no_reset_still_reaches_the_engine() {
         "nothing dated these, so nothing carries a date: {windows:?}"
     );
     assert!(
-        windows
-            .iter()
-            .all(|window| !window.expired(SystemTime::now())),
+        windows.iter().all(|window| !window.expired(SystemTime::now())),
         "and a bucket nobody dated cannot have gone stale: {windows:?}"
     );
 }
@@ -278,11 +259,7 @@ async fn the_newest_answer_wins_and_a_silent_one_erases_nothing() {
     assert_eq!(engine.rate_windows()[0].remaining, 999);
 
     turn(&engine, "two").await;
-    assert_eq!(
-        engine.rate_windows()[0].remaining,
-        998,
-        "the later response is the newer truth"
-    );
+    assert_eq!(engine.rate_windows()[0].remaining, 998, "the later response is the newer truth");
 
     turn(&engine, "three").await;
     assert_eq!(
@@ -305,10 +282,7 @@ async fn a_new_session_on_the_same_wire_keeps_the_windows_that_credential_earned
     let endpoint = serve(vec![pairs(&[
         ("anthropic-ratelimit-input-tokens-limit", "80000"),
         ("anthropic-ratelimit-input-tokens-remaining", "60000"),
-        (
-            "anthropic-ratelimit-input-tokens-reset",
-            "2099-01-01T00:00:00Z",
-        ),
+        ("anthropic-ratelimit-input-tokens-reset", "2099-01-01T00:00:00Z"),
     ])])
     .await;
     let engine = engine(&endpoint);
@@ -317,10 +291,7 @@ async fn a_new_session_on_the_same_wire_keeps_the_windows_that_credential_earned
     let before = engine.rate_windows();
     assert_eq!(before.len(), 1, "got {before:?}");
 
-    engine
-        .send(Command::NewSession)
-        .await
-        .expect("an idle engine starts a new session");
+    engine.send(Command::NewSession).await.expect("an idle engine starts a new session");
 
     assert_eq!(
         engine.rate_windows(),
@@ -335,10 +306,7 @@ async fn a_new_session_on_the_same_wire_keeps_the_windows_that_credential_earned
 fn a_wire_that_has_answered_nothing_reports_no_windows() {
     let provider = AnthropicProvider::new(CANARY).expect("a client builds");
 
-    assert!(
-        provider.rate_windows().is_empty(),
-        "nothing is known until a response says something"
-    );
+    assert!(provider.rate_windows().is_empty(), "nothing is known until a response says something");
 }
 
 /// The plan half, over the same socket (**D485**): a codex-shaped response's
@@ -406,10 +374,7 @@ async fn a_quota_snapshot_lands_with_its_percentage_flipped_and_no_invented_cloc
     assert_eq!(plans[0].name, "premium_interactions");
     assert!((plans[0].used_percent - 11.5).abs() < 1e-9);
     assert_eq!(plans[0].resets_at, None);
-    assert!(
-        !plans[0].expired(SystemTime::now()),
-        "nothing dated it, so nothing may date it stale"
-    );
+    assert!(!plans[0].expired(SystemTime::now()), "nothing dated it, so nothing may date it stale");
 }
 
 /// The D470 rule on the new family, end to end: the credentials the W-A1 probe
@@ -427,8 +392,5 @@ async fn a_backend_that_sends_no_plan_headers_leaves_the_plan_state_empty() {
     turn(&engine, "hi").await;
 
     assert_eq!(engine.rate_windows().len(), 1, "the rate half still lands");
-    assert!(
-        engine.plan_windows().is_empty(),
-        "a backend with no plan headers meters no plan"
-    );
+    assert!(engine.plan_windows().is_empty(), "a backend with no plan headers meters no plan");
 }

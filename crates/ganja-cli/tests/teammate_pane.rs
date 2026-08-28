@@ -66,22 +66,16 @@
 
 #![cfg(unix)]
 
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    process::Command,
-    time::{Duration, Instant},
-};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{Duration, Instant};
 
-use ganja_core::{
-    team::{MemberName, Spawn, Surface, TeamFile, TeamName, TeamsRoot, mailbox},
-    teammate::{SpawnSpec, pane},
-};
+use ganja_core::team::{MemberName, Spawn, Surface, TeamFile, TeamName, TeamsRoot, mailbox};
+use ganja_core::teammate::{SpawnSpec, pane};
 use ganja_protocol::team::{Frame, MemberBackend};
-use ganja_testkit::{
-    Homes,
-    tmux::{PrivateServer, require_tmux},
-};
+use ganja_testkit::Homes;
+use ganja_testkit::tmux::{PrivateServer, require_tmux};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -164,10 +158,7 @@ impl Fixture {
         vec![
             ("HOME", self.homes.data().display().to_string()),
             ("GANJA_PROVIDER", "fake".to_owned()),
-            (
-                "GANJA_FAKE_SCRIPT",
-                self.homes.project().join(SCRIPT).display().to_string(),
-            ),
+            ("GANJA_FAKE_SCRIPT", self.homes.project().join(SCRIPT).display().to_string()),
             ("GANJA_DISABLE_MODELS_FETCH", "1".to_owned()),
         ]
     }
@@ -176,19 +167,10 @@ impl Fixture {
     /// things are.
     fn lead_env(&self) -> Vec<(&'static str, String)> {
         vec![
-            (
-                "GANJA_CONFIG_HOME",
-                self.config_home().display().to_string(),
-            ),
+            ("GANJA_CONFIG_HOME", self.config_home().display().to_string()),
             ("XDG_DATA_HOME", self.homes.data().display().to_string()),
-            (
-                "XDG_CONFIG_HOME",
-                self.homes.data().join("config").display().to_string(),
-            ),
-            (
-                "XDG_CACHE_HOME",
-                self.homes.data().join("cache").display().to_string(),
-            ),
+            ("XDG_CONFIG_HOME", self.homes.data().join("config").display().to_string()),
+            ("XDG_CACHE_HOME", self.homes.data().join("cache").display().to_string()),
         ]
     }
 
@@ -229,23 +211,17 @@ impl Tmux {
     /// pane inherits), whose first pane sleeps so the server outlives every
     /// pane the test watches.
     fn start(env: &[(&str, String)], remove: &[&str]) -> Self {
-        let pairs: Vec<(&str, &str)> = env
-            .iter()
-            .map(|(name, value)| (*name, value.as_str()))
-            .collect();
+        let pairs: Vec<(&str, &str)> =
+            env.iter().map(|(name, value)| (*name, value.as_str())).collect();
 
-        Self {
-            server: PrivateServer::start(&["sleep", "3600"], remove, &pairs),
-        }
+        Self { server: PrivateServer::start(&["sleep", "3600"], remove, &pairs) }
     }
 
     /// Splits a pane in `cwd` running `argv` with `env` added, and returns
     /// its id. `argv` is at least two words, for the reason `pane.rs` gives.
     fn split(&self, cwd: &Path, env: &[(&str, String)], argv: &[&str]) -> String {
-        let pairs: Vec<(&str, &str)> = env
-            .iter()
-            .map(|(name, value)| (*name, value.as_str()))
-            .collect();
+        let pairs: Vec<(&str, &str)> =
+            env.iter().map(|(name, value)| (*name, value.as_str())).collect();
 
         self.server.split(Some(cwd), &pairs, argv)
     }
@@ -255,13 +231,8 @@ impl Tmux {
     /// opened on, since what a person sees is the layout rather than the
     /// argv that produced it.
     fn corner(&self, pane: &str) -> (u16, u16) {
-        let reported = self.server.run(&[
-            "display-message",
-            "-p",
-            "-t",
-            pane,
-            "#{pane_left} #{pane_top}",
-        ]);
+        let reported =
+            self.server.run(&["display-message", "-p", "-t", pane, "#{pane_left} #{pane_top}"]);
         let mut columns = reported.split_whitespace().map(|word| {
             word.parse()
                 .unwrap_or_else(|_| panic!("tmux reports a corner as two numbers: {reported:?}"))
@@ -279,22 +250,13 @@ impl Tmux {
 
     /// The pid of the pane's process — for the lead's pane, the lead.
     fn pane_pid(&self, pane: &str) -> String {
-        self.server
-            .run(&["display-message", "-p", "-t", pane, "#{pane_pid}"])
-            .trim()
-            .to_owned()
+        self.server.run(&["display-message", "-p", "-t", pane, "#{pane_pid}"]).trim().to_owned()
     }
 
     /// The name of the process in the pane's foreground, as tmux sees it.
     fn current_command(&self, pane: &str) -> String {
         self.server
-            .run(&[
-                "display-message",
-                "-p",
-                "-t",
-                pane,
-                "#{pane_current_command}",
-            ])
+            .run(&["display-message", "-p", "-t", pane, "#{pane_current_command}"])
             .trim()
             .to_owned()
     }
@@ -306,8 +268,7 @@ impl Tmux {
 
     /// Types `text` into `pane` literally, then Enter.
     fn type_line(&self, pane: &str, text: &str) {
-        self.server
-            .run(&["send-keys", "-t", pane, "-l", "--", text]);
+        self.server.run(&["send-keys", "-t", pane, "-l", "--", text]);
         self.server.run(&["send-keys", "-t", pane, "Enter"]);
     }
 
@@ -350,10 +311,8 @@ fn lead_holds(inbox: &Path) -> Vec<Frame> {
 /// Sends `signal` to `pid` through the system's own `kill`, so the test needs
 /// no `libc` of its own for two lines of job control.
 fn signal(pid: &str, signal: &str) {
-    let status = Command::new("kill")
-        .args([&format!("-{signal}"), pid])
-        .status()
-        .expect("kill runs");
+    let status =
+        Command::new("kill").args([&format!("-{signal}"), pid]).status().expect("kill runs");
     assert!(status.success(), "kill -{signal} {pid} failed: {status}");
 }
 
@@ -375,9 +334,7 @@ impl Held {
     fn stop(pid: &str) -> Self {
         signal(pid, "STOP");
 
-        Self {
-            pid: pid.to_owned(),
-        }
+        Self { pid: pid.to_owned() }
     }
 }
 
@@ -400,11 +357,8 @@ fn a_configured_pane_shell_still_execs_the_launch_line() {
     require_tmux();
     let fixture = Fixture::new();
     fs::create_dir_all(fixture.config_home()).expect("the config home is creatable");
-    fs::write(
-        fixture.config_home().join("ganja.toml"),
-        "[teammates]\nshell = \"/bin/bash\"\n",
-    )
-    .expect("the config is writable");
+    fs::write(fixture.config_home().join("ganja.toml"), "[teammates]\nshell = \"/bin/bash\"\n")
+        .expect("the config is writable");
     let tmux = Tmux::start(&fixture.server_env(), WITHHELD);
 
     let lead = tmux.split(
@@ -425,12 +379,9 @@ fn a_configured_pane_shell_still_execs_the_launch_line() {
             .filter(|member| member.tmux_pane_id.starts_with('%'))
     });
     let pane = member.tmux_pane_id.clone();
-    wait_for(
-        "the launch line to reach the pane through bash",
-        &tmux,
-        &lead,
-        || (tmux.current_command(&pane) == "ganja").then_some(()),
-    );
+    wait_for("the launch line to reach the pane through bash", &tmux, &lead, || {
+        (tmux.current_command(&pane) == "ganja").then_some(())
+    });
 }
 
 /// **AC-11.** `/team spawn w1 --backend ganja` in a real lead makes a real pane
@@ -460,9 +411,7 @@ fn a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shutdown_
     // team file names the member on its pane.
     tmux.type_line(&lead, &format!("/team spawn {MEMBER} --backend ganja"));
     wait_for("the spawn to be reported", &tmux, &lead, || {
-        tmux.screen(&lead)
-            .contains(&format!("{MEMBER} {SPAWN_NOTICE}"))
-            .then_some(())
+        tmux.screen(&lead).contains(&format!("{MEMBER} {SPAWN_NOTICE}")).then_some(())
     });
     let member = wait_for("the member record", &tmux, &lead, || {
         fixture
@@ -481,9 +430,7 @@ fn a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shutdown_
 
     // 2. tmux agrees, and the pane's process is this binary: the launch line
     // was typed into the idle shell and `exec`'d.
-    wait_for("the pane to be listed", &tmux, &lead, || {
-        tmux.panes().contains(&pane).then_some(())
-    });
+    wait_for("the pane to be listed", &tmux, &lead, || tmux.panes().contains(&pane).then_some(()));
     wait_for("the launch line to reach the pane", &tmux, &lead, || {
         (tmux.current_command(&pane) == "ganja").then_some(())
     });
@@ -494,10 +441,7 @@ fn a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shutdown_
     // repeated it would agree with a mistake as readily as with the layout.
     let (lead_left, lead_top) = tmux.corner(&lead);
     let (member_left, member_top) = tmux.corner(&pane);
-    assert_eq!(
-        member_top, lead_top,
-        "a teammate shares the lead's top row: | lead | {MEMBER} |"
-    );
+    assert_eq!(member_top, lead_top, "a teammate shares the lead's top row: | lead | {MEMBER} |");
     assert!(
         member_left > lead_left,
         "and sits to its right: lead at column {lead_left}, {MEMBER} at {member_left}"
@@ -518,29 +462,17 @@ fn a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shutdown_
         tmux.screen(&pane).contains(REPLY).then_some(())
     });
     let lead_inbox = fixture.lead_inbox().expect("the team exists by now");
-    wait_for(
-        "the idle notification to reach the lead's inbox",
-        &tmux,
-        &lead,
-        || {
-            lead_holds(&lead_inbox)
-                .iter()
-                .any(|frame| matches!(frame, Frame::IdleNotification(_)))
-                .then_some(())
-        },
-    );
-    drop(held);
-    wait_for(
-        "the lead to read the idle notification",
-        &tmux,
-        &lead,
-        || {
-            (!lead_holds(&lead_inbox)
-                .iter()
-                .any(|frame| matches!(frame, Frame::IdleNotification(_))))
+    wait_for("the idle notification to reach the lead's inbox", &tmux, &lead, || {
+        lead_holds(&lead_inbox)
+            .iter()
+            .any(|frame| matches!(frame, Frame::IdleNotification(_)))
             .then_some(())
-        },
-    );
+    });
+    drop(held);
+    wait_for("the lead to read the idle notification", &tmux, &lead, || {
+        (!lead_holds(&lead_inbox).iter().any(|frame| matches!(frame, Frame::IdleNotification(_))))
+            .then_some(())
+    });
 
     // 4. The handshake through the lead: it asks, the member approves and
     // leaves, and reading the approval is what kills the pane and retires the
@@ -552,17 +484,11 @@ fn a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shutdown_
         tmux.screen(&lead).contains(COMPOSER).then_some(())
     });
     tmux.type_line(&lead, &format!("/team shutdown {MEMBER}"));
-    wait_for(
-        "the pane to be killed on the approval",
-        &tmux,
-        &lead,
-        || (!tmux.panes().contains(&pane)).then_some(()),
-    );
+    wait_for("the pane to be killed on the approval", &tmux, &lead, || {
+        (!tmux.panes().contains(&pane)).then_some(())
+    });
     wait_for("the record to be retired", &tmux, &lead, || {
-        fixture
-            .team_file()
-            .is_some_and(|file| file.member(MEMBER).is_none())
-            .then_some(())
+        fixture.team_file().is_some_and(|file| file.member(MEMBER).is_none()).then_some(())
     });
     // The record's retirement above is the proof the lead read the approval —
     // nothing else takes a member out of the team file. What is left in the
@@ -570,17 +496,10 @@ fn a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shutdown_
     // for rather than asserted at once: the lead's pass retires inside its
     // loop and prunes what it read after it, in a write of its own, so the
     // record can be gone a moment before the frame is.
-    wait_for(
-        "the lead to prune the approval it read",
-        &tmux,
-        &lead,
-        || {
-            (!lead_holds(&lead_inbox)
-                .iter()
-                .any(|frame| matches!(frame, Frame::ShutdownApproved(_))))
+    wait_for("the lead to prune the approval it read", &tmux, &lead, || {
+        (!lead_holds(&lead_inbox).iter().any(|frame| matches!(frame, Frame::ShutdownApproved(_))))
             .then_some(())
-        },
-    );
+    });
 
     // The lead leaves cleanly, with nothing left to shut down: its pane
     // closes, and only the server's own sleeping pane remains.
@@ -588,14 +507,8 @@ fn a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shutdown_
         tmux.screen(&lead).contains(COMPOSER).then_some(())
     });
     tmux.key(&lead, "C-c");
-    wait_for("the lead to leave", &tmux, &lead, || {
-        (!tmux.panes().contains(&lead)).then_some(())
-    });
-    assert_eq!(
-        tmux.panes().len(),
-        1,
-        "only the server's first pane is left"
-    );
+    wait_for("the lead to leave", &tmux, &lead, || (!tmux.panes().contains(&lead)).then_some(()));
+    assert_eq!(tmux.panes().len(), 1, "only the server's first pane is left");
     drop(tmux);
 }
 
@@ -642,9 +555,7 @@ fn seed_record(spec: &SpawnSpec) {
                 color: spec.color.clone(),
                 prompt: spec.prompt.clone(),
                 plan_mode_required: spec.plan_mode_required,
-                surface: Surface::Pane {
-                    id: "%7".to_owned(),
-                },
+                surface: Surface::Pane { id: "%7".to_owned() },
                 cwd: spec.cwd.display().to_string(),
             },
         )],
@@ -753,17 +664,10 @@ fn the_launch_line_pane_composes_is_the_line_the_binary_parses() {
         .output()
         .expect("the binary runs");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let line = argv
-        .iter()
-        .map(|word| word.to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join(" ");
+    let line =
+        argv.iter().map(|word| word.to_string_lossy().into_owned()).collect::<Vec<_>>().join(" ");
 
-    assert_ne!(
-        output.status.code(),
-        Some(2),
-        "clap refused the launch line `{line}`:\n{stderr}"
-    );
+    assert_ne!(output.status.code(), Some(2), "clap refused the launch line `{line}`:\n{stderr}");
     for refusal in [
         "unexpected argument",
         "unrecognized",

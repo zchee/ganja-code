@@ -16,11 +16,9 @@
 
 use std::{env, fs};
 
-use ganja_core::{
-    auth,
-    config::Config,
-    provider::{self, SelectionError, fake},
-};
+use ganja_core::auth;
+use ganja_core::config::Config;
+use ganja_core::provider::{self, SelectionError, fake};
 
 #[test]
 fn a_session_nothing_named_defaults_to_the_oldest_stored_login() {
@@ -79,18 +77,12 @@ fn a_session_nothing_named_defaults_to_the_oldest_stored_login() {
     // Flip the ages and the default follows the stamps, not the names.
     fs::write(&stamps, r#"{"anthropic": 2000, "openai": 1000}"#).expect("the stamps rewrite");
     assert_eq!(
-        provider::select(&Config::default())
-            .expect("the stored key authenticates")
-            .provider
-            .id(),
+        provider::select(&Config::default()).expect("the stored key authenticates").provider.id(),
         "openai"
     );
 
     // The config's `default_provider` key outranks the login ordering…
-    let config = Config {
-        default_provider: Some("anthropic".to_owned()),
-        ..Config::default()
-    };
+    let config = Config { default_provider: Some("anthropic".to_owned()), ..Config::default() };
     let named = provider::select(&config).expect("the named provider has a stored key");
     assert_eq!(named.provider.id(), "anthropic");
     assert!(
@@ -106,10 +98,7 @@ fn a_session_nothing_named_defaults_to_the_oldest_stored_login() {
         env::set_var("GANJA_PROVIDER", "openai");
     }
     assert_eq!(
-        provider::select(&config)
-            .expect("the variable names a stored login")
-            .provider
-            .id(),
+        provider::select(&config).expect("the variable names a stored login").provider.id(),
         "openai"
     );
     // SAFETY: as above.
@@ -119,17 +108,9 @@ fn a_session_nothing_named_defaults_to_the_oldest_stored_login() {
 
     // An id the key names that nothing ships or declares fails at startup,
     // naming the key — not a variable nobody set — and the id it carried.
-    let wrong = Config {
-        default_provider: Some("gemini".to_owned()),
-        ..Config::default()
-    };
+    let wrong = Config { default_provider: Some("gemini".to_owned()), ..Config::default() };
     let refused = provider::select(&wrong).expect_err("no such provider");
-    let SelectionError::Unknown {
-        requested,
-        named_by,
-        ..
-    } = &refused
-    else {
+    let SelectionError::Unknown { requested, named_by, .. } = &refused else {
         panic!("expected an unknown-provider refusal, got {refused:?}");
     };
     assert_eq!(requested, "gemini");
@@ -138,8 +119,5 @@ fn a_session_nothing_named_defaults_to_the_oldest_stored_login() {
         "the config key is what named the id: {named_by}"
     );
     let rendered = refused.to_string();
-    assert!(
-        rendered.contains("default_provider") && rendered.contains("gemini"),
-        "{rendered}"
-    );
+    assert!(rendered.contains("default_provider") && rendered.contains("gemini"), "{rendered}");
 }

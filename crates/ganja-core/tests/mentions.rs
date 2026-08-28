@@ -12,13 +12,11 @@
 
 use std::sync::Arc;
 
-use ganja_core::{
-    Engine,
-    permission::Permissions,
-    protocol::{Command, Event, Mention, PartBody, Role, ToolState},
-    provider::{ChatRequest, Provider},
-    tool::Registry,
-};
+use ganja_core::Engine;
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{Command, Event, Mention, PartBody, Role, ToolState};
+use ganja_core::provider::{ChatRequest, Provider};
+use ganja_core::tool::Registry;
 use ganja_testkit::{ScriptedProvider, drain_allowing, says, tool_call};
 use serde_json::json;
 
@@ -35,12 +33,7 @@ fn user_text(request: &ChatRequest) -> String {
 }
 
 fn engine(provider: Arc<dyn Provider>, tools: Registry) -> Engine {
-    Engine::new(
-        provider,
-        "recorder-model",
-        Arc::new(tools),
-        Permissions::default(),
-    )
+    Engine::new(provider, "recorder-model", Arc::new(tools), Permissions::default())
 }
 
 #[tokio::test]
@@ -70,10 +63,7 @@ async fn a_mention_becomes_a_file_part_on_the_message_and_content_in_the_request
 
     let requests = requests.lock().expect("the request log is never poisoned");
     let sent = user_text(&requests[0]);
-    assert!(
-        sent.contains("what does this say"),
-        "the prompt is still the prompt: {sent}"
-    );
+    assert!(sent.contains("what does this say"), "the prompt is still the prompt: {sent}");
     assert!(
         sent.contains(&format!("<attached-file path=\"{}\">", path.display())),
         "and the attachment names where it came from: {sent}"
@@ -109,24 +99,12 @@ async fn the_users_message_carries_the_mention_as_a_reference() {
         .expect("an idle engine accepts a prompt");
     let seen = drain_allowing(&engine, &mut events).await;
 
-    let Some(Event::MessageStarted {
-        session_id: _,
-        message: user,
-    }) = seen.first()
-    else {
+    let Some(Event::MessageStarted { session_id: _, message: user }) = seen.first() else {
         panic!("a turn opens with the user's message, got {seen:?}");
     };
     assert_eq!(user.role, Role::User);
-    assert_eq!(
-        user.parts.len(),
-        2,
-        "the text, then the file: {:?}",
-        user.parts
-    );
-    let PartBody::File {
-        path: named, mime, ..
-    } = &user.parts[1].body
-    else {
+    assert_eq!(user.parts.len(), 2, "the text, then the file: {:?}", user.parts);
+    let PartBody::File { path: named, mime, .. } = &user.parts[1].body else {
         panic!("the second part is the mention, got {:?}", user.parts[1]);
     };
     assert_eq!(named, &path.to_string_lossy());
@@ -190,10 +168,7 @@ async fn a_mentioned_file_is_read_when_the_request_is_built_not_when_it_was_atta
         "the first request read the file as it was then"
     );
     let second = user_text(&requests[1]);
-    assert!(
-        second.contains("the second draft"),
-        "and the second read it as it is now: {second}"
-    );
+    assert!(second.contains("the second draft"), "and the second read it as it is now: {second}");
     assert!(
         !second.contains("the first draft"),
         "a reference resolved once would have gone stale: {second}"
@@ -242,10 +217,7 @@ async fn a_mention_does_not_let_the_model_edit_a_file_it_never_read() {
         .rev()
         .find_map(|event| match event {
             Event::PartUpdated { part, .. } => match &part.body {
-                PartBody::Tool {
-                    state: ToolState::Error { error, .. },
-                    ..
-                } => Some(error.clone()),
+                PartBody::Tool { state: ToolState::Error { error, .. }, .. } => Some(error.clone()),
                 _ => None,
             },
             _ => None,
@@ -276,16 +248,9 @@ async fn a_mention_naming_something_unreadable_says_so_rather_than_vanishing() {
         .send(Command::SendPrompt {
             text: "look".to_owned(),
             mentions: vec![
+                Mention { path: directory.to_string_lossy().into_owned(), ..Default::default() },
                 Mention {
-                    path: directory.to_string_lossy().into_owned(),
-                    ..Default::default()
-                },
-                Mention {
-                    path: workspace
-                        .path()
-                        .join("absent.md")
-                        .to_string_lossy()
-                        .into_owned(),
+                    path: workspace.path().join("absent.md").to_string_lossy().into_owned(),
                     ..Default::default()
                 },
             ],
@@ -299,14 +264,8 @@ async fn a_mention_naming_something_unreadable_says_so_rather_than_vanishing() {
 
     let requests = requests.lock().expect("the request log is never poisoned");
     let sent = user_text(&requests[0]);
-    assert!(
-        sent.contains("(this is a directory"),
-        "a directory says what it is: {sent}"
-    );
-    assert!(
-        sent.contains("(could not be read"),
-        "and a file that is not there says that: {sent}"
-    );
+    assert!(sent.contains("(this is a directory"), "a directory says what it is: {sent}");
+    assert!(sent.contains("(could not be read"), "and a file that is not there says that: {sent}");
 }
 
 /// The attachment promise end to end: the stored message keeps the reference,
@@ -350,7 +309,8 @@ async fn a_png_mention_reaches_the_wire_as_base64_with_its_mime() {
     assert_eq!(mime, "image/png");
     let content = content.expect("a carried binary attachment holds its base64");
     {
-        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD;
         assert_eq!(
             STANDARD.decode(&content).expect("the payload decodes"),
             b"not-really-a-png",
@@ -389,10 +349,7 @@ async fn a_png_mention_on_a_text_only_wire_reaches_the_model_as_its_name() {
 
     let requests = requests.lock().expect("the request log is never poisoned");
     let sent = user_text(&requests[0]);
-    assert!(
-        sent.contains("shot.png"),
-        "the model learns the name: {sent}"
-    );
+    assert!(sent.contains("shot.png"), "the model learns the name: {sent}");
     assert!(
         sent.contains("image/png") && sent.contains("does not carry"),
         "and why the bytes are missing: {sent}"
@@ -478,15 +435,12 @@ async fn a_clipboard_pasted_png_reaches_the_wire_as_a_decodable_image_of_its_dim
 
     let content = content.expect("a carried binary attachment holds its base64");
     let carried = {
-        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD;
         STANDARD.decode(&content).expect("the payload decodes")
     };
     let (width, height, pixels) = decode_png(&carried);
-    assert_eq!(
-        (width, height),
-        (5, 3),
-        "the wire carries the scripted dimensions"
-    );
+    assert_eq!((width, height), (5, 3), "the wire carries the scripted dimensions");
     assert_eq!(pixels, rgba, "and the scripted pixels, byte for byte");
 }
 

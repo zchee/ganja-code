@@ -63,10 +63,7 @@ const WHEN_ISO: &str = "2026-08-08T04:28:08.174Z";
 /// directory shared with a real `claude` unreadable, which is the failure this
 /// asserts against.
 fn assert_claude_shaped(rendered: &str) {
-    assert!(
-        !rendered.ends_with('\n'),
-        "a document carries no trailing newline: {rendered:?}"
-    );
+    assert!(!rendered.ends_with('\n'), "a document carries no trailing newline: {rendered:?}");
 
     for line in rendered.lines() {
         let indent = line.len() - line.trim_start().len();
@@ -83,10 +80,7 @@ fn assert_claude_shaped(rendered: &str) {
         // reaching for `to_string` instead of `to_string_pretty`, which would
         // put the whole document on one line and still parse.
         let separators = separating_colons(line);
-        assert!(
-            separators <= 1,
-            "a line carries {separators} keys rather than one: {line:?}"
-        );
+        assert!(separators <= 1, "a line carries {separators} keys rather than one: {line:?}");
         assert!(
             separators == 0 || line.trim_start().starts_with('"'),
             "a key begins its own line: {line:?}"
@@ -126,9 +120,7 @@ fn team_file(team: &TeamName) -> TeamFile {
         team,
         support::spawn(
             "review the wire\nand say ship or hold",
-            Surface::Pane {
-                id: "%7".to_owned(),
-            },
+            Surface::Pane { id: "%7".to_owned() },
         ),
         WHEN,
     ));
@@ -162,12 +154,7 @@ fn a_written_team_file_round_trips_byte_identical() {
     // worth writing rather than two.
     assert!(read.members[0].is_lead());
     assert_eq!(read.members[1].name, "kv-review-2");
-    assert_eq!(
-        read.members[1].surface(),
-        Surface::Pane {
-            id: "%7".to_owned()
-        }
-    );
+    assert_eq!(read.members[1].surface(), Surface::Pane { id: "%7".to_owned() });
 }
 
 #[test]
@@ -178,16 +165,11 @@ fn a_written_inbox_round_trips_byte_identical() {
     // A seeded inbox is two bytes and no newline, which is a document too —
     // it is what a peer finds before anybody has written anything.
     mailbox::seed(&path).expect("the inbox seeds");
-    assert_eq!(
-        fs::read_to_string(&path).expect("the inbox is readable"),
-        "[]"
-    );
+    assert_eq!(fs::read_to_string(&path).expect("the inbox is readable"), "[]");
 
-    let id = mailbox::write(
-        &path,
-        MailboxMessage::new("team-lead", "start on the parser", WHEN_ISO),
-    )
-    .expect("a message writes");
+    let id =
+        mailbox::write(&path, MailboxMessage::new("team-lead", "start on the parser", WHEN_ISO))
+            .expect("a message writes");
 
     let raw = fs::read_to_string(&path).expect("the inbox is readable");
     let held = mailbox::read(&path).expect("the inbox reads");
@@ -231,12 +213,8 @@ fn an_unknown_key_survives_a_rewrite_in_position() {
     let mut seeded = team_file(&team);
     seeded.extra.insert("zetaTeam".to_owned(), json!(true));
     seeded.extra.insert("alphaTeam".to_owned(), json!("kept"));
-    seeded.members[0]
-        .extra
-        .insert("zeta".to_owned(), json!("kept"));
-    seeded.members[0]
-        .extra
-        .insert("alpha".to_owned(), json!([1]));
+    seeded.members[0].extra.insert("zeta".to_owned(), json!("kept"));
+    seeded.members[0].extra.insert("alpha".to_owned(), json!([1]));
 
     let original = record::document(&seeded).expect("a team file encodes");
     fs::write(&path, &original).expect("the team file is writable");
@@ -245,20 +223,11 @@ fn an_unknown_key_survives_a_rewrite_in_position() {
     // disk, in arrival order, after the fields this build does know.
     let raw = fs::read_to_string(&path).expect("the team file is readable");
     let read: TeamFile = serde_json::from_str(&raw).expect("a team file decodes");
-    assert_eq!(
-        read.extra.keys().collect::<Vec<_>>(),
-        ["zetaTeam", "alphaTeam"]
-    );
-    assert_eq!(
-        read.members[0].extra.keys().collect::<Vec<_>>(),
-        ["zeta", "alpha"]
-    );
+    assert_eq!(read.extra.keys().collect::<Vec<_>>(), ["zetaTeam", "alphaTeam"]);
+    assert_eq!(read.members[0].extra.keys().collect::<Vec<_>>(), ["zeta", "alpha"]);
 
-    fs::write(
-        &path,
-        record::document(&read).expect("a team file re-encodes"),
-    )
-    .expect("the team file is rewritable");
+    fs::write(&path, record::document(&read).expect("a team file re-encodes"))
+        .expect("the team file is rewritable");
     assert_eq!(
         fs::read_to_string(&path).expect("the team file is readable"),
         original,

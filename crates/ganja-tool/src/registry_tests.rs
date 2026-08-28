@@ -24,11 +24,7 @@ fn record(stem: &str, name: &str, session_id: &str) -> Record {
 /// and the round trip loses nothing.
 #[test]
 fn a_record_round_trips_with_its_typed_case_preserved() {
-    let written = record(
-        "0198c1a2",
-        "MiXeD-Case",
-        "0198c1a2-0000-7000-8000-000000000001",
-    );
+    let written = record("0198c1a2", "MiXeD-Case", "0198c1a2-0000-7000-8000-000000000001");
 
     let json = serde_json::to_string(&written).expect("a record serializes");
     let read: Record = serde_json::from_str(&json).expect("and reads back");
@@ -46,32 +42,20 @@ fn the_listing_walk_reads_tolerantly_and_skips_what_it_does_not_know() {
     let dir = tempfile::tempdir().expect("a scratch directory");
 
     // A good record carrying a field this build never wrote.
-    let mut good = serde_json::to_value(record(
-        "0198c1a2",
-        "worker",
-        "0198c1a2-0000-7000-8000-000000000001",
-    ))
-    .expect("a record is JSON");
+    let mut good =
+        serde_json::to_value(record("0198c1a2", "worker", "0198c1a2-0000-7000-8000-000000000001"))
+            .expect("a record is JSON");
     good["a_field_from_the_future"] = json!("still reads");
-    std::fs::write(
-        record_path(dir.path(), "0198c1a2"),
-        serde_json::to_vec(&good).expect("json"),
-    )
-    .expect("the fixture writes");
+    std::fs::write(record_path(dir.path(), "0198c1a2"), serde_json::to_vec(&good).expect("json"))
+        .expect("the fixture writes");
 
     // A record from a format this build does not know.
-    let mut newer = serde_json::to_value(record(
-        "0299d2b3",
-        "future",
-        "0299d2b3-0000-7000-8000-000000000002",
-    ))
-    .expect("a record is JSON");
+    let mut newer =
+        serde_json::to_value(record("0299d2b3", "future", "0299d2b3-0000-7000-8000-000000000002"))
+            .expect("a record is JSON");
     newer["format"] = json!(2);
-    std::fs::write(
-        record_path(dir.path(), "0299d2b3"),
-        serde_json::to_vec(&newer).expect("json"),
-    )
-    .expect("the fixture writes");
+    std::fs::write(record_path(dir.path(), "0299d2b3"), serde_json::to_vec(&newer).expect("json"))
+        .expect("the fixture writes");
 
     // A half-written record at the staging spelling, a foreign name, a
     // record-shaped file that is not JSON, and one that is JSON of the
@@ -81,11 +65,8 @@ fn the_listing_walk_reads_tolerantly_and_skips_what_it_does_not_know() {
     std::fs::write(dir.path().join("notes.json"), b"{}").expect("the fixture writes");
     std::fs::write(dir.path().join("0398e3c4.json"), b"not json at all")
         .expect("the fixture writes");
-    std::fs::write(
-        dir.path().join("0498f4d5.json"),
-        b"{\"format\":1,\"name\":7}",
-    )
-    .expect("the fixture writes");
+    std::fs::write(dir.path().join("0498f4d5.json"), b"{\"format\":1,\"name\":7}")
+        .expect("the fixture writes");
 
     let listed = list(dir.path()).expect("the directory lists");
 
@@ -126,13 +107,7 @@ fn a_write_lands_atomically_and_its_staging_name_is_never_a_session_stem() {
 
     let names: Vec<String> = std::fs::read_dir(dir.path())
         .expect("the directory lists")
-        .map(|entry| {
-            entry
-                .expect("an entry reads")
-                .file_name()
-                .to_string_lossy()
-                .into_owned()
-        })
+        .map(|entry| entry.expect("an entry reads").file_name().to_string_lossy().into_owned())
         .collect();
     assert_eq!(
         names,
@@ -141,18 +116,13 @@ fn a_write_lands_atomically_and_its_staging_name_is_never_a_session_stem() {
     );
     // The listing walk's filter is what makes the staging spelling safe,
     // so the shape claim is asserted against that filter itself.
-    assert!(
-        !crate::socket::is_session_stem(".0198c1a2"),
-        "a dot-led stem can never pass the walk"
-    );
+    assert!(!crate::socket::is_session_stem(".0198c1a2"), "a dot-led stem can never pass the walk");
 
     let listed = list(dir.path()).expect("the directory lists");
     assert_eq!(listed[0].record, written);
 
     assert_eq!(
-        write(dir.path(), "not-a-stem", &written)
-            .expect_err("a non-stem name is refused")
-            .kind(),
+        write(dir.path(), "not-a-stem", &written).expect_err("a non-stem name is refused").kind(),
         std::io::ErrorKind::InvalidInput
     );
 }
@@ -166,9 +136,7 @@ fn the_name_grammar_refuses_each_clause_by_name() {
     assert_eq!(vet_name("a b"), Err(NameRefusal::Whitespace));
     assert_eq!(
         vet_name(&"x".repeat(MOST_NAME_POINTS + 1)),
-        Err(NameRefusal::TooLong {
-            points: MOST_NAME_POINTS + 1
-        })
+        Err(NameRefusal::TooLong { points: MOST_NAME_POINTS + 1 })
     );
     assert_eq!(vet_name("*"), Err(NameRefusal::Broadcast));
     assert_eq!(vet_name("name@scope"), Err(NameRefusal::Scoped));
@@ -190,11 +158,7 @@ fn the_name_grammar_refuses_each_clause_by_name() {
         Ok(()),
         "a `#`-tail that is not digits is a name, not a range"
     );
-    assert_eq!(
-        vet_name("日本語の名前"),
-        Ok(()),
-        "non-ASCII names are admitted"
-    );
+    assert_eq!(vet_name("日本語の名前"), Ok(()), "non-ASCII names are admitted");
     assert_eq!(
         vet_name(&"あ".repeat(MOST_NAME_POINTS)),
         Ok(()),
@@ -245,15 +209,7 @@ fn a_derived_name_is_the_basename_run_through_the_same_grammar() {
         "an over-long basename is cut at the cap rather than refused"
     );
 
-    for hostile in [
-        "",
-        "*",
-        "///",
-        "a b@c:d\n",
-        "\u{7}\u{8}",
-        "server#2",
-        &"y".repeat(200),
-    ] {
+    for hostile in ["", "*", "///", "a b@c:d\n", "\u{7}\u{8}", "server#2", &"y".repeat(200)] {
         assert_eq!(
             vet_name(&sanitize(hostile)),
             Ok(()),
@@ -268,10 +224,7 @@ fn a_derived_name_is_the_basename_run_through_the_same_grammar() {
 fn name_comparison_folds_ascii_case_and_only_ascii_case() {
     assert!(same_name("Worker", "wORKER"));
     assert!(!same_name("worker", "worker-1"));
-    assert!(
-        !same_name("É", "é"),
-        "two names differing only in non-ASCII case are two names"
-    );
+    assert!(!same_name("É", "é"), "two names differing only in non-ASCII case are two names");
 }
 
 /// AC-9: a record is live exactly while its stem's lock is held, the
@@ -284,12 +237,8 @@ fn a_record_is_live_exactly_while_its_lock_is_held_and_the_probe_unlinks_nothing
 
     let dir = tempfile::tempdir().expect("a scratch directory");
     let stem = "0198c1a2";
-    write(
-        dir.path(),
-        stem,
-        &record(stem, "worker", "0198c1a2-0000-7000-8000-000000000001"),
-    )
-    .expect("a record writes");
+    write(dir.path(), stem, &record(stem, "worker", "0198c1a2-0000-7000-8000-000000000001"))
+        .expect("a record writes");
 
     // Held, as a binder holds it: a second descriptor's try-lock blocks.
     let socket = dir.path().join(format!("{stem}.sock"));
@@ -299,35 +248,19 @@ fn a_record_is_live_exactly_while_its_lock_is_held_and_the_probe_unlinks_nothing
     let names = |dir: &std::path::Path| -> Vec<String> {
         let mut names: Vec<String> = std::fs::read_dir(dir)
             .expect("the directory lists")
-            .map(|entry| {
-                entry
-                    .expect("an entry reads")
-                    .file_name()
-                    .to_string_lossy()
-                    .into_owned()
-            })
+            .map(|entry| entry.expect("an entry reads").file_name().to_string_lossy().into_owned())
             .collect();
         names.sort();
         names
     };
 
     let before = names(dir.path());
-    assert!(
-        is_live(dir.path(), stem).expect("the probe answers"),
-        "a held lock is a live name"
-    );
+    assert!(is_live(dir.path(), stem).expect("the probe answers"), "a held lock is a live name");
     assert_eq!(names(dir.path()), before, "the probe touched nothing");
 
     drop(held);
-    assert!(
-        !is_live(dir.path(), stem).expect("the probe answers"),
-        "a freed lock is a stale name"
-    );
-    assert_eq!(
-        names(dir.path()),
-        before,
-        "stale is a verdict, not an unlink"
-    );
+    assert!(!is_live(dir.path(), stem).expect("the probe answers"), "a freed lock is a stale name");
+    assert_eq!(names(dir.path()), before, "stale is a verdict, not an unlink");
 
     // A name never bound: the probe creates the absent `.lock` — the
     // lister's standing price, lock files being never removed — and
@@ -352,12 +285,7 @@ fn the_collision_scan_reports_live_same_named_holders_and_never_this_session() {
 
     let dir = tempfile::tempdir().expect("a scratch directory");
     let live_id = "0198c1a2-0000-7000-8000-000000000001";
-    write(
-        dir.path(),
-        "0198c1a2",
-        &record("0198c1a2", "Worker", live_id),
-    )
-    .expect("a record writes");
+    write(dir.path(), "0198c1a2", &record("0198c1a2", "Worker", live_id)).expect("a record writes");
     write(
         dir.path(),
         "0299d2b3",
@@ -372,19 +300,14 @@ fn the_collision_scan_reports_live_same_named_holders_and_never_this_session() {
 
     let found = holders(dir.path(), "wORKER", "some-other-session").expect("the scan answers");
     assert_eq!(
-        found
-            .iter()
-            .map(|held| held.stem.as_str())
-            .collect::<Vec<_>>(),
+        found.iter().map(|held| held.stem.as_str()).collect::<Vec<_>>(),
         vec!["0198c1a2"],
         "the live holder matches case-insensitively; the stale one is no collision"
     );
     assert_eq!(found[0].record.name, "Worker", "reported as typed");
 
     assert!(
-        holders(dir.path(), "worker", live_id)
-            .expect("the scan answers")
-            .is_empty(),
+        holders(dir.path(), "worker", live_id).expect("the scan answers").is_empty(),
         "a session is never its own collision"
     );
 }

@@ -22,24 +22,18 @@
 //! all when the wire has heard nothing, or when everything it heard has
 //! expired.
 
-use std::{
-    cell::RefCell,
-    fs,
-    path::{Path, PathBuf},
-    time::{Duration, Instant, SystemTime},
-};
+use std::cell::RefCell;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
 
-use ganja_core::{
-    catalog::compact_tokens,
-    config::{StatuslineConfig, StatuslineElement},
-    provider::{PlanWindow, RateWindow},
-};
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    style::{Modifier, Style},
-    text::{Line, Span},
-};
+use ganja_core::catalog::compact_tokens;
+use ganja_core::config::{StatuslineConfig, StatuslineElement};
+use ganja_core::provider::{PlanWindow, RateWindow};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation as _;
 use unicode_width::UnicodeWidthStr as _;
 
@@ -377,10 +371,7 @@ impl Status {
     /// The plan budget that runs out first, as the fraction it meters at —
     /// [`Status::tightest_rate`]'s rule, over the sibling shape.
     fn tightest_plan(&self) -> Option<f64> {
-        self.plans
-            .iter()
-            .map(PlanWindow::used)
-            .max_by(f64::total_cmp)
+        self.plans.iter().map(PlanWindow::used).max_by(f64::total_cmp)
     }
 
     /// The fraction the window that will stop a turn first meters at: the
@@ -398,10 +389,7 @@ impl Status {
     /// [`RateWindow::expired`], because a panel has the room to say
     /// "expired" in words.
     fn tightest_rate(&self) -> Option<f64> {
-        self.rates
-            .iter()
-            .map(RateWindow::used)
-            .max_by(f64::total_cmp)
+        self.rates.iter().map(RateWindow::used).max_by(f64::total_cmp)
     }
 
     /// How many rows this bar wants: one, plus the git line above it and the
@@ -605,18 +593,13 @@ impl Status {
     ) {
         let limit = usize::from(self.max_width.map_or(area.width, |cap| cap.min(area.width)));
 
-        let mut git = elements
-            .contains(&StatuslineElement::Git)
-            .then(|| self.git_spans(theme))
-            .flatten();
+        let mut git =
+            elements.contains(&StatuslineElement::Git).then(|| self.git_spans(theme)).flatten();
         let mut detail = (self.detail && elements.contains(&StatuslineElement::Todos))
             .then(|| self.detail_text())
             .flatten()
             .map(|title| {
-                vec![
-                    Span::styled("working: ".to_owned(), theme.dim),
-                    Span::styled(title, theme.fg),
-                ]
+                vec![Span::styled("working: ".to_owned(), theme.dim), Span::styled(title, theme.fg)]
             });
 
         // The main line is the one row that never yields: a shorter area
@@ -674,12 +657,7 @@ impl Status {
 
         let mut y = area.y;
         if let Some(git) = git {
-            buffer.set_line(
-                area.x,
-                y,
-                &Line::from(truncate_spans(git, limit, theme)),
-                area.width,
-            );
+            buffer.set_line(area.x, y, &Line::from(truncate_spans(git, limit, theme)), area.width);
             y += 1;
         }
         buffer.set_line(area.x, y, &Line::from(main), area.width);
@@ -738,9 +716,9 @@ impl Status {
             // two together are the answer to "where is my message": a queue
             // with a depth and no visible strip row would otherwise be the
             // one state nothing on screen accounts for.
-            StatuslineElement::Queued => (self.queued > 0)
-                .then(|| plain(format!("{} queued", self.queued)))
-                .flatten(),
+            StatuslineElement::Queued => {
+                (self.queued > 0).then(|| plain(format!("{} queued", self.queued))).flatten()
+            }
             // Same reasoning, same place: a running background job is
             // otherwise invisible until its own `bash_output` poll names it.
             StatuslineElement::Jobs => (self.running_jobs > 0)
@@ -769,11 +747,7 @@ impl Status {
                     plain(format!(
                         "{} {} queued",
                         self.queued_dialogs,
-                        if self.queued_dialogs == 1 {
-                            "dialog"
-                        } else {
-                            "dialogs"
-                        }
+                        if self.queued_dialogs == 1 { "dialog" } else { "dialogs" }
                     ))
                 })
                 .flatten(),
@@ -793,20 +767,15 @@ impl Status {
                     plain(format!(
                         "{} {}",
                         self.teammates,
-                        if self.teammates == 1 {
-                            "teammate"
-                        } else {
-                            "teammates"
-                        }
+                        if self.teammates == 1 { "teammate" } else { "teammates" }
                     ))
                 })
                 .flatten(),
             // Spend where its width is predictable, and the notice after
             // it: the notice is the one segment with no length limit.
-            StatuslineElement::Tokens => self
-                .totals
-                .as_ref()
-                .and_then(|totals| plain(totals.segment())),
+            StatuslineElement::Tokens => {
+                self.totals.as_ref().and_then(|totals| plain(totals.segment()))
+            }
             StatuslineElement::Notice => self.notice.clone().and_then(plain),
             StatuslineElement::Model => self.model.clone().map(|model| {
                 vec![
@@ -815,38 +784,29 @@ impl Status {
                     Span::styled(model, theme.fg.add_modifier(Modifier::BOLD)),
                 ]
             }),
-            StatuslineElement::Context => self
-                .context
-                .map(|(tokens, window)| meter("ctx", percent_of(tokens, window), theme)),
+            StatuslineElement::Context => {
+                self.context.map(|(tokens, window)| meter("ctx", percent_of(tokens, window), theme))
+            }
             StatuslineElement::Session => {
                 // Whole minutes with an `m`, OMC's own `renderSession` shape.
-                plain(format!(
-                    "session:{}m",
-                    self.started.elapsed().as_secs() / 60
-                ))
+                plain(format!("session:{}m", self.started.elapsed().as_secs() / 60))
             }
             StatuslineElement::Cwd => self.cwd.clone().map(|name| {
-                vec![
-                    Span::styled("cwd:".to_owned(), theme.dim),
-                    Span::styled(name, theme.fg),
-                ]
+                vec![Span::styled("cwd:".to_owned(), theme.dim), Span::styled(name, theme.fg)]
             }),
             StatuslineElement::Todos => {
-                self.todos
-                    .as_ref()
-                    .filter(|todos| todos.total > 0)
-                    .map(|todos| {
-                        let mut text = format!("todos:{}/{}", todos.done, todos.total);
-                        // The in-progress title rides inline — OMC's
-                        // `renderTodosWithCurrent` — unless the detail line is on,
-                        // where it gets a whole row instead of a squeezed suffix.
-                        if !self.detail
-                            && let Some(current) = &todos.current
-                        {
-                            text.push_str(&format!(" (working: {current})"));
-                        }
-                        vec![Span::styled(text, theme.accent)]
-                    })
+                self.todos.as_ref().filter(|todos| todos.total > 0).map(|todos| {
+                    let mut text = format!("todos:{}/{}", todos.done, todos.total);
+                    // The in-progress title rides inline — OMC's
+                    // `renderTodosWithCurrent` — unless the detail line is on,
+                    // where it gets a whole row instead of a squeezed suffix.
+                    if !self.detail
+                        && let Some(current) = &todos.current
+                    {
+                        text.push_str(&format!(" (working: {current})"));
+                    }
+                    vec![Span::styled(text, theme.accent)]
+                })
             }
             // The tightest live window as the context meter's own shape, so
             // the two things a person reads as "how much room is left" read
@@ -893,10 +853,7 @@ impl Status {
         match fs::metadata(&head).and_then(|meta| meta.modified()) {
             Ok(stamp) => {
                 if cache.read_at != Some(stamp) {
-                    cache.branch = fs::read_to_string(&head)
-                        .ok()
-                        .as_deref()
-                        .and_then(head_name);
+                    cache.branch = fs::read_to_string(&head).ok().as_deref().and_then(head_name);
                     cache.read_at = Some(stamp);
                 }
             }
@@ -921,10 +878,7 @@ impl Status {
 
     /// What the detail line would say: the in-progress todo's title.
     fn detail_text(&self) -> Option<String> {
-        self.todos
-            .as_ref()
-            .filter(|todos| todos.total > 0)
-            .and_then(|todos| todos.current.clone())
+        self.todos.as_ref().filter(|todos| todos.total > 0).and_then(|todos| todos.current.clone())
     }
 
     /// The reminders this mode is worth showing, and [`None`] for every mode
@@ -991,10 +945,7 @@ fn meter(label: &str, percent: u64, theme: &Theme) -> Vec<Span<'static>> {
     vec![
         Span::styled(format!("{label}:["), theme.dim),
         Span::styled("#".repeat(usize::try_from(filled).unwrap_or(0)), style),
-        Span::styled(
-            "-".repeat(usize::try_from(METER_SLOTS - filled).unwrap_or(0)),
-            theme.dim,
-        ),
+        Span::styled("-".repeat(usize::try_from(METER_SLOTS - filled).unwrap_or(0)), theme.dim),
         Span::styled("]".to_owned(), theme.dim),
         Span::styled(format!("{percent}%"), style),
     ]
@@ -1075,18 +1026,12 @@ fn discover_git(dir: &Path) -> GitCache {
             dotgit.join("HEAD")
         } else if dotgit.is_file() {
             let Some(pointed) = fs::read_to_string(&dotgit).ok().and_then(|text| {
-                text.trim()
-                    .strip_prefix("gitdir:")
-                    .map(|path| path.trim().to_owned())
+                text.trim().strip_prefix("gitdir:").map(|path| path.trim().to_owned())
             }) else {
                 continue;
             };
             let gitdir = PathBuf::from(pointed);
-            let gitdir = if gitdir.is_absolute() {
-                gitdir
-            } else {
-                ancestor.join(gitdir)
-            };
+            let gitdir = if gitdir.is_absolute() { gitdir } else { ancestor.join(gitdir) };
             gitdir.join("HEAD")
         } else {
             continue;
@@ -1094,9 +1039,7 @@ fn discover_git(dir: &Path) -> GitCache {
 
         return GitCache {
             head: Some(head),
-            repo: ancestor
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned()),
+            repo: ancestor.file_name().map(|name| name.to_string_lossy().into_owned()),
             read_at: None,
             branch: None,
         };

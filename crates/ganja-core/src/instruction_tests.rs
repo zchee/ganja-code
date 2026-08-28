@@ -1,7 +1,5 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use jiff::Timestamp;
 use tempfile::TempDir;
@@ -24,10 +22,7 @@ fn temporary() -> TempDir {
 /// behaviour under test, and spelling every expectation twice to say so
 /// would bury the thing that is.
 fn under(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
+    path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/")
 }
 
 /// Writes `text` to `path`, creating whatever directories it needs.
@@ -59,10 +54,7 @@ fn the_base_prompt_is_chosen_by_what_the_model_is_called() {
         // items, so each use is free to be its own copy. The message is
         // the whole failure output on purpose — three 8 KB prompts printed
         // side by side would say less than one sentence does.
-        assert!(
-            base_prompt(model) == expected,
-            "{model} picked the wrong prompt"
-        );
+        assert!(base_prompt(model) == expected, "{model} picked the wrong prompt");
     }
 }
 
@@ -112,10 +104,7 @@ fn the_project_tier_takes_the_first_name_that_matches_and_stacks_it_closest_last
         .map(|path| {
             format!(
                 "{}/{}",
-                path.parent()
-                    .and_then(Path::file_name)
-                    .unwrap_or_default()
-                    .to_string_lossy(),
+                path.parent().and_then(Path::file_name).unwrap_or_default().to_string_lossy(),
                 path.file_name().unwrap_or_default().to_string_lossy()
             )
         })
@@ -138,12 +127,7 @@ fn a_checkout_with_no_agents_file_falls_through_to_the_next_name() {
 
     let names: Vec<String> = discover(&[], &Config::default(), &root)
         .iter()
-        .map(|path| {
-            path.file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into()
-        })
+        .map(|path| path.file_name().unwrap_or_default().to_string_lossy().into())
         .collect();
     assert_eq!(names, vec!["CLAUDE.md".to_owned()]);
 }
@@ -177,19 +161,13 @@ fn a_glob_reaches_through_directories_it_does_not_name() {
     let root = directory.path().join("api");
     fs::create_dir_all(&root).expect("the fixture tree is creatable");
     plant(&root.join("packages").join("web").join("AGENTS.md"), "web");
-    plant(
-        &root.join("packages").join("core").join("AGENTS.md"),
-        "core",
-    );
+    plant(&root.join("packages").join("core").join("AGENTS.md"), "core");
     plant(&root.join("packages").join("web").join("README.md"), "no");
 
     let found = glob(&root, "packages/*/AGENTS.md");
     let names: Vec<String> = found.iter().map(|path| under(&root, path)).collect();
 
-    assert_eq!(
-        names,
-        vec!["packages/core/AGENTS.md", "packages/web/AGENTS.md"]
-    );
+    assert_eq!(names, vec!["packages/core/AGENTS.md", "packages/web/AGENTS.md"]);
 }
 
 /// A file git ignores is still a file the user named.
@@ -242,14 +220,8 @@ fn the_environment_block_says_where_the_session_is() {
 
     let block = environment(&root, "claude-sonnet-5");
 
-    assert!(
-        block.starts_with("You are powered by the model named claude-sonnet-5."),
-        "{block}"
-    );
-    assert!(
-        block.contains("  Is directory a git repo: yes\n"),
-        "{block}"
-    );
+    assert!(block.starts_with("You are powered by the model named claude-sonnet-5."), "{block}");
+    assert!(block.contains("  Is directory a git repo: yes\n"), "{block}");
     assert!(block.contains("  Working directory: "), "{block}");
     assert!(block.ends_with("</env>"), "{block}");
 }
@@ -276,23 +248,13 @@ fn the_prompt_is_the_base_then_the_environment_then_every_file() {
     plant(&root.join("docs").join("style.md"), "");
     plant(&root.join("docs").join("api.md"), "prefer explicit types");
 
-    let config = Config {
-        instructions: vec!["docs/*.md".to_owned()],
-        ..Config::default()
-    };
+    let config = Config { instructions: vec!["docs/*.md".to_owned()], ..Config::default() };
     // The two halves through the joiner the engine composes with, which is
     // what makes "the base comes first" a fact about the real seam rather
     // than about this test's own concatenation.
     let prompt = joined(
         Some(base_prompt("claude-sonnet-5")),
-        suffix_from(
-            &[],
-            &skill::Roots::none(),
-            &config,
-            &root,
-            "claude-sonnet-5",
-        )
-        .as_deref(),
+        suffix_from(&[], &skill::Roots::none(), &config, &root, "claude-sonnet-5").as_deref(),
     )
     .expect("a prompt is composed");
 
@@ -301,18 +263,11 @@ fn the_prompt_is_the_base_then_the_environment_then_every_file() {
         prompt.contains("\nYou are powered by the model named claude-sonnet-5."),
         "the environment block follows it"
     );
-    let agents = prompt
-        .find("Instructions from: ")
-        .expect("the project file is attached");
-    let api = prompt
-        .find("prefer explicit types")
-        .expect("a configured file is attached");
+    let agents = prompt.find("Instructions from: ").expect("the project file is attached");
+    let api = prompt.find("prefer explicit types").expect("a configured file is attached");
     assert!(agents < api, "the project tier precedes the configured one");
     assert!(prompt.contains("always run the tests"));
-    assert!(
-        !prompt.contains("style.md"),
-        "an empty file contributes nothing, not even its header"
-    );
+    assert!(!prompt.contains("style.md"), "an empty file contributes nothing, not even its header");
 }
 
 #[test]
@@ -328,10 +283,7 @@ fn an_unreadable_file_is_left_out_rather_than_announced() {
     fs::create_dir_all(root.join("docs").join("gone.md"))
         .expect("the fixture directory is creatable");
 
-    let config = Config {
-        instructions: vec!["docs/*.md".to_owned()],
-        ..Config::default()
-    };
+    let config = Config { instructions: vec!["docs/*.md".to_owned()], ..Config::default() };
     let prompt = suffix_from(&[], &skill::Roots::none(), &config, &root, "fake-1")
         .expect("a prompt suffix is composed");
 
@@ -366,10 +318,7 @@ fn a_prompt_date_has_the_exact_shape_it_promises() {
 
 /// Writes a skill at `<root>/<name>/SKILL.md`.
 fn plant_skill(root: &Path, name: &str, frontmatter: &str) {
-    plant(
-        &root.join(name).join("SKILL.md"),
-        &format!("---\n{frontmatter}\n---\n# {name}\n"),
-    );
+    plant(&root.join(name).join("SKILL.md"), &format!("---\n{frontmatter}\n---\n# {name}\n"));
 }
 
 /// The block is upstream's, field for field, and the skills in it are
@@ -380,16 +329,8 @@ fn the_skills_block_is_the_one_upstream_composes() {
     let root = directory.path().join("api");
     checkout(&root);
     let skills = root.join("skills");
-    plant_skill(
-        &skills,
-        "porting",
-        "name: porting\ndescription: How to port.",
-    );
-    plant_skill(
-        &skills,
-        "auditing",
-        "name: auditing\ndescription: How to audit.",
-    );
+    plant_skill(&skills, "porting", "name: porting\ndescription: How to port.");
+    plant_skill(&skills, "auditing", "name: auditing\ndescription: How to audit.");
 
     let found = skill::discover(&skill::Roots::none().with_paths([skills.clone()]));
     let block = skills_block(&found).expect("two skills are two skills");
@@ -455,20 +396,10 @@ fn the_skills_block_comes_last_and_only_when_there_are_skills() {
     checkout(&root);
     plant(&root.join("AGENTS.md"), "always run the tests");
     let skills = root.join("skills");
-    plant_skill(
-        &skills,
-        "porting",
-        "name: porting\ndescription: How to port.",
-    );
+    plant_skill(&skills, "porting", "name: porting\ndescription: How to port.");
 
-    let bare = suffix_from(
-        &[],
-        &skill::Roots::none(),
-        &Config::default(),
-        &root,
-        "fake-1",
-    )
-    .expect("the environment block always says something");
+    let bare = suffix_from(&[], &skill::Roots::none(), &Config::default(), &root, "fake-1")
+        .expect("the environment block always says something");
     assert!(
         !bare.contains("available_skills") && !bare.contains("Skills provide"),
         "a session with no skills is told nothing about skills: {bare}"
@@ -483,16 +414,9 @@ fn the_skills_block_comes_last_and_only_when_there_are_skills() {
     )
     .expect("a prompt is composed");
 
-    let instructions = composed
-        .find("always run the tests")
-        .expect("the project file is attached");
-    let block = composed
-        .find("<available_skills>")
-        .expect("the skill is advertised");
-    assert!(
-        instructions < block,
-        "upstream puts the skills after the instructions: {composed}"
-    );
+    let instructions = composed.find("always run the tests").expect("the project file is attached");
+    let block = composed.find("<available_skills>").expect("the skill is advertised");
+    assert!(instructions < block, "upstream puts the skills after the instructions: {composed}");
     assert!(composed.contains("<name>porting</name>"));
 }
 
@@ -540,11 +464,7 @@ fn a_configured_path_outranks_ganjas_own_homes() {
     let root = directory.path().join("api");
     checkout(&root);
     let elsewhere = directory.path().join("elsewhere");
-    plant_skill(
-        &elsewhere,
-        "porting",
-        "name: porting\ndescription: How to port.",
-    );
+    plant_skill(&elsewhere, "porting", "name: porting\ndescription: How to port.");
 
     let config = Config {
         skills: SkillsConfig {
@@ -568,18 +488,13 @@ fn a_configured_path_outranks_ganjas_own_homes() {
         roots.dirs()
     );
     assert!(
-        skill::discover(&roots)
-            .iter()
-            .any(|found| found.name == "porting"),
+        skill::discover(&roots).iter().any(|found| found.name == "porting"),
         "and it is scanned"
     );
     // Nothing was fetched, and nothing failed for not having been: the URL
     // contributes no root at all.
     assert!(
-        !roots
-            .dirs()
-            .iter()
-            .any(|dir| dir.display().to_string().contains("example.invalid")),
+        !roots.dirs().iter().any(|dir| dir.display().to_string().contains("example.invalid")),
         "{:?}",
         roots.dirs()
     );
@@ -609,18 +524,11 @@ fn a_session_reads_ganjas_own_project_home_and_no_foreign_directory() {
         (root.join("skills"), "from-generic-plural"),
         (root.join(".ganja").join("skills"), "from-ganjas-own"),
     ] {
-        plant_skill(
-            &tier,
-            name,
-            &format!("name: {name}\ndescription: Found by convention."),
-        );
+        plant_skill(&tier, name, &format!("name: {name}\ndescription: Found by convention."));
     }
 
     let roots = super::skill_roots(&Config::default(), &cwd);
-    let found: Vec<String> = skill::discover(&roots)
-        .into_iter()
-        .map(|skill| skill.name)
-        .collect();
+    let found: Vec<String> = skill::discover(&roots).into_iter().map(|skill| skill.name).collect();
     let composed = suffix_from(&[], &roots, &Config::default(), &cwd, "fake-1")
         .expect("the environment block always says something");
 
@@ -646,10 +554,7 @@ fn a_session_reads_ganjas_own_project_home_and_no_foreign_directory() {
             !found.iter().any(|name| name == foreign),
             "{foreign} is not ganja's to read: {found:?}"
         );
-        assert!(
-            !composed.contains(foreign),
-            "and the model is never told about it: {composed}"
-        );
+        assert!(!composed.contains(foreign), "and the model is never told about it: {composed}");
     }
 }
 
@@ -686,11 +591,7 @@ fn the_suffix_measure_partitions_the_composed_suffix_at_its_own_seams() {
     checkout(&root);
     plant(&root.join("AGENTS.md"), "always run the tests");
     let skills = root.join("skills");
-    plant_skill(
-        &skills,
-        "porting",
-        "name: porting\ndescription: How to port.",
-    );
+    plant_skill(&skills, "porting", "name: porting\ndescription: How to port.");
 
     let suffix = suffix_from(
         &[],
@@ -712,19 +613,14 @@ fn the_suffix_measure_partitions_the_composed_suffix_at_its_own_seams() {
         environment.contains("<env>") && environment.ends_with("</env>"),
         "the first part is exactly the environment block: {environment}"
     );
-    let instructions: String = suffix
-        .chars()
-        .skip(measure.environment)
-        .take(measure.instructions)
-        .collect();
+    let instructions: String =
+        suffix.chars().skip(measure.environment).take(measure.instructions).collect();
     assert!(
         instructions.contains("always run the tests"),
         "the middle part holds the instruction files: {instructions}"
     );
-    let skills_part: String = suffix
-        .chars()
-        .skip(measure.environment + measure.instructions)
-        .collect();
+    let skills_part: String =
+        suffix.chars().skip(measure.environment + measure.instructions).collect();
     assert!(
         skills_part.contains("<available_skills>"),
         "the tail is the skills block: {skills_part}"
@@ -741,14 +637,8 @@ fn a_bare_environment_suffix_measures_as_environment_alone() {
     fs::create_dir_all(&root).expect("the fixture tree is creatable");
     checkout(&root);
 
-    let suffix = suffix_from(
-        &[],
-        &skill::Roots::none(),
-        &Config::default(),
-        &root,
-        "fake-1",
-    )
-    .expect("the environment block always says something");
+    let suffix = suffix_from(&[], &skill::Roots::none(), &Config::default(), &root, "fake-1")
+        .expect("the environment block always says something");
     let measure = suffix_measure(&suffix);
 
     assert_eq!(measure.environment, suffix.chars().count());
@@ -759,10 +649,7 @@ fn a_bare_environment_suffix_measures_as_environment_alone() {
 /// The nested walk (**D480**), named the way the assertions below read it:
 /// what a session working at `root` walks in after touching `touched`.
 fn walked(root: &Path, touched: &[PathBuf]) -> Vec<String> {
-    nested_files(root, root, touched)
-        .iter()
-        .map(|path| under(&resolved(root), path))
-        .collect()
+    nested_files(root, root, touched).iter().map(|path| under(&resolved(root), path)).collect()
 }
 
 #[test]
@@ -808,10 +695,7 @@ fn several_touches_under_one_directory_name_its_instruction_file_once() {
     checkout(&root);
     plant(&sub.join("AGENTS.md"), "sub rules");
 
-    assert_eq!(
-        walked(&root, &[sub.join("one.rs"), sub.join("two.rs")]),
-        vec!["sub/AGENTS.md"],
-    );
+    assert_eq!(walked(&root, &[sub.join("one.rs"), sub.join("two.rs")]), vec!["sub/AGENTS.md"],);
 }
 
 /// The bent rule, pinned: the tier-wide "first name with any match takes
@@ -873,10 +757,7 @@ fn a_written_path_that_does_not_exist_yet_still_walks_its_parents_in() {
     checkout(&root);
     plant(&sub.join("AGENTS.md"), "sub rules");
 
-    assert_eq!(
-        walked(&root, &[sub.join("brand-new.rs")]),
-        vec!["sub/AGENTS.md"],
-    );
+    assert_eq!(walked(&root, &[sub.join("brand-new.rs")]), vec!["sub/AGENTS.md"],);
 }
 
 #[test]
@@ -912,10 +793,7 @@ fn a_nested_file_over_the_budget_says_how_much_was_cut_and_where_the_rest_is() {
         "and where the rest is: {}",
         &block[block.len() - 120..]
     );
-    assert!(
-        block.len() < long.len(),
-        "a clamped file is shorter than the file"
-    );
+    assert!(block.len() < long.len(), "a clamped file is shorter than the file");
 }
 
 /// The memory section (**D478**): what it says, and in which order. The
@@ -930,20 +808,13 @@ fn the_memory_section_carries_the_index_and_then_the_rules_for_keeping_it() {
     let section = super::memory_section(&memory);
     let index = memory.join("MEMORY.md").display().to_string();
 
-    assert!(
-        section.starts_with(&format!("\n{}", super::MEMORY_HEAD)),
-        "{section}"
-    );
+    assert!(section.starts_with(&format!("\n{}", super::MEMORY_HEAD)), "{section}");
     assert!(
         section.contains(&format!("{HEADER}{index}\n- style: prefers explicit types")),
         "{section}"
     );
-    let facts = section
-        .find("prefers explicit types")
-        .expect("the index is quoted");
-    let upkeep = section
-        .find("Keeping it: record a fact")
-        .expect("the upkeep block follows it");
+    let facts = section.find("prefers explicit types").expect("the index is quoted");
+    let upkeep = section.find("Keeping it: record a fact").expect("the upkeep block follows it");
     assert!(facts < upkeep, "the facts come before the rules: {section}");
     assert!(
         section.contains("Never record a secret."),
@@ -967,10 +838,7 @@ fn a_project_with_no_memory_yet_is_told_how_to_start_one() {
         !section.contains(HEADER),
         "nothing is quoted from a file that does not exist: {section}"
     );
-    assert!(
-        !memory.exists(),
-        "and composing a prompt creates nothing on disk"
-    );
+    assert!(!memory.exists(), "and composing a prompt creates nothing on disk");
 }
 
 /// An index over the budget is cut with the marker pointing at the real

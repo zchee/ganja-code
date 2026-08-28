@@ -37,22 +37,16 @@
 // it.
 #![allow(dead_code)]
 
-use std::{
-    ffi::OsString,
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
-};
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
-use ganja_core::{
-    Backends, Storage, Teammates,
-    teammate::{
-        SpawnSpec, TeammateRegistry,
-        claude::ClaudePane,
-        pane::GanjaPane,
-        shim::{Door, Driver, Read, Reply, Shape, ShimBackend, Turn},
-    },
-};
+use ganja_core::teammate::claude::ClaudePane;
+use ganja_core::teammate::pane::GanjaPane;
+use ganja_core::teammate::shim::{Door, Driver, Read, Reply, Shape, ShimBackend, Turn};
+use ganja_core::teammate::{SpawnSpec, TeammateRegistry};
+use ganja_core::{Backends, Storage, Teammates};
 use ganja_protocol::team::MemberBackend;
 use ganja_team::{ShimCli, TeamName, TeamsRoot};
 
@@ -142,8 +136,7 @@ impl Fake {
             let path = directory.path().join(name);
             std::fs::write(
                 &path,
-                body.replace("@LOG@", &log.display().to_string())
-                    .replace("@MODE@", mode),
+                body.replace("@LOG@", &log.display().to_string()).replace("@MODE@", mode),
             )
             .expect("a fake CLI script");
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
@@ -165,11 +158,7 @@ impl Fake {
 
     /// Everything the fakes have been handed so far, one record per line.
     pub fn received(&self) -> Vec<String> {
-        std::fs::read_to_string(&self.log)
-            .unwrap_or_default()
-            .lines()
-            .map(str::to_owned)
-            .collect()
+        std::fs::read_to_string(&self.log).unwrap_or_default().lines().map(str::to_owned).collect()
     }
 
     /// The records of one kind — `argv`, `env`, `stdin`, `line` or `file`.
@@ -177,10 +166,7 @@ impl Fake {
         let prefix = format!("{kind}:");
         self.received()
             .into_iter()
-            .filter_map(|line| {
-                line.strip_prefix(&prefix)
-                    .map(std::borrow::ToOwned::to_owned)
-            })
+            .filter_map(|line| line.strip_prefix(&prefix).map(std::borrow::ToOwned::to_owned))
             .collect()
     }
 
@@ -227,10 +213,7 @@ impl FakeCli {
         // Both take their log and their mode on flags of their own, so the mode
         // passed here reaches neither: it is the fixture drivers that carry it.
         Self(Fake::install(
-            &[
-                ("fake-per-message", PER_MESSAGE),
-                ("fake-resident", RESIDENT),
-            ],
+            &[("fake-per-message", PER_MESSAGE), ("fake-resident", RESIDENT)],
             Mode::Answer.word(),
         ))
     }
@@ -255,10 +238,7 @@ pub struct PerMessage {
 impl PerMessage {
     /// The driver over `cli`'s log, behaving as `mode` says.
     pub fn new(log: &Path, mode: Mode) -> Self {
-        Self {
-            log: log.to_path_buf(),
-            mode,
-        }
+        Self { log: log.to_path_buf(), mode }
     }
 }
 
@@ -322,10 +302,7 @@ pub struct Resident {
 impl Resident {
     /// The driver over `cli`'s log, behaving as `mode` says.
     pub fn new(log: &Path, mode: Mode) -> Self {
-        Self {
-            log: log.to_path_buf(),
-            mode,
-        }
+        Self { log: log.to_path_buf(), mode }
     }
 }
 
@@ -395,18 +372,12 @@ fn decode(text: &str) -> Result<Reply, String> {
 
     Ok(Reply {
         messages,
-        session: value
-            .get("session")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned),
+        session: value.get("session").and_then(serde_json::Value::as_str).map(str::to_owned),
         // Optional, and read rather than hard-coded to `None`: *what* a CLI
         // says when it stops is a per-CLI fact, but the **ordering** the runner
         // owes such a turn — session stored, words mailed, then the report — is
         // the shim core's, so the shape fixtures have to be able to produce one.
-        refused: value
-            .get("refused")
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned),
+        refused: value.get("refused").and_then(serde_json::Value::as_str).map(str::to_owned),
     })
 }
 
@@ -450,18 +421,12 @@ pub fn lead_with_timeout(
     // line the real one never composes.
     let deadline =
         timeout.unwrap_or_else(|| ganja_core::teammate::shim::default_turn_timeout(driver.cli()));
-    let fake: Arc<dyn ganja_core::teammate::TeammateBackend> = Arc::new(
-        ShimBackend::new(driver)
-            .searching(path)
-            .with_deadline(deadline),
-    );
+    let fake: Arc<dyn ganja_core::teammate::TeammateBackend> =
+        Arc::new(ShimBackend::new(driver).searching(path).with_deadline(deadline));
     let storage = Storage::open(project.join("storage"));
     let mut backends = Backends {
         in_process: Arc::new(ganja_core::teammate::InProcess::new(
-            Arc::new(ganja_core::provider::FakeProvider::new(
-                "on it",
-                Duration::ZERO,
-            )),
+            Arc::new(ganja_core::provider::FakeProvider::new("on it", Duration::ZERO)),
             Arc::new(ganja_core::tool::Registry::new(Vec::new())),
             storage,
             |_: &SpawnSpec| ganja_core::permission::Permissions::default(),
@@ -561,10 +526,7 @@ impl FakeCodex {
     /// a command that takes no turn. codex's alone, because it is the only one
     /// of these CLIs with a door that is not a turn.
     pub fn turns(&self) -> Vec<String> {
-        self.records("argv")
-            .into_iter()
-            .filter(|argv| !argv.starts_with("login "))
-            .collect()
+        self.records("argv").into_iter().filter(|argv| !argv.starts_with("login ")).collect()
     }
 }
 
@@ -612,10 +574,7 @@ impl FakeGrok {
     /// Read off the fake's own argv records rather than off its answers,
     /// because what **AC-6** and **AC-19** assert is what was *composed*.
     pub fn sessions(&self) -> Vec<String> {
-        self.records("argv")
-            .iter()
-            .map(|argv| session_of(argv))
-            .collect()
+        self.records("argv").iter().map(|argv| session_of(argv)).collect()
     }
 
     /// The session id of the one turn whose prompt mentions `needle`.
@@ -624,9 +583,8 @@ impl FakeGrok {
     /// only thing that tells them apart is what each was asked to do.
     pub fn session_for(&self, needle: &str) -> Option<String> {
         self.grouped().into_iter().find_map(|invocation| {
-            let carried = invocation
-                .iter()
-                .any(|line| line.starts_with("file:") && line.contains(needle));
+            let carried =
+                invocation.iter().any(|line| line.starts_with("file:") && line.contains(needle));
             let argv = invocation.first()?.strip_prefix("argv:")?;
 
             carried.then(|| session_of(argv))
@@ -684,10 +642,7 @@ impl FakeAgy {
     /// The `--conversation` value on each composed line, empty where a launch
     /// named none.
     pub fn resumed(&self) -> Vec<String> {
-        self.records("argv")
-            .iter()
-            .map(|argv| conversation_of(argv))
-            .collect()
+        self.records("argv").iter().map(|argv| conversation_of(argv)).collect()
     }
 }
 

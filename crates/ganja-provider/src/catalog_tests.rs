@@ -1,4 +1,6 @@
-use std::{fs, sync::Arc, time::Duration};
+use std::fs;
+use std::sync::Arc;
+use std::time::Duration;
 
 use super::{
     Cost, DEFAULT_SOURCE, ModelStatus, Pricing, Source, backoff, cache_name, carries,
@@ -122,11 +124,7 @@ fn every_row_is_priced_and_sized() {
 #[test]
 fn ids_are_unique_so_a_lookup_cannot_be_ambiguous() {
     let snapshot = snapshot();
-    let mut ids: Vec<&str> = snapshot
-        .models
-        .iter()
-        .map(|model| model.id.as_str())
-        .collect();
+    let mut ids: Vec<&str> = snapshot.models.iter().map(|model| model.id.as_str()).collect();
     let total = ids.len();
     ids.sort_unstable();
     ids.dedup();
@@ -246,10 +244,7 @@ fn every_selectable_provider_has_a_default_this_table_can_price() {
     // catalog can ever know. `cursor` left this list when its pin landed
     // above: its wire publishes the id, which neither of these can claim.
     for uncataloged in [crate::provider::fake::ID, "local-llama"] {
-        assert!(
-            !carries(uncataloged),
-            "{uncataloged} is not something this table has rows for"
-        );
+        assert!(!carries(uncataloged), "{uncataloged} is not something this table has rows for");
         assert!(
             default_model(uncataloged).is_none(),
             "{uncataloged} has no rows, so it must have no default either"
@@ -335,10 +330,7 @@ fn a_fetched_row_is_filed_under_the_name_the_provider_reports() {
     // Only the aliased one is translated. Everything else is already
     // spelled the way both projects spell it.
     assert!(
-        fetched
-            .models
-            .iter()
-            .any(|model| model.id == "gpt-5.6" && model.provider_id == "openai")
+        fetched.models.iter().any(|model| model.id == "gpt-5.6" && model.provider_id == "openai")
     );
 }
 
@@ -353,11 +345,7 @@ fn a_turn_with_cache_traffic_prices_every_counter() {
         cache_write_tokens: 1_000_000,
     };
 
-    let Cost {
-        input_usd,
-        output_usd,
-        total_usd,
-    } = cost(&usage, &sonnet);
+    let Cost { input_usd, output_usd, total_usd } = cost(&usage, &sonnet);
 
     // 1 MTok fresh at $2 + 2 MTok cached at $0.20 + 1 MTok written at $2.50.
     assert!(close(input_usd, 2.0 + 0.4 + 2.5), "got {input_usd}");
@@ -373,10 +361,7 @@ fn a_cache_write_without_its_own_price_bills_as_input() {
     let nano = model("gpt-5.4-nano").expect("the snapshot carries nano");
     assert!(nano.pricing.cache_write.is_none());
 
-    let usage = Usage {
-        cache_write_tokens: 1_000_000,
-        ..Usage::default()
-    };
+    let usage = Usage { cache_write_tokens: 1_000_000, ..Usage::default() };
 
     assert!(close(cost(&usage, &nano).input_usd, nano.pricing.input));
 }
@@ -413,11 +398,7 @@ fn an_empty_turn_costs_nothing() {
 #[test]
 fn a_short_turn_is_still_worth_a_visible_amount() {
     let opus = model("claude-opus-5").expect("the snapshot carries opus");
-    let usage = Usage {
-        input_tokens: 12_000,
-        output_tokens: 800,
-        ..Usage::default()
-    };
+    let usage = Usage { input_tokens: 12_000, output_tokens: 800, ..Usage::default() };
 
     let total = cost(&usage, &opus).total_usd;
 
@@ -436,10 +417,7 @@ fn a_published_row_parses_through_fields_this_build_does_not_know() {
         .find(|model| model.id == "fixture-large")
         .expect("the fixture's large model is in the table");
 
-    assert_eq!(
-        large.provider_id, "fixture",
-        "the provider is the outer key"
-    );
+    assert_eq!(large.provider_id, "fixture", "the provider is the outer key");
     assert_eq!(large.name, "Fixture Large");
     assert_eq!(large.context_window, 500_000);
     assert_eq!(large.max_output, 32_000);
@@ -636,10 +614,7 @@ fn model_for_answers_the_named_providers_row_where_ids_collide() {
     );
     let openai =
         super::scoped(&catalog, "openai", "gpt-5.4").expect("the openai row is in the table");
-    assert!(
-        openai.variants["high"].contains_key("reasoning"),
-        "the openai row speaks Responses"
-    );
+    assert!(openai.variants["high"].contains_key("reasoning"), "the openai row speaks Responses");
     assert!(
         super::scoped(&catalog, "anthropic", "gpt-5.4").is_none(),
         "a provider that does not serve the id has no row to answer with"
@@ -653,10 +628,7 @@ fn a_row_that_names_no_limits_is_left_out() {
     let catalog = parse(&payload()).expect("the fixture is a catalog");
 
     assert!(
-        !catalog
-            .models
-            .iter()
-            .any(|model| model.id == "fixture-unsized"),
+        !catalog.models.iter().any(|model| model.id == "fixture-unsized"),
         "an unsized row must not reach the table"
     );
 }
@@ -700,10 +672,7 @@ fn a_source_other_than_the_default_gets_its_own_cache_file() {
     let mirror = cache_name("https://models.example.test");
     let other = cache_name("https://models.example.test/v2");
 
-    assert!(
-        mirror.starts_with("models-") && mirror.ends_with(".json"),
-        "{mirror}"
-    );
+    assert!(mirror.starts_with("models-") && mirror.ends_with(".json"), "{mirror}");
     assert_ne!(mirror, other, "two mirrors cannot share one cache file");
     assert_eq!(
         mirror,
@@ -739,10 +708,7 @@ fn a_cached_body_is_written_verbatim_and_read_back() {
     // edited every time the shared fixture grows a row.
     assert_eq!(
         catalog.models.len(),
-        parse(&payload())
-            .expect("the fixture is a catalog")
-            .models
-            .len(),
+        parse(&payload()).expect("the fixture is a catalog").models.len(),
         "reading the cache back yields the table the payload parses to"
     );
 }
@@ -782,10 +748,7 @@ fn a_cache_the_environment_named_is_read_as_absent_but_never_deleted() {
     };
 
     assert!(read_cached(&source).is_none());
-    assert!(
-        named.exists(),
-        "an overridden path is not this build's file"
-    );
+    assert!(named.exists(), "an overridden path is not this build's file");
     assert!(cache.exists(), "and neither is the cache it stood in for");
 }
 
@@ -802,10 +765,7 @@ fn a_cache_is_fresh_until_the_debounce_has_passed() {
     fs::write(&path, payload()).expect("the fixture is writable");
     assert!(fresh(&path), "a cache written just now is fresh");
 
-    let file = fs::File::options()
-        .write(true)
-        .open(&path)
-        .expect("the fixture is openable");
+    let file = fs::File::options().write(true).open(&path).expect("the fixture is openable");
     file.set_modified(std::time::SystemTime::now() - super::DEBOUNCE - Duration::from_secs(1))
         .expect("the fixture's timestamp is settable");
 
@@ -839,11 +799,7 @@ fn a_backoff_walks_half_to_half_again_of_the_attempts_base() {
     for attempt in 0..3 {
         let base = super::RETRY_BASE * 2_u32.pow(attempt);
 
-        assert_eq!(
-            scattered(attempt, 0),
-            base.mul_f64(0.5),
-            "the smallest draw is half the base"
-        );
+        assert_eq!(scattered(attempt, 0), base.mul_f64(0.5), "the smallest draw is half the base");
         let widest = scattered(attempt, 999_999);
         assert!(
             widest > base.mul_f64(1.499) && widest < base.mul_f64(1.5),
@@ -905,19 +861,11 @@ fn the_snapshot_stands_alone() {
 
     assert_eq!(snapshot.models.len(), super::SNAPSHOT.len());
     assert!(
-        snapshot
-            .models
-            .iter()
-            .all(|model| model.status == ModelStatus::Active && model.tool_call),
+        snapshot.models.iter().all(|model| model.status == ModelStatus::Active && model.tool_call),
         "every compiled-in row is a current tool-using model"
     );
     assert_eq!(
-        Pricing {
-            input: 2.0,
-            output: 10.0,
-            cache_read: 0.2,
-            cache_write: Some(2.5),
-        },
+        Pricing { input: 2.0, output: 10.0, cache_read: 0.2, cache_write: Some(2.5) },
         snapshot.models[0].pricing
     );
 }

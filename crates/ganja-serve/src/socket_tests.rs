@@ -11,11 +11,7 @@ fn a_session_is_named_by_its_first_eight_hex_digits_then_one_more_per_step() {
         .map(|path| path.display().to_string())
         .collect();
 
-    assert_eq!(
-        names.len(),
-        32 - SHORTEST_NAME + 1,
-        "eight digits through the whole id"
-    );
+    assert_eq!(names.len(), 32 - SHORTEST_NAME + 1, "eight digits through the whole id");
     assert_eq!(names[0], format!("/tmp/ganja-501/0198c1a2.{EXTENSION}"));
     assert_eq!(names[1], format!("/tmp/ganja-501/0198c1a23.{EXTENSION}"));
     assert_eq!(

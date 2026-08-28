@@ -17,7 +17,9 @@
 
 mod support;
 
-use std::{env, path::PathBuf, process::Command};
+use std::env;
+use std::path::PathBuf;
+use std::process::Command;
 
 use ganja_team::{MailboxMessage, mailbox, record};
 
@@ -93,11 +95,7 @@ fn n_processes_writing_one_inbox_lose_no_message() {
         "an interleaved write left something unreadable: {:?}",
         held.reports
     );
-    assert_eq!(
-        held.valid.len(),
-        WRITERS * EACH,
-        "every message a writer was told landed survived",
-    );
+    assert_eq!(held.valid.len(), WRITERS * EACH, "every message a writer was told landed survived",);
     for nth in 0..WRITERS {
         let writer = format!("writer-{nth}");
         let mine: Vec<&str> = held
@@ -120,16 +118,10 @@ fn n_processes_writing_one_inbox_lose_no_message() {
     let entries: Vec<serde_json::Value> =
         serde_json::from_str(&text).expect("the inbox is still a JSON array");
     assert_eq!(entries.len(), WRITERS * EACH);
-    assert!(
-        entries.iter().all(serde_json::Value::is_object),
-        "every entry is still an object",
-    );
+    assert!(entries.iter().all(serde_json::Value::is_object), "every entry is still an object",);
 
     // And nobody left a hold behind.
-    assert!(
-        !support::naive_lock_of(&inbox).exists(),
-        "the last writer released the lock",
-    );
+    assert!(!support::naive_lock_of(&inbox).exists(), "the last writer released the lock",);
 }
 
 /// One writer's whole job: [`EACH`] messages, each through the public door, each

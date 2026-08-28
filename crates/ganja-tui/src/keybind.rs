@@ -12,7 +12,8 @@
 //! is survivable by guessing — a typo'd action silently doing nothing is the
 //! failure mode the hard error exists to prevent.
 
-use std::{collections::BTreeMap, fmt};
+use std::collections::BTreeMap;
+use std::fmt;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -65,11 +66,7 @@ const ACTIONS: &[(Action, &str, &str)] = &[
     // keyboard protocol cannot report `shift+enter` at all — it delivers a bare
     // Enter — so `ctrl+j`, which is ASCII LF and arrives on every terminal, is
     // in the default set as the break that always works.
-    (
-        Action::InputNewline,
-        "input_newline",
-        "shift+enter,ctrl+enter,alt+enter,ctrl+j",
-    ),
+    (Action::InputNewline, "input_newline", "shift+enter,ctrl+enter,alt+enter,ctrl+j"),
     // Claude Code's binding, not upstream's — opencode's `keybind.ts` has no
     // redraw action at all (deviation **D445**, ctrl-l-redraw-no-upstream).
     (Action::Redraw, "redraw", "ctrl+l"),
@@ -89,10 +86,7 @@ impl Action {
     /// The name a config file spells this action with.
     #[must_use]
     pub fn key(self) -> &'static str {
-        ACTIONS
-            .iter()
-            .find(|(action, _, _)| *action == self)
-            .map_or("", |(_, name, _)| *name)
+        ACTIONS.iter().find(|(action, _, _)| *action == self).map_or("", |(_, name, _)| *name)
     }
 
     /// Every action, in reference order.
@@ -125,11 +119,7 @@ pub enum KeybindError {
 
 /// The action names this build has, for the error above.
 fn known() -> String {
-    ACTIONS
-        .iter()
-        .map(|(_, name, _)| *name)
-        .collect::<Vec<_>>()
-        .join(", ")
+    ACTIONS.iter().map(|(_, name, _)| *name).collect::<Vec<_>>().join(", ")
 }
 
 /// One binding: the keys that reach an action.
@@ -187,15 +177,11 @@ impl Keybinds {
                 .map(|(action, _, _)| *action)
                 .ok_or_else(|| KeybindError::UnknownAction { name: name.clone() })?;
 
-            let keys = parse(value).map_err(|key| KeybindError::UnparseableKey {
-                action: name.clone(),
-                key,
-            })?;
+            let keys = parse(value)
+                .map_err(|key| KeybindError::UnparseableKey { action: name.clone(), key })?;
 
-            if let Some(binding) = binds
-                .bindings
-                .iter_mut()
-                .find(|binding| binding.action == action)
+            if let Some(binding) =
+                binds.bindings.iter_mut().find(|binding| binding.action == action)
             {
                 binding.keys = keys;
             }
@@ -229,10 +215,7 @@ impl Keybinds {
     /// none left.
     #[must_use]
     pub fn hint(&self, action: Action) -> Option<String> {
-        let binding = self
-            .bindings
-            .iter()
-            .find(|binding| binding.action == action)?;
+        let binding = self.bindings.iter().find(|binding| binding.action == action)?;
         let keys: Vec<String> = binding.keys.iter().map(|key| render(*key)).collect();
 
         (!keys.is_empty()).then(|| keys.join(", "))
@@ -271,10 +254,7 @@ fn canonical(key: KeyEvent) -> (KeyCode, KeyModifiers) {
         KeyCode::Char(character) if shifted => {
             // `to_uppercase` can yield more than one character for a few
             // letters; a key is one, and the first is the one a keyboard sends.
-            (
-                KeyCode::Char(character.to_uppercase().next().unwrap_or(character)),
-                true,
-            )
+            (KeyCode::Char(character.to_uppercase().next().unwrap_or(character)), true)
         }
         // Shift-tab has its own key code, so `shift+tab` and `backtab` are two
         // ways of writing the key every terminal reports as the second.
@@ -283,14 +263,7 @@ fn canonical(key: KeyEvent) -> (KeyCode, KeyModifiers) {
         other => (other, false),
     };
 
-    (
-        code,
-        if folded {
-            key.modifiers - KeyModifiers::SHIFT
-        } else {
-            key.modifiers
-        },
-    )
+    (code, if folded { key.modifiers - KeyModifiers::SHIFT } else { key.modifiers })
 }
 
 /// Every alternative in a comma-separated binding.

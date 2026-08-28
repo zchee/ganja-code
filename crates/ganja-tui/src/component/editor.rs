@@ -3,13 +3,11 @@
 //! A [`TextArea`] with ganja's submit rules layered on top: the app decides
 //! what Enter means before the keystroke ever reaches the widget.
 
-use ratatui::{
-    buffer::Buffer,
-    crossterm::event::KeyEvent,
-    layout::Rect,
-    style::{Modifier, Style},
-    widgets::{Block, Widget as _},
-};
+use ratatui::buffer::Buffer;
+use ratatui::crossterm::event::KeyEvent;
+use ratatui::layout::Rect;
+use ratatui::style::{Modifier, Style};
+use ratatui::widgets::{Block, Widget as _};
 use ratatui_textarea::{CursorMove, TextArea};
 use unicode_width::UnicodeWidthStr as _;
 
@@ -112,8 +110,7 @@ impl Editor {
     /// a theme repaints the whole screen except the box the user is typing in.
     pub fn restyle(&mut self, theme: &Theme) {
         self.theme = theme.clone();
-        self.area
-            .set_block(Block::bordered().title(self.mode.title()).style(theme.dim));
+        self.area.set_block(Block::bordered().title(self.mode.title()).style(theme.dim));
         self.area.set_style(theme.fg);
         // The widget's default underlines the whole line the cursor is on,
         // which reads as decoration on every character being typed — nothing
@@ -183,11 +180,8 @@ impl Editor {
     pub fn set_token_highlight(&mut self, token: Option<u32>) {
         match token {
             Some(number) => {
-                let _ = self
-                    .area
-                    .set_search_pattern(format!("\\[Image #{number}\\]"));
-                self.area
-                    .set_search_style(Style::default().add_modifier(Modifier::REVERSED));
+                let _ = self.area.set_search_pattern(format!("\\[Image #{number}\\]"));
+                self.area.set_search_style(Style::default().add_modifier(Modifier::REVERSED));
             }
             None => {
                 let _ = self.area.set_search_pattern("");
@@ -315,12 +309,9 @@ impl Editor {
         }
         let (left, top) = (area.x + 1, area.y + 1);
         let (right, bottom) = (area.x + area.width - 1, area.y + area.height - 1);
-        let marked = (top..bottom)
-            .flat_map(|y| (left..right).map(move |x| (x, y)))
-            .find(|&(x, y)| {
-                buffer
-                    .cell((x, y))
-                    .is_some_and(|cell| cell.modifier.contains(Modifier::SLOW_BLINK))
+        let marked =
+            (top..bottom).flat_map(|y| (left..right).map(move |x| (x, y))).find(|&(x, y)| {
+                buffer.cell((x, y)).is_some_and(|cell| cell.modifier.contains(Modifier::SLOW_BLINK))
             })?;
         if let Some(cell) = buffer.cell_mut(marked) {
             cell.modifier.remove(Modifier::SLOW_BLINK);

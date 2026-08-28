@@ -13,7 +13,8 @@
 //! or write a real user's. That redirection is per-subprocess, never a
 //! `set_var`, so these can share a binary.
 
-use std::{fs, path::Path};
+use std::fs;
+use std::path::Path;
 
 use assert_cmd::Command;
 use ganja_testkit::temp_dir as temporary;
@@ -84,10 +85,7 @@ fn the_global_tier_merges_all_three_files_with_the_jsonc_last() {
         &opencode.join("config.json"),
         r#"{"model": "anthropic/first", "shell": "/bin/from-config-json"}"#,
     );
-    plant(
-        &opencode.join("opencode.json"),
-        r#"{"model": "anthropic/second", "theme": "gruvbox"}"#,
-    );
+    plant(&opencode.join("opencode.json"), r#"{"model": "anthropic/second", "theme": "gruvbox"}"#);
     plant(
         &opencode.join("opencode.jsonc"),
         r#"{
@@ -103,10 +101,7 @@ fn the_global_tier_merges_all_three_files_with_the_jsonc_last() {
         .stdout(predicate::str::contains("wrote"));
 
     let written = fs::read_to_string(global_destination(&home)).expect("the import wrote a file");
-    assert!(
-        written.contains(r#"model = "anthropic/third""#),
-        "{written}"
-    );
+    assert!(written.contains(r#"model = "anthropic/third""#), "{written}");
     assert!(
         written.contains(r#"shell = "/bin/from-config-json""#),
         "config.json is read too, not just skipped past: {written}"
@@ -125,23 +120,14 @@ fn the_project_walk_stacks_from_the_root_down_and_the_closest_file_wins() {
     let nested = root.join("crates").join("core");
     fs::create_dir_all(&nested).expect("the fixture tree is creatable");
     checkout(root);
-    plant(
-        &root.join("opencode.json"),
-        r#"{"model": "anthropic/outermost", "theme": "gruvbox"}"#,
-    );
-    plant(
-        &nested.join("opencode.jsonc"),
-        r#"{"model": "anthropic/closest"}"#,
-    );
+    plant(&root.join("opencode.json"), r#"{"model": "anthropic/outermost", "theme": "gruvbox"}"#);
+    plant(&nested.join("opencode.jsonc"), r#"{"model": "anthropic/closest"}"#);
 
     ganja(&home, &nested).assert().success();
 
     // The project root, not the working directory: the file is the project's.
     let written = fs::read_to_string(root.join("ganja.toml")).expect("the import wrote a file");
-    assert!(
-        written.contains(r#"model = "anthropic/closest""#),
-        "{written}"
-    );
+    assert!(written.contains(r#"model = "anthropic/closest""#), "{written}");
     assert!(written.contains(r#"theme = "gruvbox""#), "{written}");
 }
 
@@ -156,19 +142,13 @@ fn jsonc_beats_json_in_the_same_directory() {
         &project.path().join("opencode.json"),
         r#"{"model": "anthropic/from-json", "shell": "/bin/zsh"}"#,
     );
-    plant(
-        &project.path().join("opencode.jsonc"),
-        r#"{"model": "anthropic/from-jsonc"}"#,
-    );
+    plant(&project.path().join("opencode.jsonc"), r#"{"model": "anthropic/from-jsonc"}"#);
 
     ganja(&home, project.path()).assert().success();
 
     let written =
         fs::read_to_string(project.path().join("ganja.toml")).expect("the import wrote a file");
-    assert!(
-        written.contains(r#"model = "anthropic/from-jsonc""#),
-        "{written}"
-    );
+    assert!(written.contains(r#"model = "anthropic/from-jsonc""#), "{written}");
     assert!(written.contains(r#"shell = "/bin/zsh""#), "{written}");
 }
 
@@ -221,28 +201,16 @@ fn a_named_file_is_imported_on_its_own() {
     let home = temporary();
     let project = temporary();
     checkout(project.path());
-    plant(
-        &opencode_dir(&home).join("opencode.jsonc"),
-        r#"{"theme": "gruvbox"}"#,
-    );
-    plant(
-        &project.path().join("opencode.json"),
-        r#"{"shell": "/bin/zsh"}"#,
-    );
+    plant(&opencode_dir(&home).join("opencode.jsonc"), r#"{"theme": "gruvbox"}"#);
+    plant(&project.path().join("opencode.json"), r#"{"shell": "/bin/zsh"}"#);
     let named = project.path().join("elsewhere.jsonc");
     plant(&named, r#"{"model": "anthropic/named"}"#);
 
-    ganja(&home, project.path())
-        .args(["--file".as_ref(), named.as_os_str()])
-        .assert()
-        .success();
+    ganja(&home, project.path()).args(["--file".as_ref(), named.as_os_str()]).assert().success();
 
     let written =
         fs::read_to_string(project.path().join("ganja.toml")).expect("the import wrote a file");
-    assert!(
-        written.contains(r#"model = "anthropic/named""#),
-        "{written}"
-    );
+    assert!(written.contains(r#"model = "anthropic/named""#), "{written}");
     assert!(
         !written.contains("gruvbox") && !written.contains("/bin/zsh"),
         "discovery was skipped, so neither other file may contribute: {written}"
@@ -279,10 +247,7 @@ fn a_malformed_config_names_the_file_and_the_position() {
             .and(predicate::str::contains("column")),
     );
 
-    assert!(
-        !project.path().join("ganja.toml").exists(),
-        "a failed import writes nothing"
-    );
+    assert!(!project.path().join("ganja.toml").exists(), "a failed import writes nothing");
 }
 
 /// The table is printed, both sections, and nothing lands.
@@ -323,10 +288,7 @@ fn a_dry_run_prints_the_table_and_writes_nothing() {
                 .and(predicate::str::contains("nothing to switch off")),
         );
 
-    assert!(
-        !project.path().join("ganja.toml").exists(),
-        "a dry run writes nothing"
-    );
+    assert!(!project.path().join("ganja.toml").exists(), "a dry run writes nothing");
 }
 
 /// The one value in an opencode config that must never travel. The fixture
@@ -362,10 +324,7 @@ fn an_api_key_in_the_source_reaches_neither_the_file_nor_the_terminal() {
 
     let written =
         fs::read_to_string(project.path().join("ganja.toml")).expect("the import wrote a file");
-    assert!(
-        !written.contains(CANARY),
-        "a credential was written into a config file: {written}"
-    );
+    assert!(!written.contains(CANARY), "a credential was written into a config file: {written}");
 }
 
 /// All three names ganja reads are refused, the two legacy spellings
@@ -381,10 +340,7 @@ fn an_existing_config_is_never_overwritten() {
         let home = temporary();
         let project = temporary();
         checkout(project.path());
-        plant(
-            &project.path().join("opencode.jsonc"),
-            r#"{"theme": "aura"}"#,
-        );
+        plant(&project.path().join("opencode.jsonc"), r#"{"theme": "aura"}"#);
         let occupied = project.path().join(existing);
         plant(&occupied, held);
 
@@ -430,10 +386,7 @@ fn a_config_of_nothing_but_skipped_keys_writes_no_file_but_still_reports() {
     let home = temporary();
     let project = temporary();
     checkout(project.path());
-    plant(
-        &project.path().join("opencode.jsonc"),
-        r#"{"mcp": {"fs": {}}, "autoupdate": false}"#,
-    );
+    plant(&project.path().join("opencode.jsonc"), r#"{"mcp": {"fs": {}}, "autoupdate": false}"#);
 
     ganja(&home, project.path()).assert().success().stdout(
         predicate::str::contains("mcp")

@@ -12,11 +12,9 @@
 
 use std::{env, fs};
 
-use ganja_core::{
-    Config,
-    config::{CONFIG_ENV, CONFIG_HOME_ENV, HookCommand, HookHandler},
-    hook::{HookEvent, Hooks},
-};
+use ganja_core::Config;
+use ganja_core::config::{CONFIG_ENV, CONFIG_HOME_ENV, HookCommand, HookHandler};
+use ganja_core::hook::{HookEvent, Hooks};
 
 #[test]
 fn hooks_written_in_the_project_file_are_the_sessions_hooks() {

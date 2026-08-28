@@ -16,14 +16,9 @@ fn refresh_client() -> Command {
 
 #[test]
 fn bare_and_quoted_arguments_render_together() {
-    let line = CommandLine::new(
-        display_message(),
-        [Arg::raw("-p"), Arg::string("#{session_name}")],
-    );
-    assert_eq!(
-        line.render().unwrap(),
-        "display-message -p '#{session_name}'"
-    );
+    let line =
+        CommandLine::new(display_message(), [Arg::raw("-p"), Arg::string("#{session_name}")]);
+    assert_eq!(line.render().unwrap(), "display-message -p '#{session_name}'");
 }
 
 #[test]
@@ -59,10 +54,7 @@ fn backslash_is_escaped_in_double_quotes() {
 #[test]
 fn dollar_is_escaped_in_double_quotes() {
     let line = CommandLine::new(display_message(), [Arg::string("can't $expand ${HOME}")]);
-    assert_eq!(
-        line.render().unwrap(),
-        r#"display-message "can't \$expand \${HOME}""#
-    );
+    assert_eq!(line.render().unwrap(), r#"display-message "can't \$expand \${HOME}""#);
 }
 
 #[test]
@@ -73,10 +65,7 @@ fn unicode_is_quoted_when_needed() {
 
 #[test]
 fn raw_argument_is_passed_through() {
-    let line = CommandLine::new(
-        refresh_client(),
-        [Arg::raw("-f"), Arg::raw("pause-after=30")],
-    );
+    let line = CommandLine::new(refresh_client(), [Arg::raw("-f"), Arg::raw("pause-after=30")]);
     assert_eq!(line.render().unwrap(), "refresh-client -f pause-after=30");
 }
 

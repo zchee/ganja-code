@@ -10,10 +10,8 @@
 //! slash, one on an `@` — plus the two read-only panels `/context` and
 //! `/usage` raise over the same chrome.
 
-use ratatui::{
-    layout::{Constraint, Rect},
-    text::Line,
-};
+use ratatui::layout::{Constraint, Rect};
+use ratatui::text::Line;
 
 use crate::theme::Theme;
 
@@ -46,19 +44,9 @@ pub(crate) fn action_row(
     width: usize,
     theme: &Theme,
 ) -> Line<'static> {
-    let line = format!(
-        "{marker}{label}",
-        marker = if index == option { MARKER } else { "  " },
-    );
+    let line = format!("{marker}{label}", marker = if index == option { MARKER } else { "  " },);
 
-    Line::styled(
-        chat::clip(&line, width),
-        if index == option {
-            theme.accent
-        } else {
-            theme.fg
-        },
-    )
+    Line::styled(chat::clip(&line, width), if index == option { theme.accent } else { theme.fg })
 }
 
 /// The keys its free-text step answers to.
@@ -142,21 +130,14 @@ pub(crate) fn modal(
     let height = area.height.saturating_sub(2).clamp(1, max_height);
     let popup = area.centered(Constraint::Length(width), Constraint::Length(height));
 
-    (
-        popup,
-        usize::from(width).saturating_sub(2),
-        body_rows(height, chrome),
-    )
+    (popup, usize::from(width).saturating_sub(2), body_rows(height, chrome))
 }
 
 /// The body rows a box `height` rows tall has room for: its border takes two,
 /// its own `chrome` takes the rest, and at least one row survives whatever is
 /// left — a list with nowhere to draw is a dialog that shows nothing at all.
 pub(crate) fn body_rows(height: u16, chrome: usize) -> usize {
-    usize::from(height)
-        .saturating_sub(2)
-        .saturating_sub(chrome)
-        .max(1)
+    usize::from(height).saturating_sub(2).saturating_sub(chrome).max(1)
 }
 
 /// The first row on screen: far enough down to keep the selected one visible,

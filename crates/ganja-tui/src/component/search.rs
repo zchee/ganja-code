@@ -26,23 +26,19 @@
 //! over. Filling the composer and closing the dialog are `App`'s, the same
 //! split every other dialog here uses.
 
-use nucleo_matcher::{
-    Config, Matcher, Utf32Str,
-    pattern::{Atom, AtomKind, CaseMatching, Normalization},
-};
-use ratatui::{
-    buffer::Buffer,
-    layout::{Constraint, Rect},
-    text::{Line, Text},
-    widgets::{Block, Clear, Paragraph, Widget as _},
-};
+use nucleo_matcher::pattern::{Atom, AtomKind, CaseMatching, Normalization};
+use nucleo_matcher::{Config, Matcher, Utf32Str};
+use ratatui::buffer::Buffer;
+use ratatui::layout::{Constraint, Rect};
+use ratatui::text::{Line, Text};
+use ratatui::widgets::{Block, Clear, Paragraph, Widget as _};
 use unicode_width::UnicodeWidthStr as _;
 
-use crate::{
-    component::{chat::clip, clamped, first_visible, sessions::age},
-    history::Recalled,
-    theme::Theme,
-};
+use crate::component::chat::clip;
+use crate::component::sessions::age;
+use crate::component::{clamped, first_visible};
+use crate::history::Recalled;
+use crate::theme::Theme;
 
 /// What marks the row the cursor is on, and what pads every other row.
 const MARKER: &str = "> ";
@@ -157,9 +153,7 @@ impl HistorySearch {
     /// The prompt under the cursor, or [`None`] when nothing matches.
     #[must_use]
     pub fn selected(&self) -> Option<&crate::history::PromptInfo> {
-        self.matched
-            .get(self.selected)
-            .map(|&index| &self.entries[index].prompt)
+        self.matched.get(self.selected).map(|&index| &self.entries[index].prompt)
     }
 
     /// Moves the cursor by `delta` rows.
@@ -211,10 +205,7 @@ impl HistorySearch {
 
         // Inside the border on both axes.
         let inner_width = usize::from(width).saturating_sub(2);
-        let content_rows = usize::from(height)
-            .saturating_sub(2)
-            .saturating_sub(CHROME)
-            .max(2);
+        let content_rows = usize::from(height).saturating_sub(2).saturating_sub(CHROME).max(2);
         // The list and the preview split what is left roughly in half; the
         // list rounds up so a short terminal still shows at least one row of
         // each rather than starving the preview outright.
@@ -263,14 +254,10 @@ impl HistorySearch {
             .map(|(position, &index)| (position, &self.entries[index]))
             .collect();
 
-        let ages: Vec<String> = visible
-            .iter()
-            .map(|(_, entry)| age(self.opened, entry.at))
-            .collect();
+        let ages: Vec<String> =
+            visible.iter().map(|(_, entry)| age(self.opened, entry.at)).collect();
         let age_width = ages.iter().map(|age| age.width()).max().unwrap_or(0);
-        let title_width = width
-            .saturating_sub(MARKER.width() + age_width + GAP)
-            .max(1);
+        let title_width = width.saturating_sub(MARKER.width() + age_width + GAP).max(1);
 
         visible
             .iter()
@@ -279,21 +266,13 @@ impl HistorySearch {
                 let title = clip(title(&entry.prompt.input), title_width);
                 let row = format!(
                     "{marker}{title:<title_width$}{gap}{age:>age_width$}",
-                    marker = if *position == self.selected {
-                        MARKER
-                    } else {
-                        "  "
-                    },
+                    marker = if *position == self.selected { MARKER } else { "  " },
                     gap = " ".repeat(GAP),
                 );
 
                 Line::styled(
                     row,
-                    if *position == self.selected {
-                        theme.selection
-                    } else {
-                        theme.fg
-                    },
+                    if *position == self.selected { theme.selection } else { theme.fg },
                 )
             })
             .collect()
@@ -317,8 +296,7 @@ impl HistorySearch {
 fn fuzzy_matches(atom: &Atom, matcher: &mut Matcher, text: &str) -> bool {
     let mut buffer = Vec::new();
 
-    atom.score(Utf32Str::new(text, &mut buffer), matcher)
-        .is_some()
+    atom.score(Utf32Str::new(text, &mut buffer), matcher).is_some()
 }
 
 /// What a match row shows for the prompt: its first line, trailing carriage
@@ -339,21 +317,13 @@ fn preview_lines(text: &str, rows: usize, width: usize, theme: &Theme) -> Vec<Li
 
     let all: Vec<&str> = text.lines().collect();
     if all.len() <= rows {
-        return all
-            .iter()
-            .map(|line| Line::styled(clip(line, width), theme.fg))
-            .collect();
+        return all.iter().map(|line| Line::styled(clip(line, width), theme.fg)).collect();
     }
 
     let shown = rows - 1;
-    let mut lines: Vec<Line<'static>> = all[..shown]
-        .iter()
-        .map(|line| Line::styled(clip(line, width), theme.fg))
-        .collect();
-    lines.push(Line::styled(
-        format!("+{} lines", all.len() - shown),
-        theme.dim,
-    ));
+    let mut lines: Vec<Line<'static>> =
+        all[..shown].iter().map(|line| Line::styled(clip(line, width), theme.fg)).collect();
+    lines.push(Line::styled(format!("+{} lines", all.len() - shown), theme.dim));
 
     lines
 }

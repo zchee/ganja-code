@@ -9,18 +9,20 @@
 //! `git` on `PATH` is a prerequisite, not a skip, for the same reason given
 //! there: a run that snapshotted nothing would prove nothing.
 
-use std::{path::Path, process::Command as Process, sync::Arc, time::Duration};
+use std::path::Path;
+use std::process::Command as Process;
+use std::sync::Arc;
+use std::time::Duration;
 
-use futures::{StreamExt as _, stream::BoxStream};
-use ganja_core::{
-    Config, Engine, EngineError, Snapshots, Storage,
-    agent::{BUILD_SWITCH_REMINDER, PLAN_REMINDER},
-    permission::Permissions,
-    project::Project,
-    protocol::{Command, Event, QuestionId},
-    provider::{ChatRequest, Provider},
-    tool::Registry,
-};
+use futures::StreamExt as _;
+use futures::stream::BoxStream;
+use ganja_core::agent::{BUILD_SWITCH_REMINDER, PLAN_REMINDER};
+use ganja_core::permission::Permissions;
+use ganja_core::project::Project;
+use ganja_core::protocol::{Command, Event, QuestionId};
+use ganja_core::provider::{ChatRequest, Provider};
+use ganja_core::tool::Registry;
+use ganja_core::{Config, Engine, EngineError, Snapshots, Storage};
 use ganja_testkit::{ScriptedProvider, drain, tool_call};
 use serde_json::json;
 
@@ -46,11 +48,9 @@ fn seed_repository(root: &Path) {
         "init.defaultBranch=main",
     ];
 
-    for arguments in [
-        vec!["init"],
-        vec!["add", "-A"],
-        vec!["commit", "-m", "the state before anything"],
-    ] {
+    for arguments in
+        [vec!["init"], vec!["add", "-A"], vec!["commit", "-m", "the state before anything"]]
+    {
         let status = Process::new("git")
             .args(common)
             .args(&arguments)
@@ -94,9 +94,7 @@ fn parts_saying(request: &ChatRequest, text: &str) -> usize {
 }
 
 fn agent_changes(seen: &[Event]) -> usize {
-    seen.iter()
-        .filter(|event| matches!(event, Event::AgentChanged { .. }))
-        .count()
+    seen.iter().filter(|event| matches!(event, Event::AgentChanged { .. })).count()
 }
 
 async fn until_question(events: &mut BoxStream<'static, Event>) -> QuestionId {
@@ -142,16 +140,11 @@ async fn an_undo_after_a_yes_takes_the_approval_back_with_the_plan() {
     )
     .with_agents(ganja_testkit::agent_registry(&Config::default()))
     .with_snapshots(Arc::new(snapshots));
-    engine
-        .resume(&session)
-        .await
-        .expect("the seeded session resumes");
+    engine.resume(&session).await.expect("the seeded session resumes");
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
-        .send(Command::SwitchAgent {
-            name: "plan".to_owned(),
-        })
+        .send(Command::SwitchAgent { name: "plan".to_owned() })
         .await
         .expect("plan is a builtin primary agent");
     assert!(
@@ -172,10 +165,7 @@ async fn an_undo_after_a_yes_takes_the_approval_back_with_the_plan() {
         .expect("an idle engine accepts a prompt");
     let id = until_question(&mut events).await;
     engine
-        .send(Command::ReplyQuestion {
-            id,
-            answers: vec![vec!["Yes".to_owned()]],
-        })
+        .send(Command::ReplyQuestion { id, answers: vec![vec!["Yes".to_owned()]] })
         .await
         .expect("a reply is never refused");
     drain(&mut events).await;
@@ -183,11 +173,7 @@ async fn an_undo_after_a_yes_takes_the_approval_back_with_the_plan() {
         matches!(next_event(&mut events).await, Event::AgentChanged { agent, .. } if agent == "build")
     );
     assert_eq!(
-        engine
-            .current_session()
-            .expect("the session has a row")
-            .agent
-            .as_deref(),
+        engine.current_session().expect("the session has a row").agent.as_deref(),
         Some("build"),
         "the boundary wrote the row"
     );
@@ -197,21 +183,11 @@ async fn an_undo_after_a_yes_takes_the_approval_back_with_the_plan() {
     // without it a restart would resume a planning session as build.
     send_when_idle(&engine, Command::Undo).await;
     assert!(
-        matches!(
-            next_event(&mut events).await,
-            Event::RevertChanged {
-                revert: Some(_),
-                ..
-            }
-        ),
+        matches!(next_event(&mut events).await, Event::RevertChanged { revert: Some(_), .. }),
         "the undo announces its revert"
     );
     assert_eq!(
-        engine
-            .current_session()
-            .expect("the session has a row")
-            .agent
-            .as_deref(),
+        engine.current_session().expect("the session has a row").agent.as_deref(),
         Some("plan"),
         "the row returns to the plan the session still runs as"
     );
@@ -220,10 +196,7 @@ async fn an_undo_after_a_yes_takes_the_approval_back_with_the_plan() {
     // A redo does not resurrect the Yes.
     send_when_idle(&engine, Command::Redo).await;
     assert!(
-        matches!(
-            next_event(&mut events).await,
-            Event::RevertChanged { revert: None, .. }
-        ),
+        matches!(next_event(&mut events).await, Event::RevertChanged { revert: None, .. }),
         "the redo clears the revert"
     );
     assert_eq!(engine.agent().as_deref(), Some("plan"));
@@ -242,11 +215,7 @@ async fn an_undo_after_a_yes_takes_the_approval_back_with_the_plan() {
     )
     .await;
     let seen = drain(&mut events).await;
-    assert_eq!(
-        agent_changes(&seen),
-        0,
-        "nothing announces after a revocation"
-    );
+    assert_eq!(agent_changes(&seen), 0, "nothing announces after a revocation");
     assert_eq!(engine.agent().as_deref(), Some("plan"));
 
     let requests = requests.lock().expect("the request log is never poisoned");

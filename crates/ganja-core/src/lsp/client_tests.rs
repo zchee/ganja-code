@@ -1,4 +1,5 @@
-use std::{path::PathBuf, time::Duration};
+use std::path::PathBuf;
+use std::time::Duration;
 
 use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 use serde_json::json;
@@ -13,14 +14,8 @@ use super::{
 fn error(message: &str) -> Diagnostic {
     Diagnostic {
         range: Range {
-            start: Position {
-                line: 0,
-                character: 0,
-            },
-            end: Position {
-                line: 0,
-                character: 1,
-            },
+            start: Position { line: 0, character: 0 },
+            end: Position { line: 0, character: 1 },
         },
         severity: Some(DiagnosticSeverity::ERROR),
         message: message.to_owned(),
@@ -51,11 +46,10 @@ async fn a_publish_after_the_touch_satisfies_the_wait() {
     let store = std::sync::Arc::new(Store::default());
     let after = Instant::now();
     let handle = std::sync::Arc::clone(&store);
-    let waiting = tokio::spawn(async move {
-        handle
-            .wait_fresh(&path(), 1, after, DOCUMENT_WAIT_TIMEOUT)
-            .await
-    });
+    let waiting =
+        tokio::spawn(
+            async move { handle.wait_fresh(&path(), 1, after, DOCUMENT_WAIT_TIMEOUT).await },
+        );
 
     tokio::time::sleep(Duration::from_millis(10)).await;
     store.publish(path(), None, vec![error("mismatched types")]);
@@ -71,19 +65,10 @@ async fn a_publish_from_before_the_touch_is_not_fresh_enough() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     let after = Instant::now();
 
-    let fresh = store
-        .wait_fresh(&path(), 1, after, Duration::from_millis(300))
-        .await;
+    let fresh = store.wait_fresh(&path(), 1, after, Duration::from_millis(300)).await;
 
-    assert!(
-        !fresh,
-        "the only publish predates the edit that is being waited on"
-    );
-    assert_eq!(
-        store.for_path(&path()).len(),
-        1,
-        "and the caches still serve what they hold"
-    );
+    assert!(!fresh, "the only publish predates the edit that is being waited on");
+    assert_eq!(store.for_path(&path()).len(), 1, "and the caches still serve what they hold");
 }
 
 #[tokio::test(start_paused = true)]
@@ -94,15 +79,11 @@ async fn a_publish_naming_the_touched_version_is_fresh_however_old_it_is() {
     let after = Instant::now();
 
     assert!(
-        store
-            .wait_fresh(&path(), 7, after, DOCUMENT_WAIT_TIMEOUT)
-            .await,
+        store.wait_fresh(&path(), 7, after, DOCUMENT_WAIT_TIMEOUT).await,
         "the version matches the touch, which outranks the clock"
     );
     assert!(
-        !store
-            .wait_fresh(&path(), 8, after, Duration::from_millis(300))
-            .await,
+        !store.wait_fresh(&path(), 8, after, Duration::from_millis(300)).await,
         "a different version is never fresh"
     );
 }
@@ -113,9 +94,7 @@ async fn a_server_still_revising_restarts_the_debounce() {
     let after = Instant::now();
     let handle = std::sync::Arc::clone(&store);
     let waiting = tokio::spawn(async move {
-        let settled = handle
-            .wait_fresh(&path(), 1, after, DOCUMENT_WAIT_TIMEOUT)
-            .await;
+        let settled = handle.wait_fresh(&path(), 1, after, DOCUMENT_WAIT_TIMEOUT).await;
 
         (settled, Instant::now())
     });
@@ -146,15 +125,10 @@ async fn a_server_still_revising_restarts_the_debounce() {
 async fn a_wait_nobody_answers_times_out_silently() {
     let store = Store::default();
 
-    let settled = store
-        .wait_fresh(&path(), 1, Instant::now(), DOCUMENT_WAIT_TIMEOUT)
-        .await;
+    let settled = store.wait_fresh(&path(), 1, Instant::now(), DOCUMENT_WAIT_TIMEOUT).await;
 
     assert!(!settled);
-    assert!(
-        store.diagnostics().is_empty(),
-        "a timeout leaves no marker of any kind behind"
-    );
+    assert!(store.diagnostics().is_empty(), "a timeout leaves no marker of any kind behind");
 }
 
 #[tokio::test(start_paused = true)]
@@ -162,11 +136,7 @@ async fn a_wait_with_no_budget_does_not_wait() {
     let store = std::sync::Arc::new(Store::default());
     store.publish(path(), None, vec![error("boom")]);
 
-    assert!(
-        !store
-            .wait_fresh(&path(), 0, Instant::now(), Duration::ZERO)
-            .await
-    );
+    assert!(!store.wait_fresh(&path(), 0, Instant::now(), Duration::ZERO).await);
 }
 
 /// **Regression, pending-map leak.** A request nobody ever answers used
@@ -208,10 +178,7 @@ async fn a_timed_out_request_leaves_no_trace_in_the_pending_map() {
 
     assert!(answered.is_err(), "nothing in this test ever answers");
     assert!(
-        pending
-            .lock()
-            .expect("the pending requests are never poisoned")
-            .is_empty(),
+        pending.lock().expect("the pending requests are never poisoned").is_empty(),
         "a request the caller stopped waiting on must not leave its sender behind"
     );
 }
@@ -231,15 +198,9 @@ fn a_full_report_answers_the_pull_and_replaces_what_was_cached() {
         }],
     });
 
-    assert!(
-        store.absorb(&path(), &report),
-        "the server had something to say"
-    );
+    assert!(store.absorb(&path(), &report), "the server had something to say");
     assert_eq!(
-        store
-            .for_path(&path())
-            .first()
-            .map(|issue| issue.message.clone()),
+        store.for_path(&path()).first().map(|issue| issue.message.clone()),
         Some("expected i32, found &'static str".to_owned())
     );
 }
@@ -270,11 +231,7 @@ fn an_unchanged_report_leaves_the_cache_standing() {
     let answered = store.absorb(&path(), &json!({ "kind": "unchanged", "resultId": "x" }));
 
     assert!(answered, "\"still true\" is an answer");
-    assert_eq!(
-        store.for_path(&path()).len(),
-        1,
-        "and it did not wipe what is true"
-    );
+    assert_eq!(store.for_path(&path()).len(), 1, "and it did not wipe what is true");
 }
 
 #[test]
@@ -295,10 +252,7 @@ fn a_related_document_carries_another_files_errors() {
 
     store.absorb(&path(), &report);
 
-    assert!(
-        store.for_path(&path()).is_empty(),
-        "the edited file itself is fine"
-    );
+    assert!(store.for_path(&path()).is_empty(), "the edited file itself is fine");
     assert_eq!(
         store.for_path(&other).len(),
         1,
@@ -334,11 +288,7 @@ fn two_different_errors_on_one_line_both_survive_the_dedupe() {
         ]}),
     );
 
-    assert_eq!(
-        store.for_path(&path()).len(),
-        2,
-        "the message is part of the identity"
-    );
+    assert_eq!(store.for_path(&path()).len(), 2, "the message is part of the identity");
 }
 
 #[test]
@@ -354,11 +304,7 @@ fn a_configuration_section_is_a_dotted_path() {
     ];
 
     for (section, expected) in cases {
-        assert_eq!(
-            configuration(Some(&settings), section),
-            expected,
-            "{section:?}"
-        );
+        assert_eq!(configuration(Some(&settings), section), expected, "{section:?}");
     }
     assert_eq!(configuration(None, Some("anything")), json!(null));
 }

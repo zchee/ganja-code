@@ -25,26 +25,20 @@
 //! that pin *that* live in `engine.rs` and `agent_loop.rs` and are not
 //! restated here.
 
-use std::{
-    collections::VecDeque,
-    sync::{Arc, Mutex},
-};
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use futures::{
-    StreamExt as _,
-    stream::{self, BoxStream},
+use futures::StreamExt as _;
+use futures::stream::{self, BoxStream};
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{
+    Command, Event, FinishReason, Mention, Message, PartBody, PermissionId, PermissionReply, Role,
+    SessionId,
 };
-use ganja_core::{
-    Engine, EngineError, Storage,
-    permission::Permissions,
-    protocol::{
-        Command, Event, FinishReason, Mention, Message, PartBody, PermissionId, PermissionReply,
-        Role, SessionId,
-    },
-    provider::{ChatRequest, Provider, ProviderError, ProviderEvent},
-    tool::Registry,
-};
+use ganja_core::provider::{ChatRequest, Provider, ProviderError, ProviderEvent};
+use ganja_core::tool::Registry;
+use ganja_core::{Engine, EngineError, Storage};
 use ganja_testkit::{RecorderTool, ScriptedProvider, drain, says};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -52,14 +46,8 @@ use tokio_util::sync::CancellationToken;
 /// A tool-call script fragment.
 fn call(id: &str, tool: &str, json: &str) -> Vec<ProviderEvent> {
     vec![
-        ProviderEvent::ToolCallStart {
-            id: id.to_owned(),
-            name: tool.to_owned(),
-        },
-        ProviderEvent::ToolCallDelta {
-            id: id.to_owned(),
-            json: json.to_owned(),
-        },
+        ProviderEvent::ToolCallStart { id: id.to_owned(), name: tool.to_owned() },
+        ProviderEvent::ToolCallDelta { id: id.to_owned(), json: json.to_owned() },
         ProviderEvent::ToolCallEnd { id: id.to_owned() },
     ]
 }
@@ -134,11 +122,7 @@ impl Provider for GatedProvider {
             let _ = self.entered.send(()).await;
             // Taken out of the lock before the await: nothing holds a
             // std::sync guard across a suspension point.
-            let waiting = self
-                .release
-                .lock()
-                .expect("the release is never poisoned")
-                .take();
+            let waiting = self.release.lock().expect("the release is never poisoned").take();
             if let Some(waiting) = waiting {
                 let _ = waiting.await;
             }
@@ -226,10 +210,8 @@ async fn until_permission(events: &mut BoxStream<'static, Event>) -> (Permission
     let mut seen = Vec::new();
 
     loop {
-        let event = events
-            .next()
-            .await
-            .expect("a permission request should arrive before the stream ends");
+        let event =
+            events.next().await.expect("a permission request should arrive before the stream ends");
         seen.push(event.clone());
 
         if let Event::PermissionRequested { id, .. } = event {
@@ -272,12 +254,7 @@ async fn a_steer_joins_the_running_turn_at_its_next_step_boundary() {
 
     let (provider, requests) =
         ScriptedProvider::strict("recorder", vec![first, says("done"), says("really done")]);
-    let engine = Engine::new(
-        provider,
-        "scripted-model",
-        gated_tool(),
-        Permissions::default(),
-    );
+    let engine = Engine::new(provider, "scripted-model", gated_tool(), Permissions::default());
     let mut events = engine.subscribe().await.expect("a subscription");
 
     engine.send(prompt("go")).await.expect("the prompt starts");
@@ -290,10 +267,7 @@ async fn a_steer_joins_the_running_turn_at_its_next_step_boundary() {
         .await
         .expect("a steer reaches a running turn");
     engine
-        .send(Command::ReplyPermission {
-            id: permission,
-            reply: PermissionReply::Once,
-        })
+        .send(Command::ReplyPermission { id: permission, reply: PermissionReply::Once })
         .await
         .expect("the reply is never refused");
 
@@ -309,19 +283,11 @@ async fn a_steer_joins_the_running_turn_at_its_next_step_boundary() {
         Some("started:user:actually, stop after this"),
         "the id is announced immediately before the message it names: {shapes:?}"
     );
-    let replied = shapes
-        .iter()
-        .position(|line| line == "perm_replied")
-        .expect("the dialog was answered");
-    assert!(
-        consumed > replied,
-        "the drain is at the boundary the dialog was holding: {shapes:?}"
-    );
+    let replied =
+        shapes.iter().position(|line| line == "perm_replied").expect("the dialog was answered");
+    assert!(consumed > replied, "the drain is at the boundary the dialog was holding: {shapes:?}");
     assert_eq!(
-        shapes
-            .iter()
-            .filter(|line| line.starts_with("finished:"))
-            .count(),
+        shapes.iter().filter(|line| line.starts_with("finished:")).count(),
         1,
         "the turn stays singular: {shapes:?}"
     );
@@ -338,11 +304,7 @@ async fn a_steer_joins_the_running_turn_at_its_next_step_boundary() {
         "the steered message rides after the prompt it corrects"
     );
     assert_eq!(
-        requests[1]
-            .messages
-            .iter()
-            .map(|message| message.role)
-            .collect::<Vec<_>>(),
+        requests[1].messages.iter().map(|message| message.role).collect::<Vec<_>>(),
         [Role::User, Role::Assistant, Role::User],
         "and after the reply it interrupted, which is where its stored id sorts"
     );
@@ -356,12 +318,8 @@ async fn a_steer_joins_the_running_turn_at_its_next_step_boundary() {
 async fn a_steer_arriving_before_the_last_answer_continues_the_turn() {
     // Gated on request 0: the steer lands while the model's first — and, but
     // for the steer, only — request is in flight.
-    let Gated {
-        provider,
-        requests,
-        mut arrived,
-        release,
-    } = Gated::new(vec![says("all done"), says("and now really done")], 0);
+    let Gated { provider, requests, mut arrived, release } =
+        Gated::new(vec![says("all done"), says("and now really done")], 0);
     let engine = Engine::new(
         provider,
         "gated-model",
@@ -373,10 +331,7 @@ async fn a_steer_arriving_before_the_last_answer_continues_the_turn() {
     engine.send(prompt("go")).await.expect("the prompt starts");
     arrived.recv().await.expect("the request reaches the gate");
 
-    engine
-        .send(steer("steer-1", "one more thing"))
-        .await
-        .expect("a steer reaches a running turn");
+    engine.send(steer("steer-1", "one more thing")).await.expect("a steer reaches a running turn");
     let _ = release.send(());
 
     let seen = drain(&mut events).await;
@@ -386,33 +341,19 @@ async fn a_steer_arriving_before_the_last_answer_continues_the_turn() {
         shapes.contains(&"steer_consumed:steer-1".to_owned()),
         "a turn that would otherwise have ended took the message first: {shapes:?}"
     );
-    let consumed = shapes
-        .iter()
-        .position(|line| line == "steer_consumed:steer-1")
-        .expect("checked above");
-    let finished = shapes
-        .iter()
-        .position(|line| line.starts_with("finished:"))
-        .expect("the turn ends");
-    assert!(
-        consumed < finished,
-        "the finish tail is not reached while a steer waits: {shapes:?}"
-    );
+    let consumed =
+        shapes.iter().position(|line| line == "steer_consumed:steer-1").expect("checked above");
+    let finished =
+        shapes.iter().position(|line| line.starts_with("finished:")).expect("the turn ends");
+    assert!(consumed < finished, "the finish tail is not reached while a steer waits: {shapes:?}");
     assert_eq!(
-        shapes
-            .iter()
-            .filter(|line| line.starts_with("finished:"))
-            .count(),
+        shapes.iter().filter(|line| line.starts_with("finished:")).count(),
         1,
         "and it is still one turn: {shapes:?}"
     );
 
     let requests = requests.lock().expect("the request log is never poisoned");
-    assert_eq!(
-        requests.len(),
-        2,
-        "the waiting steer bought a second request"
-    );
+    assert_eq!(requests.len(), 2, "the waiting steer bought a second request");
     assert_eq!(user_text(&requests[1]), ["go", "one more thing"]);
 }
 
@@ -426,25 +367,14 @@ async fn a_cancelled_turn_leaves_its_steers_unconsumed() {
     first.push(ProviderEvent::Finish(FinishReason::Completed));
 
     let (provider, requests) = ScriptedProvider::named("recorder", vec![first, says("done")]);
-    let engine = Engine::new(
-        provider,
-        "scripted-model",
-        gated_tool(),
-        Permissions::default(),
-    );
+    let engine = Engine::new(provider, "scripted-model", gated_tool(), Permissions::default());
     let mut events = engine.subscribe().await.expect("a subscription");
 
     engine.send(prompt("go")).await.expect("the prompt starts");
     let (_permission, mut seen) = until_permission(&mut events).await;
 
-    engine
-        .send(steer("steer-1", "never mind"))
-        .await
-        .expect("a steer reaches a running turn");
-    engine
-        .send(Command::CancelTurn)
-        .await
-        .expect("a cancel is never refused");
+    engine.send(steer("steer-1", "never mind")).await.expect("a steer reaches a running turn");
+    engine.send(Command::CancelTurn).await.expect("a cancel is never refused");
 
     seen.extend(drain(&mut events).await);
     let shapes: Vec<String> = seen.iter().map(shape).collect();
@@ -457,16 +387,8 @@ async fn a_cancelled_turn_leaves_its_steers_unconsumed() {
         !shapes.iter().any(|line| line == "started:user:never mind"),
         "and puts nothing in the transcript: {shapes:?}"
     );
-    assert_eq!(
-        shapes.last().map(String::as_str),
-        Some("finished:Cancelled"),
-        "{shapes:?}"
-    );
-    assert_eq!(
-        requests.lock().expect("the request log").len(),
-        1,
-        "no request ever carried it"
-    );
+    assert_eq!(shapes.last().map(String::as_str), Some("finished:Cancelled"), "{shapes:?}");
+    assert_eq!(requests.lock().expect("the request log").len(), 1, "no request ever carried it");
 }
 
 /// **F4, the other race.** A steer that arrives with nothing streaming is
@@ -484,10 +406,7 @@ async fn a_steer_with_nothing_streaming_is_refused_as_not_streaming() {
     let mut events = engine.subscribe().await.expect("a subscription");
 
     let refused = engine.send(steer("steer-1", "nobody is listening")).await;
-    assert!(
-        matches!(refused, Err(EngineError::NotStreaming)),
-        "got {refused:?}"
-    );
+    assert!(matches!(refused, Err(EngineError::NotStreaming)), "got {refused:?}");
 
     // And it started nothing: the engine is still idle, and the next prompt is
     // the session's first turn.
@@ -495,10 +414,7 @@ async fn a_steer_with_nothing_streaming_is_refused_as_not_streaming() {
     let seen = drain(&mut events).await;
     let shapes: Vec<String> = seen.iter().map(shape).collect();
     assert_eq!(
-        shapes
-            .iter()
-            .filter(|line| line.starts_with("started:user"))
-            .count(),
+        shapes.iter().filter(|line| line.starts_with("started:user")).count(),
         1,
         "the refused steer is in no transcript: {shapes:?}"
     );
@@ -520,12 +436,7 @@ async fn a_steered_mention_is_read_when_the_request_carrying_it_is_built() {
 
     let (provider, requests) =
         ScriptedProvider::strict("recorder", vec![first, says("done"), says("really done")]);
-    let engine = Engine::new(
-        provider,
-        "scripted-model",
-        gated_tool(),
-        Permissions::default(),
-    );
+    let engine = Engine::new(provider, "scripted-model", gated_tool(), Permissions::default());
     let mut events = engine.subscribe().await.expect("a subscription");
 
     engine.send(prompt("go")).await.expect("the prompt starts");
@@ -539,10 +450,7 @@ async fn a_steered_mention_is_read_when_the_request_carrying_it_is_built() {
         .send(Command::Steer {
             id: "steer-1".to_owned(),
             text: format!("read @{named}"),
-            mentions: vec![Mention {
-                path: named.clone(),
-                ..Default::default()
-            }],
+            mentions: vec![Mention { path: named.clone(), ..Default::default() }],
             skills: Vec::new(),
             session_mentions: Vec::new(),
             peers: Vec::new(),
@@ -554,10 +462,7 @@ async fn a_steered_mention_is_read_when_the_request_carrying_it_is_built() {
     std::fs::write(&note, "the new contents").expect("the fixture rewrites");
 
     engine
-        .send(Command::ReplyPermission {
-            id: permission,
-            reply: PermissionReply::Once,
-        })
+        .send(Command::ReplyPermission { id: permission, reply: PermissionReply::Once })
         .await
         .expect("the reply is never refused");
     drain(&mut events).await;
@@ -570,10 +475,7 @@ async fn a_steered_mention_is_read_when_the_request_carrying_it_is_built() {
         carried.contains("the new contents"),
         "the mention is read when the request is built: {carried}"
     );
-    assert!(
-        !carried.contains("the old contents"),
-        "and not when the steer was typed: {carried}"
-    );
+    assert!(!carried.contains("the old contents"), "and not when the steer was typed: {carried}");
     assert!(
         requests[1].messages.iter().all(|message| message
             .parts
@@ -610,15 +512,9 @@ async fn a_steered_message_replays_as_an_ordinary_user_message_on_resume() {
 
     engine.send(prompt("go")).await.expect("the prompt starts");
     let (permission, _seen) = until_permission(&mut events).await;
+    engine.send(steer("steer-1", "and this too")).await.expect("a steer reaches a running turn");
     engine
-        .send(steer("steer-1", "and this too"))
-        .await
-        .expect("a steer reaches a running turn");
-    engine
-        .send(Command::ReplyPermission {
-            id: permission,
-            reply: PermissionReply::Once,
-        })
+        .send(Command::ReplyPermission { id: permission, reply: PermissionReply::Once })
         .await
         .expect("the reply is never refused");
     drain(&mut events).await;
@@ -630,14 +526,9 @@ async fn a_steered_message_replays_as_an_ordinary_user_message_on_resume() {
         .expect("the turn created one")
         .id
         .clone();
-    let stored = storage
-        .load_transcript(&session)
-        .expect("the transcript reads back");
+    let stored = storage.load_transcript(&session).expect("the transcript reads back");
     assert_eq!(
-        stored
-            .iter()
-            .map(|message| message.role)
-            .collect::<Vec<_>>(),
+        stored.iter().map(|message| message.role).collect::<Vec<_>>(),
         [Role::User, Role::Assistant, Role::User],
         "the steer sorts after the reply it interrupted"
     );
@@ -662,17 +553,11 @@ async fn a_steered_message_replays_as_an_ordinary_user_message_on_resume() {
     let mut resumed_events = resumed.subscribe().await.expect("a subscription");
     let replayed: Vec<Message> = resumed.resume(&session).await.expect("the session resumes");
     assert_eq!(
-        replayed
-            .iter()
-            .map(|message| message.role)
-            .collect::<Vec<_>>(),
+        replayed.iter().map(|message| message.role).collect::<Vec<_>>(),
         [Role::User, Role::Assistant, Role::User]
     );
 
-    resumed
-        .send(prompt("next"))
-        .await
-        .expect("the prompt starts");
+    resumed.send(prompt("next")).await.expect("the prompt starts");
     drain(&mut resumed_events).await;
 
     let requests = requests.lock().expect("the request log is never poisoned");
@@ -695,12 +580,7 @@ async fn two_steers_waiting_at_one_boundary_drain_in_the_order_they_arrived() {
 
     let (provider, requests) =
         ScriptedProvider::named("recorder", vec![first, says("done"), says("really done")]);
-    let engine = Engine::new(
-        provider,
-        "scripted-model",
-        gated_tool(),
-        Permissions::default(),
-    );
+    let engine = Engine::new(provider, "scripted-model", gated_tool(), Permissions::default());
     let mut events = engine.subscribe().await.expect("a subscription");
 
     engine.send(prompt("go")).await.expect("the prompt starts");
@@ -715,10 +595,7 @@ async fn two_steers_waiting_at_one_boundary_drain_in_the_order_they_arrived() {
         .await
         .expect("a steer reaches a running turn");
     engine
-        .send(Command::ReplyPermission {
-            id: permission,
-            reply: PermissionReply::Once,
-        })
+        .send(Command::ReplyPermission { id: permission, reply: PermissionReply::Once })
         .await
         .expect("the reply is never refused");
 
@@ -743,10 +620,7 @@ async fn two_steers_waiting_at_one_boundary_drain_in_the_order_they_arrived() {
     );
 
     let requests = requests.lock().expect("the request log is never poisoned");
-    assert_eq!(
-        user_text(&requests[1]),
-        ["go", "first correction", "second correction"]
-    );
+    assert_eq!(user_text(&requests[1]), ["go", "first correction", "second correction"]);
 }
 
 /// **F4, the Busy contract holds.** Steering adds a lane; it takes none away.
@@ -758,12 +632,7 @@ async fn steering_leaves_the_busy_refusal_where_it_was() {
     first.push(ProviderEvent::Finish(FinishReason::Completed));
 
     let (provider, _requests) = ScriptedProvider::named("recorder", vec![first, says("done")]);
-    let engine = Engine::new(
-        provider,
-        "scripted-model",
-        gated_tool(),
-        Permissions::default(),
-    );
+    let engine = Engine::new(provider, "scripted-model", gated_tool(), Permissions::default());
     let mut events = engine.subscribe().await.expect("a subscription");
 
     engine.send(prompt("go")).await.expect("the prompt starts");
@@ -773,10 +642,7 @@ async fn steering_leaves_the_busy_refusal_where_it_was() {
     assert!(matches!(refused, Err(EngineError::Busy)), "got {refused:?}");
 
     engine
-        .send(Command::ReplyPermission {
-            id: permission,
-            reply: PermissionReply::Once,
-        })
+        .send(Command::ReplyPermission { id: permission, reply: PermissionReply::Once })
         .await
         .expect("the reply is never refused");
     drain(&mut events).await;

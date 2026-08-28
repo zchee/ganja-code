@@ -7,14 +7,8 @@ use super::{MAX_PER_FILE, pretty, report};
 fn at(line: u32, column: u32, severity: Option<DiagnosticSeverity>, message: &str) -> Diagnostic {
     Diagnostic {
         range: Range {
-            start: Position {
-                line,
-                character: column,
-            },
-            end: Position {
-                line,
-                character: column + 1,
-            },
+            start: Position { line, character: column },
+            end: Position { line, character: column + 1 },
         },
         severity,
         message: message.to_owned(),
@@ -24,12 +18,7 @@ fn at(line: u32, column: u32, severity: Option<DiagnosticSeverity>, message: &st
 
 #[test]
 fn a_diagnostic_renders_one_based() {
-    let rendered = pretty(&at(
-        0,
-        0,
-        Some(DiagnosticSeverity::ERROR),
-        "mismatched types",
-    ));
+    let rendered = pretty(&at(0, 0, Some(DiagnosticSeverity::ERROR), "mismatched types"));
 
     assert_eq!(rendered, "ERROR [1:1] mismatched types");
 }
@@ -46,11 +35,7 @@ fn a_severity_the_server_omitted_is_an_error() {
 
     for (severity, expected) in cases {
         let rendered = pretty(&at(4, 2, severity, "something"));
-        assert_eq!(
-            rendered,
-            format!("{expected} [5:3] something"),
-            "{severity:?}"
-        );
+        assert_eq!(rendered, format!("{expected} [5:3] something"), "{severity:?}");
     }
 }
 
@@ -86,17 +71,8 @@ fn errors_past_the_cap_are_counted_rather_than_printed() {
 
     let block = report("src/main.rs", &issues).expect("errors are reported");
 
-    assert_eq!(
-        block
-            .lines()
-            .filter(|line| line.starts_with("ERROR"))
-            .count(),
-        MAX_PER_FILE
-    );
-    assert!(
-        block.contains("\n... and 3 more"),
-        "the tail is counted: {block}"
-    );
+    assert_eq!(block.lines().filter(|line| line.starts_with("ERROR")).count(), MAX_PER_FILE);
+    assert!(block.contains("\n... and 3 more"), "the tail is counted: {block}");
     // The suffix sits inside the block, not after it.
     assert!(block.ends_with("... and 3 more\n</diagnostics>"), "{block}");
 }

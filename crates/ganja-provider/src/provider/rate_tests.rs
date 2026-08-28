@@ -31,10 +31,7 @@ fn the_anthropic_family_parses_its_buckets_with_the_field_last() {
             ("anthropic-ratelimit-requests-reset", "1970-01-01T00:01:00Z"),
             ("anthropic-ratelimit-input-tokens-limit", "80000"),
             ("anthropic-ratelimit-input-tokens-remaining", "60000"),
-            (
-                "anthropic-ratelimit-input-tokens-reset",
-                "1970-01-01T00:00:30Z",
-            ),
+            ("anthropic-ratelimit-input-tokens-reset", "1970-01-01T00:00:30Z"),
         ]),
         NOW,
     );
@@ -140,12 +137,7 @@ fn a_bucket_its_vendor_never_dated_is_kept_clockless() {
     assert_eq!(
         windows,
         vec![
-            RateWindow {
-                kind: "requests".to_owned(),
-                limit: 500,
-                remaining: 499,
-                reset: None,
-            },
+            RateWindow { kind: "requests".to_owned(), limit: 500, remaining: 499, reset: None },
             RateWindow {
                 kind: "tokens".to_owned(),
                 limit: 150_000,
@@ -164,11 +156,7 @@ fn a_bucket_missing_a_count_is_dropped() {
         ("anthropic-ratelimit-requests-limit", "1000"),
         ("anthropic-ratelimit-requests-remaining", "999"),
     ] {
-        assert!(
-            parse(&headers(&[lonely]), NOW).is_empty(),
-            "{} alone is half a bucket",
-            lonely.0
-        );
+        assert!(parse(&headers(&[lonely]), NOW).is_empty(), "{} alone is half a bucket", lonely.0);
     }
 }
 
@@ -217,10 +205,7 @@ fn an_unreadable_value_drops_only_its_own_bucket() {
             ("anthropic-ratelimit-requests-reset", "1970-01-01T00:01:00Z"),
             ("anthropic-ratelimit-output-tokens-limit", "16000"),
             ("anthropic-ratelimit-output-tokens-remaining", "8000"),
-            (
-                "anthropic-ratelimit-output-tokens-reset",
-                "1970-01-01T00:01:00Z",
-            ),
+            ("anthropic-ratelimit-output-tokens-reset", "1970-01-01T00:01:00Z"),
         ]),
         NOW,
     );
@@ -237,10 +222,7 @@ fn a_reset_in_no_known_spelling_drops_its_bucket() {
     for spelling in ["tomorrow", "6x0s", "", "-30"] {
         let mut map = HeaderMap::new();
         map.insert("x-ratelimit-limit-requests", HeaderValue::from_static("10"));
-        map.insert(
-            "x-ratelimit-remaining-requests",
-            HeaderValue::from_static("9"),
-        );
+        map.insert("x-ratelimit-remaining-requests", HeaderValue::from_static("9"));
         map.insert(
             "x-ratelimit-reset-requests",
             HeaderValue::from_str(spelling).expect("a header value"),
@@ -258,11 +240,8 @@ fn a_reset_in_no_known_spelling_drops_its_bucket() {
 #[test]
 fn a_family_header_naming_no_known_field_is_ignored() {
     assert!(
-        parse(
-            &headers(&[("x-ratelimit-overhead-tokens", "3"), ("x-ratelimit-", "3")]),
-            NOW,
-        )
-        .is_empty()
+        parse(&headers(&[("x-ratelimit-overhead-tokens", "3"), ("x-ratelimit-", "3")]), NOW,)
+            .is_empty()
     );
 }
 
@@ -294,11 +273,7 @@ fn the_rfc3339_reader_takes_offsets_and_fractions_and_refuses_the_rest() {
         Some(UNIX_EPOCH + Duration::from_secs(1)),
         "a fraction is dropped, not refused"
     );
-    assert_eq!(
-        rfc3339("1970-01-01T01:00:00+01:00"),
-        Some(UNIX_EPOCH),
-        "an offset is subtracted"
-    );
+    assert_eq!(rfc3339("1970-01-01T01:00:00+01:00"), Some(UNIX_EPOCH), "an offset is subtracted");
     assert_eq!(
         rfc3339("2026-08-14T12:34:56Z"),
         Some(UNIX_EPOCH + Duration::from_secs(1_786_710_896)),
@@ -309,12 +284,9 @@ fn the_rfc3339_reader_takes_offsets_and_fractions_and_refuses_the_rest() {
         Some(UNIX_EPOCH + Duration::from_secs(60)),
         "a leap-second-shaped field names the next minute"
     );
-    for refused in [
-        "1970-13-01T00:00:00Z",
-        "1970-01-01T00:00:61Z",
-        "1970-01-01 00:00:00Z",
-        "not a date",
-    ] {
+    for refused in
+        ["1970-13-01T00:00:00Z", "1970-01-01T00:00:61Z", "1970-01-01 00:00:00Z", "not a date"]
+    {
         assert_eq!(rfc3339(refused), None, "{refused:?} is refused");
     }
 }
@@ -330,22 +302,14 @@ fn a_bucket_past_its_reset_reports_itself_expired() {
     };
 
     assert!(!window.expired(NOW), "before its reset it is live");
-    assert!(
-        window.expired(NOW + Duration::from_secs(61)),
-        "past its reset it is expired"
-    );
+    assert!(window.expired(NOW + Duration::from_secs(61)), "past its reset it is expired");
 }
 
 /// The other half of that guard, since P22: a bucket nobody dated cannot
 /// go stale, however long the clock runs.
 #[test]
 fn a_bucket_its_vendor_never_dated_never_expires() {
-    let window = RateWindow {
-        kind: "requests".to_owned(),
-        limit: 100,
-        remaining: 3,
-        reset: None,
-    };
+    let window = RateWindow { kind: "requests".to_owned(), limit: 100, remaining: 3, reset: None };
 
     assert!(!window.expired(NOW), "nothing dated it");
     assert!(
@@ -358,12 +322,8 @@ fn a_bucket_its_vendor_never_dated_never_expires() {
 /// A limit of zero is a vendor with nothing to divide by.
 #[test]
 fn a_bucket_with_no_size_meters_full_rather_than_dividing_by_zero() {
-    let window = RateWindow {
-        kind: "requests".to_owned(),
-        limit: 0,
-        remaining: 0,
-        reset: Some(NOW),
-    };
+    let window =
+        RateWindow { kind: "requests".to_owned(), limit: 0, remaining: 0, reset: Some(NOW) };
 
     assert!((window.used() - 1.0).abs() < f64::EPSILON);
 }
@@ -388,20 +348,10 @@ fn the_header_probe_yields_names_and_never_the_values_beside_them() {
     let rendered = format!("{names:?}");
 
     for (name, value) in sensitive {
-        assert!(
-            names.contains(&name),
-            "{name} is what the probe exists to report"
-        );
-        assert!(
-            !rendered.contains(value),
-            "{name}'s value must not reach a log line"
-        );
+        assert!(names.contains(&name), "{name} is what the probe exists to report");
+        assert!(!rendered.contains(value), "{name}'s value must not reach a log line");
     }
-    assert_eq!(
-        names.len(),
-        sensitive.len(),
-        "each header is named once and nothing else is added"
-    );
+    assert_eq!(names.len(), sensitive.len(), "each header is named once and nothing else is added");
 }
 
 /// The store keeps the newest complete set, and a response that said
@@ -599,10 +549,8 @@ fn a_percent_encoded_utf8_sequence_decodes_to_its_character() {
 /// guess a month the way the vendor's own UI does.
 #[test]
 fn a_copilot_snapshot_without_a_reset_keeps_its_numbers_and_no_clock() {
-    let plans = parse_plans(
-        &headers(&[("x-quota-snapshot-chat", "ent=1000&ov=0.0&rem=25.0")]),
-        NOW,
-    );
+    let plans =
+        parse_plans(&headers(&[("x-quota-snapshot-chat", "ent=1000&ov=0.0&rem=25.0")]), NOW);
 
     assert_eq!(plans[0].resets_at, None);
     assert!((plans[0].used_percent - 75.0).abs() < 1e-9);
@@ -626,10 +574,7 @@ fn a_copilot_snapshot_whose_grammar_does_not_parse_is_dropped_whole() {
         "",
     ] {
         let mut map = HeaderMap::new();
-        map.insert(
-            "x-quota-snapshot-chat",
-            HeaderValue::from_str(value).expect("a header value"),
-        );
+        map.insert("x-quota-snapshot-chat", HeaderValue::from_str(value).expect("a header value"));
 
         assert!(
             parse_plans(&map, NOW).is_empty(),
@@ -644,10 +589,7 @@ fn a_copilot_snapshot_whose_grammar_does_not_parse_is_dropped_whole() {
 fn an_unlimited_copilot_entitlement_meters_nothing() {
     assert!(
         parse_plans(
-            &headers(&[(
-                "x-quota-snapshot-chat",
-                "ent=-1&ov=0.0&ovPerm=false&rem=100.0",
-            )]),
+            &headers(&[("x-quota-snapshot-chat", "ent=-1&ov=0.0&ovPerm=false&rem=100.0",)]),
             NOW,
         )
         .is_empty()
@@ -668,10 +610,7 @@ fn a_plan_window_past_its_reset_reports_itself_expired() {
 
     assert!(!dated.expired(NOW), "before its reset it is live");
     assert!(dated.expired(NOW + Duration::from_secs(61)));
-    assert!(
-        (dated.used() - 0.9).abs() < 1e-9,
-        "the meter reads the fraction spent"
-    );
+    assert!((dated.used() - 0.9).abs() < 1e-9, "the meter reads the fraction spent");
 }
 
 /// A percentage past the end of the scale is a vendor talking about an
@@ -714,23 +653,14 @@ fn a_response_carrying_no_plan_headers_yields_no_plan_windows() {
 #[test]
 fn the_store_holds_the_two_families_apart() {
     let store = RateWindows::default();
-    assert!(
-        store.latest_plans().is_empty(),
-        "a fresh store holds nothing"
-    );
+    assert!(store.latest_plans().is_empty(), "a fresh store holds nothing");
 
     store.record(
-        &headers(&[
-            ("x-codex-primary-used-percent", "20"),
-            ("x-codex-primary-reset-at", "3600"),
-        ]),
+        &headers(&[("x-codex-primary-used-percent", "20"), ("x-codex-primary-reset-at", "3600")]),
         NOW,
     );
     assert_eq!(store.latest_plans().len(), 1);
-    assert!(
-        store.latest().is_empty(),
-        "a plan-only response invents no rate bucket"
-    );
+    assert!(store.latest().is_empty(), "a plan-only response invents no rate bucket");
 
     store.record(
         &headers(&[
@@ -740,18 +670,11 @@ fn the_store_holds_the_two_families_apart() {
         ]),
         NOW,
     );
-    assert_eq!(
-        store.latest_plans().len(),
-        1,
-        "a rate-only response leaves the plan set alone"
-    );
+    assert_eq!(store.latest_plans().len(), 1, "a rate-only response leaves the plan set alone");
     assert_eq!(store.latest().len(), 1, "and lands its own buckets");
 
     store.record(
-        &headers(&[
-            ("x-codex-primary-used-percent", "35"),
-            ("x-codex-primary-reset-at", "3600"),
-        ]),
+        &headers(&[("x-codex-primary-used-percent", "35"), ("x-codex-primary-reset-at", "3600")]),
         NOW,
     );
     assert!(

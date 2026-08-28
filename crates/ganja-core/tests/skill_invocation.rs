@@ -14,16 +14,12 @@
 
 use std::sync::Arc;
 
-use ganja_core::{
-    Engine,
-    permission::Permissions,
-    protocol::{Command, Event, PermissionReply, Role},
-    provider::ChatRequest,
-    tool::{
-        Credentials, FileTimes, Registry, Tool as _, ToolCtx,
-        skill::{Roots, SkillTool},
-    },
-};
+use ganja_core::Engine;
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{Command, Event, PermissionReply, Role};
+use ganja_core::provider::ChatRequest;
+use ganja_core::tool::skill::{Roots, SkillTool};
+use ganja_core::tool::{Credentials, FileTimes, Registry, Tool as _, ToolCtx};
 use ganja_testkit::{ScriptedProvider, drain, says, tool_call};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -86,13 +82,9 @@ async fn an_invocation_is_the_tools_own_rendering_byte_for_byte() {
     let roots = Roots::none().with_paths([dir.path().to_path_buf()]);
 
     let (provider, requests) = ScriptedProvider::new(vec![says("loaded")]);
-    let engine = Engine::new(
-        provider,
-        MODEL,
-        Arc::new(Registry::new(Vec::new())),
-        Permissions::default(),
-    )
-    .with_skill_roots(roots.clone());
+    let engine =
+        Engine::new(provider, MODEL, Arc::new(Registry::new(Vec::new())), Permissions::default())
+            .with_skill_roots(roots.clone());
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
@@ -110,23 +102,14 @@ async fn an_invocation_is_the_tools_own_rendering_byte_for_byte() {
     let expected = tool_output(roots, "porting").await;
     let requests = requests.lock().expect("the request log is never poisoned");
     let parts = user_parts(&requests[0]);
-    assert_eq!(
-        parts.len(),
-        2,
-        "the prompt text and exactly one skill part: {parts:?}"
-    );
+    assert_eq!(parts.len(), 2, "the prompt text and exactly one skill part: {parts:?}");
     assert_eq!(
         parts[0], "explain $porting now, and leave $PATH alone",
         "the token stays in the text the model reads"
     );
-    assert_eq!(
-        parts[1], expected,
-        "the injected part is the tool's own rendering, byte for byte"
-    );
+    assert_eq!(parts[1], expected, "the injected part is the tool's own rendering, byte for byte");
     assert!(
-        !seen
-            .iter()
-            .any(|event| matches!(event, Event::PermissionRequested { .. })),
+        !seen.iter().any(|event| matches!(event, Event::PermissionRequested { .. })),
         "an invocation crosses no permission dialog"
     );
 }
@@ -140,13 +123,9 @@ async fn a_vanished_skill_is_reported_in_the_tools_words_and_the_turn_proceeds()
     let roots = Roots::none().with_paths([dir.path().to_path_buf()]);
 
     let (provider, requests) = ScriptedProvider::new(vec![says("noted")]);
-    let engine = Engine::new(
-        provider,
-        MODEL,
-        Arc::new(Registry::new(Vec::new())),
-        Permissions::default(),
-    )
-    .with_skill_roots(roots);
+    let engine =
+        Engine::new(provider, MODEL, Arc::new(Registry::new(Vec::new())), Permissions::default())
+            .with_skill_roots(roots);
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
@@ -168,8 +147,7 @@ async fn a_vanished_skill_is_reported_in_the_tools_words_and_the_turn_proceeds()
         "the miss reads exactly as the tool's refusal does: {parts:?}"
     );
     assert!(
-        seen.iter()
-            .any(|event| matches!(event, Event::MessageFinished { .. })),
+        seen.iter().any(|event| matches!(event, Event::MessageFinished { .. })),
         "a miss is information, and the turn still finishes"
     );
 }
@@ -185,13 +163,9 @@ async fn a_name_collision_loads_the_same_body_the_tool_would() {
     let roots = Roots::none().with_paths([first.path().to_path_buf(), second.path().to_path_buf()]);
 
     let (provider, requests) = ScriptedProvider::new(vec![says("loaded")]);
-    let engine = Engine::new(
-        provider,
-        MODEL,
-        Arc::new(Registry::new(Vec::new())),
-        Permissions::default(),
-    )
-    .with_skill_roots(roots.clone());
+    let engine =
+        Engine::new(provider, MODEL, Arc::new(Registry::new(Vec::new())), Permissions::default())
+            .with_skill_roots(roots.clone());
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
@@ -232,13 +206,9 @@ async fn a_steered_invocation_expands_at_the_boundary_that_takes_it() {
     // holds the turn open long enough for a steer to land mid-turn, exactly
     // as `tests/steering.rs` holds it.
     let (gated, _calls) = ganja_testkit::RecorderTool::new("shell", "shell ran", "found it");
-    let engine = Engine::new(
-        provider,
-        MODEL,
-        Arc::new(Registry::new(vec![gated])),
-        Permissions::default(),
-    )
-    .with_skill_roots(roots.clone());
+    let engine =
+        Engine::new(provider, MODEL, Arc::new(Registry::new(vec![gated])), Permissions::default())
+            .with_skill_roots(roots.clone());
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
@@ -273,10 +243,7 @@ async fn a_steered_invocation_expands_at_the_boundary_that_takes_it() {
         .await
         .expect("a steer reaches a running turn");
     engine
-        .send(Command::ReplyPermission {
-            id: permission,
-            reply: PermissionReply::Once,
-        })
+        .send(Command::ReplyPermission { id: permission, reply: PermissionReply::Once })
         .await
         .expect("the reply is never refused");
     drain(&mut events).await;

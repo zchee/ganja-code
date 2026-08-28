@@ -86,23 +86,17 @@
 //! `explore`) are subagent-mode and cannot head a session, and the pane's own
 //! roster is the one that gets to say so.
 
-use std::{
-    ffi::{OsStr, OsString},
-    time::Duration,
-};
+use std::ffi::{OsStr, OsString};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use ganja_protocol::team::MemberBackend;
 use ganja_team::TeamFile;
 
-use crate::{
-    config::CONFIG_HOME_ENV,
-    teammate::{
-        Delivery, Handle, SpawnSpec, TeammateBackend, Unsupported,
-        reaper::Pane,
-        tmux::{self, Killed, Launch, Placement, Server, TmuxError},
-    },
-};
+use crate::config::CONFIG_HOME_ENV;
+use crate::teammate::reaper::Pane;
+use crate::teammate::tmux::{self, Killed, Launch, Placement, Server, TmuxError};
+use crate::teammate::{Delivery, Handle, SpawnSpec, TeammateBackend, Unsupported};
 
 /// The environment a `ganja` pane is started with, by name (**D502**).
 ///
@@ -113,12 +107,8 @@ use crate::{
 /// runtime directory resolve through when the first is unset. A closed list:
 /// what is not named here does not travel, however harmless it looks, because
 /// the day this list becomes a filter is the day a secret rides it.
-pub const CARRIED_ENV: [&str; 4] = [
-    CONFIG_HOME_ENV,
-    "XDG_CONFIG_HOME",
-    "XDG_DATA_HOME",
-    "XDG_RUNTIME_DIR",
-];
+pub const CARRIED_ENV: [&str; 4] =
+    [CONFIG_HOME_ENV, "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR"];
 
 /// The flag carrying §2.2's derived `<name>@<team>` identity.
 pub const AGENT_ID: &str = "--agent-id";
@@ -253,9 +243,7 @@ async fn wait_for_record(spec: &SpawnSpec, pane_id: &str, limit: Duration) -> Re
     loop {
         if let Ok(text) = tokio::fs::read_to_string(&path).await
             && let Ok(file) = serde_json::from_str::<TeamFile>(&text)
-            && file
-                .member(spec.name.as_str())
-                .is_some_and(|member| member.tmux_pane_id == pane_id)
+            && file.member(spec.name.as_str()).is_some_and(|member| member.tmux_pane_id == pane_id)
         {
             return Ok(());
         }
@@ -319,9 +307,7 @@ pub(super) async fn split_idle_shell(
     // under that column's bottom. A listing that fails is not a spawn that
     // fails — where a pane sits is cosmetic — so it falls back to the
     // placement a lead with no column would have given it anyway.
-    let beside = Placement::Beside {
-        share: spec.share.percent(),
-    };
+    let beside = Placement::Beside { share: spec.share.percent() };
     let placement = match server.column_bottom().await {
         Ok(Some(bottom)) => Placement::Under(bottom),
         Ok(None) => beside,
@@ -336,17 +322,9 @@ pub(super) async fn split_idle_shell(
         }
     };
     let pane = server
-        .split(Launch {
-            cwd: &spec.cwd,
-            environment,
-            argv: &shell,
-            placement,
-        })
+        .split(Launch { cwd: &spec.cwd, environment, argv: &shell, placement })
         .await
-        .map_err(|error| Unsupported {
-            backend: refused_as,
-            reason: error.to_string(),
-        })?;
+        .map_err(|error| Unsupported { backend: refused_as, reason: error.to_string() })?;
     tracing::info!(
         teammate = spec.name.as_str(),
         pane = pane.id,
@@ -380,10 +358,7 @@ pub(super) async fn kill_pane(handle: &Handle, backend: &'static str, whose: &'s
         // other shapes since P27 — an in-process teammate and a shim child —
         // and the answer is the same for both: this backend made neither, so
         // ending either would be ending somebody else's teammate.
-        tracing::warn!(
-            ?handle,
-            "a {backend} backend was asked to end something it did not start"
-        );
+        tracing::warn!(?handle, "a {backend} backend was asked to end something it did not start");
         return;
     };
     let server = match Server::current() {
@@ -419,10 +394,7 @@ impl GanjaPane {
     /// surface, and here is why. For [`TmuxError::NotHosted`] the reason is
     /// exactly [`tmux::REFUSED_NO_TMUX`], the D501 sentence.
     fn refused(error: &TmuxError) -> Unsupported {
-        Unsupported {
-            backend: MemberBackend::Ganja,
-            reason: error.to_string(),
-        }
+        Unsupported { backend: MemberBackend::Ganja, reason: error.to_string() }
     }
 
     /// §4.1 step 6: types `line` into the pane's idle shell.
@@ -486,14 +458,8 @@ impl TeammateBackend for GanjaPane {
         // travels here (D502), through tmux's own door; the launch line is
         // typed later, once the record this pane will read exists.
         let environment = tmux::environment(CARRIED_ENV);
-        let pane = split_idle_shell(
-            &server,
-            spec,
-            &environment,
-            MemberBackend::Ganja,
-            "teammate",
-        )
-        .await?;
+        let pane =
+            split_idle_shell(&server, spec, &environment, MemberBackend::Ganja, "teammate").await?;
 
         // §4.1 step 6, sequenced after step 2 by watching for step 2 itself:
         // the record is what the pane's process reads first, so the record's
@@ -523,11 +489,7 @@ impl TeammateBackend for GanjaPane {
         let owned = spec.clone();
         tokio::spawn(async move {
             match wait_for_record(&owned, &pane.id, RECORD_WAIT).await {
-                Ok(()) => {
-                    watched
-                        .type_launch_line(&owned, &pane, &line, &server)
-                        .await
-                }
+                Ok(()) => watched.type_launch_line(&owned, &pane, &line, &server).await,
                 Err(reason) => {
                     tracing::warn!(
                         teammate = owned.name.as_str(),

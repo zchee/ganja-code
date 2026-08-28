@@ -26,19 +26,17 @@
 //! cancelled login structurally unable to leave anything behind — the same
 //! property every other flow under [`super`] is built on.
 
-use std::{fmt, sync::Arc, time::Duration};
+use std::fmt;
+use std::sync::Arc;
+use std::time::Duration;
 
 use secrecy::{ExposeSecret as _, SecretString};
 use tokio_util::sync::CancellationToken;
 use url::form_urlencoded;
 
-use super::{
-    AuthError, OauthCredential,
-    device::{Clock, SystemClock, json_object, text},
-    now_ms,
-    pkce::{EntropyError, Pkce, random_bytes},
-    token_deadline_ms,
-};
+use super::device::{Clock, SystemClock, json_object, text};
+use super::pkce::{EntropyError, Pkce, random_bytes};
+use super::{AuthError, OauthCredential, now_ms, token_deadline_ms};
 
 /// What ganja calls this provider — and, uniquely among the OAuth providers,
 /// also the key its credential is stored under: upstream's plugin files it
@@ -174,10 +172,7 @@ pub fn login_flow() -> Result<Flow, LoginError> {
 ///
 /// Returns [`LoginError::Client`] when no HTTP client can be built.
 pub fn login_flow_at(origin: &str) -> Result<Flow, LoginError> {
-    login_flow_at_urls(
-        format!("{origin}/loginDeepControl"),
-        format!("{origin}/auth/poll"),
-    )
+    login_flow_at_urls(format!("{origin}/loginDeepControl"), format!("{origin}/auth/poll"))
 }
 
 /// The one constructor both routes above go through.
@@ -262,12 +257,7 @@ impl Flow {
             .finish();
         let url = format!("{}?{query}", self.login_url);
 
-        Ok(Login {
-            flow: self.clone(),
-            url,
-            uuid,
-            pkce,
-        })
+        Ok(Login { flow: self.clone(), url, uuid, pkce })
     }
 }
 
@@ -351,9 +341,7 @@ impl Login {
                 return Err(LoginError::Cancelled);
             }
             if self.flow.clock.now_ms() >= deadline {
-                return Err(LoginError::TimedOut {
-                    after: POLL_DEADLINE,
-                });
+                return Err(LoginError::TimedOut { after: POLL_DEADLINE });
             }
 
             match self.poll_once(&url, cancel).await? {
@@ -446,11 +434,7 @@ impl Login {
 fn credential_from(access: SecretString, refresh: Option<SecretString>) -> OauthCredential {
     let expires = expiry(&access);
 
-    OauthCredential::new(
-        refresh.unwrap_or_else(|| SecretString::from("")),
-        access,
-        expires,
-    )
+    OauthCredential::new(refresh.unwrap_or_else(|| SecretString::from("")), access, expires)
 }
 
 /// When the credential should be renewed: the access token's own `exp` less
@@ -526,10 +510,7 @@ impl Refresh {
             }
         })?;
 
-        Ok(Self {
-            client,
-            refresh_url: refresh_url.into(),
-        })
+        Ok(Self { client, refresh_url: refresh_url.into() })
     }
 }
 
@@ -599,15 +580,9 @@ impl super::RefreshOauth for Refresh {
 
             let reason = format!("HTTP {}", status.as_u16());
             return Err(if status.is_client_error() {
-                AuthError::ReauthRequired {
-                    provider_id: provider_id.to_owned(),
-                    reason,
-                }
+                AuthError::ReauthRequired { provider_id: provider_id.to_owned(), reason }
             } else {
-                AuthError::RefreshUnavailable {
-                    provider_id: provider_id.to_owned(),
-                    reason,
-                }
+                AuthError::RefreshUnavailable { provider_id: provider_id.to_owned(), reason }
             });
         }
 

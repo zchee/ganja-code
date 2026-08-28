@@ -43,28 +43,26 @@
 //! own accessors and never through the team crate: serve invents no state,
 //! holds no team, and keeps its dependency list where it was.
 
-use axum::{
-    Json,
-    body::Bytes,
-    extract::{Path, Request, State},
-    http::{HeaderMap, StatusCode, Uri, header},
-    middleware::{self, Next},
-    response::{IntoResponse as _, Response},
-    routing::{get, post},
-};
+use axum::Json;
+use axum::body::Bytes;
+use axum::extract::{Path, Request, State};
+use axum::http::{HeaderMap, StatusCode, Uri, header};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse as _, Response};
+use axum::routing::{get, post};
+use ganja_core::config::AgentMode;
+use ganja_core::engine::PeerEnvelope;
 use ganja_core::{
     EngineError, Incoming, NotReceived, SocketDelivered, SocketMessage, SocketReceipt,
-    config::AgentMode, engine::PeerEnvelope,
 };
-use ganja_protocol::{Command, Mention, PermissionId, PermissionReply, SessionId, team::TeamView};
+use ganja_protocol::team::TeamView;
+use ganja_protocol::{Command, Mention, PermissionId, PermissionReply, SessionId};
 use serde::Deserialize;
 
-use crate::{
-    auth::{self, WWW_AUTHENTICATE},
-    error::ApiError,
-    sse,
-    state::{AppState, Transport},
-};
+use crate::auth::{self, WWW_AUTHENTICATE};
+use crate::error::ApiError;
+use crate::sse;
+use crate::state::{AppState, Transport};
 
 /// The header a client names its directory in — upstream's
 /// `x-opencode-directory` (`middleware/workspace-routing.ts:87`), spelled in
@@ -77,9 +75,7 @@ pub(crate) fn router(state: AppState) -> axum::Router {
         Transport::Socket => socket_routes(),
     };
 
-    router
-        .layer(middleware::from_fn_with_state(state.clone(), guard))
-        .with_state(state)
+    router.layer(middleware::from_fn_with_state(state.clone(), guard)).with_state(state)
 }
 
 /// Every route a TCP listener serves — upstream's surface, and this build's
@@ -237,14 +233,9 @@ async fn guard(State(state): State<AppState>, request: Request, next: Next) -> R
 /// engine was built in one directory and cannot (deviation:
 /// other-directories-are-refused).
 fn wrong_directory(state: &AppState, uri: &Uri, headers: &HeaderMap) -> Option<ApiError> {
-    let asked = uri
-        .query()
-        .and_then(|query| auth::query_param(query, "directory"))
-        .or_else(|| {
-            headers
-                .get(DIRECTORY_HEADER)
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_owned)
+    let asked =
+        uri.query().and_then(|query| auth::query_param(query, "directory")).or_else(|| {
+            headers.get(DIRECTORY_HEADER).and_then(|value| value.to_str().ok()).map(str::to_owned)
         })?;
 
     if state.directory.matches(&asked) {
@@ -493,10 +484,7 @@ async fn prompt(
     ensure_session(&state, &id).await?;
 
     if let Some(agent) = body.agent {
-        state
-            .engine
-            .send(Command::SwitchAgent { name: agent })
-            .await?;
+        state.engine.send(Command::SwitchAgent { name: agent }).await?;
     }
     if let Some(model) = body.model {
         state.engine.send(Command::SwitchModel { model }).await?;
@@ -559,13 +547,7 @@ async fn run_command(
 ) -> Result<StatusCode, ApiError> {
     let body: CommandBody = parse(&body)?;
     ensure_session(&state, &id).await?;
-    state
-        .engine
-        .send(Command::RunCommand {
-            name: body.name,
-            args: body.args,
-        })
-        .await?;
+    state.engine.send(Command::RunCommand { name: body.name, args: body.args }).await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -586,12 +568,7 @@ async fn run_shell(
 ) -> Result<StatusCode, ApiError> {
     let body: ShellBody = parse(&body)?;
     ensure_session(&state, &id).await?;
-    state
-        .engine
-        .send(Command::RunShell {
-            command: body.command,
-        })
-        .await?;
+    state.engine.send(Command::RunShell { command: body.command }).await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -635,10 +612,7 @@ async fn switch_agent(
 ) -> Result<StatusCode, ApiError> {
     let body: SwitchAgentBody = parse(&body)?;
     ensure_session(&state, &id).await?;
-    state
-        .engine
-        .send(Command::SwitchAgent { name: body.name })
-        .await?;
+    state.engine.send(Command::SwitchAgent { name: body.name }).await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -658,10 +632,7 @@ async fn switch_model(
 ) -> Result<StatusCode, ApiError> {
     let body: SwitchModelBody = parse(&body)?;
     ensure_session(&state, &id).await?;
-    state
-        .engine
-        .send(Command::SwitchModel { model: body.model })
-        .await?;
+    state.engine.send(Command::SwitchModel { model: body.model }).await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -674,11 +645,7 @@ async fn switch_model(
 /// nobody), and a client asking after a team should be told there is none to
 /// ask after rather than handed a roster with no lead in it.
 async fn team(State(state): State<AppState>) -> Result<Json<TeamView>, ApiError> {
-    state
-        .engine
-        .team_view()
-        .map(Json)
-        .ok_or_else(|| ApiError::NotFound(NO_TEAM.to_owned()))
+    state.engine.team_view().map(Json).ok_or_else(|| ApiError::NotFound(NO_TEAM.to_owned()))
 }
 
 /// `POST /team/{name}/message` (D-13, socket router only): a plain message
@@ -750,31 +717,14 @@ async fn team_message(
 ) -> Result<Json<SocketDelivered>, ApiError> {
     // Destructured rather than field-read, so a fifth wire field cannot be
     // added later and quietly go unforwarded: this stops compiling instead.
-    let SocketMessage {
-        from,
-        text,
-        summary,
-        message_id,
-        from_mode,
-        hop_chain,
-        reply_to,
-    } = parse(&body)?;
+    let SocketMessage { from, text, summary, message_id, from_mode, hop_chain, reply_to } =
+        parse(&body)?;
 
     let received = state
         .engine
         .receive_peer_envelope(
-            Incoming {
-                from,
-                to: name,
-                text,
-                summary,
-            },
-            PeerEnvelope {
-                message_id,
-                from_mode,
-                hop_chain,
-                reply_to,
-            },
+            Incoming { from, to: name, text, summary },
+            PeerEnvelope { message_id, from_mode, hop_chain, reply_to },
         )
         .await
         .map_err(|refused| match refused {
@@ -864,10 +814,7 @@ async fn reply_permission(
     let body: ReplyBody = parse(&body)?;
     state
         .engine
-        .send(Command::ReplyPermission {
-            id: PermissionId::from(id),
-            reply: body.response,
-        })
+        .send(Command::ReplyPermission { id: PermissionId::from(id), reply: body.response })
         .await?;
 
     Ok(StatusCode::NO_CONTENT)

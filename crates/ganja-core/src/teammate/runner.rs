@@ -36,11 +36,9 @@
 //! left in the inbox and retried on the next pass, which is the behaviour the
 //! two-write version would also have had.
 
-use std::{
-    path::PathBuf,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use futures::StreamExt as _;
 use ganja_protocol::team::{
@@ -48,11 +46,9 @@ use ganja_protocol::team::{
 };
 use ganja_team::{MailboxMessage, MemberName, Surface, mailbox, record};
 
-use crate::{
-    EngineError,
-    protocol::{Command, PermissionMode},
-    teammate::{SETTLE, Teammate},
-};
+use crate::EngineError;
+use crate::protocol::{Command, PermissionMode};
+use crate::teammate::{SETTLE, Teammate};
 
 /// §6's teammate cadence. The lead's own poller runs at half this rate; the
 /// difference is the reference's and is kept, because the teammate is the side
@@ -86,13 +82,10 @@ pub const SHUTDOWN_AHEAD: &str = "a shutdown request goes ahead of everything el
 pub fn shutdown_ahead(
     valid: &[MailboxMessage],
 ) -> Option<(usize, &MailboxMessage, ShutdownRequest)> {
-    valid
-        .iter()
-        .enumerate()
-        .find_map(|(position, message)| match message.frame() {
-            Some(Frame::ShutdownRequest(request)) => Some((position, message, request)),
-            _ => None,
-        })
+    valid.iter().enumerate().find_map(|(position, message)| match message.frame() {
+        Some(Frame::ShutdownRequest(request)) => Some((position, message, request)),
+        _ => None,
+    })
 }
 
 /// How a batch of messages is put to the teammate's model.
@@ -291,11 +284,7 @@ impl Runner {
                     tick.dropped.push(name);
                     handled.push(mailbox::identity(message));
                 }
-                Verdict::Tell {
-                    kind,
-                    text,
-                    clears: request,
-                } => {
+                Verdict::Tell { kind, text, clears: request } => {
                     tick.applied.push(kind);
                     batch.push(text);
                     carried.push(mailbox::identity(message));
@@ -405,12 +394,7 @@ impl Runner {
                 return Verdict::Dropped("mode_set_request");
             }
         };
-        if let Err(error) = self
-            .teammate
-            .engine()
-            .send(Command::SetPermissionMode { mode })
-            .await
-        {
+        if let Err(error) = self.teammate.engine().send(Command::SetPermissionMode { mode }).await {
             tracing::warn!(
                 teammate = self.teammate.name(),
                 %error,
@@ -512,13 +496,8 @@ impl Runner {
             pane_id: Some(self.surface.tmux_pane_id().to_owned()),
             backend_type: Some(self.surface.backend_type().to_owned()),
         });
-        write_frame(
-            self.lead_inbox.clone(),
-            self.teammate.name(),
-            &approved,
-            "a shutdown answer",
-        )
-        .await;
+        write_frame(self.lead_inbox.clone(), self.teammate.name(), &approved, "a shutdown answer")
+            .await;
     }
 
     /// Takes everything this pass finished out of the inbox, in one write.

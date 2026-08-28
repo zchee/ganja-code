@@ -66,25 +66,24 @@
 //! `CreateFileW` just to close that empty-file interval would reimplement the
 //! more important no-follow invariant.
 
+use std::collections::{BTreeMap, HashMap};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
-use std::{
-    collections::{BTreeMap, HashMap},
-    env, fmt, fs, io,
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
+use std::{env, fmt, fs, io};
 
-use base64::{
-    Engine as _, alphabet,
-    engine::{GeneralPurpose, general_purpose::NO_PAD_INDIFFERENT},
-};
+use base64::engine::GeneralPurpose;
+use base64::engine::general_purpose::NO_PAD_INDIFFERENT;
+use base64::{Engine as _, alphabet};
 use etcetera::base_strategy::{BaseStrategy as _, Xdg};
 use futures::future::{BoxFuture, FutureExt as _, Shared};
-use secrecy::{ExposeSecret as _, SecretString, zeroize::Zeroize as _};
+use secrecy::zeroize::Zeroize as _;
+use secrecy::{ExposeSecret as _, SecretString};
 use serde::Deserialize;
-use serde_json::{Map, Value, error::Category};
+use serde_json::error::Category;
+use serde_json::{Map, Value};
 
 pub mod copilot;
 pub mod cursor;
@@ -108,10 +107,7 @@ pub mod pkce;
 /// attacker-influenceable origin rather than a fixed vendor endpoint; a
 /// follow-up, not a fix made here.
 pub(crate) fn login_client(timeout: std::time::Duration) -> reqwest::Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(timeout)
-        .build()
+    reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(timeout).build()
 }
 
 /// Directory ganja keeps its state in, under the XDG data home.
@@ -183,10 +179,7 @@ pub const KEY_VARS: &[(&str, &str)] = &[
 /// The environment variable an API key for `provider_id` may be passed in.
 #[must_use]
 pub fn key_var(provider_id: &str) -> Option<&'static str> {
-    KEY_VARS
-        .iter()
-        .find(|(provider, _)| *provider == provider_id)
-        .map(|(_, variable)| *variable)
+    KEY_VARS.iter().find(|(provider, _)| *provider == provider_id).map(|(_, variable)| *variable)
 }
 
 /// Providers ganja names differently from the key their credential is stored
@@ -221,10 +214,7 @@ pub fn storage_key(provider_id: &str) -> &str {
 /// list` or against the file itself will see.
 #[must_use]
 pub fn provider_id_for_storage_key(key: &str) -> &str {
-    STORAGE_ALIASES
-        .iter()
-        .find(|(_, stored)| *stored == key)
-        .map_or(key, |(ganja, _)| *ganja)
+    STORAGE_ALIASES.iter().find(|(_, stored)| *stored == key).map_or(key, |(ganja, _)| *ganja)
 }
 
 /// Where a login nobody stamped ranks, by ganja's name for its provider.
@@ -246,10 +236,7 @@ fn login_rank(key: &str, stamps: &BTreeMap<String, u64>) -> (u8, u64) {
         return (0, stored_at);
     }
 
-    match UNSTAMPED_PRIORITY
-        .iter()
-        .position(|id| *id == provider_id_for_storage_key(key))
-    {
+    match UNSTAMPED_PRIORITY.iter().position(|id| *id == provider_id_for_storage_key(key)) {
         Some(index) => (1, index as u64),
         None => (2, 0),
     }
@@ -371,9 +358,7 @@ impl RedactedTail {
     #[must_use]
     pub fn of(secret: &str) -> Self {
         let characters: Vec<char> = secret.chars().collect();
-        let visible: String = characters[characters.len().saturating_sub(TAIL)..]
-            .iter()
-            .collect();
+        let visible: String = characters[characters.len().saturating_sub(TAIL)..].iter().collect();
 
         Self(format!("{MASK}{visible}"))
     }
@@ -443,10 +428,7 @@ impl Credential {
 
 impl fmt::Debug for Credential {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Credential")
-            .field("api_key", &self.tail())
-            .finish()
+        formatter.debug_struct("Credential").field("api_key", &self.tail()).finish()
     }
 }
 
@@ -519,14 +501,7 @@ impl OauthCredential {
     /// default credential nobody asked to exist.
     #[must_use]
     pub fn new(refresh: SecretString, access: SecretString, expires: u64) -> Self {
-        Self {
-            refresh,
-            access,
-            expires,
-            account_id: None,
-            enterprise_url: None,
-            extra: Map::new(),
-        }
+        Self { refresh, access, expires, account_id: None, enterprise_url: None, extra: Map::new() }
     }
 
     /// What may be shown of the credential: the tail of the token a request
@@ -629,9 +604,7 @@ impl OauthCredential {
             self.enterprise_url = previous.enterprise_url.clone();
         }
         for (field, value) in &previous.extra {
-            self.extra
-                .entry(field.clone())
-                .or_insert_with(|| value.clone());
+            self.extra.entry(field.clone()).or_insert_with(|| value.clone());
         }
 
         self
@@ -644,23 +617,14 @@ impl OauthCredential {
     fn to_value(&self) -> Value {
         let mut entry = self.extra.clone();
         entry.insert("type".to_owned(), Value::from("oauth"));
-        entry.insert(
-            "refresh".to_owned(),
-            Value::from(self.refresh.expose_secret()),
-        );
-        entry.insert(
-            "access".to_owned(),
-            Value::from(self.access.expose_secret()),
-        );
+        entry.insert("refresh".to_owned(), Value::from(self.refresh.expose_secret()));
+        entry.insert("access".to_owned(), Value::from(self.access.expose_secret()));
         entry.insert("expires".to_owned(), Value::from(self.expires));
         if let Some(account_id) = &self.account_id {
             entry.insert("accountId".to_owned(), Value::from(account_id.clone()));
         }
         if let Some(enterprise_url) = &self.enterprise_url {
-            entry.insert(
-                "enterpriseUrl".to_owned(),
-                Value::from(enterprise_url.clone()),
-            );
+            entry.insert("enterpriseUrl".to_owned(), Value::from(enterprise_url.clone()));
         }
 
         Value::Object(entry)
@@ -966,10 +930,7 @@ impl Store {
     }
 
     fn io(&self, attempt: &str, source: io::Error) -> AuthError {
-        AuthError::Io {
-            context: format!("{} {attempt}", self.path.display()),
-            source,
-        }
+        AuthError::Io { context: format!("{} {attempt}", self.path.display()), source }
     }
 
     /// Reads the file as it stands, entries this build cannot use included.
@@ -978,7 +939,8 @@ impl Store {
     fn read(&self) -> Result<BTreeMap<String, Value>, AuthError> {
         #[cfg(windows)]
         let mut bytes = {
-            use std::{io::Read as _, os::windows::fs::OpenOptionsExt as _};
+            use std::io::Read as _;
+            use std::os::windows::fs::OpenOptionsExt as _;
 
             use windows_sys::Win32::Storage::FileSystem::FILE_GENERIC_READ;
 
@@ -996,8 +958,7 @@ impl Store {
             check_private(&self.path, &file)?;
 
             let mut bytes = Vec::new();
-            file.read_to_end(&mut bytes)
-                .map_err(|source| self.io("could not be read", source))?;
+            file.read_to_end(&mut bytes).map_err(|source| self.io("could not be read", source))?;
             bytes
         };
 
@@ -1030,10 +991,7 @@ impl Store {
     /// stored key to a crash would be a worse bug than any this method has.
     fn write(&self, data: &BTreeMap<String, Value>) -> Result<(), AuthError> {
         let parent = self.path.parent().ok_or_else(|| {
-            self.io(
-                "has no directory to be created in",
-                io::Error::from(io::ErrorKind::NotFound),
-            )
+            self.io("has no directory to be created in", io::Error::from(io::ErrorKind::NotFound))
         })?;
         fs::create_dir_all(parent).map_err(|source| AuthError::Io {
             context: format!("{} could not be created", parent.display()),
@@ -1044,9 +1002,7 @@ impl Store {
             .map_err(|error| AuthError::malformed(&self.path, &error))?;
         json.push(b'\n');
 
-        let temporary = self
-            .path
-            .with_file_name(format!("{FILE}.{}.tmp", std::process::id()));
+        let temporary = self.path.with_file_name(format!("{FILE}.{}.tmp", std::process::id()));
         let written = write_private(&temporary, &json);
         // Wiped whether or not the write landed, and before the `?`: the buffer
         // holds every stored key in plaintext and the file now has its own copy.
@@ -1077,10 +1033,7 @@ impl Store {
     /// The entry's unmodelled fields come back with it, which is what makes
     /// [`Self::set_oauth`] able to put them back.
     fn oauth(&self, provider_id: &str) -> Result<Option<OauthCredential>, AuthError> {
-        Ok(self
-            .read()?
-            .get(storage_key(provider_id))
-            .and_then(usable_oauth))
+        Ok(self.read()?.get(storage_key(provider_id)).and_then(usable_oauth))
     }
 
     /// Stores `credential` as `provider_id`'s, replacing whatever it had.
@@ -1175,11 +1128,7 @@ impl Store {
                 }
 
                 usable_oauth(value).map(|credential| {
-                    (
-                        provider_id.clone(),
-                        credential.tail(),
-                        CredentialKind::Oauth,
-                    )
+                    (provider_id.clone(), credential.tail(), CredentialKind::Oauth)
                 })
             })
             .collect())
@@ -1248,9 +1197,8 @@ impl Store {
         let mut json = serde_json::to_vec_pretty(stamps)?;
         json.push(b'\n');
 
-        let temporary = self
-            .stamps_path()
-            .with_file_name(format!("{STAMPS_FILE}.{}.tmp", std::process::id()));
+        let temporary =
+            self.stamps_path().with_file_name(format!("{STAMPS_FILE}.{}.tmp", std::process::id()));
         write_private(&temporary, &json)?;
 
         fs::rename(&temporary, self.stamps_path()).inspect_err(|_| {
@@ -1263,11 +1211,8 @@ impl Store {
     /// [`UNSTAMPED_PRIORITY`], then the rest in the store's own order.
     fn logins_oldest_first(&self) -> Result<Vec<String>, AuthError> {
         let stamps = self.read_stamps();
-        let mut keys: Vec<String> = self
-            .stored()?
-            .into_iter()
-            .map(|(provider_id, _, _)| provider_id)
-            .collect();
+        let mut keys: Vec<String> =
+            self.stored()?.into_iter().map(|(provider_id, _, _)| provider_id).collect();
         keys.sort_by_key(|key| login_rank(key, &stamps));
 
         Ok(keys)
@@ -1320,9 +1265,7 @@ fn usable_oauth(value: &Value) -> Option<OauthCredential> {
 pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| {
-            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
-        })
+        .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// How long before an access token actually expires it is renewed.
@@ -1606,15 +1549,10 @@ impl Refresher {
     /// its `Shared` in the map for whoever comes next to drive to completion,
     /// and by the time this runs the entry may already have been replaced.
     fn retire(&self, key: &str, pending: &Pending) {
-        let mut in_flight = self
-            .in_flight
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut in_flight =
+            self.in_flight.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
-        if in_flight
-            .get(key)
-            .is_some_and(|current| Shared::ptr_eq(current, pending))
-        {
+        if in_flight.get(key).is_some_and(|current| Shared::ptr_eq(current, pending)) {
             in_flight.remove(key);
         }
     }
@@ -1629,10 +1567,7 @@ fn check_private(path: &Path, metadata: &fs::Metadata) -> Result<(), AuthError> 
         return Ok(());
     }
 
-    Err(AuthError::Permissions {
-        path: path.to_path_buf(),
-        mode,
-    })
+    Err(AuthError::Permissions { path: path.to_path_buf(), mode })
 }
 
 /// Rejects a Windows DACL that lets an identity outside the accepted system
@@ -1641,10 +1576,7 @@ fn check_private(path: &Path, metadata: &fs::Metadata) -> Result<(), AuthError> 
 fn check_private(path: &Path, file: &fs::File) -> Result<(), AuthError> {
     match windows_acl::exposed_grantee(file) {
         Ok(None) => Ok(()),
-        Ok(Some(grantee)) => Err(AuthError::Permissions {
-            path: path.to_path_buf(),
-            grantee,
-        }),
+        Ok(Some(grantee)) => Err(AuthError::Permissions { path: path.to_path_buf(), grantee }),
         Err(source) => Err(AuthError::Io {
             context: format!("{} could not be inspected", path.display()),
             source,
@@ -1671,11 +1603,7 @@ fn create_private(path: &Path) -> io::Result<fs::File> {
 
     // The mode is set at creation rather than afterwards so that the file is
     // never, even briefly, readable by anyone else.
-    fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(PRIVATE)
-        .open(path)
+    fs::OpenOptions::new().write(true).create_new(true).mode(PRIVATE).open(path)
 }
 
 /// Creates a Windows file with the right to replace its inherited DACL.
@@ -1695,10 +1623,7 @@ fn create_private(path: &Path) -> io::Result<fs::File> {
 /// Platforms without unix modes or Windows DACLs retain the old open.
 #[cfg(not(any(unix, windows)))]
 fn create_private(path: &Path) -> io::Result<fs::File> {
-    fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
+    fs::OpenOptions::new().write(true).create_new(true).open(path)
 }
 
 /// Writes `bytes` to a newly created file only its owner can read.
@@ -1733,30 +1658,31 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 #[cfg(windows)]
 mod windows_acl {
-    use std::{ffi::c_void, fs, io, mem::size_of, os::windows::io::AsRawHandle as _, ptr};
+    use std::ffi::c_void;
+    use std::mem::size_of;
+    use std::os::windows::io::AsRawHandle as _;
+    use std::{fs, io, ptr};
 
-    use windows_sys::Win32::{
-        Foundation::{
-            CloseHandle, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, HANDLE, LocalFree, WIN32_ERROR,
-        },
-        Security::{
-            ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAceEx,
-            Authorization::{
-                ConvertSidToStringSidW, DENY_ACCESS, EXPLICIT_ACCESS_W, GetExplicitEntriesFromAclW,
-                GetSecurityInfo, SE_FILE_OBJECT, SetSecurityInfo, TRUSTEE_IS_NAME, TRUSTEE_IS_SID,
-            },
-            CopySid, CreateWellKnownSid, DACL_SECURITY_INFORMATION, EqualSid, GENERIC_MAPPING,
-            GetLengthSid, GetTokenInformation, InitializeAcl, IsValidSid, LookupAccountSidW,
-            MapGenericMask, PROTECTED_DACL_SECURITY_INFORMATION, PSID, SECURITY_MAX_SID_SIZE,
-            SID_NAME_USE, TOKEN_QUERY, TOKEN_USER, TokenUser, WELL_KNOWN_SID_TYPE,
-            WinBuiltinAdministratorsSid, WinLocalSystemSid,
-        },
-        Storage::FileSystem::{
-            FILE_ALL_ACCESS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
-            FILE_READ_ATTRIBUTES, FILE_READ_EA, READ_CONTROL, SYNCHRONIZE,
-        },
-        System::Threading::{GetCurrentProcess, OpenProcessToken},
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, HANDLE, LocalFree, WIN32_ERROR,
     };
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, DENY_ACCESS, EXPLICIT_ACCESS_W, GetExplicitEntriesFromAclW,
+        GetSecurityInfo, SE_FILE_OBJECT, SetSecurityInfo, TRUSTEE_IS_NAME, TRUSTEE_IS_SID,
+    };
+    use windows_sys::Win32::Security::{
+        ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAceEx, CopySid, CreateWellKnownSid,
+        DACL_SECURITY_INFORMATION, EqualSid, GENERIC_MAPPING, GetLengthSid, GetTokenInformation,
+        InitializeAcl, IsValidSid, LookupAccountSidW, MapGenericMask,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSID, SECURITY_MAX_SID_SIZE, SID_NAME_USE,
+        TOKEN_QUERY, TOKEN_USER, TokenUser, WELL_KNOWN_SID_TYPE, WinBuiltinAdministratorsSid,
+        WinLocalSystemSid,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ALL_ACCESS, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
+        FILE_READ_ATTRIBUTES, FILE_READ_EA, READ_CONTROL, SYNCHRONIZE,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     /// A kernel handle which is not a borrowed file or process pseudo-handle.
     struct OwnedHandle(HANDLE);
@@ -1794,9 +1720,7 @@ mod windows_acl {
     impl OwnedSid {
         fn zeroed(bytes: u32) -> Self {
             let words = (bytes as usize).div_ceil(size_of::<usize>());
-            Self {
-                words: vec![0; words].into_boxed_slice(),
-            }
+            Self { words: vec![0; words].into_boxed_slice() }
         }
 
         pub(super) fn as_psid(&self) -> PSID {
@@ -1873,9 +1797,7 @@ mod windows_acl {
         let queried =
             unsafe { GetTokenInformation(token.0, TokenUser, ptr::null_mut(), 0, &mut length) };
         if queried != 0 {
-            return Err(io::Error::other(
-                "Windows returned token-user data without a buffer",
-            ));
+            return Err(io::Error::other("Windows returned token-user data without a buffer"));
         }
         let source = io::Error::last_os_error();
         if source.raw_os_error() != Some(ERROR_INSUFFICIENT_BUFFER as i32) {
@@ -1913,9 +1835,7 @@ mod windows_acl {
             .and_then(|bytes| u32::try_from(bytes).ok())
             .ok_or_else(|| io::Error::other("the private DACL is too large"))?;
         let words = (bytes as usize).div_ceil(size_of::<usize>());
-        let mut acl = OwnedAcl {
-            words: vec![0; words].into_boxed_slice(),
-        };
+        let mut acl = OwnedAcl { words: vec![0; words].into_boxed_slice() };
 
         // SAFETY: acl owns an aligned allocation of bytes bytes.
         if unsafe { InitializeAcl(acl.as_mut_ptr(), bytes, ACL_REVISION) } == 0 {
@@ -2019,10 +1939,7 @@ mod windows_acl {
                 return Ok(Some(trustee_name(entry)));
             }
             let sid = entry.Trustee.ptstrName.cast();
-            if accepted
-                .iter()
-                .any(|allowed| unsafe { EqualSid(sid, allowed.as_psid()) } != 0)
-            {
+            if accepted.iter().any(|allowed| unsafe { EqualSid(sid, allowed.as_psid()) } != 0) {
                 continue;
             }
             return Ok(Some(account_name(sid)));
@@ -2088,11 +2005,7 @@ mod windows_acl {
 
         let mut name = vec![0u16; name_length as usize];
         let mut domain = vec![0u16; domain_length as usize];
-        let domain_pointer = if domain.is_empty() {
-            ptr::null_mut()
-        } else {
-            domain.as_mut_ptr()
-        };
+        let domain_pointer = if domain.is_empty() { ptr::null_mut() } else { domain.as_mut_ptr() };
         // SAFETY: both buffers have the lengths supplied by the first query.
         if unsafe {
             LookupAccountSidW(
@@ -2111,11 +2024,7 @@ mod windows_acl {
 
         let name = wide_buffer(&name, name_length);
         let domain = wide_buffer(&domain, domain_length);
-        Some(if domain.is_empty() {
-            name
-        } else {
-            format!("{domain}\\{name}")
-        })
+        Some(if domain.is_empty() { name } else { format!("{domain}\\{name}") })
     }
 
     fn sid_string(sid: PSID) -> Option<String> {
@@ -2132,10 +2041,7 @@ mod windows_acl {
 
     fn wide_buffer(buffer: &[u16], reported: u32) -> String {
         let used = (reported as usize).min(buffer.len());
-        let used = buffer[..used]
-            .iter()
-            .position(|character| *character == 0)
-            .unwrap_or(used);
+        let used = buffer[..used].iter().position(|character| *character == 0).unwrap_or(used);
         String::from_utf16_lossy(&buffer[..used])
     }
 
@@ -2373,9 +2279,7 @@ pub fn list_providers() -> Result<Vec<Entry>, AuthError> {
         });
     }
     entries.sort_by(|left, right| {
-        left.provider_id
-            .cmp(&right.provider_id)
-            .then(rank(left.source).cmp(&rank(right.source)))
+        left.provider_id.cmp(&right.provider_id).then(rank(left.source).cmp(&rank(right.source)))
     });
 
     Ok(entries)

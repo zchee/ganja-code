@@ -1,4 +1,6 @@
-use std::{collections::BTreeSet, sync::Mutex, thread};
+use std::collections::BTreeSet;
+use std::sync::Mutex;
+use std::thread;
 
 use super::{
     Command, Event, FinishReason, HeldDecision, HeldId, HeldOutcome, HoldCause, Mention, Message,
@@ -41,14 +43,9 @@ fn pinned_message() -> Message {
         role: Role::User,
         parts: vec![Part {
             id: PartId::from("prt_1".to_owned()),
-            body: PartBody::Text {
-                text: "hi".to_owned(),
-            },
+            body: PartBody::Text { text: "hi".to_owned() },
         }],
-        time: MessageTime {
-            created: 7,
-            completed: Some(7),
-        },
+        time: MessageTime { created: 7, completed: Some(7) },
         model: None,
         usage: None,
     }
@@ -133,9 +130,7 @@ fn ids_are_monotonic_within_one_millisecond_across_threads() {
         }
     });
 
-    let minted = minted
-        .into_inner()
-        .expect("no mint may panic under the lock");
+    let minted = minted.into_inner().expect("no mint may panic under the lock");
 
     assert_eq!(minted.len(), THREADS * PER_THREAD);
     assert!(minted.iter().all(|id| is_uuidv7(id)));
@@ -150,9 +145,7 @@ fn ids_are_monotonic_within_one_millisecond_across_threads() {
     // Without this the run could have spent a millisecond per id and told
     // us nothing about the case the counter exists for.
     assert!(
-        minted
-            .windows(2)
-            .any(|pair| millisecond(&pair[0]) == millisecond(&pair[1])),
+        minted.windows(2).any(|pair| millisecond(&pair[0]) == millisecond(&pair[1])),
         "four thousand mints should have shared a millisecond somewhere"
     );
 }
@@ -203,10 +196,7 @@ fn commands_round_trip_through_json() {
         },
         Command::SendPrompt {
             text: "what does this do".to_owned(),
-            mentions: vec![Mention {
-                path: "src/main.rs".to_owned(),
-                ..Default::default()
-            }],
+            mentions: vec![Mention { path: "src/main.rs".to_owned(), ..Default::default() }],
             skills: Vec::new(),
             session_mentions: Vec::new(),
             peers: Vec::new(),
@@ -262,29 +252,14 @@ fn commands_round_trip_through_json() {
             id: PermissionId::from("perm_1".to_owned()),
             reply: PermissionReply::Always,
         },
-        Command::SwitchAgent {
-            name: "plan".to_owned(),
-        },
-        Command::SwitchModel {
-            model: "claude-haiku-4.5".to_owned(),
-        },
-        Command::SwitchEffort {
-            effort: Some("max".to_owned()),
-        },
+        Command::SwitchAgent { name: "plan".to_owned() },
+        Command::SwitchModel { model: "claude-haiku-4.5".to_owned() },
+        Command::SwitchEffort { effort: Some("max".to_owned()) },
         Command::SwitchEffort { effort: None },
-        Command::SetPermissionMode {
-            mode: PermissionMode::Ask,
-        },
-        Command::SetPermissionMode {
-            mode: PermissionMode::Bypass,
-        },
-        Command::RunShell {
-            command: "git status".to_owned(),
-        },
-        Command::RunCommand {
-            name: "init".to_owned(),
-            args: "focus on the tests".to_owned(),
-        },
+        Command::SetPermissionMode { mode: PermissionMode::Ask },
+        Command::SetPermissionMode { mode: PermissionMode::Bypass },
+        Command::RunShell { command: "git status".to_owned() },
+        Command::RunCommand { name: "init".to_owned(), args: "focus on the tests".to_owned() },
         Command::Compact,
         Command::NewSession,
         Command::Undo,
@@ -316,10 +291,7 @@ fn commands_round_trip_through_json() {
 fn events_round_trip_through_json() {
     let message = pinned_message();
     let cases = [
-        Event::MessageStarted {
-            session_id: pinned_session(),
-            message: message.clone(),
-        },
+        Event::MessageStarted { session_id: pinned_session(), message: message.clone() },
         Event::PartStarted {
             session_id: pinned_session(),
             message_id: message.id.clone(),
@@ -364,10 +336,7 @@ fn events_round_trip_through_json() {
             id: PermissionId::from("perm_1".to_owned()),
             reply: PermissionReply::Reject,
         },
-        Event::SteerConsumed {
-            session_id: pinned_session(),
-            id: "steer-1".to_owned(),
-        },
+        Event::SteerConsumed { session_id: pinned_session(), id: "steer-1".to_owned() },
         Event::RevertChanged {
             session_id: pinned_session(),
             revert: Some(RevertInfo {
@@ -376,28 +345,15 @@ fn events_round_trip_through_json() {
             }),
             prompt: Some("rename the thing".to_owned()),
         },
-        Event::RevertChanged {
-            session_id: pinned_session(),
-            revert: None,
-            prompt: None,
-        },
+        Event::RevertChanged { session_id: pinned_session(), revert: None, prompt: None },
         Event::AgentChanged {
             session_id: pinned_session(),
             agent: "build".to_owned(),
             model: "claude-sonnet-4-5".to_owned(),
         },
-        Event::EffortChanged {
-            session_id: pinned_session(),
-            effort: Some("max".to_owned()),
-        },
-        Event::EffortChanged {
-            session_id: pinned_session(),
-            effort: None,
-        },
-        Event::PermissionModeChanged {
-            session_id: pinned_session(),
-            mode: PermissionMode::Bypass,
-        },
+        Event::EffortChanged { session_id: pinned_session(), effort: Some("max".to_owned()) },
+        Event::EffortChanged { session_id: pinned_session(), effort: None },
+        Event::PermissionModeChanged { session_id: pinned_session(), mode: PermissionMode::Bypass },
         Event::PeerHeld {
             session_id: pinned_session(),
             id: HeldId::from("held_1".to_owned()),
@@ -447,10 +403,8 @@ fn agent_changed_carries_the_session_the_agent_and_the_model() {
 
 #[test]
 fn effort_changed_carries_the_session_and_the_effort() {
-    let event = Event::EffortChanged {
-        session_id: pinned_session(),
-        effort: Some("max".to_owned()),
-    };
+    let event =
+        Event::EffortChanged { session_id: pinned_session(), effort: Some("max".to_owned()) };
 
     assert_eq!(event.session_id(), &pinned_session());
     match event {
@@ -484,14 +438,8 @@ fn the_wire_format_is_stable() {
             serde_json::to_string(&Command::SendPrompt {
                 text: "hi".to_owned(),
                 mentions: vec![
-                    Mention {
-                        path: "src/main.rs".to_owned(),
-                        ..Default::default()
-                    },
-                    Mention {
-                        path: "README.md".to_owned(),
-                        ..Default::default()
-                    },
+                    Mention { path: "src/main.rs".to_owned(), ..Default::default() },
+                    Mention { path: "README.md".to_owned(), ..Default::default() },
                 ],
                 skills: Vec::new(),
                 session_mentions: Vec::new(),
@@ -644,14 +592,9 @@ fn the_wire_format_is_stable() {
             }),
             r#"{"type":"compaction_progress","session_id":"ses_1","tokens":2500,"budget":4096}"#,
         ),
+        (serde_json::to_string(&Command::CancelTurn), r#"{"type":"cancel_turn"}"#),
         (
-            serde_json::to_string(&Command::CancelTurn),
-            r#"{"type":"cancel_turn"}"#,
-        ),
-        (
-            serde_json::to_string(&Command::RunShell {
-                command: "git status".to_owned(),
-            }),
+            serde_json::to_string(&Command::RunShell { command: "git status".to_owned() }),
             r#"{"type":"run_shell","command":"git status"}"#,
         ),
         (
@@ -661,14 +604,8 @@ fn the_wire_format_is_stable() {
             }),
             r#"{"type":"run_command","name":"init","args":""}"#,
         ),
-        (
-            serde_json::to_string(&Command::Compact),
-            r#"{"type":"compact"}"#,
-        ),
-        (
-            serde_json::to_string(&Command::NewSession),
-            r#"{"type":"new_session"}"#,
-        ),
+        (serde_json::to_string(&Command::Compact), r#"{"type":"compact"}"#),
+        (serde_json::to_string(&Command::NewSession), r#"{"type":"new_session"}"#),
         (serde_json::to_string(&Command::Undo), r#"{"type":"undo"}"#),
         (serde_json::to_string(&Command::Redo), r#"{"type":"redo"}"#),
         // The rewind picker's command: an anchor and a scope, both
@@ -801,9 +738,7 @@ fn the_wire_format_is_stable() {
         (
             serde_json::to_string(&Part {
                 id: PartId::from("prt_1".to_owned()),
-                body: PartBody::Text {
-                    text: "hi".to_owned(),
-                },
+                body: PartBody::Text { text: "hi".to_owned() },
             }),
             r#"{"id":"prt_1","type":"text","text":"hi"}"#,
         ),
@@ -820,9 +755,7 @@ fn the_wire_format_is_stable() {
                 message_id: MessageId::from("msg_1".to_owned()),
                 part: Part {
                     id: PartId::from("prt_1".to_owned()),
-                    body: PartBody::Text {
-                        text: String::new(),
-                    },
+                    body: PartBody::Text { text: String::new() },
                 },
             }),
             r#"{"type":"part_started","session_id":"ses_1","message_id":"msg_1","part":{"id":"prt_1","type":"text","text":""}}"#,
@@ -841,11 +774,7 @@ fn the_wire_format_is_stable() {
                 session_id: pinned_session(),
                 message_id: MessageId::from("msg_1".to_owned()),
                 reason: FinishReason::Completed,
-                usage: Some(Usage {
-                    input_tokens: 1,
-                    output_tokens: 2,
-                    ..Usage::default()
-                }),
+                usage: Some(Usage { input_tokens: 1, output_tokens: 2, ..Usage::default() }),
                 error: None,
                 completed: 9,
             }),
@@ -900,9 +829,7 @@ fn the_wire_format_is_stable() {
                 body: PartBody::Tool {
                     call_id: "call_1".to_owned(),
                     tool: "read".to_owned(),
-                    state: ToolState::Pending {
-                        input: Some(serde_json::json!({"path": "a.rs"})),
-                    },
+                    state: ToolState::Pending { input: Some(serde_json::json!({"path": "a.rs"})) },
                 },
             }),
             r#"{"id":"prt_1","type":"tool","call_id":"call_1","tool":"read","state":{"status":"pending","input":{"path":"a.rs"}}}"#,
@@ -938,11 +865,7 @@ fn the_wire_format_is_stable() {
             serde_json::to_string(&Part {
                 id: PartId::from("prt_1".to_owned()),
                 body: PartBody::StepFinish {
-                    usage: Usage {
-                        input_tokens: 1,
-                        output_tokens: 2,
-                        ..Usage::default()
-                    },
+                    usage: Usage { input_tokens: 1, output_tokens: 2, ..Usage::default() },
                 },
             }),
             r#"{"id":"prt_1","type":"step_finish","usage":{"input_tokens":1,"output_tokens":2,"reasoning_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0}}"#,
@@ -1098,24 +1021,18 @@ fn the_wire_format_is_stable() {
             r#"{"type":"reject_question","id":"que_1"}"#,
         ),
         (
-            serde_json::to_string(&Command::SwitchAgent {
-                name: "plan".to_owned(),
-            }),
+            serde_json::to_string(&Command::SwitchAgent { name: "plan".to_owned() }),
             r#"{"type":"switch_agent","name":"plan"}"#,
         ),
         (
-            serde_json::to_string(&Command::SwitchModel {
-                model: "claude-haiku-4.5".to_owned(),
-            }),
+            serde_json::to_string(&Command::SwitchModel { model: "claude-haiku-4.5".to_owned() }),
             r#"{"type":"switch_model","model":"claude-haiku-4.5"}"#,
         ),
         // The effort travels only when there is one: `None` is upstream's
         // "Default", and both the command that asks for it and the event
         // that announces it spell that as the field's absence.
         (
-            serde_json::to_string(&Command::SwitchEffort {
-                effort: Some("max".to_owned()),
-            }),
+            serde_json::to_string(&Command::SwitchEffort { effort: Some("max".to_owned()) }),
             r#"{"type":"switch_effort","effort":"max"}"#,
         ),
         (
@@ -1140,15 +1057,11 @@ fn the_wire_format_is_stable() {
         // acceptance that answers it. Two names, spelled as this crate
         // spells every other enum on the wire.
         (
-            serde_json::to_string(&Command::SetPermissionMode {
-                mode: PermissionMode::Bypass,
-            }),
+            serde_json::to_string(&Command::SetPermissionMode { mode: PermissionMode::Bypass }),
             r#"{"type":"set_permission_mode","mode":"bypass"}"#,
         ),
         (
-            serde_json::to_string(&Command::SetPermissionMode {
-                mode: PermissionMode::Ask,
-            }),
+            serde_json::to_string(&Command::SetPermissionMode { mode: PermissionMode::Ask }),
             r#"{"type":"set_permission_mode","mode":"ask"}"#,
         ),
         (
@@ -1182,9 +1095,7 @@ fn the_wire_format_is_stable() {
                 session_id: pinned_session(),
                 id: HeldId::from("held_1".to_owned()),
                 from: "w1@inbound".to_owned(),
-                cause: HoldCause::Explicit {
-                    source: PolicySource::Global,
-                },
+                cause: HoldCause::Explicit { source: PolicySource::Global },
                 summary: Some(RedactedText::from("CI is red".to_owned())),
                 preview: RedactedText::from("CI is red on main".to_owned()),
                 expires_in_ms: None,
@@ -1254,21 +1165,15 @@ fn the_wire_format_is_stable() {
 fn the_hold_vocabulary_spells_every_variant_and_round_trips() {
     let causes = [
         (
-            HoldCause::Explicit {
-                source: PolicySource::Global,
-            },
+            HoldCause::Explicit { source: PolicySource::Global },
             r#"{"kind":"explicit","source":"global"}"#,
         ),
         (
-            HoldCause::Explicit {
-                source: PolicySource::ExplicitFile,
-            },
+            HoldCause::Explicit { source: PolicySource::ExplicitFile },
             r#"{"kind":"explicit","source":"explicit_file"}"#,
         ),
         (
-            HoldCause::Explicit {
-                source: PolicySource::Project,
-            },
+            HoldCause::Explicit { source: PolicySource::Project },
             r#"{"kind":"explicit","source":"project"}"#,
         ),
         (HoldCause::ModeMismatch, r#"{"kind":"mode_mismatch"}"#),
@@ -1282,10 +1187,7 @@ fn the_hold_vocabulary_spells_every_variant_and_round_trips() {
         assert_eq!(decoded, cause);
     }
 
-    let decisions = [
-        (HeldDecision::Release, r#""release""#),
-        (HeldDecision::Deny, r#""deny""#),
-    ];
+    let decisions = [(HeldDecision::Release, r#""release""#), (HeldDecision::Deny, r#""deny""#)];
     for (decision, expected) in decisions {
         let encoded = serde_json::to_string(&decision).expect("a decision serializes");
         assert_eq!(encoded, expected);
@@ -1318,10 +1220,7 @@ fn a_held_body_debugs_as_a_size_and_never_the_text() {
 
     let debugged = format!("{preview:?}");
     assert_eq!(debugged, format!("<{} bytes>", body.len()));
-    assert!(
-        !debugged.contains(body),
-        "a debug rendering must never carry the text: {debugged}"
-    );
+    assert!(!debugged.contains(body), "a debug rendering must never carry the text: {debugged}");
 
     let event = Event::PeerHeld {
         session_id: pinned_session(),
@@ -1370,11 +1269,7 @@ fn a_prompt_written_before_mentions_existed_still_parses() {
         decoded,
         Command::SendPrompt {
             text: "hi".to_owned(),
-            mentions: vec![Mention {
-                path: "a.rs".to_owned(),
-                start: None,
-                end: None,
-            }],
+            mentions: vec![Mention { path: "a.rs".to_owned(), start: None, end: None }],
             skills: Vec::new(),
             session_mentions: Vec::new(),
             peers: Vec::new(),
@@ -1413,11 +1308,7 @@ fn a_steer_without_mentions_parses_as_one_with_nothing_attached() {
         Command::Steer {
             id: "steer-2".to_owned(),
             text: "this one".to_owned(),
-            mentions: vec![Mention {
-                path: "a.rs".to_owned(),
-                start: None,
-                end: None,
-            }],
+            mentions: vec![Mention { path: "a.rs".to_owned(), start: None, end: None }],
             skills: Vec::new(),
             session_mentions: Vec::new(),
             peers: Vec::new(),
@@ -1432,28 +1323,19 @@ fn a_steer_without_mentions_parses_as_one_with_nothing_attached() {
 #[test]
 fn a_rewind_reads_back_the_scope_it_was_written_with() {
     let cases = [
-        (
-            r#"{"type":"revert_to","message_id":"msg_1","scope":"both"}"#,
-            RevertScope::Both,
-        ),
+        (r#"{"type":"revert_to","message_id":"msg_1","scope":"both"}"#, RevertScope::Both),
         (
             r#"{"type":"revert_to","message_id":"msg_1","scope":"conversation"}"#,
             RevertScope::Conversation,
         ),
-        (
-            r#"{"type":"revert_to","message_id":"msg_1","scope":"files"}"#,
-            RevertScope::Files,
-        ),
+        (r#"{"type":"revert_to","message_id":"msg_1","scope":"files"}"#, RevertScope::Files),
     ];
 
     for (encoded, scope) in cases {
         let decoded: Command = serde_json::from_str(encoded).expect("the shape parses");
         assert_eq!(
             decoded,
-            Command::RevertTo {
-                message_id: MessageId::from("msg_1".to_owned()),
-                scope,
-            }
+            Command::RevertTo { message_id: MessageId::from("msg_1".to_owned()), scope }
         );
     }
 
@@ -1474,11 +1356,7 @@ fn a_rewind_reads_back_the_scope_it_was_written_with() {
 /// fourth variant cannot be added without deciding both.
 #[test]
 fn a_scope_says_which_halves_of_a_checkpoint_it_puts_back() {
-    for scope in [
-        RevertScope::Both,
-        RevertScope::Conversation,
-        RevertScope::Files,
-    ] {
+    for scope in [RevertScope::Both, RevertScope::Conversation, RevertScope::Files] {
         let (files, conversation) = match scope {
             RevertScope::Both => (true, true),
             RevertScope::Conversation => (false, true),
@@ -1502,10 +1380,7 @@ fn a_consumed_steer_reads_back_naming_the_id_the_command_carried() {
     assert_eq!(decoded.session_id(), &pinned_session());
     assert_eq!(
         decoded,
-        Event::SteerConsumed {
-            session_id: pinned_session(),
-            id: "steer-1".to_owned(),
-        }
+        Event::SteerConsumed { session_id: pinned_session(), id: "steer-1".to_owned() }
     );
 }
 
@@ -1533,14 +1408,7 @@ fn a_file_part_written_before_ranges_existed_still_parses() {
 
     let decoded: Mention =
         serde_json::from_str(r#"{"path":"a.rs"}"#).expect("a range-free mention parses");
-    assert_eq!(
-        decoded,
-        Mention {
-            path: "a.rs".to_owned(),
-            start: None,
-            end: None,
-        }
-    );
+    assert_eq!(decoded, Mention { path: "a.rs".to_owned(), start: None, end: None });
 }
 
 /// A running part written before it could report progress still parses,
@@ -1552,11 +1420,7 @@ fn a_running_part_without_metadata_still_parses() {
         )
         .expect("the original shape parses");
 
-    let PartBody::Tool {
-        state: ToolState::Running { metadata, .. },
-        ..
-    } = decoded.body
-    else {
+    let PartBody::Tool { state: ToolState::Running { metadata, .. }, .. } = decoded.body else {
         panic!("the fixture is a running tool part");
     };
     assert!(metadata.is_null());
@@ -1568,11 +1432,7 @@ fn a_running_part_without_metadata_still_parses() {
 fn an_assistant_message_round_trips_with_its_model_and_usage() {
     let mut message = Message::assistant("canned");
     message.parts.push(Part::text("hello"));
-    message.usage = Some(Usage {
-        input_tokens: 1,
-        output_tokens: 2,
-        ..Usage::default()
-    });
+    message.usage = Some(Usage { input_tokens: 1, output_tokens: 2, ..Usage::default() });
     message.complete();
 
     let encoded = serde_json::to_string(&message).expect("a message serializes");
@@ -1599,9 +1459,7 @@ fn a_reasoning_part_is_tagged_with_the_prefix_a_later_variant_must_keep() {
 
     assert_eq!(encoded["type"], serde_json::json!(REASONING_TAG));
     assert!(
-        encoded["type"]
-            .as_str()
-            .is_some_and(|tag| tag.starts_with(REASONING_TAG)),
+        encoded["type"].as_str().is_some_and(|tag| tag.starts_with(REASONING_TAG)),
         "the reserved prefix is what a decoder that cannot read the rest \
              still matches on: {encoded}"
     );
@@ -1618,9 +1476,7 @@ fn readable_thinking_keeps_the_reserved_prefix_too() {
 
     assert_eq!(encoded["type"], serde_json::json!("reasoning_text"));
     assert!(
-        encoded["type"]
-            .as_str()
-            .is_some_and(|tag| tag.starts_with(REASONING_TAG)),
+        encoded["type"].as_str().is_some_and(|tag| tag.starts_with(REASONING_TAG)),
         "an older reader matches this record on the prefix alone: {encoded}"
     );
 
@@ -1642,17 +1498,12 @@ fn thinking_is_its_own_body_and_never_reply_text() {
     );
     assert_eq!(thinking.as_text(), None, "thinking is not the reply");
     assert!(thinking.as_text_mut().is_none());
-    assert!(
-        matches!(&reply.body, PartBody::Text { .. }),
-        "and the reply is not thinking"
-    );
+    assert!(matches!(&reply.body, PartBody::Text { .. }), "and the reply is not thinking");
 
     // The one accessor that spans both, because a delta names an id and a
     // fragment and never which of the two it is growing.
     for part in [&mut thinking, &mut reply] {
-        part.streamed_mut()
-            .expect("both kinds of text grow by delta")
-            .push('!');
+        part.streamed_mut().expect("both kinds of text grow by delta").push('!');
     }
     assert!(
         matches!(&thinking.body, PartBody::ReasoningText { text } if text == "weighing a greeting!")
@@ -1660,9 +1511,7 @@ fn thinking_is_its_own_body_and_never_reply_text() {
     assert_eq!(reply.as_text(), Some("hello!"));
 
     assert!(
-        Part::reasoning("openai", "rs_1", Some("sealed".to_owned()))
-            .streamed_mut()
-            .is_none(),
+        Part::reasoning("openai", "rs_1", Some("sealed".to_owned())).streamed_mut().is_none(),
         "a sealed blob is bytes, not text a fragment could be appended to"
     );
 }
@@ -1720,9 +1569,7 @@ fn a_reasoning_record_without_state_reads_back_as_state_nobody_holds() {
 #[test]
 fn a_message_holding_only_sealed_reasoning_has_no_content() {
     let mut message = Message::assistant("gpt");
-    message
-        .parts
-        .push(Part::reasoning("openai", "rs_1", Some("sealed".to_owned())));
+    message.parts.push(Part::reasoning("openai", "rs_1", Some("sealed".to_owned())));
 
     assert!(!message.has_content());
     assert!(
@@ -1793,21 +1640,11 @@ fn a_peer_part_keeps_the_summary_it_was_built_with() {
 #[test]
 fn a_peer_payload_becomes_a_part_through_the_capping_constructor() {
     let long = "e".repeat(team::DISPLAY_FIELD_CAP * 2);
-    let part = team::PeerPayload::new(
-        "w1",
-        Some(long.clone()),
-        Some("blue".to_owned()),
-        long.clone(),
-    )
-    .into_part();
+    let part =
+        team::PeerPayload::new("w1", Some(long.clone()), Some("blue".to_owned()), long.clone())
+            .into_part();
 
-    let PartBody::Peer {
-        from,
-        summary,
-        color,
-        body,
-    } = &part.body
-    else {
+    let PartBody::Peer { from, summary, color, body } = &part.body else {
         unreachable!("a payload becomes a peer part and nothing else")
     };
     assert_eq!(from, "w1");
@@ -1830,10 +1667,7 @@ fn a_message_carrying_only_a_peers_words_has_content() {
         id: MessageId::from("msg_1".to_owned()),
         role: Role::User,
         parts: vec![Part::peer("w1", None, None, "done")],
-        time: MessageTime {
-            created: 7,
-            completed: Some(7),
-        },
+        time: MessageTime { created: 7, completed: Some(7) },
         model: None,
         usage: None,
     };
@@ -1848,27 +1682,13 @@ fn a_message_carrying_only_a_peers_words_has_content() {
 /// something it has to be told.
 #[test]
 fn claudes_mode_names_map_to_ganjas_two_or_are_refused_by_name() {
-    assert_eq!(
-        PermissionMode::from_claude_name("bypassPermissions"),
-        Ok(PermissionMode::Bypass)
-    );
-    assert_eq!(
-        PermissionMode::from_claude_name("default"),
-        Ok(PermissionMode::Ask)
-    );
-    assert_eq!(
-        PermissionMode::from_claude_name("acceptEdits"),
-        Ok(PermissionMode::Ask)
-    );
+    assert_eq!(PermissionMode::from_claude_name("bypassPermissions"), Ok(PermissionMode::Bypass));
+    assert_eq!(PermissionMode::from_claude_name("default"), Ok(PermissionMode::Ask));
+    assert_eq!(PermissionMode::from_claude_name("acceptEdits"), Ok(PermissionMode::Ask));
 
+    assert_eq!(PermissionMode::from_claude_name("plan"), Err(UnknownPermissionMode::Plan));
     assert_eq!(
-        PermissionMode::from_claude_name("plan"),
-        Err(UnknownPermissionMode::Plan)
-    );
-    assert_eq!(
-        PermissionMode::from_claude_name("plan")
-            .unwrap_err()
-            .to_string(),
+        PermissionMode::from_claude_name("plan").unwrap_err().to_string(),
         "plan is an agent here, not a permission mode: switch to it with /agent plan"
     );
 
@@ -1882,9 +1702,7 @@ fn claudes_mode_names_map_to_ganjas_two_or_are_refused_by_name() {
         );
     }
     assert_eq!(
-        PermissionMode::from_claude_name("ask")
-            .unwrap_err()
-            .to_string(),
+        PermissionMode::from_claude_name("ask").unwrap_err().to_string(),
         "ask is not a permission mode this build knows: it takes \
              bypassPermissions, default or acceptEdits"
     );

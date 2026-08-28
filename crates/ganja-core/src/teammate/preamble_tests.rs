@@ -1,10 +1,6 @@
 use super::{Names, frame, native};
 
-const WHO: Names<'static> = Names {
-    name: "w1",
-    team: "session-abcd1234",
-    lead: "team-lead",
-};
+const WHO: Names<'static> = Names { name: "w1", team: "session-abcd1234", lead: "team-lead" };
 
 /// The frame opens on the three names and closes on the task, whatever
 /// the channel paragraph says.

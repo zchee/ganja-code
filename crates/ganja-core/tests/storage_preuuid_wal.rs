@@ -45,31 +45,22 @@ fn the_wal_and_shm_companions_travel_with_the_set_aside_store() {
 
     let storage = Storage::open(root.clone());
     assert!(
-        storage
-            .list_sessions()
-            .expect("a superseded store opens rather than failing")
-            .is_empty(),
+        storage.list_sessions().expect("a superseded store opens rather than failing").is_empty(),
         "a fresh store must not inherit what a stale log would have replayed"
     );
     storage
         .save_info(&seeded_session_info(SessionId::from(NEW.to_owned()), 1))
         .expect("the fresh store writes");
     assert_eq!(
-        storage
-            .list_sessions()
-            .expect("the fresh store lists")
-            .len(),
+        storage.list_sessions().expect("the fresh store lists").len(),
         1,
         "what replaces the set-aside store is a working one"
     );
 
     // All three under one stamp, which is what says they travelled together
     // rather than happening to share a prefix.
-    let name = database
-        .file_name()
-        .expect("the database has a name")
-        .to_string_lossy()
-        .into_owned();
+    let name =
+        database.file_name().expect("the database has a name").to_string_lossy().into_owned();
     let prefix = format!("{name}.preuuid-");
     let listing = entries(directory.path());
     let stamp = listing
@@ -96,11 +87,7 @@ fn the_wal_and_shm_companions_travel_with_the_set_aside_store() {
 /// `path` with `suffix` appended to its file name, the way SQLite names the
 /// two files it keeps beside a database.
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
-    let name = path
-        .file_name()
-        .expect("the database has a name")
-        .to_string_lossy()
-        .into_owned();
+    let name = path.file_name().expect("the database has a name").to_string_lossy().into_owned();
 
     path.with_file_name(format!("{name}{suffix}"))
 }

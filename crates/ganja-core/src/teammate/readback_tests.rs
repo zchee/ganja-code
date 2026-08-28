@@ -13,11 +13,7 @@ use crate::teammate::preamble::{self, Names};
 /// reader hunting for a sentence nobody sends (**D515**).
 #[test]
 fn the_fingerprint_is_the_preambles_own_opening_sentence() {
-    let who = Names {
-        name: "w1",
-        team: "session-abcd1234",
-        lead: "team-lead",
-    };
+    let who = Names { name: "w1", team: "session-abcd1234", lead: "team-lead" };
     let mark = preamble::opening(who);
 
     assert!(
@@ -41,10 +37,7 @@ fn a_tail_read_leaves_a_half_written_line_where_it_is() {
     assert_eq!(cursor.bytes, 8, "only the two whole lines are behind us");
 
     // The writer finishes that line and adds another.
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .expect("the file opens");
+    let mut file = std::fs::OpenOptions::new().append(true).open(&path).expect("the file opens");
     write!(file, "ee\nfour\n").expect("the tail is written");
 
     assert_eq!(appended(&path, &mut cursor), ["three", "four"]);
@@ -57,27 +50,12 @@ fn a_tail_read_leaves_a_half_written_line_where_it_is() {
 fn a_reread_carries_each_answer_once_and_never_repeats_after_a_compaction() {
     let mut cursor = Cursor::default();
 
-    assert_eq!(
-        beyond(vec!["a".to_owned(), "b".to_owned()], &mut cursor),
-        ["a", "b"]
-    );
+    assert_eq!(beyond(vec!["a".to_owned(), "b".to_owned()], &mut cursor), ["a", "b"]);
     assert_eq!(cursor.answers, 2);
-    assert_eq!(
-        beyond(vec!["a".to_owned(), "b".to_owned()], &mut cursor),
-        Vec::<String>::new()
-    );
-    assert_eq!(
-        beyond(
-            vec!["a".to_owned(), "b".to_owned(), "c".to_owned()],
-            &mut cursor
-        ),
-        ["c"]
-    );
+    assert_eq!(beyond(vec!["a".to_owned(), "b".to_owned()], &mut cursor), Vec::<String>::new());
+    assert_eq!(beyond(vec!["a".to_owned(), "b".to_owned(), "c".to_owned()], &mut cursor), ["c"]);
     // A CLI that compacted its own record: fewer answers than carried.
-    assert_eq!(
-        beyond(vec!["z".to_owned()], &mut cursor),
-        Vec::<String>::new()
-    );
+    assert_eq!(beyond(vec!["z".to_owned()], &mut cursor), Vec::<String>::new());
     assert_eq!(cursor.answers, 3, "the count only moves forward");
 }
 
@@ -105,11 +83,8 @@ fn a_session_is_found_by_the_message_its_user_sent_and_not_by_being_newest() {
     let theirs = directory.path().join("theirs.jsonl");
     let reader_of_mailboxes = directory.path().join("nosy.jsonl");
     std::fs::write(&mine, said("user", mark)).expect("written");
-    std::fs::write(
-        &theirs,
-        said("user", "You are w2, a teammate on the team t."),
-    )
-    .expect("written");
+    std::fs::write(&theirs, said("user", "You are w2, a teammate on the team t."))
+        .expect("written");
     // A session that only ever **read** this member's mailbox: the same
     // sentence, in a record its own CLI attributes to a tool's output.
     std::fs::write(
@@ -147,12 +122,7 @@ fn a_session_is_found_by_the_message_its_user_sent_and_not_by_being_newest() {
     );
     // And a conversation older than the member cannot be its own.
     assert_eq!(
-        matching(
-            candidates,
-            mark,
-            reader,
-            SystemTime::now() + std::time::Duration::from_secs(60)
-        ),
+        matching(candidates, mark, reader, SystemTime::now() + std::time::Duration::from_secs(60)),
         None,
         "nothing written since the spawn is nothing this member said"
     );
@@ -198,10 +168,7 @@ fn an_absent_transcript_reads_as_nothing() {
     let missing = directory.path().join("nothing.jsonl");
 
     assert_eq!(whole(&missing), Vec::<String>::new());
-    assert_eq!(
-        appended(&missing, &mut Cursor::default()),
-        Vec::<String>::new()
-    );
+    assert_eq!(appended(&missing, &mut Cursor::default()), Vec::<String>::new());
     assert!(!holds(&missing, "anything", of(ShimCli::Codex)));
 }
 
@@ -222,11 +189,7 @@ fn every_shim_cli_has_a_reader_and_a_clause() {
             );
         }
     }
-    for backend in [
-        MemberBackend::InProcess,
-        MemberBackend::Ganja,
-        MemberBackend::Claude,
-    ] {
+    for backend in [MemberBackend::InProcess, MemberBackend::Ganja, MemberBackend::Claude] {
         assert_eq!(answers_clause(backend, Road::Pane), None);
         assert_eq!(answers_clause(backend, Road::Headless), None);
     }

@@ -1,4 +1,5 @@
-use std::{collections::HashSet, fs};
+use std::collections::HashSet;
+use std::fs;
 
 use serde_json::json;
 
@@ -108,10 +109,7 @@ fn a_non_string_text_is_refused_as_its_own_case_and_every_other_field_by_name() 
     // is not.
     let refusal = validate(&json!({"from": "w", "text": 42, "timestamp": WHEN}))
         .expect_err("a number is not a message body");
-    assert!(
-        matches!(refusal, MailboxError::TextNotAString { found: "a number" }),
-        "{refusal:?}"
-    );
+    assert!(matches!(refusal, MailboxError::TextNotAString { found: "a number" }), "{refusal:?}");
     assert!(refusal.to_string().contains("holds a number"));
 
     // Everything else is the other refusal, one sentence per field.
@@ -138,9 +136,7 @@ fn a_message_whose_extra_shadows_a_schema_key_is_refused_before_the_file_is_touc
     // Two shadowing keys, so the refusal is pinned as naming every
     // offender rather than the first one it met.
     let mut shadowing = MailboxMessage::new("w", "impostor", WHEN);
-    shadowing
-        .extra
-        .insert("text".to_owned(), json!("a second body"));
+    shadowing.extra.insert("text".to_owned(), json!("a second body"));
     shadowing.extra.insert("read".to_owned(), json!(true));
     let refusal = write(&path, shadowing).expect_err("a shadowed schema key is refused");
     let MailboxError::SchemaInvalid { issues } = refusal else {
@@ -159,10 +155,7 @@ fn a_message_whose_extra_shadows_a_schema_key_is_refused_before_the_file_is_touc
     // Refused before the file was touched, which is the half that matters:
     // a rejected write must not cost the messages already queued, and it
     // must not have taken a hold to find out.
-    assert_eq!(
-        fs::read_to_string(&path).expect("the inbox is readable"),
-        before
-    );
+    assert_eq!(fs::read_to_string(&path).expect("the inbox is readable"), before);
     assert!(
         !std::path::PathBuf::from(format!("{}.lock", path.display())).exists(),
         "a refusal that never reached the disk took no lock"
@@ -219,10 +212,7 @@ fn drop_reports_dedupe_and_stop_at_one_hundred() {
         assert!(!first_report(&mut reported, key), "{key} is not new twice");
     }
     assert_eq!(reported.len(), super::MAX_REPORTED);
-    assert!(
-        !first_report(&mut reported, 1_000),
-        "past the cap, a new key is not reported either"
-    );
+    assert!(!first_report(&mut reported, 1_000), "past the cap, a new key is not reported either");
 
     // And the process-wide memory really is consulted: the same damage in
     // the same file reports once and then goes quiet.
@@ -244,15 +234,8 @@ fn a_rewrite_keeps_the_inboxes_existing_mode() {
 
     write(&path, MailboxMessage::new("w", "hello", WHEN)).expect("a message writes");
 
-    let mode = fs::metadata(&path)
-        .expect("the inbox is there")
-        .permissions()
-        .mode()
-        & 0o777;
-    assert_eq!(
-        mode, 0o640,
-        "a rewrite neither tightens nor loosens what the peer wrote"
-    );
+    let mode = fs::metadata(&path).expect("the inbox is there").permissions().mode() & 0o777;
+    assert_eq!(mode, 0o640, "a rewrite neither tightens nor loosens what the peer wrote");
 }
 
 #[test]
@@ -293,10 +276,7 @@ fn the_schema_key_list_is_exactly_what_a_message_serializes() {
         broken[key] = json!([]);
         let refusal = super::validate(&serde_json::Value::Object(broken))
             .expect_err("an array is not any of the schema's types");
-        assert!(
-            refusal.to_string().contains(key),
-            "validate ignores {key}: {refusal}",
-        );
+        assert!(refusal.to_string().contains(key), "validate ignores {key}: {refusal}",);
     }
 }
 
@@ -308,9 +288,7 @@ fn a_write_also_deletes_a_damaged_neighbour() {
     // A read changes nothing.
     read(&path).expect("the inbox reads");
     assert!(
-        fs::read_to_string(&path)
-            .expect("the inbox is readable")
-            .contains(DAMAGED_BODY),
+        fs::read_to_string(&path).expect("the inbox is readable").contains(DAMAGED_BODY),
         "a read is not a rewrite",
     );
 
@@ -327,10 +305,7 @@ fn a_write_also_deletes_a_damaged_neighbour() {
     let held = read(&path).expect("the inbox reads");
     assert_eq!(held.dropped, 0, "and nothing unreadable is left to drop");
     assert_eq!(
-        held.valid
-            .iter()
-            .map(|message| message.text.as_str())
-            .collect::<Vec<_>>(),
+        held.valid.iter().map(|message| message.text.as_str()).collect::<Vec<_>>(),
         ["kept", "new"],
         "the readable neighbour and the new message both survive, in order",
     );
@@ -351,10 +326,7 @@ fn a_report_key_is_clamped_on_a_character_boundary() {
     // The raw entry is what `report` clamps, so it is the raw entry whose
     // cap must fall mid-character.
     let entry = format!(r#"{{"from":"ww","text":"{wide}","timestamp":7}}"#);
-    assert!(
-        !entry.is_char_boundary(super::REPORT_KEY_CAP),
-        "the fixture straddles the cap"
-    );
+    assert!(!entry.is_char_boundary(super::REPORT_KEY_CAP), "the fixture straddles the cap");
     let (_home, path) = inbox();
     seed(&path).expect("the inbox seeds");
     fs::write(&path, format!("[{entry}]")).expect("the inbox is writable");
@@ -369,10 +341,7 @@ const ROOMY: usize = usize::MAX;
 #[test]
 fn an_append_past_the_message_bound_is_refused_naming_the_counts() {
     let (_home, path) = inbox();
-    let ceiling = Some(Ceiling {
-        max_messages: 2,
-        max_bytes: ROOMY,
-    });
+    let ceiling = Some(Ceiling { max_messages: 2, max_bytes: ROOMY });
     write_bounded(&path, MailboxMessage::new("w", "first", WHEN), ceiling)
         .expect("an inbox under its ceiling takes a message");
     write_bounded(&path, MailboxMessage::new("w", "second", WHEN), ceiling)
@@ -386,13 +355,7 @@ fn an_append_past_the_message_bound_is_refused_naming_the_counts() {
         sentence.contains("3 messages") && sentence.contains("2 messages"),
         "the refusal names the observed count and the bound: {sentence}"
     );
-    let MailboxError::Full {
-        held,
-        max_messages,
-        max_bytes,
-        ..
-    } = refusal
-    else {
+    let MailboxError::Full { held, max_messages, max_bytes, .. } = refusal else {
         panic!("expected a full refusal, got {refusal:?}");
     };
     assert_eq!(held, 3, "the counts are what the append would have left");
@@ -401,20 +364,14 @@ fn an_append_past_the_message_bound_is_refused_naming_the_counts() {
 
     // The refusal wrote nothing: the file is byte-identical, and a read
     // still finds exactly the two admitted messages.
-    assert_eq!(
-        fs::read_to_string(&path).expect("the inbox is readable"),
-        before
-    );
+    assert_eq!(fs::read_to_string(&path).expect("the inbox is readable"), before);
     assert_eq!(read(&path).expect("the inbox reads").valid.len(), 2);
 }
 
 #[test]
 fn an_append_past_the_byte_bound_is_refused_naming_the_counts() {
     let (_home, path) = inbox();
-    let ceiling = Some(Ceiling {
-        max_messages: ROOMY,
-        max_bytes: 256,
-    });
+    let ceiling = Some(Ceiling { max_messages: ROOMY, max_bytes: 256 });
     write_bounded(&path, MailboxMessage::new("w", "short", WHEN), ceiling)
         .expect("a small message fits under the byte bound");
     let before = fs::read_to_string(&path).expect("the inbox is readable");
@@ -431,10 +388,7 @@ fn an_append_past_the_byte_bound_is_refused_naming_the_counts() {
         "the observed byte count is the document the append would have written: {bytes}"
     );
 
-    assert_eq!(
-        fs::read_to_string(&path).expect("the inbox is readable"),
-        before
-    );
+    assert_eq!(fs::read_to_string(&path).expect("the inbox is readable"), before);
 }
 
 #[test]
@@ -450,20 +404,14 @@ fn a_ceiling_refusal_leaves_even_a_damaged_neighbour_untouched() {
     let refusal = write_bounded(
         &path,
         MailboxMessage::new("w", "one too many", WHEN),
-        Some(Ceiling {
-            max_messages: 1,
-            max_bytes: ROOMY,
-        }),
+        Some(Ceiling { max_messages: 1, max_bytes: ROOMY }),
     )
     .expect_err("the valid entry already fills the one slot");
     assert!(matches!(refusal, MailboxError::Full { held: 2, .. }));
 
     let after = fs::read_to_string(&path).expect("the inbox is readable");
     assert_eq!(after, before, "a refusal is not a rewrite");
-    assert!(
-        after.contains(DAMAGED_BODY),
-        "the unreadable neighbour survives a refused append"
-    );
+    assert!(after.contains(DAMAGED_BODY), "the unreadable neighbour survives a refused append");
 }
 
 #[test]
@@ -481,10 +429,7 @@ fn no_ceiling_keeps_the_unbounded_append() {
 
 #[test]
 fn an_identity_debug_renders_no_body() {
-    let rendered = format!(
-        "{:?}",
-        identity(&MailboxMessage::new("w", "s3cret-body", WHEN))
-    );
+    let rendered = format!("{:?}", identity(&MailboxMessage::new("w", "s3cret-body", WHEN)));
 
     assert_eq!(rendered, format!("Identity(w|{WHEN}|<11 bytes>)"));
 }

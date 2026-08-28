@@ -156,23 +156,17 @@
 //! rule about whose record a lead may drop; the kill is the harm that had to
 //! stop, and it has.
 
-use std::{
-    path::{Path, PathBuf},
-    process::Stdio,
-    time::Duration,
-};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
 
 use ganja_team::{ShimCli, Surface};
 
-use crate::teammate::{
-    TeammateRegistry,
-    pane::{AGENT_ID, PARENT_SESSION_ID},
-    shim::{
-        records::{self, Started, Unreadable},
-        signal_group,
-    },
-    tmux::{Killed, Server},
-};
+use crate::teammate::TeammateRegistry;
+use crate::teammate::pane::{AGENT_ID, PARENT_SESSION_ID};
+use crate::teammate::shim::records::{self, Started, Unreadable};
+use crate::teammate::shim::signal_group;
+use crate::teammate::tmux::{Killed, Server};
 
 /// What answers, for a live pane's first process, what it was started as.
 ///
@@ -256,10 +250,7 @@ impl Swept {
     /// What became of `name`, if the sweep looked at it at all.
     #[must_use]
     pub fn fate_of(&self, name: &str) -> Option<Fate> {
-        self.fates
-            .iter()
-            .find(|(member, _)| member == name)
-            .map(|(_, fate)| *fate)
+        self.fates.iter().find(|(member, _)| member == name).map(|(_, fate)| *fate)
     }
 
     /// Whether the sweep looked at nothing.
@@ -322,12 +313,7 @@ pub async fn sweep_on(registry: &TeammateRegistry, server: &Server) -> Swept {
             // `retire_shim_records` marks inactive instead. Teaching the sweep
             // to fully witness a shim pane is bead `ganja-code-3nz`; not
             // dropping its record is the safe half of that, done here.
-            if member
-                .backend_type
-                .as_deref()
-                .and_then(ShimCli::read)
-                .is_some()
-            {
+            if member.backend_type.as_deref().and_then(ShimCli::read).is_some() {
                 return None;
             }
             match member.surface() {
@@ -365,10 +351,7 @@ pub async fn sweep_on(registry: &TeammateRegistry, server: &Server) -> Swept {
             tracing::warn!(%error, "tmux would not list its panes, so nothing was swept");
 
             return Swept {
-                fates: recorded
-                    .into_iter()
-                    .map(|(name, _, _)| (name, Fate::Undecided))
-                    .collect(),
+                fates: recorded.into_iter().map(|(name, _, _)| (name, Fate::Undecided)).collect(),
             };
         }
     };
@@ -464,11 +447,7 @@ fn flagged(argv: &str, flag: &str, value: &str) -> bool {
         if word == flag && words.next() == Some(value) {
             return true;
         }
-        if word
-            .strip_prefix(flag)
-            .and_then(|rest| rest.strip_prefix('='))
-            == Some(value)
-        {
+        if word.strip_prefix(flag).and_then(|rest| rest.strip_prefix('=')) == Some(value) {
             return true;
         }
     }
@@ -540,10 +519,9 @@ fn report(name: &str, pane_id: &str, fate: Fate) {
 async fn forget(registry: &TeammateRegistry, name: &str) {
     match registry.unrecord(name).await {
         Ok(true) => {}
-        Ok(false) => tracing::debug!(
-            teammate = name,
-            "the team file had already stopped naming this member"
-        ),
+        Ok(false) => {
+            tracing::debug!(teammate = name, "the team file had already stopped naming this member")
+        }
         Err(error) => tracing::warn!(
             teammate = name,
             %error,
@@ -631,10 +609,7 @@ impl ShimsSwept {
     /// What the sweep decided about one file, by name.
     #[must_use]
     pub fn fate_of(&self, path: &Path) -> Option<&ShimFate> {
-        self.files
-            .iter()
-            .find(|file| file.path == path)
-            .map(|file| &file.fate)
+        self.files.iter().find(|file| file.path == path).map(|file| &file.fate)
     }
 
     /// Whether the sweep did nothing at all.
@@ -709,13 +684,13 @@ pub async fn sweep_shims_in_with(directory: PathBuf, started: fn(i32) -> Started
     // One blocking job for the whole sweep, because the identity primitive is
     // a `ps` fork and the decisions are pure file reads: an async spelling
     // would fork from a runtime worker for every line of every file.
-    tokio::task::spawn_blocking(move || sweep_records(&directory, started))
-        .await
-        .unwrap_or_else(|error| {
+    tokio::task::spawn_blocking(move || sweep_records(&directory, started)).await.unwrap_or_else(
+        |error| {
             tracing::warn!(%error, "the shim sweep was lost, so nothing was swept");
 
             ShimsSwept::default()
-        })
+        },
+    )
 }
 
 /// Marks this team's shim members inactive, because their processes died with
@@ -815,11 +790,7 @@ pub async fn retire_shim_records(registry: &TeammateRegistry) -> Vec<String> {
         }
         // `backendType`, never `surface()` — see this function's own doc for
         // why the read that looks more natural cannot answer this.
-        let shim = member
-            .backend_type
-            .as_deref()
-            .and_then(ShimCli::read)
-            .is_some();
+        let shim = member.backend_type.as_deref().and_then(ShimCli::read).is_some();
         if !shim || member.is_active == Some(false) {
             continue;
         }
@@ -900,11 +871,8 @@ fn sweep_records(directory: &Path, started: fn(i32) -> Started) -> ShimsSwept {
 
 /// One `.shims` file, from its version line down.
 fn sweep_file(path: &Path, started: fn(i32) -> Started) -> ShimFile {
-    let decided = |fate: ShimFate, removed: bool| ShimFile {
-        path: path.to_path_buf(),
-        fate,
-        removed,
-    };
+    let decided =
+        |fate: ShimFate, removed: bool| ShimFile { path: path.to_path_buf(), fate, removed };
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(error) => {
@@ -967,14 +935,7 @@ fn sweep_file(path: &Path, started: fn(i32) -> Started) -> ShimFile {
             let owner_present = matches!(owner, Started::At(_));
             let removable = undecided == 0 && !owner_present;
 
-            decided(
-                ShimFate::Swept {
-                    signalled,
-                    spared,
-                    undecided,
-                },
-                removable && remove(path),
-            )
+            decided(ShimFate::Swept { signalled, spared, undecided }, removable && remove(path))
         }
     }
 }

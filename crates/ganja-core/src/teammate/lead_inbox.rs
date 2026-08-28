@@ -97,12 +97,10 @@
 //! (`poll_one`) carries the full table; the gate itself, its buffer and both
 //! sets are [`crate::teammate::inbound`]'s.
 
-use std::{
-    collections::HashSet,
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
-};
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
 use ganja_protocol::team::{
     Frame, IdleNotification, MemberBackend, PermissionRequest, PermissionResponse, ShutdownApproved,
@@ -110,14 +108,11 @@ use ganja_protocol::team::{
 use ganja_team::{MailboxMessage, MemberName, Surface, TeamsRoot, mailbox, record};
 use tokio::sync::{mpsc, oneshot};
 
-use super::{
-    Delivery, TeammateRegistry, claude,
-    inbound::{Inbound, MailboxAdmission, PassDisposition, ReceiverClass},
-    member,
-    posture::Forwarded,
-    runner::{drop_frame, prune_inbox, read_inbox},
-    shim_tui::Exited,
-};
+use super::inbound::{Inbound, MailboxAdmission, PassDisposition, ReceiverClass};
+use super::posture::Forwarded;
+use super::runner::{drop_frame, prune_inbox, read_inbox};
+use super::shim_tui::Exited;
+use super::{Delivery, TeammateRegistry, claude, member};
 use crate::protocol::{PermissionReply, SessionId};
 
 /// §6's lead cadence, and deliberately half the teammate's own
@@ -356,11 +351,7 @@ impl LeadInbox {
     /// to look) does not have to mutate the process it runs in to be heard.
     #[must_use]
     pub fn reading(registry: Arc<TeammateRegistry>, claude: Option<TeamsRoot>) -> Self {
-        Self {
-            registry,
-            claude,
-            gate: None,
-        }
+        Self { registry, claude, gate: None }
     }
 
     /// Installs the admission gate (**D523**): the engine's own [`Inbound`] —
@@ -379,10 +370,7 @@ impl LeadInbox {
         inbound: Arc<Inbound>,
         receiver: impl Fn() -> Option<ReceiverClass> + Send + Sync + 'static,
     ) -> Self {
-        self.gate = Some(Gate {
-            inbound,
-            receiver: Box::new(receiver),
-        });
+        self.gate = Some(Gate { inbound, receiver: Box::new(receiver) });
 
         self
     }
@@ -489,10 +477,7 @@ impl LeadInbox {
                 last = ?exited.last_words,
                 "a teammate's TUI exited and the lead has forgotten it"
             );
-            let surface = Surface::Shim {
-                cli: exited.cli,
-                pane: Some(exited.pane_id.clone()),
-            };
+            let surface = Surface::Shim { cli: exited.cli, pane: Some(exited.pane_id.clone()) };
             pass.retired.push(Retired {
                 name: exited.name.clone(),
                 pane_id: Some(exited.pane_id.clone()),
@@ -597,10 +582,7 @@ impl LeadInbox {
                     }
                     None => match gate.inbound.admit_mailbox(receiver.flatten(), message) {
                         MailboxAdmission::Deliver => pass.messages.push(self.plain(message)),
-                        MailboxAdmission::Held {
-                            cause,
-                            evicted_prune,
-                        } => {
+                        MailboxAdmission::Held { cause, evicted_prune } => {
                             tracing::info!(
                                 from = message.from,
                                 ?cause,
@@ -644,8 +626,7 @@ impl LeadInbox {
         }
         let identities: Vec<mailbox::Identity> = messages.iter().map(Delivered::identity).collect();
         for root in self.roots() {
-            self.prune(&self.lead_inbox_in(&root), identities.clone())
-                .await;
+            self.prune(&self.lead_inbox_in(&root), identities.clone()).await;
         }
     }
 
@@ -657,10 +638,7 @@ impl LeadInbox {
             summary: message.summary.clone(),
             color: message.color.clone(),
             body: message.text.clone(),
-            delivery: self
-                .registry
-                .delivery_of(&message.from)
-                .unwrap_or(Delivery::FireAndForget),
+            delivery: self.registry.delivery_of(&message.from).unwrap_or(Delivery::FireAndForget),
         }
     }
 
@@ -759,10 +737,8 @@ impl LeadInbox {
             tool: request.tool_name.clone(),
             input: request.input.clone(),
         };
-        let dialog = member::dialog_of(
-            SessionId::from(self.registry.lead_session_id().to_owned()),
-            request,
-        );
+        let dialog =
+            member::dialog_of(SessionId::from(self.registry.lead_session_id().to_owned()), request);
 
         let Some(surface) = self.registry.dialog_surface() else {
             tracing::warn!(
@@ -777,11 +753,9 @@ impl LeadInbox {
             return;
         };
         let (reply, waiting) = oneshot::channel();
-        if let Err(undelivered) = surface.try_send(Forwarded {
-            teammate: message.from.clone(),
-            request: dialog,
-            reply,
-        }) {
+        if let Err(undelivered) =
+            surface.try_send(Forwarded { teammate: message.from.clone(), request: dialog, reply })
+        {
             let reason = match undelivered {
                 mpsc::error::TrySendError::Full(_) => DIALOG_QUEUE_FULL,
                 mpsc::error::TrySendError::Closed(_) => LEAD_GONE,
@@ -812,10 +786,7 @@ impl LeadInbox {
             let reply = waiting.await.unwrap_or(PermissionReply::Reject);
             answer.write(reply).await;
         });
-        pass.asked.push(Asked {
-            raised: true,
-            ..asked
-        });
+        pass.asked.push(Asked { raised: true, ..asked });
     }
 
     /// A teammate saying it is done, which is the lead's cue to forget it.
@@ -867,10 +838,7 @@ impl LeadInbox {
             reason = ?idle.idle_reason,
             "a teammate reported itself available"
         );
-        pass.idle.push(Idle {
-            name: message.from.clone(),
-            summary: idle.summary,
-        });
+        pass.idle.push(Idle { name: message.from.clone(), summary: idle.summary });
     }
 
     /// Names a frame nobody here handles ([`drop_frame`]).
@@ -905,16 +873,14 @@ impl Answer {
     /// Writes the person's decision back as a `permission_response`.
     async fn write(&self, reply: PermissionReply) {
         let response = member::response_of(&self.request_id, &self.tool, &self.input, reply);
-        self.deliver(Frame::PermissionResponse(response), "answered")
-            .await;
+        self.deliver(Frame::PermissionResponse(response), "answered").await;
     }
 
     /// Writes a refusal back, for an ask nobody could be shown — a dialog
     /// that could not be raised, rather than one answered "no".
     async fn refuse(&self, reason: &str) {
         let response = PermissionResponse::error(&self.request_id, reason);
-        self.deliver(Frame::PermissionResponse(response), "refused")
-            .await;
+        self.deliver(Frame::PermissionResponse(response), "refused").await;
     }
 
     /// One write into the asker's inbox, said out loud when it fails: a pane

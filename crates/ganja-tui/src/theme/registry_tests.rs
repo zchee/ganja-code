@@ -34,16 +34,8 @@ fn every_builtin_theme_resolves_in_both_modes() {
 
         // 52 keys upstream names, less the two optional ones aura and the
         // rest omit, plus the two the post-pass fills back in.
-        assert!(
-            dark.len() >= 50,
-            "{name} resolved only {} keys in dark",
-            dark.len()
-        );
-        assert_eq!(
-            dark.len(),
-            light.len(),
-            "{name} should resolve the same keys in both modes"
-        );
+        assert!(dark.len() >= 50, "{name} resolved only {} keys in dark", dark.len());
+        assert_eq!(dark.len(), light.len(), "{name} should resolve the same keys in both modes");
     }
 }
 
@@ -131,10 +123,7 @@ fn a_custom_theme_is_listed_beside_the_builtins() {
 
     assert!(themes.names().contains(&"midnight".to_owned()));
     assert_eq!(
-        themes
-            .select("midnight")
-            .expect("the custom theme registers")
-            .color("text"),
+        themes.select("midnight").expect("the custom theme registers").color("text"),
         Some(crate::theme::Rgba::rgb(0x10, 0x10, 0x20))
     );
 }
@@ -154,15 +143,7 @@ fn the_listing_sorts_by_name_and_not_by_the_case_it_was_written_in() {
 
     assert_eq!(
         themes.names(),
-        vec![
-            "aura",
-            "Ayu",
-            "gruvbox",
-            "opencode",
-            "terminal",
-            "tokyonight",
-            "Zenburn"
-        ],
+        vec!["aura", "Ayu", "gruvbox", "opencode", "terminal", "tokyonight", "Zenburn"],
         "a byte sort would have listed Ayu and Zenburn before aura"
     );
 }
@@ -174,29 +155,15 @@ fn the_listing_sorts_by_name_and_not_by_the_case_it_was_written_in() {
 #[test]
 fn a_theme_that_only_answers_in_one_mode_never_reaches_the_listing() {
     let directory = temporary();
-    custom(
-        &directory,
-        "darkonly",
-        "{\"theme\": {\"text\": {\"dark\": \"#101020\"}}}",
-    );
+    custom(&directory, "darkonly", "{\"theme\": {\"text\": {\"dark\": \"#101020\"}}}");
     custom(&directory, "bothmodes", &minimal("#123456"));
 
     let mut themes = Themes::builtin();
     themes.add_custom_dir(directory.path());
 
-    assert!(
-        !themes.names().contains(&"darkonly".to_owned()),
-        "got: {:?}",
-        themes.names()
-    );
-    assert!(
-        themes.select("darkonly").is_none(),
-        "and there is nothing to select either"
-    );
-    assert!(
-        themes.names().contains(&"bothmodes".to_owned()),
-        "the theme beside it still loaded"
-    );
+    assert!(!themes.names().contains(&"darkonly".to_owned()), "got: {:?}", themes.names());
+    assert!(themes.select("darkonly").is_none(), "and there is nothing to select either");
+    assert!(themes.names().contains(&"bothmodes".to_owned()), "the theme beside it still loaded");
 }
 
 /// R11: a name collision is the user's file winning. That is the whole
@@ -210,18 +177,11 @@ fn a_custom_theme_shadows_the_builtin_of_the_same_name() {
     themes.add_custom_dir(directory.path());
 
     assert_eq!(
-        themes
-            .select(DEFAULT_THEME)
-            .expect("the name still resolves")
-            .color("text"),
+        themes.select(DEFAULT_THEME).expect("the name still resolves").color("text"),
         Some(crate::theme::Rgba::rgb(0xab, 0xcd, 0xef))
     );
     assert_eq!(
-        themes
-            .names()
-            .iter()
-            .filter(|name| *name == DEFAULT_THEME)
-            .count(),
+        themes.names().iter().filter(|name| *name == DEFAULT_THEME).count(),
         1,
         "shadowing replaces the entry rather than listing it twice"
     );
@@ -296,11 +256,8 @@ fn a_pick_survives_into_the_next_run() {
 fn a_stored_pick_this_build_does_not_have_falls_back_to_the_default() {
     let directory = temporary();
     let store = directory.path().join("tui.json");
-    fs::write(
-        &store,
-        "{\"version\":1,\"theme\":\"a-theme-that-was-deleted\"}",
-    )
-    .expect("the fixture writes");
+    fs::write(&store, "{\"version\":1,\"theme\":\"a-theme-that-was-deleted\"}")
+        .expect("the fixture writes");
 
     let mut themes = Themes::builtin();
     themes.adopt_store(store);
@@ -315,8 +272,5 @@ fn a_pick_with_nowhere_to_go_is_refused_rather_than_lost_silently() {
 
     let refusal = themes.persist().expect_err("there is no store");
 
-    assert!(
-        refusal.to_string().contains("could not be located"),
-        "got: {refusal}"
-    );
+    assert!(refusal.to_string().contains("could not be located"), "got: {refusal}");
 }

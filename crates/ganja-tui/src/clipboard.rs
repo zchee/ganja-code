@@ -136,17 +136,13 @@ impl System {
             );
         }
 
-        self.handle
-            .as_mut()
-            .ok_or_else(|| Error::Unavailable("the clipboard went away".to_owned()))
+        self.handle.as_mut().ok_or_else(|| Error::Unavailable("the clipboard went away".to_owned()))
     }
 }
 
 impl Clipboard for System {
     fn write(&mut self, text: &str) -> Result<(), Error> {
-        self.handle()?
-            .set_text(text)
-            .map_err(|error| Error::Unavailable(error.to_string()))
+        self.handle()?.set_text(text).map_err(|error| Error::Unavailable(error.to_string()))
     }
 
     fn read(&mut self) -> Result<String, Error> {
@@ -166,21 +162,14 @@ impl Clipboard for System {
             other => Error::Unavailable(other.to_string()),
         })?;
 
-        Ok(Image {
-            width: image.width,
-            height: image.height,
-            rgba: image.bytes.into_owned(),
-        })
+        Ok(Image { width: image.width, height: image.height, rgba: image.bytes.into_owned() })
     }
 
     fn read_files(&mut self) -> Result<Vec<std::path::PathBuf>, Error> {
-        self.handle()?
-            .get()
-            .file_list()
-            .map_err(|error| match error {
-                arboard::Error::ContentNotAvailable => Error::NoFiles,
-                other => Error::Unavailable(other.to_string()),
-            })
+        self.handle()?.get().file_list().map_err(|error| match error {
+            arboard::Error::ContentNotAvailable => Error::NoFiles,
+            other => Error::Unavailable(other.to_string()),
+        })
     }
 }
 
@@ -271,22 +260,12 @@ impl Default for Recording {
 impl Recording {
     /// A clipboard holding `text`, accepting everything written to it.
     pub fn holding(text: &str) -> Self {
-        Self {
-            holds: Ok(text.to_owned()),
-            ..Self::default()
-        }
+        Self { holds: Ok(text.to_owned()), ..Self::default() }
     }
 
     /// A clipboard holding a `width`×`height` image, its pixels `rgba`.
     pub fn holding_image(width: usize, height: usize, rgba: Vec<u8>) -> Self {
-        Self {
-            holds_image: Ok(Image {
-                width,
-                height,
-                rgba,
-            }),
-            ..Self::default()
-        }
+        Self { holds_image: Ok(Image { width, height, rgba }), ..Self::default() }
     }
 
     /// A clipboard holding copied files, the way a Finder ⌘C leaves one —
@@ -301,11 +280,7 @@ impl Recording {
             .collect::<Vec<_>>()
             .join("\n");
 
-        Self {
-            holds: Ok(names),
-            holds_files: Ok(files),
-            ..Self::default()
-        }
+        Self { holds: Ok(names), holds_files: Ok(files), ..Self::default() }
     }
 
     /// A clipboard whose reads — text and image alike — fail with `error`.
@@ -325,10 +300,7 @@ impl Recording {
 
     /// A clipboard whose writes fail with `error`.
     pub fn refusing_writes(error: Error) -> Self {
-        Self {
-            accepts: Err(error),
-            ..Self::default()
-        }
+        Self { accepts: Err(error), ..Self::default() }
     }
 
     /// A handle onto what this clipboard is handed, which survives the move
@@ -342,10 +314,7 @@ impl Recording {
 impl Clipboard for Recording {
     fn write(&mut self, text: &str) -> Result<(), Error> {
         self.accepts.clone()?;
-        self.written
-            .lock()
-            .expect("the recording lock is never poisoned")
-            .push(text.to_owned());
+        self.written.lock().expect("the recording lock is never poisoned").push(text.to_owned());
 
         Ok(())
     }

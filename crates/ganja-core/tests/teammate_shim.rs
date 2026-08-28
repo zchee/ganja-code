@@ -15,7 +15,8 @@
 
 mod shim_support;
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 use ganja_core::teammate::shim;
 use ganja_team::{MailboxMessage, MemberName, mailbox, record};
@@ -35,13 +36,7 @@ const TASK: &str = "hold the fort";
 fn lead_mail(root: &ganja_team::TeamsRoot, team: &ganja_team::TeamName) -> Vec<String> {
     let path = root.inbox_path(team, &MemberName::lead());
     mailbox::read(&path)
-        .map(|contents| {
-            contents
-                .valid
-                .into_iter()
-                .map(|message| message.text)
-                .collect()
-        })
+        .map(|contents| contents.valid.into_iter().map(|message| message.text).collect())
         .unwrap_or_default()
 }
 
@@ -55,11 +50,8 @@ fn send(
 ) {
     let member = MemberName::parse(to).expect("a member name");
     let path = root.inbox_path(team, &member);
-    mailbox::write(
-        &path,
-        MailboxMessage::new(from, text.to_owned(), record::now_iso8601()),
-    )
-    .expect("the message is written");
+    mailbox::write(&path, MailboxMessage::new(from, text.to_owned(), record::now_iso8601()))
+        .expect("the message is written");
 }
 
 /// One inbox message is one CLI turn, and the count is the assertion: a shim
@@ -149,10 +141,7 @@ async fn a_prompt_never_appears_in_a_shim_childs_argv() {
         cli.records("file")
     );
     for argv in cli.records("argv") {
-        assert!(
-            !argv.contains(secret),
-            "the prompt must never be on a command line: {argv}"
-        );
+        assert!(!argv.contains(secret), "the prompt must never be on a command line: {argv}");
     }
 
     registry.shutdown().await;
@@ -185,10 +174,8 @@ async fn a_shim_child_gets_exactly_the_enumerated_environment() {
         cli.received()
     );
 
-    let names: Vec<String> = cli.records("env")[0]
-        .split_ascii_whitespace()
-        .map(str::to_owned)
-        .collect();
+    let names: Vec<String> =
+        cli.records("env")[0].split_ascii_whitespace().map(str::to_owned).collect();
     for name in shim::CARRIED {
         // A carried variable travels only if this process actually holds it —
         // except `PATH`, which `environment()` pushes unconditionally from the
@@ -200,10 +187,7 @@ async fn a_shim_child_gets_exactly_the_enumerated_environment() {
         if name != "PATH" && std::env::var_os(name).is_none() {
             continue;
         }
-        assert!(
-            names.contains(&name.to_owned()),
-            "{name} travels: {names:?}"
-        );
+        assert!(names.contains(&name.to_owned()), "{name} travels: {names:?}");
     }
 
     // Everything this process holds that the enumeration does not name must be
@@ -278,10 +262,7 @@ async fn a_shutdown_request_from_any_sender_retires_the_member_and_never_reaches
         "the member answered the shutdown: {:?}",
         lead_mail(&root, &team)
     );
-    assert!(
-        until(ANSWERS, || registry.running() == 0).await,
-        "and stopped being listed"
-    );
+    assert!(until(ANSWERS, || registry.running() == 0).await, "and stopped being listed");
     assert!(
         !cli.ever_saw("shutdown_request"),
         "no frame JSON ever reached the CLI: {:?}",
@@ -332,12 +313,8 @@ async fn a_recognized_reserved_frame_is_dropped_as_information_and_never_compose
         lead_mail(&root, &team)
     );
 
-    let ring: Vec<String> = registry
-        .view()
-        .members
-        .iter()
-        .flat_map(|member| member.recent_calls.clone())
-        .collect();
+    let ring: Vec<String> =
+        registry.view().members.iter().flat_map(|member| member.recent_calls.clone()).collect();
     assert!(
         ring.iter().any(|line| line.contains("mode_set_request")),
         "the drop is on the ring: {ring:?}"
@@ -347,11 +324,7 @@ async fn a_recognized_reserved_frame_is_dropped_as_information_and_never_compose
         "and it never became prompt text: {:?}",
         cli.received()
     );
-    assert_eq!(
-        cli.records("argv").len(),
-        1,
-        "a dropped frame is not a turn"
-    );
+    assert_eq!(cli.records("argv").len(), 1, "a dropped frame is not a turn");
 
     registry.shutdown().await;
 }
@@ -402,15 +375,10 @@ async fn a_frame_shaped_message_of_an_unknown_kind_is_dropped_and_its_sender_is_
         lead_mail(&root, &team)
     );
 
-    let ring: Vec<String> = registry
-        .view()
-        .members
-        .iter()
-        .flat_map(|member| member.recent_calls.clone())
-        .collect();
+    let ring: Vec<String> =
+        registry.view().members.iter().flat_map(|member| member.recent_calls.clone()).collect();
     assert!(
-        ring.iter()
-            .any(|line| line.contains("not_a_kind_this_build_knows")),
+        ring.iter().any(|line| line.contains("not_a_kind_this_build_knows")),
         "and the lead's ring names it: {ring:?}"
     );
     assert!(
@@ -418,11 +386,7 @@ async fn a_frame_shaped_message_of_an_unknown_kind_is_dropped_and_its_sender_is_
         "and it never became prompt text: {:?}",
         cli.received()
     );
-    assert_eq!(
-        cli.records("argv").len(),
-        1,
-        "a dropped frame is not a turn"
-    );
+    assert_eq!(cli.records("argv").len(), 1, "a dropped frame is not a turn");
 
     registry.shutdown().await;
 }
@@ -453,13 +417,7 @@ async fn a_type_key_that_is_not_a_string_is_still_a_frame_shaped_document() {
     .expect("the fake codex spawns");
     assert!(until(ANSWERS, || cli.records("argv").len() == 1).await);
 
-    send(
-        &root,
-        &team,
-        "w1",
-        "team-lead",
-        r#"{"type":42,"payload":"x"}"#,
-    );
+    send(&root, &team, "w1", "team-lead", r#"{"type":42,"payload":"x"}"#);
     assert!(
         until(ANSWERS, || lead_mail(&root, &team)
             .iter()
@@ -468,16 +426,8 @@ async fn a_type_key_that_is_not_a_string_is_still_a_frame_shaped_document() {
         "the sender is told, even though there was no kind to name: {:?}",
         lead_mail(&root, &team)
     );
-    assert!(
-        !cli.ever_saw("payload"),
-        "and it never became prompt text: {:?}",
-        cli.received()
-    );
-    assert_eq!(
-        cli.records("argv").len(),
-        1,
-        "a dropped document is not a turn"
-    );
+    assert!(!cli.ever_saw("payload"), "and it never became prompt text: {:?}", cli.received());
+    assert_eq!(cli.records("argv").len(), 1, "a dropped document is not a turn");
 
     registry.shutdown().await;
 }
@@ -506,22 +456,13 @@ async fn a_json_document_with_no_type_key_is_still_prompt_material() {
     .expect("the fake codex spawns");
     assert!(until(ANSWERS, || cli.records("argv").len() == 1).await);
 
-    send(
-        &root,
-        &team,
-        "w1",
-        "team-lead",
-        r#"{"question":"what is this"}"#,
-    );
+    send(&root, &team, "w1", "team-lead", r#"{"question":"what is this"}"#);
     // Waited for on the *prompt file* rather than on the argv: the fake writes
     // its argv first and its prompt second, so a wait on the argv alone would
     // read the log in the window between the two.
     assert!(
-        until(ANSWERS, || cli
-            .records("file")
-            .iter()
-            .any(|text| text.contains("what is this")))
-        .await,
+        until(ANSWERS, || cli.records("file").iter().any(|text| text.contains("what is this")))
+            .await,
         "somebody's data is a turn, not a frame: {:?}",
         cli.received()
     );
@@ -728,10 +669,7 @@ async fn a_resident_turn_past_its_deadline_is_ended_and_the_mail_names_the_key_t
         "the wedged child is forgotten and its replacement recorded: {:?}",
         pids(&registry)
     );
-    assert!(
-        !shim_support::alive(wedged[0]),
-        "and the wedged one is really gone"
-    );
+    assert!(!shim_support::alive(wedged[0]), "and the wedged one is really gone");
 
     registry.shutdown().await;
 }
@@ -911,11 +849,7 @@ async fn a_turn_that_stopped_part_way_keeps_its_session_mails_its_words_then_rep
 
     // The session survived, which only the *next* turn can show.
     send(&root, &team, "w1", "team-lead", "carry on");
-    assert!(
-        until(ANSWERS, || cli.records("argv").len() == 2).await,
-        "{:?}",
-        cli.received()
-    );
+    assert!(until(ANSWERS, || cli.records("argv").len() == 2).await, "{:?}", cli.received());
     assert!(
         cli.records("argv")[1].contains("--resume fake-session-1"),
         "a stopped turn leaves a conversation to resume: {:?}",
@@ -949,11 +883,8 @@ async fn a_shim_spawn_writes_its_posture_onto_the_members_ring() {
     .expect("the fake codex spawns");
 
     let view = registry.view();
-    let member = view
-        .members
-        .iter()
-        .find(|member| member.name == "w1")
-        .expect("the member is in the view");
+    let member =
+        view.members.iter().find(|member| member.name == "w1").expect("the member is in the view");
     let posture = ganja_core::teammate::posture_line(ganja_protocol::team::MemberBackend::Codex)
         .expect("codex states its posture");
     assert!(
@@ -975,11 +906,8 @@ async fn a_shim_spawn_writes_its_posture_onto_the_members_ring() {
     // that can never exist.
     let (root, team) = shim_support::team_of(&registry);
     let file = ganja_testkit::team_file(&root, &team).expect("the spawn wrote a team file");
-    let recorded = file
-        .members
-        .iter()
-        .find(|member| member.name == "w1")
-        .expect("the member is recorded");
+    let recorded =
+        file.members.iter().find(|member| member.name == "w1").expect("the member is recorded");
     assert_eq!(recorded.backend_type.as_deref(), Some("codex"));
     assert_eq!(recorded.tmux_pane_id, "in-process");
 
@@ -997,10 +925,8 @@ async fn a_shim_spawn_writes_its_posture_onto_the_members_ring() {
 /// Exactly two are turns.
 #[tokio::test]
 async fn one_pass_sorts_its_inbox_into_turns_and_drops() {
-    use ganja_core::teammate::{
-        SpawnSpec, TeammateBackend as _,
-        shim::{Lent, ShimBackend, ShimRunner},
-    };
+    use ganja_core::teammate::shim::{Lent, ShimBackend, ShimRunner};
+    use ganja_core::teammate::{SpawnSpec, TeammateBackend as _};
 
     let home = ganja_testkit::temp_dir();
     let cli = FakeCli::install();
@@ -1066,19 +992,11 @@ async fn one_pass_sorts_its_inbox_into_turns_and_drops() {
     assert_eq!(tick.failed, 0, "both answered");
     assert_eq!(
         tick.dropped,
-        vec![
-            Some("mode_set_request".to_owned()),
-            Some("not_a_kind_this_build_knows".to_owned()),
-        ],
+        vec![Some("mode_set_request".to_owned()), Some("not_a_kind_this_build_knows".to_owned()),],
         "in inbox order, each named by what it called itself"
     );
     assert!(tick.shutdown.is_none());
-    assert_eq!(
-        cli.records("argv").len(),
-        2,
-        "two turns is two children: {:?}",
-        cli.received()
-    );
+    assert_eq!(cli.records("argv").len(), 2, "two turns is two children: {:?}", cli.received());
     assert!(
         !cli.ever_saw("mode_set_request") && !cli.ever_saw("not_a_kind_this_build_knows"),
         "and no frame JSON reached the CLI: {:?}",
@@ -1148,16 +1066,9 @@ async fn a_restarted_lead_marks_a_previous_leads_shim_members_inactive() {
     assert_eq!(retired, vec!["w1".to_owned()], "only the shim member");
     let file = ganja_testkit::team_file(&root, &team).expect("the team file is there");
     let active = |name: &str| {
-        file.members
-            .iter()
-            .find(|member| member.name == name)
-            .and_then(|member| member.is_active)
+        file.members.iter().find(|member| member.name == name).and_then(|member| member.is_active)
     };
-    assert_eq!(
-        active("w1"),
-        Some(false),
-        "the shim member says it is not running"
-    );
+    assert_eq!(active("w1"), Some(false), "the shim member says it is not running");
     assert_eq!(
         active("w2"),
         Some(true),
@@ -1166,11 +1077,7 @@ async fn a_restarted_lead_marks_a_previous_leads_shim_members_inactive() {
 
     // Idempotent: a second startup has nothing left to retire, and does not
     // rewrite the document to say so.
-    assert!(
-        ganja_core::teammate::reaper::retire_shim_records(&restarted)
-            .await
-            .is_empty()
-    );
+    assert!(ganja_core::teammate::reaper::retire_shim_records(&restarted).await.is_empty());
 
     // **Dv-3's name semantics**, which are otherwise implemented and invisible:
     // a retired row is still a row, `taken()` counts it without consulting
@@ -1185,17 +1092,11 @@ async fn a_restarted_lead_marks_a_previous_leads_shim_members_inactive() {
         )
         .await
         .expect("the work can be restaffed");
-    assert_eq!(
-        respawned.name, "w1-2",
-        "the work is restaffed, the name is not reused"
-    );
+    assert_eq!(respawned.name, "w1-2", "the work is restaffed, the name is not reused");
 
     let file = ganja_testkit::team_file(&root, &team).expect("the team file is there");
     assert_eq!(
-        file.members
-            .iter()
-            .find(|member| member.name == "w1")
-            .and_then(|member| member.is_active),
+        file.members.iter().find(|member| member.name == "w1").and_then(|member| member.is_active),
         Some(false),
         "and the retired row is left exactly as the retire wrote it"
     );
@@ -1241,10 +1142,7 @@ async fn another_leads_shim_members_are_never_retired() {
     assert!(retired.is_empty(), "{retired:?}");
     let file = ganja_testkit::team_file(&root, &team).expect("the team file is there");
     assert_eq!(
-        file.members
-            .iter()
-            .find(|member| member.name == "w1")
-            .and_then(|member| member.is_active),
+        file.members.iter().find(|member| member.name == "w1").and_then(|member| member.is_active),
         Some(true),
         "a co-tenant lead's member is left exactly as its own lead wrote it"
     );
@@ -1292,17 +1190,9 @@ async fn a_registry_shutdown_ends_every_shim_child_and_waits_for_the_reap() {
 
     registry.shutdown().await;
 
+    assert!(!shim_support::alive(pid), "the shutdown returned only once the child was really gone");
     assert!(
-        !shim_support::alive(pid),
-        "the shutdown returned only once the child was really gone"
-    );
-    assert!(
-        registry
-            .shims()
-            .lock()
-            .expect("the records are never poisoned")
-            .children()
-            .is_empty(),
+        registry.shims().lock().expect("the records are never poisoned").children().is_empty(),
         "and its record went with it"
     );
 }

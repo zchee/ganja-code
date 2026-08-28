@@ -8,17 +8,16 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::{StreamExt as _, stream::BoxStream};
-use ganja_core::{
-    Engine, EngineError,
-    permission::{Decision, Permissions},
-    protocol::{
-        Command, Event, FinishReason, PartBody, PermissionId, PermissionMode, PermissionReply,
-        Role, ToolState, Usage,
-    },
-    provider::{ChatRequest, ProviderError, ProviderEvent},
-    tool::{Registry, Tool, ToolCtx, ToolError, ToolOutput},
+use futures::StreamExt as _;
+use futures::stream::BoxStream;
+use ganja_core::permission::{Decision, Permissions};
+use ganja_core::protocol::{
+    Command, Event, FinishReason, PartBody, PermissionId, PermissionMode, PermissionReply, Role,
+    ToolState, Usage,
 };
+use ganja_core::provider::{ChatRequest, ProviderError, ProviderEvent};
+use ganja_core::tool::{Registry, Tool, ToolCtx, ToolError, ToolOutput};
+use ganja_core::{Engine, EngineError};
 use ganja_testkit::{BlockingTool, RecorderTool, ScriptedProvider, drain};
 
 /// The rejection text the model reads, pinned to upstream
@@ -55,28 +54,15 @@ fn call(id: &str, tool: &str, json: &str) -> Vec<ProviderEvent> {
     let (head, tail) = json.split_at(json.len() / 2);
 
     vec![
-        ProviderEvent::ToolCallStart {
-            id: id.to_owned(),
-            name: tool.to_owned(),
-        },
-        ProviderEvent::ToolCallDelta {
-            id: id.to_owned(),
-            json: head.to_owned(),
-        },
-        ProviderEvent::ToolCallDelta {
-            id: id.to_owned(),
-            json: tail.to_owned(),
-        },
+        ProviderEvent::ToolCallStart { id: id.to_owned(), name: tool.to_owned() },
+        ProviderEvent::ToolCallDelta { id: id.to_owned(), json: head.to_owned() },
+        ProviderEvent::ToolCallDelta { id: id.to_owned(), json: tail.to_owned() },
         ProviderEvent::ToolCallEnd { id: id.to_owned() },
     ]
 }
 
 fn usage(input: u64, output: u64) -> Usage {
-    Usage {
-        input_tokens: input,
-        output_tokens: output,
-        ..Usage::default()
-    }
+    Usage { input_tokens: input, output_tokens: output, ..Usage::default() }
 }
 
 /// One line per event, carrying exactly what the order tests pin.
@@ -91,10 +77,7 @@ fn shape(event: &Event) -> String {
     }
 
     match event {
-        Event::MessageStarted {
-            session_id: _,
-            message,
-        } => match message.role {
+        Event::MessageStarted { session_id: _, message } => match message.role {
             Role::User => "started:user".to_owned(),
             Role::Assistant => "started:assistant".to_owned(),
         },
@@ -102,10 +85,9 @@ fn shape(event: &Event) -> String {
             PartBody::Text { .. } => "part:text".to_owned(),
             PartBody::File { path, .. } => format!("part:file:{path}"),
             PartBody::StepStart => "part:step_start".to_owned(),
-            PartBody::StepFinish { usage } => format!(
-                "part:step_finish:{}/{}",
-                usage.input_tokens, usage.output_tokens
-            ),
+            PartBody::StepFinish { usage } => {
+                format!("part:step_finish:{}/{}", usage.input_tokens, usage.output_tokens)
+            }
             PartBody::Tool { call_id, state, .. } => {
                 format!("part:tool_{}:{call_id}", state_tag(state))
             }
@@ -195,10 +177,8 @@ async fn until_permission(events: &mut BoxStream<'static, Event>) -> (Permission
     let mut seen = Vec::new();
 
     loop {
-        let event = events
-            .next()
-            .await
-            .expect("a permission request should arrive before the stream ends");
+        let event =
+            events.next().await.expect("a permission request should arrive before the stream ends");
         seen.push(event.clone());
 
         if let Event::PermissionRequested { id, .. } = event {
@@ -243,10 +223,7 @@ fn prompt() -> Command {
 #[test]
 fn the_builtin_registry_advertises_every_tool() {
     let definitions = Registry::with_builtins().definitions();
-    let names: Vec<&str> = definitions
-        .iter()
-        .map(|definition| definition.name.as_str())
-        .collect();
+    let names: Vec<&str> = definitions.iter().map(|definition| definition.name.as_str()).collect();
 
     assert_eq!(
         names,
@@ -335,20 +312,13 @@ async fn a_turn_spans_steps_until_a_request_ends_without_tool_calls() {
     // Both calls executed, sequentially, in arrival order.
     assert_eq!(
         *calls.lock().expect("the call log is never poisoned"),
-        vec![
-            serde_json::json!({"key": "a"}),
-            serde_json::json!({"key": "b"}),
-        ]
+        vec![serde_json::json!({"key": "a"}), serde_json::json!({"key": "b"}),]
     );
 
     // Tool parts belong to the assistant message, and the second request
     // carries them — results included — so the model reads what its calls
     // returned.
-    let Some(Event::MessageStarted {
-        session_id: _,
-        message: assistant,
-    }) = seen.get(1)
-    else {
+    let Some(Event::MessageStarted { session_id: _, message: assistant }) = seen.get(1) else {
         panic!("the assistant envelope should be second, got {seen:?}");
     };
     for event in &seen {
@@ -358,21 +328,11 @@ async fn a_turn_spans_steps_until_a_request_ends_without_tool_calls() {
         }
     }
 
-    let requests = seen_requests
-        .lock()
-        .expect("the request log is never poisoned");
+    let requests = seen_requests.lock().expect("the request log is never poisoned");
     assert_eq!(requests.len(), 2, "one request per step");
-    assert_eq!(
-        requests[0].messages.len(),
-        1,
-        "the first request carries only the prompt"
-    );
+    assert_eq!(requests[0].messages.len(), 1, "the first request carries only the prompt");
     let second = &requests[1];
-    assert_eq!(
-        second.messages.len(),
-        2,
-        "the second request adds the reply so far"
-    );
+    assert_eq!(second.messages.len(), 2, "the second request adds the reply so far");
     let states = tool_states(second);
     assert_eq!(states.len(), 2);
     for (index, (call_id, state)) in states.iter().enumerate() {
@@ -434,13 +394,8 @@ async fn a_call_with_no_arguments_runs_with_an_empty_object() {
         "step-scripted",
         vec![
             vec![
-                ProviderEvent::ToolCallStart {
-                    id: "call_1".to_owned(),
-                    name: "lookup".to_owned(),
-                },
-                ProviderEvent::ToolCallEnd {
-                    id: "call_1".to_owned(),
-                },
+                ProviderEvent::ToolCallStart { id: "call_1".to_owned(), name: "lookup".to_owned() },
+                ProviderEvent::ToolCallEnd { id: "call_1".to_owned() },
                 ProviderEvent::Finish(FinishReason::Completed),
             ],
             vec![ProviderEvent::Finish(FinishReason::Completed)],
@@ -471,10 +426,7 @@ async fn a_permission_answered_once_runs_the_call() {
     step_one.push(ProviderEvent::Finish(FinishReason::Completed));
     let (provider, _requests) = ScriptedProvider::strict(
         "step-scripted",
-        vec![
-            step_one,
-            vec![ProviderEvent::Finish(FinishReason::Completed)],
-        ],
+        vec![step_one, vec![ProviderEvent::Finish(FinishReason::Completed)]],
     );
     let (tool, calls) = RecorderTool::new("shell", "shell ran", "found it");
     let engine = Engine::new(
@@ -488,14 +440,7 @@ async fn a_permission_answered_once_runs_the_call() {
     engine.send(prompt()).await.expect("an idle engine accepts");
 
     let (id, seen) = until_permission(&mut events).await;
-    let Some(Event::PermissionRequested {
-        call_id,
-        tool,
-        title,
-        args,
-        ..
-    }) = seen.last()
-    else {
+    let Some(Event::PermissionRequested { call_id, tool, title, args, .. }) = seen.last() else {
         panic!("the drain stops on the request");
     };
     assert_eq!(call_id, "call_1");
@@ -503,18 +448,12 @@ async fn a_permission_answered_once_runs_the_call() {
     assert_eq!(title, "shell", "the default title names the tool");
     assert_eq!(*args, serde_json::json!({"key": "a"}));
     assert!(
-        calls
-            .lock()
-            .expect("the call log is never poisoned")
-            .is_empty(),
+        calls.lock().expect("the call log is never poisoned").is_empty(),
         "nothing runs while the question is open"
     );
 
     engine
-        .send(Command::ReplyPermission {
-            id,
-            reply: PermissionReply::Once,
-        })
+        .send(Command::ReplyPermission { id, reply: PermissionReply::Once })
         .await
         .expect("a reply is always accepted");
 
@@ -562,10 +501,7 @@ async fn a_permission_answered_always_stops_the_asking() {
     engine.send(prompt()).await.expect("an idle engine accepts");
     let (id, _) = until_permission(&mut events).await;
     engine
-        .send(Command::ReplyPermission {
-            id,
-            reply: PermissionReply::Always,
-        })
+        .send(Command::ReplyPermission { id, reply: PermissionReply::Always })
         .await
         .expect("a reply is always accepted");
     drain(&mut events).await;
@@ -581,15 +517,10 @@ async fn a_permission_answered_always_stops_the_asking() {
         Decision::Allow
     );
 
-    engine
-        .send(prompt())
-        .await
-        .expect("the engine is idle again");
+    engine.send(prompt()).await.expect("the engine is idle again");
     let second = drain(&mut events).await;
     assert!(
-        !second
-            .iter()
-            .any(|event| matches!(event, Event::PermissionRequested { .. })),
+        !second.iter().any(|event| matches!(event, Event::PermissionRequested { .. })),
         "an always answer means the next call does not ask, got {second:?}"
     );
     assert_eq!(
@@ -621,10 +552,7 @@ async fn a_rejected_call_does_not_run_and_the_turn_continues() {
     engine.send(prompt()).await.expect("an idle engine accepts");
     let (id, _) = until_permission(&mut events).await;
     engine
-        .send(Command::ReplyPermission {
-            id,
-            reply: PermissionReply::Reject,
-        })
+        .send(Command::ReplyPermission { id, reply: PermissionReply::Reject })
         .await
         .expect("a reply is always accepted");
 
@@ -645,17 +573,12 @@ async fn a_rejected_call_does_not_run_and_the_turn_continues() {
     );
 
     assert!(
-        calls
-            .lock()
-            .expect("the call log is never poisoned")
-            .is_empty(),
+        calls.lock().expect("the call log is never poisoned").is_empty(),
         "a rejected call must not run"
     );
 
     // The model reads the rejection as the call's result on the next request.
-    let requests = seen_requests
-        .lock()
-        .expect("the request log is never poisoned");
+    let requests = seen_requests.lock().expect("the request log is never poisoned");
     let states = tool_states(&requests[1]);
     let Some((call_id, ToolState::Error { error, .. })) = states.first() else {
         panic!("the rejection should travel as an error state, got {states:?}");
@@ -670,10 +593,7 @@ async fn cancelling_while_a_permission_waits_refuses_it() {
     step_one.push(ProviderEvent::Finish(FinishReason::Completed));
     let (provider, _requests) = ScriptedProvider::strict(
         "step-scripted",
-        vec![
-            step_one,
-            vec![ProviderEvent::Finish(FinishReason::Completed)],
-        ],
+        vec![step_one, vec![ProviderEvent::Finish(FinishReason::Completed)]],
     );
     let (tool, calls) = RecorderTool::new("shell", "shell ran", "found it");
     let engine = Engine::new(
@@ -687,20 +607,13 @@ async fn cancelling_while_a_permission_waits_refuses_it() {
     engine.send(prompt()).await.expect("an idle engine accepts");
     let (id, _) = until_permission(&mut events).await;
 
-    engine
-        .send(Command::CancelTurn)
-        .await
-        .expect("a waiting engine accepts a cancel");
+    engine.send(Command::CancelTurn).await.expect("a waiting engine accepts a cancel");
 
     let rest = drain(&mut events).await;
     let shapes: Vec<String> = rest.iter().map(shape).collect();
     assert_eq!(
         shapes,
-        vec![
-            "perm_replied:reject",
-            "updated:error:call_1",
-            "finished:cancelled",
-        ],
+        vec!["perm_replied:reject", "updated:error:call_1", "finished:cancelled",],
         "a cancel answers the open request before the turn closes"
     );
     let Some(Event::PermissionReplied { id: replied, .. }) = rest.first() else {
@@ -708,17 +621,11 @@ async fn cancelling_while_a_permission_waits_refuses_it() {
     };
     assert_eq!(*replied, id);
     assert!(
-        calls
-            .lock()
-            .expect("the call log is never poisoned")
-            .is_empty(),
+        calls.lock().expect("the call log is never poisoned").is_empty(),
         "a refused call must not run"
     );
 
-    engine
-        .send(prompt())
-        .await
-        .expect("a cancelled turn leaves the engine idle");
+    engine.send(prompt()).await.expect("a cancelled turn leaves the engine idle");
     drain(&mut events).await;
 }
 
@@ -728,10 +635,7 @@ async fn a_prompt_is_refused_while_a_permission_waits() {
     step_one.push(ProviderEvent::Finish(FinishReason::Completed));
     let (provider, _requests) = ScriptedProvider::strict(
         "step-scripted",
-        vec![
-            step_one,
-            vec![ProviderEvent::Finish(FinishReason::Completed)],
-        ],
+        vec![step_one, vec![ProviderEvent::Finish(FinishReason::Completed)]],
     );
     let (tool, _calls) = RecorderTool::new("shell", "shell ran", "found it");
     let engine = Engine::new(
@@ -751,10 +655,7 @@ async fn a_prompt_is_refused_while_a_permission_waits() {
     );
 
     engine
-        .send(Command::ReplyPermission {
-            id,
-            reply: PermissionReply::Once,
-        })
+        .send(Command::ReplyPermission { id, reply: PermissionReply::Once })
         .await
         .expect("a reply is always accepted");
     drain(&mut events).await;
@@ -766,10 +667,7 @@ async fn a_stale_permission_reply_is_ignored() {
     step_one.push(ProviderEvent::Finish(FinishReason::Completed));
     let (provider, _requests) = ScriptedProvider::strict(
         "step-scripted",
-        vec![
-            step_one,
-            vec![ProviderEvent::Finish(FinishReason::Completed)],
-        ],
+        vec![step_one, vec![ProviderEvent::Finish(FinishReason::Completed)]],
     );
     let (tool, calls) = RecorderTool::new("shell", "shell ran", "found it");
     let engine = Engine::new(
@@ -794,18 +692,13 @@ async fn a_stale_permission_reply_is_ignored() {
         .expect("a stale reply is ignored, not an error");
 
     engine
-        .send(Command::ReplyPermission {
-            id,
-            reply: PermissionReply::Once,
-        })
+        .send(Command::ReplyPermission { id, reply: PermissionReply::Once })
         .await
         .expect("a reply is always accepted");
 
     let rest = drain(&mut events).await;
     assert_eq!(
-        rest.iter()
-            .filter(|event| matches!(event, Event::PermissionReplied { .. }))
-            .count(),
+        rest.iter().filter(|event| matches!(event, Event::PermissionReplied { .. })).count(),
         1,
         "one request, one reply, got {rest:?}"
     );
@@ -836,22 +729,12 @@ async fn an_unknown_tool_becomes_an_error_the_model_reads() {
     let seen = drain(&mut events).await;
 
     assert!(
-        seen.iter()
-            .map(shape)
-            .any(|it| it == "updated:error:call_1"),
+        seen.iter().map(shape).any(|it| it == "updated:error:call_1"),
         "an unknown tool errors its part, got {seen:?}"
     );
-    assert!(
-        calls
-            .lock()
-            .expect("the call log is never poisoned")
-            .is_empty(),
-        "nothing ran"
-    );
+    assert!(calls.lock().expect("the call log is never poisoned").is_empty(), "nothing ran");
 
-    let requests = seen_requests
-        .lock()
-        .expect("the request log is never poisoned");
+    let requests = seen_requests.lock().expect("the request log is never poisoned");
     assert_eq!(requests.len(), 2, "the loop continued past the error");
     let states = tool_states(&requests[1]);
     let Some((_, ToolState::Error { error, .. })) = states.first() else {
@@ -868,17 +751,9 @@ async fn an_unknown_tool_becomes_an_error_the_model_reads() {
 #[tokio::test]
 async fn malformed_arguments_become_an_error_the_model_reads() {
     let step_one = vec![
-        ProviderEvent::ToolCallStart {
-            id: "call_1".to_owned(),
-            name: "lookup".to_owned(),
-        },
-        ProviderEvent::ToolCallDelta {
-            id: "call_1".to_owned(),
-            json: "{not json".to_owned(),
-        },
-        ProviderEvent::ToolCallEnd {
-            id: "call_1".to_owned(),
-        },
+        ProviderEvent::ToolCallStart { id: "call_1".to_owned(), name: "lookup".to_owned() },
+        ProviderEvent::ToolCallDelta { id: "call_1".to_owned(), json: "{not json".to_owned() },
+        ProviderEvent::ToolCallEnd { id: "call_1".to_owned() },
         ProviderEvent::Finish(FinishReason::Completed),
     ];
     let step_two = vec![ProviderEvent::Finish(FinishReason::Completed)];
@@ -897,16 +772,11 @@ async fn malformed_arguments_become_an_error_the_model_reads() {
     drain(&mut events).await;
 
     assert!(
-        calls
-            .lock()
-            .expect("the call log is never poisoned")
-            .is_empty(),
+        calls.lock().expect("the call log is never poisoned").is_empty(),
         "a call whose arguments never parsed must not run"
     );
 
-    let requests = seen_requests
-        .lock()
-        .expect("the request log is never poisoned");
+    let requests = seen_requests.lock().expect("the request log is never poisoned");
     assert_eq!(requests.len(), 2, "the loop continued past the error");
     let states = tool_states(&requests[1]);
     let Some((_, ToolState::Error { error, input, .. })) = states.first() else {
@@ -916,11 +786,7 @@ async fn malformed_arguments_become_an_error_the_model_reads() {
         error.starts_with(INVALID_PREFIX),
         "the wording is upstream's invalid-tool output, got {error:?}"
     );
-    assert_eq!(
-        *input,
-        serde_json::json!({}),
-        "unparseable arguments leave an empty input"
-    );
+    assert_eq!(*input, serde_json::json!({}), "unparseable arguments leave an empty input");
 }
 
 #[tokio::test]
@@ -946,17 +812,12 @@ async fn a_tool_failure_is_a_result_not_a_turn_abort() {
     };
     assert_eq!(*reason, FinishReason::Completed);
 
-    let requests = seen_requests
-        .lock()
-        .expect("the request log is never poisoned");
+    let requests = seen_requests.lock().expect("the request log is never poisoned");
     let states = tool_states(&requests[1]);
     let Some((_, ToolState::Error { error, .. })) = states.first() else {
         panic!("the model should read the failure, got {states:?}");
     };
-    assert_eq!(
-        error, "the index is corrupt",
-        "the model reads the tool's own words"
-    );
+    assert_eq!(error, "the index is corrupt", "the model reads the tool's own words");
 }
 
 #[tokio::test]
@@ -965,10 +826,7 @@ async fn cancelling_mid_execution_errors_the_call_and_finishes_cancelled() {
     step_one.push(ProviderEvent::Finish(FinishReason::Completed));
     let (provider, _requests) = ScriptedProvider::strict(
         "step-scripted",
-        vec![
-            step_one,
-            vec![ProviderEvent::Finish(FinishReason::Completed)],
-        ],
+        vec![step_one, vec![ProviderEvent::Finish(FinishReason::Completed)]],
     );
     let (entered, mut wait_entered) = tokio::sync::mpsc::channel(1);
     let engine = Engine::new(
@@ -984,15 +842,9 @@ async fn cancelling_mid_execution_errors_the_call_and_finishes_cancelled() {
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine.send(prompt()).await.expect("an idle engine accepts");
-    wait_entered
-        .recv()
-        .await
-        .expect("the tool should start executing");
+    wait_entered.recv().await.expect("the tool should start executing");
 
-    engine
-        .send(Command::CancelTurn)
-        .await
-        .expect("an executing engine accepts a cancel");
+    engine.send(Command::CancelTurn).await.expect("an executing engine accepts a cancel");
 
     let seen = drain(&mut events).await;
     let shapes: Vec<String> = seen.iter().map(shape).collect();
@@ -1005,20 +857,14 @@ async fn cancelling_mid_execution_errors_the_call_and_finishes_cancelled() {
     // The part's wording is the cancel's.
     let cancelled = seen.iter().find_map(|event| match event {
         Event::PartUpdated { part, .. } => match &part.body {
-            PartBody::Tool {
-                state: ToolState::Error { error, .. },
-                ..
-            } => Some(error.clone()),
+            PartBody::Tool { state: ToolState::Error { error, .. }, .. } => Some(error.clone()),
             _ => None,
         },
         _ => None,
     });
     assert_eq!(cancelled.as_deref(), Some("the call was cancelled"));
 
-    engine
-        .send(prompt())
-        .await
-        .expect("a cancelled turn leaves the engine idle");
+    engine.send(prompt()).await.expect("a cancelled turn leaves the engine idle");
     drain(&mut events).await;
 }
 
@@ -1026,14 +872,8 @@ async fn cancelling_mid_execution_errors_the_call_and_finishes_cancelled() {
 async fn a_provider_failure_mid_loop_strands_the_buffered_call() {
     let step_one = vec![
         ProviderEvent::TextDelta("checking".to_owned()),
-        ProviderEvent::ToolCallStart {
-            id: "call_1".to_owned(),
-            name: "lookup".to_owned(),
-        },
-        ProviderEvent::ToolCallDelta {
-            id: "call_1".to_owned(),
-            json: r#"{"key":"a"}"#.to_owned(),
-        },
+        ProviderEvent::ToolCallStart { id: "call_1".to_owned(), name: "lookup".to_owned() },
+        ProviderEvent::ToolCallDelta { id: "call_1".to_owned(), json: r#"{"key":"a"}"#.to_owned() },
         ProviderEvent::Failed(ProviderError::Transport("connection reset".to_owned())),
     ];
     let (provider, _requests) = ScriptedProvider::strict("step-scripted", vec![step_one]);
@@ -1067,23 +907,14 @@ async fn a_provider_failure_mid_loop_strands_the_buffered_call() {
 
     let stranded = seen.iter().find_map(|event| match event {
         Event::PartUpdated { part, .. } => match &part.body {
-            PartBody::Tool {
-                state: ToolState::Error { error, .. },
-                ..
-            } => Some(error.clone()),
+            PartBody::Tool { state: ToolState::Error { error, .. }, .. } => Some(error.clone()),
             _ => None,
         },
         _ => None,
     });
-    assert_eq!(
-        stranded.as_deref(),
-        Some("the provider failed before this call could run")
-    );
+    assert_eq!(stranded.as_deref(), Some("the provider failed before this call could run"));
     assert!(
-        calls
-            .lock()
-            .expect("the call log is never poisoned")
-            .is_empty(),
+        calls.lock().expect("the call log is never poisoned").is_empty(),
         "a stranded call never ran"
     );
 
@@ -1092,9 +923,7 @@ async fn a_provider_failure_mid_loop_strands_the_buffered_call() {
     };
     assert_eq!(*reason, FinishReason::Failed);
     assert!(
-        error
-            .as_deref()
-            .is_some_and(|error| error.contains("connection reset")),
+        error.as_deref().is_some_and(|error| error.contains("connection reset")),
         "the failure explains itself, got {error:?}"
     );
 }

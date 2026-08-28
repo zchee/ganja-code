@@ -82,17 +82,10 @@ async fn a_pane_spawn_without_tmux_is_refused_readably() {
         teammates_recorded(&root, &team).is_empty(),
         "a refused spawn joined nobody to the team"
     );
-    assert_eq!(
-        registry.running(),
-        0,
-        "and nothing was quietly started instead"
-    );
+    assert_eq!(registry.running(), 0, "and nothing was quietly started instead");
     let inbox = root.inbox_path(&team, &MemberName::parse("worker").expect("a member name"));
     assert!(
-        mailbox::read(&inbox)
-            .expect("the inbox reads")
-            .valid
-            .is_empty(),
+        mailbox::read(&inbox).expect("the inbox reads").valid.is_empty(),
         "a refused spawn left its prompt in an inbox"
     );
 

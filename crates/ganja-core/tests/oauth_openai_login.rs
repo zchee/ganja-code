@@ -18,23 +18,16 @@
 //! the callback listener's own behaviour is unit-tested in `auth::loopback`.
 //! Neither needs a process-wide anything.
 
-use std::{
-    collections::{HashMap, VecDeque},
-    env, fs,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use std::{env, fs};
 
-use ganja_core::auth::{
-    self, AuthErrorKind, OauthCredential, RefreshOauth as _,
-    openai::{DEVICE_DEADLINE, Login, PROVIDER_ID},
-    pkce,
-};
+use ganja_core::auth::openai::{DEVICE_DEADLINE, Login, PROVIDER_ID};
+use ganja_core::auth::{self, AuthErrorKind, OauthCredential, RefreshOauth as _, pkce};
 use secrecy::{ExposeSecret as _, SecretString};
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::{TcpListener, TcpStream},
-};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
 /// Longer than any phase here needs, so nothing is decided by a clock.
@@ -86,26 +79,17 @@ struct Reply {
 impl Reply {
     /// A `200` carrying `body`.
     fn ok(body: serde_json::Value) -> Self {
-        Self {
-            status: 200,
-            body: body.to_string(),
-        }
+        Self { status: 200, body: body.to_string() }
     }
 
     /// A refusal with no body worth reading.
     fn status(status: u16) -> Self {
-        Self {
-            status,
-            body: "{}".to_owned(),
-        }
+        Self { status, body: "{}".to_owned() }
     }
 
     /// A refusal naming its own OAuth error code.
     fn refused(status: u16, code: &str) -> Self {
-        Self {
-            status,
-            body: serde_json::json!({ "error": code }).to_string(),
-        }
+        Self { status, body: serde_json::json!({ "error": code }).to_string() }
     }
 }
 
@@ -156,24 +140,14 @@ impl Issuer {
 
 /// Stands up an issuer serving `script`.
 async fn issuer(script: Script) -> Issuer {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("loopback is bindable");
-    let base = format!(
-        "http://{}",
-        listener
-            .local_addr()
-            .expect("a bound socket has an address")
-    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("loopback is bindable");
+    let base = format!("http://{}", listener.local_addr().expect("a bound socket has an address"));
     let seen = Arc::new(Mutex::new(Vec::new()));
     let recorded = Arc::clone(&seen);
 
     let server = tokio::spawn(async move {
-        let mut queues: HashMap<String, VecDeque<Reply>> = script
-            .0
-            .into_iter()
-            .map(|(path, replies)| (path, replies.into()))
-            .collect();
+        let mut queues: HashMap<String, VecDeque<Reply>> =
+            script.0.into_iter().map(|(path, replies)| (path, replies.into())).collect();
 
         loop {
             let Ok((mut socket, _)) = listener.accept().await else {
@@ -187,19 +161,12 @@ async fn issuer(script: Script) -> Issuer {
                 Some(queue) => queue.front().cloned().unwrap_or_else(|| Reply::status(404)),
                 None => Reply::status(404),
             };
-            recorded
-                .lock()
-                .expect("no phase panicked while holding this")
-                .push(request);
+            recorded.lock().expect("no phase panicked while holding this").push(request);
             write(&mut socket, &reply).await;
         }
     });
 
-    Issuer {
-        base,
-        seen,
-        _server: server,
-    }
+    Issuer { base, seen, _server: server }
 }
 
 /// A queue that was just checked to be non-empty cannot be empty.
@@ -230,9 +197,7 @@ async fn read(socket: &mut TcpStream) -> Option<Seen> {
             .find(|(key, _)| key.eq_ignore_ascii_case(name))
             .map(|(_, value)| value.trim().to_owned())
     };
-    let length: usize = header("content-length")
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(0);
+    let length: usize = header("content-length").and_then(|value| value.parse().ok()).unwrap_or(0);
 
     let mut body = buffer[end + 4..].to_vec();
     while body.len() < length {
@@ -244,14 +209,7 @@ async fn read(socket: &mut TcpStream) -> Option<Seen> {
     }
 
     Some(Seen {
-        path: head
-            .lines()
-            .next()?
-            .split(' ')
-            .nth(1)?
-            .split('?')
-            .next()?
-            .to_owned(),
+        path: head.lines().next()?.split(' ').nth(1)?.split('?').next()?.to_owned(),
         body: String::from_utf8(body).ok()?,
         user_agent: header("user-agent"),
         content_type: header("content-type"),
@@ -279,9 +237,7 @@ async fn write(socket: &mut TcpStream, reply: &Reply) {
 
 /// Delivers the provider's redirect to a waiting browser login.
 async fn redirect(port: u16, query: &str) {
-    let mut socket = TcpStream::connect(("127.0.0.1", port))
-        .await
-        .expect("the login is listening");
+    let mut socket = TcpStream::connect(("127.0.0.1", port)).await.expect("the login is listening");
     socket
         .write_all(
             format!(
@@ -293,10 +249,7 @@ async fn redirect(port: u16, query: &str) {
         .expect("the redirect is written");
 
     let mut answered = String::new();
-    socket
-        .read_to_string(&mut answered)
-        .await
-        .expect("the page comes back");
+    socket.read_to_string(&mut answered).await.expect("the page comes back");
 }
 
 /// One parameter out of an authorize URL.
@@ -348,11 +301,7 @@ async fn a_chatgpt_login_exchanges_polls_renews_and_stores_exactly_what_it_shoul
 /// exchange carrying the verifier that challenge was computed over.
 async fn the_code_exchange_presents_the_verifier_the_authorize_url_published() {
     let issuer = issuer(Script::default().on(TOKEN, vec![Reply::ok(tokens("rt-1", "at-1"))])).await;
-    let browser = issuer
-        .login()
-        .browser_on(0)
-        .await
-        .expect("loopback is bindable");
+    let browser = issuer.login().browser_on(0).await.expect("loopback is bindable");
 
     let published = parameter(browser.url(), "code_challenge");
     let state = parameter(browser.url(), "state");
@@ -361,10 +310,7 @@ async fn the_code_exchange_presents_the_verifier_the_authorize_url_published() {
 
     let waiting = tokio::spawn(async move { browser.wait(AMPLE, &CancellationToken::new()).await });
     redirect(port, &format!("code=the-code&state={state}")).await;
-    let credential = waiting
-        .await
-        .expect("the wait finished")
-        .expect("the exchange succeeded");
+    let credential = waiting.await.expect("the wait finished").expect("the exchange succeeded");
 
     let sent = issuer.sent_to(TOKEN);
     assert_eq!(sent.len(), 1, "one code buys one exchange");
@@ -375,23 +321,12 @@ async fn the_code_exchange_presents_the_verifier_the_authorize_url_published() {
         Some("application/x-www-form-urlencoded"),
         "the token endpoint takes a form, not JSON"
     );
-    assert_eq!(
-        exchange.field("grant_type").as_deref(),
-        Some("authorization_code")
-    );
+    assert_eq!(exchange.field("grant_type").as_deref(), Some("authorization_code"));
     assert_eq!(exchange.field("code").as_deref(), Some("the-code"));
-    assert_eq!(
-        exchange.field("redirect_uri").as_deref(),
-        Some(redirect_uri.as_str())
-    );
-    assert_eq!(
-        exchange.field("client_id").as_deref(),
-        Some("app_EMoamEEZ73f0CkXaXp7hrann")
-    );
+    assert_eq!(exchange.field("redirect_uri").as_deref(), Some(redirect_uri.as_str()));
+    assert_eq!(exchange.field("client_id").as_deref(), Some("app_EMoamEEZ73f0CkXaXp7hrann"));
 
-    let presented = exchange
-        .field("code_verifier")
-        .expect("the exchange presents a verifier");
+    let presented = exchange.field("code_verifier").expect("the exchange presents a verifier");
     assert_eq!(
         pkce::challenge_for(&presented),
         published,
@@ -401,10 +336,7 @@ async fn the_code_exchange_presents_the_verifier_the_authorize_url_published() {
     );
 
     assert!(
-        exchange
-            .user_agent
-            .as_deref()
-            .is_some_and(|agent| agent.starts_with("ganja-code/")),
+        exchange.user_agent.as_deref().is_some_and(|agent| agent.starts_with("ganja-code/")),
         "the token exchange says what this build is, not what it borrowed a \
          client registration from: {:?}",
         exchange.user_agent
@@ -448,10 +380,8 @@ async fn a_403_and_a_404_from_the_device_endpoint_both_mean_keep_waiting() {
     assert_eq!(device.user_code(), "ABCD-EFGH");
     assert!(device.url().ends_with("/codex/device"), "{}", device.url());
 
-    let credential = device
-        .wait(AMPLE, &CancellationToken::new())
-        .await
-        .expect("the third poll succeeded");
+    let credential =
+        device.wait(AMPLE, &CancellationToken::new()).await.expect("the third poll succeeded");
 
     assert_eq!(
         issuer.sent_to(DEVICE_TOKEN).len(),
@@ -529,10 +459,7 @@ async fn a_device_login_nobody_completes_ends_at_its_deadline() {
         .await
         .expect_err("nobody ever entered the code");
 
-    assert!(
-        ended.to_string().contains("was not completed within"),
-        "{ended}"
-    );
+    assert!(ended.to_string().contains("was not completed within"), "{ended}");
     assert!(
         DEVICE_DEADLINE > Duration::from_millis(250),
         "the production bound is the one in the constant, not this"
@@ -576,11 +503,7 @@ async fn a_renewal_that_rotates_the_refresh_token_yields_the_new_one() {
         issuer(Script::default().on(TOKEN, vec![Reply::ok(tokens("rt-rotated", "at-2"))])).await;
     let stale = spent();
 
-    let renewed = issuer
-        .login()
-        .refresh(PROVIDER_ID, &stale)
-        .await
-        .expect("the issuer renewed it");
+    let renewed = issuer.login().refresh(PROVIDER_ID, &stale).await.expect("the issuer renewed it");
 
     let sent = &issuer.sent_to(TOKEN)[0];
     assert_eq!(sent.field("grant_type").as_deref(), Some("refresh_token"));
@@ -588,11 +511,7 @@ async fn a_renewal_that_rotates_the_refresh_token_yields_the_new_one() {
 
     assert_eq!(renewed.refresh.expose_secret(), "rt-rotated");
     assert_eq!(renewed.access.expose_secret(), "at-2");
-    assert_eq!(
-        renewed.account_id.as_deref(),
-        Some("acct-42"),
-        "carried across the renewal"
-    );
+    assert_eq!(renewed.account_id.as_deref(), Some("acct-42"), "carried across the renewal");
 }
 
 /// An endpoint that stayed silent about the refresh token has not revoked it.
@@ -605,11 +524,8 @@ async fn a_renewal_that_returns_no_new_token_keeps_the_old_one() {
     ))
     .await;
 
-    let renewed = issuer
-        .login()
-        .refresh(PROVIDER_ID, &spent())
-        .await
-        .expect("the issuer renewed it");
+    let renewed =
+        issuer.login().refresh(PROVIDER_ID, &spent()).await.expect("the issuer renewed it");
 
     assert_eq!(
         renewed.refresh.expose_secret(),
@@ -623,11 +539,8 @@ async fn a_renewal_that_returns_no_new_token_keeps_the_old_one() {
 async fn a_refused_renewal_and_an_unreachable_one_are_different_situations() {
     let refusing =
         issuer(Script::default().on(TOKEN, vec![Reply::refused(401, "invalid_grant")])).await;
-    let refused = refusing
-        .login()
-        .refresh(PROVIDER_ID, &spent())
-        .await
-        .expect_err("the grant is gone");
+    let refused =
+        refusing.login().refresh(PROVIDER_ID, &spent()).await.expect_err("the grant is gone");
 
     assert_eq!(refused.kind(), AuthErrorKind::ReauthRequired);
     assert!(refused.to_string().contains("invalid_grant"), "{refused}");
@@ -646,13 +559,8 @@ async fn a_refused_renewal_and_an_unreachable_one_are_different_situations() {
     );
 
     // Bound, read the port, drop the listener — nothing is there to answer.
-    let closed = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("loopback is bindable");
-    let base = format!(
-        "http://{}",
-        closed.local_addr().expect("a bound socket has an address")
-    );
+    let closed = TcpListener::bind("127.0.0.1:0").await.expect("loopback is bindable");
+    let base = format!("http://{}", closed.local_addr().expect("a bound socket has an address"));
     drop(closed);
 
     let unreachable = Login::with_issuer(&base)
@@ -668,14 +576,8 @@ async fn a_refused_renewal_and_an_unreachable_one_are_different_situations() {
     );
 
     for message in [refused.to_string(), unreachable.to_string()] {
-        assert!(
-            !message.contains("rt-old"),
-            "a token reached a message: {message}"
-        );
-        assert!(
-            !message.contains("at-old"),
-            "a token reached a message: {message}"
-        );
+        assert!(!message.contains("rt-old"), "a token reached a message: {message}");
+        assert!(!message.contains("at-old"), "a token reached a message: {message}");
     }
 }
 
@@ -684,11 +586,7 @@ async fn a_login_that_never_completed_stores_nothing() {
     let before = auth::list_providers().expect("an absent store lists nothing");
 
     let issuer = issuer(Script::default()).await;
-    let browser = issuer
-        .login()
-        .browser_on(0)
-        .await
-        .expect("loopback is bindable");
+    let browser = issuer.login().browser_on(0).await.expect("loopback is bindable");
     let port = browser.port();
 
     let cancel = CancellationToken::new();
@@ -697,29 +595,16 @@ async fn a_login_that_never_completed_stores_nothing() {
         tokio::spawn(async move { browser.wait(AMPLE, &cancel).await })
     };
     cancel.cancel();
-    waiting
-        .await
-        .expect("the wait finished")
-        .expect_err("cancelling yields no credential");
+    waiting.await.expect("the wait finished").expect_err("cancelling yields no credential");
 
     // And a forged callback, on a second login, likewise.
-    let forged = issuer
-        .login()
-        .browser_on(0)
-        .await
-        .expect("loopback is bindable");
+    let forged = issuer.login().browser_on(0).await.expect("loopback is bindable");
     let forged_port = forged.port();
     let waiting = tokio::spawn(async move { forged.wait(AMPLE, &CancellationToken::new()).await });
     redirect(forged_port, "code=stolen&state=not-the-one").await;
-    waiting
-        .await
-        .expect("the wait finished")
-        .expect_err("a callback from elsewhere buys nothing");
+    waiting.await.expect("the wait finished").expect_err("a callback from elsewhere buys nothing");
 
-    assert_eq!(
-        auth::list_providers().expect("an absent store still lists nothing"),
-        before,
-    );
+    assert_eq!(auth::list_providers().expect("an absent store still lists nothing"), before,);
     assert!(
         !auth::store_path().expect("a path resolves").exists(),
         "a login that failed wrote a credential file"
@@ -741,27 +626,18 @@ async fn a_chatgpt_login_replaces_a_stored_openai_api_key() {
     );
 
     let issuer = issuer(Script::default().on(TOKEN, vec![Reply::ok(tokens("rt-1", "at-1"))])).await;
-    let browser = issuer
-        .login()
-        .browser_on(0)
-        .await
-        .expect("loopback is bindable");
+    let browser = issuer.login().browser_on(0).await.expect("loopback is bindable");
     let state = parameter(browser.url(), "state");
     let port = browser.port();
     let waiting = tokio::spawn(async move { browser.wait(AMPLE, &CancellationToken::new()).await });
     redirect(port, &format!("code=the-code&state={state}")).await;
-    let credential = waiting
-        .await
-        .expect("the wait finished")
-        .expect("the exchange succeeded");
+    let credential = waiting.await.expect("the wait finished").expect("the exchange succeeded");
 
     // The one line a caller writes, and the one line this whole hazard is.
     auth::set_oauth(PROVIDER_ID, &credential).expect("a credential is storable");
 
     assert!(
-        auth::credential_for(PROVIDER_ID)
-            .expect("the store reads")
-            .is_none(),
+        auth::credential_for(PROVIDER_ID).expect("the store reads").is_none(),
         "the API key is gone - upstream's behaviour at this key too, and \
          warning somebody first belongs to whatever runs the login"
     );
@@ -783,20 +659,15 @@ async fn a_chatgpt_login_replaces_a_stored_openai_api_key() {
     // And back the other way, which is the half somebody logging in expects.
     auth::set_credential(PROVIDER_ID, API_KEY).expect("a key is storable");
     assert!(
-        auth::oauth_for(PROVIDER_ID)
-            .expect("the store reads")
-            .is_none(),
+        auth::oauth_for(PROVIDER_ID).expect("the store reads").is_none(),
         "storing an API key takes the ChatGPT login with it"
     );
 }
 
 /// A credential due for renewal, as one would be read off disk.
 fn spent() -> OauthCredential {
-    let mut credential = OauthCredential::new(
-        SecretString::from("rt-old"),
-        SecretString::from("at-old"),
-        1,
-    );
+    let mut credential =
+        OauthCredential::new(SecretString::from("rt-old"), SecretString::from("at-old"), 1);
     credential.account_id = Some("acct-42".to_owned());
 
     credential

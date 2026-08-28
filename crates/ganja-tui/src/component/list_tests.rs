@@ -1,14 +1,10 @@
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 
 use super::{ListDialog, Row};
 use crate::theme::Theme;
 
-const AREA: Rect = Rect {
-    x: 0,
-    y: 0,
-    width: 60,
-    height: 14,
-};
+const AREA: Rect = Rect { x: 0, y: 0, width: 60, height: 14 };
 
 fn row(value: &str, active: bool) -> Row {
     Row {
@@ -20,14 +16,7 @@ fn row(value: &str, active: bool) -> Row {
 }
 
 fn dialog() -> ListDialog {
-    ListDialog::new(
-        " models ",
-        vec![
-            row("first", false),
-            row("second", true),
-            row("third", false),
-        ],
-    )
+    ListDialog::new(" models ", vec![row("first", false), row("second", true), row("third", false)])
 }
 
 fn rendered(dialog: &ListDialog) -> String {
@@ -36,9 +25,7 @@ fn rendered(dialog: &ListDialog) -> String {
 
     (0..AREA.height)
         .map(|line| {
-            (0..AREA.width)
-                .map(|column| buffer[(column, line)].symbol())
-                .collect::<String>()
+            (0..AREA.width).map(|column| buffer[(column, line)].symbol()).collect::<String>()
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -70,11 +57,8 @@ fn the_cursor_clamps_at_both_ends() {
 #[test]
 fn the_active_row_is_marked_so_the_list_says_where_the_session_stands() {
     let screen = rendered(&dialog());
-    let marked: Vec<&str> = screen
-        .lines()
-        .filter(|line| line.contains('*'))
-        .map(str::trim)
-        .collect();
+    let marked: Vec<&str> =
+        screen.lines().filter(|line| line.contains('*')).map(str::trim).collect();
 
     assert_eq!(marked.len(), 1, "exactly one row is active:\n{screen}");
     assert!(marked[0].contains("second"), "{marked:?}");
@@ -86,11 +70,7 @@ fn an_empty_list_says_so_instead_of_drawing_an_empty_box() {
 
     assert!(dialog.is_empty());
     assert_eq!(dialog.selected(), None);
-    assert!(
-        rendered(&dialog).contains("nothing to choose from"),
-        "{}",
-        rendered(&dialog)
-    );
+    assert!(rendered(&dialog).contains("nothing to choose from"), "{}", rendered(&dialog));
 }
 
 #[test]

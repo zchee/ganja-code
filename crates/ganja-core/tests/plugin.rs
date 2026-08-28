@@ -15,18 +15,14 @@
 //! sequentially inside the single `#[test]`, against one pinned temporary
 //! home, so nothing here can read a real user's config or plugins.
 
-use std::{
-    fs,
-    io::{self, Write as _},
-    path::Path,
-};
+use std::fs;
+use std::io::{self, Write as _};
+use std::path::Path;
 
-use ganja_core::{
-    Config, LspConfig, McpServer,
-    command::Registry,
-    config::{CONFIG_ENV, CONFIG_HOME_ENV},
-    plugin::Store,
-};
+use ganja_core::command::Registry;
+use ganja_core::config::{CONFIG_ENV, CONFIG_HOME_ENV};
+use ganja_core::plugin::Store;
+use ganja_core::{Config, LspConfig, McpServer};
 use ganja_testkit::{LogCapture as Capture, plant};
 
 /// A marketplace holding one plugin that carries all six surfaces — the
@@ -85,11 +81,7 @@ fn plant_marketplace(market: &Path) {
         &format!("{plugin}/commands/brief.md"),
         "---\ndescription: brief me\nargument-hint: <topic>\n---\nbrief me on $ARGUMENTS\n",
     );
-    plant(
-        market,
-        &format!("{plugin}/commands/taken.md"),
-        "the plugin's version\n",
-    );
+    plant(market, &format!("{plugin}/commands/taken.md"), "the plugin's version\n");
     // Two agents: `reviewer` collides with the project config's own and must
     // lose to it; `helper` is the one that actually arrives.
     plant(
@@ -181,13 +173,10 @@ fn an_installed_plugin_contributes_all_six_surfaces_until_disabled() {
     // The store the loader will discover is the one under the config home —
     // the same resolution `GANJA_CONFIG_HOME` moves everything else with.
     let store = Store::discover().expect("the config home resolves");
-    let added = store
-        .add_marketplace(&market.display().to_string())
-        .expect("a local marketplace adds");
+    let added =
+        store.add_marketplace(&market.display().to_string()).expect("a local marketplace adds");
     assert_eq!(added, "fixture-market", "the marketplace file names it");
-    store
-        .install("full", "fixture-market")
-        .expect("the fixture plugin installs");
+    store.install("full", "fixture-market").expect("the fixture plugin installs");
 
     let loaded = Config::load(&project).expect("the project config loads with the plugin");
 
@@ -196,10 +185,7 @@ fn an_installed_plugin_contributes_all_six_surfaces_until_disabled() {
     let pre = &loaded.hooks["PreToolUse"];
     assert_eq!(pre.len(), 2, "config group and plugin group, both");
     let ganja_core::HookHandler::Command(first) = &pre[0].hooks[0];
-    assert_eq!(
-        first.command, "config-pre.sh",
-        "the config's group is untouched, first"
-    );
+    assert_eq!(first.command, "config-pre.sh", "the config's group is untouched, first");
     let ganja_core::HookHandler::Command(second) = &pre[1].hooks[0];
     assert!(
         second.command.ends_with("/check.sh") && !second.command.contains("${"),
@@ -241,17 +227,11 @@ fn an_installed_plugin_contributes_all_six_surfaces_until_disabled() {
     // from holds them under the same names, through the one expansion path.
     let commands = Registry::build(&loaded, &project);
     assert_eq!(
-        commands
-            .get("full:brief")
-            .expect("the plugin's command is in the roster")
-            .template,
+        commands.get("full:brief").expect("the plugin's command is in the roster").template,
         "brief me on $ARGUMENTS\n"
     );
     assert_eq!(
-        commands
-            .get("full:taken")
-            .expect("the collided name is still a command")
-            .template,
+        commands.get("full:taken").expect("the collided name is still a command").template,
         "the config's version"
     );
 
@@ -308,22 +288,11 @@ fn an_installed_plugin_contributes_all_six_surfaces_until_disabled() {
     // Every collision the merge table decided said so, naming the plugin and
     // the component — the half that used to be emitted and never read back.
     let logged = capture.logged();
-    io::stdout()
-        .write_all(logged.as_bytes())
-        .expect("the captured log is printable");
+    io::stdout().write_all(logged.as_bytes()).expect("the captured log is printable");
     for (what, named) in [
-        (
-            "the config already defines this agent",
-            r#"agent="reviewer""#,
-        ),
-        (
-            "the config already configures this lsp server",
-            r#"server="go""#,
-        ),
-        (
-            "the config already declares this command",
-            r#"command="full:taken""#,
-        ),
+        ("the config already defines this agent", r#"agent="reviewer""#),
+        ("the config already configures this lsp server", r#"server="go""#),
+        ("the config already declares this command", r#"command="full:taken""#),
     ] {
         assert!(
             logged.contains(what) && logged.contains(named),
@@ -342,15 +311,9 @@ fn an_installed_plugin_contributes_all_six_surfaces_until_disabled() {
     );
 
     // Disabling withdraws every contribution without touching the disk copy.
-    store
-        .set_enabled("full", false)
-        .expect("the plugin disables");
+    store.set_enabled("full", false).expect("the plugin disables");
     let disabled = Config::load(&project).expect("the config loads with the plugin disabled");
-    assert_eq!(
-        disabled.hooks["PreToolUse"].len(),
-        1,
-        "only the config's group"
-    );
+    assert_eq!(disabled.hooks["PreToolUse"].len(), 1, "only the config's group");
     assert!(!disabled.mcp.contains_key("plugin:full:db"));
     assert_eq!(disabled.skills.paths, vec!["./own-skills".to_owned()]);
     assert!(!disabled.command.contains_key("full:brief"));
@@ -365,9 +328,7 @@ fn an_installed_plugin_contributes_all_six_surfaces_until_disabled() {
     assert!(!lsp.contains_key("fixturelsp"));
 
     // Re-enabling brings them back — the disk copy never moved.
-    store
-        .set_enabled("full", true)
-        .expect("the plugin re-enables");
+    store.set_enabled("full", true).expect("the plugin re-enables");
     let again = Config::load(&project).expect("the config loads with the plugin back");
     assert_eq!(again.hooks["PreToolUse"].len(), 2);
 
@@ -379,11 +340,7 @@ fn an_installed_plugin_contributes_all_six_surfaces_until_disabled() {
     assert_eq!(removed.hooks["PreToolUse"].len(), 1);
     assert!(store.list().expect("the store lists").is_empty());
     assert!(
-        store
-            .state()
-            .expect("the state reads")
-            .marketplaces
-            .contains_key("fixture-market"),
+        store.state().expect("the state reads").marketplaces.contains_key("fixture-market"),
         "removing a plugin does not forget where it came from"
     );
 }

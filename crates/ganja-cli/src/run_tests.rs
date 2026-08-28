@@ -52,10 +52,7 @@ fn assistant() -> Message {
         id: MessageId::from("msg_1".to_owned()),
         role: Role::Assistant,
         parts: Vec::new(),
-        time: ganja_protocol::MessageTime {
-            created: 1,
-            completed: None,
-        },
+        time: ganja_protocol::MessageTime { created: 1, completed: None },
         model: Some("canned".to_owned()),
         usage: None,
     }
@@ -66,19 +63,12 @@ fn assistant() -> Message {
 fn turn() -> Vec<Event> {
     let text = Part {
         id: PartId::from("prt_text".to_owned()),
-        body: PartBody::Text {
-            text: String::new(),
-        },
+        body: PartBody::Text { text: String::new() },
     };
-    let step = Part {
-        id: PartId::from("prt_step".to_owned()),
-        body: PartBody::StepStart,
-    };
+    let step = Part { id: PartId::from("prt_step".to_owned()), body: PartBody::StepStart };
     let finish = Part {
         id: PartId::from("prt_finish".to_owned()),
-        body: PartBody::StepFinish {
-            usage: Usage::default(),
-        },
+        body: PartBody::StepFinish { usage: Usage::default() },
     };
     let call = Part {
         id: PartId::from("prt_call".to_owned()),
@@ -102,10 +92,7 @@ fn turn() -> Vec<Event> {
             session_id: event_session(),
             message: Message::user("what is in main"),
         },
-        Event::MessageStarted {
-            session_id: event_session(),
-            message: assistant(),
-        },
+        Event::MessageStarted { session_id: event_session(), message: assistant() },
         Event::PartStarted {
             session_id: event_session(),
             message_id: message_id.clone(),
@@ -147,17 +134,7 @@ fn turn() -> Vec<Event> {
 /// would reach a default arm nobody wrote.
 #[test]
 fn the_wire_carries_exactly_upstreams_six_type_names() {
-    assert_eq!(
-        TYPES,
-        [
-            "tool_use",
-            "step_start",
-            "step_finish",
-            "text",
-            "reasoning",
-            "error"
-        ]
-    );
+    assert_eq!(TYPES, ["tool_use", "step_start", "step_finish", "text", "reasoning", "error"]);
     // Each kind names a distinct one of them, so no two objects can be
     // told apart by anything but their type. All six are listed: `as_str`
     // indexes `TYPES` by discriminant, so a kind left out of this array is
@@ -191,10 +168,7 @@ fn every_emitted_object_carries_a_type_from_the_set() {
     assert!(!emitted.is_empty(), "a turn has to emit something");
     for object in &emitted {
         let kind = object["type"].as_str().expect("every object has a type");
-        assert!(
-            TYPES.contains(&kind),
-            "an object carried a type outside the set: {kind}"
-        );
+        assert!(TYPES.contains(&kind), "an object carried a type outside the set: {kind}");
     }
 }
 
@@ -243,16 +217,10 @@ fn a_streamed_text_part_carries_every_fragment_that_was_appended() {
 fn the_default_format_writes_the_header_and_the_reply_to_stdout() {
     let (out, err) = report(Format::Default, &turn());
 
-    assert!(
-        out.contains("> build \u{b7} canned"),
-        "no header in {out:?}"
-    );
+    assert!(out.contains("> build \u{b7} canned"), "no header in {out:?}");
     assert!(out.contains("Reading it."), "no reply in {out:?}");
     assert!(out.contains("Read src/main.rs"), "no tool line in {out:?}");
-    assert!(
-        err.is_empty(),
-        "a turn that worked said nothing on stderr: {err:?}"
-    );
+    assert!(err.is_empty(), "a turn that worked said nothing on stderr: {err:?}");
 }
 
 /// A failed turn emits an `error` object *and* is what the run answers
@@ -361,18 +329,10 @@ fn a_tool_title_cannot_move_the_terminals_cursor() {
         }],
     );
 
-    let leaked: Vec<char> = out
-        .chars()
-        .filter(|character| character.is_control() && *character != '\n')
-        .collect();
-    assert!(
-        leaked.is_empty(),
-        "control characters reached stdout: {leaked:?}"
-    );
-    assert!(
-        out.contains("src/main.rs"),
-        "the printable half survives: {out:?}"
-    );
+    let leaked: Vec<char> =
+        out.chars().filter(|character| character.is_control() && *character != '\n').collect();
+    assert!(leaked.is_empty(), "control characters reached stdout: {leaked:?}");
+    assert!(out.contains("src/main.rs"), "the printable half survives: {out:?}");
 }
 
 /// The warning is the whole difference between a run that refuses and one
@@ -391,14 +351,8 @@ fn a_rejected_permission_is_warned_about_on_stderr_in_both_formats() {
         let err = String::from_utf8(err).expect("the diagnostics are text");
         assert!(out.is_empty(), "a warning is never payload: {out:?}");
         assert!(err.contains("bash"), "the tool has to be named: {err:?}");
-        assert!(
-            err.contains("rm -rf /"),
-            "what would run has to be named: {err:?}"
-        );
-        assert!(
-            err.contains("auto-rejecting"),
-            "the decision has to be said: {err:?}"
-        );
+        assert!(err.contains("rm -rf /"), "what would run has to be named: {err:?}");
+        assert!(err.contains("auto-rejecting"), "the decision has to be said: {err:?}");
     }
 }
 
@@ -412,11 +366,8 @@ async fn a_runs_dollar_tokens_reach_the_provider_expanded() {
     let root = tempfile::tempdir().expect("a scratch directory");
     let dir = root.path().join("porting");
     std::fs::create_dir_all(&dir).expect("the fixture tree is creatable");
-    std::fs::write(
-        dir.join("SKILL.md"),
-        "---\nname: porting\n---\nRead upstream first.",
-    )
-    .expect("the fixture is writable");
+    std::fs::write(dir.join("SKILL.md"), "---\nname: porting\n---\nRead upstream first.")
+        .expect("the fixture is writable");
 
     let provider = std::sync::Arc::new(ganja_core::provider::fake::FakeProvider::new(
         "done",
@@ -456,10 +407,8 @@ async fn a_runs_dollar_tokens_reach_the_provider_expanded() {
         .collect();
 
     assert!(
-        carried
-            .iter()
-            .any(|part| part.starts_with("<skill_content name=\"porting\">")
-                && part.contains("Read upstream first.")),
+        carried.iter().any(|part| part.starts_with("<skill_content name=\"porting\">")
+            && part.contains("Read upstream first.")),
         "the invoked skill rides the request whole: {carried:?}"
     );
     assert!(
@@ -474,10 +423,7 @@ async fn a_runs_dollar_tokens_reach_the_provider_expanded() {
 
 #[test]
 fn a_typed_message_and_a_piped_one_join_with_the_pipe_last() {
-    assert_eq!(
-        resolve_input("explain this", "fn main() {}"),
-        "explain this\nfn main() {}"
-    );
+    assert_eq!(resolve_input("explain this", "fn main() {}"), "explain this\nfn main() {}");
     assert_eq!(resolve_input("explain this", ""), "explain this");
     assert_eq!(resolve_input("", "fn main() {}"), "fn main() {}");
     assert_eq!(resolve_input("", ""), "");

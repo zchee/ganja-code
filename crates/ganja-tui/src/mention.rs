@@ -91,11 +91,7 @@ fn sigil_trigger(text: &str, cursor: (usize, usize), sigil: char) -> Option<Frag
         return None;
     }
 
-    Some(Fragment {
-        row,
-        start,
-        text: fragment,
-    })
+    Some(Fragment { row, start, text: fragment })
 }
 
 /// Every file `text` mentions, in the order it mentions them.
@@ -137,11 +133,7 @@ pub fn scan(text: &str) -> Vec<Mention> {
             if path.is_empty() {
                 continue;
             }
-            let mention = Mention {
-                path: path.to_owned(),
-                start,
-                end,
-            };
+            let mention = Mention { path: path.to_owned(), start, end };
             if !found.contains(&mention) {
                 found.push(mention);
             }
@@ -237,10 +229,7 @@ pub fn token(path: &str, start: Option<u32>, end: Option<u32>) -> String {
 /// the user typed.
 #[must_use]
 pub fn attachable(text: &str, root: &Path) -> Vec<Mention> {
-    scan(text)
-        .into_iter()
-        .filter(|mention| root.join(&mention.path).is_file())
-        .collect()
+    scan(text).into_iter().filter(|mention| root.join(&mention.path).is_file()).collect()
 }
 
 /// The paths `text` is a *drop* of, resolved against `root`; [`None`] when it
@@ -266,11 +255,7 @@ pub fn classify_drop(text: &str, root: &Path) -> Option<Vec<String>> {
         .into_iter()
         .map(|token| {
             let candidate = resolve_dropped(&token)?;
-            let absolute = if candidate.is_absolute() {
-                candidate
-            } else {
-                root.join(candidate)
-            };
+            let absolute = if candidate.is_absolute() { candidate } else { root.join(candidate) };
 
             absolute.exists().then(|| display(root, &absolute))
         })
@@ -383,10 +368,7 @@ fn unescape(token: &str) -> String {
 /// reason: a project-relative path is what a mention normally reads as, and
 /// a path a drop can name outside the project has nothing to be relative to.
 fn display(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .display()
-        .to_string()
+    path.strip_prefix(root).unwrap_or(path).display().to_string()
 }
 
 #[cfg(test)]

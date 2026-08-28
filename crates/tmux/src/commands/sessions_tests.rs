@@ -1,8 +1,6 @@
 use super::*;
-use crate::{
-    SessionId,
-    commands::{Invocation, words},
-};
+use crate::SessionId;
+use crate::commands::{Invocation, words};
 
 #[test]
 fn new_session_renders_every_flag_it_has() {
@@ -64,11 +62,7 @@ fn new_session_renders_every_flag_it_has() {
 fn new_session_reads_an_environment_once_per_variable() {
     assert_eq!(
         words(
-            &NewSession::new()
-                .detached()
-                .environment("A=1")
-                .environment("B=2")
-                .environment("C=3")
+            &NewSession::new().detached().environment("A=1").environment("B=2").environment("C=3")
         ),
         ["new-session", "-d", "-e", "A=1", "-e", "B=2", "-e", "C=3"],
         "tmux reads -e once per variable, so the builder must not fold them together"
@@ -83,10 +77,7 @@ fn a_session_id_reaches_a_target_without_being_restrung() {
         ["has-session", "-t", "$3"],
         "an id read out of a previous answer should pass straight into the next call"
     );
-    assert_eq!(
-        words(&KillSession::new().target(session)),
-        ["kill-session", "-t", "$3"]
-    );
+    assert_eq!(words(&KillSession::new().target(session)), ["kill-session", "-t", "$3"]);
 }
 
 #[test]
@@ -133,10 +124,7 @@ fn kill_session_can_spare_the_one_it_targets() {
         words(&KillSession::new().all_others().target("keep")),
         ["kill-session", "-a", "-t", "keep"]
     );
-    assert_eq!(
-        words(&KillSession::new().clear_alerts().group()),
-        ["kill-session", "-C", "-g"]
-    );
+    assert_eq!(words(&KillSession::new().clear_alerts().group()), ["kill-session", "-C", "-g"]);
 }
 
 #[test]
@@ -187,20 +175,8 @@ fn the_two_listings_share_their_vocabulary() {
 #[test]
 fn switch_client_walks_sessions_or_names_one() {
     assert_eq!(
-        words(
-            &SwitchClient::new()
-                .next()
-                .sort_order("creation")
-                .client("/dev/ttys004")
-        ),
-        [
-            "switch-client",
-            "-n",
-            "-O",
-            "creation",
-            "-c",
-            "/dev/ttys004"
-        ]
+        words(&SwitchClient::new().next().sort_order("creation").client("/dev/ttys004")),
+        ["switch-client", "-n", "-O", "creation", "-c", "/dev/ttys004"]
     );
     assert_eq!(
         words(
@@ -213,18 +189,7 @@ fn switch_client_walks_sessions_or_names_one() {
                 .key_table("table2")
                 .target("workers:1.0")
         ),
-        [
-            "switch-client",
-            "-E",
-            "-l",
-            "-p",
-            "-r",
-            "-Z",
-            "-T",
-            "table2",
-            "-t",
-            "workers:1.0",
-        ]
+        ["switch-client", "-E", "-l", "-p", "-r", "-Z", "-T", "table2", "-t", "workers:1.0",]
     );
 }
 
@@ -239,17 +204,7 @@ fn detach_client_names_a_client_or_a_whole_session() {
                 .session("workers")
                 .target("/dev/ttys004")
         ),
-        [
-            "detach-client",
-            "-a",
-            "-P",
-            "-E",
-            "echo bye",
-            "-s",
-            "workers",
-            "-t",
-            "/dev/ttys004",
-        ]
+        ["detach-client", "-a", "-P", "-E", "echo bye", "-s", "workers", "-t", "/dev/ttys004",]
     );
 }
 
@@ -331,10 +286,7 @@ fn the_three_commands_that_take_nothing_are_their_names_alone() {
 
 #[test]
 fn the_three_locks_and_the_suspend_name_what_they_act_on() {
-    assert_eq!(
-        words(&LockSession::new().target("workers")),
-        ["lock-session", "-t", "workers"]
-    );
+    assert_eq!(words(&LockSession::new().target("workers")), ["lock-session", "-t", "workers"]);
     assert_eq!(
         words(&LockClient::new().target("/dev/ttys004")),
         ["lock-client", "-t", "/dev/ttys004"]
@@ -348,12 +300,7 @@ fn the_three_locks_and_the_suspend_name_what_they_act_on() {
 #[test]
 fn show_messages_can_ask_for_jobs_or_terminals_instead() {
     assert_eq!(
-        words(
-            &ShowMessages::new()
-                .jobs()
-                .terminals()
-                .target("/dev/ttys004")
-        ),
+        words(&ShowMessages::new().jobs().terminals().target("/dev/ttys004")),
         ["show-messages", "-J", "-T", "-t", "/dev/ttys004"]
     );
 }
@@ -361,25 +308,8 @@ fn show_messages_can_ask_for_jobs_or_terminals_instead() {
 #[test]
 fn server_access_names_a_user_behind_the_separator() {
     assert_eq!(
-        words(
-            &ServerAccess::new()
-                .allow()
-                .deny()
-                .list()
-                .read_only()
-                .writable()
-                .name("testgroup")
-        ),
-        [
-            "server-access",
-            "-a",
-            "-d",
-            "-l",
-            "-r",
-            "-w",
-            "--",
-            "testgroup",
-        ]
+        words(&ServerAccess::new().allow().deny().list().read_only().writable().name("testgroup")),
+        ["server-access", "-a", "-d", "-l", "-r", "-w", "--", "testgroup",]
     );
 }
 
@@ -387,18 +317,8 @@ fn server_access_names_a_user_behind_the_separator() {
 fn list_commands_can_ask_about_one_command() {
     assert_eq!(words(&ListCommands::new()), ["list-commands"]);
     assert_eq!(
-        words(
-            &ListCommands::new()
-                .format("#{command_list_name}")
-                .command("split-window")
-        ),
-        [
-            "list-commands",
-            "-F",
-            "#{command_list_name}",
-            "--",
-            "split-window",
-        ]
+        words(&ListCommands::new().format("#{command_list_name}").command("split-window")),
+        ["list-commands", "-F", "#{command_list_name}", "--", "split-window",]
     );
 }
 

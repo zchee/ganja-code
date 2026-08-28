@@ -1,4 +1,5 @@
-use std::{fs, path::Path};
+use std::fs;
+use std::path::Path;
 
 use tempfile::TempDir;
 
@@ -35,10 +36,7 @@ fn a_git_file_marks_a_root_just_as_a_git_directory_does() {
     fs::write(root.join(".git"), "gitdir: /elsewhere/.git/worktrees/w")
         .expect("the fixture marker is writable");
 
-    assert_eq!(
-        Project::resolve(&nested).root(),
-        Project::resolve(&root).root()
-    );
+    assert_eq!(Project::resolve(&nested).root(), Project::resolve(&root).root());
 }
 
 #[test]
@@ -76,10 +74,7 @@ fn the_same_path_always_slugs_the_same_and_different_paths_do_not() {
     // separators are dashes and every other character is where it was.
     let slug = Project::resolve(&left).slug().to_owned();
     assert!(slug.ends_with("-work-api"), "{slug}");
-    assert!(
-        slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
-        "{slug}"
-    );
+    assert!(slug.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'), "{slug}");
 }
 
 /// A path that reaches the same directory by a different route is the same
@@ -90,17 +85,9 @@ fn an_untidy_path_resolves_to_the_same_project() {
     let directory = temporary();
     let root = directory.path().join("api");
     fs::create_dir(&root).expect("the fixture directory is creatable");
-    let untidy = directory
-        .path()
-        .join("api")
-        .join(".")
-        .join("..")
-        .join("api");
+    let untidy = directory.path().join("api").join(".").join("..").join("api");
 
-    assert_eq!(
-        Project::resolve(&untidy).slug(),
-        Project::resolve(&root).slug()
-    );
+    assert_eq!(Project::resolve(&untidy).slug(), Project::resolve(&root).slug());
 }
 
 #[test]
@@ -129,9 +116,7 @@ fn the_filesystem_root_still_gets_a_name() {
 #[test]
 fn a_path_reduces_to_the_name_claude_code_gives_it() {
     assert_eq!(
-        slug_for(Path::new(
-            "/Users/zchee/rust/src/github.com/zchee/ganja-code"
-        )),
+        slug_for(Path::new("/Users/zchee/rust/src/github.com/zchee/ganja-code")),
         "-Users-zchee-rust-src-github-com-zchee-ganja-code"
     );
 }
@@ -148,10 +133,7 @@ fn a_path_too_long_for_a_filename_is_cut_and_hashed() {
     let (head, tail) = slug.split_at(MAX);
 
     assert_eq!(head, format!("-{}", "a".repeat(MAX - 1)));
-    assert!(
-        tail.starts_with('-') && tail.len() > 1,
-        "a cut slug has to carry a hash: {slug}"
-    );
+    assert!(tail.starts_with('-') && tail.len() > 1, "a cut slug has to carry a hash: {slug}");
 
     let sibling = slug_for(Path::new(&deeper));
     assert_eq!(sibling[..MAX], slug[..MAX], "the fixtures share their cut");

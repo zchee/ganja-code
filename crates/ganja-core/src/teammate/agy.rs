@@ -123,21 +123,17 @@
 //! `result` whose `status` is not `SUCCESS`, which this driver reports as the
 //! vendor's own sentence rather than as silence.
 
-use std::{
-    ffi::OsString,
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use ganja_protocol::team::MemberBackend;
 use ganja_team::ShimCli;
 use serde::Deserialize;
 
-use crate::teammate::{
-    readback,
-    shim::{Door, Driver, Read, Reply, Shape, Turn},
-};
+use crate::teammate::readback;
+use crate::teammate::shim::{Door, Driver, Read, Reply, Shape, Turn};
 
 /// The executable a spawn looks for on `PATH`.
 pub const BINARY: &str = "agy";
@@ -181,13 +177,8 @@ pub const PRINT_TIMEOUT_HEADROOM: Duration = Duration::from_secs(60);
 /// and no escalation flag — so composing it would widen a grant in exchange for
 /// nothing. `--mode plan`'s absence is not a ban and is not here: it is a mode
 /// this driver declines to compose, recorded in the module header.
-pub const NEVER_COMPOSED: [&str; 5] = [
-    "--dangerously-skip-permissions",
-    "--add-dir",
-    "--continue",
-    "-c",
-    "accept-edits",
-];
+pub const NEVER_COMPOSED: [&str; 5] =
+    ["--dangerously-skip-permissions", "--add-dir", "--continue", "-c", "accept-edits"];
 
 /// The resume door, which names the conversation it resumes.
 pub const CONVERSATION: &str = "--conversation";
@@ -276,10 +267,7 @@ struct Ended {
 /// what reads this flag — refuses a bare integer.
 #[must_use]
 pub fn print_timeout(deadline: Duration) -> String {
-    format!(
-        "{}s",
-        deadline.saturating_add(PRINT_TIMEOUT_HEADROOM).as_secs()
-    )
+    format!("{}s", deadline.saturating_add(PRINT_TIMEOUT_HEADROOM).as_secs())
 }
 
 /// A teammate driven through a resident headless `agy`.
@@ -392,10 +380,8 @@ impl Driver for Agy {
         // `read` and never for this. Named rather than left to a default,
         // because the mirror of it — `line`'s default refusing a driver that
         // forgot to override it — is what catches the opposite mistake.
-        Err(
-            "agy is driven as a resident child, one line at a time, and never read in one piece"
-                .to_owned(),
-        )
+        Err("agy is driven as a resident child, one line at a time, and never read in one piece"
+            .to_owned())
     }
 
     fn read(&self, line: &str) -> Read {
@@ -433,11 +419,8 @@ impl Driver for Agy {
         // then failed, so the words and the reason travel together rather than
         // one replacing the other.
         let said = ended.response.trim();
-        let messages: Vec<String> = if said.is_empty() {
-            Vec::new()
-        } else {
-            vec![said.to_owned()]
-        };
+        let messages: Vec<String> =
+            if said.is_empty() { Vec::new() } else { vec![said.to_owned()] };
         let refused = if ended.status == SUCCESS {
             if messages.is_empty() {
                 // The turn succeeded and said nothing. Reported rather than
@@ -462,10 +445,7 @@ impl Driver for Agy {
                 format!("and said: {}", ended.error.trim())
             };
 
-            Some(format!(
-                "agy ended the turn {status} {why}.",
-                status = ended.status.trim(),
-            ))
+            Some(format!("agy ended the turn {status} {why}.", status = ended.status.trim(),))
         };
 
         Read::Done(Reply {
@@ -527,9 +507,7 @@ impl readback::Transcript for Transcript {
         let candidates = readback::listing(&Self::brains()?, |path| path.is_dir())
             .into_iter()
             .map(|conversation| {
-                TRANSCRIPT_PATH
-                    .iter()
-                    .fold(conversation, |path, step| path.join(step))
+                TRANSCRIPT_PATH.iter().fold(conversation, |path, step| path.join(step))
             })
             .filter(|path| path.is_file())
             .collect();
@@ -539,9 +517,7 @@ impl readback::Transcript for Transcript {
 
     fn user_said(&self, record: &serde_json::Value, mark: &str) -> bool {
         record["type"] == "USER_INPUT"
-            && record["content"]
-                .as_str()
-                .is_some_and(|text| text.contains(mark))
+            && record["content"].as_str().is_some_and(|text| text.contains(mark))
     }
 
     fn answers(&self, path: &Path, cursor: &mut readback::Cursor) -> Vec<String> {

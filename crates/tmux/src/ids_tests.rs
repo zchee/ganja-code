@@ -3,26 +3,14 @@ use super::*;
 #[test]
 fn an_id_converts_into_an_argv_word_owned_or_borrowed() {
     let pane = PaneId::new("%12").expect("a well-formed pane id");
-    assert_eq!(
-        std::ffi::OsString::from(&pane),
-        std::ffi::OsString::from("%12")
-    );
-    assert_eq!(
-        std::ffi::OsString::from(pane),
-        std::ffi::OsString::from("%12")
-    );
+    assert_eq!(std::ffi::OsString::from(&pane), std::ffi::OsString::from("%12"));
+    assert_eq!(std::ffi::OsString::from(pane), std::ffi::OsString::from("%12"));
 
     let window = WindowId::new("@3").expect("a well-formed window id");
-    assert_eq!(
-        std::ffi::OsString::from(window),
-        std::ffi::OsString::from("@3")
-    );
+    assert_eq!(std::ffi::OsString::from(window), std::ffi::OsString::from("@3"));
 
     let session = SessionId::new("$4").expect("a well-formed session id");
-    assert_eq!(
-        std::ffi::OsString::from(session),
-        std::ffi::OsString::from("$4")
-    );
+    assert_eq!(std::ffi::OsString::from(session), std::ffi::OsString::from("$4"));
 }
 
 #[test]

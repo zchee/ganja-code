@@ -20,7 +20,8 @@
 
 use std::fs;
 
-use ganja_core::{catalog, provider::openrouter};
+use ganja_core::catalog;
+use ganja_core::provider::openrouter;
 
 /// Two providers, because the interesting failure is rows landing under the
 /// *wrong* id rather than not landing at all — `xai` is here to prove the

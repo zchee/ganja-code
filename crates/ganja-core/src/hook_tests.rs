@@ -1,4 +1,5 @@
-use std::{collections::BTreeMap, path::Path};
+use std::collections::BTreeMap;
+use std::path::Path;
 
 use serde_json::{Value, json};
 
@@ -85,9 +86,7 @@ fn the_stdin_envelope_is_the_documented_one_for_every_event() {
             }),
         ),
         (
-            Payload::UserPromptSubmit {
-                prompt: "ship it".to_owned(),
-            },
+            Payload::UserPromptSubmit { prompt: "ship it".to_owned() },
             json!({
                 "session_id": "ses_1",
                 "cwd": "/tmp/project",
@@ -96,9 +95,7 @@ fn the_stdin_envelope_is_the_documented_one_for_every_event() {
             }),
         ),
         (
-            Payload::Notification {
-                message: "ganja needs your permission to use bash".to_owned(),
-            },
+            Payload::Notification { message: "ganja needs your permission to use bash".to_owned() },
             json!({
                 "session_id": "ses_1",
                 "cwd": "/tmp/project",
@@ -107,9 +104,7 @@ fn the_stdin_envelope_is_the_documented_one_for_every_event() {
             }),
         ),
         (
-            Payload::Stop {
-                stop_hook_active: false,
-            },
+            Payload::Stop { stop_hook_active: false },
             json!({
                 "session_id": "ses_1",
                 "cwd": "/tmp/project",
@@ -133,9 +128,7 @@ fn the_stdin_envelope_is_the_documented_one_for_every_event() {
             }),
         ),
         (
-            Payload::SessionStart {
-                source: Source::Resume,
-            },
+            Payload::SessionStart { source: Source::Resume },
             json!({
                 "session_id": "ses_1",
                 "cwd": "/tmp/project",
@@ -144,9 +137,7 @@ fn the_stdin_envelope_is_the_documented_one_for_every_event() {
             }),
         ),
         (
-            Payload::SessionEnd {
-                reason: "exit".to_owned(),
-            },
+            Payload::SessionEnd { reason: "exit".to_owned() },
             json!({
                 "session_id": "ses_1",
                 "cwd": "/tmp/project",
@@ -155,9 +146,7 @@ fn the_stdin_envelope_is_the_documented_one_for_every_event() {
             }),
         ),
         (
-            Payload::PreCompact {
-                trigger: Trigger::Auto,
-            },
+            Payload::PreCompact { trigger: Trigger::Auto },
             json!({
                 "session_id": "ses_1",
                 "cwd": "/tmp/project",
@@ -184,21 +173,14 @@ fn the_stdin_envelope_is_the_documented_one_for_every_event() {
 #[tokio::test]
 async fn a_matcher_fires_for_the_tools_it_names_and_no_others() {
     let dir = tempfile::tempdir().expect("a scratch directory");
-    let hooks = built(
-        HookEvent::PreToolUse,
-        Some("edit|write"),
-        &["echo refused >&2; exit 2"],
-        dir.path(),
-    );
+    let hooks =
+        built(HookEvent::PreToolUse, Some("edit|write"), &["echo refused >&2; exit 2"], dir.path());
 
     for (tool, blocked) in [("edit", true), ("write", true), ("read", false)] {
         let outcome = hooks
             .fire(
                 "ses_1",
-                &Payload::PreToolUse {
-                    tool_name: tool.to_owned(),
-                    tool_input: json!({}),
-                },
+                &Payload::PreToolUse { tool_name: tool.to_owned(), tool_input: json!({}) },
             )
             .await;
         assert_eq!(
@@ -213,33 +195,17 @@ async fn a_matcher_fires_for_the_tools_it_names_and_no_others() {
 async fn an_exit_two_blocks_with_its_stderr_and_a_clean_exit_does_not() {
     let dir = tempfile::tempdir().expect("a scratch directory");
 
-    let refusing = built(
-        HookEvent::PreToolUse,
-        None,
-        &["echo 'not that file' >&2; exit 2"],
-        dir.path(),
-    );
+    let refusing =
+        built(HookEvent::PreToolUse, None, &["echo 'not that file' >&2; exit 2"], dir.path());
     let outcome = refusing
-        .fire(
-            "ses_1",
-            &Payload::PreToolUse {
-                tool_name: "edit".to_owned(),
-                tool_input: json!({}),
-            },
-        )
+        .fire("ses_1", &Payload::PreToolUse { tool_name: "edit".to_owned(), tool_input: json!({}) })
         .await;
     assert_eq!(outcome.blocked.as_deref(), Some("not that file"));
     assert!(!outcome.allowed);
 
     let passing = built(HookEvent::PreToolUse, None, &["exit 0"], dir.path());
     let outcome = passing
-        .fire(
-            "ses_1",
-            &Payload::PreToolUse {
-                tool_name: "edit".to_owned(),
-                tool_input: json!({}),
-            },
-        )
+        .fire("ses_1", &Payload::PreToolUse { tool_name: "edit".to_owned(), tool_input: json!({}) })
         .await;
     assert_eq!(outcome.blocked, None);
 }
@@ -250,21 +216,9 @@ async fn an_exit_two_blocks_with_its_stderr_and_a_clean_exit_does_not() {
 #[tokio::test]
 async fn an_exit_two_on_a_non_blocking_event_becomes_a_notice() {
     let dir = tempfile::tempdir().expect("a scratch directory");
-    let hooks = built(
-        HookEvent::Stop,
-        None,
-        &["echo 'keep going' >&2; exit 2"],
-        dir.path(),
-    );
+    let hooks = built(HookEvent::Stop, None, &["echo 'keep going' >&2; exit 2"], dir.path());
 
-    let outcome = hooks
-        .fire(
-            "ses_1",
-            &Payload::Stop {
-                stop_hook_active: false,
-            },
-        )
-        .await;
+    let outcome = hooks.fire("ses_1", &Payload::Stop { stop_hook_active: false }).await;
 
     assert_eq!(outcome.blocked, None);
     assert_eq!(outcome.notices, vec!["keep going".to_owned()]);
@@ -308,49 +262,22 @@ async fn a_permission_decision_allows_or_denies_by_name() {
         dir.path(),
     );
     let outcome = asking.fire("ses_1", &call).await;
-    assert_eq!(
-        outcome,
-        Outcome::default(),
-        "ask is the flow with no hook at all"
-    );
+    assert_eq!(outcome, Outcome::default(), "ask is the flow with no hook at all");
 }
 
 #[tokio::test]
 async fn plain_stdout_is_context_where_the_event_takes_it() {
     let dir = tempfile::tempdir().expect("a scratch directory");
 
-    let prompt = built(
-        HookEvent::UserPromptSubmit,
-        None,
-        &["echo 'the build is red'"],
-        dir.path(),
-    );
-    let outcome = prompt
-        .fire(
-            "ses_1",
-            &Payload::UserPromptSubmit {
-                prompt: "fix it".to_owned(),
-            },
-        )
-        .await;
+    let prompt = built(HookEvent::UserPromptSubmit, None, &["echo 'the build is red'"], dir.path());
+    let outcome =
+        prompt.fire("ses_1", &Payload::UserPromptSubmit { prompt: "fix it".to_owned() }).await;
     assert_eq!(outcome.context, vec!["the build is red".to_owned()]);
 
     // The same words at an event that does not read them: not context, not
     // a failure either.
-    let stop = built(
-        HookEvent::Stop,
-        None,
-        &["echo 'the build is red'"],
-        dir.path(),
-    );
-    let outcome = stop
-        .fire(
-            "ses_1",
-            &Payload::Stop {
-                stop_hook_active: false,
-            },
-        )
-        .await;
+    let stop = built(HookEvent::Stop, None, &["echo 'the build is red'"], dir.path());
+    let outcome = stop.fire("ses_1", &Payload::Stop { stop_hook_active: false }).await;
     assert_eq!(outcome, Outcome::default(), "{outcome:?}");
 }
 
@@ -388,14 +315,8 @@ async fn the_envelope_reaches_the_process_on_standard_input() {
     let command = format!("cat > {}", written.display());
     let hooks = built(HookEvent::UserPromptSubmit, None, &[&command], dir.path());
 
-    let outcome = hooks
-        .fire(
-            "ses_7",
-            &Payload::UserPromptSubmit {
-                prompt: "hello".to_owned(),
-            },
-        )
-        .await;
+    let outcome =
+        hooks.fire("ses_7", &Payload::UserPromptSubmit { prompt: "hello".to_owned() }).await;
     assert!(outcome.notices.is_empty(), "{outcome:?}");
 
     let text = std::fs::read_to_string(&written).expect("the hook wrote its stdin");
@@ -422,43 +343,23 @@ async fn a_hook_that_runs_too_long_is_killed_and_reported_without_blocking() {
     let hooks = Hooks::new(&config, dir.path()).expect("the block describes hooks");
 
     let outcome = hooks
-        .fire(
-            "ses_1",
-            &Payload::PreToolUse {
-                tool_name: "edit".to_owned(),
-                tool_input: json!({}),
-            },
-        )
+        .fire("ses_1", &Payload::PreToolUse { tool_name: "edit".to_owned(), tool_input: json!({}) })
         .await;
 
     assert_eq!(outcome.blocked, None, "a killed hook refuses nothing");
     assert!(!outcome.allowed, "and above all approves nothing");
     assert_eq!(outcome.notices.len(), 1, "{outcome:?}");
-    assert!(
-        outcome.notices[0].contains("killed"),
-        "{}",
-        outcome.notices[0]
-    );
+    assert!(outcome.notices[0].contains("killed"), "{}", outcome.notices[0]);
 }
 
 #[tokio::test]
 async fn a_hook_that_fails_is_a_notice_and_not_a_refusal() {
     let dir = tempfile::tempdir().expect("a scratch directory");
-    let hooks = built(
-        HookEvent::PreToolUse,
-        None,
-        &["echo 'no such thing' >&2; exit 7"],
-        dir.path(),
-    );
+    let hooks =
+        built(HookEvent::PreToolUse, None, &["echo 'no such thing' >&2; exit 7"], dir.path());
 
     let outcome = hooks
-        .fire(
-            "ses_1",
-            &Payload::PreToolUse {
-                tool_name: "edit".to_owned(),
-                tool_input: json!({}),
-            },
-        )
+        .fire("ses_1", &Payload::PreToolUse { tool_name: "edit".to_owned(), tool_input: json!({}) })
         .await;
 
     assert_eq!(outcome.blocked, None);
@@ -484,14 +385,7 @@ async fn matching_hooks_all_run_and_report_in_the_order_they_were_written() {
         dir.path(),
     );
 
-    let outcome = hooks
-        .fire(
-            "ses_1",
-            &Payload::UserPromptSubmit {
-                prompt: "go".to_owned(),
-            },
-        )
-        .await;
+    let outcome = hooks.fire("ses_1", &Payload::UserPromptSubmit { prompt: "go".to_owned() }).await;
 
     assert_eq!(
         outcome.context,
@@ -513,14 +407,7 @@ async fn matching_hooks_run_concurrently() {
     );
 
     let started = std::time::Instant::now();
-    hooks
-        .fire(
-            "ses_1",
-            &Payload::UserPromptSubmit {
-                prompt: "go".to_owned(),
-            },
-        )
-        .await;
+    hooks.fire("ses_1", &Payload::UserPromptSubmit { prompt: "go".to_owned() }).await;
     let elapsed = started.elapsed();
 
     assert!(
@@ -565,10 +452,7 @@ fn a_block_with_no_handlers_configures_nothing() {
     let mut empty = BTreeMap::new();
     empty.insert(
         HookEvent::Stop.name().to_owned(),
-        vec![HookMatcher {
-            matcher: None,
-            hooks: Vec::new(),
-        }],
+        vec![HookMatcher { matcher: None, hooks: Vec::new() }],
     );
     assert!(Hooks::new(&empty, dir.path()).is_none());
 }
@@ -580,36 +464,19 @@ async fn an_uncompilable_matcher_fires_for_nothing() {
     let dir = tempfile::tempdir().expect("a scratch directory");
     let ledger = dir.path().join("ledger");
     let command = format!("echo ran >> {}", ledger.display());
-    let hooks = built(
-        HookEvent::PreToolUse,
-        Some("(unclosed"),
-        &[&command],
-        dir.path(),
-    );
+    let hooks = built(HookEvent::PreToolUse, Some("(unclosed"), &[&command], dir.path());
 
     hooks
-        .fire(
-            "ses_1",
-            &Payload::PreToolUse {
-                tool_name: "edit".to_owned(),
-                tool_input: json!({}),
-            },
-        )
+        .fire("ses_1", &Payload::PreToolUse { tool_name: "edit".to_owned(), tool_input: json!({}) })
         .await;
 
-    assert!(
-        !ledger.exists(),
-        "a broken matcher must not widen to everything"
-    );
+    assert!(!ledger.exists(), "a broken matcher must not widen to everything");
 }
 
 #[test]
 fn only_the_two_events_that_can_refuse_are_blocking() {
-    let blocking: Vec<&str> = EVENTS
-        .into_iter()
-        .filter(|event| event.blocking())
-        .map(HookEvent::name)
-        .collect();
+    let blocking: Vec<&str> =
+        EVENTS.into_iter().filter(|event| event.blocking()).map(HookEvent::name).collect();
 
     assert_eq!(blocking, vec!["PreToolUse", "UserPromptSubmit"]);
 }

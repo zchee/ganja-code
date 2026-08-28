@@ -31,26 +31,20 @@
 //! about. Everything past the seam is the real thing: the real registry, the
 //! real backends, the real team file.
 
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
-use ganja_core::{
-    Caller, SpawnAsk, SpawnAsker, Storage, Teammates,
-    permission::Permissions,
-    protocol::{PermissionReply, Role},
-    provider::FakeProvider,
-    teammate::tmux::{self, REFUSED_NO_TMUX},
-    tool::{
-        Credentials, FileTimes, Registry, Tool as _, ToolCtx, ToolError,
-        task::{
-            Delegated, Delegation, NotSpawned, Offered, Subagents, TaskTool, TeammateSpawn,
-            Teammated, Unanswered,
-        },
-    },
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{PermissionReply, Role};
+use ganja_core::provider::FakeProvider;
+use ganja_core::teammate::tmux::{self, REFUSED_NO_TMUX};
+use ganja_core::tool::task::{
+    Delegated, Delegation, NotSpawned, Offered, Subagents, TaskTool, TeammateSpawn, Teammated,
+    Unanswered,
 };
+use ganja_core::tool::{Credentials, FileTimes, Registry, Tool as _, ToolCtx, ToolError};
+use ganja_core::{Caller, SpawnAsk, SpawnAsker, Storage, Teammates};
 use ganja_testkit::{TEAM, caller, team_file, team_with};
 use tokio_util::sync::CancellationToken;
 
@@ -139,10 +133,7 @@ async fn the_task_door_starts_a_teammate_at_once_and_refuses_a_pane_as_the_other
         // has nothing to disclose and nobody to ask.
         caller: caller(home.path()),
     };
-    let tool = TaskTool::new(&[Offered {
-        name: "general".to_owned(),
-        description: None,
-    }]);
+    let tool = TaskTool::new(&[Offered { name: "general".to_owned(), description: None }]);
     let ctx = ToolCtx {
         cwd: home.path().to_path_buf(),
         cancel: CancellationToken::new(),
@@ -161,10 +152,8 @@ async fn the_task_door_starts_a_teammate_at_once_and_refuses_a_pane_as_the_other
         "a session that has not spawned anything leaves no team on disk"
     );
 
-    let output = tool
-        .run(args("in-process"), &ctx)
-        .await
-        .expect("the door starts an in-process teammate");
+    let output =
+        tool.run(args("in-process"), &ctx).await.expect("the door starts an in-process teammate");
 
     // The door answered, and it answered without the teammate having done its
     // work — which is the whole difference between this door and the other.

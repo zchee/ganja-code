@@ -32,28 +32,21 @@
 //!
 //! Mutates `XDG_DATA_HOME` — one test, one binary.
 
-use std::{
-    env,
-    sync::{Arc, Mutex},
-};
+use std::env;
+use std::sync::{Arc, Mutex};
 
 use futures::StreamExt as _;
-use ganja_core::{
-    Storage,
-    auth::{self, AuthError, OauthCredential, RefreshOauth},
-    protocol::{
-        Message, MessageId, MessageTime, Part, PartBody, PartId, REASONING_TAG, Role, ToolState,
-        Usage,
-    },
-    provider::{ChatRequest, Provider as _, ResponsesProvider},
-    storage::{SessionId, VERSION},
+use ganja_core::Storage;
+use ganja_core::auth::{self, AuthError, OauthCredential, RefreshOauth};
+use ganja_core::protocol::{
+    Message, MessageId, MessageTime, Part, PartBody, PartId, REASONING_TAG, Role, ToolState, Usage,
 };
+use ganja_core::provider::{ChatRequest, Provider as _, ResponsesProvider};
+use ganja_core::storage::{SessionId, VERSION};
 use secrecy::SecretString;
 use serde_json::json;
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::TcpListener,
-};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 /// The model the drill runs as: one the seat serves, and one that reasons.
@@ -90,12 +83,8 @@ impl RefreshOauth for NeverRenews {
 
 /// The one request the endpoint served, as JSON.
 async fn serve(seen: Arc<Mutex<Option<String>>>) -> String {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("loopback is bindable");
-    let address = listener
-        .local_addr()
-        .expect("a bound socket has an address");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("loopback is bindable");
+    let address = listener.local_addr().expect("a bound socket has an address");
 
     tokio::spawn(async move {
         let Ok((mut socket, _)) = listener.accept().await else {
@@ -148,10 +137,7 @@ fn stored_step() -> Message {
         id: MessageId::from("msg_1".to_owned()),
         role: Role::Assistant,
         parts: vec![
-            Part {
-                id: PartId::from("prt_1".to_owned()),
-                body: PartBody::StepStart,
-            },
+            Part { id: PartId::from("prt_1".to_owned()), body: PartBody::StepStart },
             Part {
                 id: PartId::from("prt_2".to_owned()),
                 body: PartBody::Reasoning {
@@ -177,15 +163,10 @@ fn stored_step() -> Message {
             },
             Part {
                 id: PartId::from("prt_4".to_owned()),
-                body: PartBody::StepFinish {
-                    usage: Usage::default(),
-                },
+                body: PartBody::StepFinish { usage: Usage::default() },
             },
         ],
-        time: MessageTime {
-            created: 7,
-            completed: Some(9),
-        },
+        time: MessageTime { created: 7, completed: Some(9) },
         model: Some(MODEL.to_owned()),
         usage: None,
     }
@@ -219,34 +200,23 @@ async fn a_stored_reasoning_part_this_build_cannot_read_costs_only_its_continuit
         role: Role::User,
         parts: vec![Part {
             id: PartId::from("prt_0".to_owned()),
-            body: PartBody::Text {
-                text: "what is the weather".to_owned(),
-            },
+            body: PartBody::Text { text: "what is the weather".to_owned() },
         }],
-        time: MessageTime {
-            created: 1,
-            completed: Some(1),
-        },
+        time: MessageTime { created: 1, completed: Some(1) },
         model: None,
         usage: None,
     };
     for message in [&asked, &stored_step()] {
-        storage
-            .save_message(&session, message)
-            .expect("the envelope stores");
+        storage.save_message(&session, message).expect("the envelope stores");
         for part in &message.parts {
-            storage
-                .save_part(&session, &message.id, part)
-                .expect("the part stores");
+            storage.save_part(&session, &message.id, part).expect("the part stores");
         }
     }
 
     // Continuity across a process at all is the premise of the rest: a part
     // that did not survive the disk would make every assertion below true for
     // the wrong reason.
-    let intact = storage
-        .load_transcript(&session)
-        .expect("the transcript loads");
+    let intact = storage.load_transcript(&session).expect("the transcript loads");
     assert_eq!(
         intact[1].parts[1].body,
         PartBody::Reasoning {
@@ -274,25 +244,17 @@ async fn a_stored_reasoning_part_this_build_cannot_read_costs_only_its_continuit
     .to_string();
     let connection = rusqlite::Connection::open(storage.database()).expect("the database opens");
     connection
-        .execute(
-            "UPDATE part SET data = ?1 WHERE id = 'prt_2'",
-            rusqlite::params![ahead],
-        )
+        .execute("UPDATE part SET data = ?1 WHERE id = 'prt_2'", rusqlite::params![ahead])
         .expect("the row is replaced");
 
     // ---- 3. The message survives, minus its continuity. --------------------
-    let transcript = storage
-        .load_transcript(&session)
-        .expect("the transcript loads");
+    let transcript = storage.load_transcript(&session).expect("the transcript loads");
     let [prompt, step] = transcript.as_slice() else {
         panic!("two messages were stored, got {}", transcript.len());
     };
     assert_eq!(prompt.parts.len(), 1, "the prompt is untouched");
     assert_eq!(
-        step.parts
-            .iter()
-            .map(|part| part.id.as_str())
-            .collect::<Vec<_>>(),
+        step.parts.iter().map(|part| part.id.as_str()).collect::<Vec<_>>(),
         vec!["prt_1", "prt_2", "prt_3", "prt_4"],
         "every other part of the step is still there, in place"
     );
@@ -365,9 +327,7 @@ async fn a_stored_reasoning_part_this_build_cannot_read_costs_only_its_continuit
 
     // ---- 5. The record is still the future build's. ------------------------
     let stored: String = connection
-        .query_row("SELECT data FROM part WHERE id = 'prt_2'", [], |row| {
-            row.get(0)
-        })
+        .query_row("SELECT data FROM part WHERE id = 'prt_2'", [], |row| row.get(0))
         .expect("the row reads");
     assert_eq!(
         stored, ahead,

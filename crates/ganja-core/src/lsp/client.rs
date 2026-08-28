@@ -36,16 +36,12 @@
 //! language server holds no state worth a graceful goodbye, and one that hangs
 //! on shutdown would hang the frontend's exit.
 
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-    process::Stdio,
-    sync::{
-        Arc,
-        atomic::{AtomicI64, Ordering},
-    },
-    time::Duration,
-};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::time::Duration;
 
 use lsp_types::{Diagnostic, PublishDiagnosticsParams, TextDocumentSyncKind};
 use serde_json::{Value, json};
@@ -59,7 +55,8 @@ use tokio::{
     time::Instant,
 };
 
-use super::{language::language_id, server::Spec};
+use super::language::language_id;
+use super::server::Spec;
 
 /// How long a publish must stay the newest one before the wait is satisfied
 /// (`client.ts:13`).
@@ -172,10 +169,7 @@ struct PendingGuard {
 
 impl Drop for PendingGuard {
     fn drop(&mut self) {
-        self.pending
-            .lock()
-            .expect("the pending requests are never poisoned")
-            .remove(&self.id);
+        self.pending.lock().expect("the pending requests are never poisoned").remove(&self.id);
     }
 }
 
@@ -247,11 +241,7 @@ impl State {
 
     /// Every path either cache knows about.
     fn paths(&self) -> std::collections::HashSet<PathBuf> {
-        self.pushed
-            .keys()
-            .chain(self.pulled.keys())
-            .cloned()
-            .collect()
+        self.pushed.keys().chain(self.pulled.keys()).cloned().collect()
     }
 }
 
@@ -265,10 +255,7 @@ fn items(report: &Value) -> Vec<Diagnostic> {
         .get("items")
         .and_then(Value::as_array)
         .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| serde_json::from_value(item.clone()).ok())
-                .collect()
+            items.iter().filter_map(|item| serde_json::from_value(item.clone()).ok()).collect()
         })
         .unwrap_or_default()
 }
@@ -291,13 +278,7 @@ impl Store {
     pub fn publish(&self, path: PathBuf, version: Option<i32>, diagnostics: Vec<Diagnostic>) {
         {
             let mut state = self.locked();
-            state.publishes.insert(
-                path.clone(),
-                Publish {
-                    at: Instant::now(),
-                    version,
-                },
-            );
+            state.publishes.insert(path.clone(), Publish { at: Instant::now(), version });
             state.pushed.insert(path, diagnostics);
         }
         self.published.notify_waiters();
@@ -390,9 +371,7 @@ impl Store {
             return false;
         }
 
-        tokio::time::timeout(budget, self.settle(path, version, after))
-            .await
-            .unwrap_or(false)
+        tokio::time::timeout(budget, self.settle(path, version, after)).await.unwrap_or(false)
     }
 
     /// The freshness-then-debounce loop [`Store::wait_fresh`] bounds.
@@ -420,9 +399,7 @@ impl Store {
     }
 
     fn locked(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state
-            .lock()
-            .expect("the diagnostics store is never poisoned")
+        self.state.lock().expect("the diagnostics store is never poisoned")
     }
 }
 
@@ -467,15 +444,11 @@ impl Client {
     /// start, or the handshake does not finish inside [`INITIALIZE_TIMEOUT`].
     /// Every one of them is a permanently broken `(root, id)` to the caller.
     pub async fn start(spec: &Spec, root: &Path) -> Result<Self, ClientError> {
-        let program = spec.program().ok_or_else(|| ClientError::NoExecutable {
-            id: spec.id.clone(),
-        })?;
-        let (binary, arguments) =
-            program
-                .split_first()
-                .ok_or_else(|| ClientError::NoExecutable {
-                    id: spec.id.clone(),
-                })?;
+        let program =
+            spec.program().ok_or_else(|| ClientError::NoExecutable { id: spec.id.clone() })?;
+        let (binary, arguments) = program
+            .split_first()
+            .ok_or_else(|| ClientError::NoExecutable { id: spec.id.clone() })?;
 
         let mut command = Command::new(binary);
         command
@@ -496,17 +469,13 @@ impl Client {
             command.process_group(0);
         }
 
-        let mut child = command.spawn().map_err(|source| ClientError::Spawn {
-            id: spec.id.clone(),
-            source,
-        })?;
+        let mut child =
+            command.spawn().map_err(|source| ClientError::Spawn { id: spec.id.clone(), source })?;
 
         let (Some(stdin), Some(stdout), Some(stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
         else {
-            return Err(ClientError::NoPipes {
-                id: spec.id.clone(),
-            });
+            return Err(ClientError::NoPipes { id: spec.id.clone() });
         };
 
         let store = Arc::new(Store::default());
@@ -582,18 +551,12 @@ impl Client {
                 id: self.id.clone(),
                 message: error.to_string(),
             })?
-            .map_err(|message| ClientError::Initialize {
-                id: self.id.clone(),
-                message,
-            })?;
+            .map_err(|message| ClientError::Initialize { id: self.id.clone(), message })?;
 
         self.incremental = sync_kind(&result) == Some(TextDocumentSyncKind::INCREMENTAL);
         self.notify("initialized", json!({}))?;
         if let Some(settings) = &spec.initialization {
-            self.notify(
-                "workspace/didChangeConfiguration",
-                json!({ "settings": settings }),
-            )?;
+            self.notify("workspace/didChangeConfiguration", json!({ "settings": settings }))?;
         }
 
         Ok(self)
@@ -619,10 +582,7 @@ impl Client {
     pub async fn open(&self, path: &Path) -> Result<i32, ClientError> {
         let text = tokio::fs::read_to_string(path)
             .await
-            .map_err(|source| ClientError::Read {
-                path: path.to_owned(),
-                source,
-            })?;
+            .map_err(|source| ClientError::Read { path: path.to_owned(), source })?;
         let uri = uri(path);
         let mut documents = self.documents.lock().await;
 
@@ -693,9 +653,7 @@ impl Client {
     /// behavior and the only honest one: the alternative is telling the model
     /// about ganja's timers instead of about its code.
     pub async fn wait_for_diagnostics(&self, path: &Path, version: i32, after: Instant) {
-        let push = self
-            .store
-            .wait_fresh(path, version, after, DOCUMENT_WAIT_TIMEOUT);
+        let push = self.store.wait_fresh(path, version, after, DOCUMENT_WAIT_TIMEOUT);
         tokio::pin!(push);
 
         let answered = {
@@ -767,11 +725,7 @@ impl Client {
     /// and drops with it), and is the whole mechanism on a platform with no
     /// process groups to signal.
     pub fn shutdown(&self) {
-        let child = self
-            .child
-            .lock()
-            .expect("the language server handle is never poisoned")
-            .take();
+        let child = self.child.lock().expect("the language server handle is never poisoned").take();
         let Some(mut child) = child else {
             return;
         };
@@ -816,9 +770,7 @@ impl Client {
     fn notify(&self, method: &str, params: Value) -> Result<(), ClientError> {
         self.outgoing
             .send(json!({ "jsonrpc": "2.0", "method": method, "params": params }))
-            .map_err(|_| ClientError::Disconnected {
-                id: self.id.clone(),
-            })
+            .map_err(|_| ClientError::Disconnected { id: self.id.clone() })
     }
 
     /// Sends a request and waits for its answer.
@@ -837,10 +789,7 @@ impl Client {
         // function — the early return below, the ordinary answer, a
         // connection dying, or this future being dropped before either —
         // clears the same entry exactly once.
-        let _guard = PendingGuard {
-            pending: Arc::clone(&self.pending),
-            id,
-        };
+        let _guard = PendingGuard { pending: Arc::clone(&self.pending), id };
 
         let sent = self.outgoing.send(json!({
             "jsonrpc": "2.0",
@@ -849,22 +798,16 @@ impl Client {
             "params": params,
         }));
         if sent.is_err() {
-            return Err(ClientError::Disconnected {
-                id: self.id.clone(),
-            });
+            return Err(ClientError::Disconnected { id: self.id.clone() });
         }
 
-        receiver.await.map_err(|_| ClientError::Disconnected {
-            id: self.id.clone(),
-        })
+        receiver.await.map_err(|_| ClientError::Disconnected { id: self.id.clone() })
     }
 
     fn locked_pending(
         &self,
     ) -> std::sync::MutexGuard<'_, HashMap<i64, oneshot::Sender<Result<Value, String>>>> {
-        self.pending
-            .lock()
-            .expect("the pending requests are never poisoned")
+        self.pending.lock().expect("the pending requests are never poisoned")
     }
 }
 
@@ -910,11 +853,7 @@ async fn read_frames(stdout: tokio::process::ChildStdout, reader: Reader) {
     // Everything still waiting is waiting forever: dropping the senders is
     // what turns that into a `Disconnected` at each call site rather than a
     // task parked for the life of the process.
-    reader
-        .pending
-        .lock()
-        .expect("the pending requests are never poisoned")
-        .clear();
+    reader.pending.lock().expect("the pending requests are never poisoned").clear();
 }
 
 /// One `Content-Length`-framed JSON message, or [`None`] at end of stream.
@@ -1039,9 +978,7 @@ impl Reader {
             }
         };
 
-        let _ = self
-            .outgoing
-            .send(json!({ "jsonrpc": "2.0", "id": id, "result": result }));
+        let _ = self.outgoing.send(json!({ "jsonrpc": "2.0", "id": id, "result": result }));
     }
 
     /// Takes note of a notification. Only one of them means anything here.
@@ -1066,8 +1003,7 @@ impl Reader {
             return;
         };
 
-        self.store
-            .publish(path, published.version, published.diagnostics);
+        self.store.publish(path, published.version, published.diagnostics);
     }
 }
 
@@ -1104,9 +1040,7 @@ async fn drain(stderr: tokio::process::ChildStderr, id: String) {
 /// The change kind the server negotiated, if it said (`client.ts:76-81`).
 fn sync_kind(result: &Value) -> Option<TextDocumentSyncKind> {
     let sync = result.get("capabilities")?.get("textDocumentSync")?;
-    let kind = sync
-        .as_i64()
-        .or_else(|| sync.get("change").and_then(Value::as_i64))?;
+    let kind = sync.as_i64().or_else(|| sync.get("change").and_then(Value::as_i64))?;
 
     match kind {
         0 => Some(TextDocumentSyncKind::NONE),
@@ -1138,10 +1072,8 @@ fn configuration(settings: Option<&Value>, section: Option<&str>) -> Value {
 
 /// `path` as a `file://` URI.
 fn uri(path: &Path) -> String {
-    url::Url::from_file_path(path).map_or_else(
-        |()| format!("file://{}", path.display()),
-        |url| url.to_string(),
-    )
+    url::Url::from_file_path(path)
+        .map_or_else(|()| format!("file://{}", path.display()), |url| url.to_string())
 }
 
 /// The path a `file://` URI names, or [`None`] for any other scheme.
@@ -1229,11 +1161,7 @@ fn split_lines(text: &str) -> Vec<&str> {
             return lines;
         };
         lines.push(&rest[..index]);
-        let skip = if rest[index..].starts_with("\r\n") {
-            2
-        } else {
-            1
-        };
+        let skip = if rest[index..].starts_with("\r\n") { 2 } else { 1 };
         rest = &rest[index + skip..];
     }
 }

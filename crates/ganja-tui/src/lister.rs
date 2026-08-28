@@ -120,10 +120,8 @@ pub trait Lister: Send + Sync {
 /// registry or a real socket to do it.
 #[cfg(test)]
 pub(crate) mod fake {
-    use std::sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use futures::FutureExt as _;
 

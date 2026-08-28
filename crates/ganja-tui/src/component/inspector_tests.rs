@@ -4,17 +4,14 @@ use ganja_core::SessionId;
 use ganja_protocol::{
     Event as CoreEvent, Message, MessageId, Part, PartBody, PartId, Role, ToolState,
 };
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 
 use super::{Feed, Inspector, TurnUsage};
-use crate::{component::status::Totals, theme::Theme};
+use crate::component::status::Totals;
+use crate::theme::Theme;
 
-const AREA: Rect = Rect {
-    x: 0,
-    y: 0,
-    width: 100,
-    height: 24,
-};
+const AREA: Rect = Rect { x: 0, y: 0, width: 100, height: 24 };
 
 fn session(title: Option<&str>) -> ganja_core::SessionInfo {
     ganja_core::SessionInfo {
@@ -44,13 +41,7 @@ fn feed<'a>(
     events: &'a VecDeque<CoreEvent>,
     usages: &'a VecDeque<TurnUsage>,
 ) -> Feed<'a> {
-    Feed {
-        session,
-        messages,
-        events,
-        usages,
-        totals: Totals::default(),
-    }
+    Feed { session, messages, events, usages, totals: Totals::default() }
 }
 
 fn render(inspector: &mut Inspector, feed: &Feed<'_>) -> String {
@@ -114,22 +105,13 @@ fn the_transcript_tab_matches_the_copy_renderer_for_the_same_part() {
 
     assert!(screen.contains("mcp__docs__search"), "{screen}");
     assert!(screen.contains("full input, never clamped"), "{screen}");
-    for line in [
-        "line one",
-        "line two",
-        "line three",
-        "line four",
-        "line five",
-    ] {
+    for line in ["line one", "line two", "line three", "line four", "line five"] {
         assert!(
             screen.contains(line),
             "the full output should be unclamped, unlike the transcript pane's preview:\n{screen}"
         );
     }
-    assert!(
-        expected.contains("mcp__docs__search"),
-        "the fixture should exercise a real mcp id"
-    );
+    assert!(expected.contains("mcp__docs__search"), "the fixture should exercise a real mcp id");
 }
 
 #[test]
@@ -164,10 +146,7 @@ fn the_log_tab_lists_one_line_per_event_newest_at_the_tail() {
     let oldest_row = screen.lines().position(|line| line.contains("oldest"));
     let newest_row = screen.lines().position(|line| line.contains("newest"));
     assert!(oldest_row.is_some() && newest_row.is_some(), "{screen}");
-    assert!(
-        oldest_row < newest_row,
-        "the oldest event should be above the newest:\n{screen}"
-    );
+    assert!(oldest_row < newest_row, "the oldest event should be above the newest:\n{screen}");
 }
 
 #[test]
@@ -198,23 +177,13 @@ fn the_tokens_tab_shows_every_split_and_a_totals_footer_matching_the_status_bar(
         usage,
     });
     let events = VecDeque::new();
-    let totals = Totals {
-        input_tokens: 16,
-        output_tokens: 4,
-        cost_usd: Some(0.5),
-    };
+    let totals = Totals { input_tokens: 16, output_tokens: 4, cost_usd: Some(0.5) };
 
     let mut inspector = Inspector::new();
     inspector.select_index(2);
     let screen = render(
         &mut inspector,
-        &Feed {
-            session: None,
-            messages: &[],
-            events: &events,
-            usages: &usages,
-            totals,
-        },
+        &Feed { session: None, messages: &[], events: &events, usages: &usages, totals },
     );
 
     for value in ["3", "4", "5", "6", "7"] {
@@ -291,35 +260,20 @@ fn the_log_tab_opens_on_its_tail_and_follows_what_arrives() {
     let area = Rect::new(0, 0, 120, 8);
 
     let opened = render_in(&mut inspector, area, &feed(None, &[], &events, &usages));
-    assert!(
-        opened.contains("prt_29"),
-        "the tail is what opens:\n{opened}"
-    );
-    assert!(
-        !opened.contains("prt_0\""),
-        "and the head is off screen:\n{opened}"
-    );
+    assert!(opened.contains("prt_29"), "the tail is what opens:\n{opened}");
+    assert!(!opened.contains("prt_0\""), "and the head is off screen:\n{opened}");
 
     events.push_back(delta(30));
     let followed = render_in(&mut inspector, area, &feed(None, &[], &events, &usages));
-    assert!(
-        followed.contains("prt_30"),
-        "a pinned viewport follows what arrives:\n{followed}"
-    );
+    assert!(followed.contains("prt_30"), "a pinned viewport follows what arrives:\n{followed}");
 
     inspector.scroll(-1);
     let held = render_in(&mut inspector, area, &feed(None, &[], &events, &usages));
-    assert!(
-        !held.contains("prt_30"),
-        "scrolled up, the viewport holds its place:\n{held}"
-    );
+    assert!(!held.contains("prt_30"), "scrolled up, the viewport holds its place:\n{held}");
 
     inspector.scroll(isize::MAX);
     let repinned = render_in(&mut inspector, area, &feed(None, &[], &events, &usages));
-    assert!(
-        repinned.contains("prt_30"),
-        "End re-pins the viewport to the tail:\n{repinned}"
-    );
+    assert!(repinned.contains("prt_30"), "End re-pins the viewport to the tail:\n{repinned}");
 }
 
 /// vim's half-page pair: `Ctrl+U` moves the viewport up by half of what
@@ -351,21 +305,12 @@ fn the_half_page_pair_moves_by_half_of_what_the_last_render_showed() {
     by_rows.scroll(-2);
     let up = render_in(&mut by_pair, area, &fed);
     assert_eq!(up, render_in(&mut by_rows, area, &fed));
-    assert!(
-        !up.contains("prt_29"),
-        "half a page up, the tail is off screen:\n{up}"
-    );
-    assert!(
-        up.contains("prt_27"),
-        "and the row two above it is the last shown:\n{up}"
-    );
+    assert!(!up.contains("prt_29"), "half a page up, the tail is off screen:\n{up}");
+    assert!(up.contains("prt_27"), "and the row two above it is the last shown:\n{up}");
 
     by_pair.scroll_half_page(1);
     let down = render_in(&mut by_pair, area, &fed);
-    assert_eq!(
-        down, pinned,
-        "half a page down from there is the tail again, re-pinned:\n{down}"
-    );
+    assert_eq!(down, pinned, "half a page down from there is the tail again, re-pinned:\n{down}");
 }
 
 /// The footer's legend is the full one where the row has room for it,
@@ -380,17 +325,11 @@ fn the_footer_drops_the_vim_pair_first_and_the_rest_of_the_legend_last() {
     assert_eq!(wide.chars().count(), 100);
 
     let eighty = super::footer(super::Tab::Transcript, 0, 10, 10, 80);
-    assert!(
-        !eighty.contains("ctrl+u/d") && eighty.contains("pgdn scroll"),
-        "{eighty}"
-    );
+    assert!(!eighty.contains("ctrl+u/d") && eighty.contains("pgdn scroll"), "{eighty}");
     assert_eq!(eighty.chars().count(), 80);
 
     let tiny = super::footer(super::Tab::Transcript, 0, 10, 10, 20);
-    assert!(
-        !tiny.contains("scroll") && tiny.starts_with("transcript"),
-        "{tiny}"
-    );
+    assert!(!tiny.contains("scroll") && tiny.starts_with("transcript"), "{tiny}");
 }
 
 #[test]

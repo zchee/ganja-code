@@ -60,10 +60,7 @@ pub const PRE_UUID_ID: &str = "ses_0193b2f0a1c2000000";
 pub fn plant_preuuid_store(root: std::path::PathBuf) -> (Storage, std::path::PathBuf) {
     let planted = Storage::open(root);
     planted
-        .save_info(&seeded_session_info(
-            SessionId::from(PRE_UUID_ID.to_owned()),
-            7,
-        ))
+        .save_info(&seeded_session_info(SessionId::from(PRE_UUID_ID.to_owned()), 7))
         .expect("the old-format record writes");
     let database = planted.database().to_path_buf();
 
@@ -74,13 +71,7 @@ pub fn plant_preuuid_store(root: std::path::PathBuf) -> (Storage, std::path::Pat
 pub fn entries(directory: &std::path::Path) -> Vec<String> {
     std::fs::read_dir(directory)
         .expect("the directory lists")
-        .map(|entry| {
-            entry
-                .expect("the entry reads")
-                .file_name()
-                .to_string_lossy()
-                .into_owned()
-        })
+        .map(|entry| entry.expect("the entry reads").file_name().to_string_lossy().into_owned())
         .collect()
 }
 
@@ -88,11 +79,8 @@ pub fn entries(directory: &std::path::Path) -> Vec<String> {
 /// `-wal`/`-shm` log companions — what a quarantine set aside, however many
 /// times it fired.
 pub fn set_aside_of(directory: &std::path::Path, database: &std::path::Path) -> Vec<String> {
-    let name = database
-        .file_name()
-        .expect("the database has a name")
-        .to_string_lossy()
-        .into_owned();
+    let name =
+        database.file_name().expect("the database has a name").to_string_lossy().into_owned();
     let prefix = format!("{name}.preuuid-");
 
     entries(directory)
@@ -115,12 +103,8 @@ pub fn set_aside_of(directory: &std::path::Path, database: &std::path::Path) -> 
 /// ganja_testkit::seed_message(&storage, &session, &Message::user("hello"));
 /// ```
 pub fn seed_message(storage: &Storage, session: &SessionId, message: &Message) {
-    storage
-        .save_message(session, message)
-        .expect("the seeded envelope writes");
+    storage.save_message(session, message).expect("the seeded envelope writes");
     for part in &message.parts {
-        storage
-            .save_part(session, &message.id, part)
-            .expect("the seeded part writes");
+        storage.save_part(session, &message.id, part).expect("the seeded part writes");
     }
 }

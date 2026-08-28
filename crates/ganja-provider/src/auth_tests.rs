@@ -1,10 +1,8 @@
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt as _;
-use std::{
-    env, fs,
-    path::PathBuf,
-    sync::{Mutex, MutexGuard, PoisonError},
-};
+use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::{env, fs};
 
 use secrecy::{ExposeSecret as _, SecretString};
 use tempfile::TempDir;
@@ -88,7 +86,8 @@ const NOW_S: u64 = NOW_MS / 1_000;
 /// answer rather than no answer: a token still good for a day was issued
 /// now, so a decode looking at `iat` calls it spent.
 fn jwt(issued_at: u64, expires_at: u64) -> SecretString {
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
     let payload = URL_SAFE_NO_PAD.encode(
         serde_json::json!({
@@ -124,27 +123,22 @@ fn rendered(error: &AuthError) -> Vec<String> {
 
 #[cfg(unix)]
 fn mode(path: &std::path::Path) -> u32 {
-    fs::metadata(path)
-        .expect("the file exists")
-        .permissions()
-        .mode()
-        & 0o777
+    fs::metadata(path).expect("the file exists").permissions().mode() & 0o777
 }
 
 #[cfg(windows)]
 mod windows_dacl {
-    use std::{mem::size_of, ptr};
+    use std::mem::size_of;
+    use std::ptr;
 
-    use windows_sys::Win32::{
-        Foundation::GENERIC_READ,
-        Security::{
-            ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAceEx, AddAccessDeniedAceEx,
-            EqualSid, INHERITED_ACE, InitializeAcl, WinWorldSid,
-        },
-        Storage::FileSystem::{
-            FILE_ALL_ACCESS, FILE_GENERIC_READ, FILE_READ_ATTRIBUTES, FILE_READ_EA, READ_CONTROL,
-            SYNCHRONIZE,
-        },
+    use windows_sys::Win32::Foundation::GENERIC_READ;
+    use windows_sys::Win32::Security::{
+        ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAceEx, AddAccessDeniedAceEx,
+        EqualSid, INHERITED_ACE, InitializeAcl, WinWorldSid,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ALL_ACCESS, FILE_GENERIC_READ, FILE_READ_ATTRIBUTES, FILE_READ_EA, READ_CONTROL,
+        SYNCHRONIZE,
     };
 
     use super::super::windows_acl::{OwnedSid, exposed_grantee_in_dacl, private_acl, process_user};
@@ -178,9 +172,7 @@ mod windows_dacl {
             bytes + size_of::<ACCESS_ALLOWED_ACE>() - size_of::<u32>() + entry.sid.len() as usize
         });
         let words = bytes.div_ceil(size_of::<usize>());
-        let mut acl = TestAcl {
-            words: vec![0; words].into_boxed_slice(),
-        };
+        let mut acl = TestAcl { words: vec![0; words].into_boxed_slice() };
         let pointer = acl.words.as_mut_ptr().cast();
         assert_ne!(
             // SAFETY: the aligned allocation is bytes bytes long.
@@ -211,23 +203,13 @@ mod windows_dacl {
                     ),
                 }
             };
-            assert_ne!(
-                added,
-                0,
-                "the test ACE is added: {}",
-                std::io::Error::last_os_error()
-            );
+            assert_ne!(added, 0, "the test ACE is added: {}", std::io::Error::last_os_error());
         }
         acl
     }
 
     fn allow(sid: &OwnedSid, mask: u32) -> Entry<'_> {
-        Entry {
-            kind: Kind::Allow,
-            mask,
-            flags: 0,
-            sid,
-        }
+        Entry { kind: Kind::Allow, mask, flags: 0, sid }
     }
 
     #[test]
@@ -267,24 +249,12 @@ mod windows_dacl {
         let everyone = OwnedSid::well_known(WinWorldSid).expect("Everyone has a SID");
 
         let owner_only = acl(&[allow(&user, FILE_ALL_ACCESS)]);
-        assert_eq!(
-            exposed_grantee_in_dacl(owner_only.as_ptr()).expect("the ACL reads"),
-            None
-        );
+        assert_eq!(exposed_grantee_in_dacl(owner_only.as_ptr()).expect("the ACL reads"), None);
 
         let inherited_system_set = acl(&[
-            Entry {
-                flags: INHERITED_ACE,
-                ..allow(&user, FILE_ALL_ACCESS)
-            },
-            Entry {
-                flags: INHERITED_ACE,
-                ..allow(&system, FILE_GENERIC_READ)
-            },
-            Entry {
-                flags: INHERITED_ACE,
-                ..allow(&administrators, FILE_GENERIC_READ)
-            },
+            Entry { flags: INHERITED_ACE, ..allow(&user, FILE_ALL_ACCESS) },
+            Entry { flags: INHERITED_ACE, ..allow(&system, FILE_GENERIC_READ) },
+            Entry { flags: INHERITED_ACE, ..allow(&administrators, FILE_GENERIC_READ) },
         ]);
         assert_eq!(
             exposed_grantee_in_dacl(inherited_system_set.as_ptr())
@@ -293,12 +263,7 @@ mod windows_dacl {
         );
 
         let denied_everyone = acl(&[
-            Entry {
-                kind: Kind::Deny,
-                mask: FILE_ALL_ACCESS,
-                flags: 0,
-                sid: &everyone,
-            },
+            Entry { kind: Kind::Deny, mask: FILE_ALL_ACCESS, flags: 0, sid: &everyone },
             allow(&user, FILE_ALL_ACCESS),
         ]);
         assert_eq!(
@@ -327,9 +292,7 @@ mod windows_dacl {
         );
 
         assert_eq!(
-            exposed_grantee_in_dacl(ptr::null())
-                .expect("a NULL DACL is classified")
-                .as_deref(),
+            exposed_grantee_in_dacl(ptr::null()).expect("a NULL DACL is classified").as_deref(),
             Some("Everyone (NULL DACL)")
         );
     }
@@ -340,10 +303,7 @@ fn a_missing_store_reads_as_no_credentials_rather_than_an_error() {
     let directory = temporary();
     let store = store(&directory);
 
-    assert_eq!(
-        key_of(store.get("anthropic").expect("a missing file is fine")),
-        None
-    );
+    assert_eq!(key_of(store.get("anthropic").expect("a missing file is fine")), None);
     assert!(store.stored().expect("a missing file is fine").is_empty());
     assert!(!store.remove("anthropic").expect("a missing file is fine"));
 }
@@ -361,18 +321,11 @@ fn a_stored_key_round_trips_and_can_be_forgotten() {
     );
     assert_eq!(
         store.stored().expect("the listing reads"),
-        vec![(
-            "anthropic".to_owned(),
-            RedactedTail::of(CANARY),
-            CredentialKind::ApiKey
-        )]
+        vec![("anthropic".to_owned(), RedactedTail::of(CANARY), CredentialKind::ApiKey)]
     );
 
     assert!(store.remove("anthropic").expect("the key is removable"));
-    assert_eq!(
-        key_of(store.get("anthropic").expect("the file still reads")),
-        None
-    );
+    assert_eq!(key_of(store.get("anthropic").expect("the file still reads")), None);
 }
 
 /// The file shape is upstream's, so that the two tools can eventually read
@@ -408,41 +361,26 @@ fn foreign_entries_survive_a_rewrite() {
         "some-future-provider": { "type": "quantum-handshake", "secret": "s" },
         "openai": { "type": "api", "key": "sk-old-0001", "metadata": { "label": "work" } },
     });
-    fs::write(
-        &store.path,
-        serde_json::to_vec_pretty(&original).expect("the fixture serializes"),
-    )
-    .expect("the fixture writes");
+    fs::write(&store.path, serde_json::to_vec_pretty(&original).expect("the fixture serializes"))
+        .expect("the fixture writes");
     #[cfg(unix)]
     fs::set_permissions(&store.path, fs::Permissions::from_mode(0o600))
         .expect("the fixture is made private");
 
     // Neither entry is a usable credential, so neither is offered.
-    assert_eq!(
-        key_of(store.get("anthropic").expect("the file reads")),
-        None
-    );
+    assert_eq!(key_of(store.get("anthropic").expect("the file reads")), None);
     assert_eq!(
         store.stored().expect("the listing reads"),
-        vec![(
-            "openai".to_owned(),
-            RedactedTail::of("sk-old-0001"),
-            CredentialKind::ApiKey
-        )]
+        vec![("openai".to_owned(), RedactedTail::of("sk-old-0001"), CredentialKind::ApiKey)]
     );
 
-    store
-        .set("anthropic", CANARY)
-        .expect("a new key stores beside them");
+    store.set("anthropic", CANARY).expect("a new key stores beside them");
 
     let rewritten: serde_json::Value =
         serde_json::from_slice(&fs::read(&store.path).expect("the file exists"))
             .expect("the file is still JSON");
 
-    assert_eq!(
-        rewritten["some-future-provider"],
-        original["some-future-provider"]
-    );
+    assert_eq!(rewritten["some-future-provider"], original["some-future-provider"]);
     assert_eq!(rewritten["openai"], original["openai"]);
     assert_eq!(rewritten["anthropic"]["type"], "api");
     assert_eq!(
@@ -490,19 +428,14 @@ fn an_oauth_entry_round_trips_with_everything_it_arrived_with() {
     assert_eq!(credential.access.expose_secret(), "gho_access_0002");
     assert_eq!(credential.expires, 1_785_000_000_000);
     assert_eq!(credential.account_id.as_deref(), Some("acct-42"));
-    assert_eq!(
-        credential.enterprise_url.as_deref(),
-        Some("https://company.ghe.com")
-    );
+    assert_eq!(credential.enterprise_url.as_deref(), Some("https://company.ghe.com"));
     assert_eq!(
         credential.extra.get("someFuturePluginField"),
         Some(&original["someFuturePluginField"]),
         "a field this build does not model has to survive the decode"
     );
 
-    store
-        .set_oauth("github-copilot", &credential)
-        .expect("the credential stores again");
+    store.set_oauth("github-copilot", &credential).expect("the credential stores again");
 
     let rewritten: serde_json::Value =
         serde_json::from_slice(&fs::read(&store.path).expect("the file exists"))
@@ -540,19 +473,12 @@ fn an_oauth_credential_is_listed_as_the_kind_it_is() {
                 RedactedTail::of("gho_access_0002"),
                 CredentialKind::Oauth
             ),
-            (
-                "openai".to_owned(),
-                RedactedTail::of(CANARY),
-                CredentialKind::ApiKey
-            ),
+            ("openai".to_owned(), RedactedTail::of(CANARY), CredentialKind::ApiKey),
         ]
     );
     // An OAuth credential is not an API key, and offering it as one would
     // send a bearer token out in an `x-api-key` header.
-    assert_eq!(
-        key_of(store.get("github-copilot").expect("the file reads")),
-        None
-    );
+    assert_eq!(key_of(store.get("github-copilot").expect("the file reads")), None);
 }
 
 /// An entry with no token in it is not a credential, the same way an `api`
@@ -568,12 +494,7 @@ fn an_oauth_entry_with_no_tokens_is_not_a_credential() {
         )
         .expect("the entry stores");
 
-    assert!(
-        store
-            .oauth("github-copilot")
-            .expect("the file reads")
-            .is_none()
-    );
+    assert!(store.oauth("github-copilot").expect("the file reads").is_none());
     assert!(store.stored().expect("the listing reads").is_empty());
 }
 
@@ -611,12 +532,8 @@ fn a_credential_is_due_only_before_the_moment_it_expires() {
             .needs_refresh(now, 0)
     );
     assert!(
-        !OauthCredential::new(
-            SecretString::from("r"),
-            SecretString::from("a"),
-            now + 86_400_000
-        )
-        .needs_refresh(now, REFRESH_SKEW_MS)
+        !OauthCredential::new(SecretString::from("r"), SecretString::from("a"), now + 86_400_000)
+            .needs_refresh(now, REFRESH_SKEW_MS)
     );
 }
 
@@ -706,7 +623,8 @@ fn a_tokens_own_expiry_decides_a_renewal_the_stored_one_cannot() {
     }
 
     let no_exp = {
-        use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+        use base64::Engine as _;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
         let payload = URL_SAFE_NO_PAD.encode(r#"{"sub":"someone"}"#);
         SecretString::from(format!("eyJhbGciOiJSUzI1NiJ9.{payload}.sig"))
@@ -751,10 +669,7 @@ fn a_tokens_own_expiry_never_decides_whether_it_may_be_sent() {
 fn every_failure_says_which_of_them_it_is_and_what_to_do() {
     #[cfg(not(windows))]
     let permissions = (
-        AuthError::Permissions {
-            path: PathBuf::from("/tmp/auth.json"),
-            mode: 0o644,
-        },
+        AuthError::Permissions { path: PathBuf::from("/tmp/auth.json"), mode: 0o644 },
         AuthErrorKind::Storage,
         "chmod 600",
     );
@@ -769,10 +684,7 @@ fn every_failure_says_which_of_them_it_is_and_what_to_do() {
     );
     let taxonomy = [
         (
-            AuthError::NotOauth {
-                provider_id: "openai".to_owned(),
-                found: "an API key is stored",
-            },
+            AuthError::NotOauth { provider_id: "openai".to_owned(), found: "an API key is stored" },
             AuthErrorKind::NotOauth,
             "ganja auth login openai",
         ),
@@ -823,14 +735,8 @@ fn a_grok_credential_is_stored_where_upstream_keeps_its_xai_one() {
 
     // Either name reaches it, so a caller that has upstream's does not have
     // to know about ganja's.
-    assert_eq!(
-        key_of(store.get("grok").expect("the file reads")),
-        Some(CANARY.to_owned())
-    );
-    assert_eq!(
-        key_of(store.get("xai").expect("the file reads")),
-        Some(CANARY.to_owned())
-    );
+    assert_eq!(key_of(store.get("grok").expect("the file reads")), Some(CANARY.to_owned()));
+    assert_eq!(key_of(store.get("xai").expect("the file reads")), Some(CANARY.to_owned()));
     assert!(store.remove("grok").expect("the key is removable"));
 
     assert_eq!(storage_key("grok"), "xai");
@@ -848,9 +754,7 @@ fn a_grok_credential_is_stored_where_upstream_keeps_its_xai_one() {
         assert_eq!(storage_key(configured), configured);
         assert_eq!(provider_id_for_storage_key(configured), configured);
     }
-    store
-        .set("local-llama", CANARY)
-        .expect("an id nothing ships is still an id");
+    store.set("local-llama", CANARY).expect("an id nothing ships is still an id");
     assert_eq!(
         key_of(store.get("local-llama").expect("the file reads")),
         Some(CANARY.to_owned()),
@@ -892,15 +796,9 @@ fn a_file_that_is_not_a_json_object_is_reported_without_quoting_it_back() {
 
         let error = store.get("anthropic").expect_err("corruption is reported");
 
-        assert!(
-            matches!(error, AuthError::Malformed { .. }),
-            "got {error:?}"
-        );
+        assert!(matches!(error, AuthError::Malformed { .. }), "got {error:?}");
         for line in rendered(&error) {
-            assert!(
-                !line.contains(CANARY),
-                "an error must not carry the file's contents: {line}"
-            );
+            assert!(!line.contains(CANARY), "an error must not carry the file's contents: {line}");
         }
     }
 }
@@ -933,12 +831,9 @@ fn a_written_store_is_private_to_its_owner() {
         .expect("the credential stores");
     assert_eq!(mode(&store.path), 0o600);
     assert!(
-        fs::read_dir(directory.path())
-            .expect("the directory lists")
-            .filter_map(Result::ok)
-            .all(|entry| {
-                entry.file_name() == "auth.json" || entry.file_name() == "auth-stamps.json"
-            }),
+        fs::read_dir(directory.path()).expect("the directory lists").filter_map(Result::ok).all(
+            |entry| { entry.file_name() == "auth.json" || entry.file_name() == "auth-stamps.json" }
+        ),
         "no temporary file may outlive a write, the stamps' included"
     );
     assert_eq!(
@@ -963,14 +858,10 @@ fn a_link_planted_at_the_temporary_file_cannot_redirect_the_write() {
 
     let target = directory.path().join("somewhere-else");
     fs::write(&target, b"not a credential store").expect("the target writes");
-    let planted = directory
-        .path()
-        .join(format!("auth.json.{}.tmp", std::process::id()));
+    let planted = directory.path().join(format!("auth.json.{}.tmp", std::process::id()));
     std::os::unix::fs::symlink(&target, &planted).expect("the link plants");
 
-    store
-        .set("anthropic", CANARY)
-        .expect("the key still stores");
+    store.set("anthropic", CANARY).expect("the key still stores");
 
     assert_eq!(
         fs::read_to_string(&target).expect("the target still exists"),
@@ -982,14 +873,9 @@ fn a_link_planted_at_the_temporary_file_cannot_redirect_the_write() {
         Some(CANARY.to_owned()),
         "refusing the planted name must not cost the write"
     );
+    assert!(!planted.is_symlink(), "the temporary file should not outlive the write");
     assert!(
-        !planted.is_symlink(),
-        "the temporary file should not outlive the write"
-    );
-    assert!(
-        !fs::read_to_string(&store.path)
-            .expect("the store exists")
-            .is_empty(),
+        !fs::read_to_string(&store.path).expect("the store exists").is_empty(),
         "the store should hold the key, not be a link to somewhere else"
     );
 }
@@ -1004,14 +890,10 @@ fn a_link_planted_at_the_temporary_file_cannot_redirect_the_write() {
 fn a_temporary_file_left_by_a_crashed_write_does_not_wedge_the_store() {
     let directory = temporary();
     let store = store(&directory);
-    let stale = directory
-        .path()
-        .join(format!("auth.json.{}.tmp", std::process::id()));
+    let stale = directory.path().join(format!("auth.json.{}.tmp", std::process::id()));
     fs::write(&stale, b"{ half a write that never landed").expect("the stale file writes");
 
-    store
-        .set("anthropic", CANARY)
-        .expect("the key still stores");
+    store.set("anthropic", CANARY).expect("the key still stores");
 
     assert_eq!(
         key_of(store.get("anthropic").expect("the store reads back")),
@@ -1044,10 +926,7 @@ fn a_group_or_world_readable_store_is_refused_with_a_way_out() {
             "the way out should be spelled out: {explanation}"
         );
         for line in rendered(&error) {
-            assert!(
-                !line.contains(CANARY),
-                "an error must not carry the key: {line}"
-            );
+            assert!(!line.contains(CANARY), "an error must not carry the key: {line}");
         }
     }
 }
@@ -1060,17 +939,12 @@ fn a_group_or_world_readable_store_is_refused_with_a_way_out() {
 fn a_listed_column_is_as_wide_as_it_was_asked_to_be() {
     assert_eq!(format!("{:<5}|", CredentialKind::ApiKey), "api  |");
     assert_eq!(format!("{:<5}|", CredentialKind::Oauth), "oauth|");
-    assert_eq!(
-        format!("{:<9}|", RedactedTail::of("sk-test-ABCD")),
-        "****ABCD |",
-    );
+    assert_eq!(format!("{:<9}|", RedactedTail::of("sk-test-ABCD")), "****ABCD |",);
 }
 
 #[test]
 fn nothing_renders_a_whole_key() {
-    let credential = Credential {
-        api_key: SecretString::from(CANARY),
-    };
+    let credential = Credential { api_key: SecretString::from(CANARY) };
     let tail = credential.tail();
     let entry = Entry {
         provider_id: "anthropic".to_owned(),
@@ -1094,10 +968,7 @@ fn nothing_renders_a_whole_key() {
             !rendering.contains(CANARY) && !rendering.contains("sk-canary"),
             "a whole key reached output: {rendering}"
         );
-        assert!(
-            rendering.contains("8842"),
-            "the tail is what identifies a key: {rendering}"
-        );
+        assert!(rendering.contains("8842"), "the tail is what identifies a key: {rendering}");
     }
 
     assert_eq!(tail.as_str(), "****8842");
@@ -1126,10 +997,7 @@ fn nothing_renders_a_whole_token_including_the_fields_this_build_cannot_read() {
         0,
     );
     credential.account_id = Some("acct-42".to_owned());
-    credential.extra.insert(
-        "somePluginToken".to_owned(),
-        serde_json::Value::from(CANARY),
-    );
+    credential.extra.insert("somePluginToken".to_owned(), serde_json::Value::from(CANARY));
 
     let renderings = [
         format!("{credential:?}"),
@@ -1143,10 +1011,7 @@ fn nothing_renders_a_whole_token_including_the_fields_this_build_cannot_read() {
             !rendering.contains(CANARY) && !rendering.contains("sk-canary"),
             "a whole token reached output: {rendering}"
         );
-        assert!(
-            rendering.contains("8842"),
-            "the tail is what identifies a token: {rendering}"
-        );
+        assert!(rendering.contains("8842"), "the tail is what identifies a token: {rendering}");
     }
     assert!(
         format!("{credential:?}").contains("somePluginToken"),
@@ -1175,10 +1040,7 @@ fn the_environment_outranks_the_file_and_an_empty_variable_outranks_nothing() {
     let expected = directory.path().join("ganja").join("auth.json");
     assert_eq!(store_path().expect("the path resolves"), expected);
 
-    assert_eq!(
-        key_of(credential_for("anthropic").expect("an empty environment is fine")),
-        None
-    );
+    assert_eq!(key_of(credential_for("anthropic").expect("an empty environment is fine")), None);
     assert!(list_providers().expect("the listing reads").is_empty());
 
     set_credential("anthropic", "sk-stored-0001").expect("the key stores");
@@ -1205,10 +1067,7 @@ fn the_environment_outranks_the_file_and_an_empty_variable_outranks_nothing() {
         "the environment has to win"
     );
     assert_eq!(
-        list_providers()
-            .expect("the listing reads")
-            .first()
-            .map(|entry| entry.source),
+        list_providers().expect("the listing reads").first().map(|entry| entry.source),
         Some(Source::Environment("ANTHROPIC_API_KEY")),
         "the listing has to show the credential actually in use"
     );
@@ -1266,10 +1125,7 @@ fn an_exported_gateway_key_outranks_a_stored_one_and_is_filed_under_its_own_name
         &fs::read(store_path().expect("the store has a path")).expect("the store exists"),
     )
     .expect("the store is JSON");
-    assert!(
-        stored.contains_key(provider),
-        "the entry is filed under {provider}: {stored:?}"
-    );
+    assert!(stored.contains_key(provider), "the entry is filed under {provider}: {stored:?}");
 
     set_env(variable, Some(CANARY));
     assert_eq!(
@@ -1401,24 +1257,14 @@ fn a_stored_login_stays_in_the_listing_when_a_variable_outranks_it() {
             .map(|entry| (entry.source, entry.kind, entry.shadowed_by))
             .collect::<Vec<_>>(),
         vec![
-            (
-                Source::Environment("OPENAI_API_KEY"),
-                CredentialKind::ApiKey,
-                None
-            ),
+            (Source::Environment("OPENAI_API_KEY"), CredentialKind::ApiKey, None),
             (Source::File, CredentialKind::Oauth, Some("OPENAI_API_KEY")),
         ],
         "the credential in use comes first and the one it outranks says so"
     );
     assert_eq!(
-        listed
-            .iter()
-            .map(|entry| entry.tail.clone())
-            .collect::<Vec<_>>(),
-        vec![
-            RedactedTail::of(CANARY),
-            RedactedTail::of("at-listing-0002")
-        ],
+        listed.iter().map(|entry| entry.tail.clone()).collect::<Vec<_>>(),
+        vec![RedactedTail::of(CANARY), RedactedTail::of("at-listing-0002")],
         "each row shows its own credential rather than the winner's twice"
     );
     // And the precedence the listing is describing is still the one that
@@ -1464,9 +1310,7 @@ fn a_login_is_stamped_when_it_lands_and_a_replacement_keeps_its_seniority() {
 
     // An aged stamp, then the same provider stored again.
     fs::write(store.stamps_path(), r#"{"anthropic": 1000}"#).expect("the stamps rewrite");
-    store
-        .set("anthropic", "sk-rotated-0002")
-        .expect("the key stores again");
+    store.set("anthropic", "sk-rotated-0002").expect("the key stores again");
     assert_eq!(store.read_stamps()["anthropic"], 1000);
 
     store
@@ -1493,13 +1337,7 @@ fn a_login_is_stamped_when_it_lands_and_a_replacement_keeps_its_seniority() {
 fn the_oldest_stamped_login_leads_and_the_unstamped_follow_in_fixed_priority() {
     let directory = temporary();
     let store = store(&directory);
-    for provider_id in [
-        "local-llama",
-        "github-copilot",
-        "grok",
-        "openai",
-        "anthropic",
-    ] {
+    for provider_id in ["local-llama", "github-copilot", "grok", "openai", "anthropic"] {
         store.set(provider_id, CANARY).expect("the key stores");
     }
 
@@ -1507,13 +1345,7 @@ fn the_oldest_stamped_login_leads_and_the_unstamped_follow_in_fixed_priority() {
     fs::write(store.stamps_path(), "{}").expect("the stamps clear");
     assert_eq!(
         store.logins_oldest_first().expect("the store reads"),
-        vec![
-            "anthropic",
-            "openai",
-            "xai",
-            "github-copilot",
-            "local-llama"
-        ],
+        vec!["anthropic", "openai", "xai", "github-copilot", "local-llama"],
     );
 
     // One stamp, held by the login the fixed priority ranks last: a
@@ -1521,13 +1353,7 @@ fn the_oldest_stamped_login_leads_and_the_unstamped_follow_in_fixed_priority() {
     fs::write(store.stamps_path(), r#"{"github-copilot": 5000}"#).expect("the stamps rewrite");
     assert_eq!(
         store.logins_oldest_first().expect("the store reads"),
-        vec![
-            "github-copilot",
-            "anthropic",
-            "openai",
-            "xai",
-            "local-llama"
-        ],
+        vec!["github-copilot", "anthropic", "openai", "xai", "local-llama"],
     );
 
     // Two stamps order by time, not by name or by priority.
@@ -1535,13 +1361,7 @@ fn the_oldest_stamped_login_leads_and_the_unstamped_follow_in_fixed_priority() {
         .expect("the stamps rewrite");
     assert_eq!(
         store.logins_oldest_first().expect("the store reads"),
-        vec![
-            "xai",
-            "anthropic",
-            "openai",
-            "github-copilot",
-            "local-llama"
-        ],
+        vec!["xai", "anthropic", "openai", "github-copilot", "local-llama"],
     );
 }
 
@@ -1555,11 +1375,8 @@ fn a_logout_ends_a_logins_seniority_and_an_orphaned_stamp_is_pruned() {
     let store = store(&directory);
     store.set("anthropic", CANARY).expect("the key stores");
     store.set("openai", CANARY).expect("the key stores");
-    fs::write(
-        store.stamps_path(),
-        r#"{"anthropic": 1000, "openai": 2000}"#,
-    )
-    .expect("the stamps rewrite");
+    fs::write(store.stamps_path(), r#"{"anthropic": 1000, "openai": 2000}"#)
+        .expect("the stamps rewrite");
 
     assert!(store.remove("anthropic").expect("the key is removable"));
     assert_eq!(
@@ -1567,9 +1384,7 @@ fn a_logout_ends_a_logins_seniority_and_an_orphaned_stamp_is_pruned() {
         std::collections::BTreeMap::from([("openai".to_owned(), 2000)])
     );
 
-    store
-        .set("anthropic", CANARY)
-        .expect("the key stores again");
+    store.set("anthropic", CANARY).expect("the key stores again");
     assert!(
         store.read_stamps()["anthropic"] > 2000,
         "a login after a logout starts its seniority over"
@@ -1585,10 +1400,7 @@ fn a_logout_ends_a_logins_seniority_and_an_orphaned_stamp_is_pruned() {
         !pruned.contains_key("gemini"),
         "a stamp with no credential under it is not a login: {pruned:?}"
     );
-    assert_eq!(
-        pruned["anthropic"], 1000,
-        "the live stamps survive the prune"
-    );
+    assert_eq!(pruned["anthropic"], 1000, "the live stamps survive the prune");
 }
 
 /// A refresh rewrites the login it was given. Minting a stamp there would
@@ -1604,15 +1416,11 @@ fn a_renewal_is_not_a_login_and_mints_no_stamp() {
         SecretString::from("at-renew-0002"),
         NOW_MS,
     );
-    store
-        .set_oauth("grok", &credential)
-        .expect("the login stores");
+    store.set_oauth("grok", &credential).expect("the login stores");
     // The pre-feature shape: a credential on disk, no stamp anywhere.
     fs::write(store.stamps_path(), "{}").expect("the stamps clear");
 
-    store
-        .renew_oauth("grok", &credential)
-        .expect("the renewal stores");
+    store.renew_oauth("grok", &credential).expect("the renewal stores");
     assert!(
         store.read_stamps().is_empty(),
         "a renewal walked an unstamped login into the stamped tier"
@@ -1620,9 +1428,7 @@ fn a_renewal_is_not_a_login_and_mints_no_stamp() {
 
     // And a stamped login keeps exactly what it has.
     fs::write(store.stamps_path(), r#"{"xai": 1000}"#).expect("the stamps rewrite");
-    store
-        .renew_oauth("grok", &credential)
-        .expect("the renewal stores");
+    store.renew_oauth("grok", &credential).expect("the renewal stores");
     assert_eq!(store.read_stamps()["xai"], 1000);
 }
 
@@ -1638,9 +1444,7 @@ fn a_broken_stamps_file_degrades_to_the_fixed_priority_order() {
     fs::write(store.stamps_path(), b"{ not json").expect("the fixture writes");
 
     assert_eq!(
-        store
-            .logins_oldest_first()
-            .expect("a broken sidecar is not a broken store"),
+        store.logins_oldest_first().expect("a broken sidecar is not a broken store"),
         vec!["anthropic".to_owned(), "openai".to_owned()],
     );
 }
@@ -1663,8 +1467,5 @@ fn the_stamps_never_touch_the_shape_upstream_reads() {
         serde_json::json!({"type": "api", "key": CANARY}),
         "the entry carries exactly the fields upstream's schema declares"
     );
-    assert!(
-        store.stamps_path().is_file(),
-        "the stamp went beside the store, not into it"
-    );
+    assert!(store.stamps_path().is_file(), "the stamp went beside the store, not into it");
 }

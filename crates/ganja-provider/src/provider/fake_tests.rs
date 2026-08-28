@@ -1,17 +1,13 @@
-use std::{
-    path::PathBuf,
-    time::{Duration, Instant},
-};
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
 use super::{EXHAUSTED, FakeProvider, ID, MODEL, REPLY, SCRIPT_ENV, split_into_chunks};
-use crate::{
-    protocol::{FinishReason, Message, Usage},
-    provider::{ChatRequest, Provider as _, ProviderError, ProviderEvent},
-};
+use crate::protocol::{FinishReason, Message, Usage};
+use crate::provider::{ChatRequest, Provider as _, ProviderError, ProviderEvent};
 
 /// A script with a turn that calls one tool, then a turn that calls two —
 /// the second of which names no arguments, so the default is exercised too.
@@ -71,16 +67,11 @@ async fn a_turns_thinking_streams_before_its_text_as_readable_reasoning() {
         .iter()
         .rposition(|event| matches!(event, ProviderEvent::ReasoningDelta(_)))
         .expect("the thought came");
-    assert!(
-        last_thought < first_text,
-        "the thought streams before the text"
-    );
+    assert!(last_thought < first_text, "the thought streams before the text");
 
     let second = turn(&provider).await;
     assert!(
-        !second
-            .iter()
-            .any(|event| matches!(event, ProviderEvent::ReasoningDelta(_))),
+        !second.iter().any(|event| matches!(event, ProviderEvent::ReasoningDelta(_))),
         "a turn without the key thinks nothing aloud: {second:?}"
     );
 }
@@ -110,9 +101,7 @@ async fn turn(provider: &FakeProvider) -> Vec<ProviderEvent> {
 /// The error a turn failed with.
 async fn failure(provider: &FakeProvider) -> ProviderError {
     // A stream is not `Debug`, so this cannot go through `expect_err`.
-    let Err(error) = provider
-        .stream(request("read src/main.rs"), CancellationToken::new())
-        .await
+    let Err(error) = provider.stream(request("read src/main.rs"), CancellationToken::new()).await
     else {
         panic!("a script that cannot be played is not a turn");
     };
@@ -194,10 +183,7 @@ async fn a_script_plays_one_turn_per_request_and_then_says_so() {
         vec![
             ProviderEvent::TextDelta("Reading ".to_owned()),
             ProviderEvent::TextDelta("it.".to_owned()),
-            ProviderEvent::ToolCallStart {
-                id: "call_1".to_owned(),
-                name: "read".to_owned(),
-            },
+            ProviderEvent::ToolCallStart { id: "call_1".to_owned(), name: "read".to_owned() },
             ProviderEvent::ToolCallDelta {
                 id: "call_1".to_owned(),
                 json: "{\"filePath\":\"".to_owned(),
@@ -206,14 +192,8 @@ async fn a_script_plays_one_turn_per_request_and_then_says_so() {
                 id: "call_1".to_owned(),
                 json: "src/main.rs\"}".to_owned(),
             },
-            ProviderEvent::ToolCallEnd {
-                id: "call_1".to_owned(),
-            },
-            ProviderEvent::Usage(Usage {
-                input_tokens: 2,
-                output_tokens: 2,
-                ..Usage::default()
-            }),
+            ProviderEvent::ToolCallEnd { id: "call_1".to_owned() },
+            ProviderEvent::Usage(Usage { input_tokens: 2, output_tokens: 2, ..Usage::default() }),
             ProviderEvent::Finish(FinishReason::Completed),
         ],
         "the script's cadence should override the provider's, or this test \
@@ -229,10 +209,7 @@ async fn a_script_plays_one_turn_per_request_and_then_says_so() {
     assert_eq!(
         second,
         vec![
-            ProviderEvent::ToolCallStart {
-                id: "call_2".to_owned(),
-                name: "glob".to_owned(),
-            },
+            ProviderEvent::ToolCallStart { id: "call_2".to_owned(), name: "glob".to_owned() },
             ProviderEvent::ToolCallDelta {
                 id: "call_2".to_owned(),
                 json: "{\"pattern\"".to_owned(),
@@ -241,31 +218,14 @@ async fn a_script_plays_one_turn_per_request_and_then_says_so() {
                 id: "call_2".to_owned(),
                 json: ":\"**/*.rs\"}".to_owned(),
             },
-            ProviderEvent::ToolCallEnd {
-                id: "call_2".to_owned(),
-            },
-            ProviderEvent::ToolCallStart {
-                id: "call_3".to_owned(),
-                name: "todo".to_owned(),
-            },
+            ProviderEvent::ToolCallEnd { id: "call_2".to_owned() },
+            ProviderEvent::ToolCallStart { id: "call_3".to_owned(), name: "todo".to_owned() },
             // A call that names no arguments still sends the empty object
             // the schema requires, and still sends it in pieces.
-            ProviderEvent::ToolCallDelta {
-                id: "call_3".to_owned(),
-                json: "{".to_owned(),
-            },
-            ProviderEvent::ToolCallDelta {
-                id: "call_3".to_owned(),
-                json: "}".to_owned(),
-            },
-            ProviderEvent::ToolCallEnd {
-                id: "call_3".to_owned(),
-            },
-            ProviderEvent::Usage(Usage {
-                input_tokens: 2,
-                output_tokens: 3,
-                ..Usage::default()
-            }),
+            ProviderEvent::ToolCallDelta { id: "call_3".to_owned(), json: "{".to_owned() },
+            ProviderEvent::ToolCallDelta { id: "call_3".to_owned(), json: "}".to_owned() },
+            ProviderEvent::ToolCallEnd { id: "call_3".to_owned() },
+            ProviderEvent::Usage(Usage { input_tokens: 2, output_tokens: 3, ..Usage::default() }),
             ProviderEvent::Finish(FinishReason::Completed),
         ],
         "the second turn should follow the first, numbering on from it"
@@ -396,10 +356,7 @@ async fn a_cancelled_stream_stops_yielding() {
         .await
         .expect("the fake provider always answers");
 
-    assert_eq!(
-        events.next().await,
-        Some(ProviderEvent::TextDelta("one ".to_owned()))
-    );
+    assert_eq!(events.next().await, Some(ProviderEvent::TextDelta("one ".to_owned())));
     cancel.cancel();
 
     assert_eq!(events.next().await, None, "a cancelled stream should end");

@@ -21,13 +21,9 @@ use std::io::{self, BufRead as _, IsTerminal as _, Write as _};
 
 use anyhow::{Context as _, Result, bail};
 use clap::ValueEnum;
-use ganja_provider::auth::{
-    self, OauthCredential,
-    copilot::{self, Deployment},
-    cursor,
-    device::{DeviceFlow, Tokens},
-    grok, openai,
-};
+use ganja_provider::auth::copilot::{self, Deployment};
+use ganja_provider::auth::device::{DeviceFlow, Tokens};
+use ganja_provider::auth::{self, OauthCredential, cursor, grok, openai};
 use tokio_util::sync::CancellationToken;
 
 use crate::ProviderId;
@@ -225,10 +221,7 @@ pub(crate) fn chosen(
     }
 
     let offered = provider.methods();
-    let labels: Vec<String> = offered
-        .iter()
-        .map(|method| label(provider, *method))
-        .collect();
+    let labels: Vec<String> = offered.iter().map(|method| label(provider, *method)).collect();
     let chosen = choose("Login method", &labels)?;
 
     Ok(offered[chosen])
@@ -352,10 +345,7 @@ async fn grok_browser(cancel: &CancellationToken) -> Result<Tokens> {
     let browser = grok_browser_flow()?.start().await.map_err(nothing_stored)?;
     announce(browser.url(), "");
 
-    browser
-        .wait(grok::CALLBACK_DEADLINE, cancel)
-        .await
-        .map_err(nothing_stored)
+    browser.wait(grok::CALLBACK_DEADLINE, cancel).await.map_err(nothing_stored)
 }
 
 /// ChatGPT through a browser on this machine (`openai.ts:39-94`).
@@ -363,10 +353,7 @@ async fn chatgpt_browser(cancel: &CancellationToken) -> Result<OauthCredential> 
     let browser = chatgpt()?.browser().await.map_err(nothing_stored)?;
     announce(browser.url(), "");
 
-    browser
-        .wait(openai::CALLBACK_DEADLINE, cancel)
-        .await
-        .map_err(nothing_stored)
+    browser.wait(openai::CALLBACK_DEADLINE, cancel).await.map_err(nothing_stored)
 }
 
 /// ChatGPT through a code typed on whatever device has a browser
@@ -375,10 +362,7 @@ async fn chatgpt_device(cancel: &CancellationToken) -> Result<OauthCredential> {
     let started = chatgpt()?.device().await.map_err(nothing_stored)?;
     announce(started.url(), started.user_code());
 
-    started
-        .wait(openai::DEVICE_DEADLINE, cancel)
-        .await
-        .map_err(nothing_stored)
+    started.wait(openai::DEVICE_DEADLINE, cancel).await.map_err(nothing_stored)
 }
 
 /// Says where to go and what to type there, before anything blocks on it
@@ -447,12 +431,10 @@ fn deployment(answer: DeploymentAnswer) -> Result<Deployment> {
 /// pins. What a pipe may no longer do is arrive *as a credential*, which is
 /// [`chosen`]'s doing rather than this function's.
 fn prompted() -> Result<Deployment> {
-    let public = choose(
-        DEPLOYMENT_QUESTION,
-        &["GitHub.com".to_owned(), "GitHub Enterprise".to_owned()],
-    )
-    .with_context(named_up_front)?
-        == 0;
+    let public =
+        choose(DEPLOYMENT_QUESTION, &["GitHub.com".to_owned(), "GitHub Enterprise".to_owned()])
+            .with_context(named_up_front)?
+            == 0;
     if public {
         return Ok(Deployment::Public);
     }
@@ -500,11 +482,8 @@ fn grok_flow() -> Result<DeviceFlow> {
         return grok::device_flow().map_err(nothing_stored);
     };
 
-    grok::device_flow_at(
-        format!("{origin}/oauth2/device/code"),
-        format!("{origin}/oauth2/token"),
-    )
-    .map_err(nothing_stored)
+    grok::device_flow_at(format!("{origin}/oauth2/device/code"), format!("{origin}/oauth2/token"))
+        .map_err(nothing_stored)
 }
 
 /// The grok browser login, against xAI or against whatever redirected it.
@@ -519,11 +498,8 @@ fn grok_browser_flow() -> Result<grok::BrowserFlow> {
         return grok::browser_flow().map_err(nothing_stored);
     };
 
-    grok::browser_flow_at(
-        format!("{origin}/oauth2/authorize"),
-        format!("{origin}/oauth2/token"),
-    )
-    .map_err(nothing_stored)
+    grok::browser_flow_at(format!("{origin}/oauth2/authorize"), format!("{origin}/oauth2/token"))
+        .map_err(nothing_stored)
 }
 
 /// The Copilot device flow for `deployment`, or against whatever redirected it.

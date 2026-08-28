@@ -65,10 +65,7 @@ impl Arg {
     ///
     /// Spec: pandaemonium pkg/tmux/commandline.go (`StringArg`).
     pub fn string(value: impl Into<String>) -> Arg {
-        Arg {
-            value: value.into(),
-            raw: false,
-        }
+        Arg { value: value.into(), raw: false }
     }
 
     /// Builds an explicit raw tmux syntax fragment, passed through
@@ -76,10 +73,7 @@ impl Arg {
     ///
     /// Spec: pandaemonium pkg/tmux/commandline.go (`RawArg`).
     pub fn raw(value: impl Into<String>) -> Arg {
-        Arg {
-            value: value.into(),
-            raw: true,
-        }
+        Arg { value: value.into(), raw: true }
     }
 }
 
@@ -97,10 +91,7 @@ impl CommandLine {
     ///
     /// Spec: pandaemonium pkg/tmux/commandline.go (`NewCommandLine`).
     pub fn new(command: Command, args: impl IntoIterator<Item = Arg>) -> CommandLine {
-        CommandLine {
-            command,
-            args: args.into_iter().collect(),
-        }
+        CommandLine { command, args: args.into_iter().collect() }
     }
 
     /// Renders `self` as one newline-free tmux command line.
@@ -142,9 +133,7 @@ fn validate_command_token(command: &str) -> Result<(), RenderError> {
         return Err(RenderError::new("tmux: command must not be empty"));
     }
     if command.trim() != command || command.contains([' ', '\t', '\r', '\n']) {
-        return Err(RenderError::new(format!(
-            "tmux: command {command:?} must be a plain token"
-        )));
+        return Err(RenderError::new(format!("tmux: command {command:?} must be a plain token")));
     }
     Ok(())
 }
@@ -162,9 +151,7 @@ fn render_arg(arg: &Arg) -> Result<String, RenderError> {
 
 fn validate_argument(value: &str) -> Result<(), RenderError> {
     if value.contains(['\r', '\n']) {
-        return Err(RenderError::new(format!(
-            "tmux: argument {value:?} contains a newline"
-        )));
+        return Err(RenderError::new(format!("tmux: argument {value:?} contains a newline")));
     }
     Ok(())
 }
@@ -194,10 +181,7 @@ fn quote_arg(value: &str) -> String {
 fn is_bare_arg(value: &str) -> bool {
     value.chars().all(|ch| {
         ch.is_ascii_alphanumeric()
-            || matches!(
-                ch,
-                '_' | '@' | '%' | '+' | '=' | ':' | ',' | '.' | '/' | '-'
-            )
+            || matches!(ch, '_' | '@' | '%' | '+' | '=' | ':' | ',' | '.' | '/' | '-')
     })
 }
 

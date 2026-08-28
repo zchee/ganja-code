@@ -23,10 +23,8 @@
 //! bytes into a temporary directory first, so a failing run cannot damage the
 //! only real documents this repo has.
 
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use ganja_team::{MemberRecord, TeamFile, mailbox, record};
 use serde_json::value::RawValue;
@@ -63,10 +61,7 @@ fn captured() -> Captured {
         )
     });
 
-    let mut captured = Captured {
-        team_files: Vec::new(),
-        inboxes: Vec::new(),
-    };
+    let mut captured = Captured { team_files: Vec::new(), inboxes: Vec::new() };
     for entry in entries {
         let team = entry.expect("a fixture directory entry reads").path();
         if !team.is_dir() {
@@ -96,10 +91,7 @@ fn captured() -> Captured {
 /// A path as a failure message should name it: relative to the fixture root, so
 /// the message is the same on every machine.
 fn named(path: &Path) -> String {
-    path.strip_prefix(fixtures())
-        .unwrap_or(path)
-        .display()
-        .to_string()
+    path.strip_prefix(fixtures()).unwrap_or(path).display().to_string()
 }
 
 /// The raw bytes of each member of a team file, still in the order and the
@@ -152,14 +144,8 @@ fn the_capture_holds_what_the_criterion_needs() {
     // lead record beside a real teammate record, and a real inbox holding a
     // real message. A capture that had lost any of them would pass every other
     // test in this binary while testing less than it claims.
-    assert!(
-        !captured.team_files.is_empty(),
-        "the capture holds no config.json"
-    );
-    assert!(
-        !captured.inboxes.is_empty(),
-        "the capture holds no inbox files"
-    );
+    assert!(!captured.team_files.is_empty(), "the capture holds no config.json");
+    assert!(!captured.inboxes.is_empty(), "the capture holds no inbox files");
 
     let mut leads = 0;
     let mut teammates = 0;
@@ -181,12 +167,7 @@ fn the_capture_holds_what_the_criterion_needs() {
     let messages: usize = captured
         .inboxes
         .iter()
-        .map(|path| {
-            mailbox::read(path)
-                .expect("a captured inbox reads")
-                .valid
-                .len()
-        })
+        .map(|path| mailbox::read(path).expect("a captured inbox reads").valid.len())
         .sum();
     assert!(
         messages > 0,
@@ -324,11 +305,7 @@ fn a_real_inbox_delivers_and_prunes_the_message_it_holds() {
         let identities: Vec<_> = held.valid.iter().map(mailbox::identity).collect();
         assert_eq!(
             identities,
-            again
-                .valid
-                .iter()
-                .map(mailbox::identity)
-                .collect::<Vec<_>>(),
+            again.valid.iter().map(mailbox::identity).collect::<Vec<_>>(),
             "{} yields a different identity on a second read",
             named(source)
         );
@@ -338,10 +315,7 @@ fn a_real_inbox_delivers_and_prunes_the_message_it_holds() {
         assert_eq!(pruned.remaining, 0);
         // Delivered means gone, and what is left is a seeded inbox again — the
         // two bytes a peer expects to find, with no trailing newline.
-        assert_eq!(
-            fs::read_to_string(&path).expect("the pruned copy reads"),
-            mailbox::EMPTY_INBOX
-        );
+        assert_eq!(fs::read_to_string(&path).expect("the pruned copy reads"), mailbox::EMPTY_INBOX);
     }
 
     assert!(delivered > 0, "no captured inbox held a message to deliver");

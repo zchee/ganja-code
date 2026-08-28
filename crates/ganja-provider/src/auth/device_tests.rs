@@ -1,11 +1,12 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
+use super::harness::{Endpoint, Reply, StalledClock, TestClock, serve};
 use super::{
     BodyEncoding, DEFAULT_EXPIRES_MS, DEFAULT_INTERVAL_MS, DeviceError, DeviceFlow,
     GANJA_USER_AGENT, MIN_INTERVAL_MS, POLLING_SAFETY_MARGIN_MS, UPSTREAM_USER_AGENT,
-    harness::{Endpoint, Reply, StalledClock, TestClock, serve},
     positive_seconds_ms, reportable_code,
 };
 use crate::auth::copilot;
@@ -141,10 +142,8 @@ async fn every_terminal_error_ends_the_loop_where_it_stands() {
         let flow = device_flow(&endpoint, clock.clone(), BodyEncoding::Form);
 
         let started = flow.start(&cancel).await.expect("the code is issued");
-        let failure = flow
-            .poll(&started, &cancel)
-            .await
-            .expect_err("a terminal error is not a login");
+        let failure =
+            flow.poll(&started, &cancel).await.expect_err("a terminal error is not a login");
 
         assert!(
             matches!(
@@ -156,11 +155,7 @@ async fn every_terminal_error_ends_the_loop_where_it_stands() {
             ),
             "{body} with {status} should be {expected}, got {failure:?}"
         );
-        assert_eq!(
-            endpoint.count(),
-            2,
-            "{body} should have ended the loop, not been polled past"
-        );
+        assert_eq!(endpoint.count(), 2, "{body} should have ended the loop, not been polled past");
         assert!(clock.waits().is_empty(), "{body} should have cost no wait");
     }
 }
@@ -189,9 +184,7 @@ async fn a_garbage_interval_falls_back_to_the_default_instead_of_spinning() {
 
         assert_eq!(
             clock.waits(),
-            vec![Duration::from_millis(
-                DEFAULT_INTERVAL_MS + POLLING_SAFETY_MARGIN_MS
-            )],
+            vec![Duration::from_millis(DEFAULT_INTERVAL_MS + POLLING_SAFETY_MARGIN_MS)],
             "an interval of {named} should have waited the default, not nothing"
         );
     }
@@ -215,9 +208,7 @@ async fn an_interval_under_the_floor_is_raised_to_it() {
     assert_eq!(started.interval(), Duration::from_millis(MIN_INTERVAL_MS));
     assert_eq!(
         clock.waits(),
-        vec![Duration::from_millis(
-            MIN_INTERVAL_MS + POLLING_SAFETY_MARGIN_MS
-        )]
+        vec![Duration::from_millis(MIN_INTERVAL_MS + POLLING_SAFETY_MARGIN_MS)]
     );
 }
 
@@ -239,10 +230,8 @@ async fn a_code_that_is_never_entered_stops_at_its_deadline() {
     let flow = device_flow(&endpoint, clock.clone(), BodyEncoding::Form);
 
     let started = flow.start(&cancel).await.expect("the code is issued");
-    let failure = flow
-        .poll(&started, &cancel)
-        .await
-        .expect_err("a code that expired is not a login");
+    let failure =
+        flow.poll(&started, &cancel).await.expect_err("a code that expired is not a login");
 
     assert!(
         matches!(failure, DeviceError::DeadlineExceeded),
@@ -271,10 +260,7 @@ async fn a_code_with_no_stated_lifetime_still_gets_a_deadline() {
     .await;
     let flow = device_flow(&endpoint, clock, BodyEncoding::Json);
 
-    let started = flow
-        .start(&CancellationToken::new())
-        .await
-        .expect("the code is issued");
+    let started = flow.start(&CancellationToken::new()).await.expect("the code is issued");
 
     assert_eq!(
         started.deadline_ms(),
@@ -291,10 +277,7 @@ async fn a_cancelled_login_never_reaches_the_provider() {
     cancel.cancel();
     let flow = device_flow(&endpoint, clock, BodyEncoding::Form);
 
-    let failure = flow
-        .start(&cancel)
-        .await
-        .expect_err("a cancelled login is not a login");
+    let failure = flow.start(&cancel).await.expect_err("a cancelled login is not a login");
 
     assert!(matches!(failure, DeviceError::Cancelled), "got {failure:?}");
     assert_eq!(endpoint.count(), 0, "nothing should have been asked for");
@@ -339,15 +322,10 @@ async fn an_endpoint_that_is_not_there_is_reported_as_unreachable() {
     let endpoint = serve(Vec::new()).await;
     let flow = device_flow(&endpoint, TestClock::at(0), BodyEncoding::Form);
 
-    let failure = flow
-        .start(&CancellationToken::new())
-        .await
-        .expect_err("a closed listener answers nothing");
+    let failure =
+        flow.start(&CancellationToken::new()).await.expect_err("a closed listener answers nothing");
 
-    assert!(
-        matches!(failure, DeviceError::Unreachable { .. }),
-        "got {failure:?}"
-    );
+    assert!(matches!(failure, DeviceError::Unreachable { .. }), "got {failure:?}");
 }
 
 #[tokio::test]
@@ -363,29 +341,15 @@ async fn an_authorization_missing_what_it_is_for_is_refused() {
         .await
         .expect_err("an authorization with no device code cannot be polled");
 
-    assert!(
-        matches!(failure, DeviceError::Malformed { .. }),
-        "got {failure:?}"
-    );
+    assert!(matches!(failure, DeviceError::Malformed { .. }), "got {failure:?}");
 }
 
 #[test]
 fn a_seconds_field_is_read_only_when_it_is_a_positive_number() {
     use serde_json::{Value, json};
 
-    for named in [
-        json!(null),
-        json!(0),
-        json!(-5),
-        json!("NaN"),
-        json!(""),
-        json!(true),
-    ] {
-        assert_eq!(
-            positive_seconds_ms(Some(&named)),
-            None,
-            "{named} is not a number of seconds"
-        );
+    for named in [json!(null), json!(0), json!(-5), json!("NaN"), json!(""), json!(true)] {
+        assert_eq!(positive_seconds_ms(Some(&named)), None, "{named} is not a number of seconds");
     }
     assert_eq!(positive_seconds_ms(None), None);
     assert_eq!(positive_seconds_ms(Some(&json!(7))), Some(7_000));
@@ -393,10 +357,7 @@ fn a_seconds_field_is_read_only_when_it_is_a_positive_number() {
     assert_eq!(positive_seconds_ms(Some(&json!("5"))), Some(5_000));
     assert_eq!(positive_seconds_ms(Some(&json!(0.25))), Some(250));
     // Absurd rather than wrapped: the deadline is what bounds it.
-    assert_eq!(
-        positive_seconds_ms(Some(&Value::from(1e30))),
-        Some(u64::MAX)
-    );
+    assert_eq!(positive_seconds_ms(Some(&Value::from(1e30))), Some(u64::MAX));
 }
 
 #[test]
@@ -440,9 +401,7 @@ async fn each_flow_sends_the_user_agent_its_own_caller_named() {
 
         assert_eq!(flow.user_agent(), mine);
 
-        flow.start(&CancellationToken::new())
-            .await
-            .expect("the code is issued");
+        flow.start(&CancellationToken::new()).await.expect("the code is issued");
 
         let request = endpoint.request(0);
         assert!(
@@ -490,10 +449,7 @@ fn the_borrowed_identity_and_ganjas_own_never_name_the_same_thing() {
     // the one is below.
     for (host, sent) in [
         ("auth.openai.com", crate::auth::openai::ISSUER_USER_AGENT),
-        (
-            "chatgpt.com/backend-api/codex",
-            crate::provider::responses::CODEX_USER_AGENT,
-        ),
+        ("chatgpt.com/backend-api/codex", crate::provider::responses::CODEX_USER_AGENT),
         ("x.ai", crate::auth::grok::XAI_USER_AGENT),
     ] {
         assert_eq!(

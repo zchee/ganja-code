@@ -23,16 +23,12 @@
 
 mod shim_support;
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
-use ganja_core::{
-    protocol::team::MemberBackend,
-    teammate::{
-        BACKENDS,
-        agy::{self, Agy},
-        backend_name, parse_backend, posture_line, shim,
-    },
-};
+use ganja_core::protocol::team::MemberBackend;
+use ganja_core::teammate::agy::{self, Agy};
+use ganja_core::teammate::{BACKENDS, backend_name, parse_backend, posture_line, shim};
 use ganja_team::{MailboxMessage, MemberName, mailbox, record};
 use ganja_testkit::AllowSpawn;
 use shim_support::{FakeAgy, Mode, until};
@@ -52,13 +48,7 @@ const PROBE: &str = include_str!("fixtures/agy-posture-probe.txt");
 fn lead_mail(root: &ganja_team::TeamsRoot, team: &ganja_team::TeamName) -> Vec<String> {
     let path = root.inbox_path(team, &MemberName::lead());
     mailbox::read(&path)
-        .map(|contents| {
-            contents
-                .valid
-                .into_iter()
-                .map(|message| message.text)
-                .collect()
-        })
+        .map(|contents| contents.valid.into_iter().map(|message| message.text).collect())
         .unwrap_or_default()
 }
 
@@ -66,11 +56,8 @@ fn lead_mail(root: &ganja_team::TeamsRoot, team: &ganja_team::TeamName) -> Vec<S
 fn send(root: &ganja_team::TeamsRoot, team: &ganja_team::TeamName, to: &str, text: &str) {
     let member = MemberName::parse(to).expect("a member name");
     let path = root.inbox_path(team, &member);
-    mailbox::write(
-        &path,
-        MailboxMessage::new("team-lead", text.to_owned(), record::now_iso8601()),
-    )
-    .expect("the message is written");
+    mailbox::write(&path, MailboxMessage::new("team-lead", text.to_owned(), record::now_iso8601()))
+        .expect("the message is written");
 }
 
 /// A lead whose agy backend is the real driver pointed at `cli`.
@@ -143,10 +130,7 @@ fn the_agy_posture_is_the_one_its_probe_recorded() {
     assert_eq!(shipped, recorded);
     // The two clauses Dv-7 exists to make honest. A sentence that lost either
     // would be describing a bound this backend does not have.
-    assert!(
-        shipped.contains("no enforced filesystem bound"),
-        "{shipped}"
-    );
+    assert!(shipped.contains("no enforced filesystem bound"), "{shipped}");
     assert!(shipped.contains("write anywhere you can"), "{shipped}");
     // And the consequence a reader could not derive from the vendor's own
     // behaviour, because it is a fact about *this* build.
@@ -174,11 +158,7 @@ async fn the_agy_launch_line_is_the_pinned_one_and_p_comes_last() {
     let (registry, door, ..) = lead(home.path(), &cli);
 
     spawn(&door, home.path(), "w1", TASK).await;
-    assert!(
-        until(ANSWERS, || !cli.records("argv").is_empty()).await,
-        "{:?}",
-        cli.received()
-    );
+    assert!(until(ANSWERS, || !cli.records("argv").is_empty()).await, "{:?}", cli.received());
 
     let argv = cli.records("argv").remove(0);
     let tokens: Vec<&str> = argv.split(' ').filter(|token| !token.is_empty()).collect();
@@ -203,10 +183,7 @@ async fn the_agy_launch_line_is_the_pinned_one_and_p_comes_last() {
     // check would report the one flag this driver must compose as the one it
     // must never.
     for banned in agy::NEVER_COMPOSED {
-        assert!(
-            !tokens.contains(&banned),
-            "{banned} is never composed: {argv}"
-        );
+        assert!(!tokens.contains(&banned), "{banned} is never composed: {argv}");
     }
 
     registry.shutdown().await;
@@ -228,11 +205,7 @@ async fn the_composed_print_timeout_outlasts_the_deadline_that_moves_it() {
     let (registry, door, ..) = lead_with_timeout(home.path(), &cli, Some(deadline));
 
     spawn(&door, home.path(), "w1", TASK).await;
-    assert!(
-        until(ANSWERS, || !cli.records("argv").is_empty()).await,
-        "{:?}",
-        cli.received()
-    );
+    assert!(until(ANSWERS, || !cli.records("argv").is_empty()).await, "{:?}", cli.received());
 
     let argv = cli.records("argv").remove(0);
     let composed = agy::print_timeout(deadline);
@@ -250,10 +223,7 @@ async fn the_composed_print_timeout_outlasts_the_deadline_that_moves_it() {
         .expect("a Go duration carries its unit")
         .parse()
         .expect("seconds");
-    assert!(
-        seconds > deadline.as_secs(),
-        "this build's deadline must fire first"
-    );
+    assert!(seconds > deadline.as_secs(), "this build's deadline must fire first");
 
     registry.shutdown().await;
 }
@@ -272,18 +242,11 @@ async fn no_prompt_text_reaches_the_command_line() {
     let secret = "the words a peer said, which argv is world-readable through ps";
 
     spawn(&door, home.path(), "w1", secret).await;
-    assert!(
-        until(ANSWERS, || !cli.records("line").is_empty()).await,
-        "{:?}",
-        cli.received()
-    );
+    assert!(until(ANSWERS, || !cli.records("line").is_empty()).await, "{:?}", cli.received());
 
     for argv in cli.records("argv") {
         assert!(!argv.contains(secret), "argv is for flags: {argv}");
-        assert!(
-            !argv.split(' ').any(|token| token == "w1"),
-            "never a title: {argv}"
-        );
+        assert!(!argv.split(' ').any(|token| token == "w1"), "never a title: {argv}");
     }
     let lines = cli.records("line");
     assert!(
@@ -330,12 +293,7 @@ async fn one_resident_child_takes_every_turn_this_member_is_sent() {
         "and both turns ran on one child: {:?}",
         cli.received()
     );
-    assert_eq!(
-        cli.conversations().len(),
-        1,
-        "which holds one conversation: {:?}",
-        cli.received()
-    );
+    assert_eq!(cli.conversations().len(), 1, "which holds one conversation: {:?}", cli.received());
     // Both answers reached the lead, one mail per turn — which is the whole of
     // what this wire carries, since a `step_update` has no text in it.
     assert!(
@@ -366,21 +324,13 @@ async fn two_agy_teammates_hold_two_conversations() {
 
     spawn(&door, home.path(), "w1", TASK).await;
     spawn(&door, home.path(), "w2", "mind the other fort").await;
-    assert!(
-        until(ANSWERS, || cli.conversations().len() == 2).await,
-        "{:?}",
-        cli.received()
-    );
+    assert!(until(ANSWERS, || cli.conversations().len() == 2).await, "{:?}", cli.received());
 
     let ids = cli.conversations();
     assert_ne!(ids[0], ids[1], "two members, two conversations: {ids:?}");
     // And neither launch resumed anything: a first child of a member names no
     // conversation, because there is none of its own to name yet.
-    assert!(
-        cli.resumed().iter().all(String::is_empty),
-        "{:?}",
-        cli.resumed()
-    );
+    assert!(cli.resumed().iter().all(String::is_empty), "{:?}", cli.resumed());
 
     registry.shutdown().await;
 }
@@ -398,11 +348,7 @@ async fn a_wedged_child_is_replaced_by_one_that_resumes_the_same_conversation() 
     // The first turn answers, which is what puts a conversation id in the
     // runner's hand; the second never answers at all.
     spawn(&door, home.path(), "w1", TASK).await;
-    assert!(
-        until(ANSWERS, || cli.records("line").len() == 1).await,
-        "{:?}",
-        cli.received()
-    );
+    assert!(until(ANSWERS, || cli.records("line").len() == 1).await, "{:?}", cli.received());
     let first = cli.conversations().remove(0);
 
     send(&root, &team, "w1", "the turn that wedges");
@@ -419,18 +365,16 @@ async fn a_wedged_child_is_replaced_by_one_that_resumes_the_same_conversation() 
         cli.records("argv")
     );
     assert!(
-        cli.records("argv")[1]
-            .split(' ')
-            .all(|token| token != "--continue" && token != "-c"),
+        cli.records("argv")[1].split(' ').all(|token| token != "--continue" && token != "-c"),
         "and never through a door that resumes whatever the machine touched \
          last: {:?}",
         cli.records("argv")[1]
     );
 
     assert!(
-        until(ANSWERS, || lead_mail(&root, &team).iter().any(|text| text
-            .contains("restarted")
-            && text.contains(&first)))
+        until(ANSWERS, || lead_mail(&root, &team)
+            .iter()
+            .any(|text| text.contains("restarted") && text.contains(&first)))
         .await,
         "the lead is told, and told what was resumed: {:?}",
         lead_mail(&root, &team)
@@ -462,11 +406,7 @@ async fn a_child_wedged_before_it_named_a_conversation_restarts_with_the_context
         lead_with_timeout(home.path(), &cli, Some(Duration::from_secs(3)));
 
     spawn(&door, home.path(), "w1", TASK).await;
-    assert!(
-        until(ANSWERS, || cli.records("argv").len() == 2).await,
-        "{:?}",
-        cli.received()
-    );
+    assert!(until(ANSWERS, || cli.records("argv").len() == 2).await, "{:?}", cli.received());
 
     assert!(
         cli.resumed()[1].is_empty(),
@@ -548,8 +488,7 @@ async fn a_result_this_build_cannot_read_ends_the_turn_out_loud() {
     assert!(
         until(ANSWERS, || {
             let mail = lead_mail(&root, &team);
-            mail.iter()
-                .any(|text| text.contains("could not read what it wrote"))
+            mail.iter().any(|text| text.contains("could not read what it wrote"))
                 && mail.iter().any(|text| text.contains("restarted"))
         })
         .await,
@@ -559,9 +498,7 @@ async fn a_result_this_build_cannot_read_ends_the_turn_out_loud() {
     // The two mails arrive in the order a person reads them: what went wrong,
     // and then what was done about it.
     let mail = lead_mail(&root, &team);
-    let failure = mail
-        .iter()
-        .position(|text| text.contains("could not read what it wrote"));
+    let failure = mail.iter().position(|text| text.contains("could not read what it wrote"));
     let restart = mail.iter().position(|text| text.contains("restarted"));
     assert!(
         matches!((failure, restart), (Some(failure), Some(restart)) if failure < restart),
@@ -602,11 +539,7 @@ async fn the_child_environment_is_enumerated_and_carries_no_ganja_credential() {
     let (registry, door, ..) = lead(home.path(), &cli);
 
     spawn(&door, home.path(), "w1", TASK).await;
-    assert!(
-        until(ANSWERS, || !cli.records("env").is_empty()).await,
-        "{:?}",
-        cli.received()
-    );
+    assert!(until(ANSWERS, || !cli.records("env").is_empty()).await, "{:?}", cli.received());
 
     let names = cli.records("env").join(" ");
     assert!(

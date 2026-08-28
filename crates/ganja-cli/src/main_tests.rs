@@ -1,17 +1,14 @@
-use std::{
-    process::Command as ProcessCommand,
-    sync::Arc,
-    time::{Duration, UNIX_EPOCH},
-};
+use std::process::Command as ProcessCommand;
+use std::sync::Arc;
+use std::time::{Duration, UNIX_EPOCH};
 
 use clap::Parser;
-use ganja_core::{
-    SessionId, SessionInfo,
-    catalog::{ModelInfo, ModelStatus, Pricing},
-    storage::VERSION,
-};
+use ganja_core::catalog::{ModelInfo, ModelStatus, Pricing};
+use ganja_core::storage::VERSION;
+use ganja_core::{SessionId, SessionInfo};
 use ganja_protocol::Usage;
-use jiff::{Timestamp, tz::TimeZone};
+use jiff::Timestamp;
+use jiff::tz::TimeZone;
 
 use super::{
     Cli, Command, UNTITLED, age, billed_tokens, matching, per_mtok, printable_session, providers,
@@ -68,10 +65,9 @@ fn a_local_date_uses_the_configured_timezone_at_a_fixed_instant() {
         return;
     }
 
-    for (case, timezone) in [
-        ("local", "America/Los_Angeles"),
-        ("fallback", "/definitely/missing/ganja-zoneinfo"),
-    ] {
+    for (case, timezone) in
+        [("local", "America/Los_Angeles"), ("fallback", "/definitely/missing/ganja-zoneinfo")]
+    {
         let output =
             ProcessCommand::new(std::env::current_exe().expect("the test binary has a path"))
                 .args([
@@ -97,11 +93,8 @@ fn a_local_date_uses_the_configured_timezone_at_a_fixed_instant() {
 /// itself, a leap-adjacent day, and the report's own.
 #[test]
 fn the_utc_fallback_date_matches_the_calendar() {
-    for (days, expected) in [
-        (0_i64, (1970, 1, 1)),
-        (11_017, (2000, 3, 1)),
-        (20_680, (2026, 8, 15)),
-    ] {
+    for (days, expected) in [(0_i64, (1970, 1, 1)), (11_017, (2000, 3, 1)), (20_680, (2026, 8, 15))]
+    {
         let timestamp = Timestamp::from_second(days * 86_400).expect("the fixture is in range");
         assert_eq!(super::date_in(timestamp, TimeZone::UTC), expected);
     }
@@ -120,15 +113,9 @@ fn the_ui_flags_map_onto_the_override_tier() {
     ]);
 
     let overrides = cli.select.overrides();
-    assert_eq!(
-        overrides.model.as_deref(),
-        Some("anthropic/claude-sonnet-5")
-    );
+    assert_eq!(overrides.model.as_deref(), Some("anthropic/claude-sonnet-5"));
     assert_eq!(overrides.agent.as_deref(), Some("plan"));
-    assert_eq!(
-        overrides.config_file.as_deref(),
-        Some(std::path::Path::new("/tmp/override.jsonc"))
-    );
+    assert_eq!(overrides.config_file.as_deref(), Some(std::path::Path::new("/tmp/override.jsonc")));
 }
 
 /// All three spellings mean one thing (**D479**), which is the whole
@@ -239,9 +226,7 @@ fn the_spawn_flags_are_hidden_from_help() {
     use clap::CommandFactory as _;
 
     let mut help = Vec::new();
-    Cli::command()
-        .write_long_help(&mut help)
-        .expect("the help renders");
+    Cli::command().write_long_help(&mut help).expect("the help renders");
     let help = String::from_utf8(help).expect("the help is UTF-8");
 
     for flag in [
@@ -252,10 +237,7 @@ fn the_spawn_flags_are_hidden_from_help() {
         "--parent-session-id",
         "--yolo",
     ] {
-        assert!(
-            !help.contains(flag),
-            "{flag} is hidden from --help:\n{help}"
-        );
+        assert!(!help.contains(flag), "{flag} is hidden from --help:\n{help}");
     }
     assert!(help.contains("--model"), "and the visible flags still show");
 }
@@ -274,28 +256,20 @@ fn the_socket_directory_door_is_hidden_and_needs_live() {
         .write_long_help(&mut help)
         .expect("the help renders");
     let help = String::from_utf8(help).expect("the help is UTF-8");
-    assert!(
-        !help.contains("--socket-dir"),
-        "--socket-dir is hidden from --help:\n{help}"
-    );
+    assert!(!help.contains("--socket-dir"), "--socket-dir is hidden from --help:\n{help}");
     assert!(help.contains("--live"), "and the visible flag still shows");
 
     assert!(
         Cli::try_parse_from(["ganja", "sessions", "--socket-dir", "/tmp/x"]).is_err(),
         "a directory to list live sockets in, without --live, is refused"
     );
-    let Ok(Cli {
-        command: Some(Command::Sessions(args)),
-        ..
-    }) = Cli::try_parse_from(["ganja", "sessions", "--live", "--socket-dir", "/tmp/x"])
+    let Ok(Cli { command: Some(Command::Sessions(args)), .. }) =
+        Cli::try_parse_from(["ganja", "sessions", "--live", "--socket-dir", "/tmp/x"])
     else {
         panic!("the pair parses");
     };
     assert!(args.live);
-    assert_eq!(
-        args.socket_dir.as_deref(),
-        Some(std::path::Path::new("/tmp/x"))
-    );
+    assert_eq!(args.socket_dir.as_deref(), Some(std::path::Path::new("/tmp/x")));
 }
 
 /// AC-5's CLI half: `--name` is validated at parse, against the same
@@ -319,10 +293,7 @@ fn the_name_flag_is_vetted_at_parse_by_the_d527_grammar() {
         let error = Cli::try_parse_from(["ganja", "--name", spelled])
             .expect_err(&format!("{spelled:?} is refused by the grammar"));
         let rendered = error.to_string();
-        assert!(
-            rendered.contains(refusal),
-            "{spelled:?} names its own clause: {rendered}"
-        );
+        assert!(rendered.contains(refusal), "{spelled:?} names its own clause: {rendered}");
     }
 }
 
@@ -354,10 +325,7 @@ fn every_invocation_takes_the_verbose_flag() {
         assert!(cli.verbose, "{spelled:?} asked for the debug log");
     }
 
-    assert!(
-        !Cli::parse_from(["ganja", "models"]).verbose,
-        "the flag is off unless it was passed"
-    );
+    assert!(!Cli::parse_from(["ganja", "models"]).verbose, "the flag is off unless it was passed");
 }
 
 /// The position the flag's doc comment promises, pinned so that a clap
@@ -442,12 +410,7 @@ fn model(provider_id: &str, id: &str) -> Arc<ModelInfo> {
         context_window: 200_000,
         max_output: 8_000,
         input_limit: None,
-        pricing: Pricing {
-            input: 1.0,
-            output: 2.0,
-            cache_read: 0.1,
-            cache_write: None,
-        },
+        pricing: Pricing { input: 1.0, output: 2.0, cache_read: 0.1, cache_write: None },
         family: None,
         release_date: None,
         tool_call: true,
@@ -550,14 +513,9 @@ fn a_price_keeps_every_digit_that_means_something() {
 /// tty, so this function is the only thing standing between the two.
 #[test]
 fn a_title_the_model_wrote_cannot_move_the_terminals_cursor() {
-    let listed = title(&info(Some(
-        "\u{1b}[2J\u{1b}[31mporting storage\u{7}\r\nsecond row",
-    )));
+    let listed = title(&info(Some("\u{1b}[2J\u{1b}[31mporting storage\u{7}\r\nsecond row")));
 
-    let leaked: Vec<char> = listed
-        .chars()
-        .filter(|character| character.is_control())
-        .collect();
+    let leaked: Vec<char> = listed.chars().filter(|character| character.is_control()).collect();
     assert!(
         leaked.is_empty(),
         "control characters reached a printed row: {leaked:?} in {listed:?}"
@@ -639,10 +597,7 @@ fn the_billed_total_counts_what_was_paid_for_and_counts_it_once() {
 
     // The exclusion has to be the rule rather than an accident of the
     // numbers above: thinking harder must not move the bill.
-    let thinking_harder = Usage {
-        reasoning_tokens: 19,
-        ..usage
-    };
+    let thinking_harder = Usage { reasoning_tokens: 19, ..usage };
     assert_eq!(
         billed_tokens(&thinking_harder),
         billed_tokens(&usage),

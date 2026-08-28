@@ -12,23 +12,19 @@
 //! the interesting half of it — the shell exiting says nothing about the
 //! `make -j8` still running underneath it.
 
-use std::{
-    collections::VecDeque,
-    io::Write as _,
-    path::{Path, PathBuf},
-    process::{ExitStatus, Stdio},
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::collections::VecDeque;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::process::{ExitStatus, Stdio};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
-use tokio::{
-    io::{AsyncRead, AsyncReadExt as _},
-    process::{Child, Command},
-    sync::mpsc,
-};
+use tokio::io::{AsyncRead, AsyncReadExt as _};
+use tokio::process::{Child, Command};
+use tokio::sync::mpsc;
 
 use crate::{Tool, ToolCtx, ToolError, ToolOutput, job, truncate};
 
@@ -136,11 +132,9 @@ impl ShellTool {
     pub fn new() -> Self {
         let shell = default_shell();
         let name = match &shell {
-            Ok(shell) => shell
-                .file_name()
-                .unwrap_or(shell.as_os_str())
-                .to_string_lossy()
-                .into_owned(),
+            Ok(shell) => {
+                shell.file_name().unwrap_or(shell.as_os_str()).to_string_lossy().into_owned()
+            }
             // The prompt is rendered once, and where there is no shell there is
             // nothing truthful to name: printing the refused one would tell the
             // model its commands run under PowerShell, which is exactly what
@@ -148,21 +142,14 @@ impl ShellTool {
             Err(_) => "unavailable".to_owned(),
         };
 
-        Self {
-            description: describe_tool(&name),
-            shell,
-            spill_dir: None,
-        }
+        Self { description: describe_tool(&name), shell, spill_dir: None }
     }
 
     /// Spills into `dir` rather than the resolved data directory. See
     /// [`ShellTool::spill_dir`].
     #[cfg(test)]
     fn spilling_into(dir: &Path) -> Self {
-        Self {
-            spill_dir: Some(dir.to_owned()),
-            ..Self::new()
-        }
+        Self { spill_dir: Some(dir.to_owned()), ..Self::new() }
     }
 
     /// The tool as it stands on a machine that offers no shell it may use.
@@ -172,11 +159,7 @@ impl ShellTool {
     /// are the ones nobody develops on.
     #[cfg(test)]
     fn refusing(why: NoPosixShell) -> Self {
-        Self {
-            description: String::new(),
-            shell: Err(why),
-            spill_dir: None,
-        }
+        Self { description: String::new(), shell: Err(why), spill_dir: None }
     }
 }
 
@@ -211,10 +194,7 @@ impl Tool for ShellTool {
     }
 
     fn describe(&self, args: &serde_json::Value) -> String {
-        let command = args
-            .get("command")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
+        let command = args.get("command").and_then(serde_json::Value::as_str).unwrap_or_default();
 
         format!("shell: {}", shorten(command, DESCRIBE_LIMIT))
     }
@@ -321,15 +301,10 @@ impl ShellTool {
             return Err(ToolError::Cancelled);
         }
 
-        let (window, dropped, spilled) = collected
-            .lock()
-            .expect("the output buffer is never poisoned")
-            .finish();
-        let Assembled {
-            mut output,
-            truncated,
-            spill,
-        } = assemble(&window, dropped, spilled, self.spill_dir.as_deref());
+        let (window, dropped, spilled) =
+            collected.lock().expect("the output buffer is never poisoned").finish();
+        let Assembled { mut output, truncated, spill } =
+            assemble(&window, dropped, spilled, self.spill_dir.as_deref());
 
         if matches!(ended, Ended::TimedOut) {
             output.push_str(&format!(
@@ -358,11 +333,7 @@ impl ShellTool {
             metadata["outputPath"] = serde_json::json!(path);
         }
 
-        Ok(ToolOutput {
-            title: args.command,
-            output,
-            metadata,
-        })
+        Ok(ToolOutput { title: args.command, output, metadata })
     }
 
     /// Runs `command` in `cwd` as a background job: the same spawn
@@ -497,10 +468,7 @@ impl Collector {
     /// A collector that spills into `spill_dir`, or wherever
     /// [`truncate::open_spill`] resolves when it is empty.
     fn new(spill_dir: Option<PathBuf>) -> Self {
-        Self {
-            spill_dir,
-            ..Self::default()
-        }
+        Self { spill_dir, ..Self::default() }
     }
 
     /// Takes one chunk of the command's output.
@@ -621,13 +589,8 @@ fn assemble(
         // output precisely when nothing was dropped on the way — a command
         // under [`SPILL_THRESHOLD`] never lost anything, whereas one whose
         // spill could not be opened at all did.
-        None if clipped => open_spill(spill_dir, window).map(|(path, _)| {
-            if dropped {
-                Spilled::Partial(path)
-            } else {
-                Spilled::Whole(path)
-            }
-        }),
+        None if clipped => open_spill(spill_dir, window)
+            .map(|(path, _)| if dropped { Spilled::Partial(path) } else { Spilled::Whole(path) }),
         None => None,
     };
 
@@ -649,11 +612,7 @@ fn assemble(
         );
     }
 
-    Assembled {
-        output,
-        truncated,
-        spill: spill.map(|spilled| spilled.path().to_owned()),
-    }
+    Assembled { output, truncated, spill: spill.map(|spilled| spilled.path().to_owned()) }
 }
 
 /// The last [`truncate::MAX_LINES`] lines of `text` that fit in
@@ -714,10 +673,7 @@ impl ShellTool {
         // A machine with no shell this port may use refuses here rather than at
         // construction, so the reason travels back as a tool result the model
         // reads instead of taking down the session that built the registry.
-        let shell = self
-            .shell
-            .as_ref()
-            .map_err(|why| ToolError::Failed(why.to_string()))?;
+        let shell = self.shell.as_ref().map_err(|why| ToolError::Failed(why.to_string()))?;
         let mut spawner = Command::new(shell);
         spawner
             .arg("-c")
@@ -864,9 +820,7 @@ async fn pump<R: AsyncRead + Unpin>(
         match reader.read(&mut chunk).await {
             Ok(0) | Err(_) => return,
             Ok(read) => {
-                sink.lock()
-                    .expect("the output buffer is never poisoned")
-                    .push(&chunk[..read]);
+                sink.lock().expect("the output buffer is never poisoned").push(&chunk[..read]);
                 // Outside the lock, and unbounded, because this arrives on the
                 // path that must never stall a producer: a command blocked on
                 // its own output is a command that never reaches its exit.
@@ -985,10 +939,7 @@ fn speaks_posix(shell: &Path) -> bool {
     let name = text.rsplit(['/', '\\']).next().unwrap_or(&text);
     let stem = name.split('.').next().unwrap_or(name);
 
-    !matches!(
-        stem.to_ascii_lowercase().as_str(),
-        "pwsh" | "powershell" | "cmd" | "command"
-    )
+    !matches!(stem.to_ascii_lowercase().as_str(), "pwsh" | "powershell" | "cmd" | "command")
 }
 
 /// The shell commands run under.

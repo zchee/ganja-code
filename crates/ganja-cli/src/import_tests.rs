@@ -11,9 +11,7 @@ const FIXTURE: &str = include_str!("../tests/fixtures/opencode.jsonc");
 /// The table rows as borrowed pairs, which is the shape the assertions
 /// read in.
 fn rows(rows: &[(String, String)]) -> Vec<(&str, &str)> {
-    rows.iter()
-        .map(|(left, right)| (left.as_str(), right.as_str()))
-        .collect()
+    rows.iter().map(|(left, right)| (left.as_str(), right.as_str())).collect()
 }
 
 fn imported(text: &str) -> (Built, Report) {
@@ -47,10 +45,7 @@ fn the_fixture_maps_agents_commands_permissions_and_leaves_the_rest_named() {
             ("agent.review.description", "agent.review.description"),
             ("agent.review.mode", "agent.review.mode"),
             ("agent.review.tools.edit", "agent.review.permission.edit"),
-            (
-                "agent.review.permission.webfetch",
-                "agent.review.permission.webfetch"
-            ),
+            ("agent.review.permission.webfetch", "agent.review.permission.webfetch"),
             ("command.release.template", "command.release.template"),
             ("command.release.description", "command.release.description"),
             ("command.release.agent", "command.release.agent"),
@@ -58,14 +53,8 @@ fn the_fixture_maps_agents_commands_permissions_and_leaves_the_rest_named() {
             // becomes the wire, and `options` becomes the entry itself.
             ("provider.local-llama.npm", "provider.local-llama.dialect"),
             ("provider.local-llama.options", "provider.local-llama"),
-            (
-                "provider.local-llama.options.baseURL",
-                "provider.local-llama.base_url",
-            ),
-            (
-                "provider.local-llama.options.headers",
-                "provider.local-llama.headers",
-            ),
+            ("provider.local-llama.options.baseURL", "provider.local-llama.base_url",),
+            ("provider.local-llama.options.headers", "provider.local-llama.headers",),
             // An MCP entry is ganja's shape already, `type` included.
             ("mcp.fs.type", "mcp.fs.type"),
             ("mcp.fs.command", "mcp.fs.command"),
@@ -237,10 +226,7 @@ fn an_api_key_is_never_written_and_is_pointed_at_the_credential_store() {
 
     let rendered = built.document().to_string();
     for canary in ["sk-canary-8842", "sk-canary-4471"] {
-        assert!(
-            !rendered.contains(canary),
-            "a key reached the written config: {rendered}"
-        );
+        assert!(!rendered.contains(canary), "a key reached the written config: {rendered}");
     }
     assert!(
         rendered.contains("local-llama") && !rendered.contains("key_env"),
@@ -248,11 +234,8 @@ fn an_api_key_is_never_written_and_is_pointed_at_the_credential_store() {
              key: {rendered}"
     );
 
-    let credentials: Vec<&String> = report
-        .warnings
-        .iter()
-        .filter(|warning| warning.contains("ganja auth login"))
-        .collect();
+    let credentials: Vec<&String> =
+        report.warnings.iter().filter(|warning| warning.contains("ganja auth login")).collect();
     assert_eq!(credentials.len(), 2, "{:?}", report.warnings);
     for warning in credentials {
         assert!(
@@ -291,24 +274,12 @@ fn a_provider_entry_this_build_has_a_wire_for_is_carried_flattened() {
         vec![
             ("provider.gateway.npm", "provider.gateway.dialect"),
             ("provider.gateway.options", "provider.gateway"),
-            (
-                "provider.gateway.options.baseURL",
-                "provider.gateway.base_url"
-            ),
-            (
-                "provider.gateway.options.endpoint",
-                "provider.gateway.base_url"
-            ),
-            (
-                "provider.gateway.options.headers",
-                "provider.gateway.headers"
-            ),
+            ("provider.gateway.options.baseURL", "provider.gateway.base_url"),
+            ("provider.gateway.options.endpoint", "provider.gateway.base_url"),
+            ("provider.gateway.options.headers", "provider.gateway.headers"),
         ]
     );
-    assert_eq!(
-        rows(&report.skipped),
-        vec![("provider.gateway.name", "catalog")]
-    );
+    assert_eq!(rows(&report.skipped), vec![("provider.gateway.name", "catalog")]);
 }
 
 /// The row that used to be refused as unsupported: the vendor's own SDK
@@ -380,11 +351,7 @@ fn a_provider_entry_this_build_cannot_talk_to_is_named_rather_than_guessed_at() 
         let (built, report) = imported(source);
 
         assert!(built.is_empty(), "{source} should have been left out");
-        assert_eq!(
-            rows(&report.skipped),
-            vec![("provider.x", reason)],
-            "{source}"
-        );
+        assert_eq!(rows(&report.skipped), vec![("provider.x", reason)], "{source}");
         assert!(
             report.warnings.iter().any(|warning| warning.contains(said)),
             "{source}: {:?}",
@@ -412,10 +379,7 @@ fn a_value_that_is_only_a_token_is_left_out_and_one_that_contains_it_is_carried(
         Some("anthropic/claude-sonnet-5".to_owned())
     );
 
-    assert_eq!(
-        rows(&report.skipped),
-        vec![("model", "token"), ("shell", "token")]
-    );
+    assert_eq!(rows(&report.skipped), vec![("model", "token"), ("shell", "token")]);
     assert_eq!(report.warnings.len(), 3, "{:?}", report.warnings);
     assert!(report.warnings[0].contains("{env:MODEL}"));
     assert!(report.warnings[2].contains("{env:TEAM}"));
@@ -451,13 +415,9 @@ fn the_legacy_tools_map_keeps_its_positions_and_loses_the_tools_named_twice() {
     .expect("the fixture is JSONC");
     let mut report = Report::default();
 
-    let permission = permission(
-        &mut report,
-        &At::root(),
-        source.get("tools"),
-        source.get("permission"),
-    )
-    .expect("both halves fold into one value");
+    let permission =
+        permission(&mut report, &At::root(), source.get("tools"), source.get("permission"))
+            .expect("both halves fold into one value");
 
     assert_eq!(
         permission,
@@ -482,18 +442,10 @@ fn a_bare_permission_action_wins_over_the_whole_legacy_tools_map() {
     let (built, report) =
         imported(r#"{"tools": {"bash": true, "webfetch": false}, "permission": "ask"}"#);
 
-    assert_eq!(
-        built.permission,
-        Some(Json::String("ask".to_owned())),
-        "{:?}",
-        built.permission
-    );
+    assert_eq!(built.permission, Some(Json::String("ask".to_owned())), "{:?}", built.permission);
     assert_eq!(
         rows(&report.skipped),
-        vec![
-            ("tools.bash", "overridden"),
-            ("tools.webfetch", "overridden")
-        ]
+        vec![("tools.bash", "overridden"), ("tools.webfetch", "overridden")]
     );
 }
 
@@ -510,11 +462,7 @@ fn an_unknown_key_and_a_value_of_the_wrong_type_are_reported_rather_than_fatal()
     assert_eq!(rows(&report.mapped), vec![("shell", "shell")]);
     assert_eq!(
         rows(&report.skipped),
-        vec![
-            ("model", "malformed"),
-            ("sparkles", "unknown"),
-            ("agent", "malformed"),
-        ]
+        vec![("model", "malformed"), ("sparkles", "unknown"), ("agent", "malformed"),]
     );
 }
 
@@ -527,11 +475,7 @@ fn a_command_without_a_template_is_not_written() {
     );
 
     assert_eq!(
-        built
-            .command
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>(),
+        built.command.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(),
         vec!["cut"]
     );
     assert_eq!(rows(&report.skipped), vec![("command.ship", "malformed")]);
@@ -559,11 +503,7 @@ fn an_mcp_entry_with_no_type_writes_no_server_and_says_what_it_was() {
     assert!(built.mcp.is_empty());
     assert_eq!(rows(&report.skipped), vec![("mcp.legacy", "malformed")]);
     assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
-    assert!(
-        report.warnings[0].contains("nothing to switch off"),
-        "{}",
-        report.warnings[0]
-    );
+    assert!(report.warnings[0].contains("nothing to switch off"), "{}", report.warnings[0]);
 }
 
 /// A server is written whole or not at all: ganja needs the `command` (or
@@ -603,10 +543,7 @@ fn a_command_argument_that_is_only_a_token_leaves_the_whole_server_out() {
     assert!(report.mapped.is_empty(), "{:?}", report.mapped);
     assert_eq!(rows(&report.skipped), vec![("mcp.fs", "token")]);
     assert!(
-        report
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("{env:SERVER}")),
+        report.warnings.iter().any(|warning| warning.contains("{env:SERVER}")),
         "{:?}",
         report.warnings
     );
@@ -625,11 +562,7 @@ fn a_remote_server_ganja_would_not_send_headers_to_is_left_out_unquoted() {
     assert!(built.mcp.is_empty());
     assert_eq!(rows(&report.skipped), vec![("mcp.docs", "refused")]);
     for said in report.warnings.iter().chain(
-        report
-            .skipped
-            .iter()
-            .map(|(key, _)| key)
-            .chain(report.mapped.iter().map(|(key, _)| key)),
+        report.skipped.iter().map(|(key, _)| key).chain(report.mapped.iter().map(|(key, _)| key)),
     ) {
         assert!(
             !said.contains("mcp.example.invalid") && !said.contains("canary-4417"),
@@ -697,12 +630,7 @@ fn an_mcp_timeout_is_carried_only_when_it_is_a_positive_whole_number() {
             carried,
             "carrying {spelled}"
         );
-        assert_eq!(
-            report.skipped.is_empty(),
-            carried,
-            "reporting {spelled}: {:?}",
-            report.skipped
-        );
+        assert_eq!(report.skipped.is_empty(), carried, "reporting {spelled}: {:?}", report.skipped);
     }
 }
 
@@ -768,14 +696,8 @@ fn a_document_that_will_not_decode_is_named_by_position_and_never_by_its_bytes()
 #[test]
 fn a_written_mcp_entry_that_decodes_but_would_not_load_is_still_refused() {
     for (document, named) in [
-        (
-            "[mcp.fs]\ntype = \"local\"\ncommand = []\n",
-            "empty command",
-        ),
-        (
-            "[mcp.fs]\ntype = \"local\"\ncommand = [\"s\"]\noutput_limit = 0\n",
-            "output_limit of 0",
-        ),
+        ("[mcp.fs]\ntype = \"local\"\ncommand = []\n", "empty command"),
+        ("[mcp.fs]\ntype = \"local\"\ncommand = [\"s\"]\noutput_limit = 0\n", "output_limit of 0"),
     ] {
         let refused =
             validate(document).expect_err("the next launch would refuse this, so this run does");
@@ -794,11 +716,7 @@ fn lsp_true_is_carried_and_names_the_servers_this_build_actually_ships() {
     assert_eq!(rows(&report.mapped), vec![("lsp", "lsp")]);
     assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
     for shipped in BUILTIN_IDS {
-        assert!(
-            report.warnings[0].contains(shipped),
-            "{}",
-            report.warnings[0]
-        );
+        assert!(report.warnings[0].contains(shipped), "{}", report.warnings[0]);
     }
 
     // `false` is the same answer on both sides — no language server at all
@@ -821,18 +739,12 @@ fn an_upstream_language_server_travels_when_it_describes_itself_whole() {
     let cases: [(&str, Vec<&str>); 6] = [
         // Upstream lets a command stand alone because the extensions come
         // from the builtin; here they would come from nowhere.
-        (
-            r#"{"typescript": {"command": ["typescript-language-server", "--stdio"]}}"#,
-            vec![],
-        ),
+        (r#"{"typescript": {"command": ["typescript-language-server", "--stdio"]}}"#, vec![]),
         (r#"{"typescript": {"extensions": [".ts"]}}"#, vec![]),
         // Nothing to switch off: this build ships no `typescript`.
         (r#"{"typescript": {"disabled": true}}"#, vec![]),
         // Leaning on nothing, so it travels under its own name.
-        (
-            r#"{"deno": {"command": ["deno", "lsp"], "extensions": [".ts"]}}"#,
-            vec!["deno"],
-        ),
+        (r#"{"deno": {"command": ["deno", "lsp"], "extensions": [".ts"]}}"#, vec!["deno"]),
         // A builtin this build *does* ship needs neither field.
         (r#"{"gopls": {"disabled": true}}"#, vec!["gopls"]),
         (
@@ -864,10 +776,7 @@ fn an_upstream_language_server_travels_when_it_describes_itself_whole() {
             );
         }
         assert!(
-            report
-                .skipped
-                .iter()
-                .all(|(_, reason)| reason == "unsupported"),
+            report.skipped.iter().all(|(_, reason)| reason == "unsupported"),
             "mapping {entries}: {:?}",
             report.skipped
         );
@@ -890,10 +799,7 @@ fn a_language_server_ganja_could_not_start_is_left_out_rather_than_completed() {
         (r#"{"nickel": {"disabled": true}}"#, vec!["nickel"]),
         // An empty extension list is legal and means every file, which is
         // why it is not refused the way an empty command is.
-        (
-            r#"{"nickel": {"command": ["nls"], "extensions": []}}"#,
-            vec!["nickel"],
-        ),
+        (r#"{"nickel": {"command": ["nls"], "extensions": []}}"#, vec!["nickel"]),
     ];
 
     for (entries, kept) in cases {
@@ -918,10 +824,7 @@ fn an_lsp_map_nothing_survives_writes_no_key_at_all() {
 
     assert_eq!(built.lsp, None);
     assert!(
-        report
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("empty map would start")),
+        report.warnings.iter().any(|warning| warning.contains("empty map would start")),
         "{:?}",
         report.warnings
     );
@@ -1020,11 +923,7 @@ fn a_written_string_comes_back_as_itself() {
             "a value carrying {value:?} came back changed: {rendered}"
         );
         assert_eq!(
-            read.permission
-                .rules()
-                .into_iter()
-                .map(|rule| rule.pattern)
-                .collect::<Vec<_>>(),
+            read.permission.rules().into_iter().map(|rule| rule.pattern).collect::<Vec<_>>(),
             vec![value.to_owned()],
             "a key carrying {value:?} came back changed: {rendered}"
         );
@@ -1049,10 +948,7 @@ fn a_null_is_left_out_and_named_rather_than_written_as_something_else() {
 
     assert_eq!(
         rows(&report.skipped),
-        vec![
-            ("permission.bash", "null"),
-            ("lsp.nickel.initialization.eval", "null"),
-        ]
+        vec![("permission.bash", "null"), ("lsp.nickel.initialization.eval", "null"),]
     );
 
     let rendered = built.document().to_string();

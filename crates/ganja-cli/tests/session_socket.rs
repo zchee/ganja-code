@@ -42,18 +42,15 @@
 
 #![cfg(unix)]
 
-use std::{
-    fs,
-    ops::{Deref, DerefMut},
-    path::{Path, PathBuf},
-    process::Command,
-    thread,
-    time::{Duration, Instant},
-};
+use std::ops::{Deref, DerefMut};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{Duration, Instant};
+use std::{fs, thread};
 
-use expectrl::{
-    ControlCode, Eof, Expect as _, Session, process::unix::WaitStatus, session::OsSession,
-};
+use expectrl::process::unix::WaitStatus;
+use expectrl::session::OsSession;
+use expectrl::{ControlCode, Eof, Expect as _, Session};
 use ganja_core::team::{MemberName, Spawn, Surface, TeamName, TeamsRoot};
 use ganja_serve::socket::EXTENSION;
 use tempfile::TempDir;
@@ -202,11 +199,7 @@ impl Fixture {
 
     /// `ganja sessions`: the ids of this project's stored sessions.
     fn stored(&self) -> Vec<String> {
-        let output = self
-            .ganja()
-            .arg("sessions")
-            .output()
-            .expect("the listing runs");
+        let output = self.ganja().arg("sessions").output().expect("the listing runs");
         assert!(
             output.status.success(),
             "sessions failed: {}",
@@ -248,10 +241,7 @@ fn wait_for<T>(session: &mut Ganja, what: &str, mut check: impl FnMut() -> Optio
         if let Some(found) = check() {
             return found;
         }
-        assert!(
-            start.elapsed() < DEADLINE,
-            "gave up waiting for {what} after {DEADLINE:?}"
-        );
+        assert!(start.elapsed() < DEADLINE, "gave up waiting for {what} after {DEADLINE:?}");
         thread::sleep(Duration::from_millis(100));
     }
 }
@@ -270,19 +260,10 @@ impl Ganja {
     fn spawn(command: Command, ledger: PathBuf) -> Self {
         let mut session = Session::spawn(command).expect("failed to spawn `ganja` in a pty");
         session.set_expect_timeout(Some(DEADLINE));
-        session
-            .get_process_mut()
-            .set_window_size(80, 40)
-            .expect("failed to size the pty");
-        session
-            .expect(ALT_SCREEN)
-            .expect("`ganja` never took the terminal over");
+        session.get_process_mut().set_window_size(80, 40).expect("failed to size the pty");
+        session.expect(ALT_SCREEN).expect("`ganja` never took the terminal over");
 
-        Self {
-            session: Some(session),
-            ledger,
-            turns: 0,
-        }
+        Self { session: Some(session), ledger, turns: 0 }
     }
 
     /// Reads whatever the process has drawn since the last read, and drops
@@ -306,12 +287,9 @@ impl Ganja {
         self.turns += 1;
         self.send(PROMPT).expect("failed to type the prompt");
         self.send("\r").expect("failed to send Enter");
-        self.expect(reply)
-            .expect("the scripted reply never reached the transcript");
+        self.expect(reply).expect("the scripted reply never reached the transcript");
         let ledger = self.ledger.clone();
-        wait_for(self, "the turn's Stop hook", || {
-            (Fixture::stops(&ledger) > before).then_some(())
-        });
+        wait_for(self, "the turn's Stop hook", || (Fixture::stops(&ledger) > before).then_some(()));
     }
 
     /// `/new`, submitted, until the socket under `sockets` answers with a
@@ -353,20 +331,10 @@ impl Ganja {
     }
 
     fn quit_and_assert_clean_exit(mut self) {
-        let mut session = self
-            .session
-            .take()
-            .expect("a session is only ever taken once");
-        session
-            .send(ControlCode::EndOfText)
-            .expect("failed to send Ctrl-C");
-        session
-            .expect(Eof)
-            .expect("`ganja` did not exit within the deadline");
-        let status = session
-            .get_process()
-            .wait()
-            .expect("failed to reap the `ganja` process");
+        let mut session = self.session.take().expect("a session is only ever taken once");
+        session.send(ControlCode::EndOfText).expect("failed to send Ctrl-C");
+        session.expect(Eof).expect("`ganja` did not exit within the deadline");
+        let status = session.get_process().wait().expect("failed to reap the `ganja` process");
         assert!(
             matches!(status, WaitStatus::Exited(_, 0)),
             "expected a clean exit, got {status:?}"
@@ -458,10 +426,7 @@ fn a_lead_binds_its_session_socket_rebinds_on_new_and_unlinks_on_exit() {
         "exit unlinks the socket: {:?}",
         Fixture::socket_files(&sockets)
     );
-    assert!(
-        fixture.live(&sockets).is_empty(),
-        "and nothing is listed as live"
-    );
+    assert!(fixture.live(&sockets).is_empty(), "and nothing is listed as live");
 }
 
 /// A pane member is addressed through its lead's team and binds no socket
@@ -544,9 +509,7 @@ fn seed_member_record(fixture: &Fixture) {
                 color: "blue".to_owned(),
                 prompt: String::new(),
                 plan_mode_required: false,
-                surface: Surface::Pane {
-                    id: "%7".to_owned(),
-                },
+                surface: Surface::Pane { id: "%7".to_owned() },
                 cwd: fixture.project.path().display().to_string(),
             },
         )],

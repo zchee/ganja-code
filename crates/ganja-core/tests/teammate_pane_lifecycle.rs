@@ -40,13 +40,9 @@
 
 mod pane_support;
 
-use ganja_core::{
-    protocol::team::{Frame, ShutdownApproved},
-    teammate::{
-        reaper::Pane,
-        tmux::{self, Server},
-    },
-};
+use ganja_core::protocol::team::{Frame, ShutdownApproved};
+use ganja_core::teammate::reaper::Pane;
+use ganja_core::teammate::tmux::{self, Server};
 use ganja_team::{MailboxMessage, MemberName, mailbox, record};
 use ganja_testkit::tmux::PrivateServer;
 use pane_support::{expected_argv, pane_child_if_asked, run_one, spawn_pane_worker};
@@ -70,10 +66,7 @@ async fn a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shu
         std::env::set_var(ganja_core::config::CONFIG_HOME_ENV, config_home.path());
         std::env::set_var("XDG_DATA_HOME", project.path().join("data"));
     }
-    assert!(
-        tmux::hosted(),
-        "the premise: this process is now inside tmux"
-    );
+    assert!(tmux::hosted(), "the premise: this process is now inside tmux");
 
     // 1 and 3, the shared spine: through the task door on the pane surface,
     // the member record written, and the child's report read back through the
@@ -116,16 +109,9 @@ async fn a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shu
         .find(|pane| pane.id == pane_id)
         .unwrap_or_else(|| panic!("the pane {pane_id} is on the server: {live:?}"))
         .clone();
-    assert!(
-        pane.birth.parse::<u32>().is_ok(),
-        "the second half of the pair is a pid: {pane:?}"
-    );
+    assert!(pane.birth.parse::<u32>().is_ok(), "the second half of the pair is a pid: {pane:?}");
     assert_eq!(spawned.registry.running(), 1, "and the registry holds it");
-    assert_eq!(
-        server.title(&pane_id),
-        "worker",
-        "§4.1 step 3: the pane wears the teammate's name"
-    );
+    assert_eq!(server.title(&pane_id), "worker", "§4.1 step 3: the pane wears the teammate's name");
 
     // 4. The lead half of §6.2: the teammate's `shutdown_approved`, read by the
     // same pass, retires the member — and the pane goes with it.
@@ -148,10 +134,7 @@ async fn a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shu
     .expect("the approval is written");
     let pass = spawned.inbox.poll().await;
     assert_eq!(
-        pass.retired
-            .iter()
-            .map(|gone| gone.name.as_str())
-            .collect::<Vec<_>>(),
+        pass.retired.iter().map(|gone| gone.name.as_str()).collect::<Vec<_>>(),
         vec!["worker"],
         "the pass read the approval: {pass:?}"
     );
@@ -161,10 +144,8 @@ async fn a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shu
         "and it names the pane: {pass:?}"
     );
 
-    let after = Server::at(server.socket(), None)
-        .panes()
-        .await
-        .expect("the private server still lists");
+    let after =
+        Server::at(server.socket(), None).panes().await.expect("the private server still lists");
     assert!(
         !after.iter().any(|live| pane.is(live)),
         "the pane was killed on shutdown_approved: {after:?}"
@@ -172,17 +153,11 @@ async fn a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shu
     assert_eq!(spawned.registry.running(), 0, "the roster forgot it");
     let file = ganja_testkit::team_file(&spawned.root, &spawned.team)
         .expect("the team file is still there");
-    assert!(
-        file.member("worker").is_none(),
-        "and so did the team file: {file:?}"
-    );
+    assert!(file.member("worker").is_none(), "and so did the team file: {file:?}");
 
     // Idempotent on the way out: killing what is already gone is nothing.
     let killed = Server::at(server.socket(), None)
-        .kill(&Pane {
-            id: pane_id,
-            birth: pane.birth,
-        })
+        .kill(&Pane { id: pane_id, birth: pane.birth })
         .await
         .expect("a second kill is answered");
     assert_eq!(killed, tmux::Killed::AlreadyGone);

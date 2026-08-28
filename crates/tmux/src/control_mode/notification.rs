@@ -61,11 +61,9 @@
 
 use std::time::Duration;
 
-use crate::{
-    control_mode::output::DecodeError,
-    error::ProtocolError,
-    ids::{InvalidId, PaneId, SessionId, WindowId},
-};
+use crate::control_mode::output::DecodeError;
+use crate::error::ProtocolError;
+use crate::ids::{InvalidId, PaneId, SessionId, WindowId};
 
 /// The leading `%name` token of a tmux control-mode notification.
 ///
@@ -221,11 +219,7 @@ pub fn parse(line: &str) -> Result<Notification, ProtocolError> {
     } else {
         rest.split_whitespace().map(str::to_string).collect()
     };
-    Ok(Notification {
-        kind: NotificationKind::from_token(kind_token),
-        raw: line.to_string(),
-        args,
-    })
+    Ok(Notification { kind: NotificationKind::from_token(kind_token), raw: line.to_string(), args })
 }
 
 /// Why a notification's typed accessor could not classify its fields.
@@ -240,9 +234,7 @@ pub struct NotificationError {
 
 impl NotificationError {
     fn new(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-        }
+        Self { message: message.into() }
     }
 }
 
@@ -275,10 +267,7 @@ impl Notification {
             None => (rest, ""),
         };
         let pane = PaneId::new(pane)?;
-        Ok(OutputNotification {
-            pane,
-            value: value.to_string(),
-        })
+        Ok(OutputNotification { pane, value: value.to_string() })
     }
 
     /// Returns the typed form of a `%extended-output` notification.
@@ -300,9 +289,7 @@ impl Notification {
         };
         let (fields, value) = split_fields_before_value(rest)?;
         if fields.len() < 2 {
-            return Err(NotificationError::new(
-                "%extended-output requires pane id and age",
-            ));
+            return Err(NotificationError::new("%extended-output requires pane id and age"));
         }
         let pane = PaneId::new(fields[0].as_str())?;
         let age_millis: u64 = fields[1].parse().map_err(|_| {
@@ -334,9 +321,7 @@ impl Notification {
         &self,
     ) -> Result<SubscriptionChangedNotification, NotificationError> {
         let Some((_, rest)) = self.raw.split_once(' ') else {
-            return Err(NotificationError::new(
-                "%subscription-changed missing fields",
-            ));
+            return Err(NotificationError::new("%subscription-changed missing fields"));
         };
         let (fields, value) = split_fields_before_value(rest)?;
         if fields.len() < 5 {
@@ -347,13 +332,9 @@ impl Notification {
         let session = SessionId::new(fields[1].as_str())?;
         // See "Session-scoped subscription sentinels (divergence)" in the
         // module doc for why these three scope fields are optional.
-        let window = dash_as_none(fields[2].as_str())
-            .map(WindowId::new)
-            .transpose()?;
+        let window = dash_as_none(fields[2].as_str()).map(WindowId::new).transpose()?;
         let window_index = dash_as_none(fields[3].as_str()).map(str::to_string);
-        let pane = dash_as_none(fields[4].as_str())
-            .map(PaneId::new)
-            .transpose()?;
+        let pane = dash_as_none(fields[4].as_str()).map(PaneId::new).transpose()?;
         Ok(SubscriptionChangedNotification {
             name: fields[0].clone(),
             session,
@@ -375,10 +356,8 @@ impl Notification {
         if self.kind != NotificationKind::Exit {
             return None;
         }
-        let reason = self
-            .raw
-            .split_once(' ')
-            .map_or_else(String::new, |(_, reason)| reason.to_string());
+        let reason =
+            self.raw.split_once(' ').map_or_else(String::new, |(_, reason)| reason.to_string());
         Some(ExitNotification { reason })
     }
 
@@ -410,9 +389,7 @@ impl Notification {
             return None;
         }
         if self.args.len() != 1 {
-            return Some(Err(NotificationError::new(format!(
-                "{kind} requires one pane id"
-            ))));
+            return Some(Err(NotificationError::new(format!("{kind} requires one pane id"))));
         }
         Some(PaneId::new(self.args[0].as_str()).map_err(NotificationError::from))
     }
@@ -426,11 +403,7 @@ impl Notification {
         if self.kind != NotificationKind::Message {
             return None;
         }
-        Some(
-            self.raw
-                .split_once(' ')
-                .map_or_else(String::new, |(_, msg)| msg.to_string()),
-        )
+        Some(self.raw.split_once(' ').map_or_else(String::new, |(_, msg)| msg.to_string()))
     }
 }
 

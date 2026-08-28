@@ -8,26 +8,18 @@
 //! the description as a weaker signal, the dropdown's own scheme — because
 //! there is no backend whose order could disagree with this one.
 
-use nucleo_matcher::{
-    Config, Matcher, Utf32Str,
-    pattern::{Atom, AtomKind, CaseMatching, Normalization},
-};
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    text::{Line, Text},
-    widgets::{Block, Clear, Paragraph, Widget as _},
-};
+use nucleo_matcher::pattern::{Atom, AtomKind, CaseMatching, Normalization};
+use nucleo_matcher::{Config, Matcher, Utf32Str};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::text::{Line, Text};
+use ratatui::widgets::{Block, Clear, Paragraph, Widget as _};
 
-use crate::{
-    component::{
-        chat::clip,
-        clamped,
-        dropdown::{menu_area, menu_lines},
-    },
-    mention::Fragment,
-    theme::Theme,
-};
+use crate::component::chat::clip;
+use crate::component::clamped;
+use crate::component::dropdown::{menu_area, menu_lines};
+use crate::mention::Fragment;
+use crate::theme::Theme;
 
 /// What is shown when the fragment matches no skill.
 const EMPTY: &str = "no matching skills";
@@ -54,11 +46,7 @@ impl SkillMenu {
     pub fn new(fragment: Fragment, skills: &[(ganja_tool::skill::Skill, String)]) -> Self {
         let rows = ranked(&fragment.text, skills);
 
-        Self {
-            fragment,
-            rows,
-            selected: 0,
-        }
+        Self { fragment, rows, selected: 0 }
     }
 
     /// The invocation this list is completing.
@@ -114,11 +102,8 @@ impl SkillMenu {
         }
 
         let names: Vec<String> = self.rows.iter().map(|(name, _)| name.clone()).collect();
-        let details: Vec<&str> = self
-            .rows
-            .iter()
-            .map(|(_, description)| description.as_str())
-            .collect();
+        let details: Vec<&str> =
+            self.rows.iter().map(|(_, description)| description.as_str()).collect();
 
         menu_lines(&names, &details, self.selected, width, rows, theme)
     }
@@ -144,13 +129,8 @@ fn ranked(needle: &str, skills: &[(ganja_tool::skill::Skill, String)]) -> Vec<(S
         return skills.iter().map(row).collect();
     }
 
-    let atom = Atom::new(
-        needle,
-        CaseMatching::Ignore,
-        Normalization::Smart,
-        AtomKind::Fuzzy,
-        false,
-    );
+    let atom =
+        Atom::new(needle, CaseMatching::Ignore, Normalization::Smart, AtomKind::Fuzzy, false);
     let mut matcher = Matcher::new(Config::DEFAULT);
     let mut buffer = Vec::new();
     let mut scored: Vec<(u32, (String, String))> = skills
@@ -160,9 +140,8 @@ fn ranked(needle: &str, skills: &[(ganja_tool::skill::Skill, String)]) -> Vec<(S
             let name_score = atom
                 .score(Utf32Str::new(&name, &mut buffer), &mut matcher)
                 .map(|score| u32::from(score) * 2);
-            let description_score = atom
-                .score(Utf32Str::new(&described, &mut buffer), &mut matcher)
-                .map(u32::from);
+            let description_score =
+                atom.score(Utf32Str::new(&described, &mut buffer), &mut matcher).map(u32::from);
 
             name_score
                 .into_iter()

@@ -29,17 +29,13 @@
 //! than tidy. The test stays as the pin for it, so a later change that made
 //! outside writes free would fail here rather than quietly widen the feature.
 
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use ganja_core::{
-    AgentRegistry, Config, Engine,
-    permission::{Decision, Permissions},
-    project::Project,
-    tool::Registry,
-};
+use ganja_core::permission::{Decision, Permissions};
+use ganja_core::project::Project;
+use ganja_core::tool::Registry;
+use ganja_core::{AgentRegistry, Config, Engine};
 use ganja_testkit::ScriptedProvider;
 use serde_json::json;
 
@@ -53,19 +49,13 @@ const MEMORY_HEAD: &str =
 
 /// A config with memory switched on and nothing else said.
 fn asked_for_memory() -> Config {
-    Config {
-        memory: Some(true),
-        ..Config::default()
-    }
+    Config { memory: Some(true), ..Config::default() }
 }
 
 /// Where this project's memory lives, resolved the way the prompt and the
 /// door both resolve it.
 fn memory_dir(root: &Path) -> PathBuf {
-    Project::resolve(root)
-        .data_dir()
-        .expect("the fixture has a data home")
-        .join("memory")
+    Project::resolve(root).data_dir().expect("the fixture has a data home").join("memory")
 }
 
 /// The rules a session at `root` runs under, with `config`'s agents beneath
@@ -76,11 +66,7 @@ fn permissions(root: &Path, config: &Config) -> Permissions {
         AgentRegistry::from_config(config).expect("the fixture config resolves an agent");
     let mut permissions = Permissions::load(root);
     permissions.set_baseline(
-        registry
-            .get(registry.default_agent())
-            .expect("the default agent exists")
-            .rules
-            .clone(),
+        registry.get(registry.default_agent()).expect("the default agent exists").rules.clone(),
     );
 
     permissions
@@ -88,9 +74,7 @@ fn permissions(root: &Path, config: &Config) -> Permissions {
 
 /// What the gate says about writing `path`.
 fn writing(permissions: &Permissions, path: &Path) -> Decision {
-    permissions
-        .gate("write", &json!({ "filePath": path.to_string_lossy() }))
-        .action
+    permissions.gate("write", &json!({ "filePath": path.to_string_lossy() })).action
 }
 
 /// Writes `text` at `path`, creating whatever directories it needs.
@@ -141,10 +125,7 @@ fn a_write_outside_the_worktree_asks_before_any_door_is_opened(root: &Path) {
         "nothing about the memory root is special until a config asks for memory"
     );
     assert_eq!(
-        writing(
-            &permissions,
-            &root.parent().unwrap_or(root).join("notes.md")
-        ),
+        writing(&permissions, &root.parent().unwrap_or(root).join("notes.md")),
         Decision::Ask,
         "and neither is anywhere else outside the worktree"
     );
@@ -164,19 +145,13 @@ fn the_suffix_says_nothing_about_memory_until_a_config_asks_for_it(root: &Path) 
     let absent = ganja_core::instruction::suffix(&Config::default(), root, MODEL)
         .expect("the environment block always says something");
     let refused = ganja_core::instruction::suffix(
-        &Config {
-            memory: Some(false),
-            ..Config::default()
-        },
+        &Config { memory: Some(false), ..Config::default() },
         root,
         MODEL,
     )
     .expect("the environment block always says something");
 
-    assert_eq!(
-        absent, refused,
-        "saying no and saying nothing must compose the same prompt"
-    );
+    assert_eq!(absent, refused, "saying no and saying nothing must compose the same prompt");
     assert!(
         !absent.contains(MEMORY_HEAD) && !absent.contains("planted, and unread"),
         "a session that did not ask for memory is told nothing about it: {absent}"
@@ -211,18 +186,11 @@ fn the_suffix_carries_the_index_and_the_upkeep_block_when_memory_is_on(root: &Pa
         .expect("the environment block always says something");
 
     assert!(
-        suffix.contains(&format!(
-            "Instructions from: {}\n- deploys are manual",
-            index.display()
-        )),
+        suffix.contains(&format!("Instructions from: {}\n- deploys are manual", index.display())),
         "{suffix}"
     );
-    let facts = suffix
-        .find("deploys are manual")
-        .expect("the index is quoted");
-    let upkeep = suffix
-        .find("Keeping it: record a fact")
-        .expect("the upkeep block is composed");
+    let facts = suffix.find("deploys are manual").expect("the index is quoted");
+    let upkeep = suffix.find("Keeping it: record a fact").expect("the upkeep block is composed");
     assert!(facts < upkeep, "the facts come first: {suffix}");
     assert!(
         suffix.contains("Never record a secret."),
@@ -254,10 +222,7 @@ fn a_write_under_the_memory_root_runs_unasked_when_memory_is_on(root: &Path) {
     assert_eq!(
         writing(
             &permissions,
-            &memory
-                .parent()
-                .expect("the memory root has a parent")
-                .join("permissions.json")
+            &memory.parent().expect("the memory root has a parent").join("permissions.json")
         ),
         Decision::Ask,
         "one directory up is the permission store, and is nobody's to rewrite"
@@ -278,11 +243,7 @@ fn a_subagent_is_given_no_door_to_write_the_memory_it_was_shown(root: &Path) {
     let registry =
         AgentRegistry::from_config(&config).expect("the fixture config resolves an agent");
     let child = parent.derive_subagent(
-        registry
-            .get("general")
-            .expect("the general subagent is builtin")
-            .rules
-            .clone(),
+        registry.get("general").expect("the general subagent is builtin").rules.clone(),
     );
 
     assert_eq!(
@@ -298,13 +259,8 @@ async fn what_memory_adds_to_the_prompt_is_priced_as_instructions(root: &Path) {
     let breakdown = |config: &Config| {
         let suffix = ganja_core::instruction::suffix(config, root, MODEL);
         let (provider, _requests) = ScriptedProvider::new(Vec::new());
-        Engine::new(
-            provider,
-            MODEL,
-            Arc::new(Registry::with_builtins()),
-            Permissions::default(),
-        )
-        .with_system_parts(None, suffix)
+        Engine::new(provider, MODEL, Arc::new(Registry::with_builtins()), Permissions::default())
+            .with_system_parts(None, suffix)
     };
 
     let off = breakdown(&Config::default()).context_breakdown().await;

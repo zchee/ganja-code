@@ -1,4 +1,5 @@
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 use ganja_protocol::team::{
     Frame, IdleNotification, PermissionRequest, PermissionResponse, PermissionResponseBody,
@@ -7,32 +8,23 @@ use ganja_protocol::team::{
 use ganja_team::{LEAD, MailboxMessage, MemberName, mailbox, record};
 
 use super::{DIALOG_QUEUE_FULL, Delivered, LeadInbox, NO_DIALOG_SURFACE};
-use crate::{
-    Storage,
-    permission::Permissions,
-    provider::FakeProvider,
-    teammate::{
-        Delivery, Handle, InProcess, MemberBackend, SpawnRequest, SpawnSpec, TeammateBackend,
-        TeammateRegistry, Unsupported, member,
-    },
-    tool::Registry as Tools,
+use crate::Storage;
+use crate::permission::Permissions;
+use crate::provider::FakeProvider;
+use crate::teammate::{
+    Delivery, Handle, InProcess, MemberBackend, SpawnRequest, SpawnSpec, TeammateBackend,
+    TeammateRegistry, Unsupported, member,
 };
+use crate::tool::Registry as Tools;
 
 /// A registry over a throwaway teams root, with the lead's inbox seeded.
 fn registry(home: &std::path::Path) -> Arc<TeammateRegistry> {
-    Arc::new(TeammateRegistry::for_session(
-        home,
-        "224cbeab-4e62-497c-aa8f-d05cc33ce7ba",
-        home,
-    ))
+    Arc::new(TeammateRegistry::for_session(home, "224cbeab-4e62-497c-aa8f-d05cc33ce7ba", home))
 }
 
 fn write(inbox: &std::path::Path, from: &str, text: &str) {
-    mailbox::write(
-        inbox,
-        MailboxMessage::new(from, text, record::now_iso8601()),
-    )
-    .expect("the inbox takes a message");
+    mailbox::write(inbox, MailboxMessage::new(from, text, record::now_iso8601()))
+        .expect("the inbox takes a message");
 }
 
 fn write_frame(inbox: &std::path::Path, from: &str, frame: &Frame) {
@@ -66,10 +58,7 @@ async fn a_plain_message_is_carried_out_and_stays_until_it_is_delivered() {
     lead.delivered(&pass.messages).await;
 
     assert!(
-        mailbox::read(&inbox)
-            .expect("the inbox reads")
-            .valid
-            .is_empty(),
+        mailbox::read(&inbox).expect("the inbox reads").valid.is_empty(),
         "a delivered message does not remain"
     );
 }
@@ -106,19 +95,13 @@ async fn a_control_frame_is_acted_on_and_never_handed_out_to_be_queued() {
 
     let pass = LeadInbox::new(registry).poll().await;
 
-    assert!(
-        pass.messages.is_empty(),
-        "a control frame is acted on, never queued: {pass:?}"
-    );
+    assert!(pass.messages.is_empty(), "a control frame is acted on, never queued: {pass:?}");
     assert_eq!(pass.retired.len(), 1);
     assert_eq!(pass.retired[0].name, "w1");
     assert_eq!(pass.idle.len(), 1);
     assert_eq!(pass.idle[0].summary.as_deref(), Some("waiting for review"));
     assert!(
-        mailbox::read(&inbox)
-            .expect("the inbox reads")
-            .valid
-            .is_empty(),
+        mailbox::read(&inbox).expect("the inbox reads").valid.is_empty(),
         "a frame the lead acted on leaves the inbox in the same pass"
     );
 }
@@ -142,11 +125,7 @@ async fn a_permission_update_an_answer_and_an_unhandled_frame_are_all_dropped_by
     let inbox = registry.lead_inbox();
     let mut payload = serde_json::Map::new();
     payload.insert("mode".to_owned(), serde_json::json!("acceptEdits"));
-    write_frame(
-        &inbox,
-        "w1",
-        &Frame::TeamPermissionUpdate(TeamPermissionUpdate { payload }),
-    );
+    write_frame(&inbox, "w1", &Frame::TeamPermissionUpdate(TeamPermissionUpdate { payload }));
     write_frame(
         &inbox,
         "w1",
@@ -172,24 +151,11 @@ async fn a_permission_update_an_answer_and_an_unhandled_frame_are_all_dropped_by
 
     let pass = LeadInbox::new(registry).poll().await;
 
-    assert_eq!(
-        pass.dropped,
-        [
-            "team_permission_update",
-            "permission_response",
-            "task_assignment"
-        ]
-    );
-    assert!(
-        pass.messages.is_empty(),
-        "a frame is never delivered as prose either"
-    );
+    assert_eq!(pass.dropped, ["team_permission_update", "permission_response", "task_assignment"]);
+    assert!(pass.messages.is_empty(), "a frame is never delivered as prose either");
     assert!(pass.asked.is_empty(), "and none of them is an ask");
     assert!(
-        mailbox::read(&inbox)
-            .expect("the inbox reads")
-            .valid
-            .is_empty(),
+        mailbox::read(&inbox).expect("the inbox reads").valid.is_empty(),
         "a named drop leaves the inbox rather than being read again forever"
     );
 }
@@ -212,9 +178,7 @@ fn ask(request_id: &str) -> Frame {
 async fn answered(inbox: &std::path::Path) -> Vec<MailboxMessage> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let held = mailbox::read(inbox)
-            .map(|contents| contents.valid)
-            .unwrap_or_default();
+        let held = mailbox::read(inbox).map(|contents| contents.valid).unwrap_or_default();
         if !held.is_empty() || tokio::time::Instant::now() >= deadline {
             return held;
         }
@@ -243,28 +207,17 @@ async fn a_pane_permission_request_raises_one_dialog_and_its_answer_lands_in_the
     assert!(pass.asked[0].raised, "it reached the channel");
     assert!(pass.dropped.is_empty(), "nothing was dropped: {pass:?}");
     assert!(
-        mailbox::read(&registry.lead_inbox())
-            .expect("the inbox reads")
-            .valid
-            .is_empty(),
+        mailbox::read(&registry.lead_inbox()).expect("the inbox reads").valid.is_empty(),
         "a routed ask leaves the lead's inbox in the same pass"
     );
 
     let forwarded = dialogs.try_recv().expect("exactly one dialog was raised");
     assert!(dialogs.try_recv().is_err(), "and only one");
     assert_eq!(forwarded.teammate, "w1");
-    let crate::protocol::Event::PermissionRequested {
-        id,
-        tool,
-        title,
-        args,
-        ..
-    } = &forwarded.request
+    let crate::protocol::Event::PermissionRequested { id, tool, title, args, .. } =
+        &forwarded.request
     else {
-        panic!(
-            "the channel carries permission requests: {:?}",
-            forwarded.request
-        );
+        panic!("the channel carries permission requests: {:?}", forwarded.request);
     };
     assert_ne!(
         id.as_str(),
@@ -280,10 +233,9 @@ async fn a_pane_permission_request_raises_one_dialog_and_its_answer_lands_in_the
         .send(crate::protocol::PermissionReply::Once)
         .expect("the answer task is waiting");
 
-    let inbox = registry.root().inbox_path(
-        registry.team(),
-        &MemberName::parse("w1").expect("a member name"),
-    );
+    let inbox = registry
+        .root()
+        .inbox_path(registry.team(), &MemberName::parse("w1").expect("a member name"));
     let held = answered(&inbox).await;
     assert_eq!(held.len(), 1, "one answer, in the asker's own inbox");
     assert_eq!(held[0].from, LEAD, "stamped as the lead");
@@ -328,10 +280,7 @@ async fn two_members_reusing_one_request_id_get_two_dialogs_and_the_right_answer
     };
     assert_ne!(one, two, "one member's id cannot shadow another's dialog");
 
-    first
-        .reply
-        .send(crate::protocol::PermissionReply::Once)
-        .expect("w1's answer task is waiting");
+    first.reply.send(crate::protocol::PermissionReply::Once).expect("w1's answer task is waiting");
     second
         .reply
         .send(crate::protocol::PermissionReply::Reject)
@@ -341,20 +290,15 @@ async fn two_members_reusing_one_request_id_get_two_dialogs_and_the_right_answer
         ("w1", crate::protocol::PermissionReply::Once),
         ("w2", crate::protocol::PermissionReply::Reject),
     ] {
-        let inbox = registry.root().inbox_path(
-            registry.team(),
-            &MemberName::parse(name).expect("a member name"),
-        );
+        let inbox = registry
+            .root()
+            .inbox_path(registry.team(), &MemberName::parse(name).expect("a member name"));
         let held = answered(&inbox).await;
         assert_eq!(held.len(), 1, "one answer for {name}: {held:?}");
         let Some(Frame::PermissionResponse(response)) = held[0].frame() else {
             panic!("the answer is a permission response: {:?}", held[0]);
         };
-        assert_eq!(
-            response.request_id(),
-            "shared",
-            "the frame's own id goes back to {name}"
-        );
+        assert_eq!(response.request_id(), "shared", "the frame's own id goes back to {name}");
         assert_eq!(member::reply_of(&response), reply, "{name}'s own answer");
     }
 }
@@ -366,10 +310,9 @@ async fn two_members_reusing_one_request_id_get_two_dialogs_and_the_right_answer
 async fn a_pane_permission_request_nobody_can_be_shown_is_refused_into_its_inbox() {
     let home = tempfile::tempdir().expect("a temporary home");
     let registry = registry(home.path());
-    let inbox = registry.root().inbox_path(
-        registry.team(),
-        &MemberName::parse("w1").expect("a member name"),
-    );
+    let inbox = registry
+        .root()
+        .inbox_path(registry.team(), &MemberName::parse("w1").expect("a member name"));
 
     // No surface attached at all.
     write_frame(&registry.lead_inbox(), "w1", &ask("req-1"));
@@ -384,10 +327,7 @@ async fn a_pane_permission_request_nobody_can_be_shown_is_refused_into_its_inbox
     };
     assert_eq!(response.request_id(), "req-1");
     assert_eq!(response.error_message(), Some(NO_DIALOG_SURFACE));
-    assert_eq!(
-        member::reply_of(&response),
-        crate::protocol::PermissionReply::Reject
-    );
+    assert_eq!(member::reply_of(&response), crate::protocol::PermissionReply::Reject);
     mailbox::prune_delivered(&inbox, &[mailbox::identity(&held[0])]).expect("pruned");
 
     // A surface whose queue is full: one slot, already taken.
@@ -415,10 +355,7 @@ async fn a_pane_permission_request_nobody_can_be_shown_is_refused_into_its_inbox
     // is written back as the refusal it is.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while tokio::time::Instant::now() < deadline
-        && mailbox::read(&inbox)
-            .map(|contents| contents.valid.len())
-            .unwrap_or_default()
-            < 2
+        && mailbox::read(&inbox).map(|contents| contents.valid.len()).unwrap_or_default() < 2
     {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -428,10 +365,7 @@ async fn a_pane_permission_request_nobody_can_be_shown_is_refused_into_its_inbox
         panic!("the refusal is a permission response: {:?}", held[1]);
     };
     assert_eq!(response.request_id(), "req-2");
-    assert_eq!(
-        member::reply_of(&response),
-        crate::protocol::PermissionReply::Reject
-    );
+    assert_eq!(member::reply_of(&response), crate::protocol::PermissionReply::Reject);
 }
 
 /// The other half of a `shutdown_approved`, which the frame test above
@@ -487,11 +421,7 @@ async fn a_shutdown_approved_takes_the_member_out_of_the_roster_and_the_team_fil
 
     assert_eq!(pass.retired.len(), 1);
     assert_eq!(pass.retired[0].name, "w1");
-    assert_eq!(
-        registry.view().members.len(),
-        1,
-        "only the lead is left in the roster"
-    );
+    assert_eq!(registry.view().members.len(), 1, "only the lead is left in the roster");
     let document = std::fs::read_to_string(registry.root().config_path(registry.team()))
         .expect("the team file is on disk");
     assert!(
@@ -602,17 +532,11 @@ async fn a_claude_teammates_answer_under_its_own_root_reaches_the_leads_pass() {
     assert_eq!(pass.messages.len(), 1, "and so was the lead's own");
     assert_eq!(pass.messages[0].from, "w2");
     assert!(
-        mailbox::read(&under_claude)
-            .expect("claude's inbox reads")
-            .valid
-            .is_empty(),
+        mailbox::read(&under_claude).expect("claude's inbox reads").valid.is_empty(),
         "a frame acted on is pruned in the root it was found in"
     );
     assert_eq!(
-        mailbox::read(&registry.lead_inbox())
-            .expect("the lead's inbox reads")
-            .valid
-            .len(),
+        mailbox::read(&registry.lead_inbox()).expect("the lead's inbox reads").valid.len(),
         1,
         "and a plain message is still owed until the caller delivers it"
     );
@@ -620,10 +544,7 @@ async fn a_claude_teammates_answer_under_its_own_root_reaches_the_leads_pass() {
     lead.delivered(&pass.messages).await;
 
     assert!(
-        mailbox::read(&registry.lead_inbox())
-            .expect("the lead's inbox reads")
-            .valid
-            .is_empty(),
+        mailbox::read(&registry.lead_inbox()).expect("the lead's inbox reads").valid.is_empty(),
         "a delivered message does not remain"
     );
 }
@@ -639,19 +560,11 @@ async fn a_lead_with_no_claude_teammate_never_looks_in_claudes_root() {
     let under_claude = claude.inbox_path(registry.team(), registry.lead());
     write_frame(&under_claude, "w1", &went_idle());
 
-    let pass = LeadInbox::reading(Arc::clone(&registry), Some(claude.clone()))
-        .poll()
-        .await;
+    let pass = LeadInbox::reading(Arc::clone(&registry), Some(claude.clone())).poll().await;
 
-    assert!(
-        pass.is_empty(),
-        "nothing of another program's is this lead's to read: {pass:?}"
-    );
+    assert!(pass.is_empty(), "nothing of another program's is this lead's to read: {pass:?}");
     assert_eq!(
-        mailbox::read(&under_claude)
-            .expect("claude's inbox reads")
-            .valid
-            .len(),
+        mailbox::read(&under_claude).expect("claude's inbox reads").valid.len(),
         1,
         "and nothing of it was pruned either"
     );
@@ -659,9 +572,7 @@ async fn a_lead_with_no_claude_teammate_never_looks_in_claudes_root() {
     // The same lead, once a claude member joins, does read it — so what the
     // assertions above pin is the roster and not the path.
     claude_member(&registry, home.path()).await;
-    let pass = LeadInbox::reading(Arc::clone(&registry), Some(claude))
-        .poll()
-        .await;
+    let pass = LeadInbox::reading(Arc::clone(&registry), Some(claude)).poll().await;
     assert_eq!(pass.idle.len(), 1, "{pass:?}");
 }
 
@@ -685,11 +596,7 @@ async fn an_ask_found_under_claudes_root_is_answered_under_claudes_root() {
     let (surface, mut dialogs) = tokio::sync::mpsc::channel(4);
     registry.forward_dialogs_to(surface);
 
-    write_frame(
-        &claude.inbox_path(registry.team(), registry.lead()),
-        "w1",
-        &ask("req-1"),
-    );
+    write_frame(&claude.inbox_path(registry.team(), registry.lead()), "w1", &ask("req-1"));
 
     let lead = LeadInbox::reading(Arc::clone(&registry), Some(claude.clone()));
     let pass = lead.poll().await;
@@ -714,10 +621,7 @@ async fn an_ask_found_under_claudes_root_is_answered_under_claudes_root() {
         panic!("the answer is a permission response: {:?}", under_claude[0]);
     };
     assert_eq!(response.request_id(), "req-1");
-    assert_eq!(
-        member::reply_of(&response),
-        crate::protocol::PermissionReply::Once
-    );
+    assert_eq!(member::reply_of(&response), crate::protocol::PermissionReply::Once);
     assert!(
         mailbox::read(&registry.root().inbox_path(registry.team(), &asker))
             .expect("the ganja-root inbox reads")
@@ -739,9 +643,7 @@ async fn one_directory_reached_two_ways_is_still_read_once() {
     let collapsed = registry.root().clone();
     write(&registry.lead_inbox(), "w1", "the parser is done");
 
-    let pass = LeadInbox::reading(Arc::clone(&registry), Some(collapsed))
-        .poll()
-        .await;
+    let pass = LeadInbox::reading(Arc::clone(&registry), Some(collapsed)).poll().await;
 
     assert_eq!(pass.messages.len(), 1, "once, not twice: {pass:?}");
 }
@@ -752,22 +654,12 @@ async fn one_directory_reached_two_ways_is_still_read_once() {
 #[test]
 fn a_delivered_entry_derives_the_identity_it_will_be_pruned_by() {
     let message = MailboxMessage::new("w1", "done", "2026-08-17T00:00:00.000Z");
-    let delivered = Delivered::new(
-        "w1",
-        "2026-08-17T00:00:00.000Z",
-        "done",
-        Delivery::Acknowledged,
-    );
+    let delivered =
+        Delivered::new("w1", "2026-08-17T00:00:00.000Z", "done", Delivery::Acknowledged);
 
     assert_eq!(delivered.identity(), mailbox::identity(&message));
     assert_ne!(
-        Delivered::new(
-            "w2",
-            "2026-08-17T00:00:00.000Z",
-            "done",
-            Delivery::Acknowledged
-        )
-        .identity(),
+        Delivered::new("w2", "2026-08-17T00:00:00.000Z", "done", Delivery::Acknowledged).identity(),
         mailbox::identity(&message),
         "the sender is part of what a message is"
     );

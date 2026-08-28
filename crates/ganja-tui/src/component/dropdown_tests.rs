@@ -1,10 +1,9 @@
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 
 use super::{Dropdown, triggered};
-use crate::{
-    command::{Choice, Completion, EngineCommand, Slot},
-    theme::Theme,
-};
+use crate::command::{Choice, Completion, EngineCommand, Slot};
+use crate::theme::Theme;
 
 /// A menu over the UI commands alone, which is what a session running
 /// without a command registry offers.
@@ -19,10 +18,7 @@ fn a_values_menu_is_titled_after_its_slot() {
     let candidates = |names: &[&str]| {
         names
             .iter()
-            .map(|name| Completion {
-                text: (*name).to_owned(),
-                detail: "a surface".to_owned(),
-            })
+            .map(|name| Completion { text: (*name).to_owned(), detail: "a surface".to_owned() })
             .collect::<Vec<_>>()
     };
     let render = |slot: &Slot| {
@@ -32,9 +28,7 @@ fn a_values_menu_is_titled_after_its_slot() {
         dropdown.render(Rect::new(0, 6, 40, 2), &mut buffer, &Theme::default());
         (0..area.height)
             .map(|row| {
-                (0..area.width)
-                    .map(|column| buffer[(column, row)].symbol())
-                    .collect::<String>()
+                (0..area.width).map(|column| buffer[(column, row)].symbol()).collect::<String>()
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -75,11 +69,7 @@ fn rendered(dropdown: &Dropdown, anchor: Rect, area: Rect) -> String {
     dropdown.render(anchor, &mut buffer, &Theme::default());
 
     (0..area.height)
-        .map(|row| {
-            (0..area.width)
-                .map(|column| buffer[(column, row)].symbol())
-                .collect::<String>()
-        })
+        .map(|row| (0..area.width).map(|column| buffer[(column, row)].symbol()).collect::<String>())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -106,11 +96,7 @@ fn the_menu_opens_only_for_a_slash_at_the_very_start_of_the_buffer() {
     ];
 
     for (text, cursor, expected) in cases {
-        assert_eq!(
-            triggered(text, cursor),
-            expected,
-            "{text:?} with the cursor at {cursor:?}"
-        );
+        assert_eq!(triggered(text, cursor), expected, "{text:?} with the cursor at {cursor:?}");
     }
 }
 
@@ -118,10 +104,7 @@ fn the_menu_opens_only_for_a_slash_at_the_very_start_of_the_buffer() {
 fn a_bare_slash_lists_every_command_from_both_populations() {
     let dropdown = Dropdown::new("/", engine());
 
-    assert_eq!(
-        dropdown.matched.len(),
-        crate::command::COMMANDS.len() + engine().len()
-    );
+    assert_eq!(dropdown.matched.len(), crate::command::COMMANDS.len() + engine().len());
 }
 
 /// With nothing typed there is no ranking to show, so the menu reads as a
@@ -144,10 +127,7 @@ fn typing_narrows_the_menu_and_puts_the_cursor_back_on_top() {
     dropdown.refresh("/agent");
 
     assert_eq!(dropdown.selected, 0);
-    assert_eq!(
-        dropdown.selected().map(|choice| choice.slash()),
-        Some("/agents".to_owned())
-    );
+    assert_eq!(dropdown.selected().map(|choice| choice.slash()), Some("/agents".to_owned()));
 }
 
 /// The one thing the dropdown matches that the palette does not.
@@ -155,10 +135,7 @@ fn typing_narrows_the_menu_and_puts_the_cursor_back_on_top() {
 fn a_fragment_that_only_appears_in_a_description_still_finds_its_command() {
     let dropdown = menu("/repaint");
 
-    assert_eq!(
-        dropdown.selected().map(|choice| choice.slash()),
-        Some("/themes".to_owned())
-    );
+    assert_eq!(dropdown.selected().map(|choice| choice.slash()), Some("/themes".to_owned()));
 }
 
 /// An engine command is a row like any other until it is chosen, which is
@@ -213,10 +190,7 @@ fn an_editor_with_no_room_above_it_gets_no_menu() {
     let area = Rect::new(0, 0, 40, 8);
     let screen = rendered(&menu("/"), Rect::new(0, 0, 40, 5), area);
 
-    assert!(
-        screen.trim().is_empty(),
-        "nothing should have been drawn:\n{screen}"
-    );
+    assert!(screen.trim().is_empty(), "nothing should have been drawn:\n{screen}");
 }
 
 #[test]

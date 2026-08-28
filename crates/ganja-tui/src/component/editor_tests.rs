@@ -1,29 +1,18 @@
-use ratatui::{
-    buffer::Buffer,
-    crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
-    layout::Rect,
-};
+use ratatui::buffer::Buffer;
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::layout::Rect;
 
 use super::{Editor, Mode};
 use crate::theme::{Theme, Themes};
 
 fn drawn(editor: &Editor) -> String {
-    const AREA: Rect = Rect {
-        x: 0,
-        y: 0,
-        width: 40,
-        height: 5,
-    };
+    const AREA: Rect = Rect { x: 0, y: 0, width: 40, height: 5 };
 
     let mut buffer = Buffer::empty(AREA);
     editor.render(AREA, &mut buffer);
 
     (0..AREA.height)
-        .map(|row| {
-            (0..AREA.width)
-                .map(|column| buffer[(column, row)].symbol())
-                .collect::<String>()
-        })
+        .map(|row| (0..AREA.width).map(|column| buffer[(column, row)].symbol()).collect::<String>())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -43,10 +32,7 @@ fn the_hint_draws_after_the_text_and_never_enters_the_buffer() {
     editor.set_hint(Some("list | spawn <name>".to_owned()));
 
     let screen = drawn(&editor);
-    assert!(
-        screen.contains("/team list | spawn <name>"),
-        "got:\n{screen}"
-    );
+    assert!(screen.contains("/team list | spawn <name>"), "got:\n{screen}");
     assert_eq!(editor.text(), "/team");
 }
 
@@ -110,10 +96,7 @@ fn an_editor_holding_only_spaces_is_not_empty_even_though_it_has_nothing_to_subm
 
     typing(&mut editor, "  ");
 
-    assert!(
-        !editor.is_empty(),
-        "typed spaces are text, however unsubmittable"
-    );
+    assert!(!editor.is_empty(), "typed spaces are text, however unsubmittable");
     assert_eq!(editor.prompt(), None);
 }
 
@@ -163,12 +146,7 @@ fn a_newline_keeps_both_lines_in_one_prompt() {
 fn the_line_being_typed_is_not_underlined() {
     use ratatui::style::Modifier;
 
-    const AREA: Rect = Rect {
-        x: 0,
-        y: 0,
-        width: 40,
-        height: 5,
-    };
+    const AREA: Rect = Rect { x: 0, y: 0, width: 40, height: 5 };
 
     let mut editor = Editor::new(&Theme::default());
     typing(&mut editor, "no decoration");
@@ -179,9 +157,7 @@ fn the_line_being_typed_is_not_underlined() {
     for row in 0..AREA.height {
         for column in 0..AREA.width {
             assert!(
-                !buffer[(column, row)]
-                    .modifier
-                    .contains(Modifier::UNDERLINED),
+                !buffer[(column, row)].modifier.contains(Modifier::UNDERLINED),
                 "cell ({column}, {row}) is underlined"
             );
         }
@@ -192,12 +168,7 @@ fn the_line_being_typed_is_not_underlined() {
 /// which is why a theme switch has to reach in and repaint it.
 #[test]
 fn restyling_repaints_the_box_without_disturbing_what_is_typed() {
-    const AREA: Rect = Rect {
-        x: 0,
-        y: 0,
-        width: 30,
-        height: 5,
-    };
+    const AREA: Rect = Rect { x: 0, y: 0, width: 30, height: 5 };
 
     let mut editor = Editor::new(&Theme::default());
     typing(&mut editor, "a draft mid-switch");
@@ -206,18 +177,10 @@ fn restyling_repaints_the_box_without_disturbing_what_is_typed() {
     editor.render(AREA, &mut buffer);
     let before = buffer[(0, 0)].fg;
 
-    editor.restyle(
-        &Themes::builtin()
-            .select("gruvbox")
-            .expect("gruvbox is builtin"),
-    );
+    editor.restyle(&Themes::builtin().select("gruvbox").expect("gruvbox is builtin"));
     editor.render(AREA, &mut buffer);
 
-    assert_ne!(
-        before,
-        buffer[(0, 0)].fg,
-        "the border kept the styles it was built with"
-    );
+    assert_ne!(before, buffer[(0, 0)].fg, "the border kept the styles it was built with");
     assert_eq!(
         editor.prompt().as_deref(),
         Some("a draft mid-switch"),
@@ -252,11 +215,7 @@ fn restyling_keeps_the_mode_the_box_is_in() {
     let mut editor = Editor::new(&Theme::default());
     editor.set_mode(Mode::Shell);
 
-    editor.restyle(
-        &Themes::builtin()
-            .select("gruvbox")
-            .expect("gruvbox is builtin"),
-    );
+    editor.restyle(&Themes::builtin().select("gruvbox").expect("gruvbox is builtin"));
 
     assert!(drawn(&editor).contains("Shell"), "got:\n{}", drawn(&editor));
 }
@@ -283,29 +242,18 @@ fn changing_mode_does_not_disturb_what_is_typed() {
 #[test]
 fn the_render_reports_the_cursor_cell_and_paints_nothing_on_it() {
     use ratatui::style::Modifier;
-    const AREA: Rect = Rect {
-        x: 0,
-        y: 0,
-        width: 40,
-        height: 5,
-    };
+    const AREA: Rect = Rect { x: 0, y: 0, width: 40, height: 5 };
     let place = |editor: &Editor| {
         let mut buffer = Buffer::empty(AREA);
         let at = editor.render(AREA, &mut buffer);
         let unpainted = at.is_none_or(|(x, y)| {
-            !buffer[(x, y)]
-                .modifier
-                .intersects(Modifier::REVERSED | Modifier::SLOW_BLINK)
+            !buffer[(x, y)].modifier.intersects(Modifier::REVERSED | Modifier::SLOW_BLINK)
         });
         assert!(unpainted, "nothing is painted on the cursor cell");
         at
     };
     let mut editor = Editor::new(&Theme::default());
-    assert_eq!(
-        place(&editor),
-        Some((1, 1)),
-        "empty: before the placeholder"
-    );
+    assert_eq!(place(&editor), Some((1, 1)), "empty: before the placeholder");
 
     typing(&mut editor, "ok");
     assert_eq!(place(&editor), Some((3, 1)), "after the typed text");
@@ -327,10 +275,7 @@ fn replacing_the_buffer_leaves_the_cursor_at_the_end() {
 
     editor.set_text("what the editor wrote\nover two lines");
 
-    assert_eq!(
-        editor.prompt().as_deref(),
-        Some("what the editor wrote\nover two lines")
-    );
+    assert_eq!(editor.prompt().as_deref(), Some("what the editor wrote\nover two lines"));
     assert_eq!(editor.cursor(), (1, "over two lines".chars().count()));
 }
 
@@ -341,10 +286,7 @@ fn replacing_the_buffer_can_put_the_cursor_where_the_caller_asks() {
     editor.set_text_at("look at @src/lib.rs and say why", 0, 19);
 
     assert_eq!(editor.cursor(), (0, 19));
-    assert_eq!(
-        editor.prompt().as_deref(),
-        Some("look at @src/lib.rs and say why")
-    );
+    assert_eq!(editor.prompt().as_deref(), Some("look at @src/lib.rs and say why"));
 }
 
 #[test]

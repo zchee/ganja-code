@@ -11,10 +11,8 @@
 
 use std::sync::Arc;
 
-use ganja_core::tool::{
-    Credentials, FileTimes, Tool as _, ToolCtx, ToolError,
-    task::{Delegated, Delegation, Offered, TaskTool, Unanswered},
-};
+use ganja_core::tool::task::{Delegated, Delegation, Offered, TaskTool, Unanswered};
+use ganja_core::tool::{Credentials, FileTimes, Tool as _, ToolCtx, ToolError};
 use ganja_testkit::ScriptedSubagents;
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
@@ -135,10 +133,7 @@ async fn an_unknown_subagent_is_named_back_in_upstreams_words() {
     let ToolError::Failed(message) = &refused else {
         panic!("an unknown agent is information, not an argument error: {refused:?}");
     };
-    assert_eq!(
-        message,
-        "Unknown agent type: nonesuch is not a valid agent type"
-    );
+    assert_eq!(message, "Unknown agent type: nonesuch is not a valid agent type");
 }
 
 /// A child that could not answer is an error the parent model reads, in the
@@ -197,13 +192,10 @@ async fn a_call_with_nothing_to_delegate_through_says_so() {
         jobs: None,
     };
 
-    let refused = TaskTool::new(&[Offered {
-        name: "general".to_owned(),
-        description: None,
-    }])
-    .run(args("general"), &ctx)
-    .await
-    .expect_err("there is nothing to run a subagent with");
+    let refused = TaskTool::new(&[Offered { name: "general".to_owned(), description: None }])
+        .run(args("general"), &ctx)
+        .await
+        .expect_err("there is nothing to run a subagent with");
 
     let ToolError::Failed(message) = &refused else {
         panic!("having nothing to delegate through is information: {refused:?}");

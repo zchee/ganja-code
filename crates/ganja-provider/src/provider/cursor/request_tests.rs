@@ -2,9 +2,10 @@ use std::collections::HashMap;
 
 use buffa::Message as _;
 
+use super::super::proto;
 use super::{
-    super::proto, ChatRequest, Message, context_answer, decode, fresh_id, kv_answer,
-    newest_user_text, refusal_answer, run_message,
+    ChatRequest, Message, context_answer, decode, fresh_id, kv_answer, newest_user_text,
+    refusal_answer, run_message,
 };
 use crate::protocol::Part;
 
@@ -28,25 +29,14 @@ fn the_assembled_bytes_decode_back_to_what_the_assembly_promised() {
     let bytes = run_message(&request()).expect("the assembly encodes");
     let decoded = proto::ClientMessage::decode_from_slice(&bytes).expect("what was sent decodes");
 
-    let run = decoded
-        .run_request
-        .as_option()
-        .expect("a run request first");
-    assert!(
-        run.conversation_state.is_set(),
-        "the state is present even when it holds nothing"
-    );
+    let run = decoded.run_request.as_option().expect("a run request first");
+    assert!(run.conversation_state.is_set(), "the state is present even when it holds nothing");
 
-    let model = run
-        .model_details
-        .as_option()
-        .expect("the model description");
+    let model = run.model_details.as_option().expect("the model description");
     assert_eq!(model.model_id.as_deref(), Some("gpt-5.3-codex"));
     assert_eq!(model.display_name.as_deref(), Some("gpt-5.3-codex"));
     assert_eq!(
-        run.requested_model
-            .as_option()
-            .and_then(|requested| requested.model_id.as_deref()),
+        run.requested_model.as_option().and_then(|requested| requested.model_id.as_deref()),
         Some("gpt-5.3-codex"),
         "the model is named on both channels the server reads"
     );
@@ -84,18 +74,12 @@ fn the_system_prompt_never_rides_the_run_request() {
 #[test]
 fn the_context_answer_echoes_the_ids_and_carries_the_prompt_on_cloud_rule() {
     let bytes = context_answer(
-        decode::ContextAsk {
-            id: Some(7),
-            exec_id: Some("exec-abc".to_owned()),
-        },
+        decode::ContextAsk { id: Some(7), exec_id: Some("exec-abc".to_owned()) },
         Some("You are terse."),
     );
     let decoded = proto::ClientMessage::decode_from_slice(&bytes).expect("what was sent decodes");
 
-    assert!(
-        decoded.run_request.as_option().is_none(),
-        "an answer is not a second run request"
-    );
+    assert!(decoded.run_request.as_option().is_none(), "an answer is not a second run request");
     let answer = decoded.exec_response.as_option().expect("the exec answer");
     assert_eq!(answer.id, Some(7), "the id the server minted comes back");
     assert_eq!(answer.exec_id.as_deref(), Some("exec-abc"));
@@ -115,19 +99,10 @@ fn the_context_answer_echoes_the_ids_and_carries_the_prompt_on_cloud_rule() {
 #[test]
 fn a_promptless_turn_answers_with_a_present_but_empty_context() {
     for system in [None, Some("")] {
-        let bytes = context_answer(
-            decode::ContextAsk {
-                id: None,
-                exec_id: None,
-            },
-            system,
-        );
+        let bytes = context_answer(decode::ContextAsk { id: None, exec_id: None }, system);
         let decoded = proto::ClientMessage::decode_from_slice(&bytes).expect("decodes");
         let answer = decoded.exec_response.as_option().expect("the exec answer");
-        assert_eq!(
-            answer.id, None,
-            "an id the server never sent is not invented"
-        );
+        assert_eq!(answer.id, None, "an id the server never sent is not invented");
 
         let context = answer
             .request_context_result
@@ -135,10 +110,7 @@ fn a_promptless_turn_answers_with_a_present_but_empty_context() {
             .and_then(|result| result.success.as_option())
             .and_then(|success| success.request_context.as_option())
             .expect("the context is present even without a prompt");
-        assert_eq!(
-            context.cloud_rule, None,
-            "an absent prompt is absent, not empty"
-        );
+        assert_eq!(context.cloud_rule, None, "an absent prompt is absent, not empty");
     }
 }
 
@@ -148,10 +120,8 @@ fn a_promptless_turn_answers_with_a_present_but_empty_context() {
 /// then the stream close that ends the exchange.
 #[test]
 fn a_refused_exec_is_a_throw_naming_the_kind_and_then_a_stream_close() {
-    let refused = refusal_answer(&decode::ExecRefusal {
-        id: Some(5),
-        kind: "shell_stream_args".to_owned(),
-    });
+    let refused =
+        refusal_answer(&decode::ExecRefusal { id: Some(5), kind: "shell_stream_args".to_owned() });
     assert_eq!(refused.len(), 2, "a throw, and the close that ends it");
 
     let decoded: Vec<proto::ClientMessage> = refused
@@ -176,27 +146,19 @@ fn a_refused_exec_is_a_throw_naming_the_kind_and_then_a_stream_close() {
         .and_then(|control| control.throw.as_option())
         .expect("the throw first");
     assert_eq!(thrown.id, Some(5), "the id the server minted comes back");
-    let reason = thrown
-        .error
-        .as_deref()
-        .expect("a reason, because the reason is the whole message");
+    let reason =
+        thrown.error.as_deref().expect("a reason, because the reason is the whole message");
     assert!(
         reason.contains("ganja") && reason.contains("shell_stream_args"),
         "the refusal names who refused and what: {reason}"
     );
 
-    let closed = decoded[1]
-        .exec_control
-        .as_option()
-        .expect("the control channel again");
+    let closed = decoded[1].exec_control.as_option().expect("the control channel again");
     assert!(
         closed.throw.as_option().is_none(),
         "the close is the exchange ending, not a second failure"
     );
-    assert_eq!(
-        closed.stream_close.as_option().and_then(|close| close.id),
-        Some(5)
-    );
+    assert_eq!(closed.stream_close.as_option().and_then(|close| close.id), Some(5));
 
     // The arm numbers themselves, on the wire: exec_control = 5 wraps
     // the ClientMessage (tag 0x2a), stream_close = 1 (0x0a) and
@@ -214,10 +176,8 @@ fn a_refused_exec_is_a_throw_naming_the_kind_and_then_a_stream_close() {
 /// either — the same discipline the context and kv answers hold.
 #[test]
 fn a_refusal_for_an_exec_without_an_id_invents_none() {
-    let refused = refusal_answer(&decode::ExecRefusal {
-        id: None,
-        kind: "no recognizable kind".to_owned(),
-    });
+    let refused =
+        refusal_answer(&decode::ExecRefusal { id: None, kind: "no recognizable kind".to_owned() });
 
     let decoded = proto::ClientMessage::decode_from_slice(&refused[0]).expect("decodes");
     let thrown = decoded
@@ -227,10 +187,7 @@ fn a_refusal_for_an_exec_without_an_id_invents_none() {
         .expect("the throw");
     assert_eq!(thrown.id, None);
     assert!(
-        thrown
-            .error
-            .as_deref()
-            .is_some_and(|reason| reason.contains("no recognizable kind")),
+        thrown.error.as_deref().is_some_and(|reason| reason.contains("no recognizable kind")),
         "an unnameable kind is still named as far as it can be: {thrown:?}"
     );
 }
@@ -246,10 +203,7 @@ fn a_kv_set_is_stored_and_acked_and_the_get_that_follows_returns_it() {
     let stored = kv_answer(
         decode::KvAsk {
             id: Some(11),
-            op: decode::KvOp::Set {
-                blob_id: b"blob-a".to_vec(),
-                data: b"opaque-state".to_vec(),
-            },
+            op: decode::KvOp::Set { blob_id: b"blob-a".to_vec(), data: b"opaque-state".to_vec() },
         },
         &mut blobs,
     );
@@ -267,22 +221,14 @@ fn a_kv_set_is_stored_and_acked_and_the_get_that_follows_returns_it() {
     assert!(answer.get_blob_result.as_option().is_none());
 
     let read = kv_answer(
-        decode::KvAsk {
-            id: Some(12),
-            op: decode::KvOp::Get {
-                blob_id: b"blob-a".to_vec(),
-            },
-        },
+        decode::KvAsk { id: Some(12), op: decode::KvOp::Get { blob_id: b"blob-a".to_vec() } },
         &mut blobs,
     );
     let decoded = proto::ClientMessage::decode_from_slice(&read).expect("decodes");
     let answer = decoded.kv_response.as_option().expect("the kv answer");
     assert_eq!(answer.id, Some(12));
     assert_eq!(
-        answer
-            .get_blob_result
-            .as_option()
-            .and_then(|result| result.blob_data.as_deref()),
+        answer.get_blob_result.as_option().and_then(|result| result.blob_data.as_deref()),
         Some(b"opaque-state".as_slice()),
         "the get reads back exactly what the set stored"
     );
@@ -297,38 +243,22 @@ fn a_kv_get_before_any_set_answers_not_found_without_inventing_bytes() {
     let mut blobs = HashMap::new();
 
     let read = kv_answer(
-        decode::KvAsk {
-            id: None,
-            op: decode::KvOp::Get {
-                blob_id: b"blob-b".to_vec(),
-            },
-        },
+        decode::KvAsk { id: None, op: decode::KvOp::Get { blob_id: b"blob-b".to_vec() } },
         &mut blobs,
     );
     let decoded = proto::ClientMessage::decode_from_slice(&read).expect("decodes");
     let answer = decoded.kv_response.as_option().expect("the kv answer");
-    assert_eq!(
-        answer.id, None,
-        "an id the server never sent is not invented"
-    );
-    let result = answer
-        .get_blob_result
-        .as_option()
-        .expect("the result is present even without the blob");
-    assert_eq!(
-        result.blob_data, None,
-        "not-found is absence, not empty bytes"
-    );
+    assert_eq!(answer.id, None, "an id the server never sent is not invented");
+    let result =
+        answer.get_blob_result.as_option().expect("the result is present even without the blob");
+    assert_eq!(result.blob_data, None, "not-found is absence, not empty bytes");
     assert!(blobs.is_empty(), "a get stores nothing");
 }
 
 #[test]
 fn the_newest_user_message_wins_and_other_roles_are_passed_over() {
-    let conversation = [
-        Message::user("first"),
-        Message::assistant("gpt-5.3-codex"),
-        Message::user("second"),
-    ];
+    let conversation =
+        [Message::user("first"), Message::assistant("gpt-5.3-codex"), Message::user("second")];
     assert_eq!(newest_user_text(&conversation), "second");
     assert_eq!(newest_user_text(&[]), "");
 }
@@ -338,9 +268,6 @@ fn a_minted_id_is_a_v4_uuid_and_two_are_two() {
     let id = fresh_id().expect("entropy is available");
     assert_eq!(id.len(), 36);
     assert_eq!(id.as_bytes()[14], b'4', "the version nibble: {id}");
-    assert!(
-        matches!(id.as_bytes()[19], b'8' | b'9' | b'a' | b'b'),
-        "the variant bits: {id}"
-    );
+    assert!(matches!(id.as_bytes()[19], b'8' | b'9' | b'a' | b'b'), "the variant bits: {id}");
     assert_ne!(id, fresh_id().expect("entropy is available"));
 }

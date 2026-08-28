@@ -7,12 +7,7 @@ use crate::theme::{Theme, Themes};
 fn render(source: &str, width: usize) -> Vec<String> {
     rendered_with(source, width, &Theme::default())
         .into_iter()
-        .map(|line| {
-            line.spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>()
-        })
+        .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect::<String>())
         .collect()
 }
 
@@ -20,10 +15,7 @@ fn rendered_with(source: &str, width: usize, theme: &Theme) -> Vec<ratatui::text
     let mut document = Document::default();
     document.update(source, theme);
 
-    document
-        .lines()
-        .flat_map(|line| wrap(line, width))
-        .collect()
+    document.lines().flat_map(|line| wrap(line, width)).collect()
 }
 
 /// The logical lines a source segments and renders to, before any width.
@@ -54,9 +46,7 @@ fn style_of(source: &str, needle: &str, theme: &Theme) -> Style {
 fn themed(name: &str) -> Theme {
     let mut themes = Themes::builtin();
 
-    themes
-        .select(name)
-        .unwrap_or_else(|| panic!("{name} is builtin"))
+    themes.select(name).unwrap_or_else(|| panic!("{name} is builtin"))
 }
 
 // ---- the plain-text invariant -------------------------------------
@@ -76,18 +66,12 @@ fn a_newline_inside_a_paragraph_is_a_hard_line_break() {
 /// the screen.
 #[test]
 fn text_renders_verbatim_including_the_whitespace_inside_it() {
-    assert_eq!(
-        render("two  spaces\tand a tab", 80),
-        vec!["two  spaces\tand a tab".to_owned()]
-    );
+    assert_eq!(render("two  spaces\tand a tab", 80), vec!["two  spaces\tand a tab".to_owned()]);
 }
 
 #[test]
 fn a_blank_line_between_paragraphs_stays_one_blank_line() {
-    assert_eq!(
-        render("one\n\ntwo", 20),
-        vec!["one".to_owned(), String::new(), "two".to_owned()]
-    );
+    assert_eq!(render("one\n\ntwo", 20), vec!["one".to_owned(), String::new(), "two".to_owned()]);
 }
 
 /// What P1's wrap did, and what this has to keep doing.
@@ -109,10 +93,7 @@ fn a_word_wider_than_the_viewport_is_chopped_not_dropped() {
 
 #[test]
 fn wrapping_measures_display_width_not_bytes() {
-    assert_eq!(
-        render("ああ ああ", 5),
-        vec!["ああ".to_owned(), "ああ".to_owned()]
-    );
+    assert_eq!(render("ああ ああ", 5), vec!["ああ".to_owned(), "ああ".to_owned()]);
 }
 
 #[test]
@@ -126,11 +107,7 @@ fn a_zero_width_viewport_renders_nothing() {
 fn a_theme_that_names_no_markdown_key_falls_back_to_the_body_role() {
     let theme = Theme::default();
 
-    assert_eq!(
-        theme.color("markdownText"),
-        None,
-        "the fixture must be bare"
-    );
+    assert_eq!(theme.color("markdownText"), None, "the fixture must be bare");
     assert_eq!(style_of("plain prose", "plain prose", &theme), theme.fg);
 }
 
@@ -202,21 +179,9 @@ fn each_construct_takes_the_theme_key_ruled_for_it() {
                 .add_modifier(Modifier::BOLD)
                 .add_modifier(Modifier::UNDERLINED),
         ),
-        (
-            "## next",
-            "next",
-            color("markdownHeading").add_modifier(Modifier::BOLD),
-        ),
-        (
-            "**loud**",
-            "loud",
-            color("markdownStrong").add_modifier(Modifier::BOLD),
-        ),
-        (
-            "*soft*",
-            "soft",
-            color("markdownEmph").add_modifier(Modifier::ITALIC),
-        ),
+        ("## next", "next", color("markdownHeading").add_modifier(Modifier::BOLD)),
+        ("**loud**", "loud", color("markdownStrong").add_modifier(Modifier::BOLD)),
+        ("*soft*", "soft", color("markdownEmph").add_modifier(Modifier::ITALIC)),
         ("`code`", "code", color("markdownCode")),
         ("- item", "- ", color("markdownListItem")),
     ];
@@ -271,11 +236,7 @@ fn emphasis_code_and_heading_markers_are_never_drawn() {
 fn a_list_keeps_its_source_marker_and_hangs_its_wrapped_text() {
     assert_eq!(
         render("* alpha beta gamma", 9),
-        vec![
-            "* alpha".to_owned(),
-            "  beta".to_owned(),
-            "  gamma".to_owned()
-        ],
+        vec!["* alpha".to_owned(), "  beta".to_owned(), "  gamma".to_owned()],
         "the source bullet is kept and continuation lines hang under it"
     );
     assert_eq!(
@@ -341,16 +302,10 @@ fn a_fence_whose_language_is_unknown_or_absent_is_flat_code() {
         .and_then(crate::theme::Rgba::color)
         .expect("aura names markdownCode");
 
-    for source in [
-        "```\nfn main() {}\n```",
-        "```notalanguage\nfn main() {}\n```",
-        "    fn main() {}",
-    ] {
-        assert_eq!(
-            style_of(source, "fn main() {}", &theme),
-            Style::new().fg(code),
-            "{source}"
-        );
+    for source in
+        ["```\nfn main() {}\n```", "```notalanguage\nfn main() {}\n```", "    fn main() {}"]
+    {
+        assert_eq!(style_of(source, "fn main() {}", &theme), Style::new().fg(code), "{source}");
     }
 }
 
@@ -382,15 +337,8 @@ fn a_streamed_delta_styles_only_the_block_that_is_still_growing() {
     document.update("# title\n\n```rust\nfn main() {}\n```\n\nand th", &theme);
     assert_eq!(document.styled(), 3, "three blocks on the first pass");
 
-    document.update(
-        "# title\n\n```rust\nfn main() {}\n```\n\nand then some",
-        &theme,
-    );
-    assert_eq!(
-        document.styled(),
-        4,
-        "only the trailing paragraph may be styled again"
-    );
+    document.update("# title\n\n```rust\nfn main() {}\n```\n\nand then some", &theme);
+    assert_eq!(document.styled(), 4, "only the trailing paragraph may be styled again");
 }
 
 #[test]
@@ -423,11 +371,7 @@ fn a_theme_switch_restyles_every_block_the_cache_holds() {
     assert_eq!(document.styled(), 2);
 
     document.update("alpha\n\nbeta", &second);
-    assert_eq!(
-        document.styled(),
-        4,
-        "both blocks have to be styled again under the new palette"
-    );
+    assert_eq!(document.styled(), 4, "both blocks have to be styled again under the new palette");
 }
 
 /// The two stages are independent: a resize is stage 2's business, and it
@@ -444,10 +388,7 @@ fn a_width_change_alone_never_reparses_or_restyles_a_block() {
         // which a resize is; the source is what says there is nothing to
         // do.
         document.update("alpha beta gamma delta", &theme);
-        let lines: Vec<_> = document
-            .lines()
-            .flat_map(|line| wrap(line, width))
-            .collect();
+        let lines: Vec<_> = document.lines().flat_map(|line| wrap(line, width)).collect();
         assert!(!lines.is_empty(), "width {width} rendered nothing");
     }
 
@@ -479,15 +420,9 @@ fn a_table_row_is_clipped_rather_than_wrapped() {
     let lines = render("| alpha | beta |\n| - | - |\n| 1 | 2 |\n", 9);
 
     for line in &lines {
-        assert!(
-            line.chars().count() <= 9,
-            "a grid row must not wrap, got {line:?}"
-        );
+        assert!(line.chars().count() <= 9, "a grid row must not wrap, got {line:?}");
     }
-    assert!(
-        lines.iter().any(|line| line.starts_with('\u{2502}')),
-        "got {lines:?}"
-    );
+    assert!(lines.iter().any(|line| line.starts_with('\u{2502}')), "got {lines:?}");
 }
 
 #[test]

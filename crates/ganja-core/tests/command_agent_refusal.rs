@@ -15,20 +15,15 @@
 //! `GANJA_CONFIG_HOME` and a plain `cargo test` runs a binary's tests on
 //! parallel threads.
 
-use std::{
-    fs,
-    io::{self, Write as _},
-    sync::Arc,
-};
+use std::fs;
+use std::io::{self, Write as _};
+use std::sync::Arc;
 
-use ganja_core::{
-    Config, Engine, EngineError,
-    command::Registry,
-    config::{CONFIG_ENV, CONFIG_HOME_ENV},
-    permission::Permissions,
-    protocol::Command,
-    tool,
-};
+use ganja_core::command::Registry;
+use ganja_core::config::{CONFIG_ENV, CONFIG_HOME_ENV};
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::Command;
+use ganja_core::{Config, Engine, EngineError, tool};
 use ganja_testkit::{LogCapture as Capture, ScriptedProvider, agent_registry, plant};
 use serde_json::json;
 
@@ -61,11 +56,7 @@ async fn a_command_naming_an_agent_nobody_has_is_refused_by_file_at_load_and_by_
 
     // Three files: one naming a real agent, one naming nobody, one naming no
     // agent at all. Only the middle one is in question.
-    plant(
-        &project,
-        ".ganja/commands/planned.md",
-        "---\nagent: plan\n---\nplan the work\n",
-    );
+    plant(&project, ".ganja/commands/planned.md", "---\nagent: plan\n---\nplan the work\n");
     plant(
         &project,
         ".ganja/commands/ghosted.md",
@@ -107,12 +98,7 @@ async fn a_command_naming_an_agent_nobody_has_is_refused_by_file_at_load_and_by_
 
     assert_eq!(
         engine.commands().names(),
-        vec![
-            "declared".to_owned(),
-            "init".to_owned(),
-            "plain".to_owned(),
-            "planned".to_owned(),
-        ],
+        vec!["declared".to_owned(), "init".to_owned(), "plain".to_owned(), "planned".to_owned(),],
         "the file naming nobody is gone; the file naming a real agent, the \
          file naming none, and the config entry all stay"
     );
@@ -120,9 +106,7 @@ async fn a_command_naming_an_agent_nobody_has_is_refused_by_file_at_load_and_by_
     // The refusal named the file somebody has to edit, and the agent that is
     // not there — the two things a log line has to carry to be actionable.
     let logged = capture.logged();
-    io::stdout()
-        .write_all(logged.as_bytes())
-        .expect("the captured log is printable");
+    io::stdout().write_all(logged.as_bytes()).expect("the captured log is printable");
     assert!(
         logged.contains("a command file names an agent this session does not have")
             && logged.contains("ghosted.md")
@@ -137,10 +121,7 @@ async fn a_command_naming_an_agent_nobody_has_is_refused_by_file_at_load_and_by_
     // The config-declared half, refused at dispatch and by name — the check
     // this build has always had, still there.
     let refused = engine
-        .send(Command::RunCommand {
-            name: "declared".to_owned(),
-            args: String::new(),
-        })
+        .send(Command::RunCommand { name: "declared".to_owned(), args: String::new() })
         .await
         .expect_err("no agent answers to that name");
     let EngineError::UnknownAgent { name } = &refused else {
@@ -151,12 +132,7 @@ async fn a_command_naming_an_agent_nobody_has_is_refused_by_file_at_load_and_by_
     // And the file command that named a real agent still runs as far as the
     // agent lookup, which is all this test is about: it is not refused.
     assert!(
-        engine
-            .commands()
-            .get("planned")
-            .expect("the file command survived")
-            .agent
-            .as_deref()
+        engine.commands().get("planned").expect("the file command survived").agent.as_deref()
             == Some("plan")
     );
 }

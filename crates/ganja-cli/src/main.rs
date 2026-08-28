@@ -13,20 +13,20 @@
 // larger, unrelated refactor this file's growth does not otherwise call for.
 #![recursion_limit = "256"]
 
-use std::{
-    io::{self, IsTerminal as _, Read as _, Write as _},
-    path::PathBuf,
-    sync::{Arc, LazyLock},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::io::{self, IsTerminal as _, Read as _, Write as _};
+use std::path::PathBuf;
+use std::sync::{Arc, LazyLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use ganja_core::{McpStatus, SessionInfo, Storage, auth, catalog};
 use ganja_permission::Project;
 use ganja_protocol::Usage;
-use jiff::{Timestamp, tz::TimeZone};
-use secrecy::{SecretString, zeroize::Zeroize as _};
+use jiff::Timestamp;
+use jiff::tz::TimeZone;
+use secrecy::SecretString;
+use secrecy::zeroize::Zeroize as _;
 use tracing_appender::non_blocking::WorkerGuard;
 
 mod assemble;
@@ -299,12 +299,8 @@ impl MemberArgs {
 
         Some(ganja_tui::member::Flags {
             agent_id,
-            name: self
-                .agent_name
-                .expect("clap requires --agent-name beside --agent-id"),
-            team: self
-                .team_name
-                .expect("clap requires --team-name beside --agent-id"),
+            name: self.agent_name.expect("clap requires --agent-name beside --agent-id"),
+            team: self.team_name.expect("clap requires --team-name beside --agent-id"),
             color: self.agent_color,
             parent_session_id: self
                 .parent_session_id
@@ -664,12 +660,7 @@ fn configured_provider_exists(provider: &NamedProvider) -> Result<()> {
         return Ok(());
     }
 
-    let declared = config
-        .provider
-        .keys()
-        .map(String::as_str)
-        .collect::<Vec<_>>()
-        .join(", ");
+    let declared = config.provider.keys().map(String::as_str).collect::<Vec<_>>().join(", ");
     bail!(
         "no provider `{id}`; this build ships {}{}",
         ganja_core::provider::PROVIDERS.join(", "),
@@ -836,9 +827,7 @@ async fn main() -> Result<()> {
             #[cfg(unix)]
             let lister: Option<Box<dyn ganja_tui::lister::Lister>> =
                 Some(Box::new(lister::RegistryLister::new(
-                    cli.socket_dir
-                        .clone()
-                        .unwrap_or_else(ganja_serve::socket::directory),
+                    cli.socket_dir.clone().unwrap_or_else(ganja_serve::socket::directory),
                 )));
             #[cfg(not(unix))]
             let lister: Option<Box<dyn ganja_tui::lister::Lister>> = None;
@@ -872,21 +861,13 @@ async fn main() -> Result<()> {
 
 fn config_command(action: Config) -> Result<()> {
     match action {
-        Config::ImportOpencode {
-            file,
-            global,
-            dry_run,
-        } => import::import_opencode(file, global, dry_run),
-        Config::Migrate {
-            file,
-            global,
-            dry_run,
-        } => migrate::migrate(file, global, dry_run),
-        Config::ImportClaudeHooks {
-            file,
-            global,
-            dry_run,
-        } => claude_hooks::import_claude_hooks(file, global, dry_run),
+        Config::ImportOpencode { file, global, dry_run } => {
+            import::import_opencode(file, global, dry_run)
+        }
+        Config::Migrate { file, global, dry_run } => migrate::migrate(file, global, dry_run),
+        Config::ImportClaudeHooks { file, global, dry_run } => {
+            claude_hooks::import_claude_hooks(file, global, dry_run)
+        }
     }
 }
 
@@ -920,17 +901,12 @@ fn install_logging(verbose: bool) -> Option<WorkerGuard> {
     // but not before writing its own complaint to stderr, and it lands on the
     // one run where a user has the least context for reading it as harmless.
     if let Err(error) = std::fs::create_dir_all(&directory) {
-        return declined(&format!(
-            "{} could not be created: {error}",
-            directory.display()
-        ));
+        return declined(&format!("{} could not be created: {error}", directory.display()));
     }
 
     let (writer, guard) = tracing_appender::non_blocking(LocalDaily::new(directory));
     let filter = resolve_filter(
-        std::env::var(tracing_subscriber::EnvFilter::DEFAULT_ENV)
-            .ok()
-            .as_deref(),
+        std::env::var(tracing_subscriber::EnvFilter::DEFAULT_ENV).ok().as_deref(),
         verbose,
     );
     let installed = tracing_subscriber::fmt()
@@ -976,10 +952,7 @@ static LOCAL_TIMEZONE: LazyLock<TimeZone> =
 
 impl LocalDaily {
     fn new(directory: PathBuf) -> Self {
-        Self {
-            directory,
-            open: None,
-        }
+        Self { directory, open: None }
     }
 
     /// The file for today, rolled — and the directory pruned — when the date
@@ -1170,11 +1143,7 @@ async fn mcp_command(action: Option<McpAction>) -> Result<()> {
 
     let standing = servers.status();
     let counts = servers.tool_counts();
-    let lent: Vec<String> = servers
-        .tools()
-        .iter()
-        .map(|tool| tool.id().to_owned())
-        .collect();
+    let lent: Vec<String> = servers.tools().iter().map(|tool| tool.id().to_owned()).collect();
     servers.shutdown().await;
 
     println!("{:<20}  {:<9}  {:<5}  ADDRESS", "SERVER", "STATUS", "TOOLS");
@@ -1350,10 +1319,7 @@ async fn sessions_command(args: SessionsArgs) -> Result<()> {
         return Ok(());
     }
 
-    println!(
-        "{:<21}  {:>9}  {:>7}  TITLE",
-        "SESSION", "UPDATED", "TOKENS"
-    );
+    println!("{:<21}  {:>9}  {:>7}  TITLE", "SESSION", "UPDATED", "TOKENS");
 
     let now = millis_now();
     for session in sessions {
@@ -1415,7 +1381,9 @@ async fn sessions_command(args: SessionsArgs) -> Result<()> {
 /// client and never `reqwest`.
 #[cfg(unix)]
 async fn live_sessions_command(directory: Option<PathBuf>) -> Result<()> {
-    use std::{collections::HashMap, fs, os::unix::fs::FileTypeExt as _};
+    use std::collections::HashMap;
+    use std::fs;
+    use std::os::unix::fs::FileTypeExt as _;
 
     use ganja_core::tool::registry;
     use ganja_serve::socket::EXTENSION;
@@ -1459,10 +1427,7 @@ async fn live_sessions_command(directory: Option<PathBuf>) -> Result<()> {
 
     let directory = directory.unwrap_or_else(ganja_serve::socket::directory);
     if !private_socket_directory(&directory)? {
-        println!(
-            "no live sessions; nothing serves a socket under {}",
-            directory.display()
-        );
+        println!("no live sessions; nothing serves a socket under {}", directory.display());
 
         return Ok(());
     }
@@ -1474,10 +1439,7 @@ async fn live_sessions_command(directory: Option<PathBuf>) -> Result<()> {
     // registry that will not read is a reason to show `-`, not a reason to
     // refuse a listing of what is actually running.
     let mut records: HashMap<String, registry::Record> = match registry::list(&directory) {
-        Ok(registered) => registered
-            .into_iter()
-            .map(|entry| (entry.stem, entry.record))
-            .collect(),
+        Ok(registered) => registered.into_iter().map(|entry| (entry.stem, entry.record)).collect(),
         Err(error) => {
             eprintln!(
                 "note: the registry at {} could not be read: {error}; names are unavailable",
@@ -1518,11 +1480,7 @@ async fn live_sessions_command(directory: Option<PathBuf>) -> Result<()> {
         // The registry's own stem for this socket — the filename minus its
         // extension, exactly [`registry::list`]'s own — so its record, when
         // there is one, is found the one way every reader finds it.
-        let stem = path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .unwrap_or_default()
-            .to_owned();
+        let stem = path.file_stem().and_then(|stem| stem.to_str()).unwrap_or_default().to_owned();
         let name = records
             .get(&stem)
             .map_or_else(|| UNNAMED.to_owned(), |record| printable_name(&record.name));
@@ -1547,10 +1505,7 @@ async fn live_sessions_command(directory: Option<PathBuf>) -> Result<()> {
                 | ganja_client::ClientError::Unauthorized { .. }
                 | ganja_client::ClientError::Skew { .. }),
             )) => {
-                eprintln!(
-                    "note: {} answered, but not with a session: {refusal}",
-                    path.display()
-                );
+                eprintln!("note: {} answered, but not with a session: {refusal}", path.display());
                 live.push((UNREADABLE.to_owned(), name, path));
             }
             Ok(Err(_)) | Err(_) => {
@@ -1598,10 +1553,7 @@ async fn live_sessions_command(directory: Option<PathBuf>) -> Result<()> {
         }
         let record_path = registry::record_path(&directory, stem);
         let Some(lock) = claim_name(&socket)? else {
-            eprintln!(
-                "note: {} is held by a live server; left in place",
-                record_path.display()
-            );
+            eprintln!("note: {} is held by a live server; left in place", record_path.display());
             continue;
         };
         remove_record(&record_path, "orphaned")?;
@@ -1609,10 +1561,7 @@ async fn live_sessions_command(directory: Option<PathBuf>) -> Result<()> {
     }
 
     if live.is_empty() {
-        println!(
-            "no live sessions; nothing serves a socket under {}",
-            directory.display()
-        );
+        println!("no live sessions; nothing serves a socket under {}", directory.display());
 
         return Ok(());
     }
@@ -1624,11 +1573,7 @@ async fn live_sessions_command(directory: Option<PathBuf>) -> Result<()> {
     let width = ganja_core::tool::registry::MOST_NAME_POINTS;
     println!("{:<36}  {:<width$}  SOCKET", "SESSION", "NAME");
     for (session, name, path) in live {
-        println!(
-            "{:<36}  {name:<width$}  {}",
-            printable_session(&session),
-            path.display()
-        );
+        println!("{:<36}  {name:<width$}  {}", printable_session(&session), path.display());
     }
 
     Ok(())
@@ -1644,13 +1589,7 @@ fn printable_session(session: &str) -> String {
     session
         .chars()
         .take(36)
-        .map(|character| {
-            if character.is_ascii_graphic() {
-                character
-            } else {
-                '?'
-            }
-        })
+        .map(|character| if character.is_ascii_graphic() { character } else { '?' })
         .collect()
 }
 
@@ -1665,13 +1604,7 @@ fn printable_session(session: &str) -> String {
 fn printable_name(name: &str) -> String {
     name.chars()
         .take(ganja_core::tool::registry::MOST_NAME_POINTS)
-        .map(|character| {
-            if character.is_control() {
-                '?'
-            } else {
-                character
-            }
-        })
+        .map(|character| if character.is_control() { '?' } else { character })
         .collect()
 }
 
@@ -1684,16 +1617,15 @@ fn printable_name(name: &str) -> String {
 /// should make the directory.
 #[cfg(unix)]
 fn private_socket_directory(directory: &std::path::Path) -> Result<bool> {
-    use ganja_serve::{DirectoryRefusal, ServeError, socket::vet_directory};
+    use ganja_serve::socket::vet_directory;
+    use ganja_serve::{DirectoryRefusal, ServeError};
 
     match vet_directory(directory) {
         Ok(()) => Ok(true),
         Err(DirectoryRefusal::Io(error)) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(reason) => Err(ServeError::UnsafeSocketDirectory {
-            path: directory.to_path_buf(),
-            reason,
+        Err(reason) => {
+            Err(ServeError::UnsafeSocketDirectory { path: directory.to_path_buf(), reason }.into())
         }
-        .into()),
     }
 }
 
@@ -1714,10 +1646,7 @@ fn private_socket_directory(directory: &std::path::Path) -> Result<bool> {
 #[cfg(unix)]
 fn claim_name(socket: &std::path::Path) -> Result<Option<ganja_serve::socket::NameLock>> {
     ganja_serve::socket::NameLock::claim(socket).with_context(|| {
-        format!(
-            "failed to claim {}",
-            ganja_serve::socket::lock_path(socket).display()
-        )
+        format!("failed to claim {}", ganja_serve::socket::lock_path(socket).display())
     })
 }
 
@@ -1753,11 +1682,7 @@ fn title(session: &SessionInfo) -> String {
     let trimmed = printable(title);
     let trimmed = trimmed.trim();
 
-    if trimmed.is_empty() {
-        UNTITLED.to_owned()
-    } else {
-        trimmed.to_owned()
-    }
+    if trimmed.is_empty() { UNTITLED.to_owned() } else { trimmed.to_owned() }
 }
 
 /// `text` with everything that would move the cursor replaced by a space.
@@ -1768,15 +1693,7 @@ fn title(session: &SessionInfo) -> String {
 /// newline would break one row of a table into two and an escape would repaint
 /// the screen, so neither reaches `println!`.
 fn printable(text: &str) -> String {
-    text.chars()
-        .map(|character| {
-            if character.is_control() {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect()
+    text.chars().map(|character| if character.is_control() { ' ' } else { character }).collect()
 }
 
 /// Every token a session was billed for.
@@ -1793,9 +1710,7 @@ fn billed_tokens(usage: &Usage) -> u64 {
 fn millis_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| {
-            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
-        })
+        .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// Renders how long ago `then` was, relative to `now`, both in milliseconds
@@ -1828,21 +1743,12 @@ fn age(then: u64, now: u64) -> String {
 
 async fn auth_command(action: Auth) -> Result<()> {
     match action {
-        Auth::Login {
-            provider,
-            key,
-            method,
-            deployment,
-            enterprise_url,
-        } => {
+        Auth::Login { provider, key, method, deployment, enterprise_url } => {
             login(
                 provider,
                 key,
                 method,
-                login::DeploymentAnswer {
-                    kind: deployment,
-                    enterprise_url,
-                },
+                login::DeploymentAnswer { kind: deployment, enterprise_url },
             )
             .await
         }
@@ -1927,10 +1833,7 @@ fn store_key(provider: &NamedProvider, key: Option<String>) -> Result<()> {
     auth::set_credential(provider.as_str(), key)
         .with_context(|| format!("failed to store the {provider} key"))?;
 
-    println!(
-        "stored the {provider} key {tail} in {}",
-        auth::store_path()?.display()
-    );
+    println!("stored the {provider} key {tail} in {}", auth::store_path()?.display());
     warn_if_shadowed(provider)
 }
 
@@ -1976,11 +1879,7 @@ fn list() -> Result<()> {
     if entries.is_empty() {
         println!(
             "no credentials; run `ganja auth login` or set one of {}",
-            auth::KEY_VARS
-                .iter()
-                .map(|(_, variable)| *variable)
-                .collect::<Vec<_>>()
-                .join(", ")
+            auth::KEY_VARS.iter().map(|(_, variable)| *variable).collect::<Vec<_>>().join(", ")
         );
 
         return Ok(());
@@ -2301,10 +2200,9 @@ async fn refreshed() {
         Ok(true) => {}
         // Forced, so the cache's five-minute debounce cannot be the reason
         // nothing was fetched; the switch is the only one left.
-        Ok(false) => eprintln!(
-            "note: {} is set, so the catalog was not fetched",
-            catalog::DISABLE_FETCH_ENV
-        ),
+        Ok(false) => {
+            eprintln!("note: {} is set, so the catalog was not fetched", catalog::DISABLE_FETCH_ENV)
+        }
         Err(error) => eprintln!("note: the catalog was not refreshed: {error}"),
     }
 }

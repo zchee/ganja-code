@@ -17,10 +17,7 @@ fn valid() -> Options {
 
 #[test]
 fn an_explicit_initial_command_is_valid() {
-    Options::new()
-        .with_initial_command(["new-session", "-A", "-s", "safe"])
-        .validate()
-        .unwrap();
+    Options::new().with_initial_command(["new-session", "-A", "-s", "safe"]).validate().unwrap();
 }
 
 #[test]
@@ -53,28 +50,19 @@ fn a_zero_event_buffer_is_rejected() {
 
 #[test]
 fn a_zero_shutdown_timeout_is_rejected() {
-    let err = valid()
-        .with_shutdown_timeout(Duration::ZERO)
-        .validate()
-        .unwrap_err();
+    let err = valid().with_shutdown_timeout(Duration::ZERO).validate().unwrap_err();
     assert!(err.to_string().contains("shutdown_timeout must be > 0"));
 }
 
 #[test]
 fn an_initial_command_argument_with_a_newline_is_rejected() {
-    let err = Options::new()
-        .with_initial_command(["new-session\n"])
-        .validate()
-        .unwrap_err();
+    let err = Options::new().with_initial_command(["new-session\n"]).validate().unwrap_err();
     assert!(err.to_string().contains("contains a newline"));
 }
 
 #[test]
 fn a_session_name_with_a_newline_is_rejected() {
-    let err = Options::new()
-        .with_session_name("bad\n")
-        .validate()
-        .unwrap_err();
+    let err = Options::new().with_session_name("bad\n").validate().unwrap_err();
     assert!(err.to_string().contains("session_name contains a newline"));
 }
 
@@ -91,21 +79,13 @@ fn initial_command_and_session_name_conflict_is_rejected() {
 #[test]
 fn launch_args_attach_explicit_session() {
     let opts = Options::new().with_session_name("safe");
-    assert_eq!(
-        opts.launch_args(),
-        vec!["-C", "attach-session", "-t", "safe"]
-    );
+    assert_eq!(opts.launch_args(), vec!["-C", "attach-session", "-t", "safe"]);
 }
 
 #[test]
 fn launch_args_create_explicit_session() {
-    let opts = Options::new()
-        .with_session_name("safe")
-        .with_create_session(true);
-    assert_eq!(
-        opts.launch_args(),
-        vec!["-C", "new-session", "-A", "-s", "safe"]
-    );
+    let opts = Options::new().with_session_name("safe").with_create_session(true);
+    assert_eq!(opts.launch_args(), vec!["-C", "new-session", "-A", "-s", "safe"]);
 }
 
 #[test]
@@ -116,35 +96,21 @@ fn launch_args_socket_name_and_config() {
         .with_session_name("safe");
     assert_eq!(
         opts.launch_args(),
-        vec![
-            "-L",
-            "sock",
-            "-f",
-            "/dev/null",
-            "-C",
-            "attach-session",
-            "-t",
-            "safe"
-        ]
+        vec!["-L", "sock", "-f", "/dev/null", "-C", "attach-session", "-t", "safe"]
     );
 }
 
 #[test]
 fn launch_args_socket_path_and_initial_command() {
-    let opts = Options::new()
-        .with_socket_path("/tmp/tmux.sock")
-        .with_initial_command(["new-session", "-A", "-s", "safe"]);
+    let opts = Options::new().with_socket_path("/tmp/tmux.sock").with_initial_command([
+        "new-session",
+        "-A",
+        "-s",
+        "safe",
+    ]);
     assert_eq!(
         opts.launch_args(),
-        vec![
-            "-S",
-            "/tmp/tmux.sock",
-            "-C",
-            "new-session",
-            "-A",
-            "-s",
-            "safe"
-        ]
+        vec!["-S", "/tmp/tmux.sock", "-C", "new-session", "-A", "-s", "safe"]
     );
 }
 
@@ -162,8 +128,6 @@ fn initial_command_line_renders_the_default_attach() {
 
 #[test]
 fn initial_command_line_renders_the_default_create() {
-    let opts = Options::new()
-        .with_session_name("test")
-        .with_create_session(true);
+    let opts = Options::new().with_session_name("test").with_create_session(true);
     assert_eq!(opts.initial_command_line(), "new-session -A -s test");
 }

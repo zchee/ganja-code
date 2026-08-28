@@ -22,28 +22,28 @@
 
 mod shim_support;
 
-use std::{ffi::OsString, path::Path, sync::Arc, time::Duration};
+use std::ffi::OsString;
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
-use ganja_core::{
-    Backends, Storage, Teammates,
-    teammate::{
-        TeammateRegistry,
-        claude::ClaudePane,
-        codex::{APPROVAL_OVERRIDE, Codex, READY_MARKER, SANDBOX_OVERRIDE},
-        lead_inbox::LeadInbox,
-        pane::GanjaPane,
-        preamble::Names,
-        reaper::Pane,
-        shim_tui::{
-            self, LIVENESS_POLL, PaneFate, REFUSED_DIED, RING_DELIVERED, RING_DELIVERY_FAILED,
-            RING_NOT_READY, RING_PASTED_UNSUBMITTED, RING_READY, Readiness, ShimTui, TuiPane,
-        },
-        tmux::Server,
-    },
+use ganja_core::teammate::TeammateRegistry;
+use ganja_core::teammate::claude::ClaudePane;
+use ganja_core::teammate::codex::{APPROVAL_OVERRIDE, Codex, READY_MARKER, SANDBOX_OVERRIDE};
+use ganja_core::teammate::lead_inbox::LeadInbox;
+use ganja_core::teammate::pane::GanjaPane;
+use ganja_core::teammate::preamble::Names;
+use ganja_core::teammate::reaper::Pane;
+use ganja_core::teammate::shim_tui::{
+    self, LIVENESS_POLL, PaneFate, REFUSED_DIED, RING_DELIVERED, RING_DELIVERY_FAILED,
+    RING_NOT_READY, RING_PASTED_UNSUBMITTED, RING_READY, Readiness, ShimTui, TuiPane,
 };
+use ganja_core::teammate::tmux::Server;
+use ganja_core::{Backends, Storage, Teammates};
 use ganja_protocol::team::MemberBackend;
 use ganja_team::{MailboxMessage, MemberName, ShimCli, TeamName, TeamsRoot, mailbox, record};
-use ganja_testkit::{AllowSpawn, tmux::PrivateServer};
+use ganja_testkit::AllowSpawn;
+use ganja_testkit::tmux::PrivateServer;
 use shim_support::{Fake, SESSION_ID, alive, until};
 
 /// What every spawn here asks its teammate to do — two lines, because the
@@ -151,9 +151,8 @@ esac
         // The envelope header plus every line of the seeded message. The
         // team's name never adds a line, so any well-formed one serves.
         late_secs = LATE.as_secs(),
-        submitted_lines = 1 + seeded(&TeamName::parse("session-abcd1234").expect("a team name"))
-            .lines()
-            .count(),
+        submitted_lines =
+            1 + seeded(&TeamName::parse("session-abcd1234").expect("a team name")).lines().count(),
     )
 }
 
@@ -180,21 +179,14 @@ fn lead(
     let storage = Storage::open(home.join("storage"));
     let backends = Backends {
         in_process: Arc::new(ganja_core::teammate::InProcess::new(
-            Arc::new(ganja_core::provider::FakeProvider::new(
-                "on it",
-                Duration::ZERO,
-            )),
+            Arc::new(ganja_core::provider::FakeProvider::new("on it", Duration::ZERO)),
             Arc::new(ganja_core::tool::Registry::new(Vec::new())),
             storage,
             |_: &ganja_core::teammate::SpawnSpec| ganja_core::permission::Permissions::default(),
         )),
         pane: Arc::new(GanjaPane),
         claude: Arc::new(ClaudePane),
-        codex: Arc::new(
-            ShimTui::new(Arc::new(Codex::new()))
-                .on(at.clone())
-                .searching(path),
-        ),
+        codex: Arc::new(ShimTui::new(Arc::new(Codex::new())).on(at.clone()).searching(path)),
         agy: Arc::new(
             ShimTui::new(Arc::new(ganja_core::teammate::agy::Agy::new()))
                 .on(at.clone())
@@ -235,11 +227,7 @@ fn pasted(from: &str, text: &str) -> Vec<u8> {
 /// legibly.
 fn seeded(team: &TeamName) -> String {
     shim_tui::preamble(
-        Names {
-            name: "w1",
-            team: team.as_str(),
-            lead: "team-lead",
-        },
+        Names { name: "w1", team: team.as_str(), lead: "team-lead" },
         MemberBackend::Codex,
         TASK,
     )
@@ -286,22 +274,15 @@ fn send(root: &TeamsRoot, team: &TeamName, to: &str, text: &str) {
 /// The live `(id, birth)` pair wearing `pane_id` on `server`.
 fn live_pane(server: &PrivateServer, pane_id: &str) -> Option<Pane> {
     server
-        .run(&[
-            "list-panes",
-            "-a",
-            "-F",
-            "#{pane_dead} #{pane_id} #{pane_pid}",
-        ])
+        .run(&["list-panes", "-a", "-F", "#{pane_dead} #{pane_id} #{pane_pid}"])
         .lines()
         .filter_map(|line| {
             let mut words = line.split_whitespace();
             let dead = words.next()?;
             let id = words.next()?;
             let pid = words.next()?;
-            (dead == "0" && id == pane_id).then(|| Pane {
-                id: id.to_owned(),
-                birth: pid.to_owned(),
-            })
+            (dead == "0" && id == pane_id)
+                .then(|| Pane { id: id.to_owned(), birth: pid.to_owned() })
         })
         .next()
 }
@@ -393,20 +374,13 @@ async fn a_codex_tui_spawn_opens_a_pane_records_its_id_and_pastes_each_message_a
         "the ring says the composer was ready: {lines:?}"
     );
     assert!(
-        lines
-            .iter()
-            .filter(|line| line.starts_with(RING_DELIVERED))
-            .count()
-            >= 1,
+        lines.iter().filter(|line| line.starts_with(RING_DELIVERED)).count() >= 1,
         "the ring says what was delivered: {lines:?}"
     );
 
     // Shutdown: the process is gone and so is the pane.
     registry.shutdown().await;
-    assert!(
-        until(LANDS, || !alive(pid)).await,
-        "the stub's process was ended"
-    );
+    assert!(until(LANDS, || !alive(pid)).await, "the stub's process was ended");
     assert!(
         until(LANDS, || !server.panes().contains(&pane_id)).await,
         "the pane was closed: {:?}",
@@ -474,9 +448,7 @@ async fn a_peer_message_carrying_a_paste_terminator_still_arrives_as_one_body_an
     .await
     .expect("the stub TUI spawns in a pane");
     assert!(
-        until(LANDS, || received(&stub)
-            == framed("team-lead", &seeded(&team)))
-        .await,
+        until(LANDS, || received(&stub) == framed("team-lead", &seeded(&team))).await,
         "the ordinary prompt landed first; got {:?}",
         String::from_utf8_lossy(&received(&stub))
     );
@@ -540,11 +512,7 @@ async fn a_tui_that_shows_its_marker_and_then_dies_is_refused_and_never_a_live_m
         "the vendor's own sentence is what the lead reads: {}",
         refused.reason
     );
-    assert_eq!(
-        server.panes(),
-        before,
-        "the dead pane was read and then closed"
-    );
+    assert_eq!(server.panes(), before, "the dead pane was read and then closed");
     assert!(
         ganja_testkit::team_file(&root, &team)
             .map(|file| file.member("w1").is_none())
@@ -552,11 +520,7 @@ async fn a_tui_that_shows_its_marker_and_then_dies_is_refused_and_never_a_live_m
         "no member record survived the refusal"
     );
     assert!(
-        registry
-            .view()
-            .members
-            .iter()
-            .all(|member| member.name != "w1"),
+        registry.view().members.iter().all(|member| member.name != "w1"),
         "and nothing is listed"
     );
     // Nothing was pasted into a pane that had already gone.
@@ -600,9 +564,7 @@ async fn a_delivery_that_fails_tells_the_sender_and_is_never_pasted_again() {
     .await
     .expect("the stub TUI spawns in a pane");
     assert!(
-        until(LANDS, || received(&stub)
-            == framed("team-lead", &seeded(&team)))
-        .await,
+        until(LANDS, || received(&stub) == framed("team-lead", &seeded(&team))).await,
         "the prompt landed while there was still a pane to land in"
     );
     let pane_id = ganja_testkit::team_file(&root, &team)
@@ -619,10 +581,7 @@ async fn a_delivery_that_fails_tells_the_sender_and_is_never_pasted_again() {
     // paste has nothing to paste through — and nothing to list, so the
     // liveness poll can prove nothing and leaves the member where it is.
     server.run(&["kill-server"]);
-    assert!(
-        until(LANDS, || !alive(live_pid)).await,
-        "the stub went down with its server"
-    );
+    assert!(until(LANDS, || !alive(live_pid)).await, "the stub went down with its server");
     let landed = received(&stub);
 
     send(&root, &team, "w1", "status?");
@@ -646,9 +605,7 @@ async fn a_delivery_that_fails_tells_the_sender_and_is_never_pasted_again() {
     );
     let lines = ring(&registry, "w1");
     assert!(
-        lines
-            .iter()
-            .any(|line| line.starts_with(RING_DELIVERY_FAILED)),
+        lines.iter().any(|line| line.starts_with(RING_DELIVERY_FAILED)),
         "the ring says the delivery failed: {lines:?}"
     );
 
@@ -693,9 +650,7 @@ async fn a_tui_that_exits_after_readiness_is_retired_and_its_pane_closed_unasked
     // The prompt lands; the stub reads it and quits. `remain-on-exit` keeps
     // the corpse on screen, which is what the loop's liveness poll sees.
     assert!(
-        until(LANDS, || received(&stub)
-            == framed("team-lead", &seeded(&team)))
-        .await,
+        until(LANDS, || received(&stub) == framed("team-lead", &seeded(&team))).await,
         "the prompt reached the composer before it quit; got {:?}",
         String::from_utf8_lossy(&received(&stub))
     );
@@ -731,34 +686,20 @@ async fn a_tui_that_exits_after_readiness_is_retired_and_its_pane_closed_unasked
         server.panes()
     );
     assert!(
-        until(LANDS, || registry
-            .view()
-            .members
-            .iter()
-            .all(|member| member.name != "w1"))
-        .await,
+        until(LANDS, || registry.view().members.iter().all(|member| member.name != "w1")).await,
         "w1 stopped being listed"
     );
 
     // The lead's next pass retires it: out of the team file, reported once
     // under both `retired` and `exited`, with the words a frontend shows.
     let pass = LeadInbox::new(Arc::clone(&registry)).poll().await;
-    let exited = pass
-        .exited
-        .iter()
-        .find(|exited| exited.name == "w1")
-        .expect("the pass reports the exit");
+    let exited =
+        pass.exited.iter().find(|exited| exited.name == "w1").expect("the pass reports the exit");
     assert_eq!(exited.pane_id, pane_id);
-    assert_eq!(
-        exited.pane,
-        PaneFate::Closed,
-        "what `end` left is reported, not assumed"
-    );
+    assert_eq!(exited.pane, PaneFate::Closed, "what `end` left is reported, not assumed");
     assert_eq!(exited.last_words.as_deref(), Some("bye from the stub"));
     assert!(
-        exited
-            .notice()
-            .starts_with("w1 (codex) exited in its pane — last line: bye from the stub"),
+        exited.notice().starts_with("w1 (codex) exited in its pane — last line: bye from the stub"),
         "{}",
         exited.notice()
     );
@@ -780,10 +721,7 @@ async fn a_tui_that_exits_after_readiness_is_retired_and_its_pane_closed_unasked
             .iter()
             .any(|message| message.from == "w1" && message.body.contains("has exited")),
         "{:?}",
-        pass.messages
-            .iter()
-            .map(|message| message.body.clone())
-            .collect::<Vec<_>>()
+        pass.messages.iter().map(|message| message.body.clone()).collect::<Vec<_>>()
     );
 
     registry.shutdown().await;
@@ -821,11 +759,7 @@ async fn a_tui_that_exits_before_its_composer_refuses_the_spawn_with_its_last_wo
         "and it says which CLI, and what happened: {}",
         refused.reason
     );
-    assert_eq!(
-        server.panes(),
-        before,
-        "the dead pane was closed, not left to halve the column"
-    );
+    assert_eq!(server.panes(), before, "the dead pane was closed, not left to halve the column");
     assert!(
         ganja_testkit::team_file(&root, &team)
             .map(|file| file.member("w1").is_none())
@@ -833,17 +767,11 @@ async fn a_tui_that_exits_before_its_composer_refuses_the_spawn_with_its_last_wo
         "no member record survived the refusal"
     );
     assert!(
-        registry
-            .view()
-            .members
-            .iter()
-            .all(|member| member.name != "w1"),
+        registry.view().members.iter().all(|member| member.name != "w1"),
         "and nothing is listed"
     );
     let inbox = root.inbox_path(&team, &MemberName::parse("w1").expect("a name"));
-    let left = mailbox::read(&inbox)
-        .map(|contents| contents.valid.len())
-        .unwrap_or(0);
+    let left = mailbox::read(&inbox).map(|contents| contents.valid.len()).unwrap_or(0);
     assert_eq!(left, 0, "the seeded prompt was taken back out");
 
     registry.shutdown().await;
@@ -877,18 +805,13 @@ async fn shutdown_ends_a_tui_that_ignores_sighup_by_terming_its_group_while_the_
     // The prompt landed, so the stub is past its setup and its traps are
     // armed before anything is signalled.
     assert!(
-        until(LANDS, || received(&stub)
-            == framed("team-lead", &seeded(&team)))
-        .await,
+        until(LANDS, || received(&stub) == framed("team-lead", &seeded(&team))).await,
         "the prompt reached the composer first"
     );
 
     registry.shutdown().await;
 
-    assert!(
-        until(LANDS, || !alive(pid)).await,
-        "the HUP-immune stub was ended"
-    );
+    assert!(until(LANDS, || !alive(pid)).await, "the HUP-immune stub was ended");
     let signals = stub.records("signal");
     assert_eq!(
         signals,
@@ -944,9 +867,7 @@ async fn a_composer_that_never_shows_its_marker_is_pasted_into_but_never_submitt
         "the member was recorded"
     );
     assert!(
-        until(LANDS, || received(&stub)
-            == unsubmitted("team-lead", &seeded(&team)))
-        .await,
+        until(LANDS, || received(&stub) == unsubmitted("team-lead", &seeded(&team))).await,
         "the prompt was pasted anyway; got {:?}",
         String::from_utf8_lossy(&received(&stub))
     );
@@ -967,14 +888,9 @@ async fn a_composer_that_never_shows_its_marker_is_pasted_into_but_never_submitt
         lines.iter().any(|line| line == RING_NOT_READY),
         "the ring says the marker was not seen: {lines:?}"
     );
+    assert!(!lines.iter().any(|line| line == RING_READY), "and does not claim it was: {lines:?}");
     assert!(
-        !lines.iter().any(|line| line == RING_READY),
-        "and does not claim it was: {lines:?}"
-    );
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.starts_with(RING_PASTED_UNSUBMITTED)),
+        lines.iter().any(|line| line.starts_with(RING_PASTED_UNSUBMITTED)),
         "the ring says the text is pasted and waiting for a person: {lines:?}"
     );
     assert!(
@@ -1000,29 +916,19 @@ async fn ending_a_tui_pane_is_identity_checked_against_the_recorded_pair() {
     let stranger = TuiPane::new(
         ShimCli::Codex,
         MemberBackend::Codex,
-        Pane {
-            id: pane_id.clone(),
-            birth: "1".to_owned(),
-        },
+        Pane { id: pane_id.clone(), birth: "1".to_owned() },
         at.clone(),
         Readiness::Seen,
     );
     stranger.end().await;
     assert!(alive(pid), "a mismatched birth signals nothing");
-    assert!(
-        server.panes().contains(&pane_id),
-        "and kills no pane: {:?}",
-        server.panes()
-    );
+    assert!(server.panes().contains(&pane_id), "and kills no pane: {:?}", server.panes());
 
     // An id nobody wears: nothing to do, and no panic.
     TuiPane::new(
         ShimCli::Codex,
         MemberBackend::Codex,
-        Pane {
-            id: "%999".to_owned(),
-            birth: pane.birth.clone(),
-        },
+        Pane { id: "%999".to_owned(), birth: pane.birth.clone() },
         at.clone(),
         Readiness::Seen,
     )
@@ -1032,13 +938,8 @@ async fn ending_a_tui_pane_is_identity_checked_against_the_recorded_pair() {
 
     // The recorded pair: ended, process and pane both — and a second end is
     // a look and nothing else.
-    let ours = TuiPane::new(
-        ShimCli::Codex,
-        MemberBackend::Codex,
-        pane.clone(),
-        at,
-        Readiness::Seen,
-    );
+    let ours =
+        TuiPane::new(ShimCli::Codex, MemberBackend::Codex, pane.clone(), at, Readiness::Seen);
     ours.end().await;
     assert!(until(LANDS, || !alive(pid)).await, "the process was ended");
     assert!(
@@ -1084,16 +985,10 @@ async fn a_prompt_that_draws_the_composers_marker_is_the_shells_and_never_the_co
     // The premise, read off the screen rather than assumed: the shell drew
     // the marker on the launch line's own row, and it is still there.
     let file = ganja_testkit::team_file(&root, &team).expect("the team file is written");
-    let pane_id = file
-        .member("w1")
-        .expect("w1 joined the team")
-        .tmux_pane_id
-        .clone();
+    let pane_id = file.member("w1").expect("w1 joined the team").tmux_pane_id.clone();
     let screen = server.run(&["capture-pane", "-p", "-J", "-t", &pane_id]);
     assert!(
-        screen
-            .lines()
-            .any(|row| row.contains(READY_MARKER) && row.contains("exec ")),
+        screen.lines().any(|row| row.contains(READY_MARKER) && row.contains("exec ")),
         "the pane's shell drew the marker on the launch row: {screen:?}"
     );
 
@@ -1152,16 +1047,8 @@ async fn a_launch_line_the_shell_cannot_exec_ends_the_shell_and_is_refused_by_it
         "the shell's own words are in the refusal: {}",
         refused.reason
     );
-    assert_eq!(
-        server.panes(),
-        before,
-        "the dead pane was closed, not left prompting"
-    );
-    assert!(
-        stub.records("argv").is_empty(),
-        "the stub never ran: {:?}",
-        stub.received()
-    );
+    assert_eq!(server.panes(), before, "the dead pane was closed, not left prompting");
+    assert!(stub.records("argv").is_empty(), "the stub never ran: {:?}", stub.received());
     assert!(
         ganja_testkit::team_file(&root, &team)
             .map(|file| file.member("w1").is_none())

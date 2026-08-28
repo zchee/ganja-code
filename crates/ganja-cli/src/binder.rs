@@ -19,13 +19,12 @@
 //! the same session's socket, the name's lock makes it walk to the next
 //! candidate rather than steal the file.
 
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
-use futures::{FutureExt as _, future::BoxFuture};
+use futures::FutureExt as _;
+use futures::future::BoxFuture;
 use ganja_core::{Engine, SessionId};
 use ganja_tui::binder::{Binder, Bound, Served};
 
@@ -54,10 +53,7 @@ impl Binder for SocketBinder {
         served: Served,
     ) -> BoxFuture<'static, Result<Box<dyn Bound>>> {
         let listen = match &self.directory {
-            Some(directory) => ganja_serve::Listen::Session {
-                id,
-                directory: directory.clone(),
-            },
+            Some(directory) => ganja_serve::Listen::Session { id, directory: directory.clone() },
             None => ganja_serve::Listen::session(id),
         };
         let config = ganja_serve::ServeConfig {

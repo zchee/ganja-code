@@ -62,7 +62,8 @@
 //! a credential or an error, and the caller decides whether and how to store
 //! it.
 
-use std::{fmt, time::Duration};
+use std::fmt;
+use std::time::Duration;
 
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::Deserialize;
@@ -70,12 +71,9 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 use url::{Url, form_urlencoded};
 
-use super::{
-    AuthError, OauthCredential, RefreshOauth,
-    loopback::{self, LoopbackError},
-    now_ms,
-    pkce::{self, EntropyError, Pkce},
-};
+use super::loopback::{self, LoopbackError};
+use super::pkce::{self, EntropyError, Pkce};
+use super::{AuthError, OauthCredential, RefreshOauth, now_ms};
 
 /// How long a browser login waits for the callback. MCP's own authorization
 /// spec names no deadline, so this is [`super::openai::CALLBACK_DEADLINE`]'s
@@ -237,15 +235,9 @@ impl LoginError {
         let reason = self.reason();
 
         if dead {
-            AuthError::ReauthRequired {
-                provider_id,
-                reason,
-            }
+            AuthError::ReauthRequired { provider_id, reason }
         } else {
-            AuthError::RefreshUnavailable {
-                provider_id,
-                reason,
-            }
+            AuthError::RefreshUnavailable { provider_id, reason }
         }
     }
 
@@ -327,10 +319,7 @@ impl Answer {
         step: &'static str,
     ) -> Result<T, LoginError> {
         if !self.accepted() {
-            return Err(LoginError::Refused {
-                step,
-                status: self.status,
-            });
+            return Err(LoginError::Refused { step, status: self.status });
         }
 
         serde_json::from_str(&self.body).map_err(|_| LoginError::Malformed { step })
@@ -341,10 +330,8 @@ impl Answer {
 /// transport: a failure to reach the server at all is [`LoginError::Unreachable`]
 /// and can be nothing else.
 async fn send(request: reqwest::RequestBuilder, step: &'static str) -> Result<Answer, LoginError> {
-    let unreachable = |source: reqwest::Error| LoginError::Unreachable {
-        step,
-        source: source.without_url(),
-    };
+    let unreachable =
+        |source: reqwest::Error| LoginError::Unreachable { step, source: source.without_url() };
 
     let response = request.send().await.map_err(unreachable)?;
     let status = response.status().as_u16();
@@ -359,10 +346,7 @@ fn form_post(
     url: &str,
     pairs: &[(&str, &str)],
 ) -> reqwest::RequestBuilder {
-    client
-        .post(url)
-        .header(reqwest::header::CONTENT_TYPE, FORM)
-        .body(super::device::form(pairs))
+    client.post(url).header(reqwest::header::CONTENT_TYPE, FORM).body(super::device::form(pairs))
 }
 
 /// Refuses `endpoint` unless [`crate::provider::reachable_in_the_clear`] calls
@@ -409,10 +393,7 @@ impl Login {
         let client =
             super::login_client(REQUEST_TIMEOUT).map_err(|source| LoginError::Client { source })?;
 
-        Ok(Self {
-            origin: origin.ascii_serialization(),
-            client,
-        })
+        Ok(Self { origin: origin.ascii_serialization(), client })
     }
 
     /// Starts a browser login: binds the loopback redirect, discovers the
@@ -629,10 +610,7 @@ impl Browser {
         within: Duration,
         cancel: &CancellationToken,
     ) -> Result<OauthCredential, LoginError> {
-        let code = self
-            .listener
-            .wait(CALLBACK_PATH, &self.state, within, cancel)
-            .await?;
+        let code = self.listener.wait(CALLBACK_PATH, &self.state, within, cancel).await?;
         let tokens = self
             .login
             .exchange(
@@ -644,12 +622,7 @@ impl Browser {
             )
             .await?;
 
-        first_credential(
-            tokens,
-            &self.token_endpoint,
-            &self.client_id,
-            step::EXCHANGING,
-        )
+        first_credential(tokens, &self.token_endpoint, &self.client_id, step::EXCHANGING)
     }
 }
 
@@ -662,10 +635,7 @@ fn first_credential(
     client_id: &str,
     step: &'static str,
 ) -> Result<OauthCredential, LoginError> {
-    let refresh = tokens
-        .refresh_token
-        .clone()
-        .ok_or(LoginError::Malformed { step })?;
+    let refresh = tokens.refresh_token.clone().ok_or(LoginError::Malformed { step })?;
 
     Ok(credential(tokens, refresh, token_endpoint, client_id))
 }
@@ -680,25 +650,17 @@ fn credential(
 ) -> OauthCredential {
     let mut credential =
         OauthCredential::new(refresh, tokens.access_token, expires(tokens.expires_in));
-    credential.extra.insert(
-        extra::TOKEN_ENDPOINT.to_owned(),
-        serde_json::Value::from(token_endpoint),
-    );
-    credential.extra.insert(
-        extra::CLIENT_ID.to_owned(),
-        serde_json::Value::from(client_id),
-    );
+    credential
+        .extra
+        .insert(extra::TOKEN_ENDPOINT.to_owned(), serde_json::Value::from(token_endpoint));
+    credential.extra.insert(extra::CLIENT_ID.to_owned(), serde_json::Value::from(client_id));
 
     credential
 }
 
 /// When an access token stops being accepted.
 fn expires(expires_in: Option<u64>) -> u64 {
-    now_ms().saturating_add(
-        expires_in
-            .unwrap_or(DEFAULT_EXPIRES_IN)
-            .saturating_mul(1_000),
-    )
+    now_ms().saturating_add(expires_in.unwrap_or(DEFAULT_EXPIRES_IN).saturating_mul(1_000))
 }
 
 /// One extra field [`credential`] wrote, read back out of a stored
@@ -730,9 +692,7 @@ impl RefreshOauth for Refresher {
         provider_id: &str,
         credential: &OauthCredential,
     ) -> Result<OauthCredential, AuthError> {
-        renew(credential)
-            .await
-            .map_err(|error| error.into_auth(provider_id))
+        renew(credential).await.map_err(|error| error.into_auth(provider_id))
     }
 }
 
@@ -767,10 +727,7 @@ async fn renew(previous: &OauthCredential) -> Result<OauthCredential, LoginError
     // A renewal that did not rotate the refresh token has not revoked the
     // one that was sent — keeping it is what lets the *next* renewal happen
     // at all, the same reasoning `openai::Login::renew` is built on.
-    let refresh = tokens
-        .refresh_token
-        .clone()
-        .unwrap_or_else(|| previous.refresh.clone());
+    let refresh = tokens.refresh_token.clone().unwrap_or_else(|| previous.refresh.clone());
 
     Ok(credential(tokens, refresh, &token_endpoint, &client_id).inheriting(previous))
 }

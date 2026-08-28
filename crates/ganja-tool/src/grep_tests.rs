@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 
 use super::{GrepTool, search};
-use crate::{Tool, ToolCtx, ToolError, read::ReadTool};
+use crate::read::ReadTool;
+use crate::{Tool, ToolCtx, ToolError};
 
 /// A context rooted at `cwd`, with a cancel nobody has pulled and the
 /// credential store the engine would have named sitting under it.
@@ -21,22 +22,12 @@ async fn matches_are_grouped_by_file_with_line_numbers() {
     std::fs::write(dir.path().join("b.rs"), "struct Three;\n").unwrap();
 
     let out = GrepTool
-        .run(
-            serde_json::json!({ "pattern": "fn \\w+" }),
-            &ctx(dir.path().to_owned()),
-        )
+        .run(serde_json::json!({ "pattern": "fn \\w+" }), &ctx(dir.path().to_owned()))
         .await
         .expect("a grep over a real directory succeeds");
 
-    assert!(
-        out.output.starts_with("Found 2 matches\n"),
-        "got {:?}",
-        out.output
-    );
-    assert!(
-        out.output
-            .contains("a.rs:\n  Line 1: fn one() {}\n  Line 2: fn two() {}")
-    );
+    assert!(out.output.starts_with("Found 2 matches\n"), "got {:?}", out.output);
+    assert!(out.output.contains("a.rs:\n  Line 1: fn one() {}\n  Line 2: fn two() {}"));
     assert!(!out.output.contains("b.rs"));
     assert_eq!(out.metadata["matches"], 2);
 }
@@ -47,19 +38,12 @@ async fn every_match_names_its_file_by_absolute_path() {
     std::fs::write(dir.path().join("a.rs"), "needle\n").expect("the fixture writes");
 
     let out = GrepTool
-        .run(
-            serde_json::json!({ "pattern": "needle" }),
-            &ctx(dir.path().to_owned()),
-        )
+        .run(serde_json::json!({ "pattern": "needle" }), &ctx(dir.path().to_owned()))
         .await
         .expect("a grep over a real directory succeeds");
 
     let header = format!("{}:", dir.path().join("a.rs").display());
-    assert!(
-        out.output.contains(&header),
-        "expected the header {header:?} in {:?}",
-        out.output
-    );
+    assert!(out.output.contains(&header), "expected the header {header:?} in {:?}", out.output);
 }
 
 #[tokio::test]
@@ -71,18 +55,12 @@ async fn a_path_taken_from_greps_output_reads_back_through_the_read_tool() {
     // against grep's search base, and would name a file that is not there.
     let dir = tempfile::tempdir().expect("a scratch directory");
     std::fs::create_dir(dir.path().join("nested")).expect("the fixture writes");
-    std::fs::write(
-        dir.path().join("nested").join("found.rs"),
-        "fn needle() {}\n",
-    )
-    .expect("the fixture writes");
+    std::fs::write(dir.path().join("nested").join("found.rs"), "fn needle() {}\n")
+        .expect("the fixture writes");
     let context = ctx(dir.path().to_owned());
 
     let found = GrepTool
-        .run(
-            serde_json::json!({ "pattern": "needle", "path": "nested" }),
-            &context,
-        )
+        .run(serde_json::json!({ "pattern": "needle", "path": "nested" }), &context)
         .await
         .expect("a grep over a subdirectory succeeds");
 
@@ -94,12 +72,10 @@ async fn a_path_taken_from_greps_output_reads_back_through_the_read_tool() {
         .find_map(|line| line.strip_suffix(':'))
         .expect("grep heads each file's matches with that file's path");
 
-    let read = ReadTool
-        .run(serde_json::json!({ "filePath": quoted }), &context)
-        .await
-        .unwrap_or_else(|error| {
-            panic!("read must accept the path grep printed ({quoted:?}): {error:?}")
-        });
+    let read =
+        ReadTool.run(serde_json::json!({ "filePath": quoted }), &context).await.unwrap_or_else(
+            |error| panic!("read must accept the path grep printed ({quoted:?}): {error:?}"),
+        );
 
     assert!(
         read.output.contains("1: fn needle() {}"),
@@ -155,10 +131,7 @@ async fn gitignored_files_are_not_searched() {
     std::fs::write(dir.path().join("kept.rs"), "needle").unwrap();
 
     let out = GrepTool
-        .run(
-            serde_json::json!({ "pattern": "needle" }),
-            &ctx(dir.path().to_owned()),
-        )
+        .run(serde_json::json!({ "pattern": "needle" }), &ctx(dir.path().to_owned()))
         .await
         .expect("a grep respecting .gitignore succeeds");
 
@@ -172,10 +145,7 @@ async fn hidden_files_are_searched_unlike_glob() {
     std::fs::write(dir.path().join(".hidden.rs"), "needle").unwrap();
 
     let out = GrepTool
-        .run(
-            serde_json::json!({ "pattern": "needle" }),
-            &ctx(dir.path().to_owned()),
-        )
+        .run(serde_json::json!({ "pattern": "needle" }), &ctx(dir.path().to_owned()))
         .await
         .expect("a grep over a directory with dotfiles succeeds");
 
@@ -191,10 +161,7 @@ async fn an_empty_pattern_is_refused_as_a_bad_argument() {
     let dir = tempfile::tempdir().expect("a scratch directory");
 
     let refused = GrepTool
-        .run(
-            serde_json::json!({ "pattern": "" }),
-            &ctx(dir.path().to_owned()),
-        )
+        .run(serde_json::json!({ "pattern": "" }), &ctx(dir.path().to_owned()))
         .await
         .expect_err("an empty pattern matches nothing meaningfully");
 
@@ -209,17 +176,11 @@ async fn an_invalid_regex_is_refused_as_a_bad_argument() {
     let dir = tempfile::tempdir().expect("a scratch directory");
 
     let refused = GrepTool
-        .run(
-            serde_json::json!({ "pattern": "(unclosed" }),
-            &ctx(dir.path().to_owned()),
-        )
+        .run(serde_json::json!({ "pattern": "(unclosed" }), &ctx(dir.path().to_owned()))
         .await
         .expect_err("an unbalanced group is not a valid regex");
 
-    assert!(
-        matches!(refused, ToolError::InvalidArgs(_)),
-        "got {refused:?}"
-    );
+    assert!(matches!(refused, ToolError::InvalidArgs(_)), "got {refused:?}");
 }
 
 #[tokio::test]
@@ -256,23 +217,16 @@ async fn more_than_the_limit_is_capped_and_reported_truncated() {
     }
 
     let out = GrepTool
-        .run(
-            serde_json::json!({ "pattern": "needle" }),
-            &ctx(dir.path().to_owned()),
-        )
+        .run(serde_json::json!({ "pattern": "needle" }), &ctx(dir.path().to_owned()))
         .await
         .expect("a grep over many matches still succeeds, capped");
 
     assert_eq!(out.metadata["matches"], 100);
     assert_eq!(out.metadata["truncated"], true);
     assert!(
-        out.output
-            .contains("(Results truncated. Consider using a more specific path or pattern.)")
+        out.output.contains("(Results truncated. Consider using a more specific path or pattern.)")
     );
-    assert!(
-        out.output
-            .starts_with("Found 100 matches (more matches available)")
-    );
+    assert!(out.output.starts_with("Found 100 matches (more matches available)"));
 }
 
 #[tokio::test]
@@ -296,10 +250,7 @@ fn the_schema_requires_only_the_pattern() {
 
     assert_eq!(schema["required"], serde_json::json!(["pattern"]));
     for name in ["pattern", "path", "include"] {
-        assert!(
-            schema["properties"][name].is_object(),
-            "missing {name}: {schema}"
-        );
+        assert!(schema["properties"][name].is_object(), "missing {name}: {schema}");
     }
 }
 
@@ -312,19 +263,10 @@ fn the_credential_store_contributes_no_line_to_a_search() {
     std::fs::write(dir.path().join("notes.md"), "sk-canary-8842 was rotated\n")
         .expect("the fixture writes");
 
-    let found = search(
-        dir.path(),
-        "sk-canary-8842",
-        None,
-        Some(&store),
-        &CancellationToken::new(),
-    )
-    .expect("the search runs");
+    let found = search(dir.path(), "sk-canary-8842", None, Some(&store), &CancellationToken::new())
+        .expect("the search runs");
 
-    let hits: Vec<(&str, u64)> = found
-        .iter()
-        .map(|item| (item.path.as_str(), item.line))
-        .collect();
+    let hits: Vec<(&str, u64)> = found.iter().map(|item| (item.path.as_str(), item.line)).collect();
 
     let notes = dir.path().join("notes.md").display().to_string();
     assert_eq!(
@@ -340,10 +282,7 @@ async fn a_project_file_that_only_shares_the_stores_name_is_still_searched() {
     std::fs::write(dir.path().join("auth.json"), "needle").expect("the fixture writes");
 
     let out = GrepTool
-        .run(
-            serde_json::json!({ "pattern": "needle" }),
-            &ctx(dir.path().to_owned()),
-        )
+        .run(serde_json::json!({ "pattern": "needle" }), &ctx(dir.path().to_owned()))
         .await
         .expect("the guard is identity-based: any other auth.json is still searched");
 

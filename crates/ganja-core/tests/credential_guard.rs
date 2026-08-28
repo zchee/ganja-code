@@ -12,12 +12,11 @@
 
 use std::sync::Arc;
 
-use ganja_core::{
-    Engine,
-    permission::Permissions,
-    protocol::{Command, Event, PartBody, ToolState},
-    tool::{Registry, read::ReadTool},
-};
+use ganja_core::Engine;
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{Command, Event, PartBody, ToolState};
+use ganja_core::tool::Registry;
+use ganja_core::tool::read::ReadTool;
 use ganja_testkit::{ScriptedProvider, drain_allowing, says, tool_call};
 use serde_json::json;
 
@@ -48,11 +47,8 @@ async fn an_engines_own_credential_store_is_refused_to_the_model_that_asks_for_i
     let store = ganja_core::auth::store_path().expect("the redirect resolves a store path");
     std::fs::create_dir_all(store.parent().expect("the store sits in a directory"))
         .expect("the fixture nests");
-    std::fs::write(
-        &store,
-        json!({ "anthropic": { "key": CANARY } }).to_string(),
-    )
-    .expect("the fixture writes");
+    std::fs::write(&store, json!({ "anthropic": { "key": CANARY } }).to_string())
+        .expect("the fixture writes");
     assert!(
         store.starts_with(home.path()),
         "the fixture must not be pointed at the real user's store: {}",
@@ -90,8 +86,5 @@ async fn an_engines_own_credential_store_is_refused_to_the_model_that_asks_for_i
         error.contains("is ganja's credential store"),
         "the refusal names what it refused: {error}"
     );
-    assert!(
-        !error.contains(CANARY),
-        "and the refusal is not a way to read it: {error}"
-    );
+    assert!(!error.contains(CANARY), "and the refusal is not a way to read it: {error}");
 }

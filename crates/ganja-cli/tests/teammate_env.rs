@@ -67,10 +67,7 @@ fn a_secret_the_lead_holds_never_reaches_a_panes_command_line() {
         &homes,
         &script,
         &[],
-        &[
-            ("ANTHROPIC_API_KEY", CANARY),
-            ("GANJA_SERVER_PASSWORD", CANARY),
-        ],
+        &[("ANTHROPIC_API_KEY", CANARY), ("GANJA_SERVER_PASSWORD", CANARY)],
     );
 
     lead.type_line(&format!("/team spawn {TEAMMATE} --backend ganja {PROMPT}"));
@@ -80,17 +77,10 @@ fn a_secret_the_lead_holds_never_reaches_a_panes_command_line() {
         !argv.contains(CANARY),
         "a credential the lead holds is on the pane's command line: {argv}"
     );
-    assert!(
-        !argv.contains("mentions"),
-        "the prompt travels the mailbox, never the line: {argv}"
-    );
-    for flag in [
-        "--agent-id",
-        "--agent-name",
-        "--team-name",
-        "--agent-color",
-        "--parent-session-id",
-    ] {
+    assert!(!argv.contains("mentions"), "the prompt travels the mailbox, never the line: {argv}");
+    for flag in
+        ["--agent-id", "--agent-name", "--team-name", "--agent-color", "--parent-session-id"]
+    {
         assert!(argv.contains(flag), "{flag} is on the line: {argv}");
     }
     assert!(
@@ -129,9 +119,7 @@ fn a_pane_joins_the_team_when_the_tmux_server_predates_the_config_home_export() 
         "the server predates the export, by construction"
     );
 
-    lead.type_line(&format!(
-        "/team spawn {TEAMMATE} --backend ganja say the word"
-    ));
+    lead.type_line(&format!("/team spawn {TEAMMATE} --backend ganja say the word"));
     let (pane, _) = lead.wait_for_teammate_pane();
 
     // The pane's turn ran, which it can only have done from the lead's team's

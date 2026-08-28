@@ -15,7 +15,8 @@
 //!
 //! ```no_run
 //! # async fn run() -> Result<(), tmux::Error> {
-//! use tmux::{Server, commands::ListPanes};
+//! use tmux::Server;
+//! use tmux::commands::ListPanes;
 //!
 //! let server = Server::current()?;
 //! let panes = server.run(ListPanes::new().all().format("#{pane_id}").args()).await?;
@@ -471,28 +472,16 @@ macro_rules! invocations {
 /// [`declared`] then compacts away.
 macro_rules! flag_slot {
     (switch, $flag:literal) => {
-        ::core::option::Option::Some($crate::commands::Flag {
-            letter: $flag,
-            argument: false,
-        })
+        ::core::option::Option::Some($crate::commands::Flag { letter: $flag, argument: false })
     };
     (value, $flag:literal) => {
-        ::core::option::Option::Some($crate::commands::Flag {
-            letter: $flag,
-            argument: true,
-        })
+        ::core::option::Option::Some($crate::commands::Flag { letter: $flag, argument: true })
     };
     (text, $flag:literal) => {
-        ::core::option::Option::Some($crate::commands::Flag {
-            letter: $flag,
-            argument: true,
-        })
+        ::core::option::Option::Some($crate::commands::Flag { letter: $flag, argument: true })
     };
     (repeat, $flag:literal) => {
-        ::core::option::Option::Some($crate::commands::Flag {
-            letter: $flag,
-            argument: true,
-        })
+        ::core::option::Option::Some($crate::commands::Flag { letter: $flag, argument: true })
     };
     (positional) => {
         ::core::option::Option::None
@@ -554,28 +543,16 @@ macro_rules! flag_count {
 /// a parser that serves it.
 macro_rules! ahead_slot {
     (ahead_switch, $flag:literal) => {
-        ::core::option::Option::Some($crate::commands::Flag {
-            letter: $flag,
-            argument: false,
-        })
+        ::core::option::Option::Some($crate::commands::Flag { letter: $flag, argument: false })
     };
     (ahead_value, $flag:literal) => {
-        ::core::option::Option::Some($crate::commands::Flag {
-            letter: $flag,
-            argument: true,
-        })
+        ::core::option::Option::Some($crate::commands::Flag { letter: $flag, argument: true })
     };
     (ahead_text, $flag:literal) => {
-        ::core::option::Option::Some($crate::commands::Flag {
-            letter: $flag,
-            argument: true,
-        })
+        ::core::option::Option::Some($crate::commands::Flag { letter: $flag, argument: true })
     };
     (ahead_repeat, $flag:literal) => {
-        ::core::option::Option::Some($crate::commands::Flag {
-            letter: $flag,
-            argument: true,
-        })
+        ::core::option::Option::Some($crate::commands::Flag { letter: $flag, argument: true })
     };
     (positional) => {
         ::core::option::Option::None
@@ -621,10 +598,7 @@ macro_rules! ahead_count {
 /// line must produce one slot, so the ones that are not flags produce `None`
 /// and this compacts them away before the binary is written.
 const fn declared<const N: usize>(slots: &[Option<Flag>]) -> [Flag; N] {
-    let mut flags = [Flag {
-        letter: "",
-        argument: false,
-    }; N];
+    let mut flags = [Flag { letter: "", argument: false }; N];
     let mut at = 0;
     let mut slot = 0;
     while slot < slots.len() {
@@ -647,12 +621,8 @@ pub(crate) use method;
 
 /// The families, in the order [`REGISTRY`] lists them. Each later wave adds
 /// one name here and nothing else.
-const FAMILIES: &[&[Entry]] = &[
-    panes::ENTRIES,
-    sessions::ENTRIES,
-    buffers_keys::ENTRIES,
-    options_misc::ENTRIES,
-];
+const FAMILIES: &[&[Entry]] =
+    &[panes::ENTRIES, sessions::ENTRIES, buffers_keys::ENTRIES, options_misc::ENTRIES];
 
 /// How many commands the families hold between them.
 const fn total(families: &[&[Entry]]) -> usize {
@@ -672,12 +642,7 @@ const fn total(families: &[&[Entry]]) -> usize {
 /// slice a caller can match against without the module owning any runtime
 /// state — and so adding a family cannot cost more than a line.
 const fn flattened<const N: usize>(families: &[&[Entry]]) -> [Entry; N] {
-    let mut all = [Entry {
-        name: "",
-        alias: None,
-        flags: &[],
-        ahead: &[],
-    }; N];
+    let mut all = [Entry { name: "", alias: None, flags: &[], ahead: &[] }; N];
     let mut at = 0;
     let mut family = 0;
     while family < families.len() {
@@ -719,11 +684,7 @@ pub const EXCLUDED: &[Excluded] = &[];
 /// bytes — the tests that *are* about bytes say so and read `args()` raw.
 #[cfg(test)]
 fn words<I: Invocation>(invocation: &I) -> Vec<String> {
-    invocation
-        .args()
-        .iter()
-        .map(|word| word.to_string_lossy().into_owned())
-        .collect()
+    invocation.args().iter().map(|word| word.to_string_lossy().into_owned()).collect()
 }
 
 #[cfg(test)]

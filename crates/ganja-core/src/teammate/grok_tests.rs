@@ -43,10 +43,7 @@ fn argv(session: Option<&str>) -> Vec<String> {
 
 /// The token after `flag`, if the argv carries one.
 fn value(argv: &[String], flag: &str) -> Option<String> {
-    argv.iter()
-        .position(|token| token == flag)
-        .and_then(|at| argv.get(at + 1))
-        .cloned()
+    argv.iter().position(|token| token == flag).and_then(|at| argv.get(at + 1)).cloned()
 }
 
 #[test]
@@ -170,9 +167,7 @@ fn no_prompt_text_is_ever_on_a_command_line() {
     });
 
     assert!(
-        !argv
-            .iter()
-            .any(|token| token.to_string_lossy().contains(secret)),
+        !argv.iter().any(|token| token.to_string_lossy().contains(secret)),
         "argv is for flags; `--prompt-file` is what says where the prompt is"
     );
     assert_eq!(Grok.door(), Door::File);
@@ -185,12 +180,7 @@ fn the_environment_carries_no_door_onto_the_posture() {
     // source — carrying any `GROK_*` name would hand a person's exported
     // variable the posture they consented to at spawn.
     assert!(Grok.additions().is_empty());
-    assert!(
-        !Grok
-            .additions()
-            .iter()
-            .any(|name| name.starts_with("GROK_"))
-    );
+    assert!(!Grok.additions().iter().any(|name| name.starts_with("GROK_")));
 }
 
 /// The shapes a probed `grok 1.0.6` actually printed, for a turn that
@@ -225,11 +215,7 @@ fn a_turn_that_answered_is_one_mail_and_the_session_it_ran_in() {
 fn thinking_is_not_a_teammate_talking() {
     let reply = Grok.reply(&answered()).expect("a turn that answered");
 
-    assert!(
-        !reply.messages.iter().any(|text| text.contains("not mail")),
-        "{:?}",
-        reply.messages
-    );
+    assert!(!reply.messages.iter().any(|text| text.contains("not mail")), "{:?}", reply.messages);
 }
 
 #[test]
@@ -295,11 +281,8 @@ fn a_tool_named_only_in_the_partial_stream_is_still_named() {
         ]
         .join("\n");
 
-    let unnamed = Grok
-        .reply(&whole_message_only)
-        .expect("still readable")
-        .refused
-        .expect("still a refusal");
+    let unnamed =
+        Grok.reply(&whole_message_only).expect("still readable").refused.expect("still a refusal");
 
     assert!(
         !unnamed.contains("last tool"),
@@ -322,10 +305,7 @@ fn a_turn_that_said_something_before_stopping_still_delivers_those_words() {
 
     let reply = Grok.reply(&stdout).expect("a readable turn");
 
-    assert_eq!(
-        reply.messages,
-        vec!["it has three facts; let me write them down"]
-    );
+    assert_eq!(reply.messages, vec!["it has three facts; let me write them down"]);
     assert!(reply.refused.is_some(), "and the reason beside them");
 }
 
@@ -369,9 +349,8 @@ fn a_line_this_build_cannot_read_does_not_cost_a_turn_that_otherwise_succeeded()
 
 #[test]
 fn output_carrying_no_record_at_all_is_refused_rather_than_read_as_silence() {
-    let refusal = Grok
-        .reply("this is not the shape any driver reads\n")
-        .expect_err("garbage is refused");
+    let refusal =
+        Grok.reply("this is not the shape any driver reads\n").expect_err("garbage is refused");
 
     assert!(refusal.contains(OUTPUT_FORMAT), "{refusal}");
 }
@@ -409,10 +388,7 @@ fn recorded_launch() -> Vec<&'static str> {
 
 /// What the driver composes for a pane, as strings.
 fn tui() -> Vec<String> {
-    Grok.tui_argv()
-        .iter()
-        .map(|token| token.to_string_lossy().into_owned())
-        .collect()
+    Grok.tui_argv().iter().map(|token| token.to_string_lossy().into_owned()).collect()
 }
 
 #[test]
@@ -422,9 +398,8 @@ fn the_tui_argv_is_the_launch_line_the_pane_probe_ran() {
     // states: `--sandbox` is unvalidated at clap, so a near-spelling is a
     // custom profile that fails to load.
     let recorded = recorded_launch();
-    let (binary, floors) = recorded
-        .split_first()
-        .expect("a binary, then the floors it was launched with");
+    let (binary, floors) =
+        recorded.split_first().expect("a binary, then the floors it was launched with");
 
     assert_eq!(*binary, BINARY);
     assert_eq!(tui(), floors);
@@ -432,10 +407,8 @@ fn the_tui_argv_is_the_launch_line_the_pane_probe_ran() {
     // happened next was the vendor's refusal, not a parse error — the
     // outcome a pane is meant to keep in front of a person — and under a
     // real one the composer.
-    let outcomes: Vec<&str> = TUI_PROBE
-        .lines()
-        .filter(|line| line.trim_start().starts_with("outcome ("))
-        .collect();
+    let outcomes: Vec<&str> =
+        TUI_PROBE.lines().filter(|line| line.trim_start().starts_with("outcome (")).collect();
     assert_eq!(outcomes.len(), 2, "{outcomes:?}");
     // Keyed on what each recording says about the home rather than on
     // position, so a third recording fails this loudly instead of
@@ -454,10 +427,7 @@ fn the_tui_argv_is_the_launch_line_the_pane_probe_ran() {
         .lines()
         .find_map(|line| line.strip_prefix("error: "))
         .expect("the recording carries the vendor's own refusal verbatim");
-    assert!(
-        refusal.contains("could not apply the 'read-only' sandbox profile"),
-        "{refusal}"
-    );
+    assert!(refusal.contains("could not apply the 'read-only' sandbox profile"), "{refusal}");
 }
 
 #[test]
@@ -482,9 +452,7 @@ fn the_ready_marker_is_the_composer_glyph_the_probe_captured() {
     // And nothing provisional is left: the recording no longer carries a
     // marker read out of somebody's source instead of off a screen.
     assert!(
-        !TUI_PROBE
-            .lines()
-            .any(|line| line.trim_start().starts_with("provisional marker")),
+        !TUI_PROBE.lines().any(|line| line.trim_start().starts_with("provisional marker")),
         "the composer was captured; the provisional line has no reader left"
     );
 }
@@ -493,10 +461,7 @@ fn the_ready_marker_is_the_composer_glyph_the_probe_captured() {
 fn the_tui_argv_carries_the_posture_and_none_of_the_headless_machinery() {
     let tui = tui();
     assert_eq!(value(&tui, "--sandbox").as_deref(), Some(SANDBOX_VALUE));
-    assert_eq!(
-        value(&tui, "--permission-mode").as_deref(),
-        Some(PERMISSION_MODE)
-    );
+    assert_eq!(value(&tui, "--permission-mode").as_deref(), Some(PERMISSION_MODE));
     // Every word here is a word of the headless first turn — one posture
     // rule, not a second one written for panes.
     let headless = argv(None);

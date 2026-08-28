@@ -15,27 +15,19 @@
 //! and `GROK_HOME` — process-wide state, which the house rule keeps in a
 //! binary of its own. The one write happens before any test body runs.
 
-use std::{
-    path::{Path, PathBuf},
-    sync::LazyLock,
-    time::SystemTime,
-};
+use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+use std::time::SystemTime;
 
-use ganja_core::teammate::{
-    preamble::{self, Names},
-    readback::{self, Cursor},
-    shim_tui,
-};
+use ganja_core::teammate::preamble::{self, Names};
+use ganja_core::teammate::readback::{self, Cursor};
+use ganja_core::teammate::shim_tui;
 use ganja_protocol::team::MemberBackend;
 use ganja_team::ShimCli;
 
 /// The member every fixture's pasted message names — and therefore the
 /// fingerprint every reader here is asked to find.
-const WHO: Names<'static> = Names {
-    name: "w1",
-    team: "session-abcd1234",
-    lead: "team-lead",
-};
+const WHO: Names<'static> = Names { name: "w1", team: "session-abcd1234", lead: "team-lead" };
 
 /// The directory the fixture panes were opened in, as the recordings carry
 /// it: grok's reader is the one that narrows by it, so it has to be the same
@@ -63,10 +55,7 @@ static HOME: LazyLock<PathBuf> = LazyLock::new(|| {
 
     // codex: <CODEX_HOME>/sessions/<yyyy>/<mm>/<dd>/rollout-*.jsonl
     let codex = home.join("codex-home");
-    write(
-        &codex.join("sessions/2026/08/23/rollout-2026-08-23T20-25-51-01a02e5e.jsonl"),
-        CODEX,
-    );
+    write(&codex.join("sessions/2026/08/23/rollout-2026-08-23T20-25-51-01a02e5e.jsonl"), CODEX);
     // A second rollout of somebody else's conversation, in the same day
     // directory: the fingerprint is what has to tell them apart.
     write(
@@ -77,10 +66,7 @@ static HOME: LazyLock<PathBuf> = LazyLock::new(|| {
     // grok: <GROK_HOME>/sessions/<percent-encoded cwd>/<id>/updates.jsonl
     let grok = home.join("grok-home");
     let encoded = "%2Ftmp%2Fganja-readback-fixture";
-    write(
-        &grok.join(format!("sessions/{encoded}/01a02e5f-0000/updates.jsonl")),
-        GROK,
-    );
+    write(&grok.join(format!("sessions/{encoded}/01a02e5f-0000/updates.jsonl")), GROK);
 
     // agy: $HOME/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/transcript.jsonl
     write(
@@ -129,10 +115,8 @@ fn carried(cli: ShimCli) -> (Option<PathBuf>, Vec<String>, Cursor) {
     let reader = readback::of(cli);
     let found = reader.find(&mark(), Path::new(CWD), spawned());
     let mut cursor = Cursor::default();
-    let answers = found
-        .as_deref()
-        .map(|path| reader.answers(path, &mut cursor))
-        .unwrap_or_default();
+    let answers =
+        found.as_deref().map(|path| reader.answers(path, &mut cursor)).unwrap_or_default();
 
     (found, answers, cursor)
 }
@@ -194,9 +178,7 @@ fn grok_carries_the_last_thing_it_said_before_each_turn_ended() {
     let (found, answers, cursor) = carried(ShimCli::Grok);
 
     assert!(
-        found
-            .expect("grok's updates are found")
-            .ends_with("updates.jsonl"),
+        found.expect("grok's updates are found").ends_with("updates.jsonl"),
         "grok's transcript is the session's own updates file"
     );
     assert_eq!(
@@ -206,10 +188,7 @@ fn grok_carries_the_last_thing_it_said_before_each_turn_ended() {
     );
     assert_eq!(
         cursor,
-        Cursor {
-            bytes: 0,
-            answers: 1
-        },
+        Cursor { bytes: 0, answers: 1 },
         "a re-read transcript counts answers rather than bytes"
     );
 }
@@ -220,11 +199,7 @@ fn grok_carries_the_last_thing_it_said_before_each_turn_ended() {
 fn agy_carries_the_planner_response_that_holds_an_answer() {
     let (found, answers, cursor) = carried(ShimCli::Agy);
 
-    assert!(
-        found
-            .expect("agy's transcript is found")
-            .ends_with("transcript.jsonl")
-    );
+    assert!(found.expect("agy's transcript is found").ends_with("transcript.jsonl"));
     assert_eq!(
         answers,
         ["### Executive Overview\n\nganja-code is a terminal-first AI coding agent in Rust."],
@@ -261,10 +236,7 @@ fn a_fingerprint_far_past_any_byte_window_is_still_found() {
     assert!(text.len() > 512 * 1024, "the fixture is past any window");
 
     let found = readback::of(ShimCli::Codex).find(
-        &preamble::opening(Names {
-            team: "session-padded1",
-            ..WHO
-        }),
+        &preamble::opening(Names { team: "session-padded1", ..WHO }),
         Path::new(CWD),
         spawned(),
     );
@@ -288,17 +260,12 @@ fn a_fingerprint_far_past_any_byte_window_is_still_found() {
 #[test]
 fn a_second_turn_carries_only_what_the_cli_added() {
     LazyLock::force(&HOME);
-    let who = Names {
-        name: "w-turns",
-        ..WHO
-    };
+    let who = Names { name: "w-turns", ..WHO };
     let mark = preamble::opening(who);
     let mine = |text: &str| text.replace(&preamble::opening(WHO), &mark);
     let grow = |path: &Path, tail: &str| {
-        let grown = format!(
-            "{}{tail}",
-            std::fs::read_to_string(path).expect("the transcript reads")
-        );
+        let grown =
+            format!("{}{tail}", std::fs::read_to_string(path).expect("the transcript reads"));
         std::fs::write(path, grown).expect("the transcript grows");
     };
 
@@ -309,10 +276,7 @@ fn a_second_turn_carries_only_what_the_cli_added() {
     write(&rollout, &mine(CODEX));
     let codex = readback::of(ShimCli::Codex);
     let mut cursor = Cursor::default();
-    assert_eq!(
-        codex.find(&mark, Path::new(CWD), spawned()).as_deref(),
-        Some(rollout.as_path())
-    );
+    assert_eq!(codex.find(&mark, Path::new(CWD), spawned()).as_deref(), Some(rollout.as_path()));
     assert_eq!(codex.answers(&rollout, &mut cursor).len(), 2);
     grow(
         &rollout,
@@ -398,11 +362,8 @@ fn a_second_turn_carries_only_what_the_cli_added() {
 #[test]
 fn a_member_with_no_session_of_its_own_finds_none() {
     LazyLock::force(&HOME);
-    let stranger = preamble::opening(Names {
-        name: "w9",
-        team: "session-abcd1234",
-        lead: "team-lead",
-    });
+    let stranger =
+        preamble::opening(Names { name: "w9", team: "session-abcd1234", lead: "team-lead" });
 
     for cli in [ShimCli::Codex, ShimCli::Grok, ShimCli::Agy] {
         assert_eq!(
@@ -432,10 +393,7 @@ fn groks_directory_is_canonicalized_the_way_that_vendor_writes_it() {
     let _ = std::fs::remove_file(&link);
     std::os::unix::fs::symlink(&real, &link).expect("the symlink");
 
-    let who = Names {
-        name: "w-link",
-        ..WHO
-    };
+    let who = Names { name: "w-link", ..WHO };
     let mark = preamble::opening(who);
     let encoded: String = std::fs::canonicalize(&real)
         .expect("the real path resolves")
@@ -448,15 +406,12 @@ fn groks_directory_is_canonicalized_the_way_that_vendor_writes_it() {
             other => format!("%{other:02X}"),
         })
         .collect();
-    let updates = HOME
-        .join("grok-home")
-        .join(format!("sessions/{encoded}/01a02e5f-link/updates.jsonl"));
+    let updates =
+        HOME.join("grok-home").join(format!("sessions/{encoded}/01a02e5f-link/updates.jsonl"));
     write(&updates, &GROK.replace(&preamble::opening(WHO), &mark));
 
     assert_eq!(
-        readback::of(ShimCli::Grok)
-            .find(&mark, &link, spawned())
-            .as_deref(),
+        readback::of(ShimCli::Grok).find(&mark, &link, spawned()).as_deref(),
         Some(updates.as_path()),
         "a pane opened through a symlink still finds the session grok wrote"
     );

@@ -1,10 +1,7 @@
-use std::{
-    fs, io,
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-    thread,
-    time::{Duration, SystemTime},
-};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
+use std::{fs, io, thread};
 
 use backon::BackoffBuilder as _;
 
@@ -92,10 +89,7 @@ fn an_unseeded_target_is_refused_as_not_found() {
         matches!(&refusal, LockError::Io(error) if error.kind() == io::ErrorKind::NotFound),
         "{refusal:?}"
     );
-    assert!(
-        !lock_path_of(&missing).exists(),
-        "nothing was made on the way to the refusal"
-    );
+    assert!(!lock_path_of(&missing).exists(), "nothing was made on the way to the refusal");
 }
 
 #[cfg(unix)]
@@ -120,15 +114,8 @@ fn a_stale_lock_holding_a_file_is_reported_not_broken() {
         ),
         "{refusal:?}"
     );
-    assert!(
-        lock.join("pid").is_file(),
-        "what was inside the lock is untouched"
-    );
-    assert_eq!(
-        fs::read_to_string(&path).expect("the inbox reads"),
-        "[]",
-        "and so is the inbox"
-    );
+    assert!(lock.join("pid").is_file(), "what was inside the lock is untouched");
+    assert_eq!(fs::read_to_string(&path).expect("the inbox reads"), "[]", "and so is the inbox");
 }
 
 #[cfg(unix)]

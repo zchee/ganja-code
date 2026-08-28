@@ -176,9 +176,7 @@ impl Tool for QuestionTool {
         // call that asks nothing cannot be answered, so there is no dialog to
         // open and nothing to wait for (deviation: a-question-that-asks-nothing-is-refused).
         if args.questions.is_empty() {
-            return Err(ToolError::Failed(
-                "no questions were given; ask at least one".to_owned(),
-            ));
+            return Err(ToolError::Failed("no questions were given; ask at least one".to_owned()));
         }
 
         let asked = args.questions.len();

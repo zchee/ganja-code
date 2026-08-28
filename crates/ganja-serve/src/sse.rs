@@ -20,15 +20,15 @@
 //! overflow, and the client re-reads state over the REST surface rather than
 //! trusting a torn transcript.
 
-use std::{convert::Infallible, time::Duration};
+use std::convert::Infallible;
+use std::time::Duration;
 
-use axum::{
-    body::{Body, Bytes},
-    extract::State,
-    http::{StatusCode, header},
-    response::Response,
-};
-use futures::{StreamExt as _, stream::BoxStream};
+use axum::body::{Body, Bytes};
+use axum::extract::State;
+use axum::http::{StatusCode, header};
+use axum::response::Response;
+use futures::StreamExt as _;
+use futures::stream::BoxStream;
 use ganja_core::Evicted;
 use ganja_protocol::Event;
 use tokio::sync::mpsc;
@@ -46,12 +46,7 @@ pub(crate) async fn events(State(state): State<AppState>) -> Response {
     let subscription = state.engine.subscribe_droppable();
 
     let (frames, body) = mpsc::channel::<Result<Bytes, Infallible>>(FRAME_QUEUE);
-    tokio::spawn(pump(
-        subscription,
-        frames,
-        state.heartbeat,
-        state.shutdown.clone(),
-    ));
+    tokio::spawn(pump(subscription, frames, state.heartbeat, state.shutdown.clone()));
 
     Response::builder()
         .status(StatusCode::OK)

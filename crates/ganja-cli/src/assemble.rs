@@ -11,17 +11,12 @@
 //! never drift apart — it existed twice, and a tool added to one copy was a
 //! tool the other silently never offered.
 
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context as _, Result};
-use ganja_core::{
-    AgentRegistry, Engine, Storage, catalog,
-    config::{Config, Overrides},
-    instruction, provider,
-};
+use ganja_core::config::{Config, Overrides};
+use ganja_core::{AgentRegistry, Engine, Storage, catalog, instruction, provider};
 use ganja_permission::Project;
 
 use crate::STORAGE;
@@ -59,34 +54,22 @@ pub(crate) fn assemble(cwd: &Path, overrides: &Overrides) -> Result<Assembled> {
     let agents = Arc::new(
         AgentRegistry::build(&config, project.root()).context("failed to resolve the agents")?,
     );
-    let data = project
-        .data_dir()
-        .context("failed to locate the project's data directory")?;
+    let data = project.data_dir().context("failed to locate the project's data directory")?;
     let storage = Storage::open(data.join(STORAGE));
-    let commands = Arc::new(ganja_core::command::Registry::build(
-        &config,
-        project.root(),
-    ));
+    let commands = Arc::new(ganja_core::command::Registry::build(&config, project.root()));
     let servers = ganja_core::McpServers::new(config.mcp.clone(), project.root());
     let lsp = ganja_core::Lsp::new(config.lsp.as_ref(), project.root());
-    let snapshots = Arc::new(ganja_core::Snapshots::new(
-        &project,
-        config.snapshots_enabled(),
-    ));
+    let snapshots = Arc::new(ganja_core::Snapshots::new(&project, config.snapshots_enabled()));
     let mut tools = ganja_core::tool::Registry::with_builtins();
     if config.webfetch_allows_private() {
-        tools = tools.with(Arc::new(
-            ganja_core::tool::webfetch::WebfetchTool::allowing_private(),
-        ));
+        tools = tools.with(Arc::new(ganja_core::tool::webfetch::WebfetchTool::allowing_private()));
     }
     // Over the top of the roster's rootless one, out of the **same** value the
     // prompt's `<available_skills>` block is built from below: a session that
     // is offered a skill has to be able to load it, and only a caller holding
     // the config and the directory can resolve where either half looks.
     let skill_roots = instruction::skill_roots(&config, cwd);
-    tools = tools.with(Arc::new(ganja_core::tool::skill::SkillTool::over(
-        skill_roots.clone(),
-    )));
+    tools = tools.with(Arc::new(ganja_core::tool::skill::SkillTool::over(skill_roots.clone())));
 
     let mut engine = Engine::persistent(
         selection.provider,
@@ -136,14 +119,7 @@ pub(crate) fn assemble(cwd: &Path, overrides: &Overrides) -> Result<Assembled> {
             move |model| instruction::suffix(&config, &cwd, model)
         });
 
-    Ok(Assembled {
-        engine,
-        servers,
-        storage,
-        root: project.root().to_owned(),
-        data,
-        config,
-    })
+    Ok(Assembled { engine, servers, storage, root: project.root().to_owned(), data, config })
 }
 
 #[cfg(test)]

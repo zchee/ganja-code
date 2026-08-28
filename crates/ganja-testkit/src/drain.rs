@@ -1,7 +1,8 @@
 //! Draining a turn's event stream to its finish — with or without answering
 //! permission dialogs along the way.
 
-use futures::{StreamExt as _, stream::BoxStream};
+use futures::StreamExt as _;
+use futures::stream::BoxStream;
 use ganja_core::Engine;
 use ganja_protocol::{Command, Event, PermissionReply};
 
@@ -16,10 +17,7 @@ pub async fn drain(events: &mut BoxStream<'static, Event>) -> Vec<Event> {
     let mut seen = Vec::new();
 
     loop {
-        let event = events
-            .next()
-            .await
-            .expect("the turn should finish before the stream ends");
+        let event = events.next().await.expect("the turn should finish before the stream ends");
         let finished = matches!(event, Event::MessageFinished { .. });
         seen.push(event);
 
@@ -38,16 +36,10 @@ pub async fn drain_answering(
     let mut seen = Vec::new();
 
     loop {
-        let event = events
-            .next()
-            .await
-            .expect("the turn should finish before the stream ends");
+        let event = events.next().await.expect("the turn should finish before the stream ends");
         if let Event::PermissionRequested { id, .. } = &event {
             engine
-                .send(Command::ReplyPermission {
-                    id: id.clone(),
-                    reply,
-                })
+                .send(Command::ReplyPermission { id: id.clone(), reply })
                 .await
                 .expect("a reply is never refused");
         }

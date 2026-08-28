@@ -143,11 +143,9 @@
 //! skip a holder it cannot judge, where a resolver that skipped one would
 //! deliver wrong.
 
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-    sync::Mutex,
-};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use ganja_tool::{registry, socket};
 
@@ -288,10 +286,7 @@ impl Identity {
     /// A handle over `directory`.
     #[must_use]
     pub fn new(directory: impl Into<PathBuf>) -> Self {
-        Self {
-            directory: directory.into(),
-            pins: Mutex::new(HashMap::new()),
-        }
+        Self { directory: directory.into(), pins: Mutex::new(HashMap::new()) }
     }
 
     /// What `name` points at right now, this conversation's pins consulted.
@@ -321,9 +316,7 @@ impl Identity {
             };
         }
         let Some(found) = live.into_iter().next() else {
-            return Resolution::NoneSuch {
-                name: name.to_owned(),
-            };
+            return Resolution::NoneSuch { name: name.to_owned() };
         };
 
         if let Some(pinned) = self.pinned(name)
@@ -387,16 +380,12 @@ impl Identity {
                 // purpose, and its liveness is the only thing a probe that
                 // failed leaves unknown — so the strict answer stands here
                 // too.
-                Ok(false) => Resolution::NoneSuch {
-                    name: address.display().to_string(),
-                },
+                Ok(false) => Resolution::NoneSuch { name: address.display().to_string() },
                 Err(error) => self.listing_failed(&error),
             };
         }
 
-        Resolution::NoneSuch {
-            name: address.display().to_string(),
-        }
+        Resolution::NoneSuch { name: address.display().to_string() }
     }
 
     /// Records that `name` reached `session_id` at `stem` for a delivery this
@@ -408,13 +397,8 @@ impl Identity {
     /// refuses — a frame, which does not cross a socket however the socket
     /// was named — pins nothing at all.
     pub fn pin(&self, name: &str, session_id: &str, stem: &str) {
-        self.pins().insert(
-            key(name),
-            Pinned {
-                session_id: session_id.to_owned(),
-                stem: stem.to_owned(),
-            },
-        );
+        self.pins()
+            .insert(key(name), Pinned { session_id: session_id.to_owned(), stem: stem.to_owned() });
     }
 
     /// What this conversation already addressed under `name`, if anything.
@@ -442,9 +426,7 @@ impl Identity {
     /// poisoned map would mean a panic that already ended the thing this
     /// guard protects.
     fn pins(&self) -> std::sync::MutexGuard<'_, HashMap<String, Pinned>> {
-        self.pins
-            .lock()
-            .expect("the identity pin map is never poisoned")
+        self.pins.lock().expect("the identity pin map is never poisoned")
     }
 
     /// The live records holding `name`, this session's own excluded, or the
@@ -506,9 +488,7 @@ impl Identity {
             "a session name could not be looked up because the registry could not be read"
         );
 
-        Resolution::ListingFailed {
-            error: error.to_string(),
-        }
+        Resolution::ListingFailed { error: error.to_string() }
     }
 }
 
@@ -557,11 +537,7 @@ fn key(name: &str) -> String {
 #[must_use]
 fn shown(value: &str) -> String {
     let admits = |point: &char| !point.is_control() && *point != '<' && *point != '>';
-    let kept: String = value
-        .chars()
-        .filter(admits)
-        .take(MOST_SHOWN_POINTS)
-        .collect();
+    let kept: String = value.chars().filter(admits).take(MOST_SHOWN_POINTS).collect();
 
     if value.chars().filter(admits).count() > MOST_SHOWN_POINTS {
         format!("{kept}…")
@@ -656,29 +632,13 @@ impl Mentioned {
     pub fn of_name(asked: &str, resolution: Resolution) -> Self {
         let token = asked.to_owned();
         match resolution {
-            Resolution::Session {
-                name,
-                stem,
-                socket,
-                cwd,
-                ..
-            } => Self::Session {
-                token,
-                name,
-                stem,
-                cwd,
-                address: address_of(&socket),
-            },
+            Resolution::Session { name, stem, socket, cwd, .. } => {
+                Self::Session { token, name, stem, cwd, address: address_of(&socket) }
+            }
             Resolution::Ambiguous { candidates, .. } => Self::Ambiguous { token, candidates },
-            Resolution::Moved {
-                pinned_stem,
-                candidates,
-                ..
-            } => Self::Moved {
-                token,
-                pinned_stem,
-                candidates,
-            },
+            Resolution::Moved { pinned_stem, candidates, .. } => {
+                Self::Moved { token, pinned_stem, candidates }
+            }
             Resolution::NoneSuch { .. } => Self::Vanished { token },
             Resolution::ListingFailed { error } => Self::Unchecked { token, error },
         }
@@ -695,23 +655,15 @@ impl Mentioned {
     #[must_use]
     pub fn of_address(address: &str, resolution: Resolution) -> Self {
         match resolution {
-            Resolution::Session {
-                name, stem, cwd, ..
-            } => Self::Addressed {
-                address: address.to_owned(),
-                name,
-                stem,
-                cwd,
-            },
-            Resolution::ListingFailed { error } => Self::Unchecked {
-                token: address.to_owned(),
-                error,
-            },
+            Resolution::Session { name, stem, cwd, .. } => {
+                Self::Addressed { address: address.to_owned(), name, stem, cwd }
+            }
+            Resolution::ListingFailed { error } => {
+                Self::Unchecked { token: address.to_owned(), error }
+            }
             Resolution::NoneSuch { .. }
             | Resolution::Ambiguous { .. }
-            | Resolution::Moved { .. } => Self::AddressMiss {
-                address: address.to_owned(),
-            },
+            | Resolution::Moved { .. } => Self::AddressMiss { address: address.to_owned() },
         }
     }
 }
@@ -751,13 +703,7 @@ pub fn reminder(mentioned: &Mentioned) -> String {
                 ],
             )
         }
-        Mentioned::Session {
-            token,
-            name,
-            stem,
-            cwd,
-            address,
-        } => {
+        Mentioned::Session { token, name, stem, cwd, address } => {
             let (token, name) = (shown(token), shown(name));
             let (stem, address) = (shown(stem), shown(address));
 
@@ -801,11 +747,7 @@ pub fn reminder(mentioned: &Mentioned) -> String {
 
             block(&token, body)
         }
-        Mentioned::Moved {
-            token,
-            pinned_stem,
-            candidates,
-        } => {
+        Mentioned::Moved { token, pinned_stem, candidates } => {
             let (token, pinned_stem) = (shown(token), shown(pinned_stem));
             let mut body = vec![
                 format!(
@@ -837,12 +779,7 @@ pub fn reminder(mentioned: &Mentioned) -> String {
                 )],
             )
         }
-        Mentioned::Addressed {
-            address,
-            name,
-            stem,
-            cwd,
-        } => {
+        Mentioned::Addressed { address, name, stem, cwd } => {
             let (address, name, stem) = (shown(address), shown(name), shown(stem));
 
             block(

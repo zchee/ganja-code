@@ -121,12 +121,11 @@ use futures::stream::BoxStream;
 use secrecy::SecretString;
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    catalog,
-    provider::{
-        AnthropicProvider, ChatRequest, CredentialSource, OpenAiProvider, Presented, Provider,
-        ProviderError, ProviderEvent, ResponsesProvider, require_key, responses::Backend,
-    },
+use crate::catalog;
+use crate::provider::responses::Backend;
+use crate::provider::{
+    AnthropicProvider, ChatRequest, CredentialSource, OpenAiProvider, Presented, Provider,
+    ProviderError, ProviderEvent, ResponsesProvider, require_key,
 };
 
 /// Value of [`PROVIDER_ENV`](super::PROVIDER_ENV) that selects Zen.

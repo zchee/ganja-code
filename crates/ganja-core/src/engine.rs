@@ -29,50 +29,40 @@
 //! compaction — which is what keeps golden, scripted and PTY runs
 //! deterministic.
 
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use futures::{
-    StreamExt as _,
-    stream::{self, BoxStream},
-};
+use futures::StreamExt as _;
+use futures::stream::{self, BoxStream};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 
+use crate::agent::{self, Agent};
+use crate::config::{AgentMode, TeamlessSend};
+use crate::permission::{Permissions, Rule};
+use crate::protocol::{
+    Command, Event, Message, MessageId, PartBody, PermissionId, PermissionMode, PermissionReply,
+    RevertInfo, RevertScope, Role, ToolState, Usage, now,
+};
+use crate::provider::Provider;
+use crate::session::{
+    Answered, LiveSession, PendingReplies, Persist, SessionState, SteerInput, Steering, Turn,
+    TurnHandle, TurnKind, run_turn,
+};
+use crate::storage::{self, SessionId, SessionInfo, Storage, StorageError};
 /// The two wire vocabularies this module's own public types are spelled in
 /// (**D532**, **D534**), re-exported here because [`PeerEnvelope`] and
 /// [`Received`] carry them and `crate::subagent` is a private module: a
 /// caller that can name the value cannot otherwise name its type.
 pub use crate::subagent::{HeldWire, SenderMode};
-use crate::{
-    agent::{self, Agent},
-    catalog, command,
-    config::{AgentMode, TeamlessSend},
-    hook, job, lsp, mcp,
-    permission::{Permissions, Rule},
-    protocol::{
-        Command, Event, Message, MessageId, PartBody, PermissionId, PermissionMode,
-        PermissionReply, RevertInfo, RevertScope, Role, ToolState, Usage, now,
-    },
-    provider::Provider,
-    session::{
-        Answered, LiveSession, PendingReplies, Persist, SessionState, SteerInput, Steering, Turn,
-        TurnHandle, TurnKind, run_turn,
-    },
-    snapshot,
-    storage::{self, SessionId, SessionInfo, Storage, StorageError},
-    subagent,
-    teammate::{self, identity::Identity},
-    tool::{Credentials, FileTimes, Registry, Tool, plan, send_message, task, team::Peer},
-    watch,
-};
+use crate::teammate::identity::Identity;
+use crate::teammate::{self};
+use crate::tool::team::Peer;
+use crate::tool::{Credentials, FileTimes, Registry, Tool, plan, send_message, task};
+use crate::{catalog, command, hook, job, lsp, mcp, snapshot, subagent, watch};
 
 /// Events each subscriber's queue holds before its policy decides what a full
 /// queue means: a lossless subscriber makes the publisher wait, a droppable
@@ -215,11 +205,7 @@ impl ContextBreakdown {
     pub fn free(&self) -> Option<u64> {
         let window = self.window?;
 
-        Some(
-            window
-                .saturating_sub(self.total())
-                .saturating_sub(self.reserve.unwrap_or(0)),
-        )
+        Some(window.saturating_sub(self.total()).saturating_sub(self.reserve.unwrap_or(0)))
     }
 }
 
@@ -497,9 +483,7 @@ impl Bypass {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Option<Arc<std::sync::Mutex<PendingReplies>>>> {
-        self.answering
-            .lock()
-            .expect("the bypassed turn's registry is never poisoned")
+        self.answering.lock().expect("the bypassed turn's registry is never poisoned")
     }
 }
 
@@ -524,10 +508,7 @@ enum Lane {
     Lossless(mpsc::Sender<Event>),
     /// The publisher never waits: a full queue evicts the subscriber, and
     /// `loss` is how its stream is told it did not simply end.
-    Droppable {
-        queue: mpsc::Sender<Event>,
-        loss: oneshot::Sender<Evicted>,
-    },
+    Droppable { queue: mpsc::Sender<Event>, loss: oneshot::Sender<Evicted> },
 }
 
 impl Fanout {
@@ -537,10 +518,7 @@ impl Fanout {
     pub(crate) fn new(first: mpsc::Sender<Event>) -> Self {
         Self {
             outlets: std::sync::Mutex::new(Outlets {
-                entries: vec![Outlet {
-                    id: 0,
-                    lane: Lane::Lossless(first),
-                }],
+                entries: vec![Outlet { id: 0, lane: Lane::Lossless(first) }],
                 minted: 1,
             }),
             publish: tokio::sync::Mutex::new(()),
@@ -549,9 +527,7 @@ impl Fanout {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Outlets> {
-        self.outlets
-            .lock()
-            .expect("the subscriber registry is never poisoned")
+        self.outlets.lock().expect("the subscriber registry is never poisoned")
     }
 
     /// Adds a subscriber. Registration is the atomic point after which
@@ -638,11 +614,7 @@ impl Fanout {
         if !dead.is_empty() {
             outlets.entries.retain(|outlet| !dead.contains(&outlet.id));
         }
-        if outlets.entries.is_empty() {
-            Err(NoSubscribers)
-        } else {
-            Ok(())
-        }
+        if outlets.entries.is_empty() { Err(NoSubscribers) } else { Ok(()) }
     }
 }
 
@@ -776,10 +748,8 @@ pub(crate) struct RecordSwitch {
 
 impl RecordSwitch {
     fn record(&self, target: SwitchTo) {
-        *self
-            .pending
-            .lock()
-            .expect("the pending switch is never poisoned") = PendingSwitch::Requested(target);
+        *self.pending.lock().expect("the pending switch is never poisoned") =
+            PendingSwitch::Requested(target);
     }
 }
 
@@ -871,10 +841,7 @@ struct TurnSlot {
 
 impl TurnSlot {
     fn new() -> Self {
-        Self {
-            slot: Arc::default(),
-            pending: Arc::new(std::sync::Mutex::new(PendingSwitch::None)),
-        }
+        Self { slot: Arc::default(), pending: Arc::new(std::sync::Mutex::new(PendingSwitch::None)) }
     }
 
     /// The Busy check every state-changing entry starts with, plus the cell
@@ -889,10 +856,7 @@ impl TurnSlot {
             return Err(EngineError::Busy);
         }
 
-        let mut pending = self
-            .pending
-            .lock()
-            .expect("the pending switch is never poisoned");
+        let mut pending = self.pending.lock().expect("the pending switch is never poisoned");
         let owed = match (policy, *pending) {
             // By the proof on the type: `Requested` exists only while the
             // slot is occupied, and this entry just found it empty.
@@ -1375,10 +1339,7 @@ impl PeerAddress {
     fn of(path: &Path) -> Option<Self> {
         let marker = path.file_stem()?.to_str()?.to_owned();
 
-        Some(Self {
-            path: path.to_owned(),
-            marker,
-        })
+        Some(Self { path: path.to_owned(), marker })
     }
 }
 
@@ -1591,10 +1552,7 @@ impl Engine {
 
     /// The base half as it currently stands.
     fn base_half(&self) -> Option<String> {
-        self.base_prompt
-            .lock()
-            .expect("the system prompt is never poisoned")
-            .clone()
+        self.base_prompt.lock().expect("the system prompt is never poisoned").clone()
     }
 
     /// Composes the base half again for the family of the model that is active
@@ -1611,10 +1569,7 @@ impl Engine {
         }
         let composed = crate::instruction::base_prompt(&self.model()).to_owned();
 
-        *self
-            .base_prompt
-            .lock()
-            .expect("the system prompt is never poisoned") = Some(composed);
+        *self.base_prompt.lock().expect("the system prompt is never poisoned") = Some(composed);
     }
 
     /// Keeps the suffix half composed for whichever model the session is
@@ -1634,10 +1589,8 @@ impl Engine {
         self,
         compose: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
     ) -> Self {
-        *self
-            .environment
-            .lock()
-            .expect("the environment composer is never poisoned") = Some(Arc::new(compose));
+        *self.environment.lock().expect("the environment composer is never poisoned") =
+            Some(Arc::new(compose));
         self.recompose_environment();
 
         self
@@ -1660,19 +1613,14 @@ impl Engine {
         &self,
         compose: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
     ) {
-        *self
-            .environment
-            .lock()
-            .expect("the environment composer is never poisoned") = Some(Arc::new(compose));
+        *self.environment.lock().expect("the environment composer is never poisoned") =
+            Some(Arc::new(compose));
         self.recompose_environment();
     }
 
     /// The environment half as it currently stands.
     fn environment_half(&self) -> Option<String> {
-        self.prompt_suffix
-            .lock()
-            .expect("the system prompt is never poisoned")
-            .clone()
+        self.prompt_suffix.lock().expect("the system prompt is never poisoned").clone()
     }
 
     /// Composes the suffix half again for the model that is active now.
@@ -1680,20 +1628,14 @@ impl Engine {
     /// Does nothing when no way to compose one was installed, which is what
     /// leaves a scripted engine's literal suffix alone.
     fn recompose_environment(&self) {
-        let compose = self
-            .environment
-            .lock()
-            .expect("the environment composer is never poisoned")
-            .clone();
+        let compose =
+            self.environment.lock().expect("the environment composer is never poisoned").clone();
         let Some(compose) = compose else {
             return;
         };
         let composed = compose(&self.model());
 
-        *self
-            .prompt_suffix
-            .lock()
-            .expect("the system prompt is never poisoned") = composed;
+        *self.prompt_suffix.lock().expect("the system prompt is never poisoned") = composed;
     }
 
     /// Sets the agents this session may run as, and starts it on the
@@ -1760,10 +1702,7 @@ impl Engine {
             expiry,
         );
         self.inbound = Arc::new(inbound);
-        *self
-            .inbound_drain
-            .lock()
-            .expect("the inbound drain slot is never poisoned") = Some(drain);
+        *self.inbound_drain.lock().expect("the inbound drain slot is never poisoned") = Some(drain);
 
         self
     }
@@ -1895,9 +1834,7 @@ impl Engine {
     /// resolves; see [`mcp::Servers::names`].
     #[must_use]
     pub fn mcp_names(&self) -> Vec<String> {
-        self.mcp
-            .as_ref()
-            .map_or_else(Vec::new, |servers| servers.names())
+        self.mcp.as_ref().map_or_else(Vec::new, |servers| servers.names())
     }
 
     /// Re-dials one MCP server by name; see [`mcp::Servers::reconnect`].
@@ -1917,18 +1854,14 @@ impl Engine {
     /// gates a Login action on it; see [`mcp::Servers::has_oauth`].
     #[must_use]
     pub fn mcp_has_oauth(&self, name: &str) -> bool {
-        self.mcp
-            .as_ref()
-            .is_some_and(|servers| servers.has_oauth(name))
+        self.mcp.as_ref().is_some_and(|servers| servers.has_oauth(name))
     }
 
     /// The URL a login for `name` wants opened, while one is in flight; see
     /// [`mcp::Servers::login_url`].
     #[must_use]
     pub fn mcp_login_url(&self, name: &str) -> Option<String> {
-        self.mcp
-            .as_ref()
-            .and_then(|servers| servers.login_url(name))
+        self.mcp.as_ref().and_then(|servers| servers.login_url(name))
     }
 
     /// Starts an OAuth login for one MCP server; see [`mcp::Servers::start_login`].
@@ -2079,10 +2012,7 @@ impl Engine {
 
         let (dialogs, waiting) = mpsc::channel(TEAMMATE_DIALOGS);
         registry.forward_dialogs_to(dialogs);
-        *self
-            .teammate_dialogs
-            .lock()
-            .expect("the dialog queue is never poisoned") = Some(waiting);
+        *self.teammate_dialogs.lock().expect("the dialog queue is never poisoned") = Some(waiting);
 
         self.teammates = Some(Arc::new(subagent::Teammates::new(
             registry,
@@ -2119,9 +2049,9 @@ impl Engine {
                 // `--print-timeout` a resident launch line derived from one
                 // belongs to the headless shape, and a TUI is launched with
                 // its floors alone.
-                agy: Arc::new(teammate::shim_tui::ShimTui::new(Arc::new(
-                    teammate::agy::Agy::new(),
-                ))),
+                agy: Arc::new(teammate::shim_tui::ShimTui::new(
+                    Arc::new(teammate::agy::Agy::new()),
+                )),
                 // Real as of W5, and carrying the codex slot's hazard for the
                 // same reason: it searches the real `PATH`, so a test that
                 // reached it would spawn the developer's own `grok`. The two
@@ -2169,20 +2099,14 @@ impl Engine {
 
             return;
         }
-        let Some(mut transitions) = self
-            .inbound_drain
-            .lock()
-            .expect("the inbound drain slot is never poisoned")
-            .take()
+        let Some(mut transitions) =
+            self.inbound_drain.lock().expect("the inbound drain slot is never poisoned").take()
         else {
             // A second team install on one engine; the first task stands.
             return;
         };
         let (flush, mut flushes) = mpsc::unbounded_channel::<oneshot::Sender<()>>();
-        *self
-            .inbound_flush
-            .lock()
-            .expect("the inbound flush slot is never poisoned") = Some(flush);
+        *self.inbound_flush.lock().expect("the inbound flush slot is never poisoned") = Some(flush);
 
         let fanout = Arc::clone(&self.fanout);
         let session = Arc::clone(&self.session);
@@ -2257,10 +2181,7 @@ impl Engine {
                     }
                 }
 
-                let current = session
-                    .lock()
-                    .expect("the session id is never poisoned")
-                    .clone();
+                let current = session.lock().expect("the session id is never poisoned").clone();
                 let _ = fanout.send(transition.into_event(current)).await;
             }
             for (_, timer) in timers {
@@ -2386,10 +2307,7 @@ impl Engine {
         // Read once, before the gate's lock is taken: the marker is a borrow
         // into the `Origin` below, and taking the address cell's lock inside
         // the gate's own would be two locks in an order nothing else uses.
-        let marker = self
-            .peer_address()
-            .map(|(_, marker)| marker)
-            .unwrap_or_default();
+        let marker = self.peer_address().map(|(_, marker)| marker).unwrap_or_default();
         let admission = self.inbound.admit_socket(
             self.receiver_class(),
             &message.from,
@@ -2424,19 +2342,12 @@ impl Engine {
                 // is the prefix of every message this session sends next.
                 // `adoptable_chain` states both clauses and the one it
                 // deliberately leaves out.
-                *self
-                    .inbound_chain
-                    .lock()
-                    .expect("the inbound chain cell is never poisoned") =
+                *self.inbound_chain.lock().expect("the inbound chain cell is never poisoned") =
                     teammate::inbound::adoptable_chain(envelope.hop_chain);
 
                 Ok(Received::accepted(sent))
             }
-            teammate::inbound::SocketAdmission::Held {
-                id,
-                cause,
-                evicted_prune,
-            } => {
+            teammate::inbound::SocketAdmission::Held { id, cause, evicted_prune } => {
                 if let Some(identity) = evicted_prune {
                     // A capacity eviction's mailbox-door victim, pruned
                     // best-effort: its record is already settled `expired`,
@@ -2455,18 +2366,14 @@ impl Engine {
                 // reply address, is a sender with nothing to answer — and the
                 // address is vetted through the one predicate before it is
                 // ever kept, let alone opened.
-                if let (Some(message_id), Some(reply_to)) = (
-                    envelope.message_id,
-                    vetted_reply_to(envelope.reply_to.as_deref()),
-                ) {
+                if let (Some(message_id), Some(reply_to)) =
+                    (envelope.message_id, vetted_reply_to(envelope.reply_to.as_deref()))
+                {
                     self.receipts.associate(id, message_id, reply_to);
                 }
 
                 Ok(Received {
-                    sent: crate::tool::team::Sent {
-                        to: lead,
-                        note: subagent::held_note(cause),
-                    },
+                    sent: crate::tool::team::Sent { to: lead, note: subagent::held_note(cause) },
                     // The typed half of the same fact the note carries in
                     // prose (**N2**), so the sender drives its outstanding-id
                     // registry off a value rather than off a peer's sentence.
@@ -2501,10 +2408,7 @@ impl Engine {
     /// hands the gate the shape it decides on.
     #[must_use]
     pub fn receiver_class(&self) -> Option<teammate::inbound::ReceiverClass> {
-        Some(teammate::inbound::classify_receiver(
-            self.permission_mode(),
-            self.inbound_bypass,
-        ))
+        Some(teammate::inbound::classify_receiver(self.permission_mode(), self.inbound_bypass))
     }
 
     /// The admission gate itself, for the one consumer outside this file
@@ -2541,10 +2445,7 @@ impl Engine {
     /// show means.
     #[must_use]
     pub fn teammate_dialogs(&self) -> Option<mpsc::Receiver<teammate::posture::Forwarded>> {
-        self.teammate_dialogs
-            .lock()
-            .expect("the dialog queue is never poisoned")
-            .take()
+        self.teammate_dialogs.lock().expect("the dialog queue is never poisoned").take()
     }
 
     /// Gives this session the postbox its own `send_message` calls are posted
@@ -2693,20 +2594,14 @@ impl Engine {
     /// frontend calls this — a model's arguments cannot reach it, the same
     /// property [`crate::tool::team::Postbox`]'s own doc states of `from`.
     pub fn set_self_name(&self, name: impl Into<String>) {
-        *self
-            .self_name
-            .lock()
-            .expect("the self-name cell is never poisoned") = name.into();
+        *self.self_name.lock().expect("the self-name cell is never poisoned") = name.into();
     }
 
     /// The self-name [`Engine::set_self_name`] last set, or the derived
     /// fallback no frontend has replaced yet.
     #[must_use]
     pub fn self_name(&self) -> String {
-        self.self_name
-            .lock()
-            .expect("the self-name cell is never poisoned")
-            .clone()
+        self.self_name.lock().expect("the self-name cell is never poisoned").clone()
     }
 
     /// Records the socket this session answers on, or that it answers on
@@ -2727,10 +2622,8 @@ impl Engine {
     /// carries no chain entry and offers no reply address, which is Axis 3's
     /// unbound sub-case reached by a different road.
     pub fn set_peer_address(&self, path: Option<&Path>) {
-        *self
-            .peer_address
-            .lock()
-            .expect("the peer address cell is never poisoned") = path.and_then(PeerAddress::of);
+        *self.peer_address.lock().expect("the peer address cell is never poisoned") =
+            path.and_then(PeerAddress::of);
     }
 
     /// This session's own bound socket, as [`Engine::set_peer_address`] last
@@ -2776,10 +2669,7 @@ impl Engine {
     /// same-uid process could probe which ids a session is holding — the
     /// same argument the message route already makes.
     pub async fn apply_receipt(&self, receipt: crate::subagent::SocketReceipt) {
-        let Some(settled) = self
-            .receipts
-            .settle_sent(&receipt.message_id, receipt.status)
-        else {
+        let Some(settled) = self.receipts.settle_sent(&receipt.message_id, receipt.status) else {
             // The only id on this line that a peer chose: an unknown one
             // matched nothing this session minted, so it is cut and escaped
             // like every other rendering of a peer's own string. The
@@ -2799,10 +2689,8 @@ impl Engine {
             "an outstanding send settled"
         );
         {
-            let mut batch = self
-                .settled_receipts
-                .lock()
-                .expect("the settled receipts batch is never poisoned");
+            let mut batch =
+                self.settled_receipts.lock().expect("the settled receipts batch is never poisoned");
             if batch.len() >= RECEIPT_BATCH_CAP {
                 batch.remove(0);
             }
@@ -2892,11 +2780,8 @@ impl Engine {
     /// microseconds and only a wedged lossless subscriber spends the bound.
     pub async fn shutdown_settle(&self) {
         self.inbound.shutdown_settle();
-        let flush = self
-            .inbound_flush
-            .lock()
-            .expect("the inbound flush slot is never poisoned")
-            .clone();
+        let flush =
+            self.inbound_flush.lock().expect("the inbound flush slot is never poisoned").clone();
         let Some(flush) = flush else {
             // No drain task — a session that never led a team, whose gate
             // never held anything to announce.
@@ -2938,19 +2823,18 @@ impl Engine {
         &self,
         registry: &Arc<teammate::TeammateRegistry>,
     ) -> impl Fn() -> Arc<Registry> + Send + Sync + use<> {
-        let lead = Peer {
-            name: registry.lead().as_str().to_owned(),
-            description: None,
-            lead: true,
-        };
+        let lead =
+            Peer { name: registry.lead().as_str().to_owned(), description: None, lead: true };
         let lent = Arc::clone(&self.lent_tools);
 
         move || {
             let base = Arc::clone(&lent.lock().expect("the tool registry is never poisoned"));
 
-            Arc::new(base.with(Arc::new(send_message::SendMessageTool::new(
-                std::slice::from_ref(&lead),
-            ))))
+            Arc::new(
+                base.with(Arc::new(send_message::SendMessageTool::new(std::slice::from_ref(
+                    &lead,
+                )))),
+            )
         }
     }
 
@@ -2976,9 +2860,7 @@ impl Engine {
                 .and_then(|registry| registry.get(&spec.agent_type))
                 .map(|agent| agent.rules.clone())
                 .unwrap_or_default();
-            let held = lead
-                .lock()
-                .expect("the permission rules are never poisoned");
+            let held = lead.lock().expect("the permission rules are never poisoned");
 
             teammate::posture::permissions_for(&held, rules)
         }
@@ -3021,10 +2903,7 @@ impl Engine {
     /// does. A running turn keeps the roots it started with, like every
     /// other value a turn clones at its start.
     pub fn replace_skill_roots(&self, roots: crate::tool::skill::Roots) {
-        *self
-            .skill_roots
-            .lock()
-            .expect("the skill roots are never poisoned") = roots;
+        *self.skill_roots.lock().expect("the skill roots are never poisoned") = roots;
     }
 
     /// The roots [`Engine::with_skill_roots`] installed, for a frontend
@@ -3032,10 +2911,7 @@ impl Engine {
     /// expand them from.
     #[must_use]
     pub fn skill_roots(&self) -> crate::tool::skill::Roots {
-        self.skill_roots
-            .lock()
-            .expect("the skill roots are never poisoned")
-            .clone()
+        self.skill_roots.lock().expect("the skill roots are never poisoned").clone()
     }
 
     /// Replaces what runs at the nine hook moments, in place — the hooks
@@ -3055,20 +2931,12 @@ impl Engine {
     /// The hooks as they currently stand, cloned out from under the lock so a
     /// caller never holds it across an await.
     fn hooks(&self) -> Option<Arc<hook::Hooks>> {
-        self.hooks
-            .lock()
-            .expect("the hooks are never poisoned")
-            .clone()
+        self.hooks.lock().expect("the hooks are never poisoned").clone()
     }
 
     /// The base tools as they currently stand.
     fn base_tools(&self) -> Arc<Registry> {
-        Arc::clone(
-            &self
-                .base_tools
-                .lock()
-                .expect("the base tools are never poisoned"),
-        )
+        Arc::clone(&self.base_tools.lock().expect("the base tools are never poisoned"))
     }
 
     /// Fires `SessionStart` with the source a fresh session has, and keeps
@@ -3081,10 +2949,7 @@ impl Engine {
     /// resume half lives in [`Engine::resume`], where a resumed session is
     /// installed.
     pub async fn session_start(&self) {
-        self.fire_session_hook(hook::Payload::SessionStart {
-            source: hook::Source::Startup,
-        })
-        .await;
+        self.fire_session_hook(hook::Payload::SessionStart { source: hook::Source::Startup }).await;
     }
 
     /// Waits until no turn is in flight, or until `limit` runs out.
@@ -3125,10 +2990,7 @@ impl Engine {
     /// purpose: every route out of every frontend is somebody ending the
     /// process, so `"exit"` is what all three pass.
     pub async fn session_end(&self, reason: &str) {
-        self.fire_session_hook(hook::Payload::SessionEnd {
-            reason: reason.to_owned(),
-        })
-        .await;
+        self.fire_session_hook(hook::Payload::SessionEnd { reason: reason.to_owned() }).await;
     }
 
     /// Runs one session-level hook and files what it said: notices to the log,
@@ -3192,10 +3054,7 @@ impl Engine {
     /// registering a recursive watch on Linux is a synchronous walk of the
     /// whole tree, and this call sits before a terminal takeover.
     pub fn watch_files(&self) {
-        *self
-            .watcher
-            .lock()
-            .expect("the watcher slot is never poisoned") =
+        *self.watcher.lock().expect("the watcher slot is never poisoned") =
             Some(watch::Watcher::new(&self.root, Arc::clone(&self.files)));
     }
 
@@ -3273,10 +3132,7 @@ impl Engine {
     /// before this returns.
     pub fn append_standing_rules(&self, rules: Vec<Rule>) {
         {
-            let mut standing = self
-                .standing
-                .lock()
-                .expect("the standing rules are never poisoned");
+            let mut standing = self.standing.lock().expect("the standing rules are never poisoned");
             standing.extend(rules);
         }
 
@@ -3372,10 +3228,7 @@ impl Engine {
     /// stores it.
     #[must_use]
     pub fn session_id(&self) -> SessionId {
-        self.session
-            .lock()
-            .expect("the session id is never poisoned")
-            .clone()
+        self.session.lock().expect("the session id is never poisoned").clone()
     }
 
     /// The session the engine is writing into, or [`None`] before the first
@@ -3458,12 +3311,7 @@ impl Engine {
         let measure = crate::instruction::suffix_measure(&suffix);
         let head_chars = head.as_deref().map_or(0, |head| head.chars().count());
 
-        let registry = Arc::clone(
-            &self
-                .tools
-                .lock()
-                .expect("the tool registry is never poisoned"),
-        );
+        let registry = Arc::clone(&self.tools.lock().expect("the tool registry is never poisoned"));
         let (mut builtin_chars, mut mcp_chars) = (0_usize, 0_usize);
         let (mut builtin_count, mut mcp_count) = (0_usize, 0_usize);
         for definition in registry.definitions() {
@@ -3499,18 +3347,15 @@ impl Engine {
         {
             let history = self.history.lock().await;
             for message in history.iter() {
-                if hidden_from
-                    .as_ref()
-                    .is_some_and(|anchor| message.id >= *anchor)
-                {
+                if hidden_from.as_ref().is_some_and(|anchor| message.id >= *anchor) {
                     continue;
                 }
                 carried.push(message.clone());
                 let (generated, tool_results) = message_chars(message);
                 let tokens = match (&message.role, message.usage) {
-                    (Role::Assistant, Some(usage)) => usage
-                        .output_tokens
-                        .saturating_add(estimate_tokens(tool_results)),
+                    (Role::Assistant, Some(usage)) => {
+                        usage.output_tokens.saturating_add(estimate_tokens(tool_results))
+                    }
                     _ => estimate_tokens(generated.saturating_add(tool_results)),
                 };
                 match message.role {
@@ -3635,10 +3480,7 @@ impl Engine {
                 "seeded the activated tools from the resumed session"
             );
         }
-        *self
-            .activated_tools
-            .lock()
-            .expect("the activated set is never poisoned") = activated;
+        *self.activated_tools.lock().expect("the activated set is never poisoned") = activated;
 
         let start = match &info.summary {
             None => 0,
@@ -3670,16 +3512,10 @@ impl Engine {
         // The slot moves before anything is announced: the resumed revert
         // below must carry the resumed session's id, not the one this engine
         // minted at birth or was on a moment ago.
-        *self
-            .session
-            .lock()
-            .expect("the session id is never poisoned") = info.id.clone();
+        *self.session.lock().expect("the session id is never poisoned") = info.id.clone();
         let revert = info.revert.clone();
         {
-            let mut live = state
-                .live
-                .lock()
-                .expect("the live session is never poisoned");
+            let mut live = state.live.lock().expect("the live session is never poisoned");
             live.info = Some(info);
             live.warned_uncataloged = false;
         }
@@ -3690,10 +3526,7 @@ impl Engine {
         // moment to put words in somebody's editor. A session that was not
         // reverted announces nothing, because a frontend seeding itself from
         // that transcript is already hiding none of it.
-        *self
-            .revert
-            .lock()
-            .expect("the revert state is never poisoned") = revert.clone();
+        *self.revert.lock().expect("the revert state is never poisoned") = revert.clone();
         if let Some(revert) = &revert {
             let _ = self
                 .fanout
@@ -3712,10 +3545,7 @@ impl Engine {
         // resume Busy for its own duration. `startup` never fires here and
         // `resume` never fires anywhere else, which is the whole of what a
         // `SessionStart` matcher selects between.
-        self.fire_session_hook(hook::Payload::SessionStart {
-            source: hook::Source::Resume,
-        })
-        .await;
+        self.fire_session_hook(hook::Payload::SessionStart { source: hook::Source::Resume }).await;
 
         Ok(transcript)
     }
@@ -3792,9 +3622,7 @@ impl Engine {
     /// environment half after either.
     fn system_for(&self, agent: Option<&Agent>) -> Option<String> {
         let base = self.base_half();
-        let head = agent
-            .and_then(|agent| agent.prompt.as_deref())
-            .or(base.as_deref());
+        let head = agent.and_then(|agent| agent.prompt.as_deref()).or(base.as_deref());
         let suffix = self.environment_half();
 
         // What the connected servers said about themselves, after the
@@ -3863,10 +3691,7 @@ impl Engine {
     pub fn subscribe_droppable(&self) -> BoxStream<'static, Result<Event, Evicted>> {
         let (sender, receiver) = mpsc::channel(EVENT_CAPACITY);
         let (loss, lost) = oneshot::channel();
-        self.fanout.register(Lane::Droppable {
-            queue: sender,
-            loss,
-        });
+        self.fanout.register(Lane::Droppable { queue: sender, loss });
 
         // The queue drains first, whole; only once it ends is the loss
         // marker consulted. An engine that simply went away drops `loss`
@@ -3891,35 +3716,16 @@ impl Engine {
     /// session cannot become.
     pub async fn send(&self, command: Command) -> Result<(), EngineError> {
         match command {
-            Command::SendPrompt {
-                text,
-                mentions,
-                skills,
-                peers,
-                session_mentions,
-            } => {
+            Command::SendPrompt { text, mentions, skills, peers, session_mentions } => {
                 self.start_turn(
                     text,
-                    TurnKind::Prompt {
-                        mentions,
-                        skills,
-                        peers,
-                        session_mentions,
-                    },
+                    TurnKind::Prompt { mentions, skills, peers, session_mentions },
                     None,
                 )
                 .await
             }
-            Command::Steer {
-                id,
-                text,
-                mentions,
-                skills,
-                peers,
-                session_mentions,
-            } => {
-                self.steer(id, text, mentions, skills, peers, session_mentions)
-                    .await
+            Command::Steer { id, text, mentions, skills, peers, session_mentions } => {
+                self.steer(id, text, mentions, skills, peers, session_mentions).await
             }
             Command::CancelTurn => {
                 self.cancel_turn().await;
@@ -3994,14 +3800,10 @@ impl Engine {
                 Ok(())
             }
             Command::RunShell { command } => {
-                self.start_turn(command.clone(), TurnKind::Shell { command }, None)
-                    .await
+                self.start_turn(command.clone(), TurnKind::Shell { command }, None).await
             }
             Command::RunCommand { name, args } => self.run_command(&name, &args).await,
-            Command::Compact => {
-                self.start_turn(String::new(), TurnKind::Compact, None)
-                    .await
-            }
+            Command::Compact => self.start_turn(String::new(), TurnKind::Compact, None).await,
             Command::NewSession => self.new_session().await,
             Command::Undo => self.undo().await,
             Command::Redo => self.redo().await,
@@ -4043,11 +3845,8 @@ impl Engine {
         };
         // Upstream's precedence: the command's own model, then the model of the
         // agent it named, then the session's.
-        let model = definition
-            .model
-            .as_deref()
-            .and_then(|model| self.model_named(model))
-            .or_else(|| {
+        let model =
+            definition.model.as_deref().and_then(|model| self.model_named(model)).or_else(|| {
                 agent
                     .as_ref()
                     .and_then(|agent| agent.model.as_deref())
@@ -4130,15 +3929,9 @@ impl Engine {
         // different name now, before anything can be said in it. Left stale,
         // the next prompt's lazy create would adopt the old id and its
         // `save_info` would upsert over the previous conversation's row.
-        *self
-            .session
-            .lock()
-            .expect("the session id is never poisoned") = SessionId::ascending();
+        *self.session.lock().expect("the session id is never poisoned") = SessionId::ascending();
         if let Some(state) = &self.persistence {
-            let mut live = state
-                .live
-                .lock()
-                .expect("the live session is never poisoned");
+            let mut live = state.live.lock().expect("the live session is never poisoned");
             live.info = None;
             live.warned_uncataloged = false;
         }
@@ -4146,10 +3939,7 @@ impl Engine {
         // and the recompute puts the names the old session had touched back
         // under the deferral arithmetic — over never-touched names only, as
         // every recompute is, which for a fresh set is all of them.
-        self.activated_tools
-            .lock()
-            .expect("the activated set is never poisoned")
-            .clear();
+        self.activated_tools.lock().expect("the activated set is never poisoned").clear();
         self.recompose_tools();
         // A new conversation has addressed nobody (**D528**'s pin guard's own
         // `NewSession` door): carrying the old one's choices forward would be
@@ -4160,15 +3950,9 @@ impl Engine {
         // to a conversation that has ended, an outstanding send whose fate
         // arrives now is news about that conversation rather than this one,
         // and a settlement nobody has read yet is news nobody will.
-        self.inbound_chain
-            .lock()
-            .expect("the inbound chain cell is never poisoned")
-            .clear();
+        self.inbound_chain.lock().expect("the inbound chain cell is never poisoned").clear();
         self.receipts.clear_sent();
-        self.settled_receipts
-            .lock()
-            .expect("the settled receipts batch is never poisoned")
-            .clear();
+        self.settled_receipts.lock().expect("the settled receipts batch is never poisoned").clear();
         // Nothing before this turn to compare against, so the plan-to-build
         // reminder does not fire on the first turn of a new session.
         self.active().previous_agent = None;
@@ -4178,10 +3962,7 @@ impl Engine {
         // A revert is a position in a transcript, and this one has none. The
         // files stay where the revert left them: starting a new conversation
         // is not asking for the last one's work back.
-        *self
-            .revert
-            .lock()
-            .expect("the revert state is never poisoned") = None;
+        *self.revert.lock().expect("the revert state is never poisoned") = None;
         drop(turn);
 
         Ok(())
@@ -4221,8 +4002,7 @@ impl Engine {
             (anchor, prompt, patches)
         };
 
-        self.revert_to(snapshots, current.as_ref(), anchor, prompt, &patches)
-            .await;
+        self.revert_to(snapshots, current.as_ref(), anchor, prompt, &patches).await;
         drop(turn);
 
         Ok(())
@@ -4250,8 +4030,7 @@ impl Engine {
 
         match forward {
             Some((anchor, prompt, patches)) => {
-                self.revert_to(snapshots, Some(&current), anchor, prompt, &patches)
-                    .await;
+                self.revert_to(snapshots, Some(&current), anchor, prompt, &patches).await;
             }
             // Nothing left to step forward to, so the working tree goes back
             // whole: every file the tree holds, whether or not a patch named
@@ -4303,10 +4082,7 @@ impl Engine {
         // therefore not that session's to refuse.
         let snapshots = match scope.touches_files() {
             true => Some(self.snapshotting()?),
-            false => self
-                .snapshots
-                .as_deref()
-                .filter(|snapshots| snapshots.enabled()),
+            false => self.snapshots.as_deref().filter(|snapshots| snapshots.enabled()),
         };
 
         let current = self.reverted();
@@ -4315,17 +4091,11 @@ impl Engine {
             // A checkpoint is a prompt. An assistant message, a part id, or an
             // id from another session all land here, and all get their own name
             // back rather than the nearest prompt this could have meant.
-            if !history
-                .iter()
-                .any(|message| message.id == anchor && message.role == Role::User)
-            {
+            if !history.iter().any(|message| message.id == anchor && message.role == Role::User) {
                 return Err(EngineError::NoSuchCheckpoint { id: anchor });
             }
 
-            (
-                snapshot::prompt_at(&history, &anchor),
-                snapshot::patches_from(&history, &anchor),
-            )
+            (snapshot::prompt_at(&history, &anchor), snapshot::patches_from(&history, &anchor))
         };
 
         // Captured once per chain and reused by every revert after it, for
@@ -4365,11 +4135,8 @@ impl Engine {
         };
 
         if scope.touches_conversation() {
-            let state = snapshot::RevertState {
-                message_id: anchor,
-                snapshot: redo,
-                files: restored,
-            };
+            let state =
+                snapshot::RevertState { message_id: anchor, snapshot: redo, files: restored };
             let info = state.info();
             self.remember_revert(Some(state));
             let _ = self
@@ -4392,10 +4159,7 @@ impl Engine {
                 .fanout
                 .send(Event::RevertChanged {
                     session_id: self.session_id(),
-                    revert: Some(RevertInfo {
-                        message_id: anchor,
-                        files: restored,
-                    }),
+                    revert: Some(RevertInfo { message_id: anchor, files: restored }),
                     prompt: None,
                 })
                 .await;
@@ -4447,11 +4211,7 @@ impl Engine {
             }
         }
 
-        let state = snapshot::RevertState {
-            message_id: anchor,
-            snapshot: redo,
-            files,
-        };
+        let state = snapshot::RevertState { message_id: anchor, snapshot: redo, files };
         let info = state.info();
         self.remember_revert(Some(state));
         let _ = self
@@ -4477,10 +4237,7 @@ impl Engine {
         };
         let anchor = state.message_id;
 
-        self.history
-            .lock()
-            .await
-            .retain(|message| message.id < anchor);
+        self.history.lock().await.retain(|message| message.id < anchor);
 
         if let Some(persistence) = &self.persistence {
             let session = persistence
@@ -4495,10 +4252,7 @@ impl Engine {
                 // was just truncated: an assistant turn that died before its
                 // first fragment is kept on disk and left out of the window,
                 // and one inside the undone range has to go with the rest.
-                let stored = persistence
-                    .storage
-                    .load_transcript(&session)
-                    .unwrap_or_default();
+                let stored = persistence.storage.load_transcript(&session).unwrap_or_default();
                 for message in stored.iter().filter(|message| message.id >= anchor) {
                     if let Err(error) = persistence.storage.delete_message(&session, &message.id) {
                         tracing::warn!(
@@ -4539,28 +4293,19 @@ impl Engine {
 
     /// How far back this session is currently reverted.
     fn reverted(&self) -> Option<snapshot::RevertState> {
-        self.revert
-            .lock()
-            .expect("the revert state is never poisoned")
-            .clone()
+        self.revert.lock().expect("the revert state is never poisoned").clone()
     }
 
     /// Records where the revert stands, and stores it when the engine
     /// persists: the messages a revert hides are still on disk, so a session
     /// reopened tomorrow has to be told it is looking at a hidden tail.
     fn remember_revert(&self, state: Option<snapshot::RevertState>) {
-        *self
-            .revert
-            .lock()
-            .expect("the revert state is never poisoned") = state.clone();
+        *self.revert.lock().expect("the revert state is never poisoned") = state.clone();
 
         let Some(persistence) = &self.persistence else {
             return;
         };
-        let mut live = persistence
-            .live
-            .lock()
-            .expect("the live session is never poisoned");
+        let mut live = persistence.live.lock().expect("the live session is never poisoned");
         let Some(info) = live.info.as_mut() else {
             return;
         };
@@ -4578,9 +4323,7 @@ impl Engine {
 
     /// The active selection, which is never held across an await.
     fn active(&self) -> std::sync::MutexGuard<'_, Active> {
-        self.active
-            .lock()
-            .expect("the active selection is never poisoned")
+        self.active.lock().expect("the active selection is never poisoned")
     }
 
     /// The permission baseline a turn running as `agent` is judged by: the
@@ -4608,10 +4351,7 @@ impl Engine {
 
     /// The rules imposed above every agent's, cloned out from under the lock.
     fn standing(&self) -> Vec<Rule> {
-        self.standing
-            .lock()
-            .expect("the standing rules are never poisoned")
-            .clone()
+        self.standing.lock().expect("the standing rules are never poisoned").clone()
     }
 
     /// Installs `agent`'s ruleset as the permission baseline, and rebuilds the
@@ -4626,11 +4366,8 @@ impl Engine {
         let Some(agents) = &self.agents else {
             return;
         };
-        let mut rebuilt = self
-            .lent()
-            .with(Arc::new(task::TaskTool::new(&subagent::roster(
-                agents, agent,
-            ))));
+        let mut rebuilt =
+            self.lent().with(Arc::new(task::TaskTool::new(&subagent::roster(agents, agent))));
         // Both plan doors ride the same rebuild the task tool does, and for
         // the same doctrine: presence is ability, and the registry holding
         // the agent a door leads to is what makes "switch to that agent" a
@@ -4648,20 +4385,12 @@ impl Engine {
             rebuilt = rebuilt.with(Arc::new(plan::PlanEnterTool));
         }
         let rebuilt = self.compose(Arc::new(rebuilt));
-        *self
-            .tools
-            .lock()
-            .expect("the tool registry is never poisoned") = rebuilt;
+        *self.tools.lock().expect("the tool registry is never poisoned") = rebuilt;
     }
 
     /// The base set plus whatever the MCP servers are currently lending.
     fn lent(&self) -> Arc<Registry> {
-        Arc::clone(
-            &self
-                .lent_tools
-                .lock()
-                .expect("the tool registry is never poisoned"),
-        )
+        Arc::clone(&self.lent_tools.lock().expect("the tool registry is never poisoned"))
     }
 
     /// Rebuilds the tool sets if the MCP servers' tool surface has moved since
@@ -4685,10 +4414,8 @@ impl Engine {
         servers.retry_once();
 
         let generation = servers.generation();
-        let mut installed = self
-            .mcp_installed
-            .lock()
-            .expect("the MCP generation is never poisoned");
+        let mut installed =
+            self.mcp_installed.lock().expect("the MCP generation is never poisoned");
         if *installed == generation {
             return;
         }
@@ -4696,10 +4423,7 @@ impl Engine {
         drop(installed);
 
         let lent = Arc::new(self.base_tools().with_all(servers.tools()));
-        *self
-            .lent_tools
-            .lock()
-            .expect("the tool registry is never poisoned") = Arc::clone(&lent);
+        *self.lent_tools.lock().expect("the tool registry is never poisoned") = Arc::clone(&lent);
         self.rebuild_offered(lent);
     }
 
@@ -4723,10 +4447,7 @@ impl Engine {
             // two arms one composition path.
             None => {
                 let composed = self.compose(lent);
-                *self
-                    .tools
-                    .lock()
-                    .expect("the tool registry is never poisoned") = composed;
+                *self.tools.lock().expect("the tool registry is never poisoned") = composed;
             }
         }
     }
@@ -4743,18 +4464,12 @@ impl Engine {
     /// the same contract the MCP rebuild keeps — and the next turn is
     /// offered the new set.
     pub fn replace_base_tools(&self, tools: Arc<Registry>) {
-        *self
-            .base_tools
-            .lock()
-            .expect("the base tools are never poisoned") = Arc::clone(&tools);
+        *self.base_tools.lock().expect("the base tools are never poisoned") = Arc::clone(&tools);
         let lent = match &self.mcp {
             Some(servers) => Arc::new(tools.with_all(servers.tools())),
             None => tools,
         };
-        *self
-            .lent_tools
-            .lock()
-            .expect("the tool registry is never poisoned") = Arc::clone(&lent);
+        *self.lent_tools.lock().expect("the tool registry is never poisoned") = Arc::clone(&lent);
         self.rebuild_offered(lent);
     }
 
@@ -4771,10 +4486,7 @@ impl Engine {
         let Some(roster) = self.postbox_roster() else {
             return;
         };
-        let mut installed = self
-            .team_roster
-            .lock()
-            .expect("the team roster is never poisoned");
+        let mut installed = self.team_roster.lock().expect("the team roster is never poisoned");
         if *installed == roster {
             return;
         }
@@ -4786,20 +4498,12 @@ impl Engine {
 
     /// The tools the next turn offers the model.
     fn tools(&self) -> Arc<Registry> {
-        Arc::clone(
-            &self
-                .tools
-                .lock()
-                .expect("the tool registry is never poisoned"),
-        )
+        Arc::clone(&self.tools.lock().expect("the tool registry is never poisoned"))
     }
 
     /// The deferral the next turn carries, as last composed.
     fn deferral(&self) -> crate::tool::deferral::Deferral {
-        self.deferral
-            .lock()
-            .expect("the deferral is never poisoned")
-            .clone()
+        self.deferral.lock().expect("the deferral is never poisoned").clone()
     }
 
     /// Everything a composed registry gains beyond the base set and what the
@@ -4843,11 +4547,7 @@ impl Engine {
     /// `task` either: a delegated turn runs inside the lead's own turn, and
     /// the identity it would send under is the lead's.
     fn team_messaging(&self, registry: Arc<Registry>) -> Arc<Registry> {
-        let postbox = self
-            .postbox
-            .lock()
-            .expect("the postbox is never poisoned")
-            .clone();
+        let postbox = self.postbox.lock().expect("the postbox is never poisoned").clone();
         let Some(postbox) = postbox else {
             return registry;
         };
@@ -4914,16 +4614,11 @@ impl Engine {
     /// answers from is rewritten last, so a reconnect's recomposition is what
     /// a later search reads.
     fn compose_deferral(&self, registry: Arc<Registry>) -> Arc<Registry> {
-        let activated = self
-            .activated_tools
-            .lock()
-            .expect("the activated set is never poisoned")
-            .clone();
+        let activated =
+            self.activated_tools.lock().expect("the activated set is never poisoned").clone();
         let definitions = registry.definitions();
         let candidates = crate::tool::deferral::candidates(
-            definitions
-                .iter()
-                .map(|definition| definition.name.as_str()),
+            definitions.iter().map(|definition| definition.name.as_str()),
             self.defer_threshold,
             &activated,
         );
@@ -4931,24 +4626,17 @@ impl Engine {
             crate::tool::deferral::Deferral::over(candidates, Arc::clone(&self.activated_tools));
 
         let registry = if deferral.any() {
-            Arc::new(
-                registry.with(Arc::new(crate::tool::deferral::ToolSearchTool::over(
-                    Arc::clone(&self.tool_definitions),
-                    deferral.clone(),
-                ))),
-            )
+            Arc::new(registry.with(Arc::new(crate::tool::deferral::ToolSearchTool::over(
+                Arc::clone(&self.tool_definitions),
+                deferral.clone(),
+            ))))
         } else {
             registry
         };
 
-        *self
-            .tool_definitions
-            .lock()
-            .expect("the definitions snapshot is never poisoned") = registry.definitions();
-        *self
-            .deferral
-            .lock()
-            .expect("the deferral is never poisoned") = deferral;
+        *self.tool_definitions.lock().expect("the definitions snapshot is never poisoned") =
+            registry.definitions();
+        *self.deferral.lock().expect("the deferral is never poisoned") = deferral;
 
         registry
     }
@@ -4960,10 +4648,7 @@ impl Engine {
     /// never-touched names back under the arithmetic.
     fn recompose_tools(&self) {
         let composed = self.compose(self.tools());
-        *self
-            .tools
-            .lock()
-            .expect("the tool registry is never poisoned") = composed;
+        *self.tools.lock().expect("the tool registry is never poisoned") = composed;
     }
 
     /// What a `task` call needs to run a child loop, or [`None`] when this
@@ -4979,13 +4664,10 @@ impl Engine {
         // same advertised subset, so it is owed the same door back in —
         // while `task` and the plan doors stay absent exactly as before.
         let tools = if deferral.any() {
-            Arc::new(
-                self.lent()
-                    .with(Arc::new(crate::tool::deferral::ToolSearchTool::over(
-                        Arc::clone(&self.tool_definitions),
-                        deferral.clone(),
-                    ))),
-            )
+            Arc::new(self.lent().with(Arc::new(crate::tool::deferral::ToolSearchTool::over(
+                Arc::clone(&self.tool_definitions),
+                deferral.clone(),
+            ))))
         } else {
             self.lent()
         };
@@ -5079,21 +4761,14 @@ impl Engine {
         };
         let _ = self
             .fanout
-            .send(Event::AgentChanged {
-                session_id: self.session_id(),
-                agent: name,
-                model,
-            })
+            .send(Event::AgentChanged { session_id: self.session_id(), agent: name, model })
             .await;
         // After the agent frame, so a subscriber reads the model that made
         // the effort impossible before the clear that answers it.
         if cleared {
             let _ = self
                 .fanout
-                .send(Event::EffortChanged {
-                    session_id: self.session_id(),
-                    effort: None,
-                })
+                .send(Event::EffortChanged { session_id: self.session_id(), effort: None })
                 .await;
         }
     }
@@ -5148,10 +4823,7 @@ impl Engine {
         if cleared {
             let _ = self
                 .fanout
-                .send(Event::EffortChanged {
-                    session_id: self.session_id(),
-                    effort: None,
-                })
+                .send(Event::EffortChanged { session_id: self.session_id(), effort: None })
                 .await;
         }
         drop(turn);
@@ -5188,23 +4860,14 @@ impl Engine {
                 .map(|info| info.variants.keys().cloned().collect())
                 .unwrap_or_default();
             if !available.iter().any(|carried| carried == name) {
-                return Err(EngineError::UnknownEffort {
-                    effort: name.clone(),
-                    model,
-                    available,
-                });
+                return Err(EngineError::UnknownEffort { effort: name.clone(), model, available });
             }
         }
 
         self.active().effort = effort.clone();
         self.remember_selection();
-        let _ = self
-            .fanout
-            .send(Event::EffortChanged {
-                session_id: self.session_id(),
-                effort,
-            })
-            .await;
+        let _ =
+            self.fanout.send(Event::EffortChanged { session_id: self.session_id(), effort }).await;
         drop(turn);
 
         Ok(())
@@ -5232,16 +4895,10 @@ impl Engine {
     /// ([`PermissionMode::from_claude_name`]). The signature matches its
     /// neighbours' so the command table stays one shape.
     async fn set_permission_mode(&self, mode: PermissionMode) -> Result<(), EngineError> {
-        *self
-            .permission_mode
-            .lock()
-            .expect("the permission mode is never poisoned") = mode;
+        *self.permission_mode.lock().expect("the permission mode is never poisoned") = mode;
         let _ = self
             .fanout
-            .send(Event::PermissionModeChanged {
-                session_id: self.session_id(),
-                mode,
-            })
+            .send(Event::PermissionModeChanged { session_id: self.session_id(), mode })
             .await;
         // A mode change re-decides every held inbound message under its own
         // recorded origin (**D524**, v2 §"Reevaluation and manual decision",
@@ -5264,10 +4921,7 @@ impl Engine {
     /// has been set since it started.
     #[must_use]
     pub fn permission_mode(&self) -> PermissionMode {
-        *self
-            .permission_mode
-            .lock()
-            .expect("the permission mode is never poisoned")
+        *self.permission_mode.lock().expect("the permission mode is never poisoned")
     }
 
     /// Adopts a configured effort for a session that has not chosen one.
@@ -5311,10 +4965,7 @@ impl Engine {
         self.remember_selection();
         let _ = self
             .fanout
-            .send(Event::EffortChanged {
-                session_id: self.session_id(),
-                effort: Some(name),
-            })
+            .send(Event::EffortChanged { session_id: self.session_id(), effort: Some(name) })
             .await;
     }
 
@@ -5349,17 +5000,10 @@ impl Engine {
         };
         let (model, effort, agent) = {
             let active = self.active();
-            (
-                active.model.clone(),
-                active.effort.clone(),
-                active.agent.clone(),
-            )
+            (active.model.clone(), active.effort.clone(), active.agent.clone())
         };
 
-        let mut live = state
-            .live
-            .lock()
-            .expect("the live session is never poisoned");
+        let mut live = state.live.lock().expect("the live session is never poisoned");
         let Some(info) = live.info.as_mut() else {
             return;
         };
@@ -5400,11 +5044,8 @@ impl Engine {
                 // direction whose door was registered, and a door is
                 // registered only when the registry holds the agent it leads
                 // to.
-                let adopted = self
-                    .agents
-                    .as_ref()
-                    .and_then(|registry| registry.get(target.agent()))
-                    .expect(
+                let adopted =
+                    self.agents.as_ref().and_then(|registry| registry.get(target.agent())).expect(
                         "a plan switch is only ever pending where the registry holds its target",
                     );
                 // The AgentChanged half of this boundary was already announced
@@ -5414,10 +5055,7 @@ impl Engine {
                 if self.apply_agent(adopted) {
                     let _ = self
                         .fanout
-                        .send(Event::EffortChanged {
-                            session_id: self.session_id(),
-                            effort: None,
-                        })
+                        .send(Event::EffortChanged { session_id: self.session_id(), effort: None })
                         .await;
                 }
             }
@@ -5470,9 +5108,7 @@ impl Engine {
             let outcome = hooks
                 .fire(
                     self.session_id().as_str(),
-                    &hook::Payload::UserPromptSubmit {
-                        prompt: prompt.clone(),
-                    },
+                    &hook::Payload::UserPromptSubmit { prompt: prompt.clone() },
                 )
                 .await;
             outcome.report(hook::HookEvent::UserPromptSubmit);
@@ -5565,10 +5201,7 @@ impl Engine {
         let effort_options = effort
             .as_ref()
             .and_then(|name| {
-                catalog::model_for(self.provider.id(), &model)?
-                    .variants
-                    .get(name)
-                    .cloned()
+                catalog::model_for(self.provider.id(), &model)?.variants.get(name).cloned()
             })
             .unwrap_or_default();
 
@@ -5599,10 +5232,7 @@ impl Engine {
         // what this prompt's own `UserPromptSubmit` hooks just added.
         if asks_the_model {
             reminders.extend(
-                self.hook_context
-                    .lock()
-                    .expect("the hook context is never poisoned")
-                    .drain(..),
+                self.hook_context.lock().expect("the hook context is never poisoned").drain(..),
             );
         }
         reminders.extend(hook_context);
@@ -5618,10 +5248,7 @@ impl Engine {
         // the stored session agree on which conversation they are.
         let persist = self.persistence.as_ref().map(|state| {
             let session = {
-                let mut live = state
-                    .live
-                    .lock()
-                    .expect("the live session is never poisoned");
+                let mut live = state.live.lock().expect("the live session is never poisoned");
                 if live.info.is_none() {
                     live.warned_uncataloged = false;
                 }
@@ -5703,11 +5330,7 @@ impl Engine {
             pending_switch: self.pending_for_turn(),
             jobs: Some(Arc::clone(&self.jobs) as Arc<dyn crate::tool::job::Jobs>),
             hooks: self.hooks(),
-            postbox: self
-                .postbox
-                .lock()
-                .expect("the postbox is never poisoned")
-                .clone(),
+            postbox: self.postbox.lock().expect("the postbox is never poisoned").clone(),
             delegated: false,
             persist,
         };
@@ -5750,33 +5373,22 @@ impl Engine {
         peers: Vec<crate::protocol::team::PeerPayload>,
         session_mentions: Vec<String>,
     ) -> Result<(), EngineError> {
-        let queued = self
-            .turn
-            .observe(move |turn| {
-                let Some(turn) = turn else {
-                    return false;
-                };
-                turn.steer
-                    .lock()
-                    .expect("the steer mailbox is never poisoned")
-                    .push(SteerInput {
-                        id,
-                        text,
-                        mentions,
-                        skills,
-                        peers,
-                        session_mentions,
-                    });
+        let queued =
+            self.turn
+                .observe(move |turn| {
+                    let Some(turn) = turn else {
+                        return false;
+                    };
+                    turn.steer
+                        .lock()
+                        .expect("the steer mailbox is never poisoned")
+                        .push(SteerInput { id, text, mentions, skills, peers, session_mentions });
 
-                true
-            })
-            .await;
+                    true
+                })
+                .await;
 
-        if queued {
-            Ok(())
-        } else {
-            Err(EngineError::NotStreaming)
-        }
+        if queued { Ok(()) } else { Err(EngineError::NotStreaming) }
     }
 
     /// Routes a reply to the permission wait that asked for it.
@@ -5877,11 +5489,7 @@ fn message_chars(message: &Message) -> (usize, usize) {
     for part in &message.parts {
         match &part.body {
             PartBody::Text { text } => generated += text.chars().count(),
-            PartBody::Tool {
-                call_id,
-                tool,
-                state,
-            } => {
+            PartBody::Tool { call_id, tool, state } => {
                 generated += call_id.chars().count() + tool.chars().count();
                 match state {
                     ToolState::Pending { .. } => {}
@@ -5910,12 +5518,7 @@ fn message_chars(message: &Message) -> (usize, usize) {
             // window emptier than the one the next request fills. They count
             // as generated rather than as a result — a teammate wrote them,
             // and no tool of this session's answered with them.
-            PartBody::Peer {
-                from,
-                summary,
-                body,
-                ..
-            } => {
+            PartBody::Peer { from, summary, body, .. } => {
                 generated += from.chars().count()
                     + summary.as_deref().map_or(0, |line| line.chars().count())
                     + body.chars().count();
@@ -5973,10 +5576,7 @@ impl teammate::TeammateBackend for Storeless {
         // Nothing this backend made can be here to end. Named rather than
         // ignored, because a handle arriving here would mean a registry had
         // crossed two backends.
-        tracing::warn!(
-            ?handle,
-            "a storeless backend was asked to end something it did not start"
-        );
+        tracing::warn!(?handle, "a storeless backend was asked to end something it did not start");
     }
 
     fn delivery(&self) -> teammate::Delivery {
@@ -6039,13 +5639,7 @@ fn stale_notice(stale: &[PathBuf], root: &Path) -> Option<String> {
     let mut notice = String::from(STALE_FILES);
     for path in stale {
         notice.push_str("\n- ");
-        notice.push_str(
-            &path
-                .strip_prefix(root)
-                .unwrap_or(path)
-                .display()
-                .to_string(),
-        );
+        notice.push_str(&path.strip_prefix(root).unwrap_or(path).display().to_string());
     }
 
     Some(notice)
@@ -6269,10 +5863,7 @@ impl subagent::PeerFacts for EnginePeerFacts {
     /// this session answers its own dialogs, not about whether anybody can
     /// reach it.
     fn sender_mode(&self) -> Option<subagent::SenderMode> {
-        let mode = *self
-            .permission_mode
-            .lock()
-            .expect("the permission mode is never poisoned");
+        let mode = *self.permission_mode.lock().expect("the permission mode is never poisoned");
 
         Some(teammate::inbound::classify_receiver(mode, self.inbound_bypass).into())
     }
@@ -6295,11 +5886,8 @@ impl subagent::PeerFacts for EnginePeerFacts {
     /// whatever it inherited, which for a session that has received nothing
     /// is an empty chain (Axis 3's unbound sub-case).
     fn hop_chain(&self) -> Vec<String> {
-        let mut chain = self
-            .inbound_chain
-            .lock()
-            .expect("the inbound chain cell is never poisoned")
-            .clone();
+        let mut chain =
+            self.inbound_chain.lock().expect("the inbound chain cell is never poisoned").clone();
         let marker = self
             .address
             .lock()

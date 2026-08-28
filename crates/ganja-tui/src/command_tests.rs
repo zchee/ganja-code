@@ -29,14 +29,8 @@ fn a_typed_team_hints_until_an_argument_arrives() {
 /// spawn grammar — the refusal's and the dialog's own string.
 #[test]
 fn a_bare_team_spawn_hints_the_spawn_grammar() {
-    assert_eq!(
-        inline_hint("/team spawn", &[]).as_deref(),
-        Some(SPAWN_GRAMMAR)
-    );
-    assert_eq!(
-        inline_hint("/team spawn ", &[]).as_deref(),
-        Some(SPAWN_GRAMMAR)
-    );
+    assert_eq!(inline_hint("/team spawn", &[]).as_deref(), Some(SPAWN_GRAMMAR));
+    assert_eq!(inline_hint("/team spawn ", &[]).as_deref(), Some(SPAWN_GRAMMAR));
     assert_eq!(
         inline_hint("/team spawn w1", &[]).as_deref(),
         Some("[--backend <surface>] [--agent <kind>] [what it should do]")
@@ -75,14 +69,8 @@ fn typed_arguments_consume_the_hint_front_to_back() {
 /// **D518.** `shutdown` hints its optional member until one is named.
 #[test]
 fn a_shutdown_line_hints_its_member_until_one_is_named() {
-    assert_eq!(
-        inline_hint("/team shutdown", &[]).as_deref(),
-        Some("[member]")
-    );
-    assert_eq!(
-        inline_hint("/team shutdown ", &[]).as_deref(),
-        Some("[member]")
-    );
+    assert_eq!(inline_hint("/team shutdown", &[]).as_deref(), Some("[member]"));
+    assert_eq!(inline_hint("/team shutdown ", &[]).as_deref(), Some("[member]"));
     assert_eq!(inline_hint("/team shutdown w1", &[]), None);
 }
 
@@ -96,11 +84,7 @@ fn an_engine_command_hints_what_its_file_declared() {
             description: Some("fix an issue — <issue>".to_owned()),
             hint: Some("<issue>".to_owned()),
         },
-        EngineCommand {
-            name: "plain".to_owned(),
-            description: None,
-            hint: None,
-        },
+        EngineCommand { name: "plain".to_owned(), description: None, hint: None },
     ];
     assert_eq!(inline_hint("/fix", &roster).as_deref(), Some("<issue>"));
     assert_eq!(inline_hint("/fix now", &roster), None);
@@ -118,10 +102,7 @@ fn a_multiline_buffer_hints_nothing() {
 fn kinds() -> Vec<Completion> {
     ["general", "explore"]
         .into_iter()
-        .map(|name| Completion {
-            text: name.to_owned(),
-            detail: String::new(),
-        })
+        .map(|name| Completion { text: name.to_owned(), detail: String::new() })
         .collect()
 }
 
@@ -139,16 +120,11 @@ fn the_backend_slot_offers_the_parsers_own_six() {
     assert_eq!(slot.partial, "g");
     assert_eq!(slot.start, text.len() - 1);
     assert_eq!(
-        slot.candidates
-            .iter()
-            .map(|c| c.text.as_str())
-            .collect::<Vec<_>>(),
+        slot.candidates.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
         BACKENDS.to_vec()
     );
     assert!(
-        slot.candidates
-            .iter()
-            .any(|c| c.text == "ganja" && c.detail.contains("default")),
+        slot.candidates.iter().any(|c| c.text == "ganja" && c.detail.contains("default")),
         "the default surface says so"
     );
 
@@ -163,35 +139,14 @@ fn the_backend_slot_offers_the_parsers_own_six() {
 fn every_team_slot_completes_and_free_words_do_not() {
     let at_end = |text: &str| team_completion(text, (0, text.len()), &kinds());
 
-    assert_eq!(
-        at_end("/team sp").map(|s| (s.title, s.partial)),
-        Some((" team ", "sp".to_owned()))
-    );
-    assert_eq!(
-        at_end("/team spawn foo --").map(|s| s.title),
-        Some(" flags ")
-    );
-    assert_eq!(
-        at_end("/team spawn foo --agent ex").map(|s| s.title),
-        Some(" agents ")
-    );
+    assert_eq!(at_end("/team sp").map(|s| (s.title, s.partial)), Some((" team ", "sp".to_owned())));
+    assert_eq!(at_end("/team spawn foo --").map(|s| s.title), Some(" flags "));
+    assert_eq!(at_end("/team spawn foo --agent ex").map(|s| s.title), Some(" agents "));
     assert_eq!(at_end("/team spawn fo"), None, "a name is anyone's");
-    assert_eq!(
-        at_end("/team spawn foo fix it"),
-        None,
-        "prompt words are prose"
-    );
-    assert_eq!(
-        at_end("/team spawn foo --backend ganja "),
-        None,
-        "a filled slot is done"
-    );
+    assert_eq!(at_end("/team spawn foo fix it"), None, "prompt words are prose");
+    assert_eq!(at_end("/team spawn foo --backend ganja "), None, "a filled slot is done");
     assert_eq!(at_end("/skills sp"), None);
-    assert_eq!(
-        at_end("team spawn --backend "),
-        None,
-        "no slash, no command"
-    );
+    assert_eq!(at_end("team spawn --backend "), None, "no slash, no command");
 }
 
 /// **D519.** A word that already is a candidate raises no menu, so the
@@ -212,10 +167,7 @@ fn a_flag_already_given_is_not_offered_again() {
     let text = "/team spawn foo --backend ganja --";
     let slot = team_completion(text, (0, text.len()), &kinds()).expect("a flag slot");
     assert_eq!(
-        slot.candidates
-            .iter()
-            .map(|c| c.text.as_str())
-            .collect::<Vec<_>>(),
+        slot.candidates.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
         vec!["--agent"]
     );
 }
@@ -278,10 +230,7 @@ fn the_command_names_and_aliases_match_their_surface_contract() {
 /// rule, so a row that reached only the dropdown would be a second set.
 #[test]
 fn both_copy_commands_are_offered_by_the_palette_and_by_the_dropdown() {
-    let cases = [
-        ("copy", "Copy session transcript"),
-        ("copy-message", "Copy message"),
-    ];
+    let cases = [("copy", "Copy session transcript"), ("copy-message", "Copy message")];
 
     for (name, title) in cases {
         let entry = lookup(name).unwrap_or_else(|| panic!("/{name} should exist"));
@@ -289,9 +238,7 @@ fn both_copy_commands_are_offered_by_the_palette_and_by_the_dropdown() {
 
         for surface in [Surface::Palette, Surface::Dropdown] {
             assert!(
-                matches(name, surface)
-                    .iter()
-                    .any(|found| found.name == name),
+                matches(name, surface).iter().any(|found| found.name == name),
                 "/{name} should be offered on {surface:?}"
             );
         }
@@ -315,22 +262,12 @@ fn undo_and_redo_are_offered_by_the_palette_and_by_the_dropdown() {
     for (name, title) in cases {
         let entry = lookup(name).unwrap_or_else(|| panic!("/{name} should exist"));
         assert_eq!(entry.title, title, "/{name} is titled upstream's way");
-        assert_eq!(
-            entry.category,
-            Category::Session,
-            "/{name} does something to the conversation"
-        );
-        assert_eq!(
-            entry.action.keybind(),
-            None,
-            "/{name} has no binding: `<leader>` is unported"
-        );
+        assert_eq!(entry.category, Category::Session, "/{name} does something to the conversation");
+        assert_eq!(entry.action.keybind(), None, "/{name} has no binding: `<leader>` is unported");
 
         for surface in [Surface::Palette, Surface::Dropdown] {
             assert!(
-                matches(name, surface)
-                    .iter()
-                    .any(|found| found.name == name),
+                matches(name, surface).iter().any(|found| found.name == name),
                 "/{name} should be offered on {surface:?}"
             );
         }
@@ -359,10 +296,7 @@ fn copying_the_transcript_and_copying_a_message_are_different_commands() {
 #[test]
 fn an_engine_command_is_not_in_the_ui_table() {
     for name in ["init", "review"] {
-        assert!(
-            lookup(name).is_none(),
-            "/{name} is the engine's, not a UI row"
-        );
+        assert!(lookup(name).is_none(), "/{name} is the engine's, not a UI row");
     }
 }
 
@@ -370,11 +304,7 @@ fn an_engine_command_is_not_in_the_ui_table() {
 fn the_dropdown_offers_both_populations() {
     let rows = dropdown_matches("", &engine());
 
-    assert_eq!(
-        rows.len(),
-        COMMANDS.len() + 1,
-        "every UI command plus the engine's one"
-    );
+    assert_eq!(rows.len(), COMMANDS.len() + 1, "every UI command plus the engine's one");
     assert!(
         rows.contains(&Choice::Engine(engine().remove(0))),
         "the engine's command should be listed: {rows:?}"
@@ -388,9 +318,7 @@ fn the_dropdown_offers_both_populations() {
 fn a_fragment_reaches_an_engine_command_by_name_and_by_description() {
     for fragment in ["ini", "guided"] {
         assert_eq!(
-            dropdown_matches(fragment, &engine())
-                .first()
-                .map(Choice::slash),
+            dropdown_matches(fragment, &engine()).first().map(Choice::slash),
             Some("/init".to_owned()),
             "{fragment:?} should rank /init first"
         );
@@ -402,10 +330,8 @@ fn a_fragment_reaches_an_engine_command_by_name_and_by_description() {
 #[test]
 fn a_ui_row_and_an_engine_row_are_told_apart_by_their_own_shape() {
     let rows = dropdown_matches("", &engine());
-    let engine_rows: Vec<&Choice> = rows
-        .iter()
-        .filter(|row| matches!(row, Choice::Engine(_)))
-        .collect();
+    let engine_rows: Vec<&Choice> =
+        rows.iter().filter(|row| matches!(row, Choice::Engine(_))).collect();
 
     assert_eq!(engine_rows.len(), 1);
     assert_eq!(engine_rows[0].slash(), "/init");
@@ -414,11 +340,7 @@ fn a_ui_row_and_an_engine_row_are_told_apart_by_their_own_shape() {
 
 #[test]
 fn an_engine_command_with_nothing_to_say_still_lists() {
-    let roster = vec![EngineCommand {
-        name: "silent".to_owned(),
-        description: None,
-        hint: None,
-    }];
+    let roster = vec![EngineCommand { name: "silent".to_owned(), description: None, hint: None }];
 
     let rows = dropdown_matches("silent", &roster);
 
@@ -454,10 +376,8 @@ fn an_empty_query_lists_every_command() {
 
 #[test]
 fn a_fragment_narrows_to_the_commands_that_contain_it() {
-    let narrowed: Vec<&str> = matches("theme", Surface::Palette)
-        .iter()
-        .map(|entry| entry.name)
-        .collect();
+    let narrowed: Vec<&str> =
+        matches("theme", Surface::Palette).iter().map(|entry| entry.name).collect();
 
     assert_eq!(narrowed, vec!["themes"]);
 }
@@ -485,9 +405,7 @@ fn only_the_dropdown_matches_a_fragment_that_appears_solely_in_a_description() {
         "the palette should not read descriptions"
     );
     assert_eq!(
-        matches(fragment, Surface::Dropdown)
-            .first()
-            .map(|entry| entry.name),
+        matches(fragment, Surface::Dropdown).first().map(|entry| entry.name),
         Some("themes")
     );
 }
@@ -495,16 +413,11 @@ fn only_the_dropdown_matches_a_fragment_that_appears_solely_in_a_description() {
 /// Ranking parity with upstream is not a goal; a stable order is.
 #[test]
 fn the_same_fragment_always_produces_the_same_order() {
-    let once: Vec<&str> = matches("s", Surface::Palette)
-        .iter()
-        .map(|entry| entry.name)
-        .collect();
+    let once: Vec<&str> = matches("s", Surface::Palette).iter().map(|entry| entry.name).collect();
 
     for _ in 0..8 {
-        let again: Vec<&str> = matches("s", Surface::Palette)
-            .iter()
-            .map(|entry| entry.name)
-            .collect();
+        let again: Vec<&str> =
+            matches("s", Surface::Palette).iter().map(|entry| entry.name).collect();
         assert_eq!(once, again);
     }
 }
@@ -519,10 +432,7 @@ fn a_fragment_nothing_carries_narrows_to_nothing() {
 /// completion or a stray space leaves some behind.
 #[test]
 fn a_submitted_buffer_names_a_command_only_when_the_name_stands_alone() {
-    assert_eq!(
-        submitted("/models ").map(|entry| entry.action),
-        Some(Action::Models)
-    );
+    assert_eq!(submitted("/models ").map(|entry| entry.action), Some(Action::Models));
     assert_eq!(
         submitted("/mo ").map(|entry| entry.action),
         Some(Action::Models),
@@ -534,15 +444,9 @@ fn a_submitted_buffer_names_a_command_only_when_the_name_stands_alone() {
         "no whitespace at all is the plain spelling"
     );
 
-    for text in [
-        "models",
-        " /models",
-        "/models gpt",
-        "/",
-        "/ models",
-        "/nonesuch ",
-        "what about /models",
-    ] {
+    for text in
+        ["models", " /models", "/models gpt", "/", "/ models", "/nonesuch ", "what about /models"]
+    {
         assert!(submitted(text).is_none(), "{text:?} should be prose");
     }
 }
@@ -560,12 +464,7 @@ fn a_team_line_reaches_every_subcommand_the_grammar_has() {
         Some(Team::Shutdown { member: None }),
         "no name is the whole team"
     );
-    assert_eq!(
-        team("/team shutdown w1"),
-        Some(Team::Shutdown {
-            member: Some("w1".to_owned())
-        })
-    );
+    assert_eq!(team("/team shutdown w1"), Some(Team::Shutdown { member: Some("w1".to_owned()) }));
 }
 
 /// Flags come before the prompt, and the first word that is not a flag
@@ -631,10 +530,7 @@ fn a_team_line_this_grammar_has_not_got_is_refused_by_name() {
         let Some(Team::Refused(refusal)) = team(text) else {
             panic!("{text:?} should be refused, got {:?}", team(text));
         };
-        assert!(
-            refusal.contains(named),
-            "{text:?} should name {named:?}: {refusal}"
-        );
+        assert!(refusal.contains(named), "{text:?} should name {named:?}: {refusal}");
     }
 }
 
@@ -642,13 +538,7 @@ fn a_team_line_this_grammar_has_not_got_is_refused_by_name() {
 /// or it is another command's.
 #[test]
 fn only_a_team_line_reaches_the_team_grammar() {
-    for text in [
-        "/teammate w1",
-        "/models",
-        "team spawn w1",
-        "tell /team spawn w1",
-        "",
-    ] {
+    for text in ["/teammate w1", "/models", "team spawn w1", "tell /team spawn w1", ""] {
         assert_eq!(team(text), None, "{text:?} is not a /team line");
     }
 }

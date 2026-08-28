@@ -62,21 +62,17 @@
 //! use tmux::Server;
 //!
 //! let server = Server::current()?;
-//! let captured = server
-//!     .run(["display-message", "-p", "#{session_name}"])
-//!     .await?;
+//! let captured = server.run(["display-message", "-p", "#{session_name}"]).await?;
 //! println!("{}", captured.text_lossy().trim());
 //! # Ok(())
 //! # }
 //! ```
 
-use std::{
-    borrow::Cow,
-    ffi::{OsStr, OsString},
-    path::{Path, PathBuf},
-    process::Stdio,
-    sync::Arc,
-};
+use std::borrow::Cow;
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::Arc;
 
 use crate::error::Error;
 
@@ -132,10 +128,7 @@ impl Server {
     /// treat as the one they came from.
     #[must_use]
     pub fn at(socket: impl Into<PathBuf>, pane: Option<String>) -> Self {
-        Self {
-            socket: socket.into(),
-            pane,
-        }
+        Self { socket: socket.into(), pane }
     }
 
     /// The socket every call against this server is pinned to.
@@ -186,9 +179,8 @@ impl Server {
         // an error naming either is more use than one naming neither.
         let command = args.first().map(|word| word.to_string_lossy().into_owned());
         let argv = self.argv(args);
-        let (program, arguments) = argv
-            .split_first()
-            .expect("an argv built here always begins with the client binary");
+        let (program, arguments) =
+            argv.split_first().expect("an argv built here always begins with the client binary");
 
         let mut client = tokio::process::Command::new(program);
         client
@@ -210,9 +202,7 @@ impl Server {
             });
         }
 
-        Ok(Captured {
-            bytes: output.stdout,
-        })
+        Ok(Captured { bytes: output.stdout })
     }
 
     /// The exact argv [`Server::run`] executes: the client, the `-S` pin,
@@ -226,11 +216,8 @@ impl Server {
         I: IntoIterator<Item = S>,
         S: Into<OsString>,
     {
-        let mut argv = vec![
-            OsString::from(BINARY),
-            OsString::from("-S"),
-            self.socket.as_os_str().to_owned(),
-        ];
+        let mut argv =
+            vec![OsString::from(BINARY), OsString::from("-S"), self.socket.as_os_str().to_owned()];
         argv.extend(args.into_iter().map(Into::into));
 
         argv
@@ -244,9 +231,7 @@ impl Server {
     /// repaired: tmux spells a pane `%N`, so bytes outside UTF-8 are not a
     /// damaged pane target, they are not a pane target at all.
     fn from_parts(tmux: Option<OsString>, pane: Option<OsString>) -> Result<Self, Error> {
-        let raw = tmux
-            .filter(|value| !value.is_empty())
-            .ok_or(Error::NotInTmux)?;
+        let raw = tmux.filter(|value| !value.is_empty()).ok_or(Error::NotInTmux)?;
         let socket = socket_of(&raw);
         if socket.as_os_str().is_empty() {
             return Err(Error::NotInTmux);
@@ -254,9 +239,7 @@ impl Server {
 
         Ok(Self {
             socket,
-            pane: pane
-                .and_then(|value| value.into_string().ok())
-                .filter(|value| !value.is_empty()),
+            pane: pane.and_then(|value| value.into_string().ok()).filter(|value| !value.is_empty()),
         })
     }
 }
@@ -269,10 +252,7 @@ fn socket_of(raw: &OsStr) -> PathBuf {
         use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 
         let bytes = raw.as_bytes();
-        let end = bytes
-            .iter()
-            .position(|byte| *byte == b',')
-            .unwrap_or(bytes.len());
+        let end = bytes.iter().position(|byte| *byte == b',').unwrap_or(bytes.len());
 
         PathBuf::from(OsString::from_vec(bytes[..end].to_vec()))
     }

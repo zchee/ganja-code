@@ -57,19 +57,14 @@
 //! test` run.
 #![cfg(unix)]
 
-use std::{
-    fs,
-    ops::{Deref, DerefMut},
-    process::Command,
-    thread,
-    time::{Duration, Instant},
-};
+use std::ops::{Deref, DerefMut};
+use std::process::Command;
+use std::time::{Duration, Instant};
+use std::{fs, thread};
 
-use expectrl::{
-    ControlCode, Eof, Expect as _, Session,
-    process::unix::{Signal, WaitStatus},
-    session::OsSession,
-};
+use expectrl::process::unix::{Signal, WaitStatus};
+use expectrl::session::OsSession;
+use expectrl::{ControlCode, Eof, Expect as _, Session};
 use ganja_core::Storage;
 use ganja_protocol::{Message, Part, PartBody, Role};
 use ganja_testkit::temp_dir as temporary;
@@ -168,18 +163,11 @@ impl Ganja {
     fn spawn(command: Command) -> Self {
         let mut session = Session::spawn(command).expect("failed to spawn `ganja` in a pty");
         session.set_expect_timeout(Some(EXIT_DEADLINE));
-        session
-            .get_process_mut()
-            .set_window_size(COLUMNS, ROWS)
-            .expect("failed to size the pty");
+        session.get_process_mut().set_window_size(COLUMNS, ROWS).expect("failed to size the pty");
 
-        session
-            .expect(ALT_SCREEN)
-            .expect("`ganja` never took the terminal over");
+        session.expect(ALT_SCREEN).expect("`ganja` never took the terminal over");
 
-        Self {
-            session: Some(session),
-        }
+        Self { session: Some(session) }
     }
 
     /// Kills the process outright and reaps it.
@@ -190,10 +178,7 @@ impl Ganja {
     /// close the turn on its way out, and then nothing under test would be
     /// under test.
     fn kill_outright(mut self) {
-        let mut session = self
-            .session
-            .take()
-            .expect("a session is only ever ended once");
+        let mut session = self.session.take().expect("a session is only ever ended once");
 
         session
             .get_process_mut()
@@ -206,14 +191,10 @@ impl Ganja {
         // drained, so a test that reached for the exit status without first
         // emptying the pty would wait on a process that is itself waiting on
         // the test. Both would wait forever.
-        session
-            .expect(Eof)
-            .expect("the killed `ganja` never let go of the pty");
+        session.expect(Eof).expect("the killed `ganja` never let go of the pty");
 
-        let status = session
-            .get_process()
-            .wait()
-            .expect("failed to reap the killed `ganja` process");
+        let status =
+            session.get_process().wait().expect("failed to reap the killed `ganja` process");
         assert!(
             matches!(status, WaitStatus::Signaled(_, Signal::SIGKILL, _)),
             "expected a process killed outright, got {status:?}"
@@ -222,22 +203,13 @@ impl Ganja {
 
     /// Quits with Ctrl-C and checks that the process ended cleanly.
     fn quit_and_assert_clean_exit(mut self) {
-        self.send(ControlCode::EndOfText)
-            .expect("failed to send Ctrl-C");
+        self.send(ControlCode::EndOfText).expect("failed to send Ctrl-C");
 
-        let mut session = self
-            .session
-            .take()
-            .expect("a session is only ever ended once");
+        let mut session = self.session.take().expect("a session is only ever ended once");
 
-        session
-            .expect(Eof)
-            .expect("`ganja` did not exit within the deadline");
+        session.expect(Eof).expect("`ganja` did not exit within the deadline");
 
-        let status = session
-            .get_process()
-            .wait()
-            .expect("failed to reap the `ganja` process");
+        let status = session.get_process().wait().expect("failed to reap the `ganja` process");
         assert!(
             matches!(status, WaitStatus::Exited(_, 0)),
             "expected a clean exit, got {status:?}"
@@ -347,9 +319,7 @@ fn submit_prompt(session: &mut Ganja) {
     session.send(PROMPT).expect("failed to type the prompt");
     session.send("\r").expect("failed to send Enter");
 
-    session
-        .expect(PROMPT)
-        .expect("the engine's user message never reached the transcript");
+    session.expect(PROMPT).expect("the engine's user message never reached the transcript");
 }
 
 /// The session store the runs under `data` write into, once one of them has
@@ -370,10 +340,7 @@ fn store(data: &TempDir) -> Option<Storage> {
         .filter(|store| store.database().is_file())
         .collect();
 
-    assert!(
-        stores.len() <= 1,
-        "one run stores under one project, got {stores:?}"
-    );
+    assert!(stores.len() <= 1, "one run stores under one project, got {stores:?}");
 
     stores.into_iter().next()
 }
@@ -487,12 +454,8 @@ fn a_reply_killed_mid_call_comes_back_under_continue_marked_interrupted() {
     // Waiting for the dialog is safe: a step's calls are resolved after the
     // model's stream has ended, so no fragment of the reply can race the
     // options line onto the screen.
-    session
-        .expect(DIALOG_OPTIONS)
-        .expect("no permission dialog for the shell command");
-    session
-        .send("y")
-        .expect("failed to allow the sleeping shell command");
+    session.expect(DIALOG_OPTIONS).expect("no permission dialog for the shell command");
+    session.send("y").expect("failed to allow the sleeping shell command");
 
     // Both halves matter. The store saying `running` is what the drill is
     // about; the marker the command itself wrote is what says the shell is
@@ -534,9 +497,7 @@ fn a_reply_killed_mid_call_comes_back_under_continue_marked_interrupted() {
 
     let mut resumed = ganja(&project, &data, &["--continue"]);
 
-    resumed
-        .expect(PARTIAL)
-        .expect("the resumed transcript never showed what had been streamed");
+    resumed.expect(PARTIAL).expect("the resumed transcript never showed what had been streamed");
     resumed
         .expect(INTERRUPTED)
         .expect("the resumed reply was not shown as one that never finished");

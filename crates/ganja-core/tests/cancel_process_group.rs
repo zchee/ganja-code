@@ -10,20 +10,16 @@
 
 #![cfg(unix)]
 
-use std::{
-    path::Path,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::path::Path;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
-use ganja_core::{
-    Engine,
-    permission::Permissions,
-    protocol::{Command, Event, FinishReason, PartBody, PermissionReply, ToolState},
-    provider::{FakeProvider, fake},
-    tool::Registry,
-};
+use ganja_core::Engine;
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{Command, Event, FinishReason, PartBody, PermissionReply, ToolState};
+use ganja_core::provider::{FakeProvider, fake};
+use ganja_core::tool::Registry;
 
 /// How long the command is given to announce its process group. Generous,
 /// because it covers a whole turn's worth of scripted streaming before the
@@ -161,10 +157,7 @@ async fn cancelling_a_turn_kills_the_process_group_of_the_command_it_was_running
         match events.next().await {
             Some(Event::PermissionRequested { id, .. }) => {
                 engine
-                    .send(Command::ReplyPermission {
-                        id,
-                        reply: PermissionReply::Once,
-                    })
+                    .send(Command::ReplyPermission { id, reply: PermissionReply::Once })
                     .await
                     .expect("a reply is always accepted");
                 break;
@@ -176,16 +169,10 @@ async fn cancelling_a_turn_kills_the_process_group_of_the_command_it_was_running
 
     let pgid = wait_for_pgid(&pidfile).await;
     let reaper = Reaper::watching(pgid);
-    assert!(
-        group_is_alive(pgid),
-        "the command should still be running when it is cancelled"
-    );
+    assert!(group_is_alive(pgid), "the command should still be running when it is cancelled");
 
     let issued = Instant::now();
-    engine
-        .send(Command::CancelTurn)
-        .await
-        .expect("a running engine accepts a cancel");
+    engine.send(Command::CancelTurn).await.expect("a running engine accepts a cancel");
 
     let deadline = issued + GROUP_DEADLINE;
     while group_is_alive(pgid) {
@@ -205,11 +192,8 @@ async fn cancelling_a_turn_kills_the_process_group_of_the_command_it_was_running
         match events.next().await {
             Some(Event::MessageFinished { reason, .. }) => break reason,
             Some(Event::PartUpdated { part, .. }) => {
-                if let PartBody::Tool {
-                    tool,
-                    state: ToolState::Error { error, .. },
-                    ..
-                } = part.body
+                if let PartBody::Tool { tool, state: ToolState::Error { error, .. }, .. } =
+                    part.body
                     && tool == "bash"
                 {
                     call_error = Some(error);

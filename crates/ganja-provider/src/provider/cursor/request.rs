@@ -71,16 +71,15 @@
 //! information that loop can act on, the way a denied tool call is
 //! information ganja's own loop acts on, and the turn survives it.
 
-use std::{collections::HashMap, fmt::Write as _};
+use std::collections::HashMap;
+use std::fmt::Write as _;
 
 use buffa::Message as _;
 
 use super::{ID, decode, proto};
-use crate::{
-    auth::pkce,
-    protocol::{Message, PartBody, Role},
-    provider::{ChatRequest, ProviderError},
-};
+use crate::auth::pkce;
+use crate::protocol::{Message, PartBody, Role};
+use crate::provider::{ChatRequest, ProviderError};
 
 /// A fresh RFC 9562 v4 id in the spelling `crypto.randomUUID()` mints, which
 /// is the shape the recorded client stamps on messages and requests alike.
@@ -141,11 +140,8 @@ pub(super) fn run_message(request: &ChatRequest) -> Result<Vec<u8>, ProviderErro
         ..Default::default()
     };
 
-    Ok(proto::ClientMessage {
-        run_request: buffa::MessageField::some(run),
-        ..Default::default()
-    }
-    .encode_to_vec())
+    Ok(proto::ClientMessage { run_request: buffa::MessageField::some(run), ..Default::default() }
+        .encode_to_vec())
 }
 
 /// The bytes answering the server's context ask: the ids echoed the way the
@@ -174,11 +170,8 @@ pub(super) fn context_answer(ask: decode::ContextAsk, system: Option<&str>) -> V
         ..Default::default()
     };
 
-    proto::ClientMessage {
-        exec_response: buffa::MessageField::some(answer),
-        ..Default::default()
-    }
-    .encode_to_vec()
+    proto::ClientMessage { exec_response: buffa::MessageField::some(answer), ..Default::default() }
+        .encode_to_vec()
 }
 
 /// The two messages refusing one tool exec (**D486**): the throw carrying
@@ -291,23 +284,18 @@ pub(super) fn kv_answer(ask: decode::KvAsk, blobs: &mut HashMap<Vec<u8>, Vec<u8>
         }
     };
 
-    proto::ClientMessage {
-        kv_response: buffa::MessageField::some(answer),
-        ..Default::default()
-    }
-    .encode_to_vec()
+    proto::ClientMessage { kv_response: buffa::MessageField::some(answer), ..Default::default() }
+        .encode_to_vec()
 }
 
 /// A blob id's leading eight bytes as hex — sixteen characters, the width
 /// the plugin's own kv debug lines truncate to. Enough to correlate a get
 /// with the set that stored it, and never the data.
 fn blob_key(id: &[u8]) -> String {
-    id.iter()
-        .take(8)
-        .fold(String::with_capacity(16), |mut rendered, byte| {
-            let _ = write!(rendered, "{byte:02x}");
-            rendered
-        })
+    id.iter().take(8).fold(String::with_capacity(16), |mut rendered, byte| {
+        let _ = write!(rendered, "{byte:02x}");
+        rendered
+    })
 }
 
 /// The text of the conversation's newest user message: its text parts in

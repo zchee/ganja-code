@@ -4,11 +4,9 @@ use super::{
     API_VERSION_HEADER, CopilotProvider, ID, INITIATOR, INITIATOR_HEADER, INTENT, INTENT_HEADER,
     NeverRenews, headers,
 };
-use crate::{
-    auth::{self, OauthCredential, RefreshOauth as _},
-    catalog,
-    provider::{PROVIDERS, Provider as _, ProviderError},
-};
+use crate::auth::{self, OauthCredential, RefreshOauth as _};
+use crate::catalog;
+use crate::provider::{PROVIDERS, Provider as _, ProviderError};
 
 #[test]
 fn one_name_reaches_the_login_the_catalog_and_the_command_line() {
@@ -18,10 +16,7 @@ fn one_name_reaches_the_login_the_catalog_and_the_command_line() {
         auth::copilot::PROVIDER_ID,
         "one constant, or a login stores under a name the provider does not read"
     );
-    assert!(
-        PROVIDERS.contains(&ID),
-        "a provider nothing can select is a provider nobody has"
-    );
+    assert!(PROVIDERS.contains(&ID), "a provider nothing can select is a provider nobody has");
     // Unlike grok, whose file key is upstream's `xai`, this provider is
     // spelled the same everywhere — so there is no alias to look through,
     // and asserting that is what would catch one being added by accident.
@@ -43,10 +38,7 @@ fn the_endpoint_is_githubs_own_and_speaks_chat_completions() {
     // never as what it authenticates with — this one has nothing to render
     // yet, because the token is not fetched until a request needs it.
     let rendered = format!("{provider:?}");
-    assert!(
-        rendered.contains("Oauth") && rendered.contains(ID),
-        "{rendered}"
-    );
+    assert!(rendered.contains("Oauth") && rendered.contains(ID), "{rendered}");
     assert!(
         rendered.contains(auth::copilot::DEFAULT_API_BASE),
         "the endpoint is what tells one provider from another: {rendered}"
@@ -60,10 +52,7 @@ fn a_github_token_may_not_be_sent_anywhere_a_key_could_not_be() {
     let refused = CopilotProvider::at("http://api.githubcopilot.com")
         .expect_err("plain http to a public host puts the token on the wire in the clear");
 
-    assert!(
-        matches!(refused, ProviderError::Transport(_)),
-        "{refused:?}"
-    );
+    assert!(matches!(refused, ProviderError::Transport(_)), "{refused:?}");
     assert!(
         CopilotProvider::at("http://127.0.0.1:8080").is_ok(),
         "loopback never reaches a network, which is what a test depends on"
@@ -148,11 +137,7 @@ fn a_copilot_session_gets_a_model_the_catalog_can_size_and_deliberately_not_pric
         "a Copilot window is the proxy's, and it is not the model's"
     );
     assert_eq!(
-        (
-            info.pricing.input,
-            info.pricing.output,
-            info.pricing.cache_read
-        ),
+        (info.pricing.input, info.pricing.output, info.pricing.cache_read),
         (0.0, 0.0, 0.0),
         "a seat is billed by the month; a per-token figure here would be \
              invented rather than reported"

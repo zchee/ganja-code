@@ -21,23 +21,19 @@
 
 use std::sync::Arc;
 
-use ganja_core::{
-    Engine,
-    permission::Permissions,
-    protocol::Command,
-    provider::ChatRequest,
-    teammate::member::MemberPostbox,
-    tool::{Registry, list_sessions, send_message},
-};
-use ganja_team::{TeamName, TeamsRoot, team::MemberName};
+use ganja_core::Engine;
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::Command;
+use ganja_core::provider::ChatRequest;
+use ganja_core::teammate::member::MemberPostbox;
+use ganja_core::tool::{Registry, list_sessions, send_message};
+use ganja_team::team::MemberName;
+use ganja_team::{TeamName, TeamsRoot};
 use ganja_testkit::{ScriptedProvider, TEAM, says, team};
 
 /// Whether `request` carried `tool` in its offered set.
 fn offers(request: &ChatRequest, tool: &str) -> bool {
-    request
-        .tools
-        .iter()
-        .any(|definition| definition.name == tool)
+    request.tools.iter().any(|definition| definition.name == tool)
 }
 
 /// Takes one turn on `engine` and answers what it offered the model.
@@ -163,10 +159,7 @@ async fn the_listing_reaches_the_postboxes_that_can_cross_a_session_and_no_other
             !offers(&request, list_sessions::ID),
             "a session with no postbox has nobody to address and nothing to list"
         );
-        assert!(
-            !offers(&request, send_message::ID),
-            "and it has no `send_message` either"
-        );
+        assert!(!offers(&request, send_message::ID), "and it has no `send_message` either");
     }
 }
 

@@ -26,21 +26,13 @@ async fn the_stored_login_is_answered_with_a_nonempty_model_list() {
     let wire = CursorWire::from_stored()
         .expect("a stored cursor login (run `ganja auth login cursor` first)");
 
-    let models = wire
-        .usable_models()
-        .await
-        .expect("the live listing answers and decodes");
+    let models = wire.usable_models().await.expect("the live listing answers and decodes");
 
-    assert!(
-        !models.is_empty(),
-        "the live listing served no models at all"
-    );
+    assert!(!models.is_empty(), "the live listing served no models at all");
     // The `default` alias pair was live-observed; its absence would mean the
     // schema moved under this build.
     assert!(
-        models
-            .iter()
-            .any(|model| model.model_id.as_deref() == Some("default")),
+        models.iter().any(|model| model.model_id.as_deref() == Some("default")),
         "no `default` entry among {} models",
         models.len()
     );

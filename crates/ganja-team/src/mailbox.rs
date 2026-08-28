@@ -41,21 +41,19 @@
 //! kilobytes, and it is named here so nobody has to rediscover it from a
 //! profile.
 
-use std::{
-    collections::HashSet,
-    fmt, fs,
-    hash::{DefaultHasher, Hash as _, Hasher as _},
-    io::{self, Write as _},
-    path::Path,
-    sync::{LazyLock, Mutex},
-};
+use std::collections::HashSet;
+use std::hash::{DefaultHasher, Hash as _, Hasher as _};
+use std::io::{self, Write as _};
+use std::path::Path;
+use std::sync::{LazyLock, Mutex};
+use std::{fmt, fs};
 
 use serde_json::Value;
 use tempfile::NamedTempFile;
 
-use crate::{
-    lock::{self, LockError},
-    record::{MESSAGE_TYPE, MESSAGE_VERSION, MailboxMessage, SCHEMA_KEYS, document, shadowed},
+use crate::lock::{self, LockError};
+use crate::record::{
+    MESSAGE_TYPE, MESSAGE_VERSION, MailboxMessage, SCHEMA_KEYS, document, shadowed,
 };
 
 /// What a brand-new inbox holds (§2.5's `writeExclusive(path, "[]")`).
@@ -222,21 +220,14 @@ impl fmt::Debug for Identity {
         let (from, rest) = self.0.split_once('|').unwrap_or((self.0.as_str(), ""));
         let (timestamp, text) = rest.split_once('|').unwrap_or((rest, ""));
 
-        write!(
-            formatter,
-            "Identity({from}|{timestamp}|<{} bytes>)",
-            text.len()
-        )
+        write!(formatter, "Identity({from}|{timestamp}|<{} bytes>)", text.len())
     }
 }
 
 /// The identity a delivery is reconciled by.
 #[must_use]
 pub fn identity(message: &MailboxMessage) -> Identity {
-    Identity(format!(
-        "{}|{}|{}",
-        message.from, message.timestamp, message.text
-    ))
+    Identity(format!("{}|{}|{}", message.from, message.timestamp, message.text))
 }
 
 /// Creates the inbox holding `[]`, and does nothing at all if it is already
@@ -263,11 +254,7 @@ pub fn seed(path: &Path) -> io::Result<()> {
         fs::create_dir_all(parent)?;
     }
 
-    let mut file = match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-    {
+    let mut file = match fs::OpenOptions::new().write(true).create_new(true).open(path) {
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(()),
         result => result?,
     };
@@ -350,10 +337,7 @@ pub fn write_bounded(
     message.kind = Some(MESSAGE_TYPE.to_owned());
     message.read = Some(false);
     message.msg_v = Some(MESSAGE_VERSION);
-    let msg_id = message
-        .msg_id
-        .clone()
-        .unwrap_or_else(ganja_protocol::uuidv7);
+    let msg_id = message.msg_id.clone().unwrap_or_else(ganja_protocol::uuidv7);
     message.msg_id = Some(msg_id.clone());
 
     // The guard `record::shadowed` documents: a schema key arriving through
@@ -417,10 +401,7 @@ pub fn prune_delivered(path: &Path, delivered: &[Identity]) -> Result<Pruned, Ma
             !message.read.unwrap_or(false) && !delivered.contains(&identity(message))
         });
 
-        Ok(Pruned {
-            pruned: before - messages.len(),
-            remaining: messages.len(),
-        })
+        Ok(Pruned { pruned: before - messages.len(), remaining: messages.len() })
     })?;
     tracing::debug!(
         inbox = %path.display(),
@@ -500,10 +481,7 @@ fn update<T>(
 /// matter — `persist` is a `rename(2)`, so a reader sees one array or the other.
 fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "an inbox path names a file inside a directory",
-        )
+        io::Error::new(io::ErrorKind::InvalidInput, "an inbox path names a file inside a directory")
     })?;
 
     let mut temp = NamedTempFile::new_in(parent)?;
@@ -533,19 +511,14 @@ fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
 pub(crate) fn validate(entry: &Value) -> Result<(), MailboxError> {
     let Value::Object(fields) = entry else {
         return Err(MailboxError::SchemaInvalid {
-            issues: vec![format!(
-                "an entry is an object; this one is {}",
-                type_name(entry)
-            )],
+            issues: vec![format!("an entry is an object; this one is {}", type_name(entry))],
         });
     };
 
     match fields.get("text") {
         Some(Value::String(_)) => {}
         Some(other) => {
-            return Err(MailboxError::TextNotAString {
-                found: type_name(other),
-            });
+            return Err(MailboxError::TextNotAString { found: type_name(other) });
         }
         None => {
             return Err(MailboxError::SchemaInvalid {
@@ -558,10 +531,9 @@ pub(crate) fn validate(entry: &Value) -> Result<(), MailboxError> {
     for key in ["from", "timestamp"] {
         match fields.get(key) {
             Some(Value::String(_)) => {}
-            Some(other) => issues.push(format!(
-                "{key}: expected a string, found {}",
-                type_name(other)
-            )),
+            Some(other) => {
+                issues.push(format!("{key}: expected a string, found {}", type_name(other)))
+            }
             None => issues.push(format!("{key}: required, and absent")),
         }
     }
@@ -578,10 +550,7 @@ pub(crate) fn validate(entry: &Value) -> Result<(), MailboxError> {
     if let Some(present) = fields.get("read")
         && !present.is_boolean()
     {
-        issues.push(format!(
-            "read: expected a boolean when present, found {}",
-            type_name(present)
-        ));
+        issues.push(format!("read: expected a boolean when present, found {}", type_name(present)));
     }
     if let Some(present) = fields.get("msgV")
         && !present.is_u64()
@@ -592,11 +561,7 @@ pub(crate) fn validate(entry: &Value) -> Result<(), MailboxError> {
         ));
     }
 
-    if issues.is_empty() {
-        Ok(())
-    } else {
-        Err(MailboxError::SchemaInvalid { issues })
-    }
+    if issues.is_empty() { Ok(()) } else { Err(MailboxError::SchemaInvalid { issues }) }
 }
 
 /// A JSON value's type, as a word a sentence can use. Never its contents.

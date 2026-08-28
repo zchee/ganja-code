@@ -115,37 +115,32 @@
 //!
 //! [`Registry`]: crate::tool::Registry
 
-use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
-    fmt,
-    io::Write as _,
-    path::{Path, PathBuf},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
-};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::fmt;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt as _;
 use ganja_protocol::team::{MemberBackend, MemberView, TeamView};
+use ganja_team::team::resolve_unique;
 use ganja_team::{
     MailboxMessage, MemberName, MemberRecord, NameError, Spawn, Surface, TeamFile, TeamName,
-    TeamsRoot, mailbox, record, team::resolve_unique,
+    TeamsRoot, mailbox, record,
 };
 use tempfile::NamedTempFile;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    Engine, Storage,
-    engine::Evicted,
-    permission::Permissions,
-    protocol::{Event, PartBody, ToolState},
-    provider::Provider,
-    tool::Registry,
-};
+use crate::engine::Evicted;
+use crate::permission::Permissions;
+use crate::protocol::{Event, PartBody, ToolState};
+use crate::provider::Provider;
+use crate::tool::Registry;
+use crate::{Engine, Storage};
 
 /// The `agy` backend: a name that parses and a spawn that refuses, because
 /// W4's ship test measured `--sandbox` as terminal-only (**D508(a)**).
@@ -468,9 +463,7 @@ pub fn parse_backend(value: &str) -> Result<MemberBackend, UnknownBackend> {
         "codex" => Ok(MemberBackend::Codex),
         "agy" => Ok(MemberBackend::Agy),
         "grok" => Ok(MemberBackend::Grok),
-        other => Err(UnknownBackend {
-            value: other.to_owned(),
-        }),
+        other => Err(UnknownBackend { value: other.to_owned() }),
     }
 }
 
@@ -622,10 +615,7 @@ fn spell(names: &[&str]) -> String {
         [only] => format!("{only:?}"),
         [rest @ .., last] => format!(
             "{} and {last:?}",
-            rest.iter()
-                .map(|name| format!("{name:?}"))
-                .collect::<Vec<_>>()
-                .join(", ")
+            rest.iter().map(|name| format!("{name:?}")).collect::<Vec<_>>().join(", ")
         ),
     }
 }
@@ -792,10 +782,9 @@ pub enum Handle {
 impl fmt::Debug for Handle {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InProcess(teammate) => formatter
-                .debug_tuple("InProcess")
-                .field(&teammate.name())
-                .finish(),
+            Self::InProcess(teammate) => {
+                formatter.debug_tuple("InProcess").field(&teammate.name()).finish()
+            }
             Self::Pane(pane) => formatter
                 .debug_struct("Pane")
                 .field("pane_id", &pane.id)
@@ -847,26 +836,20 @@ impl Handle {
     pub fn surface(&self) -> Surface {
         match self {
             Self::InProcess(_) => Surface::InProcess,
-            Self::Pane(pane) => Surface::Pane {
-                id: pane.id.clone(),
-            },
+            Self::Pane(pane) => Surface::Pane { id: pane.id.clone() },
             // Which is what makes the registry's record write produce W1's
             // shape with no change of its own: `Surface::Shim` puts the
             // in-process sentinel in `tmuxPaneId` and the CLI's name in
             // `backendType`, so every older reader classifies the member
             // safely and the one reader that needs shim-ness reads the field
             // that says so.
-            Self::Child(child) => Surface::Shim {
-                cli: child.cli(),
-                pane: None,
-            },
+            Self::Child(child) => Surface::Shim { cli: child.cli(), pane: None },
             // The same `backendType`, and the **real** pane id where the
             // headless shape writes the sentinel: the pane is there, and a
             // reader acting on panes acts on something real (**D512**).
-            Self::TuiPane(tui) => Surface::Shim {
-                cli: tui.cli(),
-                pane: Some(tui.pane().id.clone()),
-            },
+            Self::TuiPane(tui) => {
+                Surface::Shim { cli: tui.cli(), pane: Some(tui.pane().id.clone()) }
+            }
         }
     }
 }
@@ -1437,12 +1420,7 @@ impl TeammateRegistry {
     /// that was asked to end leave the roster and the team file the same way.
     #[must_use]
     pub fn take_exited(&self) -> Vec<shim_tui::Exited> {
-        std::mem::take(
-            &mut *self
-                .exited
-                .lock()
-                .expect("the exited list is never poisoned"),
-        )
+        std::mem::take(&mut *self.exited.lock().expect("the exited list is never poisoned"))
     }
 
     /// The per-turn deadline a foreign-CLI teammate runs under (**D509**).
@@ -1493,8 +1471,7 @@ impl TeammateRegistry {
     /// How long one `cli` turn may run in this session.
     #[must_use]
     pub fn shim_turn_timeout(&self, cli: ganja_team::ShimCli) -> Duration {
-        self.shim_turn_timeout
-            .unwrap_or_else(|| shim::default_turn_timeout(cli))
+        self.shim_turn_timeout.unwrap_or_else(|| shim::default_turn_timeout(cli))
     }
 
     /// The directory this session's shim orphan records live in (**D508**).
@@ -1511,10 +1488,7 @@ impl TeammateRegistry {
     /// runtime, settled once, before anything can have written one.
     #[must_use]
     pub fn with_shim_directory(mut self, directory: PathBuf) -> Self {
-        self.shims = Arc::new(Mutex::new(shim::ShimRecords::new(
-            directory,
-            &self.lead_session_id,
-        )));
+        self.shims = Arc::new(Mutex::new(shim::ShimRecords::new(directory, &self.lead_session_id)));
 
         self
     }
@@ -1557,10 +1531,7 @@ impl TeammateRegistry {
     /// keeps the one it was started with for its whole life, because the
     /// forwarding is a task of its own and the registry does not restart it.
     pub fn forward_dialogs_to(&self, lead: tokio::sync::mpsc::Sender<posture::Forwarded>) {
-        *self
-            .dialogs
-            .lock()
-            .expect("the dialog surface is never poisoned") = Some(lead);
+        *self.dialogs.lock().expect("the dialog surface is never poisoned") = Some(lead);
     }
 
     /// The team these teammates are members of.
@@ -1592,10 +1563,7 @@ impl TeammateRegistry {
     /// `try_send`, never a wait — and a registry nobody attached a surface to
     /// answers [`None`], which both callers read as a refusal.
     pub(crate) fn dialog_surface(&self) -> Option<tokio::sync::mpsc::Sender<posture::Forwarded>> {
-        self.dialogs
-            .lock()
-            .expect("the dialog surface is never poisoned")
-            .clone()
+        self.dialogs.lock().expect("the dialog surface is never poisoned").clone()
     }
 
     /// Where the team's documents live.
@@ -1623,19 +1591,14 @@ impl TeammateRegistry {
     /// still owed a read.
     #[must_use]
     pub fn holds_backend(&self, backend: MemberBackend) -> bool {
-        self.members()
-            .values()
-            .any(|member| member.backend == backend)
+        self.members().values().any(|member| member.backend == backend)
     }
 
     /// How many teammates are still running, which is what the status bar
     /// counts.
     #[must_use]
     pub fn running(&self) -> usize {
-        self.members()
-            .values()
-            .filter(|member| member.alive.load(Ordering::Relaxed))
-            .count()
+        self.members().values().filter(|member| member.alive.load(Ordering::Relaxed)).count()
     }
 
     /// The team as a frontend renders it (**D503**).
@@ -1656,10 +1619,8 @@ impl TeammateRegistry {
             recent_calls: Vec::new(),
         }];
         members.extend(
-            self.members()
-                .values()
-                .filter(|member| member.alive.load(Ordering::Relaxed))
-                .map(|member| MemberView {
+            self.members().values().filter(|member| member.alive.load(Ordering::Relaxed)).map(
+                |member| MemberView {
                     name: member.name.as_str().to_owned(),
                     agent_id: member.agent_id.clone(),
                     backend: member.backend,
@@ -1672,7 +1633,8 @@ impl TeammateRegistry {
                         .iter()
                         .cloned()
                         .collect(),
-                }),
+                },
+            ),
         );
 
         TeamView {
@@ -1693,9 +1655,7 @@ impl TeammateRegistry {
     /// makes of that is [`crate::teammate::lead_inbox::Delivered`]'s business.
     #[must_use]
     pub fn delivery_of(&self, teammate: &str) -> Option<Delivery> {
-        self.members()
-            .get(teammate)
-            .map(|member| member.surface.delivery())
+        self.members().get(teammate).map(|member| member.surface.delivery())
     }
 
     /// Forgets `teammate`, ends what it ran on, and takes its record out of
@@ -1753,11 +1713,8 @@ impl TeammateRegistry {
     /// and [`SpawnError::Lost`] when the blocking hop that does it did not come
     /// back.
     pub async fn retire(&self, teammate: &str) -> Result<bool, SpawnError> {
-        let removed = self
-            .members
-            .lock()
-            .expect("the member map is never poisoned")
-            .remove(teammate);
+        let removed =
+            self.members.lock().expect("the member map is never poisoned").remove(teammate);
         let held = removed.is_some();
         if let Some(member) = removed {
             tracing::info!(
@@ -1902,12 +1859,8 @@ impl TeammateRegistry {
             // The backend's preamble around the prompt, not the bare prompt
             // (**D514**): the first thing a teammate reads says who it is and
             // how it answers, and the record below keeps the prompt as typed.
-            match seed_inbox(
-                spec.inbox(),
-                spec.lead.as_str().to_owned(),
-                backend.preamble(&spec),
-            )
-            .await
+            match seed_inbox(spec.inbox(), spec.lead.as_str().to_owned(), backend.preamble(&spec))
+                .await
             {
                 Ok(seeded) => Some(seeded),
                 Err(error) => {
@@ -1982,16 +1935,10 @@ impl TeammateRegistry {
     /// [`TeammateRegistry::reserved`].
     async fn claim(self: &Arc<Self>, desired: &str) -> Result<MemberName, SpawnError> {
         let taken = self.taken().await?;
-        let mut reserved = self
-            .reserved
-            .lock()
-            .expect("the reserved names are never poisoned");
+        let mut reserved = self.reserved.lock().expect("the reserved names are never poisoned");
         let name = resolve_unique(
             desired,
-            taken
-                .iter()
-                .map(String::as_str)
-                .chain(reserved.iter().map(String::as_str)),
+            taken.iter().map(String::as_str).chain(reserved.iter().map(String::as_str)),
         )?;
         reserved.insert(name.as_str().to_owned());
 
@@ -2005,10 +1952,7 @@ impl TeammateRegistry {
     /// evicts nobody; a spawn that succeeded holds its name for the life of
     /// the registry, for the reason on [`TeammateRegistry::reserved`].
     fn release(&self, name: &MemberName) {
-        self.reserved
-            .lock()
-            .expect("the reserved names are never poisoned")
-            .remove(name.as_str());
+        self.reserved.lock().expect("the reserved names are never poisoned").remove(name.as_str());
     }
 
     /// Ends every teammate and waits for each one to really be gone.
@@ -2030,12 +1974,8 @@ impl TeammateRegistry {
         self.cancel.cancel();
 
         let members: Vec<Arc<Member>> = self.members().values().map(Arc::clone).collect();
-        futures::future::join_all(
-            members
-                .iter()
-                .map(|member| member.surface.kill(&member.handle)),
-        )
-        .await;
+        futures::future::join_all(members.iter().map(|member| member.surface.kill(&member.handle)))
+            .await;
 
         let tasks =
             std::mem::take(&mut *self.tasks.lock().expect("the task list is never poisoned"));
@@ -2045,9 +1985,7 @@ impl TeammateRegistry {
     }
 
     fn members(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, Arc<Member>>> {
-        self.members
-            .lock()
-            .expect("the member map is never poisoned")
+        self.members.lock().expect("the member map is never poisoned")
     }
 
     /// §4.3's assignment: the next colour round the palette, and the index only
@@ -2057,10 +1995,7 @@ impl TeammateRegistry {
     /// on its own [`Member`] and its own [`MemberRecord`]; this is asked once,
     /// at the spawn that mints it.
     fn color_for(&self) -> String {
-        let mut index = self
-            .next_color
-            .lock()
-            .expect("the palette is never poisoned");
+        let mut index = self.next_color.lock().expect("the palette is never poisoned");
         let color = PALETTE[*index % PALETTE.len()].to_owned();
         *index += 1;
 
@@ -2071,13 +2006,8 @@ impl TeammateRegistry {
     /// the lead among them, which is what keeps a teammate from taking the
     /// lead's name — and everything this registry has started, running or not.
     async fn taken(&self) -> Result<Vec<String>, SpawnError> {
-        let mut taken: Vec<String> = self
-            .read_team()
-            .await?
-            .members
-            .iter()
-            .map(|member| member.name.clone())
-            .collect();
+        let mut taken: Vec<String> =
+            self.read_team().await?.members.iter().map(|member| member.name.clone()).collect();
         taken.push(self.lead.as_str().to_owned());
         taken.extend(self.members().keys().cloned());
 
@@ -2188,11 +2118,7 @@ impl TeammateRegistry {
 
         blocking(move || {
             let failed = |doing: &'static str, source: Box<dyn std::error::Error + Send + Sync>| {
-                SpawnError::TeamFile {
-                    doing,
-                    path: path.display().to_string(),
-                    source,
-                }
+                SpawnError::TeamFile { doing, path: path.display().to_string(), source }
             };
             let document =
                 record::document(&file).map_err(|error| failed("encoded", Box::new(error)))?;
@@ -2207,10 +2133,7 @@ impl TeammateRegistry {
             staged
                 .write_all(document.as_bytes())
                 .map_err(|error| failed("written", Box::new(error)))?;
-            staged
-                .as_file()
-                .sync_all()
-                .map_err(|error| failed("written", Box::new(error)))?;
+            staged.as_file().sync_all().map_err(|error| failed("written", Box::new(error)))?;
             // A temporary is created `0600` and a rename carries that mode
             // onto the target. The team file is *shared* — that is the whole
             // premise of the crate it belongs to — so an existing document's
@@ -2231,9 +2154,7 @@ impl TeammateRegistry {
                     .set_permissions(existing.permissions())
                     .map_err(|error| failed("written", Box::new(error)))?;
             }
-            staged
-                .persist(&path)
-                .map_err(|error| failed("written", Box::new(error.error)))?;
+            staged.persist(&path).map_err(|error| failed("written", Box::new(error.error)))?;
 
             Ok(())
         })
@@ -2278,10 +2199,7 @@ impl TeammateRegistry {
             // (**D-5**).
             let forwarding = posture::Forwarding::new(
                 Arc::clone(teammate),
-                self.dialogs
-                    .lock()
-                    .expect("the dialog surface is never poisoned")
-                    .clone(),
+                self.dialogs.lock().expect("the dialog surface is never poisoned").clone(),
             );
             tasks.push(tokio::spawn(forwarding.run(self.cancel.child_token())));
 

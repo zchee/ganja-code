@@ -53,12 +53,10 @@ pub mod webfetch;
 pub mod websearch;
 pub mod write;
 
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-    time::SystemTime,
-};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
@@ -183,9 +181,7 @@ impl ToolCtx {
     /// identity comparison rather than by comparing the two as text.
     #[must_use]
     pub fn is_credential_store(&self, path: &Path) -> bool {
-        self.credentials
-            .guarded()
-            .is_some_and(|store| is_same_file(path, store))
+        self.credentials.guarded().is_some_and(|store| is_same_file(path, store))
     }
 }
 
@@ -334,12 +330,8 @@ impl Registry {
     /// tool in place.
     #[must_use]
     pub fn with(&self, tool: Arc<dyn Tool>) -> Self {
-        let mut tools: Vec<Arc<dyn Tool>> = self
-            .tools
-            .iter()
-            .filter(|held| held.id() != tool.id())
-            .map(Arc::clone)
-            .collect();
+        let mut tools: Vec<Arc<dyn Tool>> =
+            self.tools.iter().filter(|held| held.id() != tool.id()).map(Arc::clone).collect();
         tools.push(tool);
 
         Self { tools }
@@ -354,12 +346,7 @@ impl Registry {
     /// the tools it started with.
     #[must_use]
     pub fn with_all(&self, tools: impl IntoIterator<Item = Arc<dyn Tool>>) -> Self {
-        tools.into_iter().fold(
-            Self {
-                tools: self.tools.clone(),
-            },
-            |set, tool| set.with(tool),
-        )
+        tools.into_iter().fold(Self { tools: self.tools.clone() }, |set, tool| set.with(tool))
     }
 
     /// What a provider advertises to the model, in registration order.
@@ -474,10 +461,7 @@ impl FileTimes {
     /// bookkeeping.
     pub fn announce_reads(&self) -> tokio::sync::mpsc::UnboundedReceiver<PathBuf> {
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-        self.log
-            .lock()
-            .expect("the read log is never poisoned")
-            .reads = Some(sender);
+        self.log.lock().expect("the read log is never poisoned").reads = Some(sender);
 
         receiver
     }
@@ -514,12 +498,7 @@ impl FileTimes {
         // runs on every event for every watched file, and holding the log
         // across a filesystem call would put a tool call behind whatever the
         // disk is doing.
-        let recorded = match self
-            .log
-            .lock()
-            .expect("the read log is never poisoned")
-            .read
-            .get(path)
+        let recorded = match self.log.lock().expect("the read log is never poisoned").read.get(path)
         {
             Some(Seen::Read(stamp)) => *stamp,
             // Not read this session, or already condemned: either way there is
@@ -561,13 +540,7 @@ impl FileTimes {
     /// happens once. A file that is re-read and then changed again is a new
     /// episode, and is named again.
     pub fn take_stale(&self) -> Vec<PathBuf> {
-        std::mem::take(
-            &mut self
-                .log
-                .lock()
-                .expect("the read log is never poisoned")
-                .unannounced,
-        )
+        std::mem::take(&mut self.log.lock().expect("the read log is never poisoned").unannounced)
     }
 
     /// Checks that `path` was read this session and has not changed on disk
@@ -595,13 +568,8 @@ impl FileTimes {
         path: &Path,
         stamp: Option<SystemTime>,
     ) -> Result<(), ToolError> {
-        let recorded = self
-            .log
-            .lock()
-            .expect("the read log is never poisoned")
-            .read
-            .get(path)
-            .copied();
+        let recorded =
+            self.log.lock().expect("the read log is never poisoned").read.get(path).copied();
 
         let stale = || {
             ToolError::Failed(format!(
@@ -663,11 +631,7 @@ fn native_path(path: PathBuf) -> PathBuf {
 /// it back to the model one way or another. See [`native_path`].
 fn resolve(cwd: &Path, file_path: &str) -> PathBuf {
     let path = Path::new(file_path);
-    let joined = if path.is_absolute() {
-        path.to_owned()
-    } else {
-        cwd.join(path)
-    };
+    let joined = if path.is_absolute() { path.to_owned() } else { cwd.join(path) };
 
     native_path(joined)
 }
@@ -688,9 +652,7 @@ fn display(cwd: &Path, path: &Path) -> String {
 /// filesystem does not offer one — in which case recording and checking
 /// compare as equal, failing open rather than refusing every edit.
 fn modification_stamp(path: &Path) -> Option<SystemTime> {
-    std::fs::metadata(path)
-        .and_then(|metadata| metadata.modified())
-        .ok()
+    std::fs::metadata(path).and_then(|metadata| metadata.modified()).ok()
 }
 
 /// Whether `left` and `right` name the same file.

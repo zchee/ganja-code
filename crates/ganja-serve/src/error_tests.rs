@@ -28,9 +28,7 @@ fn the_engine_refusals_map_to_their_statuses_and_nothing_else_moves() {
         EngineError::NothingToUndo,
         EngineError::NothingToRedo,
         EngineError::NoSnapshots,
-        EngineError::UnknownAgent {
-            name: "nobody".to_owned(),
-        },
+        EngineError::UnknownAgent { name: "nobody".to_owned() },
     ] {
         let mapped = ApiError::from(other);
         assert_eq!(

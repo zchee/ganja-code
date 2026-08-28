@@ -27,18 +27,15 @@
 //! wait for the options line rather than for a tool's name in the reply.
 #![cfg(unix)]
 
-use std::{
-    fs,
-    ops::{Deref, DerefMut},
-    path::PathBuf,
-    process::Command,
-    thread,
-    time::Duration,
-};
+use std::ops::{Deref, DerefMut};
+use std::path::PathBuf;
+use std::process::Command;
+use std::time::Duration;
+use std::{fs, thread};
 
-use expectrl::{
-    ControlCode, Eof, Expect as _, Session, process::unix::WaitStatus, session::OsSession,
-};
+use expectrl::process::unix::WaitStatus;
+use expectrl::session::OsSession;
+use expectrl::{ControlCode, Eof, Expect as _, Session};
 use ganja_testkit::temp_dir as temporary;
 use serde_json::json;
 use tempfile::TempDir;
@@ -137,9 +134,8 @@ impl Ganja {
         // and `ok[D` came to haunt one, 2026-08-24). A caller that set
         // `XDG_DATA_HOME` already isolated everything on its own terms.
         let mut homes = None;
-        let isolated = command
-            .get_envs()
-            .any(|(key, _)| key == std::ffi::OsStr::new("XDG_DATA_HOME"));
+        let isolated =
+            command.get_envs().any(|(key, _)| key == std::ffi::OsStr::new("XDG_DATA_HOME"));
         if !isolated {
             let dir = TempDir::new().expect("an isolated home is creatable");
             command.env("XDG_DATA_HOME", dir.path());
@@ -161,19 +157,11 @@ impl Ganja {
 
         let mut session = Session::spawn(command).expect("failed to spawn `ganja` in a pty");
         session.set_expect_timeout(Some(EXIT_DEADLINE));
-        session
-            .get_process_mut()
-            .set_window_size(COLUMNS, rows)
-            .expect("failed to size the pty");
+        session.get_process_mut().set_window_size(COLUMNS, rows).expect("failed to size the pty");
 
-        session
-            .expect(ALT_SCREEN)
-            .expect("`ganja` never took the terminal over");
+        session.expect(ALT_SCREEN).expect("`ganja` never took the terminal over");
 
-        Self {
-            session: Some(session),
-            _homes: homes,
-        }
+        Self { session: Some(session), _homes: homes }
     }
 
     /// Keeps the pty drained for `ms` milliseconds so the app stays live.
@@ -208,19 +196,11 @@ impl Ganja {
 
     /// Waits for the process to end and checks that it ended cleanly.
     fn assert_clean_exit(mut self) {
-        let mut session = self
-            .session
-            .take()
-            .expect("a session is only ever taken once");
+        let mut session = self.session.take().expect("a session is only ever taken once");
 
-        session
-            .expect(Eof)
-            .expect("`ganja` did not exit within the deadline");
+        session.expect(Eof).expect("`ganja` did not exit within the deadline");
 
-        let status = session
-            .get_process()
-            .wait()
-            .expect("failed to reap the `ganja` process");
+        let status = session.get_process().wait().expect("failed to reap the `ganja` process");
         assert!(
             matches!(status, WaitStatus::Exited(_, 0)),
             "expected a clean exit, got {status:?}"
@@ -229,8 +209,7 @@ impl Ganja {
 
     /// Quits with Ctrl-C and checks that the process ended cleanly.
     fn quit_and_assert_clean_exit(mut self) {
-        self.send(ControlCode::EndOfText)
-            .expect("failed to send Ctrl-C");
+        self.send(ControlCode::EndOfText).expect("failed to send Ctrl-C");
 
         self.assert_clean_exit();
     }
@@ -304,24 +283,14 @@ const KITTY_POP: &str = "\x1b[<1u";
 fn a_positive_kitty_probe_pushes_and_the_exit_pops() {
     let mut session = ganja_probing();
 
-    session
-        .expect(KITTY_QUERY)
-        .expect("the kitty probe never asked");
+    session.expect(KITTY_QUERY).expect("the kitty probe never asked");
     // Flags report (none set), then device attributes: a supporting terminal.
-    session
-        .send("\x1b[?0u\x1b[?1;2c")
-        .expect("failed to answer the probe");
+    session.send("\x1b[?0u\x1b[?1;2c").expect("failed to answer the probe");
 
-    session
-        .expect(KITTY_PUSH)
-        .expect("a positive probe should push the disambiguate flag");
+    session.expect(KITTY_PUSH).expect("a positive probe should push the disambiguate flag");
 
-    session
-        .send(ControlCode::EndOfText)
-        .expect("failed to send Ctrl-C");
-    session
-        .expect(KITTY_POP)
-        .expect("the exit should pop what the start pushed");
+    session.send(ControlCode::EndOfText).expect("failed to send Ctrl-C");
+    session.expect(KITTY_POP).expect("the exit should pop what the start pushed");
     session.assert_clean_exit();
 }
 
@@ -332,13 +301,9 @@ fn a_positive_kitty_probe_pushes_and_the_exit_pops() {
 fn a_negative_kitty_probe_pushes_nothing() {
     let mut session = ganja_probing();
 
-    session
-        .expect(KITTY_QUERY)
-        .expect("the kitty probe never asked");
+    session.expect(KITTY_QUERY).expect("the kitty probe never asked");
     // Device attributes alone: the flags query went unanswered.
-    session
-        .send("\x1b[?1;2c")
-        .expect("failed to answer the probe");
+    session.send("\x1b[?1;2c").expect("failed to answer the probe");
 
     let after = session.harvest(600);
     assert!(
@@ -363,23 +328,15 @@ fn a_split_arrow_key_edits_instead_of_pasting_garbage() {
     let mut session = ganja();
     session.breathe(100);
 
-    session
-        .send("hel")
-        .expect("failed to type into the composer");
+    session.send("hel").expect("failed to type into the composer");
     session.breathe(30);
-    session
-        .send("\x1b")
-        .expect("failed to send the bare escape");
+    session.send("\x1b").expect("failed to send the bare escape");
     session.breathe(5);
-    session
-        .send("[D")
-        .expect("failed to send the sequence tail");
+    session.send("[D").expect("failed to send the sequence tail");
     session.send("X").expect("failed to type the marker");
     session.send("\r").expect("failed to submit");
 
-    session
-        .expect("heXl")
-        .expect("the split arrow was not repaired into a Left");
+    session.expect("heXl").expect("the split arrow was not repaired into a Left");
 
     session.quit_and_assert_clean_exit();
 }
@@ -399,20 +356,14 @@ fn a_late_continuation_stays_literal_text() {
     let mut session = ganja();
     session.breathe(100);
 
-    session
-        .send("ok")
-        .expect("failed to type into the composer");
+    session.send("ok").expect("failed to type into the composer");
     session.breathe(30);
-    session
-        .send("\x1b")
-        .expect("failed to send the bare escape");
+    session.send("\x1b").expect("failed to send the bare escape");
     session.breathe(500);
     session.send("[D").expect("failed to send the late tail");
     session.send("\r").expect("failed to submit");
 
-    session
-        .expect("ok[D")
-        .expect("a late tail should stay literal text");
+    session.expect("ok[D").expect("a late tail should stay literal text");
 
     session.quit_and_assert_clean_exit();
 }
@@ -423,9 +374,7 @@ fn a_submitted_prompt_streams_a_reply_before_quitting() {
 
     submit_prompt(&mut session);
 
-    session
-        .expect(REPLY_OPENING)
-        .expect("the fake provider's reply never reached the transcript");
+    session.expect(REPLY_OPENING).expect("the fake provider's reply never reached the transcript");
 
     session.quit_and_assert_clean_exit();
 }
@@ -470,10 +419,7 @@ fn edit_target() -> serde_json::Value {
 /// A shell call that copies [`TARGET`] to `into`, so that "the command ran"
 /// is a question about the filesystem rather than about the screen.
 fn copy_target(into: &str) -> serde_json::Value {
-    call(
-        "bash",
-        json!({ "command": format!("cat {TARGET} > {into}") }),
-    )
+    call("bash", json!({ "command": format!("cat {TARGET} > {into}") }))
 }
 
 /// A script that plays `turns` and then says [`CLOSING`].
@@ -491,11 +437,8 @@ fn script(mut turns: Vec<serde_json::Value>) -> serde_json::Value {
 /// `script`.
 fn scripted(project: &TempDir, data: &TempDir, script: &serde_json::Value) -> Ganja {
     let path = project.path().join(SCRIPT);
-    fs::write(
-        &path,
-        serde_json::to_vec_pretty(script).expect("a script serializes"),
-    )
-    .expect("the script is writable");
+    fs::write(&path, serde_json::to_vec_pretty(script).expect("a script serializes"))
+        .expect("the script is writable");
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_ganja"));
     command
@@ -526,9 +469,7 @@ fn submit_prompt(session: &mut Ganja) {
     session.send(PROMPT).expect("failed to type the prompt");
     session.send("\r").expect("failed to send Enter");
 
-    session
-        .expect(PROMPT)
-        .expect("the engine's user message never reached the transcript");
+    session.expect(PROMPT).expect("the engine's user message never reached the transcript");
 }
 
 /// Waits for the permission dialog to open.
@@ -541,9 +482,7 @@ fn expect_dialog(session: &mut Ganja, what: &str) {
 /// Waits for the script's last turn, which is what says every call before it
 /// was resolved without anything still waiting on the user.
 fn expect_closing(session: &mut Ganja) {
-    session
-        .expect(CLOSING)
-        .expect("the turn never reached the script's closing text");
+    session.expect(CLOSING).expect("the turn never reached the script's closing text");
 }
 
 fn contents(directory: &TempDir, name: &str) -> Vec<u8> {
@@ -568,10 +507,7 @@ fn permission_store(data: &TempDir) -> Option<PathBuf> {
         .filter(|store| store.is_file())
         .collect();
 
-    assert!(
-        stores.len() <= 1,
-        "one session answers for one project, got {stores:?}"
-    );
+    assert!(stores.len() <= 1, "one session answers for one project, got {stores:?}");
 
     stores.into_iter().next()
 }
@@ -612,9 +548,7 @@ fn a_scripted_read_edit_and_shell_chain_runs_once_it_is_allowed() {
     expect_dialog(&mut session, "edit");
     session.send("y").expect("failed to allow the edit");
     expect_dialog(&mut session, "shell command");
-    session
-        .send("y")
-        .expect("failed to allow the shell command");
+    session.send("y").expect("failed to allow the shell command");
 
     expect_closing(&mut session);
     session.quit_and_assert_clean_exit();
@@ -669,11 +603,7 @@ fn a_rejected_edit_leaves_the_file_untouched_and_the_turn_running() {
         format!("{SEEDED}\n").into_bytes(),
         "a rejected edit must not touch a single byte"
     );
-    assert_eq!(
-        permission_store(&data),
-        None,
-        "a rejection is not a rule to remember"
-    );
+    assert_eq!(permission_store(&data), None, "a rejection is not a rule to remember");
 }
 
 /// An "always" answer covers the calls that come after it.
@@ -703,9 +633,7 @@ fn an_always_answer_lets_the_next_shell_command_run_unasked() {
     submit_prompt(&mut session);
 
     expect_dialog(&mut session, "first shell command");
-    session
-        .send("a")
-        .expect("failed to always-allow the shell command");
+    session.send("a").expect("failed to always-allow the shell command");
 
     expect_closing(&mut session);
     session.quit_and_assert_clean_exit();

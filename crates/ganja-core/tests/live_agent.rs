@@ -22,16 +22,16 @@
 //! tool output. `cargo test` runs the tests inside a binary on parallel
 //! threads, so a binary that does either has to hold exactly one test.
 
-use std::{env, path::Path, sync::Arc};
+use std::env;
+use std::path::Path;
+use std::sync::Arc;
 
 use futures::StreamExt as _;
-use ganja_core::{
-    Engine, catalog,
-    permission::Permissions,
-    protocol::{Command, Event, FinishReason, PartBody, PermissionReply, ToolState},
-    provider::AnthropicProvider,
-    tool::Registry,
-};
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{Command, Event, FinishReason, PartBody, PermissionReply, ToolState};
+use ganja_core::provider::AnthropicProvider;
+use ganja_core::tool::Registry;
+use ganja_core::{Engine, catalog};
 
 /// Variable that has to be `1` before this talks to a vendor.
 const LIVE_ENV: &str = "GANJA_LIVE_TEST";
@@ -103,9 +103,7 @@ async fn a_live_model_writes_a_file_and_runs_it() {
     let root = env::current_dir().expect("the process has a directory");
 
     let model = env::var("GANJA_MODEL").ok().unwrap_or_else(|| {
-        catalog::default_model("anthropic")
-            .expect("the catalog has a default")
-            .to_owned()
+        catalog::default_model("anthropic").expect("the catalog has a default").to_owned()
     });
     let engine = Engine::new(
         Arc::new(AnthropicProvider::from_env().expect("a provider builds from the environment")),
@@ -131,18 +129,12 @@ async fn a_live_model_writes_a_file_and_runs_it() {
     // end of all of them, not of one step.
     let mut finished: Vec<Finished> = Vec::new();
     let (reason, error) = loop {
-        let event = events
-            .next()
-            .await
-            .expect("the turn should finish before the stream ends");
+        let event = events.next().await.expect("the turn should finish before the stream ends");
 
         match event {
             Event::PermissionRequested { id, .. } => {
                 engine
-                    .send(Command::ReplyPermission {
-                        id,
-                        reply: PermissionReply::Once,
-                    })
+                    .send(Command::ReplyPermission { id, reply: PermissionReply::Once })
                     .await
                     .expect("a reply is always accepted");
             }
@@ -182,20 +174,14 @@ async fn a_live_model_writes_a_file_and_runs_it() {
         "the file the model wrote should print something: {source:?}"
     );
 
-    let ran = finished
-        .iter()
-        .find(|(tool, _, output)| tool == "bash" && output.contains("hello"));
+    let ran = finished.iter().find(|(tool, _, output)| tool == "bash" && output.contains("hello"));
     assert!(
         ran.is_some(),
         "no shell call came back having printed hello; the turn ran {:?}",
         names(&finished)
     );
 
-    eprintln!(
-        "{model} ran {:?} and left {}",
-        names(&finished),
-        relative(&root, &script)
-    );
+    eprintln!("{model} ran {:?} and left {}", names(&finished), relative(&root, &script));
 }
 
 /// Just the tool names, for a failure message that does not paste a whole
@@ -226,8 +212,5 @@ fn listing(directory: &Path) -> Vec<String> {
 
 /// `path` as it reads from `root`.
 fn relative(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .display()
-        .to_string()
+    path.strip_prefix(root).unwrap_or(path).display().to_string()
 }

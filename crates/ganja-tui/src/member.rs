@@ -102,34 +102,26 @@
 //! refused, or a pane that died between the read and the turn, leaves the
 //! message where the next pass finds it again.
 
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-    sync::Mutex,
-    time::Duration,
-};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::Duration;
 
 use anyhow::{Context as _, Result, bail};
-use ganja_core::{
-    team::{
-        MailboxMessage, MemberName, MemberRecord, Surface, TeamFile, TeamName, TeamsRoot, mailbox,
-        record,
-    },
-    teammate::{
-        Delivery, TeammateRegistry,
-        lead_inbox::Delivered,
-        member::{Asks, Resolved},
-        posture::Posture,
-        runner::{self, DROPPED_FRAME, IGNORED_STALE, SHUTDOWN_AHEAD},
-    },
+use ganja_core::team::{
+    MailboxMessage, MemberName, MemberRecord, Surface, TeamFile, TeamName, TeamsRoot, mailbox,
+    record,
 };
-use ganja_protocol::{
-    FinishReason, PermissionId, PermissionMode, PermissionReply,
-    team::{
-        Frame, IdleNotification, IdleReason, LeadFrame, ModeSetRequest, ShutdownApproved,
-        TaskAssignment, cap_for_display,
-    },
+use ganja_core::teammate::lead_inbox::Delivered;
+use ganja_core::teammate::member::{Asks, Resolved};
+use ganja_core::teammate::posture::Posture;
+use ganja_core::teammate::runner::{self, DROPPED_FRAME, IGNORED_STALE, SHUTDOWN_AHEAD};
+use ganja_core::teammate::{Delivery, TeammateRegistry};
+use ganja_protocol::team::{
+    Frame, IdleNotification, IdleReason, LeadFrame, ModeSetRequest, ShutdownApproved,
+    TaskAssignment, cap_for_display,
 };
+use ganja_protocol::{FinishReason, PermissionId, PermissionMode, PermissionReply};
 
 /// The teammate's own cadence (§6), and the same constant the in-process
 /// runner keeps: the member is the side that has to notice a shutdown
@@ -445,13 +437,7 @@ impl Inbox {
         let lead_inbox = membership.lead_inbox();
         let asks = Asks::new(membership.name.clone(), &membership.team, &membership.root);
 
-        Self {
-            membership,
-            inbox,
-            lead_inbox,
-            asks,
-            rendered: Mutex::new(HashMap::new()),
-        }
+        Self { membership, inbox, lead_inbox, asks, rendered: Mutex::new(HashMap::new()) }
     }
 
     /// The asks waiting on the lead.
@@ -546,10 +532,7 @@ impl Inbox {
             return;
         }
         let identities = {
-            let mut rendered = self
-                .rendered
-                .lock()
-                .expect("the rendering map is never poisoned");
+            let mut rendered = self.rendered.lock().expect("the rendering map is never poisoned");
 
             messages
                 .iter()
@@ -802,11 +785,8 @@ pub(crate) fn membership(root: &Path, pane: Option<&str>) -> Membership {
 /// Writes one plain message into `inbox`, as a test's lead or peer would.
 #[cfg(test)]
 pub(crate) fn write(inbox: &Path, from: &str, text: &str) {
-    mailbox::write(
-        inbox,
-        MailboxMessage::new(from, text, record::now_iso8601()),
-    )
-    .expect("the inbox takes a message");
+    mailbox::write(inbox, MailboxMessage::new(from, text, record::now_iso8601()))
+        .expect("the inbox takes a message");
 }
 
 /// Writes one frame into `inbox`, from `from`.

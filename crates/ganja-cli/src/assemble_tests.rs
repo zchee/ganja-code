@@ -30,11 +30,8 @@ fn the_configured_cap_reaches_an_assembled_engine() {
         std::env::remove_var("GANJA_PROVIDER");
         std::env::remove_var("GANJA_MODEL");
     }
-    std::fs::write(
-        project.path().join("ganja.toml"),
-        "[agents]\nconcurrency = 3\n",
-    )
-    .expect("the fixture config is writable");
+    std::fs::write(project.path().join("ganja.toml"), "[agents]\nconcurrency = 3\n")
+        .expect("the fixture config is writable");
 
     let assembled = assemble(project.path(), &Overrides::default())
         .expect("a project holding one config key assembles");

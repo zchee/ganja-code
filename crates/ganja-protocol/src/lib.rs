@@ -46,9 +46,7 @@ use uuid::Uuid;
 pub fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| {
-            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
-        })
+        .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// Mints an identifier that sorts after every identifier minted before it: a
@@ -755,10 +753,7 @@ impl Part {
     /// Builds a text part with a fresh id.
     #[must_use]
     pub fn text(text: impl Into<String>) -> Self {
-        Self {
-            id: PartId::ascending(),
-            body: PartBody::Text { text: text.into() },
-        }
+        Self { id: PartId::ascending(), body: PartBody::Text { text: text.into() } }
     }
 
     /// Builds a tool part with a fresh id, opening in
@@ -810,10 +805,7 @@ impl Part {
     /// own text part is.
     #[must_use]
     pub fn reasoning_text(text: impl Into<String>) -> Self {
-        Self {
-            id: PartId::ascending(),
-            body: PartBody::ReasoningText { text: text.into() },
-        }
+        Self { id: PartId::ascending(), body: PartBody::ReasoningText { text: text.into() } }
     }
 
     /// Builds a provider-run tool row with a fresh id (**D489**).
@@ -829,11 +821,7 @@ impl Part {
     ) -> Self {
         Self {
             id: PartId::ascending(),
-            body: PartBody::ServerTool {
-                tool: tool.into(),
-                input,
-                output: output.into(),
-            },
+            body: PartBody::ServerTool { tool: tool.into(), input, output: output.into() },
         }
     }
 
@@ -856,12 +844,7 @@ impl Part {
     ) -> Self {
         Self {
             id: PartId::ascending(),
-            body: PartBody::Peer {
-                from: from.into(),
-                summary,
-                color,
-                body: body.into(),
-            },
+            body: PartBody::Peer { from: from.into(), summary, color, body: body.into() },
         }
     }
 
@@ -879,11 +862,7 @@ impl Part {
     ) -> Self {
         Self {
             id: PartId::ascending(),
-            body: PartBody::Reasoning {
-                provider: provider.into(),
-                item: item.into(),
-                encrypted,
-            },
+            body: PartBody::Reasoning { provider: provider.into(), item: item.into(), encrypted },
         }
     }
 
@@ -996,10 +975,7 @@ impl Message {
             id: MessageId::ascending(),
             role: Role::User,
             parts: vec![Part::text(text)],
-            time: MessageTime {
-                created,
-                completed: Some(created),
-            },
+            time: MessageTime { created, completed: Some(created) },
             model: None,
             usage: None,
         }
@@ -1012,10 +988,7 @@ impl Message {
             id: MessageId::ascending(),
             role: Role::Assistant,
             parts: Vec::new(),
-            time: MessageTime {
-                created: now(),
-                completed: None,
-            },
+            time: MessageTime { created: now(), completed: None },
             model: Some(model.into()),
             usage: None,
         }

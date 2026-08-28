@@ -95,10 +95,8 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::{
-    Tool, ToolCtx, ToolError, ToolOutput, socket,
-    team::{Address, Body, Peer, Postbox, Reserved, Undelivered},
-};
+use crate::team::{Address, Body, Peer, Postbox, Reserved, Undelivered};
+use crate::{Tool, ToolCtx, ToolError, ToolOutput, socket};
 
 /// The tool id, which is also the permission key. Both are a permanent
 /// commitment: a rule stored under this name has to keep meaning what it
@@ -382,9 +380,7 @@ impl SendMessageTool {
     /// teammate in `roster`.
     #[must_use]
     pub fn new(roster: &[Peer]) -> Self {
-        Self {
-            description: describe(roster),
-        }
+        Self { description: describe(roster) }
     }
 
     /// The tool as a session that leads no team sees it (**D530**): the
@@ -395,9 +391,7 @@ impl SendMessageTool {
     /// alike.
     #[must_use]
     pub fn teamless() -> Self {
-        Self {
-            description: TEAMLESS_DESCRIPTION.to_owned(),
-        }
+        Self { description: TEAMLESS_DESCRIPTION.to_owned() }
     }
 }
 
@@ -429,10 +423,7 @@ fn describe(roster: &[Peer]) -> String {
 
 /// The lead's name, where the roster names one.
 fn lead_of(roster: &[Peer]) -> Option<String> {
-    roster
-        .iter()
-        .find(|peer| peer.lead)
-        .map(|peer| peer.name.clone())
+    roster.iter().find(|peer| peer.lead).map(|peer| peer.name.clone())
 }
 
 /// §5.2's rungs 2 to 4: which address form `to` is, or which refusal it earns.
@@ -444,9 +435,7 @@ fn lead_of(roster: &[Peer]) -> Option<String> {
 fn parse_address(to: &str) -> Result<Address, Refused> {
     // Rung 2, and §5.6's two spellings of one thing: the scheme, and the bare
     // leading slash its own parser reads as the same address.
-    let socket_path = to
-        .strip_prefix(UDS_SCHEME)
-        .or_else(|| to.starts_with('/').then_some(to));
+    let socket_path = to.strip_prefix(UDS_SCHEME).or_else(|| to.starts_with('/').then_some(to));
     if let Some(path) = socket_path {
         // Rung 3. A NUL cannot travel in a socket path, and an empty one
         // names nothing at all; both are the model's mistake to see rather
@@ -463,10 +452,7 @@ fn parse_address(to: &str) -> Result<Address, Refused> {
         session_socket(&path)?;
         return Ok(Address::Uds { path });
     }
-    if let Some(scheme) = UNSUPPORTED_SCHEMES
-        .iter()
-        .find(|scheme| to.starts_with(*scheme))
-    {
+    if let Some(scheme) = UNSUPPORTED_SCHEMES.iter().find(|scheme| to.starts_with(*scheme)) {
         return Err(Refused::UnsupportedScheme { scheme });
     }
 
@@ -530,10 +516,7 @@ fn validate(
                 Reserved::AgentSendable { kind } => return Err(Refused::ProtocolFrame { kind }),
                 Reserved::HarnessOnly { kind } => return Err(Refused::LifecycleFrame { kind }),
             }
-            Body::Text {
-                text,
-                summary: cap_summary(args.summary),
-            }
+            Body::Text { text, summary: cap_summary(args.summary) }
         }
         Message::Frame(frame) => {
             // Rung 6, transferred from the scheme the reference applies it to:
@@ -606,10 +589,7 @@ impl Tool for SendMessageTool {
     }
 
     fn describe(&self, args: &serde_json::Value) -> String {
-        let to = args
-            .get("to")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
+        let to = args.get("to").and_then(serde_json::Value::as_str).unwrap_or_default();
 
         format!("message to {to}")
     }
@@ -637,9 +617,7 @@ impl Tool for SendMessageTool {
         match postbox.deliver(address, body).await {
             Ok(sent) => Ok(ToolOutput {
                 title: format!("message to {}", sent.to),
-                output: format!("{DELIVERED} {}. {}", sent.to, sent.note)
-                    .trim_end()
-                    .to_owned(),
+                output: format!("{DELIVERED} {}. {}", sent.to, sent.note).trim_end().to_owned(),
                 metadata: serde_json::json!({
                     "to": sent.to,
                     "structured": structured,

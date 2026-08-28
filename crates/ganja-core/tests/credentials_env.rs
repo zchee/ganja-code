@@ -15,12 +15,11 @@
 //! threads.
 #![cfg(unix)]
 
-use std::{env, fs, os::unix::fs::PermissionsExt as _};
+use std::os::unix::fs::PermissionsExt as _;
+use std::{env, fs};
 
-use ganja_core::{
-    auth,
-    provider::{self, AnthropicProvider},
-};
+use ganja_core::auth;
+use ganja_core::provider::{self, AnthropicProvider};
 
 /// The key the store is loaded with. Nothing may render it.
 const CANARY: &str = "sk-test-canary-XYZ";
@@ -60,10 +59,7 @@ fn a_refused_credential_store_reports_why_and_how_to_repair_it() {
         provider::select(&ganja_core::Config::default()).expect_err("an exposed store is refused");
     let rendered = format!("{refusal} / {refusal:?}");
 
-    assert!(
-        !rendered.contains(CANARY),
-        "the refusal carried the key it refused: {rendered}"
-    );
+    assert!(!rendered.contains(CANARY), "the refusal carried the key it refused: {rendered}");
     assert!(
         rendered.contains(&path.display().to_string()),
         "the refusal should name the file to repair: {rendered}"

@@ -11,7 +11,8 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ganja_tool::{Credentials, FileTimes, Tool, ToolCtx, ToolError, ToolOutput, task::Subagents};
+use ganja_tool::task::Subagents;
+use ganja_tool::{Credentials, FileTimes, Tool, ToolCtx, ToolError, ToolOutput};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -111,10 +112,7 @@ impl Tool for RecorderTool {
     }
 
     async fn run(&self, args: Value, _ctx: &ToolCtx) -> Result<ToolOutput, ToolError> {
-        self.calls
-            .lock()
-            .expect("the call log is never poisoned")
-            .push(args);
+        self.calls.lock().expect("the call log is never poisoned").push(args);
 
         Ok(ToolOutput {
             title: self.title.clone(),
@@ -140,11 +138,7 @@ pub struct BlockingTool {
 impl BlockingTool {
     /// A tool named `id` that blocks silently until cancelled.
     pub fn new(id: &'static str, description: &'static str) -> Arc<Self> {
-        Arc::new(Self {
-            id,
-            description,
-            entered: None,
-        })
+        Arc::new(Self { id, description, entered: None })
     }
 
     /// The same, sending on `entered` the instant it starts running.
@@ -153,11 +147,7 @@ impl BlockingTool {
         description: &'static str,
         entered: tokio::sync::mpsc::Sender<()>,
     ) -> Arc<Self> {
-        Arc::new(Self {
-            id,
-            description,
-            entered: Some(entered),
-        })
+        Arc::new(Self { id, description, entered: Some(entered) })
     }
 }
 

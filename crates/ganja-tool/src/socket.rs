@@ -68,10 +68,8 @@
 //! the sticky-bit assumption it rests on and the peer-uid check on accept are
 //! the binder's — `ganja-serve/src/socket.rs` — and are argued there.
 
-use std::{
-    io,
-    path::{Component, Path, PathBuf},
-};
+use std::io;
+use std::path::{Component, Path, PathBuf};
 
 /// The extension every session socket carries, so a listing can tell a
 /// socket from anything else somebody left in the directory.
@@ -173,10 +171,7 @@ pub fn is_session_stem(stem: &str) -> bool {
 #[must_use]
 pub fn is_session_socket_name(path: &Path) -> bool {
     path.extension().and_then(|extension| extension.to_str()) == Some(EXTENSION)
-        && path
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .is_some_and(is_session_stem)
+        && path.file_stem().and_then(|stem| stem.to_str()).is_some_and(is_session_stem)
 }
 
 /// The verdict on a directory found at the socket directory's path, from
@@ -402,16 +397,11 @@ pub fn prepare_directory(directory: &Path) -> Result<(), DirectoryRefusal> {
         let world_writable = mode & 0o002 != 0;
         let sticky = mode & 0o1000 != 0;
         if world_writable && !sticky {
-            return Err(DirectoryRefusal::ParentNotSticky {
-                parent: parent.to_path_buf(),
-            });
+            return Err(DirectoryRefusal::ParentNotSticky { parent: parent.to_path_buf() });
         }
     }
 
-    match std::fs::DirBuilder::new()
-        .mode(DIRECTORY_MODE)
-        .create(directory)
-    {
+    match std::fs::DirBuilder::new().mode(DIRECTORY_MODE).create(directory) {
         // Ours, this instant; the umask can only have removed bits, so put
         // the mode where the check below expects it.
         Ok(()) => {
@@ -448,11 +438,7 @@ impl SessionSocket {
         let path = directory.path().join("0198c1a2.sock");
         let listener = std::os::unix::net::UnixListener::bind(&path).expect("a socket binds");
 
-        Self {
-            _directory: directory,
-            _listener: listener,
-            path,
-        }
+        Self { _directory: directory, _listener: listener, path }
     }
 
     /// The address as a model writes it.

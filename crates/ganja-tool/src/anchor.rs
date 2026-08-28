@@ -51,13 +51,11 @@
 //! What ACLs a created file lands with is a separate question and still an open
 //! one, the same way the credential store's is (`tool/truncate.rs`).
 
-use std::{
-    ffi::OsString,
-    fs::File,
-    io,
-    path::{Component, Path, PathBuf},
-    time::SystemTime,
-};
+use std::ffi::OsString;
+use std::fs::File;
+use std::io;
+use std::path::{Component, Path, PathBuf};
+use std::time::SystemTime;
 
 use ganja_permission::project::Project;
 
@@ -344,10 +342,8 @@ fn split_existing(dir: &Path) -> Result<(PathBuf, Vec<OsString>), AnchorError> {
             missing.reverse();
             return Ok((canonical, missing));
         }
-        let name = head
-            .file_name()
-            .ok_or_else(|| AnchorError::Nameless(dir.to_owned()))?
-            .to_owned();
+        let name =
+            head.file_name().ok_or_else(|| AnchorError::Nameless(dir.to_owned()))?.to_owned();
         missing.push(name);
         if !head.pop() {
             return Err(AnchorError::Nameless(dir.to_owned()));
@@ -367,27 +363,22 @@ fn split_path(path: &Path) -> Result<(PathBuf, OsString), AnchorError> {
         Some(Component::Normal(name)) => name.to_owned(),
         _ => return Err(AnchorError::Nameless(path.to_owned())),
     };
-    let parent = path
-        .parent()
-        .ok_or_else(|| AnchorError::Nameless(path.to_owned()))?;
+    let parent = path.parent().ok_or_else(|| AnchorError::Nameless(path.to_owned()))?;
 
     Ok((real_path(parent), name))
 }
 
 #[cfg(unix)]
 mod unix {
-    use std::{
-        ffi::OsStr,
-        fs::File,
-        io,
-        os::{fd::OwnedFd, unix::ffi::OsStrExt as _},
-        path::{Component, Path, PathBuf},
-    };
+    use std::ffi::OsStr;
+    use std::fs::File;
+    use std::io;
+    use std::os::fd::OwnedFd;
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::path::{Component, Path, PathBuf};
 
-    use rustix::{
-        fs::{self, Mode, OFlags},
-        io::Errno,
-    };
+    use rustix::fs::{self, Mode, OFlags};
+    use rustix::io::Errno;
 
     use super::{Anchor, AnchorError, split_existing, split_path};
 
@@ -412,10 +403,7 @@ mod unix {
             let (parent, name) = split_path(path)?;
             let (existing, missing) = split_existing(&parent)?;
             if !missing.is_empty() && !create_parents {
-                return Err(AnchorError::Io(
-                    parent,
-                    io::Error::from(io::ErrorKind::NotFound),
-                ));
+                return Err(AnchorError::Io(parent, io::Error::from(io::ErrorKind::NotFound)));
             }
 
             let mut walked = existing.clone();
@@ -426,11 +414,7 @@ mod unix {
                 dir = openat_dir(&dir, &component, &walked)?;
             }
 
-            Ok(Self {
-                dir,
-                parent: walked,
-                name,
-            })
+            Ok(Self { dir, parent: walked, name })
         }
 
         /// Opens the anchored file for reading, refusing to follow a link
@@ -588,10 +572,7 @@ mod unix {
         if name.as_bytes().contains(&b'\0') {
             return Err(AnchorError::Io(
                 at.to_owned(),
-                io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "a path component holds a NUL byte",
-                ),
+                io::Error::new(io::ErrorKind::InvalidInput, "a path component holds a NUL byte"),
             ));
         }
 
@@ -611,12 +592,10 @@ mod unix {
 /// that comes back is the link's own, and nothing is ever written through it.
 #[cfg(windows)]
 mod windows {
-    use std::{
-        fs::{File, OpenOptions},
-        io,
-        os::windows::fs::OpenOptionsExt as _,
-        path::Path,
-    };
+    use std::fs::{File, OpenOptions};
+    use std::io;
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use std::path::Path;
 
     use super::{Anchor, AnchorError, split_path};
 
@@ -640,10 +619,7 @@ mod windows {
                 std::fs::create_dir_all(&parent)
                     .map_err(|error| AnchorError::Io(parent.clone(), error))?;
             } else if !parent.is_dir() {
-                return Err(AnchorError::Io(
-                    parent,
-                    io::Error::from(io::ErrorKind::NotFound),
-                ));
+                return Err(AnchorError::Io(parent, io::Error::from(io::ErrorKind::NotFound)));
             }
 
             Ok(Self { parent, name })
@@ -675,10 +651,7 @@ mod windows {
             let path = self.path();
             let flags = FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS;
 
-            let opened = OpenOptions::new()
-                .write(true)
-                .custom_flags(flags)
-                .open(&path);
+            let opened = OpenOptions::new().write(true).custom_flags(flags).open(&path);
             let (file, existed) = match opened {
                 Ok(file) => (file, true),
                 Err(error) if missing(&error) => {
@@ -737,10 +710,7 @@ mod windows {
     /// directory reports the second and means the same thing to a caller that
     /// is about to create it.
     fn missing(error: &io::Error) -> bool {
-        matches!(
-            error.kind(),
-            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
-        )
+        matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::NotADirectory)
     }
 }
 

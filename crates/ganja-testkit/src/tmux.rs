@@ -9,10 +9,8 @@
 //! and which variables the server is or is not born with — all parameters
 //! here rather than forks.
 
-use std::{
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use tempfile::TempDir;
 
@@ -28,12 +26,7 @@ pub fn require_tmux() {
 
 /// One tmux client call against `socket`, or a panic in tmux's own words.
 pub fn tmux(socket: &Path, args: &[&str]) -> String {
-    let output = Command::new("tmux")
-        .arg("-S")
-        .arg(socket)
-        .args(args)
-        .output()
-        .expect("tmux runs");
+    let output = Command::new("tmux").arg("-S").arg(socket).args(args).output().expect("tmux runs");
     assert!(
         output.status.success(),
         "tmux {args:?} failed: {}",
@@ -115,16 +108,9 @@ impl PrivateServer {
         );
         let listing = tmux(&socket, &["list-panes", "-a", "-F", "#{pane_id}"]);
         let first_pane = listing.trim().to_owned();
-        assert!(
-            first_pane.starts_with('%'),
-            "the private server has a first pane: {listing:?}"
-        );
+        assert!(first_pane.starts_with('%'), "the private server has a first pane: {listing:?}");
 
-        Self {
-            socket,
-            first_pane,
-            _dir: dir,
-        }
+        Self { socket, first_pane, _dir: dir }
     }
 
     /// The socket, for `Server::at` and for `$TMUX`.
@@ -162,9 +148,8 @@ impl PrivateServer {
     /// least two words, for the reason production's `pane.rs` gives: tmux
     /// hands a one-word command to the login shell.
     pub fn split(&self, cwd: Option<&Path>, env: &[(&str, &str)], argv: &[&str]) -> String {
-        let mut args: Vec<String> = ["split-window", "-d", "-P", "-F", "#{pane_id}"]
-            .map(str::to_owned)
-            .into();
+        let mut args: Vec<String> =
+            ["split-window", "-d", "-P", "-F", "#{pane_id}"].map(str::to_owned).into();
         if let Some(cwd) = cwd {
             args.push("-c".to_owned());
             args.push(cwd.to_string_lossy().into_owned());
@@ -209,29 +194,17 @@ impl PrivateServer {
 
     /// The pane's title, as `select-pane -T` set it.
     pub fn title(&self, pane_id: &str) -> String {
-        self.run(&["display-message", "-p", "-t", pane_id, "#{pane_title}"])
-            .trim()
-            .to_owned()
+        self.run(&["display-message", "-p", "-t", pane_id, "#{pane_title}"]).trim().to_owned()
     }
 
     /// The command a pane was started with, as tmux itself records it.
     pub fn start_command(&self, pane_id: &str) -> String {
-        self.run(&[
-            "display-message",
-            "-p",
-            "-t",
-            pane_id,
-            "#{pane_start_command}",
-        ])
+        self.run(&["display-message", "-p", "-t", pane_id, "#{pane_start_command}"])
     }
 }
 
 impl Drop for PrivateServer {
     fn drop(&mut self) {
-        let _ = Command::new("tmux")
-            .arg("-S")
-            .arg(&self.socket)
-            .arg("kill-server")
-            .output();
+        let _ = Command::new("tmux").arg("-S").arg(&self.socket).arg("kill-server").output();
     }
 }

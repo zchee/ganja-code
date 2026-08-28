@@ -6,25 +6,19 @@
 //! made is sitting in its history — and the run is **ungated**, because this is
 //! a person running their own command rather than a model asking to (**D13**).
 
-use std::{
-    path::PathBuf,
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
-};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use futures::{
-    StreamExt as _,
-    stream::{self, BoxStream},
-};
-use ganja_core::{
-    Engine,
-    permission::{Action, Permissions, Rule},
-    project::Project,
-    protocol::{Command, Event, FinishReason, PartBody, Role, ToolState},
-    provider::{ChatRequest, Provider, ProviderError, ProviderEvent},
-    tool::Registry,
-};
+use futures::StreamExt as _;
+use futures::stream::{self, BoxStream};
+use ganja_core::Engine;
+use ganja_core::permission::{Action, Permissions, Rule};
+use ganja_core::project::Project;
+use ganja_core::protocol::{Command, Event, FinishReason, PartBody, Role, ToolState};
+use ganja_core::provider::{ChatRequest, Provider, ProviderError, ProviderEvent};
+use ganja_core::tool::Registry;
 use ganja_testkit::drain;
 use tokio_util::sync::CancellationToken;
 
@@ -42,10 +36,7 @@ use tokio_util::sync::CancellationToken;
 #[cfg(windows)]
 fn native(text: &str) -> PathBuf {
     let rest = text.strip_prefix('/').unwrap_or(text);
-    let rest = rest
-        .strip_prefix("cygdrive/")
-        .or_else(|| rest.strip_prefix("mnt/"))
-        .unwrap_or(rest);
+    let rest = rest.strip_prefix("cygdrive/").or_else(|| rest.strip_prefix("mnt/")).unwrap_or(rest);
     let (head, tail) = rest.split_once('/').unwrap_or((rest, ""));
 
     match head.strip_suffix(':').unwrap_or(head).as_bytes() {
@@ -76,12 +67,7 @@ struct Recorder {
 impl Recorder {
     fn new() -> (Arc<Self>, Arc<Mutex<Vec<ChatRequest>>>) {
         let seen: Arc<Mutex<Vec<ChatRequest>>> = Arc::default();
-        (
-            Arc::new(Self {
-                seen: Arc::clone(&seen),
-            }),
-            seen,
-        )
+        (Arc::new(Self { seen: Arc::clone(&seen) }), seen)
     }
 }
 
@@ -96,10 +82,7 @@ impl Provider for Recorder {
         request: ChatRequest,
         _cancel: CancellationToken,
     ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
-        self.seen
-            .lock()
-            .expect("the request log is never poisoned")
-            .push(request);
+        self.seen.lock().expect("the request log is never poisoned").push(request);
 
         Ok(stream::iter([
             ProviderEvent::TextDelta("noted".to_owned()),
@@ -161,49 +144,29 @@ async fn a_passthrough_writes_the_command_and_its_output_into_the_transcript() {
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
-        .send(Command::RunShell {
-            command: "printf 'hello from the shell'".to_owned(),
-        })
+        .send(Command::RunShell { command: "printf 'hello from the shell'".to_owned() })
         .await
         .expect("an idle engine accepts a command");
     let seen = drain(&mut events).await;
 
-    let Some(Event::MessageStarted {
-        session_id: _,
-        message: user,
-    }) = seen.first()
-    else {
+    let Some(Event::MessageStarted { session_id: _, message: user }) = seen.first() else {
         panic!("a passthrough opens with the synthetic user message, got {seen:?}");
     };
     assert_eq!(user.role, Role::User);
-    assert_eq!(
-        user.parts.len(),
-        1,
-        "one text part and nothing else: {:?}",
-        user.parts
-    );
+    assert_eq!(user.parts.len(), 1, "one text part and nothing else: {:?}", user.parts);
     assert_eq!(
         user.parts[0].as_text(),
         Some(NOTICE),
         "the notice is exact, because it is what explains the call below it"
     );
 
-    let ToolState::Completed {
-        input,
-        output,
-        metadata,
-        ..
-    } = shell_part(&seen)
-    else {
+    let ToolState::Completed { input, output, metadata, .. } = shell_part(&seen) else {
         panic!("the command completed");
     };
     assert_eq!(input["command"], "printf 'hello from the shell'");
     assert_eq!(output, "hello from the shell");
     assert_eq!(metadata["output"], "hello from the shell");
-    assert!(
-        metadata.get("exit").is_none(),
-        "the exit code is awaited and discarded: {metadata}"
-    );
+    assert!(metadata.get("exit").is_none(), "the exit code is awaited and discarded: {metadata}");
 
     let Some(Event::MessageFinished { reason, .. }) = seen.last() else {
         panic!("a turn always finishes");
@@ -230,22 +193,19 @@ async fn a_passthrough_writes_the_command_and_its_output_into_the_transcript() {
     let requests = requests.lock().expect("the request log is never poisoned");
     let asked = requests.first().expect("the model was asked");
     assert!(
-        asked.messages.iter().any(|message| message
-            .parts
+        asked
+            .messages
             .iter()
-            .any(|part| part.as_text() == Some(NOTICE))),
+            .any(|message| message.parts.iter().any(|part| part.as_text() == Some(NOTICE))),
         "the model reads why the call is there: {:?}",
         asked.messages
     );
     assert!(
-        asked
-            .messages
-            .iter()
-            .any(|message| message.parts.iter().any(|part| matches!(
-                &part.body,
-                PartBody::Tool { tool, state: ToolState::Completed { output, .. }, .. }
-                    if tool == "bash" && output == "hello from the shell"
-            ))),
+        asked.messages.iter().any(|message| message.parts.iter().any(|part| matches!(
+            &part.body,
+            PartBody::Tool { tool, state: ToolState::Completed { output, .. }, .. }
+                if tool == "bash" && output == "hello from the shell"
+        ))),
         "and it reads the command and what it printed: {:?}",
         asked.messages
     );
@@ -301,29 +261,21 @@ async fn a_passthrough_runs_at_the_project_root_and_not_at_the_process_directory
 async fn a_passthrough_runs_even_where_a_rule_refuses_the_model() {
     let (provider, _) = Recorder::new();
     let engine = engine(provider);
-    engine
-        .permissions()
-        .lock()
-        .expect("the rules are never poisoned")
-        .set_baseline(vec![Rule {
-            permission: "bash".to_owned(),
-            pattern: "*".to_owned(),
-            action: Action::Deny,
-        }]);
+    engine.permissions().lock().expect("the rules are never poisoned").set_baseline(vec![Rule {
+        permission: "bash".to_owned(),
+        pattern: "*".to_owned(),
+        action: Action::Deny,
+    }]);
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
-        .send(Command::RunShell {
-            command: "printf refused-nothing".to_owned(),
-        })
+        .send(Command::RunShell { command: "printf refused-nothing".to_owned() })
         .await
         .expect("an idle engine accepts a command");
     let seen = drain(&mut events).await;
 
     assert!(
-        !seen
-            .iter()
-            .any(|event| matches!(event, Event::PermissionRequested { .. })),
+        !seen.iter().any(|event| matches!(event, Event::PermissionRequested { .. })),
         "and nobody is asked either: {seen:?}"
     );
     let ToolState::Completed { output, .. } = shell_part(&seen) else {
@@ -339,9 +291,7 @@ async fn cancelling_a_passthrough_stops_the_command() {
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
-        .send(Command::RunShell {
-            command: "sleep 30".to_owned(),
-        })
+        .send(Command::RunShell { command: "sleep 30".to_owned() })
         .await
         .expect("an idle engine accepts a command");
 
@@ -357,10 +307,7 @@ async fn cancelling_a_passthrough_stops_the_command() {
     }
 
     let started = Instant::now();
-    engine
-        .send(Command::CancelTurn)
-        .await
-        .expect("a cancel is never refused");
+    engine.send(Command::CancelTurn).await.expect("a cancel is never refused");
     let seen = drain(&mut events).await;
 
     let Some(Event::MessageFinished { reason, .. }) = seen.last() else {
@@ -393,24 +340,13 @@ async fn a_passthrough_is_refused_while_a_turn_is_streaming() {
         })
         .await
         .expect("an idle engine accepts a prompt");
-    assert!(matches!(
-        events.next().await,
-        Some(Event::MessageStarted { .. })
-    ));
+    assert!(matches!(events.next().await, Some(Event::MessageStarted { .. })));
 
     assert!(
-        engine
-            .send(Command::RunShell {
-                command: "printf nope".to_owned(),
-            })
-            .await
-            .is_err(),
+        engine.send(Command::RunShell { command: "printf nope".to_owned() }).await.is_err(),
         "the engine runs one turn at a time, whatever kind it is"
     );
 
-    engine
-        .send(Command::CancelTurn)
-        .await
-        .expect("a cancel is never refused");
+    engine.send(Command::CancelTurn).await.expect("a cancel is never refused");
     drain(&mut events).await;
 }

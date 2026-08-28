@@ -1,5 +1,6 @@
 use super::*;
-use crate::{PaneId, commands::words};
+use crate::PaneId;
+use crate::commands::words;
 
 #[test]
 fn set_buffer_renders_every_flag_it_has() {
@@ -13,19 +14,7 @@ fn set_buffer_renders_every_flag_it_has() {
                 .target("/dev/ttys001")
                 .data("hello")
         ),
-        [
-            "set-buffer",
-            "-a",
-            "-w",
-            "-b",
-            "work",
-            "-n",
-            "kept",
-            "-t",
-            "/dev/ttys001",
-            "--",
-            "hello",
-        ]
+        ["set-buffer", "-a", "-w", "-b", "work", "-n", "kept", "-t", "/dev/ttys001", "--", "hello",]
     );
 }
 
@@ -48,16 +37,7 @@ fn load_buffer_renders_every_flag_it_has() {
                 .target("/dev/ttys001")
                 .path("/tmp/clip.txt")
         ),
-        [
-            "load-buffer",
-            "-w",
-            "-b",
-            "work",
-            "-t",
-            "/dev/ttys001",
-            "--",
-            "/tmp/clip.txt",
-        ],
+        ["load-buffer", "-w", "-b", "work", "-t", "/dev/ttys001", "--", "/tmp/clip.txt",],
         "-w is documented and accepted, and only the usage string omits it"
     );
 }
@@ -73,15 +53,9 @@ fn save_buffer_renders_every_flag_it_has() {
 
 #[test]
 fn show_buffer_and_delete_buffer_name_one_buffer_each() {
-    assert_eq!(
-        words(&ShowBuffer::new().buffer("work")),
-        ["show-buffer", "-b", "work"]
-    );
+    assert_eq!(words(&ShowBuffer::new().buffer("work")), ["show-buffer", "-b", "work"]);
     assert_eq!(words(&ShowBuffer::new()), ["show-buffer"]);
-    assert_eq!(
-        words(&DeleteBuffer::new().buffer("work")),
-        ["delete-buffer", "-b", "work"]
-    );
+    assert_eq!(words(&DeleteBuffer::new().buffer("work")), ["delete-buffer", "-b", "work"]);
 }
 
 #[test]
@@ -97,19 +71,7 @@ fn paste_buffer_renders_every_flag_it_has() {
                 .separator("\r\n")
                 .target("%1")
         ),
-        [
-            "paste-buffer",
-            "-d",
-            "-p",
-            "-r",
-            "-S",
-            "-b",
-            "work",
-            "-s",
-            "\r\n",
-            "-t",
-            "%1",
-        ]
+        ["paste-buffer", "-d", "-p", "-r", "-S", "-b", "work", "-s", "\r\n", "-t", "%1",]
     );
 }
 
@@ -226,13 +188,7 @@ fn send_keys_renders_every_flag_it_has() {
 #[test]
 fn send_keys_takes_one_key_per_call_in_the_order_they_were_given() {
     assert_eq!(
-        words(
-            &SendKeys::new()
-                .target("%1")
-                .key("C-c")
-                .key("q")
-                .key("Enter")
-        ),
+        words(&SendKeys::new().target("%1").key("C-c").key("q").key("Enter")),
         ["send-keys", "-t", "%1", "--", "C-c", "q", "Enter"],
         "tmux sends the keys first to last, so the builder must not reorder or fold them"
     );
@@ -246,17 +202,8 @@ fn a_literal_line_outside_utf8_survives_into_argv_byte_for_byte() {
     let line = std::ffi::OsString::from_vec(b"-echo \x80\xfe not text".to_vec());
     let argv = SendKeys::new().target("%1").literal().key(line).args();
     assert_eq!(
-        argv.iter()
-            .map(|word| word.as_bytes())
-            .collect::<Vec<&[u8]>>(),
-        [
-            &b"send-keys"[..],
-            b"-t",
-            b"%1",
-            b"-l",
-            b"--",
-            b"-echo \x80\xfe not text",
-        ],
+        argv.iter().map(|word| word.as_bytes()).collect::<Vec<&[u8]>>(),
+        [&b"send-keys"[..], b"-t", b"%1", b"-l", b"--", b"-echo \x80\xfe not text",],
         "a literal line is a caller's own bytes, and this layer hands them to execve unread"
     );
 }
@@ -302,24 +249,8 @@ fn bind_key_renders_every_flag_it_has() {
 #[test]
 fn unbind_key_renders_every_flag_it_has() {
     assert_eq!(
-        words(
-            &UnbindKey::new()
-                .all()
-                .root_table()
-                .quiet()
-                .key_table("copy-mode")
-                .key("C-s")
-        ),
-        [
-            "unbind-key",
-            "-a",
-            "-n",
-            "-q",
-            "-T",
-            "copy-mode",
-            "--",
-            "C-s",
-        ]
+        words(&UnbindKey::new().all().root_table().quiet().key_table("copy-mode").key("C-s")),
+        ["unbind-key", "-a", "-n", "-q", "-T", "copy-mode", "--", "C-s",]
     );
 }
 
@@ -495,12 +426,7 @@ fn display_message_renders_every_flag_it_has() {
 fn display_message_reads_a_format_off_a_pane_id() {
     let pane = PaneId::new("%9").expect("a well-formed pane id");
     assert_eq!(
-        words(
-            &DisplayMessage::new()
-                .print()
-                .target(&pane)
-                .message("#{pane_pid}")
-        ),
+        words(&DisplayMessage::new().print().target(&pane).message("#{pane_pid}")),
         ["display-message", "-p", "-t", "%9", "--", "#{pane_pid}"]
     );
 }

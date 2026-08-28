@@ -69,13 +69,13 @@
 
 mod shim_support;
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
-use ganja_core::teammate::{
-    SpawnSpec,
-    grok::Grok,
-    shim::{self, Driver as _, Prompt, Turn},
-};
+use ganja_core::teammate::SpawnSpec;
+use ganja_core::teammate::grok::Grok;
+use ganja_core::teammate::shim::{self, Driver as _, Prompt, Turn};
 use ganja_protocol::team::MemberBackend;
 use ganja_team::{MailboxMessage, MemberName, TeamName, TeamsRoot, mailbox, record};
 use ganja_testkit::AllowSpawn;
@@ -97,9 +97,7 @@ fn enabled() -> bool {
 /// A symlinked grok home makes `--sandbox read-only` refuse to start, so a run
 /// under one would measure that refusal and nothing else.
 fn home_is_real() -> bool {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_default();
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
     let grok = home.join(".grok");
 
     grok.is_dir() && !grok.symlink_metadata().is_ok_and(|meta| meta.is_symlink())
@@ -177,10 +175,7 @@ impl Ran {
 
     /// Why the terminal `result` said the turn stopped.
     fn stop_reason(&self) -> Option<String> {
-        self.result()?
-            .get("stop_reason")?
-            .as_str()
-            .map(str::to_owned)
+        self.result()?.get("stop_reason")?.as_str().map(str::to_owned)
     }
 
     /// What every settled tool call answered with, as text — the vendor's own
@@ -209,11 +204,7 @@ impl Ran {
     fn record(&self, label: &str) {
         eprintln!("--- probe {label} ---");
         eprintln!("argv:   {}", self.argv.join(" "));
-        eprintln!(
-            "exit:   {:?} after {:.1}s",
-            self.code,
-            self.took.as_secs_f64()
-        );
+        eprintln!("exit:   {:?} after {:.1}s", self.code, self.took.as_secs_f64());
         eprintln!("tools:  {:?} (settled: {:?})", self.tools(), self.settled());
         eprintln!(
             "answers: {:?}",
@@ -224,10 +215,8 @@ impl Ran {
         );
         eprintln!(
             "result: {}",
-            self.result().map_or_else(
-                || "(no result record arrived)".to_owned(),
-                |value| value.to_string()
-            )
+            self.result()
+                .map_or_else(|| "(no result record arrived)".to_owned(), |value| value.to_string())
         );
         if !self.stderr.trim().is_empty() {
             eprintln!("stderr: {}", self.stderr.trim());
@@ -268,9 +257,7 @@ fn collect_results(value: &serde_json::Value, found: &mut Vec<String>) {
                     serde_json::Value::String(text) => found.push(text.clone()),
                     serde_json::Value::Array(items) => {
                         found.extend(items.iter().filter_map(|item| {
-                            item.get("text")
-                                .and_then(serde_json::Value::as_str)
-                                .map(str::to_owned)
+                            item.get("text").and_then(serde_json::Value::as_str).map(str::to_owned)
                         }))
                     }
                     other => found.push(other.to_string()),
@@ -330,10 +317,7 @@ async fn run(cwd: &std::path::Path, text: &str, session: Option<&str>) -> Ran {
         .expect("the child ran");
 
     Ran {
-        argv: argv
-            .iter()
-            .map(|token| token.to_string_lossy().into_owned())
-            .collect(),
+        argv: argv.iter().map(|token| token.to_string_lossy().into_owned()).collect(),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         code: output.status.code(),
@@ -582,9 +566,7 @@ async fn what_a_read_only_grok_teammate_can_do_and_what_an_unapproved_ask_costs(
         bash.stdout
     );
     assert!(
-        bash.result_texts()
-            .iter()
-            .any(|text| text.contains("probe-ran")),
+        bash.result_texts().iter().any(|text| text.contains("probe-ran")),
         "the command's own output never came back in a tool result, so it did not run — only a \
          shell that ran can have spelled that token: {}",
         bash.stdout
@@ -618,10 +600,10 @@ async fn what_a_read_only_grok_teammate_can_do_and_what_an_unapproved_ask_costs(
     // `200` inside a token count or a byte size elsewhere in the stream cannot
     // stand in for it, and the model's own "it printed 200" counts for
     // nothing.
-    let answered_200 = network.result_texts().iter().any(|text| {
-        text.split(|c: char| !c.is_ascii_digit())
-            .any(|digits| digits == "200")
-    });
+    let answered_200 = network
+        .result_texts()
+        .iter()
+        .any(|text| text.split(|c: char| !c.is_ascii_digit()).any(|digits| digits == "200"));
     assert!(
         answered_200,
         "no HTTP 200 in any tool result — either the network is bounded now (then the posture \
@@ -679,11 +661,7 @@ async fn what_a_read_only_grok_teammate_can_do_and_what_an_unapproved_ask_costs(
         ("c", bash.took),
         ("d", network.took),
     ];
-    let longest = turns
-        .iter()
-        .map(|(_, took)| *took)
-        .max()
-        .expect("six turns");
+    let longest = turns.iter().map(|(_, took)| *took).max().expect("six turns");
     eprintln!(
         "grok probe wall-clock: {}; twice the longest is {:.1}s, so the shipped deadline is \
          max(15m, that)",
@@ -759,18 +737,11 @@ async fn a_real_grok_teammate_answers_its_lead_through_the_mailbox() {
     let mail = || {
         mailbox::read(&inbox)
             .map(|contents| {
-                contents
-                    .valid
-                    .into_iter()
-                    .map(|message| message.text)
-                    .collect::<Vec<_>>()
+                contents.valid.into_iter().map(|message| message.text).collect::<Vec<_>>()
             })
             .unwrap_or_default()
     };
-    assert!(
-        until(TURN, || !mail().is_empty()).await,
-        "the turn answered"
-    );
+    assert!(until(TURN, || !mail().is_empty()).await, "the turn answered");
     let answered = mail().join("\n");
     eprintln!("--- probe (e2e) lead mail ---\n{answered}");
     assert!(
@@ -789,11 +760,7 @@ async fn a_real_grok_teammate_answers_its_lead_through_the_mailbox() {
         ),
     )
     .expect("the message is written");
-    assert!(
-        until(TURN, || mail().len() > 1).await,
-        "the resumed turn answered: {:?}",
-        mail()
-    );
+    assert!(until(TURN, || mail().len() > 1).await, "the resumed turn answered: {:?}", mail());
     eprintln!("--- probe (e2e) after resume ---\n{}", mail().join("\n"));
 
     registry.shutdown().await;

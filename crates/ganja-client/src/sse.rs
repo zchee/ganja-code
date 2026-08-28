@@ -93,11 +93,13 @@ impl Frame {
                 .map_err(|error| ClientError::Skew {
                     detail: format!("an event frame does not parse: {error}"),
                 }),
-            EVICTED => serde_json::from_str::<EvictedNotice>(data)
-                .map(Self::Evicted)
-                .map_err(|error| ClientError::Skew {
-                    detail: format!("an evicted frame does not parse: {error}"),
-                }),
+            EVICTED => {
+                serde_json::from_str::<EvictedNotice>(data).map(Self::Evicted).map_err(|error| {
+                    ClientError::Skew {
+                        detail: format!("an evicted frame does not parse: {error}"),
+                    }
+                })
+            }
             other => Err(ClientError::Skew {
                 detail: format!(
                     "a frame named {other:?} is none of the {} this build knows",

@@ -2,11 +2,7 @@ use super::*;
 use crate::control_mode::notification::NotificationKind;
 
 fn marker(time: i64, command: i64, flags: i64) -> BlockMarker {
-    BlockMarker {
-        time,
-        command,
-        flags,
-    }
+    BlockMarker { time, command, flags }
 }
 
 fn feed_all(parser: &mut Parser, lines: &[&str]) -> Result<Option<Event>, ProtocolError> {
@@ -23,12 +19,9 @@ fn feed_all(parser: &mut Parser, lines: &[&str]) -> Result<Option<Event>, Protoc
 #[test]
 fn an_empty_response_has_no_lines() {
     let mut parser = Parser::default();
-    let event = feed_all(
-        &mut parser,
-        &["%begin 1578920019 258 0", "%end 1578920019 258 0"],
-    )
-    .unwrap()
-    .unwrap();
+    let event = feed_all(&mut parser, &["%begin 1578920019 258 0", "%end 1578920019 258 0"])
+        .unwrap()
+        .unwrap();
     assert_eq!(
         event,
         Event::Response(Response {
@@ -75,11 +68,7 @@ fn a_command_error_response_is_flagged() {
     let mut parser = Parser::default();
     let event = feed_all(
         &mut parser,
-        &[
-            "%begin 1578923149 270 1",
-            "parse error",
-            "%error 1578923149 270 1",
-        ],
+        &["%begin 1578923149 270 1", "parse error", "%error 1578923149 270 1"],
     )
     .unwrap()
     .unwrap();
@@ -97,9 +86,8 @@ fn a_command_error_response_is_flagged() {
 #[test]
 fn a_fake_end_payload_does_not_terminate_the_block() {
     let mut parser = Parser::default();
-    let event = feed_all(&mut parser, &["%begin 1 2 1", "%end payload", "%end 1 2 1"])
-        .unwrap()
-        .unwrap();
+    let event =
+        feed_all(&mut parser, &["%begin 1 2 1", "%end payload", "%end 1 2 1"]).unwrap().unwrap();
     assert_eq!(
         event,
         Event::Response(Response {
@@ -114,9 +102,8 @@ fn a_fake_end_payload_does_not_terminate_the_block() {
 #[test]
 fn malformed_end_like_payload_does_not_terminate() {
     let mut parser = Parser::default();
-    let event = feed_all(&mut parser, &["%begin 1 2 1", "%end a b c", "%end 1 2 1"])
-        .unwrap()
-        .unwrap();
+    let event =
+        feed_all(&mut parser, &["%begin 1 2 1", "%end a b c", "%end 1 2 1"]).unwrap().unwrap();
     assert_eq!(
         event,
         Event::Response(Response {
@@ -131,12 +118,9 @@ fn malformed_end_like_payload_does_not_terminate() {
 #[test]
 fn malformed_error_like_payload_does_not_terminate() {
     let mut parser = Parser::default();
-    let event = feed_all(
-        &mut parser,
-        &["%begin 1 2 1", "%error one two three", "%end 1 2 1"],
-    )
-    .unwrap()
-    .unwrap();
+    let event = feed_all(&mut parser, &["%begin 1 2 1", "%error one two three", "%end 1 2 1"])
+        .unwrap()
+        .unwrap();
     assert_eq!(
         event,
         Event::Response(Response {
@@ -151,9 +135,8 @@ fn malformed_error_like_payload_does_not_terminate() {
 #[test]
 fn mismatched_end_marker_remains_output() {
     let mut parser = Parser::default();
-    let event = feed_all(&mut parser, &["%begin 1 2 1", "%end 1 3 1", "%end 1 2 1"])
-        .unwrap()
-        .unwrap();
+    let event =
+        feed_all(&mut parser, &["%begin 1 2 1", "%end 1 3 1", "%end 1 2 1"]).unwrap().unwrap();
     assert_eq!(
         event,
         Event::Response(Response {
@@ -168,9 +151,8 @@ fn mismatched_end_marker_remains_output() {
 #[test]
 fn mismatched_error_marker_remains_output() {
     let mut parser = Parser::default();
-    let event = feed_all(&mut parser, &["%begin 1 2 1", "%error 1 3 1", "%end 1 2 1"])
-        .unwrap()
-        .unwrap();
+    let event =
+        feed_all(&mut parser, &["%begin 1 2 1", "%error 1 3 1", "%end 1 2 1"]).unwrap().unwrap();
     assert_eq!(
         event,
         Event::Response(Response {
@@ -202,17 +184,11 @@ fn a_known_notification_kind_is_recognized() {
 #[test]
 fn an_unknown_notification_kind_still_parses() {
     let mut parser = Parser::default();
-    let event = parser
-        .feed("%beginning future notification")
-        .unwrap()
-        .unwrap();
+    let event = parser.feed("%beginning future notification").unwrap().unwrap();
     let Event::Notification(notification) = event else {
         panic!("expected a notification");
     };
-    assert_eq!(
-        notification.kind,
-        NotificationKind::Other("%beginning".to_string())
-    );
+    assert_eq!(notification.kind, NotificationKind::Other("%beginning".to_string()));
 }
 
 #[test]

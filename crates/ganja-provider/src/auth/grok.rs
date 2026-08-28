@@ -25,23 +25,21 @@
 //! [`OauthCredential`] and the caller stores it, which is what makes a
 //! cancelled login structurally unable to leave anything behind.
 
-use std::{fmt, io, time::Duration};
+use std::time::Duration;
+use std::{fmt, io};
 
 use secrecy::{ExposeSecret as _, SecretString};
 use serde_json::{Map, Value};
 use tokio_util::sync::CancellationToken;
 use url::form_urlencoded;
 
-use super::{
-    AuthError, OauthCredential,
-    device::{
-        BodyEncoding, DeviceError, DeviceFlow, Tokens, form, json_object, positive_seconds_ms,
-        reportable_code, text,
-    },
-    loopback::{self, LoopbackError},
-    now_ms,
-    pkce::{self, EntropyError, Pkce},
+use super::device::{
+    BodyEncoding, DeviceError, DeviceFlow, Tokens, form, json_object, positive_seconds_ms,
+    reportable_code, text,
 };
+use super::loopback::{self, LoopbackError};
+use super::pkce::{self, EntropyError, Pkce};
+use super::{AuthError, OauthCredential, now_ms};
 
 /// What ganja calls this provider, everywhere but in the credential file.
 ///
@@ -317,11 +315,7 @@ pub fn browser_flow_at(
     let client =
         super::login_client(EXCHANGE_TIMEOUT).map_err(|source| BrowserError::Client { source })?;
 
-    Ok(BrowserFlow {
-        client,
-        authorize_url: authorize_url.into(),
-        token_url: token_url.into(),
-    })
+    Ok(BrowserFlow { client, authorize_url: authorize_url.into(), token_url: token_url.into() })
 }
 
 /// xAI's browser login: where to send somebody, and what to do with what comes
@@ -385,14 +379,7 @@ impl BrowserFlow {
             nonce.expose_secret(),
         );
 
-        Ok(Browser {
-            flow: self.clone(),
-            url,
-            redirect,
-            listener,
-            pkce,
-            state,
-        })
+        Ok(Browser { flow: self.clone(), url, redirect, listener, pkce, state })
     }
 
     /// Where the person is sent (`xai.ts:118-142`).
@@ -442,9 +429,7 @@ impl BrowserFlow {
         let response = match sent {
             Ok(response) => response,
             Err(error) => {
-                return Err(BrowserError::Unreachable {
-                    source: error.without_url(),
-                });
+                return Err(BrowserError::Unreachable { source: error.without_url() });
             }
         };
         let status = response.status();
@@ -462,9 +447,7 @@ impl BrowserFlow {
                 "the token endpoint would not exchange the authorization code",
             );
 
-            return Err(BrowserError::Refused {
-                reason: refusal(status.as_u16(), &fields),
-            });
+            return Err(BrowserError::Refused { reason: refusal(status.as_u16(), &fields) });
         }
 
         let Some(access) = text(&fields, "access_token") else {
@@ -553,14 +536,9 @@ impl Browser {
         within: Duration,
         cancel: &CancellationToken,
     ) -> Result<Tokens, BrowserError> {
-        let code = self
-            .listener
-            .wait(CALLBACK_PATH, &self.state, within, cancel)
-            .await?;
+        let code = self.listener.wait(CALLBACK_PATH, &self.state, within, cancel).await?;
 
-        self.flow
-            .exchange(&code, &self.redirect, self.pkce.verifier())
-            .await
+        self.flow.exchange(&code, &self.redirect, self.pkce.verifier()).await
     }
 }
 
@@ -582,10 +560,7 @@ impl Browser {
 #[must_use]
 pub fn credential_from(tokens: &Tokens) -> OauthCredential {
     OauthCredential::new(
-        tokens
-            .refresh
-            .clone()
-            .unwrap_or_else(|| SecretString::from("")),
+        tokens.refresh.clone().unwrap_or_else(|| SecretString::from("")),
         tokens.access.clone(),
         expiry(tokens.expires_in),
     )
@@ -594,11 +569,7 @@ pub fn credential_from(tokens: &Tokens) -> OauthCredential {
 /// When a token issued now with a stated lifetime of `expires_in` seconds
 /// stops being accepted.
 fn expiry(expires_in: Option<u64>) -> u64 {
-    now_ms().saturating_add(
-        expires_in
-            .unwrap_or(DEFAULT_EXPIRES_IN_S)
-            .saturating_mul(1_000),
-    )
+    now_ms().saturating_add(expires_in.unwrap_or(DEFAULT_EXPIRES_IN_S).saturating_mul(1_000))
 }
 
 /// Renews an xAI credential from the refresh token stored beside it.
@@ -643,10 +614,7 @@ impl Refresh {
             }
         })?;
 
-        Ok(Self {
-            client,
-            token_url: token_url.into(),
-        })
+        Ok(Self { client, token_url: token_url.into() })
     }
 }
 
@@ -726,19 +694,13 @@ impl super::RefreshOauth for Refresh {
             );
 
             return Err(if status.is_client_error() {
-                AuthError::ReauthRequired {
-                    provider_id: provider_id.to_owned(),
-                    reason,
-                }
+                AuthError::ReauthRequired { provider_id: provider_id.to_owned(), reason }
             } else {
                 // A 5xx is the endpoint being broken, not the token being
                 // dead. Upstream draws no such line (`xai.ts:177-180` throws
                 // one error for every non-`ok`), which leaves it unable to
                 // tell a person whether logging in again would help.
-                AuthError::RefreshUnavailable {
-                    provider_id: provider_id.to_owned(),
-                    reason,
-                }
+                AuthError::RefreshUnavailable { provider_id: provider_id.to_owned(), reason }
             });
         }
 
@@ -772,10 +734,7 @@ fn token_request(client: &reqwest::Client, token_url: &str) -> reqwest::RequestB
         .post(token_url)
         .header(reqwest::header::ACCEPT, "application/json")
         .header(reqwest::header::USER_AGENT, XAI_USER_AGENT)
-        .header(
-            reqwest::header::CONTENT_TYPE,
-            "application/x-www-form-urlencoded",
-        )
+        .header(reqwest::header::CONTENT_TYPE, "application/x-www-form-urlencoded")
 }
 
 /// Why the token endpoint refused, in a form that can be shown and logged.

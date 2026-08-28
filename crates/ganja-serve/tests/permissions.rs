@@ -7,10 +7,8 @@ mod support;
 
 use std::time::Duration;
 
-use ganja_core::{
-    permission::{Action, Permissions, Rule},
-    tool::Registry,
-};
+use ganja_core::permission::{Action, Permissions, Rule};
+use ganja_core::tool::Registry;
 use ganja_protocol::{Event, PartBody, ToolState, is_uuidv7};
 use ganja_testkit::{RecorderTool, says, tool_call};
 use support::{DEADLINE, base_url, loopback_config, scripted_engine};
@@ -57,10 +55,7 @@ async fn poll_permissions(
 async fn a_dialog_is_listed_answered_over_http_and_then_gone() {
     let (tool, calls) = RecorderTool::new("lookup", "lookup ran", "found it");
     let engine = scripted_engine(
-        vec![
-            tool_call("lookup", serde_json::json!({"key": "a"})),
-            says("done"),
-        ],
+        vec![tool_call("lookup", serde_json::json!({"key": "a"})), says("done")],
         Registry::new(vec![tool]),
         asking_about_lookup(),
     );
@@ -87,10 +82,9 @@ async fn a_dialog_is_listed_answered_over_http_and_then_gone() {
 
     // The dialog crosses to the HTTP surface with everything a client needs
     // to render and answer it.
-    let listed = poll_permissions(&base, |listed| {
-        listed.as_array().is_some_and(|list| !list.is_empty())
-    })
-    .await;
+    let listed =
+        poll_permissions(&base, |listed| listed.as_array().is_some_and(|list| !list.is_empty()))
+            .await;
     let request = &listed[0];
     assert_eq!(request["tool"], "lookup");
     assert_eq!(request["session_id"], session.as_str());
@@ -110,9 +104,7 @@ async fn a_dialog_is_listed_answered_over_http_and_then_gone() {
 
     let events = ganja_testkit::drain(&mut direct).await;
     assert!(
-        events
-            .iter()
-            .any(|event| matches!(event, Event::PermissionReplied { .. })),
+        events.iter().any(|event| matches!(event, Event::PermissionReplied { .. })),
         "the answer is observable on the stream: {events:?}"
     );
     assert_eq!(
@@ -122,10 +114,9 @@ async fn a_dialog_is_listed_answered_over_http_and_then_gone() {
     );
 
     // Answered means gone.
-    let after = poll_permissions(&base, |listed| {
-        listed.as_array().is_some_and(|list| list.is_empty())
-    })
-    .await;
+    let after =
+        poll_permissions(&base, |listed| listed.as_array().is_some_and(|list| list.is_empty()))
+            .await;
     assert_eq!(after, serde_json::json!([]));
 
     handle.shutdown().await.expect("a clean stop");
@@ -135,10 +126,7 @@ async fn a_dialog_is_listed_answered_over_http_and_then_gone() {
 async fn a_rejected_dialog_never_runs_the_tool_and_the_turn_continues() {
     let (tool, calls) = RecorderTool::new("lookup", "lookup ran", "found it");
     let engine = scripted_engine(
-        vec![
-            tool_call("lookup", serde_json::json!({"key": "a"})),
-            says("understood"),
-        ],
+        vec![tool_call("lookup", serde_json::json!({"key": "a"})), says("understood")],
         Registry::new(vec![tool]),
         asking_about_lookup(),
     );
@@ -158,10 +146,9 @@ async fn a_rejected_dialog_never_runs_the_tool_and_the_turn_continues() {
         .await
         .expect("the prompt route answers");
 
-    let listed = poll_permissions(&base, |listed| {
-        listed.as_array().is_some_and(|list| !list.is_empty())
-    })
-    .await;
+    let listed =
+        poll_permissions(&base, |listed| listed.as_array().is_some_and(|list| !list.is_empty()))
+            .await;
     let id = listed[0]["id"].as_str().expect("the id travels").to_owned();
 
     let replied = reqwest::Client::new()
@@ -185,10 +172,7 @@ async fn a_rejected_dialog_never_runs_the_tool_and_the_turn_continues() {
         "the refusal reaches the transcript as the call's error: {events:?}"
     );
     assert!(
-        calls
-            .lock()
-            .expect("the call log is never poisoned")
-            .is_empty(),
+        calls.lock().expect("the call log is never poisoned").is_empty(),
         "a rejected call never runs"
     );
 

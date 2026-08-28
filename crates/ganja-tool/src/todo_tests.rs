@@ -26,10 +26,7 @@ async fn a_write_reports_the_work_that_is_left_and_hands_back_the_list() {
 
     let out = tool.run(todos(), &ctx()).await.expect("a list is written");
 
-    assert_eq!(
-        out.title, "3 todos",
-        "upstream counts everything that is not completed"
-    );
+    assert_eq!(out.title, "3 todos", "upstream counts everything that is not completed");
     assert_eq!(
         out.metadata["todos"].as_array().map(Vec::len),
         Some(4),
@@ -102,10 +99,7 @@ async fn a_status_outside_the_schema_is_refused() {
         .await
         .expect_err("`in-progress` is not one of the four statuses");
 
-    assert!(
-        matches!(refused, ToolError::InvalidArgs(_)),
-        "got {refused:?}"
-    );
+    assert!(matches!(refused, ToolError::InvalidArgs(_)), "got {refused:?}");
 }
 
 #[test]
@@ -123,8 +117,7 @@ fn the_prompt_and_schema_are_what_the_model_is_given() {
 
     assert_eq!(tool.id(), "todowrite");
     assert!(
-        tool.description()
-            .contains("Create and maintain a structured task list"),
+        tool.description().contains("Create and maintain a structured task list"),
         "the ported prompt should reach the model intact"
     );
     assert_eq!(schema["required"], serde_json::json!(["todos"]));

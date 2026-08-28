@@ -17,21 +17,18 @@
 //! variables, and `cargo test` runs the tests inside a binary on parallel
 //! threads.
 
-use std::{env, sync::Arc};
+use std::env;
+use std::sync::Arc;
 
 use futures::StreamExt as _;
-use ganja_core::{
-    Engine,
-    config::{Config, ProviderConfig},
-    permission::Permissions,
-    protocol::{Command, Event, FinishReason, PartBody, PartId},
-    provider::{self, Dialect},
-    tool::Registry,
-};
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::TcpListener,
-};
+use ganja_core::Engine;
+use ganja_core::config::{Config, ProviderConfig};
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{Command, Event, FinishReason, PartBody, PartId};
+use ganja_core::provider::{self, Dialect};
+use ganja_core::tool::Registry;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::TcpListener;
 
 /// The key the endpoint is reached with. It is named by the config entry and
 /// exported here, and nothing may render it.
@@ -68,15 +65,9 @@ async fn a_config_named_openai_compatible_endpoint_takes_a_whole_turn_on_the_key
         env::remove_var("GANJA_MODEL");
     }
 
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("loopback is bindable");
-    let base_url = format!(
-        "http://{}/v1",
-        listener
-            .local_addr()
-            .expect("a bound socket has an address")
-    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("loopback is bindable");
+    let base_url =
+        format!("http://{}/v1", listener.local_addr().expect("a bound socket has an address"));
     let seen = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.expect("the turn connects");
         let mut request = Vec::new();
@@ -101,10 +92,7 @@ async fn a_config_named_openai_compatible_endpoint_takes_a_whole_turn_on_the_key
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         );
-        socket
-            .write_all(response.as_bytes())
-            .await
-            .expect("the reply is writable");
+        socket.write_all(response.as_bytes()).await.expect("the reply is writable");
         socket.flush().await.expect("the reply flushes");
         drop(socket);
 
@@ -118,9 +106,7 @@ async fn a_config_named_openai_compatible_endpoint_takes_a_whole_turn_on_the_key
             dialect: Dialect::OpenaiChatCompletions,
             base_url: base_url.clone(),
             key_env: Some(KEY_VAR.to_owned()),
-            headers: [(ROUTE.to_owned(), "gpu-0".to_owned())]
-                .into_iter()
-                .collect(),
+            headers: [(ROUTE.to_owned(), "gpu-0".to_owned())].into_iter().collect(),
         },
     );
     // The config's own `model` tier names both halves, which is the route a
@@ -197,11 +183,7 @@ async fn a_config_named_openai_compatible_endpoint_takes_a_whole_turn_on_the_key
     );
 
     let request = seen.await.expect("the endpoint answered");
-    let head = request
-        .split("\r\n\r\n")
-        .next()
-        .expect("a request has a head")
-        .to_owned();
+    let head = request.split("\r\n\r\n").next().expect("a request has a head").to_owned();
 
     assert!(
         request.starts_with("POST /v1/chat/completions "),
@@ -238,10 +220,7 @@ async fn a_config_named_openai_compatible_endpoint_takes_a_whole_turn_on_the_key
         request.contains(&format!("\"model\":\"{MODEL}\"")),
         "the model the config named is what was asked for: {request}"
     );
-    assert!(
-        request.contains("\"stream\":true"),
-        "a turn streams: {request}"
-    );
+    assert!(request.contains("\"stream\":true"), "a turn streams: {request}");
 }
 
 /// The value `head` carries for the header `name`.
@@ -252,9 +231,6 @@ fn header(head: &str, name: &str) -> Option<String> {
     head.lines().find_map(|line| {
         let (field, value) = line.split_once(':')?;
 
-        field
-            .trim()
-            .eq_ignore_ascii_case(name)
-            .then(|| value.trim().to_owned())
+        field.trim().eq_ignore_ascii_case(name).then(|| value.trim().to_owned())
     })
 }

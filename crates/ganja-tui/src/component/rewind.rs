@@ -26,18 +26,15 @@
 //! the same split every other dialog here uses.
 
 use ganja_protocol::{MessageId, RevertScope};
-use ratatui::{
-    buffer::Buffer,
-    layout::{Constraint, Rect},
-    text::{Line, Text},
-    widgets::{Block, Clear, Paragraph, Widget as _},
-};
+use ratatui::buffer::Buffer;
+use ratatui::layout::{Constraint, Rect};
+use ratatui::text::{Line, Text};
+use ratatui::widgets::{Block, Clear, Paragraph, Widget as _};
 use unicode_width::UnicodeWidthStr as _;
 
-use crate::{
-    component::{action_row, body_rows, chat::clip, clamped, first_visible},
-    theme::Theme,
-};
+use crate::component::chat::clip;
+use crate::component::{action_row, body_rows, clamped, first_visible};
+use crate::theme::Theme;
 
 /// What marks the row the cursor is on, and what pads every other row so the
 /// titles stay in one column.
@@ -104,11 +101,7 @@ const SCOPES: [(RevertScope, &str, &str); 3] = [
         "Conversation only",
         "Take the messages back and leave the working tree exactly as it is",
     ),
-    (
-        RevertScope::Files,
-        "Code only",
-        "Put the files back and keep every message",
-    ),
+    (RevertScope::Files, "Code only", "Put the files back and keep every message"),
 ];
 
 /// The checkpoints, which one is under the cursor, and which step is showing.
@@ -219,9 +212,9 @@ impl Rewind {
         // bottom.
         let height = match self.step {
             Step::Checkpoints => available,
-            Step::Scope(_) => u16::try_from(lines.len().saturating_add(2))
-                .unwrap_or(available)
-                .min(available),
+            Step::Scope(_) => {
+                u16::try_from(lines.len().saturating_add(2)).unwrap_or(available).min(available)
+            }
         };
         let popup = area.centered(Constraint::Length(width), Constraint::Length(height));
 
@@ -236,9 +229,8 @@ impl Rewind {
     /// what its turns changed.
     fn checkpoint_rows(&self, width: usize, rows: usize, theme: &Theme) -> Vec<Line<'static>> {
         let first = first_visible(self.selected, rows);
-        let notes: Vec<String> = std::iter::once(String::new())
-            .chain(self.checkpoints.iter().map(annotation))
-            .collect();
+        let notes: Vec<String> =
+            std::iter::once(String::new()).chain(self.checkpoints.iter().map(annotation)).collect();
         let titles: Vec<&str> = std::iter::once(CURRENT)
             .chain(self.checkpoints.iter().map(|point| point.title.as_str()))
             .collect();
@@ -246,14 +238,8 @@ impl Rewind {
         // The annotation column is as wide as its widest value, so the titles
         // beside it line up instead of jittering per row.
         let visible: Vec<usize> = (first..titles.len()).take(rows).collect();
-        let note_width = visible
-            .iter()
-            .map(|&index| notes[index].width())
-            .max()
-            .unwrap_or(0);
-        let title_width = width
-            .saturating_sub(MARKER.width() + note_width + GAP)
-            .max(1);
+        let note_width = visible.iter().map(|&index| notes[index].width()).max().unwrap_or(0);
+        let title_width = width.saturating_sub(MARKER.width() + note_width + GAP).max(1);
 
         visible
             .iter()
@@ -266,14 +252,7 @@ impl Rewind {
                     note = notes[index],
                 );
 
-                Line::styled(
-                    row,
-                    if index == self.selected {
-                        theme.accent
-                    } else {
-                        theme.fg
-                    },
-                )
+                Line::styled(row, if index == self.selected { theme.accent } else { theme.fg })
             })
             .collect()
     }
@@ -288,11 +267,7 @@ impl Rewind {
     fn scope_rows(&self, width: usize, option: usize, theme: &Theme) -> Vec<Line<'static>> {
         let mut lines = vec![
             Line::styled(
-                clip(
-                    self.selected()
-                        .map_or(CURRENT, |point| point.title.as_str()),
-                    width,
-                ),
+                clip(self.selected().map_or(CURRENT, |point| point.title.as_str()), width),
                 theme.fg,
             ),
             Line::styled(clip(SUBTITLE, width), theme.dim),
@@ -300,10 +275,7 @@ impl Rewind {
 
         for (index, (_, label, description)) in SCOPES.iter().enumerate() {
             lines.push(action_row(index, option, label, width, theme));
-            lines.push(Line::styled(
-                clip(&format!("    {description}"), width),
-                theme.dim,
-            ));
+            lines.push(Line::styled(clip(&format!("    {description}"), width), theme.dim));
         }
 
         lines

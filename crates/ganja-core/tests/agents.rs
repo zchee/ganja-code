@@ -7,17 +7,16 @@
 //! dialog, that a switch lands on the *next* request and not the one in
 //! flight, and that a session reopened tomorrow is the session that was left.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 use futures::StreamExt as _;
-use ganja_core::{
-    AgentConfig, Config, Engine, EngineError, Storage,
-    agent::{BUILD_SWITCH_REMINDER, PLAN_REMINDER},
-    permission::{Decision, Permissions},
-    protocol::{Command, Event, FinishReason, PartBody, Role, ToolState},
-    provider::{ChatRequest, FakeProvider, ProviderEvent, fake},
-    tool::Registry,
-};
+use ganja_core::agent::{BUILD_SWITCH_REMINDER, PLAN_REMINDER};
+use ganja_core::permission::{Decision, Permissions};
+use ganja_core::protocol::{Command, Event, FinishReason, PartBody, Role, ToolState};
+use ganja_core::provider::{ChatRequest, FakeProvider, ProviderEvent, fake};
+use ganja_core::tool::Registry;
+use ganja_core::{AgentConfig, Config, Engine, EngineError, Storage};
 use ganja_testkit::{RecorderTool, ScriptedProvider, drain, says};
 use serde_json::json;
 
@@ -29,14 +28,8 @@ use serde_json::json;
 /// alone.
 fn calls(tool: &str, args: serde_json::Value) -> Vec<ProviderEvent> {
     vec![
-        ProviderEvent::ToolCallStart {
-            id: format!("call_{tool}"),
-            name: tool.to_owned(),
-        },
-        ProviderEvent::ToolCallDelta {
-            id: format!("call_{tool}"),
-            json: args.to_string(),
-        },
+        ProviderEvent::ToolCallStart { id: format!("call_{tool}"), name: tool.to_owned() },
+        ProviderEvent::ToolCallDelta { id: format!("call_{tool}"), json: args.to_string() },
         ProviderEvent::Finish(FinishReason::Completed),
     ]
 }
@@ -46,10 +39,7 @@ fn refusals(seen: &[Event]) -> Vec<String> {
     seen.iter()
         .filter_map(|event| match event {
             Event::PartUpdated { part, .. } => match &part.body {
-                PartBody::Tool {
-                    state: ToolState::Error { error, .. },
-                    ..
-                } => Some(error.clone()),
+                PartBody::Tool { state: ToolState::Error { error, .. }, .. } => Some(error.clone()),
                 _ => None,
             },
             _ => None,
@@ -76,9 +66,7 @@ async fn the_planning_agent_refuses_an_edit_without_asking_anyone() {
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
-        .send(Command::SwitchAgent {
-            name: "plan".to_owned(),
-        })
+        .send(Command::SwitchAgent { name: "plan".to_owned() })
         .await
         .expect("plan is a builtin primary agent");
 
@@ -95,15 +83,10 @@ async fn the_planning_agent_refuses_an_edit_without_asking_anyone() {
     let seen = drain(&mut events).await;
 
     assert!(
-        !seen
-            .iter()
-            .any(|event| matches!(event, Event::PermissionRequested { .. })),
+        !seen.iter().any(|event| matches!(event, Event::PermissionRequested { .. })),
         "a denial is not a question, got {seen:?}"
     );
-    assert!(
-        edits.lock().expect("the call log").is_empty(),
-        "the tool must never have run"
-    );
+    assert!(edits.lock().expect("the call log").is_empty(), "the tool must never have run");
 
     let refused = refusals(&seen);
     assert_eq!(refused.len(), 1, "{refused:?}");
@@ -119,11 +102,7 @@ async fn the_planning_agent_refuses_an_edit_without_asking_anyone() {
     let Some(Event::MessageFinished { reason, .. }) = seen.last() else {
         panic!("a turn always ends with a finish, got {seen:?}");
     };
-    assert_eq!(
-        *reason,
-        FinishReason::Completed,
-        "a refusal is information, not a turn abort"
-    );
+    assert_eq!(*reason, FinishReason::Completed, "a refusal is information, not a turn abort");
 }
 
 /// The same session under the agent that may act runs the same call.
@@ -181,11 +160,7 @@ async fn a_config_rule_decides_and_a_stored_answer_outranks_it() {
         ..Config::default()
     };
     let baseline = |config: &Config| {
-        ganja_testkit::agent_registry(config)
-            .get("build")
-            .expect("build is builtin")
-            .rules
-            .clone()
+        ganja_testkit::agent_registry(config).get("build").expect("build is builtin").rules.clone()
     };
     let command = json!({ "command": "cargo test" });
 
@@ -204,15 +179,11 @@ async fn a_config_rule_decides_and_a_stored_answer_outranks_it() {
     answered.remember(&decision);
     answered.set_baseline(baseline(&deny));
     assert_eq!(
-        answered
-            .gate("bash", &json!({ "command": "cargo test --release" }))
-            .action,
+        answered.gate("bash", &json!({ "command": "cargo test --release" })).action,
         Decision::Allow
     );
     assert_eq!(
-        answered
-            .gate("bash", &json!({ "command": "npm run dev" }))
-            .action,
+        answered.gate("bash", &json!({ "command": "npm run dev" })).action,
         Decision::Deny,
         "the config still decides everything nobody answered for"
     );
@@ -230,15 +201,9 @@ async fn switching_agents_swaps_the_prompt_and_keeps_the_environment() {
     let mut agent = std::collections::BTreeMap::new();
     agent.insert(
         "scribe".to_owned(),
-        AgentConfig {
-            prompt: Some(SCRIBE.to_owned()),
-            ..AgentConfig::default()
-        },
+        AgentConfig { prompt: Some(SCRIBE.to_owned()), ..AgentConfig::default() },
     );
-    let config = Config {
-        agent,
-        ..Config::default()
-    };
+    let config = Config { agent, ..Config::default() };
 
     let engine = Engine::new(
         provider,
@@ -266,25 +231,19 @@ async fn switching_agents_swaps_the_prompt_and_keeps_the_environment() {
 
     ask(&engine, "first").await;
     engine
-        .send(Command::SwitchAgent {
-            name: "scribe".to_owned(),
-        })
+        .send(Command::SwitchAgent { name: "scribe".to_owned() })
         .await
         .expect("a config agent is selectable");
     ask(&engine, "second").await;
     engine
-        .send(Command::SwitchAgent {
-            name: "build".to_owned(),
-        })
+        .send(Command::SwitchAgent { name: "build".to_owned() })
         .await
         .expect("build is a builtin primary agent");
     ask(&engine, "third").await;
 
     let requests = seen.lock().expect("the request log is never poisoned");
-    let systems: Vec<Option<&str>> = requests
-        .iter()
-        .map(|request| request.system.as_deref())
-        .collect();
+    let systems: Vec<Option<&str>> =
+        requests.iter().map(|request| request.system.as_deref()).collect();
     assert_eq!(
         systems,
         vec![
@@ -312,16 +271,12 @@ async fn switching_models_recomposes_the_environment_block_for_the_new_model() {
     let cwd = directory.path().to_owned();
 
     let (provider, seen) = ScriptedProvider::new(vec![says("one"), says("two")]);
-    let engine = Engine::new(
-        provider,
-        LAUNCH,
-        Arc::new(Registry::new(Vec::new())),
-        Permissions::default(),
-    )
-    .with_system_parts(Some(BASE.to_owned()), None)
-    .with_environment(move |model| {
-        ganja_core::instruction::suffix(&Config::default(), &cwd, model)
-    });
+    let engine =
+        Engine::new(provider, LAUNCH, Arc::new(Registry::new(Vec::new())), Permissions::default())
+            .with_system_parts(Some(BASE.to_owned()), None)
+            .with_environment(move |model| {
+                ganja_core::instruction::suffix(&Config::default(), &cwd, model)
+            });
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
@@ -337,9 +292,7 @@ async fn switching_models_recomposes_the_environment_block_for_the_new_model() {
     drain(&mut events).await;
 
     engine
-        .send(Command::SwitchModel {
-            model: PICKED.to_owned(),
-        })
+        .send(Command::SwitchModel { model: PICKED.to_owned() })
         .await
         .expect("a provider the catalog does not cover takes the model at its word");
 
@@ -359,10 +312,7 @@ async fn switching_models_recomposes_the_environment_block_for_the_new_model() {
     let systems: Vec<&str> = requests
         .iter()
         .map(|request| {
-            request
-                .system
-                .as_deref()
-                .expect("every request carries the prompt it was built with")
+            request.system.as_deref().expect("every request carries the prompt it was built with")
         })
         .collect();
     assert_eq!(systems.len(), 2, "one request per prompt");
@@ -398,27 +348,17 @@ async fn switching_to_an_agent_that_prefers_a_model_recomposes_the_environment_b
     let mut agent = std::collections::BTreeMap::new();
     agent.insert(
         "scribe".to_owned(),
-        AgentConfig {
-            model: Some(format!("recorder/{PREFERRED}")),
-            ..AgentConfig::default()
-        },
+        AgentConfig { model: Some(format!("recorder/{PREFERRED}")), ..AgentConfig::default() },
     );
-    let config = Config {
-        agent,
-        ..Config::default()
-    };
+    let config = Config { agent, ..Config::default() };
 
     let (provider, seen) = ScriptedProvider::new(vec![says("one"), says("two")]);
-    let engine = Engine::new(
-        provider,
-        LAUNCH,
-        Arc::new(Registry::new(Vec::new())),
-        Permissions::default(),
-    )
-    .with_agents(ganja_testkit::agent_registry(&config))
-    .with_environment(move |model| {
-        ganja_core::instruction::suffix(&Config::default(), &cwd, model)
-    });
+    let engine =
+        Engine::new(provider, LAUNCH, Arc::new(Registry::new(Vec::new())), Permissions::default())
+            .with_agents(ganja_testkit::agent_registry(&config))
+            .with_environment(move |model| {
+                ganja_core::instruction::suffix(&Config::default(), &cwd, model)
+            });
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
@@ -434,9 +374,7 @@ async fn switching_to_an_agent_that_prefers_a_model_recomposes_the_environment_b
     drain(&mut events).await;
 
     engine
-        .send(Command::SwitchAgent {
-            name: "scribe".to_owned(),
-        })
+        .send(Command::SwitchAgent { name: "scribe".to_owned() })
         .await
         .expect("a config agent is selectable");
     assert_eq!(
@@ -461,10 +399,7 @@ async fn switching_to_an_agent_that_prefers_a_model_recomposes_the_environment_b
     let systems: Vec<&str> = requests
         .iter()
         .map(|request| {
-            request
-                .system
-                .as_deref()
-                .expect("every request carries the prompt it was built with")
+            request.system.as_deref().expect("every request carries the prompt it was built with")
         })
         .collect();
     assert_eq!(systems.len(), 2, "one request per prompt");
@@ -507,9 +442,7 @@ async fn a_shell_passthrough_does_not_consume_the_notice_that_planning_is_over()
     engine.resume(&session).await.expect("the session loads");
 
     engine
-        .send(Command::SwitchAgent {
-            name: "plan".to_owned(),
-        })
+        .send(Command::SwitchAgent { name: "plan".to_owned() })
         .await
         .expect("plan is a builtin primary agent");
     engine
@@ -525,15 +458,11 @@ async fn a_shell_passthrough_does_not_consume_the_notice_that_planning_is_over()
     drain(&mut events).await;
 
     engine
-        .send(Command::SwitchAgent {
-            name: "build".to_owned(),
-        })
+        .send(Command::SwitchAgent { name: "build".to_owned() })
         .await
         .expect("build is a builtin primary agent");
     engine
-        .send(Command::RunShell {
-            command: "printf 'on branch main'".to_owned(),
-        })
+        .send(Command::RunShell { command: "printf 'on branch main'".to_owned() })
         .await
         .expect("an idle engine accepts a command");
     drain(&mut events).await;
@@ -561,13 +490,7 @@ async fn a_shell_passthrough_does_not_consume_the_notice_that_planning_is_over()
         .iter()
         .rev()
         .find(|message| message.role == Role::User)
-        .map(|message| {
-            message
-                .parts
-                .iter()
-                .filter_map(|part| part.as_text())
-                .collect()
-        })
+        .map(|message| message.parts.iter().filter_map(|part| part.as_text()).collect())
         .unwrap_or_default();
     assert_eq!(
         carried,
@@ -611,16 +534,12 @@ async fn the_plan_reminders_reach_the_request_and_not_the_stored_history() {
     };
 
     engine
-        .send(Command::SwitchAgent {
-            name: "plan".to_owned(),
-        })
+        .send(Command::SwitchAgent { name: "plan".to_owned() })
         .await
         .expect("plan is a builtin primary agent");
     ask(&engine, "how would you do it").await;
     engine
-        .send(Command::SwitchAgent {
-            name: "build".to_owned(),
-        })
+        .send(Command::SwitchAgent { name: "build".to_owned() })
         .await
         .expect("build is a builtin primary agent");
     ask(&engine, "go ahead").await;
@@ -633,13 +552,7 @@ async fn the_plan_reminders_reach_the_request_and_not_the_stored_history() {
             .iter()
             .rev()
             .find(|message| message.role == Role::User)
-            .map(|message| {
-                message
-                    .parts
-                    .iter()
-                    .filter_map(|part| part.as_text())
-                    .collect()
-            })
+            .map(|message| message.parts.iter().filter_map(|part| part.as_text()).collect())
             .unwrap_or_default()
     }
 
@@ -661,9 +574,7 @@ async fn the_plan_reminders_reach_the_request_and_not_the_stored_history() {
     );
     drop(requests);
 
-    let transcript = storage
-        .load_transcript(&session)
-        .expect("the transcript reads back");
+    let transcript = storage.load_transcript(&session).expect("the transcript reads back");
     let stored: Vec<String> = transcript
         .iter()
         .filter(|message| message.role == Role::User)
@@ -710,24 +621,18 @@ async fn a_switch_applies_to_the_next_turn_and_outlives_the_process() {
     drain(&mut events).await;
 
     engine
-        .send(Command::SwitchModel {
-            model: "second-model".to_owned(),
-        })
+        .send(Command::SwitchModel { model: "second-model".to_owned() })
         .await
         .expect("a provider the catalog does not cover takes the model at its word");
     engine
-        .send(Command::SwitchAgent {
-            name: "plan".to_owned(),
-        })
+        .send(Command::SwitchAgent { name: "plan".to_owned() })
         .await
         .expect("plan is a builtin primary agent");
 
     // On disk before another turn has run: the switch is a decision about the
     // session, not a side effect of sending a message.
-    let stored = storage
-        .load_info(&session)
-        .expect("the record reads back")
-        .expect("the record is there");
+    let stored =
+        storage.load_info(&session).expect("the record reads back").expect("the record is there");
     assert_eq!(stored.model.as_deref(), Some("second-model"));
     assert_eq!(stored.agent.as_deref(), Some("plan"));
 
@@ -745,10 +650,7 @@ async fn a_switch_applies_to_the_next_turn_and_outlives_the_process() {
 
     {
         let requests = seen.lock().expect("the request log is never poisoned");
-        let models: Vec<&str> = requests
-            .iter()
-            .map(|request| request.model.as_str())
-            .collect();
+        let models: Vec<&str> = requests.iter().map(|request| request.model.as_str()).collect();
         assert_eq!(
             models,
             vec!["first-model", "second-model"],
@@ -767,10 +669,7 @@ async fn a_switch_applies_to_the_next_turn_and_outlives_the_process() {
         Storage::open(directory.path().join("storage")),
     )
     .with_agents(ganja_testkit::agent_registry(&Config::default()));
-    let _events = reopened
-        .subscribe()
-        .await
-        .expect("the first subscriber wins");
+    let _events = reopened.subscribe().await.expect("the first subscriber wins");
     reopened.resume(&session).await.expect("the session loads");
 
     assert_eq!(reopened.model(), "second-model");
@@ -782,10 +681,7 @@ async fn a_switch_applies_to_the_next_turn_and_outlives_the_process() {
 #[tokio::test]
 async fn a_switch_sent_mid_turn_is_refused() {
     let engine = Engine::new(
-        Arc::new(FakeProvider::new(
-            "one two three four five",
-            Duration::from_millis(200),
-        )),
+        Arc::new(FakeProvider::new("one two three four five", Duration::from_millis(200))),
         fake::MODEL,
         Arc::new(Registry::new(Vec::new())),
         Permissions::default(),
@@ -803,39 +699,23 @@ async fn a_switch_sent_mid_turn_is_refused() {
         })
         .await
         .expect("an idle engine accepts a prompt");
-    assert!(matches!(
-        events.next().await,
-        Some(Event::MessageStarted { .. })
-    ));
+    assert!(matches!(events.next().await, Some(Event::MessageStarted { .. })));
 
     assert!(matches!(
-        engine
-            .send(Command::SwitchAgent {
-                name: "plan".to_owned()
-            })
-            .await,
+        engine.send(Command::SwitchAgent { name: "plan".to_owned() }).await,
         Err(EngineError::Busy)
     ));
     assert!(matches!(
-        engine
-            .send(Command::SwitchModel {
-                model: "other".to_owned()
-            })
-            .await,
+        engine.send(Command::SwitchModel { model: "other".to_owned() }).await,
         Err(EngineError::Busy)
     ));
 
-    engine
-        .send(Command::CancelTurn)
-        .await
-        .expect("a cancel is always accepted");
+    engine.send(Command::CancelTurn).await.expect("a cancel is always accepted");
     drain(&mut events).await;
 
     // And once the turn is over the same switch is accepted.
     engine
-        .send(Command::SwitchAgent {
-            name: "plan".to_owned(),
-        })
+        .send(Command::SwitchAgent { name: "plan".to_owned() })
         .await
         .expect("a finished turn leaves the engine idle");
 }
@@ -852,20 +732,12 @@ async fn a_switch_that_cannot_be_honoured_says_which_half_refused() {
     .with_agents(ganja_testkit::agent_registry(&Config::default()));
 
     assert!(matches!(
-        engine
-            .send(Command::SwitchAgent {
-                name: "nope".to_owned()
-            })
-            .await,
+        engine.send(Command::SwitchAgent { name: "nope".to_owned() }).await,
         Err(EngineError::UnknownAgent { .. })
     ));
     assert!(
         matches!(
-            engine
-                .send(Command::SwitchAgent {
-                    name: "explore".to_owned()
-                })
-                .await,
+            engine.send(Command::SwitchAgent { name: "explore".to_owned() }).await,
             Err(EngineError::SubagentNotSelectable { .. })
         ),
         "a subagent is the task tool's to run, not a session's to become"
@@ -879,10 +751,7 @@ async fn a_switch_that_cannot_be_honoured_says_which_half_refused() {
         Permissions::default(),
     );
     assert!(matches!(
-        bare.send(Command::SwitchAgent {
-            name: "plan".to_owned()
-        })
-        .await,
+        bare.send(Command::SwitchAgent { name: "plan".to_owned() }).await,
         Err(EngineError::NoAgents)
     ));
 }
@@ -903,17 +772,11 @@ async fn a_model_the_provider_does_not_serve_is_refused() {
 
     // The fake provider is not in the catalog, so nothing contradicts it.
     engine
-        .send(Command::SwitchModel {
-            model: cataloged.to_owned(),
-        })
+        .send(Command::SwitchModel { model: cataloged.to_owned() })
         .await
         .expect("an uncataloged provider takes a model at its word");
     assert!(matches!(
-        engine
-            .send(Command::SwitchModel {
-                model: "   ".to_owned()
-            })
-            .await,
+        engine.send(Command::SwitchModel { model: "   ".to_owned() }).await,
         Err(EngineError::UnknownModel { .. })
     ));
 }
@@ -927,12 +790,8 @@ async fn an_agents_model_is_adopted_from_the_spelling_a_config_writes() {
     let mut served = ganja_core::catalog::models()
         .filter(|model| model.provider_id == "anthropic")
         .map(|model| model.id.clone());
-    let start = served
-        .next()
-        .expect("the compiled-in catalog covers anthropic");
-    let wanted = served
-        .next()
-        .expect("and covers more than one model of theirs");
+    let start = served.next().expect("the compiled-in catalog covers anthropic");
+    let wanted = served.next().expect("and covers more than one model of theirs");
 
     let config: Config = serde_json::from_value(json!({
         "agent": {
@@ -942,19 +801,13 @@ async fn an_agents_model_is_adopted_from_the_spelling_a_config_writes() {
     .expect("the fixture is a config");
 
     let (provider, seen) = ScriptedProvider::named("anthropic", vec![says("reviewed")]);
-    let engine = Engine::new(
-        provider,
-        &start,
-        Arc::new(Registry::new(Vec::new())),
-        Permissions::default(),
-    )
-    .with_agents(ganja_testkit::agent_registry(&config));
+    let engine =
+        Engine::new(provider, &start, Arc::new(Registry::new(Vec::new())), Permissions::default())
+            .with_agents(ganja_testkit::agent_registry(&config));
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
-        .send(Command::SwitchAgent {
-            name: "review".to_owned(),
-        })
+        .send(Command::SwitchAgent { name: "review".to_owned() })
         .await
         .expect("the config names review a primary agent");
     engine

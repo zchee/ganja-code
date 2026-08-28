@@ -48,22 +48,20 @@
 //! call's bullet answers "did it work" — green for a call that did, red for
 //! one that failed — while the heading beside it stays prose.
 
-use std::{
-    collections::HashMap,
-    time::{Duration, Instant},
-};
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use ganja_protocol::{Message, MessageId, Part, PartBody, PartId, Role, ToolState, team};
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    style::{Color, Modifier, Style},
-    text::{Line, Span},
-};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
 use unicode_segmentation::UnicodeSegmentation as _;
 use unicode_width::UnicodeWidthStr as _;
 
-use crate::{component::rewind, graphics, markdown, mention, theme::Theme};
+use crate::component::rewind;
+use crate::theme::Theme;
+use crate::{graphics, markdown, mention};
 
 /// Lines one wheel notch moves the viewport.
 pub const WHEEL_LINES: isize = 3;
@@ -110,13 +108,7 @@ const BULLET: &str = "\u{25cf} ";
 /// rung is one column wide, so the words after it never move; a settled call
 /// keeps `BULLET`, whose color answers the verdict — told from the crest's
 /// identical glyph by standing still.
-const POINT_GLYPHS: [&str; 5] = [
-    "\u{b7} ",
-    "\u{2219} ",
-    "\u{2022} ",
-    "\u{2022} ",
-    "\u{25cf} ",
-];
+const POINT_GLYPHS: [&str; 5] = ["\u{b7} ", "\u{2219} ", "\u{2022} ", "\u{2022} ", "\u{25cf} "];
 
 /// The rung `level` wears, clamped to the crest.
 fn point_glyph(level: u8) -> &'static str {
@@ -440,11 +432,7 @@ fn blend(base: (u8, u8, u8), peak: (u8, u8, u8), numerator: u64, denominator: u6
         u8::try_from(mixed).unwrap_or(u8::MAX)
     };
 
-    Color::Rgb(
-        channel(base.0, peak.0),
-        channel(base.1, peak.1),
-        channel(base.2, peak.2),
-    )
+    Color::Rgb(channel(base.0, peak.0), channel(base.1, peak.1), channel(base.2, peak.2))
 }
 
 /// The compacting headline's paint at the spinner cycle's ends — a pale
@@ -485,11 +473,7 @@ fn compact_elapsed(elapsed: Duration) -> String {
     if seconds < 60 {
         format!("{seconds}s")
     } else {
-        format!(
-            "{minutes}m {seconds}s",
-            minutes = seconds / 60,
-            seconds = seconds % 60
-        )
+        format!("{minutes}m {seconds}s", minutes = seconds / 60, seconds = seconds % 60)
     }
 }
 
@@ -513,10 +497,7 @@ fn compact_tokens(tokens: u64) -> String {
 /// streamed so far — not the session total the ordinary line shows, because
 /// what is streaming is the summary and nothing else.
 fn compacting_line(elapsed: Duration, compaction: Compaction, theme: &Theme) -> Line<'static> {
-    let head = format!(
-        "{glyph} Compacting conversation\u{2026} ",
-        glyph = working_frame(elapsed)
-    );
+    let head = format!("{glyph} Compacting conversation\u{2026} ", glyph = working_frame(elapsed));
     let mut tail = format!("({clock}", clock = compact_elapsed(elapsed));
     if compaction.tokens > 0 {
         tail.push_str(&format!(
@@ -529,9 +510,7 @@ fn compacting_line(elapsed: Duration, compaction: Compaction, theme: &Theme) -> 
     Line::from(vec![
         Span::styled(
             head,
-            Style::default()
-                .fg(compact_pulse(elapsed))
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(compact_pulse(elapsed)).add_modifier(Modifier::BOLD),
         ),
         Span::styled(tail, theme.dim),
     ])
@@ -587,20 +566,12 @@ struct Row {
 
 impl Row {
     fn new(prefix: &str, text: impl Into<String>, style: Style) -> Self {
-        Self {
-            prefix: prefix.to_owned(),
-            lead: None,
-            text: text.into(),
-            style,
-        }
+        Self { prefix: prefix.to_owned(), lead: None, text: text.into(), style }
     }
 
     /// A row whose prefix is painted `lead` while its text keeps `style`.
     fn led(prefix: &str, lead: Style, text: impl Into<String>, style: Style) -> Self {
-        Self {
-            lead: Some(lead),
-            ..Self::new(prefix, text, style)
-        }
+        Self { lead: Some(lead), ..Self::new(prefix, text, style) }
     }
 }
 
@@ -624,9 +595,7 @@ fn lay_out(rows: &[Row], width: usize) -> Vec<Line<'static>> {
         // words, not the elbow and the blank columns leading up to them —
         // ink drawn across an indent reads as a rule floating out to the
         // left of the row (2026-08-15).
-        let margin = row
-            .lead
-            .unwrap_or_else(|| row.style.remove_modifier(Modifier::CROSSED_OUT));
+        let margin = row.lead.unwrap_or_else(|| row.style.remove_modifier(Modifier::CROSSED_OUT));
 
         for (index, line) in wrap(&row.text, body).into_iter().enumerate() {
             // A blank line inside a block stays blank — a row of spaces is an
@@ -760,10 +729,7 @@ impl Chat {
     /// are left out for the same reason — they are not on the screen either,
     /// and they are not in what the next request will carry.
     pub fn messages(&self) -> Vec<crate::transcript::Entry<'_>> {
-        self.shown()
-            .iter()
-            .map(|entry| (entry.role, entry.parts.as_slice()))
-            .collect()
+        self.shown().iter().map(|entry| (entry.role, entry.parts.as_slice())).collect()
     }
 
     /// How many `task` calls on screen are still running — the delegated
@@ -810,10 +776,8 @@ impl Chat {
             .filter(|(_, entry)| entry.role == Role::User)
             .map(|(index, entry)| {
                 let mut files: Vec<&str> = Vec::new();
-                for later in shown
-                    .iter()
-                    .skip(index + 1)
-                    .take_while(|later| later.role != Role::User)
+                for later in
+                    shown.iter().skip(index + 1).take_while(|later| later.role != Role::User)
                 {
                     for part in &later.parts {
                         if let PartBody::Patch { files: changed, .. } = &part.body {
@@ -860,11 +824,7 @@ impl Chat {
     /// Nothing is dropped: an undo is reversible until the next prompt, so the
     /// entries stay exactly where they are and only stop being drawn.
     pub fn revert(&mut self, anchor: MessageId, files: Vec<String>) {
-        self.revert = Some(Revert {
-            anchor,
-            files,
-            wrapped: None,
-        });
+        self.revert = Some(Revert { anchor, files, wrapped: None });
         self.follow_tail();
     }
 
@@ -922,11 +882,7 @@ impl Chat {
     /// event rather than restarting with every report.
     pub fn set_compacting(&mut self, tokens: u64, budget: u64) {
         self.settling = None;
-        let compaction = Some(Compaction {
-            tokens,
-            budget,
-            done: false,
-        });
+        let compaction = Some(Compaction { tokens, budget, done: false });
         match &mut self.working {
             Some(working) => working.compaction = compaction,
             None => {
@@ -948,10 +904,7 @@ impl Chat {
     /// reply opening.
     pub fn finish_compacting(&mut self) -> bool {
         match &mut self.working {
-            Some(Working {
-                compaction: Some(compaction),
-                ..
-            }) => {
+            Some(Working { compaction: Some(compaction), .. }) => {
                 compaction.done = true;
                 true
             }
@@ -966,10 +919,9 @@ impl Chat {
     /// a dead provider — clears immediately: there is no arrival to show.
     pub fn settle_working(&mut self) {
         match self.working {
-            Some(Working {
-                compaction: Some(Compaction { done: true, .. }),
-                ..
-            }) => self.settling = Some(Instant::now()),
+            Some(Working { compaction: Some(Compaction { done: true, .. }), .. }) => {
+                self.settling = Some(Instant::now())
+            }
             _ => self.set_working(None),
         }
     }
@@ -1021,11 +973,8 @@ impl Chat {
             return;
         };
 
-        if let Some(text) = entry
-            .parts
-            .iter_mut()
-            .find(|part| part.id == *part_id)
-            .and_then(Part::streamed_mut)
+        if let Some(text) =
+            entry.parts.iter_mut().find(|part| part.id == *part_id).and_then(Part::streamed_mut)
         {
             text.push_str(delta);
             entry.wrapped = None;
@@ -1039,11 +988,7 @@ impl Chat {
             return;
         };
 
-        match entry
-            .parts
-            .iter_mut()
-            .find(|existing| existing.id == part.id)
-        {
+        match entry.parts.iter_mut().find(|existing| existing.id == part.id) {
             Some(existing) => *existing = part,
             None => entry.parts.push(part),
         }
@@ -1053,10 +998,7 @@ impl Chat {
     /// Finds an entry by id, newest first: deltas address the message that is
     /// still streaming, which is the one at the end.
     fn entry_mut(&mut self, message_id: &MessageId) -> Option<&mut Entry> {
-        self.entries
-            .iter_mut()
-            .rev()
-            .find(|entry| entry.id == *message_id)
+        self.entries.iter_mut().rev().find(|entry| entry.id == *message_id)
     }
 
     /// Moves the viewport by `delta` lines, negative being towards the top.
@@ -1132,9 +1074,8 @@ impl Chat {
             }
         }
 
-        let offset = self
-            .offset
-            .map_or_else(|| self.max_offset(), |offset| offset.min(self.max_offset()));
+        let offset =
+            self.offset.map_or_else(|| self.max_offset(), |offset| offset.min(self.max_offset()));
         self.offset = self.offset.map(|_| offset);
 
         // The image paths this frame's wraps wanted cells for and did not
@@ -1167,10 +1108,7 @@ impl Chat {
                 let Ok(row) = u16::try_from(line - offset) else {
                     break;
                 };
-                buffer.set_style(
-                    Rect::new(area.x, area.y + row, area.width, 1),
-                    theme.selection,
-                );
+                buffer.set_style(Rect::new(area.x, area.y + row, area.width, 1), theme.selection);
             }
         }
     }
@@ -1205,11 +1143,7 @@ impl Chat {
     pub(crate) fn line_count(&self) -> usize {
         let entries: usize = self.shown().iter().map(|entry| entry.lines().len()).sum();
 
-        entries
-            + self
-                .revert
-                .as_ref()
-                .map_or(0, |revert| revert.lines().len())
+        entries + self.revert.as_ref().map_or(0, |revert| revert.lines().len())
     }
 
     /// Widths the entries are currently cached at, which is how a test tells
@@ -1250,11 +1184,11 @@ impl Chat {
             .take_while(|entry| entry.role != Role::User)
             .flat_map(|entry| entry.parts.iter().rev())
             .find_map(|part| match &part.body {
-                PartBody::Tool {
-                    tool,
-                    state: ToolState::Completed { input, .. },
-                    ..
-                } if tool == TODO_TOOL => todo_rows(input, theme),
+                PartBody::Tool { tool, state: ToolState::Completed { input, .. }, .. }
+                    if tool == TODO_TOOL =>
+                {
+                    todo_rows(input, theme)
+                }
                 _ => None,
             })
             .unwrap_or_default()
@@ -1275,10 +1209,7 @@ impl Chat {
         // A held gauge expires here rather than on an event: the frames a
         // settled screen still draws — the tick-driven ones — are what carry
         // the clock past the hold.
-        if self
-            .settling
-            .is_some_and(|settled| settled.elapsed() >= COMPACT_SETTLE)
-        {
+        if self.settling.is_some_and(|settled| settled.elapsed() >= COMPACT_SETTLE) {
             self.set_working(None);
         }
         let lines = match self.working {
@@ -1347,9 +1278,7 @@ impl Chat {
 
 impl Revert {
     fn lines(&self) -> &[Line<'static>] {
-        self.wrapped
-            .as_ref()
-            .map_or(&[], |wrapped| wrapped.lines.as_slice())
+        self.wrapped.as_ref().map_or(&[], |wrapped| wrapped.lines.as_slice())
     }
 
     /// Lays the marker out for `hidden` hidden entries.
@@ -1393,16 +1322,12 @@ impl Revert {
 
 impl Entry {
     fn lines(&self) -> &[Line<'static>] {
-        self.wrapped
-            .as_ref()
-            .map_or(&[], |wrapped| wrapped.lines.as_slice())
+        self.wrapped.as_ref().map_or(&[], |wrapped| wrapped.lines.as_slice())
     }
 
     /// The attached images the last wrap reserved boxes for.
     fn images(&self) -> &[(usize, String)] {
-        self.wrapped
-            .as_ref()
-            .map_or(&[], |wrapped| wrapped.images.as_slice())
+        self.wrapped.as_ref().map_or(&[], |wrapped| wrapped.images.as_slice())
     }
 
     fn wrap(
@@ -1484,11 +1409,7 @@ impl Entry {
                 // because the row is finished when it arrives: the gateway
                 // reports no timings, and the grammar shows none for a settled
                 // call anyway.
-                PartBody::ServerTool {
-                    tool,
-                    input,
-                    output,
-                } => {
+                PartBody::ServerTool { tool, input, output } => {
                     let state = ToolState::Completed {
                         input: input.clone(),
                         output: output.clone(),
@@ -1509,13 +1430,7 @@ impl Entry {
                 // would show the user their own file back. A mime outside
                 // `text/plain` is named beside it, which is all a transcript
                 // can honestly say about bytes it never reads.
-                PartBody::File {
-                    path,
-                    mime,
-                    start,
-                    end,
-                    ..
-                } => {
+                PartBody::File { path, mime, start, end, .. } => {
                     // An attached image the terminal can draw is drawn
                     // (2026-08-15): the token-and-mime row gives way to rows
                     // of kitty Unicode placeholder cells the terminal
@@ -1555,11 +1470,8 @@ impl Entry {
                         continue;
                     }
                     let token = mention::token(path, *start, *end);
-                    let label = if mime == "text/plain" {
-                        token
-                    } else {
-                        format!("{token} ({mime})")
-                    };
+                    let label =
+                        if mime == "text/plain" { token } else { format!("{token} ({mime})") };
                     let prefix = match self.role {
                         Role::User => prompt_lead(lines.is_empty()),
                         Role::Assistant => BULLET.to_owned(),
@@ -1627,12 +1539,7 @@ impl Entry {
                 // use. The member's assigned `color` is deliberately unread:
                 // a palette this pane never mixed is not one it can trust
                 // against an arbitrary theme.
-                PartBody::Peer {
-                    from,
-                    summary,
-                    body,
-                    ..
-                } => {
+                PartBody::Peer { from, summary, body, .. } => {
                     let head = format!("@ {from}\u{276f}");
                     // `display_summary` owns the blank-dropped, capped
                     // projection this renderer shares with the engine's
@@ -1644,10 +1551,7 @@ impl Entry {
                     // Two columns of hang, not the head's own width: the body
                     // is prose, and prose pushed past a name-sized margin
                     // reads as a quotation rather than as what the block says.
-                    rows.extend(
-                        body.lines()
-                            .map(|line| Row::new("  ", line.to_owned(), theme.fg)),
-                    );
+                    rows.extend(body.lines().map(|line| Row::new("  ", line.to_owned(), theme.fg)));
                     lines.extend(lay_out(&rows, columns));
                 }
                 // Sealed reasoning has no rendering: what it holds is opaque
@@ -1686,11 +1590,7 @@ impl Entry {
 /// What leads a prompt's row: the caret on the entry's first line, the columns
 /// it occupies under every row after it.
 fn prompt_lead(first: bool) -> String {
-    if first {
-        PROMPT.to_owned()
-    } else {
-        " ".repeat(PROMPT.width())
-    }
+    if first { PROMPT.to_owned() } else { " ".repeat(PROMPT.width()) }
 }
 
 /// Tool argument keys named first in a call's header. Tool-agnostic on
@@ -1760,14 +1660,8 @@ const TODO_DONE: char = '\u{2612}';
 /// still not one a single line can carry.
 fn derive_args(input: &serde_json::Value) -> Option<String> {
     let object = input.as_object()?;
-    let named = TITLE_KEYS
-        .iter()
-        .copied()
-        .filter(|key| object.contains_key(*key));
-    let rest = object
-        .keys()
-        .map(String::as_str)
-        .filter(|key| !TITLE_KEYS.contains(key));
+    let named = TITLE_KEYS.iter().copied().filter(|key| object.contains_key(*key));
+    let rest = object.keys().map(String::as_str).filter(|key| !TITLE_KEYS.contains(key));
 
     let mut shown: Vec<String> = Vec::new();
     let mut cut = false;
@@ -1821,10 +1715,7 @@ fn quoted(text: &str) -> String {
 fn in_flight(part: &Part) -> bool {
     matches!(
         &part.body,
-        PartBody::Tool {
-            state: ToolState::Pending { .. } | ToolState::Running { .. },
-            ..
-        }
+        PartBody::Tool { state: ToolState::Pending { .. } | ToolState::Running { .. }, .. }
     )
 }
 
@@ -1891,10 +1782,7 @@ fn point_style(theme: &Theme, level: u8) -> Style {
 /// its markup asked for.
 fn thought(span: Span<'static>, theme: &Theme) -> Span<'static> {
     let kept = span.style.add_modifier;
-    Span::styled(
-        span.content,
-        theme.dim.add_modifier(Modifier::ITALIC).add_modifier(kept),
-    )
+    Span::styled(span.content, theme.dim.add_modifier(Modifier::ITALIC).add_modifier(kept))
 }
 
 /// The one line a call is announced on: the tool, and what it was called with.
@@ -1929,10 +1817,7 @@ fn tool_heading(tool: &str, input: Option<&serde_json::Value>) -> String {
 fn read_args(input: &serde_json::Value) -> Option<String> {
     let path = field(input, "filePath")?;
     let offset = input.get("offset").and_then(serde_json::Value::as_u64);
-    let limit = input
-        .get("limit")
-        .and_then(serde_json::Value::as_u64)
-        .filter(|limit| *limit > 0);
+    let limit = input.get("limit").and_then(serde_json::Value::as_u64).filter(|limit| *limit > 0);
 
     match (offset, limit) {
         (Some(offset), Some(limit)) => Some(format!(
@@ -1967,22 +1852,15 @@ fn read_summary(metadata: &serde_json::Value) -> Option<String> {
 
     match field(display, "type")? {
         "file" => {
-            let start = display
-                .get("lineStart")
-                .and_then(serde_json::Value::as_u64)?;
+            let start = display.get("lineStart").and_then(serde_json::Value::as_u64)?;
             let end = display.get("lineEnd").and_then(serde_json::Value::as_u64)?;
             // An empty file reports an end before its start, and read nothing.
             let read = if end < start { 0 } else { end - start + 1 };
 
-            Some(format!(
-                "Read {read} line{plural}",
-                plural = if read == 1 { "" } else { "s" }
-            ))
+            Some(format!("Read {read} line{plural}", plural = if read == 1 { "" } else { "s" }))
         }
         "directory" => {
-            let entries = display
-                .get("entries")
-                .and_then(serde_json::Value::as_array)?;
+            let entries = display.get("entries").and_then(serde_json::Value::as_array)?;
 
             Some(format!(
                 "Listed {count} entr{plural}",
@@ -2010,10 +1888,7 @@ fn read_summary(metadata: &serde_json::Value) -> Option<String> {
 /// least shows what really arrived. A checklist with no rows would be a `⎿`
 /// pointing at nothing.
 fn todo_rows(input: &serde_json::Value, theme: &Theme) -> Option<Vec<(String, Style)>> {
-    let todos = input
-        .get("todos")?
-        .as_array()
-        .filter(|todos| !todos.is_empty())?;
+    let todos = input.get("todos")?.as_array().filter(|todos| !todos.is_empty())?;
 
     todos
         .iter()
@@ -2044,11 +1919,7 @@ fn result_rows(lines: Vec<(String, Style)>, claimed: bool) -> Vec<Row> {
         .into_iter()
         .enumerate()
         .map(|(index, (text, style))| {
-            let prefix = if index == 0 && !claimed {
-                RESULT
-            } else {
-                under.as_str()
-            };
+            let prefix = if index == 0 && !claimed { RESULT } else { under.as_str() };
             Row::new(prefix, text, style)
         })
         .collect()
@@ -2069,11 +1940,7 @@ fn clamp_hint(hidden: usize) -> String {
 /// The first `TOOL_PREVIEW_LINES` lines of `text`, and how many were cut.
 fn clamp_preview(text: &str) -> (Vec<String>, usize) {
     let mut lines = text.lines();
-    let preview: Vec<String> = lines
-        .by_ref()
-        .take(TOOL_PREVIEW_LINES)
-        .map(str::to_owned)
-        .collect();
+    let preview: Vec<String> = lines.by_ref().take(TOOL_PREVIEW_LINES).map(str::to_owned).collect();
 
     (preview, lines.count())
 }
@@ -2087,13 +1954,7 @@ fn clamp_tail(text: &str) -> (Vec<String>, usize) {
     let lines: Vec<&str> = text.lines().collect();
     let skipped = lines.len().saturating_sub(TOOL_PREVIEW_LINES);
 
-    (
-        lines[skipped..]
-            .iter()
-            .map(|line| (*line).to_owned())
-            .collect(),
-        skipped,
-    )
+    (lines[skipped..].iter().map(|line| (*line).to_owned()).collect(), skipped)
 }
 
 /// Styles one line of a unified diff by its leading marker. Hunk headers and
@@ -2138,9 +1999,7 @@ fn tool_lines(tool: &str, state: &ToolState, theme: &Theme, blink: u8) -> Vec<Ro
             tool_heading(tool, input.as_ref()),
             theme.dim,
         )],
-        ToolState::Running {
-            input, metadata, ..
-        } => {
+        ToolState::Running { input, metadata, .. } => {
             let mut rows = vec![Row::led(
                 point_glyph(blink),
                 point_style(theme, blink),
@@ -2168,21 +2027,11 @@ fn tool_lines(tool: &str, state: &ToolState, theme: &Theme, blink: u8) -> Vec<Ro
 
             rows
         }
-        ToolState::Completed {
-            input,
-            output,
-            title,
-            metadata,
-            ..
-        } => {
+        ToolState::Completed { input, output, title, metadata, .. } => {
             // The bullet alone answers "did it work" (2026-08-15): green
             // here, red on a failed call, while the heading stays prose.
-            let mut rows = vec![Row::led(
-                BULLET,
-                theme.success,
-                tool_heading(tool, Some(input)),
-                theme.fg,
-            )];
+            let mut rows =
+                vec![Row::led(BULLET, theme.success, tool_heading(tool, Some(input)), theme.fg)];
             // A read answers with a count and stops there; see [`READ_TOOL`].
             if tool == READ_TOOL
                 && let Some(summary) = read_summary(metadata)
@@ -2244,12 +2093,8 @@ fn tool_lines(tool: &str, state: &ToolState, theme: &Theme, blink: u8) -> Vec<Ro
             rows
         }
         ToolState::Error { input, error, .. } => {
-            let mut rows = vec![Row::led(
-                BULLET,
-                theme.error,
-                tool_heading(tool, Some(input)),
-                theme.fg,
-            )];
+            let mut rows =
+                vec![Row::led(BULLET, theme.error, tool_heading(tool, Some(input)), theme.fg)];
             if let Some(first) = error.lines().next().filter(|line| !line.is_empty()) {
                 rows.push(Row::new(RESULT, format!("[error] {first}"), theme.error));
             }
@@ -2279,16 +2124,9 @@ fn task_lines(state: &ToolState, theme: &Theme, blink: u8) -> Vec<Row> {
                 |input| task_heading(field(input, "subagent_type"), field(input, "description")),
             );
 
-            vec![Row::led(
-                point_glyph(blink),
-                point_style(theme, blink),
-                heading,
-                theme.dim,
-            )]
+            vec![Row::led(point_glyph(blink), point_style(theme, blink), heading, theme.dim)]
         }
-        ToolState::Running {
-            input, metadata, ..
-        } => {
+        ToolState::Running { input, metadata, .. } => {
             let agent = field(input, "subagent_type");
             let mut rows = vec![Row::led(
                 point_glyph(blink),
@@ -2324,24 +2162,12 @@ fn task_lines(state: &ToolState, theme: &Theme, blink: u8) -> Vec<Row> {
 
             rows
         }
-        ToolState::Completed {
-            input,
-            title,
-            metadata,
-            started,
-            completed,
-            ..
-        } => {
+        ToolState::Completed { input, title, metadata, started, completed, .. } => {
             let agent = field(metadata, "agent").or_else(|| field(input, "subagent_type"));
             let description = field(input, "description").or(Some(title.as_str()));
 
             vec![
-                Row::led(
-                    BULLET,
-                    theme.success,
-                    task_heading(agent, description),
-                    theme.fg,
-                ),
+                Row::led(BULLET, theme.success, task_heading(agent, description), theme.fg),
                 Row::new(
                     RESULT,
                     format!(
@@ -2361,18 +2187,12 @@ fn task_lines(state: &ToolState, theme: &Theme, blink: u8) -> Vec<Row> {
 
 /// One string field of a JSON object, when it is there and is not empty.
 fn field<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
-    value
-        .get(key)
-        .and_then(serde_json::Value::as_str)
-        .filter(|found| !found.is_empty())
+    value.get(key).and_then(serde_json::Value::as_str).filter(|found| !found.is_empty())
 }
 
 /// How many tools the child has called, as its parent's part recorded it.
 fn toolcalls(metadata: &serde_json::Value) -> u64 {
-    metadata
-        .get("toolcalls")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(0)
+    metadata.get("toolcalls").and_then(serde_json::Value::as_u64).unwrap_or(0)
 }
 
 /// The child's own calls, as the watcher logged them onto the parent's part —
@@ -2382,11 +2202,7 @@ fn call_log(metadata: &serde_json::Value) -> Vec<String> {
         .get("calls")
         .and_then(serde_json::Value::as_array)
         .map(|calls| {
-            calls
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .map(str::to_owned)
-                .collect()
+            calls.iter().filter_map(serde_json::Value::as_str).map(str::to_owned).collect()
         })
         .unwrap_or_default()
 }
@@ -2438,11 +2254,7 @@ fn elapsed(started: u64, completed: u64) -> String {
         return format!("{seconds}.{tenths}s", tenths = millis % 1_000 / 100);
     }
 
-    format!(
-        "{minutes}m {rest}s",
-        minutes = seconds / 60,
-        rest = seconds % 60
-    )
+    format!("{minutes}m {rest}s", minutes = seconds / 60, rest = seconds % 60)
 }
 
 /// Greedily wraps `text` to `width` display columns, preserving blank lines and

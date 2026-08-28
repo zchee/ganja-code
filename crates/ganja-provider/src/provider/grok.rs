@@ -32,12 +32,10 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    auth::{self, RefreshOauth},
-    provider::{
-        ChatRequest, CredentialSource, OpenAiProvider, Provider, ProviderError, ProviderEvent,
-        check_base_url,
-    },
+use crate::auth::{self, RefreshOauth};
+use crate::provider::{
+    ChatRequest, CredentialSource, OpenAiProvider, Provider, ProviderError, ProviderEvent,
+    check_base_url,
 };
 
 /// Value of [`PROVIDER_ENV`](super::PROVIDER_ENV) that selects this provider.
@@ -128,10 +126,7 @@ impl GrokProvider {
         check_base_url(&base_url)?;
 
         Ok(Self(OpenAiProvider::with_credential(
-            CredentialSource::Oauth {
-                provider_id: ID,
-                refresh,
-            },
+            CredentialSource::Oauth { provider_id: ID, refresh },
             base_url,
         )?))
     }

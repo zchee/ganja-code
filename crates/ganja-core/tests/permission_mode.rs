@@ -14,18 +14,16 @@
 //! So nothing here reads the environment for a path and nothing mutates it,
 //! which is why this binary may hold more than one test.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
-use futures::{StreamExt as _, stream::BoxStream};
-use ganja_core::{
-    Engine,
-    permission::{Action, Permissions, Rule},
-    protocol::{
-        Command, Event, PermissionId, PermissionMode, PermissionReply,
-        team::{Frame, ModeSetRequest},
-    },
-    tool::Registry,
-};
+use futures::StreamExt as _;
+use futures::stream::BoxStream;
+use ganja_core::Engine;
+use ganja_core::permission::{Action, Permissions, Rule};
+use ganja_core::protocol::team::{Frame, ModeSetRequest};
+use ganja_core::protocol::{Command, Event, PermissionId, PermissionMode, PermissionReply};
+use ganja_core::tool::Registry;
 use ganja_team::LEAD;
 use ganja_testkit::{RecorderTool, RunnerHarness, ScriptedProvider, drain, says, tool_call};
 use serde_json::json;
@@ -61,21 +59,12 @@ fn engine(
     let mut permissions = Permissions::default();
     permissions.set_baseline(rules);
 
-    Engine::new(
-        provider,
-        "recorder-model",
-        Arc::new(Registry::new(tools)),
-        permissions,
-    )
+    Engine::new(provider, "recorder-model", Arc::new(Registry::new(tools)), permissions)
 }
 
 /// A rule about one tool's every call.
 fn rule(tool: &str, action: Action) -> Rule {
-    Rule {
-        permission: tool.to_owned(),
-        pattern: "*".to_owned(),
-        action,
-    }
+    Rule { permission: tool.to_owned(), pattern: "*".to_owned(), action }
 }
 
 async fn prompt(engine: &Engine, text: &str) {
@@ -125,10 +114,7 @@ async fn quiet(
             let Some(event) = events.next().await else {
                 return;
             };
-            assert!(
-                !forbidden(&event),
-                "{what}, and it should not have: {event:?}"
-            );
+            assert!(!forbidden(&event), "{what}, and it should not have: {event:?}");
             seen.push(event);
         }
     };
@@ -174,9 +160,7 @@ async fn a_mode_set_does_not_change_the_running_turn_and_bites_at_the_next_one()
     // effort would be refused as `Busy`: what sends this may be a lead
     // answering a teammate mid-turn.
     engine
-        .send(Command::SetPermissionMode {
-            mode: PermissionMode::Bypass,
-        })
+        .send(Command::SetPermissionMode { mode: PermissionMode::Bypass })
         .await
         .expect("a permission mode is taken while a turn streams");
     assert_eq!(
@@ -197,26 +181,17 @@ async fn a_mode_set_does_not_change_the_running_turn_and_bites_at_the_next_one()
     assert!(
         seen.iter().any(|event| matches!(
             event,
-            Event::PermissionModeChanged {
-                mode: PermissionMode::Bypass,
-                ..
-            }
+            Event::PermissionModeChanged { mode: PermissionMode::Bypass, .. }
         )),
         "the acceptance is announced when it happens, not when it bites: {seen:?}"
     );
     assert!(
-        calls
-            .lock()
-            .expect("the call log is never poisoned")
-            .is_empty(),
+        calls.lock().expect("the call log is never poisoned").is_empty(),
         "the gated call has not run: it is still waiting on an answer"
     );
 
     engine
-        .send(Command::ReplyPermission {
-            id: waiting,
-            reply: PermissionReply::Once,
-        })
+        .send(Command::ReplyPermission { id: waiting, reply: PermissionReply::Once })
         .await
         .expect("the dialog this turn raised is answerable");
     drain(&mut events).await;
@@ -237,18 +212,13 @@ async fn a_mode_set_does_not_change_the_running_turn_and_bites_at_the_next_one()
         .expect("a bypassed turn answers its own dialog instead of waiting for a person");
 
     assert!(
-        second
-            .iter()
-            .any(|event| matches!(event, Event::PermissionRequested { .. })),
+        second.iter().any(|event| matches!(event, Event::PermissionRequested { .. })),
         "a bypass answers the dialog rather than hiding it: {second:?}"
     );
     assert!(
         second.iter().any(|event| matches!(
             event,
-            Event::PermissionReplied {
-                reply: PermissionReply::Once,
-                ..
-            }
+            Event::PermissionReplied { reply: PermissionReply::Once, .. }
         )),
         "and it answers `once`, which remembers nothing: {second:?}"
     );
@@ -277,25 +247,18 @@ async fn a_bypassed_turn_does_not_launder_a_denied_call() {
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
-        .send(Command::SetPermissionMode {
-            mode: PermissionMode::Bypass,
-        })
+        .send(Command::SetPermissionMode { mode: PermissionMode::Bypass })
         .await
         .expect("an idle engine takes a permission mode too");
     prompt(&engine, "run the refused call").await;
     let seen = drain(&mut events).await;
 
     assert!(
-        !seen
-            .iter()
-            .any(|event| matches!(event, Event::PermissionRequested { .. })),
+        !seen.iter().any(|event| matches!(event, Event::PermissionRequested { .. })),
         "a denied call raises no dialog, so a bypass has nothing to answer: {seen:?}"
     );
     assert!(
-        calls
-            .lock()
-            .expect("the call log is never poisoned")
-            .is_empty(),
+        calls.lock().expect("the call log is never poisoned").is_empty(),
         "and the call itself never ran"
     );
 }
@@ -312,17 +275,12 @@ async fn a_lead_frame_maps_to_the_command_and_a_peer_frame_does_not() {
     // The birth queue is a lossless lane, so somebody has to read it; this test
     // reads it itself, because the announcement it asserts on arrives there.
     let mut harness = RunnerHarness::new(false).await;
-    let mut events = harness
-        .events
-        .take()
-        .expect("an undrained harness hands the birth queue to the test");
+    let mut events =
+        harness.events.take().expect("an undrained harness hands the birth queue to the test");
     let arrives = |from: &str, mode: &str| {
         harness.arrives(
             from,
-            &Frame::ModeSetRequest(ModeSetRequest {
-                mode: mode.to_owned(),
-                from: from.to_owned(),
-            }),
+            &Frame::ModeSetRequest(ModeSetRequest { mode: mode.to_owned(), from: from.to_owned() }),
         );
     };
 

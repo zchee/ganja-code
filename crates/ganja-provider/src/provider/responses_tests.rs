@@ -10,16 +10,14 @@ use super::{
     OPENAI_CAP, ORIGINATOR, ORIGINATOR_HEADER, ResponsesProvider, SEAT_ROSTER,
     SUBSCRIPTION_DEFAULT, alias, generation, reauth, seals_reasoning, serves, summarized,
 };
-use crate::{
-    auth::{self, AuthError, OauthCredential, RefreshOauth},
-    catalog,
-    protocol::{FinishReason, Message, Part, PartBody, PartId, ToolState, Usage},
-    provider::{
-        ChatRequest, CredentialSource, NO_RESULT, PROVIDERS, Presented, Provider as _,
-        ProviderError, ProviderEvent, Resolved, openai, openrouter, replay, splice_effort,
-    },
-    tool::ToolDefinition,
+use crate::auth::{self, AuthError, OauthCredential, RefreshOauth};
+use crate::catalog;
+use crate::protocol::{FinishReason, Message, Part, PartBody, PartId, ToolState, Usage};
+use crate::provider::{
+    ChatRequest, CredentialSource, NO_RESULT, PROVIDERS, Presented, Provider as _, ProviderError,
+    ProviderEvent, Resolved, openai, openrouter, replay, splice_effort,
 };
+use crate::tool::ToolDefinition;
 
 /// A token no other value in this module could be mistaken for.
 const ACCESS: &str = "at-responses-canary-7717";
@@ -54,9 +52,7 @@ impl RefreshOauth for NeverRenews {
 
 /// Runs a recorded transcript through the real splitter and mapper.
 async fn events(transcript: &'static str) -> Vec<ProviderEvent> {
-    replay(transcript, CancellationToken::new(), Mapping::default())
-        .collect()
-        .await
+    replay(transcript, CancellationToken::new(), Mapping::default()).collect().await
 }
 
 /// The same, read by the mapper a gateway turn installs: nothing sealed,
@@ -108,11 +104,8 @@ fn presenting(secret: &str, account_id: Option<&str>) -> Resolved {
 
 /// A subscription provider pointed somewhere a token may travel.
 fn provider() -> ResponsesProvider {
-    ResponsesProvider::at(
-        "http://127.0.0.1:8080/backend-api/codex",
-        Arc::new(NeverRenews),
-    )
-    .expect("loopback may carry a token")
+    ResponsesProvider::at("http://127.0.0.1:8080/backend-api/codex", Arc::new(NeverRenews))
+        .expect("loopback may carry a token")
 }
 
 /// The same wire against the platform, authenticated by a key.
@@ -145,10 +138,7 @@ fn routed() -> ResponsesProvider {
 
 /// One turn's worth of request against the gateway.
 fn gateway_ask() -> ChatRequest {
-    ChatRequest {
-        model: GATEWAY_MODEL.to_owned(),
-        ..ask()
-    }
+    ChatRequest { model: GATEWAY_MODEL.to_owned(), ..ask() }
 }
 
 /// One turn's worth of request, on a model this backend serves — anything
@@ -166,10 +156,7 @@ fn ask() -> ChatRequest {
 #[test]
 fn the_subscription_wire_is_the_same_vendor_as_the_key_one() {
     assert_eq!(ID, openai::ID, "one provider id, or a turn is priced wrong");
-    assert!(
-        PROVIDERS.contains(&ID),
-        "a provider nothing can select is a provider nobody has"
-    );
+    assert!(PROVIDERS.contains(&ID), "a provider nothing can select is a provider nobody has");
     assert_eq!(ID, auth::openai::PROVIDER_ID, "and one credential to read");
     assert_eq!(
         format!("{DEFAULT_BASE_URL}/responses"),
@@ -191,20 +178,12 @@ fn the_subscription_wire_is_the_same_vendor_as_the_key_one() {
 /// on the code that builds it.
 #[test]
 fn every_subscription_request_names_the_account_the_originator_and_the_agent() {
-    let built = provider()
-        .request(&resolved(Some(ACCOUNT)), &ask())
-        .expect("the request builds");
+    let built = provider().request(&resolved(Some(ACCOUNT)), &ask()).expect("the request builds");
     let headers = built.headers();
     let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
 
-    assert_eq!(
-        built.url().as_str(),
-        "http://127.0.0.1:8080/backend-api/codex/responses"
-    );
-    assert_eq!(
-        header("authorization"),
-        Some(format!("Bearer {ACCESS}")).as_deref()
-    );
+    assert_eq!(built.url().as_str(), "http://127.0.0.1:8080/backend-api/codex/responses");
+    assert_eq!(header("authorization"), Some(format!("Bearer {ACCESS}")).as_deref());
     assert_eq!(
         header(ACCOUNT_HEADER),
         Some(ACCOUNT),
@@ -223,9 +202,7 @@ fn every_subscription_request_names_the_account_the_originator_and_the_agent() {
     // A credential naming no account still makes a request: most people
     // have exactly one, and `auth::openai` reads a token with no such claim
     // as a login that worked.
-    let anonymous = provider()
-        .request(&resolved(None), &ask())
-        .expect("the request builds");
+    let anonymous = provider().request(&resolved(None), &ask()).expect("the request builds");
     assert!(
         !anonymous.headers().contains_key(ACCOUNT_HEADER),
         "an account nobody named must not travel as an empty string"
@@ -248,9 +225,8 @@ fn a_key_request_carries_the_bearer_and_none_of_the_subscription_headers() {
     // resolves with `account_id: None` — but the header is skipped by
     // *backend* rather than by whether one was resolved, so handing it one
     // anyway proves the branch instead of the coincidence.
-    let built = keyed()
-        .request(&presenting(KEY, Some(ACCOUNT)), &ask())
-        .expect("the request builds");
+    let built =
+        keyed().request(&presenting(KEY, Some(ACCOUNT)), &ask()).expect("the request builds");
     let headers = built.headers();
 
     assert_eq!(
@@ -260,9 +236,7 @@ fn a_key_request_carries_the_bearer_and_none_of_the_subscription_headers() {
              at it"
     );
     assert_eq!(
-        headers
-            .get("authorization")
-            .and_then(|value| value.to_str().ok()),
+        headers.get("authorization").and_then(|value| value.to_str().ok()),
         Some(format!("Bearer {KEY}")).as_deref()
     );
     for absent in [ACCOUNT_HEADER, ORIGINATOR_HEADER, BETA_HEADER, "user-agent"] {
@@ -300,9 +274,7 @@ fn an_openrouter_request_carries_only_what_that_vendor_documents() {
         "the vendor's own Responses path, under whatever base URL points at it"
     );
     assert_eq!(
-        headers
-            .get("authorization")
-            .and_then(|value| value.to_str().ok()),
+        headers.get("authorization").and_then(|value| value.to_str().ok()),
         Some(format!("Bearer {KEY}")).as_deref(),
         "the reference asks for a bearer and a content type, and this is the \
              half that is a credential"
@@ -356,9 +328,8 @@ fn a_config_named_request_carries_its_headers_and_asks_for_nothing_sealed() {
     .expect("loopback may carry a key")
     .with_headers(declared);
 
-    let built = provider
-        .request(&presenting(KEY, Some(ACCOUNT)), &ask())
-        .expect("the request builds");
+    let built =
+        provider.request(&presenting(KEY, Some(ACCOUNT)), &ask()).expect("the request builds");
     let headers = built.headers();
 
     assert_eq!(
@@ -367,16 +338,12 @@ fn a_config_named_request_carries_its_headers_and_asks_for_nothing_sealed() {
         "the endpoint the entry named, under the wire's own path"
     );
     assert_eq!(
-        headers
-            .get("x-custom")
-            .and_then(|value| value.to_str().ok()),
+        headers.get("x-custom").and_then(|value| value.to_str().ok()),
         Some("1"),
         "the entry's own headers travel"
     );
     assert_eq!(
-        headers
-            .get("authorization")
-            .and_then(|value| value.to_str().ok()),
+        headers.get("authorization").and_then(|value| value.to_str().ok()),
         Some(format!("Bearer {KEY}")).as_deref()
     );
     for absent in [ACCOUNT_HEADER, ORIGINATOR_HEADER, BETA_HEADER, "user-agent"] {
@@ -457,10 +424,7 @@ fn an_openrouter_turn_neither_asks_for_sealed_reasoning_nor_replays_it() {
 
     let body = serde_json::to_value(Body::new(&request, Backend::OpenRouter))
         .expect("the body serializes");
-    assert!(
-        body.get("include").is_none(),
-        "nothing was asked for: {body}"
-    );
+    assert!(body.get("include").is_none(), "nothing was asked for: {body}");
     assert!(
         !body["input"]
             .as_array()
@@ -474,9 +438,7 @@ fn an_openrouter_turn_neither_asks_for_sealed_reasoning_nor_replays_it() {
     // backend whose vendor documents the pairing, does both — so what the
     // assertions above prove is the backend and not the fixture.
     let mut owned = Message::assistant("gpt");
-    owned
-        .parts
-        .push(Part::reasoning(ID, "rs_1", Some("sealed".to_owned())));
+    owned.parts.push(Part::reasoning(ID, "rs_1", Some("sealed".to_owned())));
     let mut control = ask();
     control.messages.push(owned);
 
@@ -521,11 +483,7 @@ fn the_backend_that_replays_sealed_state_is_the_one_that_records_it() {
 /// reference does document `reasoning` with effort levels.
 #[test]
 fn an_openrouter_request_defaults_no_summary_and_still_carries_an_effort() {
-    let bare = summarized(
-        &serde_json::Map::new(),
-        "openai/gpt-5.4",
-        Backend::OpenRouter,
-    );
+    let bare = summarized(&serde_json::Map::new(), "openai/gpt-5.4", Backend::OpenRouter);
     assert!(
         bare.is_empty(),
         "an id that merely *contains* this vendor's model family is not this \
@@ -533,10 +491,8 @@ fn an_openrouter_request_defaults_no_summary_and_still_carries_an_effort() {
     );
 
     let mut request = gateway_ask();
-    request.effort_options = json!({"reasoning": {"effort": "high"}})
-        .as_object()
-        .cloned()
-        .expect("object fixture");
+    request.effort_options =
+        json!({"reasoning": {"effort": "high"}}).as_object().cloned().expect("object fixture");
     let own = Body::new(&request, Backend::OpenRouter);
     let options = summarized(&request.effort_options, &request.model, Backend::OpenRouter);
     let body =
@@ -560,12 +516,7 @@ fn gateway_row() -> catalog::ModelInfo {
         context_window: 1_050_000,
         max_output: 128_000,
         input_limit: None,
-        pricing: catalog::Pricing {
-            input: 2.5,
-            output: 15.0,
-            cache_read: 0.25,
-            cache_write: None,
-        },
+        pricing: catalog::Pricing { input: 2.5, output: 15.0, cache_read: 0.25, cache_write: None },
         family: None,
         release_date: None,
         tool_call: true,
@@ -646,11 +597,7 @@ fn an_effort_adds_reasoning_but_cannot_claim_store() {
         json!({"effort": "high"}),
         "a key the wire does not write arrives verbatim"
     );
-    assert_eq!(
-        body["store"],
-        json!(false),
-        "a key the wire writes resolves to the wire"
-    );
+    assert_eq!(body["store"], json!(false), "a key the wire writes resolves to the wire");
     assert_eq!(body["model"], json!(SERVED));
 }
 
@@ -660,22 +607,11 @@ fn an_effort_adds_reasoning_but_cannot_claim_store() {
 /// `reasoning` field to be refused over.
 #[test]
 fn a_reasoning_model_is_asked_to_show_its_thinking() {
-    let cases: Vec<(
-        &str,
-        serde_json::Map<String, serde_json::Value>,
-        serde_json::Value,
-    )> = vec![
-        (
-            "bare request asks for auto",
-            serde_json::Map::new(),
-            json!({"summary": "auto"}),
-        ),
+    let cases: Vec<(&str, serde_json::Map<String, serde_json::Value>, serde_json::Value)> = vec![
+        ("bare request asks for auto", serde_json::Map::new(), json!({"summary": "auto"})),
         (
             "an effort's own keys survive beside the default",
-            json!({"reasoning": {"effort": "high"}})
-                .as_object()
-                .cloned()
-                .expect("object fixture"),
+            json!({"reasoning": {"effort": "high"}}).as_object().cloned().expect("object fixture"),
             json!({"effort": "high", "summary": "auto"}),
         ),
         (
@@ -777,9 +713,7 @@ fn a_chat_completions_only_model_is_refused_on_both_backends() {
     // replaces that table with upstream's own file, and this list has to
     // keep applying to whatever it brings.
     assert!(
-        CHAT_COMPLETIONS_ONLY
-            .iter()
-            .all(|alias| catalog::model(alias).is_none()),
+        CHAT_COMPLETIONS_ONLY.iter().all(|alias| catalog::model(alias).is_none()),
         "a row the snapshot now carries wants deciding here as well as at \
              the wire"
     );
@@ -789,16 +723,11 @@ fn a_chat_completions_only_model_is_refused_on_both_backends() {
 /// to just because the credential arrived as a token rather than as a key.
 #[test]
 fn an_access_token_may_not_be_sent_anywhere_a_key_could_not_be() {
-    let refused = ResponsesProvider::at(
-        "http://chatgpt.com/backend-api/codex",
-        Arc::new(NeverRenews),
-    )
-    .expect_err("plain http to a public host puts the token on the wire in the clear");
+    let refused =
+        ResponsesProvider::at("http://chatgpt.com/backend-api/codex", Arc::new(NeverRenews))
+            .expect_err("plain http to a public host puts the token on the wire in the clear");
 
-    assert!(
-        matches!(refused, ProviderError::Transport(_)),
-        "{refused:?}"
-    );
+    assert!(matches!(refused, ProviderError::Transport(_)), "{refused:?}");
     assert!(
         ResponsesProvider::at("http://127.0.0.1:8080", Arc::new(NeverRenews)).is_ok(),
         "loopback never reaches a network, which is what a test depends on"
@@ -869,10 +798,7 @@ fn a_subscription_session_that_names_no_model_gets_one_the_seat_can_run() {
 #[test]
 fn every_model_the_seat_offers_is_one_the_seat_serves() {
     for offered in SEAT_ROSTER {
-        assert!(
-            serves(offered),
-            "the roster offers `{offered}`, which this backend refuses"
-        );
+        assert!(serves(offered), "the roster offers `{offered}`, which this backend refuses");
     }
 }
 
@@ -884,10 +810,7 @@ fn every_model_the_seat_offers_is_one_the_seat_serves() {
 #[test]
 fn a_model_the_roster_leaves_out_is_still_one_an_explicit_request_may_name() {
     for unoffered in ["gpt-5.4", "gpt-5.4-mini"] {
-        assert!(
-            !SEAT_ROSTER.contains(&unoffered),
-            "`{unoffered}` is deliberately unoffered"
-        );
+        assert!(!SEAT_ROSTER.contains(&unoffered), "`{unoffered}` is deliberately unoffered");
         assert!(
             serves(unoffered),
             "and deliberately still servable: the pin is an offer, not a gate"
@@ -912,13 +835,10 @@ fn a_transcript_held_thought_is_absent_from_the_body_while_the_sealed_half_trave
     let mut turn = Message::assistant(SERVED);
     turn.parts.push(Part::reasoning_text(THOUGHT));
     turn.parts.push(Part::text("Hello!"));
-    turn.parts
-        .push(Part::reasoning(ID, "rs_1", Some(SEALED.to_owned())));
+    turn.parts.push(Part::reasoning(ID, "rs_1", Some(SEALED.to_owned())));
 
-    let request = ChatRequest {
-        messages: vec![Message::user("hi"), turn, Message::user("again")],
-        ..ask()
-    };
+    let request =
+        ChatRequest { messages: vec![Message::user("hi"), turn, Message::user("again")], ..ask() };
     let body = serde_json::to_string(&Body::new(&request, Backend::Platform))
         .expect("the body serializes");
 
@@ -932,10 +852,7 @@ fn a_transcript_held_thought_is_absent_from_the_body_while_the_sealed_half_trave
              a build that dropped it starts every reasoning turn from nothing \
              — this test must fail if the split is collapsed either way: {body}"
     );
-    assert!(
-        body.contains("Hello!"),
-        "the reply still has to be sent: {body}"
-    );
+    assert!(body.contains("Hello!"), "the reply still has to be sent: {body}");
 }
 
 /// The field the live pass died on. A body without it is answered
@@ -970,24 +887,16 @@ fn every_body_tells_the_backend_to_keep_nothing_and_to_seal_what_it_thought() {
 /// deliberately still asked, because that is what the pin's literal does.
 #[test]
 fn asking_for_sealed_reasoning_is_a_question_about_the_model() {
-    for reasons in [
-        "gpt-5.4",
-        "gpt-5.5",
-        "gpt-5.6",
-        "gpt-5.3-codex-spark",
-        "GPT-5.4-MINI",
-        "gpt-5.5-pro",
-    ] {
+    for reasons in
+        ["gpt-5.4", "gpt-5.5", "gpt-5.6", "gpt-5.3-codex-spark", "GPT-5.4-MINI", "gpt-5.5-pro"]
+    {
         assert!(seals_reasoning(reasons), "{reasons} reasons");
     }
     for plain in ["gpt-5-chat-latest", "gpt-5-pro", "gpt-4.1", "o3", "claude"] {
         assert!(!seals_reasoning(plain), "{plain} has nothing to seal");
     }
 
-    let plain = ChatRequest {
-        model: "gpt-4.1".to_owned(),
-        ..ask()
-    };
+    let plain = ChatRequest { model: "gpt-4.1".to_owned(), ..ask() };
     let body =
         serde_json::to_value(Body::new(&plain, Backend::Platform)).expect("the body serializes");
     assert!(
@@ -1006,13 +915,8 @@ fn asking_for_sealed_reasoning_is_a_question_about_the_model() {
 #[test]
 fn a_sealed_thought_is_replayed_before_the_calls_it_produced() {
     let mut assistant = Message::assistant("gpt-test");
-    assistant.parts.push(Part {
-        id: PartId::ascending(),
-        body: PartBody::StepStart,
-    });
-    assistant
-        .parts
-        .push(Part::reasoning(ID, "rs_1", Some("sealed-state".to_owned())));
+    assistant.parts.push(Part { id: PartId::ascending(), body: PartBody::StepStart });
+    assistant.parts.push(Part::reasoning(ID, "rs_1", Some("sealed-state".to_owned())));
     assistant.parts.push(tool_part(
         "call_read",
         "read",
@@ -1115,10 +1019,7 @@ fn an_attachment_becomes_the_input_item_its_mime_names() {
 #[test]
 fn reasoning_with_nothing_to_replay_never_reaches_the_wire() {
     let mut assistant = Message::assistant("gpt-test");
-    assistant.parts.push(Part {
-        id: PartId::ascending(),
-        body: PartBody::StepStart,
-    });
+    assistant.parts.push(Part { id: PartId::ascending(), body: PartBody::StepStart });
     // 1. State this build does not hold — an item that arrived without
     //    any, or a stored record that would not decode. Upstream drops it
     //    at `openai-responses.ts:451` and so does this.
@@ -1130,12 +1031,8 @@ fn reasoning_with_nothing_to_replay_never_reaches_the_wire() {
         Some("someone-elses-state".to_owned()),
     ));
     // 3. The same item twice, which is one item said twice.
-    assistant
-        .parts
-        .push(Part::reasoning(ID, "rs_1", Some("sealed-state".to_owned())));
-    assistant
-        .parts
-        .push(Part::reasoning(ID, "rs_1", Some("sealed-state".to_owned())));
+    assistant.parts.push(Part::reasoning(ID, "rs_1", Some("sealed-state".to_owned())));
+    assistant.parts.push(Part::reasoning(ID, "rs_1", Some("sealed-state".to_owned())));
 
     let request = ChatRequest {
         effort_options: Default::default(),
@@ -1182,10 +1079,7 @@ async fn a_second_summary_part_breaks_the_thought_before_it() {
     let thoughts: Vec<&ProviderEvent> = seen
         .iter()
         .filter(|event| {
-            matches!(
-                event,
-                ProviderEvent::ReasoningDelta(_) | ProviderEvent::ReasoningBreak
-            )
+            matches!(event, ProviderEvent::ReasoningDelta(_) | ProviderEvent::ReasoningBreak)
         })
         .collect();
     assert_eq!(
@@ -1221,10 +1115,7 @@ async fn a_reasoning_text_stream_breaks_at_its_own_block_close() {
     let thoughts: Vec<&ProviderEvent> = seen
         .iter()
         .filter(|event| {
-            matches!(
-                event,
-                ProviderEvent::ReasoningDelta(_) | ProviderEvent::ReasoningBreak
-            )
+            matches!(event, ProviderEvent::ReasoningDelta(_) | ProviderEvent::ReasoningBreak)
         })
         .collect();
     assert_eq!(
@@ -1263,9 +1154,7 @@ async fn a_reasoning_item_is_taken_when_it_closes_and_only_if_it_was_sealed() {
         "the sealed state has to reach the loop or nothing can replay it: {seen:?}"
     );
     assert_eq!(
-        seen.iter()
-            .filter(|event| matches!(event, ProviderEvent::ReasoningState { .. }))
-            .count(),
+        seen.iter().filter(|event| matches!(event, ProviderEvent::ReasoningState { .. })).count(),
         1,
         "the item opened once and closed once: {seen:?}"
     );
@@ -1297,9 +1186,7 @@ async fn a_gateways_reasoning_delta_is_read_as_thinking() {
     assert_eq!(thinking(&seen), "First, the year. Then the difference.");
     assert_eq!(text(&seen), "Yes.");
     assert!(
-        !seen
-            .iter()
-            .any(|event| matches!(event, ProviderEvent::ReasoningState { .. })),
+        !seen.iter().any(|event| matches!(event, ProviderEvent::ReasoningState { .. })),
         "readable thinking is not sealed state, and this backend records \
              none of the latter: {seen:?}"
     );
@@ -1326,9 +1213,7 @@ async fn both_reasoning_spellings_on_one_stream_render_one_train_of_thought() {
 
     assert_eq!(thinking(&seen), "Thinking it through.");
     assert_eq!(
-        seen.iter()
-            .filter(|event| matches!(event, ProviderEvent::ReasoningDelta(_)))
-            .count(),
+        seen.iter().filter(|event| matches!(event, ProviderEvent::ReasoningDelta(_))).count(),
         2,
         "the relayed copy is dropped rather than appended: {seen:?}"
     );
@@ -1364,10 +1249,7 @@ async fn a_summary_that_was_never_streamed_still_reaches_the_pane() {
     let thoughts: Vec<&ProviderEvent> = seen
         .iter()
         .filter(|event| {
-            matches!(
-                event,
-                ProviderEvent::ReasoningDelta(_) | ProviderEvent::ReasoningBreak
-            )
+            matches!(event, ProviderEvent::ReasoningDelta(_) | ProviderEvent::ReasoningBreak)
         })
         .collect();
     assert_eq!(
@@ -1380,9 +1262,7 @@ async fn a_summary_that_was_never_streamed_still_reaches_the_pane() {
         "each block is a thought of its own: {seen:?}"
     );
     assert!(
-        !seen
-            .iter()
-            .any(|event| matches!(event, ProviderEvent::ReasoningState { .. })),
+        !seen.iter().any(|event| matches!(event, ProviderEvent::ReasoningState { .. })),
         "a summary is not state, and this backend still seals nothing: {seen:?}"
     );
 
@@ -1463,9 +1343,7 @@ async fn a_reasoning_item_that_was_never_sealed_leaves_no_trace() {
         let seen = events(transcript).await;
 
         assert!(
-            !seen
-                .iter()
-                .any(|event| matches!(event, ProviderEvent::ReasoningState { .. })),
+            !seen.iter().any(|event| matches!(event, ProviderEvent::ReasoningState { .. })),
             "{item} has no state to replay: {seen:?}"
         );
         assert!(
@@ -1494,21 +1372,14 @@ fn the_backend_serves_a_pinned_list_and_the_order_of_the_rules_is_the_rule() {
     );
 
     for refused in ["gpt-5.6", "gpt-5.5-pro", "gpt-5.4-nano", "gpt-5.3-codex"] {
-        assert!(
-            !serves(refused),
-            "{refused} is refused by the backend and has to be refused here"
-        );
+        assert!(!serves(refused), "{refused} is refused by the backend and has to be refused here");
     }
 
     // The forward hedge: a row the catalog gains later is reachable without
     // a code change, and anything that is not a `gpt-N.M` at all is not.
     assert!(serves("gpt-5.7") && serves("gpt-6.0-codex"));
     assert!(!serves("gpt-5") && !serves("o3") && !serves("claude-sonnet-5"));
-    assert_eq!(
-        generation("gpt-5.4-mini"),
-        Some(5.4),
-        "the halves are the id's"
-    );
+    assert_eq!(generation("gpt-5.4-mini"), Some(5.4), "the halves are the id's");
     assert_eq!(generation("gpt-5"), None, "the fraction is required");
 }
 
@@ -1520,28 +1391,16 @@ async fn an_unsupported_model_is_refused_here_naming_what_the_seat_does_serve() 
     // would not compile; the match is the same assertion said a way that
     // does, as elsewhere in this suite.
     let Err(refused) = provider()
-        .stream(
-            ChatRequest {
-                model: REFUSED.to_owned(),
-                ..ask()
-            },
-            CancellationToken::new(),
-        )
+        .stream(ChatRequest { model: REFUSED.to_owned(), ..ask() }, CancellationToken::new())
         .await
     else {
         panic!("a model this backend will not serve is not a turn to take");
     };
     let said = refused.to_string();
 
-    assert!(
-        said.contains(REFUSED),
-        "it has to name what was asked for: {said}"
-    );
+    assert!(said.contains(REFUSED), "it has to name what was asked for: {said}");
     for served in ALLOWED_MODELS {
-        assert!(
-            said.contains(served),
-            "the served set is the part that is actionable: {said}"
-        );
+        assert!(said.contains(served), "the served set is the part that is actionable: {said}");
     }
     assert!(
         said.contains(openai::API_KEY_ENV),
@@ -1561,10 +1420,7 @@ fn a_refused_credential_says_which_login_repairs_it() {
     for status in [401, 403] {
         let named = reauth(
             Backend::Codex,
-            ProviderError::Status {
-                status,
-                message: "invalid token".to_owned(),
-            },
+            ProviderError::Status { status, message: "invalid token".to_owned() },
         );
 
         assert!(matches!(named, ProviderError::Auth(_)), "{named:?}");
@@ -1583,10 +1439,7 @@ fn a_refused_credential_says_which_login_repairs_it() {
         // session cannot even reach while the key is exported.
         let keyed = reauth(
             Backend::Platform,
-            ProviderError::Status {
-                status,
-                message: "invalid token".to_owned(),
-            },
+            ProviderError::Status { status, message: "invalid token".to_owned() },
         );
         assert!(
             matches!(keyed, ProviderError::Status { .. }),
@@ -1597,10 +1450,7 @@ fn a_refused_credential_says_which_login_repairs_it() {
     // Everything else is left as it was: a rate limit is not a login.
     let limited = reauth(
         Backend::Codex,
-        ProviderError::Status {
-            status: 429,
-            message: "slow down".to_owned(),
-        },
+        ProviderError::Status { status: 429, message: "slow down".to_owned() },
     );
     assert!(
         matches!(limited, ProviderError::Status { status: 429, .. }) && limited.is_retryable(),
@@ -1647,19 +1497,14 @@ const REFUSED_NAME: &str = "mcp__plugin:mcp-gemini-search:mcp-gemini-search__dee
 
 /// [`a_tool`] under the name that got a live turn killed.
 fn a_refused_tool() -> ToolDefinition {
-    ToolDefinition {
-        name: REFUSED_NAME.to_owned(),
-        ..a_tool()
-    }
+    ToolDefinition { name: REFUSED_NAME.to_owned(), ..a_tool() }
 }
 
 /// Whether `name` is one this API's `^[a-zA-Z0-9_-]{1,64}$` accepts.
 fn conforms(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= OPENAI_CAP
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+        && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 #[test]
@@ -1674,14 +1519,9 @@ fn a_tool_name_this_api_refuses_is_advertised_under_a_conforming_alias() {
 
     let body = serde_json::to_value(Body::new(&request, Backend::OpenRouter))
         .expect("the body serializes");
-    let advertised = body["tools"][0]["name"]
-        .as_str()
-        .expect("the tool is advertised");
+    let advertised = body["tools"][0]["name"].as_str().expect("the tool is advertised");
 
-    assert_ne!(
-        advertised, REFUSED_NAME,
-        "the refused name must not go out again"
-    );
+    assert_ne!(advertised, REFUSED_NAME, "the refused name must not go out again");
     assert!(conforms(advertised), "{advertised} is still refusable");
 }
 
@@ -1754,10 +1594,7 @@ fn a_completed_call_replays_under_the_same_alias_the_roster_advertises() {
         .find(|item| item["type"] == "function_call")
         .expect("the replayed call is there");
 
-    assert!(
-        conforms(advertised.as_str().expect("a name")),
-        "got {advertised}"
-    );
+    assert!(conforms(advertised.as_str().expect("a name")), "got {advertised}");
     assert_eq!(
         called["name"], *advertised,
         "the replayed call has to name exactly what the roster named: {body}"
@@ -1815,10 +1652,7 @@ fn a_request_advertises_the_tools_it_was_given() {
 ///   say, and the failure it would cause is a roster nothing ever calls.
 #[test]
 fn an_openrouter_tool_roster_is_the_shape_that_vendors_reference_documents() {
-    let request = ChatRequest {
-        tools: vec![a_tool()],
-        ..gateway_ask()
-    };
+    let request = ChatRequest { tools: vec![a_tool()], ..gateway_ask() };
     let body = serde_json::to_value(Body::new(&request, Backend::OpenRouter))
         .expect("the body serializes");
 
@@ -1851,20 +1685,14 @@ fn an_openrouter_tool_roster_is_the_shape_that_vendors_reference_documents() {
     // an absent roster is a choice about nothing.
     let bare = serde_json::to_value(Body::new(&gateway_ask(), Backend::OpenRouter))
         .expect("the body serializes");
-    assert!(
-        bare.get("tools").is_none() && bare.get("tool_choice").is_none(),
-        "got {bare}"
-    );
+    assert!(bare.get("tools").is_none() && bare.get("tool_choice").is_none(), "got {bare}");
 
     // And the two OpenAI backends are untouched: their request is the Codex
     // CLI's, which sends no `tool_choice` and has been served without one on
     // every turn this build has taken.
     for backend in [Backend::Codex, Backend::Platform] {
         let owned = serde_json::to_value(Body::new(
-            &ChatRequest {
-                tools: vec![a_tool()],
-                ..ask()
-            },
+            &ChatRequest { tools: vec![a_tool()], ..ask() },
             backend,
         ))
         .expect("the body serializes");
@@ -1884,10 +1712,7 @@ fn an_openrouter_tool_roster_is_the_shape_that_vendors_reference_documents() {
 /// carries every function tool it had.
 #[test]
 fn a_configured_gateway_asks_for_its_own_tools_beside_this_builds() {
-    let request = ChatRequest {
-        tools: vec![a_tool()],
-        ..gateway_ask()
-    };
+    let request = ChatRequest { tools: vec![a_tool()], ..gateway_ask() };
 
     let asked = Body::new(&request, Backend::OpenRouter)
         .serving(&["web_search".to_owned(), "datetime".to_owned()]);
@@ -1991,10 +1816,7 @@ fn the_server_tool_roster_is_the_one_that_vendor_publishes() {
 #[test]
 fn a_gateway_turn_replays_a_call_and_its_output_in_the_documented_pair() {
     let mut assistant = Message::assistant(GATEWAY_MODEL);
-    assistant.parts.push(Part {
-        id: PartId::ascending(),
-        body: PartBody::StepStart,
-    });
+    assistant.parts.push(Part { id: PartId::ascending(), body: PartBody::StepStart });
     assistant.parts.push(tool_part(
         "call_xyz789",
         "read",
@@ -2065,21 +1887,14 @@ async fn the_references_own_streaming_tool_sequence_opens_fills_and_closes_once(
     .await;
 
     assert_eq!(
-        seen.iter()
-            .filter(|event| !matches!(event, ProviderEvent::Usage(_)))
-            .collect::<Vec<_>>(),
+        seen.iter().filter(|event| !matches!(event, ProviderEvent::Usage(_))).collect::<Vec<_>>(),
         vec![
-            &ProviderEvent::ToolCallStart {
-                id: "call_xyz789".to_owned(),
-                name: "read".to_owned(),
-            },
+            &ProviderEvent::ToolCallStart { id: "call_xyz789".to_owned(), name: "read".to_owned() },
             &ProviderEvent::ToolCallDelta {
                 id: "call_xyz789".to_owned(),
                 json: r#"{"filePath":"src/main.rs"}"#.to_owned(),
             },
-            &ProviderEvent::ToolCallEnd {
-                id: "call_xyz789".to_owned(),
-            },
+            &ProviderEvent::ToolCallEnd { id: "call_xyz789".to_owned() },
             &ProviderEvent::Finish(FinishReason::Completed),
         ],
         "got {seen:?}"
@@ -2138,9 +1953,7 @@ async fn a_gateway_run_tool_becomes_a_row_and_never_a_call_to_execute() {
     // Once: the opening frame announces structure, exactly as a reasoning
     // item's does, and a row minted there would be a claim about nothing.
     assert_eq!(
-        seen.iter()
-            .filter(|event| matches!(event, ProviderEvent::ServerTool { .. }))
-            .count(),
+        seen.iter().filter(|event| matches!(event, ProviderEvent::ServerTool { .. })).count(),
         1,
         "{seen:?}"
     );
@@ -2245,9 +2058,7 @@ async fn parallel_calls_in_one_response_keep_their_own_identities() {
              opened, or two concurrent calls trade arguments: {seen:?}"
     );
     assert_eq!(
-        seen.iter()
-            .filter(|event| matches!(event, ProviderEvent::ToolCallEnd { .. }))
-            .count(),
+        seen.iter().filter(|event| matches!(event, ProviderEvent::ToolCallEnd { .. })).count(),
         2,
         "each call ends once and on its own frame: {seen:?}"
     );
@@ -2271,11 +2082,7 @@ fn a_tool() -> ToolDefinition {
 fn tool_part(call_id: &str, tool: &str, state: ToolState) -> Part {
     Part {
         id: PartId::ascending(),
-        body: PartBody::Tool {
-            call_id: call_id.to_owned(),
-            tool: tool.to_owned(),
-            state,
-        },
+        body: PartBody::Tool { call_id: call_id.to_owned(), tool: tool.to_owned(), state },
     }
 }
 
@@ -2297,10 +2104,7 @@ fn completed(input: serde_json::Value, output: &str) -> ToolState {
 #[test]
 fn a_finished_call_is_sent_back_as_a_call_item_and_an_output_item() {
     let mut assistant = Message::assistant("gpt-test");
-    assistant.parts.push(Part {
-        id: PartId::ascending(),
-        body: PartBody::StepStart,
-    });
+    assistant.parts.push(Part { id: PartId::ascending(), body: PartBody::StepStart });
     assistant.parts.push(Part::text("Reading the file first."));
     assistant.parts.push(tool_part(
         "call_read",
@@ -2322,11 +2126,7 @@ fn a_finished_call_is_sent_back_as_a_call_item_and_an_output_item() {
         effort_options: Default::default(),
         model: "gpt-test".to_owned(),
         system: None,
-        messages: vec![
-            Message::user("read src/main.rs"),
-            assistant,
-            Message::user("thanks"),
-        ],
+        messages: vec![Message::user("read src/main.rs"), assistant, Message::user("thanks")],
         tools: vec![a_tool()],
     };
 
@@ -2394,14 +2194,9 @@ fn a_two_step_turn_is_sent_back_one_group_per_step() {
             "1 replacement",
         ),
     ] {
-        assistant.parts.push(Part {
-            id: PartId::ascending(),
-            body: PartBody::StepStart,
-        });
+        assistant.parts.push(Part { id: PartId::ascending(), body: PartBody::StepStart });
         assistant.parts.push(Part::text(text));
-        assistant
-            .parts
-            .push(tool_part(call_id, tool, completed(input, output)));
+        assistant.parts.push(tool_part(call_id, tool, completed(input, output)));
     }
 
     let request = ChatRequest {
@@ -2431,11 +2226,7 @@ fn a_two_step_turn_is_sent_back_one_group_per_step() {
 #[test]
 fn a_call_that_never_finished_is_answered_rather_than_left_dangling() {
     let mut assistant = Message::assistant("gpt-test");
-    assistant.parts.push(tool_part(
-        "call_read",
-        "read",
-        ToolState::Pending { input: None },
-    ));
+    assistant.parts.push(tool_part("call_read", "read", ToolState::Pending { input: None }));
 
     let request = ChatRequest {
         effort_options: Default::default(),
@@ -2496,9 +2287,7 @@ async fn a_happy_path_transcript_maps_to_text_reasoning_and_a_bill() {
 
     assert_eq!(text(&seen), "Hello, world!");
     assert!(
-        seen.contains(&ProviderEvent::ReasoningDelta(
-            "A greeting is enough.".to_owned()
-        )),
+        seen.contains(&ProviderEvent::ReasoningDelta("A greeting is enough.".to_owned())),
         "a summarized thought should not be dropped, got {seen:?}"
     );
     assert_eq!(
@@ -2566,12 +2355,7 @@ async fn a_cached_prompt_reports_only_its_fresh_half_as_input() {
                 r#""output_tokens":5}}}"#,
                 "\n\n",
             ),
-            Usage {
-                input_tokens: 0,
-                output_tokens: 5,
-                cache_read_tokens: 900,
-                ..Usage::default()
-            },
+            Usage { input_tokens: 0, output_tokens: 5, cache_read_tokens: 900, ..Usage::default() },
         ),
         (
             "a prompt nothing was cached for is fresh in full, thinking included \
@@ -2594,10 +2378,7 @@ async fn a_cached_prompt_reports_only_its_fresh_half_as_input() {
     for (name, transcript, expected) in cases {
         let seen = events(transcript).await;
 
-        assert!(
-            seen.contains(&ProviderEvent::Usage(expected)),
-            "{name}: got {seen:?}"
-        );
+        assert!(seen.contains(&ProviderEvent::Usage(expected)), "{name}: got {seen:?}");
     }
 }
 
@@ -2607,15 +2388,8 @@ async fn a_cached_prompt_reports_only_its_fresh_half_as_input() {
 #[test]
 fn a_cached_prompt_is_billed_once_rather_than_twice() {
     let model = catalog::model("gpt-5.6").expect("the catalog knows the model");
-    let corrected = Usage {
-        input_tokens: 200_000,
-        cache_read_tokens: 800_000,
-        ..Usage::default()
-    };
-    let doubled = Usage {
-        input_tokens: 1_000_000,
-        ..corrected
-    };
+    let corrected = Usage { input_tokens: 200_000, cache_read_tokens: 800_000, ..Usage::default() };
+    let doubled = Usage { input_tokens: 1_000_000, ..corrected };
 
     assert!(
         catalog::cost(&doubled, &model).total_usd
@@ -2661,10 +2435,7 @@ async fn tool_calls_are_opened_filled_and_closed() {
         vec![
             // The `call_id`, never the item id the deltas were keyed by:
             // this is the string a `function_call_output` has to quote.
-            &ProviderEvent::ToolCallStart {
-                id: "call_read".to_owned(),
-                name: "read".to_owned(),
-            },
+            &ProviderEvent::ToolCallStart { id: "call_read".to_owned(), name: "read".to_owned() },
             &ProviderEvent::ToolCallDelta {
                 id: "call_read".to_owned(),
                 json: "{\"file".to_owned(),
@@ -2674,9 +2445,7 @@ async fn tool_calls_are_opened_filled_and_closed() {
                 json: "Path\":\"src/main.rs\"}".to_owned(),
             },
             // This API *does* terminate a call, unlike chat completions.
-            &ProviderEvent::ToolCallEnd {
-                id: "call_read".to_owned(),
-            },
+            &ProviderEvent::ToolCallEnd { id: "call_read".to_owned() },
             &ProviderEvent::Finish(FinishReason::Completed),
         ],
         "got {seen:?}"
@@ -2725,10 +2494,7 @@ async fn a_body_that_stops_mid_reply_fails_rather_than_completing() {
 
     assert_eq!(text(&seen), "The connection drops right");
     assert!(
-        matches!(
-            seen.last(),
-            Some(ProviderEvent::Failed(ProviderError::Transport(_)))
-        ),
+        matches!(seen.last(), Some(ProviderEvent::Failed(ProviderError::Transport(_)))),
         "a dropped connection must never read as a finished turn, got {seen:?}"
     );
 }
@@ -2745,16 +2511,9 @@ async fn a_malformed_chunk_ends_the_turn_rather_than_being_skipped() {
     .await;
 
     assert_eq!(text(&seen), "Hello", "text before the break is kept");
-    assert_eq!(
-        seen.len(),
-        2,
-        "nothing after the broken chunk is read, got {seen:?}"
-    );
+    assert_eq!(seen.len(), 2, "nothing after the broken chunk is read, got {seen:?}");
     assert!(
-        matches!(
-            seen.last(),
-            Some(ProviderEvent::Failed(ProviderError::Parse(_)))
-        ),
+        matches!(seen.last(), Some(ProviderEvent::Failed(ProviderError::Parse(_)))),
         "got {seen:?}"
     );
 }
@@ -2807,10 +2566,7 @@ async fn a_cancel_mid_transcript_ends_the_stream_without_a_verdict() {
         Mapping::default(),
     ));
 
-    assert_eq!(
-        stream.next().await,
-        Some(ProviderEvent::TextDelta("one".to_owned()))
-    );
+    assert_eq!(stream.next().await, Some(ProviderEvent::TextDelta("one".to_owned())));
     cancel.cancel();
 
     let rest: Vec<ProviderEvent> = stream.collect().await;

@@ -69,28 +69,24 @@
 
 #![cfg(unix)]
 
-use std::{
-    env, fs,
-    os::unix::fs::PermissionsExt as _,
-    path::{Path, PathBuf},
-    process::Stdio,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::os::unix::fs::PermissionsExt as _;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use std::{env, fs};
 
 use futures::StreamExt as _;
-use ganja_core::{
-    Engine,
-    config::{DialogExpiry, InboundPolicy},
-    protocol::Part,
-    provider::fake::FakeProvider,
-    teammate::{TeammateRegistry, lead_inbox::LeadInbox},
-    tool::{Registry, registry},
-};
+use ganja_core::Engine;
+use ganja_core::config::{DialogExpiry, InboundPolicy};
+use ganja_core::protocol::Part;
+use ganja_core::provider::fake::FakeProvider;
+use ganja_core::teammate::TeammateRegistry;
+use ganja_core::teammate::lead_inbox::LeadInbox;
+use ganja_core::tool::{Registry, registry};
 use ganja_permission::Permissions;
-use ganja_protocol::{
-    Command, Event, HeldDecision, PartBody, PolicySource, Role, TeamView, team::PeerPayload,
-};
+use ganja_protocol::team::PeerPayload;
+use ganja_protocol::{Command, Event, HeldDecision, PartBody, PolicySource, Role, TeamView};
 use ganja_serve::{Handle, Listen, ServeConfig};
 use tempfile::TempDir;
 
@@ -178,16 +174,9 @@ fn receiving_engine(
     // does once it holds the value.
     .with_inbound_policy(policy, DialogExpiry::default());
     let cwd = env::current_dir().expect("the working directory resolves");
-    let registry = Arc::new(TeammateRegistry::for_session(
-        home,
-        engine.session_id().as_str(),
-        cwd,
-    ));
+    let registry = Arc::new(TeammateRegistry::for_session(home, engine.session_id().as_str(), cwd));
 
-    (
-        Arc::new(engine.with_teammates(Arc::clone(&registry))),
-        registry,
-    )
+    (Arc::new(engine.with_teammates(Arc::clone(&registry))), registry)
 }
 
 /// `engine`'s own session socket, bound under `directory` — `Listen::Session`,
@@ -195,10 +184,7 @@ fn receiving_engine(
 async fn serve_session(engine: &Arc<Engine>, directory: &Path) -> Handle {
     let mut config =
         ServeConfig::in_directory(env::current_dir().expect("the working directory resolves"));
-    config.listen = Listen::Session {
-        id: engine.session_id(),
-        directory: directory.to_path_buf(),
-    };
+    config.listen = Listen::Session { id: engine.session_id(), directory: directory.to_path_buf() };
 
     ganja_serve::serve(Arc::clone(engine), config)
         .await
@@ -258,9 +244,7 @@ fn write_registered(directory: &Path, stem: &str, name: &str) {
 
 /// The team a receiving session leads, for the roster assertions.
 fn team_of(engine: &Engine) -> TeamView {
-    engine
-        .team_view()
-        .expect("a receiving session in these drills always leads a team")
+    engine.team_view().expect("a receiving session in these drills always leads a team")
 }
 
 // ---------------------------------------------------------------------------
@@ -352,9 +336,7 @@ async fn send_as_child(
     let sink = Arc::clone(&seen);
     tokio::spawn(async move {
         while let Some(event) = stream.next().await {
-            sink.lock()
-                .expect("the child's event log is never poisoned")
-                .push(event);
+            sink.lock().expect("the child's event log is never poisoned").push(event);
         }
     });
 
@@ -424,10 +406,8 @@ async fn send_as_child(
 /// with — the tool's own output line, which is where a held answer's note
 /// arrives.
 fn tool_output(seen: &Arc<Mutex<Vec<Event>>>) -> Option<String> {
-    seen.lock()
-        .expect("the child's event log is never poisoned")
-        .iter()
-        .find_map(|event| match event {
+    seen.lock().expect("the child's event log is never poisoned").iter().find_map(|event| {
+        match event {
             Event::PartUpdated { part, .. } => match &part.body {
                 PartBody::Tool {
                     tool,
@@ -437,23 +417,23 @@ fn tool_output(seen: &Arc<Mutex<Vec<Event>>>) -> Option<String> {
                 _ => None,
             },
             _ => None,
-        })
+        }
+    })
 }
 
 /// The settlement this session has been told about, as the parent reads it:
 /// `{status, to, id}`, or [`None`] while nothing has arrived.
 fn receipt_now(seen: &Arc<Mutex<Vec<Event>>>) -> Option<serde_json::Value> {
-    seen.lock()
-        .expect("the child's event log is never poisoned")
-        .iter()
-        .find_map(|event| match event {
+    seen.lock().expect("the child's event log is never poisoned").iter().find_map(|event| {
+        match event {
             Event::PeerReceipt { id, status, to, .. } => Some(serde_json::json!({
                 "id": id.as_str(),
                 "status": status,
                 "to": to,
             })),
             _ => None,
-        })
+        }
+    })
 }
 
 /// The same, waited for.
@@ -522,11 +502,8 @@ fn spawn_sender(
 /// The child's whole role, when this binary was re-executed as one — [`None`]
 /// in the parent, which is what the tests below branch on.
 fn child_role() -> Option<(PathBuf, String, PathBuf, ReplyTo, Await)> {
-    let (directory, name, report) = (
-        env::var_os(DRILL_DIR)?,
-        env::var_os(DRILL_NAME)?,
-        env::var_os(DRILL_REPORT)?,
-    );
+    let (directory, name, report) =
+        (env::var_os(DRILL_DIR)?, env::var_os(DRILL_NAME)?, env::var_os(DRILL_REPORT)?);
     let reply = env::var(DRILL_REPLY).expect("a re-executed sender is told where to be answered");
     let wait = env::var(DRILL_AWAIT).expect("a re-executed sender is told what to wait for");
 
@@ -626,15 +603,9 @@ async fn reaches_the_model(engine: &Arc<Engine>, registry: &Arc<TeammateRegistry
             _ => None,
         })
         .unwrap_or_else(|| {
-            panic!(
-                "the sender's words are a peer part of the next turn: {:?}",
-                user.parts
-            )
+            panic!("the sender's words are a peer part of the next turn: {:?}", user.parts)
         });
-    assert!(
-        engine.settle(DEADLINE).await,
-        "the fake provider's turn settles"
-    );
+    assert!(engine.settle(DEADLINE).await, "the fake provider's turn settles");
 
     peer
 }
@@ -684,11 +655,7 @@ async fn a_bare_name_reaches_a_zero_teammate_session_exactly_as_it_did_before() 
     write_registered(directory.path(), &stem_of(&bound(&handle)), RECEIVER_NAME);
 
     let team = team_of(&engine);
-    let teammates: Vec<_> = team
-        .members
-        .iter()
-        .filter(|member| !member.is_lead)
-        .collect();
+    let teammates: Vec<_> = team.members.iter().filter(|member| !member.is_lead).collect();
     assert!(
         teammates.is_empty(),
         "the receiving session leads a team of nobody but itself: {teammates:?}"
@@ -717,10 +684,7 @@ async fn a_bare_name_reaches_a_zero_teammate_session_exactly_as_it_did_before() 
         "an accept leaves the sender nothing to wait for: {sent}"
     );
     assert!(
-        !sent["intake"]
-            .as_str()
-            .expect("the sender took a second turn")
-            .contains("<peer_receipt>"),
+        !sent["intake"].as_str().expect("the sender took a second turn").contains("<peer_receipt>"),
         "and its model is told of no settlement either: {sent}"
     );
 
@@ -775,10 +739,8 @@ async fn a_person_releasing_a_held_message_delivers_it_and_receipts_the_sender()
     let directory = private_dir();
     let home = TempDir::new().expect("a home for the receiving team");
     let reports = TempDir::new().expect("a place for the sender's report");
-    let (engine, registry) = receiving_engine(
-        home.path(),
-        Some((InboundPolicy::Hold, PolicySource::Global)),
-    );
+    let (engine, registry) =
+        receiving_engine(home.path(), Some((InboundPolicy::Hold, PolicySource::Global)));
     let handle = serve_session(&engine, directory.path()).await;
     write_registered(directory.path(), &stem_of(&bound(&handle)), RECEIVER_NAME);
 
@@ -803,10 +765,7 @@ async fn a_person_releasing_a_held_message_delivers_it_and_receipts_the_sender()
     );
 
     engine
-        .send(Command::SettleHeld {
-            id: held.id.clone(),
-            decision: HeldDecision::Release,
-        })
+        .send(Command::SettleHeld { id: held.id.clone(), decision: HeldDecision::Release })
         .await
         .expect("a settle is never refused");
 
@@ -821,10 +780,7 @@ async fn a_person_releasing_a_held_message_delivers_it_and_receipts_the_sender()
         "and the release settled it delivered: {sent}"
     );
     assert!(
-        sent["intake"]
-            .as_str()
-            .expect("the sender took a reading turn")
-            .contains("<peer_receipt>"),
+        sent["intake"].as_str().expect("the sender took a reading turn").contains("<peer_receipt>"),
         "which its own model read, once, on its next turn: {sent}"
     );
 
@@ -861,10 +817,8 @@ async fn a_person_denying_a_held_message_delivers_nothing_and_receipts_the_sende
     let directory = private_dir();
     let home = TempDir::new().expect("a home for the receiving team");
     let reports = TempDir::new().expect("a place for the sender's report");
-    let (engine, registry) = receiving_engine(
-        home.path(),
-        Some((InboundPolicy::Hold, PolicySource::Global)),
-    );
+    let (engine, registry) =
+        receiving_engine(home.path(), Some((InboundPolicy::Hold, PolicySource::Global)));
     let handle = serve_session(&engine, directory.path()).await;
     write_registered(directory.path(), &stem_of(&bound(&handle)), RECEIVER_NAME);
 
@@ -878,16 +832,10 @@ async fn a_person_denying_a_held_message_delivers_nothing_and_receipts_the_sende
     );
 
     let held = eventually_held(&engine).await;
-    assert!(
-        lead_inbox(&registry).is_empty(),
-        "nothing is written while it is held"
-    );
+    assert!(lead_inbox(&registry).is_empty(), "nothing is written while it is held");
 
     engine
-        .send(Command::SettleHeld {
-            id: held.id.clone(),
-            decision: HeldDecision::Deny,
-        })
+        .send(Command::SettleHeld { id: held.id.clone(), decision: HeldDecision::Deny })
         .await
         .expect("a settle is never refused");
 
@@ -897,10 +845,7 @@ async fn a_person_denying_a_held_message_delivers_nothing_and_receipts_the_sende
         answered.contains(HELD_PROSE) && answered.contains(HELD_CAUSE),
         "the sender learned the hold and its cause on the POST itself: {answered}"
     );
-    assert_eq!(
-        sent["settlement"]["status"], "denied",
-        "and the denial settled it denied: {sent}"
-    );
+    assert_eq!(sent["settlement"]["status"], "denied", "and the denial settled it denied: {sent}");
 
     assert!(
         lead_inbox(&registry).is_empty(),
@@ -908,14 +853,8 @@ async fn a_person_denying_a_held_message_delivers_nothing_and_receipts_the_sende
         lead_inbox(&registry)
     );
     let pass = LeadInbox::reading(Arc::clone(&registry), None).poll().await;
-    assert!(
-        pass.messages.is_empty(),
-        "and the lead's own pass hands its model nothing: {pass:?}"
-    );
-    assert!(
-        engine.held_messages().is_empty(),
-        "the hold itself is settled and gone"
-    );
+    assert!(pass.messages.is_empty(), "and the lead's own pass hands its model nothing: {pass:?}");
+    assert!(engine.held_messages().is_empty(), "the hold itself is settled and gone");
 
     println!(
         "[drill D] denied: the receiver's model was handed nothing at all, and the sender was told \
@@ -963,10 +902,8 @@ async fn a_reply_to_naming_a_third_session_steers_the_settlement_away_from_the_s
     let third_home = TempDir::new().expect("a home for the third session");
     let reports = TempDir::new().expect("a place for the sender's report");
 
-    let (engine, registry) = receiving_engine(
-        home.path(),
-        Some((InboundPolicy::Hold, PolicySource::Global)),
-    );
+    let (engine, registry) =
+        receiving_engine(home.path(), Some((InboundPolicy::Hold, PolicySource::Global)));
     let handle = serve_session(&engine, directory.path()).await;
     write_registered(directory.path(), &stem_of(&bound(&handle)), RECEIVER_NAME);
 
@@ -987,10 +924,7 @@ async fn a_reply_to_naming_a_third_session_steers_the_settlement_away_from_the_s
 
     let held = eventually_held(&engine).await;
     engine
-        .send(Command::SettleHeld {
-            id: held.id.clone(),
-            decision: HeldDecision::Release,
-        })
+        .send(Command::SettleHeld { id: held.id.clone(), decision: HeldDecision::Release })
         .await
         .expect("a settle is never refused");
 
@@ -1000,10 +934,7 @@ async fn a_reply_to_naming_a_third_session_steers_the_settlement_away_from_the_s
         "the sender named somewhere else, and hears nothing: {sent}"
     );
     assert!(
-        !sent["intake"]
-            .as_str()
-            .expect("the sender took a second turn")
-            .contains("<peer_receipt>"),
+        !sent["intake"].as_str().expect("the sender took a second turn").contains("<peer_receipt>"),
         "so its model is told of no settlement either: {sent}"
     );
 
@@ -1014,17 +945,9 @@ async fn a_reply_to_naming_a_third_session_steers_the_settlement_away_from_the_s
         "a receipt writes nothing into the session that receives it: {:?}",
         lead_inbox(&third_registry)
     );
-    assert!(
-        third.held_messages().is_empty(),
-        "and raises nothing for review"
-    );
-    let pass = LeadInbox::reading(Arc::clone(&third_registry), None)
-        .poll()
-        .await;
-    assert!(
-        pass.messages.is_empty(),
-        "and hands the third session's model nothing: {pass:?}"
-    );
+    assert!(third.held_messages().is_empty(), "and raises nothing for review");
+    let pass = LeadInbox::reading(Arc::clone(&third_registry), None).poll().await;
+    assert!(pass.messages.is_empty(), "and hands the third session's model nothing: {pass:?}");
 
     // The release itself is unaffected by where it could not be reported.
     let from = reaches_the_model(&engine, &registry).await;

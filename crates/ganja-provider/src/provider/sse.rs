@@ -68,9 +68,8 @@ impl Decoder {
         self.buffer.extend_from_slice(chunk);
 
         let mut start = 0;
-        while let Some(offset) = self.buffer[start..]
-            .iter()
-            .position(|byte| *byte == b'\n' || *byte == b'\r')
+        while let Some(offset) =
+            self.buffer[start..].iter().position(|byte| *byte == b'\n' || *byte == b'\r')
         {
             let end = start + offset;
 
@@ -80,11 +79,8 @@ impl Decoder {
                 break;
             }
 
-            let terminator = if self.buffer[end] == b'\r' && self.buffer[end + 1] == b'\n' {
-                2
-            } else {
-                1
-            };
+            let terminator =
+                if self.buffer[end] == b'\r' && self.buffer[end + 1] == b'\n' { 2 } else { 1 };
             // Lossy because a provider that sends invalid UTF-8 has already
             // broken its own contract, and losing the turn over it would be
             // worse than rendering a replacement character.
@@ -106,9 +102,9 @@ impl Decoder {
             return;
         }
 
-        let (field, value) = line.split_once(':').map_or((line, ""), |(field, value)| {
-            (field, value.strip_prefix(' ').unwrap_or(value))
-        });
+        let (field, value) = line
+            .split_once(':')
+            .map_or((line, ""), |(field, value)| (field, value.strip_prefix(' ').unwrap_or(value)));
 
         match field {
             "event" => self.event = Some(value.to_owned()),
@@ -135,10 +131,7 @@ impl Decoder {
         data.pop();
         self.has_data = false;
 
-        frames.extend([Frame {
-            event: self.event.take(),
-            data,
-        }]);
+        frames.extend([Frame { event: self.event.take(), data }]);
     }
 }
 
@@ -163,12 +156,7 @@ where
     }
 
     stream::unfold(
-        State {
-            chunks,
-            decoder: Decoder::default(),
-            ready: VecDeque::new(),
-            done: false,
-        },
+        State { chunks, decoder: Decoder::default(), ready: VecDeque::new(), done: false },
         |mut state| async move {
             loop {
                 if let Some(frame) = state.ready.pop_front() {

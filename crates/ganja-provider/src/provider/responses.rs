@@ -71,12 +71,10 @@
 //! happened after this session started, and a renewal another turn performed,
 //! are both picked up by the next request rather than the next process.
 
-use std::{
-    borrow::Cow,
-    collections::{HashMap, HashSet},
-    fmt,
-    sync::Arc,
-};
+use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -84,20 +82,17 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    auth::{self, RefreshOauth},
-    protocol::{FinishReason, Part, PartBody, Role, ToolState, Usage},
-    provider::{
-        ChatRequest, CredentialSource, Mapper, Provider, ProviderError, ProviderEvent, Resolved,
-        check_base_url, client, open,
-        openai::{self, arguments, result},
-        opencode, openrouter, require_key, setting, shown_base_url, splice_effort,
-        sse::Frame,
-        steps,
-        toolname::{Aliases, OPENAI_CAP, alias},
-    },
-    tool::ToolDefinition,
+use crate::auth::{self, RefreshOauth};
+use crate::protocol::{FinishReason, Part, PartBody, Role, ToolState, Usage};
+use crate::provider::openai::{self, arguments, result};
+use crate::provider::sse::Frame;
+use crate::provider::toolname::{Aliases, OPENAI_CAP, alias};
+use crate::provider::{
+    ChatRequest, CredentialSource, Mapper, Provider, ProviderError, ProviderEvent, Resolved,
+    check_base_url, client, open, opencode, openrouter, require_key, setting, shown_base_url,
+    splice_effort, steps,
 };
+use crate::tool::ToolDefinition;
 
 /// Value of [`PROVIDER_ENV`](super::PROVIDER_ENV) that selects this provider.
 ///
@@ -304,13 +299,8 @@ const ALLOWED_MODELS: [&str; 4] = ["gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.4", 
 /// Every id here has to satisfy `serves`: an offer this backend would then
 /// refuse is a lie the listing tells, and the test in `responses_tests.rs`
 /// is what keeps it honest.
-pub const SEAT_ROSTER: [&str; 5] = [
-    "gpt-5.5",
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-    "gpt-5.6-luna",
-    "gpt-5.3-codex-spark",
-];
+pub const SEAT_ROSTER: [&str; 5] =
+    ["gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.3-codex-spark"];
 
 /// What a subscription session asks for when nothing named a model.
 ///
@@ -408,9 +398,7 @@ pub(crate) fn serves(model: &str) -> bool {
 fn generation(model: &str) -> Option<f64> {
     /// The leading run of digits, and whatever follows it.
     fn digits(text: &str) -> (&str, &str) {
-        let end = text
-            .find(|character: char| !character.is_ascii_digit())
-            .unwrap_or(text.len());
+        let end = text.find(|character: char| !character.is_ascii_digit()).unwrap_or(text.len());
 
         text.split_at(end)
     }
@@ -570,10 +558,7 @@ impl ResponsesProvider {
         refresh: Arc<dyn RefreshOauth>,
     ) -> Result<Self, ProviderError> {
         Self::built(
-            CredentialSource::Oauth {
-                provider_id: ID,
-                refresh,
-            },
+            CredentialSource::Oauth { provider_id: ID, refresh },
             base_url.into(),
             Backend::Codex,
         )
@@ -729,9 +714,7 @@ impl ResponsesProvider {
         let body = splice_effort(&options, &own);
         built.json(&body).build().map_err(|error| {
             ProviderError::Transport(
-                resolved
-                    .presented
-                    .redact(&format!("malformed request: {error}")),
+                resolved.presented.redact(&format!("malformed request: {error}")),
             )
         })
     }
@@ -761,10 +744,7 @@ impl Provider for ResponsesProvider {
     /// attachment allowlist and still degrades — a block the vendor does not
     /// document is a guess, and the engine's text fallback is not.
     fn accepts_attachment(&self, mime: &str) -> bool {
-        matches!(
-            mime,
-            "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "application/pdf"
-        )
+        matches!(mime, "image/jpeg" | "image/png" | "image/gif" | "image/webp" | "application/pdf")
     }
 
     async fn stream(
@@ -850,13 +830,14 @@ impl Provider for ResponsesProvider {
 /// exported. The endpoint's own message is the honest one.
 fn reauth(backend: Backend, error: ProviderError) -> ProviderError {
     match error {
-        ProviderError::Status {
-            status: status @ (401 | 403),
-            message,
-        } if backend == Backend::Codex => ProviderError::Auth(format!(
-            "the ChatGPT endpoint refused the stored credential (HTTP {status}): \
+        ProviderError::Status { status: status @ (401 | 403), message }
+            if backend == Backend::Codex =>
+        {
+            ProviderError::Auth(format!(
+                "the ChatGPT endpoint refused the stored credential (HTTP {status}): \
              {message}; run `ganja auth login {ID}`"
-        )),
+            ))
+        }
         other => other,
     }
 }
@@ -992,10 +973,7 @@ enum ToolSpec<'a> {
 #[serde(untagged)]
 enum Item<'a> {
     /// Something a person or the model said.
-    Said {
-        role: &'static str,
-        content: Vec<Block<'a>>,
-    },
+    Said { role: &'static str, content: Vec<Block<'a>> },
     /// A call the model made (`convert-to-openai-responses-input.ts:3338-3344`).
     ///
     /// Its own item rather than a field on the message that made it, which is
@@ -1277,12 +1255,7 @@ struct Attached<'a> {
 /// calls it made, and the thinking it sealed.
 fn split(
     parts: &[Part],
-) -> (
-    Option<Cow<'_, str>>,
-    Vec<Attached<'_>>,
-    Vec<Made<'_>>,
-    Vec<Thought<'_>>,
-) {
+) -> (Option<Cow<'_, str>>, Vec<Attached<'_>>, Vec<Made<'_>>, Vec<Thought<'_>>) {
     let mut texts: Vec<&str> = Vec::new();
     let mut attachments = Vec::new();
     let mut calls = Vec::new();
@@ -1295,37 +1268,16 @@ fn split(
                     texts.push(text);
                 }
             }
-            PartBody::Tool {
-                call_id,
-                tool,
-                state,
-            } => calls.push(Made {
-                call_id,
-                tool,
-                state,
-            }),
-            PartBody::Reasoning {
-                provider,
-                item,
-                encrypted,
-            } => thoughts.push(Thought {
-                provider,
-                item,
-                encrypted: encrypted.as_deref(),
-            }),
+            PartBody::Tool { call_id, tool, state } => calls.push(Made { call_id, tool, state }),
+            PartBody::Reasoning { provider, item, encrypted } => {
+                thoughts.push(Thought { provider, item, encrypted: encrypted.as_deref() })
+            }
             // A binary attachment the engine read at send time, and only for a
             // mime `accepts_attachment` said yes to — the match is by payload
             // shape rather than by allowlist.
-            PartBody::File {
-                path,
-                mime,
-                content: Some(content),
-                ..
-            } => attachments.push(Attached {
-                path,
-                mime,
-                content,
-            }),
+            PartBody::File { path, mime, content: Some(content), .. } => {
+                attachments.push(Attached { path, mime, content })
+            }
             // A mentioned *text* file is a reference, resolved into a text
             // block before a request is built (`session::resolve_mentions`);
             // see the same arm in `openai.rs`. `StepFinish` carries a step's
@@ -1417,11 +1369,7 @@ impl Mapping {
     /// The `seals` field is the reading half of the same decision the encoder
     /// makes: ask for state and keep it, or do neither.
     fn for_backend(backend: Backend, aliases: Aliases) -> Self {
-        Self {
-            seals: backend.replays_reasoning(),
-            aliases,
-            ..Self::default()
-        }
+        Self { seals: backend.replays_reasoning(), aliases, ..Self::default() }
     }
 }
 
@@ -1646,18 +1594,13 @@ impl Mapping {
             // Back through this request's own map: what the engine executes,
             // what the permission rules match and what the transcript records
             // is the registry name, never the one the wire had to advertise.
-            name: self
-                .aliases
-                .original(item["name"].as_str().unwrap_or_default().to_owned()),
+            name: self.aliases.original(item["name"].as_str().unwrap_or_default().to_owned()),
         });
     }
 
     /// Appends a fragment of a call's arguments.
     fn filled(&mut self, chunk: &Value, events: &mut Vec<ProviderEvent>) {
-        let Some(id) = chunk["item_id"]
-            .as_str()
-            .and_then(|item_id| self.calls.get(item_id))
-        else {
+        let Some(id) = chunk["item_id"].as_str().and_then(|item_id| self.calls.get(item_id)) else {
             tracing::debug!("arguments arrived for a call that was never opened");
             return;
         };
@@ -1665,10 +1608,7 @@ impl Mapping {
         if let Some(json) = chunk["delta"].as_str()
             && !json.is_empty()
         {
-            events.push(ProviderEvent::ToolCallDelta {
-                id: id.clone(),
-                json: json.to_owned(),
-            });
+            events.push(ProviderEvent::ToolCallDelta { id: id.clone(), json: json.to_owned() });
         }
     }
 
@@ -1769,14 +1709,9 @@ fn sealed(item: &Value, events: &mut Vec<ProviderEvent>) {
         tracing::debug!("a reasoning item arrived without the id that identifies it");
         return;
     };
-    let Some(encrypted) = item["encrypted_content"]
-        .as_str()
-        .filter(|state| !state.is_empty())
+    let Some(encrypted) = item["encrypted_content"].as_str().filter(|state| !state.is_empty())
     else {
-        tracing::debug!(
-            item = id,
-            "a reasoning item arrived with no state to replay"
-        );
+        tracing::debug!(item = id, "a reasoning item arrived with no state to replay");
         return;
     };
 
@@ -1828,11 +1763,7 @@ fn server_tool(kind: &str, item: &Value, events: &mut Vec<ProviderEvent>) {
                         .collect()
                 })
                 .unwrap_or_default();
-            if rest.is_empty() {
-                Value::Null
-            } else {
-                Value::Object(rest)
-            }
+            if rest.is_empty() { Value::Null } else { Value::Object(rest) }
         }
         arguments => arguments.clone(),
     };
@@ -1842,11 +1773,7 @@ fn server_tool(kind: &str, item: &Value, events: &mut Vec<ProviderEvent>) {
         structured => structured.to_string(),
     };
 
-    events.push(ProviderEvent::ServerTool {
-        tool: kind.to_owned(),
-        input,
-        output,
-    });
+    events.push(ProviderEvent::ServerTool { tool: kind.to_owned(), input, output });
 }
 
 /// The item kind a tool call arrives as.
@@ -1969,10 +1896,7 @@ fn failure(error: &Value) -> ProviderError {
     // `provider::shielded`, the seam that holds the credential to mask with.
     let message = super::reported(error);
 
-    ProviderError::Status {
-        status: 500,
-        message,
-    }
+    ProviderError::Status { status: 500, message }
 }
 
 #[cfg(test)]

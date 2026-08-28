@@ -15,17 +15,14 @@
 
 #![allow(dead_code, reason = "each suite uses a different part of the stub")]
 
-use std::{
-    collections::VecDeque,
-    io::{BufRead as _, BufReader, Read as _, Write as _},
-    os::unix::{fs::PermissionsExt as _, net::UnixListener},
-    path::{Path, PathBuf},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::{Duration, Instant},
-};
+use std::collections::VecDeque;
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::net::UnixListener;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use ganja_core::protocol::{MemberBackend, MemberView, TeamView};
 
@@ -154,9 +151,7 @@ impl FarSide {
     ) -> Self {
         let path = directory.path().join(format!("{stem}.sock"));
         let listener = UnixListener::bind(&path).expect("a socket binds");
-        listener
-            .set_nonblocking(false)
-            .expect("a blocking listener");
+        listener.set_nonblocking(false).expect("a blocking listener");
 
         let taken: Arc<Mutex<Vec<Taken>>> = Arc::default();
         let answers = Arc::new(Mutex::new(VecDeque::from(answers)));
@@ -179,14 +174,7 @@ impl FarSide {
             }
         });
 
-        Self {
-            directory,
-            path,
-            team,
-            taken,
-            answers,
-            running,
-        }
+        Self { directory, path, team, taken, answers, running }
     }
 
     /// Where this peer answers.
@@ -218,19 +206,13 @@ impl FarSide {
     /// Everything it has taken in so far.
     #[must_use]
     pub fn taken(&self) -> Vec<Taken> {
-        self.taken
-            .lock()
-            .expect("the log is never poisoned")
-            .clone()
+        self.taken.lock().expect("the log is never poisoned").clone()
     }
 
     /// Every request it took on `route`.
     #[must_use]
     pub fn taken_on(&self, route: &str) -> Vec<Taken> {
-        self.taken()
-            .into_iter()
-            .filter(|taken| taken.route == route)
-            .collect()
+        self.taken().into_iter().filter(|taken| taken.route == route).collect()
     }
 
     /// The one message body it took, or a panic naming what it did take.
@@ -317,11 +299,7 @@ fn serve_one(
     if reader.read_line(&mut request).is_err() || request.trim().is_empty() {
         return;
     }
-    let route = request
-        .split_whitespace()
-        .nth(1)
-        .unwrap_or_default()
-        .to_owned();
+    let route = request.split_whitespace().nth(1).unwrap_or_default().to_owned();
 
     let mut length = 0usize;
     loop {
@@ -346,10 +324,7 @@ fn serve_one(
     taken
         .lock()
         .expect("the log is never poisoned")
-        .push(Taken {
-            route: route.clone(),
-            body: parsed,
-        });
+        .push(Taken { route: route.clone(), body: parsed });
 
     let answer = if route == "/team" {
         Some(team.to_owned())

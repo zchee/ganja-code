@@ -10,10 +10,15 @@
 // nothing useful to say here.
 #![allow(dead_code)]
 
-use std::{path::Path, sync::Arc, time::Duration};
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
 use base64::Engine as _;
-use ganja_core::{Engine, permission::Permissions, provider::ProviderEvent, tool::Registry};
+use ganja_core::Engine;
+use ganja_core::permission::Permissions;
+use ganja_core::provider::ProviderEvent;
+use ganja_core::tool::Registry;
 use ganja_serve::{Credentials, DEFAULT_HOSTNAME, Handle, Listen, ServeConfig};
 use ganja_testkit::{ScriptedProvider, says};
 use secrecy::SecretString;
@@ -35,22 +40,13 @@ pub fn scripted_engine(
 ) -> Arc<Engine> {
     let (provider, _requests) = ScriptedProvider::new(scripts);
 
-    Arc::new(Engine::new(
-        provider,
-        "scripted-model",
-        Arc::new(tools),
-        permissions,
-    ))
+    Arc::new(Engine::new(provider, "scripted-model", Arc::new(tools), permissions))
 }
 
 /// The one-turn engine most suites open with: a scripted "hi", no tools, and
 /// default permissions.
 pub fn engine() -> Arc<Engine> {
-    scripted_engine(
-        vec![says("hi")],
-        Registry::new(Vec::new()),
-        Permissions::default(),
-    )
+    scripted_engine(vec![says("hi")], Registry::new(Vec::new()), Permissions::default())
 }
 
 /// A loopback config for the working directory, on an OS-assigned port so
@@ -67,10 +63,7 @@ pub fn loopback_config() -> ServeConfig {
 /// A loopback TCP ask on `port` — the shape every suite here but the socket
 /// one binds.
 pub fn tcp(port: Option<u16>) -> Listen {
-    Listen::Tcp {
-        hostname: DEFAULT_HOSTNAME.to_owned(),
-        port,
-    }
+    Listen::Tcp { hostname: DEFAULT_HOSTNAME.to_owned(), port }
 }
 
 /// The loopback fixture with its listen swapped for `listen` — the same
@@ -89,37 +82,25 @@ pub const SOCKET_URL: &str = "http://ganja";
 /// A client bound to `path` and nothing else — one per socket, the rule
 /// every caller of `unix_socket` in this workspace keeps.
 pub fn socket_client(path: &Path) -> reqwest::Client {
-    reqwest::Client::builder()
-        .unix_socket(path)
-        .build()
-        .expect("a socket-bound client builds")
+    reqwest::Client::builder().unix_socket(path).build().expect("a socket-bound client builds")
 }
 
 /// The credential a `GANJA_SERVER_PASSWORD` export resolves to
 /// (`Credentials::from_env`), built directly so no suite here mutates the
 /// process environment.
 pub fn credentials() -> Credentials {
-    Credentials {
-        username: "ganja".to_owned(),
-        password: SecretString::from("hunter2".to_owned()),
-    }
+    Credentials { username: "ganja".to_owned(), password: SecretString::from("hunter2".to_owned()) }
 }
 
 /// The `Authorization` header for [`credentials`].
 pub fn basic() -> String {
-    format!(
-        "Basic {}",
-        base64::engine::general_purpose::STANDARD.encode("ganja:hunter2")
-    )
+    format!("Basic {}", base64::engine::general_purpose::STANDARD.encode("ganja:hunter2"))
 }
 
 /// The base URL a suite drives `handle` at — a TCP one; the socket suite
 /// speaks through a client bound to the path instead.
 pub fn base_url(handle: &Handle) -> String {
-    format!(
-        "http://{}",
-        handle.address().tcp().expect("these suites bind tcp")
-    )
+    format!("http://{}", handle.address().tcp().expect("these suites bind tcp"))
 }
 
 /// One SSE frame: the event name and the data line.

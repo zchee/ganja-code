@@ -26,12 +26,12 @@
 //! is no headless seam in `ganja-tui/src/lib.rs` to witness the call itself
 //! from. Nothing below consults `$TMUX`, because nothing in the function does.
 
-use std::{path::Path, process::Command, time::Duration};
+use std::path::Path;
+use std::process::Command;
+use std::time::Duration;
 
-use ganja_core::teammate::{
-    reaper::{ShimFate, sweep_shims_in, sweep_shims_in_with},
-    shim::records::{self, Identity, Recorded, Records, Started},
-};
+use ganja_core::teammate::reaper::{ShimFate, sweep_shims_in, sweep_shims_in_with};
+use ganja_core::teammate::shim::records::{self, Identity, Recorded, Records, Started};
 
 /// A pid no `ps`/`kill` pair can portably answer for — the sentinel that
 /// forces the "could not be established" arm. Shared by [`cannot_establish`]
@@ -44,11 +44,7 @@ const UNASKABLE: i32 = 999_999;
 /// through one; this declines [`UNASKABLE`] and defers every other pid to the
 /// real primitive.
 fn cannot_establish(pid: i32) -> Started {
-    if pid == UNASKABLE {
-        Started::Unknown
-    } else {
-        records::started_at(pid)
-    }
+    if pid == UNASKABLE { Started::Unknown } else { records::started_at(pid) }
 }
 use ganja_team::ShimCli;
 
@@ -76,21 +72,14 @@ impl Decoy {
             panic!("a decoy that is running has a start time");
         };
 
-        Self {
-            child,
-            pid,
-            started,
-        }
+        Self { child, pid, started }
     }
 
     /// How a lead would have recorded it.
     fn recorded(&self) -> Recorded {
         Recorded {
             cli: ShimCli::Codex,
-            process: Identity {
-                pid: self.pid,
-                started: self.started.clone(),
-            },
+            process: Identity { pid: self.pid, started: self.started.clone() },
             // Spawned as its own group leader, so the group is the pid — the
             // same identity a shim child's own record carries.
             pgid: self.pid,
@@ -183,10 +172,7 @@ async fn a_recorded_child_whose_lead_is_gone_is_ended_on_an_exact_identity_match
         directory.path(),
         "0198c1a2-4711.shims",
         &Records {
-            owner: Identity {
-                pid: dead_pid(),
-                started: "Wed Aug 19 14:54:57 2026".to_owned(),
-            },
+            owner: Identity { pid: dead_pid(), started: "Wed Aug 19 14:54:57 2026".to_owned() },
             children: vec![orphan.recorded()],
         },
     );
@@ -195,11 +181,7 @@ async fn a_recorded_child_whose_lead_is_gone_is_ended_on_an_exact_identity_match
 
     assert_eq!(
         swept.fate_of(&path),
-        Some(&ShimFate::Swept {
-            signalled: 1,
-            spared: 0,
-            undecided: 0,
-        }),
+        Some(&ShimFate::Swept { signalled: 1, spared: 0, undecided: 0 }),
         "{swept:?}"
     );
     assert!(orphan.ended(), "the orphan was ended");
@@ -222,19 +204,13 @@ async fn a_concurrently_live_leads_children_survive_a_sweep_that_reaps_another_l
     let live = write_records(
         directory.path(),
         "0198c1a2-1.shims",
-        &Records {
-            owner: live_owner(),
-            children: vec![mine.recorded()],
-        },
+        &Records { owner: live_owner(), children: vec![mine.recorded()] },
     );
     let dead = write_records(
         directory.path(),
         "0198c1a2-2.shims",
         &Records {
-            owner: Identity {
-                pid: dead_pid(),
-                started: "Wed Aug 19 14:54:57 2026".to_owned(),
-            },
+            owner: Identity { pid: dead_pid(), started: "Wed Aug 19 14:54:57 2026".to_owned() },
             children: vec![orphan.recorded()],
         },
     );
@@ -242,11 +218,7 @@ async fn a_concurrently_live_leads_children_survive_a_sweep_that_reaps_another_l
 
     let swept = sweep_shims_in(directory.path().to_path_buf()).await;
 
-    assert_eq!(
-        swept.fate_of(&live),
-        Some(&ShimFate::OwnerLive),
-        "{swept:?}"
-    );
+    assert_eq!(swept.fate_of(&live), Some(&ShimFate::OwnerLive), "{swept:?}");
     assert!(mine.alive(), "a live lead's child is untouched");
     assert_eq!(
         std::fs::read_to_string(&live).expect("still there"),
@@ -284,27 +256,16 @@ async fn a_file_whose_owner_cannot_be_proven_gone_signals_nothing() {
 
     // An owner line that is not one.
     let unparseable = directory.path().join("0198c1a2-4.shims");
-    std::fs::write(
-        &unparseable,
-        format!("{}\nnot-a-pid\tnot-a-time\n", records::VERSION),
-    )
-    .expect("a file with an unparseable owner line");
+    std::fs::write(&unparseable, format!("{}\nnot-a-pid\tnot-a-time\n", records::VERSION))
+        .expect("a file with an unparseable owner line");
 
     let swept = sweep_shims_in(directory.path().to_path_buf()).await;
 
     // Both are "a known version and content that is not this format's", which
     // a same-version writer cannot produce — so they are corruption, and
     // corruption has no future reader.
-    assert_eq!(
-        swept.fate_of(&headless),
-        Some(&ShimFate::Corrupt),
-        "{swept:?}"
-    );
-    assert_eq!(
-        swept.fate_of(&unparseable),
-        Some(&ShimFate::Corrupt),
-        "{swept:?}"
-    );
+    assert_eq!(swept.fate_of(&headless), Some(&ShimFate::Corrupt), "{swept:?}");
+    assert_eq!(swept.fate_of(&unparseable), Some(&ShimFate::Corrupt), "{swept:?}");
     assert!(decoy.alive(), "and nothing was signalled about either");
     assert!(!headless.exists(), "**AC-30**: corruption is unlinked");
     assert!(!unparseable.exists());
@@ -341,18 +302,11 @@ async fn an_owner_pid_that_exists_with_another_start_time_is_swept_but_never_unl
 
     assert_eq!(
         swept.fate_of(&path),
-        Some(&ShimFate::Swept {
-            signalled: 0,
-            spared: 1,
-            undecided: 0,
-        }),
+        Some(&ShimFate::Swept { signalled: 0, spared: 1, undecided: 0 }),
         "{swept:?}"
     );
     assert!(decoy.alive(), "a mismatched child is never signalled");
-    assert!(
-        path.exists(),
-        "and a file whose owner pid still exists is never unlinked"
-    );
+    assert!(path.exists(), "and a file whose owner pid still exists is never unlinked");
 }
 
 /// **AC-26**, arm four: the `TZ` decoy. `ps -o lstart=` renders through libc's
@@ -391,10 +345,7 @@ async fn a_record_written_under_another_timezone_signals_nothing() {
         directory.path(),
         "0198c1a2-6.shims",
         &Records {
-            owner: Identity {
-                pid: dead_pid(),
-                started: "Wed Aug 19 14:54:57 2026".to_owned(),
-            },
+            owner: Identity { pid: dead_pid(), started: "Wed Aug 19 14:54:57 2026".to_owned() },
             children: vec![decoy.recorded_as(&elsewhere)],
         },
     );
@@ -403,17 +354,10 @@ async fn a_record_written_under_another_timezone_signals_nothing() {
 
     assert_eq!(
         swept.fate_of(&path),
-        Some(&ShimFate::Swept {
-            signalled: 0,
-            spared: 1,
-            undecided: 0,
-        }),
+        Some(&ShimFate::Swept { signalled: 0, spared: 1, undecided: 0 }),
         "{swept:?}"
     );
-    assert!(
-        decoy.alive(),
-        "a rendering this build did not write is not an identity it may act on"
-    );
+    assert!(decoy.alive(), "a rendering this build did not write is not an identity it may act on");
 }
 
 /// **AC-25**: belt beside braces. A record naming this lead's own process group
@@ -427,10 +371,7 @@ async fn a_record_naming_this_leads_own_process_group_is_refused() {
         directory.path(),
         "0198c1a2-7.shims",
         &Records {
-            owner: Identity {
-                pid: dead_pid(),
-                started: "Wed Aug 19 14:54:57 2026".to_owned(),
-            },
+            owner: Identity { pid: dead_pid(), started: "Wed Aug 19 14:54:57 2026".to_owned() },
             children: vec![Recorded {
                 cli: ShimCli::Grok,
                 process: Identity {
@@ -449,11 +390,7 @@ async fn a_record_naming_this_leads_own_process_group_is_refused() {
 
     assert_eq!(
         swept.fate_of(&path),
-        Some(&ShimFate::Swept {
-            signalled: 0,
-            spared: 1,
-            undecided: 0,
-        }),
+        Some(&ShimFate::Swept { signalled: 0, spared: 1, undecided: 0 }),
         "the sweep refused its own group: {swept:?}"
     );
     // The proof that nothing was signalled is that this test is still running:
@@ -487,11 +424,7 @@ async fn retention_turns_how_old_is_too_old_into_who_wrote_this() {
     assert_eq!(swept.fate_of(&newer), Some(&ShimFate::Foreign), "{swept:?}");
     assert!(newer.exists(), "a newer lead's file is never unlinked");
 
-    assert_eq!(
-        swept.fate_of(&empty),
-        Some(&ShimFate::Headerless),
-        "{swept:?}"
-    );
+    assert_eq!(swept.fate_of(&empty), Some(&ShimFate::Headerless), "{swept:?}");
     assert!(!empty.exists(), "a header-less file has no future reader");
 
     // A torn staging file's first line is a partial token rather than an empty
@@ -499,10 +432,7 @@ async fn retention_turns_how_old_is_too_old_into_who_wrote_this() {
     // the conservative answer and it is the one this build takes: the next
     // sweep meets it again rather than a build deleting a file it cannot
     // attribute.
-    assert!(matches!(
-        swept.fate_of(&staging),
-        Some(ShimFate::Foreign | ShimFate::Headerless)
-    ));
+    assert!(matches!(swept.fate_of(&staging), Some(ShimFate::Foreign | ShimFate::Headerless)));
 }
 
 /// **AC-30**: a child whose liveness could not be established leaves the file
@@ -522,10 +452,7 @@ async fn a_file_with_an_undecided_child_is_left_exactly_as_it_is() {
         directory.path(),
         "0198c1a2-11.shims",
         &Records {
-            owner: Identity {
-                pid: dead_pid(),
-                started: "Wed Aug 19 14:54:57 2026".to_owned(),
-            },
+            owner: Identity { pid: dead_pid(), started: "Wed Aug 19 14:54:57 2026".to_owned() },
             children: vec![Recorded {
                 cli: ShimCli::Agy,
                 process: Identity {
@@ -542,11 +469,7 @@ async fn a_file_with_an_undecided_child_is_left_exactly_as_it_is() {
 
     assert_eq!(
         swept.fate_of(&path),
-        Some(&ShimFate::Swept {
-            signalled: 0,
-            spared: 0,
-            undecided: 1,
-        }),
+        Some(&ShimFate::Swept { signalled: 0, spared: 0, undecided: 1 }),
         "{swept:?}"
     );
     assert!(path.exists(), "an undecided file is kept");
@@ -588,11 +511,7 @@ async fn what_a_lead_records_is_what_a_sweep_reads() {
     let path = writer.path();
     assert!(path.exists(), "the first write publishes a file");
     assert_eq!(
-        std::fs::metadata(&path)
-            .expect("readable")
-            .permissions()
-            .mode()
-            & 0o777,
+        std::fs::metadata(&path).expect("readable").permissions().mode() & 0o777,
         0o600,
         "nobody else may read which processes this lead owns"
     );
@@ -613,8 +532,5 @@ async fn what_a_lead_records_is_what_a_sweep_reads() {
     writer.remove(decoy.recorded().process.pid);
     let parsed = records::parse(&std::fs::read_to_string(&path).expect("readable"))
         .expect("still this format");
-    assert!(
-        parsed.children.is_empty(),
-        "a child that exited is taken back out"
-    );
+    assert!(parsed.children.is_empty(), "a child that exited is taken back out");
 }

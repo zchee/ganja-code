@@ -100,10 +100,7 @@ fn the_posture_is_pinned_on_every_turn_and_not_only_the_first() {
     for session in [None, Some("01a01b4f-174e-7fe2-8abd-ba8e51156c43")] {
         let argv = argv(session);
         for pinned in [SANDBOX_OVERRIDE, APPROVAL_OVERRIDE] {
-            assert!(
-                argv.iter().any(|token| token == pinned),
-                "{pinned} is missing from {argv:?}"
-            );
+            assert!(argv.iter().any(|token| token == pinned), "{pinned} is missing from {argv:?}");
         }
     }
 }
@@ -138,10 +135,7 @@ fn the_only_config_overrides_are_the_two_pinned_posture_keys() {
         assert_eq!(overrides.len(), PINNED_KEYS.len(), "in {argv:?}");
         for value in overrides {
             let key = value.split('=').next().expect("a key before the equals");
-            assert!(
-                PINNED_KEYS.contains(&key),
-                "{key} is not one of the pinned posture keys"
-            );
+            assert!(PINNED_KEYS.contains(&key), "{key} is not one of the pinned posture keys");
         }
     }
 }
@@ -158,9 +152,7 @@ fn no_prompt_text_is_ever_on_a_command_line() {
         deadline: shim::CODEX_TURN_TIMEOUT,
     });
     assert!(
-        !argv
-            .iter()
-            .any(|token| token.to_string_lossy().contains(secret)),
+        !argv.iter().any(|token| token.to_string_lossy().contains(secret)),
         "argv is for flags; `-` is what says the prompt is on stdin"
     );
     assert_eq!(Codex.door(), Door::Stdin);
@@ -178,10 +170,7 @@ fn a_thread_started_line_is_where_a_later_turn_gets_its_id() {
             "\n",
         ))
         .expect("the shapes a probed 0.149.0-alpha.1 actually printed");
-    assert_eq!(
-        reply.session.as_deref(),
-        Some("01a01b4f-174e-7fe2-8abd-ba8e51156c43")
-    );
+    assert_eq!(reply.session.as_deref(), Some("01a01b4f-174e-7fe2-8abd-ba8e51156c43"));
 }
 
 #[test]
@@ -241,9 +230,8 @@ fn output_carrying_no_event_at_all_is_refused_rather_than_read_as_silence() {
     // **AC-8**'s garbage arm: a clean exit with unreadable stdout becomes a
     // structured failure mail, where an empty [`Reply`] would become a
     // teammate that answered nothing and said nothing about it.
-    let refusal = Codex
-        .reply("this is not the shape any driver reads\n")
-        .expect_err("garbage is refused");
+    let refusal =
+        Codex.reply("this is not the shape any driver reads\n").expect_err("garbage is refused");
     assert!(refusal.contains("--json"), "{refusal}");
 }
 
@@ -267,10 +255,7 @@ fn the_environment_carries_the_credential_home_and_no_posture_door() {
     // the very permission profile a turn's own rollout records, and
     // enumeration is what keeps it out.
     assert!(
-        !Codex
-            .additions()
-            .iter()
-            .any(|name| name.contains("PERMISSION")),
+        !Codex.additions().iter().any(|name| name.contains("PERMISSION")),
         "no environment door onto the posture may be carried"
     );
 }
@@ -292,11 +277,7 @@ fn recorded_launch() -> Vec<&'static str> {
 
 /// What the driver composes for a pane, as strings.
 fn tui() -> Vec<String> {
-    Codex
-        .tui_argv()
-        .iter()
-        .map(|token| token.to_string_lossy().into_owned())
-        .collect()
+    Codex.tui_argv().iter().map(|token| token.to_string_lossy().into_owned()).collect()
 }
 
 #[test]
@@ -306,9 +287,8 @@ fn the_tui_argv_is_the_launch_line_the_pane_probe_ran() {
     // [`SANDBOX_OVERRIDE`] and [`APPROVAL_OVERRIDE`], because that is how
     // the binary received them.
     let recorded = recorded_launch();
-    let (binary, floors) = recorded
-        .split_first()
-        .expect("a binary, then the floors it was launched with");
+    let (binary, floors) =
+        recorded.split_first().expect("a binary, then the floors it was launched with");
 
     assert_eq!(*binary, BINARY);
     assert_eq!(tui(), floors);
@@ -371,10 +351,7 @@ fn the_tui_argv_carries_the_posture_and_none_of_the_headless_machinery() {
     assert_eq!(overrides.len(), PINNED_KEYS.len(), "in {tui:?}");
     for value in overrides {
         let key = value.split('=').next().expect("a key before the equals");
-        assert!(
-            PINNED_KEYS.contains(&key),
-            "{key} is not one of the pinned posture keys"
-        );
+        assert!(PINNED_KEYS.contains(&key), "{key} is not one of the pinned posture keys");
     }
 }
 

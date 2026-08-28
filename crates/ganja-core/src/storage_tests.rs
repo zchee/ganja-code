@@ -1,4 +1,5 @@
-use std::{fs, path::Path};
+use std::fs;
+use std::path::Path;
 
 use rusqlite::Connection;
 use tempfile::TempDir;
@@ -98,26 +99,14 @@ fn message(id: &str, parts: Vec<Part>) -> Message {
         id: MessageId::from(id.to_owned()),
         role: Role::Assistant,
         parts,
-        time: MessageTime {
-            created: 7,
-            completed: Some(9),
-        },
+        time: MessageTime { created: 7, completed: Some(9) },
         model: Some("canned".to_owned()),
-        usage: Some(Usage {
-            input_tokens: 1,
-            output_tokens: 2,
-            ..Usage::default()
-        }),
+        usage: Some(Usage { input_tokens: 1, output_tokens: 2, ..Usage::default() }),
     }
 }
 
 fn text(id: &str, text: &str) -> Part {
-    Part {
-        id: PartId::from(id.to_owned()),
-        body: PartBody::Text {
-            text: text.to_owned(),
-        },
-    }
+    Part { id: PartId::from(id.to_owned()), body: PartBody::Text { text: text.to_owned() } }
 }
 
 /// A completed tool call, the richest shape a part takes.
@@ -143,13 +132,7 @@ fn tool(id: &str) -> Part {
 fn names(directory: &Path) -> Vec<String> {
     let mut names: Vec<String> = fs::read_dir(directory)
         .expect("the directory lists")
-        .map(|entry| {
-            entry
-                .expect("the entry reads")
-                .file_name()
-                .to_string_lossy()
-                .into_owned()
-        })
+        .map(|entry| entry.expect("the entry reads").file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
 
@@ -159,13 +142,9 @@ fn names(directory: &Path) -> Vec<String> {
 /// Stores a whole message the way the engine does — envelope first, then
 /// each part — which is the order the part table's foreign key needs.
 fn store_message(storage: &Storage, id: &SessionId, message: &Message) {
-    storage
-        .save_message(id, message)
-        .expect("the envelope stores");
+    storage.save_message(id, message).expect("the envelope stores");
     for part in &message.parts {
-        storage
-            .save_part(id, &message.id, part)
-            .expect("the part stores");
+        storage.save_part(id, &message.id, part).expect("the part stores");
     }
 }
 
@@ -179,9 +158,7 @@ fn beside(storage: &Storage) -> Connection {
     let connection =
         Connection::open(storage.database()).expect("the database opens a second time");
     for pragma in PRAGMAS {
-        connection
-            .execute_batch(pragma)
-            .expect("the pragmas apply to any connection");
+        connection.execute_batch(pragma).expect("the pragmas apply to any connection");
     }
 
     connection
@@ -192,18 +169,8 @@ fn a_store_that_was_never_written_reads_as_empty_rather_than_failing() {
     let directory = temporary();
     let storage = storage(&directory);
 
-    assert!(
-        storage
-            .list_sessions()
-            .expect("an unwritten store lists")
-            .is_empty()
-    );
-    assert_eq!(
-        storage
-            .load_info(&session("ses_missing"))
-            .expect("an unwritten store reads"),
-        None
-    );
+    assert!(storage.list_sessions().expect("an unwritten store lists").is_empty());
+    assert_eq!(storage.load_info(&session("ses_missing")).expect("an unwritten store reads"), None);
     assert!(
         storage
             .load_transcript(&session("ses_missing"))
@@ -220,11 +187,7 @@ fn an_info_record_round_trips_with_its_optional_fields_set_and_unset() {
     let bare = info("ses_bare", 5);
     let full = SessionInfo {
         title: Some("what it was about".to_owned()),
-        usage: Usage {
-            input_tokens: 11,
-            output_tokens: 22,
-            ..Usage::default()
-        },
+        usage: Usage { input_tokens: 11, output_tokens: 22, ..Usage::default() },
         context_tokens: 33,
         summary: Some(MessageId::from("msg_summary".to_owned())),
         agent: Some("plan".to_owned()),
@@ -236,14 +199,8 @@ fn an_info_record_round_trips_with_its_optional_fields_set_and_unset() {
     storage.save_info(&bare).expect("the bare record writes");
     storage.save_info(&full).expect("the full record writes");
 
-    assert_eq!(
-        storage.load_info(&bare.id).expect("the bare record reads"),
-        Some(bare)
-    );
-    assert_eq!(
-        storage.load_info(&full.id).expect("the full record reads"),
-        Some(full)
-    );
+    assert_eq!(storage.load_info(&bare.id).expect("the bare record reads"), Some(bare));
+    assert_eq!(storage.load_info(&full.id).expect("the full record reads"), Some(full));
 }
 
 #[test]
@@ -253,15 +210,9 @@ fn a_message_is_stored_without_its_parts_and_the_caller_keeps_them() {
     let id = session("ses_1");
 
     let held = message("msg_1", vec![text("prt_1", "kept by the caller")]);
-    storage
-        .save_message(&id, &held)
-        .expect("the envelope stores");
+    storage.save_message(&id, &held).expect("the envelope stores");
 
-    assert_eq!(
-        held.parts.len(),
-        1,
-        "the caller's message must not be emptied by storing it"
-    );
+    assert_eq!(held.parts.len(), 1, "the caller's message must not be emptied by storing it");
     let loaded = storage.load_transcript(&id).expect("the transcript loads");
     assert_eq!(loaded.len(), 1);
     assert!(
@@ -303,22 +254,12 @@ fn a_transcript_reassembles_its_messages_and_parts_in_id_order() {
         .map(|message| {
             (
                 message.id.as_str(),
-                message
-                    .parts
-                    .iter()
-                    .map(|part| part.id.as_str())
-                    .collect::<Vec<_>>(),
+                message.parts.iter().map(|part| part.id.as_str()).collect::<Vec<_>>(),
             )
         })
         .collect();
 
-    assert_eq!(
-        shape,
-        vec![
-            ("msg_1", vec!["prt_1", "prt_2"]),
-            ("msg_2", vec!["prt_3", "prt_4"]),
-        ]
-    );
+    assert_eq!(shape, vec![("msg_1", vec!["prt_1", "prt_2"]), ("msg_2", vec!["prt_3", "prt_4"]),]);
 }
 
 #[test]
@@ -332,9 +273,7 @@ fn a_deleted_message_takes_its_parts_and_leaves_the_rest_of_the_transcript() {
     store_message(&storage, &id, &doomed);
     store_message(&storage, &id, &kept);
 
-    storage
-        .delete_message(&id, &doomed.id)
-        .expect("the message deletes");
+    storage.delete_message(&id, &doomed.id).expect("the message deletes");
 
     let loaded = storage.load_transcript(&id).expect("the transcript loads");
     assert_eq!(loaded.len(), 1);
@@ -351,32 +290,20 @@ fn a_deleted_message_takes_its_parts_and_leaves_the_rest_of_the_transcript() {
             |row| row.get(0),
         )
         .expect("the part table counts");
-    assert_eq!(
-        orphans, 0,
-        "the cascade must carry a deleted message's parts away with it"
-    );
+    assert_eq!(orphans, 0, "the cascade must carry a deleted message's parts away with it");
 
-    storage
-        .delete_message(&id, &doomed.id)
-        .expect("deleting what is already gone is not an error");
+    storage.delete_message(&id, &doomed.id).expect("deleting what is already gone is not an error");
 }
 
 #[test]
 fn a_corrupt_info_row_is_skipped_and_the_rest_still_lists() {
     let directory = temporary();
     let storage = storage(&directory);
-    storage
-        .save_info(&info("ses_rotten", 5))
-        .expect("the record writes");
-    storage
-        .save_info(&info("ses_intact", 4))
-        .expect("the record writes");
+    storage.save_info(&info("ses_rotten", 5)).expect("the record writes");
+    storage.save_info(&info("ses_intact", 4)).expect("the record writes");
 
     beside(&storage)
-        .execute(
-            "UPDATE session SET data = 'not json at all' WHERE id = 'ses_rotten'",
-            [],
-        )
+        .execute("UPDATE session SET data = 'not json at all' WHERE id = 'ses_rotten'", [])
         .expect("the row is damaged");
 
     let listed: Vec<String> = storage
@@ -387,20 +314,14 @@ fn a_corrupt_info_row_is_skipped_and_the_rest_still_lists() {
         .collect();
     assert_eq!(listed, vec!["ses_intact".to_owned()]);
     assert_eq!(
-        storage
-            .load_info(&session("ses_rotten"))
-            .expect("the unreadable record reads as absent"),
+        storage.load_info(&session("ses_rotten")).expect("the unreadable record reads as absent"),
         None
     );
 
     // Left where it is: a row has no name to lose, so the reversible
     // set-aside a file gets is simply not deleting it.
     let still_there: i64 = beside(&storage)
-        .query_row(
-            "SELECT COUNT(*) FROM session WHERE id = 'ses_rotten'",
-            [],
-            |row| row.get(0),
-        )
+        .query_row("SELECT COUNT(*) FROM session WHERE id = 'ses_rotten'", [], |row| row.get(0))
         .expect("the session table counts");
     assert_eq!(still_there, 1, "nothing may be destroyed to skip it");
 }
@@ -423,11 +344,7 @@ fn a_corrupt_envelope_takes_its_message_and_its_parts_out_of_the_transcript() {
     let loaded = storage.load_transcript(&id).expect("the transcript loads");
     assert_eq!(loaded.len(), 1, "{loaded:#?}");
     assert_eq!(loaded[0].id, kept.id);
-    assert_eq!(
-        loaded[0].parts.len(),
-        1,
-        "the surviving message keeps exactly its own parts"
-    );
+    assert_eq!(loaded[0].parts.len(), 1, "the surviving message keeps exactly its own parts");
 }
 
 #[test]
@@ -446,11 +363,7 @@ fn a_corrupt_part_row_is_skipped_and_its_message_keeps_the_rest() {
     let loaded = storage.load_transcript(&id).expect("the transcript loads");
     assert_eq!(loaded.len(), 1);
     assert_eq!(
-        loaded[0]
-            .parts
-            .iter()
-            .map(|part| part.id.as_str())
-            .collect::<Vec<_>>(),
+        loaded[0].parts.iter().map(|part| part.id.as_str()).collect::<Vec<_>>(),
         vec!["prt_2"]
     );
 }
@@ -500,19 +413,12 @@ fn a_reasoning_record_this_build_cannot_read_costs_continuity_and_says_so() {
     .to_string();
     let connection = beside(&storage);
     connection
-        .execute(
-            "UPDATE part SET data = ?1 WHERE id = 'prt_2'",
-            rusqlite::params![ahead],
-        )
+        .execute("UPDATE part SET data = ?1 WHERE id = 'prt_2'", rusqlite::params![ahead])
         .expect("the row is replaced");
 
     let loaded = storage.load_transcript(&id).expect("the transcript loads");
     assert_eq!(
-        loaded[0]
-            .parts
-            .iter()
-            .map(|part| part.id.as_str())
-            .collect::<Vec<_>>(),
+        loaded[0].parts.iter().map(|part| part.id.as_str()).collect::<Vec<_>>(),
         vec!["prt_1", "prt_2", "prt_3"],
         "the rest of the message survives and the lost part keeps its place"
     );
@@ -530,14 +436,9 @@ fn a_reasoning_record_this_build_cannot_read_costs_continuity_and_says_so() {
     );
 
     let stored: String = connection
-        .query_row("SELECT data FROM part WHERE id = 'prt_2'", [], |row| {
-            row.get(0)
-        })
+        .query_row("SELECT data FROM part WHERE id = 'prt_2'", [], |row| row.get(0))
         .expect("the row reads");
-    assert_eq!(
-        stored, ahead,
-        "reading a record this build cannot decode must not rewrite it"
-    );
+    assert_eq!(stored, ahead, "reading a record this build cannot decode must not rewrite it");
 
     // The other way a record becomes unreadable — a whole format this
     // build predates — has to reach the same answer, or the marker would
@@ -558,11 +459,7 @@ fn a_reasoning_record_this_build_cannot_read_costs_continuity_and_says_so() {
     let loaded = storage.load_transcript(&id).expect("the transcript loads");
     assert_eq!(
         loaded[0].parts[1].body,
-        PartBody::Reasoning {
-            provider: String::new(),
-            item: String::new(),
-            encrypted: None,
-        },
+        PartBody::Reasoning { provider: String::new(), item: String::new(), encrypted: None },
         "provenance the record does not spell plainly is left unknown \
              rather than guessed"
     );
@@ -579,9 +476,7 @@ fn readable_thinking_is_stored_and_reads_back_as_itself() {
     let id = session("ses_1");
 
     let mut reply = Message::assistant("canned");
-    reply
-        .parts
-        .push(Part::reasoning_text("weighing a greeting"));
+    reply.parts.push(Part::reasoning_text("weighing a greeting"));
     reply.parts.push(Part::text("hello"));
     store_message(&storage, &id, &reply);
 
@@ -589,9 +484,7 @@ fn readable_thinking_is_stored_and_reads_back_as_itself() {
 
     assert_eq!(
         loaded[0].parts[0].body,
-        PartBody::ReasoningText {
-            text: "weighing a greeting".to_owned()
-        },
+        PartBody::ReasoningText { text: "weighing a greeting".to_owned() },
         "a stored thought comes back whole, not as a marker"
     );
     assert_eq!(loaded[0].parts[1].as_text(), Some("hello"));
@@ -606,11 +499,7 @@ fn an_unreadable_part_that_is_not_reasoning_is_still_dropped_whole() {
     let directory = temporary();
     let storage = storage(&directory);
     let id = session("ses_1");
-    store_message(
-        &storage,
-        &id,
-        &message("msg_1", vec![text("prt_1", "a"), text("prt_2", "b")]),
-    );
+    store_message(&storage, &id, &message("msg_1", vec![text("prt_1", "a"), text("prt_2", "b")]));
 
     beside(&storage)
         .execute(
@@ -627,11 +516,7 @@ fn an_unreadable_part_that_is_not_reasoning_is_still_dropped_whole() {
 
     let loaded = storage.load_transcript(&id).expect("the transcript loads");
     assert_eq!(
-        loaded[0]
-            .parts
-            .iter()
-            .map(|part| part.id.as_str())
-            .collect::<Vec<_>>(),
+        loaded[0].parts.iter().map(|part| part.id.as_str()).collect::<Vec<_>>(),
         vec!["prt_2"]
     );
 }
@@ -641,9 +526,7 @@ fn a_record_from_a_newer_build_is_skipped_and_left_exactly_where_it_is() {
     let directory = temporary();
     let storage = storage(&directory);
     let id = session("ses_1");
-    storage
-        .save_info(&info("ses_1", 5))
-        .expect("the record writes");
+    storage.save_info(&info("ses_1", 5)).expect("the record writes");
     store_message(&storage, &id, &message("msg_1", vec![text("prt_1", "a")]));
 
     let ahead = serde_json::json!({
@@ -656,10 +539,7 @@ fn a_record_from_a_newer_build_is_skipped_and_left_exactly_where_it_is() {
     .to_string();
     let connection = beside(&storage);
     connection
-        .execute(
-            "UPDATE session SET data = ?1 WHERE id = 'ses_1'",
-            rusqlite::params![ahead],
-        )
+        .execute("UPDATE session SET data = ?1 WHERE id = 'ses_1'", rusqlite::params![ahead])
         .expect("the row is replaced");
     connection
         .execute(
@@ -670,34 +550,16 @@ fn a_record_from_a_newer_build_is_skipped_and_left_exactly_where_it_is() {
         )
         .expect("the row is replaced");
 
-    assert_eq!(
-        storage
-            .load_info(&id)
-            .expect("a newer build's record is not an error"),
-        None
-    );
-    assert!(
-        storage
-            .list_sessions()
-            .expect("a newer build's record is not an error")
-            .is_empty()
-    );
+    assert_eq!(storage.load_info(&id).expect("a newer build's record is not an error"), None);
+    assert!(storage.list_sessions().expect("a newer build's record is not an error").is_empty());
     let loaded = storage.load_transcript(&id).expect("the transcript loads");
-    assert!(
-        loaded[0].parts.is_empty(),
-        "a newer build's part is skipped, not decoded"
-    );
+    assert!(loaded[0].parts.is_empty(), "a newer build's part is skipped, not decoded");
 
     // The bytes are still exactly the ones the newer build wrote.
     let stored: String = connection
-        .query_row("SELECT data FROM session WHERE id = 'ses_1'", [], |row| {
-            row.get(0)
-        })
+        .query_row("SELECT data FROM session WHERE id = 'ses_1'", [], |row| row.get(0))
         .expect("the row reads");
-    assert_eq!(
-        stored, ahead,
-        "a newer build's record must not be rewritten"
-    );
+    assert_eq!(stored, ahead, "a newer build's record must not be rewritten");
 }
 
 #[test]
@@ -705,13 +567,9 @@ fn sessions_list_newest_first_and_ignore_what_could_not_be_read() {
     let directory = temporary();
     let storage = storage(&directory);
     for (id, updated) in [("ses_a", 10), ("ses_b", 30), ("ses_c", 20), ("ses_d", 30)] {
-        storage
-            .save_info(&info(id, updated))
-            .expect("the record writes");
+        storage.save_info(&info(id, updated)).expect("the record writes");
     }
-    storage
-        .save_info(&info("ses_e", 40))
-        .expect("the record writes");
+    storage.save_info(&info("ses_e", 40)).expect("the record writes");
     beside(&storage)
         .execute("UPDATE session SET data = '' WHERE id = 'ses_e'", [])
         .expect("the row is damaged");
@@ -752,21 +610,13 @@ fn a_part_whose_message_was_never_stored_is_refused_rather_than_orphaned() {
     // Nothing ever read such a part back — a transcript reaches parts only
     // through an envelope — so what used to be a file nobody opened is now
     // a write that says so.
-    let orphan = storage.save_part(
-        &id,
-        &MessageId::from("msg_never".to_owned()),
-        &text("prt_1", "a"),
-    );
+    let orphan =
+        storage.save_part(&id, &MessageId::from("msg_never".to_owned()), &text("prt_1", "a"));
     assert!(
         matches!(orphan, Err(StorageError::Sql { .. })),
         "a part with no message must be refused, got {orphan:?}"
     );
-    assert!(
-        storage
-            .load_transcript(&id)
-            .expect("the transcript loads")
-            .is_empty()
-    );
+    assert!(storage.load_transcript(&id).expect("the transcript loads").is_empty());
 }
 
 #[test]
@@ -774,9 +624,7 @@ fn a_write_leaves_nothing_beside_the_database_but_what_sqlite_owns() {
     let directory = temporary();
     let storage = storage(&directory);
     let id = session("ses_1");
-    storage
-        .save_info(&info("ses_1", 5))
-        .expect("the record writes");
+    storage.save_info(&info("ses_1", 5)).expect("the record writes");
     store_message(&storage, &id, &message("msg_1", vec![text("prt_1", "a")]));
 
     for name in names(directory.path()) {
@@ -803,23 +651,11 @@ fn a_message_id_reused_in_another_session_does_not_overwrite_it() {
     // Two sessions can carry a message under the same id however it was
     // minted; under a bare `id` primary key the second write would take
     // the first one's row.
-    store_message(
-        &storage,
-        &mine,
-        &message("msg_same", vec![text("prt_same", "mine")]),
-    );
-    store_message(
-        &storage,
-        &yours,
-        &message("msg_same", vec![text("prt_same", "yours")]),
-    );
+    store_message(&storage, &mine, &message("msg_same", vec![text("prt_same", "mine")]));
+    store_message(&storage, &yours, &message("msg_same", vec![text("prt_same", "yours")]));
 
-    let mine = storage
-        .load_transcript(&mine)
-        .expect("the transcript loads");
-    let yours = storage
-        .load_transcript(&yours)
-        .expect("the transcript loads");
+    let mine = storage.load_transcript(&mine).expect("the transcript loads");
+    let yours = storage.load_transcript(&yours).expect("the transcript loads");
     assert_eq!(mine.len(), 1);
     assert_eq!(yours.len(), 1);
     assert_eq!(mine[0].parts[0].as_text(), Some("mine"));
@@ -846,14 +682,9 @@ fn two_stores_on_one_database_take_turns_rather_than_take_each_others_writes() {
     let rounds = 25;
     let write = |storage: &Storage, owner: &str, what: &str| {
         let id = session(owner);
-        storage
-            .save_info(&info(owner, 1))
-            .expect("the record writes");
+        storage.save_info(&info(owner, 1)).expect("the record writes");
         for round in 0..rounds {
-            let held = message(
-                "msg_same",
-                vec![text("prt_same", &format!("{what} {round}"))],
-            );
+            let held = message("msg_same", vec![text("prt_same", &format!("{what} {round}"))]);
             store_message(storage, &id, &held);
         }
     };
@@ -872,9 +703,7 @@ fn two_stores_on_one_database_take_turns_rather_than_take_each_others_writes() {
     // Either handle answers for both sessions: one database, two views of
     // it, and neither writer's row was overwritten by the other's.
     let read = |storage: &Storage, owner: &str, what: &str| {
-        let loaded = storage
-            .load_transcript(&session(owner))
-            .expect("the transcript loads");
+        let loaded = storage.load_transcript(&session(owner)).expect("the transcript loads");
         assert_eq!(loaded.len(), 1, "{owner}: {loaded:#?}");
         assert_eq!(
             loaded[0].parts.len(),
@@ -902,9 +731,7 @@ fn two_stores_on_one_database_take_turns_rather_than_take_each_others_writes() {
 fn every_connection_sets_the_pragmas_the_store_depends_on() {
     let directory = temporary();
     let storage = storage(&directory);
-    storage
-        .save_info(&info("ses_1", 1))
-        .expect("the record writes");
+    storage.save_info(&info("ses_1", 1)).expect("the record writes");
 
     let connection = connect(storage.database()).expect("a connection opens");
     let read = |pragma: &str| -> i64 {
@@ -917,16 +744,8 @@ fn every_connection_sets_the_pragmas_the_store_depends_on() {
         .expect("the pragma reads");
 
     assert_eq!(journal, "wal");
-    assert_eq!(
-        read("synchronous"),
-        1,
-        "NORMAL, not the build's FULL default"
-    );
-    assert_eq!(
-        read("foreign_keys"),
-        1,
-        "without this the cascade is a no-op"
-    );
+    assert_eq!(read("synchronous"), 1, "NORMAL, not the build's FULL default");
+    assert_eq!(read("foreign_keys"), 1, "without this the cascade is a no-op");
     assert_eq!(read("busy_timeout"), 5000);
     assert_eq!(read("cache_size"), -64_000);
 }
@@ -938,9 +757,7 @@ fn a_second_open_finds_the_schema_already_there_and_the_sessions_with_it() {
     let id = session(&name);
     {
         let storage = storage(&directory);
-        storage
-            .save_info(&info(&name, 5))
-            .expect("the record writes");
+        storage.save_info(&info(&name, 5)).expect("the record writes");
         store_message(&storage, &id, &message("msg_1", vec![text("prt_1", "a")]));
     }
 
@@ -966,9 +783,7 @@ fn an_unreadable_database_is_set_aside_and_the_store_starts_fresh() {
     let directory = temporary();
     {
         let storage = storage(&directory);
-        storage
-            .save_info(&info("ses_lost", 5))
-            .expect("the record writes");
+        storage.save_info(&info("ses_lost", 5)).expect("the record writes");
     }
 
     // The log goes first, and its absence is the point rather than
@@ -991,20 +806,12 @@ fn an_unreadable_database_is_set_aside_and_the_store_starts_fresh() {
 
     let storage = storage(&directory);
     assert!(
-        storage
-            .list_sessions()
-            .expect("a damaged store opens rather than failing")
-            .is_empty(),
+        storage.list_sessions().expect("a damaged store opens rather than failing").is_empty(),
         "what replaces a damaged store is empty"
     );
-    storage
-        .save_info(&info("ses_new", 1))
-        .expect("the fresh store writes");
+    storage.save_info(&info("ses_new", 1)).expect("the fresh store writes");
     assert_eq!(
-        storage
-            .list_sessions()
-            .expect("the fresh store lists")
-            .len(),
+        storage.list_sessions().expect("the fresh store lists").len(),
         1,
         "the store that replaces a damaged one is a working one"
     );
@@ -1021,18 +828,11 @@ fn a_database_set_aside_takes_its_write_ahead_log_with_it() {
     let directory = temporary();
     let database = directory.path().join(DATABASE);
     for suffix in ["", "-wal", "-shm"] {
-        fs::write(
-            directory.path().join(format!("{DATABASE}{suffix}")),
-            b"whatever was there",
-        )
-        .expect("the file is writable");
+        fs::write(directory.path().join(format!("{DATABASE}{suffix}")), b"whatever was there")
+            .expect("the file is writable");
     }
 
-    assert!(super::set_aside(
-        &database,
-        "for the test",
-        super::QUARANTINE
-    ));
+    assert!(super::set_aside(&database, "for the test", super::QUARANTINE));
 
     // A log left behind is recovered into the *fresh* file that takes the
     // old name, which would pour the damaged store straight back in — so
@@ -1040,16 +840,13 @@ fn a_database_set_aside_takes_its_write_ahead_log_with_it() {
     // useless.
     let left = names(directory.path());
     assert_eq!(
-        left.iter()
-            .filter(|name| !name.contains(".corrupt-"))
-            .count(),
+        left.iter().filter(|name| !name.contains(".corrupt-")).count(),
         0,
         "nothing may be left under the name a fresh database will take, got {left:?}"
     );
     for suffix in ["", "-wal", "-shm"] {
         assert!(
-            left.iter()
-                .any(|name| name.contains(".corrupt-") && name.ends_with(suffix)),
+            left.iter().any(|name| name.contains(".corrupt-") && name.ends_with(suffix)),
             "the {suffix:?} file must travel with its database, got {left:?}"
         );
     }
@@ -1092,9 +889,7 @@ fn a_quarantine_waits_for_the_lock_and_then_finds_nothing_left_to_do() {
         // the lock, and be waiting on it.
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(
-            !names(directory.path())
-                .iter()
-                .any(|name| name.contains(".preuuid-")),
+            !names(directory.path()).iter().any(|name| name.contains(".preuuid-")),
             "nothing may be set aside while another process holds the lock"
         );
 
@@ -1102,9 +897,7 @@ fn a_quarantine_waits_for_the_lock_and_then_finds_nothing_left_to_do() {
         // and a fresh one created at the name it left.
         assert!(super::set_aside(&database, "for the test", super::PREUUID));
         let fresh = minted(1);
-        Storage::open(root.clone())
-            .save_info(&info(&fresh, 1))
-            .expect("the fresh store writes");
+        Storage::open(root.clone()).save_info(&info(&fresh, 1)).expect("the fresh store writes");
         drop(held);
 
         let listed = parked
@@ -1112,10 +905,7 @@ fn a_quarantine_waits_for_the_lock_and_then_finds_nothing_left_to_do() {
             .expect("the waiting store does not panic")
             .expect("the waiting store opens rather than failing");
         assert_eq!(
-            listed
-                .iter()
-                .map(|info| info.id.as_str())
-                .collect::<Vec<_>>(),
+            listed.iter().map(|info| info.id.as_str()).collect::<Vec<_>>(),
             vec![fresh.as_str()],
             "the store that waited must go on with what the winner left"
         );
@@ -1138,9 +928,7 @@ fn a_database_from_a_newer_build_is_refused_rather_than_migrated_down() {
     let directory = temporary();
     {
         let storage = storage(&directory);
-        storage
-            .save_info(&info("ses_1", 5))
-            .expect("the record writes");
+        storage.save_info(&info("ses_1", 5)).expect("the record writes");
         beside(&storage)
                 .execute(
                     "INSERT INTO migration (id, time_completed) VALUES ('29991231235959_from_ahead', 1)",
@@ -1162,9 +950,7 @@ fn a_database_from_a_newer_build_is_refused_rather_than_migrated_down() {
     // Refused is not quarantined: the sessions in there belong to the
     // build that can read them.
     assert!(
-        !names(directory.path())
-            .iter()
-            .any(|name| name.contains(".corrupt-")),
+        !names(directory.path()).iter().any(|name| name.contains(".corrupt-")),
         "a database this build merely does not understand must be left alone"
     );
 }
@@ -1201,25 +987,12 @@ fn an_older_file_store_is_carried_across_on_first_open_and_set_aside_intact() {
     // are this build's, because a tree carrying older ones is set aside
     // rather than carried across (**D493**) — `storage_preuuid_tree.rs`
     // is where that is asserted.
-    let info = SessionInfo {
-        title: Some("carried".to_owned()),
-        ..info(&name, 5)
-    };
-    write_json(
-        &root
-            .join("session")
-            .join("info")
-            .join(format!("{name}.json")),
-        &info,
-    );
+    let info = SessionInfo { title: Some("carried".to_owned()), ..info(&name, 5) };
+    write_json(&root.join("session").join("info").join(format!("{name}.json")), &info);
     let mut envelope = held.clone();
     envelope.parts.clear();
     write_json(
-        &root
-            .join("session")
-            .join("message")
-            .join(&name)
-            .join("msg_1.json"),
+        &root.join("session").join("message").join(&name).join("msg_1.json"),
         &serde_json::json!({"version": VERSION, "payload": envelope}),
     );
     for part in &held.parts {
@@ -1235,10 +1008,7 @@ fn an_older_file_store_is_carried_across_on_first_open_and_set_aside_intact() {
     }
 
     let storage = Storage::open(root.clone());
-    assert_eq!(
-        storage.load_info(&id).expect("the carried record reads"),
-        Some(info)
-    );
+    assert_eq!(storage.load_info(&id).expect("the carried record reads"), Some(info));
     let loaded = storage.load_transcript(&id).expect("the transcript loads");
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].parts, held.parts);
@@ -1277,16 +1047,12 @@ fn a_tree_holding_one_id_twice_is_left_where_it_is() {
     let root = directory.path().join("storage");
 
     let name = minted(1);
-    for (file, title) in [
-        (format!("{name}.json"), "first"),
-        (format!("also-{name}.json"), "second"),
-    ] {
+    for (file, title) in
+        [(format!("{name}.json"), "first"), (format!("also-{name}.json"), "second")]
+    {
         write_json(
             &root.join("session").join("info").join(file),
-            &SessionInfo {
-                title: Some(title.to_owned()),
-                ..info(&name, 5)
-            },
+            &SessionInfo { title: Some(title.to_owned()), ..info(&name, 5) },
         );
     }
 
@@ -1294,23 +1060,15 @@ fn a_tree_holding_one_id_twice_is_left_where_it_is() {
     // Whichever of the two got there first is readable; which one it is is
     // the directory's order to decide and not this test's.
     assert!(
-        storage
-            .load_info(&session(&name))
-            .expect("the database opens")
-            .is_some(),
+        storage.load_info(&session(&name)).expect("the database opens").is_some(),
         "the session that did carry across is there"
     );
     assert!(
-        root.join("session")
-            .join("info")
-            .join(format!("{name}.json"))
-            .is_file(),
+        root.join("session").join("info").join(format!("{name}.json")).is_file(),
         "and the tree that holds the one that did not is untouched"
     );
     assert!(
-        !names(directory.path())
-            .into_iter()
-            .any(|name| name.starts_with("storage.migrated-")),
+        !names(directory.path()).into_iter().any(|name| name.starts_with("storage.migrated-")),
         "a conversion that lost something sets nothing aside"
     );
 }
@@ -1322,22 +1080,14 @@ fn a_second_open_does_not_convert_a_tree_that_appeared_after_the_first() {
     let native = minted(1);
     {
         let storage = Storage::open(root.clone());
-        storage
-            .save_info(&info(&native, 5))
-            .expect("the record writes");
+        storage.save_info(&info(&native, 5)).expect("the record writes");
     }
 
     // A tree that turns up after the database exists is not this build's
     // to import: convert-on-first-open happens exactly once, and once is
     // the open that created the file.
     let late = minted(2);
-    write_json(
-        &root
-            .join("session")
-            .join("info")
-            .join(format!("{late}.json")),
-        &info(&late, 9),
-    );
+    write_json(&root.join("session").join("info").join(format!("{late}.json")), &info(&late, 9));
 
     let storage = Storage::open(root.clone());
     let listed: Vec<String> = storage
@@ -1347,10 +1097,7 @@ fn a_second_open_does_not_convert_a_tree_that_appeared_after_the_first() {
         .map(|info| info.id.as_str().to_owned())
         .collect();
     assert_eq!(listed, vec![native]);
-    assert!(
-        root.exists(),
-        "a tree that was not converted is not set aside"
-    );
+    assert!(root.exists(), "a tree that was not converted is not set aside");
 }
 
 /// Writes one file of the layout the conversion reads.

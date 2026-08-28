@@ -73,9 +73,7 @@ impl Spy {
                     body.extend_from_slice(&chunk[..read]);
                 }
                 let body = String::from_utf8_lossy(&body).into_owned();
-                seen.lock()
-                    .expect("the spy's log is never poisoned")
-                    .push((method, route, body));
+                seen.lock().expect("the spy's log is never poisoned").push((method, route, body));
                 let response = b"HTTP/1.1 200 X\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
                 let _ = stream.write_all(response).await;
                 let _ = stream.shutdown().await;
@@ -85,10 +83,7 @@ impl Spy {
     }
 
     fn requests(&self) -> Vec<(String, String, String)> {
-        self.requests
-            .lock()
-            .expect("the spy's log is never poisoned")
-            .clone()
+        self.requests.lock().expect("the spy's log is never poisoned").clone()
     }
 }
 
@@ -113,17 +108,11 @@ fn a_send_registers_only_when_held_and_reply_capable() {
 
     let unbound = PeerMessageId::ascending();
     registry.register(unbound.clone(), "w@t".to_owned(), true, None);
-    assert_eq!(
-        registry.settle_sent(&unbound, ReceiptStatus::Delivered),
-        None
-    );
+    assert_eq!(registry.settle_sent(&unbound, ReceiptStatus::Delivered), None);
 
     let accepted = PeerMessageId::ascending();
     registry.register(accepted.clone(), "w@t".to_owned(), false, Some(&reply));
-    assert_eq!(
-        registry.settle_sent(&accepted, ReceiptStatus::Delivered),
-        None
-    );
+    assert_eq!(registry.settle_sent(&accepted, ReceiptStatus::Delivered), None);
 
     let refused = PeerMessageId::ascending();
     registry.register(refused.clone(), "w@t".to_owned(), false, Some(&reply));
@@ -133,11 +122,7 @@ fn a_send_registers_only_when_held_and_reply_capable() {
     registry.register(held.clone(), "w@t".to_owned(), true, Some(&reply));
     assert_eq!(
         registry.settle_sent(&held, ReceiptStatus::Delivered),
-        Some(Settled {
-            id: held,
-            to: "w@t".to_owned(),
-            status: PeerReceiptStatus::Delivered,
-        })
+        Some(Settled { id: held, to: "w@t".to_owned(), status: PeerReceiptStatus::Delivered })
     );
 }
 
@@ -151,16 +136,9 @@ fn a_settlement_applies_only_to_an_outstanding_id_once() {
     registry.register(id.clone(), "w@t".to_owned(), true, Some(&reply));
 
     let unknown = PeerMessageId::ascending();
-    assert_eq!(
-        registry.settle_sent(&unknown, ReceiptStatus::Delivered),
-        None
-    );
+    assert_eq!(registry.settle_sent(&unknown, ReceiptStatus::Delivered), None);
 
-    assert!(
-        registry
-            .settle_sent(&id, ReceiptStatus::Delivered)
-            .is_some()
-    );
+    assert!(registry.settle_sent(&id, ReceiptStatus::Delivered).is_some());
     // A second terminal for the same id is a settlement for an id that is
     // no longer outstanding.
     assert_eq!(registry.settle_sent(&id, ReceiptStatus::Denied), None);
@@ -174,17 +152,10 @@ fn the_outstanding_registry_evicts_the_oldest_at_its_cap() {
     let first = PeerMessageId::ascending();
     registry.register(first.clone(), "w@t".to_owned(), true, Some(&reply));
     for _ in 1..OUTSTANDING_CAP {
-        registry.register(
-            PeerMessageId::ascending(),
-            "w@t".to_owned(),
-            true,
-            Some(&reply),
-        );
+        registry.register(PeerMessageId::ascending(), "w@t".to_owned(), true, Some(&reply));
     }
     assert!(
-        registry
-            .settle_sent(&first, ReceiptStatus::Delivered)
-            .is_some(),
+        registry.settle_sent(&first, ReceiptStatus::Delivered).is_some(),
         "the cap has not been exceeded yet"
     );
 
@@ -192,19 +163,9 @@ fn the_outstanding_registry_evicts_the_oldest_at_its_cap() {
     let oldest = PeerMessageId::ascending();
     registry.register(oldest.clone(), "w@t".to_owned(), true, Some(&reply));
     for _ in 1..OUTSTANDING_CAP {
-        registry.register(
-            PeerMessageId::ascending(),
-            "w@t".to_owned(),
-            true,
-            Some(&reply),
-        );
+        registry.register(PeerMessageId::ascending(), "w@t".to_owned(), true, Some(&reply));
     }
-    registry.register(
-        PeerMessageId::ascending(),
-        "w@t".to_owned(),
-        true,
-        Some(&reply),
-    );
+    registry.register(PeerMessageId::ascending(), "w@t".to_owned(), true, Some(&reply));
     assert_eq!(
         registry.settle_sent(&oldest, ReceiptStatus::Delivered),
         None,
@@ -227,12 +188,7 @@ fn new_session_clears_every_outstanding_send() {
 // this must return promptly with no listener anywhere near the path.
 #[tokio::test]
 async fn a_target_failing_vet_is_never_opened() {
-    post(
-        Path::new("/etc/passwd"),
-        PeerMessageId::ascending(),
-        ReceiptStatus::Delivered,
-    )
-    .await;
+    post(Path::new("/etc/passwd"), PeerMessageId::ascending(), ReceiptStatus::Delivered).await;
 }
 
 // AC-53: the `HeldId` returned by admission is paired with the message it
@@ -255,9 +211,7 @@ async fn a_settlement_names_the_message_that_caused_it() {
     registry.associate(held_a.clone(), message_a.clone(), socket_a);
     registry.associate(held_b.clone(), message_b.clone(), socket_b);
 
-    registry
-        .settle_and_post(&held_a, HeldOutcome::Delivered)
-        .await;
+    registry.settle_and_post(&held_a, HeldOutcome::Delivered).await;
     registry.settle_and_post(&held_b, HeldOutcome::Denied).await;
 
     let seen_a = spy_a.requests();
@@ -281,9 +235,7 @@ async fn a_settlement_with_no_association_posts_nothing() {
     let socket = socket_path(dir.path(), "0c0c0c0c");
     let spy = Spy::listen(&socket).await;
     let registry = Receipts::new();
-    registry
-        .settle_and_post(&HeldId::ascending(), HeldOutcome::Expired)
-        .await;
+    registry.settle_and_post(&HeldId::ascending(), HeldOutcome::Expired).await;
     assert!(spy.requests().is_empty());
 }
 
@@ -308,20 +260,10 @@ async fn only_a_called_settlement_posts_and_a_left_alone_one_does_not() {
     let registry = Receipts::new();
     let timer_hold = HeldId::ascending();
     let never_called_hold = HeldId::ascending();
-    registry.associate(
-        timer_hold.clone(),
-        PeerMessageId::ascending(),
-        socket_called,
-    );
-    registry.associate(
-        never_called_hold,
-        PeerMessageId::ascending(),
-        socket_left_alone,
-    );
+    registry.associate(timer_hold.clone(), PeerMessageId::ascending(), socket_called);
+    registry.associate(never_called_hold, PeerMessageId::ascending(), socket_left_alone);
 
-    registry
-        .settle_and_post(&timer_hold, HeldOutcome::Expired)
-        .await;
+    registry.settle_and_post(&timer_hold, HeldOutcome::Expired).await;
 
     assert_eq!(spy_called.requests().len(), 1);
     assert!(spy_left_alone.requests().is_empty());
@@ -402,22 +344,10 @@ fn the_rendering_neutralizes_peer_authored_text_in_to() {
 
 #[test]
 fn every_held_outcome_and_wire_status_maps_by_name() {
-    assert_eq!(
-        wire_status_of(HeldOutcome::Delivered),
-        ReceiptStatus::Delivered
-    );
+    assert_eq!(wire_status_of(HeldOutcome::Delivered), ReceiptStatus::Delivered);
     assert_eq!(wire_status_of(HeldOutcome::Denied), ReceiptStatus::Denied);
     assert_eq!(wire_status_of(HeldOutcome::Expired), ReceiptStatus::Expired);
-    assert_eq!(
-        peer_status_of(ReceiptStatus::Delivered),
-        PeerReceiptStatus::Delivered
-    );
-    assert_eq!(
-        peer_status_of(ReceiptStatus::Denied),
-        PeerReceiptStatus::Denied
-    );
-    assert_eq!(
-        peer_status_of(ReceiptStatus::Expired),
-        PeerReceiptStatus::Expired
-    );
+    assert_eq!(peer_status_of(ReceiptStatus::Delivered), PeerReceiptStatus::Delivered);
+    assert_eq!(peer_status_of(ReceiptStatus::Denied), PeerReceiptStatus::Denied);
+    assert_eq!(peer_status_of(ReceiptStatus::Expired), PeerReceiptStatus::Expired);
 }

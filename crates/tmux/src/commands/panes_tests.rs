@@ -1,5 +1,6 @@
 use super::*;
-use crate::{PaneId, WindowId, commands::words};
+use crate::commands::words;
+use crate::{PaneId, WindowId};
 
 #[test]
 fn split_window_renders_every_flag_it_has() {
@@ -78,9 +79,7 @@ fn new_pane_carries_a_floating_panes_position_and_size() {
                 .y_position("2")
                 .target("%0")
         ),
-        [
-            "new-pane", "-d", "-x", "60%", "-y", "40%", "-X", "10", "-Y", "2", "-t", "%0",
-        ]
+        ["new-pane", "-d", "-x", "60%", "-y", "40%", "-X", "10", "-Y", "2", "-t", "%0",]
     );
 }
 
@@ -90,10 +89,7 @@ fn select_pane_can_mark_a_pane_and_title_it() {
         words(&SelectPane::new().mark().title("build").target("%3")),
         ["select-pane", "-m", "-T", "build", "-t", "%3"]
     );
-    assert_eq!(
-        words(&SelectPane::new().clear_marked()),
-        ["select-pane", "-M"]
-    );
+    assert_eq!(words(&SelectPane::new().clear_marked()), ["select-pane", "-M"]);
 }
 
 #[test]
@@ -119,10 +115,7 @@ fn last_pane_names_the_window_it_looks_in() {
 
 #[test]
 fn kill_pane_can_spare_the_one_it_targets() {
-    assert_eq!(
-        words(&KillPane::new().all_others().target("%1")),
-        ["kill-pane", "-a", "-t", "%1",]
-    );
+    assert_eq!(words(&KillPane::new().all_others().target("%1")), ["kill-pane", "-a", "-t", "%1",]);
 }
 
 #[test]
@@ -201,20 +194,7 @@ fn join_pane_moves_a_pane_into_a_split() {
                 .source("%5")
                 .target("%0")
         ),
-        [
-            "join-pane",
-            "-b",
-            "-d",
-            "-f",
-            "-h",
-            "-v",
-            "-l",
-            "30%",
-            "-s",
-            "%5",
-            "-t",
-            "%0",
-        ]
+        ["join-pane", "-b", "-d", "-f", "-h", "-v", "-l", "30%", "-s", "%5", "-t", "%0",]
     );
 }
 
@@ -225,14 +205,7 @@ fn move_pane_renders_both_of_the_jobs_it_does() {
         ["move-pane", "-s", "%5", "-t", "%0", "-l", "50%"]
     );
     assert_eq!(
-        words(
-            &MovePane::new()
-                .before()
-                .detached()
-                .full_size()
-                .horizontal()
-                .vertical()
-        ),
+        words(&MovePane::new().before().detached().full_size().horizontal().vertical()),
         ["move-pane", "-b", "-d", "-f", "-h", "-v"]
     );
 }
@@ -373,23 +346,9 @@ fn capture_pane_renders_every_flag_it_has() {
 fn pipe_pane_fences_its_shell_command_off() {
     assert_eq!(
         words(
-            &PipePane::new()
-                .input()
-                .output()
-                .toggle()
-                .target("%0")
-                .shell_command("cat >>/tmp/log")
+            &PipePane::new().input().output().toggle().target("%0").shell_command("cat >>/tmp/log")
         ),
-        [
-            "pipe-pane",
-            "-I",
-            "-O",
-            "-o",
-            "-t",
-            "%0",
-            "--",
-            "cat >>/tmp/log",
-        ]
+        ["pipe-pane", "-I", "-O", "-o", "-t", "%0", "--", "cat >>/tmp/log",]
     );
     assert_eq!(
         words(&PipePane::new().target("%0")),
@@ -505,14 +464,7 @@ fn list_windows_asks_the_whole_server_in_a_caller_format() {
 #[test]
 fn select_window_renders_every_flag_it_has() {
     assert_eq!(
-        words(
-            &SelectWindow::new()
-                .last()
-                .next()
-                .previous()
-                .toggle()
-                .target("@2")
-        ),
+        words(&SelectWindow::new().last().next().previous().toggle().target("@2")),
         ["select-window", "-l", "-n", "-p", "-T", "-t", "@2"]
     );
 }
@@ -531,10 +483,7 @@ fn next_and_previous_window_can_look_for_an_alert() {
 
 #[test]
 fn last_window_names_only_a_session() {
-    assert_eq!(
-        words(&LastWindow::new().target("work")),
-        ["last-window", "-t", "work"]
-    );
+    assert_eq!(words(&LastWindow::new().target("work")), ["last-window", "-t", "work"]);
 }
 
 #[test]
@@ -559,18 +508,7 @@ fn move_window_renders_every_flag_it_has() {
                 .source("@1")
                 .target("other:3")
         ),
-        [
-            "move-window",
-            "-a",
-            "-b",
-            "-d",
-            "-k",
-            "-r",
-            "-s",
-            "@1",
-            "-t",
-            "other:3",
-        ]
+        ["move-window", "-a", "-b", "-d", "-k", "-r", "-s", "@1", "-t", "other:3",]
     );
 }
 
@@ -594,17 +532,7 @@ fn link_window_renders_every_flag_it_has() {
                 .source("@1")
                 .target("other:3")
         ),
-        [
-            "link-window",
-            "-a",
-            "-b",
-            "-d",
-            "-k",
-            "-s",
-            "@1",
-            "-t",
-            "other:3",
-        ]
+        ["link-window", "-a", "-b", "-d", "-k", "-s", "@1", "-t", "other:3",]
     );
 }
 
@@ -627,18 +555,7 @@ fn respawn_window_can_replace_a_dead_command() {
                 .target("@1")
                 .command(["true"])
         ),
-        [
-            "respawn-window",
-            "-k",
-            "-c",
-            "/srv",
-            "-e",
-            "A=1",
-            "-t",
-            "@1",
-            "--",
-            "true",
-        ]
+        ["respawn-window", "-k", "-c", "/srv", "-e", "A=1", "-t", "@1", "--", "true",]
     );
 }
 
@@ -681,13 +598,7 @@ fn resize_window_takes_its_adjustment_as_a_positional() {
 #[test]
 fn rotate_window_turns_either_way() {
     assert_eq!(
-        words(
-            &RotateWindow::new()
-                .downward()
-                .upward()
-                .keep_zoomed()
-                .target("@1")
-        ),
+        words(&RotateWindow::new().downward().upward().keep_zoomed().target("@1")),
         ["rotate-window", "-D", "-U", "-Z", "-t", "@1"]
     );
 }
@@ -706,32 +617,14 @@ fn find_window_renders_every_flag_it_has() {
                 .target("%0")
                 .pattern("^build")
         ),
-        [
-            "find-window",
-            "-C",
-            "-i",
-            "-N",
-            "-r",
-            "-T",
-            "-Z",
-            "-t",
-            "%0",
-            "--",
-            "^build",
-        ]
+        ["find-window", "-C", "-i", "-N", "-r", "-T", "-Z", "-t", "%0", "--", "^build",]
     );
 }
 
 #[test]
 fn the_two_bare_layout_moves_name_only_a_window() {
-    assert_eq!(
-        words(&NextLayout::new().target("@1")),
-        ["next-layout", "-t", "@1"]
-    );
-    assert_eq!(
-        words(&PreviousLayout::new().target("@1")),
-        ["previous-layout", "-t", "@1"]
-    );
+    assert_eq!(words(&NextLayout::new().target("@1")), ["next-layout", "-t", "@1"]);
+    assert_eq!(words(&PreviousLayout::new().target("@1")), ["previous-layout", "-t", "@1"]);
 }
 
 #[test]
@@ -746,17 +639,7 @@ fn select_layout_takes_a_layout_name_or_none() {
                 .target("%0")
                 .layout("main-vertical")
         ),
-        [
-            "select-layout",
-            "-E",
-            "-n",
-            "-o",
-            "-p",
-            "-t",
-            "%0",
-            "--",
-            "main-vertical",
-        ]
+        ["select-layout", "-E", "-n", "-o", "-p", "-t", "%0", "--", "main-vertical",]
     );
     assert_eq!(words(&SelectLayout::new()), ["select-layout"]);
 }
@@ -770,10 +653,7 @@ fn a_target_takes_an_id_read_out_of_a_previous_answer() {
         ["kill-pane", "-t", "%7"],
         "an id that has to be restrung to be used again is an id in name only"
     );
-    assert_eq!(
-        words(&KillWindow::new().target(window)),
-        ["kill-window", "-t", "@3"]
-    );
+    assert_eq!(words(&KillWindow::new().target(window)), ["kill-window", "-t", "@3"]);
 }
 
 #[test]

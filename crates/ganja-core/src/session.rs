@@ -32,36 +32,31 @@
 //! deterministic. A persistence failure is a warning, never a dead turn:
 //! losing the disk must not kill the conversation.
 
-use std::{
-    collections::HashMap,
-    ops::ControlFlow,
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
-};
+use std::collections::HashMap;
+use std::ops::ControlFlow;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
 
-use futures::{StreamExt as _, stream::BoxStream};
-use tokio::{
-    sync::{Mutex, mpsc, oneshot},
-    time::Instant,
-};
+use futures::StreamExt as _;
+use futures::stream::BoxStream;
+use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    catalog,
-    engine::{Fanout, PendingSwitch, RecordSwitch},
-    permission::{Decision, Permissions},
-    protocol::{
-        Event, FinishReason, Message, Part, PartBody, PartId, PermissionId, PermissionReply,
-        QuestionAnswer, QuestionId, QuestionInfo, QuestionOption, QuestionSource, Role, ToolState,
-        Usage, now,
-    },
-    provider::{ChatRequest, Provider, ProviderError, ProviderEvent},
-    storage::{SessionId, SessionInfo, Storage, StorageError},
-    tool::{
-        Credentials, FileTimes, Registry, Tool, ToolCtx, ToolError, ToolOutput, question,
-        send_message, shell, skill,
-    },
+use crate::catalog;
+use crate::engine::{Fanout, PendingSwitch, RecordSwitch};
+use crate::permission::{Decision, Permissions};
+use crate::protocol::{
+    Event, FinishReason, Message, Part, PartBody, PartId, PermissionId, PermissionReply,
+    QuestionAnswer, QuestionId, QuestionInfo, QuestionOption, QuestionSource, Role, ToolState,
+    Usage, now,
+};
+use crate::provider::{ChatRequest, Provider, ProviderError, ProviderEvent};
+use crate::storage::{SessionId, SessionInfo, Storage, StorageError};
+use crate::tool::{
+    Credentials, FileTimes, Registry, Tool, ToolCtx, ToolError, ToolOutput, question, send_message,
+    shell, skill,
 };
 
 /// What the model reads when the user refuses a call, ported verbatim from
@@ -429,17 +424,13 @@ impl PendingReplies {
     pub(crate) fn answer_permission(&mut self, id: &PermissionId, reply: PermissionReply) -> bool {
         // A closed receiver means the turn is already tearing down, which is
         // the same race as replying after the turn ended.
-        self.permissions
-            .remove(id)
-            .is_some_and(|sender| sender.send(reply).is_ok())
+        self.permissions.remove(id).is_some_and(|sender| sender.send(reply).is_ok())
     }
 
     /// The same for a question, which one command answers and another
     /// dismisses.
     pub(crate) fn answer_question(&mut self, id: &QuestionId, answered: Answered) -> bool {
-        self.questions
-            .remove(id)
-            .is_some_and(|sender| sender.send(answered).is_ok())
+        self.questions.remove(id).is_some_and(|sender| sender.send(answered).is_ok())
     }
 
     /// How many requests are open right now — what a status line counts.
@@ -518,17 +509,11 @@ struct PersistInner {
 
 impl Persist {
     pub(crate) fn new(state: Arc<SessionState>, session: SessionId) -> Self {
-        Self {
-            state,
-            session,
-            inner: std::sync::Mutex::new(PersistInner::default()),
-        }
+        Self { state, session, inner: std::sync::Mutex::new(PersistInner::default()) }
     }
 
     fn locked(&self) -> std::sync::MutexGuard<'_, PersistInner> {
-        self.inner
-            .lock()
-            .expect("the write-through state is never poisoned")
+        self.inner.lock().expect("the write-through state is never poisoned")
     }
 
     /// One warning per failed write, naming the session so a log reader can
@@ -622,10 +607,7 @@ impl Persist {
     /// When the dirty text part must reach the disk, for the stream loop to
     /// sleep against; [`None`] when nothing is pending.
     fn flush_deadline(&self) -> Option<Instant> {
-        self.locked()
-            .dirty
-            .as_ref()
-            .map(|(_, since)| *since + TEXT_FLUSH)
+        self.locked().dirty.as_ref().map(|(_, since)| *since + TEXT_FLUSH)
     }
 
     fn note_input_tokens(&self, tokens: u64) {
@@ -635,11 +617,7 @@ impl Persist {
         // turn runs — a measure only moved at finish left the gauge frozen
         // for the whole of a long turn (2026-08-15). The disk write stays at
         // [`Persist::finish`]; a gauge does not need durability.
-        let mut live = self
-            .state
-            .live
-            .lock()
-            .expect("the live session is never poisoned");
+        let mut live = self.state.live.lock().expect("the live session is never poisoned");
         if let Some(info) = live.info.as_mut()
             && info.id == self.session
         {
@@ -669,11 +647,7 @@ impl Persist {
             self.complain("the finished assistant envelope", &error);
         }
 
-        let mut live = self
-            .state
-            .live
-            .lock()
-            .expect("the live session is never poisoned");
+        let mut live = self.state.live.lock().expect("the live session is never poisoned");
         let Some(info) = live.info.as_mut() else {
             return;
         };
@@ -709,11 +683,7 @@ impl Persist {
     /// a mid-turn model switch is refused Busy, so the turn's model *is* the
     /// active one.
     fn remember_agent(&self, agent: &str, model: &str) {
-        let mut live = self
-            .state
-            .live
-            .lock()
-            .expect("the live session is never poisoned");
+        let mut live = self.state.live.lock().expect("the live session is never poisoned");
         let Some(info) = live.info.as_mut() else {
             return;
         };
@@ -742,11 +712,7 @@ impl Persist {
     /// row carries pre-tail `usage`/`context_tokens` on purpose, the same
     /// staleness a crash before any tail write has always had.
     fn flush_activated(&self, activated: &std::collections::BTreeSet<String>) {
-        let mut live = self
-            .state
-            .live
-            .lock()
-            .expect("the live session is never poisoned");
+        let mut live = self.state.live.lock().expect("the live session is never poisoned");
         let Some(info) = live.info.as_mut() else {
             return;
         };
@@ -1202,11 +1168,7 @@ impl Turn {
     /// request or a history it then owns, and holding the lock across either
     /// would hold it across an await.
     fn steered(&self) -> Vec<Message> {
-        self.steer
-            .lock()
-            .expect("the steer mailbox is never poisoned")
-            .consumed
-            .clone()
+        self.steer.lock().expect("the steer mailbox is never poisoned").consumed.clone()
     }
 }
 
@@ -1253,11 +1215,7 @@ fn mention_parts(mentions: &[crate::protocol::Mention]) -> impl Iterator<Item = 
 fn skill_parts<'a>(roots: &skill::Roots, names: &'a [String]) -> impl Iterator<Item = Part> + 'a {
     // One walk per message, not one per name: the roster the misses are
     // reported against is then the roster the hits were found in.
-    let skills = if names.is_empty() {
-        Vec::new()
-    } else {
-        skill::discover(roots)
-    };
+    let skills = if names.is_empty() { Vec::new() } else { skill::discover(roots) };
 
     names.iter().map(move |name| {
         let text = match skills.iter().find(|skill| skill.name == *name) {
@@ -1323,14 +1281,9 @@ fn mention_of(
         return Mentioned::of_address(&name, identity.resolve_address(path, own_session));
     }
     if let Some(peer) = roster.and_then(|roster| {
-        roster
-            .iter()
-            .find(|peer| ganja_tool::registry::same_name(&peer.name, &name))
+        roster.iter().find(|peer| ganja_tool::registry::same_name(&peer.name, &name))
     }) {
-        return Mentioned::Teammate {
-            name,
-            lead: peer.lead,
-        };
+        return Mentioned::Teammate { name, lead: peer.lead };
     }
 
     let resolution = identity.resolve(&name, own_session);
@@ -1395,10 +1348,7 @@ async fn session_mention_parts(turn: &Turn, names: &[String]) -> Vec<Part> {
 /// the model as the same message settling over and over.
 fn receipt_part(turn: &Turn) -> Option<Part> {
     let batch = std::mem::take(
-        &mut *turn
-            .receipts
-            .lock()
-            .expect("the settled receipts batch is never poisoned"),
+        &mut *turn.receipts.lock().expect("the settled receipts batch is never poisoned"),
     );
     if batch.is_empty() {
         return None;
@@ -1433,8 +1383,7 @@ async fn user_message(
     user.parts.extend(peer_parts(peers));
     user.parts.extend(mention_parts(mentions));
     user.parts.extend(skill_parts(&turn.skill_roots, skills));
-    user.parts
-        .extend(session_mention_parts(turn, session_mentions).await);
+    user.parts.extend(session_mention_parts(turn, session_mentions).await);
     // Last, after the mention parts (**D534**): a receipt is news about a
     // send this session already made, so it belongs behind everything this
     // message is *about*.
@@ -1463,11 +1412,7 @@ async fn drain_steers(turn: &Turn) -> ControlFlow<Option<Outcome>, bool> {
         return ControlFlow::Continue(false);
     }
 
-    let waiting = turn
-        .steer
-        .lock()
-        .expect("the steer mailbox is never poisoned")
-        .take_waiting();
+    let waiting = turn.steer.lock().expect("the steer mailbox is never poisoned").take_waiting();
     if waiting.is_empty() {
         return ControlFlow::Continue(false);
     }
@@ -1478,10 +1423,7 @@ async fn drain_steers(turn: &Turn) -> ControlFlow<Option<Outcome>, bool> {
         // committed to taking it.
         if let ControlFlow::Break(stop) = deliver(
             turn,
-            Event::SteerConsumed {
-                session_id: turn.session_id.clone(),
-                id: input.id,
-            },
+            Event::SteerConsumed { session_id: turn.session_id.clone(), id: input.id },
         )
         .await
         {
@@ -1507,18 +1449,11 @@ async fn drain_steers(turn: &Turn) -> ControlFlow<Option<Outcome>, bool> {
         // Recorded before the announcement for the same reason: the request
         // this turn builds next is composed from here, and a frontend that
         // applies the event holds what that request will carry.
-        turn.steer
-            .lock()
-            .expect("the steer mailbox is never poisoned")
-            .consumed
-            .push(user.clone());
+        turn.steer.lock().expect("the steer mailbox is never poisoned").consumed.push(user.clone());
 
         if let ControlFlow::Break(stop) = deliver(
             turn,
-            Event::MessageStarted {
-                session_id: turn.session_id.clone(),
-                message: user,
-            },
+            Event::MessageStarted { session_id: turn.session_id.clone(), message: user },
         )
         .await
         {
@@ -1537,24 +1472,15 @@ struct Outcome {
 
 impl Outcome {
     fn finished(reason: FinishReason) -> Self {
-        Self {
-            reason,
-            error: None,
-        }
+        Self { reason, error: None }
     }
 
     fn cancelled() -> Self {
-        Self {
-            reason: FinishReason::Cancelled,
-            error: None,
-        }
+        Self { reason: FinishReason::Cancelled, error: None }
     }
 
     fn failed(error: String) -> Self {
-        Self {
-            reason: FinishReason::Failed,
-            error: Some(error),
-        }
+        Self { reason: FinishReason::Failed, error: Some(error) }
     }
 }
 
@@ -1770,14 +1696,8 @@ async fn spawn_title_if_untitled(turn: &Turn) {
     }
 
     let untitled = {
-        let live = persist
-            .state
-            .live
-            .lock()
-            .expect("the live session is never poisoned");
-        live.info
-            .as_ref()
-            .is_some_and(|info| info.id == persist.session && info.title.is_none())
+        let live = persist.state.live.lock().expect("the live session is never poisoned");
+        live.info.as_ref().is_some_and(|info| info.id == persist.session && info.title.is_none())
     };
     if !untitled {
         return;
@@ -1788,10 +1708,7 @@ async fn spawn_title_if_untitled(turn: &Turn) {
     // alone.
     let first_user = {
         let history = turn.history.lock().await;
-        history
-            .iter()
-            .find(|message| message.role == Role::User)
-            .cloned()
+        history.iter().find(|message| message.role == Role::User).cloned()
     };
     let Some(mut first_user) = first_user else {
         return;
@@ -1802,18 +1719,10 @@ async fn spawn_title_if_untitled(turn: &Turn) {
     // than as the file's whole contents.
     for part in &mut first_user.parts {
         if let PartBody::File { path, .. } = &part.body {
-            part.body = PartBody::Text {
-                text: format!("@{path}"),
-            };
+            part.body = PartBody::Text { text: format!("@{path}") };
         }
     }
-    let fallback = clip_title(
-        first_user
-            .parts
-            .iter()
-            .find_map(Part::as_text)
-            .unwrap_or_default(),
-    );
+    let fallback = clip_title(first_user.parts.iter().find_map(Part::as_text).unwrap_or_default());
 
     let provider = Arc::clone(&turn.provider);
     let model = turn.model.clone();
@@ -2022,10 +1931,7 @@ fn title_model(
 /// line kept, anything past 100 characters clipped to 97 plus an ellipsis.
 fn clean_title(text: &str) -> Option<String> {
     let stripped = strip_think(text);
-    let line = stripped
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())?;
+    let line = stripped.lines().map(str::trim).find(|line| !line.is_empty())?;
 
     Some(if line.chars().count() > 100 {
         let clipped: String = line.chars().take(97).collect();
@@ -2064,10 +1970,7 @@ fn strip_think(text: &str) -> String {
 /// user resumed another one mid-request. Every path holds the live lock, so
 /// a concurrent finish write cannot be torn.
 fn store_title(state: &SessionState, session: &SessionId, title: String) {
-    let mut live = state
-        .live
-        .lock()
-        .expect("the live session is never poisoned");
+    let mut live = state.live.lock().expect("the live session is never poisoned");
 
     if let Some(info) = live.info.as_mut()
         && info.id == *session
@@ -2120,22 +2023,8 @@ async fn drive(turn: &Turn) -> (Message, Option<Outcome>) {
     // A teammate's message is the second kind and then some: it arrived
     // whole, and it leads the extras because it is content rather than an
     // attachment to some.
-    let user = if let TurnKind::Prompt {
-        mentions,
-        skills,
-        peers,
-        session_mentions,
-    } = &turn.kind
-    {
-        user_message(
-            turn,
-            turn.prompt.clone(),
-            peers,
-            mentions,
-            skills,
-            session_mentions,
-        )
-        .await
+    let user = if let TurnKind::Prompt { mentions, skills, peers, session_mentions } = &turn.kind {
+        user_message(turn, turn.prompt.clone(), peers, mentions, skills, session_mentions).await
     } else {
         Message::user(turn.prompt.clone())
     };
@@ -2148,10 +2037,7 @@ async fn drive(turn: &Turn) -> (Message, Option<Outcome>) {
 
     if turn
         .events
-        .send(Event::MessageStarted {
-            session_id: turn.session_id.clone(),
-            message: user,
-        })
+        .send(Event::MessageStarted { session_id: turn.session_id.clone(), message: user })
         .await
         .is_err()
     {
@@ -2330,10 +2216,7 @@ async fn record_patch(turn: &Turn, assistant: &mut Message, before: Option<Strin
 
     let part = Part {
         id: PartId::ascending(),
-        body: PartBody::Patch {
-            hash: patch.hash,
-            files: patch.files,
-        },
+        body: PartBody::Patch { hash: patch.hash, files: patch.files },
     };
     assistant.parts.push(part.clone());
     turn.persist_part(assistant, &part);
@@ -2374,10 +2257,7 @@ async fn drive_shell(turn: &Turn, command: String) -> (Message, Option<Outcome>)
     turn.history.lock().await.push(user.clone());
     if turn
         .events
-        .send(Event::MessageStarted {
-            session_id: turn.session_id.clone(),
-            message: user,
-        })
+        .send(Event::MessageStarted { session_id: turn.session_id.clone(), message: user })
         .await
         .is_err()
     {
@@ -2524,23 +2404,13 @@ async fn drive_shell(turn: &Turn, command: String) -> (Message, Option<Outcome>)
             Some(Outcome::finished(FinishReason::Completed)),
         ),
         Err(error @ ToolError::Cancelled) => (
-            ToolState::Error {
-                input,
-                error: error.to_string(),
-                started,
-                completed,
-            },
+            ToolState::Error { input, error: error.to_string(), started, completed },
             Some(Outcome::cancelled()),
         ),
         // A command that could not be started is information like any other:
         // the transcript says so and the next turn reads it.
         Err(error) => (
-            ToolState::Error {
-                input,
-                error: error.to_string(),
-                started,
-                completed,
-            },
+            ToolState::Error { input, error: error.to_string(), started, completed },
             Some(Outcome::finished(FinishReason::Completed)),
         ),
     };
@@ -2636,11 +2506,7 @@ async fn compact_if_needed(
     };
 
     let (summary_id, context_window) = {
-        let mut live = persist
-            .state
-            .live
-            .lock()
-            .expect("the live session is never poisoned");
+        let mut live = persist.state.live.lock().expect("the live session is never poisoned");
         let Some(info) = live.info.as_ref() else {
             return ControlFlow::Continue(None);
         };
@@ -2684,11 +2550,7 @@ async fn compact_if_needed(
     // the automatic one at the top of a turn and the `/compact` a person typed,
     // which is exactly Claude's `auto`/`manual`.
     turn.fire_hook(crate::hook::Payload::PreCompact {
-        trigger: if forced {
-            crate::hook::Trigger::Manual
-        } else {
-            crate::hook::Trigger::Auto
-        },
+        trigger: if forced { crate::hook::Trigger::Manual } else { crate::hook::Trigger::Auto },
     })
     .await;
 
@@ -2776,11 +2638,7 @@ async fn compact_if_needed(
     // Disk first, then the announcement, like every other write-through
     // point. A cancel between the two leaves a complete assistant message in
     // the transcript that no window pointer names — clutter, not corruption.
-    if let Err(error) = persist
-        .state
-        .storage
-        .save_message(&persist.session, &summary)
-    {
+    if let Err(error) = persist.state.storage.save_message(&persist.session, &summary) {
         persist.complain("the summary envelope", &error);
     }
     for part in &summary.parts {
@@ -2790,21 +2648,14 @@ async fn compact_if_needed(
 
     deliver(
         turn,
-        Event::MessageStarted {
-            session_id: turn.session_id.clone(),
-            message: summary.clone(),
-        },
+        Event::MessageStarted { session_id: turn.session_id.clone(), message: summary.clone() },
     )
     .await?;
 
     *turn.history.lock().await = vec![summary.clone()];
 
     {
-        let mut live = persist
-            .state
-            .live
-            .lock()
-            .expect("the live session is never poisoned");
+        let mut live = persist.state.live.lock().expect("the live session is never poisoned");
         if let Some(info) = live.info.as_mut()
             && info.id == persist.session
         {
@@ -2963,10 +2814,7 @@ fn serialize_message(message: &Message) -> String {
                 PartBody::Tool { tool, state, .. } => {
                     let (input, outcome) = match state {
                         ToolState::Pending { input } => (
-                            input
-                                .clone()
-                                .unwrap_or_else(|| serde_json::json!({}))
-                                .to_string(),
+                            input.clone().unwrap_or_else(|| serde_json::json!({})).to_string(),
                             None,
                         ),
                         ToolState::Running { input, .. } => (input.to_string(), None),
@@ -3058,10 +2906,7 @@ fn build_summary_prompt(previous: Option<&str>, context: &str) -> String {
 /// How one model request ended.
 enum StepEnd {
     /// The stream ran out, and these calls now want to run.
-    Finished {
-        reason: FinishReason,
-        calls: Vec<BufferedCall>,
-    },
+    Finished { reason: FinishReason, calls: Vec<BufferedCall> },
     /// The turn is over — cancelled, failed, or abandoned — and any buffered
     /// call has already been closed.
     Interrupted(Option<Outcome>),
@@ -3104,11 +2949,7 @@ pub(crate) fn touched_files(messages: &[Message], cwd: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
     for message in messages {
         for part in &message.parts {
-            let PartBody::Tool {
-                tool,
-                state: ToolState::Completed { input, .. },
-                ..
-            } = &part.body
+            let PartBody::Tool { tool, state: ToolState::Completed { input, .. }, .. } = &part.body
             else {
                 continue;
             };
@@ -3120,11 +2961,7 @@ pub(crate) fn touched_files(messages: &[Message], cwd: &Path) -> Vec<PathBuf> {
             };
 
             let path = Path::new(named);
-            found.push(if path.is_absolute() {
-                path.to_owned()
-            } else {
-                cwd.join(path)
-            });
+            found.push(if path.is_absolute() { path.to_owned() } else { cwd.join(path) });
         }
     }
 
@@ -3157,10 +2994,7 @@ fn nested_system(turn: &Turn, messages: &[Message]) -> Option<String> {
 async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
     // Every request opens with a step marker, upstream's `step-start` part,
     // so a transcript shows where one request ended and the next began.
-    let marker = Part {
-        id: PartId::ascending(),
-        body: PartBody::StepStart,
-    };
+    let marker = Part { id: PartId::ascending(), body: PartBody::StepStart };
     assistant.parts.push(marker.clone());
     turn.persist_part(assistant, &marker);
     if let ControlFlow::Break(stop) = deliver(
@@ -3173,10 +3007,7 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
     )
     .await
     {
-        return Step {
-            end: StepEnd::Interrupted(stop),
-            usage: None,
-        };
+        return Step { end: StepEnd::Interrupted(stop), usage: None };
     }
 
     let request = {
@@ -3203,13 +3034,9 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
         // later turn about a mode it left. This clone is the request's alone,
         // so nothing here can reach the history it was copied from.
         if !turn.reminders.is_empty()
-            && let Some(user) = messages
-                .iter_mut()
-                .rev()
-                .find(|message| message.role == Role::User)
+            && let Some(user) = messages.iter_mut().rev().find(|message| message.role == Role::User)
         {
-            user.parts
-                .extend(turn.reminders.iter().cloned().map(Part::text));
+            user.parts.extend(turn.reminders.iter().cloned().map(Part::text));
         }
 
         // What is deferred right now, named beside the reminders as its own
@@ -3221,10 +3048,7 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
         let mut tools = turn.tools.definitions();
         let listing = turn.deferral.listing(&tools);
         if !listing.is_empty()
-            && let Some(user) = messages
-                .iter_mut()
-                .rev()
-                .find(|message| message.role == Role::User)
+            && let Some(user) = messages.iter_mut().rev().find(|message| message.role == Role::User)
         {
             user.parts.push(Part::text(listing));
         }
@@ -3254,9 +3078,7 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
         // when the user attached the file is what makes the model read the
         // file as it is *now*: a mention is a reference, and a reference
         // resolved at attach time would go stale the moment the user saved.
-        resolve_mentions(&mut messages, &turn.root, &|mime| {
-            turn.provider.accepts_attachment(mime)
-        });
+        resolve_mentions(&mut messages, &turn.root, &|mime| turn.provider.accepts_attachment(mime));
 
         // Last, over the messages this request actually carries: the
         // instruction files below the root that the work so far has walked
@@ -3303,10 +3125,7 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
     macro_rules! interrupt {
         ($stop:expr, $error:expr) => {{
             fail_buffered(turn, assistant, &mut calls, $error).await;
-            return Step {
-                end: StepEnd::Interrupted($stop),
-                usage,
-            };
+            return Step { end: StepEnd::Interrupted($stop), usage };
         }};
     }
 
@@ -3336,10 +3155,7 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
             // A stream that ends after a cancel ended because of it; one that
             // ends without a finish has said all it is going to.
             if turn.cancel.is_cancelled() {
-                interrupt!(
-                    Some(Outcome::cancelled()),
-                    &ToolError::Cancelled.to_string()
-                );
+                interrupt!(Some(Outcome::cancelled()), &ToolError::Cancelled.to_string());
             }
             break FinishReason::Completed;
         };
@@ -3455,10 +3271,7 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
                 let Ok(args) = parse_args(&call.json) else {
                     continue;
                 };
-                let updated = match assistant
-                    .parts
-                    .iter_mut()
-                    .find(|part| part.id == call.part_id)
+                let updated = match assistant.parts.iter_mut().find(|part| part.id == call.part_id)
                 {
                     Some(part) => {
                         if let PartBody::Tool { state, .. } = &mut part.body {
@@ -3499,11 +3312,7 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
             // `calls`: there is nothing to execute, nothing to ask permission
             // for, and nothing for the next request to carry. What it changes
             // is what a person sees.
-            ProviderEvent::ServerTool {
-                tool,
-                input,
-                output,
-            } => {
+            ProviderEvent::ServerTool { tool, input, output } => {
                 let part = Part::server_tool(tool, input, output);
                 assistant.parts.push(part.clone());
                 turn.persist_part(assistant, &part);
@@ -3622,9 +3431,7 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
     // step's text part, which is the step-end flush the debounce promises.
     let marker = Part {
         id: PartId::ascending(),
-        body: PartBody::StepFinish {
-            usage: usage.unwrap_or_default(),
-        },
+        body: PartBody::StepFinish { usage: usage.unwrap_or_default() },
     };
     assistant.parts.push(marker.clone());
     turn.persist_part(assistant, &marker);
@@ -3641,10 +3448,7 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
         interrupt!(stop, &ToolError::Cancelled.to_string());
     }
 
-    Step {
-        end: StepEnd::Finished { reason, calls },
-        usage,
-    }
+    Step { end: StepEnd::Finished { reason, calls }, usage }
 }
 
 /// Turns every [`PartBody::File`] in `messages` into what the selected wire
@@ -3687,26 +3491,18 @@ fn resolve_mentions(
 ) {
     for message in messages {
         for part in &mut message.parts {
-            let PartBody::File {
-                path,
-                mime,
-                start,
-                end,
-                ..
-            } = &part.body
-            else {
+            let PartBody::File { path, mime, start, end, .. } = &part.body else {
                 continue;
             };
             let (path, mime, start, end) = (path.clone(), mime.clone(), *start, *end);
 
             part.body = if !crate::attachment::is_binary(&mime) {
-                PartBody::Text {
-                    text: attached(root, &path, start, end),
-                }
+                PartBody::Text { text: attached(root, &path, start, end) }
             } else if carries(&mime) {
                 match std::fs::read(root.join(&path)) {
                     Ok(bytes) => {
-                        use base64::{Engine as _, engine::general_purpose::STANDARD};
+                        use base64::Engine as _;
+                        use base64::engine::general_purpose::STANDARD;
                         PartBody::File {
                             path,
                             mime,
@@ -3784,13 +3580,7 @@ const PEER_CLOSING_ESCAPED: &str = "&lt;/teammate-message";
 fn render_peer_envelopes(messages: &mut [Message]) {
     for message in messages {
         for part in &mut message.parts {
-            let PartBody::Peer {
-                from,
-                summary,
-                color,
-                body,
-            } = &part.body
-            else {
+            let PartBody::Peer { from, summary, color, body } = &part.body else {
                 continue;
             };
 
@@ -3815,10 +3605,7 @@ fn render_peer_envelopes(messages: &mut [Message]) {
 /// it counts is the peer's own characters rather than the entities they
 /// expand into.
 fn peer_envelope(from: &str, summary: Option<&str>, color: Option<&str>, body: &str) -> String {
-    let mut open = format!(
-        "<teammate-message teammate_id=\"{}\"",
-        escape_attribute(from)
-    );
+    let mut open = format!("<teammate-message teammate_id=\"{}\"", escape_attribute(from));
     if let Some(color) = color {
         open.push_str(&format!(" color=\"{}\"", escape_attribute(color)));
     }
@@ -3826,10 +3613,7 @@ fn peer_envelope(from: &str, summary: Option<&str>, color: Option<&str>, body: &
         open.push_str(&format!(" summary=\"{}\"", escape_attribute(capped)));
     }
 
-    format!(
-        "{open}>\n{}\n</teammate-message>",
-        body.replace(PEER_CLOSING, PEER_CLOSING_ESCAPED)
-    )
+    format!("{open}>\n{}\n</teammate-message>", body.replace(PEER_CLOSING, PEER_CLOSING_ESCAPED))
 }
 
 /// One attribute value, with the four characters that could end it — or start
@@ -3843,11 +3627,7 @@ fn peer_envelope(from: &str, summary: Option<&str>, color: Option<&str>, body: &
 /// `&#39;`, and sharing it would change the §5.3 envelope's bytes for a
 /// summary or member name holding an apostrophe.
 fn escape_attribute(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
+    value.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
 /// One mentioned file as the model reads it: a tag naming where it came from
@@ -3904,10 +3684,7 @@ fn sliced(text: &str, start: u32, end: Option<u32>) -> String {
     let lines = text.lines().skip(start.saturating_sub(1) as usize);
 
     match end.filter(|end| *end > start) {
-        Some(end) => lines
-            .take((end - start) as usize + 1)
-            .collect::<Vec<_>>()
-            .join("\n"),
+        Some(end) => lines.take((end - start) as usize + 1).collect::<Vec<_>>().join("\n"),
         None => lines.collect::<Vec<_>>().join("\n"),
     }
 }
@@ -4119,10 +3896,8 @@ async fn prepare(
         // telling the model a name the request never offered.
         let mut definitions = turn.tools.definitions();
         turn.deferral.retain_advertised(&mut definitions);
-        let names: Vec<String> = definitions
-            .into_iter()
-            .map(|definition| definition.name)
-            .collect();
+        let names: Vec<String> =
+            definitions.into_iter().map(|definition| definition.name).collect();
         let available = if names.is_empty() {
             "No tools are available.".to_owned()
         } else {
@@ -4179,14 +3954,8 @@ async fn prepare(
         // by the user's own code, for this call alone.
         Decision::Ask if hook.allowed => {}
         Decision::Ask => {
-            match wait_permission(
-                turn,
-                call,
-                tool.describe(&args),
-                &args,
-                &decision.directories,
-            )
-            .await?
+            match wait_permission(turn, call, tool.describe(&args), &args, &decision.directories)
+                .await?
             {
                 PermissionReply::Once => {}
                 PermissionReply::Always => turn
@@ -4203,12 +3972,7 @@ async fn prepare(
         }
     }
 
-    ControlFlow::Continue(Some(Prepared {
-        call: call.clone(),
-        tool: Arc::clone(tool),
-        args,
-        hook,
-    }))
+    ControlFlow::Continue(Some(Prepared { call: call.clone(), tool: Arc::clone(tool), args, hook }))
 }
 
 /// A call that ended inside [`prepare`], as that phase's own answer.
@@ -4305,9 +4069,8 @@ async fn start(
         // child turn carries no cell, so a subagent's call reads the
         // no-such-agent refusal even before its rules refuse it.
         switch: turn.pending_switch.as_ref().map(|cell| {
-            Arc::new(RecordSwitch {
-                pending: Arc::clone(cell),
-            }) as Arc<dyn crate::tool::plan::Switcher>
+            Arc::new(RecordSwitch { pending: Arc::clone(cell) })
+                as Arc<dyn crate::tool::plan::Switcher>
         }),
         // Shared with every call in this session, root or subagent alike
         // (`Turn::child` carries it forward too): a background job
@@ -4316,12 +4079,7 @@ async fn start(
         jobs: turn.jobs.clone(),
     };
 
-    ControlFlow::Continue(Started {
-        prepared,
-        at,
-        ctx,
-        cancel: turn.cancel.clone(),
-    })
+    ControlFlow::Continue(Started { prepared, at, ctx, cancel: turn.cancel.clone() })
 }
 
 /// Runs one started call's tool and reports what it produced.
@@ -4331,12 +4089,7 @@ async fn start(
 /// tasks of their own while the turn's thread keeps sole ownership of the
 /// assistant message.
 async fn body(started: Started) -> Finished {
-    let Started {
-        prepared,
-        at,
-        ctx,
-        cancel,
-    } = started;
+    let Started { prepared, at, ctx, cancel } = started;
 
     // The tool gets a child of the turn's token so a cancel reaches it, and
     // the race below is what stops waiting for the tool's *result*. What it
@@ -4370,10 +4123,7 @@ async fn body(started: Started) -> Finished {
                 // waits on cleanup rather than on the work. Reached only with
                 // a future that has been polled at least once, which is what
                 // makes "cleanup" the right word for what is being waited on.
-                if tokio::time::timeout(TOOL_CANCEL_GRACE, running)
-                    .await
-                    .is_err()
-                {
+                if tokio::time::timeout(TOOL_CANCEL_GRACE, running).await.is_err() {
                     tracing::warn!(
                         tool = prepared.call.name.as_str(),
                         grace = ?TOOL_CANCEL_GRACE,
@@ -4391,11 +4141,7 @@ async fn body(started: Started) -> Finished {
         }
     };
 
-    Finished {
-        prepared,
-        at,
-        result,
-    }
+    Finished { prepared, at, result }
 }
 
 /// Applies one finished call to the assistant message: the language server's
@@ -4410,14 +4156,8 @@ async fn finish(
     assistant: &mut Message,
     finished: Finished,
 ) -> ControlFlow<Option<Outcome>> {
-    let Finished {
-        prepared,
-        at: started,
-        result,
-    } = finished;
-    let Prepared {
-        call, args, hook, ..
-    } = prepared;
+    let Finished { prepared, at: started, result } = finished;
+    let Prepared { call, args, hook, .. } = prepared;
 
     // A deferred tool that *executed* — resolved, permission-passed, body ran
     // — activates whatever came back (**D492**). Before the outcome match so
@@ -4426,16 +4166,10 @@ async fn finish(
     // the schema advertised, success-only activation would leave it retrying
     // blind, and a cancelled call activating is harmless — the set is
     // grow-only, and advertisement is not authority.
-    if call
-        .name
-        .starts_with(ganja_permission::permission::MCP_PREFIX)
+    if call.name.starts_with(ganja_permission::permission::MCP_PREFIX)
         && turn.deferral.activate(&call.name)
     {
-        tracing::debug!(
-            tool = call.name.as_str(),
-            by = "call",
-            "activated a deferred tool"
-        );
+        tracing::debug!(tool = call.name.as_str(), by = "call", "activated a deferred tool");
     }
     // Durability at the activation event, not the turn tail: the growth
     // check runs at *every* call's finish — the parent's `task` call
@@ -4455,9 +4189,7 @@ async fn finish(
             // so a language server can cost this call some advice and can
             // never cost it its result.
             if let Some(lsp) = &turn.lsp {
-                output
-                    .output
-                    .push_str(&lsp.annotate(&call.name, &args, &turn.cwd).await);
+                output.output.push_str(&lsp.annotate(&call.name, &args, &turn.cwd).await);
             }
 
             // After the annotation, so a `PostToolUse` hook is shown what the
@@ -4568,10 +4300,7 @@ async fn wait_permission(
     // itself wait for a program whose whole job is to run beside it. Each hook
     // still has its own budget, and the detached task holds nothing the turn
     // needs.
-    notify_hook(
-        turn,
-        format!("ganja needs your permission to use {}", call.name),
-    );
+    notify_hook(turn, format!("ganja needs your permission to use {}", call.name));
 
     let (sender, receiver) = oneshot::channel();
     let id = PermissionId::ascending();
@@ -4585,10 +4314,8 @@ async fn wait_permission(
     // They arrive from the decision that judged the call rather than being
     // read off the rules again here: what the person is shown has to be what
     // the judgement was made on, and what an "always" would then remember.
-    let directories = outside
-        .iter()
-        .map(|directory| directory.to_string_lossy().into_owned())
-        .collect();
+    let directories =
+        outside.iter().map(|directory| directory.to_string_lossy().into_owned()).collect();
 
     if let ControlFlow::Break(stop) = deliver(
         turn,
@@ -4632,11 +4359,7 @@ async fn wait_permission(
 
     match deliver(
         turn,
-        Event::PermissionReplied {
-            session_id: turn.session_id.clone(),
-            id: id.clone(),
-            reply,
-        },
+        Event::PermissionReplied { session_id: turn.session_id.clone(), id: id.clone(), reply },
     )
     .await
     {
@@ -4674,12 +4397,7 @@ async fn wait_permission(
 /// the other side.
 #[must_use]
 pub fn question_info(prompt: &question::Prompt) -> QuestionInfo {
-    let question::Prompt {
-        question,
-        header,
-        options,
-        multiple,
-    } = prompt;
+    let question::Prompt { question, header, options, multiple } = prompt;
 
     QuestionInfo {
         question: question.clone(),
@@ -4724,10 +4442,7 @@ pub fn question_prompt(info: &QuestionInfo) -> question::Prompt {
 pub fn question_option(choice: &question::Choice) -> QuestionOption {
     let question::Choice { label, description } = choice;
 
-    QuestionOption {
-        label: label.clone(),
-        description: description.clone(),
-    }
+    QuestionOption { label: label.clone(), description: description.clone() }
 }
 
 /// One choice as the model offers it. See [`question_info`].
@@ -4735,10 +4450,7 @@ pub fn question_option(choice: &question::Choice) -> QuestionOption {
 pub fn question_choice(option: &QuestionOption) -> question::Choice {
     let QuestionOption { label, description } = option;
 
-    question::Choice {
-        label: label.clone(),
-        description: description.clone(),
-    }
+    question::Choice { label: label.clone(), description: description.clone() }
 }
 
 /// What one `question` call asks the person through.
@@ -4868,10 +4580,7 @@ impl question::Asker for Ask {
                 Ok(answers),
             ),
             Answered::Rejected => (
-                Event::QuestionRejected {
-                    session_id: self.session_id.clone(),
-                    id: id.clone(),
-                },
+                Event::QuestionRejected { session_id: self.session_id.clone(), id: id.clone() },
                 Err(question::Unanswered::Dismissed),
             ),
         };
@@ -4906,10 +4615,7 @@ impl Ask {
     /// Forgets this question, by its own id — [`retract_permission`]'s twin for
     /// the seam that carries the registry without carrying the turn.
     fn retract(&self, id: &QuestionId) {
-        self.pending
-            .lock()
-            .expect("the pending replies are never poisoned")
-            .close_question(id);
+        self.pending.lock().expect("the pending replies are never poisoned").close_question(id);
     }
 
     /// Sends the terminal event a published request is owed, on the plain path
@@ -4917,10 +4623,7 @@ impl Ask {
     async fn terminate(&self, id: &QuestionId) {
         let _ = self
             .events
-            .send(Event::QuestionRejected {
-                session_id: self.session_id.clone(),
-                id: id.clone(),
-            })
+            .send(Event::QuestionRejected { session_id: self.session_id.clone(), id: id.clone() })
             .await;
     }
 }
@@ -4936,9 +4639,7 @@ fn notify_hook(turn: &Turn, message: String) {
     };
     let session = turn.session_id.as_str().to_owned();
     tokio::spawn(async move {
-        let outcome = hooks
-            .fire(&session, &crate::hook::Payload::Notification { message })
-            .await;
+        let outcome = hooks.fire(&session, &crate::hook::Payload::Notification { message }).await;
         outcome.report(crate::hook::HookEvent::Notification);
     });
 }
@@ -4951,10 +4652,7 @@ fn notify_hook(turn: &Turn, message: String) {
 /// that can ask makes them different sentences, and clearing the registry here
 /// would abandon a sibling's dialog — the deadlock the pre-mortem named.
 fn retract_permission(turn: &Turn, id: &PermissionId) {
-    turn.pending
-        .lock()
-        .expect("the pending replies are never poisoned")
-        .close_permission(id);
+    turn.pending.lock().expect("the pending replies are never poisoned").close_permission(id);
 }
 
 /// Moves the call's part to [`ToolState::Error`] carrying `error`, which is
@@ -4971,12 +4669,7 @@ async fn fail_call(
         turn,
         assistant,
         &call.part_id,
-        ToolState::Error {
-            input,
-            error: error.to_owned(),
-            started: stamp,
-            completed: stamp,
-        },
+        ToolState::Error { input, error: error.to_owned(), started: stamp, completed: stamp },
     )
     .await
 }
@@ -5008,12 +4701,7 @@ async fn close_unresolved(turn: &Turn, assistant: &mut Message, call: &BufferedC
     if let Some(part) = set_tool_state(
         assistant,
         &call.part_id,
-        ToolState::Error {
-            input,
-            error: error.to_owned(),
-            started: stamp,
-            completed: stamp,
-        },
+        ToolState::Error { input, error: error.to_owned(), started: stamp, completed: stamp },
     ) {
         turn.persist_part(assistant, &part);
         let _ = turn
@@ -5031,17 +4719,11 @@ async fn close_unresolved(turn: &Turn, assistant: &mut Message, call: &BufferedC
 /// now stands for the event that reports it, or [`None`] when there is
 /// nothing to report.
 fn set_tool_state(assistant: &mut Message, part_id: &PartId, state: ToolState) -> Option<Part> {
-    let part = assistant
-        .parts
-        .iter_mut()
-        .find(|part| part.id == *part_id)?;
+    let part = assistant.parts.iter_mut().find(|part| part.id == *part_id)?;
     if let PartBody::Tool { state: current, .. } = &mut part.body {
         // Terminal states stick: a call the turn already closed is not
         // reopened by a late race.
-        if matches!(
-            current,
-            ToolState::Completed { .. } | ToolState::Error { .. }
-        ) {
+        if matches!(current, ToolState::Completed { .. } | ToolState::Error { .. }) {
             return None;
         }
         *current = state;

@@ -6,10 +6,8 @@ use super::{
     ENTER, EXIT, NO_BUILD_AGENT, NO_LABEL, NO_PLAN_AGENT, PlanEnterTool, PlanExitTool, Switcher,
     YES_LABEL,
 };
-use crate::{
-    Tool, ToolCtx, ToolError,
-    question::{self, Answer, Asker, Choice, Prompt},
-};
+use crate::question::{self, Answer, Asker, Choice, Prompt};
+use crate::{Tool, ToolCtx, ToolError};
 
 /// An asker that answers whatever it was built with, and records what it
 /// was asked.
@@ -21,10 +19,7 @@ struct Scripted {
 
 impl Scripted {
     fn new(reply: Result<Vec<Answer>, question::Unanswered>) -> Arc<Self> {
-        Arc::new(Self {
-            reply,
-            seen: Mutex::new(Vec::new()),
-        })
+        Arc::new(Self { reply, seen: Mutex::new(Vec::new()) })
     }
 }
 
@@ -81,14 +76,8 @@ fn expected(door: &super::Door) -> Prompt {
         question: door.question.to_owned(),
         header: door.header.to_owned(),
         options: vec![
-            Choice {
-                label: YES_LABEL.to_owned(),
-                description: door.yes_description.to_owned(),
-            },
-            Choice {
-                label: NO_LABEL.to_owned(),
-                description: door.no_description.to_owned(),
-            },
+            Choice { label: YES_LABEL.to_owned(), description: door.yes_description.to_owned() },
+            Choice { label: NO_LABEL.to_owned(), description: door.no_description.to_owned() },
         ],
         multiple: None,
     }
@@ -99,10 +88,7 @@ async fn a_yes_answer_switches_to_build_and_tells_the_model_to_wait() {
     let asker = Scripted::new(Ok(vec![vec![YES_LABEL.to_owned()]]));
     let switcher = RecordingSwitcher::new();
     let output = PlanExitTool
-        .run(
-            serde_json::json!({}),
-            &ctx(Some(asker.clone()), Some(switcher.clone())),
-        )
+        .run(serde_json::json!({}), &ctx(Some(asker.clone()), Some(switcher.clone())))
         .await
         .expect("an approved switch completes");
 
@@ -111,11 +97,7 @@ async fn a_yes_answer_switches_to_build_and_tells_the_model_to_wait() {
     assert_eq!(output.metadata, serde_json::json!({}));
     assert_eq!(switcher.calls(), (1, 0));
     assert_eq!(
-        asker
-            .seen
-            .lock()
-            .expect("the record is never poisoned")
-            .as_slice(),
+        asker.seen.lock().expect("the record is never poisoned").as_slice(),
         &[expected(&EXIT)]
     );
 }
@@ -125,27 +107,16 @@ async fn a_yes_answer_switches_to_plan_and_tells_the_model_to_wait() {
     let asker = Scripted::new(Ok(vec![vec![YES_LABEL.to_owned()]]));
     let switcher = RecordingSwitcher::new();
     let output = PlanEnterTool
-        .run(
-            serde_json::json!({}),
-            &ctx(Some(asker.clone()), Some(switcher.clone())),
-        )
+        .run(serde_json::json!({}), &ctx(Some(asker.clone()), Some(switcher.clone())))
         .await
         .expect("an approved switch completes");
 
     assert_eq!(output.title, ENTER.title);
     assert_eq!(output.output, ENTER.output);
     assert_eq!(output.metadata, serde_json::json!({}));
+    assert_eq!(switcher.calls(), (0, 1), "exactly one switch, and in the enter direction");
     assert_eq!(
-        switcher.calls(),
-        (0, 1),
-        "exactly one switch, and in the enter direction"
-    );
-    assert_eq!(
-        asker
-            .seen
-            .lock()
-            .expect("the record is never poisoned")
-            .as_slice(),
+        asker.seen.lock().expect("the record is never poisoned").as_slice(),
         &[expected(&ENTER)]
     );
 }
@@ -157,12 +128,8 @@ async fn a_yes_answer_switches_to_plan_and_tells_the_model_to_wait() {
 async fn the_enter_door_asks_about_researching_before_implementing() {
     let asker = Scripted::new(Ok(vec![vec![NO_LABEL.to_owned()]]));
     let switcher = RecordingSwitcher::new();
-    let _ = PlanEnterTool
-        .run(
-            serde_json::json!({}),
-            &ctx(Some(asker.clone()), Some(switcher)),
-        )
-        .await;
+    let _ =
+        PlanEnterTool.run(serde_json::json!({}), &ctx(Some(asker.clone()), Some(switcher))).await;
 
     let seen = asker.seen.lock().expect("the record is never poisoned");
     let asked = seen.first().expect("the tool asks before it switches");
@@ -192,10 +159,7 @@ async fn a_no_answer_reads_as_the_dismissal_sentence_and_switches_nothing() {
     let asker = Scripted::new(Ok(vec![vec![NO_LABEL.to_owned()]]));
     let switcher = RecordingSwitcher::new();
     let error = PlanExitTool
-        .run(
-            serde_json::json!({}),
-            &ctx(Some(asker), Some(switcher.clone())),
-        )
+        .run(serde_json::json!({}), &ctx(Some(asker), Some(switcher.clone())))
         .await
         .expect_err("a declined switch fails the call");
 
@@ -209,10 +173,7 @@ async fn a_no_answer_to_the_enter_door_keeps_the_build_agent() {
     let asker = Scripted::new(Ok(vec![vec![NO_LABEL.to_owned()]]));
     let switcher = RecordingSwitcher::new();
     let error = PlanEnterTool
-        .run(
-            serde_json::json!({}),
-            &ctx(Some(asker), Some(switcher.clone())),
-        )
+        .run(serde_json::json!({}), &ctx(Some(asker), Some(switcher.clone())))
         .await
         .expect_err("a declined switch fails the call");
 
@@ -226,10 +187,7 @@ async fn a_dismissed_dialog_reads_the_same_as_a_no() {
     let asker = Scripted::new(Err(question::Unanswered::Dismissed));
     let switcher = RecordingSwitcher::new();
     let error = PlanExitTool
-        .run(
-            serde_json::json!({}),
-            &ctx(Some(asker), Some(switcher.clone())),
-        )
+        .run(serde_json::json!({}), &ctx(Some(asker), Some(switcher.clone())))
         .await
         .expect_err("a dismissed switch fails the call");
 
@@ -243,10 +201,7 @@ async fn a_dismissed_enter_dialog_reads_the_same_as_a_no() {
     let asker = Scripted::new(Err(question::Unanswered::Dismissed));
     let switcher = RecordingSwitcher::new();
     let error = PlanEnterTool
-        .run(
-            serde_json::json!({}),
-            &ctx(Some(asker), Some(switcher.clone())),
-        )
+        .run(serde_json::json!({}), &ctx(Some(asker), Some(switcher.clone())))
         .await
         .expect_err("a dismissed switch fails the call");
 
@@ -259,10 +214,7 @@ async fn an_answer_that_is_not_no_still_switches() {
     let asker = Scripted::new(Ok(vec![vec!["Sure, let's go".to_owned()]]));
     let switcher = RecordingSwitcher::new();
     PlanExitTool
-        .run(
-            serde_json::json!({}),
-            &ctx(Some(asker), Some(switcher.clone())),
-        )
+        .run(serde_json::json!({}), &ctx(Some(asker), Some(switcher.clone())))
         .await
         .expect("only a literal No declines the switch");
 
@@ -274,10 +226,7 @@ async fn an_answer_that_is_not_no_still_enters_planning() {
     let asker = Scripted::new(Ok(vec![vec!["Sure, let's plan".to_owned()]]));
     let switcher = RecordingSwitcher::new();
     PlanEnterTool
-        .run(
-            serde_json::json!({}),
-            &ctx(Some(asker), Some(switcher.clone())),
-        )
+        .run(serde_json::json!({}), &ctx(Some(asker), Some(switcher.clone())))
         .await
         .expect("only a literal No declines the switch");
 
@@ -289,10 +238,7 @@ async fn a_cancelled_question_is_a_cancelled_call_and_not_failure_text() {
     let asker = Scripted::new(Err(question::Unanswered::Cancelled));
     let switcher = RecordingSwitcher::new();
     let error = PlanExitTool
-        .run(
-            serde_json::json!({}),
-            &ctx(Some(asker), Some(switcher.clone())),
-        )
+        .run(serde_json::json!({}), &ctx(Some(asker), Some(switcher.clone())))
         .await
         .expect_err("a cancelled question fails the call");
 
@@ -305,10 +251,7 @@ async fn a_cancelled_enter_question_is_a_cancelled_call_too() {
     let asker = Scripted::new(Err(question::Unanswered::Cancelled));
     let switcher = RecordingSwitcher::new();
     let error = PlanEnterTool
-        .run(
-            serde_json::json!({}),
-            &ctx(Some(asker), Some(switcher.clone())),
-        )
+        .run(serde_json::json!({}), &ctx(Some(asker), Some(switcher.clone())))
         .await
         .expect_err("a cancelled question fails the call");
 
@@ -369,9 +312,7 @@ fn the_schema_asks_for_nothing_at_all() {
     for schema in [PlanExitTool.schema(), PlanEnterTool.schema()] {
         let schema = serde_json::to_value(schema).expect("a schema is JSON");
         let required = schema.get("required").and_then(serde_json::Value::as_array);
-        let properties = schema
-            .get("properties")
-            .and_then(serde_json::Value::as_object);
+        let properties = schema.get("properties").and_then(serde_json::Value::as_object);
 
         assert!(required.is_none_or(|required| required.is_empty()));
         assert!(properties.is_none_or(|properties| properties.is_empty()));

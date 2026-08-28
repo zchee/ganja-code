@@ -17,17 +17,13 @@
 //! Nothing here mocks the HTTP client. The requests asserted on are the
 //! requests that were actually built and sent.
 
-use std::{
-    env, fs,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
+use std::{env, fs};
 
 use ganja_core::auth::{self, AuthErrorKind, OauthCredential, REFRESH_SKEW_MS, Refresher, grok};
 use secrecy::{ExposeSecret as _, SecretString};
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::{TcpListener, TcpStream},
-};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
 /// The refresh token the first login yields. It must reach the file and
@@ -47,10 +43,7 @@ struct Endpoint {
 impl Endpoint {
     /// Every request body that arrived, in order.
     fn bodies(&self) -> Vec<String> {
-        self.requests
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        self.requests.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 
     fn count(&self) -> usize {
@@ -60,15 +53,8 @@ impl Endpoint {
 
 /// Serves `replies` as `(status, body)`, one per connection, then stops.
 async fn serve(replies: Vec<(u16, String)>) -> Endpoint {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("loopback is bindable");
-    let url = format!(
-        "http://{}",
-        listener
-            .local_addr()
-            .expect("a bound socket has an address")
-    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("loopback is bindable");
+    let url = format!("http://{}", listener.local_addr().expect("a bound socket has an address"));
     let requests = Arc::new(Mutex::new(Vec::new()));
 
     let server = tokio::spawn({
@@ -80,10 +66,7 @@ async fn serve(replies: Vec<(u16, String)>) -> Endpoint {
                 };
 
                 let request = read(&mut socket).await;
-                requests
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(request);
+                requests.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(request);
 
                 let response = format!(
                     "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: \
@@ -96,11 +79,7 @@ async fn serve(replies: Vec<(u16, String)>) -> Endpoint {
         }
     });
 
-    Endpoint {
-        url,
-        requests,
-        _server: server,
-    }
+    Endpoint { url, requests, _server: server }
 }
 
 /// Reads a request and hands back its body.
@@ -143,28 +122,20 @@ struct Instant {
 
 impl Instant {
     fn at(now_ms: u64) -> Arc<Self> {
-        Arc::new(Self {
-            now_ms: Mutex::new(now_ms),
-        })
+        Arc::new(Self { now_ms: Mutex::new(now_ms) })
     }
 }
 
 #[async_trait::async_trait]
 impl auth::device::Clock for Instant {
     fn now_ms(&self) -> u64 {
-        *self
-            .now_ms
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        *self.now_ms.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     async fn sleep(&self, duration: std::time::Duration) {
         // Time passes exactly as far as it was asked to, so the deadline the
         // flow computes still means what it means.
-        let mut now = self
-            .now_ms
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut now = self.now_ms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         *now = now.saturating_add(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
     }
 }
@@ -236,19 +207,14 @@ async fn a_headless_login_stores_nothing_until_it_is_told_to_and_then_renews_its
     let started = flow.start(&abandoned).await.expect("the code is issued");
     assert_eq!(started.user_code, "AAAA-1111");
     abandoned.cancel();
-    let failure = flow
-        .poll(&started, &abandoned)
-        .await
-        .expect_err("a cancelled login is not a login");
+    let failure =
+        flow.poll(&started, &abandoned).await.expect_err("a cancelled login is not a login");
     assert!(
         matches!(failure, ganja_core::auth::device::DeviceError::Cancelled),
         "expected a cancellation, got {failure:?}"
     );
     assert_eq!(endpoint.count(), 1, "the abandoned poll asked for nothing");
-    assert!(
-        stored().is_none(),
-        "a cancelled login must leave no credential file at all"
-    );
+    assert!(stored().is_none(), "a cancelled login must leave no credential file at all");
 
     // A login that completes.
     let cancel = CancellationToken::new();
@@ -284,10 +250,7 @@ async fn a_headless_login_stores_nothing_until_it_is_told_to_and_then_renews_its
         file.get("xai").is_some(),
         "upstream's key is what a shared auth.json is read by: {file}"
     );
-    assert!(
-        file.get("grok").is_none(),
-        "ganja's own name for it must not reach the file: {file}"
-    );
+    assert!(file.get("grok").is_none(), "ganja's own name for it must not reach the file: {file}");
     assert_eq!(
         auth::oauth_for(grok::PROVIDER_ID)
             .expect("the store reads")
@@ -357,9 +320,5 @@ async fn a_headless_login_stores_nothing_until_it_is_told_to_and_then_renews_its
         .await
         .expect_err("anthropic has nothing stored");
     assert_eq!(missing.kind(), AuthErrorKind::NotOauth);
-    assert_eq!(
-        endpoint.count(),
-        5,
-        "a provider with nothing stored must not cost a request"
-    );
+    assert_eq!(endpoint.count(), 5, "a provider with nothing stored must not cost a request");
 }

@@ -7,7 +7,9 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::{Tool, ToolCtx, ToolError, ToolOutput, bash_output::state_word, job, job::JobsError};
+use crate::bash_output::state_word;
+use crate::job::JobsError;
+use crate::{Tool, ToolCtx, ToolError, ToolOutput, job};
 
 /// The tool id, and the permission key.
 pub const ID: &str = "kill_shell";
@@ -50,10 +52,7 @@ impl Tool for KillShellTool {
     }
 
     fn describe(&self, args: &serde_json::Value) -> String {
-        let id = args
-            .get("bash_id")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("?");
+        let id = args.get("bash_id").and_then(serde_json::Value::as_str).unwrap_or("?");
 
         format!("kill_shell {id}")
     }
@@ -65,22 +64,15 @@ impl Tool for KillShellTool {
             return Err(ToolError::Failed(job::NO_JOBS.to_owned()));
         };
 
-        let status = jobs
-            .kill(&args.bash_id)
-            .await
-            .map_err(|error| match error {
-                JobsError::NotFound(id) => {
-                    ToolError::Failed(format!("no background shell with id {id}"))
-                }
-            })?;
+        let status = jobs.kill(&args.bash_id).await.map_err(|error| match error {
+            JobsError::NotFound(id) => {
+                ToolError::Failed(format!("no background shell with id {id}"))
+            }
+        })?;
 
         Ok(ToolOutput {
             title: format!("kill_shell {}", args.bash_id),
-            output: format!(
-                "background shell {} is now {}",
-                status.id,
-                state_word(&status.state)
-            ),
+            output: format!("background shell {} is now {}", status.id, state_word(&status.state)),
             metadata: serde_json::json!({
                 "bash_id": status.id,
                 "status": state_word(&status.state),

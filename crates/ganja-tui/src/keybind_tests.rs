@@ -9,10 +9,7 @@ fn pressed(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
 }
 
 fn configured(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-    pairs
-        .iter()
-        .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
-        .collect()
+    pairs.iter().map(|(name, value)| ((*name).to_owned(), (*value).to_owned())).collect()
 }
 
 #[test]
@@ -38,11 +35,7 @@ fn an_empty_binding_parses_to_no_keys_rather_than_an_error() {
     assert_eq!(parse(""), Ok(Vec::new()));
 
     let binds = Keybinds::defaults();
-    assert_eq!(
-        binds.hint(Action::ThemesOpen),
-        None,
-        "no keys means no hint to show"
-    );
+    assert_eq!(binds.hint(Action::ThemesOpen), None, "no keys means no hint to show");
     for key in [
         pressed(KeyCode::Char('t'), KeyModifiers::CONTROL),
         pressed(KeyCode::Char('t'), KeyModifiers::NONE),
@@ -61,37 +54,17 @@ fn the_defaults_are_the_keys_this_frontend_has_always_used() {
         (Action::AppExit, KeyCode::Char('c'), KeyModifiers::CONTROL),
         (Action::AppExit, KeyCode::Char('q'), KeyModifiers::CONTROL),
         (Action::AppExit, KeyCode::Char('d'), KeyModifiers::CONTROL),
-        (
-            Action::PaletteOpen,
-            KeyCode::Char('p'),
-            KeyModifiers::CONTROL,
-        ),
-        (
-            Action::SessionsOpen,
-            KeyCode::Char('s'),
-            KeyModifiers::CONTROL,
-        ),
+        (Action::PaletteOpen, KeyCode::Char('p'), KeyModifiers::CONTROL),
+        (Action::SessionsOpen, KeyCode::Char('s'), KeyModifiers::CONTROL),
         // Not `Action::ThemesOpen`: `ctrl+t` moved to the inspector
         // overlay (**D453**), and the picker ships with no chord at all —
         // see `an_empty_binding_parses_to_no_keys_rather_than_an_error`.
-        (
-            Action::TranscriptOpen,
-            KeyCode::Char('t'),
-            KeyModifiers::CONTROL,
-        ),
+        (Action::TranscriptOpen, KeyCode::Char('t'), KeyModifiers::CONTROL),
         (Action::AgentCycle, KeyCode::Tab, KeyModifiers::NONE),
-        (
-            Action::InputNewline,
-            KeyCode::Char('j'),
-            KeyModifiers::CONTROL,
-        ),
+        (Action::InputNewline, KeyCode::Char('j'), KeyModifiers::CONTROL),
         (Action::InputNewline, KeyCode::Enter, KeyModifiers::SHIFT),
         (Action::Redraw, KeyCode::Char('l'), KeyModifiers::CONTROL),
-        (
-            Action::HistorySearch,
-            KeyCode::Char('r'),
-            KeyModifiers::CONTROL,
-        ),
+        (Action::HistorySearch, KeyCode::Char('r'), KeyModifiers::CONTROL),
     ];
 
     for (action, code, modifiers) in cases {
@@ -150,10 +123,7 @@ fn the_newline_chord_is_rebindable_from_config() {
         "the rebind reaches the action"
     );
     assert!(
-        !binds.binds(
-            Action::InputNewline,
-            pressed(KeyCode::Char('j'), KeyModifiers::CONTROL)
-        ),
+        !binds.binds(Action::InputNewline, pressed(KeyCode::Char('j'), KeyModifiers::CONTROL)),
         "and the default is replaced, not kept alongside"
     );
 }
@@ -171,10 +141,7 @@ fn the_redraw_chord_is_rebindable_from_config() {
         "the rebind reaches the action"
     );
     assert!(
-        !binds.binds(
-            Action::Redraw,
-            pressed(KeyCode::Char('l'), KeyModifiers::CONTROL)
-        ),
+        !binds.binds(Action::Redraw, pressed(KeyCode::Char('l'), KeyModifiers::CONTROL)),
         "and the default is replaced, not kept alongside"
     );
 }
@@ -192,10 +159,7 @@ fn the_history_search_chord_is_rebindable_from_config() {
         "the rebind reaches the action"
     );
     assert!(
-        !binds.binds(
-            Action::HistorySearch,
-            pressed(KeyCode::Char('r'), KeyModifiers::CONTROL)
-        ),
+        !binds.binds(Action::HistorySearch, pressed(KeyCode::Char('r'), KeyModifiers::CONTROL)),
         "and the default is replaced, not kept alongside"
     );
 }
@@ -212,10 +176,7 @@ fn a_rebind_still_binds_even_when_it_collides_with_anothers_default() {
     let binds = Keybinds::from_config(&configured(&[("history_search", "ctrl+t")]))
         .expect("a legible binding loads");
 
-    assert!(binds.binds(
-        Action::HistorySearch,
-        pressed(KeyCode::Char('t'), KeyModifiers::CONTROL)
-    ));
+    assert!(binds.binds(Action::HistorySearch, pressed(KeyCode::Char('t'), KeyModifiers::CONTROL)));
 }
 
 #[test]
@@ -229,20 +190,12 @@ fn a_key_string_parses_the_shapes_a_config_file_can_write() {
         ("pgup", KeyCode::PageUp, KeyModifiers::NONE),
         ("esc", KeyCode::Esc, KeyModifiers::NONE),
         ("space", KeyCode::Char(' '), KeyModifiers::NONE),
-        (
-            "ctrl+alt+delete",
-            KeyCode::Delete,
-            KeyModifiers::CONTROL.union(KeyModifiers::ALT),
-        ),
+        ("ctrl+alt+delete", KeyCode::Delete, KeyModifiers::CONTROL.union(KeyModifiers::ALT)),
         ("shift+tab", KeyCode::Tab, KeyModifiers::SHIFT),
     ];
 
     for (text, code, modifiers) in cases {
-        assert_eq!(
-            key(text),
-            Some(pressed(code, modifiers)),
-            "{text} should parse"
-        );
+        assert_eq!(key(text), Some(pressed(code, modifiers)), "{text} should parse");
     }
 }
 
@@ -258,15 +211,9 @@ fn a_config_binding_replaces_the_default_rather_than_joining_it() {
     let binds = Keybinds::from_config(&configured(&[("palette_open", "f5")]))
         .expect("a legible binding loads");
 
-    assert!(binds.binds(
-        Action::PaletteOpen,
-        pressed(KeyCode::F(5), KeyModifiers::NONE)
-    ));
+    assert!(binds.binds(Action::PaletteOpen, pressed(KeyCode::F(5), KeyModifiers::NONE)));
     assert!(
-        !binds.binds(
-            Action::PaletteOpen,
-            pressed(KeyCode::Char('p'), KeyModifiers::CONTROL)
-        ),
+        !binds.binds(Action::PaletteOpen, pressed(KeyCode::Char('p'), KeyModifiers::CONTROL)),
         "the default should be gone, not kept alongside"
     );
 }
@@ -276,14 +223,8 @@ fn comma_separated_alternatives_all_reach_the_action() {
     let binds = Keybinds::from_config(&configured(&[("themes_open", "f2, ctrl+y")]))
         .expect("a legible binding loads");
 
-    assert!(binds.binds(
-        Action::ThemesOpen,
-        pressed(KeyCode::F(2), KeyModifiers::NONE)
-    ));
-    assert!(binds.binds(
-        Action::ThemesOpen,
-        pressed(KeyCode::Char('y'), KeyModifiers::CONTROL)
-    ));
+    assert!(binds.binds(Action::ThemesOpen, pressed(KeyCode::F(2), KeyModifiers::NONE)));
+    assert!(binds.binds(Action::ThemesOpen, pressed(KeyCode::Char('y'), KeyModifiers::CONTROL)));
 }
 
 #[test]
@@ -295,10 +236,7 @@ fn an_action_this_build_does_not_have_is_named_rather_than_ignored() {
         matches!(&refusal, KeybindError::UnknownAction { name } if name == "session_share"),
         "got {refusal:?}"
     );
-    assert!(
-        refusal.to_string().contains("session_share"),
-        "the message should name it: {refusal}"
-    );
+    assert!(refusal.to_string().contains("session_share"), "the message should name it: {refusal}");
 }
 
 #[test]
@@ -311,10 +249,7 @@ fn a_key_this_build_cannot_parse_is_named_rather_than_ignored() {
                 if action == "app_exit" && key == "hypermeta+z"),
         "got {refusal:?}"
     );
-    assert!(
-        refusal.to_string().contains("hypermeta+z"),
-        "the message should name it: {refusal}"
-    );
+    assert!(refusal.to_string().contains("hypermeta+z"), "the message should name it: {refusal}");
 }
 
 /// A `shift+…` binding has to survive the round trip through the terminal,
@@ -364,10 +299,7 @@ fn shift_tab_and_backtab_are_one_key_however_they_were_written() {
             );
         }
         assert!(
-            !binds.binds(
-                Action::ThemesOpen,
-                pressed(KeyCode::Tab, KeyModifiers::NONE)
-            ),
+            !binds.binds(Action::ThemesOpen, pressed(KeyCode::Tab, KeyModifiers::NONE)),
             "{spelling} is not plain tab"
         );
         assert_eq!(
@@ -382,11 +314,7 @@ fn shift_tab_and_backtab_are_one_key_however_they_were_written() {
 fn a_hint_spells_every_key_that_reaches_an_action() {
     let binds = Keybinds::defaults();
 
-    assert_eq!(
-        binds.hint(Action::PaletteOpen).as_deref(),
-        Some("ctrl+p"),
-        "one key"
-    );
+    assert_eq!(binds.hint(Action::PaletteOpen).as_deref(), Some("ctrl+p"), "one key");
     assert_eq!(
         binds.hint(Action::AppExit).as_deref(),
         Some("ctrl+c, ctrl+q, ctrl+d"),
@@ -396,10 +324,7 @@ fn a_hint_spells_every_key_that_reaches_an_action() {
 
 #[test]
 fn an_unbound_key_reaches_nothing() {
-    assert_eq!(
-        Keybinds::defaults().action(pressed(KeyCode::Char('z'), KeyModifiers::NONE)),
-        None
-    );
+    assert_eq!(Keybinds::defaults().action(pressed(KeyCode::Char('z'), KeyModifiers::NONE)), None);
 }
 
 #[test]

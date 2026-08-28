@@ -2,11 +2,7 @@ use super::*;
 
 /// A char key the way crossterm delivers it: uppercase carries SHIFT.
 fn ch(c: char) -> TermEvent {
-    let modifiers = if c.is_ascii_uppercase() {
-        KeyModifiers::SHIFT
-    } else {
-        KeyModifiers::NONE
-    };
+    let modifiers = if c.is_ascii_uppercase() { KeyModifiers::SHIFT } else { KeyModifiers::NONE };
     TermEvent::Key(KeyEvent::new(KeyCode::Char(c), modifiers))
 }
 
@@ -39,22 +35,15 @@ fn a_split_left_arrow_becomes_left_and_never_text() {
 #[test]
 fn a_modified_arrow_keeps_its_modifiers() {
     let mut machine = EscRepair::active();
-    let out = run(
-        &mut machine,
-        &[esc(), ch('['), ch('1'), ch(';'), ch('5'), ch('D')],
-        Instant::now(),
-    );
+    let out =
+        run(&mut machine, &[esc(), ch('['), ch('1'), ch(';'), ch('5'), ch('D')], Instant::now());
     assert_eq!(out, vec![key(KeyCode::Left, KeyModifiers::CONTROL)]);
 }
 
 #[test]
 fn a_tilde_sequence_maps_its_number() {
     let mut machine = EscRepair::active();
-    let out = run(
-        &mut machine,
-        &[esc(), ch('['), ch('3'), ch('~')],
-        Instant::now(),
-    );
+    let out = run(&mut machine, &[esc(), ch('['), ch('3'), ch('~')], Instant::now());
     assert_eq!(out, vec![key(KeyCode::Delete, KeyModifiers::NONE)]);
 }
 
@@ -87,11 +76,7 @@ fn a_bare_esc_is_released_at_the_deadline() {
     let deadline = machine.deadline().expect("a held esc has a deadline");
     assert_eq!(deadline, base + HOLDOFF);
     // A wake just before the deadline releases nothing.
-    assert!(
-        machine
-            .expire(deadline - Duration::from_millis(1))
-            .is_empty()
-    );
+    assert!(machine.expire(deadline - Duration::from_millis(1)).is_empty());
     assert_eq!(machine.expire(deadline), vec![esc()]);
     assert_eq!(machine.deadline(), None);
 }
@@ -104,10 +89,7 @@ fn esc_esc_releases_the_first_and_holds_the_second() {
     let out = machine.accept(esc(), base + Duration::from_millis(5));
     assert_eq!(out, vec![esc()]);
     // The second is now held, released at its own deadline.
-    assert_eq!(
-        machine.expire(base + Duration::from_millis(5) + HOLDOFF),
-        vec![esc()]
-    );
+    assert_eq!(machine.expire(base + Duration::from_millis(5) + HOLDOFF), vec![esc()]);
 }
 
 #[test]
@@ -122,11 +104,7 @@ fn a_mismatch_mid_sequence_replays_the_fragment_literally() {
     let mut machine = EscRepair::active();
     // `[1` then a ctrl-chord: not a sequence after all.
     let chord = key(KeyCode::Char('c'), KeyModifiers::CONTROL);
-    let out = run(
-        &mut machine,
-        &[esc(), ch('['), ch('1'), chord.clone()],
-        Instant::now(),
-    );
+    let out = run(&mut machine, &[esc(), ch('['), ch('1'), chord.clone()], Instant::now());
     assert_eq!(out, vec![esc(), ch('['), ch('1'), chord]);
 }
 
@@ -158,17 +136,7 @@ fn a_split_mouse_fragment_is_swallowed() {
     let mut machine = EscRepair::active();
     let out = run(
         &mut machine,
-        &[
-            esc(),
-            ch('['),
-            ch('<'),
-            ch('0'),
-            ch(';'),
-            ch('5'),
-            ch(';'),
-            ch('3'),
-            ch('M'),
-        ],
+        &[esc(), ch('['), ch('<'), ch('0'), ch(';'), ch('5'), ch(';'), ch('3'), ch('M')],
         Instant::now(),
     );
     assert_eq!(out, vec![]);
@@ -178,11 +146,8 @@ fn a_split_mouse_fragment_is_swallowed() {
 #[test]
 fn a_split_paste_marker_is_swallowed() {
     let mut machine = EscRepair::active();
-    let out = run(
-        &mut machine,
-        &[esc(), ch('['), ch('2'), ch('0'), ch('0'), ch('~')],
-        Instant::now(),
-    );
+    let out =
+        run(&mut machine, &[esc(), ch('['), ch('2'), ch('0'), ch('0'), ch('~')], Instant::now());
     assert_eq!(out, vec![]);
 }
 

@@ -89,11 +89,9 @@
 //! no `etimes` keyword, and its `etime` is an elapsed duration that changes
 //! with the sampling moment and so is not an identity at all.
 
-use std::{
-    fmt,
-    path::{Path, PathBuf},
-    process::{Command, Stdio},
-};
+use std::fmt;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use ganja_team::ShimCli;
 use ganja_tool::socket::{DirectoryRefusal, SOCKET_MODE};
@@ -210,10 +208,9 @@ impl fmt::Display for Unreadable {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Headerless => formatter.write_str("it carries no version line"),
-            Self::Version { token } => write!(
-                formatter,
-                "it is version {token}, which this build does not know"
-            ),
+            Self::Version { token } => {
+                write!(formatter, "it is version {token}, which this build does not know")
+            }
             Self::Malformed { reason } => write!(formatter, "it is this version and {reason}"),
         }
     }
@@ -281,11 +278,7 @@ pub fn stem_of(session_id: &str) -> String {
         .take(ganja_tool::socket::LONGEST_NAME)
         .collect();
 
-    if sanitized.is_empty() {
-        "session".to_owned()
-    } else {
-        sanitized
-    }
+    if sanitized.is_empty() { "session".to_owned() } else { sanitized }
 }
 
 /// How `pid`'s start time renders, under the pinned zone and locale.
@@ -388,10 +381,7 @@ pub fn render(records: &Records) -> String {
     let mut text = String::with_capacity(64 + records.children.len() * 48);
     text.push_str(VERSION);
     text.push('\n');
-    text.push_str(&format!(
-        "{}\t{}\n",
-        records.owner.pid, records.owner.started
-    ));
+    text.push_str(&format!("{}\t{}\n", records.owner.pid, records.owner.started));
     for child in &records.children {
         text.push_str(&format!(
             "{}\t{}\t{}\t{}\n",
@@ -432,24 +422,16 @@ pub fn parse(text: &str) -> Result<Records, Unreadable> {
     }
 
     let Some(owner) = lines.next() else {
-        return Err(Unreadable::Malformed {
-            reason: "it names no owner",
-        });
+        return Err(Unreadable::Malformed { reason: "it names no owner" });
     };
     let Some((pid, started)) = owner.split_once('\t') else {
-        return Err(Unreadable::Malformed {
-            reason: "its owner line has no start time",
-        });
+        return Err(Unreadable::Malformed { reason: "its owner line has no start time" });
     };
     let Ok(pid) = pid.parse::<i32>() else {
-        return Err(Unreadable::Malformed {
-            reason: "its owner line names no pid",
-        });
+        return Err(Unreadable::Malformed { reason: "its owner line names no pid" });
     };
     if started.trim().is_empty() {
-        return Err(Unreadable::Malformed {
-            reason: "its owner line has an empty start time",
-        });
+        return Err(Unreadable::Malformed { reason: "its owner line has an empty start time" });
     }
 
     let mut children = Vec::new();
@@ -471,21 +453,12 @@ pub fn parse(text: &str) -> Result<Records, Unreadable> {
         };
         children.push(Recorded {
             cli,
-            process: Identity {
-                pid,
-                started: started.to_owned(),
-            },
+            process: Identity { pid, started: started.to_owned() },
             pgid,
         });
     }
 
-    Ok(Records {
-        owner: Identity {
-            pid,
-            started: started.to_owned(),
-        },
-        children,
-    })
+    Ok(Records { owner: Identity { pid, started: started.to_owned() }, children })
 }
 
 /// The single writer of one lead's records file.
@@ -541,8 +514,7 @@ impl ShimRecords {
     /// costs the *next* lead its net, and refusing a spawn over it would cost
     /// this one its teammate.
     pub fn add(&mut self, child: Recorded) {
-        self.children
-            .retain(|held| held.process.pid != child.process.pid);
+        self.children.retain(|held| held.process.pid != child.process.pid);
         self.children.push(child);
         self.publish();
     }
@@ -596,10 +568,7 @@ impl ShimRecords {
 
             return;
         };
-        let records = Records {
-            owner,
-            children: self.children.clone(),
-        };
+        let records = Records { owner, children: self.children.clone() };
         if let Err(error) = self.write(&render(&records)) {
             tracing::warn!(
                 %error,
@@ -611,7 +580,8 @@ impl ShimRecords {
 
     /// Stages, chmods and renames.
     fn write(&self, text: &str) -> std::io::Result<()> {
-        use std::{io::Write as _, os::unix::fs::OpenOptionsExt as _};
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
 
         let staging = temp_path_for(&self.directory, &self.stem, self.lead_pid);
         {

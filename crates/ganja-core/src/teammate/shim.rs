@@ -89,18 +89,14 @@
 
 pub mod records;
 
-use std::{
-    collections::VecDeque,
-    ffi::{OsStr, OsString},
-    os::unix::fs::PermissionsExt as _,
-    path::{Path, PathBuf},
-    process::Stdio,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
-};
+use std::collections::VecDeque;
+use std::ffi::{OsStr, OsString};
+use std::os::unix::fs::PermissionsExt as _;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use ganja_protocol::team::{
@@ -108,10 +104,8 @@ use ganja_protocol::team::{
 };
 use ganja_team::{MailboxMessage, MemberName, ShimCli, Surface, mailbox, record};
 pub use records::ShimRecords;
-use tokio::{
-    io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader},
-    sync::watch,
-};
+use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::teammate::{
@@ -528,9 +522,7 @@ pub fn resolve(path: &OsStr, binary: &str) -> Option<PathBuf> {
     directories.peek()?;
     let search_path = std::env::join_paths(directories).ok()?;
 
-    which::which_in_global(binary, Some(search_path))
-        .ok()?
-        .next()
+    which::which_in_global(binary, Some(search_path)).ok()?.next()
 }
 
 /// The environment one shim child gets: [`CARRIED`], plus this CLI's own
@@ -613,7 +605,8 @@ impl Prompt {
     /// the caller turns into a structured failure mail rather than a dead
     /// member.
     pub fn write(under: &Path, text: &str) -> Result<Self, String> {
-        use std::{io::Write as _, os::unix::fs::OpenOptionsExt as _};
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
 
         let directory = tempfile::Builder::new()
             .prefix("ganja-shim-")
@@ -627,13 +620,9 @@ impl Prompt {
             .mode(0o600)
             .open(&path)
             .map_err(|error| format!("the prompt file: {error}"))?;
-        file.write_all(text.as_bytes())
-            .map_err(|error| format!("the prompt file: {error}"))?;
+        file.write_all(text.as_bytes()).map_err(|error| format!("the prompt file: {error}"))?;
 
-        Ok(Self {
-            _directory: directory,
-            path,
-        })
+        Ok(Self { _directory: directory, path })
     }
 
     /// Where the child reads it.
@@ -820,10 +809,7 @@ impl Child {
     /// Takes the resident pipes, which exactly one caller ever may.
     #[must_use]
     pub fn take_started(&self) -> Option<Started> {
-        self.started
-            .lock()
-            .expect("the shim pipes are never poisoned")
-            .take()
+        self.started.lock().expect("the shim pipes are never poisoned").take()
     }
 
     /// Ends whatever is running and waits for it to really be gone.
@@ -987,10 +973,7 @@ impl Launch {
     /// The names in the child environment, in order.
     #[must_use]
     pub fn names(&self) -> Vec<String> {
-        self.environment
-            .iter()
-            .map(|(name, _)| name.to_string_lossy().into_owned())
-            .collect()
+        self.environment.iter().map(|(name, _)| name.to_string_lossy().into_owned()).collect()
     }
 
     /// The command one turn runs, with the enumerated environment and nothing
@@ -1060,12 +1043,7 @@ pub fn prepare(
         .find(|(name, _)| name == "TMPDIR")
         .map_or_else(std::env::temp_dir, |(_, value)| PathBuf::from(value));
 
-    Ok(Launch {
-        binary,
-        environment,
-        cwd: spec.cwd.clone(),
-        tmp,
-    })
+    Ok(Launch { binary, environment, cwd: spec.cwd.clone(), tmp })
 }
 
 /// Starts a [`Shape::Resident`] child and wraps it as a handle.
@@ -1085,10 +1063,7 @@ pub fn start_resident(
     launch: Launch,
     argv: &[OsString],
 ) -> Result<Handle, Unsupported> {
-    let cannot = |reason: String| Unsupported {
-        backend: driver.backend(),
-        reason,
-    };
+    let cannot = |reason: String| Unsupported { backend: driver.backend(), reason };
     let (started, pid) = open_resident(&launch, argv, driver.binary()).map_err(cannot)?;
 
     Ok(Handle::Child(Arc::new(Child::resident(
@@ -1123,26 +1098,12 @@ fn open_resident(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| format!("{binary} could not be started: {error}"))?;
-    let taken = child
-        .stdin
-        .take()
-        .zip(child.stdout.take())
-        .zip(child.stderr.take());
+    let taken = child.stdin.take().zip(child.stdout.take()).zip(child.stderr.take());
     let (Some(((stdin, stdout), stderr)), Some(pid)) = (taken, child.id()) else {
-        return Err(format!(
-            "{binary} was reaped before this side could speak to it"
-        ));
+        return Err(format!("{binary} was reaped before this side could speak to it"));
     };
 
-    Ok((
-        Started {
-            child,
-            stdin,
-            stdout,
-            stderr,
-        },
-        i32::try_from(pid).unwrap_or_default(),
-    ))
+    Ok((Started { child, stdin, stdout, stderr }, i32::try_from(pid).unwrap_or_default()))
 }
 
 /// A [`Shape::PerMessage`] member's handle: nothing is running yet, and the
@@ -1181,10 +1142,7 @@ pub struct ShimBackend {
 
 impl std::fmt::Debug for ShimBackend {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ShimBackend")
-            .field("driver", &self.driver)
-            .finish_non_exhaustive()
+        formatter.debug_struct("ShimBackend").field("driver", &self.driver).finish_non_exhaustive()
     }
 }
 
@@ -1193,11 +1151,7 @@ impl ShimBackend {
     /// `PATH`.
     #[must_use]
     pub fn new(driver: Arc<dyn Driver>) -> Self {
-        Self {
-            driver,
-            path: None,
-            deadline: None,
-        }
+        Self { driver, path: None, deadline: None }
     }
 
     /// The same backend against an explicit search path.
@@ -1222,8 +1176,7 @@ impl ShimBackend {
 
     /// The deadline this backend composes a launch line for.
     fn deadline(&self) -> Duration {
-        self.deadline
-            .unwrap_or_else(|| default_turn_timeout(self.driver.cli()))
+        self.deadline.unwrap_or_else(|| default_turn_timeout(self.driver.cli()))
     }
 }
 
@@ -1235,11 +1188,7 @@ impl crate::teammate::TeammateBackend for ShimBackend {
 
     /// The headless channel, in this CLI's name: answers are mail.
     fn preamble(&self, spec: &SpawnSpec) -> String {
-        preamble(
-            crate::teammate::preamble::Names::of(spec),
-            self.driver.backend(),
-            &spec.prompt,
-        )
+        preamble(crate::teammate::preamble::Names::of(spec), self.driver.backend(), &spec.prompt)
     }
 
     async fn spawn(&self, spec: &SpawnSpec) -> Result<Handle, Unsupported> {
@@ -1249,10 +1198,7 @@ impl crate::teammate::TeammateBackend for ShimBackend {
         self.driver
             .ready(&launch)
             .await
-            .map_err(|reason| Unsupported {
-                backend: self.driver.backend(),
-                reason,
-            })?;
+            .map_err(|reason| Unsupported { backend: self.driver.backend(), reason })?;
         match self.driver.shape() {
             Shape::Resident => {
                 // The launch turn carries no text and no session: a resident
@@ -1411,19 +1357,14 @@ impl ShimRunner {
     /// this member's child is gone for good.
     pub async fn run(self) {
         if let Some(started) = self.handle.take_started() {
-            let pid = started
-                .child
-                .id()
-                .map(|pid| i32::try_from(pid).unwrap_or_default());
+            let pid = started.child.id().map(|pid| i32::try_from(pid).unwrap_or_default());
             self.drain_stderr(started.stderr);
-            *self
-                .resident
-                .lock()
-                .expect("the resident pipes are never poisoned") = Some(Resident {
-                child: started.child,
-                stdin: started.stdin,
-                stdout: BufReader::new(started.stdout).lines(),
-            });
+            *self.resident.lock().expect("the resident pipes are never poisoned") =
+                Some(Resident {
+                    child: started.child,
+                    stdin: started.stdin,
+                    stdout: BufReader::new(started.stdout).lines(),
+                });
             // A resident child is running from the moment it is spawned, so it
             // is recorded now rather than at a turn boundary — the whole point
             // of the record is the window in which nothing is happening.
@@ -1579,11 +1520,7 @@ impl ShimRunner {
 
     /// What a resident child said on stderr, if it said anything.
     fn complaint(&self) -> String {
-        self.complaint
-            .lock()
-            .expect("the complaint is never poisoned")
-            .clone()
-            .unwrap_or_default()
+        self.complaint.lock().expect("the complaint is never poisoned").clone().unwrap_or_default()
     }
 
     /// The same, giving the drain task a moment to have read it.
@@ -1617,9 +1554,7 @@ impl ShimRunner {
         // The vendor's own sentence leads, because it is the one that says
         // *why*; the pipe error is the symptom this side happened to see
         // first.
-        Failure::Unreadable {
-            reason: format!("{complaint} ({what}: {error})"),
-        }
+        Failure::Unreadable { reason: format!("{complaint} ({what}: {error})") }
     }
 
     /// A recognized frame kind, dropped as information.
@@ -1630,9 +1565,7 @@ impl ShimRunner {
     /// lead that set a mode and heard nothing would reasonably believe the mode
     /// was set.
     async fn drop_reserved(&self, kind: &'static str, from: &str) {
-        self.remember(format!(
-            "dropped frame {kind} · a shim member has no engine to apply it to"
-        ));
+        self.remember(format!("dropped frame {kind} · a shim member has no engine to apply it to"));
         tracing::info!(
             teammate = self.spec.name.as_str(),
             from,
@@ -1709,10 +1642,7 @@ impl ShimRunner {
         }?;
 
         if let Some(session) = reply.session {
-            *self
-                .session
-                .lock()
-                .expect("the shim session is never poisoned") = Some(session);
+            *self.session.lock().expect("the shim session is never poisoned") = Some(session);
         }
         let count = reply.messages.len();
         for message in reply.messages {
@@ -1723,10 +1653,7 @@ impl ShimRunner {
         // still a conversation to resume, and whatever it managed to say before
         // stopping is still owed to whoever asked.
         if let Some(reason) = reply.refused {
-            return Err(Failure::Refused {
-                reason,
-                spoke: count > 0,
-            });
+            return Err(Failure::Refused { reason, spoke: count > 0 });
         }
 
         Ok(())
@@ -1734,10 +1661,7 @@ impl ShimRunner {
 
     /// The observed conversation id, for a driver composing a resume.
     fn session(&self) -> Option<String> {
-        self.session
-            .lock()
-            .expect("the shim session is never poisoned")
-            .clone()
+        self.session.lock().expect("the shim session is never poisoned").clone()
     }
 
     /// One turn as a child of its own.
@@ -1764,10 +1688,7 @@ impl ShimRunner {
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| {
-                Failure::Local(format!(
-                    "{} could not be started: {error}",
-                    self.driver().binary()
-                ))
+                Failure::Local(format!("{} could not be started: {error}", self.driver().binary()))
             })?;
         let Some(pid) = child.id().map(|pid| i32::try_from(pid).unwrap_or_default()) else {
             return Err(Failure::Local(
@@ -1840,20 +1761,16 @@ impl ShimRunner {
         match halt {
             Halt::Finished(Ok(status)) if status.success() => {
                 let stdout = String::from_utf8_lossy(&out).into_owned();
-                self.driver()
-                    .reply(&stdout)
-                    .map_err(|reason| Failure::Unreadable { reason })
+                self.driver().reply(&stdout).map_err(|reason| Failure::Unreadable { reason })
             }
             Halt::Finished(Ok(status)) => Err(Failure::Exit {
                 status: status_of(&status),
                 stderr: first_line(&String::from_utf8_lossy(&err)),
             }),
-            Halt::Finished(Err(error)) => Err(Failure::Local(format!(
-                "the child could not be waited on: {error}"
-            ))),
-            Halt::Deadline => Err(Failure::Deadline {
-                after: self.deadline,
-            }),
+            Halt::Finished(Err(error)) => {
+                Err(Failure::Local(format!("the child could not be waited on: {error}")))
+            }
+            Halt::Deadline => Err(Failure::Deadline { after: self.deadline }),
             Halt::Cancelled => Err(Failure::Cancelled),
         }
     }
@@ -1901,10 +1818,7 @@ impl ShimRunner {
             // Read **before** the child is ended: `end_group` awaits the reap,
             // and a reaped child reports no pid, so asking afterwards leaves
             // the record naming a process that no longer exists.
-            let pid = held
-                .child
-                .id()
-                .map(|pid| i32::try_from(pid).unwrap_or_default());
+            let pid = held.child.id().map(|pid| i32::try_from(pid).unwrap_or_default());
             if let Some(group) = self.handle.group() {
                 self.end_group(group, &mut held.child).await;
             }
@@ -1918,10 +1832,7 @@ impl ShimRunner {
             // what went wrong, then what was done about it.
             self.handle.left();
         } else {
-            *self
-                .resident
-                .lock()
-                .expect("the resident pipes are never poisoned") = Some(held);
+            *self.resident.lock().expect("the resident pipes are never poisoned") = Some(held);
         }
 
         outcome
@@ -1937,11 +1848,7 @@ impl ShimRunner {
     async fn replace_lost_child(&self) {
         let lost = self.driver().shape() == Shape::Resident
             && self.handle.running() != Running::Ended
-            && self
-                .resident
-                .lock()
-                .expect("the resident pipes are never poisoned")
-                .is_none();
+            && self.resident.lock().expect("the resident pipes are never poisoned").is_none();
         if lost {
             self.respawn().await;
         }
@@ -2005,15 +1912,9 @@ impl ShimRunner {
         // The old child's first complaint belongs to the old child. Cleared
         // before the new one's stderr is drained, or a later failure would be
         // reported with a sentence a dead process said.
-        *self
-            .complaint
-            .lock()
-            .expect("the complaint is never poisoned") = None;
+        *self.complaint.lock().expect("the complaint is never poisoned") = None;
         self.drain_stderr(started.stderr);
-        *self
-            .resident
-            .lock()
-            .expect("the resident pipes are never poisoned") = Some(Resident {
+        *self.resident.lock().expect("the resident pipes are never poisoned") = Some(Resident {
             child: started.child,
             stdin: started.stdin,
             stdout: BufReader::new(started.stdout).lines(),
@@ -2111,10 +2012,8 @@ impl ShimRunner {
     fn record(&self, pid: i32) {
         let cli = self.driver().cli();
         if let records::Started::At(started) = records::started_at(pid) {
-            self.shims
-                .lock()
-                .expect("the shim records are never poisoned")
-                .add(records::Recorded {
+            self.shims.lock().expect("the shim records are never poisoned").add(
+                records::Recorded {
                     cli,
                     process: records::Identity { pid, started },
                     // Every shim child is its own group leader, so the group is
@@ -2122,7 +2021,8 @@ impl ShimRunner {
                     // while the group lives, and that case is decided on the
                     // two values separately.
                     pgid: pid,
-                });
+                },
+            );
         }
     }
 
@@ -2134,24 +2034,14 @@ impl ShimRunner {
 
     /// Takes one child back out of the orphan records.
     fn forget(&self, pid: i32) {
-        self.shims
-            .lock()
-            .expect("the shim records are never poisoned")
-            .remove(pid);
+        self.shims.lock().expect("the shim records are never poisoned").remove(pid);
     }
 
     /// Ends whatever this member owns, without answering anybody.
     async fn retire_child(&self) {
-        let held = self
-            .resident
-            .lock()
-            .expect("the resident pipes are never poisoned")
-            .take();
+        let held = self.resident.lock().expect("the resident pipes are never poisoned").take();
         if let Some(mut held) = held {
-            let pid = held
-                .child
-                .id()
-                .map(|pid| i32::try_from(pid).unwrap_or_default());
+            let pid = held.child.id().map(|pid| i32::try_from(pid).unwrap_or_default());
             // Layer 2 first: a well-behaved CLI exits on stdin EOF. Stated as
             // an expectation about a foreign binary, which is why the group
             // signal below is not conditional on it.
@@ -2377,11 +2267,7 @@ fn status_of(status: &std::process::ExitStatus) -> String {
 /// a character boundary, since a CLI's own message is not necessarily ASCII.
 #[must_use]
 pub fn first_line(stderr: &str) -> String {
-    let line = stderr
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or_default()
-        .trim();
+    let line = stderr.lines().find(|line| !line.trim().is_empty()).unwrap_or_default().trim();
     match line.char_indices().nth(DISPLAY_FIELD_CAP) {
         Some((end, _)) => line[..end].to_owned(),
         None => line.to_owned(),

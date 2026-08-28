@@ -107,35 +107,19 @@ fn bytes_after_the_end_stream_frame_are_refused() {
         splitter.frame().expect("the data frame parses").is_some(),
         "the real frames still come out"
     );
-    assert!(
-        splitter
-            .frame()
-            .expect("the EndStream frame parses")
-            .is_some()
-    );
+    assert!(splitter.frame().expect("the EndStream frame parses").is_some());
 
-    let refused = splitter
-        .frame()
-        .expect_err("nothing follows the stream's ending");
+    let refused = splitter.frame().expect_err("nothing follows the stream's ending");
     assert!(refused.to_string().contains("EndStream"), "{refused}");
 }
 
 #[test]
 fn an_end_stream_without_an_error_member_is_a_clean_end() {
-    assert_eq!(
-        end_stream_error(b"{}").expect("an empty object parses"),
-        None
-    );
+    assert_eq!(end_stream_error(b"{}").expect("an empty object parses"), None);
     // Members this build does not model are not a reason to fail a turn
     // that succeeded.
-    assert_eq!(
-        end_stream_error(br#"{"metadata":{"x":"y"}}"#).expect("parses"),
-        None
-    );
-    assert!(matches!(
-        end_stream_error(b"not json"),
-        Err(ProviderError::Parse(_))
-    ));
+    assert_eq!(end_stream_error(br#"{"metadata":{"x":"y"}}"#).expect("parses"), None);
+    assert!(matches!(end_stream_error(b"not json"), Err(ProviderError::Parse(_))));
 }
 
 #[test]

@@ -17,25 +17,20 @@
 //! path twice, so what is written back is the file that was read — and a link
 //! at the file's own name is refused rather than followed.
 
-use std::{
-    borrow::Cow,
-    collections::HashMap,
-    io::{Read as _, Write as _},
-    ops::Range,
-    path::{Path, PathBuf},
-    sync::{Arc, LazyLock, Mutex},
-    time::SystemTime,
-};
+use std::borrow::Cow;
+use std::collections::HashMap;
+use std::io::{Read as _, Write as _};
+use std::ops::Range;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::SystemTime;
 
 use async_trait::async_trait;
 use serde::Deserialize;
 use similar::{ChangeTag, TextDiff};
 
-use crate::{
-    Tool, ToolCtx, ToolError, ToolOutput,
-    anchor::{self, Anchor},
-    display, resolve,
-};
+use crate::anchor::{self, Anchor};
+use crate::{Tool, ToolCtx, ToolError, ToolOutput, display, resolve};
 
 /// What the model is told about the tool: upstream's prompt file, verbatim.
 const DESCRIPTION: &str = include_str!("edit.txt");
@@ -89,11 +84,7 @@ static LOCKS: LazyLock<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>> =
 /// The lock guarding `path`, creating it the first time the file is edited.
 fn lock(path: &Path) -> Arc<tokio::sync::Mutex<()>> {
     Arc::clone(
-        LOCKS
-            .lock()
-            .expect("the lock table is never poisoned")
-            .entry(path.to_owned())
-            .or_default(),
+        LOCKS.lock().expect("the lock table is never poisoned").entry(path.to_owned()).or_default(),
     )
 }
 
@@ -279,21 +270,13 @@ async fn read_through(anchor: &Arc<Anchor>) -> Result<Option<Opened>, ToolError>
 
         let meta = file.metadata().map_err(failed)?;
         if meta.is_dir() {
-            return Ok(Some(Opened {
-                is_dir: true,
-                stamp: None,
-                bytes: Vec::new(),
-            }));
+            return Ok(Some(Opened { is_dir: true, stamp: None, bytes: Vec::new() }));
         }
 
         let mut bytes = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or_default());
         file.read_to_end(&mut bytes).map_err(failed)?;
 
-        Ok(Some(Opened {
-            is_dir: false,
-            stamp: meta.modified().ok(),
-            bytes,
-        }))
+        Ok(Some(Opened { is_dir: false, stamp: meta.modified().ok(), bytes }))
     })
     .await
 }
@@ -360,10 +343,7 @@ async fn prepare(
     }
 
     let Some(existing) = existing else {
-        return Err(ToolError::Failed(format!(
-            "File {} not found",
-            path.display()
-        )));
+        return Err(ToolError::Failed(format!("File {} not found", path.display())));
     };
     if existing.is_dir {
         return Err(ToolError::Failed(format!(
@@ -397,11 +377,7 @@ async fn prepare(
     );
     let (next_bom, content_new) = split_bom(&replaced.text);
 
-    Ok((
-        content_old.to_owned(),
-        content_new.to_owned(),
-        bom || next_bom,
-    ))
+    Ok((content_old.to_owned(), content_new.to_owned(), bom || next_bom))
 }
 
 // ---------------------------------------------------------------------------
@@ -665,12 +641,7 @@ fn block_anchor<'a>(content: &'a str, find: &'a str) -> Vec<Cow<'a, str>> {
 
     match best {
         Some((start, end)) if best_similarity >= MULTIPLE_CANDIDATES_SIMILARITY_THRESHOLD => {
-            vec![Cow::Borrowed(block(
-                content,
-                &spans,
-                start,
-                end - start + 1,
-            ))]
+            vec![Cow::Borrowed(block(content, &spans, start, end - start + 1))]
         }
         _ => Vec::new(),
     }
@@ -685,10 +656,7 @@ fn line_similarity(original: &str, search: &str) -> Option<f64> {
     if longest == 0 {
         return None;
     }
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "line and char counts stay far below 2^53"
-    )]
+    #[expect(clippy::cast_precision_loss, reason = "line and char counts stay far below 2^53")]
     Some(1.0 - levenshtein(original, search) as f64 / longest as f64)
 }
 
@@ -696,10 +664,7 @@ fn line_similarity(original: &str, search: &str) -> Option<f64> {
 /// reflowed the line.
 fn whitespace_normalized<'a>(content: &'a str, find: &'a str) -> Vec<Cow<'a, str>> {
     let normalized_find = normalize_whitespace(find);
-    let words: Vec<&str> = find
-        .split(is_js_whitespace)
-        .filter(|word| !word.is_empty())
-        .collect();
+    let words: Vec<&str> = find.split(is_js_whitespace).filter(|word| !word.is_empty()).collect();
     let lines: Vec<&str> = content.split('\n').collect();
     let mut found = Vec::new();
 
@@ -893,10 +858,7 @@ fn context_aware<'a>(content: &'a str, find: &'a str) -> Vec<Cow<'a, str>> {
             }
         }
 
-        #[expect(
-            clippy::cast_precision_loss,
-            reason = "line and char counts stay far below 2^53"
-        )]
+        #[expect(clippy::cast_precision_loss, reason = "line and char counts stay far below 2^53")]
         let alike = compared == 0 || matching as f64 / compared as f64 >= 0.5;
         if alike {
             found.push(Cow::Borrowed(block(content, &spans, start, length)));
@@ -914,10 +876,7 @@ fn context_aware<'a>(content: &'a str, find: &'a str) -> Vec<Cow<'a, str>> {
 /// order is the contract, and dropping a link from the chain would be a claim
 /// about upstream that a later version could falsify.
 fn multi_occurrence<'a>(content: &'a str, find: &'a str) -> Vec<Cow<'a, str>> {
-    content
-        .match_indices(find)
-        .map(|_| Cow::Borrowed(find))
-        .collect()
+    content.match_indices(find).map(|_| Cow::Borrowed(find)).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -977,9 +936,7 @@ fn remove_indentation(text: &str) -> String {
 
 /// `text` from its `count`-th character on, or nothing when it is shorter.
 fn chars_from(text: &str, count: usize) -> &str {
-    text.char_indices()
-        .nth(count)
-        .map_or("", |(offset, _)| &text[offset..])
+    text.char_indices().nth(count).map_or("", |(offset, _)| &text[offset..])
 }
 
 /// `text` with the escape sequences a model writes inside source code resolved
@@ -1038,11 +995,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
         std::mem::swap(&mut previous, &mut current);
     }
 
-    if rows == 0 {
-        b.len()
-    } else {
-        previous[b.len()]
-    }
+    if rows == 0 { b.len() } else { previous[b.len()] }
 }
 
 /// The line ending the file is written with, which is CRLF as soon as it uses
@@ -1060,11 +1013,7 @@ fn normalize_line_endings(text: &str) -> String {
 /// arrived with.
 fn to_line_ending(text: &str, ending: &str) -> String {
     let normalized = normalize_line_endings(text);
-    if ending == "\n" {
-        normalized
-    } else {
-        normalized.replace('\n', ending)
-    }
+    if ending == "\n" { normalized } else { normalized.replace('\n', ending) }
 }
 
 /// Splits the byte order mark off `text`, reporting whether there was one.
@@ -1119,11 +1068,7 @@ fn block<'a>(text: &'a str, spans: &[Range<usize>], first: usize, count: usize) 
 /// off so a deeply nested change does not render mostly as blank space.
 fn patch(name: &str, old: &str, new: &str) -> String {
     let diff = TextDiff::from_lines(old, new);
-    let hunks = diff
-        .unified_diff()
-        .context_radius(CONTEXT_RADIUS)
-        .header(name, name)
-        .to_string();
+    let hunks = diff.unified_diff().context_radius(CONTEXT_RADIUS).header(name, name).to_string();
     trim_diff(&format!("Index: {name}\n{SEPARATOR}\n{hunks}"))
 }
 

@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use ganja_tool::registry::NameSource;
 
-use super::{Health, Listing, LiveSession, fake::Recording};
+use super::fake::Recording;
+use super::{Health, Listing, LiveSession};
 use crate::lister::Lister as _;
 
 fn session(name: &str, stem: &str) -> LiveSession {
@@ -25,10 +26,7 @@ async fn a_fake_lister_answers_what_it_was_set_to_and_counts_its_calls() {
     recording.set(Listing::Complete(vec![session("worker", "0198c1a2")]));
 
     let listing = recording.list().await;
-    assert_eq!(
-        listing,
-        Listing::Complete(vec![session("worker", "0198c1a2")])
-    );
+    assert_eq!(listing, Listing::Complete(vec![session("worker", "0198c1a2")]));
 
     recording.set(Listing::Partial {
         rows: vec![],
@@ -37,10 +35,7 @@ async fn a_fake_lister_answers_what_it_was_set_to_and_counts_its_calls() {
     let listing = recording.list().await;
     assert_eq!(
         listing,
-        Listing::Partial {
-            rows: vec![],
-            error: "the directory could not be read".to_owned(),
-        }
+        Listing::Partial { rows: vec![], error: "the directory could not be read".to_owned() }
     );
 
     assert_eq!(recording.calls.load(std::sync::atomic::Ordering::SeqCst), 2);

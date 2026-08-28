@@ -17,20 +17,17 @@
 //! The dialog owns the filter and which row is under the cursor. Running a
 //! command is [`crate::app::App`]'s, like every other dialog here.
 
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    text::{Line, Text},
-    widgets::{Block, Clear, Paragraph, Widget as _},
-};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::text::{Line, Text};
+use ratatui::widgets::{Block, Clear, Paragraph, Widget as _};
 use unicode_width::UnicodeWidthStr as _;
 
-use crate::{
-    command::{self, Action, Entry, Surface},
-    component::{chat::clip, first_visible, modal},
-    keybind::Keybinds,
-    theme::Theme,
-};
+use crate::command::{self, Action, Entry, Surface};
+use crate::component::chat::clip;
+use crate::component::{first_visible, modal};
+use crate::keybind::Keybinds;
+use crate::theme::Theme;
 
 /// What marks the row the cursor is on, and what pads every other row.
 const MARKER: &str = "> ";
@@ -104,12 +101,7 @@ impl Palette {
     /// Opens the palette over every command, with `keys` supplying the hints.
     #[must_use]
     pub fn new(keys: Keybinds) -> Self {
-        let mut palette = Self {
-            filter: String::new(),
-            keys,
-            rows: Vec::new(),
-            selected: 0,
-        };
+        let mut palette = Self { filter: String::new(), keys, rows: Vec::new(), selected: 0 };
         palette.refresh();
 
         palette
@@ -123,12 +115,7 @@ impl Palette {
     /// empty either way (deviation: palette-filter-survives-close).
     #[must_use]
     pub fn reopened(keys: Keybinds, filter: String) -> Self {
-        let mut palette = Self {
-            filter,
-            keys,
-            rows: Vec::new(),
-            selected: 0,
-        };
+        let mut palette = Self { filter, keys, rows: Vec::new(), selected: 0 };
         palette.refresh();
 
         palette
@@ -155,10 +142,7 @@ impl Palette {
     /// The command under the cursor, or [`None`] when nothing matches.
     #[must_use]
     pub fn selected(&self) -> Option<Action> {
-        self.rows
-            .get(self.selected)
-            .and_then(Row::entry)
-            .map(|entry| entry.action)
+        self.rows.get(self.selected).and_then(Row::entry).map(|entry| entry.action)
     }
 
     /// Moves the cursor by `delta` commands, stepping over headings.
@@ -177,10 +161,7 @@ impl Palette {
             return;
         };
 
-        let current = commands
-            .iter()
-            .position(|index| *index == self.selected)
-            .unwrap_or(0);
+        let current = commands.iter().position(|index| *index == self.selected).unwrap_or(0);
         let moved = if delta < 0 {
             current.saturating_sub(delta.unsigned_abs())
         } else {
@@ -200,11 +181,8 @@ impl Palette {
         // drops it as soon as the filter says something, because a fragment is
         // already a statement about what the user is looking for.
         if self.filter.is_empty() {
-            let suggested: Vec<&Entry> = matched
-                .iter()
-                .copied()
-                .filter(|entry| entry.suggested)
-                .collect();
+            let suggested: Vec<&Entry> =
+                matched.iter().copied().filter(|entry| entry.suggested).collect();
             if !suggested.is_empty() {
                 rows.push(Row::Heading(SUGGESTED));
                 rows.extend(suggested.into_iter().map(|entry| self.row(entry)));
@@ -221,21 +199,14 @@ impl Palette {
         }
 
         self.rows = rows;
-        self.selected = self
-            .rows
-            .iter()
-            .position(|row| row.entry().is_some())
-            .unwrap_or(0);
+        self.selected = self.rows.iter().position(|row| row.entry().is_some()).unwrap_or(0);
     }
 
     /// One command row, carrying whatever key reaches it.
     fn row(&self, entry: &'static Entry) -> Row {
         Row::Command {
             entry,
-            hint: entry
-                .action
-                .keybind()
-                .and_then(|action| self.keys.hint(action)),
+            hint: entry.action.keybind().and_then(|action| self.keys.hint(action)),
         }
     }
 
@@ -318,9 +289,7 @@ impl Palette {
         );
         // The key sits hard right, where the eye finds it without reading the
         // title; the title takes whatever is left.
-        let title_width = width
-            .saturating_sub(head.width() + hint.width() + GAP * 2)
-            .max(1);
+        let title_width = width.saturating_sub(head.width() + hint.width() + GAP * 2).max(1);
         let row = format!(
             "{head}{gap}{title:<title_width$}{gap}{hint}",
             gap = " ".repeat(GAP),
@@ -331,11 +300,7 @@ impl Palette {
         // answer — the same choice the theme picker makes.
         Line::styled(
             format!("{row:<width$}"),
-            if index == self.selected {
-                theme.selection
-            } else {
-                theme.fg
-            },
+            if index == self.selected { theme.selection } else { theme.fg },
         )
     }
 }

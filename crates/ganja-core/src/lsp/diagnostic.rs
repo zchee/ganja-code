@@ -44,30 +44,20 @@ pub fn pretty(diagnostic: &Diagnostic) -> String {
 pub fn report(file: &str, issues: &[Diagnostic]) -> Option<String> {
     let errors: Vec<&Diagnostic> = issues
         .iter()
-        .filter(|issue| {
-            issue
-                .severity
-                .is_none_or(|s| s == DiagnosticSeverity::ERROR)
-        })
+        .filter(|issue| issue.severity.is_none_or(|s| s == DiagnosticSeverity::ERROR))
         .collect();
     if errors.is_empty() {
         return None;
     }
 
-    let lines = errors
-        .iter()
-        .take(MAX_PER_FILE)
-        .map(|issue| pretty(issue))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let lines =
+        errors.iter().take(MAX_PER_FILE).map(|issue| pretty(issue)).collect::<Vec<_>>().join("\n");
     let suffix = match errors.len().saturating_sub(MAX_PER_FILE) {
         0 => String::new(),
         more => format!("\n... and {more} more"),
     };
 
-    Some(format!(
-        "<diagnostics file=\"{file}\">\n{lines}{suffix}\n</diagnostics>"
-    ))
+    Some(format!("<diagnostics file=\"{file}\">\n{lines}{suffix}\n</diagnostics>"))
 }
 
 #[cfg(test)]

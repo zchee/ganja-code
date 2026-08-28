@@ -65,16 +65,14 @@
 //! the library is what pins the semantics. Nothing here relies on those
 //! defaults; every pragma is set explicitly, on every connection.
 
-use std::{
-    collections::BTreeSet,
-    fs, io,
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex, mpsc},
-    thread,
-};
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, mpsc};
+use std::{fs, io, thread};
 
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 use crate::protocol::{
     Message, MessageId, Part, PartBody, PartId, REASONING_TAG, Usage, is_uuidv7, now,
@@ -89,11 +87,7 @@ pub const VERSION: u32 = 1;
 /// (`database.ts:48-54`): a build being worked on must not write into the file
 /// an installed one reads, because the schema under development is exactly the
 /// thing that has not settled yet.
-const DATABASE: &str = if cfg!(debug_assertions) {
-    "sessions-dev.db"
-} else {
-    "sessions.db"
-};
+const DATABASE: &str = if cfg!(debug_assertions) { "sessions-dev.db" } else { "sessions.db" };
 
 /// Directory every session artefact used to hang under, and the one a first
 /// open converts from.
@@ -284,10 +278,8 @@ struct Migration {
 /// specification: nothing has ever written a ganja database in an older shape,
 /// so there is nothing to migrate *from*. The machinery is here for the second
 /// entry, whenever it is owed.
-const MIGRATIONS: &[Migration] = &[Migration {
-    id: "20260805000000_session_message_part",
-    up: SCHEMA,
-}];
+const MIGRATIONS: &[Migration] =
+    &[Migration { id: "20260805000000_session_message_part", up: SCHEMA }];
 
 /// The session id began life here, beside the rows it names, and moved to
 /// [`crate::protocol`] when events started carrying it — a wire type has to
@@ -659,11 +651,9 @@ impl Storage {
             let reader = self.reader(&handles);
 
             reader
-                .query_row(
-                    "SELECT data FROM session WHERE id = ?1",
-                    params![id.as_str()],
-                    |row| row.get(0),
-                )
+                .query_row("SELECT data FROM session WHERE id = ?1", params![id.as_str()], |row| {
+                    row.get(0)
+                })
                 .optional()
                 .map_err(|source| self.sql(source))?
         };
@@ -685,20 +675,13 @@ impl Storage {
         let stored = {
             let reader = self.reader(&handles);
 
-            rows(
-                &reader,
-                "SELECT id, data FROM session ORDER BY time_updated DESC, id DESC",
-                None,
-            )
-            .map_err(|source| self.sql(source))?
+            rows(&reader, "SELECT id, data FROM session ORDER BY time_updated DESC, id DESC", None)
+                .map_err(|source| self.sql(source))?
         };
 
         // Row by row rather than all at once: one session whose bytes rotted
         // must cost that session, not the listing every other one is in.
-        Ok(stored
-            .into_iter()
-            .filter_map(|(id, data)| self.usable(&id, &data))
-            .collect())
+        Ok(stored.into_iter().filter_map(|(id, data)| self.usable(&id, &data)).collect())
     }
 
     /// Writes a message's envelope, its parts stripped: parts have their own
@@ -716,10 +699,7 @@ impl Storage {
         let mut stored = message.clone();
         stored.parts.clear();
 
-        let data = self.encode(&Envelope {
-            version: VERSION,
-            payload: &stored,
-        })?;
+        let data = self.encode(&Envelope { version: VERSION, payload: &stored })?;
 
         self.write(Work::Message {
             session: session.as_str().to_owned(),
@@ -745,10 +725,7 @@ impl Storage {
         message: &MessageId,
         part: &Part,
     ) -> Result<(), StorageError> {
-        let data = self.encode(&Envelope {
-            version: VERSION,
-            payload: part,
-        })?;
+        let data = self.encode(&Envelope { version: VERSION, payload: part })?;
 
         self.write(Work::Part {
             session: session.as_str().to_owned(),
@@ -818,8 +795,7 @@ impl Storage {
         let mut transcript: Vec<Message> = stored
             .into_iter()
             .filter_map(|(id, data)| {
-                self.usable::<Envelope<Message>>(&id, &data)
-                    .map(|envelope| envelope.payload)
+                self.usable::<Envelope<Message>>(&id, &data).map(|envelope| envelope.payload)
             })
             .collect();
 
@@ -827,18 +803,15 @@ impl Storage {
             let Some((owner, id)) = key.split_once(' ') else {
                 continue;
             };
-            let Some(message) = transcript
-                .iter_mut()
-                .find(|message| message.id.as_str() == owner)
+            let Some(message) = transcript.iter_mut().find(|message| message.id.as_str() == owner)
             else {
                 continue;
             };
             // A row that did not decode is not always a row that costs only
             // itself; see [`Self::lost_reasoning`] for which ones do not.
-            let part = self.usable::<Envelope<Part>>(id, &data).map_or_else(
-                || self.lost_reasoning(id, &data),
-                |envelope| Some(envelope.payload),
-            );
+            let part = self
+                .usable::<Envelope<Part>>(id, &data)
+                .map_or_else(|| self.lost_reasoning(id, &data), |envelope| Some(envelope.payload));
             if let Some(part) = part {
                 message.parts.push(part);
             }
@@ -849,18 +822,13 @@ impl Storage {
 
     /// Serializes a value into the JSON one column holds.
     fn encode<T: Serialize>(&self, value: &T) -> Result<String, StorageError> {
-        serde_json::to_string(value).map_err(|source| StorageError::Encode {
-            path: self.inner.database.clone(),
-            source,
-        })
+        serde_json::to_string(value)
+            .map_err(|source| StorageError::Encode { path: self.inner.database.clone(), source })
     }
 
     /// Names the database on whatever SQLite refused.
     fn sql(&self, source: rusqlite::Error) -> StorageError {
-        StorageError::Sql {
-            path: self.inner.database.clone(),
-            source,
-        }
+        StorageError::Sql { path: self.inner.database.clone(), source }
     }
 
     /// Decodes one row's `data`, or says why it came back with nothing.
@@ -983,10 +951,7 @@ impl Storage {
         let handles = self.handles()?;
         let (reply, answer) = mpsc::channel();
 
-        handles
-            .writer
-            .send(Job { work, reply })
-            .map_err(|_| self.gone())?;
+        handles.writer.send(Job { work, reply }).map_err(|_| self.gone())?;
 
         answer.recv().map_err(|_| self.gone())?
     }
@@ -1008,11 +973,7 @@ impl Storage {
 
     /// The store's handles, opening it if this is the first operation.
     fn handles(&self) -> Result<Handles, StorageError> {
-        let mut open = self
-            .inner
-            .open
-            .lock()
-            .expect("the storage handles are never poisoned");
+        let mut open = self.inner.open.lock().expect("the storage handles are never poisoned");
 
         if let Some(handles) = open.as_ref() {
             return Ok(handles.clone());
@@ -1029,10 +990,7 @@ impl Storage {
         &self,
         handles: &'handles Handles,
     ) -> std::sync::MutexGuard<'handles, Connection> {
-        handles
-            .reader
-            .lock()
-            .expect("the read connection is never poisoned")
+        handles.reader.lock().expect("the read connection is never poisoned")
     }
 }
 
@@ -1050,12 +1008,10 @@ fn rows(
 
     let mut statement = connection.prepare(sql)?;
     match session {
-        Some(session) => statement
-            .query_map(params![session], read)?
-            .collect::<Result<Vec<_>, _>>(),
-        None => statement
-            .query_map([], read)?
-            .collect::<Result<Vec<_>, _>>(),
+        Some(session) => {
+            statement.query_map(params![session], read)?.collect::<Result<Vec<_>, _>>()
+        }
+        None => statement.query_map([], read)?.collect::<Result<Vec<_>, _>>(),
     }
 }
 
@@ -1117,15 +1073,9 @@ impl Inner {
         let connection = set_aside_preuuid(connection, &self.database)?;
 
         let (writer, thread) = spawn_writer(self.database.clone())?;
-        *self
-            .thread
-            .lock()
-            .expect("the writer thread handle is never poisoned") = Some(thread);
+        *self.thread.lock().expect("the writer thread handle is never poisoned") = Some(thread);
 
-        Ok(Handles {
-            writer,
-            reader: Arc::new(Mutex::new(connection)),
-        })
+        Ok(Handles { writer, reader: Arc::new(Mutex::new(connection)) })
     }
 }
 
@@ -1161,16 +1111,11 @@ impl Drop for Inner {
 /// any writer would fail to open a database that is perfectly well.
 fn connect(path: &Path) -> Result<Connection, StorageError> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|source| StorageError::Io {
-            path: parent.to_path_buf(),
-            source,
-        })?;
+        fs::create_dir_all(parent)
+            .map_err(|source| StorageError::Io { path: parent.to_path_buf(), source })?;
     }
 
-    let named = |source: rusqlite::Error| StorageError::Sql {
-        path: path.to_path_buf(),
-        source,
-    };
+    let named = |source: rusqlite::Error| StorageError::Sql { path: path.to_path_buf(), source };
     let connection = Connection::open(path).map_err(named)?;
 
     // One at a time rather than one batch, so a failure names the pragma that
@@ -1209,9 +1154,7 @@ fn wal(connection: &Connection) -> Result<(), rusqlite::Error> {
         if mode(connection)?.eq_ignore_ascii_case("wal") {
             return Ok(());
         }
-        match connection.query_row("PRAGMA journal_mode = WAL", [], |row| {
-            row.get::<_, String>(0)
-        }) {
+        match connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get::<_, String>(0)) {
             Ok(_) => return Ok(()),
             Err(error) if attempt + 1 == WAL_ATTEMPTS => return Err(error),
             Err(_) => thread::sleep(WAL_BACKOFF),
@@ -1384,17 +1327,14 @@ fn set_aside_preuuid(connection: Connection, database: &Path) -> Result<Connecti
         return Ok(connection);
     };
 
-    let named = |source: rusqlite::Error| StorageError::Sql {
-        path: database.to_path_buf(),
-        source,
-    };
+    let named =
+        |source: rusqlite::Error| StorageError::Sql { path: database.to_path_buf(), source };
     let old = {
         // `IMMEDIATE` still, though the lock is what serializes us now: it
         // keeps the row set from moving under the read while another process
         // writes a session, which is a different race and a real one.
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(named)?;
+        let transaction =
+            connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(named)?;
         let old = preuuid_id(&transaction, database)?;
         transaction.commit().map_err(named)?;
 
@@ -1407,18 +1347,12 @@ fn set_aside_preuuid(connection: Connection, database: &Path) -> Result<Connecti
         return Ok(connection);
     };
 
-    let ours = held
-        .as_ref()
-        .is_some_and(|file| still_named_by(file, database));
+    let ours = held.as_ref().is_some_and(|file| still_named_by(file, database));
     drop(connection);
     drop(held);
 
     if ours {
-        set_aside(
-            database,
-            &format!("session {old} predates UUIDv7 ids"),
-            PREUUID,
-        );
+        set_aside(database, &format!("session {old} predates UUIDv7 ids"), PREUUID);
     } else {
         tracing::warn!(
             path = %database.display(),
@@ -1441,10 +1375,7 @@ fn set_aside_preuuid(connection: Connection, database: &Path) -> Result<Connecti
 fn preuuid_id(connection: &Connection, database: &Path) -> Result<Option<String>, StorageError> {
     names(connection, "SELECT id FROM session")
         .map(|ids| ids.into_iter().find(|id| !is_uuidv7(id)))
-        .map_err(|source| StorageError::Sql {
-            path: database.to_path_buf(),
-            source,
-        })
+        .map_err(|source| StorageError::Sql { path: database.to_path_buf(), source })
 }
 
 /// The exclusive advisory lock a pre-UUIDv7 quarantine is decided and
@@ -1496,11 +1427,7 @@ impl QuarantineLock {
         // `truncate(false)` said out loud because the file's *contents* are
         // not the lock and never were — truncating one another process is
         // holding would be a write for no reason.
-        let file = match fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(&path)
+        let file = match fs::OpenOptions::new().create(true).write(true).truncate(false).open(&path)
         {
             Ok(file) => file,
             Err(failure) => {
@@ -1569,18 +1496,11 @@ fn still_named_by(_file: &fs::File, _path: &Path) -> bool {
 /// page is damaged and some reads still work, and `SQLITE_NOTADB` when the
 /// header is, and nothing works at all — not even reading the schema.
 fn damaged(error: &StorageError) -> bool {
-    let StorageError::Sql {
-        source: rusqlite::Error::SqliteFailure(failure, _),
-        ..
-    } = error
-    else {
+    let StorageError::Sql { source: rusqlite::Error::SqliteFailure(failure, _), .. } = error else {
         return false;
     };
 
-    matches!(
-        failure.code,
-        rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase
-    )
+    matches!(failure.code, rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
 }
 
 /// `path` with `suffix` appended to its file name, which is how SQLite names
@@ -1629,14 +1549,10 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
 /// transaction rather than several — atomicity gained, resumability given up,
 /// and with a single migration nothing yet to tell apart.
 fn migrate(connection: &mut Connection, path: &Path) -> Result<(), StorageError> {
-    let named = |source: rusqlite::Error| StorageError::Sql {
-        path: path.to_path_buf(),
-        source,
-    };
+    let named = |source: rusqlite::Error| StorageError::Sql { path: path.to_path_buf(), source };
 
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(named)?;
+    let transaction =
+        connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(named)?;
 
     let existing = names(
         &transaction,
@@ -1665,20 +1581,14 @@ fn migrate(connection: &mut Connection, path: &Path) -> Result<(), StorageError>
     if !ours {
         // Dropping the transaction rolls it back: a database this build
         // refuses is one it has written nothing to.
-        return Err(StorageError::Foreign {
-            path: path.to_path_buf(),
-        });
+        return Err(StorageError::Foreign { path: path.to_path_buf() });
     }
 
     let applied = names(&transaction, "SELECT id FROM migration").map_err(named)?;
-    if let Some(unknown) = applied
-        .iter()
-        .find(|id| !MIGRATIONS.iter().any(|migration| migration.id == **id))
+    if let Some(unknown) =
+        applied.iter().find(|id| !MIGRATIONS.iter().any(|migration| migration.id == **id))
     {
-        return Err(StorageError::Newer {
-            path: path.to_path_buf(),
-            unknown: unknown.clone(),
-        });
+        return Err(StorageError::Newer { path: path.to_path_buf(), unknown: unknown.clone() });
     }
 
     let completed = stamp(now());
@@ -1702,9 +1612,7 @@ fn migrate(connection: &mut Connection, path: &Path) -> Result<(), StorageError>
 fn names(connection: &Connection, sql: &str) -> Result<Vec<String>, rusqlite::Error> {
     let mut statement = connection.prepare(sql)?;
 
-    statement
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()
+    statement.query_map([], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()
 }
 
 /// Carries an older store's `storage/` tree into the database, once.
@@ -1867,18 +1775,11 @@ fn carry(
                 session,
                 stamp(message.time.created),
                 stamp(message.time.completed.unwrap_or(message.time.created)),
-                json(&Envelope {
-                    version: VERSION,
-                    payload: &message,
-                })?
+                json(&Envelope { version: VERSION, payload: &message })?
             ],
         )?;
 
-        let parts = root
-            .join(SESSION)
-            .join(PART)
-            .join(session)
-            .join(message.id.as_str());
+        let parts = root.join(SESSION).join(PART).join(session).join(message.id.as_str());
         for file in stored_files(&parts).unwrap_or_default() {
             let Ok(Some(envelope)) = read_stored::<Envelope<Part>>(&file) else {
                 continue;
@@ -1970,13 +1871,7 @@ fn spawn_writer(
 /// is what a resume after a `kill -9` reads back.
 fn apply(connection: &Connection, path: &Path, work: &Work) -> Result<(), StorageError> {
     let outcome = match work {
-        Work::Session {
-            id,
-            parent,
-            created,
-            updated,
-            data,
-        } => connection.execute(
+        Work::Session { id, parent, created, updated, data } => connection.execute(
             "INSERT INTO session (id, parent_id, time_created, time_updated, data) \
              VALUES (?1, ?2, ?3, ?4, ?5) \
              ON CONFLICT (id) DO UPDATE SET \
@@ -1986,13 +1881,7 @@ fn apply(connection: &Connection, path: &Path, work: &Work) -> Result<(), Storag
                data = excluded.data",
             params![id, parent, stamp(*created), stamp(*updated), data],
         ),
-        Work::Message {
-            session,
-            id,
-            created,
-            updated,
-            data,
-        } => connection.execute(
+        Work::Message { session, id, created, updated, data } => connection.execute(
             "INSERT INTO message (id, session_id, time_created, time_updated, data) \
              VALUES (?1, ?2, ?3, ?4, ?5) \
              ON CONFLICT (session_id, id) DO UPDATE SET \
@@ -2001,13 +1890,7 @@ fn apply(connection: &Connection, path: &Path, work: &Work) -> Result<(), Storag
                data = excluded.data",
             params![id, session, stamp(*created), stamp(*updated), data],
         ),
-        Work::Part {
-            session,
-            message,
-            id,
-            updated,
-            data,
-        } => connection.execute(
+        Work::Part { session, message, id, updated, data } => connection.execute(
             "INSERT INTO part (id, message_id, session_id, time_created, time_updated, data) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
              ON CONFLICT (session_id, message_id, id) DO UPDATE SET \
@@ -2019,16 +1902,11 @@ fn apply(connection: &Connection, path: &Path, work: &Work) -> Result<(), Storag
         // second statement: an interrupted deletion used to have to leave a
         // message short of content rather than parts with no envelope, and one
         // statement cannot be interrupted in the middle.
-        Work::Delete { session, id } => connection.execute(
-            "DELETE FROM message WHERE session_id = ?1 AND id = ?2",
-            params![session, id],
-        ),
+        Work::Delete { session, id } => connection
+            .execute("DELETE FROM message WHERE session_id = ?1 AND id = ?2", params![session, id]),
     };
 
-    outcome.map(|_| ()).map_err(|source| StorageError::Sql {
-        path: path.to_path_buf(),
-        source,
-    })
+    outcome.map(|_| ()).map_err(|source| StorageError::Sql { path: path.to_path_buf(), source })
 }
 
 /// Decides what a stored record is, before anything decodes it.
@@ -2058,10 +1936,7 @@ fn read_stored<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, StorageErr
         Ok(bytes) => bytes,
         Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(source) => {
-            return Err(StorageError::Io {
-                path: path.to_path_buf(),
-                source,
-            });
+            return Err(StorageError::Io { path: path.to_path_buf(), source });
         }
     };
 
@@ -2128,24 +2003,16 @@ fn stored_files(directory: &Path) -> Result<Vec<PathBuf>, StorageError> {
         Ok(listing) => listing,
         Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(source) => {
-            return Err(StorageError::Io {
-                path: directory.to_path_buf(),
-                source,
-            });
+            return Err(StorageError::Io { path: directory.to_path_buf(), source });
         }
     };
 
     let mut paths = Vec::new();
     for entry in listing {
-        let entry = entry.map_err(|source| StorageError::Io {
-            path: directory.to_path_buf(),
-            source,
-        })?;
+        let entry =
+            entry.map_err(|source| StorageError::Io { path: directory.to_path_buf(), source })?;
         let path = entry.path();
-        if path
-            .extension()
-            .is_some_and(|extension| extension == EXTENSION)
-        {
+        if path.extension().is_some_and(|extension| extension == EXTENSION) {
             paths.push(path);
         }
     }

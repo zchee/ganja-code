@@ -22,22 +22,19 @@
 //! variables, and `cargo test` runs the tests inside a binary on parallel
 //! threads.
 
-use std::{env, sync::Arc};
+use std::env;
+use std::sync::Arc;
 
 use futures::StreamExt as _;
-use ganja_core::{
-    Engine, Storage, catalog,
-    config::{Config, ProviderConfig},
-    permission::Permissions,
-    protocol::{Command, Event, Role},
-    provider::{self, Dialect},
-    tool::Registry,
-};
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::TcpListener,
-    sync::mpsc,
-};
+use ganja_core::config::{Config, ProviderConfig};
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{Command, Event, Role};
+use ganja_core::provider::{self, Dialect};
+use ganja_core::tool::Registry;
+use ganja_core::{Engine, Storage, catalog};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 
 const CANARY: &str = "sk-test-canary-XYZ";
 const KEY_VAR: &str = "GANJA_TEST_LOCAL_LLAMA_KEY";
@@ -62,24 +59,15 @@ async fn an_uncataloged_providers_session_never_auto_compacts_and_reports_no_cos
 
     // The tier this whole suite is about, stated before anything is driven:
     // the endpoint is selectable and the catalog knows nothing about it.
-    assert!(
-        !catalog::carries(PROVIDER_ID),
-        "no published catalog knows a private endpoint"
-    );
+    assert!(!catalog::carries(PROVIDER_ID), "no published catalog knows a private endpoint");
     assert!(
         catalog::model(MODEL).is_none(),
         "and it has no row to size or price the model it serves"
     );
 
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("loopback is bindable");
-    let base_url = format!(
-        "http://{}/v1",
-        listener
-            .local_addr()
-            .expect("a bound socket has an address")
-    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("loopback is bindable");
+    let base_url =
+        format!("http://{}/v1", listener.local_addr().expect("a bound socket has an address"));
     let (counted, mut requests) = mpsc::unbounded_channel();
     let endpoint = tokio::spawn(async move {
         while let Ok((mut socket, _)) = listener.accept().await {
@@ -165,9 +153,7 @@ async fn an_uncataloged_providers_session_never_auto_compacts_and_reports_no_cos
     while let Some(event) = events.next().await {
         match event {
             Event::MessageStarted { message, .. } => opened.push(message.role),
-            Event::MessageFinished {
-                usage: reported, ..
-            } => {
+            Event::MessageFinished { usage: reported, .. } => {
                 usage = reported;
                 break;
             }

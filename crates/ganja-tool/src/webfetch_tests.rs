@@ -1,9 +1,9 @@
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::TcpListener,
-};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::TcpListener;
 
 use super::{MAX_RESPONSE_SIZE, WebfetchTool};
 use crate::{Tool, ToolCtx, ToolError};
@@ -23,25 +23,15 @@ struct Endpoint {
 
 impl Endpoint {
     fn seen(&self) -> String {
-        self.seen
-            .lock()
-            .expect("the request log is never poisoned")
-            .clone()
+        self.seen.lock().expect("the request log is never poisoned").clone()
     }
 }
 
 /// Serves `response`, or nothing at all when it is [`None`], which is how
 /// a server that accepts and then goes quiet is spelled.
 async fn serve(response: Option<Vec<u8>>) -> Endpoint {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("loopback is bindable");
-    let url = format!(
-        "http://{}",
-        listener
-            .local_addr()
-            .expect("a bound socket has an address")
-    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("loopback is bindable");
+    let url = format!("http://{}", listener.local_addr().expect("a bound socket has an address"));
     let seen = Arc::new(std::sync::Mutex::new(String::new()));
     let log = Arc::clone(&seen);
 
@@ -74,11 +64,7 @@ async fn serve(response: Option<Vec<u8>>) -> Endpoint {
         let _ = socket.flush().await;
     });
 
-    Endpoint {
-        url,
-        seen,
-        _server: server,
-    }
+    Endpoint { url, seen, _server: server }
 }
 
 /// A 200 carrying `body` as `content_type`.
@@ -141,10 +127,7 @@ async fn a_url_on_this_machine_or_a_private_network_is_refused_before_anything_i
         let ToolError::Failed(message) = &error else {
             panic!("{what} should be refused as a failure: {error:?}");
         };
-        assert!(
-            message.contains("private network"),
-            "{what} should say why: {message}"
-        );
+        assert!(message.contains("private network"), "{what} should say why: {message}");
         assert!(
             !message.contains("latest/meta-data"),
             "a refusal names the host and not the whole URL, which can carry a \
@@ -167,11 +150,7 @@ async fn the_same_private_url_is_fetched_once_the_session_allows_it() {
         matches!(&refused, ToolError::Failed(message) if message.contains("private network")),
         "got {refused:?}"
     );
-    assert!(
-        endpoint.seen().is_empty(),
-        "and refused without connecting: {}",
-        endpoint.seen()
-    );
+    assert!(endpoint.seen().is_empty(), "and refused without connecting: {}", endpoint.seen());
 
     let out = WebfetchTool::allowing_private()
         .run(serde_json::json!({ "url": endpoint.url }), &ctx())
@@ -255,10 +234,7 @@ async fn an_html_page_asked_for_as_text_comes_back_without_its_markup() {
     let endpoint = serve(Some(response("text/html; charset=utf-8", PAGE))).await;
 
     let out = WebfetchTool::allowing_private()
-        .run(
-            serde_json::json!({ "url": endpoint.url, "format": "text" }),
-            &ctx(),
-        )
+        .run(serde_json::json!({ "url": endpoint.url, "format": "text" }), &ctx())
         .await
         .expect("the endpoint answers");
 
@@ -271,11 +247,7 @@ async fn an_html_page_asked_for_as_text_comes_back_without_its_markup() {
         "a stylesheet and a script are not prose: {:?}",
         out.output
     );
-    assert!(
-        out.title.contains("text/html"),
-        "the title names what was served: {}",
-        out.title
-    );
+    assert!(out.title.contains("text/html"), "the title names what was served: {}", out.title);
 }
 
 #[tokio::test]
@@ -314,18 +286,11 @@ async fn an_html_page_asked_for_as_markdown_comes_back_as_markdown() {
     let endpoint = serve(Some(response("text/html; charset=utf-8", STRUCTURED))).await;
 
     let out = WebfetchTool::allowing_private()
-        .run(
-            serde_json::json!({ "url": endpoint.url, "format": "markdown" }),
-            &ctx(),
-        )
+        .run(serde_json::json!({ "url": endpoint.url, "format": "markdown" }), &ctx())
         .await
         .expect("the endpoint answers");
 
-    assert!(
-        out.output.contains("# Ganja"),
-        "a heading should be a heading: {:?}",
-        out.output
-    );
+    assert!(out.output.contains("# Ganja"), "a heading should be a heading: {:?}", out.output);
     assert!(
         out.output.contains("[the docs](https://example.com/docs)"),
         "a link should keep the target a reader would follow: {:?}",
@@ -333,11 +298,8 @@ async fn an_html_page_asked_for_as_markdown_comes_back_as_markdown() {
     );
     // Asserted by shape rather than by exact marker and spacing, which are
     // the converter's style options and not the claim being made.
-    let bulleted: Vec<&str> = out
-        .output
-        .lines()
-        .filter(|line| line.trim_start().starts_with(['-', '*', '+']))
-        .collect();
+    let bulleted: Vec<&str> =
+        out.output.lines().filter(|line| line.trim_start().starts_with(['-', '*', '+'])).collect();
     assert!(
         bulleted.len() == 2 && bulleted[0].contains("one") && bulleted[1].contains("two"),
         "a list should be a list: {:?}",
@@ -351,9 +313,7 @@ async fn an_html_page_asked_for_as_markdown_comes_back_as_markdown() {
     assert!(
         !stripped.contains("# Ganja")
             && !stripped.contains("example.com/docs")
-            && !stripped
-                .lines()
-                .any(|line| line.trim_start().starts_with(['-', '*', '+'])),
+            && !stripped.lines().any(|line| line.trim_start().starts_with(['-', '*', '+'])),
         "the stripper has no markdown to lose: {stripped:?}"
     );
 }
@@ -364,10 +324,7 @@ async fn neither_rendering_hands_the_model_a_script_or_a_stylesheet() {
         let endpoint = serve(Some(response("text/html", STRUCTURED))).await;
 
         let out = WebfetchTool::allowing_private()
-            .run(
-                serde_json::json!({ "url": endpoint.url, "format": format }),
-                &ctx(),
-            )
+            .run(serde_json::json!({ "url": endpoint.url, "format": format }), &ctx())
             .await
             .expect("the endpoint answers");
 
@@ -384,10 +341,7 @@ async fn a_body_that_is_not_html_is_handed_over_as_it_arrived() {
     let endpoint = serve(Some(response("text/plain", "plain <b>text</b>"))).await;
 
     let out = WebfetchTool::allowing_private()
-        .run(
-            serde_json::json!({ "url": endpoint.url, "format": "markdown" }),
-            &ctx(),
-        )
+        .run(serde_json::json!({ "url": endpoint.url, "format": "markdown" }), &ctx())
         .await
         .expect("the endpoint answers");
 
@@ -399,10 +353,7 @@ async fn html_asked_for_as_html_keeps_its_markup() {
     let endpoint = serve(Some(response("text/html", PAGE))).await;
 
     let out = WebfetchTool::allowing_private()
-        .run(
-            serde_json::json!({ "url": endpoint.url, "format": "html" }),
-            &ctx(),
-        )
+        .run(serde_json::json!({ "url": endpoint.url, "format": "html" }), &ctx())
         .await
         .expect("the endpoint answers");
 
@@ -436,10 +387,7 @@ async fn an_endpoint_that_never_answers_ends_at_the_timeout() {
 
     let started = std::time::Instant::now();
     let refused = WebfetchTool::allowing_private()
-        .run(
-            serde_json::json!({ "url": endpoint.url, "timeout": 1 }),
-            &ctx(),
-        )
+        .run(serde_json::json!({ "url": endpoint.url, "timeout": 1 }), &ctx())
         .await
         .expect_err("nothing ever came back");
     let elapsed = started.elapsed();
@@ -466,10 +414,7 @@ async fn a_cancel_ends_a_fetch_that_is_still_waiting() {
     });
 
     let refused = WebfetchTool::allowing_private()
-        .run(
-            serde_json::json!({ "url": endpoint.url, "timeout": 120 }),
-            &context,
-        )
+        .run(serde_json::json!({ "url": endpoint.url, "timeout": 120 }), &context)
         .await
         .expect_err("the turn ended before the page did");
 
@@ -478,12 +423,9 @@ async fn a_cancel_ends_a_fetch_that_is_still_waiting() {
 
 #[tokio::test]
 async fn a_scheme_that_is_not_http_is_refused_before_anything_is_opened() {
-    for url in [
-        "file:///etc/passwd",
-        "data:text/html,<b>hi</b>",
-        "ftp://example.com/x",
-        "example.com",
-    ] {
+    for url in
+        ["file:///etc/passwd", "data:text/html,<b>hi</b>", "ftp://example.com/x", "example.com"]
+    {
         let refused = match WebfetchTool::allowing_private()
             .run(serde_json::json!({ "url": url }), &ctx())
             .await
@@ -506,10 +448,7 @@ async fn a_call_without_a_url_is_refused() {
         .await
         .expect_err("there is nothing to fetch");
 
-    assert!(
-        matches!(refused, ToolError::InvalidArgs(_)),
-        "got {refused:?}"
-    );
+    assert!(matches!(refused, ToolError::InvalidArgs(_)), "got {refused:?}");
 }
 
 #[test]
@@ -525,11 +464,7 @@ fn the_prompt_and_schema_are_what_the_model_is_given() {
     let schema = serde_json::to_value(WebfetchTool::new().schema()).expect("a schema is JSON");
 
     assert_eq!(WebfetchTool::new().id(), "webfetch");
-    assert!(
-        WebfetchTool::new()
-            .description()
-            .contains("Fetches content from a specified URL")
-    );
+    assert!(WebfetchTool::new().description().contains("Fetches content from a specified URL"));
     assert_eq!(schema["required"], serde_json::json!(["url"]));
     assert!(
         schema.to_string().contains("markdown"),
@@ -570,10 +505,7 @@ fn a_script_holding_markup_characters_does_not_swallow_the_page() {
 /// the two here are ordinary typography that any prose page carries.
 #[test]
 fn a_named_entity_outside_the_handful_still_decodes() {
-    assert_eq!(
-        super::strip_tags("<p>He said &mdash; &rsquo;yes&rsquo;</p>"),
-        "He said — ’yes’"
-    );
+    assert_eq!(super::strip_tags("<p>He said &mdash; &rsquo;yes&rsquo;</p>"), "He said — ’yes’");
 }
 
 /// A hand scanner that ends a tag at the first `>` ends this one inside
@@ -599,10 +531,7 @@ fn markdown_punctuation_in_prose_is_handed_over_unescaped() {
         text,
         "Run cargo build --release, edit src/main_test.rs, and see the note [1] about *why*."
     );
-    assert!(
-        !text.contains('\\'),
-        "a plain-text reading has no syntax to escape for: {text:?}"
-    );
+    assert!(!text.contains('\\'), "a plain-text reading has no syntax to escape for: {text:?}");
 }
 
 /// Titles and rows remain blocks while cells within one row remain inline.
@@ -647,11 +576,7 @@ fn deeply_nested_inline_elements_fit_a_two_mebibyte_thread_stack() {
 #[test]
 fn deeply_nested_template_contents_do_not_overflow_the_stack() {
     const DEPTH: usize = 10_000;
-    let html = format!(
-        "{}text{}",
-        "<template>".repeat(DEPTH),
-        "</template>".repeat(DEPTH)
-    );
+    let html = format!("{}text{}", "<template>".repeat(DEPTH), "</template>".repeat(DEPTH));
 
     assert_eq!(super::strip_tags(&html), "");
 }

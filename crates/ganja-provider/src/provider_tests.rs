@@ -3,12 +3,14 @@ use std::convert::Infallible;
 use futures::{StreamExt as _, stream};
 use tokio_util::sync::CancellationToken;
 
+use super::sse::Frame;
 use super::{
     CredentialSource, Mapper, Peeked, Presented, ProviderError, ProviderEvent, check_base_url,
     configured_headers, endpoint, events, peeked, reopens, reported, responses, retry, shielded,
-    shown_base_url, sse::Frame, unusable,
+    shown_base_url, unusable,
 };
-use crate::{auth, protocol::FinishReason};
+use crate::auth;
+use crate::protocol::FinishReason;
 
 /// The three shapes an in-body error object arrives in, and the rule that
 /// none of them may be answered with a sentence that says nothing.
@@ -69,10 +71,7 @@ fn an_empty_turns_transient_death_is_reopened_at_most_three_times() {
         message: "Our servers are currently overloaded.".to_owned(),
     };
     assert!(reopens(0, &overloaded) && reopens(1, &overloaded) && reopens(2, &overloaded));
-    assert!(
-        !reopens(3, &overloaded),
-        "the fourth death is the turn's answer"
-    );
+    assert!(!reopens(3, &overloaded), "the fourth death is the turn's answer");
     assert!(
         !reopens(0, &ProviderError::Auth("expired".to_owned())),
         "a failure retrying cannot fix is never reopened"
@@ -179,11 +178,9 @@ fn an_error_body_is_reported_as_whatever_it_actually_carried() {
         "a nested error object's naming outranks the wrapper's: {wrapped}"
     );
 
-    for empty in [
-        serde_json::json!({}),
-        serde_json::json!({"message": "   "}),
-        serde_json::Value::Null,
-    ] {
+    for empty in
+        [serde_json::json!({}), serde_json::json!({"message": "   "}), serde_json::Value::Null]
+    {
         assert_eq!(
             reported(&empty),
             "the provider reported an error and its body carried no detail",
@@ -208,10 +205,7 @@ fn a_logged_endpoint_carries_neither_userinfo_nor_a_query_string() {
     let rendered = endpoint(&url, "https://api.example.com:8443");
 
     assert_eq!(rendered, "https://api.example.com:8443/v1/responses");
-    assert!(
-        !rendered.contains("canary"),
-        "a credential reached a log line: {rendered}"
-    );
+    assert!(!rendered.contains("canary"), "a credential reached a log line: {rendered}");
 }
 
 /// The P22 narrowing (`od8`): a base a person configured may carry a token
@@ -230,10 +224,7 @@ fn a_logged_endpoint_renders_no_path_segment_a_configured_base_contributed() {
         rendered, "https://compat.example.com/v1/messages",
         "the route this build appended survives; the tenant path does not"
     );
-    assert!(
-        !rendered.contains("canary"),
-        "a credential reached a log line: {rendered}"
-    );
+    assert!(!rendered.contains("canary"), "a credential reached a log line: {rendered}");
 
     // Fails closed: a base this function cannot read is a base whose shape
     // it cannot vouch for, so none of the path is rendered.
@@ -264,10 +255,7 @@ fn a_builtin_base_that_carries_its_own_path_still_names_the_route() {
             .expect("a parseable URL");
         let rendered = endpoint(&url, base);
 
-        assert!(
-            rendered.ends_with(route),
-            "{base} should still name {route}; got {rendered}"
-        );
+        assert!(rendered.ends_with(route), "{base} should still name {route}; got {rendered}");
     }
 }
 
@@ -281,18 +269,12 @@ fn a_header_a_request_cannot_carry_is_refused_by_name_and_not_by_value() {
     assert_eq!(carried["x-route"], "gpu-0");
 
     let mut refused = super::BTreeMap::new();
-    refused.insert(
-        "x authorization".to_owned(),
-        "sk-test-canary-XYZ".to_owned(),
-    );
+    refused.insert("x authorization".to_owned(), "sk-test-canary-XYZ".to_owned());
     let error = configured_headers("local-llama", &refused)
         .expect_err("a space is not legal in a header name");
     let rendered = format!("{error} / {error:?}");
     assert!(rendered.contains("x authorization"), "{rendered}");
-    assert!(
-        !rendered.contains("sk-test-canary-XYZ"),
-        "the value reached the refusal: {rendered}"
-    );
+    assert!(!rendered.contains("sk-test-canary-XYZ"), "the value reached the refusal: {rendered}");
 
     let mut unencodable = super::BTreeMap::new();
     unencodable.insert("x-route".to_owned(), "sk-test-canary-XYZ\n".to_owned());
@@ -300,10 +282,7 @@ fn a_header_a_request_cannot_carry_is_refused_by_name_and_not_by_value() {
         .expect_err("a newline cannot travel in a header value");
     let rendered = format!("{error} / {error:?}");
     assert!(rendered.contains("x-route"), "{rendered}");
-    assert!(
-        !rendered.contains("sk-test-canary-XYZ"),
-        "the value reached the refusal: {rendered}"
-    );
+    assert!(!rendered.contains("sk-test-canary-XYZ"), "the value reached the refusal: {rendered}");
 }
 
 /// The value the subscription backend actually hands over, held to the one
@@ -357,10 +336,7 @@ fn a_credential_never_renders_itself() {
     let key = Presented::new("sk-test-canary-XYZ").expect("a non-blank key");
 
     assert_eq!(format!("{key:?}"), "Presented([redacted])");
-    assert_eq!(
-        key.redact("rejected sk-test-canary-XYZ, sorry"),
-        "rejected [redacted], sorry"
-    );
+    assert_eq!(key.redact("rejected sk-test-canary-XYZ, sorry"), "rejected [redacted], sorry");
     assert_eq!(key.expose(), "sk-test-canary-XYZ");
     assert!(Presented::new("   ").is_none(), "a blank key is not a key");
     assert!(Presented::new("").is_none());
@@ -425,11 +401,7 @@ fn only_a_refusal_is_worth_a_new_login_and_only_a_reachable_failure_is_worth_ret
     // `Expired` variant retired with the kind it mapped to, having had no
     // production constructor once `usable_access` went.
     let absent = unusable(
-        &auth::AuthError::NotOauth {
-            provider_id: "grok".to_owned(),
-            found: "an API key",
-        }
-        .into(),
+        &auth::AuthError::NotOauth { provider_id: "grok".to_owned(), found: "an API key" }.into(),
     );
 
     assert!(
@@ -480,19 +452,13 @@ fn only_https_or_loopback_may_carry_a_key() {
     ];
 
     for base_url in allowed {
-        assert!(
-            check_base_url(base_url).is_ok(),
-            "{base_url} should be usable"
-        );
+        assert!(check_base_url(base_url).is_ok(), "{base_url} should be usable");
     }
     for base_url in refused {
         let error =
             check_base_url(base_url).expect_err(&format!("{base_url} should not be handed a key"));
 
-        assert!(
-            matches!(error, ProviderError::Transport(_)),
-            "{base_url}: got {error:?}"
-        );
+        assert!(matches!(error, ProviderError::Transport(_)), "{base_url}: got {error:?}");
         // A base URL is allowed to carry credentials in its userinfo, so
         // the refusal must describe the rule rather than quote the URL.
         assert!(
@@ -509,19 +475,10 @@ fn only_https_or_loopback_may_carry_a_key() {
 fn a_shown_base_url_keeps_the_endpoint_and_drops_the_secrets() {
     let cases = [
         ("https://api.anthropic.com", "https://api.anthropic.com/"),
-        (
-            "https://ganja:secret@gateway.invalid:8443/v1",
-            "https://gateway.invalid:8443/v1",
-        ),
+        ("https://ganja:secret@gateway.invalid:8443/v1", "https://gateway.invalid:8443/v1"),
         // A token in a query string is a real shape for a gateway URL.
-        (
-            "https://gateway.invalid/v1?token=secret",
-            "https://gateway.invalid/v1",
-        ),
-        (
-            "https://gateway.invalid/v1#secret",
-            "https://gateway.invalid/v1",
-        ),
+        ("https://gateway.invalid/v1?token=secret", "https://gateway.invalid/v1"),
+        ("https://gateway.invalid/v1#secret", "https://gateway.invalid/v1"),
         // Userinfo with no password at all still names an account.
         ("https://secret@gateway.invalid", "https://gateway.invalid/"),
         ("http://127.0.0.1:8080/v1", "http://127.0.0.1:8080/v1"),
@@ -537,12 +494,10 @@ fn a_shown_base_url_keeps_the_endpoint_and_drops_the_secrets() {
 
 #[tokio::test]
 async fn nothing_survives_a_terminal_event() {
-    let seen: Vec<ProviderEvent> = pipeline(
-        vec!["data: hi\n\ndata: done\n\ndata: more\n\n"],
-        CancellationToken::new(),
-    )
-    .collect()
-    .await;
+    let seen: Vec<ProviderEvent> =
+        pipeline(vec!["data: hi\n\ndata: done\n\ndata: more\n\n"], CancellationToken::new())
+            .collect()
+            .await;
 
     assert_eq!(
         seen,
@@ -557,9 +512,8 @@ async fn nothing_survives_a_terminal_event() {
 
 #[tokio::test]
 async fn a_body_that_just_stops_fails_rather_than_completing() {
-    let seen: Vec<ProviderEvent> = pipeline(vec!["data: hi\n\n"], CancellationToken::new())
-        .collect()
-        .await;
+    let seen: Vec<ProviderEvent> =
+        pipeline(vec!["data: hi\n\n"], CancellationToken::new()).collect().await;
 
     assert_eq!(
         seen,
@@ -578,17 +532,13 @@ async fn a_transport_error_mid_body_becomes_a_failure() {
         Ok::<&[u8], &str>(b"data: hi\n\n".as_slice()),
         Err("connection reset by peer"),
     ]);
-    let seen: Vec<ProviderEvent> = events(chunks, CancellationToken::new(), Echo)
-        .collect()
-        .await;
+    let seen: Vec<ProviderEvent> = events(chunks, CancellationToken::new(), Echo).collect().await;
 
     assert_eq!(
         seen,
         vec![
             ProviderEvent::TextDelta("hi".to_owned()),
-            ProviderEvent::Failed(ProviderError::Transport(
-                "connection reset by peer".to_owned()
-            )),
+            ProviderEvent::Failed(ProviderError::Transport("connection reset by peer".to_owned())),
         ]
     );
 }
@@ -596,15 +546,10 @@ async fn a_transport_error_mid_body_becomes_a_failure() {
 #[tokio::test]
 async fn a_cancelled_stream_stops_without_reporting_a_failure() {
     let cancel = CancellationToken::new();
-    let mut stream = Box::pin(pipeline(
-        vec!["data: one\n\ndata: two\n\ndata: three\n\n"],
-        cancel.clone(),
-    ));
+    let mut stream =
+        Box::pin(pipeline(vec!["data: one\n\ndata: two\n\ndata: three\n\n"], cancel.clone()));
 
-    assert_eq!(
-        stream.next().await,
-        Some(ProviderEvent::TextDelta("one".to_owned()))
-    );
+    assert_eq!(stream.next().await, Some(ProviderEvent::TextDelta("one".to_owned())));
     cancel.cancel();
 
     assert_eq!(
@@ -628,10 +573,7 @@ fn a_spliced_body_keeps_the_wires_fields_over_the_efforts() {
     let merged = serde_json::to_value(super::splice_effort(&options, &body))
         .expect("a spliced body serializes");
 
-    assert_eq!(
-        merged,
-        serde_json::json!({"model": "ours", "stream": true, "extra": 1})
-    );
+    assert_eq!(merged, serde_json::json!({"model": "ours", "stream": true, "extra": 1}));
 
     let untouched = serde_json::to_value(super::splice_effort(&serde_json::Map::new(), &body))
         .expect("a spliced body serializes");

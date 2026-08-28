@@ -34,27 +34,19 @@
 //! decision is made and documented; nothing here ever sees a deadline to
 //! apply.
 
-use std::{
-    collections::BTreeMap,
-    path::PathBuf,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
-};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use ganja_tool::{
-    job::{JobRead, JobStatus, JobsError, State},
-    shell::kill_tree,
-    truncate,
-};
-use tokio::{
-    io::{AsyncRead, AsyncReadExt as _},
-    process::Child,
-    sync::Notify,
-    task::JoinHandle,
-};
+use ganja_tool::job::{JobRead, JobStatus, JobsError, State};
+use ganja_tool::shell::kill_tree;
+use ganja_tool::truncate;
+use tokio::io::{AsyncRead, AsyncReadExt as _};
+use tokio::process::Child;
+use tokio::sync::Notify;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 /// Bytes kept in memory, undelivered, before the oldest are dropped. Mirrors
@@ -93,14 +85,7 @@ impl std::fmt::Debug for JobRegistry {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("JobRegistry")
-            .field(
-                "jobs",
-                &self
-                    .jobs
-                    .lock()
-                    .expect("the job map is never poisoned")
-                    .len(),
-            )
+            .field("jobs", &self.jobs.lock().expect("the job map is never poisoned").len())
             .finish()
     }
 }
@@ -170,34 +155,23 @@ impl ganja_tool::job::Jobs for JobRegistry {
         let handle = tokio::spawn(async move {
             run_job(watched, child, stdout, stderr).await;
         });
-        self.tasks
-            .lock()
-            .expect("the task list is never poisoned")
-            .push(handle);
+        self.tasks.lock().expect("the task list is never poisoned").push(handle);
 
         job.status()
     }
 
     async fn output(&self, bash_id: &str) -> Result<JobRead, JobsError> {
         let job = self.find(bash_id)?;
-        let (bytes, dropped, spill) = job
-            .buffer
-            .lock()
-            .expect("a job's buffer is never poisoned")
-            .drain();
+        let (bytes, dropped, spill) =
+            job.buffer.lock().expect("a job's buffer is never poisoned").drain();
 
-        Ok(JobRead {
-            chunk: render_chunk(&bytes, dropped, spill.as_deref()),
-            status: job.status(),
-        })
+        Ok(JobRead { chunk: render_chunk(&bytes, dropped, spill.as_deref()), status: job.status() })
     }
 
     async fn kill(&self, bash_id: &str) -> Result<JobStatus, JobsError> {
         let job = self.find(bash_id)?;
-        let running = matches!(
-            *job.state.lock().expect("a job's state is never poisoned"),
-            State::Running
-        );
+        let running =
+            matches!(*job.state.lock().expect("a job's state is never poisoned"), State::Running);
         if running {
             job.cancel.cancel();
             job.done.notified().await;
@@ -239,11 +213,7 @@ impl Job {
         JobStatus {
             id: self.id.clone(),
             command: self.command.clone(),
-            state: self
-                .state
-                .lock()
-                .expect("a job's state is never poisoned")
-                .clone(),
+            state: self.state.lock().expect("a job's state is never poisoned").clone(),
         }
     }
 }
@@ -314,11 +284,9 @@ async fn pump(mut reader: impl AsyncRead + Unpin, job: &Arc<Job>) {
     loop {
         match reader.read(&mut chunk).await {
             Ok(0) | Err(_) => return,
-            Ok(read) => job
-                .buffer
-                .lock()
-                .expect("a job's buffer is never poisoned")
-                .push(&chunk[..read]),
+            Ok(read) => {
+                job.buffer.lock().expect("a job's buffer is never poisoned").push(&chunk[..read])
+            }
         }
     }
 }
@@ -471,10 +439,7 @@ mod tests {
     async fn a_started_job_is_running_and_answers_to_its_own_id() {
         let registry = JobRegistry::new();
         let status = registry
-            .start(
-                "sleep 5".to_owned(),
-                shell("sleep 5").spawn().expect("sh spawns"),
-            )
+            .start("sleep 5".to_owned(), shell("sleep 5").spawn().expect("sh spawns"))
             .await;
 
         assert_eq!(status.state, State::Running);
@@ -486,12 +451,10 @@ mod tests {
     #[tokio::test]
     async fn ids_are_assigned_in_order_and_never_reused() {
         let registry = JobRegistry::new();
-        let first = registry
-            .start("true".to_owned(), shell("true").spawn().expect("sh spawns"))
-            .await;
-        let second = registry
-            .start("true".to_owned(), shell("true").spawn().expect("sh spawns"))
-            .await;
+        let first =
+            registry.start("true".to_owned(), shell("true").spawn().expect("sh spawns")).await;
+        let second =
+            registry.start("true".to_owned(), shell("true").spawn().expect("sh spawns")).await;
 
         assert_ne!(first.id, second.id);
         registry.shutdown().await;
@@ -503,39 +466,22 @@ mod tests {
         let status = registry
             .start(
                 "echo one; sleep 0.2; echo two".to_owned(),
-                shell("echo one; sleep 0.2; echo two")
-                    .spawn()
-                    .expect("sh spawns"),
+                shell("echo one; sleep 0.2; echo two").spawn().expect("sh spawns"),
             )
             .await;
 
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let first = registry
-            .output(&status.id)
-            .await
-            .expect("a known id answers");
+        let first = registry.output(&status.id).await.expect("a known id answers");
         assert!(first.chunk.contains("one"), "got {:?}", first.chunk);
         assert!(!first.chunk.contains("two"), "got {:?}", first.chunk);
 
         tokio::time::sleep(Duration::from_millis(400)).await;
-        let second = registry
-            .output(&status.id)
-            .await
-            .expect("a known id answers");
+        let second = registry.output(&status.id).await.expect("a known id answers");
         assert!(second.chunk.contains("two"), "got {:?}", second.chunk);
-        assert!(
-            !second.chunk.contains("one"),
-            "the first poll already delivered it"
-        );
-        assert!(matches!(
-            second.status.state,
-            State::Exited { code: Some(0) }
-        ));
+        assert!(!second.chunk.contains("one"), "the first poll already delivered it");
+        assert!(matches!(second.status.state, State::Exited { code: Some(0) }));
 
-        let third = registry
-            .output(&status.id)
-            .await
-            .expect("a known id answers");
+        let third = registry.output(&status.id).await.expect("a known id answers");
         assert!(third.chunk.is_empty(), "nothing new since the second poll");
 
         registry.shutdown().await;
@@ -545,16 +491,10 @@ mod tests {
     async fn an_unknown_id_is_refused_by_name() {
         let registry = JobRegistry::new();
 
-        let refused = registry
-            .output("bash_9")
-            .await
-            .expect_err("nothing registered that id");
+        let refused = registry.output("bash_9").await.expect_err("nothing registered that id");
         assert_eq!(refused, JobsError::NotFound("bash_9".to_owned()));
 
-        let refused = registry
-            .kill("bash_9")
-            .await
-            .expect_err("nothing registered that id");
+        let refused = registry.kill("bash_9").await.expect_err("nothing registered that id");
         assert_eq!(refused, JobsError::NotFound("bash_9".to_owned()));
     }
 
@@ -570,25 +510,18 @@ mod tests {
             survived = survived.display(),
         );
 
-        let status = registry
-            .start(command.clone(), shell(&command).spawn().expect("sh spawns"))
-            .await;
+        let status =
+            registry.start(command.clone(), shell(&command).spawn().expect("sh spawns")).await;
 
         while !forked.exists() {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
 
-        let killed = registry
-            .kill(&status.id)
-            .await
-            .expect("a running job can be killed");
+        let killed = registry.kill(&status.id).await.expect("a running job can be killed");
         assert_eq!(killed.state, State::Killed);
 
         tokio::time::sleep(Duration::from_secs(2)).await;
-        assert!(
-            !survived.exists(),
-            "the grandchild outlived the kill; the tree was not reached"
-        );
+        assert!(!survived.exists(), "the grandchild outlived the kill; the tree was not reached");
     }
 
     /// Killing something already dead is not an error: the second call
@@ -596,26 +529,20 @@ mod tests {
     #[tokio::test]
     async fn killing_an_already_exited_job_is_answered_not_refused() {
         let registry = JobRegistry::new();
-        let status = registry
-            .start("true".to_owned(), shell("true").spawn().expect("sh spawns"))
-            .await;
+        let status =
+            registry.start("true".to_owned(), shell("true").spawn().expect("sh spawns")).await;
 
         // Give the job a moment to actually exit before asking again.
         loop {
-            let read = registry
-                .output(&status.id)
-                .await
-                .expect("a known id answers");
+            let read = registry.output(&status.id).await.expect("a known id answers");
             if !matches!(read.status.state, State::Running) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
 
-        let answer = registry
-            .kill(&status.id)
-            .await
-            .expect("an already-dead job is still answered");
+        let answer =
+            registry.kill(&status.id).await.expect("an already-dead job is still answered");
         assert!(matches!(answer.state, State::Exited { code: Some(0) }));
     }
 
@@ -625,22 +552,12 @@ mod tests {
     async fn a_job_outlives_the_registry_without_being_asked_to_stop() {
         let registry = JobRegistry::new();
         let status = registry
-            .start(
-                "sleep 1".to_owned(),
-                shell("sleep 1").spawn().expect("sh spawns"),
-            )
+            .start("sleep 1".to_owned(), shell("sleep 1").spawn().expect("sh spawns"))
             .await;
 
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let mid = registry
-            .output(&status.id)
-            .await
-            .expect("a known id answers");
-        assert_eq!(
-            mid.status.state,
-            State::Running,
-            "nothing here should have stopped it"
-        );
+        let mid = registry.output(&status.id).await.expect("a known id answers");
+        assert_eq!(mid.status.state, State::Running, "nothing here should have stopped it");
 
         registry.shutdown().await;
     }
@@ -659,9 +576,7 @@ mod tests {
             survived = survived.display(),
         );
 
-        registry
-            .start(command.clone(), shell(&command).spawn().expect("sh spawns"))
-            .await;
+        registry.start(command.clone(), shell(&command).spawn().expect("sh spawns")).await;
 
         while !forked.exists() {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -670,9 +585,6 @@ mod tests {
         registry.shutdown().await;
 
         tokio::time::sleep(Duration::from_secs(2)).await;
-        assert!(
-            !survived.exists(),
-            "a job outlived engine shutdown; the tree was not reached"
-        );
+        assert!(!survived.exists(), "a job outlived engine shutdown; the tree was not reached");
     }
 }

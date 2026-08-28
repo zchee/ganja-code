@@ -11,10 +11,8 @@ use super::{
     Asks, IGNORED_STALE_ANSWER, MemberPostbox, REFUSED_AT_DIALOG, Resolved, Unforwarded, ask_of,
     dialog_of, reply_of, response_of,
 };
-use crate::{
-    protocol::{Event, PermissionId, PermissionReply, SessionId},
-    tool::team::{Address, Body, Peer, Postbox as _, Reserved, Undelivered},
-};
+use crate::protocol::{Event, PermissionId, PermissionReply, SessionId};
+use crate::tool::team::{Address, Body, Peer, Postbox as _, Reserved, Undelivered};
 
 /// A teams root under a throwaway home, and the names both sides use.
 struct Team {
@@ -28,11 +26,7 @@ impl Team {
         let home = tempfile::tempdir().expect("a temporary home");
         let root = TeamsRoot::new(home.path().join("teams"));
 
-        Self {
-            _home: home,
-            root,
-            team: TeamName::parse("session-abcd1234").expect("a team name"),
-        }
+        Self { _home: home, root, team: TeamName::parse("session-abcd1234").expect("a team name") }
     }
 
     /// Writes a team file naming the lead and `teammates`, the way a lead
@@ -51,9 +45,7 @@ impl Team {
                     cwd: "/tmp".to_owned(),
                     color: "blue".to_owned(),
                     plan_mode_required: false,
-                    surface: Surface::Pane {
-                        id: "%3".to_owned(),
-                    },
+                    surface: Surface::Pane { id: "%3".to_owned() },
                 },
                 record::now_millis(),
             ));
@@ -73,14 +65,11 @@ impl Team {
     }
 
     fn inbox(&self, name: &str) -> std::path::PathBuf {
-        self.root
-            .inbox_path(&self.team, &MemberName::parse(name).expect("a member name"))
+        self.root.inbox_path(&self.team, &MemberName::parse(name).expect("a member name"))
     }
 
     fn held(&self, name: &str) -> Vec<MailboxMessage> {
-        mailbox::read(&self.inbox(name))
-            .map(|contents| contents.valid)
-            .unwrap_or_default()
+        mailbox::read(&self.inbox(name)).map(|contents| contents.valid).unwrap_or_default()
     }
 }
 
@@ -94,11 +83,7 @@ async fn a_member_can_reach_its_lead_before_the_team_file_exists() {
     let roster = postbox.roster();
     assert_eq!(
         roster,
-        [Peer {
-            name: LEAD.to_owned(),
-            description: Some(super::LEADS.to_owned()),
-            lead: true,
-        }],
+        [Peer { name: LEAD.to_owned(), description: Some(super::LEADS.to_owned()), lead: true }],
         "the lead, and only the lead, with no file to read"
     );
 
@@ -131,19 +116,12 @@ async fn a_members_roster_is_the_team_file_without_itself() {
 
     let names: Vec<String> = postbox.roster().into_iter().map(|peer| peer.name).collect();
     assert_eq!(names, [LEAD, "reviewer"], "the lead first, then the peers");
-    assert_eq!(
-        postbox.roster().iter().filter(|peer| peer.lead).count(),
-        1,
-        "exactly one lead"
-    );
+    assert_eq!(postbox.roster().iter().filter(|peer| peer.lead).count(), 1, "exactly one lead");
 
     postbox
         .deliver(
             Address::Local("reviewer".to_owned()),
-            Body::Text {
-                text: "look at the parser".to_owned(),
-                summary: None,
-            },
+            Body::Text { text: "look at the parser".to_owned(), summary: None },
         )
         .await
         .expect("a named peer is reachable");
@@ -153,10 +131,7 @@ async fn a_members_roster_is_the_team_file_without_itself() {
         postbox
             .deliver(
                 Address::Local("nobody".to_owned()),
-                Body::Text {
-                    text: "hello?".to_owned(),
-                    summary: None,
-                },
+                Body::Text { text: "hello?".to_owned(), summary: None },
             )
             .await,
         Err(Undelivered::Unknown),
@@ -196,15 +171,11 @@ fn a_member_postbox_classifies_with_the_protocols_own_lists() {
     assert_eq!(postbox.classify("just a message"), Reserved::No);
     assert_eq!(
         postbox.classify(r#"{"type":"shutdown_approved","requestId":"r1"}"#),
-        Reserved::AgentSendable {
-            kind: "shutdown_approved"
-        }
+        Reserved::AgentSendable { kind: "shutdown_approved" }
     );
     assert_eq!(
         postbox.classify(r#"{"type":"idle_notification"}"#),
-        Reserved::HarnessOnly {
-            kind: "idle_notification"
-        }
+        Reserved::HarnessOnly { kind: "idle_notification" }
     );
 }
 
@@ -214,20 +185,12 @@ async fn a_uds_address_is_validated_but_has_no_transport_yet() {
     let outcome = team
         .postbox("worker")
         .deliver(
-            Address::Uds {
-                path: "/tmp/peer.sock".into(),
-            },
-            Body::Text {
-                text: "hello".to_owned(),
-                summary: None,
-            },
+            Address::Uds { path: "/tmp/peer.sock".into() },
+            Body::Text { text: "hello".to_owned(), summary: None },
         )
         .await;
 
-    assert!(
-        matches!(outcome, Err(Undelivered::NoTransport { .. })),
-        "{outcome:?}"
-    );
+    assert!(matches!(outcome, Err(Undelivered::NoTransport { .. })), "{outcome:?}");
 }
 
 /// One dialog as the member's engine publishes it.
@@ -255,22 +218,10 @@ fn the_dialect_round_trips_a_dialog_and_its_answer() {
     assert_eq!(frame.tool_name, "bash");
     assert_eq!(frame.tool_use_id, "call-1");
     assert_eq!(frame.description, "rm -rf build");
-    assert_eq!(
-        frame.permission_suggestions.len(),
-        1,
-        "one directory disclosure"
-    );
+    assert_eq!(frame.permission_suggestions.len(), 1, "one directory disclosure");
 
     let dialog = dialog_of(SessionId::from("lead-session".to_owned()), frame);
-    let Event::PermissionRequested {
-        id,
-        tool,
-        title,
-        args,
-        directories,
-        ..
-    } = &dialog
-    else {
+    let Event::PermissionRequested { id, tool, title, args, directories, .. } = &dialog else {
         panic!("a dialog is a permission request");
     };
     assert_ne!(
@@ -287,11 +238,7 @@ fn the_dialect_round_trips_a_dialog_and_its_answer() {
     let plain = ask_of("worker@session-abcd1234", &ask("req-2", &[])).expect("an ask");
     assert!(plain.permission_suggestions.is_empty());
 
-    for reply in [
-        PermissionReply::Once,
-        PermissionReply::Always,
-        PermissionReply::Reject,
-    ] {
+    for reply in [PermissionReply::Once, PermissionReply::Always, PermissionReply::Reject] {
         let response = response_of("req-1", "bash", &json!({"command": "rm -rf build"}), reply);
         assert!(response.is_consistent());
         assert_eq!(reply_of(&response), reply, "{reply:?} survives the frame");
@@ -326,11 +273,7 @@ fn an_unknown_update_is_once_and_an_inconsistent_frame_refuses() {
 }
 
 fn asks(team: &Team) -> Asks {
-    Asks::new(
-        MemberName::parse("worker").expect("a member name"),
-        &team.team,
-        &team.root,
-    )
+    Asks::new(MemberName::parse("worker").expect("a member name"), &team.team, &team.root)
 }
 
 fn lead_answers(response: PermissionResponse) -> LeadFrame {
@@ -344,17 +287,12 @@ async fn a_forwarded_ask_reaches_the_lead_and_its_answer_comes_back_once() {
     let team = Team::new();
     let asks = asks(&team);
 
-    asks.forward(&ask("req-1", &[]))
-        .await
-        .expect("the lead's inbox takes it");
+    asks.forward(&ask("req-1", &[])).await.expect("the lead's inbox takes it");
     assert_eq!(asks.waiting(), 1);
 
     let held = team.held(LEAD);
     assert_eq!(held.len(), 1);
-    assert_eq!(
-        held[0].from, "worker",
-        "asked as the member, by construction"
-    );
+    assert_eq!(held[0].from, "worker", "asked as the member, by construction");
     let Some(Frame::PermissionRequest(request)) = held[0].frame() else {
         panic!("the lead was handed something other than a permission request");
     };
@@ -387,12 +325,7 @@ async fn a_forwarded_ask_reaches_the_lead_and_its_answer_comes_back_once() {
             PermissionReply::Always,
         )))
     };
-    assert_eq!(
-        again,
-        Resolved::Stale {
-            request_id: "req-1".to_owned()
-        }
-    );
+    assert_eq!(again, Resolved::Stale { request_id: "req-1".to_owned() });
     assert!(
         logged.text().contains(IGNORED_STALE_ANSWER),
         "the ignoring is not silent: {}",
@@ -416,12 +349,7 @@ async fn a_retired_ask_makes_a_late_answer_stale() {
     );
     assert_eq!(asks.waiting(), 0);
     assert!(matches!(
-        asks.resolve(lead_answers(response_of(
-            "req-1",
-            "bash",
-            &json!({}),
-            PermissionReply::Once
-        ))),
+        asks.resolve(lead_answers(response_of("req-1", "bash", &json!({}), PermissionReply::Once))),
         Resolved::Stale { .. }
     ));
 }
@@ -445,12 +373,7 @@ async fn only_answers_are_read_and_only_asks_are_forwarded() {
         }),
     )
     .expect("the lead's");
-    assert_eq!(
-        asks.resolve(shutdown),
-        Resolved::NotAnAnswer {
-            kind: "shutdown_request"
-        }
-    );
+    assert_eq!(asks.resolve(shutdown), Resolved::NotAnAnswer { kind: "shutdown_request" });
 
     let not_an_ask = Event::QuestionRejected {
         session_id: SessionId::from("member-session".to_owned()),
@@ -483,10 +406,7 @@ impl Capture {
 
 impl std::io::Write for Capture {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        self.0
-            .lock()
-            .expect("the log is never poisoned")
-            .extend_from_slice(buffer);
+        self.0.lock().expect("the log is never poisoned").extend_from_slice(buffer);
 
         Ok(buffer.len())
     }

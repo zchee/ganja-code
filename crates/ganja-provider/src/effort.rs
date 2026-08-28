@@ -56,7 +56,8 @@
 //! roster sorts by name, which is the catalog schema's standing order and not
 //! this module's to change.
 
-use std::{collections::BTreeMap, sync::LazyLock};
+use std::collections::BTreeMap;
+use std::sync::LazyLock;
 
 use regex::Regex;
 use serde_json::{Map, Value};
@@ -191,9 +192,8 @@ fn reasoning_efforts(model: &ModelInfo) -> Option<Roster> {
         return Some(Roster::new());
     }
 
-    if let Some(ReasoningOption::Effort { values }) = options
-        .iter()
-        .find(|option| matches!(option, ReasoningOption::Effort { .. }))
+    if let Some(ReasoningOption::Effort { values }) =
+        options.iter().find(|option| matches!(option, ReasoningOption::Effort { .. }))
     {
         return Some(effort_values(model, values));
     }
@@ -259,10 +259,7 @@ fn budget_efforts(model: &ModelInfo, min: Option<f64>, max: Option<f64>) -> Rost
     if maximum <= 0.0 {
         return Roster::new();
     }
-    let high = ((maximum + 1.0) / 2.0)
-        .floor()
-        .max(min.unwrap_or(0.0))
-        .min(maximum);
+    let high = ((maximum + 1.0) / 2.0).floor().max(min.unwrap_or(0.0)).min(maximum);
 
     let mut roster = Roster::new();
     for (id, budget) in [("high", high), ("max", maximum)] {
@@ -320,10 +317,7 @@ fn table(model: &ModelInfo) -> Roster {
             } else {
                 &WIDELY_SUPPORTED_EFFORTS
             };
-            efforts
-                .iter()
-                .map(|effort| ((*effort).to_owned(), chat_effort(effort)))
-                .collect()
+            efforts.iter().map(|effort| ((*effort).to_owned(), chat_effort(effort))).collect()
         }
         Wire::Copilot => copilot_table(model),
     }
@@ -353,14 +347,9 @@ fn anthropic_table(model: &ModelInfo) -> Roster {
 
     let output = model.max_output as f64;
     let mut roster = Roster::new();
-    roster.insert(
-        "high".to_owned(),
-        thinking_budget(16_000.0_f64.min((output / 2.0 - 1.0).floor())),
-    );
-    roster.insert(
-        "max".to_owned(),
-        thinking_budget(31_999.0_f64.min(output - 1.0)),
-    );
+    roster
+        .insert("high".to_owned(), thinking_budget(16_000.0_f64.min((output / 2.0 - 1.0).floor())));
+    roster.insert("max".to_owned(), thinking_budget(31_999.0_f64.min(output - 1.0)));
 
     roster
 }
@@ -396,10 +385,7 @@ fn copilot_table(model: &ModelInfo) -> Roster {
         efforts.push("xhigh");
     }
 
-    efforts
-        .into_iter()
-        .map(|effort| (effort.to_owned(), chat_effort(effort)))
-        .collect()
+    efforts.into_iter().map(|effort| (effort.to_owned(), chat_effort(effort))).collect()
 }
 
 /// `{"reasoning_effort": E}` — the whole vocabulary of the chat wire.
@@ -431,10 +417,7 @@ fn responses_effort(effort: &str) -> Map<String, Value> {
 
     let mut map = Map::new();
     map.insert("reasoning".to_owned(), Value::Object(reasoning));
-    map.insert(
-        "include".to_owned(),
-        Value::Array(vec![INCLUDE_ENCRYPTED_REASONING.into()]),
-    );
+    map.insert("include".to_owned(), Value::Array(vec![INCLUDE_ENCRYPTED_REASONING.into()]));
 
     map
 }
@@ -554,17 +537,12 @@ fn anthropic_adaptive_efforts(api_id: &str) -> Option<&'static [&'static str]> {
         "4-6-sonnet",
         "4.6-sonnet",
     ];
-    FOUR_SIX
-        .iter()
-        .any(|name| api_id.contains(name))
-        .then_some(&["low", "medium", "high", "max"])
+    FOUR_SIX.iter().any(|name| api_id.contains(name)).then_some(&["low", "medium", "high", "max"])
 }
 
 /// Upstream's `anthropicOpus45`.
 fn anthropic_opus_45(api_id: &str) -> bool {
-    ["opus-4-5", "opus-4.5"]
-        .iter()
-        .any(|name| api_id.contains(name))
+    ["opus-4-5", "opus-4.5"].iter().any(|name| api_id.contains(name))
 }
 
 /// The major and minor a Claude id carries, by upstream's own pattern.
@@ -586,10 +564,7 @@ fn claude_version(id: &str) -> Option<(u64, u64)> {
 
     let found = PATTERN.captures(id)?;
     let major = found.get(1)?.as_str().parse().ok()?;
-    let minor = found
-        .get(2)
-        .map_or(Ok(0), |minor| minor.as_str().parse())
-        .ok()?;
+    let minor = found.get(2).map_or(Ok(0), |minor| minor.as_str().parse()).ok()?;
 
     Some((major, minor))
 }
@@ -693,15 +668,8 @@ fn gpt5_version(id: &str) -> Option<u64> {
             continue;
         }
         let after = &tail[1..];
-        let digits = after
-            .find(|c: char| !c.is_ascii_digit())
-            .unwrap_or(after.len());
-        if digits == 0
-            || !after[digits..]
-                .chars()
-                .next()
-                .is_none_or(|c| matches!(c, '.' | '-'))
-        {
+        let digits = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
+        if digits == 0 || !after[digits..].chars().next().is_none_or(|c| matches!(c, '.' | '-')) {
             continue;
         }
         if let Ok(version) = after[..digits].parse::<u64>()
@@ -718,8 +686,7 @@ fn gpt5_version(id: &str) -> Option<u64> {
 fn is_gpt5_pro(id: &str) -> bool {
     gpt5_tails(id).any(|tail| {
         let tail = tail.strip_prefix(['.', '-']).unwrap_or(tail);
-        tail.strip_prefix("pro")
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with(['.', '-']))
+        tail.strip_prefix("pro").is_some_and(|rest| rest.is_empty() || rest.starts_with(['.', '-']))
     })
 }
 
@@ -729,17 +696,14 @@ fn is_versioned_gpt5_pro(id: &str) -> bool {
         let Some(after) = tail.strip_prefix(['.', '-']) else {
             return false;
         };
-        let digits = after
-            .find(|c: char| !c.is_ascii_digit())
-            .unwrap_or(after.len());
+        let digits = after.find(|c: char| !c.is_ascii_digit()).unwrap_or(after.len());
         if digits == 0 {
             return false;
         }
         let Some(rest) = after[digits..].strip_prefix(['.', '-']) else {
             return false;
         };
-        rest.strip_prefix("pro")
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with(['.', '-']))
+        rest.strip_prefix("pro").is_some_and(|rest| rest.is_empty() || rest.starts_with(['.', '-']))
     })
 }
 

@@ -34,18 +34,14 @@
 
 mod support;
 
-use std::{
-    fs,
-    os::unix::fs::PermissionsExt as _,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::fs;
+use std::os::unix::fs::PermissionsExt as _;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ganja_protocol::SessionId;
-use ganja_serve::{
-    Address, DirectoryRefusal, Handle, Listen, ServeError,
-    socket::{self, EXTENSION, LOCK_EXTENSION, NameLock, SHORTEST_NAME},
-};
+use ganja_serve::socket::{self, EXTENSION, LOCK_EXTENSION, NameLock, SHORTEST_NAME};
+use ganja_serve::{Address, DirectoryRefusal, Handle, Listen, ServeError};
 use support::{SOCKET_URL, engine, socket_client, with_listen};
 
 /// A fresh directory at `0700` — what the socket directory has to be, where
@@ -77,11 +73,7 @@ async fn health(path: &Path) -> serde_json::Value {
 }
 
 fn mode(path: &Path) -> u32 {
-    fs::metadata(path)
-        .expect("the path exists")
-        .permissions()
-        .mode()
-        & 0o777
+    fs::metadata(path).expect("the path exists").permissions().mode() & 0o777
 }
 
 /// The socket path a handle is bound on — these tests bind sockets, so there
@@ -100,18 +92,13 @@ async fn a_session_socket_binds_in_a_private_directory_and_answers_health() {
 
     let handle = ganja_serve::serve(
         engine(),
-        with_listen(Listen::Session {
-            id: id.clone(),
-            directory: directory.path().to_path_buf(),
-        }),
+        with_listen(Listen::Session { id: id.clone(), directory: directory.path().to_path_buf() }),
     )
     .await
     .expect("a session socket comes up with no password: the filesystem is the credential");
 
     let path = bound(&handle);
-    let shortest = socket::candidates(directory.path(), &id)
-        .next()
-        .expect("a session has a name");
+    let shortest = socket::candidates(directory.path(), &id).next().expect("a session has a name");
     assert_eq!(path, shortest, "an uncontested name is the shortest one");
     assert_eq!(
         path.file_name().and_then(|name| name.to_str()),
@@ -128,11 +115,7 @@ async fn a_session_socket_binds_in_a_private_directory_and_answers_health() {
     assert_eq!(health["healthy"], true, "the same routes, over the socket");
 
     handle.shutdown().await.expect("a clean stop");
-    assert!(
-        !path.exists(),
-        "a stopped server gives its socket file back: {}",
-        path.display()
-    );
+    assert!(!path.exists(), "a stopped server gives its socket file back: {}", path.display());
 }
 
 #[tokio::test]
@@ -143,10 +126,7 @@ async fn an_absent_socket_directory_is_created_private() {
 
     let handle = ganja_serve::serve(
         engine(),
-        with_listen(Listen::Session {
-            id: session("0001"),
-            directory: directory.clone(),
-        }),
+        with_listen(Listen::Session { id: session("0001"), directory: directory.clone() }),
     )
     .await
     .expect("the directory is made on the way to the bind");
@@ -197,10 +177,7 @@ async fn a_socket_directory_that_is_not_private_is_refused_naming_its_mode() {
         "the sentence says which directory, what it is, and what it must be: {message}"
     );
     assert!(
-        fs::read_dir(directory.path())
-            .expect("the directory is still there")
-            .next()
-            .is_none(),
+        fs::read_dir(directory.path()).expect("the directory is still there").next().is_none(),
         "nothing was bound into a directory that was refused"
     );
 }
@@ -214,10 +191,7 @@ async fn a_symlink_or_plain_file_where_the_directory_should_be_is_refused() {
     fs::write(&file, b"not a directory").expect("the decoy writes");
     let refused = ganja_serve::serve(
         engine(),
-        with_listen(Listen::Session {
-            id: session("0003"),
-            directory: file.clone(),
-        }),
+        with_listen(Listen::Session { id: session("0003"), directory: file.clone() }),
     )
     .await;
     assert!(
@@ -238,10 +212,7 @@ async fn a_symlink_or_plain_file_where_the_directory_should_be_is_refused() {
     std::os::unix::fs::symlink(real.path(), &link).expect("the link is made");
     let refused = ganja_serve::serve(
         engine(),
-        with_listen(Listen::Session {
-            id: session("0004"),
-            directory: link.clone(),
-        }),
+        with_listen(Listen::Session { id: session("0004"), directory: link.clone() }),
     )
     .await;
     assert!(
@@ -255,10 +226,7 @@ async fn a_symlink_or_plain_file_where_the_directory_should_be_is_refused() {
         "a symlink is not a directory either, however good its target: {refused:?}"
     );
     assert!(
-        fs::read_dir(real.path())
-            .expect("the target is still there")
-            .next()
-            .is_none(),
+        fs::read_dir(real.path()).expect("the target is still there").next().is_none(),
         "nothing was bound through the link"
     );
 }
@@ -267,25 +235,17 @@ async fn a_symlink_or_plain_file_where_the_directory_should_be_is_refused() {
 async fn a_stale_socket_file_is_unlinked_and_the_name_reused() {
     let directory = private_dir();
     let id = session("0005");
-    let shortest = socket::candidates(directory.path(), &id)
-        .next()
-        .expect("a session has a name");
+    let shortest = socket::candidates(directory.path(), &id).next().expect("a session has a name");
 
     // A socket somebody bound and then died holding: the file stays, nobody
     // answers behind it.
     let dead = std::os::unix::net::UnixListener::bind(&shortest).expect("the stale socket binds");
     drop(dead);
-    assert!(
-        shortest.exists(),
-        "dropping a listener leaves the file behind"
-    );
+    assert!(shortest.exists(), "dropping a listener leaves the file behind");
 
     let handle = ganja_serve::serve(
         engine(),
-        with_listen(Listen::Session {
-            id,
-            directory: directory.path().to_path_buf(),
-        }),
+        with_listen(Listen::Session { id, directory: directory.path().to_path_buf() }),
     )
     .await
     .expect("a dead socket's name is free to take");
@@ -293,21 +253,11 @@ async fn a_stale_socket_file_is_unlinked_and_the_name_reused() {
     assert_eq!(bound(&handle), shortest, "the same name, not the next one");
     assert_eq!(health(&shortest).await["healthy"], true);
     let lock = socket::lock_path(&shortest);
-    assert_eq!(
-        lock.extension().and_then(|extension| extension.to_str()),
-        Some(LOCK_EXTENSION)
-    );
-    assert_eq!(
-        mode(&lock),
-        0o600,
-        "the lock file is as private as the socket"
-    );
+    assert_eq!(lock.extension().and_then(|extension| extension.to_str()), Some(LOCK_EXTENSION));
+    assert_eq!(mode(&lock), 0o600, "the lock file is as private as the socket");
     handle.shutdown().await.expect("a clean stop");
     assert!(!shortest.exists(), "the socket file goes");
-    assert!(
-        lock.exists(),
-        "the lock file stays: unlinking it would reopen the race"
-    );
+    assert!(lock.exists(), "the lock file stays: unlinking it would reopen the race");
 }
 
 /// The liveness token is the lock, not a connection: a name whose lock is
@@ -326,9 +276,7 @@ async fn a_stale_socket_file_is_unlinked_and_the_name_reused() {
 async fn a_held_name_is_never_unlinked_even_when_nothing_accepts_behind_it() {
     let directory = private_dir();
     let id = session("0007");
-    let shortest = socket::candidates(directory.path(), &id)
-        .next()
-        .expect("a session has a name");
+    let shortest = socket::candidates(directory.path(), &id).next().expect("a session has a name");
 
     // Somebody live, from this test's point of view: the lock held, and a
     // socket file at the name that nothing is listening behind — a binder
@@ -347,10 +295,7 @@ async fn a_held_name_is_never_unlinked_even_when_nothing_accepts_behind_it() {
 
     let handle = ganja_serve::serve(
         engine(),
-        with_listen(Listen::Session {
-            id,
-            directory: directory.path().to_path_buf(),
-        }),
+        with_listen(Listen::Session { id, directory: directory.path().to_path_buf() }),
     )
     .await
     .expect("a held name is walked past, not fought over");
@@ -362,10 +307,7 @@ async fn a_held_name_is_never_unlinked_even_when_nothing_accepts_behind_it() {
         Some(&*format!("0198c1a20.{EXTENSION}")),
         "one digit longer"
     );
-    assert!(
-        shortest.exists(),
-        "and the held name's file was not unlinked"
-    );
+    assert!(shortest.exists(), "and the held name's file was not unlinked");
     assert_eq!(health(&landed).await["healthy"], true);
 
     handle.shutdown().await.expect("a clean stop");
@@ -384,9 +326,7 @@ async fn a_held_name_is_never_unlinked_even_when_nothing_accepts_behind_it() {
 async fn a_name_the_lister_holds_is_walked_past_and_its_stale_file_goes_under_the_lock() {
     let directory = private_dir();
     let id = session("0011");
-    let shortest = socket::candidates(directory.path(), &id)
-        .next()
-        .expect("a session has a name");
+    let shortest = socket::candidates(directory.path(), &id).next().expect("a session has a name");
     // A stale socket file at the name: bound once and dropped, as a dead
     // server leaves it, its lock file left behind unheld.
     drop(std::os::unix::net::UnixListener::bind(&shortest).expect("the socket binds"));
@@ -402,10 +342,7 @@ async fn a_name_the_lister_holds_is_walked_past_and_its_stale_file_goes_under_th
     // bound at the held name.
     let racing = ganja_serve::serve(
         engine(),
-        with_listen(Listen::Session {
-            id: id.clone(),
-            directory: directory.path().to_path_buf(),
-        }),
+        with_listen(Listen::Session { id: id.clone(), directory: directory.path().to_path_buf() }),
     )
     .await
     .expect("a held name is walked past, not fought over");
@@ -419,24 +356,16 @@ async fn a_name_the_lister_holds_is_walked_past_and_its_stale_file_goes_under_th
     // The lister unlinks the stale file under the lock it still holds.
     lock.unlink_stale().expect("a stale socket is unlinked");
     assert!(!shortest.exists(), "the stale file is gone");
-    assert!(
-        landed.exists(),
-        "and the racing binder's live socket, at its own name, is untouched"
-    );
+    assert!(landed.exists(), "and the racing binder's live socket, at its own name, is untouched");
     assert_eq!(health(&landed).await["healthy"], true);
     racing.shutdown().await.expect("a clean stop");
 
     // The window closes: with the lock dropped, the name is free and empty,
     // and the next binder takes it.
     drop(lock);
-    let next = ganja_serve::serve(
-        engine(),
-        with_listen(Listen::Unix {
-            path: shortest.clone(),
-        }),
-    )
-    .await
-    .expect("a released name binds");
+    let next = ganja_serve::serve(engine(), with_listen(Listen::Unix { path: shortest.clone() }))
+        .await
+        .expect("a released name binds");
     assert_eq!(bound(&next), shortest);
     assert_eq!(health(&shortest).await["healthy"], true);
     next.shutdown().await.expect("a clean stop");
@@ -451,19 +380,14 @@ async fn a_live_name_is_never_claimed_by_the_lister() {
     let id = session("0013");
     let handle = ganja_serve::serve(
         engine(),
-        with_listen(Listen::Session {
-            id,
-            directory: directory.path().to_path_buf(),
-        }),
+        with_listen(Listen::Session { id, directory: directory.path().to_path_buf() }),
     )
     .await
     .expect("a session socket comes up");
     let path = bound(&handle);
 
     assert!(
-        NameLock::claim(&path)
-            .expect("the lock file opens")
-            .is_none(),
+        NameLock::claim(&path).expect("the lock file opens").is_none(),
         "a live server's name is held, and the lister gets no lock to unlink under"
     );
     assert!(path.exists(), "the live socket is untouched");
@@ -550,10 +474,7 @@ async fn binders_racing_one_bucket_all_come_up_at_different_names() {
                     go.wait().await;
                     ganja_serve::serve(
                         engine(),
-                        with_listen(Listen::Session {
-                            id,
-                            directory: dir.to_path_buf(),
-                        }),
+                        with_listen(Listen::Session { id, directory: dir.to_path_buf() }),
                     )
                     .await
                 })
@@ -613,11 +534,7 @@ async fn a_live_socket_is_never_stolen_and_a_colliding_session_extends_its_name(
         matches!(refused, Err(ServeError::SocketInUse { ref path }) if *path == held),
         "a live socket is somebody's: {refused:?}"
     );
-    assert_eq!(
-        health(&held).await["healthy"],
-        true,
-        "and the somebody is still answering"
-    );
+    assert_eq!(health(&held).await["healthy"], true, "and the somebody is still answering");
 
     // The session ask walks past it: the same eight digits, one more digit.
     let extended = ganja_serve::serve(
@@ -658,17 +575,12 @@ async fn a_live_socket_is_never_stolen_and_a_colliding_session_extends_its_name(
 async fn something_that_is_not_a_socket_at_the_path_is_left_alone() {
     let directory = private_dir();
     let id = session("0006");
-    let shortest = socket::candidates(directory.path(), &id)
-        .next()
-        .expect("a session has a name");
+    let shortest = socket::candidates(directory.path(), &id).next().expect("a session has a name");
     fs::write(&shortest, b"somebody's file").expect("the decoy writes");
 
     let refused = ganja_serve::serve(
         engine(),
-        with_listen(Listen::Session {
-            id,
-            directory: directory.path().to_path_buf(),
-        }),
+        with_listen(Listen::Session { id, directory: directory.path().to_path_buf() }),
     )
     .await;
 
@@ -681,8 +593,5 @@ async fn something_that_is_not_a_socket_at_the_path_is_left_alone() {
         ),
         "only what this build would have made is ever removed: {refused:?}"
     );
-    assert_eq!(
-        fs::read(&shortest).expect("the file is still there"),
-        b"somebody's file"
-    );
+    assert_eq!(fs::read(&shortest).expect("the file is still there"), b"somebody's file");
 }

@@ -1,14 +1,13 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use serde_json::json;
 
 use super::{
     Server, Servers, Status, catalog, decoded_len, force_object, render, sanitize, tool_name,
 };
-use crate::{
-    config::{MCP_CALL_TIMEOUT, MCP_LIST_TIMEOUT, McpServer},
-    tool::ToolError,
-};
+use crate::config::{MCP_CALL_TIMEOUT, MCP_LIST_TIMEOUT, McpServer};
+use crate::tool::ToolError;
 
 /// A tool definition as a server would have listed it.
 fn listed(name: &str) -> rmcp::model::Tool {
@@ -24,16 +23,8 @@ fn a_tool_is_named_for_its_server_and_itself() {
     let cases = [
         ("github", "create_issue", "mcp__github__create_issue"),
         // Hyphens survive the sanitizer; dots and spaces do not.
-        (
-            "my.special-server",
-            "tool-a",
-            "mcp__my_special-server__tool-a",
-        ),
-        (
-            "my.special-server",
-            "tool.b",
-            "mcp__my_special-server__tool_b",
-        ),
+        ("my.special-server", "tool-a", "mcp__my_special-server__tool-a"),
+        ("my.special-server", "tool.b", "mcp__my_special-server__tool_b"),
         ("a b", "c/d", "mcp__a_b__c_d"),
         // Not ASCII, so not kept: one replacement per character.
         ("héllo", "wörld", "mcp__h_llo__w_rld"),
@@ -85,15 +76,10 @@ fn two_tools_that_sanitize_to_one_name_leave_only_the_first() {
     let one = "a.b".to_owned();
     let defs = [listed("tool.x"), listed("tool_x"), listed("other")];
 
-    let names: Vec<String> = catalog(&[(&one, defs.as_slice())])
-        .into_iter()
-        .map(|(id, _, _)| id)
-        .collect();
+    let names: Vec<String> =
+        catalog(&[(&one, defs.as_slice())]).into_iter().map(|(id, _, _)| id).collect();
 
-    assert_eq!(
-        names,
-        vec!["mcp__a_b__tool_x".to_owned(), "mcp__a_b__other".to_owned(),]
-    );
+    assert_eq!(names, vec!["mcp__a_b__tool_x".to_owned(), "mcp__a_b__other".to_owned(),]);
 }
 
 /// A collision across two servers is decided the same way, and the order
@@ -121,13 +107,7 @@ fn servers_contribute_in_sorted_order_and_the_earlier_one_keeps_the_name() {
     // the two `run` tools really do collide and only the first survives.
     let clash = "alpha_one".to_owned();
     let names = catalog_names(&[(&first, shared.as_slice()), (&clash, alias.as_slice())]);
-    assert_eq!(
-        names,
-        vec![
-            "mcp__alpha_one__run".to_owned(),
-            "mcp__alpha_one__stop".to_owned(),
-        ]
-    );
+    assert_eq!(names, vec!["mcp__alpha_one__run".to_owned(), "mcp__alpha_one__stop".to_owned(),]);
 }
 
 /// The names [`catalog`] would register, for a test that only cares about
@@ -166,12 +146,8 @@ fn an_error_result_carries_the_servers_own_words() {
     ]);
     result.is_error = Some(true);
 
-    let error = render(
-        "mcp__github__create_issue",
-        result,
-        crate::tool::truncate::MAX_CHARS,
-    )
-    .expect_err("isError is an error");
+    let error = render("mcp__github__create_issue", result, crate::tool::truncate::MAX_CHARS)
+        .expect_err("isError is an error");
     assert!(
         matches!(&error, ToolError::Failed(text) if text == "the repository is archived"),
         "{error}"
@@ -185,10 +161,7 @@ fn an_error_result_with_nothing_to_say_still_says_something() {
 
     let error = render("mcp__x__y", result, crate::tool::truncate::MAX_CHARS)
         .expect_err("isError is an error");
-    assert!(
-        matches!(&error, ToolError::Failed(text) if text == super::UNSPOKEN_ERROR),
-        "{error}"
-    );
+    assert!(matches!(&error, ToolError::Failed(text) if text == super::UNSPOKEN_ERROR), "{error}");
 }
 
 #[test]
@@ -211,10 +184,7 @@ fn binary_content_is_described_rather_than_carried() {
 
     let output = render("mcp__x__y", result, crate::tool::truncate::MAX_CHARS)
         .expect("an image answer is an answer");
-    assert_eq!(
-        output.output,
-        "here it is\n[binary MCP content omitted: image/png, 9 bytes]"
-    );
+    assert_eq!(output.output, "here it is\n[binary MCP content omitted: image/png, 9 bytes]");
 }
 
 #[test]

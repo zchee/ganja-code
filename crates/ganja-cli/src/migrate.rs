@@ -56,10 +56,8 @@
 //! and the report. The other reader of that dialect is `import.rs`, which
 //! reads upstream's files rather than ganja's own.
 
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use ganja_core::config::{Config, LEGACY_FILES, legacy};
@@ -67,11 +65,9 @@ use ganja_permission::Project;
 use jsonc_parser::ast::{Object, Value as Ast};
 use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, Value};
 
-use crate::{
-    position::{line_of, located},
-    report::{Report, print_table},
-    staging::stage,
-};
+use crate::position::{line_of, located};
+use crate::report::{Report, print_table};
+use crate::staging::stage;
 
 /// What this writes, beside whatever it read.
 const DESTINATION: &str = "ganja.toml";
@@ -106,10 +102,7 @@ mod reason {
 pub fn migrate(file: Option<PathBuf>, global: bool, dry_run: bool) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read the working directory")?;
     let source = source(file, global, &cwd)?;
-    let destination = source
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(DESTINATION);
+    let destination = source.parent().unwrap_or_else(|| Path::new(".")).join(DESTINATION);
 
     // Both printed before a byte is read, and the destination refused before
     // any work is done, so a run that cannot land says so first rather than
@@ -121,16 +114,9 @@ pub fn migrate(file: Option<PathBuf>, global: bool, dry_run: bool) -> Result<()>
     // "would write" under `--dry-run`: a preview that announced a write and
     // then said nothing was written would be contradicting itself in the one
     // mode somebody runs to be told the truth about what will happen.
-    println!(
-        "{} {}",
-        if dry_run { "would write" } else { "writing" },
-        destination.display()
-    );
+    println!("{} {}", if dry_run { "would write" } else { "writing" }, destination.display());
     if destination.exists() {
-        bail!(
-            "{} already exists; move it aside and run this again",
-            destination.display()
-        );
+        bail!("{} already exists; move it aside and run this again", destination.display());
     }
 
     let decoded = decode(&source)?;
@@ -203,12 +189,7 @@ fn source(file: Option<PathBuf>, global: bool, cwd: &Path) -> Result<PathBuf> {
             .context("the home directory holding the global config could not be located")?;
 
         return legacy_in(&home).ok_or_else(|| {
-            anyhow!(
-                "no {} or {} in {}",
-                LEGACY_FILES[0],
-                LEGACY_FILES[1],
-                home.display()
-            )
+            anyhow!("no {} or {} in {}", LEGACY_FILES[0], LEGACY_FILES[1], home.display())
         });
     }
 
@@ -225,10 +206,7 @@ fn source(file: Option<PathBuf>, global: bool, cwd: &Path) -> Result<PathBuf> {
 
 /// The legacy file `directory` holds, preferring the one the loader prefers.
 fn legacy_in(directory: &Path) -> Option<PathBuf> {
-    LEGACY_FILES
-        .iter()
-        .map(|name| directory.join(name))
-        .find(|path| path.is_file())
+    LEGACY_FILES.iter().map(|name| directory.join(name)).find(|path| path.is_file())
 }
 
 /// The closest legacy file at or above `cwd`, the walk stopping where the
@@ -270,10 +248,8 @@ fn nearest(cwd: &Path) -> Option<PathBuf> {
 /// about the format that left is in this module and because the sentence
 /// names this module's own command.
 pub(crate) fn unmigrated(directory: &Path) -> Result<()> {
-    if let Some(legacy) = LEGACY_FILES
-        .iter()
-        .map(|name| directory.join(name))
-        .find(|path| path.is_file())
+    if let Some(legacy) =
+        LEGACY_FILES.iter().map(|name| directory.join(name)).find(|path| path.is_file())
     {
         bail!(
             "{} is a config in the format ganja has moved off; run \
@@ -327,9 +303,7 @@ fn remaining(source: &Path, cwd: &Path) {
     if let Ok(named) = std::env::var(ganja_core::config::CONFIG_ENV) {
         let path = PathBuf::from(named.trim());
         if path.is_file()
-            && LEGACY_FILES
-                .iter()
-                .any(|name| path.file_name().is_some_and(|found| found == *name))
+            && LEGACY_FILES.iter().any(|name| path.file_name().is_some_and(|found| found == *name))
         {
             add(path);
         }
@@ -341,11 +315,7 @@ fn remaining(source: &Path, cwd: &Path) {
 
     println!(
         "still legacy, and still refused by this build: {}",
-        found
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
+        found.iter().map(|path| path.display().to_string()).collect::<Vec<_>>().join(", ")
     );
     println!("migrate each with `ganja config migrate --file <path>`");
 }
@@ -395,10 +365,7 @@ fn translate(path: &Path, text: &str) -> Result<(DocumentMut, Report)> {
                 document.as_table_mut().insert(key, entry);
             }
         }
-        Some(_) => bail!(
-            "{}: a config file has to hold a JSON object",
-            path.display()
-        ),
+        Some(_) => bail!("{}: a config file has to hold a JSON object", path.display()),
     }
 
     Ok((document, report))
@@ -438,10 +405,7 @@ fn item(at: &str, key: &str, value: &Ast<'_>, report: &mut Report) -> Result<Opt
         }
         Ast::Array(array)
             if !array.elements.is_empty()
-                && array
-                    .elements
-                    .iter()
-                    .all(|element| matches!(element, Ast::Object(_))) =>
+                && array.elements.iter().all(|element| matches!(element, Ast::Object(_))) =>
         {
             let mut tables = ArrayOfTables::new();
             for (index, element) in array.elements.iter().enumerate() {
@@ -620,16 +584,8 @@ fn warn(lines: &[usize]) {
 
     eprintln!(
         "warning: comments do not survive the translation; {} held one: {}",
-        if lines.len() == 1 {
-            "this line"
-        } else {
-            "these lines"
-        },
-        lines
-            .iter()
-            .map(usize::to_string)
-            .collect::<Vec<_>>()
-            .join(", ")
+        if lines.len() == 1 { "this line" } else { "these lines" },
+        lines.iter().map(usize::to_string).collect::<Vec<_>>().join(", ")
     );
 }
 
@@ -646,12 +602,7 @@ fn dropped(report: &Report) -> String {
 
     format!(
         ". Dropped as null, which TOML cannot spell: {}",
-        report
-            .skipped
-            .iter()
-            .map(|(key, _)| key.clone())
-            .collect::<Vec<_>>()
-            .join(", ")
+        report.skipped.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>().join(", ")
     )
 }
 
@@ -687,11 +638,7 @@ pub(crate) fn write_with(path: &Path, document: &str, create_only: bool) -> Resu
     }
 
     let staged = stage(path, document.as_bytes())?;
-    let persisted = if create_only {
-        staged.persist_noclobber(path)
-    } else {
-        staged.persist(path)
-    };
+    let persisted = if create_only { staged.persist_noclobber(path) } else { staged.persist(path) };
 
     // `PersistError` hands the staged file back rather than dropping it, so
     // the temporary outlives the failed rename by exactly as long as this
@@ -700,10 +647,7 @@ pub(crate) fn write_with(path: &Path, document: &str, create_only: bool) -> Resu
     // directory forever.
     persisted.map_err(|error| {
         if create_only && error.error.kind() == std::io::ErrorKind::AlreadyExists {
-            return anyhow!(
-                "{} already exists; move it aside and run this again",
-                path.display()
-            );
+            return anyhow!("{} already exists; move it aside and run this again", path.display());
         }
 
         anyhow!("{} could not be written: {}", path.display(), error.error)

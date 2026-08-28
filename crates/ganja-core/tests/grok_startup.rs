@@ -20,10 +20,8 @@
 
 use std::{env, fs};
 
-use ganja_core::{
-    auth::{self, OauthCredential, grok},
-    provider::{GrokProvider, Provider as _, ProviderError},
-};
+use ganja_core::auth::{self, OauthCredential, grok};
+use ganja_core::provider::{GrokProvider, Provider as _, ProviderError};
 use ganja_testkit::LogCapture as Capture;
 use secrecy::SecretString;
 

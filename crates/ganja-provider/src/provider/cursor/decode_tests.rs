@@ -1,7 +1,7 @@
 use buffa::Message as _;
 
+use super::super::{connect, proto};
 use super::{
-    super::{connect, proto},
     Ask, ContextAsk, ExecRefusal, FinishReason, KvAsk, KvOp, Mapping, ProviderError, ProviderEvent,
     model_list, verdict,
 };
@@ -66,10 +66,8 @@ fn thinking_completed() -> proto::Update {
 
 /// A data frame holding one kv request, the way the server frames one.
 fn kv_framed(kv: proto::KvRequest) -> Vec<u8> {
-    let message = proto::ServerMessage {
-        kv_request: buffa::MessageField::some(kv),
-        ..Default::default()
-    };
+    let message =
+        proto::ServerMessage { kv_request: buffa::MessageField::some(kv), ..Default::default() };
 
     connect::envelope(&message.encode_to_vec())
 }
@@ -78,9 +76,7 @@ fn kv_framed(kv: proto::KvRequest) -> Vec<u8> {
 fn end_stream(payload: &str) -> Vec<u8> {
     let mut frame = vec![0b0000_0010];
     frame.extend_from_slice(
-        &u32::try_from(payload.len())
-            .expect("a test payload fits")
-            .to_be_bytes(),
+        &u32::try_from(payload.len()).expect("a test payload fits").to_be_bytes(),
     );
     frame.extend_from_slice(payload.as_bytes());
 
@@ -146,10 +142,7 @@ fn a_clean_end_stream_finishes_a_turn_the_server_never_marked_ended() {
     let mut body = framed(text("done"));
     body.extend(end_stream("{}"));
 
-    assert_eq!(
-        mapped(&body, false).last(),
-        Some(&ProviderEvent::Finish(FinishReason::Completed))
-    );
+    assert_eq!(mapped(&body, false).last(), Some(&ProviderEvent::Finish(FinishReason::Completed)));
 }
 
 /// The exact exchange the live probe recorded: one heartbeat, then the
@@ -180,17 +173,12 @@ fn the_recorded_refusal_arrives_as_the_turns_failure() {
 #[test]
 fn an_error_after_visible_text_keeps_the_text() {
     let mut body = framed(text("partial"));
-    body.extend(end_stream(
-        r#"{"error":{"code":"internal","message":"boom"}}"#,
-    ));
+    body.extend(end_stream(r#"{"error":{"code":"internal","message":"boom"}}"#));
 
     let events = mapped(&body, false);
     assert_eq!(events[0], ProviderEvent::TextDelta("partial".to_owned()));
     assert!(
-        matches!(
-            &events[1],
-            ProviderEvent::Failed(ProviderError::Status { status: 500, .. })
-        ),
+        matches!(&events[1], ProviderEvent::Failed(ProviderError::Status { status: 500, .. })),
         "{events:?}"
     );
 }
@@ -199,22 +187,13 @@ fn an_error_after_visible_text_keeps_the_text() {
 fn a_body_without_an_ending_is_a_truncation_not_a_short_answer() {
     let events = mapped(&framed(heartbeat()), true);
     assert!(
-        matches!(
-            events.as_slice(),
-            [ProviderEvent::Failed(ProviderError::Transport(_))]
-        ),
+        matches!(events.as_slice(), [ProviderEvent::Failed(ProviderError::Transport(_))]),
         "{events:?}"
     );
 
     let events = mapped(&framed(text("half")), true);
     assert_eq!(events[0], ProviderEvent::TextDelta("half".to_owned()));
-    assert!(
-        matches!(
-            &events[1],
-            ProviderEvent::Failed(ProviderError::Transport(_))
-        ),
-        "{events:?}"
-    );
+    assert!(matches!(&events[1], ProviderEvent::Failed(ProviderError::Transport(_))), "{events:?}");
 }
 
 /// The Anthropic reading of a body cut off after the stop reason: the
@@ -242,17 +221,12 @@ fn a_body_that_dies_after_turn_ended_lost_only_its_terminator() {
 fn an_end_stream_error_after_turn_ended_is_a_failure_not_a_dropped_frame() {
     let mut body = framed(text("said"));
     body.extend(framed(turn_ended()));
-    body.extend(end_stream(
-        r#"{"error":{"code":"resource_exhausted","message":"quota spent"}}"#,
-    ));
+    body.extend(end_stream(r#"{"error":{"code":"resource_exhausted","message":"quota spent"}}"#));
 
     let events = mapped(&body, false);
     assert_eq!(events[0], ProviderEvent::TextDelta("said".to_owned()));
     assert!(
-        matches!(
-            &events[1],
-            ProviderEvent::Failed(ProviderError::Status { status: 429, .. })
-        ),
+        matches!(&events[1], ProviderEvent::Failed(ProviderError::Status { status: 429, .. })),
         "{events:?}"
     );
 }
@@ -262,10 +236,7 @@ fn a_frame_that_is_not_a_server_message_fails_the_turn_readably() {
     // 0xff opens a field with wire type 7, which protobuf does not have.
     let events = mapped(&connect::envelope(&[0xff, 0xff, 0xff]), false);
     assert!(
-        matches!(
-            events.as_slice(),
-            [ProviderEvent::Failed(ProviderError::Parse(_))]
-        ),
+        matches!(events.as_slice(), [ProviderEvent::Failed(ProviderError::Parse(_))]),
         "{events:?}"
     );
 }
@@ -306,16 +277,10 @@ fn the_servers_context_ask_is_handed_up_with_its_ids() {
     );
 
     let (events, asks) = mapped_asks(&body, false);
-    assert!(
-        events.is_empty(),
-        "an ask is a question, not an event: {events:?}"
-    );
+    assert!(events.is_empty(), "an ask is a question, not an event: {events:?}");
     assert_eq!(
         asks,
-        vec![Ask::Context(ContextAsk {
-            id: Some(7),
-            exec_id: Some("exec-abc".to_owned()),
-        })]
+        vec![Ask::Context(ContextAsk { id: Some(7), exec_id: Some("exec-abc".to_owned()) })]
     );
 }
 
@@ -386,26 +351,15 @@ fn the_servers_kv_set_and_get_are_handed_up_with_their_ids() {
     }));
 
     let (events, asks) = mapped_asks(&body, false);
-    assert!(
-        events.is_empty(),
-        "a kv exchange is a question, not an event: {events:?}"
-    );
+    assert!(events.is_empty(), "a kv exchange is a question, not an event: {events:?}");
     assert_eq!(
         asks,
         vec![
             Ask::Kv(KvAsk {
                 id: Some(11),
-                op: KvOp::Set {
-                    blob_id: b"blob-a".to_vec(),
-                    data: b"opaque-state".to_vec(),
-                },
+                op: KvOp::Set { blob_id: b"blob-a".to_vec(), data: b"opaque-state".to_vec() },
             }),
-            Ask::Kv(KvAsk {
-                id: Some(12),
-                op: KvOp::Get {
-                    blob_id: b"blob-a".to_vec(),
-                },
-            }),
+            Ask::Kv(KvAsk { id: Some(12), op: KvOp::Get { blob_id: b"blob-a".to_vec() } }),
         ]
     );
 }
@@ -416,10 +370,7 @@ fn the_servers_kv_set_and_get_are_handed_up_with_their_ids() {
 /// mistaken for one.
 #[test]
 fn a_kv_kind_this_build_cannot_answer_fails_the_turn_by_name() {
-    let mut asked = proto::KvRequest {
-        id: Some(3),
-        ..Default::default()
-    };
+    let mut asked = proto::KvRequest { id: Some(3), ..Default::default() };
     asked.__buffa_unknown_fields.push(buffa::UnknownField {
         number: 4,
         data: buffa::UnknownFieldData::LengthDelimited(Vec::new()),
@@ -470,16 +421,10 @@ fn a_skipped_arm_is_named_the_way_the_plugins_descriptor_names_it() {
 fn the_live_observed_shell_stream_exec_is_handed_up_as_a_refusal() {
     let (events, asks) = mapped_asks(&exec_framed(exec_of_kind(5, 14)), false);
 
-    assert!(
-        events.is_empty(),
-        "a refusal is an answer to send, not an event: {events:?}"
-    );
+    assert!(events.is_empty(), "a refusal is an answer to send, not an event: {events:?}");
     assert_eq!(
         asks,
-        vec![Ask::Refuse(ExecRefusal {
-            id: Some(5),
-            kind: "shell_stream_args".to_owned(),
-        })]
+        vec![Ask::Refuse(ExecRefusal { id: Some(5), kind: "shell_stream_args".to_owned() })]
     );
 }
 
@@ -495,13 +440,7 @@ fn a_named_tool_exec_is_refused_and_the_turn_carries_on_past_it() {
     body.extend(end_stream("{}"));
 
     let (events, asks) = mapped_asks(&body, false);
-    assert_eq!(
-        asks,
-        vec![Ask::Refuse(ExecRefusal {
-            id: Some(3),
-            kind: "shell_args".to_owned(),
-        })]
-    );
+    assert_eq!(asks, vec![Ask::Refuse(ExecRefusal { id: Some(3), kind: "shell_args".to_owned() })]);
     assert_eq!(
         events,
         vec![
@@ -531,10 +470,7 @@ fn an_exec_kind_beyond_the_table_is_refused_by_its_field_number() {
     assert!(events.is_empty(), "{events:?}");
     assert_eq!(
         asks,
-        vec![Ask::Refuse(ExecRefusal {
-            id: Some(4),
-            kind: "field 42".to_owned(),
-        })],
+        vec![Ask::Refuse(ExecRefusal { id: Some(4), kind: "field 42".to_owned() })],
         "the span context is passed over rather than blamed"
     );
 
@@ -542,10 +478,7 @@ fn an_exec_kind_beyond_the_table_is_refused_by_its_field_number() {
     assert!(events.is_empty(), "{events:?}");
     assert_eq!(
         asks,
-        vec![Ask::Refuse(ExecRefusal {
-            id: None,
-            kind: "no recognizable kind".to_owned(),
-        })],
+        vec![Ask::Refuse(ExecRefusal { id: None, kind: "no recognizable kind".to_owned() })],
         "an id the server never sent is not invented"
     );
 }
@@ -554,9 +487,7 @@ fn an_exec_kind_beyond_the_table_is_refused_by_its_field_number() {
 fn the_model_listing_decodes_and_a_wrong_body_is_a_parse_error() {
     let listing = proto::GetUsableModelsResponse {
         models: vec![
-            proto::ModelEntry::default()
-                .with_model_id("default")
-                .with_display_model_id("auto"),
+            proto::ModelEntry::default().with_model_id("default").with_display_model_id("auto"),
             proto::ModelEntry::default().with_model_id("gpt-5.3-codex"),
         ],
         ..Default::default()
@@ -567,10 +498,7 @@ fn the_model_listing_decodes_and_a_wrong_body_is_a_parse_error() {
     assert_eq!(models.len(), 2);
     assert_eq!(models[0].model_id.as_deref(), Some("default"));
 
-    assert!(matches!(
-        model_list(&[0xff, 0xff, 0xff]),
-        Err(ProviderError::Parse(_))
-    ));
+    assert!(matches!(model_list(&[0xff, 0xff, 0xff]), Err(ProviderError::Parse(_))));
 }
 
 /// The `default` entry's first bytes, encoded by this build, are the
@@ -578,9 +506,7 @@ fn the_model_listing_decodes_and_a_wrong_body_is_a_parse_error() {
 /// types in `cursor.proto` really are the server's.
 #[test]
 fn the_encoding_matches_the_bytes_recorded_off_the_live_wire() {
-    let entry = proto::ModelEntry::default()
-        .with_model_id("default")
-        .with_display_model_id("auto");
+    let entry = proto::ModelEntry::default().with_model_id("default").with_display_model_id("auto");
 
     assert_eq!(
         &entry.encode_to_vec()[..15],

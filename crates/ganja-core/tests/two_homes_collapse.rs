@@ -21,7 +21,8 @@
 //! config home inside the fixture project — is one no other test wants. The
 //! arrangement is `tests/agent_files.rs`'s, for its reason.
 
-use std::{fs, path::Path};
+use std::fs;
+use std::path::Path;
 
 use ganja_core::{AgentRegistry, Config, command, config};
 use tempfile::TempDir;
@@ -77,22 +78,14 @@ fn a_project_whose_own_ganja_directory_is_the_config_home_is_read_once() {
     let config = Config::default();
     let agents = AgentRegistry::build(&config, &project).expect("the fixture agent is selectable");
     assert_eq!(
-        agents
-            .agents()
-            .iter()
-            .filter(|agent| agent.name == "solo")
-            .count(),
+        agents.agents().iter().filter(|agent| agent.name == "solo").count(),
         1,
         "the definition file is one agent, not one agent found twice"
     );
 
     let commands = command::Registry::build(&config, &project);
     assert_eq!(
-        commands
-            .commands()
-            .iter()
-            .filter(|definition| definition.name == "solo")
-            .count(),
+        commands.commands().iter().filter(|definition| definition.name == "solo").count(),
         1,
         "and the command file is one command"
     );

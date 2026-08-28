@@ -22,22 +22,14 @@ fn tagged(name: &str, description: Option<&str>, source: &str) -> (Skill, String
 }
 
 fn fragment(text: &str) -> Fragment {
-    Fragment {
-        row: 0,
-        start: 0,
-        text: text.to_owned(),
-    }
+    Fragment { row: 0, start: 0, text: text.to_owned() }
 }
 
 #[test]
 fn an_empty_fragment_offers_every_skill_in_discovery_order() {
     let menu = SkillMenu::new(
         fragment(""),
-        &[
-            skill("alpha", Some("first")),
-            skill("beta", None),
-            skill("gamma", Some("third")),
-        ],
+        &[skill("alpha", Some("first")), skill("beta", None), skill("gamma", Some("third"))],
     );
 
     assert!(!menu.is_empty());
@@ -50,19 +42,13 @@ fn an_empty_fragment_offers_every_skill_in_discovery_order() {
 fn a_row_opens_its_description_with_the_source_tag() {
     let menu = SkillMenu::new(
         fragment(""),
-        &[
-            tagged("ask-matt", Some("A router."), "mattpocock-skills"),
-            skill("mine", None),
-        ],
+        &[tagged("ask-matt", Some("A router."), "mattpocock-skills"), skill("mine", None)],
     );
 
     assert_eq!(
         menu.rows,
         vec![
-            (
-                "ask-matt".to_owned(),
-                "(mattpocock-skills) A router.".to_owned()
-            ),
+            ("ask-matt".to_owned(), "(mattpocock-skills) A router.".to_owned()),
             ("mine".to_owned(), "(user)".to_owned()),
         ]
     );
@@ -94,11 +80,7 @@ fn a_fragment_narrows_and_ranks_with_the_name_outweighing_the_description() {
         ],
     );
 
-    assert_eq!(
-        menu.selected(),
-        Some("porting"),
-        "the name match outranks the description match"
-    );
+    assert_eq!(menu.selected(), Some("porting"), "the name match outranks the description match");
 }
 
 #[test]

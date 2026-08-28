@@ -36,24 +36,21 @@
 //!   that failed stores nothing" a fact about which functions exist rather than
 //!   a claim about which branches were taken.
 
-use std::{fmt, time::Duration};
+use std::fmt;
+use std::time::Duration;
 
-use base64::{
-    Engine as _, alphabet,
-    engine::{GeneralPurpose, general_purpose::NO_PAD_INDIFFERENT},
-};
+use base64::engine::GeneralPurpose;
+use base64::engine::general_purpose::NO_PAD_INDIFFERENT;
+use base64::{Engine as _, alphabet};
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use url::{Url, form_urlencoded};
 
-use super::{
-    AuthError, OauthCredential, RedactedTail, RefreshOauth,
-    loopback::{self, LoopbackError},
-    now_ms,
-    pkce::{self, EntropyError, Pkce},
-};
+use super::loopback::{self, LoopbackError};
+use super::pkce::{self, EntropyError, Pkce};
+use super::{AuthError, OauthCredential, RedactedTail, RefreshOauth, now_ms};
 
 /// The provider this logs in to, as ganja and `auth.json` both name it.
 ///
@@ -298,15 +295,9 @@ impl LoginError {
         let reason = self.reason();
 
         if dead {
-            AuthError::ReauthRequired {
-                provider_id,
-                reason,
-            }
+            AuthError::ReauthRequired { provider_id, reason }
         } else {
-            AuthError::RefreshUnavailable {
-                provider_id,
-                reason,
-            }
+            AuthError::RefreshUnavailable { provider_id, reason }
         }
     }
 
@@ -445,14 +436,7 @@ impl Login {
         let redirect = format!("http://localhost:{}{CALLBACK_PATH}", listener.port());
         let url = self.authorize_url(&redirect, pkce.challenge(), state.expose_secret());
 
-        Ok(Browser {
-            login: self.clone(),
-            url,
-            redirect,
-            listener,
-            pkce,
-            state,
-        })
+        Ok(Browser { login: self.clone(), url, redirect, listener, pkce, state })
     }
 
     /// Asks for a device code, so the browser can be on another machine.
@@ -559,10 +543,7 @@ impl Login {
         // one that was sent: keeping it is what lets the *next* renewal happen
         // at all. ChatGPT's does rotate, which is why this credential is one of
         // the reasons `Refresher`'s single flight exists.
-        let refresh = tokens
-            .refresh_token
-            .clone()
-            .unwrap_or_else(|| previous.refresh.clone());
+        let refresh = tokens.refresh_token.clone().unwrap_or_else(|| previous.refresh.clone());
 
         // `Refresher::usable` carries the unmodelled fields forward too, so
         // this is belt and braces — but a caller renewing through this trait
@@ -598,10 +579,8 @@ impl Login {
         request: reqwest::RequestBuilder,
         step: &'static str,
     ) -> Result<Answer, LoginError> {
-        let unreachable = |source: reqwest::Error| LoginError::Unreachable {
-            step,
-            source: source.without_url(),
-        };
+        let unreachable =
+            |source: reqwest::Error| LoginError::Unreachable { step, source: source.without_url() };
 
         let response = request
             .header(reqwest::header::USER_AGENT, ISSUER_USER_AGENT)
@@ -628,9 +607,7 @@ impl RefreshOauth for Login {
         provider_id: &str,
         credential: &OauthCredential,
     ) -> Result<OauthCredential, AuthError> {
-        self.renew(credential)
-            .await
-            .map_err(|error| error.into_auth(provider_id))
+        self.renew(credential).await.map_err(|error| error.into_auth(provider_id))
     }
 }
 
@@ -702,14 +679,8 @@ impl Browser {
         within: Duration,
         cancel: &CancellationToken,
     ) -> Result<OauthCredential, LoginError> {
-        let code = self
-            .listener
-            .wait(CALLBACK_PATH, &self.state, within, cancel)
-            .await?;
-        let tokens = self
-            .login
-            .exchange(&code, &self.redirect, self.pkce.verifier())
-            .await?;
+        let code = self.listener.wait(CALLBACK_PATH, &self.state, within, cancel).await?;
+        let tokens = self.login.exchange(&code, &self.redirect, self.pkce.verifier()).await?;
 
         first_credential(tokens, step::EXCHANGING)
     }
@@ -800,10 +771,7 @@ impl Device {
                 .send(
                     self.login
                         .client
-                        .post(format!(
-                            "{}/api/accounts/deviceauth/token",
-                            self.login.issuer
-                        ))
+                        .post(format!("{}/api/accounts/deviceauth/token", self.login.issuer))
                         .json(&json!({
                             "device_auth_id": self.device_auth_id,
                             "user_code": self.user_code,
@@ -938,10 +906,7 @@ struct DeviceGrant {
 /// way back. Upstream types the field as required for the same reason
 /// (`openai.ts:29`).
 fn first_credential(tokens: Tokens, step: &'static str) -> Result<OauthCredential, LoginError> {
-    let refresh = tokens
-        .refresh_token
-        .clone()
-        .ok_or(LoginError::Malformed { step })?;
+    let refresh = tokens.refresh_token.clone().ok_or(LoginError::Malformed { step })?;
 
     Ok(credential(tokens, refresh))
 }
@@ -961,11 +926,7 @@ fn credential(tokens: Tokens, refresh: SecretString) -> OauthCredential {
 /// Through [`now_ms`] and not a local clock read, because three login flows
 /// computing this by hand is one of them computing it wrong.
 fn expires(expires_in: Option<u64>) -> u64 {
-    now_ms().saturating_add(
-        expires_in
-            .unwrap_or(DEFAULT_EXPIRES_IN)
-            .saturating_mul(1_000),
-    )
+    now_ms().saturating_add(expires_in.unwrap_or(DEFAULT_EXPIRES_IN).saturating_mul(1_000))
 }
 
 /// The account a request is billed to (`openai.ts:275-292`, `codex.ts:38-76`).
@@ -1040,10 +1001,7 @@ fn claimed_account(token: &str) -> Option<String> {
 fn poll_interval(named: Option<&Value>) -> Duration {
     let seconds = named
         .and_then(|value| {
-            value
-                .as_str()
-                .and_then(|text| text.parse::<u64>().ok())
-                .or_else(|| value.as_u64())
+            value.as_str().and_then(|text| text.parse::<u64>().ok()).or_else(|| value.as_u64())
         })
         .filter(|seconds| *seconds > 0)
         .unwrap_or(DEFAULT_POLL_SECONDS);

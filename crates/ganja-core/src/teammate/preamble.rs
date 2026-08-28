@@ -50,11 +50,7 @@ impl<'a> Names<'a> {
     /// The three names a spawn fixed.
     #[must_use]
     pub fn of(spec: &'a SpawnSpec) -> Self {
-        Self {
-            name: spec.name.as_str(),
-            team: spec.team.as_str(),
-            lead: spec.lead.as_str(),
-        }
+        Self { name: spec.name.as_str(), team: spec.team.as_str(), lead: spec.lead.as_str() }
     }
 }
 
@@ -88,10 +84,7 @@ pub fn opening(who: Names<'_>) -> String {
 /// seeded message can pin that it ends with the prompt.
 #[must_use]
 pub fn frame(who: Names<'_>, channel: &str, prompt: &str) -> String {
-    format!(
-        "{opening}\n\n{channel}\n\nYour task:\n\n{prompt}",
-        opening = opening(who),
-    )
+    format!("{opening}\n\n{channel}\n\nYour task:\n\n{prompt}", opening = opening(who),)
 }
 
 /// The preamble for a teammate that holds ganja's own `send_message` tool —

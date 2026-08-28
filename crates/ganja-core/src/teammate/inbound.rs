@@ -319,19 +319,18 @@
 //! - **Coordinator / host-injected ingress classes** — no ganja counterpart
 //!   exists to classify.
 
-use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    hash::{Hash, Hasher},
-    sync::Mutex,
-    time::Duration,
-};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::hash::{Hash, Hasher};
+use std::sync::Mutex;
+use std::time::Duration;
 
+use ganja_protocol::team::{cap_chars, cap_for_display};
 use ganja_protocol::{
     Event, HeldId, HeldOutcome, HoldCause, PermissionMode, PolicySource, RedactedText, SessionId,
-    team::{cap_chars, cap_for_display},
 };
 use ganja_team::{MailboxMessage, mailbox};
-use tokio::{sync::mpsc, time::Instant};
+use tokio::sync::mpsc;
+use tokio::time::Instant;
 
 use crate::config::{DialogExpiry, InboundPolicy};
 
@@ -520,11 +519,7 @@ const fn severity(verdict: &Verdict) -> u8 {
 /// a genuine no-op, not merely a harmless one.
 #[must_use]
 fn strictest_of(collapsed: Verdict, honored: Verdict) -> Verdict {
-    if severity(&honored) >= severity(&collapsed) {
-        honored
-    } else {
-        collapsed
-    }
+    if severity(&honored) >= severity(&collapsed) { honored } else { collapsed }
 }
 
 /// The resolved admission policy: what config said, if it said anything, and
@@ -688,27 +683,12 @@ impl HoldTransition {
     #[must_use]
     pub fn into_event(self, session_id: SessionId) -> Event {
         match self {
-            HoldTransition::Held {
-                id,
-                from,
-                cause,
-                summary,
-                preview,
-                expires_in_ms,
-            } => Event::PeerHeld {
-                session_id,
-                id,
-                from,
-                cause,
-                summary,
-                preview,
-                expires_in_ms,
-            },
-            HoldTransition::Settled { id, outcome } => Event::PeerHoldSettled {
-                session_id,
-                id,
-                outcome,
-            },
+            HoldTransition::Held { id, from, cause, summary, preview, expires_in_ms } => {
+                Event::PeerHeld { session_id, id, from, cause, summary, preview, expires_in_ms }
+            }
+            HoldTransition::Settled { id, outcome } => {
+                Event::PeerHoldSettled { session_id, id, outcome }
+            }
         }
     }
 }
@@ -798,11 +778,7 @@ impl WireFacts<'_> {
     /// give, a test included.
     #[must_use]
     pub const fn none() -> Self {
-        Self {
-            sender: None,
-            hop_chain: &[],
-            own_marker: None,
-        }
+        Self { sender: None, hop_chain: &[], own_marker: None }
     }
 }
 
@@ -822,12 +798,7 @@ struct SenderState {
 impl SenderState {
     /// A sender never seen before: a full bucket and an empty window.
     fn fresh(now: Instant) -> Self {
-        Self {
-            tokens: BUCKET_CAPACITY,
-            refilled_at: now,
-            recent: VecDeque::new(),
-            touched: 0,
-        }
+        Self { tokens: BUCKET_CAPACITY, refilled_at: now, recent: VecDeque::new(), touched: 0 }
     }
 }
 
@@ -871,11 +842,7 @@ impl PeerGuard {
     /// An empty guard: nobody tracked, nothing admitted.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            senders: HashMap::new(),
-            clock: 0,
-            holds: None,
-        }
+        Self { senders: HashMap::new(), clock: 0, holds: None }
     }
 
     /// Admits or drops one arrival, returning exactly the four reasons.
@@ -909,9 +876,7 @@ impl PeerGuard {
         let state = self.touch(format!("from:{sender}"), now);
 
         let hash = body_hash(origin.body);
-        state
-            .recent
-            .retain(|(_, at)| now.duration_since(*at) < DEDUP_WINDOW);
+        state.recent.retain(|(_, at)| now.duration_since(*at) < DEDUP_WINDOW);
         if state.recent.iter().any(|(seen, _)| *seen == hash) {
             return Err(Dropped::Duplicate);
         }
@@ -965,10 +930,8 @@ impl PeerGuard {
         self.admit(origin)?;
 
         let now = Instant::now();
-        let bucket = self.holds.get_or_insert(HoldBucket {
-            tokens: BUCKET_CAPACITY,
-            refilled_at: now,
-        });
+        let bucket =
+            self.holds.get_or_insert(HoldBucket { tokens: BUCKET_CAPACITY, refilled_at: now });
         let elapsed = now.duration_since(bucket.refilled_at).as_secs_f64();
         bucket.tokens = (bucket.tokens + elapsed * REFILL_PER_SECOND).min(BUCKET_CAPACITY);
         bucket.refilled_at = now;
@@ -999,10 +962,7 @@ impl PeerGuard {
                 self.senders.remove(&evict);
             }
         }
-        let state = self
-            .senders
-            .entry(key)
-            .or_insert_with(|| SenderState::fresh(now));
+        let state = self.senders.entry(key).or_insert_with(|| SenderState::fresh(now));
         state.touched = clock;
         state
     }
@@ -1354,11 +1314,7 @@ impl Inbound {
                     .expect("hold() always pushes exactly one record before returning");
                 record.sender = facts.sender;
                 let id = record.id.clone();
-                SocketAdmission::Held {
-                    id,
-                    cause,
-                    evicted_prune,
-                }
+                SocketAdmission::Held { id, cause, evicted_prune }
             }
             Verdict::Accept => {
                 if let Err(dropped) = state.guard.admit(&origin) {
@@ -1392,10 +1348,7 @@ impl Inbound {
         // stricter-of-two would be a second call returning the first's
         // answer. `admit_socket`'s composition is the spelling for the door
         // where the two can differ.
-        match state
-            .resolved
-            .decide(receiver, None, false, HONOR_SENDER_MODE)
-        {
+        match state.resolved.decide(receiver, None, false, HONOR_SENDER_MODE) {
             Verdict::Refuse(cause) => MailboxAdmission::Drop(DropReason::Refused(cause)),
             Verdict::Hold(cause) => {
                 state.held_index.insert(identity.clone());
@@ -1407,10 +1360,7 @@ impl Inbound {
                     message.summary.clone(),
                     cause,
                 );
-                MailboxAdmission::Held {
-                    cause,
-                    evicted_prune,
-                }
+                MailboxAdmission::Held { cause, evicted_prune }
             }
             Verdict::Accept => {
                 let origin = Origin {
@@ -1463,9 +1413,7 @@ impl Inbound {
     /// [`Inbound::pruned`] owns that settlement.
     pub fn reconcile(&self, present: &HashSet<mailbox::Identity>) {
         let mut state = self.lock();
-        state
-            .admitted
-            .retain(|identity, _| present.contains(identity));
+        state.admitted.retain(|identity, _| present.contains(identity));
 
         let vanished: Vec<HeldId> = state
             .buffer
@@ -1518,12 +1466,7 @@ impl Inbound {
             }
             Door::Mailbox { identity } => {
                 state.held_index.remove(&identity);
-                state.admitted.insert(
-                    identity,
-                    Admitted::Released {
-                        summary: held.summary,
-                    },
-                );
+                state.admitted.insert(identity, Admitted::Released { summary: held.summary });
                 self.settle(&mut state, held.id, HeldOutcome::Delivered);
                 Some(Settlement::Done(HeldOutcome::Delivered))
             }
@@ -1606,12 +1549,8 @@ impl Inbound {
             // `mode_mismatch` hold as an unasserted accept — a mode change
             // loosening what admission held, which the composition exists
             // to forbid.
-            let collapsed = state
-                .resolved
-                .decide(receiver, held.sender, held.self_sent, false);
-            let honored = state
-                .resolved
-                .decide(receiver, held.sender, held.self_sent, true);
+            let collapsed = state.resolved.decide(receiver, held.sender, held.self_sent, false);
+            let honored = state.resolved.decide(receiver, held.sender, held.self_sent, true);
             match strictest_of(collapsed, honored) {
                 Verdict::Hold(_) => {}
                 Verdict::Accept => {
@@ -1626,12 +1565,9 @@ impl Inbound {
                         }),
                         Door::Mailbox { identity } => {
                             state.held_index.remove(&identity);
-                            state.admitted.insert(
-                                identity,
-                                Admitted::Released {
-                                    summary: held.summary,
-                                },
-                            );
+                            state
+                                .admitted
+                                .insert(identity, Admitted::Released { summary: held.summary });
                             Settlement::Done(HeldOutcome::Delivered)
                         }
                     };
@@ -1696,9 +1632,7 @@ impl Inbound {
     /// across straight-line transitions, so poison means a bug worth
     /// stopping on — the engine's own posture for its mode slot.
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state
-            .lock()
-            .expect("the inbound gate's state is never poisoned")
+        self.state.lock().expect("the inbound gate's state is never poisoned")
     }
 
     /// Whether `id` names a record no settler has claimed.
@@ -1789,9 +1723,7 @@ impl Inbound {
     /// Enqueues one settlement transition — under the caller's lock, so it
     /// lands after the `Held` that opened this id and in decision order.
     fn settle(&self, _state: &mut State, id: HeldId, outcome: HeldOutcome) {
-        let _ = self
-            .transitions
-            .send(HoldTransition::Settled { id, outcome });
+        let _ = self.transitions.send(HoldTransition::Settled { id, outcome });
     }
 }
 
@@ -1814,15 +1746,9 @@ fn deadline_for(cause: HoldCause, expiry: DialogExpiry) -> Option<Duration> {
 /// characters stripped save the newline and tab a review pane reads as
 /// content, capped at [`PREVIEW_CHARS`].
 fn preview_of(text: &str) -> String {
-    let clipped = text
-        .lines()
-        .take(PREVIEW_LINES)
-        .collect::<Vec<_>>()
-        .join("\n");
-    let stripped: String = clipped
-        .chars()
-        .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
-        .collect();
+    let clipped = text.lines().take(PREVIEW_LINES).collect::<Vec<_>>().join("\n");
+    let stripped: String =
+        clipped.chars().filter(|c| !c.is_control() || *c == '\n' || *c == '\t').collect();
     cap_chars(&stripped, PREVIEW_CHARS).to_owned()
 }
 

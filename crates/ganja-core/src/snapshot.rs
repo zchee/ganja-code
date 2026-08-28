@@ -22,22 +22,19 @@
 //! engine never branches on whether a snapshot succeeded, and the worst a
 //! broken one costs is an undo with less to restore.
 
-use std::{
-    collections::{BTreeSet, HashSet},
-    ffi::OsStr,
-    path::{Path, PathBuf},
-    process::Stdio,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::collections::{BTreeSet, HashSet};
+use std::ffi::OsStr;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use tokio::{io::AsyncWriteExt as _, sync::Mutex};
+use tokio::io::AsyncWriteExt as _;
+use tokio::sync::Mutex;
 
-use crate::{
-    project::{self, Project},
-    protocol::{Message, MessageId, PartBody, RevertInfo, Role},
-};
+use crate::project::{self, Project};
+use crate::protocol::{Message, MessageId, PartBody, RevertInfo, Role};
 
 /// Directory the per-project snapshot repositories hang under, beside the
 /// `project/` tree the rest of a project's state lives in:
@@ -71,14 +68,8 @@ const CORE: &[&str] = &["-c", "core.longpaths=true", "-c", "core.symlinks=true"]
 
 /// [`CORE`] plus the line-ending translation git would otherwise apply,
 /// switched off: a snapshot is a copy of the bytes on disk. Upstream's `cfg`.
-const CFG: &[&str] = &[
-    "-c",
-    "core.autocrlf=false",
-    "-c",
-    "core.longpaths=true",
-    "-c",
-    "core.symlinks=true",
-];
+const CFG: &[&str] =
+    &["-c", "core.autocrlf=false", "-c", "core.longpaths=true", "-c", "core.symlinks=true"];
 
 /// [`CFG`] plus verbatim path output, for the commands whose stdout is parsed
 /// as paths: git quotes and octal-escapes a non-ASCII name otherwise, and a
@@ -133,10 +124,7 @@ impl RevertState {
     /// What a frontend is told about this state.
     #[must_use]
     pub fn info(&self) -> RevertInfo {
-        RevertInfo {
-            message_id: self.message_id.clone(),
-            files: self.files.clone(),
-        }
+        RevertInfo { message_id: self.message_id.clone(), files: self.files.clone() }
     }
 }
 
@@ -218,10 +206,7 @@ impl Snapshots {
             return (PathBuf::new(), Some(Unavailable::NoDataDirectory));
         };
 
-        let gitdir = home
-            .join(SNAPSHOTS)
-            .join(project.slug())
-            .join(project::digest(worktree));
+        let gitdir = home.join(SNAPSHOTS).join(project.slug()).join(project::digest(worktree));
 
         (gitdir, None)
     }
@@ -292,10 +277,7 @@ impl Snapshots {
     /// A git that refuses answers "nothing changed", which costs the step its
     /// undo and nothing else.
     pub async fn patch(&self, hash: &str) -> Patch {
-        let mut patch = Patch {
-            hash: hash.to_owned(),
-            files: Vec::new(),
-        };
+        let mut patch = Patch { hash: hash.to_owned(), files: Vec::new() };
         if !self.enabled() {
             return patch;
         }
@@ -305,15 +287,7 @@ impl Snapshots {
         let changed = self
             .git(&arguments(
                 QUOTE,
-                self.args([
-                    "diff",
-                    "--cached",
-                    "--no-ext-diff",
-                    "--name-only",
-                    hash,
-                    "--",
-                    ".",
-                ]),
+                self.args(["diff", "--cached", "--no-ext-diff", "--name-only", hash, "--", "."]),
             ))
             .await;
         if changed.code != 0 {
@@ -339,10 +313,7 @@ impl Snapshots {
         let ignored = self.ignored(&files).await;
         drop(guard);
 
-        patch.files = files
-            .into_iter()
-            .filter(|file| !ignored.contains(file))
-            .collect();
+        patch.files = files.into_iter().filter(|file| !ignored.contains(file)).collect();
 
         patch
     }
@@ -358,9 +329,7 @@ impl Snapshots {
         }
 
         let guard = self.lock.lock().await;
-        let read = self
-            .git(&arguments(CORE, self.args(["read-tree", snapshot])))
-            .await;
+        let read = self.git(&arguments(CORE, self.args(["read-tree", snapshot]))).await;
         if read.code != 0 {
             drop(guard);
             tracing::error!(
@@ -372,9 +341,7 @@ impl Snapshots {
             return;
         }
 
-        let checkout = self
-            .git(&arguments(CORE, self.args(["checkout-index", "-a", "-f"])))
-            .await;
+        let checkout = self.git(&arguments(CORE, self.args(["checkout-index", "-a", "-f"]))).await;
         drop(guard);
         if checkout.code != 0 {
             tracing::error!(
@@ -411,12 +378,8 @@ impl Snapshots {
         let mut achieved = Vec::new();
         let guard = self.lock.lock().await;
         for (hash, file) in dedupe(patches) {
-            let restored = self
-                .git(&arguments(
-                    CORE,
-                    self.args(["checkout", &hash, "--", &file]),
-                ))
-                .await;
+            let restored =
+                self.git(&arguments(CORE, self.args(["checkout", &hash, "--", &file]))).await;
             if restored.code == 0 {
                 achieved.push(file);
                 continue;
@@ -428,9 +391,8 @@ impl Snapshots {
             // revert-checks-out-one-file-at-a-time). The outcome is identical
             // — the batch exists to amortize process spawns on a revert that
             // spans hundreds of files.
-            let known = self
-                .git(&arguments(CORE, self.args(["ls-tree", &hash, "--", &file])))
-                .await;
+            let known =
+                self.git(&arguments(CORE, self.args(["ls-tree", &hash, "--", &file]))).await;
             if known.code == 0 && !known.text.trim().is_empty() {
                 tracing::info!(
                     file,
@@ -482,10 +444,7 @@ impl Snapshots {
         // would have to name.
         self.git_with_env(
             &["init".to_owned()],
-            &[
-                ("GIT_DIR", self.gitdir.as_os_str()),
-                ("GIT_WORK_TREE", self.worktree.as_os_str()),
-            ],
+            &[("GIT_DIR", self.gitdir.as_os_str()), ("GIT_WORK_TREE", self.worktree.as_os_str())],
         )
         .await;
 
@@ -560,11 +519,7 @@ impl Snapshots {
         if std::fs::create_dir_all(&info).is_err() {
             return;
         }
-        if std::fs::write(
-            info.join("alternates"),
-            format!("{}\n", alternates.join("\n")),
-        )
-        .is_err()
+        if std::fs::write(info.join("alternates"), format!("{}\n", alternates.join("\n"))).is_err()
         {
             return;
         }
@@ -593,10 +548,7 @@ impl Snapshots {
         self.exclude(&[]).await;
 
         let tracked = self
-            .git(&arguments(
-                QUOTE,
-                self.args(["diff-files", "--name-only", "-z", "--", "."]),
-            ))
+            .git(&arguments(QUOTE, self.args(["diff-files", "--name-only", "-z", "--", "."])))
             .await;
         let untracked = self
             .git(&arguments(
@@ -624,10 +576,7 @@ impl Snapshots {
         let untracked: Vec<String> = split_nul(&untracked.text);
         let mut seen: HashSet<String> = HashSet::new();
         let mut candidates: Vec<String> = Vec::new();
-        for file in split_nul(&tracked.text)
-            .into_iter()
-            .chain(untracked.clone())
-        {
+        for file in split_nul(&tracked.text).into_iter().chain(untracked.clone()) {
             if seen.insert(file.clone()) {
                 candidates.push(file);
             }
@@ -646,10 +595,8 @@ impl Snapshots {
             self.drop_staged(&ignored).await;
         }
 
-        let allowed: Vec<String> = candidates
-            .into_iter()
-            .filter(|file| !ignored.contains(file))
-            .collect();
+        let allowed: Vec<String> =
+            candidates.into_iter().filter(|file| !ignored.contains(file)).collect();
         if allowed.is_empty() {
             return;
         }
@@ -667,10 +614,8 @@ impl Snapshots {
         }
 
         let blocked_set: HashSet<&String> = blocked.iter().collect();
-        let staged: Vec<String> = allowed
-            .into_iter()
-            .filter(|file| !blocked_set.contains(file))
-            .collect();
+        let staged: Vec<String> =
+            allowed.into_iter().filter(|file| !blocked_set.contains(file)).collect();
         if staged.is_empty() {
             return;
         }
@@ -713,13 +658,7 @@ impl Snapshots {
         // — and echoes back — a `./` prefix that stops it.
         let guarded: Vec<String> = files
             .iter()
-            .map(|file| {
-                if file.starts_with(':') {
-                    format!("./{file}")
-                } else {
-                    file.clone()
-                }
-            })
+            .map(|file| if file.starts_with(':') { format!("./{file}") } else { file.clone() })
             .collect();
 
         // The project's repository is discovered from the working directory
@@ -729,14 +668,10 @@ impl Snapshots {
         // check-ignore-discovers-the-repo).
         let mut command: Vec<String> = QUOTE.iter().map(ToString::to_string).collect();
         command.extend(
-            ["check-ignore", "--no-index", "--stdin", "-z"]
-                .into_iter()
-                .map(ToOwned::to_owned),
+            ["check-ignore", "--no-index", "--stdin", "-z"].into_iter().map(ToOwned::to_owned),
         );
 
-        let checked = self
-            .git_with_stdin(&command, nul_terminated(&guarded).into_bytes())
-            .await;
+        let checked = self.git_with_stdin(&command, nul_terminated(&guarded).into_bytes()).await;
         // 0 is "some are ignored", 1 is "none are"; anything else is git
         // refusing to answer, and the safe reading of that is to filter
         // nothing out.
@@ -756,10 +691,7 @@ impl Snapshots {
     /// Removes files from the snapshot index without touching the disk.
     async fn drop_staged(&self, files: &BTreeSet<String>) {
         let files: Vec<String> = files.iter().cloned().collect();
-        tracing::info!(
-            count = files.len(),
-            "dropping newly ignored files from the snapshot"
-        );
+        tracing::info!(count = files.len(), "dropping newly ignored files from the snapshot");
 
         self.git_with_stdin(
             &arguments(
@@ -835,10 +767,8 @@ impl Snapshots {
     /// next one will.
     fn collect_later(&self) {
         {
-            let mut collected = self
-                .collected
-                .lock()
-                .expect("the collection clock is never poisoned");
+            let mut collected =
+                self.collected.lock().expect("the collection clock is never poisoned");
             if collected.elapsed() < GC_INTERVAL {
                 return;
             }
@@ -853,11 +783,7 @@ impl Snapshots {
             let collected = run(
                 &arguments(
                     CORE,
-                    named(
-                        &gitdir,
-                        &worktree,
-                        ["gc", PRUNE].into_iter().map(str::to_owned),
-                    ),
+                    named(&gitdir, &worktree, ["gc", PRUNE].into_iter().map(str::to_owned)),
                 ),
                 &worktree,
                 None,
@@ -880,11 +806,7 @@ impl Snapshots {
 
     /// `cmd` addressed at this session's repository and working tree.
     fn args<'a>(&self, cmd: impl IntoIterator<Item = &'a str>) -> Vec<String> {
-        named(
-            &self.gitdir,
-            &self.worktree,
-            cmd.into_iter().map(str::to_owned),
-        )
+        named(&self.gitdir, &self.worktree, cmd.into_iter().map(str::to_owned))
     }
 
     async fn git(&self, args: &[String]) -> Output {
@@ -948,10 +870,9 @@ pub fn patches_from(history: &[Message], anchor: &MessageId) -> Vec<Patch> {
         .filter(|message| message.id >= *anchor)
         .flat_map(|message| &message.parts)
         .filter_map(|part| match &part.body {
-            PartBody::Patch { hash, files } => Some(Patch {
-                hash: hash.clone(),
-                files: files.clone(),
-            }),
+            PartBody::Patch { hash, files } => {
+                Some(Patch { hash: hash.clone(), files: files.clone() })
+            }
             _ => None,
         })
         .collect()
@@ -1036,10 +957,7 @@ fn nul_terminated(files: &[String]) -> String {
 /// of the worktree, so a name containing a glob character stages itself and
 /// nothing else.
 fn pathspecs(files: &[String]) -> String {
-    let literal: Vec<String> = files
-        .iter()
-        .map(|file| format!(":(top,literal){file}"))
-        .collect();
+    let literal: Vec<String> = files.iter().map(|file| format!(":(top,literal){file}")).collect();
 
     nul_terminated(&literal)
 }
@@ -1047,10 +965,7 @@ fn pathspecs(files: &[String]) -> String {
 /// Splits git's `-z` output, which is NUL-**terminated** rather than
 /// -separated, so the last field is followed by one.
 fn split_nul(text: &str) -> Vec<String> {
-    text.split('\0')
-        .filter(|field| !field.is_empty())
-        .map(ToOwned::to_owned)
-        .collect()
+    text.split('\0').filter(|field| !field.is_empty()).map(ToOwned::to_owned).collect()
 }
 
 /// What one git invocation said.
@@ -1081,11 +996,7 @@ async fn run(
     command
         .args(args)
         .current_dir(cwd)
-        .stdin(if stdin.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
+        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);

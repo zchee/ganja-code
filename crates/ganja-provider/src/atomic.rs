@@ -21,11 +21,9 @@
 //!
 //! Until then: a change to one of these copies is a change to all of them.
 
-use std::{
-    fs, io,
-    path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::{fs, io};
 
 /// Keeps one write's temporary file apart from another's inside this process.
 static WRITES: AtomicU64 = AtomicU64::new(0);
@@ -54,21 +52,14 @@ pub(crate) fn temporary_beside(path: &Path) -> PathBuf {
 pub(crate) fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
     use std::io::Write as _;
 
-    let mut file = match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
-    {
+    let mut file = match fs::OpenOptions::new().write(true).create_new(true).open(path) {
         // Either a write that died before its rename, or something planted to
         // catch this one. Unlinking the name and creating it again exclusively
         // settles both: what is removed is the name, never whatever it pointed
         // at, and a link planted in between fails the retry outright.
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
             fs::remove_file(path)?;
-            fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(path)?
+            fs::OpenOptions::new().write(true).create_new(true).open(path)?
         }
         result => result?,
     };

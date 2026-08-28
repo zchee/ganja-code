@@ -44,21 +44,22 @@
 //! `ganja-team` under that name — so no second dependency is needed to seed
 //! an inbox or read the lead's back.
 
+use std::path::Path;
+use std::process::Command;
+use std::sync::Arc;
+use std::time::Duration;
 #[cfg(unix)]
 use std::time::Instant;
-use std::{path::Path, process::Command, sync::Arc, time::Duration};
 
 #[cfg(unix)]
 use expectrl::{Eof, Expect as _, Session, process::unix::WaitStatus, session::OsSession};
 use futures::StreamExt as _;
-use ganja_core::{
-    Storage,
-    permission::Permissions,
-    protocol::{Command as EngineCommand, Role},
-    provider::FakeProvider,
-    teammate::{SETTLE, Teammate},
-    tool::Registry,
-};
+use ganja_core::Storage;
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{Command as EngineCommand, Role};
+use ganja_core::provider::FakeProvider;
+use ganja_core::teammate::{SETTLE, Teammate};
+use ganja_core::tool::Registry;
 #[cfg(unix)]
 use ganja_core::{
     protocol::PartBody,
@@ -114,11 +115,7 @@ impl Fixture {
     /// Runs the binary and hands back its standard output, failing here rather
     /// than downstream when it did not exit 0.
     fn run(&self, arguments: &[&str]) -> String {
-        let output = self
-            .ganja()
-            .args(arguments)
-            .output()
-            .expect("the binary is runnable");
+        let output = self.ganja().args(arguments).output().expect("the binary is runnable");
 
         assert!(
             output.status.success(),
@@ -164,11 +161,7 @@ async fn a_teammate_session_is_listed_and_resumable_on_both_backends() {
     );
     // The birth queue is a lossless lane, and one nobody drains fills and then
     // makes the teammate's own turn wait.
-    let mut events = teammate
-        .engine()
-        .subscribe()
-        .await
-        .expect("the first subscriber wins");
+    let mut events = teammate.engine().subscribe().await.expect("the first subscriber wins");
     tokio::spawn(async move { while events.next().await.is_some() {} });
 
     let session = teammate.engine().session_id();
@@ -191,18 +184,14 @@ async fn a_teammate_session_is_listed_and_resumable_on_both_backends() {
     // Listed: `ganja sessions` shows roots only, so the id being here *is* the
     // claim that the row carries no parent.
     let listed = fixture.run(&["sessions"]);
-    assert!(
-        listed.contains(session.as_str()),
-        "the teammate's session should be listed: {listed}"
-    );
+    assert!(listed.contains(session.as_str()), "the teammate's session should be listed: {listed}");
 
     // Resumable: the binary opens that id and adds to it. Nothing about the
     // exit code says *which* session was opened, so the transcript does.
     fixture.run(&["run", "--session", session.as_str(), RESUMED_PROMPT]);
 
-    let transcript = storage
-        .load_transcript(&session)
-        .expect("the teammate's transcript reads back");
+    let transcript =
+        storage.load_transcript(&session).expect("the teammate's transcript reads back");
     let said: Vec<&str> = transcript
         .iter()
         .filter(|message| message.role == Role::User)
@@ -324,9 +313,7 @@ fn a_pane_teammates_own_process_writes_a_row_that_is_listed_and_resumable() {
                 color: "blue".to_owned(),
                 prompt: TEAMMATE_PROMPT.to_owned(),
                 plan_mode_required: false,
-                surface: Surface::Pane {
-                    id: PANE.to_owned(),
-                },
+                surface: Surface::Pane { id: PANE.to_owned() },
                 cwd: fixture.path().display().to_string(),
             },
         )],
@@ -354,32 +341,22 @@ fn a_pane_teammates_own_process_writes_a_row_that_is_listed_and_resumable() {
         .env("GANJA_DISABLE_TERM_PROBE", "1");
     let mut session = Session::spawn(command).expect("the member spawns in a pty");
     session.set_expect_timeout(Some(DEADLINE));
-    session
-        .get_process_mut()
-        .set_window_size(100, 30)
-        .expect("the pty is sized");
-    session
-        .expect(ALT_SCREEN)
-        .expect("the member never took its terminal over");
+    session.get_process_mut().set_window_size(100, 30).expect("the pty is sized");
+    session.expect(ALT_SCREEN).expect("the member never took its terminal over");
 
     // §10.3-2 and -3: the seed becomes the first turn with no mechanism of
     // its own, and the turn's end reaches the lead as a frame. The reply
     // drawn on screen is waited for first — which also keeps the pty read,
     // because a full-screen app whose output nobody drains blocks on its next
     // frame — and the frame is then read off the file, which is the contract.
-    session
-        .expect(REPLY)
-        .expect("the seeded turn never reached the member's transcript");
+    session.expect(REPLY).expect("the seeded turn never reached the member's transcript");
     let started = Instant::now();
     let idle = loop {
         drain(&mut session);
-        if let Some(idle) = lead_heard(&lead_inbox)
-            .into_iter()
-            .find_map(|frame| match frame {
-                Frame::IdleNotification(idle) => Some(idle),
-                _ => None,
-            })
-        {
+        if let Some(idle) = lead_heard(&lead_inbox).into_iter().find_map(|frame| match frame {
+            Frame::IdleNotification(idle) => Some(idle),
+            _ => None,
+        }) {
             break idle;
         }
         assert!(
@@ -392,10 +369,7 @@ fn a_pane_teammates_own_process_writes_a_row_that_is_listed_and_resumable() {
     assert_eq!(idle.from, member.as_str());
     assert_eq!(idle.idle_reason, Some(IdleReason::Available));
     assert!(
-        mailbox::read(&inbox)
-            .expect("the inbox reads")
-            .valid
-            .is_empty(),
+        mailbox::read(&inbox).expect("the inbox reads").valid.is_empty(),
         "the seed was delivered and left the inbox"
     );
 
@@ -416,9 +390,7 @@ fn a_pane_teammates_own_process_writes_a_row_that_is_listed_and_resumable() {
         .expect("the frame encodes"),
     )
     .expect("the member's inbox takes the request");
-    session
-        .expect(Eof)
-        .expect("the member did not leave within the deadline");
+    session.expect(Eof).expect("the member did not leave within the deadline");
     let status = session.get_process().wait().expect("the member is reaped");
     assert!(
         matches!(status, WaitStatus::Exited(_, 0)),
@@ -451,9 +423,8 @@ fn a_pane_teammates_own_process_writes_a_row_that_is_listed_and_resumable() {
     );
     fixture.run(&["run", "--session", session_id.as_str(), RESUMED_PROMPT]);
 
-    let transcript = storage
-        .load_transcript(&session_id)
-        .expect("the member's transcript reads back");
+    let transcript =
+        storage.load_transcript(&session_id).expect("the member's transcript reads back");
     let user_parts: Vec<&PartBody> = transcript
         .iter()
         .filter(|message| message.role == Role::User)

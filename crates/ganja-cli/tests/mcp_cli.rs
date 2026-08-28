@@ -29,7 +29,9 @@
 //! whoever runs the suite. Nothing here reaches the network — no server is
 //! ever connected, because none of these three subcommands connects.
 
-use std::{collections::BTreeSet, fs, path::Path};
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::Path;
 
 use assert_cmd::Command;
 use predicates::prelude::*;
@@ -104,11 +106,7 @@ fn keys(value: &Value, prefix: &str, into: &mut BTreeSet<String>) {
         return;
     };
     for (key, child) in map {
-        let path = if prefix.is_empty() {
-            key.clone()
-        } else {
-            format!("{prefix}.{key}")
-        };
+        let path = if prefix.is_empty() { key.clone() } else { format!("{prefix}.{key}") };
         into.insert(path.clone());
         keys(child, &path, into);
     }
@@ -139,15 +137,7 @@ fn oauth_added_from_the_flag_reaches_login_past_the_no_oauth_refusal() {
     // connection in milliseconds, so the test proves login got PAST the
     // no-oauth gate without a single byte leaving the machine.
     home.ganja()
-        .args([
-            "mcp",
-            "add",
-            "context7",
-            "--global",
-            "--oauth",
-            "--url",
-            "http://127.0.0.1:1/mcp",
-        ])
+        .args(["mcp", "add", "context7", "--global", "--oauth", "--url", "http://127.0.0.1:1/mcp"])
         .assert()
         .success();
 
@@ -222,9 +212,7 @@ fn a_local_server_round_trips_through_the_loader_that_will_read_it() {
         .stdout(predicate::str::contains("type         local"))
         .stdout(predicate::str::contains("bun server.ts"))
         .stdout(predicate::str::contains("timeout      9000"))
-        .stdout(predicate::str::contains(
-            home.project_config().display().to_string(),
-        ));
+        .stdout(predicate::str::contains(home.project_config().display().to_string()));
 }
 
 #[test]
@@ -290,10 +278,7 @@ type = "local"
     );
     let before = read(&home.project_config());
 
-    home.ganja()
-        .args(["mcp", "add", "docs", "--", "bun", "server.ts"])
-        .assert()
-        .success();
+    home.ganja().args(["mcp", "add", "docs", "--", "bun", "server.ts"]).assert().success();
     home.ganja()
         .args(["mcp", "remove", "docs"])
         .assert()
@@ -301,15 +286,8 @@ type = "local"
         .stdout(predicate::str::contains("removed mcp server \"docs\""));
 
     let after = read(&home.project_config());
-    assert_eq!(
-        after, before,
-        "an add and its removal leave the file as it was"
-    );
-    assert_eq!(
-        key_set(&after),
-        key_set(&before),
-        "no key was dropped, and none was invented"
-    );
+    assert_eq!(after, before, "an add and its removal leave the file as it was");
+    assert_eq!(key_set(&after), key_set(&before), "no key was dropped, and none was invented");
 
     // And the loader still reads what is left — the entry the edit was never
     // about included.
@@ -343,20 +321,11 @@ type = "local"
     );
     let before = read(&home.project_config());
 
-    home.ganja()
-        .args(["mcp", "add", "docs", "--", "bun"])
-        .assert()
-        .success();
-    home.ganja()
-        .args(["mcp", "remove", "docs"])
-        .assert()
-        .success();
+    home.ganja().args(["mcp", "add", "docs", "--", "bun"]).assert().success();
+    home.ganja().args(["mcp", "remove", "docs"]).assert().success();
 
     let after = read(&home.project_config());
-    assert_eq!(
-        after, before,
-        "the key nobody here understands is still there"
-    );
+    assert_eq!(after, before, "the key nobody here understands is still there");
     assert_eq!(key_set(&after), key_set(&before));
 
     // And the refusal is the loader's, by name, unchanged by any of this.
@@ -389,11 +358,7 @@ type = "local"
 /// Every line of `text` that carries a comment, trimmed — what "the comments
 /// survived" is asserted over.
 fn comment_lines(text: &str) -> Vec<String> {
-    text.lines()
-        .map(str::trim)
-        .filter(|line| line.starts_with('#'))
-        .map(str::to_owned)
-        .collect()
+    text.lines().map(str::trim).filter(|line| line.starts_with('#')).map(str::to_owned).collect()
 }
 
 #[test]
@@ -405,9 +370,7 @@ fn adding_to_a_commented_config_edits_it_and_keeps_every_comment_in_it() {
         .args(["mcp", "add", "docs", "--", "bun", "server.ts"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            home.project_config().display().to_string(),
-        ));
+        .stdout(predicate::str::contains(home.project_config().display().to_string()));
 
     let after = fs::read_to_string(home.project_config()).expect("the fixture survives");
     assert_eq!(
@@ -433,9 +396,7 @@ fn adding_to_a_commented_config_edits_it_and_keeps_every_comment_in_it() {
         .assert()
         .success()
         .stdout(predicate::str::contains("bun server.ts"))
-        .stdout(predicate::str::contains(
-            home.project_config().display().to_string(),
-        ));
+        .stdout(predicate::str::contains(home.project_config().display().to_string()));
     home.ganja()
         .args(["mcp", "get", "tokens"])
         .assert()
@@ -448,17 +409,12 @@ fn removing_from_a_commented_config_keeps_every_comment_in_it_too() {
     let home = Home::new();
     plant(&home.project_config(), COMMENTED);
 
-    home.ganja()
-        .args(["mcp", "add", "docs", "--", "bun"])
-        .assert()
-        .success();
+    home.ganja().args(["mcp", "add", "docs", "--", "bun"]).assert().success();
     home.ganja()
         .args(["mcp", "remove", "docs"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            home.project_config().display().to_string(),
-        ));
+        .stdout(predicate::str::contains(home.project_config().display().to_string()));
 
     // Not merely "the comments survived" — an add and its removal give the
     // file back byte for byte, blank line included. That is the whole claim
@@ -508,10 +464,7 @@ fn adding_where_there_is_no_mcp_table_yet_creates_one_and_disturbs_nothing() {
     let before = "# the only thing configured here\ntheme = \"ganja\"\n";
     plant(&home.project_config(), before);
 
-    home.ganja()
-        .args(["mcp", "add", "docs", "--", "bun"])
-        .assert()
-        .success();
+    home.ganja().args(["mcp", "add", "docs", "--", "bun"]).assert().success();
 
     let after = fs::read_to_string(home.project_config()).expect("the fixture survives");
     assert!(
@@ -519,10 +472,7 @@ fn adding_where_there_is_no_mcp_table_yet_creates_one_and_disturbs_nothing() {
         "the comment and the sibling key are the bytes they were, and the \
          table arrived under them: {after}"
     );
-    assert!(
-        !after.contains("[mcp]\n"),
-        "no empty header was written above the entry: {after}"
-    );
+    assert!(!after.contains("[mcp]\n"), "no empty header was written above the entry: {after}");
     home.ganja()
         .args(["mcp", "get", "docs"])
         .assert()
@@ -537,10 +487,7 @@ fn adding_where_there_is_no_mcp_table_yet_creates_one_and_disturbs_nothing() {
 fn a_name_that_needs_quoting_round_trips_through_the_loader() {
     let home = Home::new();
 
-    home.ganja()
-        .args(["mcp", "add", "tools.v2", "--", "bun"])
-        .assert()
-        .success();
+    home.ganja().args(["mcp", "add", "tools.v2", "--", "bun"]).assert().success();
 
     assert!(
         fs::read_to_string(home.project_config())
@@ -553,10 +500,7 @@ fn a_name_that_needs_quoting_round_trips_through_the_loader() {
         .assert()
         .success()
         .stdout(predicate::str::contains("command      bun"));
-    home.ganja()
-        .args(["mcp", "remove", "tools.v2"])
-        .assert()
-        .success();
+    home.ganja().args(["mcp", "remove", "tools.v2"]).assert().success();
     assert_eq!(
         read(&home.project_config()),
         json!({}),
@@ -631,9 +575,7 @@ fn a_tier_holding_the_older_config_is_refused_by_name() {
         .args(["mcp", "add", "docs", "--", "bun"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            home.project_config().display().to_string(),
-        ));
+        .stdout(predicate::str::contains(home.project_config().display().to_string()));
 }
 
 #[test]
@@ -648,10 +590,7 @@ fn a_url_the_loader_would_refuse_is_never_written() {
         // Not even in the refusal: a URL may carry a credential in its
         // userinfo, and echoing one back is how it reaches a log.
         .stderr(predicate::str::contains("mcp.example").not());
-    assert!(
-        !home.project_config().exists(),
-        "a refused entry leaves no file behind"
-    );
+    assert!(!home.project_config().exists(), "a refused entry leaves no file behind");
 
     // And with a file already there, it is left untouched rather than rewritten.
     plant(&home.project_config(), "theme = \"ganja\"\n");
@@ -688,10 +627,7 @@ fn a_file_that_does_not_parse_refuses_rather_than_being_overwritten() {
 fn a_second_add_of_one_name_needs_force_and_then_replaces() {
     let home = Home::new();
 
-    home.ganja()
-        .args(["mcp", "add", "docs", "--", "bun", "one.ts"])
-        .assert()
-        .success();
+    home.ganja().args(["mcp", "add", "docs", "--", "bun", "one.ts"]).assert().success();
     home.ganja()
         .args(["mcp", "add", "docs", "--", "bun", "two.ts"])
         .assert()
@@ -708,10 +644,7 @@ fn a_second_add_of_one_name_needs_force_and_then_replaces() {
         .assert()
         .success()
         .stdout(predicate::str::contains("replaced mcp server \"docs\""));
-    assert_eq!(
-        read(&home.project_config())["mcp"]["docs"]["command"],
-        json!(["bun", "two.ts"])
-    );
+    assert_eq!(read(&home.project_config())["mcp"]["docs"]["command"], json!(["bun", "two.ts"]));
 }
 
 #[test]
@@ -722,20 +655,13 @@ fn global_writes_the_config_home_and_the_project_tier_overrides_it() {
         .args(["mcp", "add", "docs", "--global", "--", "bun", "global.ts"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            home.global_config().display().to_string(),
-        ));
-    assert!(
-        !home.project_config().exists(),
-        "`--global` writes the config home and nothing else"
-    );
+        .stdout(predicate::str::contains(home.global_config().display().to_string()));
+    assert!(!home.project_config().exists(), "`--global` writes the config home and nothing else");
     home.ganja()
         .args(["mcp", "get", "docs"])
         .assert()
         .success()
-        .stdout(predicate::str::contains(
-            home.global_config().display().to_string(),
-        ));
+        .stdout(predicate::str::contains(home.global_config().display().to_string()));
 
     // The same name in the project tier: both files hold it, and the project
     // is merged last.
@@ -752,9 +678,7 @@ fn global_writes_the_config_home_and_the_project_tier_overrides_it() {
         .success()
         .stdout(predicate::str::contains("bun project.ts"))
         .stdout(predicate::str::contains("overridden by"))
-        .stdout(predicate::str::contains(
-            home.project_config().display().to_string(),
-        ));
+        .stdout(predicate::str::contains(home.project_config().display().to_string()));
 
     // Removing the project's says the global one is still there.
     home.ganja()
@@ -762,9 +686,7 @@ fn global_writes_the_config_home_and_the_project_tier_overrides_it() {
         .assert()
         .success()
         .stdout(predicate::str::contains("still configured in"))
-        .stdout(predicate::str::contains(
-            home.global_config().display().to_string(),
-        ));
+        .stdout(predicate::str::contains(home.global_config().display().to_string()));
     home.ganja()
         .args(["mcp", "get", "docs"])
         .assert()
@@ -776,20 +698,13 @@ fn global_writes_the_config_home_and_the_project_tier_overrides_it() {
 fn adding_globally_over_a_project_entry_says_which_tier_wins() {
     let home = Home::new();
 
-    home.ganja()
-        .args(["mcp", "add", "docs", "--", "bun", "project.ts"])
-        .assert()
-        .success();
+    home.ganja().args(["mcp", "add", "docs", "--", "bun", "project.ts"]).assert().success();
     home.ganja()
         .args(["mcp", "add", "docs", "--global", "--", "bun", "global.ts"])
         .assert()
         .success()
-        .stderr(predicate::str::contains(
-            home.project_config().display().to_string(),
-        ))
-        .stderr(predicate::str::contains(
-            "this project's entry wins at load",
-        ));
+        .stderr(predicate::str::contains(home.project_config().display().to_string()))
+        .stderr(predicate::str::contains("this project's entry wins at load"));
 }
 
 #[test]
@@ -800,23 +715,16 @@ fn removing_a_name_the_target_file_does_not_hold_names_the_file() {
         .args(["mcp", "remove", "docs"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            home.project_config().display().to_string(),
-        ));
+        .stderr(predicate::str::contains(home.project_config().display().to_string()));
 
     // Including when the *other* tier holds it: a `remove` that silently did
     // nothing to the tier asked for is the failure this refusal prevents.
-    home.ganja()
-        .args(["mcp", "add", "docs", "--global", "--", "bun"])
-        .assert()
-        .success();
+    home.ganja().args(["mcp", "add", "docs", "--global", "--", "bun"]).assert().success();
     home.ganja()
         .args(["mcp", "remove", "docs"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains(
-            home.project_config().display().to_string(),
-        ));
+        .stderr(predicate::str::contains(home.project_config().display().to_string()));
 }
 
 #[test]
@@ -829,10 +737,7 @@ fn getting_a_name_nothing_configures_lists_the_ones_that_are() {
         .failure()
         .stderr(predicate::str::contains("neither is any other"));
 
-    home.ganja()
-        .args(["mcp", "add", "notes", "--", "bun"])
-        .assert()
-        .success();
+    home.ganja().args(["mcp", "add", "notes", "--", "bun"]).assert().success();
     home.ganja()
         .args(["mcp", "get", "docs"])
         .assert()
@@ -852,39 +757,17 @@ fn naming_both_kinds_of_server_or_neither_is_refused_before_anything_runs() {
         .stderr(predicate::str::contains("--url"));
     // Both.
     home.ganja()
-        .args([
-            "mcp",
-            "add",
-            "docs",
-            "--url",
-            "https://mcp.example",
-            "--",
-            "bun",
-        ])
+        .args(["mcp", "add", "docs", "--url", "https://mcp.example", "--", "bun"])
         .assert()
         .failure();
     // A local-only flag on a remote, and a remote-only flag on a local.
     home.ganja()
-        .args([
-            "mcp",
-            "add",
-            "docs",
-            "--url",
-            "https://mcp.example",
-            "--cwd",
-            ".",
-        ])
+        .args(["mcp", "add", "docs", "--url", "https://mcp.example", "--cwd", "."])
         .assert()
         .failure();
-    home.ganja()
-        .args(["mcp", "add", "docs", "--header", "K=V", "--", "bun"])
-        .assert()
-        .failure();
+    home.ganja().args(["mcp", "add", "docs", "--header", "K=V", "--", "bun"]).assert().failure();
 
-    assert!(
-        !home.project_config().exists(),
-        "nothing that clap refused ever reached the disk"
-    );
+    assert!(!home.project_config().exists(), "nothing that clap refused ever reached the disk");
 }
 
 #[test]
@@ -903,27 +786,10 @@ fn a_name_that_is_a_path_is_refused_before_anything_is_written() {
 fn the_bare_listing_and_the_list_word_are_the_same_command() {
     let home = Home::new();
 
-    let bare = home
-        .ganja()
-        .arg("mcp")
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let worded = home
-        .ganja()
-        .args(["mcp", "list"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
+    let bare = home.ganja().arg("mcp").assert().success().get_output().stdout.clone();
+    let worded = home.ganja().args(["mcp", "list"]).assert().success().get_output().stdout.clone();
 
-    assert_eq!(
-        bare, worded,
-        "`list` is the word for what the bare form does"
-    );
+    assert_eq!(bare, worded, "`list` is the word for what the bare form does");
     assert!(
         String::from_utf8_lossy(&bare).contains("no MCP servers configured"),
         "an empty project says so"

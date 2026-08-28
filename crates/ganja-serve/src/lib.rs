@@ -84,15 +84,12 @@ pub mod socket;
 mod sse;
 mod state;
 
-use std::{
-    fmt,
-    future::IntoFuture as _,
-    io,
-    net::{IpAddr, Ipv4Addr, SocketAddr},
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
-};
+use std::future::IntoFuture as _;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+use std::{fmt, io};
 
 pub use auth::{Credentials, PASSWORD_ENV};
 use futures::StreamExt as _;
@@ -153,20 +150,14 @@ impl Listen {
     /// The default: loopback TCP, no fixed port.
     #[must_use]
     pub fn loopback() -> Self {
-        Self::Tcp {
-            hostname: DEFAULT_HOSTNAME.to_owned(),
-            port: None,
-        }
+        Self::Tcp { hostname: DEFAULT_HOSTNAME.to_owned(), port: None }
     }
 
     /// The socket `id` owns in this user's own socket directory.
     #[cfg(unix)]
     #[must_use]
     pub fn session(id: SessionId) -> Self {
-        Self::Session {
-            id,
-            directory: socket::directory(),
-        }
+        Self::Session { id, directory: socket::directory() }
     }
 }
 
@@ -327,9 +318,7 @@ impl fmt::Debug for Handle {
     /// The address alone: the signal and the task say nothing a reader of a
     /// failed assertion could use.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Handle")
-            .field("address", &self.address)
-            .finish_non_exhaustive()
+        f.debug_struct("Handle").field("address", &self.address).finish_non_exhaustive()
     }
 }
 
@@ -395,9 +384,7 @@ pub async fn serve(engine: Arc<Engine>, config: ServeConfig) -> Result<Handle, S
         Listen::Tcp { hostname, port } => {
             let ip = resolve_hostname(hostname)?;
             if !ip.is_loopback() && config.credentials.is_none() {
-                return Err(ServeError::UnsecuredNonLoopback {
-                    hostname: hostname.clone(),
-                });
+                return Err(ServeError::UnsecuredNonLoopback { hostname: hostname.clone() });
             }
 
             let listener = bind(ip, *port).await?;
@@ -432,11 +419,7 @@ pub async fn serve(engine: Arc<Engine>, config: ServeConfig) -> Result<Handle, S
         Bound::Unix(listener, path) => (Address::Unix(path), spawn_server(listener, app, watch)),
     };
 
-    Ok(Handle {
-        address,
-        shutdown,
-        task,
-    })
+    Ok(Handle { address, shutdown, task })
 }
 
 /// A listener the OS handed back, held beside the truth about where.
@@ -470,9 +453,7 @@ async fn bind_unix(path: &Path) -> Result<Bound, ServeError> {
 
 #[cfg(not(unix))]
 async fn bind_session(directory: &Path, id: &SessionId) -> Result<Bound, ServeError> {
-    let path = socket::candidates(directory, id)
-        .next()
-        .unwrap_or_else(|| directory.to_path_buf());
+    let path = socket::candidates(directory, id).next().unwrap_or_else(|| directory.to_path_buf());
     bind_unix(&path).await
 }
 
@@ -543,9 +524,7 @@ fn resolve_hostname(hostname: &str) -> Result<IpAddr, ServeError> {
         return Ok(IpAddr::V4(Ipv4Addr::LOCALHOST));
     }
 
-    hostname.parse().map_err(|_| ServeError::UnknownHostname {
-        hostname: hostname.to_owned(),
-    })
+    hostname.parse().map_err(|_| ServeError::UnknownHostname { hostname: hostname.to_owned() })
 }
 
 /// Upstream's port policy (`server/server.ts:117-122`): an explicit port is
@@ -566,10 +545,7 @@ async fn try_bind(ip: IpAddr, port: u16) -> Result<TcpListener, ServeError> {
 
     TcpListener::bind(address)
         .await
-        .map_err(|source| ServeError::Bind {
-            address: Address::Tcp(address),
-            source,
-        })
+        .map_err(|source| ServeError::Bind { address: Address::Tcp(address), source })
 }
 
 #[cfg(test)]

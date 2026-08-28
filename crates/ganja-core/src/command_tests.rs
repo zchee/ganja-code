@@ -1,4 +1,5 @@
-use std::{path::Path, sync::Arc};
+use std::path::Path;
+use std::sync::Arc;
 
 use super::{
     Definition, INIT, INIT_TEMPLATE, MAX_COMMAND_FILE_BYTES, PATH_PLACEHOLDER, Registry,
@@ -22,8 +23,7 @@ fn the_init_template_is_upstreams_with_ganjas_identity_and_the_worktree_filled_i
     );
     assert!(init.template.contains("/repo/ganja"));
     assert!(
-        init.template
-            .starts_with("Create or update `AGENTS.md` for this repository."),
+        init.template.starts_with("Create or update `AGENTS.md` for this repository."),
         "the template is upstream's prose, identity substituted: {}",
         init.template
     );
@@ -36,36 +36,20 @@ fn a_template_fills_its_placeholders_the_way_upstream_fills_them() {
         // (template, arguments, expected)
         ("fix $1", "auth", "fix auth"),
         // The highest-numbered placeholder is greedy: `$2` takes the rest.
-        (
-            "fix $1 because $2",
-            "auth it broke again",
-            "fix auth because it broke again",
-        ),
+        ("fix $1 because $2", "auth it broke again", "fix auth because it broke again"),
         // …even when it is not the last one written.
         ("$2 — fix $1", "auth it broke", "it broke — fix auth"),
         // A position past the last token is empty rather than an error.
         ("fix $1 and $2", "auth", "fix auth and"),
         ("focus: $ARGUMENTS", "the tests", "focus: the tests"),
         // Raw and untokenized: quotes survive `$ARGUMENTS`.
-        (
-            r#"focus: $ARGUMENTS"#,
-            r#""two words""#,
-            r#"focus: "two words""#,
-        ),
+        (r#"focus: $ARGUMENTS"#, r#""two words""#, r#"focus: "two words""#),
         // Neither placeholder, so the arguments are appended.
-        (
-            "review the diff",
-            "only src/",
-            "review the diff\n\nonly src/",
-        ),
+        ("review the diff", "only src/", "review the diff\n\nonly src/"),
         // Neither placeholder and no arguments: nothing is appended.
         ("review the diff", "", "review the diff"),
         // A quoted span is one token.
-        (
-            r#"say $1 to $2"#,
-            r#""good morning" world"#,
-            "say good morning to world",
-        ),
+        (r#"say $1 to $2"#, r#""good morning" world"#, "say good morning to world"),
         // A `$` that names nothing is left alone.
         ("costs $5.00 and $x", "", "costs .00 and $x"),
         // Trimmed, as upstream trims.
@@ -97,10 +81,8 @@ fn shell_substitutions_match_complete_nonempty_commands_in_written_order() {
 
     for (text, expected) in cases {
         let matches = shell_substitutions(text);
-        let commands = matches
-            .iter()
-            .map(|substitution| substitution.command.as_str())
-            .collect::<Vec<_>>();
+        let commands =
+            matches.iter().map(|substitution| substitution.command.as_str()).collect::<Vec<_>>();
         assert_eq!(commands, *expected, "scanning {text:?}");
     }
 }
@@ -134,10 +116,7 @@ fn mentions_open_only_at_a_word_boundary_and_require_a_path() {
 
     for (text, expected) in cases {
         let found = mentions(text);
-        let paths = found
-            .iter()
-            .map(|mention| mention.path.as_str())
-            .collect::<Vec<_>>();
+        let paths = found.iter().map(|mention| mention.path.as_str()).collect::<Vec<_>>();
         assert_eq!(paths, *expected, "scanning {text:?}");
     }
 }
@@ -165,10 +144,7 @@ fn a_range_suffix_is_split_only_when_it_parses() {
         ("a.rs#-5", ("a.rs#-5", None, None)),
         ("a.rs#+5", ("a.rs#+5", None, None)),
         // A line number past `u32` is not a line number.
-        (
-            "a.rs#99999999999999999999",
-            ("a.rs#99999999999999999999", None, None),
-        ),
+        ("a.rs#99999999999999999999", ("a.rs#99999999999999999999", None, None)),
     ];
 
     for (mentioned, (path, start, end)) in cases {
@@ -214,25 +190,17 @@ async fn template_expansion_runs_shells_and_attaches_only_files_that_exist() {
     let echoed = command(r#"!`echo hi`"#).expand("", &ctx).await;
     assert_eq!(echoed.prompt, "hi");
 
-    let failed = command(r#"!`printf still-here; exit 7`"#)
-        .expand("", &ctx)
-        .await;
+    let failed = command(r#"!`printf still-here; exit 7`"#).expand("", &ctx).await;
     assert_eq!(
         failed.prompt, "still-here",
         "a non-zero exit still substitutes what the command wrote"
     );
 
-    let attached = command("read @present.md and ask @alice")
-        .expand("", &ctx)
-        .await;
+    let attached = command("read @present.md and ask @alice").expand("", &ctx).await;
     assert_eq!(attached.prompt, "read @present.md and ask @alice");
     assert_eq!(
         attached.mentions,
-        vec![crate::protocol::Mention {
-            path: "present.md".to_owned(),
-            start: None,
-            end: None,
-        }],
+        vec![crate::protocol::Mention { path: "present.md".to_owned(), start: None, end: None }],
         "only the path that exists becomes a file part"
     );
 }
@@ -274,10 +242,7 @@ fn a_command_file_is_its_frontmatter_and_its_body() {
     );
     assert_eq!(review.agent.as_deref(), Some("plan"));
     assert_eq!(review.model.as_deref(), Some("anthropic/claude-sonnet-4-5"));
-    assert_eq!(
-        review.template, "review $ARGUMENTS\n",
-        "the body is the template verbatim"
-    );
+    assert_eq!(review.template, "review $ARGUMENTS\n", "the body is the template verbatim");
     assert_eq!(
         fill_template(&review.template, "src/"),
         "review src/",
@@ -320,30 +285,22 @@ fn frontmatter_tolerates_what_it_does_not_understand() {
         .map(|command| (command.name.as_str(), command.description.as_deref()))
         .collect();
     // D518: the hint also travels on its own slot for the composer.
-    let hinted: Vec<Option<&str>> = commands
-        .iter()
-        .map(|command| command.argument_hint.as_deref())
-        .collect();
+    let hinted: Vec<Option<&str>> =
+        commands.iter().map(|command| command.argument_hint.as_deref()).collect();
     assert!(
         hinted.contains(&Some("<issue>")),
         "the hint slot should carry the file's argument-hint: {hinted:?}"
     );
     assert_eq!(
         described,
-        vec![
-            ("hint", Some("<issue>")),
-            ("kept", Some("quoted, and capitalised")),
-        ],
+        vec![("hint", Some("<issue>")), ("kept", Some("quoted, and capitalised")),],
         "unknown keys, comments and stray lines are skipped, not fatal"
     );
     let kept = commands
         .iter()
         .find(|command| command.name == "kept")
         .expect("the tolerated file is a command");
-    assert_eq!(
-        kept.agent, None,
-        "a key with nothing after it says nothing at all"
-    );
+    assert_eq!(kept.agent, None, "a key with nothing after it says nothing at all");
     assert_eq!(kept.template, "body\n");
 }
 
@@ -352,10 +309,7 @@ fn a_file_this_build_will_not_read_is_skipped_rather_than_half_parsed() {
     let oversized = vec![b'x'; usize::try_from(MAX_COMMAND_FILE_BYTES).expect("a usize") + 1];
     let dir = commands_dir(&[
         // A block that opens and never closes: the header is not a prompt.
-        (
-            "unterminated.md",
-            b"---\ndescription: half a header\nand then a body\n",
-        ),
+        ("unterminated.md", b"---\ndescription: half a header\nand then a body\n"),
         ("binary.md", &[0xff, 0xfe, b'n', 0x00, b'o']),
         ("huge.md", &oversized),
         // Not Markdown, so not meant for this directory.
@@ -367,15 +321,8 @@ fn a_file_this_build_will_not_read_is_skipped_rather_than_half_parsed() {
         .expect("the nested fixture is writable");
 
     let commands = file_commands(dir.path());
-    let names: Vec<&str> = commands
-        .iter()
-        .map(|command| command.name.as_str())
-        .collect();
-    assert_eq!(
-        names,
-        vec!["good"],
-        "every hostile file is absent from the roster: {commands:?}"
-    );
+    let names: Vec<&str> = commands.iter().map(|command| command.name.as_str()).collect();
+    assert_eq!(names, vec!["good"], "every hostile file is absent from the roster: {commands:?}");
 }
 
 #[test]
@@ -413,11 +360,7 @@ async fn a_file_command_expands_through_the_one_expansion_path() {
     assert_eq!(expanded.prompt, "hi about the port beside @present.md");
     assert_eq!(
         expanded.mentions,
-        vec![crate::protocol::Mention {
-            path: "present.md".to_owned(),
-            start: None,
-            end: None,
-        }],
+        vec![crate::protocol::Mention { path: "present.md".to_owned(), start: None, end: None }],
         "a file command attaches what a config command's template would"
     );
 }

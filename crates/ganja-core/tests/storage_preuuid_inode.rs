@@ -20,10 +20,8 @@
 //!
 //! One test, one binary, beside its three `storage_preuuid*` siblings.
 
-use std::{
-    fs, thread,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
+use std::{fs, thread};
 
 use ganja_core::{SessionId, Storage};
 use ganja_testkit::{
@@ -53,11 +51,8 @@ fn a_quarantine_refuses_when_the_inode_moved_under_it() {
         .execute_batch("PRAGMA busy_timeout = 5000; BEGIN IMMEDIATE;")
         .expect("the lock is taken");
 
-    let name = database
-        .file_name()
-        .expect("the database has a name")
-        .to_string_lossy()
-        .into_owned();
+    let name =
+        database.file_name().expect("the database has a name").to_string_lossy().into_owned();
     let aside = database.with_file_name(format!("{name}.preuuid-1755300000000"));
 
     let loser = Storage::open(root.clone());
@@ -78,10 +73,7 @@ fn a_quarantine_refuses_when_the_inode_moved_under_it() {
             if from.exists() {
                 let to = aside.with_file_name(format!(
                     "{}{suffix}",
-                    aside
-                        .file_name()
-                        .expect("the aside path has a name")
-                        .to_string_lossy()
+                    aside.file_name().expect("the aside path has a name").to_string_lossy()
                 ));
                 fs::rename(&from, &to).expect("the winner sets the old store aside");
             }
@@ -99,9 +91,7 @@ fn a_quarantine_refuses_when_the_inode_moved_under_it() {
         // synchroniser exists — SQLite exposes no waiting-on-lock signal — so
         // the timestamp pair is the honest minimum.
         let freed_at = Instant::now();
-        blocker
-            .execute_batch("COMMIT")
-            .expect("the lock is released");
+        blocker.execute_batch("COMMIT").expect("the lock is released");
         let (returned_at, listed) = parked.join().expect("the parked store does not panic");
 
         (freed_at, returned_at, listed)
@@ -124,10 +114,7 @@ fn a_quarantine_refuses_when_the_inode_moved_under_it() {
     // *unreadable* database — and this drill never reaches it.
     let listed = listed.expect("the parked store opens rather than failing");
     assert_eq!(
-        listed
-            .iter()
-            .map(|info| info.id.as_str())
-            .collect::<Vec<_>>(),
+        listed.iter().map(|info| info.id.as_str()).collect::<Vec<_>>(),
         vec![NEW],
         "the loser must go on with the store that replaced the one it had open"
     );
@@ -144,14 +131,7 @@ fn a_quarantine_refuses_when_the_inode_moved_under_it() {
     // a guard that fired for the wrong reason would leave an empty file here.
     let kept = Connection::open(&aside).expect("the set-aside store opens like any other database");
     let held: i64 = kept
-        .query_row(
-            "SELECT COUNT(*) FROM session WHERE id = ?1",
-            [PRE_UUID_ID],
-            |row| row.get(0),
-        )
+        .query_row("SELECT COUNT(*) FROM session WHERE id = ?1", [PRE_UUID_ID], |row| row.get(0))
         .expect("the set-aside store still answers");
-    assert_eq!(
-        held, 1,
-        "the set-aside store is the one that held the old ids"
-    );
+    assert_eq!(held, 1, "the set-aside store is the one that held the old ids");
 }

@@ -27,15 +27,11 @@
 use std::{env, fs};
 
 use futures::StreamExt as _;
-use ganja_core::{
-    catalog,
-    protocol::Message,
-    provider::{ChatRequest, OpencodeProvider, Provider, ProviderError, opencode},
-};
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::TcpListener,
-};
+use ganja_core::catalog;
+use ganja_core::protocol::Message;
+use ganja_core::provider::{ChatRequest, OpencodeProvider, Provider, ProviderError, opencode};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 /// The key every turn here presents. Nothing may render it; what the
@@ -147,10 +143,7 @@ async fn one_turn(listener: &TcpListener, model: &str, body: &'static str) -> St
         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     );
-    socket
-        .write_all(response.as_bytes())
-        .await
-        .expect("the reply is writable");
+    socket.write_all(response.as_bytes()).await.expect("the reply is writable");
     socket.flush().await.expect("the reply flushes");
     drop(socket);
 
@@ -222,18 +215,12 @@ async fn the_catalogs_transport_hint_picks_the_wire_and_the_wire_picks_the_heade
         "both gateways' rows landed under their own ids"
     );
 
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("loopback is bindable");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("loopback is bindable");
     // Shaped like the real thing, `/v1` and all: the three wires disagree about
     // where that segment lives, and a bare host would hide the disagreement
     // rather than test it.
-    let base = format!(
-        "http://{}/zen/v1",
-        listener
-            .local_addr()
-            .expect("a bound socket has an address")
-    );
+    let base =
+        format!("http://{}/zen/v1", listener.local_addr().expect("a bound socket has an address"));
     let zen = OpencodeProvider::at(opencode::ZEN_ID, &base, KEY).expect("loopback may carry a key");
     let go = OpencodeProvider::at(opencode::GO_ID, &base, KEY).expect("loopback may carry a key");
 
@@ -320,8 +307,5 @@ async fn the_catalogs_transport_hint_picks_the_wire_and_the_wire_picks_the_heade
     // Nothing connected for the refusal: a further accept would have to wait
     // for a client that never came.
     let idle = tokio::time::timeout(std::time::Duration::from_millis(150), listener.accept()).await;
-    assert!(
-        idle.is_err(),
-        "a refused dialect must not reach the network at all"
-    );
+    assert!(idle.is_err(), "a refused dialect must not reach the network at all");
 }

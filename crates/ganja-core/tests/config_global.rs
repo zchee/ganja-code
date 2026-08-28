@@ -15,11 +15,9 @@
 
 use std::{env, fs};
 
-use ganja_core::{
-    Config, ConfigError, Overrides,
-    config::{CONFIG_ENV, LEGACY_FILES},
-    provider::{self, fake},
-};
+use ganja_core::config::{CONFIG_ENV, LEGACY_FILES};
+use ganja_core::provider::{self, fake};
+use ganja_core::{Config, ConfigError, Overrides};
 
 #[test]
 fn a_legacy_file_in_the_global_home_is_refused_by_path() {
@@ -52,18 +50,12 @@ fn a_legacy_file_in_the_global_home_is_refused_by_path() {
 
     let config = Config::load_with(&project, &Overrides::default())
         .expect("a global home holding only the config it reads loads");
-    assert_eq!(
-        config.model.as_deref(),
-        Some(format!("{}/toml-model", fake::ID).as_str())
-    );
+    assert_eq!(config.model.as_deref(), Some(format!("{}/toml-model", fake::ID).as_str()));
 
     for name in LEGACY_FILES {
         let legacy = global.join(name);
-        fs::write(
-            &legacy,
-            format!(r#"{{ "model": "{}/old-model" }}"#, fake::ID),
-        )
-        .expect("the fixture file is writable");
+        fs::write(&legacy, format!(r#"{{ "model": "{}/old-model" }}"#, fake::ID))
+            .expect("the fixture file is writable");
 
         let error = Config::load_with(&project, &Overrides::default())
             .expect_err("a file in the old format is answered for, not skipped");

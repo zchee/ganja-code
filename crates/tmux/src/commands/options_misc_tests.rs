@@ -113,15 +113,7 @@ fn the_window_scoped_pair_carries_its_own_smaller_flag_set() {
                 .target("@1")
                 .option("pane-border-status")
         ),
-        [
-            "show-window-options",
-            "-g",
-            "-v",
-            "-t",
-            "@1",
-            "--",
-            "pane-border-status",
-        ],
+        ["show-window-options", "-g", "-v", "-t", "@1", "--", "pane-border-status",],
         "this command has no -A, so an inherited read goes through show-options -w"
     );
 }
@@ -161,24 +153,8 @@ fn set_hook_renders_every_flag_it_has() {
 #[test]
 fn show_hooks_can_list_subscriptions_instead() {
     assert_eq!(
-        words(
-            &ShowHooks::new()
-                .global()
-                .pane()
-                .window()
-                .target("%1")
-                .hook("pane-exited")
-        ),
-        [
-            "show-hooks",
-            "-g",
-            "-p",
-            "-w",
-            "-t",
-            "%1",
-            "--",
-            "pane-exited",
-        ]
+        words(&ShowHooks::new().global().pane().window().target("%1").hook("pane-exited")),
+        ["show-hooks", "-g", "-p", "-w", "-t", "%1", "--", "pane-exited",]
     );
 }
 
@@ -223,16 +199,7 @@ fn show_environment_renders_every_flag_it_has() {
                 .target("work")
                 .variable("GANJA_AGENT_ID")
         ),
-        [
-            "show-environment",
-            "-g",
-            "-h",
-            "-s",
-            "-t",
-            "work",
-            "--",
-            "GANJA_AGENT_ID",
-        ]
+        ["show-environment", "-g", "-h", "-s", "-t", "work", "--", "GANJA_AGENT_ID",]
     );
 }
 
@@ -251,29 +218,13 @@ fn copy_mode_renders_every_flag_it_has() {
                 .source("%2")
                 .target("%1")
         ),
-        [
-            "copy-mode",
-            "-d",
-            "-e",
-            "-H",
-            "-M",
-            "-q",
-            "-S",
-            "-u",
-            "-s",
-            "%2",
-            "-t",
-            "%1",
-        ]
+        ["copy-mode", "-d", "-e", "-H", "-M", "-q", "-S", "-u", "-s", "%2", "-t", "%1",]
     );
 }
 
 #[test]
 fn clock_mode_names_only_a_pane() {
-    assert_eq!(
-        words(&ClockMode::new().target("%1")),
-        ["clock-mode", "-t", "%1"]
-    );
+    assert_eq!(words(&ClockMode::new().target("%1")), ["clock-mode", "-t", "%1"]);
 }
 
 #[test]
@@ -425,18 +376,7 @@ fn source_file_takes_one_path_per_call_in_that_order() {
                 .path("/etc/tmux.conf")
                 .path("~/.tmux.conf")
         ),
-        [
-            "source-file",
-            "-F",
-            "-n",
-            "-q",
-            "-v",
-            "-t",
-            "%1",
-            "--",
-            "/etc/tmux.conf",
-            "~/.tmux.conf",
-        ],
+        ["source-file", "-F", "-n", "-q", "-v", "-t", "%1", "--", "/etc/tmux.conf", "~/.tmux.conf",],
         "tmux reads `path ...`, so a second file is another word rather than a replacement"
     );
 }
@@ -512,16 +452,11 @@ fn wait_for_renders_every_flag_it_has() {
 #[cfg(unix)]
 #[test]
 fn an_environment_value_outside_utf8_survives_into_argv_byte_for_byte() {
-    use std::{
-        ffi::OsString,
-        os::unix::ffi::{OsStrExt as _, OsStringExt as _},
-    };
+    use std::ffi::OsString;
+    use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
 
     let value = OsString::from_vec(b"/tmp/a\x80b".to_vec());
-    let argv = SetEnvironment::new()
-        .variable("GANJA_PATH")
-        .value(value)
-        .args();
+    let argv = SetEnvironment::new().variable("GANJA_PATH").value(value).args();
     assert_eq!(
         argv.last().map(|word| word.as_bytes()),
         Some(&b"/tmp/a\x80b"[..]),

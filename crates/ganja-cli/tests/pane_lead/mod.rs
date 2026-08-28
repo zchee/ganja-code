@@ -29,11 +29,9 @@
 
 #![allow(dead_code)]
 
-use std::{
-    path::Path,
-    process::Command,
-    time::{Duration, Instant},
-};
+use std::path::Path;
+use std::process::Command;
+use std::time::{Duration, Instant};
 
 pub use ganja_testkit::Homes;
 use ganja_testkit::tmux::{PrivateServer, require_tmux};
@@ -147,8 +145,7 @@ impl Lead {
 
     /// Types `line` into the lead and presses Enter.
     pub fn type_line(&self, line: &str) {
-        self.server
-            .run(&["send-keys", "-t", &self.pane, "-l", line]);
+        self.server.run(&["send-keys", "-t", &self.pane, "-l", line]);
         self.server.run(&["send-keys", "-t", &self.pane, "Enter"]);
     }
 
@@ -218,10 +215,8 @@ impl Lead {
 
 /// The command line of the process `pid`, as `ps(1)` shows it to everybody.
 pub fn argv_of(pid: u32) -> String {
-    let output = Command::new("ps")
-        .args(["-o", "args=", "-p", &pid.to_string()])
-        .output()
-        .expect("ps runs");
+    let output =
+        Command::new("ps").args(["-o", "args=", "-p", &pid.to_string()]).output().expect("ps runs");
 
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
@@ -241,7 +236,5 @@ pub fn wait_for<T>(what: &str, mut look: impl FnMut() -> Option<T>) -> T {
 /// `text` as one `sh` word, by the same crate the production launch line
 /// rides.
 fn shell_quote(text: &str) -> String {
-    shlex::try_quote(text)
-        .expect("no NUL rides a test's window command")
-        .into_owned()
+    shlex::try_quote(text).expect("no NUL rides a test's window command").into_owned()
 }

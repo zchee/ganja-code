@@ -37,10 +37,7 @@ fn every_lock_is_released_even_when_the_write_fails() {
         matches!(refusal, mailbox::MailboxError::Io(_)),
         "the failure lands inside the hold, not before it: {refusal:?}",
     );
-    assert!(
-        !support::naive_lock_of(&wedged).exists(),
-        "a failed write gave its lock back",
-    );
+    assert!(!support::naive_lock_of(&wedged).exists(), "a failed write gave its lock back",);
 
     // The same claim for the refusal that never reaches the disk at all: a
     // message refused on its way in — here for a passthrough key the schema
@@ -48,26 +45,15 @@ fn every_lock_is_released_even_when_the_write_fails() {
     let refused = support::inbox_of(&root, &team, "refused");
     mailbox::write(&refused, support::message("kept")).expect("a message writes");
     let mut shadowing = support::message("impostor");
-    shadowing
-        .extra
-        .insert("text".to_owned(), json!("a second body"));
+    shadowing.extra.insert("text".to_owned(), json!("a second body"));
     mailbox::write(&refused, shadowing).expect_err("a shadowed schema key is refused");
-    assert!(
-        !support::naive_lock_of(&refused).exists(),
-        "a refused write left no hold behind",
-    );
+    assert!(!support::naive_lock_of(&refused).exists(), "a refused write left no hold behind",);
 
     // And the ordinary path, which is what proves the assertions above are not
     // passing because nothing ever took a lock in this process.
     mailbox::write(&refused, support::message("also kept"))
         .expect("the inbox was never wedged by the refusals above");
-    assert_eq!(
-        mailbox::read(&refused)
-            .expect("the inbox reads")
-            .valid
-            .len(),
-        2
-    );
+    assert_eq!(mailbox::read(&refused).expect("the inbox reads").valid.len(), 2);
     assert!(
         !support::naive_lock_of(&refused).exists(),
         "a successful write gave its lock back too",

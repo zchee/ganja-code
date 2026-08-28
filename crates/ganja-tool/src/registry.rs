@@ -109,10 +109,8 @@
 //!   the day it leads one, its bind needs this lifecycle (a filed bead
 //!   holds the question).
 
-use std::{
-    io,
-    path::{Path, PathBuf},
-};
+use std::io;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -250,10 +248,7 @@ pub fn list(directory: &Path) -> io::Result<Vec<Registered>> {
         let Some(name) = name.to_str() else {
             continue;
         };
-        let Some(stem) = name
-            .strip_suffix(EXTENSION)
-            .and_then(|it| it.strip_suffix('.'))
-        else {
+        let Some(stem) = name.strip_suffix(EXTENSION).and_then(|it| it.strip_suffix('.')) else {
             continue;
         };
         if !socket::is_session_stem(stem) {
@@ -307,10 +302,7 @@ pub fn list(directory: &Path) -> io::Result<Vec<Registered>> {
             }
         };
 
-        records.push(Registered {
-            stem: stem.to_owned(),
-            record,
-        });
+        records.push(Registered { stem: stem.to_owned(), record });
     }
     records.sort_by(|left, right| left.stem.cmp(&right.stem));
 
@@ -513,17 +505,9 @@ pub fn sanitize(candidate: &str) -> String {
             !point.is_whitespace() && !point.is_control() && *point != '@' && *point != ':'
         })
         .collect();
-    let kept: String = kept
-        .trim_start_matches('/')
-        .chars()
-        .take(MOST_NAME_POINTS)
-        .collect();
+    let kept: String = kept.trim_start_matches('/').chars().take(MOST_NAME_POINTS).collect();
 
-    if vet_name(&kept).is_err() {
-        FALLBACK_NAME.to_owned()
-    } else {
-        kept
-    }
+    if vet_name(&kept).is_err() { FALLBACK_NAME.to_owned() } else { kept }
 }
 
 /// The one name-comparison predicate, shared by the collision scan, the

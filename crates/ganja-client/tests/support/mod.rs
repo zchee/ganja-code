@@ -13,16 +13,12 @@
 // Compiled once per binary, and each binary uses its own subset.
 #![allow(dead_code)]
 
-use std::{
-    path::PathBuf,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use tokio::{
-    io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _},
-    net::TcpListener,
-};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
+use tokio::net::TcpListener;
 
 /// How long any single wait may take before the fixture is declared broken.
 pub const DEADLINE: Duration = Duration::from_secs(30);
@@ -57,10 +53,7 @@ pub enum Reply {
 impl Reply {
     /// A `200` carrying `body`.
     pub fn ok(body: impl Into<String>) -> Self {
-        Self::Json {
-            status: 200,
-            body: body.into(),
-        }
+        Self::Json { status: 200, body: body.into() }
     }
 }
 
@@ -92,13 +85,9 @@ impl Stub {
     pub async fn answering(
         answer: impl Fn(&Recorded) -> Reply + Send + Sync + 'static,
     ) -> Arc<Self> {
-        let listener = TcpListener::bind(("127.0.0.1", 0))
-            .await
-            .expect("a loopback port is bindable");
-        let address = format!(
-            "http://{}",
-            listener.local_addr().expect("the bound address reads")
-        );
+        let listener =
+            TcpListener::bind(("127.0.0.1", 0)).await.expect("a loopback port is bindable");
+        let address = format!("http://{}", listener.local_addr().expect("the bound address reads"));
         let received = Arc::new(Mutex::new(Vec::new()));
 
         let answer = Arc::new(answer);
@@ -118,12 +107,7 @@ impl Stub {
             }
         });
 
-        Arc::new(Self {
-            address,
-            socket: None,
-            received,
-            task,
-        })
+        Arc::new(Self { address, socket: None, received, task })
     }
 
     /// Binds a Unix socket in the temp directory and answers every request
@@ -163,12 +147,7 @@ impl Stub {
             }
         });
 
-        Arc::new(Self {
-            address: path.display().to_string(),
-            socket: Some(path),
-            received,
-            task,
-        })
+        Arc::new(Self { address: path.display().to_string(), socket: Some(path), received, task })
     }
 
     /// A stub that answers the same document to everything.
@@ -198,10 +177,7 @@ impl Stub {
 
     /// Every request it has received, in order.
     pub fn received(&self) -> Vec<Recorded> {
-        self.received
-            .lock()
-            .expect("the request log is never poisoned")
-            .clone()
+        self.received.lock().expect("the request log is never poisoned").clone()
     }
 
     /// The one request it received, which is what most suites assert about.
@@ -222,10 +198,7 @@ async fn serve_one<S: AsyncRead + AsyncWrite + Unpin>(
     let Some(request) = read_request(&mut socket).await else {
         return;
     };
-    received
-        .lock()
-        .expect("the request log is never poisoned")
-        .push(request.clone());
+    received.lock().expect("the request log is never poisoned").push(request.clone());
 
     match answer(&request) {
         Reply::Json { status, body } => {
@@ -238,9 +211,7 @@ async fn serve_one<S: AsyncRead + AsyncWrite + Unpin>(
             let _ = socket.write_all(body.as_bytes()).await;
         }
         Reply::Accepted => {
-            let _ = socket
-                .write_all(b"HTTP/1.1 204 No Content\r\nconnection: close\r\n\r\n")
-                .await;
+            let _ = socket.write_all(b"HTTP/1.1 204 No Content\r\nconnection: close\r\n\r\n").await;
         }
         Reply::Stream { chunks } => {
             // No content-length and no chunked encoding: the body ends when

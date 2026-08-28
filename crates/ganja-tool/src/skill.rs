@@ -73,19 +73,15 @@
 //!   writes and the shape upstream's own permissive fallback exists to rescue
 //!   (`config/markdown.ts:20-33`).
 
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::{
-    Tool, ToolCtx, ToolError, ToolOutput,
-    frontmatter::{fields, split},
-};
+use crate::frontmatter::{fields, split};
+use crate::{Tool, ToolCtx, ToolError, ToolOutput};
 
 /// The file that makes a directory a skill.
 const MANIFEST: &str = "SKILL.md";
@@ -289,9 +285,7 @@ impl SkillTool {
     /// which agents a session may spawn.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            roots: Roots::none(),
-        }
+        Self { roots: Roots::none() }
     }
 
     /// The tool over exactly `roots`.
@@ -328,10 +322,7 @@ impl Tool for SkillTool {
     }
 
     fn describe(&self, args: &serde_json::Value) -> String {
-        let name = args
-            .get("name")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
+        let name = args.get("name").and_then(serde_json::Value::as_str).unwrap_or_default();
 
         format!("skill {name}")
     }
@@ -375,11 +366,7 @@ pub fn not_found(name: &str, skills: &[Skill]) -> String {
 
     format!(
         "Skill \"{name}\" not found. Available skills: {}",
-        if available.is_empty() {
-            "none".to_owned()
-        } else {
-            available.join(", ")
-        }
+        if available.is_empty() { "none".to_owned() } else { available.join(", ") }
     )
 }
 
@@ -440,10 +427,7 @@ pub fn requested_in(text: &str, skills: &[Skill]) -> Vec<String> {
 /// `$` expansion alike.
 #[must_use]
 pub fn base_dir(skill: &Skill) -> PathBuf {
-    skill
-        .location
-        .parent()
-        .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
+    skill.location.parent().map_or_else(|| PathBuf::from("."), Path::to_path_buf)
 }
 
 /// The root `skill` was found under, for a listing that names where each
@@ -455,12 +439,7 @@ pub fn base_dir(skill: &Skill) -> PathBuf {
 /// no root prefixes, which only a hand-built [`Skill`] can be.
 #[must_use]
 pub fn origin<'a>(roots: &'a Roots, skill: &Skill) -> Option<&'a Path> {
-    roots
-        .dirs()
-        .iter()
-        .rev()
-        .find(|dir| skill.location.starts_with(dir))
-        .map(PathBuf::as_path)
+    roots.dirs().iter().rev().find(|dir| skill.location.starts_with(dir)).map(PathBuf::as_path)
 }
 
 /// What a loaded skill hands the model (`tool/skill.ts:45-61`).
@@ -471,10 +450,8 @@ pub fn origin<'a>(roots: &'a Roots, skill: &Skill) -> Option<&'a Path> {
 /// two spellings of one body. Share it; never copy it.
 #[must_use]
 pub fn rendered(skill: &Skill, dir: &Path) -> String {
-    let files: Vec<String> = beside(dir)
-        .iter()
-        .map(|path| format!("<file>{}</file>", path.display()))
-        .collect();
+    let files: Vec<String> =
+        beside(dir).iter().map(|path| format!("<file>{}</file>", path.display())).collect();
 
     [
         format!("<skill_content name=\"{}\">", skill.name),

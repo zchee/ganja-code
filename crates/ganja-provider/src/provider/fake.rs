@@ -42,28 +42,20 @@
 //! for, loudly, with the reason: falling back to the canned reply would leave a
 //! demo silently proving nothing.
 
-use std::{
-    path::{Path, PathBuf},
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::Duration,
-};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::{
-    StreamExt as _,
-    stream::{self, BoxStream},
-};
+use futures::StreamExt as _;
+use futures::stream::{self, BoxStream};
 use serde::Deserialize;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    protocol::{FinishReason, Part, Usage},
-    provider::{ChatRequest, Provider, ProviderError, ProviderEvent, setting},
-};
+use crate::protocol::{FinishReason, Part, Usage};
+use crate::provider::{ChatRequest, Provider, ProviderError, ProviderEvent, setting};
 
 /// Value of [`PROVIDER_ENV`](super::PROVIDER_ENV) that selects this provider.
 pub const ID: &str = "fake";
@@ -120,10 +112,7 @@ pub struct FakeProvider {
 impl Default for FakeProvider {
     /// Plays the script [`SCRIPT_ENV`] names, or `REPLY` when it names none.
     fn default() -> Self {
-        Self {
-            script: setting(SCRIPT_ENV).map(PathBuf::from),
-            ..Self::new(REPLY, CADENCE)
-        }
+        Self { script: setting(SCRIPT_ENV).map(PathBuf::from), ..Self::new(REPLY, CADENCE) }
     }
 }
 
@@ -147,10 +136,7 @@ impl FakeProvider {
     /// Every request this provider has been asked so far, oldest first.
     #[must_use]
     pub fn recorded(&self) -> Vec<ChatRequest> {
-        self.recorded
-            .lock()
-            .expect("the request log is never poisoned")
-            .clone()
+        self.recorded.lock().expect("the request log is never poisoned").clone()
     }
 
     /// Plays the script at `path` instead of the canned reply.
@@ -172,10 +158,7 @@ impl FakeProvider {
             .iter()
             .cloned()
             .map(ProviderEvent::TextDelta)
-            .chain([
-                ProviderEvent::Usage(usage),
-                ProviderEvent::Finish(FinishReason::Completed),
-            ])
+            .chain([ProviderEvent::Usage(usage), ProviderEvent::Finish(FinishReason::Completed)])
             .collect()
     }
 
@@ -198,24 +181,16 @@ impl FakeProvider {
         let index = self.requests.fetch_add(1, Ordering::Relaxed);
 
         let (thinking, text, calls) = match script.turns.get(index) {
-            Some(turn) => (
-                turn.thinking.as_str(),
-                turn.text.as_str(),
-                turn.tool_calls.as_slice(),
-            ),
+            Some(turn) => (turn.thinking.as_str(), turn.text.as_str(), turn.tool_calls.as_slice()),
             None => ("", EXHAUSTED, &[][..]),
         };
 
         // The thought first, as a model streams it; counted towards nothing,
         // the way the engine's own meter counts readable thinking.
-        let mut events: Vec<ProviderEvent> = split_into_chunks(thinking)
-            .into_iter()
-            .map(ProviderEvent::ReasoningDelta)
-            .collect();
-        let replies: Vec<ProviderEvent> = split_into_chunks(text)
-            .into_iter()
-            .map(ProviderEvent::TextDelta)
-            .collect();
+        let mut events: Vec<ProviderEvent> =
+            split_into_chunks(thinking).into_iter().map(ProviderEvent::ReasoningDelta).collect();
+        let replies: Vec<ProviderEvent> =
+            split_into_chunks(text).into_iter().map(ProviderEvent::TextDelta).collect();
         let fragments = replies.len();
         events.extend(replies);
 
@@ -224,25 +199,16 @@ impl FakeProvider {
         // on it, and a turn is several requests once tools are in play. `take`
         // rather than a slice, because a request past the end of the script has
         // an index past the end of the turns.
-        let first = 1 + script
-            .turns
-            .iter()
-            .take(index)
-            .map(|turn| turn.tool_calls.len())
-            .sum::<usize>();
+        let first =
+            1 + script.turns.iter().take(index).map(|turn| turn.tool_calls.len()).sum::<usize>();
 
         for (offset, call) in calls.iter().enumerate() {
             let id = format!("call_{}", first + offset);
 
-            events.push(ProviderEvent::ToolCallStart {
-                id: id.clone(),
-                name: call.name.clone(),
-            });
+            events.push(ProviderEvent::ToolCallStart { id: id.clone(), name: call.name.clone() });
             events.extend(
-                fragmented(&call.args).map(|json| ProviderEvent::ToolCallDelta {
-                    id: id.clone(),
-                    json,
-                }),
+                fragmented(&call.args)
+                    .map(|json| ProviderEvent::ToolCallDelta { id: id.clone(), json }),
             );
             events.push(ProviderEvent::ToolCallEnd { id });
         }
@@ -254,12 +220,7 @@ impl FakeProvider {
         }));
         events.push(ProviderEvent::Finish(FinishReason::Completed));
 
-        Ok((
-            events,
-            script
-                .cadence_ms
-                .map_or(self.cadence, Duration::from_millis),
-        ))
+        Ok((events, script.cadence_ms.map_or(self.cadence, Duration::from_millis)))
     }
 }
 
@@ -285,10 +246,7 @@ impl Provider for FakeProvider {
             Some(path) => self.scripted(path, &request).await?,
             None => (self.canned(&request), self.cadence),
         };
-        self.recorded
-            .lock()
-            .expect("the request log is never poisoned")
-            .push(request);
+        self.recorded.lock().expect("the request log is never poisoned").push(request);
 
         // Ending the stream on cancel is what a real provider does when its
         // response body is dropped; the engine stops the turn either way, but
@@ -389,10 +347,8 @@ impl Script {
 /// provider.
 fn fragmented(args: &Value) -> impl Iterator<Item = String> {
     let json = serde_json::to_string(args).expect("a serde_json::Value always serializes");
-    let middle = json
-        .char_indices()
-        .nth(json.chars().count() / 2)
-        .map_or(json.len(), |(offset, _)| offset);
+    let middle =
+        json.char_indices().nth(json.chars().count() / 2).map_or(json.len(), |(offset, _)| offset);
 
     if middle == 0 {
         return vec![json].into_iter();

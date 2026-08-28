@@ -1,8 +1,6 @@
 use super::{CompatProvider, Dialect};
-use crate::{
-    catalog,
-    provider::{CredentialSource, PROVIDERS, Presented, Provider as _, ProviderError},
-};
+use crate::catalog;
+use crate::provider::{CredentialSource, PROVIDERS, Presented, Provider as _, ProviderError};
 
 /// A credential that must never be rendered by anything here.
 const CANARY: &str = "sk-test-canary-XYZ";
@@ -21,18 +19,12 @@ fn built(dialect: Dialect, base_url: &str) -> Result<CompatProvider, ProviderErr
 /// gated and disclosed by the name its provider reports.
 #[test]
 fn a_config_named_provider_answers_to_the_name_its_entry_was_written_under() {
-    for dialect in [
-        Dialect::OpenaiChatCompletions,
-        Dialect::OpenaiResponses,
-        Dialect::AnthropicMessages,
-    ] {
+    for dialect in
+        [Dialect::OpenaiChatCompletions, Dialect::OpenaiResponses, Dialect::AnthropicMessages]
+    {
         let provider = built(dialect, "http://127.0.0.1:8080/v1").expect("a client builds");
 
-        assert_eq!(
-            provider.id(),
-            "local-llama",
-            "{dialect:?} reported the wire it borrows"
-        );
+        assert_eq!(provider.id(), "local-llama", "{dialect:?} reported the wire it borrows");
         assert!(
             !PROVIDERS.contains(&provider.id()),
             "the config tier is what makes this selectable, not the builtin list"
@@ -50,17 +42,12 @@ fn a_config_named_provider_answers_to_the_name_its_entry_was_written_under() {
 /// a provider becomes.
 #[test]
 fn a_configured_endpoint_may_carry_a_key_only_where_a_builtin_one_could() {
-    for dialect in [
-        Dialect::OpenaiChatCompletions,
-        Dialect::OpenaiResponses,
-        Dialect::AnthropicMessages,
-    ] {
+    for dialect in
+        [Dialect::OpenaiChatCompletions, Dialect::OpenaiResponses, Dialect::AnthropicMessages]
+    {
         let refused = built(dialect, "http://gateway.example/v1")
             .expect_err("plain http to a public host puts the key on the wire in the clear");
-        assert!(
-            matches!(refused, ProviderError::Transport(_)),
-            "{dialect:?}: {refused:?}"
-        );
+        assert!(matches!(refused, ProviderError::Transport(_)), "{dialect:?}: {refused:?}");
 
         let provider = built(dialect, "https://ganja:secret@gateway.example/v1")
             .expect("https is where a key may travel");

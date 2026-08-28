@@ -11,17 +11,14 @@
 //! reverting and storing are [`crate::app::App`]'s, because they touch state
 //! the dialog does not own — the same split the sessions picker uses.
 
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    text::{Line, Text},
-    widgets::{Block, Clear, Paragraph, Widget as _},
-};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::text::{Line, Text};
+use ratatui::widgets::{Block, Clear, Paragraph, Widget as _};
 
-use crate::{
-    component::{chat::clip, clamped, first_visible, modal},
-    theme::Theme,
-};
+use crate::component::chat::clip;
+use crate::component::{clamped, first_visible, modal};
+use crate::theme::Theme;
 
 /// What marks the row the cursor is on, and what pads every other row so the
 /// names stay in one column.
@@ -61,11 +58,7 @@ impl ThemeList {
     pub fn new(names: Vec<String>, active: &str) -> Self {
         let selected = names.iter().position(|name| name == active).unwrap_or(0);
 
-        Self {
-            names,
-            selected,
-            initial: active.to_owned(),
-        }
+        Self { names, selected, initial: active.to_owned() }
     }
 
     /// The theme under the cursor, or [`None`] when there is nothing to pick.
@@ -127,11 +120,7 @@ impl ThemeList {
                 // gives the contrast rule something to answer.
                 Line::styled(
                     format!("{row:<width$}"),
-                    if index == self.selected {
-                        theme.selection
-                    } else {
-                        theme.fg
-                    },
+                    if index == self.selected { theme.selection } else { theme.fg },
                 )
             })
             .collect()

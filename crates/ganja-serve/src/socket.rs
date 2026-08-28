@@ -119,16 +119,15 @@ pub(crate) use unix::{PeerChecked, bind_path, bind_session};
 
 #[cfg(unix)]
 mod unix {
-    use std::{
-        fs, io,
-        os::unix::fs::{FileTypeExt as _, OpenOptionsExt as _, PermissionsExt as _},
-        path::{Path, PathBuf},
-    };
+    use std::os::unix::fs::{FileTypeExt as _, OpenOptionsExt as _, PermissionsExt as _};
+    use std::path::{Path, PathBuf};
+    use std::{fs, io};
 
     use axum::serve::Listener;
     use ganja_core::tool::socket::{SOCKET_MODE, uid};
     use ganja_protocol::SessionId;
-    use tokio::net::{UnixListener, UnixStream, unix::SocketAddr};
+    use tokio::net::unix::SocketAddr;
+    use tokio::net::{UnixListener, UnixStream};
 
     use super::{candidates, lock_path, peer_allowed};
     use crate::{Address, ServeError};
@@ -193,10 +192,7 @@ mod unix {
             // `storage::QuarantineLock` takes the blocking half of the same
             // family for the same reason.
             match file.try_lock() {
-                Ok(()) => Ok(Some(Self {
-                    _file: file,
-                    socket: socket.to_path_buf(),
-                })),
+                Ok(()) => Ok(Some(Self { _file: file, socket: socket.to_path_buf() })),
                 Err(fs::TryLockError::WouldBlock) => Ok(None),
                 Err(fs::TryLockError::Error(error)) => Err(error),
             }
@@ -290,9 +286,7 @@ mod unix {
         // Every prefix down to the whole id is answering — the id itself is
         // already served. Unreachable short of one session bound at every one
         // of its names, and answered rather than looped past.
-        Err(ServeError::SocketInUse {
-            path: last.unwrap_or_else(|| directory.to_path_buf()),
-        })
+        Err(ServeError::SocketInUse { path: last.unwrap_or_else(|| directory.to_path_buf()) })
     }
 
     /// Binds exactly `path`: its directory prepared and checked, its name's
@@ -301,10 +295,8 @@ mod unix {
     /// `0600`. `EADDRINUSE` from the bind itself is unreachable under the
     /// lock and is reported as the plain bind failure it would be.
     pub(crate) async fn bind_path(path: &Path) -> Result<PeerChecked, ServeError> {
-        let bind_error = |source| ServeError::Bind {
-            address: Address::Unix(path.to_path_buf()),
-            source,
-        };
+        let bind_error =
+            |source| ServeError::Bind { address: Address::Unix(path.to_path_buf()), source };
         let directory = path.parent().ok_or_else(|| {
             bind_error(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -312,12 +304,9 @@ mod unix {
             ))
         })?;
         prepare_directory(directory)?;
-        let lock =
-            NameLock::claim(path)
-                .map_err(bind_error)?
-                .ok_or_else(|| ServeError::SocketInUse {
-                    path: path.to_path_buf(),
-                })?;
+        let lock = NameLock::claim(path)
+            .map_err(bind_error)?
+            .ok_or_else(|| ServeError::SocketInUse { path: path.to_path_buf() })?;
         lock.unlink_stale().map_err(bind_error)?;
 
         let listener = UnixListener::bind(path).map_err(bind_error)?;
@@ -330,11 +319,7 @@ mod unix {
             return Err(bind_error(source));
         }
 
-        Ok(PeerChecked {
-            listener,
-            uid: uid(),
-            _lock: lock,
-        })
+        Ok(PeerChecked { listener, uid: uid(), _lock: lock })
     }
 
     /// [`ganja_core::tool::socket::prepare_directory`] in the vocabulary this
@@ -347,10 +332,7 @@ mod unix {
     /// cannot move down, and nothing about it needs to.
     fn prepare_directory(directory: &Path) -> Result<(), ServeError> {
         ganja_core::tool::socket::prepare_directory(directory).map_err(|reason| {
-            ServeError::UnsafeSocketDirectory {
-                path: directory.to_path_buf(),
-                reason,
-            }
+            ServeError::UnsafeSocketDirectory { path: directory.to_path_buf(), reason }
         })
     }
 
@@ -359,10 +341,8 @@ mod unix {
         use std::os::unix::fs::PermissionsExt as _;
 
         use axum::serve::Listener as _;
-        use tokio::{
-            io::{AsyncReadExt as _, AsyncWriteExt as _},
-            net::{UnixListener, UnixStream},
-        };
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use tokio::net::{UnixListener, UnixStream};
 
         use super::{NameLock, PeerChecked, uid};
 
@@ -380,9 +360,8 @@ mod unix {
                 .tempdir()
                 .expect("a private directory");
             let path = directory.path().join("0198c1a2.sock");
-            let lock = NameLock::claim(&path)
-                .expect("the lock file opens")
-                .expect("a fresh name is free");
+            let lock =
+                NameLock::claim(&path).expect("the lock file opens").expect("a fresh name is free");
             let mut checked = PeerChecked {
                 listener: UnixListener::bind(&path).expect("a socket binds"),
                 // Every peer this test can produce is refused by this.
@@ -396,9 +375,7 @@ mod unix {
                         .await;
                 (checked, accepted.is_ok())
             });
-            let mut peer = UnixStream::connect(&path)
-                .await
-                .expect("a same-uid connect");
+            let mut peer = UnixStream::connect(&path).await.expect("a same-uid connect");
             let _ = peer.write_all(b"GET /global/health HTTP/1.1\r\n\r\n").await;
             let mut answer = Vec::new();
             let read = tokio::time::timeout(
@@ -417,9 +394,7 @@ mod unix {
             // Measured against the real uid, the same connection is accepted.
             checked.uid = uid();
             let accepting = tokio::spawn(async move { checked.accept().await });
-            let _peer = UnixStream::connect(&path)
-                .await
-                .expect("a same-uid connect");
+            let _peer = UnixStream::connect(&path).await.expect("a same-uid connect");
             let (_stream, _) = tokio::time::timeout(std::time::Duration::from_secs(5), accepting)
                 .await
                 .expect("the accept yields within the deadline")

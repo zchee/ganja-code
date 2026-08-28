@@ -42,11 +42,7 @@ fn a_sweep_visits_both_of_the_directories_a_clamp_would_have_spilled_to() {
         plant(&dir.join("notes.txt"), STALE);
     }
 
-    assert_eq!(
-        truncate::sweep(),
-        2,
-        "one stale spill in each of the two candidate directories"
-    );
+    assert_eq!(truncate::sweep(), 2, "one stale spill in each of the two candidate directories");
 
     for dir in &dirs {
         assert!(
@@ -70,9 +66,7 @@ fn a_sweep_visits_both_of_the_directories_a_clamp_would_have_spilled_to() {
 /// Writes a file and backdates it by `age`.
 fn plant(path: &std::path::Path, age: Duration) {
     std::fs::write(path, "spilled").expect("the fixture writes");
-    let when = SystemTime::now()
-        .checked_sub(age)
-        .expect("a representable stamp");
+    let when = SystemTime::now().checked_sub(age).expect("a representable stamp");
     // Opened for writing because a stamp is metadata a handle must be allowed
     // to write: unix grants that with the file's own permissions, Windows only
     // through a handle that asked for write access.

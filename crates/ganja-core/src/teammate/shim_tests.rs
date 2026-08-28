@@ -1,4 +1,5 @@
-use std::{ffi::OsString, time::Duration};
+use std::ffi::OsString;
+use std::time::Duration;
 
 use ganja_protocol::team::{DISPLAY_FIELD_CAP, MemberBackend};
 use ganja_team::ShimCli;
@@ -8,7 +9,8 @@ use super::{
     TIMEOUT_KEY, admits, default_turn_timeout, environment, first_line, preamble, resolve,
     spawn_lines,
 };
-use crate::teammate::{posture_line, preamble::Names};
+use crate::teammate::posture_line;
+use crate::teammate::preamble::Names;
 
 /// The headless channel says that answers are mail and that there is no
 /// door to go looking for, in the CLI's own name — and says **how much**
@@ -17,11 +19,7 @@ use crate::teammate::{posture_line, preamble::Names};
 /// message ends with (**D514**).
 #[test]
 fn the_headless_preamble_says_how_much_of_an_answer_is_mail_and_ends_with_the_task() {
-    let who = Names {
-        name: "w1",
-        team: "session-abcd1234",
-        lead: "team-lead",
-    };
+    let who = Names { name: "w1", team: "session-abcd1234", lead: "team-lead" };
     for (backend, cli) in [
         (MemberBackend::Codex, "codex"),
         (MemberBackend::Agy, "agy"),
@@ -48,10 +46,7 @@ fn the_headless_preamble_says_how_much_of_an_answer_is_mail_and_ends_with_the_ta
             text.contains("carried to the lead"),
             "{cli}: and it is said in words, not implied: {text}"
         );
-        assert!(
-            text.ends_with("Your task:\n\nhold the fort"),
-            "{cli}: {text}"
-        );
+        assert!(text.ends_with("Your task:\n\nhold the fort"), "{cli}: {text}");
     }
 }
 
@@ -83,10 +78,7 @@ fn a_child_gets_exactly_the_enumerated_names() {
     // fake CLI is reached without mutating the process under test.
     let pointed = environment(&[], Some(&OsString::from("/opt/fake/bin")));
     assert_eq!(
-        pointed
-            .iter()
-            .find(|(name, _)| name == "PATH")
-            .map(|(_, value)| value.clone()),
+        pointed.iter().find(|(name, _)| name == "PATH").map(|(_, value)| value.clone()),
         Some(OsString::from("/opt/fake/bin"))
     );
 }
@@ -118,9 +110,7 @@ fn no_grok_variable_is_ever_in_the_enumeration() {
     assert!(admits("MY_GROK_NOTES"));
 
     assert!(
-        environment(&["GROK_SANDBOX"], None)
-            .iter()
-            .all(|(name, _)| name != "GROK_SANDBOX"),
+        environment(&["GROK_SANDBOX"], None).iter().all(|(name, _)| name != "GROK_SANDBOX"),
         "a driver naming one does not get it"
     );
 }
@@ -167,10 +157,7 @@ fn a_spawn_ring_line_carries_the_same_posture_the_dialog_does() {
 
 #[test]
 fn a_timeout_mail_names_both_the_deadline_and_the_key_that_moves_it() {
-    let sentence = Failure::Deadline {
-        after: Duration::from_secs(900),
-    }
-    .sentence("codex");
+    let sentence = Failure::Deadline { after: Duration::from_secs(900) }.sentence("codex");
 
     assert!(sentence.contains("900s"), "{sentence}");
     assert!(sentence.contains(TIMEOUT_KEY), "{sentence}");
@@ -191,10 +178,7 @@ fn a_failure_mail_names_the_cli_the_status_and_the_first_stderr_line() {
 
 #[test]
 fn only_the_first_stderr_line_travels_and_it_is_capped() {
-    assert_eq!(
-        first_line("\n\nerror: no\nstack trace line\nanother"),
-        "error: no"
-    );
+    assert_eq!(first_line("\n\nerror: no\nstack trace line\nanother"), "error: no");
     assert_eq!(first_line(""), "");
 
     let wide: String = "あ".repeat(DISPLAY_FIELD_CAP * 2);

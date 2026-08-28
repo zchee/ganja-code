@@ -17,21 +17,18 @@
 //! variables, and `cargo test` runs the tests inside a binary on parallel
 //! threads.
 
-use std::{env, sync::Arc};
+use std::env;
+use std::sync::Arc;
 
 use futures::StreamExt as _;
-use ganja_core::{
-    Engine,
-    config::{Config, ProviderConfig},
-    permission::Permissions,
-    protocol::{Command, Event, FinishReason},
-    provider::{self, Dialect, anthropic},
-    tool::Registry,
-};
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::TcpListener,
-};
+use ganja_core::Engine;
+use ganja_core::config::{Config, ProviderConfig};
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{Command, Event, FinishReason};
+use ganja_core::provider::{self, Dialect, anthropic};
+use ganja_core::tool::Registry;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::TcpListener;
 
 /// The key the endpoint is reached with. Nothing may render it.
 const CANARY: &str = "sk-test-canary-XYZ";
@@ -62,15 +59,9 @@ async fn a_config_named_anthropic_compatible_endpoint_speaks_messages_on_the_key
         env::remove_var("GANJA_MODEL");
     }
 
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("loopback is bindable");
-    let base_url = format!(
-        "http://{}",
-        listener
-            .local_addr()
-            .expect("a bound socket has an address")
-    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("loopback is bindable");
+    let base_url =
+        format!("http://{}", listener.local_addr().expect("a bound socket has an address"));
     let seen = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.expect("the turn connects");
         let mut request = Vec::new();
@@ -92,10 +83,7 @@ async fn a_config_named_anthropic_compatible_endpoint_speaks_messages_on_the_key
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         );
-        socket
-            .write_all(response.as_bytes())
-            .await
-            .expect("the reply is writable");
+        socket.write_all(response.as_bytes()).await.expect("the reply is writable");
         socket.flush().await.expect("the reply flushes");
         drop(socket);
 
@@ -156,11 +144,7 @@ async fn a_config_named_anthropic_compatible_endpoint_speaks_messages_on_the_key
     );
 
     let request = seen.await.expect("the endpoint answered");
-    let head = request
-        .split("\r\n\r\n")
-        .next()
-        .expect("a request has a head")
-        .to_owned();
+    let head = request.split("\r\n\r\n").next().expect("a request has a head").to_owned();
 
     assert!(
         request.starts_with("POST /v1/messages "),
@@ -198,9 +182,6 @@ fn header(head: &str, name: &str) -> Option<String> {
     head.lines().find_map(|line| {
         let (field, value) = line.split_once(':')?;
 
-        field
-            .trim()
-            .eq_ignore_ascii_case(name)
-            .then(|| value.trim().to_owned())
+        field.trim().eq_ignore_ascii_case(name).then(|| value.trim().to_owned())
     })
 }

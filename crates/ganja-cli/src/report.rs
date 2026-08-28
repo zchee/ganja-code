@@ -119,13 +119,11 @@ fn section(name: &str, header: &str, right: &str, rows: &[(String, String)], wid
 /// annoying and drop the ones that are not.
 fn printable(text: &str) -> String {
     text.chars()
-        .map(|character| {
-            if character.is_control() {
-                char::REPLACEMENT_CHARACTER
-            } else {
-                character
-            }
-        })
+        .map(
+            |character| {
+                if character.is_control() { char::REPLACEMENT_CHARACTER } else { character }
+            },
+        )
         .collect()
 }
 

@@ -26,12 +26,12 @@
 //! parallel threads. The schema-only checks need no config discovery at all
 //! and are safe to run as their own tests alongside it.
 
-use std::{collections::BTreeSet, env, fs, path::Path};
+use std::collections::BTreeSet;
+use std::path::Path;
+use std::{env, fs};
 
-use ganja_core::{
-    Config, ConfigError, Overrides,
-    config::{CONFIG_ENV, CONFIG_HOME_ENV},
-};
+use ganja_core::config::{CONFIG_ENV, CONFIG_HOME_ENV};
+use ganja_core::{Config, ConfigError, Overrides};
 use regex::Regex;
 use serde_json::{Value, json};
 
@@ -65,15 +65,10 @@ fn schema_keys(schema: &Value, def: Option<&str>) -> BTreeSet<String> {
 /// contain "expected" at all, since that means the probe below did not trip
 /// the refusal it was written to trip.
 fn expected_fields(message: &str) -> BTreeSet<String> {
-    let after_expected = message
-        .split_once("expected")
-        .unwrap_or_else(|| panic!("no \"expected\" in: {message}"))
-        .1;
+    let after_expected =
+        message.split_once("expected").unwrap_or_else(|| panic!("no \"expected\" in: {message}")).1;
     let backtick_quoted = Regex::new(r"`([^`]+)`").expect("a fixed pattern compiles");
-    backtick_quoted
-        .captures_iter(after_expected)
-        .map(|capture| capture[1].to_owned())
-        .collect()
+    backtick_quoted.captures_iter(after_expected).map(|capture| capture[1].to_owned()).collect()
 }
 
 /// Loads `text` as the sole project-tier config file under `project`, the way
@@ -266,10 +261,8 @@ fn the_loader_names_exactly_the_fields_a_local_mcp_entry_accepts(project: &Path,
     // to discriminate `oneOf` between the two shapes. Accounted for
     // explicitly rather than silently, the same way the top-level probe
     // above does not need to (`Config::schema` really is named `$schema`).
-    let schema_fields: BTreeSet<String> = schema_keys(schema, Some("McpLocal"))
-        .into_iter()
-        .filter(|key| key != "type")
-        .collect();
+    let schema_fields: BTreeSet<String> =
+        schema_keys(schema, Some("McpLocal")).into_iter().filter(|key| key != "type").collect();
 
     assert_eq!(
         loader_fields, schema_fields,
@@ -287,10 +280,8 @@ fn the_loader_names_exactly_the_fields_a_remote_mcp_entry_accepts(project: &Path
         "[mcp.hub]\ntype = \"remote\"\nurl = \"https://x/mcp\"\nzzz_schema_probe = 1\n",
     );
     let loader_fields = expected_fields(&message);
-    let schema_fields: BTreeSet<String> = schema_keys(schema, Some("McpRemote"))
-        .into_iter()
-        .filter(|key| key != "type")
-        .collect();
+    let schema_fields: BTreeSet<String> =
+        schema_keys(schema, Some("McpRemote")).into_iter().filter(|key| key != "type").collect();
 
     assert_eq!(
         loader_fields, schema_fields,
@@ -330,10 +321,7 @@ fn the_loader_refuses_a_non_loopback_mcp_url_that_the_schema_alone_would_accept(
     let ConfigError::Parse { message, .. } = error else {
         panic!("expected a parse failure");
     };
-    assert!(
-        message.contains("loopback"),
-        "the refusal should name why: {message}"
-    );
+    assert!(message.contains("loopback"), "the refusal should name why: {message}");
 }
 
 /// The schema on its own: compiles under Draft 2020-12, with no external
@@ -351,10 +339,8 @@ fn a_kitchen_sink_document_also_validates_against_the_schema() {
     let validator = jsonschema::validator_for(&schema()).expect("the schema compiles");
     let instance: Value = kitchen_sink();
 
-    let errors: Vec<String> = validator
-        .iter_errors(&instance)
-        .map(|error| error.to_string())
-        .collect();
+    let errors: Vec<String> =
+        validator.iter_errors(&instance).map(|error| error.to_string()).collect();
     assert!(
         errors.is_empty(),
         "a document naming every key this build understands should validate cleanly: {errors:?}"
@@ -477,10 +463,7 @@ fn the_boolean_notification_spelling_also_validates() {
     for spelling in [json!(true), json!(false)] {
         let mut sink: Value = kitchen_sink();
         sink["tui"]["notifications"] = spelling.clone();
-        assert!(
-            validator.is_valid(&sink),
-            "tui.notifications takes a bare boolean: {spelling}"
-        );
+        assert!(validator.is_valid(&sink), "tui.notifications takes a bare boolean: {spelling}");
     }
 }
 

@@ -16,14 +16,12 @@
 
 #![cfg(unix)]
 
-use std::{
-    fs,
-    io::{BufRead as _, BufReader, Read as _},
-    path::Path,
-    process::{Child, Command as Spawn, Stdio},
-    sync::mpsc,
-    time::{Duration, Instant},
-};
+use std::fs;
+use std::io::{BufRead as _, BufReader, Read as _};
+use std::path::Path;
+use std::process::{Child, Command as Spawn, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use assert_cmd::Command;
 use ganja_testkit::temp_dir as temporary;
@@ -40,14 +38,7 @@ const CLOSING: &str = "script-finished-zarquon";
 /// Every key whose value is minted per run — a session, a part, a call, or a
 /// clock reading. Nothing else may differ between the two transcripts, which
 /// is what the comparison below is for.
-const MINTED: [&str; 6] = [
-    "sessionID",
-    "timestamp",
-    "id",
-    "call_id",
-    "started",
-    "completed",
-];
+const MINTED: [&str; 6] = ["sessionID", "timestamp", "id", "call_id", "started", "completed"];
 
 /// A script whose only turn says `CLOSING`.
 fn one_word() -> Value {
@@ -141,11 +132,7 @@ struct Local {
 
 impl Local {
     fn playing(script: &Value) -> Self {
-        let local = Self {
-            project: temporary(),
-            data: temporary(),
-            config: temporary(),
-        };
+        let local = Self { project: temporary(), data: temporary(), config: temporary() };
         fs::write(local.project.path().join("script.json"), script.to_string())
             .expect("the script is writable");
 
@@ -155,12 +142,7 @@ impl Local {
     /// Runs the turn and answers stdout and stderr.
     fn run(&self, arguments: &[&str]) -> (String, String) {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ganja"));
-        sealed(
-            &mut command,
-            self.project.path(),
-            self.data.path(),
-            self.config.path(),
-        );
+        sealed(&mut command, self.project.path(), self.data.path(), self.config.path());
         let assert = command
             .env("GANJA_FAKE_SCRIPT", self.project.path().join("script.json"))
             .args(arguments)
@@ -249,13 +231,7 @@ impl Server {
             .parse()
             .expect("the port is a number");
 
-        Self {
-            child,
-            port,
-            _project: project,
-            _data: data,
-            _config: config,
-        }
+        Self { child, port, _project: project, _data: data, _config: config }
     }
 
     fn url(&self) -> String {
@@ -301,18 +277,10 @@ impl Server {
 
         let deadline = Instant::now() + DEADLINE;
         loop {
-            if self
-                .child
-                .try_wait()
-                .expect("the child is waitable")
-                .is_some()
-            {
+            if self.child.try_wait().expect("the child is waitable").is_some() {
                 break;
             }
-            assert!(
-                Instant::now() < deadline,
-                "the server should exit on SIGTERM"
-            );
+            assert!(Instant::now() < deadline, "the server should exit on SIGTERM");
             std::thread::sleep(Duration::from_millis(50));
         }
 
@@ -361,10 +329,7 @@ fn normalize(value: &mut Value) {
 /// The lines of `stream` that are permission warnings, which is the one part
 /// of a headless run's diagnostics both paths must agree on word for word.
 fn warnings(stream: &str) -> Vec<&str> {
-    stream
-        .lines()
-        .filter(|line| line.starts_with("! permission requested"))
-        .collect()
+    stream.lines().filter(|line| line.starts_with("! permission requested")).collect()
 }
 
 /// The headline acceptance: a person reading the two runs cannot tell them
@@ -385,14 +350,8 @@ fn a_turn_over_a_socket_reads_exactly_the_way_the_same_turn_reads_in_process() {
     let local = Local::playing(&script);
     let (in_process, in_process_err) = local.run(&["run", "--agent", "build", "hello"]);
 
-    assert!(
-        in_process.contains(CLOSING),
-        "the local turn ran at all: {in_process:?}"
-    );
-    assert_eq!(
-        attached, in_process,
-        "the same turn reads differently over a socket"
-    );
+    assert!(in_process.contains(CLOSING), "the local turn ran at all: {in_process:?}");
+    assert_eq!(attached, in_process, "the same turn reads differently over a socket");
 
     // The one diagnostic that legitimately differs: a local run announces the
     // provider it selected, and an attached run selects none.
@@ -463,19 +422,13 @@ fn an_attached_run_refuses_a_dialog_nobody_is_there_to_answer() {
     let local = Local::playing(&script);
     let (in_process, in_process_err) = local.run(&["run", "--agent", "build", "run something"]);
 
-    assert!(
-        !warnings(&attached_err).is_empty(),
-        "the refusal has to be said: {attached_err:?}"
-    );
+    assert!(!warnings(&attached_err).is_empty(), "the refusal has to be said: {attached_err:?}");
     assert_eq!(
         warnings(&attached_err),
         warnings(&in_process_err),
         "the same dialog is refused with the same words"
     );
-    assert!(
-        attached_err.contains("bash"),
-        "the tool is named: {attached_err:?}"
-    );
+    assert!(attached_err.contains("bash"), "the tool is named: {attached_err:?}");
     // The turn survives the refusal — a rejected call is information the model
     // reads, not the end of the turn — and both paths report the same account
     // of what ran.
@@ -512,11 +465,7 @@ fn an_attached_auto_run_answers_a_shell_dialog_and_still_refuses_a_question() {
     // One dialog was refused, and it is the question's. A second line here
     // would mean `--auto` answered nothing; none would mean it answered this.
     let refusals = warnings(&attached_err);
-    assert_eq!(
-        refusals.len(),
-        1,
-        "exactly one dialog is refused: {attached_err:?}"
-    );
+    assert_eq!(refusals.len(), 1, "exactly one dialog is refused: {attached_err:?}");
     assert!(
         refusals[0].contains("permission requested: question ("),
         "and it is the question's: {refusals:?}"
@@ -527,10 +476,7 @@ fn an_attached_auto_run_answers_a_shell_dialog_and_still_refuses_a_question() {
         attached.contains("question failed"),
         "the refused call is reported as a failed one: {attached:?}"
     );
-    assert!(
-        attached.contains(CLOSING),
-        "the turn survived the refusal: {attached:?}"
-    );
+    assert!(attached.contains(CLOSING), "the turn survived the refusal: {attached:?}");
 }
 
 /// The attached path's own refusals: a session the server does not hold is
@@ -545,14 +491,7 @@ fn a_session_the_server_does_not_hold_is_refused_the_way_a_local_one_is() {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ganja"));
     sealed(&mut command, elsewhere.path(), data.path(), config.path());
     let assert = command
-        .args([
-            "run",
-            "--attach",
-            &server.url(),
-            "--session",
-            "ses_nothing_here",
-            "hello",
-        ])
+        .args(["run", "--attach", &server.url(), "--session", "ses_nothing_here", "hello"])
         .assert()
         .code(1);
     let output = assert.get_output();

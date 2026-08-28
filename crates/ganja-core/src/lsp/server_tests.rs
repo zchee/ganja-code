@@ -1,8 +1,6 @@
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 
@@ -37,10 +35,7 @@ fn a_windows_binary_is_looked_for_under_the_extensions_that_make_it_one() {
             || found.contains(&PathBuf::from(r"C:\opt\bin\rust-analyzer.exe")),
         "an executable extension has to be among the spellings tried: {found:?}"
     );
-    assert!(
-        found.len() > 1,
-        "the bare name alone is what fails on this platform: {found:?}"
-    );
+    assert!(found.len() > 1, "the bare name alone is what fails on this platform: {found:?}");
 }
 
 /// Writes `contents` at `root/relative`, creating the directories above it.
@@ -67,28 +62,15 @@ fn a_bare_true_ships_both_builtins() {
     let specs = resolve(&BTreeMap::new());
 
     let ids: Vec<&str> = specs.iter().map(|spec| spec.id.as_str()).collect();
-    assert_eq!(
-        ids,
-        [GOPLS, RUST],
-        "sorted, so the order is not the config's"
-    );
+    assert_eq!(ids, [GOPLS, RUST], "sorted, so the order is not the config's");
     assert_eq!(specs[1].extensions, [".rs"]);
     assert_eq!(specs[1].root, Root::Rust);
-    assert!(
-        specs.iter().all(|spec| spec.command.is_none()),
-        "a builtin finds its own binary"
-    );
+    assert!(specs.iter().all(|spec| spec.command.is_none()), "a builtin finds its own binary");
 }
 
 #[test]
 fn a_disabled_entry_removes_that_builtin_and_leaves_the_other() {
-    let entries = BTreeMap::from([(
-        RUST.to_owned(),
-        LspEntry {
-            disabled: true,
-            ..entry()
-        },
-    )]);
+    let entries = BTreeMap::from([(RUST.to_owned(), LspEntry { disabled: true, ..entry() })]);
 
     let specs = resolve(&entries);
 
@@ -107,10 +89,7 @@ fn a_configured_command_replaces_the_builtin_spawn_and_keeps_its_root() {
     )]);
 
     let specs = resolve(&entries);
-    let rust = specs
-        .iter()
-        .find(|spec| spec.id == RUST)
-        .expect("rust survives");
+    let rust = specs.iter().find(|spec| spec.id == RUST).expect("rust survives");
 
     assert_eq!(
         rust.program().as_deref(),
@@ -132,10 +111,7 @@ fn a_custom_server_is_rooted_at_the_project_directory() {
     )]);
 
     let specs = resolve(&entries);
-    let zls = specs
-        .iter()
-        .find(|spec| spec.id == "zls")
-        .expect("zls is a server");
+    let zls = specs.iter().find(|spec| spec.id == "zls").expect("zls is a server");
 
     assert_eq!(zls.root, Root::Directory);
     assert!(zls.matches(Path::new("/p/build.zig")));
@@ -146,18 +122,11 @@ fn a_custom_server_is_rooted_at_the_project_directory() {
 fn empty_extensions_match_every_file() {
     let entries = BTreeMap::from([(
         "everything".to_owned(),
-        LspEntry {
-            command: Some(vec!["srv".to_owned()]),
-            extensions: Some(Vec::new()),
-            ..entry()
-        },
+        LspEntry { command: Some(vec!["srv".to_owned()]), extensions: Some(Vec::new()), ..entry() },
     )]);
 
     let specs = resolve(&entries);
-    let all = specs
-        .iter()
-        .find(|spec| spec.id == "everything")
-        .expect("it is a server");
+    let all = specs.iter().find(|spec| spec.id == "everything").expect("it is a server");
 
     assert!(all.matches(Path::new("/p/main.rs")));
     assert!(all.matches(Path::new("/p/README")));
@@ -182,10 +151,7 @@ fn a_walk_with_no_marker_finds_nothing_and_stops_at_the_project() {
     let base = temp.path();
     write(base, "src/main.go", "package main\n");
 
-    assert_eq!(
-        nearest_root(&base.join("src/main.go"), &["go.mod"], base),
-        None
-    );
+    assert_eq!(nearest_root(&base.join("src/main.go"), &["go.mod"], base), None);
 }
 
 #[test]
@@ -194,10 +160,7 @@ fn a_go_file_with_no_module_falls_back_to_the_project_directory() {
     let base = temp.path();
     write(base, "src/main.go", "package main\n");
     let specs = resolve(&BTreeMap::new());
-    let gopls = specs
-        .iter()
-        .find(|spec| spec.id == GOPLS)
-        .expect("gopls is a server");
+    let gopls = specs.iter().find(|spec| spec.id == GOPLS).expect("gopls is a server");
 
     let found = root(gopls, &base.join("src/main.go"), base, base);
 
@@ -212,34 +175,19 @@ fn a_go_workspace_outranks_the_module_beside_it() {
     write(base, "svc/go.mod", "module example.com/svc\n");
     write(base, "svc/main.go", "package main\n");
     let specs = resolve(&BTreeMap::new());
-    let gopls = specs
-        .iter()
-        .find(|spec| spec.id == GOPLS)
-        .expect("gopls is a server");
+    let gopls = specs.iter().find(|spec| spec.id == GOPLS).expect("gopls is a server");
 
     let found = root(gopls, &base.join("svc/main.go"), base, base);
 
-    assert_eq!(
-        found.as_deref(),
-        Some(base),
-        "go.work wins over the nearer go.mod"
-    );
+    assert_eq!(found.as_deref(), Some(base), "go.work wins over the nearer go.mod");
 }
 
 #[test]
 fn a_crate_in_a_workspace_is_rooted_at_the_workspace() {
     let temp = TempDir::new().expect("a temp dir");
     let base = temp.path();
-    write(
-        base,
-        "Cargo.toml",
-        "[workspace]\nmembers = [\"crates/*\"]\n",
-    );
-    write(
-        base,
-        "crates/core/Cargo.toml",
-        "[package]\nname = \"core\"\n",
-    );
+    write(base, "Cargo.toml", "[workspace]\nmembers = [\"crates/*\"]\n");
+    write(base, "crates/core/Cargo.toml", "[package]\nname = \"core\"\n");
     write(base, "crates/core/src/lib.rs", "pub fn hello() {}\n");
 
     let found = rust_root(&base.join("crates/core/src/lib.rs"), base, base);
@@ -254,16 +202,8 @@ fn the_nearest_workspace_wins_and_the_walk_stops_there() {
     let temp = TempDir::new().expect("a temp dir");
     let base = temp.path();
     write(base, "Cargo.toml", "[workspace]\nmembers = [\"inner\"]\n");
-    write(
-        base,
-        "inner/Cargo.toml",
-        "[workspace]\nmembers = [\"crates/*\"]\n",
-    );
-    write(
-        base,
-        "inner/crates/leaf/Cargo.toml",
-        "[package]\nname = \"leaf\"\n",
-    );
+    write(base, "inner/Cargo.toml", "[workspace]\nmembers = [\"crates/*\"]\n");
+    write(base, "inner/crates/leaf/Cargo.toml", "[package]\nname = \"leaf\"\n");
     write(base, "inner/crates/leaf/src/lib.rs", "pub fn hello() {}\n");
 
     let found = rust_root(&base.join("inner/crates/leaf/src/lib.rs"), base, base);
@@ -294,11 +234,7 @@ fn the_workspace_walk_does_not_leave_the_worktree() {
     let temp = TempDir::new().expect("a temp dir");
     let base = temp.path();
     write(base, "Cargo.toml", "[workspace]\nmembers = [\"tree/*\"]\n");
-    write(
-        base,
-        "tree/thing/Cargo.toml",
-        "[package]\nname = \"thing\"\n",
-    );
+    write(base, "tree/thing/Cargo.toml", "[package]\nname = \"thing\"\n");
     write(base, "tree/thing/src/main.rs", "fn main() {}\n");
     let worktree = base.join("tree");
 

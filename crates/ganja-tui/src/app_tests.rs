@@ -1,30 +1,25 @@
-use std::{
-    fs,
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use futures::{FutureExt as _, StreamExt as _, stream::BoxStream};
-use ganja_core::{
-    Engine, SessionId, SessionInfo, Storage,
-    provider::{FakeProvider, fake},
-    storage::VERSION,
-};
+use futures::stream::BoxStream;
+use futures::{FutureExt as _, StreamExt as _};
+use ganja_core::provider::{FakeProvider, fake};
+use ganja_core::storage::VERSION;
+use ganja_core::{Engine, SessionId, SessionInfo, Storage};
 use ganja_protocol::{
     Event as CoreEvent, FinishReason, HeldId, HeldOutcome, HoldCause, Message, Part, PartBody,
     PartId, PermissionId, PermissionReply, QuestionId, QuestionInfo, QuestionOption, RedactedText,
     ToolState, Usage,
 };
-use ratatui::{
-    Terminal,
-    backend::{Backend, ClearType, TestBackend},
-    crossterm::event::{
-        Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
-        MouseEventKind,
-    },
-    style::{Color, Modifier},
+use ratatui::Terminal;
+use ratatui::backend::{Backend, ClearType, TestBackend};
+use ratatui::crossterm::event::{
+    Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
 };
+use ratatui::style::{Color, Modifier};
 use tempfile::TempDir;
 
 use super::{
@@ -41,14 +36,12 @@ fn session() -> SessionId {
 }
 use ganja_tool::registry;
 
-use crate::{
-    binder, clipboard, command,
-    component::{self, effort, files::Row as MenuRow, mcp, sessions},
-    escrepair::EscRepair,
-    event::AppEvent,
-    history, lister, mention,
-    theme::{DEFAULT_THEME, Themes},
-};
+use crate::component::files::Row as MenuRow;
+use crate::component::{self, effort, mcp, sessions};
+use crate::escrepair::EscRepair;
+use crate::event::AppEvent;
+use crate::theme::{DEFAULT_THEME, Themes};
+use crate::{binder, clipboard, command, history, lister, mention};
 
 fn engine() -> Engine {
     engine_asking(fake::MODEL)
@@ -110,10 +103,7 @@ fn store_session(
         title: title.map(str::to_owned),
         created: updated,
         updated,
-        usage: Usage {
-            input_tokens: tokens,
-            ..Usage::default()
-        },
+        usage: Usage { input_tokens: tokens, ..Usage::default() },
         context_tokens: 0,
         summary: None,
         agent: None,
@@ -125,13 +115,9 @@ fn store_session(
     let message = Message::user("what the picker is choosing between");
 
     storage.save_info(&info).expect("the info stores");
-    storage
-        .save_message(&info.id, &message)
-        .expect("the envelope stores");
+    storage.save_message(&info.id, &message).expect("the envelope stores");
     for part in &message.parts {
-        storage
-            .save_part(&info.id, &message.id, part)
-            .expect("the part stores");
+        storage.save_part(&info.id, &message.id, part).expect("the part stores");
     }
 }
 
@@ -180,14 +166,7 @@ fn store_pickable_sessions(directory: &TempDir) {
         30 * 1_000,
         12_400,
     );
-    store_session(
-        directory,
-        "0198f2c4-a1b0-7000-8000-000000000012",
-        None,
-        now,
-        5 * MINUTE,
-        1_234,
-    );
+    store_session(directory, "0198f2c4-a1b0-7000-8000-000000000012", None, now, 5 * MINUTE, 1_234);
     store_session(
         directory,
         "0198f2c4-a1b0-7000-8000-000000000013",
@@ -245,9 +224,7 @@ async fn questioning() -> (TempDir, App, BoxStream<'static, CoreEvent>) {
     let engine = Engine::new(
         Arc::new(FakeProvider::new("", Duration::ZERO).with_script(&script)),
         fake::MODEL,
-        Arc::new(ganja_tool::Registry::new(vec![Arc::new(
-            ganja_tool::question::QuestionTool,
-        )])),
+        Arc::new(ganja_tool::Registry::new(vec![Arc::new(ganja_tool::question::QuestionTool)])),
         ganja_permission::Permissions::default(),
     );
     let mut events = engine.subscribe().await.expect("the test subscribes first");
@@ -266,9 +243,7 @@ async fn questioning() -> (TempDir, App, BoxStream<'static, CoreEvent>) {
     for _ in 0..64 {
         let event = next_event(&mut events).await;
         let asked = matches!(event, CoreEvent::QuestionAsked { .. });
-        app.handle(AppEvent::core(event))
-            .await
-            .expect("an engine event is handled");
+        app.handle(AppEvent::core(event)).await.expect("an engine event is handled");
         if asked {
             return (directory, app, events);
         }
@@ -290,9 +265,7 @@ async fn next_event(events: &mut BoxStream<'static, CoreEvent>) -> CoreEvent {
 async fn pump(app: &mut App, events: &mut BoxStream<'static, CoreEvent>, count: usize) {
     for _ in 0..count {
         let event = events.next().await.expect("the engine keeps reporting");
-        app.handle(AppEvent::core(event))
-            .await
-            .expect("an engine event is handled");
+        app.handle(AppEvent::core(event)).await.expect("an engine event is handled");
     }
 }
 
@@ -305,11 +278,7 @@ fn screen(terminal: &Terminal<TestBackend>) -> String {
     let area = buffer.area();
 
     (0..area.height)
-        .map(|row| {
-            (0..area.width)
-                .map(|column| buffer[(column, row)].symbol())
-                .collect::<String>()
-        })
+        .map(|row| (0..area.width).map(|column| buffer[(column, row)].symbol()).collect::<String>())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -366,9 +335,7 @@ fn styled_screen(terminal: &Terminal<TestBackend>) -> String {
 /// An app drawing in the builtin theme `name`.
 fn themed_app(name: &str) -> App {
     let mut themes = Themes::builtin();
-    themes
-        .select(name)
-        .unwrap_or_else(|| panic!("{name} should be a builtin theme"));
+    themes.select(name).unwrap_or_else(|| panic!("{name} should be a builtin theme"));
 
     App::new(engine(), None, themes)
 }
@@ -377,13 +344,10 @@ fn themed_app(name: &str) -> App {
 /// reply, an edit carrying a diff and a call that was refused — between
 /// them every role the transcript paints.
 fn palette_transcript(app: &mut App) {
-    app.chat
-        .start_message(Message::user("show me every color you have"));
+    app.chat.start_message(Message::user("show me every color you have"));
 
     let mut reply = Message::assistant("canned");
-    reply
-        .parts
-        .push(Part::text("One edit applied, one command refused."));
+    reply.parts.push(Part::text("One edit applied, one command refused."));
     reply.parts.push(Part {
             id: PartId::from("prt_1".to_owned()),
             body: PartBody::Tool {
@@ -422,8 +386,7 @@ fn key(code: KeyCode, modifiers: KeyModifiers) -> AppEvent {
 }
 
 fn typing(text: &str) -> impl Iterator<Item = AppEvent> + use<'_> {
-    text.chars()
-        .map(|character| key(KeyCode::Char(character), KeyModifiers::NONE))
+    text.chars().map(|character| key(KeyCode::Char(character), KeyModifiers::NONE))
 }
 
 /// **D516.** The repaired stream drives the same editor a direct key
@@ -453,9 +416,7 @@ async fn a_split_arrow_repaired_by_the_machine_edits_the_composer() {
     }
 
     for event in repaired {
-        app.handle(AppEvent::Term(event))
-            .await
-            .expect("the repaired key is handled");
+        app.handle(AppEvent::Term(event)).await.expect("the repaired key is handled");
     }
     for event in typing("X") {
         app.handle(event).await.expect("typing is handled");
@@ -473,9 +434,7 @@ async fn enter_submits_the_prompt_and_the_engine_puts_it_in_the_transcript() {
         app.handle(event).await.expect("typing is handled");
     }
 
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     assert!(app.editor.prompt().is_none(), "the editor should be empty");
 
@@ -499,18 +458,12 @@ async fn enter_submits_the_prompt_and_the_engine_puts_it_in_the_transcript() {
 
 #[tokio::test]
 async fn modified_enter_inserts_a_newline_instead_of_submitting() {
-    for modifier in [
-        KeyModifiers::SHIFT,
-        KeyModifiers::ALT,
-        KeyModifiers::CONTROL,
-    ] {
+    for modifier in [KeyModifiers::SHIFT, KeyModifiers::ALT, KeyModifiers::CONTROL] {
         let mut app = app();
         for event in typing("one") {
             app.handle(event).await.expect("typing is handled");
         }
-        app.handle(key(KeyCode::Enter, modifier))
-            .await
-            .expect("modified enter is handled");
+        app.handle(key(KeyCode::Enter, modifier)).await.expect("modified enter is handled");
         for event in typing("two") {
             app.handle(event).await.expect("typing is handled");
         }
@@ -530,9 +483,7 @@ async fn ctrl_j_inserts_a_newline_and_submits_nothing() {
     for event in typing("one") {
         app.handle(event).await.expect("typing is handled");
     }
-    app.handle(key(KeyCode::Char('j'), KeyModifiers::CONTROL))
-        .await
-        .expect("ctrl+j is handled");
+    app.handle(key(KeyCode::Char('j'), KeyModifiers::CONTROL)).await.expect("ctrl+j is handled");
     for event in typing("two") {
         app.handle(event).await.expect("typing is handled");
     }
@@ -548,9 +499,7 @@ async fn ctrl_j_inserts_a_newline_and_submits_nothing() {
 async fn a_bare_q_types_instead_of_quitting() {
     let mut app = app();
 
-    app.handle(key(KeyCode::Char('q'), KeyModifiers::NONE))
-        .await
-        .expect("typing is handled");
+    app.handle(key(KeyCode::Char('q'), KeyModifiers::NONE)).await.expect("typing is handled");
 
     assert!(!app.quit);
     assert_eq!(app.editor.prompt().as_deref(), Some("q"));
@@ -561,9 +510,7 @@ async fn control_c_and_control_q_quit() {
     for code in [KeyCode::Char('c'), KeyCode::Char('q')] {
         let mut app = app();
 
-        app.handle(key(code, KeyModifiers::CONTROL))
-            .await
-            .expect("a quit key is handled");
+        app.handle(key(code, KeyModifiers::CONTROL)).await.expect("a quit key is handled");
 
         assert!(app.quit, "{code:?} with Control should quit");
     }
@@ -579,9 +526,7 @@ async fn a_second_prompt_mid_turn_is_steered_into_the_running_turn() {
     for event in typing("first") {
         app.handle(event).await.expect("typing is handled");
     }
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
     // Both message envelopes, so the turn is visibly under way.
     pump(&mut app, &mut events, 2).await;
     assert!(app.turn_running, "the fixture needs a turn in flight");
@@ -589,14 +534,9 @@ async fn a_second_prompt_mid_turn_is_steered_into_the_running_turn() {
     for event in typing("second") {
         app.handle(event).await.expect("typing is handled");
     }
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
-    assert!(
-        app.editor.is_empty(),
-        "a steered message leaves the composer, like any accepted one"
-    );
+    assert!(app.editor.is_empty(), "a steered message leaves the composer, like any accepted one");
     assert_eq!(app.queue.depth(), 1);
     assert!(
         app.queue.entries()[0].is_steered(),
@@ -626,9 +566,7 @@ async fn escape_stops_a_streaming_turn_inside_the_budget() {
     for event in typing("hello") {
         app.handle(event).await.expect("typing is handled");
     }
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     // Both envelopes, the reply's part, and a fragment in it: the turn is
     // actually streaming before it gets interrupted.
@@ -636,15 +574,11 @@ async fn escape_stops_a_streaming_turn_inside_the_budget() {
     assert!(app.status.is_streaming());
 
     let issued = Instant::now();
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("escape is handled");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("escape is handled");
 
     while app.status.is_streaming() {
         let event = events.next().await.expect("the engine keeps reporting");
-        app.handle(AppEvent::core(event))
-            .await
-            .expect("an engine event is handled");
+        app.handle(AppEvent::core(event)).await.expect("an engine event is handled");
     }
     let elapsed = issued.elapsed();
 
@@ -666,9 +600,7 @@ async fn escape_stops_a_streaming_turn_inside_the_budget() {
 async fn escape_while_idle_changes_nothing() {
     let mut app = app();
 
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("escape is handled");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("escape is handled");
 
     assert!(!app.status.is_streaming());
     assert!(!app.quit);
@@ -839,15 +771,10 @@ async fn usage_accumulates_across_turns_and_reaches_the_status_bar() {
     };
 
     for _ in 0..2 {
-        app.handle(finished(MODEL, usage))
-            .await
-            .expect("a turn end is handled");
+        app.handle(finished(MODEL, usage)).await.expect("a turn end is handled");
     }
 
-    assert_eq!(
-        app.totals.input_tokens, 24_600,
-        "6,000 + 6,000 + 300, twice"
-    );
+    assert_eq!(app.totals.input_tokens, 24_600, "6,000 + 6,000 + 300, twice");
     assert_eq!(app.totals.output_tokens, 800);
 
     let mut terminal = terminal(100, 12);
@@ -888,11 +815,7 @@ async fn a_default_agents_own_model_is_what_the_first_turn_is_priced_against() {
     let mut app = App::new(engine, None, Themes::builtin());
     app.handle(finished(
         MODEL,
-        Usage {
-            input_tokens: 1_000_000,
-            output_tokens: 0,
-            ..Usage::default()
-        },
+        Usage { input_tokens: 1_000_000, output_tokens: 0, ..Usage::default() },
     ))
     .await
     .expect("a turn end is handled");
@@ -910,11 +833,7 @@ async fn an_unpriced_model_reports_its_tokens_and_invents_no_price() {
 
     app.handle(finished(
         fake::MODEL,
-        Usage {
-            input_tokens: 40,
-            output_tokens: 7,
-            ..Usage::default()
-        },
+        Usage { input_tokens: 40, output_tokens: 7, ..Usage::default() },
     ))
     .await
     .expect("a turn end is handled");
@@ -944,11 +863,7 @@ async fn a_failed_turn_still_bills_for_what_it_spent() {
         session_id: session(),
         message_id: Message::assistant(MODEL).id,
         reason: FinishReason::Failed,
-        usage: Some(Usage {
-            input_tokens: 2_000,
-            output_tokens: 150,
-            ..Usage::default()
-        }),
+        usage: Some(Usage { input_tokens: 2_000, output_tokens: 150, ..Usage::default() }),
         error: Some("the provider answered 500: overloaded".to_owned()),
         completed: 0,
     }))
@@ -966,10 +881,7 @@ async fn a_failed_turn_still_bills_for_what_it_spent() {
     assert!(screen.contains("2.0k in"), "got:\n{screen}");
     // 2,000 in at $2 plus 150 out at $10, per million tokens.
     assert!(screen.contains("$0.0055"), "got:\n{screen}");
-    assert!(
-        screen.contains("overloaded"),
-        "the reason must survive beside the bill:\n{screen}"
-    );
+    assert!(screen.contains("overloaded"), "the reason must survive beside the bill:\n{screen}");
 }
 
 /// A turn that ends without usage — a cancel, or a provider that reports
@@ -981,11 +893,7 @@ async fn a_turn_without_usage_does_not_disturb_the_totals() {
     let mut app = App::new(engine_asking(MODEL), None, Themes::builtin());
     app.handle(finished(
         MODEL,
-        Usage {
-            input_tokens: 1_000,
-            output_tokens: 100,
-            ..Usage::default()
-        },
+        Usage { input_tokens: 1_000, output_tokens: 100, ..Usage::default() },
     ))
     .await
     .expect("a turn end is handled");
@@ -1056,10 +964,7 @@ async fn a_turn_without_usage_adds_no_turn_usage_row() {
     .await
     .expect("a cancel is handled");
 
-    assert!(
-        app.turn_usages.is_empty(),
-        "a turn that reported no usage should add no row"
-    );
+    assert!(app.turn_usages.is_empty(), "a turn that reported no usage should add no row");
 }
 
 /// The raw-log ring buffer is capped rather than growing without bound
@@ -1086,8 +991,7 @@ fn the_raw_log_caps_rather_than_growing_without_bound() {
 async fn the_wheel_and_the_page_keys_move_the_viewport() {
     let mut app = app();
     for index in 0..60 {
-        app.chat
-            .start_message(Message::user(format!("entry {index}")));
+        app.chat.start_message(Message::user(format!("entry {index}")));
     }
     let mut terminal = terminal(40, 12);
     app.draw(&mut terminal).expect("a frame draws");
@@ -1102,19 +1006,13 @@ async fn the_wheel_and_the_page_keys_move_the_viewport() {
     .expect("a wheel event is handled");
     assert!(!app.chat.is_following_tail());
 
-    app.handle(key(KeyCode::End, KeyModifiers::NONE))
-        .await
-        .expect("End is handled");
+    app.handle(key(KeyCode::End, KeyModifiers::NONE)).await.expect("End is handled");
     assert!(app.chat.is_following_tail());
 
-    app.handle(key(KeyCode::PageUp, KeyModifiers::NONE))
-        .await
-        .expect("PageUp is handled");
+    app.handle(key(KeyCode::PageUp, KeyModifiers::NONE)).await.expect("PageUp is handled");
     assert!(!app.chat.is_following_tail());
 
-    app.handle(key(KeyCode::PageDown, KeyModifiers::NONE))
-        .await
-        .expect("PageDown is handled");
+    app.handle(key(KeyCode::PageDown, KeyModifiers::NONE)).await.expect("PageDown is handled");
     assert!(app.chat.is_following_tail());
 }
 
@@ -1175,16 +1073,11 @@ async fn engine_bursts_are_coalesced_but_keystrokes_are_not() {
     }))
     .await
     .expect("a fragment is handled");
-    assert!(
-        !app.needs_draw(),
-        "a fragment arriving inside the frame budget should wait"
-    );
+    assert!(!app.needs_draw(), "a fragment arriving inside the frame budget should wait");
     assert!(app.wants_wakeup(), "the pending frame must be woken up for");
     assert!(app.until_next_frame() <= FRAME);
 
-    app.handle(key(KeyCode::Char('a'), KeyModifiers::NONE))
-        .await
-        .expect("typing is handled");
+    app.handle(key(KeyCode::Char('a'), KeyModifiers::NONE)).await.expect("typing is handled");
     assert!(app.needs_draw(), "a keystroke should redraw immediately");
 }
 
@@ -1200,21 +1093,16 @@ fn a_resize_storm_rewraps_without_panicking() {
     let mut terminal = terminal(80, 24);
     for width in [80_u16, 12, 200, 1, 61, 3, 120, 40] {
         terminal.backend_mut().resize(width, 24);
-        app.draw(&mut terminal)
-            .expect("a frame draws after a resize");
+        app.draw(&mut terminal).expect("a frame draws after a resize");
 
         assert!(
-            app.chat
-                .cached_widths()
-                .iter()
-                .all(|cached| *cached == Some(width)),
+            app.chat.cached_widths().iter().all(|cached| *cached == Some(width)),
             "the wrap cache should be invalidated by a resize to {width}"
         );
     }
 
     terminal.backend_mut().resize(1, 1);
-    app.draw(&mut terminal)
-        .expect("a frame draws into a one-cell terminal");
+    app.draw(&mut terminal).expect("a frame draws into a one-cell terminal");
 }
 
 #[test]
@@ -1244,8 +1132,7 @@ fn a_five_thousand_line_transcript_draws_inside_the_frame_budget() {
 
     let mut samples = Vec::with_capacity(FRAMES);
     for frame in 0..FRAMES {
-        app.chat
-            .scroll_lines(if frame.is_multiple_of(2) { -7 } else { 5 });
+        app.chat.scroll_lines(if frame.is_multiple_of(2) { -7 } else { 5 });
 
         let started = Instant::now();
         app.draw(&mut terminal).expect("a frame draws");
@@ -1263,10 +1150,7 @@ fn a_five_thousand_line_transcript_draws_inside_the_frame_budget() {
         app.chat.line_count()
     );
 
-    assert!(
-        p95 < FRAME,
-        "p95 frame time was {p95:?} (worst {worst:?}), budget is {FRAME:?}"
-    );
+    assert!(p95 < FRAME, "p95 frame time was {p95:?} (worst {worst:?}), budget is {FRAME:?}");
 }
 
 /// A stored conversation of `count` messages with the shape a real one
@@ -1364,10 +1248,7 @@ fn a_two_hundred_message_session_reaches_its_first_frame_inside_the_budget() {
         "a transcript this budget is worth measuring should be at least 1,000 lines, got {}",
         app.chat.line_count()
     );
-    assert!(
-        elapsed < BUDGET,
-        "the first frame took {elapsed:?}, budget is {BUDGET:?}"
-    );
+    assert!(elapsed < BUDGET, "the first frame took {elapsed:?}, budget is {BUDGET:?}");
 }
 
 /// One reply of the frame-time fixture, **markdown-heavy by construction**.
@@ -1422,10 +1303,7 @@ fn markdown_transcript(replies: usize) -> Vec<Message> {
             reply.parts.push(Part::text(markdown_reply(index)));
             reply.complete();
 
-            [
-                Message::user(format!("walk me through step {index}")),
-                reply,
-            ]
+            [Message::user(format!("walk me through step {index}")), reply]
         })
         .collect()
 }
@@ -1490,10 +1368,7 @@ fn scrolls_a_ten_thousand_line_markdown_transcript_at_thirty_frames_a_second() {
         frames = frames.len()
     );
 
-    assert!(
-        p95 <= BUDGET,
-        "p95 frame time was {p95:?}, budget is {BUDGET:?}"
-    );
+    assert!(p95 <= BUDGET, "p95 frame time was {p95:?}, budget is {BUDGET:?}");
 }
 
 #[test]
@@ -1573,11 +1448,7 @@ async fn a_finished_todowrite_fills_the_bars_todo_element() {
 
     let mut terminal = terminal(80, 24);
     app.draw(&mut terminal).expect("a frame draws");
-    assert!(
-        screen(&terminal).contains("todos:1/2"),
-        "got:\n{}",
-        screen(&terminal)
-    );
+    assert!(screen(&terminal).contains("todos:1/2"), "got:\n{}", screen(&terminal));
 }
 
 #[tokio::test]
@@ -1602,11 +1473,7 @@ async fn a_tool_call_moves_through_its_lifecycle_on_screen() {
 
     let mut terminal = terminal(80, 24);
     app.draw(&mut terminal).expect("a frame draws");
-    assert!(
-        screen(&terminal).contains("\u{25cf} Shell"),
-        "got:\n{}",
-        screen(&terminal)
-    );
+    assert!(screen(&terminal).contains("\u{25cf} Shell"), "got:\n{}", screen(&terminal));
 
     app.handle(AppEvent::core(CoreEvent::PartUpdated {
         session_id: session(),
@@ -1627,11 +1494,7 @@ async fn a_tool_call_moves_through_its_lifecycle_on_screen() {
     .await
     .expect("a running update is handled");
     app.draw(&mut terminal).expect("a frame draws");
-    assert!(
-        screen(&terminal).contains("cargo test"),
-        "got:\n{}",
-        screen(&terminal)
-    );
+    assert!(screen(&terminal).contains("cargo test"), "got:\n{}", screen(&terminal));
 
     app.handle(AppEvent::core(CoreEvent::PartUpdated {
         session_id: session(),
@@ -1656,14 +1519,8 @@ async fn a_tool_call_moves_through_its_lifecycle_on_screen() {
     .expect("a completed update is handled");
     app.draw(&mut terminal).expect("a frame draws");
     let screen_text = screen(&terminal);
-    assert!(
-        screen_text.contains("\u{25cf} Shell(command: \"cargo test\")"),
-        "got:\n{screen_text}"
-    );
-    assert!(
-        screen_text.contains("\u{23bf} cargo test"),
-        "got:\n{screen_text}"
-    );
+    assert!(screen_text.contains("\u{25cf} Shell(command: \"cargo test\")"), "got:\n{screen_text}");
+    assert!(screen_text.contains("\u{23bf} cargo test"), "got:\n{screen_text}");
     assert!(screen_text.contains("ok"), "got:\n{screen_text}");
 }
 
@@ -1684,11 +1541,7 @@ async fn the_working_line_lives_exactly_as_long_as_the_turn_does() {
 
     let mut terminal = terminal(80, 24);
     app.draw(&mut terminal).expect("a frame draws");
-    assert!(
-        screen(&terminal).contains("\u{2026} (0s"),
-        "got:\n{}",
-        screen(&terminal)
-    );
+    assert!(screen(&terminal).contains("\u{2026} (0s"), "got:\n{}", screen(&terminal));
     assert!(app.animating(), "the loop has a reason to wake itself");
 
     app.handle(AppEvent::core(CoreEvent::MessageFinished {
@@ -1708,10 +1561,7 @@ async fn the_working_line_lives_exactly_as_long_as_the_turn_does() {
         "a settled turn leaves no working line:\n{}",
         screen(&terminal)
     );
-    assert!(
-        !app.animating(),
-        "and nothing left on screen moves on its own"
-    );
+    assert!(!app.animating(), "and nothing left on screen moves on its own");
 }
 
 #[tokio::test]
@@ -1757,22 +1607,10 @@ async fn a_part_updated_for_an_unseen_id_is_appended_not_dropped() {
 
 #[test]
 fn permission_keys_map_to_the_right_reply() {
-    assert_eq!(
-        permission_reply(KeyCode::Char('y')),
-        Some(PermissionReply::Once)
-    );
-    assert_eq!(
-        permission_reply(KeyCode::Char('a')),
-        Some(PermissionReply::Always)
-    );
-    assert_eq!(
-        permission_reply(KeyCode::Char('n')),
-        Some(PermissionReply::Reject)
-    );
-    assert_eq!(
-        permission_reply(KeyCode::Esc),
-        Some(PermissionReply::Reject)
-    );
+    assert_eq!(permission_reply(KeyCode::Char('y')), Some(PermissionReply::Once));
+    assert_eq!(permission_reply(KeyCode::Char('a')), Some(PermissionReply::Always));
+    assert_eq!(permission_reply(KeyCode::Char('n')), Some(PermissionReply::Reject));
+    assert_eq!(permission_reply(KeyCode::Esc), Some(PermissionReply::Reject));
     assert_eq!(permission_reply(KeyCode::Char('x')), None);
 }
 
@@ -1783,18 +1621,10 @@ async fn keys_while_the_dialog_is_open_are_sent_as_replies_not_typed() {
         .await
         .expect("a permission request is handled");
 
-    app.handle(key(KeyCode::Char('y'), KeyModifiers::NONE))
-        .await
-        .expect("y is handled");
+    app.handle(key(KeyCode::Char('y'), KeyModifiers::NONE)).await.expect("y is handled");
 
-    assert!(
-        app.permission.is_some(),
-        "the dialog waits for PermissionReplied before closing"
-    );
-    assert!(
-        app.editor.prompt().is_none(),
-        "the keystroke must not reach the editor"
-    );
+    assert!(app.permission.is_some(), "the dialog waits for PermissionReplied before closing");
+    assert!(app.editor.prompt().is_none(), "the keystroke must not reach the editor");
 }
 
 #[tokio::test]
@@ -1861,10 +1691,7 @@ async fn a_second_request_queues_behind_the_open_dialog_and_is_asked_next() {
         .expect("the second request is handled");
 
     assert_eq!(
-        app.permission
-            .as_ref()
-            .and_then(PendingDialog::permission_id)
-            .map(|id| id.as_str()),
+        app.permission.as_ref().and_then(PendingDialog::permission_id).map(|id| id.as_str()),
         Some("perm_1"),
         "the dialog on screen is still the one that was asked first"
     );
@@ -1873,10 +1700,7 @@ async fn a_second_request_queues_behind_the_open_dialog_and_is_asked_next() {
     let mut terminal = terminal(100, 24);
     app.draw(&mut terminal).expect("a frame draws");
     let screen = screen(&terminal);
-    assert!(
-        screen.contains("1 dialog queued"),
-        "the bar says how many are behind it:\n{screen}"
-    );
+    assert!(screen.contains("1 dialog queued"), "the bar says how many are behind it:\n{screen}");
 
     app.handle(AppEvent::core(CoreEvent::PermissionReplied {
         session_id: session(),
@@ -1887,10 +1711,7 @@ async fn a_second_request_queues_behind_the_open_dialog_and_is_asked_next() {
     .expect("the first reply is handled");
 
     assert_eq!(
-        app.permission
-            .as_ref()
-            .and_then(PendingDialog::permission_id)
-            .map(|id| id.as_str()),
+        app.permission.as_ref().and_then(PendingDialog::permission_id).map(|id| id.as_str()),
         Some("perm_2"),
         "answering one asks the next rather than leaving the queue stranded"
     );
@@ -1913,9 +1734,7 @@ async fn a_second_request_queues_behind_the_open_dialog_and_is_asked_next() {
 async fn a_reply_to_a_queued_request_retires_it_without_ever_showing_it() {
     let mut app = app();
     for id in ["perm_1", "perm_2"] {
-        app.handle(AppEvent::core(permission_event(id)))
-            .await
-            .expect("a request is handled");
+        app.handle(AppEvent::core(permission_event(id))).await.expect("a request is handled");
     }
 
     app.handle(AppEvent::core(CoreEvent::PermissionReplied {
@@ -1926,15 +1745,9 @@ async fn a_reply_to_a_queued_request_retires_it_without_ever_showing_it() {
     .await
     .expect("the queued request's own refusal is handled");
 
-    assert!(
-        app.queued_permissions.is_empty(),
-        "the refused request left the queue"
-    );
+    assert!(app.queued_permissions.is_empty(), "the refused request left the queue");
     assert_eq!(
-        app.permission
-            .as_ref()
-            .and_then(PendingDialog::permission_id)
-            .map(|id| id.as_str()),
+        app.permission.as_ref().and_then(PendingDialog::permission_id).map(|id| id.as_str()),
         Some("perm_1"),
         "and the one on screen is untouched by it"
     );
@@ -1963,12 +1776,9 @@ fn held_event(id: &str, cause: HoldCause) -> CoreEvent {
 #[tokio::test]
 async fn a_parity_hold_raises_the_approval_dialog_and_its_settlement_closes_it() {
     let mut app = app();
-    app.handle(AppEvent::core(held_event(
-        "held_1",
-        HoldCause::NoModeAsserted,
-    )))
-    .await
-    .expect("the hold is handled");
+    app.handle(AppEvent::core(held_event("held_1", HoldCause::NoModeAsserted)))
+        .await
+        .expect("the hold is handled");
 
     let open = app.permission.as_ref().expect("the modal is on screen");
     assert_eq!(
@@ -1976,10 +1786,7 @@ async fn a_parity_hold_raises_the_approval_dialog_and_its_settlement_closes_it()
         Some("held_1"),
         "and it is the hold's own dialog, not a permission's"
     );
-    assert!(
-        open.permission_id().is_none(),
-        "a hold has no permission id"
-    );
+    assert!(open.permission_id().is_none(), "a hold has no permission id");
 
     app.handle(AppEvent::core(CoreEvent::PeerHoldSettled {
         session_id: session(),
@@ -1989,10 +1796,7 @@ async fn a_parity_hold_raises_the_approval_dialog_and_its_settlement_closes_it()
     .await
     .expect("the settlement is handled");
 
-    assert!(
-        app.permission.is_none(),
-        "the settlement retires the modal, whatever settled it"
-    );
+    assert!(app.permission.is_none(), "the settlement retires the modal, whatever settled it");
 }
 
 /// An explicit hold — and a mode-unknown one — raises **no** modal
@@ -2002,23 +1806,13 @@ async fn a_parity_hold_raises_the_approval_dialog_and_its_settlement_closes_it()
 async fn an_explicit_or_mode_unknown_hold_raises_no_dialog() {
     let mut app = app();
     for (id, cause) in [
-        (
-            "held_1",
-            HoldCause::Explicit {
-                source: ganja_protocol::PolicySource::Global,
-            },
-        ),
+        ("held_1", HoldCause::Explicit { source: ganja_protocol::PolicySource::Global }),
         ("held_2", HoldCause::ModeUnknown),
     ] {
-        app.handle(AppEvent::core(held_event(id, cause)))
-            .await
-            .expect("the hold is handled");
+        app.handle(AppEvent::core(held_event(id, cause))).await.expect("the hold is handled");
     }
 
-    assert!(
-        app.permission.is_none(),
-        "an explicit hold is /held's to review, not a modal's"
-    );
+    assert!(app.permission.is_none(), "an explicit hold is /held's to review, not a modal's");
     assert!(app.queued_permissions.is_empty());
 }
 
@@ -2031,12 +1825,9 @@ async fn a_hold_settled_while_queued_retires_without_being_shown() {
     app.handle(AppEvent::core(permission_event("perm_1")))
         .await
         .expect("the permission is handled");
-    app.handle(AppEvent::core(held_event(
-        "held_1",
-        HoldCause::ModeMismatch,
-    )))
-    .await
-    .expect("the hold is handled");
+    app.handle(AppEvent::core(held_event("held_1", HoldCause::ModeMismatch)))
+        .await
+        .expect("the hold is handled");
     assert_eq!(app.queued_permissions.len(), 1, "the hold queued behind");
 
     app.handle(AppEvent::core(CoreEvent::PeerHoldSettled {
@@ -2049,10 +1840,7 @@ async fn a_hold_settled_while_queued_retires_without_being_shown() {
 
     assert!(app.queued_permissions.is_empty(), "the hold left the queue");
     assert_eq!(
-        app.permission
-            .as_ref()
-            .and_then(PendingDialog::permission_id)
-            .map(|id| id.as_str()),
+        app.permission.as_ref().and_then(PendingDialog::permission_id).map(|id| id.as_str()),
         Some("perm_1"),
         "and the permission on screen is untouched by it"
     );
@@ -2064,24 +1852,15 @@ async fn a_hold_settled_while_queued_retires_without_being_shown() {
 #[tokio::test]
 async fn approval_keys_settle_by_event_never_by_keypress() {
     let mut app = app();
-    app.handle(AppEvent::core(held_event(
-        "held_1",
-        HoldCause::NoModeAsserted,
-    )))
-    .await
-    .expect("the hold is handled");
+    app.handle(AppEvent::core(held_event("held_1", HoldCause::NoModeAsserted)))
+        .await
+        .expect("the hold is handled");
 
-    app.handle(AppEvent::Term(TermEvent::Key(KeyEvent::new(
-        KeyCode::Esc,
-        KeyModifiers::NONE,
-    ))))
-    .await
-    .expect("the dismiss is handled");
+    app.handle(AppEvent::Term(TermEvent::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))))
+        .await
+        .expect("the dismiss is handled");
 
-    assert!(
-        app.permission.is_some(),
-        "Esc sent the deny; the settlement event is what closes"
-    );
+    assert!(app.permission.is_some(), "Esc sent the deny; the settlement event is what closes");
 
     app.handle(AppEvent::core(CoreEvent::PeerHoldSettled {
         session_id: session(),
@@ -2118,13 +1897,7 @@ async fn a_yolo_session_never_answers_a_hold_and_the_entry_stays_held() {
         WireFacts::none(),
     );
     assert!(
-        matches!(
-            admission,
-            SocketAdmission::Held {
-                cause: HoldCause::NoModeAsserted,
-                ..
-            }
-        ),
+        matches!(admission, SocketAdmission::Held { cause: HoldCause::NoModeAsserted, .. }),
         "a bypassed receiver's unset policy holds: {admission:?}"
     );
     let held = app.engine.held_messages();
@@ -2177,25 +1950,15 @@ async fn the_bar_counts_held_messages_only_while_any_are_held() {
         ganja_core::teammate::inbound::WireFacts::none(),
     );
     assert!(
-        matches!(
-            admission,
-            ganja_core::teammate::inbound::SocketAdmission::Held { .. }
-        ),
+        matches!(admission, ganja_core::teammate::inbound::SocketAdmission::Held { .. }),
         "the seed held: {admission:?}"
     );
     app.handle(AppEvent::Tick).await.expect("a tick is handled");
-    assert!(
-        status_line(&mut app).contains("1 held"),
-        "got: {}",
-        status_line(&mut app)
-    );
+    assert!(status_line(&mut app).contains("1 held"), "got: {}", status_line(&mut app));
 
     let id = app.engine.held_messages()[0].id.clone();
     app.engine
-        .send(ganja_protocol::Command::SettleHeld {
-            id,
-            decision: super::HeldDecision::Deny,
-        })
+        .send(ganja_protocol::Command::SettleHeld { id, decision: super::HeldDecision::Deny })
         .await
         .expect("the settle is accepted");
     app.handle(AppEvent::Tick).await.expect("a tick is handled");
@@ -2216,34 +1979,22 @@ async fn the_held_listing_lists_and_its_deny_retires_the_row() {
         ganja_core::teammate::inbound::WireFacts::none(),
     );
     assert!(
-        matches!(
-            admission,
-            ganja_core::teammate::inbound::SocketAdmission::Held { .. }
-        ),
+        matches!(admission, ganja_core::teammate::inbound::SocketAdmission::Held { .. }),
         "the seed held: {admission:?}"
     );
 
     app.run_command(command::Action::Held).await;
     let dialog = app.held_dialog.as_ref().expect("/held opens the dialog");
-    assert_eq!(
-        dialog.selected().map(|row| row.from.as_str()),
-        Some("w1@ganja-team")
-    );
+    assert_eq!(dialog.selected().map(|row| row.from.as_str()), Some("w1@ganja-team"));
 
     // Enter opens the actions; Down moves to Deny; Enter settles it.
     app.handle_held_key(KeyCode::Enter).await;
     app.handle_held_key(KeyCode::Down).await;
     app.handle_held_key(KeyCode::Enter).await;
 
-    assert!(
-        app.engine.held_messages().is_empty(),
-        "the deny settled the entry in the engine"
-    );
+    assert!(app.engine.held_messages().is_empty(), "the deny settled the entry in the engine");
     let dialog = app.held_dialog.as_ref().expect("the dialog stays open");
-    assert!(
-        dialog.selected().is_none(),
-        "and the row is gone from the listing"
-    );
+    assert!(dialog.selected().is_none(), "and the row is gone from the listing");
 
     app.handle_held_key(KeyCode::Esc).await;
     assert!(app.held_dialog.is_none(), "Esc closes the listing");
@@ -2282,9 +2033,7 @@ fn snapshot_held_listing_open() {
         super::held::Row::new(
             HeldId::from("held_2".to_owned()),
             "scribbler@nowhere".to_owned(),
-            HoldCause::Explicit {
-                source: ganja_protocol::PolicySource::Global,
-            },
+            HoldCause::Explicit { source: ganja_protocol::PolicySource::Global },
             Duration::from_secs(12),
             None,
             "an unsummarized body",
@@ -2339,9 +2088,7 @@ async fn shelling(
     let engine = Engine::new(
         Arc::new(FakeProvider::new("", Duration::ZERO).with_script(&script)),
         fake::MODEL,
-        Arc::new(ganja_tool::Registry::new(vec![Arc::new(
-            ganja_tool::shell::ShellTool::new(),
-        )])),
+        Arc::new(ganja_tool::Registry::new(vec![Arc::new(ganja_tool::shell::ShellTool::new())])),
         permissions,
     );
     let events = engine.subscribe().await.expect("the test subscribes first");
@@ -2374,9 +2121,7 @@ async fn pump_turn(app: &mut App, events: &mut BoxStream<'static, CoreEvent>) ->
         let event = next_event(events).await;
         let finished = matches!(event, CoreEvent::MessageFinished { .. });
         seen.push(event.clone());
-        app.handle(AppEvent::core(event))
-            .await
-            .expect("an engine event is handled");
+        app.handle(AppEvent::core(event)).await.expect("an engine event is handled");
         assert!(
             app.permission.is_none() && app.queued_permissions.is_empty(),
             "no dialog may be raised in a bypassed session"
@@ -2397,11 +2142,11 @@ async fn pump_turn(app: &mut App, events: &mut BoxStream<'static, CoreEvent>) ->
 fn completed_shell(events: &[CoreEvent]) -> Option<String> {
     events.iter().find_map(|event| match event {
         CoreEvent::PartUpdated { part, .. } => match &part.body {
-            PartBody::Tool {
-                tool,
-                state: ToolState::Completed { output, .. },
-                ..
-            } if tool == "bash" => Some(output.clone()),
+            PartBody::Tool { tool, state: ToolState::Completed { output, .. }, .. }
+                if tool == "bash" =>
+            {
+                Some(output.clone())
+            }
             _ => None,
         },
         _ => None,
@@ -2417,10 +2162,8 @@ async fn a_yolo_session_answers_a_raised_dialog_once_and_never_draws_it() {
 
     let seen = pump_turn(&mut app, &mut events).await;
 
-    let asked = seen
-        .iter()
-        .filter(|event| matches!(event, CoreEvent::PermissionRequested { .. }))
-        .count();
+    let asked =
+        seen.iter().filter(|event| matches!(event, CoreEvent::PermissionRequested { .. })).count();
     assert_eq!(asked, 1, "the rules still raised the request: {seen:#?}");
 
     let replies: Vec<_> = seen
@@ -2458,15 +2201,10 @@ async fn a_denied_call_stays_denied_in_a_yolo_session() {
     let seen = pump_turn(&mut app, &mut events).await;
 
     assert!(
-        !seen
-            .iter()
-            .any(|event| matches!(event, CoreEvent::PermissionRequested { .. })),
+        !seen.iter().any(|event| matches!(event, CoreEvent::PermissionRequested { .. })),
         "a denial is decided inside the engine and asks nobody: {seen:#?}"
     );
-    assert!(
-        completed_shell(&seen).is_none(),
-        "the denied command never ran: {seen:#?}"
-    );
+    assert!(completed_shell(&seen).is_none(), "the denied command never ran: {seen:#?}");
     // And the turn carried on regardless: a refusal is information the
     // model reads, never a turn this frontend ended.
     assert!(
@@ -2505,10 +2243,7 @@ async fn a_yolo_session_still_raises_its_questions() {
     .await
     .expect("the question is handled");
 
-    assert!(
-        app.question.is_some(),
-        "a bypass covers permission, never conversation"
-    );
+    assert!(app.question.is_some(), "a bypass covers permission, never conversation");
 }
 
 #[tokio::test]
@@ -2529,16 +2264,9 @@ async fn a_question_dialog_offers_the_options_and_enter_replies_the_selected_lab
         assert!(screen.contains(expected), "missing {expected:?}:\n{screen}");
     }
 
-    app.handle(key(KeyCode::Down, KeyModifiers::NONE))
-        .await
-        .expect("down is handled");
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
-    assert!(
-        app.question.is_some(),
-        "the dialog waits for QuestionReplied before closing"
-    );
+    app.handle(key(KeyCode::Down, KeyModifiers::NONE)).await.expect("down is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
+    assert!(app.question.is_some(), "the dialog waits for QuestionReplied before closing");
 
     let mut answered = None;
     for _ in 0..64 {
@@ -2547,9 +2275,7 @@ async fn a_question_dialog_offers_the_options_and_enter_replies_the_selected_lab
             answered = Some(answers.clone());
         }
         let finished = matches!(event, CoreEvent::MessageFinished { .. });
-        app.handle(AppEvent::core(event))
-            .await
-            .expect("an engine event is handled");
+        app.handle(AppEvent::core(event)).await.expect("an engine event is handled");
         if finished {
             break;
         }
@@ -2563,13 +2289,8 @@ async fn a_question_dialog_offers_the_options_and_enter_replies_the_selected_lab
 async fn esc_rejects_the_question_and_the_turn_reads_it_as_dismissal() {
     let (_directory, mut app, mut events) = questioning().await;
 
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("escape is handled");
-    assert!(
-        app.question.is_some(),
-        "the dialog waits for QuestionRejected before closing"
-    );
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("escape is handled");
+    assert!(app.question.is_some(), "the dialog waits for QuestionRejected before closing");
 
     let mut rejected = false;
     let mut dismissed = false;
@@ -2588,19 +2309,14 @@ async fn esc_rejects_the_question_and_the_turn_reads_it_as_dismissal() {
             _ => {}
         }
         let finished = matches!(event, CoreEvent::MessageFinished { .. });
-        app.handle(AppEvent::core(event))
-            .await
-            .expect("an engine event is handled");
+        app.handle(AppEvent::core(event)).await.expect("an engine event is handled");
         if finished {
             break;
         }
     }
 
     assert!(rejected, "the engine should announce the dismissal");
-    assert!(
-        dismissed,
-        "the question tool should read its dismissal text"
-    );
+    assert!(dismissed, "the question tool should read its dismissal text");
     assert!(app.question.is_none());
 }
 
@@ -2611,9 +2327,7 @@ async fn control_c_still_quits_while_the_dialog_is_open() {
         .await
         .expect("a permission request is handled");
 
-    app.handle(key(KeyCode::Char('c'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-c is handled");
+    app.handle(key(KeyCode::Char('c'), KeyModifiers::CONTROL)).await.expect("control-c is handled");
 
     assert!(app.quit);
 }
@@ -2637,9 +2351,7 @@ async fn escape_with_the_dialog_open_does_not_cancel_the_turn() {
     for event in typing("hello") {
         app.handle(event).await.expect("typing is handled");
     }
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
     pump(&mut app, &mut events, 4).await;
     assert!(app.status.is_streaming());
 
@@ -2648,9 +2360,7 @@ async fn escape_with_the_dialog_open_does_not_cancel_the_turn() {
         .expect("a permission request is handled");
     assert!(app.permission.is_some());
 
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("escape is handled");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("escape is handled");
     assert!(
         app.permission.is_some(),
         "Esc should reject the dialog, not close it before PermissionReplied"
@@ -2662,20 +2372,11 @@ async fn escape_with_the_dialog_open_does_not_cancel_the_turn() {
         if let CoreEvent::MessageFinished { reason, .. } = &event {
             finished = Some(*reason);
         }
-        app.handle(AppEvent::core(event))
-            .await
-            .expect("an engine event is handled");
+        app.handle(AppEvent::core(event)).await.expect("an engine event is handled");
     }
 
-    assert_eq!(
-        finished,
-        Some(FinishReason::Completed),
-        "Esc must not have cancelled the turn"
-    );
-    assert!(
-        app.permission.is_some(),
-        "the dialog should not self-close on an unrelated event"
-    );
+    assert_eq!(finished, Some(FinishReason::Completed), "Esc must not have cancelled the turn");
+    assert!(app.permission.is_some(), "the dialog should not self-close on an unrelated event");
 }
 
 /// **AC3.** A reply that thought before it answered, as the pane draws it:
@@ -2887,14 +2588,9 @@ async fn snapshot_sessions_picker_open() {
     store_pickable_sessions(&directory);
     let mut app = persistent_app(&directory);
 
-    app.handle(key(KeyCode::Char('s'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-s is handled");
+    app.handle(key(KeyCode::Char('s'), KeyModifiers::CONTROL)).await.expect("control-s is handled");
 
-    assert!(
-        app.sessions.is_some(),
-        "the picker must be open, or the snapshot is of a bare screen"
-    );
+    assert!(app.sessions.is_some(), "the picker must be open, or the snapshot is of a bare screen");
 
     let mut terminal = terminal(80, 24);
     app.draw(&mut terminal).expect("a frame draws");
@@ -2920,15 +2616,9 @@ async fn moving_the_cursor_in_the_theme_picker_applies_what_it_lands_on() {
         "opening previews nothing: the cursor starts where the user is"
     );
 
-    app.handle(key(KeyCode::Char('j'), KeyModifiers::NONE))
-        .await
-        .expect("j is handled");
+    app.handle(key(KeyCode::Char('j'), KeyModifiers::NONE)).await.expect("j is handled");
 
-    assert_eq!(
-        app.theme.name(),
-        "terminal",
-        "the row below opencode should already be applied"
-    );
+    assert_eq!(app.theme.name(), "terminal", "the row below opencode should already be applied");
     assert_eq!(app.themes.active(), "terminal");
     assert!(app.theme_list.is_some(), "moving must not close the picker");
 }
@@ -2941,14 +2631,10 @@ async fn cancelling_the_theme_picker_puts_back_the_theme_it_opened_on() {
     // own default chord is gone, so these fixtures open it the way
     // `snapshot_help_dialog_open` opens the reference card.
     app.run_command(command::Action::Themes).await;
-    app.handle(key(KeyCode::Char('j'), KeyModifiers::NONE))
-        .await
-        .expect("j is handled");
+    app.handle(key(KeyCode::Char('j'), KeyModifiers::NONE)).await.expect("j is handled");
     assert_ne!(app.theme.name(), DEFAULT_THEME, "a preview must have run");
 
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("escape is handled");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("escape is handled");
 
     assert!(app.theme_list.is_none(), "escape closes the picker");
     assert_eq!(app.theme.name(), DEFAULT_THEME);
@@ -2962,14 +2648,10 @@ async fn keeping_a_theme_closes_the_picker_and_leaves_it_applied() {
     // own default chord is gone, so these fixtures open it the way
     // `snapshot_help_dialog_open` opens the reference card.
     app.run_command(command::Action::Themes).await;
-    app.handle(key(KeyCode::Char('k'), KeyModifiers::NONE))
-        .await
-        .expect("k is handled");
+    app.handle(key(KeyCode::Char('k'), KeyModifiers::NONE)).await.expect("k is handled");
     let previewed = app.theme.name().to_owned();
 
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     assert!(app.theme_list.is_none());
     assert_eq!(app.theme.name(), previewed);
@@ -3000,8 +2682,7 @@ async fn keys_while_the_theme_picker_is_open_do_not_reach_the_editor() {
 async fn the_wheel_does_not_reach_the_transcript_while_the_theme_picker_is_open() {
     let mut app = app();
     for index in 0..60 {
-        app.chat
-            .start_message(Message::user(format!("entry {index}")));
+        app.chat.start_message(Message::user(format!("entry {index}")));
     }
     app.draw(&mut terminal(40, 12)).expect("a frame draws");
 
@@ -3018,10 +2699,7 @@ async fn the_wheel_does_not_reach_the_transcript_while_the_theme_picker_is_open(
     .await
     .expect("a wheel event is handled");
 
-    assert!(
-        app.chat.is_following_tail(),
-        "the wheel should be swallowed"
-    );
+    assert!(app.chat.is_following_tail(), "the wheel should be swallowed");
 }
 
 /// An app whose prompt history already holds `entries`, submitted in the
@@ -3041,9 +2719,7 @@ async fn control_r_opens_the_history_search() {
     let directory = temporary();
     let mut app = app_with_history(&directory, &["first prompt", "second prompt"]);
 
-    app.handle(key(KeyCode::Char('r'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-r is handled");
+    app.handle(key(KeyCode::Char('r'), KeyModifiers::CONTROL)).await.expect("control-r is handled");
 
     assert!(app.history_search.is_some(), "the search should be open");
 }
@@ -3055,9 +2731,7 @@ async fn typing_into_the_history_search_narrows_to_a_fuzzy_match() {
     let directory = temporary();
     let mut app = app_with_history(&directory, &["commit the fix", "git status"]);
 
-    app.handle(key(KeyCode::Char('r'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-r is handled");
+    app.handle(key(KeyCode::Char('r'), KeyModifiers::CONTROL)).await.expect("control-r is handled");
     for event in typing("ommi") {
         app.handle(event).await.expect("typing narrows the query");
     }
@@ -3082,21 +2756,14 @@ async fn enter_in_history_search_fills_the_composer_and_sends_nothing() {
     history.append(history::PromptInfo::text("what does this crate do"));
     app.history = history;
 
-    app.handle(key(KeyCode::Char('r'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-r is handled");
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Char('r'), KeyModifiers::CONTROL)).await.expect("control-r is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     assert!(app.history_search.is_none(), "enter closes the search");
     assert_eq!(app.editor.text(), "what does this crate do");
 
     let arrived = tokio::time::timeout(Duration::from_millis(50), events.next()).await;
-    assert!(
-        arrived.is_err(),
-        "no engine event should have fired — a fill is not a submit"
-    );
+    assert!(arrived.is_err(), "no engine event should have fired — a fill is not a submit");
 }
 
 /// Esc restores exactly the buffer the search opened over — text and
@@ -3112,25 +2779,15 @@ async fn esc_restores_the_pre_search_buffer_byte_for_byte() {
     let text_before = app.editor.text();
     let cursor_before = app.editor.cursor();
 
-    app.handle(key(KeyCode::Char('r'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-r is handled");
+    app.handle(key(KeyCode::Char('r'), KeyModifiers::CONTROL)).await.expect("control-r is handled");
     for event in typing("remem") {
         app.handle(event).await.expect("typing narrows the query");
     }
-    app.handle(key(KeyCode::Down, KeyModifiers::NONE))
-        .await
-        .expect("down is handled");
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("escape is handled");
+    app.handle(key(KeyCode::Down, KeyModifiers::NONE)).await.expect("down is handled");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("escape is handled");
 
     assert!(app.history_search.is_none(), "escape closes the search");
-    assert_eq!(
-        app.editor.text(),
-        text_before,
-        "the buffer is restored byte for byte"
-    );
+    assert_eq!(app.editor.text(), text_before, "the buffer is restored byte for byte");
     assert_eq!(app.editor.cursor(), cursor_before, "and the cursor too");
 }
 
@@ -3145,21 +2802,13 @@ async fn a_rebound_history_search_reaches_its_new_key_and_the_default_stops_work
     let configured: std::collections::BTreeMap<String, String> =
         [("history_search".to_owned(), "f7".to_owned())].into();
     let keys = crate::keybind::Keybinds::from_config(&configured).expect("a legible binding");
-    let mut app = App::new(engine(), None, Themes::builtin())
-        .with_history(history)
-        .with_keybinds(keys);
+    let mut app =
+        App::new(engine(), None, Themes::builtin()).with_history(history).with_keybinds(keys);
 
-    app.handle(key(KeyCode::Char('r'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-r is handled");
-    assert!(
-        app.history_search.is_none(),
-        "the replaced default should be inert"
-    );
+    app.handle(key(KeyCode::Char('r'), KeyModifiers::CONTROL)).await.expect("control-r is handled");
+    assert!(app.history_search.is_none(), "the replaced default should be inert");
 
-    app.handle(key(KeyCode::F(7), KeyModifiers::NONE))
-        .await
-        .expect("f7 is handled");
+    app.handle(key(KeyCode::F(7), KeyModifiers::NONE)).await.expect("f7 is handled");
     assert!(app.history_search.is_some(), "and f7 should open it");
 }
 
@@ -3171,9 +2820,7 @@ async fn keys_while_the_history_search_is_open_do_not_reach_the_editor() {
     let directory = temporary();
     let mut app = app_with_history(&directory, &["remembered prompt"]);
 
-    app.handle(key(KeyCode::Char('r'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-r is handled");
+    app.handle(key(KeyCode::Char('r'), KeyModifiers::CONTROL)).await.expect("control-r is handled");
     for event in typing("jkx") {
         app.handle(event).await.expect("typing is handled");
     }
@@ -3188,14 +2835,11 @@ async fn the_wheel_does_not_reach_the_transcript_while_the_history_search_is_ope
     let directory = temporary();
     let mut app = app_with_history(&directory, &["remembered prompt"]);
     for index in 0..60 {
-        app.chat
-            .start_message(Message::user(format!("entry {index}")));
+        app.chat.start_message(Message::user(format!("entry {index}")));
     }
     app.draw(&mut terminal(40, 12)).expect("a frame draws");
 
-    app.handle(key(KeyCode::Char('r'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-r is handled");
+    app.handle(key(KeyCode::Char('r'), KeyModifiers::CONTROL)).await.expect("control-r is handled");
     app.handle(AppEvent::Term(TermEvent::Mouse(MouseEvent {
         kind: MouseEventKind::ScrollUp,
         column: 0,
@@ -3205,10 +2849,7 @@ async fn the_wheel_does_not_reach_the_transcript_while_the_history_search_is_ope
     .await
     .expect("a wheel event is handled");
 
-    assert!(
-        app.chat.is_following_tail(),
-        "the wheel should be swallowed"
-    );
+    assert!(app.chat.is_following_tail(), "the wheel should be swallowed");
 }
 
 /// An empty store still opens — the modal says so honestly rather than
@@ -3217,9 +2858,7 @@ async fn the_wheel_does_not_reach_the_transcript_while_the_history_search_is_ope
 async fn control_r_over_an_empty_store_still_opens() {
     let mut app = app();
 
-    app.handle(key(KeyCode::Char('r'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-r is handled");
+    app.handle(key(KeyCode::Char('r'), KeyModifiers::CONTROL)).await.expect("control-r is handled");
 
     assert!(app.history_search.is_some());
 }
@@ -3227,14 +2866,10 @@ async fn control_r_over_an_empty_store_still_opens() {
 #[tokio::test]
 async fn snapshot_history_search_open() {
     let directory = temporary();
-    let mut app = app_with_history(
-        &directory,
-        &["what does this crate do", "commit the fix", "git status"],
-    );
+    let mut app =
+        app_with_history(&directory, &["what does this crate do", "commit the fix", "git status"]);
 
-    app.handle(key(KeyCode::Char('r'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-r is handled");
+    app.handle(key(KeyCode::Char('r'), KeyModifiers::CONTROL)).await.expect("control-r is handled");
 
     assert!(
         app.history_search.is_some(),
@@ -3262,12 +2897,8 @@ async fn a_kept_theme_is_stored_and_reopened_next_run() {
     // own default chord is gone, so these fixtures open it the way
     // `snapshot_help_dialog_open` opens the reference card.
     app.run_command(command::Action::Themes).await;
-    app.handle(key(KeyCode::Char('k'), KeyModifiers::NONE))
-        .await
-        .expect("k is handled");
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Char('k'), KeyModifiers::NONE)).await.expect("k is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
     let kept = app.theme.name().to_owned();
 
     let mut reopened = Themes::builtin();
@@ -3292,17 +2923,10 @@ async fn a_cancelled_preview_is_never_written_down() {
     // own default chord is gone, so these fixtures open it the way
     // `snapshot_help_dialog_open` opens the reference card.
     app.run_command(command::Action::Themes).await;
-    app.handle(key(KeyCode::Char('j'), KeyModifiers::NONE))
-        .await
-        .expect("j is handled");
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("escape is handled");
+    app.handle(key(KeyCode::Char('j'), KeyModifiers::NONE)).await.expect("j is handled");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("escape is handled");
 
-    assert!(
-        !store.exists(),
-        "nothing was confirmed, so nothing is stored"
-    );
+    assert!(!store.exists(), "nothing was confirmed, so nothing is stored");
 }
 
 /// A theme switch has to reach the editor and the cached transcript, not
@@ -3324,11 +2948,7 @@ async fn a_theme_switch_repaints_the_whole_screen() {
         screen(&screen_buffer),
         "a theme switch must not move a single glyph"
     );
-    assert_ne!(
-        styles_before,
-        styled_screen(&screen_buffer),
-        "nothing was repainted"
-    );
+    assert_ne!(styles_before, styled_screen(&screen_buffer), "nothing was repainted");
 }
 
 #[test]
@@ -3404,18 +3024,11 @@ async fn snapshot_sessions_picker_after_moving_the_selection() {
     store_pickable_sessions(&directory);
     let mut app = persistent_app(&directory);
 
-    app.handle(key(KeyCode::Char('s'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-s is handled");
-    app.handle(key(KeyCode::Char('j'), KeyModifiers::NONE))
-        .await
-        .expect("j is handled");
+    app.handle(key(KeyCode::Char('s'), KeyModifiers::CONTROL)).await.expect("control-s is handled");
+    app.handle(key(KeyCode::Char('j'), KeyModifiers::NONE)).await.expect("j is handled");
 
     assert_eq!(
-        app.sessions
-            .as_ref()
-            .and_then(|sessions| sessions.selected())
-            .map(|info| info.id.as_str()),
+        app.sessions.as_ref().and_then(|sessions| sessions.selected()).map(|info| info.id.as_str()),
         Some("0198f2c4-a1b0-7000-8000-000000000012"),
         "j should move down one row rather than reaching the editor"
     );
@@ -3439,10 +3052,8 @@ async fn the_session_socket_follows_the_picker_and_new_through_the_apps_doors() 
     let directory = temporary();
     store_pickable_sessions(&directory);
     let recording = Arc::new(crate::binder::fake::Recording::default());
-    let mut app = persistent_app(&directory).with_socket(
-        Box::new(Arc::clone(&recording)),
-        crate::binder::fake::served(),
-    );
+    let mut app = persistent_app(&directory)
+        .with_socket(Box::new(Arc::clone(&recording)), crate::binder::fake::served());
     let minted = app.engine.session_id();
 
     // The first pass, whatever event carries it, binds under the minted id.
@@ -3455,9 +3066,7 @@ async fn the_session_socket_follows_the_picker_and_new_through_the_apps_doors() 
 
     // The picker: Ctrl-S opens it and Enter resumes the row under the
     // cursor, which is a stored session with an id of its own.
-    app.handle(key(KeyCode::Char('s'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-s is handled");
+    app.handle(key(KeyCode::Char('s'), KeyModifiers::CONTROL)).await.expect("control-s is handled");
     let chosen = app
         .sessions
         .as_ref()
@@ -3465,9 +3074,7 @@ async fn the_session_socket_follows_the_picker_and_new_through_the_apps_doors() 
         .map(|info| info.id.clone())
         .expect("the picker has a row under the cursor");
     assert_ne!(chosen, minted);
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
     assert_eq!(app.engine.session_id(), chosen, "the resume moved the slot");
     assert_eq!(
         recording.bound.lock().expect("not poisoned").as_slice(),
@@ -3484,9 +3091,7 @@ async fn the_session_socket_follows_the_picker_and_new_through_the_apps_doors() 
     for event in typing("/new") {
         app.handle(event).await.expect("typing is handled");
     }
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
     let fresh = app.engine.session_id();
     assert_ne!(fresh, chosen, "/new re-minted the id");
     assert_eq!(
@@ -3501,11 +3106,7 @@ async fn the_session_socket_follows_the_picker_and_new_through_the_apps_doors() 
     );
 
     // The exit path: what `App::run` does after the loop.
-    app.socket
-        .as_mut()
-        .expect("this app serves a socket")
-        .shutdown()
-        .await;
+    app.socket.as_mut().expect("this app serves a socket").shutdown().await;
     assert_eq!(
         recording.closed.lock().expect("not poisoned").last(),
         Some(&crate::binder::fake::Recording::path_for(&fresh)),
@@ -3540,10 +3141,7 @@ impl CompactRecording {
 /// naming rule — for a test to compute the stem a bound path (real or
 /// [`CompactRecording`]'s) will actually carry.
 fn compact(id: &SessionId) -> String {
-    id.as_str()
-        .chars()
-        .filter(char::is_ascii_hexdigit)
-        .collect()
+    id.as_str().chars().filter(char::is_ascii_hexdigit).collect()
 }
 
 struct CompactBound {
@@ -3557,10 +3155,7 @@ impl binder::Bound for CompactBound {
     }
 
     fn shutdown(self: Box<Self>) -> futures::future::BoxFuture<'static, anyhow::Result<()>> {
-        self.closed
-            .lock()
-            .expect("not poisoned")
-            .push(self.path.clone());
+        self.closed.lock().expect("not poisoned").push(self.path.clone());
         Box::pin(async { Ok(()) })
     }
 }
@@ -3590,10 +3185,7 @@ impl binder::Binder for Arc<CompactRecording> {
 fn registering_app(directory: &TempDir, registry_dir: &TempDir) -> (App, Arc<CompactRecording>) {
     let recording = Arc::new(CompactRecording::default());
     let app = persistent_app(directory)
-        .with_socket(
-            Box::new(Arc::clone(&recording)),
-            crate::binder::fake::served(),
-        )
+        .with_socket(Box::new(Arc::clone(&recording)), crate::binder::fake::served())
         .with_registry_directory(registry_dir.path());
 
     (app, recording)
@@ -3614,39 +3206,26 @@ async fn a_lead_session_registers_beside_its_socket_and_unregisters_on_teardown(
     app.handle(AppEvent::Tick).await.expect("a tick is handled");
 
     let minted_record = registry::record_path(registry_dir.path(), &compact(&minted));
-    assert!(
-        minted_record.exists(),
-        "a record appears beside the bound socket"
-    );
+    assert!(minted_record.exists(), "a record appears beside the bound socket");
     let read: registry::Record =
         serde_json::from_slice(&fs::read(&minted_record).expect("the record reads"))
             .expect("the record is JSON");
     assert_eq!(read.session_id, minted.as_str());
 
     // The rebind: the picker moves the slot.
-    app.handle(key(KeyCode::Char('s'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-s is handled");
+    app.handle(key(KeyCode::Char('s'), KeyModifiers::CONTROL)).await.expect("control-s is handled");
     let chosen = app
         .sessions
         .as_ref()
         .and_then(|sessions| sessions.selected())
         .map(|info| info.id.clone())
         .expect("the picker has a row under the cursor");
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
     assert_eq!(app.engine.session_id(), chosen, "the resume moved the slot");
 
-    assert!(
-        !minted_record.exists(),
-        "the old record is gone the moment the slot moved"
-    );
+    assert!(!minted_record.exists(), "the old record is gone the moment the slot moved");
     let chosen_record = registry::record_path(registry_dir.path(), &compact(&chosen));
-    assert!(
-        chosen_record.exists(),
-        "a fresh record appears beside the rebound socket"
-    );
+    assert!(chosen_record.exists(), "a fresh record appears beside the rebound socket");
 
     // `App::run`'s own teardown order: the record goes before the
     // socket is asked to close.
@@ -3662,17 +3241,12 @@ async fn a_refused_bind_writes_no_record() {
     let directory = temporary();
     let registry_dir = temporary();
     let (mut app, recording) = registering_app(&directory, &registry_dir);
-    recording
-        .refuse
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+    recording.refuse.store(true, std::sync::atomic::Ordering::SeqCst);
 
     app.handle(AppEvent::Tick).await.expect("a tick is handled");
 
     assert!(
-        fs::read_dir(registry_dir.path())
-            .expect("the directory reads")
-            .next()
-            .is_none(),
+        fs::read_dir(registry_dir.path()).expect("the directory reads").next().is_none(),
         "a refused first bind writes nothing"
     );
 }
@@ -3688,25 +3262,13 @@ async fn a_refused_rebind_writes_no_new_record_but_the_old_one_still_goes() {
     let minted_record = registry::record_path(registry_dir.path(), &compact(&minted));
     assert!(minted_record.exists());
 
-    recording
-        .refuse
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-    app.handle(key(KeyCode::Char('s'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-s is handled");
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    recording.refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+    app.handle(key(KeyCode::Char('s'), KeyModifiers::CONTROL)).await.expect("control-s is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
+    assert!(!minted_record.exists(), "the old record is still removed on observing the slot move");
     assert!(
-        !minted_record.exists(),
-        "the old record is still removed on observing the slot move"
-    );
-    assert!(
-        fs::read_dir(registry_dir.path())
-            .expect("the directory reads")
-            .next()
-            .is_none(),
+        fs::read_dir(registry_dir.path()).expect("the directory reads").next().is_none(),
         "a refused rebind writes no new record"
     );
 }
@@ -3748,10 +3310,7 @@ async fn a_name_collision_is_a_notice_never_a_refusal_at_registration() {
     assert!(line.contains(holder_stem), "{line}");
 
     let record = registry::record_path(registry_dir.path(), &compact(&app.engine.session_id()));
-    assert!(
-        record.exists(),
-        "registration succeeds despite the collision"
-    );
+    assert!(record.exists(), "registration succeeds despite the collision");
 }
 
 /// AC-7: `/rename` rewrites a lead's own record in place — same stem,
@@ -3771,9 +3330,7 @@ async fn rename_rewrites_a_leads_record_in_place() {
     for event in typing("/rename fresh") {
         app.handle(event).await.expect("typing is handled");
     }
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     assert_eq!(app.engine.self_name(), "fresh");
     let read: registry::Record =
@@ -3787,19 +3344,10 @@ async fn rename_rewrites_a_leads_record_in_place() {
     for event in typing("/rename a@b") {
         app.handle(event).await.expect("typing is handled");
     }
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
-    assert_eq!(
-        app.engine.self_name(),
-        "fresh",
-        "the refused rename changed nothing"
-    );
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
+    assert_eq!(app.engine.self_name(), "fresh", "the refused rename changed nothing");
     let line = status_line(&mut app);
-    assert!(
-        line.contains("scopes an address"),
-        "the grammar's own sentence: {line}"
-    );
+    assert!(line.contains("scopes an address"), "the grammar's own sentence: {line}");
 }
 
 /// AC-40 TUI half: in a **teamless** session (no socket, no record),
@@ -3837,9 +3385,7 @@ async fn teamless_rename_updates_the_cell_and_still_warns_of_collisions() {
     for event in typing("/rename fresh") {
         app.handle(event).await.expect("typing is handled");
     }
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     assert_eq!(app.engine.self_name(), "fresh");
     let line = status_line(&mut app);
@@ -3883,9 +3429,7 @@ async fn the_incumbents_collision_scan_warns_once_per_newly_seen_collider() {
         &registry_dir.path().join(format!("{preexisting_stem}.sock")),
     )
     .expect("the lock file opens");
-    preexisting_held
-        .try_lock()
-        .expect("nothing else holds a fresh lock");
+    preexisting_held.try_lock().expect("nothing else holds a fresh lock");
 
     let (mut app, _recording) = registering_app(&directory, &registry_dir);
     app.engine.set_self_name("worker");
@@ -3931,10 +3475,7 @@ async fn the_incumbents_collision_scan_warns_once_per_newly_seen_collider() {
 
     // Not due yet: the throttle has not elapsed.
     app.poll_collision_scan();
-    assert!(
-        !status_line(&mut app).contains("registered your name"),
-        "the scan has not run yet"
-    );
+    assert!(!status_line(&mut app).contains("registered your name"), "the scan has not run yet");
 
     // Force the throttle open, as a real thirty seconds would.
     app.collision_scanned =
@@ -3982,10 +3523,7 @@ async fn with_no_lister_the_at_menu_offers_files_and_roster_only() {
 
     let files = app.files.as_ref().expect("the menu is open");
     assert!(
-        !files
-            .rows()
-            .iter()
-            .any(|row| matches!(row, MenuRow::Session { .. })),
+        !files.rows().iter().any(|row| matches!(row, MenuRow::Session { .. })),
         "no session rows without a lister"
     );
 }
@@ -4035,10 +3573,7 @@ async fn a_member_shows_roster_rows_only_never_live_sessions() {
 
     if let Some(files) = &app.files {
         assert!(
-            !files
-                .rows()
-                .iter()
-                .any(|row| matches!(row, MenuRow::Session { .. })),
+            !files.rows().iter().any(|row| matches!(row, MenuRow::Session { .. })),
             "a member's menu never carries session rows"
         );
     }
@@ -4087,10 +3622,7 @@ async fn a_partial_listing_marks_the_menu_incomplete_and_still_completes() {
 
     let mut terminal = terminal(80, 16);
     app.draw(&mut terminal).expect("a frame draws");
-    assert!(
-        screen(&terminal).contains("partial"),
-        "the incomplete marker shows"
-    );
+    assert!(screen(&terminal).contains("partial"), "the incomplete marker shows");
 }
 
 /// AC-23 (ADJ-3): completing a duplicate-named session row splices the
@@ -4110,9 +3642,7 @@ async fn a_colliding_session_completion_splices_its_uds_address() {
     // Both rows are files-then-roster-then-sessions; select the first
     // session row (index 0, since there are no files or roster rows for
     // this fragment).
-    app.handle(key(KeyCode::Tab, KeyModifiers::NONE))
-        .await
-        .expect("tab is handled");
+    app.handle(key(KeyCode::Tab, KeyModifiers::NONE)).await.expect("tab is handled");
 
     let prompt = app.editor.text();
     assert!(
@@ -4143,14 +3673,10 @@ async fn a_token_that_is_neither_file_nor_name_stays_literal() {
         .with_registry_directory(registry_dir.path());
     app.session_listing = vec![live_session("worker", "0298c1a2", "/work/a")];
 
-    let mentions = mention::attachable(
-        "@backend @worker @uds:/tmp/ganja-0/x.sock @nobody",
-        &app.root,
-    );
-    let session_mentions = app.session_mention_tokens(
-        "@backend @worker @uds:/tmp/ganja-0/x.sock @nobody",
-        &mentions,
-    );
+    let mentions =
+        mention::attachable("@backend @worker @uds:/tmp/ganja-0/x.sock @nobody", &app.root);
+    let session_mentions =
+        app.session_mention_tokens("@backend @worker @uds:/tmp/ganja-0/x.sock @nobody", &mentions);
 
     assert_eq!(
         mentions.iter().map(|m| m.path.as_str()).collect::<Vec<_>>(),
@@ -4189,10 +3715,8 @@ async fn deliver_peers_sends_no_session_mentions() {
         "the not-yet-running-turn arm sends a prompt"
     );
 
-    let CoreEvent::MessageStarted {
-        session_id: _,
-        message,
-    } = events.next().await.expect("the engine reports the prompt")
+    let CoreEvent::MessageStarted { session_id: _, message } =
+        events.next().await.expect("the engine reports the prompt")
     else {
         panic!("the first event should be the prompt starting");
     };
@@ -4230,23 +3754,17 @@ fn agentic_app() -> App {
 async fn control_p_opens_the_palette_and_escape_closes_it() {
     let mut app = app();
 
-    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-p is handled");
+    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL)).await.expect("control-p is handled");
     assert!(app.palette.is_some(), "the palette should be open");
 
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("escape is handled");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("escape is handled");
     assert!(app.palette.is_none(), "escape should close it");
 }
 
 #[tokio::test]
 async fn typing_in_the_palette_filters_it_rather_than_reaching_the_editor() {
     let mut app = app();
-    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-p is handled");
+    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL)).await.expect("control-p is handled");
 
     // `j` and `k` are movement in the dialogs with no filter line; here
     // they have to be text, or half the alphabet cannot be searched for.
@@ -4259,30 +3777,20 @@ async fn typing_in_the_palette_filters_it_rather_than_reaching_the_editor() {
         Some("jk"),
         "the keys should have reached the filter"
     );
-    assert!(
-        app.editor.prompt().is_none(),
-        "and not the editor underneath"
-    );
+    assert!(app.editor.prompt().is_none(), "and not the editor underneath");
 }
 
 #[tokio::test]
 async fn the_palette_runs_the_command_under_its_cursor() {
     let mut app = app();
-    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-p is handled");
+    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL)).await.expect("control-p is handled");
     for event in typing("themes") {
         app.handle(event).await.expect("typing is handled");
     }
 
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
-    assert!(
-        app.palette.is_none(),
-        "running a command closes the palette"
-    );
+    assert!(app.palette.is_none(), "running a command closes the palette");
     assert!(app.theme_list.is_some(), "and opens what it named");
 }
 
@@ -4291,19 +3799,13 @@ async fn the_palette_runs_the_command_under_its_cursor() {
 #[tokio::test]
 async fn a_reopened_palette_still_holds_what_was_typed_into_it() {
     let mut app = app();
-    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-p is handled");
+    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL)).await.expect("control-p is handled");
     for event in typing("mo") {
         app.handle(event).await.expect("typing is handled");
     }
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("escape is handled");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("escape is handled");
 
-    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-p is handled");
+    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL)).await.expect("control-p is handled");
 
     assert_eq!(app.palette.as_ref().map(Palette::filter), Some("mo"));
 }
@@ -4326,9 +3828,7 @@ async fn the_palette_reaches_every_command_it_lists() {
         for event in typing(typed) {
             app.handle(event).await.expect("typing is handled");
         }
-        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-            .await
-            .expect("enter is handled");
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
         assert!(opened(&app), "/{typed} should have done something");
     }
@@ -4343,15 +3843,10 @@ async fn tab_completes_a_backend_from_the_parsers_own_list() {
     for event in typing("/team spawn foo --backend g") {
         app.handle(event).await.expect("typing is handled");
     }
-    assert!(
-        app.dropdown.is_some(),
-        "the backend slot should raise the menu"
-    );
+    assert!(app.dropdown.is_some(), "the backend slot should raise the menu");
     assert!(app.completion.is_some());
 
-    app.handle(key(KeyCode::Tab, KeyModifiers::NONE))
-        .await
-        .expect("tab is handled");
+    app.handle(key(KeyCode::Tab, KeyModifiers::NONE)).await.expect("tab is handled");
 
     assert_eq!(app.editor.text(), "/team spawn foo --backend ganja ");
     assert!(app.dropdown.is_none(), "choosing closes the menu");
@@ -4384,9 +3879,7 @@ async fn enter_fills_a_team_subcommand_without_submitting() {
     }
     assert!(app.dropdown.is_some());
 
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     assert_eq!(app.editor.text(), "/team shutdown ");
     assert!(app.dropdown.is_none());
@@ -4400,22 +3893,14 @@ async fn free_words_raise_no_values_menu_and_esc_keeps_the_text() {
     for event in typing("/team spawn fo") {
         app.handle(event).await.expect("typing is handled");
     }
-    assert!(
-        app.dropdown.is_none(),
-        "a member name is anyone's to choose"
-    );
+    assert!(app.dropdown.is_none(), "a member name is anyone's to choose");
 
     for event in typing(" --agent ") {
         app.handle(event).await.expect("typing is handled");
     }
-    assert!(
-        app.dropdown.is_some(),
-        "the agent slot should raise the menu"
-    );
+    assert!(app.dropdown.is_some(), "the agent slot should raise the menu");
 
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("esc is handled");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("esc is handled");
     assert!(app.dropdown.is_none());
     assert_eq!(app.editor.text(), "/team spawn fo --agent ");
 }
@@ -4434,10 +3919,7 @@ async fn the_command_menu_opens_on_a_leading_slash_and_on_nothing_else() {
     for event in typing("what about /tmp") {
         midway.handle(event).await.expect("typing is handled");
     }
-    assert!(
-        midway.dropdown.is_none(),
-        "a slash mid-sentence is a path, not a command"
-    );
+    assert!(midway.dropdown.is_none(), "a slash mid-sentence is a path, not a command");
 }
 
 #[tokio::test]
@@ -4467,9 +3949,7 @@ async fn escape_closes_the_command_menu_and_keeps_what_was_typed() {
         app.handle(event).await.expect("typing is handled");
     }
 
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("escape is handled");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("escape is handled");
 
     assert!(app.dropdown.is_none(), "the menu should have closed");
     assert_eq!(
@@ -4486,15 +3966,10 @@ async fn enter_on_the_command_menu_runs_the_command_and_empties_the_editor() {
         app.handle(event).await.expect("typing is handled");
     }
 
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     assert!(app.theme_list.is_some(), "the command should have run");
-    assert!(
-        app.editor.prompt().is_none(),
-        "the text that named it has done its job"
-    );
+    assert!(app.editor.prompt().is_none(), "the text that named it has done its job");
 }
 
 /// **F1**, **D446**: Tab completes the buffer and closes the menu without
@@ -4508,9 +3983,7 @@ async fn tab_on_the_command_menu_completes_the_buffer_without_running_it() {
         app.handle(event).await.expect("typing is handled");
     }
 
-    app.handle(key(KeyCode::Tab, KeyModifiers::NONE))
-        .await
-        .expect("tab is handled");
+    app.handle(key(KeyCode::Tab, KeyModifiers::NONE)).await.expect("tab is handled");
 
     assert_eq!(
         app.editor.prompt().as_deref(),
@@ -4518,10 +3991,7 @@ async fn tab_on_the_command_menu_completes_the_buffer_without_running_it() {
         "the selected row's name, not the fragment that narrowed to it"
     );
     assert!(app.dropdown.is_none(), "choosing closes the menu");
-    assert!(
-        app.theme_list.is_none(),
-        "Tab must not run the command the way Enter does"
-    );
+    assert!(app.theme_list.is_none(), "Tab must not run the command the way Enter does");
 }
 
 /// The same claim from the engine's side of the wire: nothing reaches it.
@@ -4532,15 +4002,10 @@ async fn tab_on_a_ui_command_never_reaches_the_engine() {
         app.handle(event).await.expect("typing is handled");
     }
 
-    app.handle(key(KeyCode::Tab, KeyModifiers::NONE))
-        .await
-        .expect("tab is handled");
+    app.handle(key(KeyCode::Tab, KeyModifiers::NONE)).await.expect("tab is handled");
 
     assert_eq!(app.editor.prompt().as_deref(), Some("/new "));
-    assert!(
-        events.next().now_or_never().is_none(),
-        "nothing should have been sent to the engine"
-    );
+    assert!(events.next().now_or_never().is_none(), "nothing should have been sent to the engine");
 }
 
 #[tokio::test]
@@ -4549,15 +4014,9 @@ async fn the_arrow_keys_steer_the_command_menu_instead_of_the_transcript() {
     for event in typing("/") {
         app.handle(event).await.expect("typing is handled");
     }
-    let first = app
-        .dropdown
-        .as_ref()
-        .and_then(Dropdown::selected)
-        .expect("a menu with rows");
+    let first = app.dropdown.as_ref().and_then(Dropdown::selected).expect("a menu with rows");
 
-    app.handle(key(KeyCode::Down, KeyModifiers::NONE))
-        .await
-        .expect("down is handled");
+    app.handle(key(KeyCode::Down, KeyModifiers::NONE)).await.expect("down is handled");
 
     assert_ne!(
         app.dropdown.as_ref().and_then(Dropdown::selected),
@@ -4575,9 +4034,7 @@ async fn ctrl_l_marks_the_next_frame_stale() {
     let mut app = app();
     assert!(!app.stale, "nothing has asked for a repaint yet");
 
-    app.handle(key(KeyCode::Char('l'), KeyModifiers::CONTROL))
-        .await
-        .expect("ctrl-l is handled");
+    app.handle(key(KeyCode::Char('l'), KeyModifiers::CONTROL)).await.expect("ctrl-l is handled");
 
     assert!(app.stale, "the next draw should force a full repaint");
 
@@ -4603,10 +4060,7 @@ async fn ctrl_l_forces_a_full_repaint_instead_of_a_diff_against_a_stale_screen()
 
     // Something else wrote over the screen without this `Terminal`
     // knowing, the way an external editor does.
-    terminal
-        .backend_mut()
-        .clear_region(ClearType::All)
-        .expect("the backend clears");
+    terminal.backend_mut().clear_region(ClearType::All).expect("the backend clears");
     assert!(screen(&terminal).trim().is_empty(), "the corruption landed");
 
     // Nothing changed from this `Terminal`'s point of view, so an
@@ -4618,9 +4072,7 @@ async fn ctrl_l_forces_a_full_repaint_instead_of_a_diff_against_a_stale_screen()
         "an undirected draw should not have repainted over the corruption"
     );
 
-    app.handle(key(KeyCode::Char('l'), KeyModifiers::CONTROL))
-        .await
-        .expect("ctrl-l is handled");
+    app.handle(key(KeyCode::Char('l'), KeyModifiers::CONTROL)).await.expect("ctrl-l is handled");
     app.draw(&mut terminal).expect("the redraw repaints");
 
     assert!(
@@ -4636,14 +4088,8 @@ async fn the_model_list_holds_the_running_providers_models_and_marks_the_active_
 
     let dialog = served.chooser.as_ref().expect("the list should be open");
     assert_eq!(dialog.0, Chooser::Models);
-    assert!(
-        !dialog.1.is_empty(),
-        "anthropic has models in the compiled-in catalog"
-    );
-    assert!(
-        served.wire_fetch.is_none(),
-        "a cataloged provider never consults the wire"
-    );
+    assert!(!dialog.1.is_empty(), "anthropic has models in the compiled-in catalog");
+    assert!(served.wire_fetch.is_none(), "a cataloged provider never consults the wire");
 }
 
 /// The fake model has no catalog row, so `/effort` has nothing to list
@@ -4654,11 +4100,7 @@ async fn the_effort_picker_refuses_a_model_with_nothing_to_offer() {
     app.run_command(command::Action::Effort).await;
 
     assert!(app.chooser.is_none(), "there is nothing to choose from");
-    assert!(
-        status_line(&mut app).contains(NO_EFFORTS),
-        "got {:?}",
-        status_line(&mut app)
-    );
+    assert!(status_line(&mut app).contains(NO_EFFORTS), "got {:?}", status_line(&mut app));
 }
 
 /// Enter on the picker routes through [`Command::SwitchEffort`]; the
@@ -4668,25 +4110,17 @@ async fn the_effort_picker_refuses_a_model_with_nothing_to_offer() {
 #[tokio::test]
 async fn choosing_an_effort_sends_the_switch_and_surfaces_the_refusal() {
     let mut app = app();
-    app.chooser = Some((
-        Chooser::Effort,
-        ListDialog::new(" effort ", effort::rows(["max"], None)),
-    ));
+    app.chooser = Some((Chooser::Effort, ListDialog::new(" effort ", effort::rows(["max"], None))));
     app.move_chooser(1);
 
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     assert!(
         status_line(&mut app).contains("not in the catalog"),
         "the engine's refusal should be readable: {:?}",
         status_line(&mut app)
     );
-    assert!(
-        app.chooser.is_some(),
-        "a refused switch keeps the list the user was choosing from"
-    );
+    assert!(app.chooser.is_some(), "a refused switch keeps the list the user was choosing from");
 }
 
 /// The announcement is what moves the status line — whichever frontend
@@ -4710,12 +4144,9 @@ async fn an_effort_change_event_moves_the_status_line_and_a_clear_empties_it() {
         status_line(&mut app)
     );
 
-    app.handle(AppEvent::core(CoreEvent::EffortChanged {
-        session_id: session(),
-        effort: None,
-    }))
-    .await
-    .expect("the clear is handled");
+    app.handle(AppEvent::core(CoreEvent::EffortChanged { session_id: session(), effort: None }))
+        .await
+        .expect("the clear is handled");
     assert!(
         !status_line(&mut app).contains("canned (max)"),
         "Default has no segment: {:?}",
@@ -4725,20 +4156,14 @@ async fn an_effort_change_event_moves_the_status_line_and_a_clear_empties_it() {
 
 /// A wire-listed model row, in the shape the seam hands back.
 fn listed(id: &str, name: &str) -> ganja_core::provider::ListedModel {
-    ganja_core::provider::ListedModel {
-        id: id.to_owned(),
-        name: name.to_owned(),
-    }
+    ganja_core::provider::ListedModel { id: id.to_owned(), name: name.to_owned() }
 }
 
 /// A whole seam answer around `models`. The notice is the seam's to write
 /// and nothing in this crate renders it — the chooser shows rows — so a
 /// fixture supplies any of them.
 fn served(models: Vec<ganja_core::provider::ListedModel>) -> ganja_core::provider::WireModels {
-    ganja_core::provider::WireModels {
-        models,
-        notice: "a listing fixture",
-    }
+    ganja_core::provider::WireModels { models, notice: "a listing fixture" }
 }
 
 /// Ticks until the in-flight listing fetch has been reaped.
@@ -4764,17 +4189,11 @@ async fn reap_wire_fetch(app: &mut App) {
 async fn a_provider_no_listing_serves_still_opens_the_empty_list_it_always_did() {
     let mut unknown = app().with_provider("a-provider-nothing-ships");
     unknown.open_models();
-    assert!(
-        unknown.chooser.is_none(),
-        "nothing opens until the fetch lands"
-    );
+    assert!(unknown.chooser.is_none(), "nothing opens until the fetch lands");
 
     reap_wire_fetch(&mut unknown).await;
     assert!(
-        unknown
-            .chooser
-            .as_ref()
-            .is_some_and(|(_, list)| list.is_empty()),
+        unknown.chooser.as_ref().is_some_and(|(_, list)| list.is_empty()),
         "a provider with no catalog entries has nothing to offer"
     );
 }
@@ -4806,10 +4225,7 @@ async fn a_cached_wire_listing_opens_the_chooser_with_its_rows_and_marks_the_act
     app.draw(&mut terminal).expect("a frame draws");
     let screen = screen(&terminal);
     assert!(screen.contains("gpt-5.3-codex"), "{screen}");
-    assert!(
-        screen.contains("Codex 5.3"),
-        "the display name rides beside the id: {screen}"
-    );
+    assert!(screen.contains("Codex 5.3"), "the display name rides beside the id: {screen}");
 }
 
 /// While the fetch is out, the status bar says so instead of the frame
@@ -4835,9 +4251,8 @@ async fn an_uncataloged_model_list_says_it_is_fetching_while_the_wire_answers() 
 async fn a_second_model_list_while_the_fetch_is_in_flight_does_not_spawn_another() {
     let mut app = app().with_provider("cursor");
     let (landing, planted) = tokio::sync::oneshot::channel();
-    app.wire_fetch = Some(tokio::spawn(async move {
-        planted.await.expect("the test completes the fetch")
-    }));
+    app.wire_fetch =
+        Some(tokio::spawn(async move { planted.await.expect("the test completes the fetch") }));
 
     app.open_models();
     assert!(app.chooser.is_none(), "nothing to show yet");
@@ -4848,9 +4263,7 @@ async fn a_second_model_list_while_the_fetch_is_in_flight_does_not_spawn_another
     reap_wire_fetch(&mut app).await;
 
     assert!(
-        app.wire_models
-            .as_ref()
-            .is_some_and(|models| models[0].id == "planted-one"),
+        app.wire_models.as_ref().is_some_and(|models| models[0].id == "planted-one"),
         "the planted fetch is the one that landed"
     );
     assert!(
@@ -4882,9 +4295,8 @@ async fn an_in_flight_wire_fetch_keeps_the_loop_waking_up() {
 async fn a_listing_that_lands_under_a_modal_waits_in_the_cache() {
     let mut app = app().with_provider("cursor");
     app.help = Some(Help::new(app.keys.clone()));
-    app.wire_fetch = Some(tokio::spawn(async {
-        Some(Ok(served(vec![listed("planted-one", "Planted One")])))
-    }));
+    app.wire_fetch =
+        Some(tokio::spawn(async { Some(Ok(served(vec![listed("planted-one", "Planted One")]))) }));
 
     reap_wire_fetch(&mut app).await;
     assert!(app.chooser.is_none(), "the modal keeps its keys");
@@ -4892,10 +4304,7 @@ async fn a_listing_that_lands_under_a_modal_waits_in_the_cache() {
 
     app.help = None;
     app.open_models();
-    assert!(
-        app.chooser.is_some(),
-        "the next `/model` opens instantly from the cache"
-    );
+    assert!(app.chooser.is_some(), "the next `/model` opens instantly from the cache");
 }
 
 /// An empty roster is an answer, and an empty dialog is not a way to
@@ -4940,16 +4349,10 @@ async fn choosing_a_model_switches_the_session_to_it() {
     let mut app = app().with_provider("anthropic");
     app.open_models();
 
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     assert!(app.chooser.is_none(), "a switch that took closes the list");
-    assert_eq!(
-        app.model,
-        app.engine.model(),
-        "the frontend prices what the engine will ask for"
-    );
+    assert_eq!(app.model, app.engine.model(), "the frontend prices what the engine will ask for");
     assert_ne!(app.model, fake::MODEL, "and it is no longer the old model");
 }
 
@@ -4962,19 +4365,12 @@ async fn a_refused_model_switch_reaches_the_status_bar_and_leaves_the_list_up() 
     for event in typing("a turn to be busy with") {
         app.handle(event).await.expect("typing is handled");
     }
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     app.open_models();
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
-    assert!(
-        app.chooser.is_some(),
-        "a refused switch keeps the list the user was choosing from"
-    );
+    assert!(app.chooser.is_some(), "a refused switch keeps the list the user was choosing from");
     let mut terminal = terminal(120, 12);
     app.draw(&mut terminal).expect("a frame draws");
     assert!(
@@ -5018,19 +4414,11 @@ async fn the_agent_list_holds_only_the_agents_a_user_may_switch_to() {
 #[tokio::test]
 async fn choosing_an_agent_switches_the_session_and_the_status_bar_says_so() {
     let mut app = agentic_app();
-    assert_eq!(
-        app.agent.as_deref(),
-        Some("build"),
-        "sessions start on build"
-    );
+    assert_eq!(app.agent.as_deref(), Some("build"), "sessions start on build");
 
     app.open_agents();
-    app.handle(key(KeyCode::Down, KeyModifiers::NONE))
-        .await
-        .expect("down is handled");
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Down, KeyModifiers::NONE)).await.expect("down is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     assert_eq!(app.agent.as_deref(), Some("plan"));
     assert_eq!(app.engine.agent().as_deref(), Some("plan"));
@@ -5074,9 +4462,7 @@ async fn tab_on_an_empty_editor_cycles_the_agents_and_wraps() {
     let mut seen = vec![app.agent.clone()];
 
     for _ in 0..3 {
-        app.handle(key(KeyCode::Tab, KeyModifiers::NONE))
-            .await
-            .expect("tab is handled");
+        app.handle(key(KeyCode::Tab, KeyModifiers::NONE)).await.expect("tab is handled");
         seen.push(app.agent.clone());
     }
 
@@ -5099,9 +4485,7 @@ async fn tab_with_something_typed_reaches_the_editor_instead_of_the_agents() {
         app.handle(event).await.expect("typing is handled");
     }
 
-    app.handle(key(KeyCode::Tab, KeyModifiers::NONE))
-        .await
-        .expect("tab is handled");
+    app.handle(key(KeyCode::Tab, KeyModifiers::NONE)).await.expect("tab is handled");
 
     assert_eq!(
         app.agent.as_deref(),
@@ -5128,21 +4512,14 @@ async fn control_d_exits_on_an_empty_editor_and_deletes_forward_otherwise() {
     for event in typing("abc") {
         typed.handle(event).await.expect("typing is handled");
     }
-    typed
-        .handle(key(KeyCode::Home, KeyModifiers::NONE))
-        .await
-        .expect("home is handled");
+    typed.handle(key(KeyCode::Home, KeyModifiers::NONE)).await.expect("home is handled");
     typed
         .handle(key(KeyCode::Char('d'), KeyModifiers::CONTROL))
         .await
         .expect("control-d is handled");
 
     assert!(!typed.quit, "there was something to delete");
-    assert_eq!(
-        typed.editor.prompt().as_deref(),
-        Some("bc"),
-        "and it was deleted"
-    );
+    assert_eq!(typed.editor.prompt().as_deref(), Some("bc"), "and it was deleted");
 }
 
 /// Ganja's own interrupts, which stay unconditional where Ctrl-D is gated.
@@ -5154,9 +4531,7 @@ async fn control_c_and_control_q_quit_whatever_is_typed() {
             app.handle(event).await.expect("typing is handled");
         }
 
-        app.handle(key(code, KeyModifiers::CONTROL))
-            .await
-            .expect("a quit key is handled");
+        app.handle(key(code, KeyModifiers::CONTROL)).await.expect("a quit key is handled");
 
         assert!(app.quit, "{code:?} with Control should quit");
     }
@@ -5169,20 +4544,10 @@ async fn home_and_end_move_in_the_buffer_while_there_is_one_and_in_the_transcrip
         written.handle(event).await.expect("typing is handled");
     }
 
-    written
-        .handle(key(KeyCode::Home, KeyModifiers::NONE))
-        .await
-        .expect("home is handled");
-    assert_eq!(
-        written.editor.cursor(),
-        (0, 0),
-        "home reached the line's start"
-    );
+    written.handle(key(KeyCode::Home, KeyModifiers::NONE)).await.expect("home is handled");
+    assert_eq!(written.editor.cursor(), (0, 0), "home reached the line's start");
 
-    written
-        .handle(key(KeyCode::End, KeyModifiers::NONE))
-        .await
-        .expect("end is handled");
+    written.handle(key(KeyCode::End, KeyModifiers::NONE)).await.expect("end is handled");
     assert_eq!(
         written.editor.cursor(),
         (0, "a line to move around in".chars().count()),
@@ -5195,23 +4560,11 @@ async fn home_and_end_move_in_the_buffer_while_there_is_one_and_in_the_transcrip
     let mut terminal = terminal(40, 12);
     empty.draw(&mut terminal).expect("a frame draws");
 
-    empty
-        .handle(key(KeyCode::Home, KeyModifiers::NONE))
-        .await
-        .expect("home is handled");
-    assert!(
-        !empty.chat.is_following_tail(),
-        "home should have gone to the oldest message"
-    );
+    empty.handle(key(KeyCode::Home, KeyModifiers::NONE)).await.expect("home is handled");
+    assert!(!empty.chat.is_following_tail(), "home should have gone to the oldest message");
 
-    empty
-        .handle(key(KeyCode::End, KeyModifiers::NONE))
-        .await
-        .expect("end is handled");
-    assert!(
-        empty.chat.is_following_tail(),
-        "end should have come back to the newest"
-    );
+    empty.handle(key(KeyCode::End, KeyModifiers::NONE)).await.expect("end is handled");
+    assert!(empty.chat.is_following_tail(), "end should have come back to the newest");
 }
 
 #[tokio::test]
@@ -5222,9 +4575,7 @@ async fn a_bare_exit_word_submitted_on_its_own_quits() {
             app.handle(event).await.expect("typing is handled");
         }
 
-        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-            .await
-            .expect("enter is handled");
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
         assert!(app.quit, "{word:?} on its own should quit");
     }
@@ -5237,9 +4588,7 @@ async fn an_exit_word_inside_a_sentence_is_a_prompt_like_any_other() {
         app.handle(event).await.expect("typing is handled");
     }
 
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     assert!(!app.quit, "the word only quits when it is the whole prompt");
     pump(&mut app, &mut events, 1).await;
@@ -5254,32 +4603,21 @@ async fn a_rebound_key_opens_what_it_was_bound_to_and_the_default_stops_working(
     let keys = crate::keybind::Keybinds::from_config(&configured).expect("a legible binding");
     let mut app = app().with_keybinds(keys);
 
-    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-p is handled");
-    assert!(
-        app.palette.is_none(),
-        "the replaced default should be inert"
-    );
+    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL)).await.expect("control-p is handled");
+    assert!(app.palette.is_none(), "the replaced default should be inert");
 
-    app.handle(key(KeyCode::F(5), KeyModifiers::NONE))
-        .await
-        .expect("f5 is handled");
+    app.handle(key(KeyCode::F(5), KeyModifiers::NONE)).await.expect("f5 is handled");
     assert!(app.palette.is_some(), "and f5 should open it");
 }
 
 #[tokio::test]
 async fn the_help_card_opens_from_the_palette_and_closes_on_escape() {
     let mut app = app();
-    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-p is handled");
+    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL)).await.expect("control-p is handled");
     for event in typing("help") {
         app.handle(event).await.expect("typing is handled");
     }
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
     assert!(app.help.is_some());
 
     // Every other key is swallowed, like any modal here.
@@ -5289,9 +4627,7 @@ async fn the_help_card_opens_from_the_palette_and_closes_on_escape() {
     assert!(app.help.is_some(), "typing should not close it");
     assert!(app.editor.prompt().is_none(), "nor reach the editor");
 
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("escape is handled");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("escape is handled");
     assert!(app.help.is_none());
 }
 
@@ -5302,19 +4638,13 @@ async fn ctrl_t_opens_the_inspector_and_either_esc_or_ctrl_t_closes_it() {
     let mut app = app();
     assert!(app.inspector.is_none());
 
-    app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
-        .await
-        .expect("ctrl+t is handled");
+    app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL)).await.expect("ctrl+t is handled");
     assert!(app.inspector.is_some());
 
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("escape is handled");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("escape is handled");
     assert!(app.inspector.is_none(), "escape should close it");
 
-    app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
-        .await
-        .expect("ctrl+t is handled");
+    app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL)).await.expect("ctrl+t is handled");
     app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
         .await
         .expect("ctrl+t is handled again");
@@ -5356,26 +4686,17 @@ async fn ctrl_u_and_ctrl_d_scroll_the_inspector_by_half_a_page() {
         .expect("a fragment is handled");
     }
 
-    app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
-        .await
-        .expect("ctrl+t is handled");
-    app.handle(key(KeyCode::Char('2'), KeyModifiers::NONE))
-        .await
-        .expect("the log tab is selected");
+    app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL)).await.expect("ctrl+t is handled");
+    app.handle(key(KeyCode::Char('2'), KeyModifiers::NONE)).await.expect("the log tab is selected");
     // Wide enough that a `PartDelta`'s `{event:?}` line reaches its
     // `delta` before the clip; eight rows less the chrome is five of
     // content, so a half page is two.
     let mut terminal = terminal(220, 8);
     app.draw(&mut terminal).expect("a frame draws");
     let pinned = screen(&terminal);
-    assert!(
-        pinned.contains("fragment 29"),
-        "the log tab opens on its tail:\n{pinned}"
-    );
+    assert!(pinned.contains("fragment 29"), "the log tab opens on its tail:\n{pinned}");
 
-    app.handle(key(KeyCode::Char('u'), KeyModifiers::CONTROL))
-        .await
-        .expect("ctrl+u is handled");
+    app.handle(key(KeyCode::Char('u'), KeyModifiers::CONTROL)).await.expect("ctrl+u is handled");
     app.draw(&mut terminal).expect("a frame draws");
     let up = screen(&terminal);
     assert!(
@@ -5383,29 +4704,20 @@ async fn ctrl_u_and_ctrl_d_scroll_the_inspector_by_half_a_page() {
         "ctrl+u moved half of the five content rows up:\n{up}"
     );
 
-    app.handle(key(KeyCode::Char('d'), KeyModifiers::CONTROL))
-        .await
-        .expect("ctrl+d is handled");
+    app.handle(key(KeyCode::Char('d'), KeyModifiers::CONTROL)).await.expect("ctrl+d is handled");
     app.draw(&mut terminal).expect("a frame draws");
     assert_eq!(screen(&terminal), pinned, "ctrl+d brought the tail back");
-    assert!(
-        !app.quit,
-        "inside the overlay ctrl+d is vim's, not the exit chord it is elsewhere"
-    );
+    assert!(!app.quit, "inside the overlay ctrl+d is vim's, not the exit chord it is elsewhere");
 }
 
 #[tokio::test]
 async fn q_closes_the_inspector_too() {
     let mut app = app();
 
-    app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL))
-        .await
-        .expect("ctrl+t is handled");
+    app.handle(key(KeyCode::Char('t'), KeyModifiers::CONTROL)).await.expect("ctrl+t is handled");
     assert!(app.inspector.is_some());
 
-    app.handle(key(KeyCode::Char('q'), KeyModifiers::NONE))
-        .await
-        .expect("q is handled");
+    app.handle(key(KeyCode::Char('q'), KeyModifiers::NONE)).await.expect("q is handled");
     assert!(app.inspector.is_none(), "q should close it");
 }
 
@@ -5427,19 +4739,11 @@ async fn digit_keys_and_arrows_switch_the_inspectors_tab() {
         screen(&terminal)
     );
 
-    app.handle(key(KeyCode::Char('2'), KeyModifiers::NONE))
-        .await
-        .expect("2 jumps to the log tab");
+    app.handle(key(KeyCode::Char('2'), KeyModifiers::NONE)).await.expect("2 jumps to the log tab");
     app.draw(&mut terminal).expect("a frame draws");
-    assert!(
-        screen(&terminal).contains("no events yet"),
-        "got:\n{}",
-        screen(&terminal)
-    );
+    assert!(screen(&terminal).contains("no events yet"), "got:\n{}", screen(&terminal));
 
-    app.handle(key(KeyCode::Left, KeyModifiers::NONE))
-        .await
-        .expect("left cycles back a tab");
+    app.handle(key(KeyCode::Left, KeyModifiers::NONE)).await.expect("left cycles back a tab");
     app.draw(&mut terminal).expect("a frame draws");
     assert!(
         screen(&terminal).contains("no session yet"),
@@ -5484,19 +4788,13 @@ async fn the_inspector_does_not_pause_a_streaming_turn() {
     .await
     .expect("a fragment is handled");
 
-    assert!(
-        app.status.is_streaming(),
-        "the overlay must not pause the turn"
-    );
-    let grew = app.chat.messages().iter().any(|(_, parts)| {
-        parts
-            .iter()
-            .any(|part| part.as_text() == Some("still streaming"))
-    });
-    assert!(
-        grew,
-        "the transcript should keep growing while the overlay is open"
-    );
+    assert!(app.status.is_streaming(), "the overlay must not pause the turn");
+    let grew = app
+        .chat
+        .messages()
+        .iter()
+        .any(|(_, parts)| parts.iter().any(|part| part.as_text() == Some("still streaming")));
+    assert!(grew, "the transcript should keep growing while the overlay is open");
 }
 
 /// Opened the way a user opens it, over a real transcript — this is what
@@ -5543,14 +4841,9 @@ async fn the_inspector_covers_the_composer_and_the_status_bar() {
         !open.contains("Ask ganja something"),
         "the composer should be covered while the overlay is open:\n{open}"
     );
-    assert!(
-        !open.contains("ready"),
-        "the status bar should be covered too:\n{open}"
-    );
+    assert!(!open.contains("ready"), "the status bar should be covered too:\n{open}");
 
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("escape closes the overlay");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("escape closes the overlay");
     app.draw(&mut terminal).expect("a frame draws");
     let reclosed = screen(&terminal);
     assert!(
@@ -5566,9 +4859,7 @@ async fn the_wheel_does_not_reach_the_transcript_while_the_palette_is_open() {
     let mut terminal = terminal(40, 12);
     app.draw(&mut terminal).expect("a frame draws");
 
-    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-p is handled");
+    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL)).await.expect("control-p is handled");
     app.handle(AppEvent::Term(TermEvent::Mouse(MouseEvent {
         kind: MouseEventKind::ScrollUp,
         column: 0,
@@ -5578,10 +4869,7 @@ async fn the_wheel_does_not_reach_the_transcript_while_the_palette_is_open() {
     .await
     .expect("the wheel is handled");
 
-    assert!(
-        app.chat.is_following_tail(),
-        "a modal claims the wheel as well as the keys"
-    );
+    assert!(app.chat.is_following_tail(), "a modal claims the wheel as well as the keys");
 }
 
 #[tokio::test]
@@ -5589,14 +4877,9 @@ async fn snapshot_palette_open() {
     let mut app = app();
     palette_transcript(&mut app);
 
-    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-p is handled");
+    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL)).await.expect("control-p is handled");
 
-    assert!(
-        app.palette.is_some(),
-        "the palette must be open, or the snapshot is of a bare screen"
-    );
+    assert!(app.palette.is_some(), "the palette must be open, or the snapshot is of a bare screen");
 
     let mut terminal = terminal(80, 24);
     app.draw(&mut terminal).expect("a frame draws");
@@ -5609,9 +4892,7 @@ async fn snapshot_palette_filtered() {
     let mut app = app();
     palette_transcript(&mut app);
 
-    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-p is handled");
+    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL)).await.expect("control-p is handled");
     for event in typing("s") {
         app.handle(event).await.expect("typing is handled");
     }
@@ -5635,12 +4916,8 @@ async fn snapshot_palette_selection_styling() {
     let mut app = themed_app("tokyonight");
     palette_transcript(&mut app);
 
-    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-p is handled");
-    app.handle(key(KeyCode::Down, KeyModifiers::NONE))
-        .await
-        .expect("down is handled");
+    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL)).await.expect("control-p is handled");
+    app.handle(key(KeyCode::Down, KeyModifiers::NONE)).await.expect("down is handled");
 
     let mut terminal = terminal(80, 24);
     app.draw(&mut terminal).expect("a frame draws");
@@ -5657,10 +4934,7 @@ async fn snapshot_command_menu_open() {
         app.handle(event).await.expect("typing is handled");
     }
 
-    assert!(
-        app.dropdown.is_some(),
-        "the menu must be open, or the snapshot is of a bare screen"
-    );
+    assert!(app.dropdown.is_some(), "the menu must be open, or the snapshot is of a bare screen");
 
     let mut terminal = terminal(80, 24);
     app.draw(&mut terminal).expect("a frame draws");
@@ -5785,9 +5059,7 @@ async fn tab_completes_the_invocation_without_submitting() {
         app.handle(event).await.expect("typing is handled");
     }
 
-    app.handle(key(KeyCode::Tab, KeyModifiers::NONE))
-        .await
-        .expect("tab is handled");
+    app.handle(key(KeyCode::Tab, KeyModifiers::NONE)).await.expect("tab is handled");
 
     assert_eq!(
         app.editor.prompt().as_deref(),
@@ -5810,9 +5082,7 @@ async fn enter_on_the_skill_menu_completes_the_same_as_tab() {
         app.handle(event).await.expect("typing is handled");
     }
 
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     assert_eq!(
         app.editor.prompt().as_deref(),
@@ -5833,9 +5103,7 @@ async fn esc_closes_the_skill_menu_and_keeps_the_text() {
     }
     assert!(app.skill_menu.is_some());
 
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("esc is handled");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("esc is handled");
 
     assert!(app.skill_menu.is_none());
     assert_eq!(app.editor.prompt().as_deref(), Some("$port"));
@@ -5879,9 +5147,7 @@ async fn the_skills_dialog_lists_and_enter_inserts_the_token() {
         "the dialog shows the skill's sentence: {drawn}"
     );
 
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     assert_eq!(app.editor.prompt().as_deref(), Some("$porting "));
     assert!(app.chooser.is_none(), "choosing closes the dialog");
@@ -5973,10 +5239,7 @@ async fn a_fragment_naming_a_directory_offers_what_is_inside_it() {
 
     let mut offered = offered(&app);
     offered.sort();
-    assert_eq!(
-        offered,
-        vec!["src/app.rs".to_owned(), "src/lib.rs".to_owned()]
-    );
+    assert_eq!(offered, vec!["src/app.rs".to_owned(), "src/lib.rs".to_owned()]);
 }
 
 /// The exact trigger, at the level a person meets it. The shapes
@@ -6018,9 +5281,7 @@ async fn moving_the_cursor_out_of_a_mention_closes_the_menu() {
     typed(&mut app, "@lib").await;
     assert!(app.files.is_some());
 
-    app.handle(key(KeyCode::Home, KeyModifiers::NONE))
-        .await
-        .expect("home is handled");
+    app.handle(key(KeyCode::Home, KeyModifiers::NONE)).await.expect("home is handled");
 
     assert!(app.files.is_none(), "the cursor is in front of the `@` now");
 }
@@ -6031,9 +5292,7 @@ async fn choosing_a_file_writes_the_mention_into_the_buffer() {
     let mut app = app_in(&directory);
     typed(&mut app, "compare @lib").await;
 
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     assert_eq!(
         app.editor.prompt().as_deref(),
@@ -6058,9 +5317,7 @@ async fn tab_on_the_file_menu_completes_the_mention_the_same_as_enter() {
     let mut app = app_in(&directory);
     typed(&mut app, "compare @lib").await;
 
-    app.handle(key(KeyCode::Tab, KeyModifiers::NONE))
-        .await
-        .expect("tab is handled");
+    app.handle(key(KeyCode::Tab, KeyModifiers::NONE)).await.expect("tab is handled");
 
     assert_eq!(app.editor.prompt().as_deref(), Some("compare @src/lib.rs "),);
     assert!(app.files.is_none(), "choosing closes the menu");
@@ -6075,29 +5332,19 @@ async fn a_mention_mid_sentence_is_replaced_without_moving_the_rest() {
     typed(&mut app, "look at @lib and say why").await;
     // Back into the mention: nine characters from the end.
     for _ in 0.."and say why".chars().count() + 1 {
-        app.handle(key(KeyCode::Left, KeyModifiers::NONE))
-            .await
-            .expect("left is handled");
+        app.handle(key(KeyCode::Left, KeyModifiers::NONE)).await.expect("left is handled");
     }
     settle_file_menu(&mut app).await;
-    assert!(
-        app.files.is_some(),
-        "the cursor is inside the mention again"
-    );
+    assert!(app.files.is_some(), "the cursor is inside the mention again");
 
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     assert_eq!(
         app.editor.prompt().as_deref(),
         Some("look at @src/lib.rs and say why"),
         "the space already after the mention is not doubled"
     );
-    assert_eq!(
-        app.editor.cursor(),
-        (0, "look at @src/lib.rs".chars().count())
-    );
+    assert_eq!(app.editor.cursor(), (0, "look at @src/lib.rs".chars().count()));
 }
 
 /// **Non-vacuity target for the submit scan.** Dropping `mention::scan`
@@ -6119,17 +5366,11 @@ async fn a_submitted_prompt_carries_its_mentions_and_keeps_their_text() {
     typed(&mut app, "compare @src/lib.rs with @README.md").await;
     // The menu is still up over the mention the cursor is in, and it owns
     // Enter — so the way to send this is the way a person sends it.
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("escape is handled");
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("escape is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
-    let CoreEvent::MessageStarted {
-        session_id: _,
-        message,
-    } = events.next().await.expect("the engine reports the prompt")
+    let CoreEvent::MessageStarted { session_id: _, message } =
+        events.next().await.expect("the engine reports the prompt")
     else {
         panic!("the first event of a turn is the user's message");
     };
@@ -6148,11 +5389,7 @@ async fn a_submitted_prompt_carries_its_mentions_and_keeps_their_text() {
         "both mentions should have reached the engine"
     );
 
-    let text: String = message
-        .parts
-        .iter()
-        .filter_map(ganja_protocol::Part::as_text)
-        .collect();
+    let text: String = message.parts.iter().filter_map(ganja_protocol::Part::as_text).collect();
     assert_eq!(
         text, "compare @src/lib.rs with @README.md",
         "the literal tokens stay in the prompt, as upstream leaves them"
@@ -6187,9 +5424,7 @@ async fn choosing_a_file_keeps_the_normalized_typed_range() {
         let mut app = app_in(&directory);
         typed(&mut app, text).await;
 
-        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-            .await
-            .expect("enter is handled");
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
         assert_eq!(app.editor.prompt().as_deref(), Some(expected), "{text:?}");
     }
@@ -6216,22 +5451,15 @@ async fn submitting_a_binary_mention_the_wire_refuses_warns_in_the_status_line()
         .with_root(directory.path());
 
     typed(&mut app, "look at @shot.png").await;
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("escape is handled");
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("escape is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     let bar = status_line(&mut app);
     assert!(
         bar.contains("@shot.png (image/png)"),
         "the warning names the file and its mime: {bar}"
     );
-    assert!(
-        bar.contains("does not carry"),
-        "and says why the bytes will not travel: {bar}"
-    );
+    assert!(bar.contains("does not carry"), "and says why the bytes will not travel: {bar}");
 }
 
 /// The other half: a wire that carries the mime warns about nothing.
@@ -6245,12 +5473,8 @@ async fn submitting_a_binary_mention_the_wire_carries_warns_about_nothing() {
         .with_root(directory.path());
 
     typed(&mut app, "look at @shot.png").await;
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("escape is handled");
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("escape is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     let bar = status_line(&mut app);
     assert!(
@@ -6266,9 +5490,7 @@ async fn escape_closes_the_file_menu_and_keeps_what_was_typed() {
     let mut app = app_in(&directory);
     typed(&mut app, "look at @lib").await;
 
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("escape is handled");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("escape is handled");
 
     assert!(app.files.is_none());
     assert_eq!(app.editor.prompt().as_deref(), Some("look at @lib"));
@@ -6307,9 +5529,7 @@ async fn an_exclamation_anywhere_else_is_a_character_like_any_other() {
 async fn an_exclamation_in_front_of_existing_text_still_flips() {
     let mut app = app();
     typed(&mut app, "ls -la").await;
-    app.handle(key(KeyCode::Home, KeyModifiers::NONE))
-        .await
-        .expect("home is handled");
+    app.handle(key(KeyCode::Home, KeyModifiers::NONE)).await.expect("home is handled");
 
     typed(&mut app, "!").await;
 
@@ -6323,13 +5543,9 @@ async fn escape_and_backspace_at_the_start_are_the_two_ways_out_of_shell_mode() 
         let mut app = app();
         typed(&mut app, "!").await;
         typed(&mut app, "ls").await;
-        app.handle(key(KeyCode::Home, KeyModifiers::NONE))
-            .await
-            .expect("home is handled");
+        app.handle(key(KeyCode::Home, KeyModifiers::NONE)).await.expect("home is handled");
 
-        app.handle(key(leaving, KeyModifiers::NONE))
-            .await
-            .expect("the way out is handled");
+        app.handle(key(leaving, KeyModifiers::NONE)).await.expect("the way out is handled");
 
         assert_eq!(app.editor.mode(), Mode::Prompt, "{leaving:?}");
         assert_eq!(
@@ -6347,9 +5563,7 @@ async fn backspace_inside_a_shell_command_deletes_rather_than_leaving() {
     typed(&mut app, "!").await;
     typed(&mut app, "lsx").await;
 
-    app.handle(key(KeyCode::Backspace, KeyModifiers::NONE))
-        .await
-        .expect("backspace is handled");
+    app.handle(key(KeyCode::Backspace, KeyModifiers::NONE)).await.expect("backspace is handled");
 
     assert_eq!(app.editor.mode(), Mode::Shell);
     assert_eq!(app.editor.prompt().as_deref(), Some("ls"));
@@ -6364,9 +5578,7 @@ async fn submitting_in_shell_mode_runs_the_command_and_comes_back() {
     typed(&mut app, "!").await;
     typed(&mut app, "echo hello").await;
 
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     assert_eq!(
         app.editor.mode(),
@@ -6375,18 +5587,12 @@ async fn submitting_in_shell_mode_runs_the_command_and_comes_back() {
     );
     assert!(app.editor.is_empty());
 
-    let CoreEvent::MessageStarted {
-        session_id: _,
-        message,
-    } = events.next().await.expect("the engine reports the command")
+    let CoreEvent::MessageStarted { session_id: _, message } =
+        events.next().await.expect("the engine reports the command")
     else {
         panic!("the first event of a passthrough is the synthetic user message");
     };
-    let text: String = message
-        .parts
-        .iter()
-        .filter_map(ganja_protocol::Part::as_text)
-        .collect();
+    let text: String = message.parts.iter().filter_map(ganja_protocol::Part::as_text).collect();
     assert_eq!(text, "The following tool was executed by the user");
 
     // Drain the rest so the test does not leave a turn streaming.
@@ -6404,16 +5610,12 @@ async fn submitting_in_shell_mode_runs_the_command_and_comes_back() {
 async fn a_refused_shell_command_keeps_the_text_and_the_mode() {
     let (mut app, mut events) = wired().await;
     typed(&mut app, "a turn to be busy with").await;
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
     pump(&mut app, &mut events, 2).await;
 
     typed(&mut app, "!").await;
     typed(&mut app, "echo hello").await;
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     assert_eq!(app.editor.mode(), Mode::Shell);
     assert_eq!(app.editor.prompt().as_deref(), Some("echo hello"));
@@ -6452,19 +5654,15 @@ async fn choosing_an_engine_command_types_its_name_instead_of_running_it() {
 
     assert_eq!(
         app.dropdown.as_ref().and_then(Dropdown::selected),
-        Some(crate::command::Choice::Engine(
-            crate::command::EngineCommand {
-                name: "init".to_owned(),
-                description: Some("guided AGENTS.md setup".to_owned()),
-                hint: None,
-            }
-        )),
+        Some(crate::command::Choice::Engine(crate::command::EngineCommand {
+            name: "init".to_owned(),
+            description: Some("guided AGENTS.md setup".to_owned()),
+            hint: None,
+        })),
         "the engine's own command should be under the cursor"
     );
 
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     assert_eq!(
         app.editor.text(),
@@ -6482,9 +5680,7 @@ async fn tab_on_an_engine_command_types_its_name_the_same_as_enter() {
     let (mut app, _events) = wired().await;
     typed(&mut app, "/init").await;
 
-    app.handle(key(KeyCode::Tab, KeyModifiers::NONE))
-        .await
-        .expect("tab is handled");
+    app.handle(key(KeyCode::Tab, KeyModifiers::NONE)).await.expect("tab is handled");
 
     assert_eq!(app.editor.text(), "/init ");
     assert!(app.dropdown.is_none());
@@ -6498,35 +5694,21 @@ async fn submitting_an_engine_command_runs_it_with_what_was_typed_after_it() {
     let mut app = App::new(engine, None, Themes::builtin());
 
     typed(&mut app, "/init focus on the test suite").await;
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
-    let CoreEvent::MessageStarted {
-        session_id: _,
-        message,
-    } = events.next().await.expect("the engine reports the prompt")
+    let CoreEvent::MessageStarted { session_id: _, message } =
+        events.next().await.expect("the engine reports the prompt")
     else {
         panic!("the first event of a turn is the user's message");
     };
-    let text: String = message
-        .parts
-        .iter()
-        .filter_map(ganja_protocol::Part::as_text)
-        .collect();
+    let text: String = message.parts.iter().filter_map(ganja_protocol::Part::as_text).collect();
 
-    assert!(
-        text.contains("AGENTS.md"),
-        "the template should have been expanded, got: {text}"
-    );
+    assert!(text.contains("AGENTS.md"), "the template should have been expanded, got: {text}");
     assert!(
         text.contains("focus on the test suite"),
         "and the arguments should be in it, got: {text}"
     );
-    assert!(
-        app.editor.is_empty(),
-        "a command that ran clears the composer"
-    );
+    assert!(app.editor.is_empty(), "a command that ran clears the composer");
 }
 
 /// A slash this build does not know is not a command, so it is text. The
@@ -6540,22 +5722,14 @@ async fn an_unknown_slash_command_is_sent_as_the_text_it_is() {
 
     // Trailing space, so the menu is closed and Enter reaches the submit.
     typed(&mut app, "/nonesuch please ").await;
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
-    let CoreEvent::MessageStarted {
-        session_id: _,
-        message,
-    } = events.next().await.expect("the engine reports the prompt")
+    let CoreEvent::MessageStarted { session_id: _, message } =
+        events.next().await.expect("the engine reports the prompt")
     else {
         panic!("the first event of a turn is the user's message");
     };
-    let text: String = message
-        .parts
-        .iter()
-        .filter_map(ganja_protocol::Part::as_text)
-        .collect();
+    let text: String = message.parts.iter().filter_map(ganja_protocol::Part::as_text).collect();
 
     assert_eq!(text, "/nonesuch please ");
 }
@@ -6571,15 +5745,10 @@ async fn a_ui_command_with_a_trailing_space_still_runs_on_enter() {
     typed(&mut app, "/exit ").await;
     assert!(app.dropdown.is_none(), "the space closed the menu");
 
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     assert!(app.quit, "the command should have run, not been sent");
-    assert!(
-        app.editor.is_empty(),
-        "a command that ran clears the composer"
-    );
+    assert!(app.editor.is_empty(), "a command that ran clears the composer");
 }
 
 /// The sharpest spelling of the same edge: Tab fills `/exit ` without
@@ -6590,14 +5759,10 @@ async fn tab_completion_then_enter_runs_the_command_it_completed() {
     let (mut app, _events) = wired().await;
     typed(&mut app, "/exi").await;
 
-    app.handle(key(KeyCode::Tab, KeyModifiers::NONE))
-        .await
-        .expect("tab is handled");
+    app.handle(key(KeyCode::Tab, KeyModifiers::NONE)).await.expect("tab is handled");
     assert_eq!(app.editor.text(), "/exit ");
 
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     assert!(app.quit, "tab completed the command and enter ran it");
 }
@@ -6612,23 +5777,15 @@ async fn a_ui_command_followed_by_arguments_is_sent_as_the_text_it_is() {
     let mut app = App::new(engine, None, Themes::builtin());
 
     typed(&mut app, "/exit now ").await;
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     assert!(!app.quit, "words after the name make it prose");
-    let CoreEvent::MessageStarted {
-        session_id: _,
-        message,
-    } = events.next().await.expect("the engine reports the prompt")
+    let CoreEvent::MessageStarted { session_id: _, message } =
+        events.next().await.expect("the engine reports the prompt")
     else {
         panic!("the first event of a turn is the user's message");
     };
-    let text: String = message
-        .parts
-        .iter()
-        .filter_map(ganja_protocol::Part::as_text)
-        .collect();
+    let text: String = message.parts.iter().filter_map(ganja_protocol::Part::as_text).collect();
 
     assert_eq!(text, "/exit now ");
 }
@@ -6642,9 +5799,7 @@ async fn a_ui_command_submitted_mid_turn_runs_instead_of_steering() {
     app.turn_running = true;
 
     typed(&mut app, "/exit ").await;
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     assert!(app.quit, "the command should have run instead of queueing");
 }
@@ -6673,9 +5828,7 @@ async fn new_session_empties_the_screen_the_old_one_filled() {
 async fn a_refused_new_session_leaves_the_transcript_alone() {
     let (mut app, mut events) = wired().await;
     typed(&mut app, "a turn to be busy with").await;
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
     pump(&mut app, &mut events, 2).await;
 
     app.run_command(crate::command::Action::New).await;
@@ -6698,10 +5851,7 @@ async fn compact_reaches_the_engine_as_a_turn_of_its_own() {
     app.run_command(crate::command::Action::Compact).await;
 
     let event = events.next().await.expect("the engine runs the turn");
-    assert!(
-        matches!(event, CoreEvent::MessageFinished { .. }),
-        "got {event:?}"
-    );
+    assert!(matches!(event, CoreEvent::MessageFinished { .. }), "got {event:?}");
     assert!(!app.status.is_streaming());
 }
 
@@ -6712,35 +5862,20 @@ async fn the_palette_reaches_the_commands_this_wave_added() {
     let (mut app, _events) = wired().await;
     palette_transcript(&mut app);
     app.draw(&mut terminal(80, 24)).expect("a frame draws");
-    assert_ne!(
-        app.chat.line_count(),
-        0,
-        "there has to be something to clear"
-    );
+    assert_ne!(app.chat.line_count(), 0, "there has to be something to clear");
 
-    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-p is handled");
+    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL)).await.expect("control-p is handled");
     typed(&mut app, "new").await;
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
     assert_eq!(app.chat.line_count(), 0, "/new should have cleared it");
 
     // `/compact` reaches the engine, which answers with a turn.
     let (mut app, mut events) = wired().await;
-    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-p is handled");
+    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL)).await.expect("control-p is handled");
     typed(&mut app, "compact").await;
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
-    assert!(
-        events.next().await.is_some(),
-        "/compact should have reached the engine"
-    );
+    assert!(events.next().await.is_some(), "/compact should have reached the engine");
 }
 
 /// A child session belongs to the task call that spawned it, and is
@@ -6764,9 +5899,7 @@ async fn the_picker_lists_roots_only() {
     );
     let mut app = persistent_app(&directory);
 
-    app.handle(key(KeyCode::Char('s'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-s is handled");
+    app.handle(key(KeyCode::Char('s'), KeyModifiers::CONTROL)).await.expect("control-s is handled");
 
     let listed: Vec<String> = app
         .sessions
@@ -6818,11 +5951,7 @@ async fn task_part(app: &mut App, state: ToolState) {
         message_id: reply.id,
         part: Part {
             id: PartId::from("prt_1".to_owned()),
-            body: PartBody::Tool {
-                call_id: "call_1".to_owned(),
-                tool: "task".to_owned(),
-                state,
-            },
+            body: PartBody::Tool { call_id: "call_1".to_owned(), tool: "task".to_owned(), state },
         },
     }))
     .await
@@ -6851,10 +5980,7 @@ async fn a_delegated_turns_progress_reaches_the_transcript() {
     app.draw(&mut terminal).expect("a frame draws");
     let screen = screen(&terminal);
 
-    assert!(
-        screen.contains("\u{25cf} Task(agent: \"explore\""),
-        "got:\n{screen}"
-    );
+    assert!(screen.contains("\u{25cf} Task(agent: \"explore\""), "got:\n{screen}");
     assert!(screen.contains("find the parser"), "got:\n{screen}");
     assert!(screen.contains("\u{23bf} grep parser"), "got:\n{screen}");
 }
@@ -6867,10 +5993,7 @@ async fn snapshot_file_menu_open() {
 
     typed(&mut app, "compare @lib").await;
 
-    assert!(
-        app.files.is_some(),
-        "the menu must be open, or the snapshot is of a bare screen"
-    );
+    assert!(app.files.is_some(), "the menu must be open, or the snapshot is of a bare screen");
 
     let mut terminal = terminal(80, 24);
     app.draw(&mut terminal).expect("a frame draws");
@@ -7076,11 +6199,7 @@ fn status_line(app: &mut App) -> String {
     let mut terminal = terminal(120, 12);
     app.draw(&mut terminal).expect("a frame draws");
 
-    screen(&terminal)
-        .lines()
-        .next_back()
-        .unwrap_or_default()
-        .to_owned()
+    screen(&terminal).lines().next_back().unwrap_or_default().to_owned()
 }
 
 /// Submits `text` and hands back every `File` part the engine put on the
@@ -7088,9 +6207,8 @@ fn status_line(app: &mut App) -> String {
 async fn submitted_files(root: &TempDir, text: &str) -> Vec<String> {
     let engine = engine();
     let mut events = engine.subscribe().await.expect("the test subscribes first");
-    let mut app = App::new(engine, None, Themes::builtin())
-        .with_cwd(root.path())
-        .with_root(root.path());
+    let mut app =
+        App::new(engine, None, Themes::builtin()).with_cwd(root.path()).with_root(root.path());
 
     for event in typing(text) {
         app.handle(event).await.expect("typing is handled");
@@ -7099,18 +6217,12 @@ async fn submitted_files(root: &TempDir, text: &str) -> Vec<String> {
     // means "cancel the turn" when there is no menu, so it is only sent
     // when there is one.
     if app.files.is_some() {
-        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-            .await
-            .expect("escape is handled");
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("escape is handled");
     }
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
-    let CoreEvent::MessageStarted {
-        session_id: _,
-        message,
-    } = events.next().await.expect("the engine reports the prompt")
+    let CoreEvent::MessageStarted { session_id: _, message } =
+        events.next().await.expect("the engine reports the prompt")
     else {
         panic!("the first event of a turn is the user's message");
     };
@@ -7133,9 +6245,7 @@ async fn a_word_that_names_no_file_is_submitted_as_text_and_attaches_nothing() {
     let root = project_holding(&["notes.md"]);
 
     assert!(
-        submitted_files(&root, "ask @alice about it")
-            .await
-            .is_empty(),
+        submitted_files(&root, "ask @alice about it").await.is_empty(),
         "a name should attach nothing"
     );
 }
@@ -7144,10 +6254,7 @@ async fn a_word_that_names_no_file_is_submitted_as_text_and_attaches_nothing() {
 async fn a_mention_that_names_a_real_file_still_attaches_it() {
     let root = project_holding(&["notes.md"]);
 
-    assert_eq!(
-        submitted_files(&root, "read @notes.md please").await,
-        vec!["notes.md".to_owned()]
-    );
+    assert_eq!(submitted_files(&root, "read @notes.md please").await, vec!["notes.md".to_owned()]);
 }
 
 /// The degradation the ruling asks for: the typo rides into the prompt as
@@ -7157,26 +6264,19 @@ async fn a_mistyped_path_rides_as_visible_text_beside_the_one_that_resolved() {
     let root = project_holding(&["notes.md"]);
     let engine = engine();
     let mut events = engine.subscribe().await.expect("the test subscribes first");
-    let mut app = App::new(engine, None, Themes::builtin())
-        .with_cwd(root.path())
-        .with_root(root.path());
+    let mut app =
+        App::new(engine, None, Themes::builtin()).with_cwd(root.path()).with_root(root.path());
 
     for event in typing("compare @notes.md with @notez.md") {
         app.handle(event).await.expect("typing is handled");
     }
     // The cursor is still inside the second mention, so the file menu owns
     // Enter — closing it is how a person sends this.
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("escape is handled");
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("escape is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
-    let CoreEvent::MessageStarted {
-        session_id: _,
-        message,
-    } = events.next().await.expect("the engine reports the prompt")
+    let CoreEvent::MessageStarted { session_id: _, message } =
+        events.next().await.expect("the engine reports the prompt")
     else {
         panic!("the first event of a turn is the user's message");
     };
@@ -7192,10 +6292,7 @@ async fn a_mistyped_path_rides_as_visible_text_beside_the_one_that_resolved() {
     let text: String = message.parts.iter().filter_map(Part::as_text).collect();
 
     assert_eq!(attached, vec!["notes.md"], "only the file that exists");
-    assert!(
-        text.contains("@notez.md"),
-        "the typo has to reach the model as text: {text}"
-    );
+    assert!(text.contains("@notez.md"), "the typo has to reach the model as text: {text}");
 }
 
 /// A pasted paragraph is content, not keystrokes — which is the whole
@@ -7208,11 +6305,9 @@ async fn a_bracketed_paste_lands_at_the_cursor_with_its_line_breaks_intact() {
         app.handle(event).await.expect("typing is handled");
     }
 
-    app.handle(AppEvent::Term(TermEvent::Paste(
-        "one\r\ntwo\rthree".to_owned(),
-    )))
-    .await
-    .expect("a paste is handled");
+    app.handle(AppEvent::Term(TermEvent::Paste("one\r\ntwo\rthree".to_owned())))
+        .await
+        .expect("a paste is handled");
 
     assert_eq!(
         app.editor.text(),
@@ -7227,17 +6322,12 @@ async fn a_bracketed_paste_lands_at_the_cursor_with_its_line_breaks_intact() {
 async fn a_multi_line_paste_does_not_submit_the_prompt() {
     let (mut app, mut events) = wired().await;
 
-    app.handle(AppEvent::Term(TermEvent::Paste(
-        "first line\nsecond line".to_owned(),
-    )))
-    .await
-    .expect("a paste is handled");
+    app.handle(AppEvent::Term(TermEvent::Paste("first line\nsecond line".to_owned())))
+        .await
+        .expect("a paste is handled");
 
     assert_eq!(app.editor.text(), "first line\nsecond line");
-    assert!(
-        events.next().now_or_never().is_none(),
-        "nothing should have been sent to the engine"
-    );
+    assert!(events.next().now_or_never().is_none(), "nothing should have been sent to the engine");
 }
 
 /// **F5**: a dropped path becomes a mention instead of landing as raw
@@ -7268,11 +6358,7 @@ async fn a_dropped_image_path_becomes_an_image_token() {
         .await
         .expect("a paste is handled");
 
-    assert_eq!(
-        app.editor.text(),
-        "[Image #1] ",
-        "the picture's token, never its path"
-    );
+    assert_eq!(app.editor.text(), "[Image #1] ", "the picture's token, never its path");
     assert_eq!(
         app.pasted_images_in("[Image #1]")
             .into_iter()
@@ -7290,11 +6376,9 @@ async fn a_multi_file_drop_pastes_as_mentions_in_order() {
     let directory = project();
     let mut app = app_in(&directory);
 
-    app.handle(AppEvent::Term(TermEvent::Paste(
-        "README.md src/lib.rs".to_owned(),
-    )))
-    .await
-    .expect("a paste is handled");
+    app.handle(AppEvent::Term(TermEvent::Paste("README.md src/lib.rs".to_owned())))
+        .await
+        .expect("a paste is handled");
 
     assert_eq!(app.editor.text(), "@README.md @src/lib.rs ");
 }
@@ -7307,11 +6391,9 @@ async fn a_pasted_shell_one_liner_stays_raw_text() {
     let directory = project();
     let mut app = app_in(&directory);
 
-    app.handle(AppEvent::Term(TermEvent::Paste(
-        "cat src/lib.rs | grep x".to_owned(),
-    )))
-    .await
-    .expect("a paste is handled");
+    app.handle(AppEvent::Term(TermEvent::Paste("cat src/lib.rs | grep x".to_owned())))
+        .await
+        .expect("a paste is handled");
 
     assert_eq!(app.editor.text(), "cat src/lib.rs | grep x");
 }
@@ -7319,9 +6401,7 @@ async fn a_pasted_shell_one_liner_stays_raw_text() {
 #[tokio::test]
 async fn a_paste_while_a_dialog_is_up_does_not_reach_the_composer_behind_it() {
     let mut app = app();
-    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-p is handled");
+    app.handle(key(KeyCode::Char('p'), KeyModifiers::CONTROL)).await.expect("control-p is handled");
 
     app.handle(AppEvent::Term(TermEvent::Paste("pasted".to_owned())))
         .await
@@ -7333,13 +6413,10 @@ async fn a_paste_while_a_dialog_is_up_does_not_reach_the_composer_behind_it() {
 
 #[tokio::test]
 async fn control_v_pastes_what_the_clipboard_holds() {
-    let mut app = app().with_clipboard(Box::new(clipboard::Recording::holding(
-        "pasted\nfrom the clipboard",
-    )));
+    let mut app =
+        app().with_clipboard(Box::new(clipboard::Recording::holding("pasted\nfrom the clipboard")));
 
-    app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-v is handled");
+    app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL)).await.expect("control-v is handled");
 
     assert_eq!(app.editor.text(), "pasted\nfrom the clipboard");
 }
@@ -7350,9 +6427,7 @@ async fn control_v_pastes_what_the_clipboard_holds() {
 async fn a_clipboard_holding_neither_text_nor_an_image_says_so() {
     let mut app = app().with_clipboard(Box::new(clipboard::Recording::default()));
 
-    app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-v is handled");
+    app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL)).await.expect("control-v is handled");
 
     assert!(
         status_line(&mut app).contains("the clipboard holds neither text nor an image"),
@@ -7371,16 +6446,10 @@ async fn pasting_a_clipboard_image_shows_an_inline_image_token() {
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let rgba = vec![255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255];
     let mut app = app()
-        .with_clipboard(Box::new(clipboard::Recording::holding_image(
-            3,
-            1,
-            rgba.clone(),
-        )))
+        .with_clipboard(Box::new(clipboard::Recording::holding_image(3, 1, rgba.clone())))
         .with_clipboard_scratch_dir(scratch.path());
 
-    app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-v is handled");
+    app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL)).await.expect("control-v is handled");
 
     assert_eq!(
         app.editor.text(),
@@ -7400,25 +6469,13 @@ async fn pasting_a_clipboard_image_shows_an_inline_image_token() {
 fn the_token_under_the_cursor_is_found_and_prose_is_not() {
     let text = "see [Image #12] here";
 
-    assert_eq!(
-        super::image_token_at(text, 4),
-        Some((4, 14, 12)),
-        "its first char"
-    );
+    assert_eq!(super::image_token_at(text, 4), Some((4, 14, 12)), "its first char");
     assert_eq!(super::image_token_at(text, 9), Some((4, 14, 12)), "inside");
-    assert_eq!(
-        super::image_token_at(text, 15),
-        Some((4, 14, 12)),
-        "right after the bracket"
-    );
+    assert_eq!(super::image_token_at(text, 15), Some((4, 14, 12)), "right after the bracket");
     assert_eq!(super::image_token_at(text, 3), None, "before it");
     assert_eq!(super::image_token_at(text, 16), None, "past it");
     assert_eq!(super::image_token_at("no tokens at all", 5), None);
-    assert_eq!(
-        super::image_token_at("[Image #] empty", 3),
-        None,
-        "digits are required"
-    );
+    assert_eq!(super::image_token_at("[Image #] empty", 3), None, "digits are required");
 }
 
 /// The offset math the highlight rides: rows rejoined on newlines,
@@ -7441,30 +6498,20 @@ async fn backspace_on_an_image_token_deletes_the_whole_token() {
         let mut app = app();
         typed(&mut app, "see [Image #12] x").await;
         for _ in 0..3 {
-            app.handle(key(KeyCode::Left, KeyModifiers::NONE))
-                .await
-                .expect("left is handled");
+            app.handle(key(KeyCode::Left, KeyModifiers::NONE)).await.expect("left is handled");
         }
         app.handle(key(KeyCode::Backspace, KeyModifiers::NONE))
             .await
             .expect("backspace is handled");
-        assert_eq!(
-            app.editor.text(),
-            "see  x",
-            "mid-token backspace takes the token whole"
-        );
+        assert_eq!(app.editor.text(), "see  x", "mid-token backspace takes the token whole");
     }
 
     let mut app = app();
     typed(&mut app, "ab[Image #5]").await;
     for _ in 0..10 {
-        app.handle(key(KeyCode::Left, KeyModifiers::NONE))
-            .await
-            .expect("left is handled");
+        app.handle(key(KeyCode::Left, KeyModifiers::NONE)).await.expect("left is handled");
     }
-    app.handle(key(KeyCode::Backspace, KeyModifiers::NONE))
-        .await
-        .expect("backspace is handled");
+    app.handle(key(KeyCode::Backspace, KeyModifiers::NONE)).await.expect("backspace is handled");
     assert_eq!(
         app.editor.text(),
         "a[Image #5]",
@@ -7477,24 +6524,14 @@ async fn backspace_on_an_image_token_deletes_the_whole_token() {
 /// thirty-second limit keeps a window-switching flurry to one hint.
 #[tokio::test]
 async fn regaining_focus_over_a_clipboard_image_hints_once() {
-    let mut app = app().with_clipboard(Box::new(clipboard::Recording::holding_image(
-        1,
-        1,
-        vec![1, 2, 3, 4],
-    )));
+    let mut app =
+        app().with_clipboard(Box::new(clipboard::Recording::holding_image(1, 1, vec![1, 2, 3, 4])));
 
-    app.handle(AppEvent::Term(TermEvent::FocusGained))
-        .await
-        .expect("focus is handled");
-    assert!(
-        status_line(&mut app).contains("Image in clipboard"),
-        "the hint names the ctrl+v door"
-    );
+    app.handle(AppEvent::Term(TermEvent::FocusGained)).await.expect("focus is handled");
+    assert!(status_line(&mut app).contains("Image in clipboard"), "the hint names the ctrl+v door");
 
     app.status.set_notice(None);
-    app.handle(AppEvent::Term(TermEvent::FocusGained))
-        .await
-        .expect("focus is handled again");
+    app.handle(AppEvent::Term(TermEvent::FocusGained)).await.expect("focus is handled again");
     assert!(
         !status_line(&mut app).contains("Image in clipboard"),
         "the rate limit holds the second hint"
@@ -7510,11 +6547,7 @@ async fn regaining_focus_over_a_clipboard_image_hints_once() {
 async fn an_empty_terminal_paste_reads_the_image_off_the_clipboard() {
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let mut app = app()
-        .with_clipboard(Box::new(clipboard::Recording::holding_image(
-            1,
-            1,
-            vec![1, 2, 3, 4],
-        )))
+        .with_clipboard(Box::new(clipboard::Recording::holding_image(1, 1, vec![1, 2, 3, 4])))
         .with_clipboard_scratch_dir(scratch.path());
 
     app.handle(AppEvent::Term(TermEvent::Paste(String::new())))
@@ -7540,13 +6573,10 @@ async fn pasting_a_copied_image_file_tokenizes_the_file_itself() {
     let dir = tempfile::tempdir().expect("a directory for the copied file");
     let copied = dir.path().join("Screenshot 2026-08-15 at 10.29.02.png");
     fs::write(&copied, b"not-really-a-png").expect("the copied file exists");
-    let mut app = app().with_clipboard(Box::new(clipboard::Recording::holding_files(vec![
-        copied.clone(),
-    ])));
+    let mut app =
+        app().with_clipboard(Box::new(clipboard::Recording::holding_files(vec![copied.clone()])));
 
-    app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-v is handled");
+    app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL)).await.expect("control-v is handled");
 
     assert_eq!(
         app.editor.text(),
@@ -7570,13 +6600,10 @@ async fn pasting_a_copied_non_image_file_becomes_a_mention() {
     let dir = tempfile::tempdir().expect("a directory for the copied file");
     let copied = dir.path().join("notes.rs");
     fs::write(&copied, b"fn main() {}").expect("the copied file exists");
-    let mut app = app().with_clipboard(Box::new(clipboard::Recording::holding_files(vec![
-        copied.clone(),
-    ])));
+    let mut app =
+        app().with_clipboard(Box::new(clipboard::Recording::holding_files(vec![copied.clone()])));
 
-    app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-v is handled");
+    app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL)).await.expect("control-v is handled");
 
     assert_eq!(
         app.editor.text(),
@@ -7594,22 +6621,14 @@ async fn a_submitted_image_token_attaches_the_saved_png() {
     let engine = engine();
     let mut events = engine.subscribe().await.expect("the test subscribes first");
     let mut app = App::new(engine, None, Themes::builtin())
-        .with_clipboard(Box::new(clipboard::Recording::holding_image(
-            1,
-            1,
-            vec![1, 2, 3, 4],
-        )))
+        .with_clipboard(Box::new(clipboard::Recording::holding_image(1, 1, vec![1, 2, 3, 4])))
         .with_clipboard_scratch_dir(scratch.path());
 
-    app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-v is handled");
+    app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL)).await.expect("control-v is handled");
     for event in typing("what is this") {
         app.handle(event).await.expect("typing is handled");
     }
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     let CoreEvent::MessageStarted { message, .. } =
         events.next().await.expect("the engine reports the prompt")
@@ -7631,10 +6650,7 @@ async fn a_submitted_image_token_attaches_the_saved_png() {
         "the token's file rides the mentions"
     );
     assert!(
-        message
-            .parts
-            .iter()
-            .any(|part| part.as_text() == Some("[Image #1] what is this")),
+        message.parts.iter().any(|part| part.as_text() == Some("[Image #1] what is this")),
         "and the text keeps the token: {:?}",
         message.parts
     );
@@ -7646,11 +6662,7 @@ async fn a_submitted_image_token_attaches_the_saved_png() {
 async fn a_second_clipboard_image_paste_gets_its_own_number() {
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let mut app = app()
-        .with_clipboard(Box::new(clipboard::Recording::holding_image(
-            1,
-            1,
-            vec![1, 2, 3, 4],
-        )))
+        .with_clipboard(Box::new(clipboard::Recording::holding_image(1, 1, vec![1, 2, 3, 4])))
         .with_clipboard_scratch_dir(scratch.path());
 
     app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL))
@@ -7682,16 +6694,10 @@ async fn a_clipboard_image_on_a_wire_without_image_support_warns_at_submit() {
         ganja_permission::Permissions::default(),
     );
     let mut app = App::new(engine, None, Themes::builtin())
-        .with_clipboard(Box::new(clipboard::Recording::holding_image(
-            1,
-            1,
-            vec![9, 8, 7, 6],
-        )))
+        .with_clipboard(Box::new(clipboard::Recording::holding_image(1, 1, vec![9, 8, 7, 6])))
         .with_clipboard_scratch_dir(scratch.path());
 
-    app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-v is handled");
+    app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL)).await.expect("control-v is handled");
 
     // Asserted at the data level, not through the rendered status line:
     // a real `<XDG data>/ganja/clipboard` path is long enough that the
@@ -7705,16 +6711,11 @@ async fn a_clipboard_image_on_a_wire_without_image_support_warns_at_submit() {
     assert_eq!(mentions.len(), 1, "the pasted image resolved as a mention");
     assert_eq!(
         app.degraded(&mentions),
-        vec![format!(
-            "@{} (image/png)",
-            scratch.path().join("clipboard-1.png").display()
-        )],
+        vec![format!("@{} (image/png)", scratch.path().join("clipboard-1.png").display())],
         "the pasted image is exactly what the degradation warning names"
     );
 
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     let bar = status_line(&mut app);
     assert!(
@@ -7733,22 +6734,13 @@ async fn a_clipboard_image_that_cannot_be_saved_reports_why() {
     let blocked = scratch.path().join("blocked");
     fs::write(&blocked, "not a directory").expect("the fixture writes");
     let mut app = app()
-        .with_clipboard(Box::new(clipboard::Recording::holding_image(
-            1,
-            1,
-            vec![1, 2, 3, 4],
-        )))
+        .with_clipboard(Box::new(clipboard::Recording::holding_image(1, 1, vec![1, 2, 3, 4])))
         .with_clipboard_scratch_dir(&blocked);
 
-    app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-v is handled");
+    app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL)).await.expect("control-v is handled");
 
     assert!(app.editor.is_empty(), "nothing was inserted");
-    assert!(
-        !status_line(&mut app).is_empty(),
-        "the failure is reported rather than swallowed"
-    );
+    assert!(!status_line(&mut app).is_empty(), "the failure is reported rather than swallowed");
 }
 
 /// Decodes `bytes` as a PNG, answering its declared width, height and raw
@@ -7768,11 +6760,7 @@ fn decode_png(bytes: &[u8]) -> (u32, u32, Vec<u8>) {
 /// dimensions with no shared factor to hide a stride bug behind.
 #[test]
 fn encoding_a_clipboard_image_round_trips_at_1x1() {
-    let image = clipboard::Image {
-        width: 1,
-        height: 1,
-        rgba: vec![10, 20, 30, 40],
-    };
+    let image = clipboard::Image { width: 1, height: 1, rgba: vec![10, 20, 30, 40] };
 
     let bytes = App::encode_clipboard_png(&image).expect("the encode succeeds");
     let (width, height, decoded) = decode_png(&bytes);
@@ -7784,11 +6772,7 @@ fn encoding_a_clipboard_image_round_trips_at_1x1() {
 #[test]
 fn encoding_a_clipboard_image_round_trips_at_odd_dimensions() {
     let rgba: Vec<u8> = (0..(3 * 5 * 4)).map(|byte| byte as u8).collect();
-    let image = clipboard::Image {
-        width: 3,
-        height: 5,
-        rgba: rgba.clone(),
-    };
+    let image = clipboard::Image { width: 3, height: 5, rgba: rgba.clone() };
 
     let bytes = App::encode_clipboard_png(&image).expect("the encode succeeds");
     let (width, height, decoded) = decode_png(&bytes);
@@ -7807,16 +6791,10 @@ async fn a_clipboard_that_cannot_be_reached_is_a_notice_and_not_a_lost_prompt() 
         app.handle(event).await.expect("typing is handled");
     }
 
-    app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-v is handled");
+    app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL)).await.expect("control-v is handled");
 
     assert!(status_line(&mut app).contains("no display"));
-    assert_eq!(
-        app.editor.text(),
-        "half a thought",
-        "what was being typed survives"
-    );
+    assert_eq!(app.editor.text(), "half a thought", "what was being typed survives");
 }
 
 /// A user who bound `ctrl+v` to something else gets what they asked for:
@@ -7824,18 +6802,14 @@ async fn a_clipboard_that_cannot_be_reached_is_a_notice_and_not_a_lost_prompt() 
 #[tokio::test]
 async fn a_rebound_control_v_reaches_its_binding_rather_than_the_clipboard() {
     let keys = crate::keybind::Keybinds::from_config(
-        &[("app_exit".to_owned(), "ctrl+v".to_owned())]
-            .into_iter()
-            .collect(),
+        &[("app_exit".to_owned(), "ctrl+v".to_owned())].into_iter().collect(),
     )
     .expect("the binding parses");
     let mut app = app()
         .with_keybinds(keys)
         .with_clipboard(Box::new(clipboard::Recording::holding("not this")));
 
-    app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-v is handled");
+    app.handle(key(KeyCode::Char('v'), KeyModifiers::CONTROL)).await.expect("control-v is handled");
 
     assert!(app.quit, "the binding wins");
     assert!(app.editor.is_empty());
@@ -7847,10 +6821,7 @@ fn replied(texts: &[&str]) -> Message {
         id: ganja_protocol::MessageId::ascending(),
         role: ganja_protocol::Role::Assistant,
         parts: texts.iter().map(|text| Part::text(*text)).collect(),
-        time: ganja_protocol::MessageTime {
-            created: 1,
-            completed: Some(2),
-        },
+        time: ganja_protocol::MessageTime { created: 1, completed: Some(2) },
         model: Some(fake::MODEL.to_owned()),
         usage: None,
     }
@@ -7938,9 +6909,7 @@ async fn the_terminal_cursor_sits_in_the_composer_and_no_cell_is_painted_for_it(
         .position(|line| line.contains("Ask ganja something"))
         .expect("the composer is on screen");
     let row = u16::try_from(row).expect("a row fits");
-    let placed = terminal
-        .get_cursor_position()
-        .expect("the test backend reports the cursor");
+    let placed = terminal.get_cursor_position().expect("the test backend reports the cursor");
     assert_eq!((placed.x, placed.y), (1, row), "before the placeholder");
     assert!(
         !terminal.backend().buffer()[(1, row)]
@@ -7955,9 +6924,7 @@ async fn the_terminal_cursor_sits_in_the_composer_and_no_cell_is_painted_for_it(
             .expect("typing is handled");
     }
     app.draw(&mut terminal).expect("a frame draws");
-    let placed = terminal
-        .get_cursor_position()
-        .expect("the test backend reports the cursor");
+    let placed = terminal.get_cursor_position().expect("the test backend reports the cursor");
     assert_eq!((placed.x, placed.y), (3, row), "after the typed text");
 }
 
@@ -7965,38 +6932,22 @@ async fn the_terminal_cursor_sits_in_the_composer_and_no_cell_is_painted_for_it(
 async fn an_unfocused_finished_turn_writes_exactly_one_osc9_notification() {
     let (mut app, log) = notifying_app(serde_json::json!({"notifications": true}));
 
-    app.handle(AppEvent::Term(TermEvent::FocusLost))
-        .await
-        .expect("a focus event is handled");
-    app.handle(finished(fake::MODEL, Usage::default()))
-        .await
-        .expect("a finish is handled");
+    app.handle(AppEvent::Term(TermEvent::FocusLost)).await.expect("a focus event is handled");
+    app.handle(finished(fake::MODEL, Usage::default())).await.expect("a finish is handled");
 
     let bytes = String::from_utf8(notified(&log)).expect("the escape is utf-8");
-    assert_eq!(
-        bytes, "\x1b]9;turn complete\x07",
-        "one sequence, whole, and nothing beside it"
-    );
+    assert_eq!(bytes, "\x1b]9;turn complete\x07", "one sequence, whole, and nothing beside it");
 }
 
 #[tokio::test]
 async fn a_focused_finished_turn_writes_nothing() {
     let (mut app, log) = notifying_app(serde_json::json!({"notifications": true}));
 
-    app.handle(AppEvent::Term(TermEvent::FocusLost))
-        .await
-        .expect("a focus event is handled");
-    app.handle(AppEvent::Term(TermEvent::FocusGained))
-        .await
-        .expect("a focus event is handled");
-    app.handle(finished(fake::MODEL, Usage::default()))
-        .await
-        .expect("a finish is handled");
+    app.handle(AppEvent::Term(TermEvent::FocusLost)).await.expect("a focus event is handled");
+    app.handle(AppEvent::Term(TermEvent::FocusGained)).await.expect("a focus event is handled");
+    app.handle(finished(fake::MODEL, Usage::default())).await.expect("a finish is handled");
 
-    assert!(
-        notified(&log).is_empty(),
-        "a watched terminal hears nothing"
-    );
+    assert!(notified(&log).is_empty(), "a watched terminal hears nothing");
 }
 
 /// Crossterm only learns the state from the first focus event, so a turn
@@ -8006,9 +6957,7 @@ async fn a_focused_finished_turn_writes_nothing() {
 async fn a_turn_finishing_before_any_focus_event_is_assumed_watched() {
     let (mut app, log) = notifying_app(serde_json::json!({"notifications": true}));
 
-    app.handle(finished(fake::MODEL, Usage::default()))
-        .await
-        .expect("a finish is handled");
+    app.handle(finished(fake::MODEL, Usage::default())).await.expect("a finish is handled");
 
     assert!(notified(&log).is_empty());
 }
@@ -8018,12 +6967,8 @@ async fn the_bel_method_writes_exactly_the_bell_byte() {
     let (mut app, log) =
         notifying_app(serde_json::json!({"notifications": true, "notification_method": "bel"}));
 
-    app.handle(AppEvent::Term(TermEvent::FocusLost))
-        .await
-        .expect("a focus event is handled");
-    app.handle(finished(fake::MODEL, Usage::default()))
-        .await
-        .expect("a finish is handled");
+    app.handle(AppEvent::Term(TermEvent::FocusLost)).await.expect("a focus event is handled");
+    app.handle(finished(fake::MODEL, Usage::default())).await.expect("a finish is handled");
 
     assert_eq!(notified(&log), b"\x07");
 }
@@ -8032,17 +6977,10 @@ async fn the_bel_method_writes_exactly_the_bell_byte() {
 async fn an_approval_only_config_notifies_on_a_permission_dialog_and_not_at_turn_end() {
     let (mut app, log) =
         notifying_app(serde_json::json!({"notifications": ["approval-requested"]}));
-    app.handle(AppEvent::Term(TermEvent::FocusLost))
-        .await
-        .expect("a focus event is handled");
+    app.handle(AppEvent::Term(TermEvent::FocusLost)).await.expect("a focus event is handled");
 
-    app.handle(finished(fake::MODEL, Usage::default()))
-        .await
-        .expect("a finish is handled");
-    assert!(
-        notified(&log).is_empty(),
-        "turn end is a moment this config did not ask for"
-    );
+    app.handle(finished(fake::MODEL, Usage::default())).await.expect("a finish is handled");
+    assert!(notified(&log).is_empty(), "turn end is a moment this config did not ask for");
 
     app.handle(AppEvent::core(permission_event("perm_1")))
         .await
@@ -8067,10 +7005,7 @@ async fn copying_a_message_with_nothing_to_copy_says_which_kind_of_nothing() {
         "got: {}",
         status_line(&mut app)
     );
-    assert!(
-        log.lock().expect("the lock holds").is_empty(),
-        "nothing was copied"
-    );
+    assert!(log.lock().expect("the lock holds").is_empty(), "nothing was copied");
 }
 
 #[tokio::test]
@@ -8089,9 +7024,7 @@ async fn copying_the_transcript_hands_over_the_whole_conversation() {
     let mut app = persistent_app(&directory).with_clipboard(Box::new(clipboard));
     let stored = app
         .engine
-        .resume(&SessionId::from(
-            "0198f2c4-a1b0-7000-8000-000000000016".to_owned(),
-        ))
+        .resume(&SessionId::from("0198f2c4-a1b0-7000-8000-000000000016".to_owned()))
         .await
         .expect("the stored session resumes");
     app.seed(stored);
@@ -8141,10 +7074,7 @@ async fn a_clipboard_that_refuses_a_copy_says_so_in_upstreams_words() {
 
     let line = status_line(&mut app);
     assert!(line.contains("Failed to copy to clipboard"), "got: {line}");
-    assert!(
-        line.contains("no display"),
-        "and it names the reason: {line}"
-    );
+    assert!(line.contains("no display"), "and it names the reason: {line}");
 }
 
 // ---- the MCP status notice ----
@@ -8182,14 +7112,8 @@ async fn a_server_that_cannot_be_reached_is_named_in_the_status_bar() {
         line = status_line(&mut app);
     }
 
-    assert!(
-        line.contains("mcp broken"),
-        "the failed server should be named: {line}"
-    );
-    assert!(
-        !app.pending_mcp(),
-        "and once it has answered there is nothing left to wait for"
-    );
+    assert!(line.contains("mcp broken"), "the failed server should be named: {line}");
+    assert!(!app.pending_mcp(), "and once it has answered there is nothing left to wait for");
 }
 
 #[tokio::test]
@@ -8200,15 +7124,8 @@ async fn a_session_with_no_mcp_servers_says_nothing_about_them() {
         app.handle(AppEvent::Tick).await.expect("a tick is handled");
     }
 
-    assert!(
-        !status_line(&mut app).contains("mcp"),
-        "got: {}",
-        status_line(&mut app)
-    );
-    assert!(
-        !app.pending_mcp(),
-        "and nothing keeps the loop awake looking for one"
-    );
+    assert!(!status_line(&mut app).contains("mcp"), "got: {}", status_line(&mut app));
+    assert!(!app.pending_mcp(), "and nothing keeps the loop awake looking for one");
 }
 
 /// Without this, an idle app never wakes: `wants_wakeup` is what schedules
@@ -8217,12 +7134,8 @@ async fn a_session_with_no_mcp_servers_says_nothing_about_them() {
 #[tokio::test]
 async fn a_session_still_dialling_keeps_waking_up_to_look() {
     let root = temporary();
-    let mut app = App::new(
-        engine_dialling_a_missing_server(&root),
-        None,
-        Themes::builtin(),
-    )
-    .watching_mcp(1);
+    let mut app =
+        App::new(engine_dialling_a_missing_server(&root), None, Themes::builtin()).watching_mcp(1);
     app.draw(&mut terminal(80, 24)).expect("a frame draws");
 
     assert!(!app.dirty, "the frame above cleared it");
@@ -8253,9 +7166,7 @@ async fn slash_mcp_lists_every_configured_server_with_its_status_and_actions() {
     app.run_command(command::Action::Mcp).await;
 
     let dialog = app.mcp_dialog.as_ref().expect("/mcp opens the dialog");
-    let row = dialog
-        .selected()
-        .expect("the one configured server has a row");
+    let row = dialog.selected().expect("the one configured server has a row");
     assert_eq!(row.name, "broken");
     assert_eq!(row.status, "Failed");
     assert_eq!(row.tools, None, "a failed server lends nothing to count");
@@ -8292,13 +7203,8 @@ async fn login_appears_for_an_oauth_server_and_shows_the_url_while_it_runs() {
 
     app.run_command(command::Action::Mcp).await;
     let dialog = app.mcp_dialog.as_ref().expect("/mcp opens the dialog");
-    let row = dialog
-        .selected()
-        .expect("the one configured server has a row");
-    assert_eq!(
-        row.status, "dialling",
-        "nothing has attempted a connect yet"
-    );
+    let row = dialog.selected().expect("the one configured server has a row");
+    assert_eq!(row.status, "dialling", "nothing has attempted a connect yet");
     assert_eq!(
         row.actions,
         vec![mcp::Action::Login],
@@ -8316,9 +7222,7 @@ async fn login_appears_for_an_oauth_server_and_shows_the_url_while_it_runs() {
     let row = dialog.selected().expect("still the one row");
     assert_eq!(row.status, "Logging in", "{row:?}");
     assert!(
-        row.detail
-            .as_deref()
-            .is_some_and(|detail| detail.starts_with("go to: http")),
+        row.detail.as_deref().is_some_and(|detail| detail.starts_with("go to: http")),
         "the URL a person has to open should be shown: {row:?}"
     );
 }
@@ -8330,14 +7234,10 @@ async fn login_appears_for_an_oauth_server_and_shows_the_url_while_it_runs() {
 /// endpoint is itself a real, exercised path — the fixed fallback client
 /// id — and one this test does not need to distinguish).
 async fn oauth_discovery_fixture() -> std::net::SocketAddr {
-    use tokio::{
-        io::{AsyncReadExt as _, AsyncWriteExt as _},
-        net::TcpListener,
-    };
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::net::TcpListener;
 
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("a loopback port is available");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("a loopback port is available");
     let address = listener.local_addr().expect("the socket has an address");
 
     tokio::spawn(async move {
@@ -8384,15 +7284,11 @@ async fn esc_closes_the_mcp_dialog_from_either_step() {
         .await
         .expect("enter opens the failed row's actions");
     assert!(
-        app.mcp_dialog
-            .as_ref()
-            .is_some_and(mcp::Mcp::is_choosing_action),
+        app.mcp_dialog.as_ref().is_some_and(mcp::Mcp::is_choosing_action),
         "the one configured server is failed, so enter must open its actions"
     );
 
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("escape is handled");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("escape is handled");
     assert!(app.mcp_dialog.is_none(), "escape closes the whole dialog");
 }
 
@@ -8411,19 +7307,12 @@ async fn enter_on_a_row_with_no_actions_leaves_the_dialog_open() {
 
     app.run_command(command::Action::Mcp).await;
     let dialog = app.mcp_dialog.as_ref().expect("/mcp opens the dialog");
-    assert_eq!(
-        dialog.selected().map(|row| row.status.as_str()),
-        Some("Disabled")
-    );
+    assert_eq!(dialog.selected().map(|row| row.status.as_str()), Some("Disabled"));
 
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
     assert!(app.mcp_dialog.is_some(), "a disabled row does not close it");
     assert!(
-        !app.mcp_dialog
-            .as_ref()
-            .is_some_and(mcp::Mcp::is_choosing_action),
+        !app.mcp_dialog.as_ref().is_some_and(mcp::Mcp::is_choosing_action),
         "and it has nothing to choose, so no action step opens"
     );
 }
@@ -8449,37 +7338,21 @@ async fn reconnect_from_the_dialog_spawns_a_fresh_dial() {
     engine.connect_mcp();
     let mut app = App::new(engine, None, Themes::builtin()).watching_mcp(1);
     wait_for_mcp_to_settle(&mut app).await;
-    let attempts = |path: &std::path::Path| {
-        std::fs::read_to_string(path)
-            .unwrap_or_default()
-            .lines()
-            .count()
-    };
-    assert_eq!(
-        attempts(&counter),
-        1,
-        "the startup dial is the first attempt"
-    );
+    let attempts =
+        |path: &std::path::Path| std::fs::read_to_string(path).unwrap_or_default().lines().count();
+    assert_eq!(attempts(&counter), 1, "the startup dial is the first attempt");
 
     app.run_command(command::Action::Mcp).await;
     app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
         .await
         .expect("enter opens the failed row's actions");
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter on Reconnect runs it");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter on Reconnect runs it");
 
     assert!(
-        app.mcp_dialog
-            .as_ref()
-            .is_some_and(|dialog| !dialog.is_choosing_action()),
+        app.mcp_dialog.as_ref().is_some_and(|dialog| !dialog.is_choosing_action()),
         "running the action returns to the server list"
     );
-    assert_eq!(
-        attempts(&counter),
-        2,
-        "reconnect must have spawned a real second dial"
-    );
+    assert_eq!(attempts(&counter), 2, "reconnect must have spawned a real second dial");
 }
 
 /// The dialog, over one connected and one failed server (screenshot: no
@@ -8536,9 +7409,7 @@ async fn slash_context_opens_the_panel_and_esc_closes_it() {
     app.run_command(command::Action::Context).await;
     assert!(app.context_dialog.is_some(), "/context opens the panel");
 
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("escape is handled");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("escape is handled");
     assert!(app.context_dialog.is_none(), "escape closes it");
 }
 
@@ -8555,9 +7426,7 @@ async fn slash_usage_opens_the_panel_and_esc_closes_it() {
     app.run_command(command::Action::Usage).await;
     assert!(app.usage_dialog.is_some(), "/usage opens the panel");
 
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("escape is handled");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("escape is handled");
     assert!(app.usage_dialog.is_none(), "escape closes it");
 }
 
@@ -8612,10 +7481,7 @@ async fn the_usage_panel_carries_no_plan_limit_meter_and_says_why() {
         screen.contains("platform.claude.com/docs/en/manage-claude/usage-cost-api"),
         "the reason names the vendor's own page, whole:\n{screen}"
     );
-    assert!(
-        !screen.contains("Plan limits"),
-        "no plan-limit meter may be drawn:\n{screen}"
-    );
+    assert!(!screen.contains("Plan limits"), "no plan-limit meter may be drawn:\n{screen}");
 }
 
 /// The `/context` grid over a sized fixture breakdown (screenshot:
@@ -8697,22 +7563,15 @@ fn only_a_failed_server_earns_a_notice_and_it_is_one_line() {
         (
             vec![
                 ("fs", ganja_core::McpStatus::Connected),
-                (
-                    "hub",
-                    ganja_core::McpStatus::Failed {
-                        error: "connection refused".to_owned(),
-                    },
-                ),
+                ("hub", ganja_core::McpStatus::Failed { error: "connection refused".to_owned() }),
             ],
             Some("mcp hub: connection refused"),
         ),
     ];
 
     for (status, expected) in cases {
-        let status: std::collections::BTreeMap<String, ganja_core::McpStatus> = status
-            .into_iter()
-            .map(|(name, status)| (name.to_owned(), status))
-            .collect();
+        let status: std::collections::BTreeMap<String, ganja_core::McpStatus> =
+            status.into_iter().map(|(name, status)| (name.to_owned(), status)).collect();
 
         assert_eq!(super::mcp_notice(&status).as_deref(), expected);
     }
@@ -8722,8 +7581,7 @@ fn only_a_failed_server_earns_a_notice_and_it_is_one_line() {
 /// A conversation of two exchanges, and the id of the prompt an undo of
 /// the last one anchors on.
 fn two_exchanges(app: &mut App) -> ganja_protocol::MessageId {
-    app.chat
-        .start_message(Message::user("the question that stands"));
+    app.chat.start_message(Message::user("the question that stands"));
     let mut first = Message::assistant("canned");
     first.parts.push(Part::text("the answer that stands"));
     app.chat.start_message(first);
@@ -8732,9 +7590,7 @@ fn two_exchanges(app: &mut App) -> ganja_protocol::MessageId {
     let anchor = taken_back.id.clone();
     app.chat.start_message(taken_back);
     let mut second = Message::assistant("canned");
-    second
-        .parts
-        .push(Part::text("the answer that goes with it"));
+    second.parts.push(Part::text("the answer that goes with it"));
     app.chat.start_message(second);
 
     anchor
@@ -8754,11 +7610,7 @@ fn reverted(anchor: &ganja_protocol::MessageId, prompt: Option<&str>) -> AppEven
 
 /// The event the engine sends when a revert ends, whichever way it ended.
 fn unreverted() -> AppEvent {
-    AppEvent::core(CoreEvent::RevertChanged {
-        session_id: session(),
-        revert: None,
-        prompt: None,
-    })
+    AppEvent::core(CoreEvent::RevertChanged { session_id: session(), revert: None, prompt: None })
 }
 
 /// The transcript pane alone: everything above the composer's box.
@@ -8769,9 +7621,7 @@ fn unreverted() -> AppEvent {
 fn transcript_pane(terminal: &Terminal<TestBackend>) -> String {
     let whole = screen(terminal);
 
-    whole
-        .split_once("\u{250c} message")
-        .map_or(whole.clone(), |(above, _)| above.to_owned())
+    whole.split_once("\u{250c} message").map_or(whole.clone(), |(above, _)| above.to_owned())
 }
 
 /// **R10**, the whole of the TUI half in one pass: what an undo hid stops
@@ -8796,10 +7646,7 @@ async fn an_undo_hides_what_it_took_back_shows_one_marker_row_and_refills_the_ed
         "the anchor is hidden with everything after it:\n{pane}"
     );
     assert!(!pane.contains("the answer that goes with it"), "{pane}");
-    assert!(
-        pane.contains("2 messages reverted \u{2014} /redo to restore"),
-        "{pane}"
-    );
+    assert!(pane.contains("2 messages reverted \u{2014} /redo to restore"), "{pane}");
     assert!(pane.contains("src/lib.rs"), "{pane}");
     assert_eq!(
         app.editor.prompt().as_deref(),
@@ -8820,9 +7667,7 @@ async fn a_redo_past_the_newest_reverted_prompt_puts_those_messages_back() {
         .expect("a revert is handled");
 
     app.run_command(command::Action::Redo).await;
-    app.handle(unreverted())
-        .await
-        .expect("a cleared revert is handled");
+    app.handle(unreverted()).await.expect("a cleared revert is handled");
 
     let mut terminal = terminal(80, 24);
     app.draw(&mut terminal).expect("a frame draws");
@@ -8852,14 +7697,10 @@ async fn a_prompt_after_an_undo_drops_the_messages_it_hid_for_good() {
     // submit path a person takes.
     app.editor.set_text("a different question");
     app.submit().await;
-    app.handle(unreverted())
-        .await
-        .expect("a cleared revert is handled");
+    app.handle(unreverted()).await.expect("a cleared revert is handled");
     // A second `/redo` has nothing left to show.
     app.run_command(command::Action::Redo).await;
-    app.handle(unreverted())
-        .await
-        .expect("a cleared revert is handled");
+    app.handle(unreverted()).await.expect("a cleared revert is handled");
 
     let mut terminal = terminal(80, 24);
     app.draw(&mut terminal).expect("a frame draws");
@@ -8879,9 +7720,7 @@ async fn a_prompt_after_an_undo_drops_the_messages_it_hid_for_good() {
 async fn a_refused_prompt_leaves_the_revert_still_undoable() {
     let (mut app, mut events) = wired().await;
     let anchor = two_exchanges(&mut app);
-    app.handle(reverted(&anchor, None))
-        .await
-        .expect("a revert is handled");
+    app.handle(reverted(&anchor, None)).await.expect("a revert is handled");
     assert_eq!(app.cleared, Cleared::Unhide);
 
     // A turn already streaming, which is what refuses the prompt below —
@@ -8912,11 +7751,7 @@ async fn a_refused_prompt_leaves_the_revert_still_undoable() {
         app.editor.is_empty() && app.queue.depth() == 1,
         "the fixture only proves anything while the prompt really is refused"
     );
-    assert_eq!(
-        app.cleared,
-        Cleared::Unhide,
-        "a refusal must put the reading back"
-    );
+    assert_eq!(app.cleared, Cleared::Unhide, "a refusal must put the reading back");
 }
 
 /// **Resume.** A frontend that has just started learns the hidden range
@@ -8929,9 +7764,7 @@ async fn a_resumed_session_reconstructs_the_hidden_range_without_refilling_the_e
     let anchor = two_exchanges(&mut app);
     app.editor.set_text("what was already being typed");
 
-    app.handle(reverted(&anchor, None))
-        .await
-        .expect("a seeded revert is handled");
+    app.handle(reverted(&anchor, None)).await.expect("a seeded revert is handled");
 
     let mut terminal = terminal(80, 24);
     app.draw(&mut terminal).expect("a frame draws");
@@ -8962,9 +7795,7 @@ async fn the_palette_rows_send_undo_and_redo_to_the_engine() {
         for event in typing(typed) {
             app.handle(event).await.expect("typing is handled");
         }
-        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-            .await
-            .expect("enter is handled");
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
         let mut terminal = terminal(80, 12);
         app.draw(&mut terminal).expect("a frame draws");
@@ -8985,35 +7816,20 @@ async fn the_command_menu_reaches_undo_too() {
     for event in typing("/undo") {
         app.handle(event).await.expect("typing is handled");
     }
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     let mut terminal = terminal(80, 12);
     app.draw(&mut terminal).expect("a frame draws");
 
-    assert!(
-        screen(&terminal).contains("takes no snapshots"),
-        "{}",
-        screen(&terminal)
-    );
-    assert!(
-        app.editor.is_empty(),
-        "a UI command runs rather than being typed"
-    );
+    assert!(screen(&terminal).contains("takes no snapshots"), "{}", screen(&terminal));
+    assert!(app.editor.is_empty(), "a UI command runs rather than being typed");
 }
 
 #[test]
 fn snapshot_reverted_transcript() {
     let mut app = app();
     let anchor = two_exchanges(&mut app);
-    app.chat.revert(
-        anchor,
-        vec![
-            "crates/ganja-tui/src/app.rs".to_owned(),
-            "README.md".to_owned(),
-        ],
-    );
+    app.chat.revert(anchor, vec!["crates/ganja-tui/src/app.rs".to_owned(), "README.md".to_owned()]);
 
     let mut terminal = terminal(80, 24);
     app.draw(&mut terminal).expect("a frame draws");
@@ -9044,9 +7860,7 @@ async fn the_help_card_reaches_all_of_itself_on_a_stock_terminal() {
 
     let mut seen = opening;
     for _ in 0..20 {
-        app.handle(key(KeyCode::Down, KeyModifiers::NONE))
-            .await
-            .expect("down is handled");
+        app.handle(key(KeyCode::Down, KeyModifiers::NONE)).await.expect("down is handled");
         app.draw(&mut terminal).expect("a frame draws");
         seen.push('\n');
         seen.push_str(&screen(&terminal));
@@ -9066,9 +7880,7 @@ async fn scrolling_the_help_card_does_not_type_into_the_editor() {
     app.run_command(command::Action::Help).await;
 
     for code in [KeyCode::Down, KeyCode::Char('j'), KeyCode::Char('k')] {
-        app.handle(key(code, KeyModifiers::NONE))
-            .await
-            .expect("a key is handled");
+        app.handle(key(code, KeyModifiers::NONE)).await.expect("a key is handled");
     }
 
     assert!(app.help.is_some());
@@ -9105,9 +7917,7 @@ async fn a_tall_terminal_shows_the_whole_help_card_at_once() {
 async fn streaming() -> (App, BoxStream<'static, CoreEvent>) {
     let (mut app, mut events) = wired().await;
     typed(&mut app, "the turn to steer").await;
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
     // Both envelopes: the second is the assistant's, which is what tells
     // this side a turn holds the engine.
     pump(&mut app, &mut events, 2).await;
@@ -9121,9 +7931,7 @@ async fn streaming() -> (App, BoxStream<'static, CoreEvent>) {
 async fn finish(app: &mut App, events: &mut BoxStream<'static, CoreEvent>) {
     while let Some(event) = events.next().await {
         let finished = matches!(event, CoreEvent::MessageFinished { .. });
-        app.handle(AppEvent::core(event))
-            .await
-            .expect("an engine event is handled");
+        app.handle(AppEvent::core(event)).await.expect("an engine event is handled");
         if finished {
             return;
         }
@@ -9136,9 +7944,7 @@ async fn finish(app: &mut App, events: &mut BoxStream<'static, CoreEvent>) {
 async fn a_queued_entry_leaves_the_strip_when_the_engine_says_it_consumed_it() {
     let (mut app, mut events) = streaming().await;
     typed(&mut app, "one more thing").await;
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
     assert_eq!(app.queue.depth(), 1);
 
     let id = app.queue.entries()[0].id.clone();
@@ -9149,10 +7955,7 @@ async fn a_queued_entry_leaves_the_strip_when_the_engine_says_it_consumed_it() {
     .await
     .expect("the event is handled");
 
-    assert!(
-        app.queue.is_empty(),
-        "the engine took it, so the strip lets go"
-    );
+    assert!(app.queue.is_empty(), "the engine took it, so the strip lets go");
     assert!(!status_line(&mut app).contains("queued"));
 
     finish(&mut app, &mut events).await;
@@ -9165,9 +7968,7 @@ async fn a_queued_entry_leaves_the_strip_when_the_engine_says_it_consumed_it() {
 async fn a_real_turn_takes_the_steer_and_the_strip_empties_on_its_own() {
     let (mut app, mut events) = streaming().await;
     typed(&mut app, "and one more thing").await;
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
     assert_eq!(app.queue.depth(), 1);
 
     let mut consumed = false;
@@ -9175,9 +7976,7 @@ async fn a_real_turn_takes_the_steer_and_the_strip_empties_on_its_own() {
         let event = events.next().await.expect("the turn keeps reporting");
         let finished = matches!(event, CoreEvent::MessageFinished { .. });
         consumed |= matches!(event, CoreEvent::SteerConsumed { .. });
-        app.handle(AppEvent::core(event))
-            .await
-            .expect("an engine event is handled");
+        app.handle(AppEvent::core(event)).await.expect("an engine event is handled");
         if finished {
             break;
         }
@@ -9193,10 +7992,7 @@ async fn a_real_turn_takes_the_steer_and_the_strip_empties_on_its_own() {
         screen.contains("and one more thing"),
         "and it is in the transcript, not on the strip:\n{screen}"
     );
-    assert!(
-        !screen.contains("press up to edit queued messages"),
-        "the strip is gone:\n{screen}"
-    );
+    assert!(!screen.contains("press up to edit queued messages"), "the strip is gone:\n{screen}");
 }
 
 /// An id nothing answers to is the withdrawal race, and is not an error:
@@ -9205,9 +8001,7 @@ async fn a_real_turn_takes_the_steer_and_the_strip_empties_on_its_own() {
 async fn a_consumed_id_that_names_nothing_changes_nothing() {
     let (mut app, mut events) = streaming().await;
     typed(&mut app, "one more thing").await;
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     app.handle(AppEvent::core(CoreEvent::SteerConsumed {
         session_id: app.engine.session_id(),
@@ -9229,15 +8023,11 @@ async fn up_recalls_and_withdraws_the_newest_queued_message() {
     let (mut app, mut events) = streaming().await;
     for text in ["first correction", "second correction"] {
         typed(&mut app, text).await;
-        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-            .await
-            .expect("enter is handled");
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
     }
     assert_eq!(app.queue.depth(), 2);
 
-    app.handle(key(KeyCode::Up, KeyModifiers::NONE))
-        .await
-        .expect("up is handled");
+    app.handle(key(KeyCode::Up, KeyModifiers::NONE)).await.expect("up is handled");
 
     assert_eq!(
         app.editor.prompt().as_deref(),
@@ -9256,9 +8046,7 @@ async fn up_walks_the_history_again_once_the_strip_is_empty() {
     let directory = temporary();
     let mut app = app_with_history(&directory, &["an older prompt"]);
 
-    app.handle(key(KeyCode::Up, KeyModifiers::NONE))
-        .await
-        .expect("up is handled");
+    app.handle(key(KeyCode::Up, KeyModifiers::NONE)).await.expect("up is handled");
 
     assert_eq!(app.editor.prompt().as_deref(), Some("an older prompt"));
 }
@@ -9270,36 +8058,21 @@ async fn up_walks_the_history_again_once_the_strip_is_empty() {
 async fn an_unconsumed_steer_survives_a_cancelled_turn_into_the_fallback_lane() {
     let (mut app, mut events) = streaming().await;
     typed(&mut app, "the correction nobody took").await;
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
     assert!(app.queue.entries()[0].is_steered());
 
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("escape is handled");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("escape is handled");
     finish(&mut app, &mut events).await;
 
     // The finish stranded it and the same handler replayed it, so the
     // engine has a turn of its own for the message now.
-    assert!(
-        app.queue.is_empty(),
-        "the lane owns it and has sent it: {:?}",
-        app.queue.entries()
-    );
-    let started = events
-        .next()
-        .await
-        .expect("the replay starts a turn of its own");
+    assert!(app.queue.is_empty(), "the lane owns it and has sent it: {:?}", app.queue.entries());
+    let started = events.next().await.expect("the replay starts a turn of its own");
     let CoreEvent::MessageStarted { message, .. } = started else {
         panic!("a turn opens with the user's message");
     };
     assert_eq!(
-        message
-            .parts
-            .iter()
-            .filter_map(ganja_protocol::Part::as_text)
-            .collect::<String>(),
+        message.parts.iter().filter_map(ganja_protocol::Part::as_text).collect::<String>(),
         "the correction nobody took"
     );
 
@@ -9313,18 +8086,14 @@ async fn an_unconsumed_steer_survives_a_cancelled_turn_into_the_fallback_lane() 
 async fn the_fallback_lane_pauses_while_a_revert_is_outstanding() {
     let (mut app, mut events) = wired().await;
     typed(&mut app, "the first turn").await;
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
     finish(&mut app, &mut events).await;
 
     // Refused `NotStreaming`, so the entry is the fallback lane's — the
     // one kind a replay could send, and the kind this test holds back.
     app.turn_running = true;
     typed(&mut app, "the queued correction").await;
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
     app.turn_running = false;
     assert_eq!(app.queue.depth(), 1);
 
@@ -9342,11 +8111,7 @@ async fn the_fallback_lane_pauses_while_a_revert_is_outstanding() {
 
     app.handle(AppEvent::Tick).await.expect("a tick is handled");
 
-    assert_eq!(
-        app.queue.depth(),
-        1,
-        "the entry waits for the person to decide about the revert"
-    );
+    assert_eq!(app.queue.depth(), 1, "the entry waits for the person to decide about the revert");
     assert!(status_line(&mut app).contains("1 queued"));
 
     // And once the revert is over, the same entry goes.
@@ -9370,23 +8135,16 @@ async fn the_fallback_lane_pauses_while_a_revert_is_outstanding() {
 async fn a_steer_that_loses_the_turn_is_refused_and_replayed_exactly_once() {
     let (mut app, mut events) = wired().await;
     typed(&mut app, "the first turn").await;
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
     finish(&mut app, &mut events).await;
 
     // The turn is over; this side has not noticed, which is the race.
     app.turn_running = true;
     typed(&mut app, "the message that lost the race").await;
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     assert_eq!(app.queue.depth(), 1);
-    assert!(
-        !app.queue.entries()[0].is_steered(),
-        "a refused steer belongs to the fallback lane"
-    );
+    assert!(!app.queue.entries()[0].is_steered(), "a refused steer belongs to the fallback lane");
 
     // The lane sends it on the next tick, and sends it once.
     app.turn_running = false;
@@ -9402,17 +8160,11 @@ async fn a_steer_that_loses_the_turn_is_refused_and_replayed_exactly_once() {
         {
             prompts += 1;
             assert_eq!(
-                message
-                    .parts
-                    .iter()
-                    .filter_map(ganja_protocol::Part::as_text)
-                    .collect::<String>(),
+                message.parts.iter().filter_map(ganja_protocol::Part::as_text).collect::<String>(),
                 "the message that lost the race"
             );
         }
-        app.handle(AppEvent::core(event))
-            .await
-            .expect("an engine event is handled");
+        app.handle(AppEvent::core(event)).await.expect("an engine event is handled");
         if finished {
             break;
         }
@@ -9420,10 +8172,7 @@ async fn a_steer_that_loses_the_turn_is_refused_and_replayed_exactly_once() {
     assert_eq!(prompts, 1, "exactly once");
 
     app.handle(AppEvent::Tick).await.expect("a tick is handled");
-    assert!(
-        app.queue.is_empty(),
-        "and nothing is left to send a second time"
-    );
+    assert!(app.queue.is_empty(), "and nothing is left to send a second time");
 }
 
 /// **Acceptance 4, the Busy retry.** A replay that loses a race to a turn
@@ -9437,9 +8186,7 @@ async fn a_replay_that_meets_busy_keeps_its_place_and_is_retried() {
     // survives it.
     app.turn_running = false;
     typed(&mut app, "the message that met busy").await;
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     assert_eq!(app.queue.depth(), 1, "the refusal cost nothing");
     assert!(app.editor.is_empty());
@@ -9465,15 +8212,10 @@ async fn an_engine_command_typed_mid_turn_waits_for_the_end_of_the_turn() {
     // With an argument, so the inline command menu is closed and Enter is
     // the submit rather than the menu's own selection.
     typed(&mut app, "/init focus on the tests").await;
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     assert_eq!(app.queue.depth(), 1);
-    assert!(
-        !app.queue.entries()[0].is_steered(),
-        "a command is not a message the model reads"
-    );
+    assert!(!app.queue.entries()[0].is_steered(), "a command is not a message the model reads");
     assert!(app.editor.is_empty());
 
     finish(&mut app, &mut events).await;
@@ -9491,9 +8233,7 @@ async fn a_shell_submission_mid_turn_is_still_refused_and_never_queued() {
 
     typed(&mut app, "!").await;
     typed(&mut app, "echo hello").await;
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     assert_eq!(app.editor.prompt().as_deref(), Some("echo hello"));
     assert_eq!(app.editor.mode(), Mode::Shell);
@@ -9510,13 +8250,9 @@ async fn a_shell_submission_mid_turn_is_still_refused_and_never_queued() {
 async fn escape_does_not_clear_the_strip() {
     let (mut app, mut events) = streaming().await;
     typed(&mut app, "still wanted").await;
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("escape is handled");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("escape is handled");
 
     assert_eq!(app.queue.depth(), 1, "Esc says nothing about the queue");
 
@@ -9530,9 +8266,7 @@ async fn snapshot_queued_messages_strip() {
     let (mut app, mut events) = streaming().await;
     for text in ["run the tests too", "and then commit"] {
         typed(&mut app, text).await;
-        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-            .await
-            .expect("enter is handled");
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
     }
 
     let mut terminal = terminal(80, 16);
@@ -9557,9 +8291,7 @@ fn with_checkpoints() -> App {
 /// never closes between them.
 async fn escapes(app: &mut App, times: usize) {
     for _ in 0..times {
-        app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-            .await
-            .expect("escape is handled");
+        app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("escape is handled");
     }
 }
 
@@ -9575,18 +8307,9 @@ async fn slash_rewind_lists_the_prompts_the_transcript_holds_and_current() {
     let screen = screen(&terminal);
 
     assert!(screen.contains("(Current)"), "got:\n{screen}");
-    assert!(
-        screen.contains("the question that stands"),
-        "got:\n{screen}"
-    );
-    assert!(
-        screen.contains("the question that is taken back"),
-        "got:\n{screen}"
-    );
-    assert!(
-        !screen.contains("the answer that stands"),
-        "a reply is not a checkpoint:\n{screen}"
-    );
+    assert!(screen.contains("the question that stands"), "got:\n{screen}");
+    assert!(screen.contains("the question that is taken back"), "got:\n{screen}");
+    assert!(!screen.contains("the answer that stands"), "a reply is not a checkpoint:\n{screen}");
 }
 
 /// A prompt whose turn recorded patches says how many files it moved; one
@@ -9604,8 +8327,7 @@ async fn a_checkpoint_says_whether_its_turn_changed_any_code() {
         },
     });
     app.chat.start_message(reply);
-    app.chat
-        .start_message(Message::user("just tell me about it"));
+    app.chat.start_message(Message::user("just tell me about it"));
     app.chat.start_message(Message::assistant("canned"));
 
     app.run_command(command::Action::Rewind).await;
@@ -9633,25 +8355,14 @@ async fn esc_esc_highlights_the_newest_prompt_and_each_esc_steps_one_older() {
     assert!(app.backtrack.is_none(), "one Esc is still just a cancel");
 
     escapes(&mut app, 1).await;
-    assert_eq!(
-        app.chat.backtrack_anchor(),
-        Some(&newest),
-        "the second lands on the newest prompt"
-    );
-    assert!(
-        app.rewind.is_none(),
-        "the picker is /rewind's, not the gesture's"
-    );
+    assert_eq!(app.chat.backtrack_anchor(), Some(&newest), "the second lands on the newest prompt");
+    assert!(app.rewind.is_none(), "the picker is /rewind's, not the gesture's");
 
     escapes(&mut app, 1).await;
     assert_eq!(app.chat.backtrack_anchor(), Some(&oldest), "one step older");
 
     escapes(&mut app, 1).await;
-    assert_eq!(
-        app.chat.backtrack_anchor(),
-        Some(&oldest),
-        "the walk holds at the oldest"
-    );
+    assert_eq!(app.chat.backtrack_anchor(), Some(&oldest), "the walk holds at the oldest");
 
     let mut terminal = terminal(80, 24);
     app.draw(&mut terminal).expect("a frame draws");
@@ -9669,10 +8380,7 @@ async fn esc_esc_while_a_turn_streams_cancels_and_never_backtracks() {
     let (mut app, mut events) = streaming().await;
 
     escapes(&mut app, 2).await;
-    assert!(
-        app.backtrack.is_none(),
-        "no walk starts over a turn the user is watching"
-    );
+    assert!(app.backtrack.is_none(), "no walk starts over a turn the user is watching");
 
     finish(&mut app, &mut events).await;
     assert!(!app.turn_running, "and the Esc really did cancel it");
@@ -9708,10 +8416,7 @@ async fn a_keystroke_between_the_two_escs_ends_the_gesture() {
     typed(&mut app, "n").await;
     escapes(&mut app, 1).await;
 
-    assert!(
-        app.backtrack.is_none(),
-        "that was a cancel, a letter, a cancel"
-    );
+    assert!(app.backtrack.is_none(), "that was a cancel, a letter, a cancel");
 }
 
 /// A transcript with no user message gives the gesture nothing to walk.
@@ -9736,19 +8441,13 @@ async fn any_other_key_exits_the_walk_without_reverting_and_is_then_handled() {
     typed(&mut app, "n").await;
 
     assert!(app.backtrack.is_none(), "the walk exits silently");
-    assert!(
-        app.chat.backtrack_anchor().is_none(),
-        "the highlight is down"
-    );
+    assert!(app.chat.backtrack_anchor().is_none(), "the highlight is down");
     assert!(!app.chat.is_reverted(), "and nothing was reverted");
     assert_eq!(app.editor.text(), "n", "the key was then handled as typing");
 
     let mut terminal = terminal(80, 24);
     app.draw(&mut terminal).expect("a frame draws");
-    assert!(
-        !screen(&terminal).contains(BACKTRACK_HINT),
-        "the hint left with the walk"
-    );
+    assert!(!screen(&terminal).contains(BACKTRACK_HINT), "the hint left with the walk");
 }
 
 /// **Acceptance 1, the whole gesture.** Enter reverts the conversation to
@@ -9763,15 +8462,11 @@ async fn backtrack_enter_reverts_and_hands_back_the_whole_multi_line_prompt() {
         .await
         .expect("the newline chord is handled");
     typed(&mut app, "and the second").await;
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
     finish(&mut app, &mut events).await;
 
     escapes(&mut app, 2).await;
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
     pump(&mut app, &mut events, 1).await;
 
     assert!(app.backtrack.is_none(), "confirming closes the walk");
@@ -9794,15 +8489,11 @@ async fn backtrack_enter_reverts_and_hands_back_the_whole_multi_line_prompt() {
 async fn a_backtrack_revert_announces_the_prompt_it_took_back() {
     let (mut app, mut events) = wired().await;
     typed(&mut app, "the prompt to step back to").await;
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
     finish(&mut app, &mut events).await;
 
     escapes(&mut app, 2).await;
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     let event = events.next().await.expect("the engine answers the revert");
     let CoreEvent::RevertChanged { prompt, .. } = &event else {
@@ -9813,9 +8504,7 @@ async fn a_backtrack_revert_announces_the_prompt_it_took_back() {
         Some("the prompt to step back to"),
         "the event itself carries the prompt for the composer"
     );
-    app.handle(AppEvent::core(event))
-        .await
-        .expect("the revert is handled");
+    app.handle(AppEvent::core(event)).await.expect("the revert is handled");
 }
 
 /// `/rewind` is untouched by the gesture's retargeting: it still opens the
@@ -9826,10 +8515,7 @@ async fn slash_rewind_still_opens_the_picker_and_never_the_walk() {
 
     app.run_command(command::Action::Rewind).await;
 
-    assert!(
-        app.rewind.is_some(),
-        "the two-step picker is /rewind's door"
-    );
+    assert!(app.rewind.is_some(), "the two-step picker is /rewind's door");
     assert!(app.backtrack.is_none(), "the walk is the gesture's alone");
 }
 
@@ -9840,22 +8526,13 @@ async fn slash_rewind_still_opens_the_picker_and_never_the_walk() {
 async fn a_walk_over_a_standing_revert_offers_only_visible_prompts() {
     let mut app = app();
     let anchor = two_exchanges(&mut app);
-    app.handle(reverted(&anchor, None))
-        .await
-        .expect("a revert is handled");
-    assert!(
-        app.chat.is_reverted(),
-        "the fixture needs a standing revert"
-    );
+    app.handle(reverted(&anchor, None)).await.expect("a revert is handled");
+    assert!(app.chat.is_reverted(), "the fixture needs a standing revert");
 
     escapes(&mut app, 2).await;
 
     let backtrack = app.backtrack.as_ref().expect("the gesture still works");
-    assert_eq!(
-        backtrack.candidates.len(),
-        1,
-        "the hidden prompt is not on offer"
-    );
+    assert_eq!(backtrack.candidates.len(), 1, "the hidden prompt is not on offer");
     let visible = app.chat.checkpoints()[0].message_id.clone();
     assert_eq!(app.chat.backtrack_anchor(), Some(&visible));
 }
@@ -9867,27 +8544,19 @@ async fn esc_closes_the_picker_from_either_step_and_changes_nothing() {
     let mut app = with_checkpoints();
 
     app.run_command(command::Action::Rewind).await;
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("escape is handled");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("escape is handled");
     assert!(app.rewind.is_none());
     assert!(!app.chat.is_reverted());
 
     app.run_command(command::Action::Rewind).await;
-    app.handle(key(KeyCode::Down, KeyModifiers::NONE))
-        .await
-        .expect("down is handled");
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Down, KeyModifiers::NONE)).await.expect("down is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
     assert!(
         app.rewind.as_ref().is_some_and(Rewind::is_choosing_scope),
         "the scope step should be showing"
     );
 
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("escape is handled");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("escape is handled");
     assert!(app.rewind.is_none(), "Esc leaves the scope step too");
     assert!(!app.chat.is_reverted(), "and nothing was reverted");
 }
@@ -9899,9 +8568,7 @@ async fn enter_on_current_closes_the_picker_and_reverts_nothing() {
     let mut app = with_checkpoints();
     app.run_command(command::Action::Rewind).await;
 
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     assert!(app.rewind.is_none());
     assert!(!app.chat.is_reverted());
@@ -9914,18 +8581,14 @@ async fn enter_on_current_closes_the_picker_and_reverts_nothing() {
 async fn choosing_conversation_only_takes_the_prompt_back_through_the_engine() {
     let (mut app, mut events) = wired().await;
     typed(&mut app, "the prompt to rewind past").await;
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
     finish(&mut app, &mut events).await;
 
     app.run_command(command::Action::Rewind).await;
     // Off `(Current)`, onto the one checkpoint, into the scope step, then
     // down one row to "Conversation only".
     for code in [KeyCode::Down, KeyCode::Enter, KeyCode::Down, KeyCode::Enter] {
-        app.handle(key(code, KeyModifiers::NONE))
-            .await
-            .expect("the key is handled");
+        app.handle(key(code, KeyModifiers::NONE)).await.expect("the key is handled");
     }
     pump(&mut app, &mut events, 1).await;
 
@@ -9936,11 +8599,7 @@ async fn choosing_conversation_only_takes_the_prompt_back_through_the_engine() {
         Some("the prompt to rewind past"),
         "rewinding and retyping a prompt is editing it"
     );
-    assert_eq!(
-        app.cleared,
-        Cleared::Unhide,
-        "what this hid can still be stepped back through"
-    );
+    assert_eq!(app.cleared, Cleared::Unhide, "what this hid can still be stepped back through");
 }
 
 /// **Acceptance 7, code only.** The engine announces the files it put back
@@ -9955,22 +8614,11 @@ async fn a_code_only_rewind_names_the_files_and_hides_nothing() {
     // this is the flag that tells them apart (**R10**).
     app.code_only_rewind = true;
 
-    app.handle(reverted(&anchor, None))
-        .await
-        .expect("a revert is handled");
+    app.handle(reverted(&anchor, None)).await.expect("a revert is handled");
 
-    assert!(
-        !app.chat.is_reverted(),
-        "a code-only rewind hides no message"
-    );
-    assert!(
-        !app.revert_pending,
-        "and holds nothing the fallback lane has to wait on"
-    );
-    assert!(
-        app.editor.is_empty(),
-        "nothing was taken back, so nothing is offered again"
-    );
+    assert!(!app.chat.is_reverted(), "a code-only rewind hides no message");
+    assert!(!app.revert_pending, "and holds nothing the fallback lane has to wait on");
+    assert!(app.editor.is_empty(), "nothing was taken back, so nothing is offered again");
 
     let mut terminal = terminal(80, 24);
     app.draw(&mut terminal).expect("a frame draws");
@@ -9986,13 +8634,9 @@ async fn the_code_only_reading_lasts_exactly_one_event() {
     let mut app = with_checkpoints();
     let anchor = two_exchanges(&mut app);
     app.code_only_rewind = true;
-    app.handle(reverted(&anchor, None))
-        .await
-        .expect("the code-only answer is handled");
+    app.handle(reverted(&anchor, None)).await.expect("the code-only answer is handled");
 
-    app.handle(reverted(&anchor, None))
-        .await
-        .expect("an ordinary revert is handled");
+    app.handle(reverted(&anchor, None)).await.expect("an ordinary revert is handled");
 
     assert!(app.chat.is_reverted(), "the second one is an ordinary undo");
     assert!(app.revert_pending, "and the lane pauses for it");
@@ -10024,16 +8668,10 @@ async fn a_rewind_a_session_cannot_serve_says_so_in_the_status_bar() {
 async fn a_rewind_to_something_that_is_not_a_checkpoint_is_refused_by_name() {
     let (mut app, mut events) = wired().await;
     typed(&mut app, "the only prompt there is").await;
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
     finish(&mut app, &mut events).await;
 
-    app.rewind_to(
-        MessageId::from("msg_nobody".to_owned()),
-        RevertScope::Conversation,
-    )
-    .await;
+    app.rewind_to(MessageId::from("msg_nobody".to_owned()), RevertScope::Conversation).await;
 
     let mut terminal = terminal(100, 24);
     app.draw(&mut terminal).expect("a frame draws");
@@ -10058,9 +8696,7 @@ async fn snapshot_rewind_scope_choice() {
     let mut app = with_checkpoints();
     app.run_command(command::Action::Rewind).await;
     for code in [KeyCode::Down, KeyCode::Enter] {
-        app.handle(key(code, KeyModifiers::NONE))
-            .await
-            .expect("the key is handled");
+        app.handle(key(code, KeyModifiers::NONE)).await.expect("the key is handled");
     }
 
     let mut terminal = terminal(80, 20);
@@ -10104,9 +8740,7 @@ fn plugin_store_fixture(directory: &TempDir) -> ganja_core::plugin::Store {
     store
         .add_marketplace(market.to_str().expect("the fixture path is unicode"))
         .expect("the fixture marketplace adds");
-    store
-        .install("formatter", "company-tools")
-        .expect("the fixture plugin installs");
+    store.install("formatter", "company-tools").expect("the fixture plugin installs");
 
     store
 }
@@ -10162,24 +8796,16 @@ async fn slash_plugin_opens_the_dialog_and_esc_walks_back_out() {
     app.run_command(command::Action::Plugin).await;
     assert!(app.plugin_dialog.is_some(), "/plugin opens the dialog");
 
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("escape is handled");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("escape is handled");
     assert!(app.plugin_dialog.is_none(), "escape closes the list step");
 
     app.run_command(command::Action::Plugin).await;
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
     assert!(
-        app.plugin_dialog
-            .as_ref()
-            .is_some_and(component::plugin::Plugin::is_choosing_action),
+        app.plugin_dialog.as_ref().is_some_and(component::plugin::Plugin::is_choosing_action),
         "enter on a plugin row opens its actions"
     );
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("escape is handled");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("escape is handled");
     assert!(app.plugin_dialog.is_none(), "escape closes the action step");
 }
 
@@ -10233,9 +8859,7 @@ async fn enable_disable_and_remove_round_trip_through_the_dialog() {
     // Enter opens the row's actions; Enter again runs the toggle, which
     // reads Disable on an enabled row.
     for _ in 0..2 {
-        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-            .await
-            .expect("the key is handled");
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("the key is handled");
     }
     settle_plugin(&mut app).await;
     assert!(
@@ -10252,9 +8876,7 @@ async fn enable_disable_and_remove_round_trip_through_the_dialog() {
 
     // The same toggle now reads Enable.
     for _ in 0..2 {
-        app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-            .await
-            .expect("the key is handled");
+        app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("the key is handled");
     }
     settle_plugin(&mut app).await;
     assert!(
@@ -10264,19 +8886,14 @@ async fn enable_disable_and_remove_round_trip_through_the_dialog() {
 
     // Remove is the action after the toggle.
     for code in [KeyCode::Enter, KeyCode::Down, KeyCode::Enter] {
-        app.handle(key(code, KeyModifiers::NONE))
-            .await
-            .expect("the key is handled");
+        app.handle(key(code, KeyModifiers::NONE)).await.expect("the key is handled");
     }
     settle_plugin(&mut app).await;
     assert!(
         store.state().expect("the state reads").plugins.is_empty(),
         "remove deletes the state entry"
     );
-    assert!(
-        !store.plugin_root("formatter").exists(),
-        "and the installed directory with it"
-    );
+    assert!(!store.plugin_root("formatter").exists(), "and the installed directory with it");
 }
 
 /// The free-text step is the frontend's own: Enter submits to the store,
@@ -10297,61 +8914,37 @@ async fn the_add_input_submits_on_enter_and_cancels_on_esc_without_an_engine_com
 
     app.run_command(command::Action::Plugin).await;
     // An empty store starts the cursor on "Add marketplace".
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("the key is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("the key is handled");
     assert!(
-        app.plugin_dialog
-            .as_ref()
-            .is_some_and(component::plugin::Plugin::is_typing),
+        app.plugin_dialog.as_ref().is_some_and(component::plugin::Plugin::is_typing),
         "add opens the free-text step"
     );
 
     // Esc cancels the edit and keeps the dialog open.
-    app.handle(key(KeyCode::Char('x'), KeyModifiers::NONE))
-        .await
-        .expect("the key is handled");
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("the key is handled");
+    app.handle(key(KeyCode::Char('x'), KeyModifiers::NONE)).await.expect("the key is handled");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("the key is handled");
     assert!(
-        app.plugin_dialog
-            .as_ref()
-            .is_some_and(|dialog| !dialog.is_typing()),
+        app.plugin_dialog.as_ref().is_some_and(|dialog| !dialog.is_typing()),
         "esc cancels the edit without closing the dialog"
     );
 
     // Enter with a real path submits to the store.
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("the key is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("the key is handled");
     for character in market.to_str().expect("unicode").chars() {
         app.handle(key(KeyCode::Char(character), KeyModifiers::NONE))
             .await
             .expect("the key is handled");
     }
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("the key is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("the key is handled");
     settle_plugin(&mut app).await;
     assert!(
-        store
-            .state()
-            .expect("the state reads")
-            .marketplaces
-            .contains_key("m"),
+        store.state().expect("the state reads").marketplaces.contains_key("m"),
         "the typed marketplace was added"
     );
 
-    assert!(
-        app.editor.is_empty(),
-        "nothing typed at the dialog reaches the composer"
-    );
+    assert!(app.editor.is_empty(), "nothing typed at the dialog reaches the composer");
     assert!(app.question.is_none(), "and no question round trip exists");
-    assert!(
-        events.next().now_or_never().is_none(),
-        "the engine heard nothing from any of it"
-    );
+    assert!(events.next().now_or_never().is_none(), "the engine heard nothing from any of it");
 }
 
 /// A marketplace add that fails surfaces the refusal in the dialog —
@@ -10366,17 +8959,13 @@ async fn a_failed_marketplace_add_surfaces_the_captured_error_in_the_dialog() {
     // `.git` routes through a real `git clone`, which fails and is
     // captured; the notice is the error's own Display, stderr included.
     let missing = directory.path().join("nowhere.git");
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("the key is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("the key is handled");
     for character in missing.to_str().expect("unicode").chars() {
         app.handle(key(KeyCode::Char(character), KeyModifiers::NONE))
             .await
             .expect("the key is handled");
     }
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("the key is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("the key is handled");
     settle_plugin(&mut app).await;
 
     assert!(app.plugin_dialog.is_some(), "the dialog stays open");
@@ -10404,30 +8993,20 @@ async fn the_loop_answers_keys_while_a_marketplace_add_is_running() {
     app.run_command(command::Action::Plugin).await;
 
     app.plugin_task = Some(parked_add(500));
-    app.plugin_dialog
-        .as_mut()
-        .expect("the dialog is open")
-        .set_busy(true);
+    app.plugin_dialog.as_mut().expect("the dialog is open").set_busy(true);
 
     for code in [KeyCode::Down, KeyCode::Up, KeyCode::Down] {
-        app.handle(key(code, KeyModifiers::NONE))
-            .await
-            .expect("the key is handled");
+        app.handle(key(code, KeyModifiers::NONE)).await.expect("the key is handled");
     }
     let mut terminal = terminal(90, 24);
     app.draw(&mut terminal).expect("a frame draws");
 
     assert!(
-        !app.plugin_task
-            .as_ref()
-            .expect("the action still owns the lane")
-            .is_finished(),
+        !app.plugin_task.as_ref().expect("the action still owns the lane").is_finished(),
         "the keys and the frame were answered while the add ran, not after it"
     );
     assert!(
-        app.plugin_dialog
-            .as_ref()
-            .is_some_and(|dialog| dialog.selected_plugin().is_none()),
+        app.plugin_dialog.as_ref().is_some_and(|dialog| dialog.selected_plugin().is_none()),
         "and the keys really moved the cursor: off the one plugin row"
     );
 
@@ -10439,9 +9018,7 @@ async fn the_loop_answers_keys_while_a_marketplace_add_is_running() {
         screen(&terminal)
     );
     assert!(
-        app.plugin_dialog
-            .as_ref()
-            .is_some_and(|dialog| !dialog.is_busy()),
+        app.plugin_dialog.as_ref().is_some_and(|dialog| !dialog.is_busy()),
         "the reap clears the running flag"
     );
 }
@@ -10458,22 +9035,15 @@ async fn a_second_store_action_during_a_clone_is_refused_with_a_notice() {
     app.run_command(command::Action::Plugin).await;
 
     app.plugin_task = Some(parked_add(400));
-    app.plugin_dialog
-        .as_mut()
-        .expect("the dialog is open")
-        .set_busy(true);
+    app.plugin_dialog.as_mut().expect("the dialog is open").set_busy(true);
 
     // Down off the one plugin row lands on Add marketplace; Enter would
     // open its input step were an add not already running.
     for code in [KeyCode::Down, KeyCode::Enter] {
-        app.handle(key(code, KeyModifiers::NONE))
-            .await
-            .expect("the key is handled");
+        app.handle(key(code, KeyModifiers::NONE)).await.expect("the key is handled");
     }
     assert!(
-        app.plugin_dialog
-            .as_ref()
-            .is_some_and(|dialog| !dialog.is_typing()),
+        app.plugin_dialog.as_ref().is_some_and(|dialog| !dialog.is_typing()),
         "the second add never opens its input"
     );
     let mut terminal = terminal(100, 24);
@@ -10487,36 +9057,24 @@ async fn a_second_store_action_during_a_clone_is_refused_with_a_notice() {
     // The app's own backstop, for what the dialog does not refuse itself:
     // a row's Remove chosen while the add runs.
     app.run_plugin_effect(component::plugin::Effect::Remove("formatter".to_owned()));
+    assert!(store.plugin_root("formatter").exists(), "the refused remove ran nothing");
     assert!(
-        store.plugin_root("formatter").exists(),
-        "the refused remove ran nothing"
-    );
-    assert!(
-        !app.plugin_task
-            .as_ref()
-            .expect("the first action still owns the lane")
-            .is_finished(),
+        !app.plugin_task.as_ref().expect("the first action still owns the lane").is_finished(),
         "and nothing was spawned beside it"
     );
 
     // A dialog closed and reopened while the same action runs is told the
     // lane is still busy, rather than offering an add it would refuse.
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("the key is handled");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("the key is handled");
     app.run_command(command::Action::Plugin).await;
     assert!(
-        app.plugin_dialog
-            .as_ref()
-            .is_some_and(component::plugin::Plugin::is_busy),
+        app.plugin_dialog.as_ref().is_some_and(component::plugin::Plugin::is_busy),
         "the reopened dialog inherits the running action"
     );
 
     settle_plugin(&mut app).await;
     assert!(
-        app.plugin_dialog
-            .as_ref()
-            .is_some_and(|dialog| !dialog.is_busy()),
+        app.plugin_dialog.as_ref().is_some_and(|dialog| !dialog.is_busy()),
         "the lane frees when the first action lands"
     );
 }
@@ -10540,17 +9098,13 @@ async fn closing_the_dialog_mid_clone_leaves_no_panic_and_no_half_add() {
     // An empty store starts the cursor on "Add marketplace"; `.git`
     // routes through a real `git clone`, which is the slow one.
     let missing = directory.path().join("nowhere.git");
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("the key is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("the key is handled");
     for character in missing.to_str().expect("unicode").chars() {
         app.handle(key(KeyCode::Char(character), KeyModifiers::NONE))
             .await
             .expect("the key is handled");
     }
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("the key is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("the key is handled");
     assert!(app.plugin_task.is_some(), "the clone runs off the loop");
     // Nothing has ticked yet, so this frame is the one drawn *during* the
     // clone: it says what is running rather than showing a stale list.
@@ -10562,25 +9116,13 @@ async fn closing_the_dialog_mid_clone_leaves_no_panic_and_no_half_add() {
         screen(&terminal)
     );
 
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("the key is handled");
-    assert!(
-        app.plugin_dialog.is_none(),
-        "esc closes the dialog with the clone still in flight"
-    );
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("the key is handled");
+    assert!(app.plugin_dialog.is_none(), "esc closes the dialog with the clone still in flight");
 
     settle_plugin(&mut app).await;
+    assert!(app.plugin_dialog.is_none(), "the landed answer reopens nothing");
     assert!(
-        app.plugin_dialog.is_none(),
-        "the landed answer reopens nothing"
-    );
-    assert!(
-        store
-            .state()
-            .expect("the state reads")
-            .marketplaces
-            .is_empty(),
+        store.state().expect("the state reads").marketplaces.is_empty(),
         "the failed clone added no marketplace"
     );
     let leftovers: Vec<String> = fs::read_dir(&root)
@@ -10593,10 +9135,7 @@ async fn closing_the_dialog_mid_clone_leaves_no_panic_and_no_half_add() {
                 .collect()
         })
         .unwrap_or_default();
-    assert!(
-        leftovers.is_empty(),
-        "and left no staging directory behind: {leftovers:?}"
-    );
+    assert!(leftovers.is_empty(), "and left no staging directory behind: {leftovers:?}");
 }
 
 /// **D474 pinned**: the reload notice names exactly what rebuilt
@@ -10659,11 +9198,7 @@ async fn snapshot_plugin_action_menu() {
 /// `session-224cbeab` and a reader can find it by hand.
 async fn leading(
     directory: &TempDir,
-) -> (
-    App,
-    Arc<ganja_core::teammate::TeammateRegistry>,
-    BoxStream<'static, CoreEvent>,
-) {
+) -> (App, Arc<ganja_core::teammate::TeammateRegistry>, BoxStream<'static, CoreEvent>) {
     let registry = Arc::new(ganja_core::teammate::TeammateRegistry::for_session(
         directory.path(),
         "224cbeab-4e62-497c-aa8f-d05cc33ce7ba",
@@ -10698,19 +9233,14 @@ async fn turn_in_flight(app: &mut App, events: &mut BoxStream<'static, CoreEvent
     for event in typing("what is left") {
         app.handle(event).await.expect("typing is handled");
     }
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
     pump(app, events, 2).await;
     assert!(app.turn_running, "the fixture needs a turn in flight");
 }
 
 /// What is left in the lead's inbox.
 fn still_owed(registry: &ganja_core::teammate::TeammateRegistry) -> usize {
-    ganja_core::team::mailbox::read(&registry.lead_inbox())
-        .expect("the inbox reads")
-        .valid
-        .len()
+    ganja_core::team::mailbox::read(&registry.lead_inbox()).expect("the inbox reads").valid.len()
 }
 
 /// **AC-10's lead leg**, idle half: a teammate's message reaches the
@@ -10750,11 +9280,7 @@ async fn a_teammates_message_reaches_an_idle_conversation_and_only_then_leaves_t
         Some(("w1".to_owned(), "the parser is done".to_owned())),
         "the message became a turn of the lead's own, and says who wrote it"
     );
-    assert_eq!(
-        still_owed(&registry),
-        0,
-        "a delivered message does not remain"
-    );
+    assert_eq!(still_owed(&registry), 0, "a delivered message does not remain");
 }
 
 /// **AC-10's lead leg**, the other half of the same rule: a control frame
@@ -10778,9 +9304,7 @@ async fn a_control_frame_from_a_teammate_never_reaches_the_strip_or_the_model() 
 
     assert_eq!(app.queue.depth(), 0, "a control frame is not a message");
     assert!(
-        !drained(&mut events)
-            .iter()
-            .any(|event| matches!(event, CoreEvent::MessageStarted { .. })),
+        !drained(&mut events).iter().any(|event| matches!(event, CoreEvent::MessageStarted { .. })),
         "and nothing about it is put to the model"
     );
     assert_eq!(still_owed(&registry), 0, "it was acted on and pruned");
@@ -10817,11 +9341,7 @@ async fn the_strip_holds_an_acknowledged_peers_message_and_never_a_fire_and_forg
         )])
         .await
     );
-    assert_eq!(
-        app.queue.depth(),
-        1,
-        "sent at write time, so nothing new is pending"
-    );
+    assert_eq!(app.queue.depth(), 1, "sent at write time, so nothing new is pending");
 }
 
 /// **§7-5, and the door it closes.** A teammate's message waits on the
@@ -10843,9 +9363,7 @@ async fn a_peers_message_cannot_be_recalled_into_the_composer() {
     .await;
     assert_eq!(app.queue.depth(), 1);
 
-    app.handle(key(KeyCode::Up, KeyModifiers::NONE))
-        .await
-        .expect("the arrow is handled");
+    app.handle(key(KeyCode::Up, KeyModifiers::NONE)).await.expect("the arrow is handled");
 
     assert_eq!(
         app.editor.text(),
@@ -10859,11 +9377,8 @@ async fn a_peers_message_cannot_be_recalled_into_the_composer() {
     // The person's own entry is still theirs to take back, from under the
     // peer's row.
     app.editor.set_text("");
-    app.queue
-        .push_steered("steer-99".to_owned(), "mine".to_owned());
-    app.handle(key(KeyCode::Up, KeyModifiers::NONE))
-        .await
-        .expect("the arrow is handled");
+    app.queue.push_steered("steer-99".to_owned(), "mine".to_owned());
+    app.handle(key(KeyCode::Up, KeyModifiers::NONE)).await.expect("the arrow is handled");
 
     assert_eq!(app.editor.text(), "mine");
     assert_eq!(app.queue.depth(), 1, "and the peer's row stayed put");
@@ -10931,11 +9446,7 @@ async fn a_whole_pass_of_messages_crosses_as_one_command() {
     app.handle(AppEvent::Tick).await.expect("a tick is handled");
 
     assert_eq!(app.steers, 1, "three messages, one command");
-    assert_eq!(
-        still_owed(&registry),
-        0,
-        "and one prune for the whole batch"
-    );
+    assert_eq!(still_owed(&registry), 0, "and one prune for the whole batch");
 
     // The strip still renders *messages*, one row each, all standing for
     // the single steer that carried them — shown here with senders whose
@@ -11001,15 +9512,10 @@ async fn a_backlog_past_the_cap_delivers_the_cap_now_and_the_rest_on_the_next_dr
 
     // The next pass, as the tick builds it: the same backlog read back
     // from the durable mailbox, minus what is already in flight.
-    let leftover: Vec<ganja_core::teammate::lead_inbox::Delivered> = backlog()
-        .into_iter()
-        .filter(|message| !app.in_flight(message))
-        .collect();
+    let leftover: Vec<ganja_core::teammate::lead_inbox::Delivered> =
+        backlog().into_iter().filter(|message| !app.in_flight(message)).collect();
     assert_eq!(
-        leftover
-            .iter()
-            .map(|message| message.body.as_str())
-            .collect::<Vec<_>>(),
+        leftover.iter().map(|message| message.body.as_str()).collect::<Vec<_>>(),
         ["message 8", "message 9"],
         "what the cap cut off is exactly what the next pass is offered"
     );
@@ -11067,10 +9573,7 @@ async fn a_peers_unconsumed_message_leaves_the_strip_rather_than_becoming_a_prom
     app.strand_peers();
 
     assert_eq!(app.queue.depth(), 0, "the strip entry is given back");
-    assert!(
-        !app.queue.has_fallback(),
-        "and it is emphatically not the replay lane's to interpret"
-    );
+    assert!(!app.queue.has_fallback(), "and it is emphatically not the replay lane's to interpret");
 }
 
 /// **D-5**: a teammate's dialog is shown through the machinery the
@@ -11157,10 +9660,7 @@ async fn a_session_leading_no_team_polls_nothing_and_counts_nobody() {
     assert!(app.lead_inbox.is_none());
     assert!(app.teammate_dialogs.is_none());
     assert_eq!(app.teammates, 0);
-    assert!(
-        app.team_polled.is_none(),
-        "there is no mailbox to have polled"
-    );
+    assert!(app.team_polled.is_none(), "there is no mailbox to have polled");
     assert!(
         app.engine.teammates().is_none(),
         "leading no team is a different answer from leading an empty one"
@@ -11196,30 +9696,18 @@ async fn only_asking_for_the_roster_raises_the_team_dialog() {
     let (mut app, _registry, _events) = leading(&directory).await;
 
     app.run_command(command::Action::Team).await;
-    assert!(
-        app.team_dialog.is_some(),
-        "the palette's door asks for the roster"
-    );
+    assert!(app.team_dialog.is_some(), "the palette's door asks for the roster");
     app.team_dialog = None;
 
     app.editor.set_text("/team wat");
     app.submit().await;
 
-    assert!(
-        app.team_dialog.is_none(),
-        "a line that did not ask for the roster does not raise it"
-    );
+    assert!(app.team_dialog.is_none(), "a line that did not ask for the roster does not raise it");
     let mut terminal = terminal(80, 24);
     app.draw(&mut terminal).expect("a frame draws");
     let screen = screen(&terminal);
-    assert!(
-        screen.contains("wat"),
-        "and the refusal is still said, on the bar instead:\n{screen}"
-    );
-    assert!(
-        app.editor.prompt().is_none(),
-        "and the line it came from is out of the composer"
-    );
+    assert!(screen.contains("wat"), "and the refusal is still said, on the bar instead:\n{screen}");
+    assert!(app.editor.prompt().is_none(), "and the line it came from is out of the composer");
 
     // `/team list` is the typed spelling of the very same ask, so it
     // raises the dialog exactly as the palette's row does.
@@ -11253,39 +9741,22 @@ async fn a_team_line_is_remembered_whatever_it_turned_out_to_mean() {
     let directory = temporary();
     let mut app = app_with_history(&directory, &[]);
 
-    for line in [
-        "/team spawn w1 --backend in-process explain this crate",
-        "/team wat",
-        "/team",
-    ] {
+    for line in ["/team spawn w1 --backend in-process explain this crate", "/team wat", "/team"] {
         app.editor.set_text(line);
         app.submit().await;
         app.team_dialog = None;
-        assert!(
-            app.editor.prompt().is_none(),
-            "{line}: the line left the composer"
-        );
+        assert!(app.editor.prompt().is_none(), "{line}: the line left the composer");
     }
 
-    let remembered: Vec<String> = app
-        .history
-        .entries()
-        .into_iter()
-        .map(|recalled| recalled.prompt.input)
-        .collect();
+    let remembered: Vec<String> =
+        app.history.entries().into_iter().map(|recalled| recalled.prompt.input).collect();
     assert_eq!(
         remembered,
-        [
-            "/team wat",
-            "/team spawn w1 --backend in-process explain this crate",
-        ],
+        ["/team wat", "/team spawn w1 --backend in-process explain this crate",],
         "newest first, every argument-bearing line as typed, the bare ask not"
     );
     assert_eq!(
-        app.history
-            .step(history::Direction::Older, "")
-            .map(|recalled| recalled.input)
-            .as_deref(),
+        app.history.step(history::Direction::Older, "").map(|recalled| recalled.input).as_deref(),
         Some("/team wat"),
         "and Up brings the newest one back to fix"
     );
@@ -11310,10 +9781,7 @@ async fn a_spawn_from_the_team_dialog_is_remembered_as_its_team_spawn_line() {
     .await;
 
     assert_eq!(
-        app.history
-            .entries()
-            .first()
-            .map(|recalled| recalled.prompt.input.as_str()),
+        app.history.entries().first().map(|recalled| recalled.prompt.input.as_str()),
         Some("/team spawn w2 --backend in-process hold the fort")
     );
 }
@@ -11340,12 +9808,7 @@ fn team_row(
 /// timing.
 fn team_dialog() -> component::team::Team {
     component::team::Team::new(vec![
-        team_row(
-            "team-lead",
-            ganja_protocol::MemberBackend::InProcess,
-            true,
-            &[],
-        ),
+        team_row("team-lead", ganja_protocol::MemberBackend::InProcess, true, &[]),
         team_row(
             "w1",
             ganja_protocol::MemberBackend::InProcess,
@@ -11391,9 +9854,7 @@ async fn esc_closes_the_team_dialog_from_either_step() {
     let mut app = app();
 
     app.team_dialog = Some(team_dialog());
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("the key is handled");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("the key is handled");
     assert!(app.team_dialog.is_none(), "Esc on the members step closes");
 
     let mut dialog = team_dialog();
@@ -11401,9 +9862,7 @@ async fn esc_closes_the_team_dialog_from_either_step() {
     dialog.submit();
     assert!(dialog.is_choosing_action());
     app.team_dialog = Some(dialog);
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("the key is handled");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("the key is handled");
     assert!(app.team_dialog.is_none(), "Esc on the action step closes");
 
     let mut dialog = team_dialog();
@@ -11411,14 +9870,10 @@ async fn esc_closes_the_team_dialog_from_either_step() {
     dialog.submit();
     assert!(dialog.is_typing());
     app.team_dialog = Some(dialog);
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("the key is handled");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("the key is handled");
     let open = app.team_dialog.as_ref().expect("the dialog stays open");
     assert!(!open.is_typing(), "the first Esc only abandons the edit");
-    app.handle(key(KeyCode::Esc, KeyModifiers::NONE))
-        .await
-        .expect("the key is handled");
+    app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("the key is handled");
     assert!(app.team_dialog.is_none(), "and the second closes");
 }
 
@@ -11430,21 +9885,11 @@ async fn keys_while_the_team_dialog_is_open_do_not_reach_the_editor() {
     let mut app = app();
     app.team_dialog = Some(team_dialog());
 
-    for code in [
-        KeyCode::Char('x'),
-        KeyCode::Char('j'),
-        KeyCode::Char('k'),
-        KeyCode::Char('q'),
-    ] {
-        app.handle(key(code, KeyModifiers::NONE))
-            .await
-            .expect("the key is handled");
+    for code in [KeyCode::Char('x'), KeyCode::Char('j'), KeyCode::Char('k'), KeyCode::Char('q')] {
+        app.handle(key(code, KeyModifiers::NONE)).await.expect("the key is handled");
     }
     assert_eq!(app.editor.text(), "", "nothing leaked past the dialog");
-    assert!(
-        app.team_dialog.is_some(),
-        "and none of it closed the dialog"
-    );
+    assert!(app.team_dialog.is_some(), "and none of it closed the dialog");
 
     let dialog = app.team_dialog.as_mut().expect("the dialog is open");
     dialog.move_selection(9);
@@ -11474,30 +9919,21 @@ async fn enter_on_the_team_dialogs_input_step_runs_the_effect() {
     dialog.move_selection(1);
     dialog.submit();
     app.team_dialog = Some(dialog);
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("the key is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("the key is handled");
     assert!(
-        app.team_dialog
-            .as_ref()
-            .is_some_and(component::team::Team::is_typing),
+        app.team_dialog.as_ref().is_some_and(component::team::Team::is_typing),
         "Message opens the free-text step"
     );
     for event in typing("status?") {
         app.handle(event).await.expect("typing is handled");
     }
 
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("the key is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("the key is handled");
 
     let mut terminal = terminal(90, 24);
     app.draw(&mut terminal).expect("a frame draws");
     let screen = screen(&terminal);
-    assert!(
-        screen.contains("nobody on this team answers to that name"),
-        "{screen}"
-    );
+    assert!(screen.contains("nobody on this team answers to that name"), "{screen}");
 }
 
 /// A spawn's own dialog is raised by the tick and answered on the channel
@@ -11577,10 +10013,7 @@ async fn an_open_team_dialog_repaints_only_when_the_roster_moved() {
     assert!(app.dirty, "a roster that grew is");
     let mut terminal = terminal(80, 24);
     app.draw(&mut terminal).expect("a frame draws");
-    assert!(
-        screen(&terminal).contains("w1"),
-        "and the refreshed dialog shows the new row"
-    );
+    assert!(screen(&terminal).contains("w1"), "and the refreshed dialog shows the new row");
 
     app.dirty = false;
     app.poll_team_dialog();
@@ -11613,10 +10046,7 @@ async fn a_team_spawn_is_reaped_by_the_tick_and_says_where_the_prompt_landed() {
     app.draw(&mut terminal).expect("a frame draws");
     let screen = screen(&terminal);
     assert!(screen.contains("w1 started"), "{screen}");
-    assert!(
-        screen.contains("prompt persisted in cleartext at"),
-        "{screen}"
-    );
+    assert!(screen.contains("prompt persisted in cleartext at"), "{screen}");
     assert_eq!(app.teammates, 1, "the bar counts the started teammate");
 }
 
@@ -11670,11 +10100,7 @@ async fn shutting_down_a_team_of_nobody_says_so_rather_than_writing_to_the_lead(
     app.draw(&mut terminal).expect("a frame draws");
     let screen = screen(&terminal);
     assert!(screen.contains("no teammates to stop"), "{screen}");
-    assert_eq!(
-        still_owed(&registry),
-        0,
-        "and the lead did not write a shutdown request to itself"
-    );
+    assert_eq!(still_owed(&registry), 0, "and the lead did not write a shutdown request to itself");
 }
 
 /// A message typed at a member goes through the lead's own postbox, so an
@@ -11722,11 +10148,7 @@ async fn membered(directory: &TempDir) -> (App, BoxStream<'static, CoreEvent>) {
 
 /// The member's own inbox and the lead's, as the app resolved them.
 fn member_paths(app: &App) -> (std::path::PathBuf, std::path::PathBuf) {
-    let membership = app
-        .member
-        .as_ref()
-        .expect("the app is a member")
-        .membership();
+    let membership = app.member.as_ref().expect("the app is a member").membership();
 
     (membership.inbox(), membership.lead_inbox())
 }
@@ -11787,10 +10209,7 @@ async fn a_pane_teammates_seeded_prompt_is_its_first_turn_and_its_end_tells_the_
         0,
         "an accepted prompt is the turn, so the seed is delivered and gone"
     );
-    assert!(
-        lead_heard(&lead_inbox).is_empty(),
-        "nothing said until the turn ends"
-    );
+    assert!(lead_heard(&lead_inbox).is_empty(), "nothing said until the turn ends");
 
     let seen = pump_turn(&mut app, &mut events).await;
 
@@ -11805,10 +10224,7 @@ async fn a_pane_teammates_seeded_prompt_is_its_first_turn_and_its_end_tells_the_
     match &heard[0] {
         ganja_protocol::team::Frame::IdleNotification(idle) => {
             assert_eq!(idle.from, "w1");
-            assert_eq!(
-                idle.idle_reason,
-                Some(ganja_protocol::team::IdleReason::Available)
-            );
+            assert_eq!(idle.idle_reason, Some(ganja_protocol::team::IdleReason::Available));
         }
         other => panic!("an idle_notification was expected, got {other:?}"),
     }
@@ -11830,19 +10246,11 @@ async fn a_leads_message_steers_a_pane_teammates_running_turn() {
     assert_eq!(app.queue.depth(), 1, "pending until the turn consumes it");
     assert!(app.queue.entries()[0].is_steered());
     assert_eq!(owed(&inbox), 1, "durable until consumed");
-    let id = app
-        .peer_steers
-        .keys()
-        .next()
-        .cloned()
-        .expect("one batch in flight");
+    let id = app.peer_steers.keys().next().cloned().expect("one batch in flight");
 
-    app.handle(AppEvent::core(CoreEvent::SteerConsumed {
-        session_id: session(),
-        id,
-    }))
-    .await
-    .expect("the event is handled");
+    app.handle(AppEvent::core(CoreEvent::SteerConsumed { session_id: session(), id }))
+        .await
+        .expect("the event is handled");
 
     assert_eq!(app.queue.depth(), 0);
     assert_eq!(owed(&inbox), 0, "consumed means gone");
@@ -11857,11 +10265,7 @@ async fn an_idle_pane_teammate_answers_a_shutdown_request_and_quits() {
     let directory = temporary();
     let (mut app, _events) = membered(&directory).await;
     let (inbox, lead_inbox) = member_paths(&app);
-    crate::member::write_frame(
-        &inbox,
-        "team-lead",
-        &crate::member::shutdown_request("req-1"),
-    );
+    crate::member::write_frame(&inbox, "team-lead", &crate::member::shutdown_request("req-1"));
 
     app.handle(AppEvent::Tick).await.expect("a tick is handled");
 
@@ -11885,32 +10289,20 @@ async fn a_shutdown_request_during_a_turn_waits_for_the_turn_to_end() {
     let (mut app, mut events) = membered(&directory).await;
     let (inbox, lead_inbox) = member_paths(&app);
     turn_in_flight(&mut app, &mut events).await;
-    crate::member::write_frame(
-        &inbox,
-        "team-lead",
-        &crate::member::shutdown_request("req-2"),
-    );
+    crate::member::write_frame(&inbox, "team-lead", &crate::member::shutdown_request("req-2"));
 
     app.handle(AppEvent::Tick).await.expect("a tick is handled");
 
     assert!(!app.quit, "the turn is still running");
     assert!(app.member_shutdown.is_some(), "and the request is held");
     assert!(lead_heard(&lead_inbox).is_empty(), "nothing answered yet");
-    assert!(
-        app.wants_frame(),
-        "a held shutdown keeps the loop ticking so its bound is read"
-    );
+    assert!(app.wants_frame(), "a held shutdown keeps the loop ticking so its bound is read");
 
     pump_turn(&mut app, &mut events).await;
 
-    assert!(
-        app.quit,
-        "the turn ended, so the request is answered and the app leaves"
-    );
-    let kinds: Vec<&str> = lead_heard(&lead_inbox)
-        .iter()
-        .map(ganja_protocol::team::Frame::kind)
-        .collect();
+    assert!(app.quit, "the turn ended, so the request is answered and the app leaves");
+    let kinds: Vec<&str> =
+        lead_heard(&lead_inbox).iter().map(ganja_protocol::team::Frame::kind).collect();
     assert_eq!(kinds, ["idle_notification", "shutdown_approved"]);
 }
 
@@ -11933,18 +10325,12 @@ async fn a_leads_mode_set_request_reaches_the_pane_teammates_engine() {
 
     app.handle(AppEvent::Tick).await.expect("a tick is handled");
 
-    let changed = drained(&mut events)
-        .into_iter()
-        .find_map(|event| match event {
-            CoreEvent::PermissionModeChanged { mode, .. } => Some(mode),
-            _ => None,
-        });
+    let changed = drained(&mut events).into_iter().find_map(|event| match event {
+        CoreEvent::PermissionModeChanged { mode, .. } => Some(mode),
+        _ => None,
+    });
     assert_eq!(changed, Some(ganja_protocol::PermissionMode::Bypass));
-    assert_eq!(
-        owed(&inbox),
-        0,
-        "a frame acted on leaves the inbox in the same pass"
-    );
+    assert_eq!(owed(&inbox), 0, "a frame acted on leaves the inbox in the same pass");
 }
 
 /// A member wakes at its own cadence, which is the teammate's rather than
@@ -11958,11 +10344,7 @@ fn a_member_wakes_at_the_teammates_cadence() {
     member.dirty = false;
 
     assert!(member.wants_wakeup());
-    assert_eq!(
-        member.until_next_wakeup(),
-        Duration::ZERO,
-        "the first pass is due at once"
-    );
+    assert_eq!(member.until_next_wakeup(), Duration::ZERO, "the first pass is due at once");
     member.member_polled = Some(Instant::now());
     assert!(
         member.until_next_wakeup() > FRAME && member.until_next_wakeup() <= crate::member::POLL,
@@ -12007,9 +10389,7 @@ async fn a_pane_teammates_ask_travels_to_the_lead_and_the_answer_lets_the_call_r
     let engine = Engine::new(
         Arc::new(FakeProvider::new("", Duration::ZERO).with_script(&script)),
         fake::MODEL,
-        Arc::new(ganja_tool::Registry::new(vec![Arc::new(
-            ganja_tool::shell::ShellTool::new(),
-        )])),
+        Arc::new(ganja_tool::Registry::new(vec![Arc::new(ganja_tool::shell::ShellTool::new())])),
         ganja_permission::Permissions::default(),
     );
     let mut events = engine.subscribe().await.expect("the test subscribes first");
@@ -12033,19 +10413,12 @@ async fn a_pane_teammates_ask_travels_to_the_lead_and_the_answer_lets_the_call_r
         let event = next_event(&mut events).await;
         let finished = matches!(event, CoreEvent::MessageFinished { .. });
         seen.push(event.clone());
-        app.handle(AppEvent::core(event))
-            .await
-            .expect("an engine event is handled");
+        app.handle(AppEvent::core(event)).await.expect("an engine event is handled");
         assert!(
             app.permission.is_none() && app.queued_permissions.is_empty(),
             "a forwarding pane draws no dialog of its own"
         );
-        if !answered
-            && app
-                .member
-                .as_ref()
-                .is_some_and(|inbox| inbox.asks().waiting() > 0)
-        {
+        if !answered && app.member.as_ref().is_some_and(|inbox| inbox.asks().waiting() > 0) {
             // The ask reached the lead as a frame naming the engine's own
             // request id, and this is the lead answering it.
             let request = lead_heard(&lead_inbox)
@@ -12105,11 +10478,7 @@ async fn a_pane_teammates_ask_travels_to_the_lead_and_the_answer_lets_the_call_r
             _ => None,
         })
         .collect();
-    assert_eq!(
-        replies,
-        vec![PermissionReply::Once],
-        "the lead's success is Once, never Always"
-    );
+    assert_eq!(replies, vec![PermissionReply::Once], "the lead's success is Once, never Always");
     assert!(
         completed_shell(&seen).is_some_and(|output| output.contains(ECHOED)),
         "the call the ask was about actually ran: {seen:#?}"
@@ -12148,18 +10517,14 @@ async fn the_peer_reply_address_moves_with_the_registration_record() {
 
     // The picker moves the slot: the old record goes, and the address goes
     // with it — then the new bind sets both again.
-    app.handle(key(KeyCode::Char('s'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-s is handled");
+    app.handle(key(KeyCode::Char('s'), KeyModifiers::CONTROL)).await.expect("control-s is handled");
     let chosen = app
         .sessions
         .as_ref()
         .and_then(|sessions| sessions.selected())
         .map(|info| info.id.clone())
         .expect("the picker has a row under the cursor");
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
     assert_eq!(
         app.engine.peer_address(),
         Some((CompactRecording::path_for(&chosen), compact(&chosen))),
@@ -12188,15 +10553,9 @@ async fn a_refused_rebind_leaves_this_session_claiming_no_reply_address() {
     app.handle(AppEvent::Tick).await.expect("a tick is handled");
     assert!(app.engine.peer_address().is_some());
 
-    recording
-        .refuse
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-    app.handle(key(KeyCode::Char('s'), KeyModifiers::CONTROL))
-        .await
-        .expect("control-s is handled");
-    app.handle(key(KeyCode::Enter, KeyModifiers::NONE))
-        .await
-        .expect("enter is handled");
+    recording.refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+    app.handle(key(KeyCode::Char('s'), KeyModifiers::CONTROL)).await.expect("control-s is handled");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
     assert_eq!(
         app.engine.peer_address(),
@@ -12211,9 +10570,7 @@ async fn a_refused_first_bind_claims_no_reply_address() {
     let directory = temporary();
     let registry_dir = temporary();
     let (mut app, recording) = registering_app(&directory, &registry_dir);
-    recording
-        .refuse
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+    recording.refuse.store(true, std::sync::atomic::Ordering::SeqCst);
 
     app.handle(AppEvent::Tick).await.expect("a tick is handled");
 
@@ -12246,9 +10603,7 @@ async fn a_settlement_receipt_says_one_line_on_the_status_bar() {
         ganja_protocol::PeerReceiptStatus::Denied,
         ganja_protocol::PeerReceiptStatus::Expired,
     ] {
-        app.handle(AppEvent::core(receipt(status)))
-            .await
-            .expect("a receipt is handled");
+        app.handle(AppEvent::core(receipt(status))).await.expect("a receipt is handled");
 
         assert!(
             app.permission.is_none() && app.held_dialog.is_none(),
@@ -12256,10 +10611,7 @@ async fn a_settlement_receipt_says_one_line_on_the_status_bar() {
         );
         let line = status_line(&mut app);
         assert!(line.contains("0198f2c4"), "the short id is named: {line}");
-        assert!(
-            line.contains("backend@solo"),
-            "the recipient is named: {line}"
-        );
+        assert!(line.contains("backend@solo"), "the recipient is named: {line}");
     }
 }
 
@@ -12307,10 +10659,7 @@ fn a_receipt_notice_escapes_the_recipient_the_far_side_named() {
         "back\u{1b}[2Jend@solo",
     );
 
-    assert!(
-        !line.contains('\u{1b}'),
-        "no escape survives into the line: {line}"
-    );
+    assert!(!line.contains('\u{1b}'), "no escape survives into the line: {line}");
 }
 
 /// The short cut lands on a character boundary: an id this build never
@@ -12411,10 +10760,7 @@ async fn a_pasted_mention_that_never_opened_the_menu_still_resolves() {
         .with_cwd(root.path())
         .with_root(root.path())
         .with_registry_directory(registry_dir.path());
-    assert!(
-        app.session_listing.is_empty(),
-        "the `@` menu never opened, so nothing is cached"
-    );
+    assert!(app.session_listing.is_empty(), "the `@` menu never opened, so nothing is cached");
 
     let text = "ping @backend and @nobody";
     let mentions = mention::attachable(text, &app.root);
@@ -12526,8 +10872,5 @@ async fn the_fresh_read_is_taken_once_per_distinct_token() {
         fresh.holds(&app, "backend"),
         "the second ask answers from the memo rather than reading again"
     );
-    assert!(
-        !fresh.holds(&app, "gone"),
-        "a name never asked about is read now, and is not held"
-    );
+    assert!(!fresh.holds(&app, "gone"), "a name never asked about is read now, and is not held");
 }

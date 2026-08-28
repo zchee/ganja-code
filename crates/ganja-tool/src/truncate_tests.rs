@@ -1,7 +1,5 @@
-use std::{
-    path::{Path, PathBuf},
-    time::{Duration, SystemTime},
-};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use super::{MAX_CHARS, MAX_LINES, Truncated, clamp, clamp_with};
 
@@ -12,12 +10,7 @@ const DAY: u64 = 24 * 60 * 60;
 fn plant(dir: &Path, name: &str, age: Duration) -> PathBuf {
     let path = dir.join(name);
     std::fs::write(&path, "spilled").expect("the fixture writes");
-    stamp(
-        &path,
-        SystemTime::now()
-            .checked_sub(age)
-            .expect("a representable stamp"),
-    );
+    stamp(&path, SystemTime::now().checked_sub(age).expect("a representable stamp"));
 
     path
 }
@@ -55,11 +48,7 @@ fn a_sweep_deletes_old_spills_and_leaves_everything_else_alone() {
         plant(dir.path(), name, age);
     }
 
-    assert_eq!(
-        super::sweep_in(dir.path()),
-        1,
-        "exactly the one stale spill goes"
-    );
+    assert_eq!(super::sweep_in(dir.path()), 1, "exactly the one stale spill goes");
 
     for (name, age, survives) in cases {
         assert_eq!(
@@ -138,10 +127,7 @@ fn a_planted_link_is_judged_by_its_own_age_and_never_followed() {
         0,
         "a link created a moment ago is not a week old, whatever it points at"
     );
-    assert!(
-        std::fs::symlink_metadata(&planted).is_ok(),
-        "the link itself is still there"
-    );
+    assert!(std::fs::symlink_metadata(&planted).is_ok(), "the link itself is still there");
     assert!(ancient.exists(), "and so is what it pointed at");
 }
 
@@ -159,10 +145,7 @@ fn an_aged_link_is_unlinked_and_what_it_pointed_at_is_not() {
     age_link(&planted, Duration::from_secs(8 * DAY));
 
     assert_eq!(super::sweep_in(dir.path()), 1);
-    assert!(
-        std::fs::symlink_metadata(&planted).is_err(),
-        "the link is gone"
-    );
+    assert!(std::fs::symlink_metadata(&planted).is_err(), "the link is gone");
     assert!(
         target.exists(),
         "and the file it pointed at, which is fresh and not even a spill, is untouched"
@@ -182,10 +165,7 @@ fn age_link(path: &Path, ago: Duration) {
         .and_then(|when| when.duration_since(SystemTime::UNIX_EPOCH).ok())
         .expect("a representable stamp")
         .as_secs();
-    let when = libc::timespec {
-        tv_sec: seconds as libc::time_t,
-        tv_nsec: 0,
-    };
+    let when = libc::timespec { tv_sec: seconds as libc::time_t, tv_nsec: 0 };
     let times = [when, when];
     let name = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("a path with no NUL");
 
@@ -193,19 +173,9 @@ fn age_link(path: &Path, ago: Duration) {
     // is the two-element array utimensat is specified to take, and
     // AT_SYMLINK_NOFOLLOW is what makes the stamp the link's own.
     let result = unsafe {
-        libc::utimensat(
-            libc::AT_FDCWD,
-            name.as_ptr(),
-            times.as_ptr(),
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
+        libc::utimensat(libc::AT_FDCWD, name.as_ptr(), times.as_ptr(), libc::AT_SYMLINK_NOFOLLOW)
     };
-    assert_eq!(
-        result,
-        0,
-        "the fixture can age a link: {}",
-        std::io::Error::last_os_error()
-    );
+    assert_eq!(result, 0, "the fixture can age a link: {}", std::io::Error::last_os_error());
 }
 
 #[test]
@@ -221,11 +191,7 @@ fn only_entry(dir: &Path) -> PathBuf {
         .expect("the overflow directory was created")
         .map(|entry| entry.expect("a readable directory entry").path())
         .collect();
-    assert_eq!(
-        entries.len(),
-        1,
-        "expected exactly one overflow file in {dir:?}, got {entries:?}"
-    );
+    assert_eq!(entries.len(), 1, "expected exactly one overflow file in {dir:?}, got {entries:?}");
     entries.remove(0)
 }
 
@@ -234,33 +200,26 @@ fn only_entry(dir: &Path) -> PathBuf {
 fn mode(path: &Path) -> u32 {
     use std::os::unix::fs::PermissionsExt as _;
 
-    std::fs::metadata(path)
-        .expect("the path exists")
-        .permissions()
-        .mode()
-        & 0o777
+    std::fs::metadata(path).expect("the path exists").permissions().mode() & 0o777
 }
 
 #[cfg(windows)]
 mod windows_dacl {
-    use std::{
-        ffi::c_void,
-        fs, io,
-        os::windows::{fs::OpenOptionsExt as _, io::AsRawHandle as _},
-        path::Path,
-        ptr, slice,
-    };
+    use std::ffi::c_void;
+    use std::os::windows::fs::OpenOptionsExt as _;
+    use std::os::windows::io::AsRawHandle as _;
+    use std::path::Path;
+    use std::{fs, io, ptr, slice};
 
-    use windows_sys::Win32::{
-        Foundation::{LocalFree, WIN32_ERROR},
-        Security::{
-            ACCESS_ALLOWED_ACE, ACL,
-            Authorization::{GetSecurityInfo, SE_FILE_OBJECT},
-            CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, EqualSid, GetAce,
-            GetSecurityDescriptorControl, GetSecurityDescriptorLength, INHERITED_ACE,
-            OBJECT_INHERIT_ACE, SE_DACL_PROTECTED,
-        },
-        Storage::FileSystem::{FILE_ALL_ACCESS, FILE_FLAG_BACKUP_SEMANTICS, READ_CONTROL},
+    use windows_sys::Win32::Foundation::{LocalFree, WIN32_ERROR};
+    use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{
+        ACCESS_ALLOWED_ACE, ACL, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION, EqualSid,
+        GetAce, GetSecurityDescriptorControl, GetSecurityDescriptorLength, INHERITED_ACE,
+        OBJECT_INHERIT_ACE, SE_DACL_PROTECTED,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ALL_ACCESS, FILE_FLAG_BACKUP_SEMANTICS, READ_CONTROL,
     };
 
     struct LocalAllocation(*mut c_void);
@@ -284,11 +243,7 @@ mod windows_dacl {
 
     impl Descriptor {
         fn read(path: &Path, directory: bool) -> Self {
-            let flags = if directory {
-                FILE_FLAG_BACKUP_SEMANTICS
-            } else {
-                0
-            };
+            let flags = if directory { FILE_FLAG_BACKUP_SEMANTICS } else { 0 };
             let file = fs::OpenOptions::new()
                 .access_mode(READ_CONTROL)
                 .custom_flags(flags)
@@ -312,11 +267,7 @@ mod windows_dacl {
             };
             win32(status).expect("the security descriptor reads");
 
-            Self {
-                _allocation: LocalAllocation(pointer),
-                pointer,
-                dacl,
-            }
+            Self { _allocation: LocalAllocation(pointer), pointer, dacl }
         }
 
         fn bytes(&self) -> Vec<u8> {
@@ -353,19 +304,12 @@ mod windows_dacl {
                 "the descriptor control reads: {}",
                 io::Error::last_os_error()
             );
-            assert_eq!(
-                control & SE_DACL_PROTECTED != 0,
-                protected,
-                "the DACL protection bit"
-            );
+            assert_eq!(control & SE_DACL_PROTECTED != 0, protected, "the DACL protection bit");
         }
 
         // SAFETY: GetSecurityInfo returned a valid ACL header.
         let header = unsafe { &*descriptor.dacl };
-        assert_eq!(
-            header.AceCount, 1,
-            "only the process user should receive access"
-        );
+        assert_eq!(header.AceCount, 1, "only the process user should receive access");
         let mut raw = ptr::null_mut();
         // SAFETY: index zero exists by the assertion above.
         assert_ne!(
@@ -384,19 +328,11 @@ mod windows_dacl {
         assert_ne!(unsafe { EqualSid(sid, user.as_psid()) }, 0);
 
         let flags = u32::from(ace.Header.AceFlags);
-        assert_eq!(
-            flags & INHERITED_ACE != 0,
-            inherited,
-            "the ACE inheritance origin"
-        );
+        assert_eq!(flags & INHERITED_ACE != 0, inherited, "the ACE inheritance origin");
         if let Some(inheritable) = inheritable {
             assert_eq!(
                 flags & (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE),
-                if inheritable {
-                    OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE
-                } else {
-                    0
-                },
+                if inheritable { OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE } else { 0 },
                 "only a directory's grant should propagate to children"
             );
         }
@@ -407,11 +343,7 @@ mod windows_dacl {
     }
 
     fn win32(status: WIN32_ERROR) -> io::Result<()> {
-        if status == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::from_raw_os_error(status as i32))
-        }
+        if status == 0 { Ok(()) } else { Err(io::Error::from_raw_os_error(status as i32)) }
     }
 }
 
@@ -430,11 +362,7 @@ fn a_spilled_output_is_readable_only_by_its_owner() {
 
     assert!(clamp_with(&long, &spill).truncated);
 
-    assert_eq!(
-        mode(&spill),
-        0o700,
-        "a spill directory this code created is the owner's alone"
-    );
+    assert_eq!(mode(&spill), 0o700, "a spill directory this code created is the owner's alone");
     assert_eq!(
         mode(&only_entry(&spill)),
         0o600,
@@ -515,16 +443,10 @@ fn a_link_planted_at_the_spill_name_is_replaced_rather_than_followed() {
         "the spill followed a planted link and wrote through it"
     );
     assert!(
-        !std::fs::symlink_metadata(&planted)
-            .expect("the spill exists")
-            .file_type()
-            .is_symlink(),
+        !std::fs::symlink_metadata(&planted).expect("the spill exists").file_type().is_symlink(),
         "the planted link should have been replaced by a real file"
     );
-    assert_eq!(
-        std::fs::read_to_string(&planted).expect("the spill is readable"),
-        "tool output"
-    );
+    assert_eq!(std::fs::read_to_string(&planted).expect("the spill is readable"), "tool output");
     assert_eq!(mode(&planted), 0o600);
 }
 
@@ -539,9 +461,7 @@ fn candidate_dirs_tries_the_data_directory_before_the_temp_directory() {
     let last = dirs.last().expect("checked non-empty above");
     assert_eq!(
         *last,
-        std::env::temp_dir()
-            .join(super::DIRECTORY)
-            .join(super::TOOL_OUTPUT),
+        std::env::temp_dir().join(super::DIRECTORY).join(super::TOOL_OUTPUT),
         "the temp directory is always the last resort"
     );
     if dirs.len() > 1 {
@@ -554,20 +474,8 @@ fn candidate_dirs_tries_the_data_directory_before_the_temp_directory() {
 
 #[test]
 fn short_output_passes_through_untouched() {
-    assert_eq!(
-        clamp("hello"),
-        Truncated {
-            text: "hello".to_owned(),
-            truncated: false,
-        }
-    );
-    assert_eq!(
-        clamp(""),
-        Truncated {
-            text: String::new(),
-            truncated: false,
-        }
-    );
+    assert_eq!(clamp("hello"), Truncated { text: "hello".to_owned(), truncated: false });
+    assert_eq!(clamp(""), Truncated { text: String::new(), truncated: false });
 }
 
 #[test]
@@ -587,11 +495,7 @@ fn output_over_the_byte_budget_is_cut_and_says_so() {
 
     let clamped = clamp_with(&long, dir.path());
     assert!(clamped.truncated);
-    assert!(
-        clamped.text.contains("bytes truncated"),
-        "got {:?}",
-        clamped.text
-    );
+    assert!(clamped.text.contains("bytes truncated"), "got {:?}", clamped.text);
 }
 
 #[test]
@@ -606,14 +510,7 @@ fn output_over_the_line_budget_is_cut_at_the_budget() {
         "a line-budget cut reports lines, not bytes: {:?}",
         clamped.text
     );
-    assert_eq!(
-        clamped
-            .text
-            .lines()
-            .take_while(|line| *line == "line")
-            .count(),
-        MAX_LINES
-    );
+    assert_eq!(clamped.text.lines().take_while(|line| *line == "line").count(), MAX_LINES);
 }
 
 /// A caller with its own byte budget — smaller than [`MAX_CHARS`] — is
@@ -635,11 +532,7 @@ fn clamp_bytes_honors_a_budget_smaller_than_the_default() {
 
     let over = super::clamp_bytes_with(&text, 199, dir.path());
     assert!(over.truncated);
-    assert!(
-        over.text.contains("200 bytes truncated"),
-        "got {:?}",
-        over.text
-    );
+    assert!(over.text.contains("200 bytes truncated"), "got {:?}", over.text);
 }
 
 /// [`clamp_bytes_with`] spills the full original text, exactly as
@@ -653,11 +546,7 @@ fn clamp_bytes_spills_the_full_original_at_its_own_budget() {
     let clamped = super::clamp_bytes_with(&text, 50, dir.path());
 
     assert!(clamped.truncated);
-    assert!(
-        clamped.text.contains("500 bytes truncated"),
-        "got {:?}",
-        clamped.text
-    );
+    assert!(clamped.text.contains("500 bytes truncated"), "got {:?}", clamped.text);
     let file = only_entry(dir.path());
     assert_eq!(
         std::fs::read_to_string(&file).expect("the overflow file was written"),
@@ -688,9 +577,7 @@ fn a_huge_single_line_keeps_no_preview_but_still_reports_the_full_size() {
     let clamped = clamp_with(&long, dir.path());
     assert!(clamped.truncated);
     assert!(
-        clamped
-            .text
-            .starts_with(&format!("\n\n...{} bytes truncated...", MAX_CHARS * 2)),
+        clamped.text.starts_with(&format!("\n\n...{} bytes truncated...", MAX_CHARS * 2)),
         "got {:?}",
         clamped.text
     );

@@ -14,19 +14,11 @@ fn a_seeded_team_file_reads_back_with_its_members() {
         color: "blue".to_owned(),
         prompt: "watch the build".to_owned(),
         plan_mode_required: false,
-        surface: Surface::Pane {
-            id: "%7".to_owned(),
-        },
+        surface: Surface::Pane { id: "%7".to_owned() },
         cwd: home.path().to_string_lossy().into_owned(),
     };
 
-    let path = seed_team_file(
-        &root,
-        &team,
-        LEAD_SESSION_ID,
-        home.path(),
-        &[(worker, spawn)],
-    );
+    let path = seed_team_file(&root, &team, LEAD_SESSION_ID, home.path(), &[(worker, spawn)]);
 
     assert_eq!(path, root.config_path(&team));
     let file = team_file(&root, &team).expect("the seeded file is on disk");

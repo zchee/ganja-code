@@ -25,29 +25,23 @@
 //! One test, one binary, on purpose: it mutates `XDG_DATA_HOME`, and a plain
 //! `cargo test` runs the tests inside a binary on parallel threads.
 
-use std::{
-    collections::VecDeque,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use buffa::Message as _;
 use futures::StreamExt as _;
-use ganja_provider::{
-    auth::{self, AuthError, OauthCredential, RefreshOauth},
-    protocol::{FinishReason, Message},
-    provider::{
-        ChatRequest, CursorProvider, Provider as _, ProviderError, ProviderEvent,
-        cursor::{CursorWire, proto},
-    },
+use ganja_provider::auth::{self, AuthError, OauthCredential, RefreshOauth};
+use ganja_provider::protocol::{FinishReason, Message};
+use ganja_provider::provider::cursor::{CursorWire, proto};
+use ganja_provider::provider::{
+    ChatRequest, CursorProvider, Provider as _, ProviderError, ProviderEvent,
 };
 use secrecy::SecretString;
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::TcpListener,
-    sync::Notify,
-    time::timeout,
-};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::TcpListener;
+use tokio::sync::Notify;
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 /// The access token the seeded credential carries. Nothing may render it.
@@ -99,20 +93,14 @@ impl Recorded {
     /// Whether the request carried `name: value`, compared the way a header
     /// name is.
     fn has_header(&self, name: &str, value: &str) -> bool {
-        self.head.lines().any(|line| {
-            line.trim()
-                .eq_ignore_ascii_case(&format!("{name}: {value}"))
-        })
+        self.head.lines().any(|line| line.trim().eq_ignore_ascii_case(&format!("{name}: {value}")))
     }
 
     /// The value of header `name`, when the request carried it.
     fn header(&self, name: &str) -> Option<String> {
         self.head.lines().find_map(|line| {
             let (candidate, value) = line.split_once(':')?;
-            candidate
-                .trim()
-                .eq_ignore_ascii_case(name)
-                .then(|| value.trim().to_owned())
+            candidate.trim().eq_ignore_ascii_case(name).then(|| value.trim().to_owned())
         })
     }
 }
@@ -199,11 +187,7 @@ struct Endpoint {
 impl Endpoint {
     /// Every request served so far, oldest first.
     fn seen(&self) -> Vec<Recorded> {
-        self.state
-            .seen
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+        self.state.seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
     }
 
     /// The one request the current phase made.
@@ -216,30 +200,18 @@ impl Endpoint {
 
     /// Forgets what has been served, so a phase counts only its own traffic.
     fn forget(&self) {
-        self.state
-            .seen
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
+        self.state.seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
     }
 
     /// Sets what every request is answered with from now on.
     fn answers_with(&self, reply: Reply) {
-        *self
-            .state
-            .sticky
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = reply;
+        *self.state.sticky.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = reply;
     }
 
     /// Queues an answer served once, ahead of the sticky one — which is how
     /// a phase says "refuse the first attempt, answer the retry".
     fn answers_once(&self, reply: Reply) {
-        self.state
-            .queued
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .push_back(reply);
+        self.state.queued.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push_back(reply);
     }
 }
 
@@ -259,15 +231,11 @@ async fn read_request(socket: &mut tokio::net::TcpStream) -> Option<Recorded> {
         .lines()
         .find_map(|line| {
             let (name, value) = line.split_once(':')?;
-            name.trim()
-                .eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse().ok())?
+            name.trim().eq_ignore_ascii_case("content-length").then(|| value.trim().parse().ok())?
         })
         .unwrap_or(0);
-    let chunked = head.lines().any(|line| {
-        line.trim()
-            .eq_ignore_ascii_case("transfer-encoding: chunked")
-    });
+    let chunked =
+        head.lines().any(|line| line.trim().eq_ignore_ascii_case("transfer-encoding: chunked"));
 
     let body = if chunked {
         read_enveloped_chunks(socket).await?
@@ -324,12 +292,8 @@ async fn read_enveloped_chunks(socket: &mut tokio::net::TcpStream) -> Option<Vec
 }
 
 async fn serve() -> Endpoint {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("loopback is bindable");
-    let address = listener
-        .local_addr()
-        .expect("a bound socket has an address");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("loopback is bindable");
+    let address = listener.local_addr().expect("a bound socket has an address");
     let state = Arc::new(State {
         seen: Mutex::new(Vec::new()),
         queued: Mutex::new(VecDeque::new()),
@@ -354,17 +318,9 @@ async fn serve() -> Endpoint {
                     .unwrap_or_else(|poisoned| poisoned.into_inner())
                     .pop_front()
                     .unwrap_or_else(|| {
-                        state
-                            .sticky
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner())
-                            .clone()
+                        state.sticky.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
                     });
-                state
-                    .seen
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .push(request);
+                state.seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(request);
 
                 let _ = socket.write_all(&reply.head_bytes()).await;
                 match &reply.gate {
@@ -384,22 +340,14 @@ async fn serve() -> Endpoint {
         }
     });
 
-    Endpoint {
-        base_url: format!("http://127.0.0.1:{}", address.port()),
-        state,
-        _server: server,
-    }
+    Endpoint { base_url: format!("http://127.0.0.1:{}", address.port()), state, _server: server }
 }
 
 /// Wraps one message's bytes in the 5-byte Connect envelope, spelled by hand
 /// so the suite's framing is independent of the code it drills.
 fn frame(flags: u8, payload: &[u8]) -> Vec<u8> {
     let mut framed = vec![flags];
-    framed.extend_from_slice(
-        &u32::try_from(payload.len())
-            .expect("a test fits")
-            .to_be_bytes(),
-    );
+    framed.extend_from_slice(&u32::try_from(payload.len()).expect("a test fits").to_be_bytes());
     framed.extend_from_slice(payload);
 
     framed
@@ -488,9 +436,7 @@ fn assert_recorded_headers(recorded: &Recorded, streaming: bool) {
     assert!(recorded.has_header("x-cursor-client-type", "cli"));
     assert!(recorded.has_header("x-ghost-mode", "true"));
     assert!(recorded.has_header("te", "trailers"));
-    let request_id = recorded
-        .header("x-request-id")
-        .expect("every request is stamped");
+    let request_id = recorded.header("x-request-id").expect("every request is stamped");
     assert_eq!(request_id.len(), 36, "a v4 uuid: {request_id}");
 
     if streaming {
@@ -561,9 +507,7 @@ async fn the_wire_speaks_the_recorded_connect_protocol() {
     // the `default`/`auto` pair first.
     let listing = proto::GetUsableModelsResponse {
         models: vec![
-            proto::ModelEntry::default()
-                .with_model_id("default")
-                .with_display_model_id("auto"),
+            proto::ModelEntry::default().with_model_id("default").with_display_model_id("auto"),
             proto::ModelEntry::default()
                 .with_model_id("gpt-5.3-codex")
                 .with_display_model_id("gpt-5.3-codex")
@@ -610,27 +554,18 @@ async fn the_wire_speaks_the_recorded_connect_protocol() {
     assert_eq!(recorded.body[0], 0, "an ordinary data frame");
     let declared =
         u32::from_be_bytes(recorded.body[1..5].try_into().expect("a whole prefix")) as usize;
-    assert_eq!(
-        declared,
-        recorded.body.len() - 5,
-        "the envelope covers the body"
-    );
+    assert_eq!(declared, recorded.body.len() - 5, "the envelope covers the body");
     let sent = proto::ClientMessage::decode_from_slice(&recorded.body[5..])
         .expect("the sent bytes are the client message");
     let run = sent.run_request.as_option().expect("a run request first");
     assert!(run.conversation_state.is_set());
     let prompt = b"You are terse.";
     assert!(
-        !recorded
-            .body
-            .windows(prompt.len())
-            .any(|window| window == prompt),
+        !recorded.body.windows(prompt.len()).any(|window| window == prompt),
         "the system prompt the turn carried must not reach cursor's wire"
     );
     assert_eq!(
-        run.requested_model
-            .as_option()
-            .and_then(|model| model.model_id.as_deref()),
+        run.requested_model.as_option().and_then(|model| model.model_id.as_deref()),
         Some("gpt-5.3-codex")
     );
     assert_eq!(
@@ -656,18 +591,14 @@ async fn the_wire_speaks_the_recorded_connect_protocol() {
             .gated(first_frame, Arc::clone(&open)),
     );
 
-    let mut streamed = wire
-        .stream(request(), CancellationToken::new())
-        .await
-        .expect("the exchange opens");
+    let mut streamed =
+        wire.stream(request(), CancellationToken::new()).await.expect("the exchange opens");
     let first = timeout(PATIENCE, streamed.next())
         .await
         .expect("the first delta must arrive while the body is still open");
     assert_eq!(
         first,
-        Some(ProviderEvent::ReasoningDelta(
-            "Weighing a greeting.".to_owned()
-        )),
+        Some(ProviderEvent::ReasoningDelta("Weighing a greeting.".to_owned())),
         "decoded from a body whose remainder is deliberately unwritten"
     );
 
@@ -688,26 +619,15 @@ async fn the_wire_speaks_the_recorded_connect_protocol() {
     );
 
     let cancel = CancellationToken::new();
-    let mut streamed = wire
-        .stream(request(), cancel.clone())
-        .await
-        .expect("the exchange opens");
+    let mut streamed = wire.stream(request(), cancel.clone()).await.expect("the exchange opens");
     let first = timeout(PATIENCE, streamed.next())
         .await
         .expect("the first delta arrives before the cancel");
-    assert_eq!(
-        first,
-        Some(ProviderEvent::ReasoningDelta(
-            "Weighing a greeting.".to_owned()
-        ))
-    );
+    assert_eq!(first, Some(ProviderEvent::ReasoningDelta("Weighing a greeting.".to_owned())));
 
     cancel.cancel();
     let rest: Vec<ProviderEvent> = streamed.collect().await;
-    assert!(
-        rest.is_empty(),
-        "a cancelled stream ends without a verdict: {rest:?}"
-    );
+    assert!(rest.is_empty(), "a cancelled stream ends without a verdict: {rest:?}");
     // Lets the server task finish writing into whatever is left of the
     // socket, so nothing outlives the phase.
     open.notify_one();
@@ -749,10 +669,7 @@ async fn the_wire_speaks_the_recorded_connect_protocol() {
     endpoint.forget();
     endpoint.answers_with(Reply::ok(
         "application/connect+proto",
-        frame(
-            END_STREAM,
-            br#"{"error":{"code":"unauthenticated","message":"token expired"}}"#,
-        ),
+        frame(END_STREAM, br#"{"error":{"code":"unauthenticated","message":"token expired"}}"#),
     ));
 
     let events: Vec<ProviderEvent> = wire
@@ -777,21 +694,14 @@ async fn the_wire_speaks_the_recorded_connect_protocol() {
     // a stream existed, so it refuses the turn's opening — and it is not a
     // status worth retrying, so exactly one request is made.
     endpoint.forget();
-    endpoint.answers_with(Reply::with(
-        "415 Unsupported Media Type",
-        "text/plain",
-        Vec::new(),
-    ));
+    endpoint.answers_with(Reply::with("415 Unsupported Media Type", "text/plain", Vec::new()));
 
     let unsupported = wire
         .stream(request(), CancellationToken::new())
         .await
         .err()
         .expect("a non-2xx answer refuses the turn");
-    assert!(
-        matches!(unsupported, ProviderError::Status { status: 415, .. }),
-        "{unsupported:?}"
-    );
+    assert!(matches!(unsupported, ProviderError::Status { status: 415, .. }), "{unsupported:?}");
     assert_eq!(endpoint.seen().len(), 1, "a 415 is not worth a second try");
 
     // ── The retry the other wires ride ───────────────────────────────────
@@ -801,14 +711,10 @@ async fn the_wire_speaks_the_recorded_connect_protocol() {
     // the same request rather than a new one wearing a fresh stamp.
     endpoint.forget();
     endpoint.answers_once(
-        Reply::with(
-            "503 Service Unavailable",
-            "text/plain",
-            b"try later".to_vec(),
-        )
-        // Zero seconds so the schedule is exercised without the test
-        // waiting out a real backoff.
-        .header("retry-after", "0"),
+        Reply::with("503 Service Unavailable", "text/plain", b"try later".to_vec())
+            // Zero seconds so the schedule is exercised without the test
+            // waiting out a real backoff.
+            .header("retry-after", "0"),
     );
     endpoint.answers_with(Reply::ok("application/connect+proto", exchange_body()));
 
@@ -818,11 +724,7 @@ async fn the_wire_speaks_the_recorded_connect_protocol() {
         .expect("the retry answers")
         .collect()
         .await;
-    assert_eq!(
-        events.last(),
-        Some(&ProviderEvent::Finish(FinishReason::Completed)),
-        "{events:?}"
-    );
+    assert_eq!(events.last(), Some(&ProviderEvent::Finish(FinishReason::Completed)), "{events:?}");
 
     let seen = endpoint.seen();
     assert_eq!(seen.len(), 2, "one refusal, one replay");
@@ -850,15 +752,9 @@ async fn the_wire_speaks_the_recorded_connect_protocol() {
         .err()
         .expect("a 401 is not answerable");
     let rendered = format!("{rejected} / {rejected:?}");
-    assert!(
-        matches!(rejected, ProviderError::Status { status: 401, .. }),
-        "{rendered}"
-    );
+    assert!(matches!(rejected, ProviderError::Status { status: 401, .. }), "{rendered}");
     assert!(!rendered.contains(ACCESS), "{rendered}");
-    assert!(
-        rendered.contains("[redacted]"),
-        "the echo is masked rather than dropped: {rendered}"
-    );
+    assert!(rendered.contains("[redacted]"), "the echo is masked rather than dropped: {rendered}");
 
     // ── An in-body verdict echoing the credential ────────────────────────
     // The same echo, arriving the way this wire's failures actually arrive:
@@ -890,10 +786,7 @@ async fn the_wire_speaks_the_recorded_connect_protocol() {
     };
     let rendered = format!("{echoed} / {echoed:?}");
     assert!(!rendered.contains(ACCESS), "{rendered}");
-    assert!(
-        rendered.contains("[redacted]"),
-        "the echo is masked rather than dropped: {rendered}"
-    );
+    assert!(rendered.contains("[redacted]"), "the echo is masked rather than dropped: {rendered}");
 
     // ── A redirect is refused where it stands ────────────────────────────
     // A 3xx is an instruction to send the request — and its bearer token —
@@ -901,10 +794,10 @@ async fn the_wire_speaks_the_recorded_connect_protocol() {
     // would surface as a transport error; a Status 302 is the proof it was
     // refused unfollowed, the bound every wire's client is built with.
     endpoint.forget();
-    endpoint.answers_with(Reply::with("302 Found", "text/plain", Vec::new()).header(
-        "location",
-        "http://elsewhere.invalid/agent.v1.AgentService/Run",
-    ));
+    endpoint.answers_with(
+        Reply::with("302 Found", "text/plain", Vec::new())
+            .header("location", "http://elsewhere.invalid/agent.v1.AgentService/Run"),
+    );
 
     let redirected = wire
         .stream(request(), CancellationToken::new())
@@ -915,9 +808,5 @@ async fn the_wire_speaks_the_recorded_connect_protocol() {
         matches!(redirected, ProviderError::Status { status: 302, .. }),
         "a redirect must be refused where it stands, not followed: {redirected:?}"
     );
-    assert_eq!(
-        endpoint.seen().len(),
-        1,
-        "nothing followed the redirect anywhere"
-    );
+    assert_eq!(endpoint.seen().len(), 1, "nothing followed the redirect anywhere");
 }

@@ -88,9 +88,8 @@
 //!   `provider` entry already reaches an arbitrary endpoint, so a variable
 //!   invented here would be a third way to say what two already say.
 
-use crate::provider::{
-    CredentialSource, ProviderError, ResponsesProvider, require_key, responses::Backend,
-};
+use crate::provider::responses::Backend;
+use crate::provider::{CredentialSource, ProviderError, ResponsesProvider, require_key};
 
 /// Value of [`PROVIDER_ENV`](super::PROVIDER_ENV) that selects this provider.
 ///

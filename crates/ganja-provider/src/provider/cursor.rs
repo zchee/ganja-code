@@ -51,23 +51,21 @@
 //! the stored login is read per request, so a login that happens after a
 //! session starts is picked up by its next request.
 
-use std::{
-    collections::{HashMap, VecDeque},
-    convert::Infallible,
-    fmt,
-    sync::Arc,
-};
+use std::collections::{HashMap, VecDeque};
+use std::convert::Infallible;
+use std::fmt;
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::{Stream, StreamExt as _, channel::mpsc, stream, stream::BoxStream};
+use futures::channel::mpsc;
+use futures::stream::BoxStream;
+use futures::{Stream, StreamExt as _, stream};
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    auth::{self, RefreshOauth},
-    provider::{
-        ChatRequest, CredentialSource, Presented, Provider, ProviderError, ProviderEvent,
-        check_base_url, client, endpoint, is_terminal, retry, shielded, shown_base_url,
-    },
+use crate::auth::{self, RefreshOauth};
+use crate::provider::{
+    ChatRequest, CredentialSource, Presented, Provider, ProviderError, ProviderEvent,
+    check_base_url, client, endpoint, is_terminal, retry, shielded, shown_base_url,
 };
 
 mod connect;
@@ -211,10 +209,7 @@ impl CursorWire {
         Ok(Self {
             client: client()?,
             base_url,
-            credential: CredentialSource::Oauth {
-                provider_id: ID,
-                refresh,
-            },
+            credential: CredentialSource::Oauth { provider_id: ID, refresh },
         })
     }
 
@@ -231,13 +226,8 @@ impl CursorWire {
         // The request message has no fields, and an empty message encodes to
         // no bytes at all — the zero-byte body the live probe was answered
         // on. A `Vec` body stays replayable, so the shared driver may retry.
-        let built = self.build(
-            MODELS_PATH,
-            false,
-            Vec::new().into(),
-            &presented,
-            &request::fresh_id()?,
-        )?;
+        let built =
+            self.build(MODELS_PATH, false, Vec::new().into(), &presented, &request::fresh_id()?)?;
         // A listing has no cancel channel of its own, so the retry driver
         // rides under a token nothing fires.
         let never = CancellationToken::new();
@@ -334,11 +324,7 @@ impl CursorWire {
             events(
                 response.bytes_stream().boxed(),
                 cancel,
-                Duplex {
-                    answers,
-                    system: request.system.clone(),
-                    blobs: HashMap::new(),
-                },
+                Duplex { answers, system: request.system.clone(), blobs: HashMap::new() },
             ),
             presented,
             endpoint,
@@ -371,10 +357,7 @@ impl CursorWire {
         let mut built = self
             .client
             .post(format!("{}{path}", self.base_url))
-            .header(
-                reqwest::header::AUTHORIZATION,
-                format!("Bearer {}", presented.expose()),
-            )
+            .header(reqwest::header::AUTHORIZATION, format!("Bearer {}", presented.expose()))
             .header("x-cursor-client-version", CLIENT_VERSION)
             .header("x-cursor-client-type", "cli")
             .header("x-ghost-mode", "true")
@@ -385,11 +368,7 @@ impl CursorWire {
             .header(reqwest::header::TE, "trailers")
             .header(
                 reqwest::header::CONTENT_TYPE,
-                if streaming {
-                    STREAMING_CONTENT_TYPE
-                } else {
-                    UNARY_CONTENT_TYPE
-                },
+                if streaming { STREAMING_CONTENT_TYPE } else { UNARY_CONTENT_TYPE },
             );
         if streaming {
             built = built.header("connect-protocol-version", "1");
@@ -573,11 +552,9 @@ where
                     }
                     Some(Err(error)) => {
                         state.done = true;
-                        state
-                            .scratch
-                            .push(ProviderEvent::Failed(ProviderError::Transport(
-                                error.to_string(),
-                            )));
+                        state.scratch.push(ProviderEvent::Failed(ProviderError::Transport(
+                            error.to_string(),
+                        )));
                     }
                     None => {
                         state.done = true;
@@ -606,11 +583,7 @@ fn replay(body: Vec<u8>, cancel: CancellationToken) -> BoxStream<'static, Provid
     events(
         stream::iter([Ok::<Vec<u8>, std::convert::Infallible>(body)]),
         cancel,
-        Duplex {
-            answers,
-            system: None,
-            blobs: std::collections::HashMap::new(),
-        },
+        Duplex { answers, system: None, blobs: std::collections::HashMap::new() },
     )
 }
 

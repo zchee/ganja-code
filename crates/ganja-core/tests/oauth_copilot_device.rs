@@ -16,17 +16,13 @@
 //! that was actually built and sent — and it being JSON at all is a divergence
 //! from every other device flow in this build.
 
-use std::{
-    env, fs,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
+use std::{env, fs};
 
 use ganja_core::auth::{self, CredentialKind, REFRESH_SKEW_MS, copilot};
 use secrecy::ExposeSecret as _;
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::{TcpListener, TcpStream},
-};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
 /// The GitHub token the login yields. It is the whole credential.
@@ -42,10 +38,7 @@ struct Endpoint {
 impl Endpoint {
     /// Every request that arrived, as `(head, body)`.
     fn requests(&self) -> Vec<(String, String)> {
-        self.requests
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone()
+        self.requests.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 }
 
@@ -57,15 +50,8 @@ impl Endpoint {
 /// that for success — or, read the other way round, would end xAI's flow on
 /// its first poll. Serving GitHub's spelling here is what holds that.
 async fn serve(bodies: Vec<String>) -> Endpoint {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("loopback is bindable");
-    let url = format!(
-        "http://{}",
-        listener
-            .local_addr()
-            .expect("a bound socket has an address")
-    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("loopback is bindable");
+    let url = format!("http://{}", listener.local_addr().expect("a bound socket has an address"));
     let requests = Arc::new(Mutex::new(Vec::new()));
 
     let server = tokio::spawn({
@@ -77,10 +63,7 @@ async fn serve(bodies: Vec<String>) -> Endpoint {
                 };
 
                 let request = read(&mut socket).await;
-                requests
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push(request);
+                requests.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(request);
 
                 let response = format!(
                     "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: \
@@ -93,11 +76,7 @@ async fn serve(bodies: Vec<String>) -> Endpoint {
         }
     });
 
-    Endpoint {
-        url,
-        requests,
-        _server: server,
-    }
+    Endpoint { url, requests, _server: server }
 }
 
 /// Reads a request as `(head, body)`.
@@ -140,28 +119,20 @@ struct Instant {
 
 impl Instant {
     fn at(now_ms: u64) -> Arc<Self> {
-        Arc::new(Self {
-            now_ms: Mutex::new(now_ms),
-        })
+        Arc::new(Self { now_ms: Mutex::new(now_ms) })
     }
 }
 
 #[async_trait::async_trait]
 impl auth::device::Clock for Instant {
     fn now_ms(&self) -> u64 {
-        *self
-            .now_ms
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        *self.now_ms.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     async fn sleep(&self, duration: std::time::Duration) {
         // Time passes exactly as far as it was asked to, so the deadline the
         // flow computes still means what it means.
-        let mut now = self
-            .now_ms
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut now = self.now_ms.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         *now = now.saturating_add(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
     }
 }
@@ -227,26 +198,15 @@ async fn an_enterprise_copilot_login_stores_one_token_that_never_needs_renewing(
     );
 
     // Nothing is stored until the caller stores it, here as elsewhere.
-    assert!(
-        stored().is_none(),
-        "a completed login must not write a credential of its own accord"
-    );
+    assert!(stored().is_none(), "a completed login must not write a credential of its own accord");
 
     auth::set_oauth(copilot::PROVIDER_ID, &credential).expect("the credential stores");
 
     // The record upstream writes, field for field (`copilot.ts:286-305`).
     let entry = stored().expect("the store exists now");
-    let entry = entry
-        .get("github-copilot")
-        .expect("stored under upstream's own name for it");
-    assert_eq!(
-        entry.get("type").and_then(serde_json::Value::as_str),
-        Some("oauth")
-    );
-    assert_eq!(
-        entry.get("access").and_then(serde_json::Value::as_str),
-        Some(TOKEN)
-    );
+    let entry = entry.get("github-copilot").expect("stored under upstream's own name for it");
+    assert_eq!(entry.get("type").and_then(serde_json::Value::as_str), Some("oauth"));
+    assert_eq!(entry.get("access").and_then(serde_json::Value::as_str), Some(TOKEN));
     assert_eq!(
         entry.get("refresh").and_then(serde_json::Value::as_str),
         Some(TOKEN),
@@ -258,9 +218,7 @@ async fn an_enterprise_copilot_login_stores_one_token_that_never_needs_renewing(
         "zero is upstream's `never`, and it has to reach the file as zero"
     );
     assert_eq!(
-        entry
-            .get("enterpriseUrl")
-            .and_then(serde_json::Value::as_str),
+        entry.get("enterpriseUrl").and_then(serde_json::Value::as_str),
         Some("company.ghe.com"),
         "the deployment has to travel with the token, or requests go to the wrong host"
     );
@@ -298,8 +256,7 @@ async fn an_enterprise_copilot_login_stores_one_token_that_never_needs_renewing(
     assert_eq!(requests.len(), 3, "one start and two polls");
     for (head, _) in &requests {
         assert!(
-            head.to_lowercase()
-                .contains("content-type: application/json"),
+            head.to_lowercase().contains("content-type: application/json"),
             "GitHub's device endpoints take JSON, not a form: {head}"
         );
         assert!(
@@ -321,9 +278,7 @@ async fn an_enterprise_copilot_login_stores_one_token_that_never_needs_renewing(
         }),
     );
     assert!(
-        !requests
-            .iter()
-            .any(|(head, body)| head.contains(TOKEN) || body.contains(TOKEN)),
+        !requests.iter().any(|(head, body)| head.contains(TOKEN) || body.contains(TOKEN)),
         "the token is what comes back, never what goes out"
     );
 }

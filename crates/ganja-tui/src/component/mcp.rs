@@ -20,18 +20,15 @@
 //! what a tick hands a fresh set of rows to while the dialog is open, no new
 //! protocol event involved.
 
-use ratatui::{
-    buffer::Buffer,
-    layout::{Constraint, Rect},
-    text::{Line, Text},
-    widgets::{Block, Clear, Paragraph, Widget as _},
-};
+use ratatui::buffer::Buffer;
+use ratatui::layout::{Constraint, Rect};
+use ratatui::text::{Line, Text};
+use ratatui::widgets::{Block, Clear, Paragraph, Widget as _};
 use unicode_width::UnicodeWidthStr as _;
 
-use crate::{
-    component::{action_row, body_rows, chat::clip, clamped, first_visible},
-    theme::Theme,
-};
+use crate::component::chat::clip;
+use crate::component::{action_row, body_rows, clamped, first_visible};
+use crate::theme::Theme;
 
 /// What marks the row the cursor is on, and what pads every other row.
 const MARKER: &str = "> ";
@@ -119,11 +116,7 @@ impl Mcp {
     /// Opens the dialog over `rows`, cursor on the first one.
     #[must_use]
     pub fn new(rows: Vec<Row>) -> Self {
-        Self {
-            rows,
-            selected: 0,
-            step: Step::Servers,
-        }
+        Self { rows, selected: 0, step: Step::Servers }
     }
 
     /// Replaces the rows with a fresh poll, keeping the cursor and step where
@@ -226,9 +219,9 @@ impl Mcp {
         // needs, mirroring `Rewind`'s own two-height scheme.
         let height = match self.step {
             Step::Servers => available,
-            Step::Actions(_) => u16::try_from(lines.len().saturating_add(2))
-                .unwrap_or(available)
-                .min(available),
+            Step::Actions(_) => {
+                u16::try_from(lines.len().saturating_add(2)).unwrap_or(available).min(available)
+            }
         };
         let popup = area.centered(Constraint::Length(width), Constraint::Length(height));
 
@@ -246,18 +239,8 @@ impl Mcp {
         }
 
         let first = first_visible(self.selected, rows);
-        let name_width = self
-            .rows
-            .iter()
-            .map(|row| row.name.width())
-            .max()
-            .unwrap_or(0);
-        let status_width = self
-            .rows
-            .iter()
-            .map(|row| row.status.width())
-            .max()
-            .unwrap_or(0);
+        let name_width = self.rows.iter().map(|row| row.name.width()).max().unwrap_or(0);
+        let status_width = self.rows.iter().map(|row| row.status.width()).max().unwrap_or(0);
 
         self.rows
             .iter()
@@ -265,9 +248,7 @@ impl Mcp {
             .skip(first)
             .take(rows)
             .map(|(index, row)| {
-                let tools = row
-                    .tools
-                    .map_or_else(|| "-".to_owned(), |count| count.to_string());
+                let tools = row.tools.map_or_else(|| "-".to_owned(), |count| count.to_string());
                 let head = format!(
                     "{marker}{name:<name_width$}  {status:<status_width$}  {tools:>3} tools",
                     marker = if index == self.selected { MARKER } else { "  " },
@@ -289,11 +270,7 @@ impl Mcp {
 
                 Line::styled(
                     format!("{line:<width$}"),
-                    if index == self.selected {
-                        theme.selection
-                    } else {
-                        theme.fg
-                    },
+                    if index == self.selected { theme.selection } else { theme.fg },
                 )
             })
             .collect()

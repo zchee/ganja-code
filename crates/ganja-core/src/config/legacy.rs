@@ -19,7 +19,8 @@
 //! this module is what makes that refusal answerable rather than merely
 //! final.
 
-use std::{fs, path::Path};
+use std::fs;
+use std::path::Path;
 
 use super::{Config, ConfigError};
 
@@ -74,10 +75,8 @@ pub fn parse_options() -> jsonc_parser::ParseOptions {
 /// discovers its way into this function, so every path that arrives was asked
 /// for by name.
 pub fn read(path: &Path) -> Result<Config, ConfigError> {
-    let text = fs::read_to_string(path).map_err(|source| ConfigError::Read {
-        path: path.to_owned(),
-        source,
-    })?;
+    let text = fs::read_to_string(path)
+        .map_err(|source| ConfigError::Read { path: path.to_owned(), source })?;
 
     let config = jsonc_parser::parse_to_serde_value::<Option<Config>>(&text, &parse_options())
         .map(Option::unwrap_or_default)

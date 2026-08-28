@@ -13,7 +13,8 @@
 mod support;
 
 use futures::StreamExt as _;
-use ganja_core::{permission::Permissions, tool::Registry};
+use ganja_core::permission::Permissions;
+use ganja_core::tool::Registry;
 use ganja_protocol::Event;
 use ganja_testkit::{RecorderTool, says, tool_call};
 use support::{
@@ -32,11 +33,7 @@ struct SseReader {
 
 impl SseReader {
     fn new(response: reqwest::Response) -> Self {
-        Self {
-            stream: response.bytes_stream().boxed(),
-            buffer: Vec::new(),
-            frames: Vec::new(),
-        }
+        Self { stream: response.bytes_stream().boxed(), buffer: Vec::new(), frames: Vec::new() }
     }
 
     /// Reads until `done` says the frames collected so far are enough.
@@ -67,9 +64,8 @@ fn holds_the_finish(frames: &[Frame]) -> bool {
 #[tokio::test]
 async fn a_direct_subscriber_and_an_sse_client_see_the_same_turn_frame_for_frame() {
     let (tool, calls) = RecorderTool::new("lookup", "lookup ran", "found it");
-    let mut step_one = vec![ganja_core::provider::ProviderEvent::TextDelta(
-        "Let me look. ".to_owned(),
-    )];
+    let mut step_one =
+        vec![ganja_core::provider::ProviderEvent::TextDelta("Let me look. ".to_owned())];
     step_one.extend(tool_call("lookup", serde_json::json!({"key": "a"})));
     let engine = scripted_engine(
         vec![step_one, says("all done")],
@@ -82,15 +78,10 @@ async fn a_direct_subscriber_and_an_sse_client_see_the_same_turn_frame_for_frame
         .expect("a loopback server with no password comes up");
     let base = base_url(&handle);
 
-    let response = reqwest::get(format!("{base}/event"))
-        .await
-        .expect("the event stream answers");
+    let response = reqwest::get(format!("{base}/event")).await.expect("the event stream answers");
     assert_eq!(response.status(), 200);
     assert_eq!(
-        response
-            .headers()
-            .get("content-type")
-            .and_then(|value| value.to_str().ok()),
+        response.headers().get("content-type").and_then(|value| value.to_str().ok()),
         Some("text/event-stream")
     );
     for (header, wanted) in [
@@ -99,10 +90,7 @@ async fn a_direct_subscriber_and_an_sse_client_see_the_same_turn_frame_for_frame
         ("x-content-type-options", "nosniff"),
     ] {
         assert_eq!(
-            response
-                .headers()
-                .get(header)
-                .and_then(|value| value.to_str().ok()),
+            response.headers().get(header).and_then(|value| value.to_str().ok()),
             Some(wanted),
             "the {header} posture header travels"
         );
@@ -131,25 +119,16 @@ async fn a_direct_subscriber_and_an_sse_client_see_the_same_turn_frame_for_frame
         .send()
         .await
         .expect("the prompt route answers");
-    assert_eq!(
-        accepted.status(),
-        204,
-        "a prompt is accepted and nothing more"
-    );
+    assert_eq!(accepted.status(), 204, "a prompt is accepted and nothing more");
 
     // Both readers to the same finish: the direct one first, then the open
     // SSE connection — the same connection that read the connected frame.
     let direct_events = ganja_testkit::drain(&mut direct).await;
     assert!(
-        direct_events
-            .iter()
-            .any(|event| matches!(event, Event::PartUpdated { .. })),
+        direct_events.iter().any(|event| matches!(event, Event::PartUpdated { .. })),
         "the scripted turn ran its tool: {direct_events:?}"
     );
-    assert_eq!(
-        calls.lock().expect("the call log is never poisoned").len(),
-        1
-    );
+    assert_eq!(calls.lock().expect("the call log is never poisoned").len(), 1);
 
     let frames = reader.read_until(holds_the_finish).await.to_vec();
 
@@ -186,13 +165,9 @@ async fn a_direct_subscriber_and_an_sse_client_see_the_same_turn_frame_for_frame
     // A quiet stream still proves it is alive: with the heartbeat turned all
     // the way down, silence after the turn produces heartbeat frames.
     tokio::time::sleep(FAST_HEARTBEAT * 4).await;
-    let after = reader
-        .read_until(|frames| frames.iter().any(|frame| frame.event == "heartbeat"))
-        .await;
-    assert!(
-        after.iter().any(|frame| frame.event == "heartbeat"),
-        "a silent stream heartbeats"
-    );
+    let after =
+        reader.read_until(|frames| frames.iter().any(|frame| frame.event == "heartbeat")).await;
+    assert!(after.iter().any(|frame| frame.event == "heartbeat"), "a silent stream heartbeats");
 
     handle.shutdown().await.expect("the server stops cleanly");
 }

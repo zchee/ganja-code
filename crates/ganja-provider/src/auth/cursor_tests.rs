@@ -1,17 +1,16 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use secrecy::{ExposeSecret as _, SecretString};
 use tokio_util::sync::CancellationToken;
 
+use super::super::device::harness::{Reply, StalledClock, TestClock, serve};
+use super::super::pkce::challenge_for;
+use super::super::{AuthError, OauthCredential, RefreshOauth as _, now_ms, storage_key};
 use super::{
-    super::{
-        AuthError, OauthCredential, RefreshOauth as _,
-        device::harness::{Reply, StalledClock, TestClock, serve},
-        now_ms,
-        pkce::challenge_for,
-        storage_key,
-    },
     Flow, HARD_ERROR_LIMIT, LoginError, POLL_DEADLINE, PROVIDER_ID, Refresh, credential_from,
     login_flow, login_flow_at,
 };
@@ -30,9 +29,7 @@ fn pending() -> Reply {
 
 /// A flow against `url`, driven by `clock`.
 fn flow_at(url: &str, clock: Arc<dyn super::Clock>) -> Flow {
-    login_flow_at(url)
-        .expect("a client builds")
-        .with_clock(clock)
+    login_flow_at(url).expect("a client builds").with_clock(clock)
 }
 
 /// A credential whose refresh token is the canary.
@@ -87,13 +84,7 @@ fn the_deep_link_carries_the_challenge_the_pairing_id_and_the_cli_return_target(
     let flow = flow_at("http://127.0.0.1:1", TestClock::at(0));
     let login = flow.start().expect("the platform has a random source");
 
-    assert!(
-        login
-            .url()
-            .starts_with("http://127.0.0.1:1/loginDeepControl?"),
-        "{}",
-        login.url()
-    );
+    assert!(login.url().starts_with("http://127.0.0.1:1/loginDeepControl?"), "{}", login.url());
     let query = query_of(login.url());
     assert_eq!(
         query.get("challenge").map(String::as_str),
@@ -116,16 +107,10 @@ fn the_deep_link_carries_the_challenge_the_pairing_id_and_the_cli_return_target(
         assert_eq!(uuid[index], '-', "{uuid:?}");
     }
     assert_eq!(uuid[14], '4', "the version nibble names v4: {uuid:?}");
-    assert!(
-        matches!(uuid[19], '8' | '9' | 'a' | 'b'),
-        "the variant bits are RFC 9562's: {uuid:?}"
-    );
+    assert!(matches!(uuid[19], '8' | '9' | 'a' | 'b'), "the variant bits are RFC 9562's: {uuid:?}");
     for (index, character) in uuid.iter().enumerate() {
         if ![8, 13, 18, 23].contains(&index) {
-            assert!(
-                character.is_ascii_hexdigit() && !character.is_ascii_uppercase(),
-                "{uuid:?}"
-            );
+            assert!(character.is_ascii_hexdigit() && !character.is_ascii_uppercase(), "{uuid:?}");
         }
     }
 
@@ -143,33 +128,23 @@ fn the_deep_link_carries_the_challenge_the_pairing_id_and_the_cli_return_target(
 async fn a_pending_login_is_polled_on_ganjas_own_backoff_until_the_tokens_arrive() {
     let endpoint = serve(vec![pending(), pending(), Reply::ok(TOKENS)]).await;
     let clock = TestClock::at(0);
-    let login = flow_at(&endpoint.url, clock.clone())
-        .start()
-        .expect("the platform has a random source");
+    let login =
+        flow_at(&endpoint.url, clock.clone()).start().expect("the platform has a random source");
     let uuid = login.uuid.expose_secret().to_owned();
     let verifier = login.pkce.verifier().expose_secret().to_owned();
 
-    let landed = login
-        .poll(&CancellationToken::new())
-        .await
-        .expect("the third poll carries the tokens");
+    let landed =
+        login.poll(&CancellationToken::new()).await.expect("the third poll carries the tokens");
 
     assert_eq!(landed.access.expose_secret(), "at-cursor-1");
     assert_eq!(landed.refresh.expose_secret(), "rt-cursor-1");
     // The schedule is asserted on the waits that were asked for, never on
     // wall time: 1s, then 2s, and the delivery ends it before a third.
-    assert_eq!(
-        clock.waits(),
-        vec![Duration::from_secs(1), Duration::from_secs(2)]
-    );
+    assert_eq!(clock.waits(), vec![Duration::from_secs(1), Duration::from_secs(2)]);
     assert_eq!(endpoint.count(), 3);
     for index in 0..3 {
         let request = endpoint.request(index);
-        assert!(
-            request.head.starts_with("GET "),
-            "the poll is a GET: {}",
-            request.head
-        );
+        assert!(request.head.starts_with("GET "), "the poll is a GET: {}", request.head);
         let query = query_of(request.path());
         assert_eq!(query.get("uuid"), Some(&uuid), "poll {index}");
         assert_eq!(query.get("verifier"), Some(&verifier), "poll {index}");
@@ -178,28 +153,16 @@ async fn a_pending_login_is_polled_on_ganjas_own_backoff_until_the_tokens_arrive
 
 #[tokio::test]
 async fn the_backoff_doubles_to_its_cap_and_no_further() {
-    let endpoint = serve(
-        (0..6)
-            .map(|_| pending())
-            .chain([Reply::ok(TOKENS)])
-            .collect(),
-    )
-    .await;
+    let endpoint = serve((0..6).map(|_| pending()).chain([Reply::ok(TOKENS)]).collect()).await;
     let clock = TestClock::at(0);
-    let login = flow_at(&endpoint.url, clock.clone())
-        .start()
-        .expect("the platform has a random source");
+    let login =
+        flow_at(&endpoint.url, clock.clone()).start().expect("the platform has a random source");
 
-    login
-        .poll(&CancellationToken::new())
-        .await
-        .expect("the seventh poll carries the tokens");
+    login.poll(&CancellationToken::new()).await.expect("the seventh poll carries the tokens");
 
     assert_eq!(
         clock.waits(),
-        [1_000, 2_000, 4_000, 8_000, 8_000, 8_000]
-            .map(Duration::from_millis)
-            .to_vec(),
+        [1_000, 2_000, 4_000, 8_000, 8_000, 8_000].map(Duration::from_millis).to_vec(),
         "1s doubling to the 8s cap, then holding there"
     );
 }
@@ -216,9 +179,8 @@ async fn three_consecutive_failures_abort_where_a_pending_answer_resets_the_coun
         Reply::new(500, r#"{"error":"cursor-body-canary"}"#),
     ])
     .await;
-    let login = flow_at(&endpoint.url, TestClock::at(0))
-        .start()
-        .expect("the platform has a random source");
+    let login =
+        flow_at(&endpoint.url, TestClock::at(0)).start().expect("the platform has a random source");
 
     let refused = login
         .poll(&CancellationToken::new())
@@ -245,9 +207,8 @@ async fn a_login_nobody_finishes_stops_at_its_deadline() {
     // More answers than the budget can spend, so the end is the clock's.
     let endpoint = serve((0..48).map(|_| pending()).collect()).await;
     let clock = TestClock::at(0);
-    let login = flow_at(&endpoint.url, clock.clone())
-        .start()
-        .expect("the platform has a random source");
+    let login =
+        flow_at(&endpoint.url, clock.clone()).start().expect("the platform has a random source");
 
     let refused = login
         .poll(&CancellationToken::new())
@@ -270,16 +231,12 @@ async fn a_login_nobody_finishes_stops_at_its_deadline() {
 #[tokio::test]
 async fn a_cancelled_login_never_reaches_the_endpoint() {
     let endpoint = serve(Vec::new()).await;
-    let login = flow_at(&endpoint.url, TestClock::at(0))
-        .start()
-        .expect("the platform has a random source");
+    let login =
+        flow_at(&endpoint.url, TestClock::at(0)).start().expect("the platform has a random source");
     let cancel = CancellationToken::new();
     cancel.cancel();
 
-    let refused = login
-        .poll(&cancel)
-        .await
-        .expect_err("a cancelled login polls nothing");
+    let refused = login.poll(&cancel).await.expect_err("a cancelled login polls nothing");
 
     assert!(matches!(refused, LoginError::Cancelled), "{refused}");
     assert_eq!(endpoint.count(), 0);
@@ -338,10 +295,8 @@ fn a_credential_expires_five_minutes_before_its_tokens_own_deadline_or_an_hour_f
 
 #[tokio::test]
 async fn a_renewal_rotates_the_stored_pair_with_the_bearer_the_endpoint_wants() {
-    let endpoint = serve(vec![Reply::ok(
-        r#"{"accessToken":"at-rotated","refreshToken":"rt-rotated"}"#,
-    )])
-    .await;
+    let endpoint =
+        serve(vec![Reply::ok(r#"{"accessToken":"at-rotated","refreshToken":"rt-rotated"}"#)]).await;
 
     let renewed = Refresh::at(format!("{}/auth/exchange_user_api_key", endpoint.url))
         .expect("a client builds")
@@ -358,20 +313,13 @@ async fn a_renewal_rotates_the_stored_pair_with_the_bearer_the_endpoint_wants() 
 
     let request = endpoint.request(0);
     assert_eq!(request.path(), "/auth/exchange_user_api_key");
-    assert!(
-        request.head.starts_with("POST "),
-        "the renewal is a POST: {}",
-        request.head
-    );
+    assert!(request.head.starts_with("POST "), "the renewal is a POST: {}", request.head);
     assert!(
         request.has_header("authorization", &format!("Bearer {REFRESH_CANARY}")),
         "the bearer is the refresh token, which is the recorded shape"
     );
     assert!(request.has_header("content-type", "application/json"));
-    assert_eq!(
-        request.body, "{}",
-        "the recorded body is the literal empty object"
-    );
+    assert_eq!(request.body, "{}", "the recorded body is the literal empty object");
 }
 
 #[tokio::test]
@@ -394,11 +342,7 @@ async fn a_renewal_with_no_new_refresh_token_keeps_the_old_one() {
 #[tokio::test]
 async fn a_refusal_ends_the_credential_where_an_outage_does_not() {
     for (status, dead) in [(401, true), (403, true), (500, false), (503, false)] {
-        let endpoint = serve(vec![Reply::new(
-            status,
-            r#"{"error":"cursor-body-canary"}"#,
-        )])
-        .await;
+        let endpoint = serve(vec![Reply::new(status, r#"{"error":"cursor-body-canary"}"#)]).await;
 
         let refused = Refresh::at(format!("{}/auth/exchange_user_api_key", endpoint.url))
             .expect("a client builds")
@@ -438,10 +382,7 @@ async fn a_credential_with_no_refresh_token_is_dead_without_a_round_trip() {
         .await
         .expect_err("there is nothing to present");
 
-    assert!(
-        matches!(refused, AuthError::ReauthRequired { .. }),
-        "{refused}"
-    );
+    assert!(matches!(refused, AuthError::ReauthRequired { .. }), "{refused}");
     assert_eq!(
         endpoint.count(),
         0,

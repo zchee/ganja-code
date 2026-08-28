@@ -17,10 +17,8 @@
 //! start, which is a session with no diagnostics for that language and
 //! nothing else (deviation: lsp-no-auto-install).
 
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use crate::config::LspEntry;
 
@@ -190,12 +188,10 @@ pub fn resolve(entries: &BTreeMap<String, LspEntry>) -> Vec<Spec> {
 pub fn root(server: &Spec, file: &Path, directory: &Path, worktree: &Path) -> Option<PathBuf> {
     match server.root {
         Root::Rust => rust_root(file, directory, worktree),
-        Root::Gopls => Some(
-            nearest_root(file, &["go.work"], directory).unwrap_or_else(|| {
-                nearest_root(file, &["go.mod", "go.sum"], directory)
-                    .unwrap_or_else(|| directory.to_owned())
-            }),
-        ),
+        Root::Gopls => Some(nearest_root(file, &["go.work"], directory).unwrap_or_else(|| {
+            nearest_root(file, &["go.mod", "go.sum"], directory)
+                .unwrap_or_else(|| directory.to_owned())
+        })),
         Root::Directory => Some(directory.to_owned()),
     }
 }

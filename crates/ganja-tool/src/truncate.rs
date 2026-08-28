@@ -44,12 +44,10 @@
 //! notice, silently. The tool call already succeeded by the time truncation
 //! runs; losing the overflow file is never a reason to fail it.
 
-use std::{
-    fs, io,
-    path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{fs, io};
 
 use etcetera::base_strategy::{BaseStrategy as _, Xdg};
 use tokio_util::sync::CancellationToken;
@@ -165,24 +163,16 @@ fn clamp_bytes_with(text: &str, max_bytes: usize, dir: &Path) -> Truncated {
 /// to `max_bytes`, then writes it to the first of `dirs` that accepts it.
 fn clamp_in(text: &str, max_bytes: usize, dirs: impl IntoIterator<Item = PathBuf>) -> Truncated {
     let Some(body) = clamp_body(text, max_bytes) else {
-        return Truncated {
-            text: text.to_owned(),
-            truncated: false,
-        };
+        return Truncated { text: text.to_owned(), truncated: false };
     };
 
-    let written = dirs
-        .into_iter()
-        .find_map(|dir| write_overflow(&dir, text.as_bytes()));
+    let written = dirs.into_iter().find_map(|dir| write_overflow(&dir, text.as_bytes()));
     let text = match written {
         Some((file, _)) => format!("{body}\n\n{}", hint(&file)),
         None => body,
     };
 
-    Truncated {
-        text,
-        truncated: true,
-    }
+    Truncated { text, truncated: true }
 }
 
 /// The clamped preview and upstream's `...N {unit} truncated...` notice, or
@@ -218,11 +208,7 @@ fn clamp_body(text: &str, max_bytes: usize) -> Option<String> {
     }
 
     let preview = lines[..kept].join("\n");
-    let removed = if hit_bytes {
-        total_bytes - bytes
-    } else {
-        lines.len() - kept
-    };
+    let removed = if hit_bytes { total_bytes - bytes } else { lines.len() - kept };
     let unit = if hit_bytes { "bytes" } else { "lines" };
 
     Some(format!("{preview}\n\n...{removed} {unit} truncated..."))
@@ -261,9 +247,7 @@ fn hint(file: &Path) -> String {
 /// permission-hardened file creation this wraps would be duplicating the
 /// exact code a security review has to read twice instead of once.
 pub fn open_spill(head: &[u8]) -> Option<(PathBuf, fs::File)> {
-    candidate_dirs()
-        .into_iter()
-        .find_map(|dir| write_overflow(&dir, head))
+    candidate_dirs().into_iter().find_map(|dir| write_overflow(&dir, head))
 }
 
 /// Same as [`open_spill`], but into exactly `dir` — no XDG resolution and no
@@ -294,10 +278,7 @@ fn write_overflow(dir: &Path, bytes: &[u8]) -> Option<(PathBuf, fs::File)> {
 fn create_dir_private(dir: &Path) -> io::Result<()> {
     use std::os::unix::fs::DirBuilderExt as _;
 
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(PRIVATE_DIR)
-        .create(dir)
+    fs::DirBuilder::new().recursive(true).mode(PRIVATE_DIR).create(dir)
 }
 
 /// Creates only the Windows leaf with an inheritable owner-only DACL.
@@ -331,11 +312,7 @@ fn create_private(path: &Path) -> io::Result<fs::File> {
 
     // The mode is set at creation rather than afterwards, so the file is
     // never, even briefly, readable by anyone else.
-    fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(PRIVATE)
-        .open(path)
+    fs::OpenOptions::new().write(true).create_new(true).mode(PRIVATE).open(path)
 }
 
 /// Creates a Windows file with the right to replace its inherited DACL.
@@ -355,10 +332,7 @@ fn create_private(path: &Path) -> io::Result<fs::File> {
 /// Platforms without unix modes or Windows DACLs retain the old open.
 #[cfg(not(any(unix, windows)))]
 fn create_private(path: &Path) -> io::Result<fs::File> {
-    fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)
+    fs::OpenOptions::new().write(true).create_new(true).open(path)
 }
 
 /// Writes `bytes` to a newly created file only its owner can read, leaving it
@@ -404,31 +378,27 @@ fn write_private(path: &Path, bytes: &[u8]) -> io::Result<fs::File> {
 /// can take ownership regardless, so explicit grants would only widen access.
 #[cfg(windows)]
 mod windows_acl {
-    use std::{
-        fs, io,
-        mem::size_of,
-        os::windows::{ffi::OsStrExt as _, io::AsRawHandle as _},
-        path::Path,
-        ptr,
-    };
+    use std::mem::size_of;
+    use std::os::windows::ffi::OsStrExt as _;
+    use std::os::windows::io::AsRawHandle as _;
+    use std::path::Path;
+    use std::{fs, io, ptr};
 
-    use windows_sys::Win32::{
-        Foundation::{
-            CloseHandle, ERROR_ALREADY_EXISTS, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, HANDLE,
-            WIN32_ERROR,
-        },
-        Security::{
-            ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAceEx,
-            Authorization::{SE_FILE_OBJECT, SetSecurityInfo},
-            CONTAINER_INHERIT_ACE, CopySid, DACL_SECURITY_INFORMATION, GetLengthSid,
-            GetTokenInformation, InitializeAcl, InitializeSecurityDescriptor, IsValidSid,
-            OBJECT_INHERIT_ACE, PROTECTED_DACL_SECURITY_INFORMATION, PSID, SE_DACL_PROTECTED,
-            SECURITY_ATTRIBUTES, SECURITY_DESCRIPTOR, SetSecurityDescriptorControl,
-            SetSecurityDescriptorDacl, TOKEN_QUERY, TOKEN_USER, TokenUser,
-        },
-        Storage::FileSystem::{CreateDirectoryW, FILE_ALL_ACCESS},
-        System::Threading::{GetCurrentProcess, OpenProcessToken},
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_ALREADY_EXISTS, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, HANDLE,
+        WIN32_ERROR,
     };
+    use windows_sys::Win32::Security::Authorization::{SE_FILE_OBJECT, SetSecurityInfo};
+    use windows_sys::Win32::Security::{
+        ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAceEx, CONTAINER_INHERIT_ACE,
+        CopySid, DACL_SECURITY_INFORMATION, GetLengthSid, GetTokenInformation, InitializeAcl,
+        InitializeSecurityDescriptor, IsValidSid, OBJECT_INHERIT_ACE,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSID, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES,
+        SECURITY_DESCRIPTOR, SetSecurityDescriptorControl, SetSecurityDescriptorDacl, TOKEN_QUERY,
+        TOKEN_USER, TokenUser,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{CreateDirectoryW, FILE_ALL_ACCESS};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
     /// The revision accepted by `InitializeSecurityDescriptor`.
     const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
@@ -454,9 +424,7 @@ mod windows_acl {
     impl OwnedSid {
         fn zeroed(bytes: u32) -> Self {
             let words = (bytes as usize).div_ceil(size_of::<usize>());
-            Self {
-                words: vec![0; words].into_boxed_slice(),
-            }
+            Self { words: vec![0; words].into_boxed_slice() }
         }
 
         pub(super) fn as_psid(&self) -> PSID {
@@ -521,9 +489,7 @@ mod windows_acl {
         let queried =
             unsafe { GetTokenInformation(token.0, TokenUser, ptr::null_mut(), 0, &mut length) };
         if queried != 0 {
-            return Err(io::Error::other(
-                "Windows returned token-user data without a buffer",
-            ));
+            return Err(io::Error::other("Windows returned token-user data without a buffer"));
         }
         let source = io::Error::last_os_error();
         if source.raw_os_error() != Some(ERROR_INSUFFICIENT_BUFFER as i32) {
@@ -561,9 +527,7 @@ mod windows_acl {
             .and_then(|bytes| u32::try_from(bytes).ok())
             .ok_or_else(|| io::Error::other("the private DACL is too large"))?;
         let words = (bytes as usize).div_ceil(size_of::<usize>());
-        let mut acl = OwnedAcl {
-            words: vec![0; words].into_boxed_slice(),
-        };
+        let mut acl = OwnedAcl { words: vec![0; words].into_boxed_slice() };
 
         // SAFETY: acl owns an aligned allocation of bytes bytes.
         if unsafe { InitializeAcl(acl.as_mut_ptr(), bytes, ACL_REVISION) } == 0 {
@@ -670,11 +634,7 @@ mod windows_acl {
         }
 
         let error = io::Error::last_os_error();
-        if error.raw_os_error() == Some(ERROR_ALREADY_EXISTS as i32) {
-            Ok(())
-        } else {
-            Err(error)
-        }
+        if error.raw_os_error() == Some(ERROR_ALREADY_EXISTS as i32) { Ok(()) } else { Err(error) }
     }
 
     fn win32(status: WIN32_ERROR) -> io::Result<()> {
@@ -732,11 +692,7 @@ pub(crate) fn sweep_in(dir: &Path) -> usize {
         // shares with anything else — the temp fallback is `/tmp` on a machine
         // with no data directory — holds files that are none of its business,
         // and it may not so much as stat them by mistake.
-        if !entry
-            .file_name()
-            .as_encoded_bytes()
-            .starts_with(PREFIX.as_bytes())
-        {
+        if !entry.file_name().as_encoded_bytes().starts_with(PREFIX.as_bytes()) {
             continue;
         }
         let path = entry.path();
@@ -810,9 +766,8 @@ fn overflow_filename() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
 
     let count = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_nanos());
+    let stamp =
+        SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_nanos());
 
     format!("tool_{stamp:x}_{count:x}")
 }

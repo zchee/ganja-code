@@ -89,10 +89,7 @@ async fn a_file_read_first_may_be_overwritten_and_becomes_fresh_again() {
 
     // The write itself counts as a fresh read, so a second write right
     // after does not need another explicit read in between.
-    context
-        .files
-        .check_fresh(&path)
-        .expect("a write leaves the file fresh for the next call");
+    context.files.check_fresh(&path).expect("a write leaves the file fresh for the next call");
 }
 
 #[tokio::test]
@@ -107,10 +104,7 @@ async fn a_relative_path_resolves_against_the_call_cwd() {
         .await
         .expect("a relative filePath resolves against ctx.cwd");
 
-    assert_eq!(
-        std::fs::read_to_string(dir.path().join("relative.txt")).unwrap(),
-        "hi"
-    );
+    assert_eq!(std::fs::read_to_string(dir.path().join("relative.txt")).unwrap(), "hi");
     assert_eq!(out.title, "relative.txt");
 }
 
@@ -145,10 +139,7 @@ async fn a_write_through_a_link_that_leaves_the_project_is_refused() {
     let context = ctx(project.path().to_owned());
     context.files.record(&planted);
     let refused = WriteTool
-        .run(
-            serde_json::json!({ "filePath": "notes.txt", "content": "after" }),
-            &context,
-        )
+        .run(serde_json::json!({ "filePath": "notes.txt", "content": "after" }), &context)
         .await
         .expect_err("a link out of the project is not a path this tool writes");
 
@@ -188,10 +179,7 @@ async fn a_link_planted_at_the_name_is_refused_by_the_open_not_by_the_guard() {
     let context = ctx(project.path().to_owned());
     context.files.record(&planted);
     let refused = WriteTool
-        .run(
-            serde_json::json!({ "filePath": "notes.txt", "content": "after" }),
-            &context,
-        )
+        .run(serde_json::json!({ "filePath": "notes.txt", "content": "after" }), &context)
         .await
         .expect_err("a link at the final component is not followed");
 
@@ -317,10 +305,7 @@ async fn a_dot_dot_path_that_climbs_out_through_a_link_is_refused() {
         matches!(&refused, ToolError::Failed(message) if message.contains("symbolic link")),
         "got {refused:?}"
     );
-    assert!(
-        !landing.exists(),
-        "the write escaped the project through `..` after a link"
-    );
+    assert!(!landing.exists(), "the write escaped the project through `..` after a link");
 }
 
 /// Both halves of the `..` story, pinned together because they are one
@@ -344,12 +329,7 @@ async fn dot_dot_is_popped_before_the_claim_is_judged() {
     let outer = tempfile::tempdir().expect("a scratch directory");
     let project = outer.path().join("project");
     let elsewhere = outer.path().join("elsewhere");
-    for dir in [
-        &project,
-        &project.join(".git"),
-        &project.join("nested"),
-        &elsewhere,
-    ] {
+    for dir in [&project, &project.join(".git"), &project.join("nested"), &elsewhere] {
         std::fs::create_dir(dir).expect("the fixture makes its directories");
     }
 
@@ -359,9 +339,7 @@ async fn dot_dot_is_popped_before_the_claim_is_judged() {
     std::os::unix::fs::symlink(&secret, project.join("escape.txt")).expect("the link is creatable");
 
     let context = ctx(project.clone());
-    context
-        .files
-        .record(&project.join("nested").join("..").join("escape.txt"));
+    context.files.record(&project.join("nested").join("..").join("escape.txt"));
     let refused = WriteTool
         .run(
             serde_json::json!({ "filePath": "nested/../escape.txt", "content": "after" }),
@@ -382,10 +360,7 @@ async fn dot_dot_is_popped_before_the_claim_is_judged() {
 
     // Half two: `..` that walks out. The guard stands aside; the gate asks.
     WriteTool
-        .run(
-            serde_json::json!({ "filePath": "../outside.txt", "content": "gated" }),
-            &ctx(project),
-        )
+        .run(serde_json::json!({ "filePath": "../outside.txt", "content": "gated" }), &ctx(project))
         .await
         .expect("an openly external `..` is the gate's decision, not a refusal here");
 
@@ -418,10 +393,7 @@ async fn a_path_that_openly_names_somewhere_else_is_left_to_the_permission_gate(
         .await
         .expect("an openly external write is gated, not refused outright");
 
-    assert_eq!(
-        std::fs::read_to_string(&target).expect("the file was written"),
-        "allowed"
-    );
+    assert_eq!(std::fs::read_to_string(&target).expect("the file was written"), "allowed");
 }
 
 #[test]

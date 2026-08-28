@@ -31,14 +31,10 @@
 
 use std::path::PathBuf;
 
-use ganja_core::{
-    team::{MemberName, ShimCli, Spawn, Surface, TeamFile, TeamName, TeamsRoot},
-    teammate::{
-        TeammateRegistry,
-        reaper::{self, Fate},
-        tmux::Server,
-    },
-};
+use ganja_core::team::{MemberName, ShimCli, Spawn, Surface, TeamFile, TeamName, TeamsRoot};
+use ganja_core::teammate::TeammateRegistry;
+use ganja_core::teammate::reaper::{self, Fate};
+use ganja_core::teammate::tmux::Server;
 use ganja_testkit::tmux::{PrivateServer, require_tmux};
 use tempfile::TempDir;
 
@@ -117,12 +113,7 @@ impl Team {
             .collect();
         let path = ganja_testkit::seed_team_file(&root, &name, lead_session, home.path(), &members);
 
-        Self {
-            _home: home,
-            root,
-            name,
-            path,
-        }
+        Self { _home: home, root, name, path }
     }
 
     /// The registry a lead leading `session` would sweep with.
@@ -147,9 +138,7 @@ impl Team {
 
 /// The pane surface a record names.
 fn on(pane_id: &str) -> Surface {
-    Surface::Pane {
-        id: pane_id.to_owned(),
-    }
+    Surface::Pane { id: pane_id.to_owned() }
 }
 
 /// `<name>@<team>`, built the way a member record builds it — so a test can
@@ -173,15 +162,7 @@ fn teammate_pane(server: &PrivateServer, agent_id: &str, parent_session: &str) -
     server.split(
         None,
         &[],
-        &[
-            "/bin/sh",
-            "-c",
-            IDLE,
-            "--agent-id",
-            agent_id,
-            "--parent-session-id",
-            parent_session,
-        ],
+        &["/bin/sh", "-c", IDLE, "--agent-id", agent_id, "--parent-session-id", parent_session],
     )
 }
 
@@ -202,17 +183,9 @@ async fn an_orphaned_pane_is_reaped_at_lead_startup() {
 
     let swept = reaper::sweep_on(&team.registry(SESSION), &Server::at(server.socket(), None)).await;
 
-    assert_eq!(
-        swept.fate_of("worker"),
-        Some(Fate::Reaped),
-        "the orphan was ended: {swept:?}"
-    );
+    assert_eq!(swept.fate_of("worker"), Some(Fate::Reaped), "the orphan was ended: {swept:?}");
     assert!(!holds(&server, &pane), "and its pane is gone: {pane}");
-    assert_eq!(
-        team.members(),
-        vec!["team-lead".to_owned()],
-        "and the team file stopped naming it"
-    );
+    assert_eq!(team.members(), vec!["team-lead".to_owned()], "and the team file stopped naming it");
 }
 
 /// The near-miss: a live pane wearing a recorded id, running somebody else's
@@ -231,11 +204,7 @@ async fn a_recycled_pane_id_is_not_killed() {
         Some(Fate::Recycled),
         "a pane that cannot show the agent id is not the teammate's: {swept:?}"
     );
-    assert!(
-        holds(&server, &pane),
-        "and it is still running: {pane} on {:?}",
-        server.socket()
-    );
+    assert!(holds(&server, &pane), "and it is still running: {pane} on {:?}", server.socket());
     assert_eq!(
         team.members(),
         vec!["team-lead".to_owned()],
@@ -266,13 +235,7 @@ async fn a_shim_teammates_pane_record_survives_a_sweep_that_cannot_witness_it() 
     let team = Team::written(
         "session-01998ad0",
         SESSION,
-        &[(
-            "worker",
-            Surface::Shim {
-                cli: ShimCli::Codex,
-                pane: Some(pane.clone()),
-            },
-        )],
+        &[("worker", Surface::Shim { cli: ShimCli::Codex, pane: Some(pane.clone()) })],
     );
 
     let swept = reaper::sweep_on(&team.registry(SESSION), &Server::at(server.socket(), None)).await;
@@ -317,10 +280,7 @@ async fn a_team_led_by_another_session_is_left_whole() {
     let swept = reaper::sweep_on(&team.registry(SESSION), &Server::at(server.socket(), None)).await;
 
     assert!(swept.is_empty(), "nothing was even looked at: {swept:?}");
-    assert!(
-        holds(&server, &pane),
-        "the other lead's teammate is still running"
-    );
+    assert!(holds(&server, &pane), "the other lead's teammate is still running");
     assert_eq!(
         team.members(),
         vec!["team-lead".to_owned(), "worker".to_owned()],
@@ -377,11 +337,7 @@ async fn a_siblings_pane_is_not_killed_because_its_name_ends_with_the_dead_ones(
 #[tokio::test]
 async fn a_co_tenant_leads_live_panes_survive_a_sweep_of_the_team_file_they_share() {
     let server = server();
-    let pane = teammate_pane(
-        &server,
-        &agent_id("session-01998ad0", "worker"),
-        OTHER_SESSION,
-    );
+    let pane = teammate_pane(&server, &agent_id("session-01998ad0", "worker"), OTHER_SESSION);
     let team = Team::written("session-01998ad0", SESSION, &[("worker", on(&pane))]);
 
     let swept = reaper::sweep_on(&team.registry(SESSION), &Server::at(server.socket(), None)).await;
@@ -403,11 +359,7 @@ async fn a_co_tenant_leads_live_panes_survive_a_sweep_of_the_team_file_they_shar
 #[tokio::test]
 async fn a_team_with_no_panes_is_swept_silently() {
     let server = server();
-    let team = Team::written(
-        "session-01998ad0",
-        SESSION,
-        &[("worker", Surface::InProcess)],
-    );
+    let team = Team::written("session-01998ad0", SESSION, &[("worker", Surface::InProcess)]);
 
     let swept = reaper::sweep_on(&team.registry(SESSION), &Server::at(server.socket(), None)).await;
 

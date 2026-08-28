@@ -20,31 +20,21 @@
 //!
 //! [`ScriptedProvider`]: ganja_testkit::ScriptedProvider
 
-use std::{
-    collections::{HashMap, VecDeque},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::Duration,
-};
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::{
-    StreamExt as _,
-    stream::{self, BoxStream},
+use futures::StreamExt as _;
+use futures::stream::{self, BoxStream};
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{
+    Command, Event, FinishReason, PartBody, PermissionId, PermissionReply, Role, ToolState, Usage,
 };
-use ganja_core::{
-    Config, Engine, SessionId, SessionInfo, Storage,
-    permission::Permissions,
-    protocol::{
-        Command, Event, FinishReason, PartBody, PermissionId, PermissionReply, Role, ToolState,
-        Usage,
-    },
-    provider::{ChatRequest, Provider, ProviderError, ProviderEvent},
-    storage,
-    tool::{Registry, Tool, ToolCtx, ToolError, ToolOutput},
-};
+use ganja_core::provider::{ChatRequest, Provider, ProviderError, ProviderEvent};
+use ganja_core::tool::{Registry, Tool, ToolCtx, ToolError, ToolOutput};
+use ganja_core::{Config, Engine, SessionId, SessionInfo, Storage, storage};
 use ganja_testkit::{ScriptedProvider, drain, says, tool_call};
 use serde_json::{Value, json};
 
@@ -78,13 +68,7 @@ impl Router {
             .map(|(opening, steps)| (opening.to_owned(), steps.into()))
             .collect();
 
-        (
-            Arc::new(Self {
-                scripts: Mutex::new(routed),
-                seen: Arc::clone(&seen),
-            }),
-            seen,
-        )
+        (Arc::new(Self { scripts: Mutex::new(routed), seen: Arc::clone(&seen) }), seen)
     }
 }
 
@@ -121,10 +105,7 @@ impl Provider for Router {
         _cancel: tokio_util::sync::CancellationToken,
     ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
         let opening = opening(&request);
-        self.seen
-            .lock()
-            .expect("the request log is never poisoned")
-            .push(request);
+        self.seen.lock().expect("the request log is never poisoned").push(request);
 
         let script = {
             let mut scripts = self.scripts.lock().expect("the scripts are never poisoned");
@@ -187,11 +168,7 @@ impl Gate {
 
 /// Makes `who` wait at the gate until [`release`] nudges it.
 fn hold(traffic: &Mutex<Traffic>, who: &str) {
-    traffic
-        .lock()
-        .expect("the gate is never poisoned")
-        .held
-        .insert(who.to_owned(), Arc::default());
+    traffic.lock().expect("the gate is never poisoned").held.insert(who.to_owned(), Arc::default());
 }
 
 /// Lets a held caller through. A permit, not a broadcast: the nudge is stored
@@ -229,13 +206,7 @@ impl Tool for Gate {
 
         self.barrier.wait().await;
 
-        let held = self
-            .traffic
-            .lock()
-            .expect("the gate is never poisoned")
-            .held
-            .get(&who)
-            .cloned();
+        let held = self.traffic.lock().expect("the gate is never poisoned").held.get(&who).cloned();
         if let Some(held) = held {
             held.notified().await;
         }
@@ -261,13 +232,7 @@ struct Canned {
 impl Canned {
     fn new(id: &'static str) -> (Arc<Self>, Arc<AtomicUsize>) {
         let calls = Arc::new(AtomicUsize::new(0));
-        (
-            Arc::new(Self {
-                id,
-                calls: Arc::clone(&calls),
-            }),
-            calls,
-        )
+        (Arc::new(Self { id, calls: Arc::clone(&calls) }), calls)
     }
 }
 
@@ -308,10 +273,7 @@ fn delegates(children: &[(&str, &str)]) -> Vec<ProviderEvent> {
     let mut script = Vec::new();
     for (index, (agent, prompt)) in children.iter().enumerate() {
         let id = format!("call_{index}");
-        script.push(ProviderEvent::ToolCallStart {
-            id: id.clone(),
-            name: "task".to_owned(),
-        });
+        script.push(ProviderEvent::ToolCallStart { id: id.clone(), name: "task".to_owned() });
         script.push(ProviderEvent::ToolCallDelta {
             id: id.clone(),
             json: json!({
@@ -349,14 +311,9 @@ fn config(concurrency: Option<usize>) -> Config {
 
 /// An engine over `provider` offering `tools`, running the builtin agents.
 fn engine(provider: Arc<dyn Provider>, tools: Vec<Arc<dyn Tool>>, config: &Config) -> Engine {
-    Engine::new(
-        provider,
-        "recorder-model",
-        Arc::new(Registry::new(tools)),
-        Permissions::default(),
-    )
-    .with_agents(ganja_testkit::agent_registry(config))
-    .with_concurrency(config.agents.concurrency())
+    Engine::new(provider, "recorder-model", Arc::new(Registry::new(tools)), Permissions::default())
+        .with_agents(ganja_testkit::agent_registry(config))
+        .with_concurrency(config.agents.concurrency())
 }
 
 /// The final state of every `task` part on the stream, keyed by the
@@ -394,11 +351,11 @@ fn finish_order(seen: &[Event]) -> Vec<String> {
     seen.iter()
         .filter_map(|event| match event {
             Event::PartUpdated { part, .. } => match &part.body {
-                PartBody::Tool {
-                    tool,
-                    state: ToolState::Completed { input, .. },
-                    ..
-                } if tool == "task" => input["description"].as_str().map(str::to_owned),
+                PartBody::Tool { tool, state: ToolState::Completed { input, .. }, .. }
+                    if tool == "task" =>
+                {
+                    input["description"].as_str().map(str::to_owned)
+                }
                 _ => None,
             },
             _ => None,
@@ -469,10 +426,7 @@ async fn two_children_asking_at_once_hold_two_dialogs_answered_by_id() {
     let mut seen = Vec::new();
     let drained = tokio::time::timeout(PATIENCE, async {
         loop {
-            let event = events
-                .next()
-                .await
-                .expect("the turn should finish before the stream ends");
+            let event = events.next().await.expect("the turn should finish before the stream ends");
             if let Event::PermissionRequested { id, tool, .. } = &event {
                 assert_eq!(
                     tool, "webfetch",
@@ -515,17 +469,11 @@ async fn two_children_asking_at_once_hold_two_dialogs_answered_by_id() {
     );
 
     let parts = task_parts(&drained);
-    for (child, answer) in [
-        ("alpha-child", "alpha found it"),
-        ("beta-child", "beta found it"),
-    ] {
+    for (child, answer) in [("alpha-child", "alpha found it"), ("beta-child", "beta found it")] {
         let Some(ToolState::Completed { output, .. }) = parts.get(child) else {
             panic!("{child} did not complete: {parts:?}");
         };
-        assert!(
-            output.contains(answer),
-            "{child}'s part carries its own child's answer: {output}"
-        );
+        assert!(output.contains(answer), "{child}'s part carries its own child's answer: {output}");
     }
 
     let Some(Event::MessageFinished { reason, .. }) = drained.last() else {
@@ -558,24 +506,15 @@ async fn three_task_calls_run_concurrently_and_land_as_they_finish() {
         ),
         (
             "alpha-child",
-            vec![
-                tool_call("gate", json!({ "who": "alpha-child" })),
-                says("alpha is done"),
-            ],
+            vec![tool_call("gate", json!({ "who": "alpha-child" })), says("alpha is done")],
         ),
         (
             "beta-child",
-            vec![
-                tool_call("gate", json!({ "who": "beta-child" })),
-                says("beta is done"),
-            ],
+            vec![tool_call("gate", json!({ "who": "beta-child" })), says("beta is done")],
         ),
         (
             "gamma-child",
-            vec![
-                tool_call("gate", json!({ "who": "gamma-child" })),
-                says("gamma is done"),
-            ],
+            vec![tool_call("gate", json!({ "who": "gamma-child" })), says("gamma is done")],
         ),
     ]);
     let (gate, traffic, _peak) = Gate::new(3);
@@ -598,10 +537,7 @@ async fn three_task_calls_run_concurrently_and_land_as_they_finish() {
     let mut seen = Vec::new();
     let drained = tokio::time::timeout(PATIENCE, async {
         loop {
-            let event = events
-                .next()
-                .await
-                .expect("the turn should finish before the stream ends");
+            let event = events.next().await.expect("the turn should finish before the stream ends");
             let completed = matches!(&event, Event::PartUpdated { part, .. } if matches!(
                 &part.body,
                 PartBody::Tool { tool, state: ToolState::Completed { .. }, .. } if tool == "task"
@@ -660,17 +596,11 @@ async fn each_child_reports_progress_on_its_own_part() {
         ),
         (
             "alpha-child",
-            vec![
-                tool_call("gate", json!({ "who": "alpha-child" })),
-                says("alpha is done"),
-            ],
+            vec![tool_call("gate", json!({ "who": "alpha-child" })), says("alpha is done")],
         ),
         (
             "beta-child",
-            vec![
-                tool_call("gate", json!({ "who": "beta-child" })),
-                says("beta is done"),
-            ],
+            vec![tool_call("gate", json!({ "who": "beta-child" })), says("beta is done")],
         ),
     ]);
     let (gate, _traffic, _peak) = Gate::new(2);
@@ -697,13 +627,8 @@ async fn each_child_reports_progress_on_its_own_part() {
         let Event::PartUpdated { part, .. } = event else {
             continue;
         };
-        let PartBody::Tool {
-            tool,
-            state: ToolState::Running {
-                input, metadata, ..
-            },
-            ..
-        } = &part.body
+        let PartBody::Tool { tool, state: ToolState::Running { input, metadata, .. }, .. } =
+            &part.body
         else {
             continue;
         };
@@ -715,16 +640,10 @@ async fn each_child_reports_progress_on_its_own_part() {
         }
     }
 
-    assert_eq!(
-        progress.len(),
-        2,
-        "two calls, two parts carrying progress: {progress:?}"
-    );
+    assert_eq!(progress.len(), 2, "two calls, two parts carrying progress: {progress:?}");
     for (part_id, reports) in &progress {
-        let described: Vec<&str> = reports
-            .iter()
-            .filter_map(|report| report["input"]["description"].as_str())
-            .collect();
+        let described: Vec<&str> =
+            reports.iter().filter_map(|report| report["input"]["description"].as_str()).collect();
         assert!(
             described.windows(2).all(|pair| pair[0] == pair[1]),
             "part {part_id} reported for more than one child: {described:?}"
@@ -757,27 +676,18 @@ async fn the_configured_cap_is_how_many_children_run_at_once() {
         ("general", "gamma-child"),
         ("general", "delta-child"),
     ];
-    let mut scripts = vec![(
-        "delegate four ways",
-        vec![delegates(&children), says("all four are back")],
-    )];
+    let mut scripts =
+        vec![("delegate four ways", vec![delegates(&children), says("all four are back")])];
     for (_, prompt) in &children {
         scripts.push((
             *prompt,
-            vec![
-                tool_call("gate", json!({ "who": *prompt })),
-                says("a child is done"),
-            ],
+            vec![tool_call("gate", json!({ "who": *prompt })), says("a child is done")],
         ));
     }
     let (provider, _requests) = Router::new(scripts);
 
     let config = config(Some(2));
-    assert_eq!(
-        config.agents.concurrency(),
-        2,
-        "the knob a frontend reads is the one under test"
-    );
+    assert_eq!(config.agents.concurrency(), 2, "the knob a frontend reads is the one under test");
     let (gate, _traffic, peak) = Gate::new(2);
     let engine = engine(provider, vec![gate], &config);
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
@@ -796,16 +706,8 @@ async fn the_configured_cap_is_how_many_children_run_at_once() {
         .await
         .expect("a cap of two must still let pairs through");
 
-    assert_eq!(
-        peak.load(Ordering::SeqCst),
-        2,
-        "two at a time, never more and never fewer"
-    );
-    assert_eq!(
-        finish_order(&drained).len(),
-        4,
-        "and all four children still ran"
-    );
+    assert_eq!(peak.load(Ordering::SeqCst), 2, "two at a time, never more and never fewer");
+    assert_eq!(finish_order(&drained).len(), 4, "and all four children still ran");
 }
 
 /// A cancel while two dialogs are queued ends the turn, answers both requests,
@@ -834,10 +736,7 @@ async fn a_cancel_while_two_dialogs_are_queued_answers_both_and_ends_the_turn() 
         ),
         (
             "beta-child",
-            vec![
-                tool_call("webfetch", json!({ "url": "https://beta.test" })),
-                says("unreachable"),
-            ],
+            vec![tool_call("webfetch", json!({ "url": "https://beta.test" })), says("unreachable")],
         ),
     ]);
     let (webfetch, fetches) = Canned::new("webfetch");
@@ -859,17 +758,11 @@ async fn a_cancel_while_two_dialogs_are_queued_answers_both_and_ends_the_turn() 
     let mut seen = Vec::new();
     let drained = tokio::time::timeout(PATIENCE, async {
         loop {
-            let event = events
-                .next()
-                .await
-                .expect("the turn should finish before the stream ends");
+            let event = events.next().await.expect("the turn should finish before the stream ends");
             if let Event::PermissionRequested { id, .. } = &event {
                 asked.push(id.clone());
                 if asked.len() == 2 {
-                    engine
-                        .send(Command::CancelTurn)
-                        .await
-                        .expect("a cancel is never refused");
+                    engine.send(Command::CancelTurn).await.expect("a cancel is never refused");
                 }
             }
             let finished = matches!(event, Event::MessageFinished { .. });
@@ -959,30 +852,20 @@ async fn concurrent_children_stay_off_the_subscribed_stream() {
         })
         .await
         .expect("an idle engine accepts a prompt");
-    let drained = tokio::time::timeout(PATIENCE, drain(&mut events))
-        .await
-        .expect("three children finish");
+    let drained =
+        tokio::time::timeout(PATIENCE, drain(&mut events)).await.expect("three children finish");
 
-    let sentinels = [
-        "only alpha utters this",
-        "only beta utters this",
-        "only gamma utters this",
-    ];
+    let sentinels = ["only alpha utters this", "only beta utters this", "only gamma utters this"];
 
     // The one place they are allowed: each parent part carries its own child's
     // answer, which is also what stops the sweep below passing vacuously.
     let parts = task_parts(&drained);
-    for (child, sentinel) in ["alpha-child", "beta-child", "gamma-child"]
-        .into_iter()
-        .zip(sentinels)
+    for (child, sentinel) in ["alpha-child", "beta-child", "gamma-child"].into_iter().zip(sentinels)
     {
         let Some(ToolState::Completed { output, .. }) = parts.get(child) else {
             panic!("{child} did not complete: {parts:?}");
         };
-        assert!(
-            output.contains(sentinel),
-            "{child}'s own part carries its answer: {output}"
-        );
+        assert!(output.contains(sentinel), "{child}'s own part carries its answer: {output}");
     }
 
     for event in &drained {
@@ -1076,24 +959,15 @@ async fn a_stored_turn_replays_its_calls_in_call_order() {
         ),
         (
             "alpha-child",
-            vec![
-                tool_call("gate", json!({ "who": "alpha-child" })),
-                says("alpha is done"),
-            ],
+            vec![tool_call("gate", json!({ "who": "alpha-child" })), says("alpha is done")],
         ),
         (
             "beta-child",
-            vec![
-                tool_call("gate", json!({ "who": "beta-child" })),
-                says("beta is done"),
-            ],
+            vec![tool_call("gate", json!({ "who": "beta-child" })), says("beta is done")],
         ),
         (
             "gamma-child",
-            vec![
-                tool_call("gate", json!({ "who": "gamma-child" })),
-                says("gamma is done"),
-            ],
+            vec![tool_call("gate", json!({ "who": "gamma-child" })), says("gamma is done")],
         ),
     ]);
     let (gate, traffic, _peak) = Gate::new(3);
@@ -1124,10 +998,7 @@ async fn a_stored_turn_replays_its_calls_in_call_order() {
     let mut seen = Vec::new();
     let drained = tokio::time::timeout(PATIENCE, async {
         loop {
-            let event = events
-                .next()
-                .await
-                .expect("the turn should finish before the stream ends");
+            let event = events.next().await.expect("the turn should finish before the stream ends");
             let completed = matches!(&event, Event::PartUpdated { part, .. } if matches!(
                 &part.body,
                 PartBody::Tool { tool, state: ToolState::Completed { .. }, .. } if tool == "task"
@@ -1169,22 +1040,18 @@ async fn a_stored_turn_replays_its_calls_in_call_order() {
         .iter()
         .flat_map(|message| message.parts.iter())
         .filter_map(|part| match &part.body {
-            PartBody::Tool {
-                tool,
-                state: ToolState::Completed { input, .. },
-                ..
-            } if tool == "task" => input["description"].as_str().map(str::to_owned),
+            PartBody::Tool { tool, state: ToolState::Completed { input, .. }, .. }
+                if tool == "task" =>
+            {
+                input["description"].as_str().map(str::to_owned)
+            }
             _ => None,
         })
         .collect();
 
     assert_eq!(
         replayed,
-        vec![
-            "alpha-child".to_owned(),
-            "beta-child".to_owned(),
-            "gamma-child".to_owned()
-        ],
+        vec!["alpha-child".to_owned(), "beta-child".to_owned(), "gamma-child".to_owned()],
         "the stored turn replays in the order the model called, not the order the children came home"
     );
 }
@@ -1240,14 +1107,8 @@ async fn ordinary_calls_still_resolve_one_after_another() {
     let mut step = Vec::new();
     for (index, tool) in ["first", "second"].into_iter().enumerate() {
         let id = format!("call_{index}");
-        step.push(ProviderEvent::ToolCallStart {
-            id: id.clone(),
-            name: tool.to_owned(),
-        });
-        step.push(ProviderEvent::ToolCallDelta {
-            id: id.clone(),
-            json: "{}".to_owned(),
-        });
+        step.push(ProviderEvent::ToolCallStart { id: id.clone(), name: tool.to_owned() });
+        step.push(ProviderEvent::ToolCallDelta { id: id.clone(), json: "{}".to_owned() });
         step.push(ProviderEvent::ToolCallEnd { id });
     }
     step.push(ProviderEvent::Finish(FinishReason::Completed));
@@ -1257,14 +1118,8 @@ async fn ordinary_calls_still_resolve_one_after_another() {
         provider,
         "recorder-model",
         Arc::new(Registry::new(vec![
-            Arc::new(Sequential {
-                id: "first",
-                order: Arc::clone(&order),
-            }) as Arc<dyn Tool>,
-            Arc::new(Sequential {
-                id: "second",
-                order: Arc::clone(&order),
-            }) as Arc<dyn Tool>,
+            Arc::new(Sequential { id: "first", order: Arc::clone(&order) }) as Arc<dyn Tool>,
+            Arc::new(Sequential { id: "second", order: Arc::clone(&order) }) as Arc<dyn Tool>,
         ])),
         Permissions::default(),
     );
@@ -1280,9 +1135,7 @@ async fn ordinary_calls_still_resolve_one_after_another() {
         })
         .await
         .expect("an idle engine accepts a prompt");
-    tokio::time::timeout(PATIENCE, drain(&mut events))
-        .await
-        .expect("two ordinary calls finish");
+    tokio::time::timeout(PATIENCE, drain(&mut events)).await.expect("two ordinary calls finish");
 
     assert_eq!(
         *order.lock().expect("the order log is never poisoned"),
@@ -1315,10 +1168,8 @@ async fn ordinary_calls_still_resolve_one_after_another() {
 async fn every_child_that_ends_fires_its_own_subagent_stop() {
     use std::collections::BTreeMap;
 
-    use ganja_core::{
-        config::{HookCommand, HookHandler, HookMatcher},
-        hook::{HookEvent, Hooks},
-    };
+    use ganja_core::config::{HookCommand, HookHandler, HookMatcher};
+    use ganja_core::hook::{HookEvent, Hooks};
 
     let directory = tempfile::TempDir::new().expect("a temporary directory is creatable");
     let ledger = directory.path().join("stops");
@@ -1366,9 +1217,7 @@ async fn every_child_that_ends_fires_its_own_subagent_stop() {
         })
         .await
         .expect("an idle engine accepts a prompt");
-    tokio::time::timeout(PATIENCE, drain(&mut events))
-        .await
-        .expect("three children finish");
+    tokio::time::timeout(PATIENCE, drain(&mut events)).await.expect("three children finish");
 
     // A child's hook fires as that child ends, which is before the turn's own
     // finish event — but the writes are files, and a file is not there the
@@ -1386,11 +1235,7 @@ async fn every_child_that_ends_fires_its_own_subagent_stop() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    assert_eq!(
-        written.len(),
-        3,
-        "one firing per child, not one per batch: {written:?}"
-    );
+    assert_eq!(written.len(), 3, "one firing per child, not one per batch: {written:?}");
     let mut agents: Vec<&str> = written
         .iter()
         .map(|envelope| {

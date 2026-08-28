@@ -37,13 +37,12 @@
 //! §4.1.2.1 requires the echo on error responses too, so that is a conformance
 //! bet rather than a guess.
 
-use std::{io, time::Duration};
+use std::io;
+use std::time::Duration;
 
 use secrecy::{ExposeSecret as _, SecretString};
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::TcpStream,
-};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::TcpStream;
 use tokio_util::sync::CancellationToken;
 use url::form_urlencoded;
 
@@ -156,15 +155,10 @@ impl Listener {
         let socket = tokio::net::TcpListener::bind(("127.0.0.1", port))
             .await
             .map_err(|source| LoopbackError::Bind { port, source })?;
-        let bound = socket
-            .local_addr()
-            .map_err(|source| LoopbackError::Bind { port, source })?
-            .port();
+        let bound =
+            socket.local_addr().map_err(|source| LoopbackError::Bind { port, source })?.port();
 
-        Ok(Self {
-            socket,
-            port: bound,
-        })
+        Ok(Self { socket, port: bound })
     }
 
     /// The port the redirect URI has to name.
@@ -216,11 +210,8 @@ impl Listener {
     /// Accepts until one request settles the login.
     async fn serve(&self, path: &str, state: &SecretString) -> Result<SecretString, LoopbackError> {
         loop {
-            let (mut socket, _) = self
-                .socket
-                .accept()
-                .await
-                .map_err(|source| LoopbackError::Accept { source })?;
+            let (mut socket, _) =
+                self.socket.accept().await.map_err(|source| LoopbackError::Accept { source })?;
 
             let Some(head) = head(&mut socket).await else {
                 // Said nothing usable before it was cut off. Not a callback,
@@ -299,9 +290,7 @@ async fn settle(
 pub(crate) fn error_code(value: &str) -> Option<String> {
     let code_shaped = !value.is_empty()
         && value.len() <= MAX_ERROR_CODE
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
+        && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
 
     code_shaped.then(|| value.to_owned())
 }
@@ -356,10 +345,7 @@ async fn head(socket: &mut TcpStream) -> Option<String> {
     let mut chunk = [0_u8; 1024];
 
     loop {
-        let read = tokio::time::timeout(HEAD_WINDOW, socket.read(&mut chunk))
-            .await
-            .ok()?
-            .ok()?;
+        let read = tokio::time::timeout(HEAD_WINDOW, socket.read(&mut chunk)).await.ok()?.ok()?;
         if read == 0 {
             return None;
         }
@@ -439,10 +425,8 @@ macro_rules! page {
 }
 
 /// The page a completed login leaves in the browser.
-const SUCCESS_PAGE: &str = page!(
-    "Signed in",
-    "You can close this tab and go back to the terminal."
-);
+const SUCCESS_PAGE: &str =
+    page!("Signed in", "You can close this tab and go back to the terminal.");
 
 /// The page a forged or misdirected callback leaves in the browser.
 const FORGED_PAGE: &str = page!(
@@ -451,10 +435,8 @@ const FORGED_PAGE: &str = page!(
 );
 
 /// The page a provider's refusal leaves in the browser.
-const DENIED_PAGE: &str = page!(
-    "The provider refused",
-    "Nothing was signed in. The terminal has the reason."
-);
+const DENIED_PAGE: &str =
+    page!("The provider refused", "Nothing was signed in. The terminal has the reason.");
 
 /// The page a callback with no code leaves in the browser.
 const NO_CODE_PAGE: &str = page!(
@@ -463,10 +445,8 @@ const NO_CODE_PAGE: &str = page!(
 );
 
 /// The page `/cancel` leaves in the browser.
-const CANCELLED_PAGE: &str = page!(
-    "Login cancelled",
-    "Nothing was signed in. You can close this tab."
-);
+const CANCELLED_PAGE: &str =
+    page!("Login cancelled", "Nothing was signed in. You can close this tab.");
 
 /// The page a request this could not parse leaves in the browser.
 const MALFORMED_PAGE: &str = page!("Not something this understood", "Nothing was signed in.");

@@ -47,12 +47,7 @@ fn both(text: &str) -> (Config, Config, String) {
 
 /// The tools a permission config names, in the order it will be evaluated in.
 fn tools(config: &Config) -> Vec<String> {
-    config
-        .permission
-        .rules()
-        .into_iter()
-        .map(|rule| rule.permission)
-        .collect()
+    config.permission.rules().into_iter().map(|rule| rule.permission).collect()
 }
 
 /// The failure this whole command is written around.
@@ -184,21 +179,15 @@ fn a_null_property_is_dropped_and_reported() {
     let (_, report) = migrated(r#"{ "model": null, "theme": "gruvbox" }"#);
 
     assert_eq!(legacy, toml, "an absent key and a null one load the same");
-    assert_eq!(
-        report.skipped,
-        [("model".to_owned(), reason::NULL.to_owned())]
-    );
+    assert_eq!(report.skipped, [("model".to_owned(), reason::NULL.to_owned())]);
 }
 
 /// A null *element* is the case with a consequence: dropping it shortens the
 /// list, which is a different setting, and there is no spelling that keeps it.
 #[test]
 fn a_null_array_element_refuses() {
-    let error = translate(
-        Path::new(FIXTURE),
-        r#"{ "instructions": ["./AGENTS.md", null] }"#,
-    )
-    .expect_err("a null element has no TOML spelling");
+    let error = translate(Path::new(FIXTURE), r#"{ "instructions": ["./AGENTS.md", null] }"#)
+        .expect_err("a null element has no TOML spelling");
 
     let message = format!("{error}");
     assert!(
@@ -243,10 +232,7 @@ fn an_empty_object_keeps_the_header_that_is_its_whole_value() {
            }"#,
     );
 
-    assert!(
-        rendered.contains("[mcp.docs.oauth]"),
-        "the marker keeps its header:\n{rendered}"
-    );
+    assert!(rendered.contains("[mcp.docs.oauth]"), "the marker keeps its header:\n{rendered}");
     assert_eq!(legacy, toml);
 }
 
@@ -274,10 +260,7 @@ fn an_integer_too_large_for_toml_refuses() {
     )
     .expect_err("an integer past 64 signed bits has no TOML spelling");
 
-    assert!(
-        format!("{error}").contains("64"),
-        "the refusal says what would not fit: {error}"
-    );
+    assert!(format!("{error}").contains("64"), "the refusal says what would not fit: {error}");
 }
 
 /// The report is the output, so a key that travelled is a row that names the
@@ -348,12 +331,6 @@ fn a_hooks_matcher_that_does_not_compile_is_refused_before_it_is_translated() {
     let error = decode(&path).expect_err("a matcher nothing can compile matches nothing");
 
     let rendered = format!("{error}");
-    assert!(
-        rendered.contains(FIXTURE),
-        "the refusal names the file that said it: {rendered}"
-    );
-    assert!(
-        rendered.contains("matcher"),
-        "and what about it: {rendered}"
-    );
+    assert!(rendered.contains(FIXTURE), "the refusal names the file that said it: {rendered}");
+    assert!(rendered.contains("matcher"), "and what about it: {rendered}");
 }

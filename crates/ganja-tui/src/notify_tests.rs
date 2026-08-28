@@ -20,10 +20,7 @@ fn emitted(config: TuiConfig, event: NotificationEvent, summary: &str) -> Vec<u8
 fn a_moment_the_config_did_not_ask_for_writes_nothing() {
     let cases = [
         (serde_json::json!({}), NotificationEvent::TurnComplete),
-        (
-            serde_json::json!({"notifications": false}),
-            NotificationEvent::TurnComplete,
-        ),
+        (serde_json::json!({"notifications": false}), NotificationEvent::TurnComplete),
         (
             serde_json::json!({"notifications": ["turn-complete"]}),
             NotificationEvent::ApprovalRequested,

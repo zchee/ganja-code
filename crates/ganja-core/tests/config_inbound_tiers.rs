@@ -19,12 +19,11 @@
 //! the machine running the suite cannot contribute a config of its own, and
 //! nothing here can read or write a real user's state.
 
-use std::{env, fs, path::Path};
+use std::path::Path;
+use std::{env, fs};
 
-use ganja_core::{
-    Config, ConfigError, Overrides,
-    config::{CONFIG_ENV, CONFIG_HOME_ENV, DialogExpiry, InboundPolicy},
-};
+use ganja_core::config::{CONFIG_ENV, CONFIG_HOME_ENV, DialogExpiry, InboundPolicy};
+use ganja_core::{Config, ConfigError, Overrides};
 
 /// Writes `text` to `path`, creating whatever directories it needs.
 fn plant(path: &Path, text: &str) {
@@ -69,10 +68,7 @@ fn the_inbound_keys_cross_the_tiers_under_the_tighten_only_rule() {
         ("refuse", "accept", InboundPolicy::Refuse),
         ("hold", "accept", InboundPolicy::Hold),
     ] {
-        plant(
-            &global,
-            &format!("cross_session_inbound = \"{global_value}\"\n"),
-        );
+        plant(&global, &format!("cross_session_inbound = \"{global_value}\"\n"));
         plant(
             &project.join("ganja.toml"),
             &format!("cross_session_inbound = \"{project_value}\"\n"),
@@ -104,10 +100,7 @@ fn the_inbound_keys_cross_the_tiers_under_the_tighten_only_rule() {
 
     // ...and a project file then tightens the value the trusted tiers
     // settled on, not the global one it never saw.
-    plant(
-        &project.join("ganja.toml"),
-        "cross_session_inbound = \"hold\"\n",
-    );
+    plant(&project.join("ganja.toml"), "cross_session_inbound = \"hold\"\n");
     let config = load(&project).expect("all three tiers parse");
     assert_eq!(
         config.cross_session_inbound,
@@ -131,9 +124,8 @@ fn the_inbound_keys_cross_the_tiers_under_the_tighten_only_rule() {
     // the file. The loader canonicalises the walk's start, so the expected
     // path is spelled the same way.
     plant(&project.join("ganja.toml"), "dialog_expiry = \"5m\"\n");
-    let offender = fs::canonicalize(&project)
-        .expect("the fixture directory resolves")
-        .join("ganja.toml");
+    let offender =
+        fs::canonicalize(&project).expect("the fixture directory resolves").join("ganja.toml");
 
     let error = load(&project).expect_err("a checkout must not size the review window");
     let ConfigError::Parse { path, message } = &error else {
@@ -146,13 +138,9 @@ fn the_inbound_keys_cross_the_tiers_under_the_tighten_only_rule() {
     // that far: the refusal is the format's, it names that path, and it is
     // what a session sees instead of any of the above.
     fs::remove_file(project.join("ganja.toml")).expect("the fixture file is removable");
-    plant(
-        &project.join("ganja.jsonc"),
-        r#"{"cross_session_inbound": "refuse"}"#,
-    );
-    let offender = fs::canonicalize(&project)
-        .expect("the fixture directory resolves")
-        .join("ganja.jsonc");
+    plant(&project.join("ganja.jsonc"), r#"{"cross_session_inbound": "refuse"}"#);
+    let offender =
+        fs::canonicalize(&project).expect("the fixture directory resolves").join("ganja.jsonc");
 
     let error = load(&project).expect_err("the old format is refused, not read");
     let ConfigError::Legacy { path } = &error else {

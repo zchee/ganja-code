@@ -4,19 +4,15 @@
 //! special-cased in code, so what proves it works is a scripted loop that
 //! actually writes `AGENTS.md` with the ordinary `write` tool.
 
-use std::{
-    path::{Path, PathBuf},
-    sync::{Arc, LazyLock},
-};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock};
 
-use ganja_core::{
-    Config, Engine, EngineError, SessionId, Storage, command,
-    config::CONFIG_HOME_ENV,
-    permission::Permissions,
-    protocol::{Command, Event, FinishReason, Message, PartBody, Role, ToolState},
-    provider::ChatRequest,
-    tool::Registry,
-};
+use ganja_core::config::CONFIG_HOME_ENV;
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{Command, Event, FinishReason, Message, PartBody, Role, ToolState};
+use ganja_core::provider::ChatRequest;
+use ganja_core::tool::Registry;
+use ganja_core::{Config, Engine, EngineError, SessionId, Storage, command};
 use ganja_testkit::{ScriptedProvider, drain_allowing, says, tool_call};
 use serde_json::json;
 
@@ -95,10 +91,7 @@ async fn the_init_command_produces_an_agents_file_through_the_ordinary_loop() {
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
-        .send(Command::RunCommand {
-            name: "init".to_owned(),
-            args: String::new(),
-        })
+        .send(Command::RunCommand { name: "init".to_owned(), args: String::new() })
         .await
         .expect("init is builtin");
     let seen = drain_allowing(&engine, &mut events).await;
@@ -165,10 +158,7 @@ async fn a_command_nothing_answers_to_says_what_would_have_worked() {
     );
 
     let refused = engine
-        .send(Command::RunCommand {
-            name: "nope".to_owned(),
-            args: String::new(),
-        })
+        .send(Command::RunCommand { name: "nope".to_owned(), args: String::new() })
         .await
         .expect_err("no command answers to that");
 
@@ -206,19 +196,13 @@ async fn a_configured_command_runs_like_a_builtin() {
     );
 
     engine
-        .send(Command::RunCommand {
-            name: "review".to_owned(),
-            args: "the shell tool".to_owned(),
-        })
+        .send(Command::RunCommand { name: "review".to_owned(), args: "the shell tool".to_owned() })
         .await
         .expect("the configured command runs");
     drain_allowing(&engine, &mut events).await;
 
     let requests = requests.lock().expect("the request log is never poisoned");
-    assert_eq!(
-        prompt_of(&requests[0]),
-        "review the diff, focusing on the shell tool"
-    );
+    assert_eq!(prompt_of(&requests[0]), "review the diff, focusing on the shell tool");
 }
 
 /// A command that names an agent runs as it — its prompt and its rules — for
@@ -244,10 +228,7 @@ async fn a_command_that_names_an_agent_runs_as_it_for_one_turn() {
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
-        .send(Command::RunCommand {
-            name: "review".to_owned(),
-            args: String::new(),
-        })
+        .send(Command::RunCommand { name: "review".to_owned(), args: String::new() })
         .await
         .expect("the configured command runs");
     drain_allowing(&engine, &mut events).await;
@@ -270,11 +251,7 @@ async fn a_command_that_names_an_agent_runs_as_it_for_one_turn() {
         Some("you review and nothing else"),
         "the command's turn ran as the agent it named"
     );
-    assert_eq!(
-        engine.agent().as_deref(),
-        Some("build"),
-        "and the session is still what it was"
-    );
+    assert_eq!(engine.agent().as_deref(), Some("build"), "and the session is still what it was");
     assert!(
         requests[1].system.is_none(),
         "so the next turn is not the reviewer: {:?}",
@@ -312,19 +289,13 @@ async fn compacting_on_demand_summarizes_a_session_that_is_nowhere_near_full() {
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
     engine.resume(&session).await.expect("the session loads");
 
-    engine
-        .send(Command::Compact)
-        .await
-        .expect("an idle engine accepts a compaction");
+    engine.send(Command::Compact).await.expect("an idle engine accepts a compaction");
     let seen = drain_allowing(&engine, &mut events).await;
 
     {
         let requests = requests.lock().expect("the request log is never poisoned");
         assert_eq!(requests.len(), 1, "a compaction asks once: to summarize");
-        assert!(
-            requests[0].tools.is_empty(),
-            "and the summarize request is the toolless one"
-        );
+        assert!(requests[0].tools.is_empty(), "and the summarize request is the toolless one");
         assert!(
             prompt_of(&requests[0]).contains("[User]: the objective"),
             "with the conversation serialized into it"
@@ -334,18 +305,14 @@ async fn compacting_on_demand_summarizes_a_session_that_is_nowhere_near_full() {
     let summary = seen
         .iter()
         .find_map(|event| match event {
-            Event::MessageStarted {
-                session_id: _,
-                message,
-            } if message.role == Role::Assistant => Some(message.clone()),
+            Event::MessageStarted { session_id: _, message } if message.role == Role::Assistant => {
+                Some(message.clone())
+            }
             _ => None,
         })
         .expect("the summary enters the transcript");
     assert_eq!(
-        summary
-            .parts
-            .first()
-            .and_then(ganja_core::protocol::Part::as_text),
+        summary.parts.first().and_then(ganja_core::protocol::Part::as_text),
         Some("## Objective\n- find the thing")
     );
 
@@ -354,10 +321,7 @@ async fn compacting_on_demand_summarizes_a_session_that_is_nowhere_near_full() {
     };
     assert_eq!(*reason, FinishReason::Completed);
     assert_eq!(
-        engine
-            .current_session()
-            .and_then(|info| info.summary)
-            .as_ref(),
+        engine.current_session().and_then(|info| info.summary).as_ref(),
         Some(&summary.id),
         "the window now opens at the summary"
     );
@@ -417,19 +381,10 @@ async fn starting_a_new_session_leaves_the_old_one_on_disk_and_the_next_prompt_f
         .await
         .expect("an idle engine accepts a prompt");
     drain_allowing(&engine, &mut events).await;
-    let first = engine
-        .current_session()
-        .expect("the first prompt minted a session")
-        .id;
+    let first = engine.current_session().expect("the first prompt minted a session").id;
 
-    engine
-        .send(Command::NewSession)
-        .await
-        .expect("an idle engine accepts a reset");
-    assert!(
-        engine.current_session().is_none(),
-        "the engine is between sessions"
-    );
+    engine.send(Command::NewSession).await.expect("an idle engine accepts a reset");
+    assert!(engine.current_session().is_none(), "the engine is between sessions");
 
     engine
         .send(Command::SendPrompt {
@@ -442,19 +397,11 @@ async fn starting_a_new_session_leaves_the_old_one_on_disk_and_the_next_prompt_f
         .await
         .expect("an idle engine accepts a prompt");
     drain_allowing(&engine, &mut events).await;
-    let second = engine
-        .current_session()
-        .expect("the next prompt minted another")
-        .id;
+    let second = engine.current_session().expect("the next prompt minted another").id;
 
     assert_ne!(first, second, "a fresh session, not the old one reopened");
-    let stored: Vec<SessionId> = engine
-        .sessions()
-        .await
-        .expect("the store lists")
-        .into_iter()
-        .map(|info| info.id)
-        .collect();
+    let stored: Vec<SessionId> =
+        engine.sessions().await.expect("the store lists").into_iter().map(|info| info.id).collect();
     assert!(
         stored.contains(&first) && stored.contains(&second),
         "and the old one is still there to resume: {stored:?}"
@@ -474,10 +421,7 @@ async fn a_new_session_does_not_inherit_what_the_last_one_had_read() {
     let (provider, _) = ScriptedProvider::new(vec![
         tool_call("read", json!({ "filePath": path })),
         says("read it"),
-        tool_call(
-            "write",
-            json!({ "filePath": path, "content": "something else\n" }),
-        ),
+        tool_call("write", json!({ "filePath": path, "content": "something else\n" })),
         says("tried to write it"),
     ]);
     // No store, so no title request: this is about the read log, and an engine
@@ -505,10 +449,7 @@ async fn a_new_session_does_not_inherit_what_the_last_one_had_read() {
         .expect("an idle engine accepts a prompt");
     drain_allowing(&engine, &mut events).await;
 
-    engine
-        .send(Command::NewSession)
-        .await
-        .expect("an idle engine accepts a reset");
+    engine.send(Command::NewSession).await.expect("an idle engine accepts a reset");
 
     engine
         .send(Command::SendPrompt {
@@ -526,19 +467,14 @@ async fn a_new_session_does_not_inherit_what_the_last_one_had_read() {
         .iter()
         .filter_map(|event| match event {
             Event::PartUpdated { part, .. } => match &part.body {
-                PartBody::Tool {
-                    state: ToolState::Error { error, .. },
-                    ..
-                } => Some(error.clone()),
+                PartBody::Tool { state: ToolState::Error { error, .. }, .. } => Some(error.clone()),
                 _ => None,
             },
             _ => None,
         })
         .collect();
     assert!(
-        refused
-            .iter()
-            .any(|error| error.contains("has not been read this session")),
+        refused.iter().any(|error| error.contains("has not been read this session")),
         "the write had to be refused as unread, got {refused:?}"
     );
     assert_eq!(

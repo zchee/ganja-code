@@ -15,19 +15,17 @@
 //! clock at render time. A list whose rows silently re-age between frames
 //! would be a list that never renders the same way twice.
 
-use ganja_core::{SessionInfo, catalog::compact_tokens};
-use ratatui::{
-    buffer::Buffer,
-    layout::Rect,
-    text::{Line, Text},
-    widgets::{Block, Clear, Paragraph, Widget as _},
-};
+use ganja_core::SessionInfo;
+use ganja_core::catalog::compact_tokens;
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::text::{Line, Text};
+use ratatui::widgets::{Block, Clear, Paragraph, Widget as _};
 use unicode_width::UnicodeWidthStr as _;
 
-use crate::{
-    component::{chat::clip, clamped, first_visible, modal},
-    theme::Theme,
-};
+use crate::component::chat::clip;
+use crate::component::{clamped, first_visible, modal};
+use crate::theme::Theme;
 
 /// Milliseconds in each unit an age is rounded to.
 const SECOND: u64 = 1_000;
@@ -67,9 +65,7 @@ const HINTS: &str = "[j/k] [up/down] move   [Enter] resume   [Esc] close";
 pub fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| {
-            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
-        })
+        .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// Stored sessions, and which one the user is on.
@@ -87,11 +83,7 @@ impl Sessions {
     /// Builds the picker over `entries`, ageing them against `now`.
     #[must_use]
     pub fn new(entries: Vec<SessionInfo>, now: u64) -> Self {
-        Self {
-            entries,
-            selected: 0,
-            opened: now,
-        }
+        Self { entries, selected: 0, opened: now }
     }
 
     /// Whether there is nothing to choose from.
@@ -138,26 +130,17 @@ impl Sessions {
     /// One line per visible session, aligned into three columns.
     fn rows(&self, width: usize, rows: usize, theme: &Theme) -> Vec<Line<'static>> {
         let first = first_visible(self.selected, rows);
-        let visible = self
-            .entries
-            .iter()
-            .enumerate()
-            .skip(first)
-            .take(rows)
-            .collect::<Vec<_>>();
+        let visible = self.entries.iter().enumerate().skip(first).take(rows).collect::<Vec<_>>();
 
         // The two right-hand columns are as wide as their widest value, so the
         // titles beside them line up instead of jittering per row.
-        let ages: Vec<String> = visible
-            .iter()
-            .map(|(_, info)| age(self.opened, info.updated))
-            .collect();
+        let ages: Vec<String> =
+            visible.iter().map(|(_, info)| age(self.opened, info.updated)).collect();
         let sizes: Vec<String> = visible.iter().map(|(_, info)| size(info)).collect();
         let age_width = ages.iter().map(|age| age.width()).max().unwrap_or(0);
         let size_width = sizes.iter().map(|size| size.width()).max().unwrap_or(0);
-        let title_width = width
-            .saturating_sub(MARKER.width() + age_width + size_width + GAP * 2)
-            .max(1);
+        let title_width =
+            width.saturating_sub(MARKER.width() + age_width + size_width + GAP * 2).max(1);
 
         visible
             .iter()
@@ -166,22 +149,11 @@ impl Sessions {
                 let title = clip(title(info), title_width);
                 let row = format!(
                     "{marker}{title:<title_width$}{gap}{age:>age_width$}{gap}{size:>size_width$}",
-                    marker = if *index == self.selected {
-                        MARKER
-                    } else {
-                        "  "
-                    },
+                    marker = if *index == self.selected { MARKER } else { "  " },
                     gap = " ".repeat(GAP),
                 );
 
-                Line::styled(
-                    row,
-                    if *index == self.selected {
-                        theme.accent
-                    } else {
-                        theme.fg
-                    },
-                )
+                Line::styled(row, if *index == self.selected { theme.accent } else { theme.fg })
             })
             .collect()
     }

@@ -9,13 +9,9 @@
 //! stay untouched — "no fetch happened" is asserted against a listener that
 //! would have counted one, not against the absence of a log line.
 
-use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::Duration,
-};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use ganja_core::catalog;
 use tokio::net::TcpListener;
@@ -24,15 +20,8 @@ use tokio_util::sync::CancellationToken;
 #[tokio::test]
 async fn the_static_table_answers_when_the_network_never_does() {
     let cache_home = tempfile::tempdir().expect("a temporary directory");
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("loopback is bindable");
-    let url = format!(
-        "http://{}",
-        listener
-            .local_addr()
-            .expect("a bound socket has an address")
-    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("loopback is bindable");
+    let url = format!("http://{}", listener.local_addr().expect("a bound socket has an address"));
 
     // Anything that reaches this socket is a fetch that should not have
     // happened; the count is what the assertions below read.

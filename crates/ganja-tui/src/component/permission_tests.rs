@@ -1,5 +1,6 @@
 use ganja_protocol::PermissionId;
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 use unicode_width::UnicodeWidthStr as _;
 
 use super::{Permission, wrap};
@@ -20,11 +21,7 @@ fn rendered(permission: &Permission, area: Rect) -> String {
     permission.render(area, &mut buffer, &Theme::default());
 
     (0..area.height)
-        .map(|row| {
-            (0..area.width)
-                .map(|column| buffer[(column, row)].symbol())
-                .collect::<String>()
-        })
+        .map(|row| (0..area.width).map(|column| buffer[(column, row)].symbol()).collect::<String>())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -50,7 +47,8 @@ fn the_dialog_shows_the_tool_the_title_and_the_options() {
 /// key shows up here as the cut it would be on a terminal.
 #[test]
 fn a_shim_spawn_dialog_keeps_the_read_back_clause_on_screen() {
-    use ganja_core::teammate::{posture_line, shim_tui::pane_line};
+    use ganja_core::teammate::posture_line;
+    use ganja_core::teammate::shim_tui::pane_line;
     use ganja_protocol::team::MemberBackend;
 
     for (backend, name) in [
@@ -88,10 +86,7 @@ fn a_shim_spawn_dialog_keeps_the_read_back_clause_on_screen() {
             screen.contains("mailed back to you"),
             "{name}: the read-back clause fell off the dialog:\n{screen}"
         );
-        assert!(
-            screen.contains("\"surface\""),
-            "{name}: no surface row:\n{screen}"
-        );
+        assert!(screen.contains("\"surface\""), "{name}: no surface row:\n{screen}");
         // grok's row is the one that contradicts its own bound row on
         // purpose (D512, the 1.0.7 recording): where the bound row says an
         // unapproved ask ends the turn, the pane asks the person. Its
@@ -99,10 +94,7 @@ fn a_shim_spawn_dialog_keeps_the_read_back_clause_on_screen() {
         // — about twenty characters past the opener — so the row leads
         // with the ask, and the ask is what must survive the same cut.
         if backend == MemberBackend::Grok {
-            assert!(
-                screen.contains("asks you"),
-                "{name}: the ask fell off the dialog:\n{screen}"
-            );
+            assert!(screen.contains("asks you"), "{name}: the ask fell off the dialog:\n{screen}");
         }
     }
 }
@@ -130,20 +122,14 @@ fn a_long_args_object_is_clamped_with_a_marker() {
 
     let screen = rendered(&permission, Rect::new(0, 0, 60, 18));
 
-    assert!(
-        screen.contains("..."),
-        "a clamped preview should say so:\n{screen}"
-    );
+    assert!(screen.contains("..."), "a clamped preview should say so:\n{screen}");
 }
 
 #[test]
 fn a_zero_area_draws_nothing_and_does_not_panic() {
     let screen = rendered(&permission(), Rect::new(0, 0, 0, 0));
 
-    assert!(
-        screen.is_empty(),
-        "a zero area has no cell to hold: {screen}"
-    );
+    assert!(screen.is_empty(), "a zero area has no cell to hold: {screen}");
 }
 
 /// The marker is a claim about what the user is not being shown, so it must
@@ -153,10 +139,7 @@ fn a_zero_area_draws_nothing_and_does_not_panic() {
 fn a_call_the_dialog_draws_in_full_says_nothing_about_overflow() {
     let screen = rendered(&permission(), Rect::new(0, 0, 60, 18));
 
-    assert!(
-        !screen.contains("not shown"),
-        "this call fits with rows to spare:\n{screen}"
-    );
+    assert!(!screen.contains("not shown"), "this call fits with rows to spare:\n{screen}");
 }
 
 /// The failure the marker exists to prevent: a command longer than the
@@ -174,10 +157,7 @@ fn a_call_too_long_to_draw_says_so_and_still_offers_the_keys() {
 
     let screen = rendered(&permission, Rect::new(0, 0, 60, 18));
 
-    assert!(
-        screen.contains("not shown"),
-        "a cut command has to be flagged as cut:\n{screen}"
-    );
+    assert!(screen.contains("not shown"), "a cut command has to be flagged as cut:\n{screen}");
     // Overflow must never push the answers off the bottom, which is also
     // what the pty suite waits on to know the dialog is up.
     assert!(screen.contains("[y] allow once"), "got:\n{screen}");
@@ -200,10 +180,7 @@ fn a_call_reaching_outside_the_project_lists_where_it_would_reach() {
 
     let screen = rendered(&permission, Rect::new(0, 0, 60, 18));
 
-    assert!(
-        screen.contains("grants access outside the project:"),
-        "got:\n{screen}"
-    );
+    assert!(screen.contains("grants access outside the project:"), "got:\n{screen}");
     assert!(screen.contains("/etc"), "got:\n{screen}");
     assert!(screen.contains("/var/tmp/scratch"), "got:\n{screen}");
 }
@@ -341,18 +318,10 @@ fn an_escape_sequence_in_a_title_never_reaches_the_buffer() {
 
     // `rendered` joins rows with a newline of its own; any other control
     // character in the string got there from the dialog's own text.
-    let leaked: Vec<char> = screen
-        .chars()
-        .filter(|character| *character != '\n' && character.is_control())
-        .collect();
+    let leaked: Vec<char> =
+        screen.chars().filter(|character| *character != '\n' && character.is_control()).collect();
 
-    assert!(
-        leaked.is_empty(),
-        "control characters reached the buffer: {leaked:?}\n{screen}"
-    );
+    assert!(leaked.is_empty(), "control characters reached the buffer: {leaked:?}\n{screen}");
     // Without this the assertion above would also pass on a blank screen.
-    assert!(
-        screen.contains("rm -rf /"),
-        "the printable remainder still has to render:\n{screen}"
-    );
+    assert!(screen.contains("rm -rf /"), "the printable remainder still has to render:\n{screen}");
 }

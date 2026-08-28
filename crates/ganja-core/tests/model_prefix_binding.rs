@@ -17,13 +17,12 @@
 //! authenticate nothing — every assertion here is about *selection*, which
 //! happens before a request.
 
-use std::{collections::BTreeMap, env};
+use std::collections::BTreeMap;
+use std::env;
 
-use ganja_core::{
-    catalog,
-    config::{Config, ProviderConfig},
-    provider::{self, Dialect, SelectionError},
-};
+use ganja_core::catalog;
+use ganja_core::config::{Config, ProviderConfig};
+use ganja_core::provider::{self, Dialect, SelectionError};
 
 const COMPAT_ID: &str = "local-llama";
 const COMPAT_KEY_VAR: &str = "GANJA_TEST_BINDING_LOCAL_LLAMA_KEY";
@@ -31,10 +30,7 @@ const COMPAT_KEY_VAR: &str = "GANJA_TEST_BINDING_LOCAL_LLAMA_KEY";
 /// The config under test: one declared endpoint, and whatever `model` spelling
 /// the case wants.
 fn spelling(model: &str) -> Config {
-    let mut config = Config {
-        model: Some(model.to_owned()),
-        ..Config::default()
-    };
+    let mut config = Config { model: Some(model.to_owned()), ..Config::default() };
     config.provider.insert(
         COMPAT_ID.to_owned(),
         ProviderConfig {

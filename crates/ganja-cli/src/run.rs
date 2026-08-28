@@ -55,16 +55,15 @@
 //!   so this is a recorded gap, not a stance; `ganja-code-80g` tracks it
 //!   (deviation: an-attached-run-sends-dollar-tokens-literal).
 
-use std::{
-    io::{self, IsTerminal as _, Read as _, Write},
-    path::PathBuf,
-};
+use std::io::{self, IsTerminal as _, Read as _, Write};
+use std::path::PathBuf;
 
 use anyhow::{Context as _, Result, bail};
 use clap::{Args, ValueEnum};
 use futures::StreamExt as _;
 use ganja_client::Prompt;
-use ganja_core::{Engine, EngineError, SessionId, config::Overrides};
+use ganja_core::config::Overrides;
+use ganja_core::{Engine, EngineError, SessionId};
 use ganja_permission::permission;
 use ganja_protocol::{
     Command as EngineCommand, Event, FinishReason, Message, Part, PartBody, PartId,
@@ -73,10 +72,8 @@ use ganja_protocol::{
 use secrecy::ExposeSecret as _;
 use serde_json::Value;
 
-use crate::{
-    assemble::{Assembled, assemble},
-    millis_now, printable,
-};
+use crate::assemble::{Assembled, assemble};
+use crate::{millis_now, printable};
 
 /// Every `type` an nd-JSON object may carry: upstream's six and no seventh
 /// (`run.ts:720`, `:741`, `:745`, `:749`, `:762`, `:784`).
@@ -92,14 +89,7 @@ use crate::{
 /// it would run together with the reply it precedes. A consumer parsing types
 /// is told the difference and a reader watching stdout is not, so only the one
 /// that can tell them apart is given both.
-const TYPES: [&str; 6] = [
-    "tool_use",
-    "step_start",
-    "step_finish",
-    "text",
-    "reasoning",
-    "error",
-];
+const TYPES: [&str; 6] = ["tool_use", "step_start", "step_finish", "text", "reasoning", "error"];
 
 /// The entries of [`TYPES`] this build emits, discriminants being indexes into
 /// it. There is no gap left: every name in the set has a source.
@@ -306,18 +296,9 @@ pub async fn run(args: RunArgs) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read the working directory")?;
     let assembled = assemble(
         &cwd,
-        &Overrides {
-            model: args.model,
-            agent: args.agent,
-            config_file: args.config,
-        },
+        &Overrides { model: args.model, agent: args.agent, config_file: args.config },
     )?;
-    let Assembled {
-        engine,
-        servers,
-        config,
-        ..
-    } = assembled;
+    let Assembled { engine, servers, config, .. } = assembled;
     // The D479 trio reaches the receiver classifier (D523): a `run --auto`
     // session is bypass-classed for cross-session admission, exactly as the
     // UI's `--yolo` session is. Classification only — what `auto` does to
@@ -346,15 +327,7 @@ pub async fn run(args: RunArgs) -> Result<()> {
     // model's real names — and never a request built around it.
     let outcome = match effort_switch(&engine, args.effort).await {
         Ok(()) => {
-            drive(
-                &engine,
-                session,
-                &message,
-                args.command.as_deref(),
-                auto,
-                args.format,
-            )
-            .await
+            drive(&engine, session, &message, args.command.as_deref(), auto, args.format).await
         }
         Err(refusal) => Err(refusal),
     };
@@ -487,11 +460,7 @@ async fn remote_session(
     // A `--continue` with no root falls through to a fresh session exactly as
     // the local path does; the server mints it.
     if resume_latest
-        && let Some(root) = client
-            .sessions()
-            .await?
-            .into_iter()
-            .find(|row| row.parent.is_none())
+        && let Some(root) = client.sessions().await?.into_iter().find(|row| row.parent.is_none())
     {
         return Ok(root.id);
     }
@@ -518,9 +487,7 @@ async fn drive_attached(
     let started = client
         .prompt(
             session,
-            &Prompt::new(run.message.clone())
-                .as_agent(run.agent.clone())
-                .asking(run.model.clone()),
+            &Prompt::new(run.message.clone()).as_agent(run.agent.clone()).asking(run.model.clone()),
         )
         .await;
 
@@ -548,10 +515,7 @@ async fn drive_attached(
             }
         };
 
-        if let Event::PermissionRequested {
-            id, tool, title, ..
-        } = &event
-        {
+        if let Event::PermissionRequested { id, tool, title, .. } = &event {
             let reply = if run.auto && !REFUSED.contains(&tool.as_str()) {
                 PermissionReply::Once
             } else {
@@ -598,19 +562,13 @@ async fn select_session(
         return Ok(None);
     }
 
-    let roots = engine
-        .sessions()
-        .await
-        .context("failed to list the stored sessions")?;
+    let roots = engine.sessions().await.context("failed to list the stored sessions")?;
     // Roots only, as `ganja sessions` lists them: a session carrying a parent
     // belongs to the `task` call that spawned it.
     let Some(root) = roots.into_iter().find(|session| session.parent.is_none()) else {
         return Ok(None);
     };
-    engine
-        .resume(&root.id)
-        .await
-        .context("failed to resume the session")?;
+    engine.resume(&root.id).await.context("failed to resume the session")?;
 
     Ok(Some(root.id))
 }
@@ -628,18 +586,12 @@ async fn drive(
     format: Format,
 ) -> Result<Option<String>> {
     // Before the prompt, always. See the module documentation.
-    let mut events = engine
-        .subscribe()
-        .await
-        .context("failed to subscribe to the engine")?;
+    let mut events = engine.subscribe().await.context("failed to subscribe to the engine")?;
 
     let started = match command {
         Some(name) => {
             engine
-                .send(EngineCommand::RunCommand {
-                    name: name.to_owned(),
-                    args: message.to_owned(),
-                })
+                .send(EngineCommand::RunCommand { name: name.to_owned(), args: message.to_owned() })
                 .await
         }
         None => {
@@ -672,11 +624,7 @@ async fn drive(
     // the rest of the run.
     let id = session
         .map(|id| id.as_str().to_owned())
-        .or_else(|| {
-            engine
-                .current_session()
-                .map(|info| info.id.as_str().to_owned())
-        })
+        .or_else(|| engine.current_session().map(|info| info.id.as_str().to_owned()))
         .unwrap_or_default();
 
     let stdout = io::stdout();
@@ -700,10 +648,7 @@ async fn drive(
     while let Some(event) = events.next().await {
         // Answered here rather than in the reporter, because answering is a
         // command and the reporter only writes.
-        if let Event::PermissionRequested {
-            id, tool, title, ..
-        } = &event
-        {
+        if let Event::PermissionRequested { id, tool, title, .. } = &event {
             let reply = if auto {
                 PermissionReply::Once
             } else {
@@ -712,12 +657,7 @@ async fn drive(
             };
             // A reply nothing is waiting for is defined to be ignored, which
             // is what a reply racing a cancelled turn becomes.
-            let _ = engine
-                .send(EngineCommand::ReplyPermission {
-                    id: id.clone(),
-                    reply,
-                })
-                .await;
+            let _ = engine.send(EngineCommand::ReplyPermission { id: id.clone(), reply }).await;
 
             continue;
         }
@@ -1050,9 +990,7 @@ impl<'a> Reporter<'a> {
     fn finish(mut self) -> Result<Option<String>> {
         self.flush();
         self.out.flush().context("failed to write the turn")?;
-        self.err
-            .flush()
-            .context("failed to write the diagnostics")?;
+        self.err.flush().context("failed to write the diagnostics")?;
 
         Ok(self.failure)
     }
@@ -1101,9 +1039,7 @@ fn piped_stdin() -> Result<String> {
     }
 
     let mut piped = String::new();
-    stdin
-        .read_to_string(&mut piped)
-        .context("failed to read the message from standard input")?;
+    stdin.read_to_string(&mut piped).context("failed to read the message from standard input")?;
 
     Ok(piped)
 }

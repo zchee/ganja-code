@@ -1,10 +1,8 @@
 use std::sync::Arc;
 
-use ganja_core::{
-    Engine, Storage,
-    config::{Config, ThemeMode},
-    provider::{FakeProvider, fake},
-};
+use ganja_core::config::{Config, ThemeMode};
+use ganja_core::provider::{FakeProvider, fake};
+use ganja_core::{Engine, Storage};
 use ganja_protocol::Message;
 use tempfile::TempDir;
 
@@ -54,13 +52,9 @@ fn stored(directory: &TempDir, prompt: &str) -> String {
     let message = Message::user(prompt);
 
     storage.save_info(&info).expect("the info stores");
-    storage
-        .save_message(&info.id, &message)
-        .expect("the envelope stores");
+    storage.save_message(&info.id, &message).expect("the envelope stores");
     for part in &message.parts {
-        storage
-            .save_part(&info.id, &message.id, part)
-            .expect("the part stores");
+        storage.save_part(&info.id, &message.id, part).expect("the part stores");
     }
 
     info.id.as_str().to_owned()
@@ -96,10 +90,7 @@ async fn continuing_with_nothing_stored_says_so_rather_than_opening_a_blank_sess
         .await
         .expect_err("an empty store has nothing to continue");
 
-    assert!(
-        format!("{refusal:#}").contains("no stored session"),
-        "got: {refusal:#}"
-    );
+    assert!(format!("{refusal:#}").contains("no stored session"), "got: {refusal:#}");
 }
 
 #[tokio::test]
@@ -109,14 +100,11 @@ async fn continuing_picks_the_newest_session_and_returns_its_transcript() {
     let newest = stored(&directory, "the newer conversation");
     let engine = engine(&directory);
 
-    let transcript = stored_transcript(&engine, Resume::Latest)
-        .await
-        .expect("the newest session resumes");
+    let transcript =
+        stored_transcript(&engine, Resume::Latest).await.expect("the newest session resumes");
 
     assert_eq!(
-        engine
-            .current_session()
-            .map(|info| info.id.as_str().to_owned()),
+        engine.current_session().map(|info| info.id.as_str().to_owned()),
         Some(newest),
         "the newest session should be the one installed"
     );
@@ -141,12 +129,7 @@ async fn resuming_by_id_returns_that_session_rather_than_the_newest() {
         .await
         .expect("a stored session resumes");
 
-    assert_eq!(
-        engine
-            .current_session()
-            .map(|info| info.id.as_str().to_owned()),
-        Some(older)
-    );
+    assert_eq!(engine.current_session().map(|info| info.id.as_str().to_owned()), Some(older));
     assert_eq!(
         transcript
             .iter()
@@ -164,9 +147,7 @@ fn with_stored_pick(directory: &TempDir, stored: &str) -> Themes {
 
     let mut previous = Themes::builtin();
     previous.adopt_store(store.clone());
-    previous
-        .select(stored)
-        .unwrap_or_else(|| panic!("{stored} should be a builtin theme"));
+    previous.select(stored).unwrap_or_else(|| panic!("{stored} should be a builtin theme"));
     previous.persist().expect("the pick stores");
 
     let mut themes = Themes::builtin();
@@ -187,10 +168,7 @@ fn a_theme_named_in_the_config_outranks_the_one_that_was_last_picked() {
 
     let complaint = configure_themes(
         &mut themes,
-        &Config {
-            theme: Some("tokyonight".to_owned()),
-            ..Config::default()
-        },
+        &Config { theme: Some("tokyonight".to_owned()), ..Config::default() },
     );
 
     assert_eq!(complaint, None);
@@ -215,10 +193,7 @@ fn the_configured_mode_is_the_arm_themes_resolve_in_and_dark_is_the_default() {
 
     configure_themes(
         &mut themes,
-        &Config {
-            theme_mode: Some(ThemeMode::Light),
-            ..Config::default()
-        },
+        &Config { theme_mode: Some(ThemeMode::Light), ..Config::default() },
     );
 
     assert_eq!(themes.mode(), Mode::Light);
@@ -232,10 +207,7 @@ fn a_configured_theme_this_build_does_not_have_is_reported_rather_than_fatal() {
 
     let complaint = configure_themes(
         &mut themes,
-        &Config {
-            theme: Some("a-theme-nobody-shipped".to_owned()),
-            ..Config::default()
-        },
+        &Config { theme: Some("a-theme-nobody-shipped".to_owned()), ..Config::default() },
     )
     .expect("an unknown theme should be worth saying something about");
 
@@ -267,10 +239,7 @@ fn the_system_prompt_carries_the_base_half_a_promptless_agent_falls_back_to() {
             base.is_some_and(|base| !base.trim().is_empty()),
             "{model}: an empty base prompt would pass the check above and say nothing"
         );
-        assert!(
-            suffix.is_some(),
-            "{model}: the environment block always says something"
-        );
+        assert!(suffix.is_some(), "{model}: the environment block always says something");
     }
 }
 
@@ -318,10 +287,7 @@ fn the_system_prompt_is_composed_for_the_model_the_agents_left_the_engine_on() {
         suffix.contains(ADOPTED),
         "the environment block names the model that will be asked: {suffix}"
     );
-    assert!(
-        !suffix.contains(LAUNCH),
-        "and never the one it was launched with: {suffix}"
-    );
+    assert!(!suffix.contains(LAUNCH), "and never the one it was launched with: {suffix}");
 }
 
 #[test]
@@ -331,10 +297,7 @@ fn the_opening_notice_carries_whatever_startup_had_to_say() {
         (&[Some("provider"), None, None], Some("provider")),
         (&[None, Some("theme"), None], Some("theme")),
         (&[None, None, Some("no git")], Some("no git")),
-        (
-            &[Some("provider"), Some("theme"), None],
-            Some("provider \u{b7} theme"),
-        ),
+        (&[Some("provider"), Some("theme"), None], Some("provider \u{b7} theme")),
         (
             &[Some("provider"), Some("theme"), Some("no git")],
             Some("provider \u{b7} theme \u{b7} no git"),
@@ -410,9 +373,8 @@ fn the_bind_predicate_is_interactive_non_member() {
     let member_at = source
         .find("None if let Some((membership, _)) = &membership =>")
         .expect("the member arm is in this file");
-    let binder_at = source
-        .find("binder.map(|binder| {")
-        .expect("the binder is asked for in this file");
+    let binder_at =
+        source.find("binder.map(|binder| {").expect("the binder is asked for in this file");
     assert!(
         gate_at < binder_at && binder_at < member_at,
         "the one hand-in sits in the config-home, non-member arm, ahead of the member arm"
@@ -421,13 +383,9 @@ fn the_bind_predicate_is_interactive_non_member() {
     // (iii) The member arm hands back no socket at all — its tuple's third
     // slot is `None`, and so is the no-config-home arm's.
     let member_arm = &source[member_at..];
-    let member_arm = &member_arm[..member_arm
-        .find("None => {")
-        .expect("the no-config-home arm follows the member arm")];
-    assert!(
-        !member_arm.contains("binder"),
-        "a member pane binds nothing: {member_arm}"
-    );
+    let member_arm = &member_arm
+        [..member_arm.find("None => {").expect("the no-config-home arm follows the member arm")];
+    assert!(!member_arm.contains("binder"), "a member pane binds nothing: {member_arm}");
     assert!(
         source.contains("(engine.with_solo_postbox(), None, None)"),
         "the no-config-home arm binds nothing either, and OQ1(b) left it that way"

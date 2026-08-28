@@ -16,9 +16,7 @@ fn definition(name: &str, description: &str) -> ToolDefinition {
 }
 
 fn shared(names: &[&str]) -> Arc<Mutex<BTreeSet<String>>> {
-    Arc::new(Mutex::new(
-        names.iter().map(|&name| name.to_owned()).collect(),
-    ))
+    Arc::new(Mutex::new(names.iter().map(|&name| name.to_owned()).collect()))
 }
 
 #[test]
@@ -48,15 +46,9 @@ fn whole_servers_defer_largest_first_until_the_total_fits() {
     let at_five = candidates(names, 5, &BTreeSet::new());
     assert_eq!(
         at_five,
-        [
-            "mcp__big__a",
-            "mcp__big__b",
-            "mcp__big__c",
-            "mcp__big__d",
-            "mcp__big__e"
-        ]
-        .map(str::to_owned)
-        .into(),
+        ["mcp__big__a", "mcp__big__b", "mcp__big__c", "mcp__big__d", "mcp__big__e"]
+            .map(str::to_owned)
+            .into(),
         "deferring the biggest server alone brings 10 down to 5"
     );
 
@@ -68,12 +60,7 @@ fn whole_servers_defer_largest_first_until_the_total_fits() {
 
 #[test]
 fn equal_sized_servers_defer_in_name_order() {
-    let names = [
-        "mcp__beta__x",
-        "mcp__beta__y",
-        "mcp__alpha__x",
-        "mcp__alpha__y",
-    ];
+    let names = ["mcp__beta__x", "mcp__beta__y", "mcp__alpha__x", "mcp__alpha__y"];
 
     let deferred = candidates(names, 2, &BTreeSet::new());
 
@@ -86,13 +73,7 @@ fn equal_sized_servers_defer_in_name_order() {
 
 #[test]
 fn activated_names_are_exempt_before_the_arithmetic_starts() {
-    let names = [
-        "mcp__a__one",
-        "mcp__a__two",
-        "mcp__a__three",
-        "mcp__a__four",
-        "mcp__a__five",
-    ];
+    let names = ["mcp__a__one", "mcp__a__two", "mcp__a__three", "mcp__a__four", "mcp__a__five"];
     let activated: BTreeSet<String> = ["mcp__a__one", "mcp__a__two"].map(str::to_owned).into();
 
     assert!(
@@ -136,9 +117,7 @@ fn a_server_key_is_everything_up_to_the_first_separator() {
 #[test]
 fn advertised_is_not_a_candidate_or_activated() {
     let deferral = Deferral::over(
-        ["mcp__s__deferred", "mcp__s__touched"]
-            .map(str::to_owned)
-            .into(),
+        ["mcp__s__deferred", "mcp__s__touched"].map(str::to_owned).into(),
         shared(&["mcp__s__touched"]),
     );
 
@@ -149,10 +128,8 @@ fn advertised_is_not_a_candidate_or_activated() {
 
 #[test]
 fn retain_advertised_preserves_registration_order() {
-    let deferral = Deferral::over(
-        ["mcp__s__a", "mcp__s__b"].map(str::to_owned).into(),
-        shared(&[]),
-    );
+    let deferral =
+        Deferral::over(["mcp__s__a", "mcp__s__b"].map(str::to_owned).into(), shared(&[]));
     let mut definitions = vec![
         definition("read", "reads"),
         definition("mcp__s__a", "deferred"),
@@ -164,10 +141,7 @@ fn retain_advertised_preserves_registration_order() {
     deferral.retain_advertised(&mut definitions);
 
     assert_eq!(
-        definitions
-            .iter()
-            .map(|d| d.name.as_str())
-            .collect::<Vec<_>>(),
+        definitions.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
         ["read", "bash", "mcp__t__c"],
         "the deferred leave; everything else keeps its order"
     );
@@ -187,10 +161,8 @@ fn an_activation_through_one_clone_is_read_by_every_other() {
 
 #[test]
 fn the_listing_names_the_deferred_and_shrinks_on_activation() {
-    let deferral = Deferral::over(
-        ["mcp__s__a", "mcp__s__b"].map(str::to_owned).into(),
-        shared(&[]),
-    );
+    let deferral =
+        Deferral::over(["mcp__s__a", "mcp__s__b"].map(str::to_owned).into(), shared(&[]));
     let definitions = vec![
         definition("read", "reads a file"),
         definition("mcp__s__a", "does the first thing"),
@@ -199,10 +171,7 @@ fn the_listing_names_the_deferred_and_shrinks_on_activation() {
 
     let listing = deferral.listing(&definitions);
     assert!(listing.starts_with("<deferred_tools>\n"));
-    assert!(
-        listing.contains("`tool_search`"),
-        "the header names the door"
-    );
+    assert!(listing.contains("`tool_search`"), "the header names the door");
     assert!(listing.contains("- mcp__s__a: does the first thing"));
     assert!(listing.contains("- mcp__s__b: does the second thing"));
     assert!(!listing.contains("read"), "advertised tools are not listed");
@@ -213,30 +182,22 @@ fn the_listing_names_the_deferred_and_shrinks_on_activation() {
     assert!(shrunk.contains("mcp__s__b"));
 
     deferral.activate("mcp__s__b");
-    assert_eq!(
-        deferral.listing(&definitions),
-        "",
-        "everything activated appends nothing"
-    );
+    assert_eq!(deferral.listing(&definitions), "", "everything activated appends nothing");
 }
 
 #[test]
 fn a_description_is_clamped_to_one_line() {
     let long = "x".repeat(200);
-    let deferral = Deferral::over(
-        ["mcp__s__a", "mcp__s__b"].map(str::to_owned).into(),
-        shared(&[]),
-    );
+    let deferral =
+        Deferral::over(["mcp__s__a", "mcp__s__b"].map(str::to_owned).into(), shared(&[]));
     let definitions = vec![
         definition("mcp__s__a", &format!("{long}\nsecond line never shows")),
         definition("mcp__s__b", "short"),
     ];
 
     let listing = deferral.listing(&definitions);
-    let line = listing
-        .lines()
-        .find(|line| line.starts_with("- mcp__s__a:"))
-        .expect("the tool is listed");
+    let line =
+        listing.lines().find(|line| line.starts_with("- mcp__s__a:")).expect("the tool is listed");
 
     assert!(!line.contains("second line"), "only the first line rides");
     assert_eq!(
@@ -255,11 +216,7 @@ fn an_empty_deferral_lists_nothing_and_filters_nothing() {
     assert_eq!(deferral.listing(&definitions), "");
     assert!(!deferral.any());
     deferral.retain_advertised(&mut definitions);
-    assert_eq!(
-        definitions.len(),
-        1,
-        "nothing is a candidate, nothing leaves"
-    );
+    assert_eq!(definitions.len(), 1, "nothing is a candidate, nothing leaves");
 }
 
 fn search_over(definitions: Vec<ToolDefinition>, deferral: &Deferral) -> ToolSearchTool {
@@ -270,10 +227,7 @@ fn search_over(definitions: Vec<ToolDefinition>, deferral: &Deferral) -> ToolSea
 async fn a_select_returns_the_schema_and_activates() {
     let deferral = Deferral::over(["mcp__s__t"].map(str::to_owned).into(), shared(&[]));
     let tool = search_over(
-        vec![
-            definition("read", "reads"),
-            definition("mcp__s__t", "the deferred one"),
-        ],
+        vec![definition("read", "reads"), definition("mcp__s__t", "the deferred one")],
         &deferral,
     );
 
@@ -285,20 +239,14 @@ async fn a_select_returns_the_schema_and_activates() {
     assert_eq!(out.title, "tool_search: activated mcp__s__t");
     assert!(out.output.contains("## mcp__s__t"));
     assert!(out.output.contains("the deferred one"));
-    assert!(
-        out.output.contains(r#""input""#),
-        "the full schema rides the result: {}",
-        out.output
-    );
+    assert!(out.output.contains(r#""input""#), "the full schema rides the result: {}", out.output);
     assert!(deferral.advertised("mcp__s__t"), "the hit activated it");
 }
 
 #[tokio::test]
 async fn a_batch_select_activates_every_name_in_one_call() {
     let deferral = Deferral::over(
-        ["mcp__s__a", "mcp__s__b", "mcp__s__c"]
-            .map(str::to_owned)
-            .into(),
+        ["mcp__s__a", "mcp__s__b", "mcp__s__c"].map(str::to_owned).into(),
         shared(&[]),
     );
     let tool = search_over(
@@ -311,32 +259,22 @@ async fn a_batch_select_activates_every_name_in_one_call() {
     );
 
     let out = tool
-        .run(
-            serde_json::json!({ "query": "select:mcp__s__a, mcp__s__b, mcp__s__c" }),
-            &ctx(),
-        )
+        .run(serde_json::json!({ "query": "select:mcp__s__a, mcp__s__b, mcp__s__c" }), &ctx())
         .await
         .expect("the batch answers");
 
     assert_eq!(out.title, "tool_search: activated 3 tools");
     for name in ["mcp__s__a", "mcp__s__b", "mcp__s__c"] {
-        assert!(
-            deferral.advertised(name),
-            "{name} activated in the one call"
-        );
+        assert!(deferral.advertised(name), "{name} activated in the one call");
     }
 }
 
 #[tokio::test]
 async fn keywords_rank_by_relevance_and_the_cap_holds() {
     let deferral = Deferral::over(
-        [
-            "mcp__s__notebook_edit",
-            "mcp__s__notebook_read",
-            "mcp__s__unrelated",
-        ]
-        .map(str::to_owned)
-        .into(),
+        ["mcp__s__notebook_edit", "mcp__s__notebook_read", "mcp__s__unrelated"]
+            .map(str::to_owned)
+            .into(),
         shared(&[]),
     );
     let tool = search_over(
@@ -349,27 +287,18 @@ async fn keywords_rank_by_relevance_and_the_cap_holds() {
     );
 
     let out = tool
-        .run(
-            serde_json::json!({ "query": "jupyter notebook", "max_results": 1 }),
-            &ctx(),
-        )
+        .run(serde_json::json!({ "query": "jupyter notebook", "max_results": 1 }), &ctx())
         .await
         .expect("keywords answer");
 
     assert_eq!(out.title, "tool_search: activated mcp__s__notebook_edit");
-    assert!(
-        !out.output.contains("mcp__s__notebook_read"),
-        "max_results capped the matches to one"
-    );
+    assert!(!out.output.contains("mcp__s__notebook_read"), "max_results capped the matches to one");
     assert!(!out.output.contains("mcp__s__unrelated"));
 }
 
 #[tokio::test]
 async fn an_empty_deferred_set_answers_that_nothing_is_deferred() {
-    let deferral = Deferral::over(
-        ["mcp__s__t"].map(str::to_owned).into(),
-        shared(&["mcp__s__t"]),
-    );
+    let deferral = Deferral::over(["mcp__s__t"].map(str::to_owned).into(), shared(&["mcp__s__t"]));
     let tool = search_over(vec![definition("mcp__s__t", "already touched")], &deferral);
 
     let out = tool
@@ -384,9 +313,7 @@ async fn an_empty_deferred_set_answers_that_nothing_is_deferred() {
 #[tokio::test]
 async fn a_failed_select_answers_with_near_misses() {
     let deferral = Deferral::over(
-        ["mcp__github__create_issue", "mcp__github__list_issues"]
-            .map(str::to_owned)
-            .into(),
+        ["mcp__github__create_issue", "mcp__github__list_issues"].map(str::to_owned).into(),
         shared(&[]),
     );
     let tool = search_over(
@@ -399,17 +326,13 @@ async fn a_failed_select_answers_with_near_misses() {
     );
 
     let out = tool
-        .run(
-            serde_json::json!({ "query": "select:mcp__github__issues, read" }),
-            &ctx(),
-        )
+        .run(serde_json::json!({ "query": "select:mcp__github__issues, read" }), &ctx())
         .await
         .expect("a miss is information, never an error");
 
     assert_eq!(out.title, "tool_search: nothing activated");
     assert!(
-        out.output
-            .contains("No deferred tool is named `mcp__github__issues`"),
+        out.output.contains("No deferred tool is named `mcp__github__issues`"),
         "{}",
         out.output
     );
@@ -418,11 +341,7 @@ async fn a_failed_select_answers_with_near_misses() {
         "the near-misses name the neighbours: {}",
         out.output
     );
-    assert!(
-        out.output.contains("`read` is already advertised"),
-        "{}",
-        out.output
-    );
+    assert!(out.output.contains("`read` is already advertised"), "{}", out.output);
     assert!(!deferral.advertised("mcp__github__create_issue"));
 }
 
@@ -433,16 +352,12 @@ async fn a_failed_select_answers_with_near_misses() {
 async fn keyword_matches_default_to_five_and_clamp_at_twenty() {
     let names: Vec<String> = (0..25).map(|n| format!("mcp__s__thing_{n:02}")).collect();
     let deferral = Deferral::over(names.iter().cloned().collect(), shared(&[]));
-    let definitions: Vec<ToolDefinition> = names
-        .iter()
-        .map(|name| definition(name, "does a thing"))
-        .collect();
+    let definitions: Vec<ToolDefinition> =
+        names.iter().map(|name| definition(name, "does a thing")).collect();
     let tool = search_over(definitions, &deferral);
 
-    let defaulted = tool
-        .run(serde_json::json!({ "query": "thing" }), &ctx())
-        .await
-        .expect("keywords answer");
+    let defaulted =
+        tool.run(serde_json::json!({ "query": "thing" }), &ctx()).await.expect("keywords answer");
     assert_eq!(
         defaulted.metadata["activated"]
             .as_array()
@@ -453,10 +368,7 @@ async fn keyword_matches_default_to_five_and_clamp_at_twenty() {
     );
 
     let clamped = tool
-        .run(
-            serde_json::json!({ "query": "thing", "max_results": 50 }),
-            &ctx(),
-        )
+        .run(serde_json::json!({ "query": "thing", "max_results": 50 }), &ctx())
         .await
         .expect("keywords answer");
     assert_eq!(
@@ -474,10 +386,7 @@ async fn keyword_matches_default_to_five_and_clamp_at_twenty() {
 /// model is taught, so it is pinned byte-for-byte.
 #[test]
 fn the_description_opens_with_the_select_grammar() {
-    let first = DESCRIPTION
-        .split("\n\n")
-        .next()
-        .expect("the description has paragraphs");
+    let first = DESCRIPTION.split("\n\n").next().expect("the description has paragraphs");
 
     assert_eq!(
         first,

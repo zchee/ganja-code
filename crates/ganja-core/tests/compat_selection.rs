@@ -14,10 +14,8 @@
 
 use std::env;
 
-use ganja_core::{
-    config::{Config, ProviderConfig},
-    provider::{self, Dialect, PROVIDERS, SelectionError},
-};
+use ganja_core::config::{Config, ProviderConfig};
+use ganja_core::provider::{self, Dialect, PROVIDERS, SelectionError};
 
 const CANARY: &str = "sk-test-canary-XYZ";
 const KEY_VAR: &str = "GANJA_TEST_LOCAL_LLAMA_KEY";
@@ -71,12 +69,7 @@ fn the_provider_variable_names_a_configured_endpoint_and_refuses_the_rest_honest
         env::set_var("GANJA_PROVIDER", "local-lama");
     }
     let refused = provider::select(&config).expect_err("no such provider");
-    let SelectionError::Unknown {
-        requested,
-        named_by,
-        configured,
-    } = &refused
-    else {
+    let SelectionError::Unknown { requested, named_by, configured } = &refused else {
         panic!("expected an unknown-provider refusal, got {refused:?}");
     };
     assert_eq!(requested, "local-lama");
@@ -95,10 +88,7 @@ fn the_provider_variable_names_a_configured_endpoint_and_refuses_the_rest_honest
          that hid it would tell somebody their entry does not exist: {rendered}"
     );
     for builtin in PROVIDERS {
-        assert!(
-            rendered.contains(builtin),
-            "{builtin} is missing: {rendered}"
-        );
+        assert!(rendered.contains(builtin), "{builtin} is missing: {rendered}");
     }
 
     // A config declaring nothing gets the message it always had — an empty
@@ -107,9 +97,7 @@ fn the_provider_variable_names_a_configured_endpoint_and_refuses_the_rest_honest
     unsafe {
         env::set_var("GANJA_PROVIDER", "gemini");
     }
-    let bare = provider::select(&Config::default())
-        .expect_err("no such provider")
-        .to_string();
+    let bare = provider::select(&Config::default()).expect_err("no such provider").to_string();
     assert!(
         !bare.contains("this config names"),
         "nothing was configured, so nothing should be listed: {bare}"
@@ -123,9 +111,8 @@ fn the_provider_variable_names_a_configured_endpoint_and_refuses_the_rest_honest
         env::set_var("GANJA_PROVIDER", PROVIDER_ID);
         env::remove_var(KEY_VAR);
     }
-    let unusable = provider::select(&config)
-        .expect_err("nothing supplies this endpoint's key")
-        .to_string();
+    let unusable =
+        provider::select(&config).expect_err("nothing supplies this endpoint's key").to_string();
     assert!(unusable.contains(KEY_VAR), "{unusable}");
     assert!(
         unusable.contains(&format!("ganja auth login {PROVIDER_ID}")),

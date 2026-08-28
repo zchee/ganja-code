@@ -15,11 +15,7 @@ fn scripted_client() -> Scripted {
     let (client_end, peer) = tokio::io::duplex(8192);
     let client = crate::control_mode::client::Client::from_duplex(&options, client_end, None);
     let (peer_read, peer_write) = tokio::io::split(peer);
-    Scripted {
-        client,
-        peer_read,
-        peer_write,
-    }
+    Scripted { client, peer_read, peer_write }
 }
 
 async fn peer_send(write: &mut PeerWrite, line: &str) {
@@ -33,9 +29,7 @@ async fn peer_send(write: &mut PeerWrite, line: &str) {
 async fn peer_recv_written(read: &mut PeerRead) -> String {
     let mut reader = tokio::io::BufReader::new(read);
     let mut buf = String::new();
-    tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut buf)
-        .await
-        .unwrap();
+    tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut buf).await.unwrap();
     crate::control_mode::client::trim_line_ending(&buf).to_owned()
 }
 
@@ -59,11 +53,7 @@ fn assert_invalid_command(error: Error, expected_message_fragment: &str) {
 
 #[tokio::test]
 async fn refresh_client_size_renders_dimensions_as_wxh() {
-    let Scripted {
-        client,
-        mut peer_read,
-        mut peer_write,
-    } = scripted_client();
+    let Scripted { client, mut peer_read, mut peer_write } = scripted_client();
     let call = client.refresh_client_size(120, 40);
     let answer = answer_command(&mut peer_read, &mut peer_write, "refresh-client -C 120x40");
 
@@ -80,17 +70,10 @@ async fn refresh_client_size_refuses_zero_dimensions() {
 
 #[tokio::test]
 async fn set_client_flags_renders_comma_separated_values() {
-    let Scripted {
-        client,
-        mut peer_read,
-        mut peer_write,
-    } = scripted_client();
+    let Scripted { client, mut peer_read, mut peer_write } = scripted_client();
     let call = client.set_client_flags(&[ClientFlag::NO_OUTPUT, ClientFlag::WAIT_EXIT]);
-    let answer = answer_command(
-        &mut peer_read,
-        &mut peer_write,
-        "refresh-client -f no-output,wait-exit",
-    );
+    let answer =
+        answer_command(&mut peer_read, &mut peer_write, "refresh-client -f no-output,wait-exit");
 
     let (result, ()) = tokio::join!(call, answer);
     result.unwrap();
@@ -106,26 +89,15 @@ async fn set_client_flags_requires_at_least_one_flag() {
 #[tokio::test]
 async fn set_client_flags_surfaces_invalid_fragments_as_invalid_commands() {
     let Scripted { client, .. } = scripted_client();
-    let error = client
-        .set_client_flags(&[ClientFlag::new("bad\nflag")])
-        .await
-        .unwrap_err();
+    let error = client.set_client_flags(&[ClientFlag::new("bad\nflag")]).await.unwrap_err();
     assert_invalid_command(error, "client flag");
 }
 
 #[tokio::test]
 async fn set_pause_after_renders_whole_seconds() {
-    let Scripted {
-        client,
-        mut peer_read,
-        mut peer_write,
-    } = scripted_client();
+    let Scripted { client, mut peer_read, mut peer_write } = scripted_client();
     let call = client.set_pause_after(std::time::Duration::from_secs(2));
-    let answer = answer_command(
-        &mut peer_read,
-        &mut peer_write,
-        "refresh-client -f pause-after=2",
-    );
+    let answer = answer_command(&mut peer_read, &mut peer_write, "refresh-client -f pause-after=2");
 
     let (result, ()) = tokio::join!(call, answer);
     result.unwrap();
@@ -134,20 +106,14 @@ async fn set_pause_after_renders_whole_seconds() {
 #[tokio::test]
 async fn set_pause_after_refuses_zero_duration() {
     let Scripted { client, .. } = scripted_client();
-    let error = client
-        .set_pause_after(std::time::Duration::ZERO)
-        .await
-        .unwrap_err();
+    let error = client.set_pause_after(std::time::Duration::ZERO).await.unwrap_err();
     assert_invalid_command(error, "positive");
 }
 
 #[tokio::test]
 async fn set_pause_after_refuses_fractional_seconds() {
     let Scripted { client, .. } = scripted_client();
-    let error = client
-        .set_pause_after(std::time::Duration::from_millis(1_500))
-        .await
-        .unwrap_err();
+    let error = client.set_pause_after(std::time::Duration::from_millis(1_500)).await.unwrap_err();
     assert_invalid_command(error, "whole number of seconds");
 }
 
@@ -155,18 +121,10 @@ async fn set_pause_after_refuses_fractional_seconds() {
 // test on the newtype itself, over in `crate::ids`.
 #[tokio::test]
 async fn pause_pane_renders_pause_state() {
-    let Scripted {
-        client,
-        mut peer_read,
-        mut peer_write,
-    } = scripted_client();
+    let Scripted { client, mut peer_read, mut peer_write } = scripted_client();
     let pane = PaneId::new("%1").unwrap();
     let call = client.pause_pane(&pane);
-    let answer = answer_command(
-        &mut peer_read,
-        &mut peer_write,
-        "refresh-client -A '%1:pause'",
-    );
+    let answer = answer_command(&mut peer_read, &mut peer_write, "refresh-client -A '%1:pause'");
 
     let (result, ()) = tokio::join!(call, answer);
     result.unwrap();
@@ -174,18 +132,10 @@ async fn pause_pane_renders_pause_state() {
 
 #[tokio::test]
 async fn continue_pane_renders_continue_state() {
-    let Scripted {
-        client,
-        mut peer_read,
-        mut peer_write,
-    } = scripted_client();
+    let Scripted { client, mut peer_read, mut peer_write } = scripted_client();
     let pane = PaneId::new("%1").unwrap();
     let call = client.continue_pane(&pane);
-    let answer = answer_command(
-        &mut peer_read,
-        &mut peer_write,
-        "refresh-client -A '%1:continue'",
-    );
+    let answer = answer_command(&mut peer_read, &mut peer_write, "refresh-client -A '%1:continue'");
 
     let (result, ()) = tokio::join!(call, answer);
     result.unwrap();
@@ -193,18 +143,10 @@ async fn continue_pane_renders_continue_state() {
 
 #[tokio::test]
 async fn disable_pane_output_renders_the_off_action() {
-    let Scripted {
-        client,
-        mut peer_read,
-        mut peer_write,
-    } = scripted_client();
+    let Scripted { client, mut peer_read, mut peer_write } = scripted_client();
     let pane = PaneId::new("%1").unwrap();
     let call = client.disable_pane_output(&pane);
-    let answer = answer_command(
-        &mut peer_read,
-        &mut peer_write,
-        "refresh-client -A '%1:off'",
-    );
+    let answer = answer_command(&mut peer_read, &mut peer_write, "refresh-client -A '%1:off'");
 
     let (result, ()) = tokio::join!(call, answer);
     result.unwrap();
@@ -212,11 +154,7 @@ async fn disable_pane_output_renders_the_off_action() {
 
 #[tokio::test]
 async fn enable_pane_output_renders_the_on_action() {
-    let Scripted {
-        client,
-        mut peer_read,
-        mut peer_write,
-    } = scripted_client();
+    let Scripted { client, mut peer_read, mut peer_write } = scripted_client();
     let pane = PaneId::new("%1").unwrap();
     let call = client.enable_pane_output(&pane);
     let answer = answer_command(&mut peer_read, &mut peer_write, "refresh-client -A '%1:on'");
@@ -227,11 +165,7 @@ async fn enable_pane_output_renders_the_on_action() {
 
 #[tokio::test]
 async fn subscribe_format_renders_target_and_format() {
-    let Scripted {
-        client,
-        mut peer_read,
-        mut peer_write,
-    } = scripted_client();
+    let Scripted { client, mut peer_read, mut peer_write } = scripted_client();
     let call = client.subscribe_format(
         "sub",
         &SubscriptionTarget::ALL_PANES,
@@ -249,11 +183,7 @@ async fn subscribe_format_renders_target_and_format() {
 
 #[tokio::test]
 async fn unsubscribe_format_renders_the_subscription_name() {
-    let Scripted {
-        client,
-        mut peer_read,
-        mut peer_write,
-    } = scripted_client();
+    let Scripted { client, mut peer_read, mut peer_write } = scripted_client();
     let call = client.unsubscribe_format("sub");
     let answer = answer_command(&mut peer_read, &mut peer_write, "refresh-client -B sub");
 
@@ -275,20 +205,15 @@ async fn subscribe_format_requires_a_subscription_name() {
 async fn subscribe_format_refuses_a_colon_in_the_target() {
     let Scripted { client, .. } = scripted_client();
     let target = SubscriptionTarget::new("bad:target");
-    let error = client
-        .subscribe_format("sub", &target, "#{pane_id}")
-        .await
-        .unwrap_err();
+    let error = client.subscribe_format("sub", &target, "#{pane_id}").await.unwrap_err();
     assert_invalid_command(error, "target");
 }
 
 #[tokio::test]
 async fn subscribe_format_refuses_a_newline_in_the_format() {
     let Scripted { client, .. } = scripted_client();
-    let error = client
-        .subscribe_format("sub", &SubscriptionTarget::ALL_PANES, "bad\n")
-        .await
-        .unwrap_err();
+    let error =
+        client.subscribe_format("sub", &SubscriptionTarget::ALL_PANES, "bad\n").await.unwrap_err();
     assert_invalid_command(error, "format");
 }
 

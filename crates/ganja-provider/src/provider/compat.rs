@@ -38,9 +38,10 @@ use futures::stream::BoxStream;
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
+use crate::provider::responses::Backend;
 use crate::provider::{
     AnthropicProvider, ChatRequest, CredentialSource, OpenAiProvider, Provider, ProviderError,
-    ProviderEvent, ResponsesProvider, check_base_url, responses::Backend,
+    ProviderEvent, ResponsesProvider, check_base_url,
 };
 
 /// The wire a config-named endpoint speaks.
@@ -139,10 +140,7 @@ impl CompatProvider {
             ),
         };
 
-        Ok(Self {
-            id: id.into(),
-            wire,
-        })
+        Ok(Self { id: id.into(), wire })
     }
 }
 

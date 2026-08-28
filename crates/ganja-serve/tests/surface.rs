@@ -10,7 +10,9 @@ mod support;
 
 use std::sync::Arc;
 
-use ganja_core::{Engine, Storage, permission::Permissions, tool::Registry};
+use ganja_core::permission::Permissions;
+use ganja_core::tool::Registry;
+use ganja_core::{Engine, Storage};
 use ganja_protocol::Message;
 use ganja_testkit::{BlockingTool, ScriptedProvider, says, seed_message, tool_call};
 use support::{DEADLINE, base_url, loopback_config};
@@ -48,12 +50,7 @@ async fn fixture(
         .await
         .expect("a loopback server with no password comes up");
 
-    Fixture {
-        engine,
-        handle,
-        seeded,
-        _data: data,
-    }
+    Fixture { engine, handle, seeded, _data: data }
 }
 
 fn url(fixture: &Fixture, path: &str) -> String {
@@ -61,14 +58,9 @@ fn url(fixture: &Fixture, path: &str) -> String {
 }
 
 async fn get_json(fixture: &Fixture, path: &str) -> (reqwest::StatusCode, serde_json::Value) {
-    let response = reqwest::get(url(fixture, path))
-        .await
-        .expect("the route answers");
+    let response = reqwest::get(url(fixture, path)).await.expect("the route answers");
     let status = response.status();
-    let value = response
-        .json::<serde_json::Value>()
-        .await
-        .unwrap_or(serde_json::Value::Null);
+    let value = response.json::<serde_json::Value>().await.unwrap_or(serde_json::Value::Null);
 
     (status, value)
 }
@@ -86,10 +78,7 @@ async fn post_json(
         .await
         .expect("the route answers");
     let status = response.status();
-    let value = response
-        .json::<serde_json::Value>()
-        .await
-        .unwrap_or(serde_json::Value::Null);
+    let value = response.json::<serde_json::Value>().await.unwrap_or(serde_json::Value::Null);
 
     (status, value)
 }
@@ -128,10 +117,7 @@ async fn the_informational_routes_answer_about_this_server() {
         .iter()
         .filter_map(|command| command["name"].as_str())
         .collect();
-    assert!(
-        names.contains(&"init"),
-        "the builtins are listed: {names:?}"
-    );
+    assert!(names.contains(&"init"), "the builtins are listed: {names:?}");
 
     fixture.handle.shutdown().await.expect("a clean stop");
 }
@@ -149,10 +135,7 @@ async fn a_seeded_store_round_trips_through_the_session_routes() {
         .iter()
         .filter_map(|session| session["id"].as_str())
         .collect();
-    assert!(
-        ids.contains(&seeded.as_str()),
-        "the seeded session is listed: {ids:?}"
-    );
+    assert!(ids.contains(&seeded.as_str()), "the seeded session is listed: {ids:?}");
 
     let (status, info) = get_json(&fixture, &format!("/session/{seeded}")).await;
     assert_eq!(status, 200);
@@ -188,32 +171,17 @@ async fn the_refusal_table_is_observable_through_the_routes() {
     let (status, body) = get_json(&fixture, "/session/ses_nothing_here").await;
     assert_eq!(status, 404);
     assert_eq!(body["type"], "not_found");
-    assert!(
-        body["message"]
-            .as_str()
-            .is_some_and(|m| m.contains("ses_nothing_here"))
-    );
+    assert!(body["message"].as_str().is_some_and(|m| m.contains("ses_nothing_here")));
 
-    let (status, body) = post_json(
-        &fixture,
-        "/session/ses_nothing_here/prompt_async",
-        r#"{"text":"hi"}"#,
-    )
-    .await;
-    assert_eq!(
-        status, 404,
-        "a write route names the missing session too: {body}"
-    );
+    let (status, body) =
+        post_json(&fixture, "/session/ses_nothing_here/prompt_async", r#"{"text":"hi"}"#).await;
+    assert_eq!(status, 404, "a write route names the missing session too: {body}");
     assert_eq!(body["type"], "not_found");
 
     // 400: a payload that is not the route's JSON.
     let current = fixture.engine.session_id().as_str().to_owned();
-    let (status, body) = post_json(
-        &fixture,
-        &format!("/session/{current}/prompt_async"),
-        "this is not json",
-    )
-    .await;
+    let (status, body) =
+        post_json(&fixture, &format!("/session/{current}/prompt_async"), "this is not json").await;
     assert_eq!(status, 400);
     assert_eq!(body["type"], "invalid_request");
 
@@ -235,25 +203,15 @@ async fn a_streaming_turn_makes_the_engine_busy_and_abort_ends_it() {
     // is exactly as wide as the test needs it.
     let (entered_tx, mut entered) = tokio::sync::mpsc::channel(1);
     let tool = BlockingTool::with_entry_signal("blocker", "blocks until cancelled", entered_tx);
-    let mut turn = vec![ganja_core::provider::ProviderEvent::TextDelta(
-        "starting".to_owned(),
-    )];
+    let mut turn = vec![ganja_core::provider::ProviderEvent::TextDelta("starting".to_owned())];
     turn.extend(tool_call("blocker", serde_json::json!({})));
     let fixture = fixture(vec![turn, says("done")], Registry::new(vec![tool])).await;
 
-    let mut direct = fixture
-        .engine
-        .subscribe()
-        .await
-        .expect("a subscriber registers");
+    let mut direct = fixture.engine.subscribe().await.expect("a subscriber registers");
     let current = fixture.engine.session_id().as_str().to_owned();
 
-    let (status, _) = post_json(
-        &fixture,
-        &format!("/session/{current}/prompt_async"),
-        r#"{"text":"go"}"#,
-    )
-    .await;
+    let (status, _) =
+        post_json(&fixture, &format!("/session/{current}/prompt_async"), r#"{"text":"go"}"#).await;
     assert_eq!(status, 204);
 
     tokio::time::timeout(DEADLINE, entered.recv())
@@ -262,23 +220,17 @@ async fn a_streaming_turn_makes_the_engine_busy_and_abort_ends_it() {
         .expect("the tool reports entry");
 
     // 409: one turn at a time is engine law, and the wire says so.
-    let (status, body) = post_json(
-        &fixture,
-        &format!("/session/{current}/prompt_async"),
-        r#"{"text":"another"}"#,
-    )
-    .await;
+    let (status, body) =
+        post_json(&fixture, &format!("/session/{current}/prompt_async"), r#"{"text":"another"}"#)
+            .await;
     assert_eq!(status, 409);
     assert_eq!(body["type"], "conflict");
 
     // A different stored session cannot be switched to mid-turn either.
     let seeded = fixture.seeded.as_str().to_owned();
-    let (status, body) = post_json(
-        &fixture,
-        &format!("/session/{seeded}/prompt_async"),
-        r#"{"text":"switch"}"#,
-    )
-    .await;
+    let (status, body) =
+        post_json(&fixture, &format!("/session/{seeded}/prompt_async"), r#"{"text":"switch"}"#)
+            .await;
     assert_eq!(status, 409, "a resume mid-turn is the same refusal: {body}");
 
     // Abort ends the turn observably.

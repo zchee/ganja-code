@@ -72,28 +72,22 @@
 //!   cannot read without a certificate the machine already trusts; for a
 //!   loopback endpoint no proxy is used.
 
-use std::{
-    collections::{BTreeMap, VecDeque},
-    env, fmt,
-    sync::Arc,
-};
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
+use std::{env, fmt};
 
 use async_trait::async_trait;
-use futures::{
-    Stream, StreamExt as _,
-    stream::{self, BoxStream},
-};
+use futures::stream::{self, BoxStream};
+use futures::{Stream, StreamExt as _};
 use reqwest::Url;
 use secrecy::{ExposeSecret as _, SecretString};
 use tokio_util::sync::CancellationToken;
 use url::Host;
 
-use crate::{
-    auth, catalog,
-    protocol::{FinishReason, Message, Part, PartBody, Usage},
-    provider::sse::Frame,
-    tool::ToolDefinition,
-};
+use crate::protocol::{FinishReason, Message, Part, PartBody, Usage};
+use crate::provider::sse::Frame;
+use crate::tool::ToolDefinition;
+use crate::{auth, catalog};
 
 pub mod anthropic;
 pub mod compat;
@@ -417,10 +411,9 @@ impl ProviderError {
         match self {
             Self::Auth(message) => Self::Auth(presented.redact(&message)),
             Self::Transport(message) => Self::Transport(presented.redact(&message)),
-            Self::Status { status, message } => Self::Status {
-                status,
-                message: presented.redact(&message),
-            },
+            Self::Status { status, message } => {
+                Self::Status { status, message: presented.redact(&message) }
+            }
             Self::Parse(message) => Self::Parse(presented.redact(&message)),
         }
     }
@@ -481,10 +474,7 @@ pub(super) fn reported(error: &serde_json::Value) -> String {
         return "the provider reported an error and its body carried no detail".to_owned();
     }
 
-    format!(
-        "the provider reported an error with no message ({})",
-        named.join(", ")
-    )
+    format!("the provider reported an error with no message ({})", named.join(", "))
 }
 
 /// A source of assistant text.
@@ -681,14 +671,8 @@ impl CredentialSource {
     /// [`ProviderError::Transport`], which are two different things to do next.
     async fn resolved(&self) -> Result<Resolved, ProviderError> {
         match self {
-            Self::Key(key) => Ok(Resolved {
-                presented: key.clone(),
-                account_id: None,
-            }),
-            Self::Oauth {
-                provider_id,
-                refresh,
-            } => {
+            Self::Key(key) => Ok(Resolved { presented: key.clone(), account_id: None }),
+            Self::Oauth { provider_id, refresh } => {
                 let credential = auth::Refresher::shared()
                     .usable(provider_id, Arc::clone(refresh))
                     .await
@@ -706,10 +690,7 @@ impl CredentialSource {
                     ))
                 })?;
 
-                Ok(Resolved {
-                    presented,
-                    account_id,
-                })
+                Ok(Resolved { presented, account_id })
             }
         }
     }
@@ -945,9 +926,8 @@ async fn open<M: Mapper>(
 
     let mut attempt = 0;
     let settled = loop {
-        let replay = request
-            .try_clone()
-            .expect("a body that cannot replay took the single-shot arm above");
+        let replay =
+            request.try_clone().expect("a body that cannot replay took the single-shot arm above");
         let response = match retry::send(client, replay, presented, &cancel).await {
             Ok(response) => response,
             Err(_) if cancel.is_cancelled() => return Ok(stream::empty().boxed()),
@@ -955,11 +935,7 @@ async fn open<M: Mapper>(
             // and a transport failure carries its own cause chain.
             Err(error) => return Err(error),
         };
-        tracing::debug!(
-            status = response.status().as_u16(),
-            endpoint,
-            "the provider answered"
-        );
+        tracing::debug!(status = response.status().as_u16(), endpoint, "the provider answered");
         // Beside the status log for the reason that log is here: this is the
         // one seam holding a response's headers before its body becomes a
         // stream, and the buckets it carries are the same fact for every wire
@@ -970,13 +946,7 @@ async fn open<M: Mapper>(
         // A fresh mapper per attempt — which is why this is a factory rather
         // than a mapper: a retried turn starts over, and one that remembered
         // the dead attempt's half-open state would splice two turns together.
-        match peeked(events(
-            response.bytes_stream().boxed(),
-            cancel.clone(),
-            mapper(),
-        ))
-        .await
-        {
+        match peeked(events(response.bytes_stream().boxed(), cancel.clone(), mapper())).await {
             Peeked::Content { prefix, rest } => break stream::iter(prefix).chain(rest).boxed(),
             Peeked::Ended { prefix } => break stream::iter(prefix).boxed(),
             Peeked::Died { mut prefix, error } => {
@@ -989,10 +959,7 @@ async fn open<M: Mapper>(
                 // The attempt count only: the message may quote a credential,
                 // and it reaches the log redacted through `shielded` when the
                 // last attempt hands its failure on.
-                tracing::debug!(
-                    attempt,
-                    "the turn died before it said anything; reopening it"
-                );
+                tracing::debug!(attempt, "the turn died before it said anything; reopening it");
                 tokio::select! {
                     () = cancel.cancelled() => return Ok(stream::empty().boxed()),
                     () = tokio::time::sleep(retry::stream_backoff(attempt)) => {}
@@ -1046,18 +1013,12 @@ fn matters(event: &ProviderEvent) -> bool {
 enum Peeked {
     /// Content arrived; `prefix` ends with the event that proved it, and
     /// `rest` is everything not yet read.
-    Content {
-        prefix: Vec<ProviderEvent>,
-        rest: BoxStream<'static, ProviderEvent>,
-    },
+    Content { prefix: Vec<ProviderEvent>, rest: BoxStream<'static, ProviderEvent> },
     /// The stream ended without content and without failing.
     Ended { prefix: Vec<ProviderEvent> },
     /// The stream failed while the transcript was still empty: `prefix`
     /// holds only non-content events, and `error` is not among them.
-    Died {
-        prefix: Vec<ProviderEvent>,
-        error: ProviderError,
-    },
+    Died { prefix: Vec<ProviderEvent>, error: ProviderError },
 }
 
 /// Reads `stream` up to its first content event, failure, or end (**D475**).
@@ -1074,10 +1035,7 @@ async fn peeked(mut stream: BoxStream<'static, ProviderEvent>) -> Peeked {
                 let content = matters(&event);
                 prefix.push(event);
                 if content {
-                    return Peeked::Content {
-                        prefix,
-                        rest: stream,
-                    };
+                    return Peeked::Content { prefix, rest: stream };
                 }
             }
             None => return Peeked::Ended { prefix },
@@ -1237,11 +1195,9 @@ where
                     Some(Ok(frame)) => state.mapper.frame(&frame, &mut state.scratch),
                     Some(Err(error)) => {
                         state.done = true;
-                        state
-                            .scratch
-                            .push(ProviderEvent::Failed(ProviderError::Transport(
-                                error.to_string(),
-                            )));
+                        state.scratch.push(ProviderEvent::Failed(ProviderError::Transport(
+                            error.to_string(),
+                        )));
                     }
                     None => {
                         state.done = true;
@@ -1304,9 +1260,7 @@ pub fn key_for(provider_id: &str) -> Result<Option<Presented>, ProviderError> {
 /// The key for `provider_id`, or the error a startup should die on.
 fn require_key(provider_id: &str, variable: &str) -> Result<Presented, ProviderError> {
     key_for(provider_id)?.ok_or_else(|| {
-        ProviderError::Auth(format!(
-            "{variable} is unset; export it or run `ganja auth login`"
-        ))
+        ProviderError::Auth(format!("{variable} is unset; export it or run `ganja auth login`"))
     })
 }
 
@@ -1420,10 +1374,7 @@ pub fn serves(provider_id: &str, model: &str) -> bool {
 /// exported-but-empty `ANTHROPIC_BASE_URL` names no endpoint. One reader keeps
 /// the two halves from disagreeing about what blank means.
 pub fn setting(variable: &str) -> Option<String> {
-    env::var(variable)
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
+    env::var(variable).ok().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty())
 }
 
 #[cfg(test)]

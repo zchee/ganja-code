@@ -15,29 +15,22 @@
 //! exercises the catalog lookups and claiming `"fake"` proves the no-request
 //! title rule while still exposing a request log.
 
-use std::{
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-    },
-    time::Duration,
-};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
-use futures::{
-    StreamExt as _,
-    stream::{self, BoxStream},
+use futures::StreamExt as _;
+use futures::stream::{self, BoxStream};
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{
+    Command, Event, FinishReason, Message, Part, PartBody, PartId, Role, ToolState, Usage,
 };
-use ganja_core::{
-    Engine, EngineError, SessionId, SessionInfo, Storage,
-    permission::Permissions,
-    protocol::{
-        Command, Event, FinishReason, Message, Part, PartBody, PartId, Role, ToolState, Usage,
-    },
-    provider::{ChatRequest, FakeProvider, Provider, ProviderError, ProviderEvent, fake},
-    storage,
-    tool::Registry,
+use ganja_core::provider::{
+    ChatRequest, FakeProvider, Provider, ProviderError, ProviderEvent, fake,
 };
+use ganja_core::tool::Registry;
+use ganja_core::{Engine, EngineError, SessionId, SessionInfo, Storage, storage};
 use tokio_util::sync::CancellationToken;
 
 /// A store rooted in a directory that vanishes with the test. The directory
@@ -74,19 +67,11 @@ impl LaneProvider {
     fn new(id: &'static str, turns: Vec<Result<Vec<ProviderEvent>, ProviderError>>) -> Arc<Self> {
         assert!(!turns.is_empty(), "a lane script needs at least one turn");
 
-        Arc::new(Self {
-            id,
-            turns,
-            seen: Arc::default(),
-            served: AtomicUsize::new(0),
-        })
+        Arc::new(Self { id, turns, seen: Arc::default(), served: AtomicUsize::new(0) })
     }
 
     fn requests(&self) -> Vec<ChatRequest> {
-        self.seen
-            .lock()
-            .expect("the request log is never poisoned")
-            .clone()
+        self.seen.lock().expect("the request log is never poisoned").clone()
     }
 }
 
@@ -101,10 +86,7 @@ impl Provider for LaneProvider {
         request: ChatRequest,
         _cancel: CancellationToken,
     ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
-        self.seen
-            .lock()
-            .expect("the request log is never poisoned")
-            .push(request);
+        self.seen.lock().expect("the request log is never poisoned").push(request);
 
         let index = self.served.fetch_add(1, Ordering::SeqCst);
         let turn = self
@@ -176,11 +158,7 @@ impl Provider for HeldProvider {
         _cancel: CancellationToken,
     ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
         self.asked.add_permits(1);
-        self.released
-            .acquire()
-            .await
-            .expect("the latch is never closed")
-            .forget();
+        self.released.acquire().await.expect("the latch is never closed").forget();
 
         Ok(stream::iter(self.reply.clone()).boxed())
     }
@@ -191,11 +169,7 @@ impl Provider for HeldProvider {
 fn reply(text: &str, input_tokens: u64) -> Vec<ProviderEvent> {
     vec![
         ProviderEvent::TextDelta(text.to_owned()),
-        ProviderEvent::Usage(Usage {
-            input_tokens,
-            output_tokens: 7,
-            ..Usage::default()
-        }),
+        ProviderEvent::Usage(Usage { input_tokens, output_tokens: 7, ..Usage::default() }),
         ProviderEvent::Finish(FinishReason::Completed),
     ]
 }
@@ -239,20 +213,12 @@ fn text_of(message: &Message) -> String {
 
 /// Every text a request carries, flattened, for content assertions.
 fn request_text(request: &ChatRequest) -> String {
-    request
-        .messages
-        .iter()
-        .map(text_of)
-        .collect::<Vec<_>>()
-        .join("\n")
+    request.messages.iter().map(text_of).collect::<Vec<_>>().join("\n")
 }
 
 /// The stored info for `id`, read back through the same API the picker uses.
 fn stored_info(storage: &Storage, id: &SessionId) -> SessionInfo {
-    storage
-        .load_info(id)
-        .expect("the store is readable")
-        .expect("the session exists on disk")
+    storage.load_info(id).expect("the store is readable").expect("the session exists on disk")
 }
 
 #[tokio::test]
@@ -277,58 +243,34 @@ async fn a_turn_on_a_persistent_engine_reaches_the_disk_as_it_streamed() {
         .expect("an idle engine accepts a prompt");
     drain(&mut events).await;
 
-    let info = engine
-        .current_session()
-        .expect("the first prompt creates a session");
+    let info = engine.current_session().expect("the first prompt creates a session");
     let on_disk = stored_info(&storage, &info.id);
     assert_eq!(on_disk.version, storage::VERSION);
     assert_eq!(
         on_disk.usage,
-        Usage {
-            input_tokens: 2,
-            output_tokens: 2,
-            ..Usage::default()
-        },
+        Usage { input_tokens: 2, output_tokens: 2, ..Usage::default() },
         "the fake reports word counts, and the session should have summed them"
     );
-    assert_eq!(
-        on_disk.context_tokens, 2,
-        "context_tokens is the last request's reported input"
-    );
+    assert_eq!(on_disk.context_tokens, 2, "context_tokens is the last request's reported input");
     assert_eq!(
         on_disk.title.as_deref(),
         Some("hi disk"),
         "a fake session takes the fallback title, already on disk at finish"
     );
 
-    let transcript = storage
-        .load_transcript(&info.id)
-        .expect("the transcript loads");
-    assert_eq!(
-        transcript.len(),
-        2,
-        "one prompt, one reply: {transcript:#?}"
-    );
+    let transcript = storage.load_transcript(&info.id).expect("the transcript loads");
+    assert_eq!(transcript.len(), 2, "one prompt, one reply: {transcript:#?}");
 
     let user = &transcript[0];
     assert_eq!(user.role, Role::User);
     assert_eq!(text_of(user), "hi disk");
-    assert!(
-        user.time.completed.is_some(),
-        "a user message is born complete"
-    );
+    assert!(user.time.completed.is_some(), "a user message is born complete");
 
     let assistant = &transcript[1];
     assert_eq!(assistant.role, Role::Assistant);
     assert_eq!(assistant.model.as_deref(), Some(fake::MODEL));
-    assert!(
-        assistant.time.completed.is_some(),
-        "the finish rewrite stamps the envelope"
-    );
-    assert!(
-        assistant.usage.is_some(),
-        "the finish rewrite carries what the turn spent"
-    );
+    assert!(assistant.time.completed.is_some(), "the finish rewrite stamps the envelope");
+    assert!(assistant.usage.is_some(), "the finish rewrite carries what the turn spent");
     assert_eq!(
         text_of(assistant),
         "one two",
@@ -340,11 +282,7 @@ async fn a_turn_on_a_persistent_engine_reaches_the_disk_as_it_streamed() {
 async fn a_prompt_is_on_disk_before_the_provider_is_asked_rather_than_when_the_turn_ends() {
     let (_dir, storage) = store();
     let provider = HeldProvider::new(reply("understood", 3));
-    let engine = persistent(
-        Arc::clone(&provider) as Arc<dyn Provider>,
-        "canned",
-        storage.clone(),
-    );
+    let engine = persistent(Arc::clone(&provider) as Arc<dyn Provider>, "canned", storage.clone());
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine
@@ -363,12 +301,8 @@ async fn a_prompt_is_on_disk_before_the_provider_is_asked_rather_than_when_the_t
     // would have left behind.
     provider.asked().await;
 
-    let info = engine
-        .current_session()
-        .expect("the first prompt creates a session");
-    let mid_turn = storage
-        .load_transcript(&info.id)
-        .expect("the transcript loads");
+    let info = engine.current_session().expect("the first prompt creates a session");
+    let mid_turn = storage.load_transcript(&info.id).expect("the transcript loads");
     assert_eq!(mid_turn[0].role, Role::User);
     assert_eq!(
         text_of(&mid_turn[0]),
@@ -385,9 +319,7 @@ async fn a_prompt_is_on_disk_before_the_provider_is_asked_rather_than_when_the_t
     provider.release();
     drain(&mut events).await;
 
-    let finished = storage
-        .load_transcript(&info.id)
-        .expect("the transcript loads");
+    let finished = storage.load_transcript(&info.id).expect("the transcript loads");
     assert_eq!(finished.len(), 2, "{finished:#?}");
     assert_eq!(text_of(&finished[1]), "understood");
 }
@@ -429,18 +361,11 @@ async fn a_crash_resumes_with_the_prompt_kept_and_open_calls_closed() {
             state: ToolState::Pending { input: None },
         },
     });
-    assert!(
-        aborted.time.completed.is_none(),
-        "the crash marker is the seed"
-    );
+    assert!(aborted.time.completed.is_none(), "the crash marker is the seed");
     ganja_testkit::seed_message(&storage, &sid, &aborted);
 
     let provider = LaneProvider::new("scripted", vec![Ok(reply("understood", 42))]);
-    let engine = persistent(
-        Arc::clone(&provider) as Arc<dyn Provider>,
-        "canned",
-        storage.clone(),
-    );
+    let engine = persistent(Arc::clone(&provider) as Arc<dyn Provider>, "canned", storage.clone());
 
     let transcript = engine.resume(&sid).await.expect("the session resumes");
     assert_eq!(transcript.len(), 2, "{transcript:#?}");
@@ -465,23 +390,10 @@ async fn a_crash_resumes_with_the_prompt_kept_and_open_calls_closed() {
         })
         .collect();
     assert_eq!(states.len(), 2);
-    let ToolState::Error {
-        input,
-        error,
-        started,
-        completed,
-    } = states[0]
-    else {
-        panic!(
-            "a Running call closes as Error on load, got {:?}",
-            states[0]
-        );
+    let ToolState::Error { input, error, started, completed } = states[0] else {
+        panic!("a Running call closes as Error on load, got {:?}", states[0]);
     };
-    assert_eq!(
-        input,
-        &serde_json::json!({"path": "x.rs"}),
-        "the stored input is kept"
-    );
+    assert_eq!(input, &serde_json::json!({"path": "x.rs"}), "the stored input is kept");
     assert!(
         error.contains("interrupted"),
         "the error should explain the interruption, got {error:?}"
@@ -494,9 +406,7 @@ async fn a_crash_resumes_with_the_prompt_kept_and_open_calls_closed() {
     );
 
     // The closure is persisted, not just returned: a second load sees it.
-    let reloaded = storage
-        .load_transcript(&sid)
-        .expect("the transcript reloads");
+    let reloaded = storage.load_transcript(&sid).expect("the transcript reloads");
     assert!(
         reloaded[1].parts.iter().all(|part| match &part.body {
             PartBody::Tool { state, .. } => matches!(state, ToolState::Error { .. }),
@@ -523,11 +433,7 @@ async fn a_crash_resumes_with_the_prompt_kept_and_open_calls_closed() {
     let requests = provider.requests();
     assert_eq!(requests.len(), 1, "a pre-titled session asks for no title");
     let carried = &requests[0].messages;
-    assert_eq!(
-        carried.len(),
-        3,
-        "prompt, aborted reply, new prompt: {carried:#?}"
-    );
+    assert_eq!(carried.len(), 3, "prompt, aborted reply, new prompt: {carried:#?}");
     assert!(
         carried[1].parts.iter().all(|part| match &part.body {
             PartBody::Tool { state, .. } => matches!(state, ToolState::Error { .. }),
@@ -551,10 +457,7 @@ async fn session_operations_know_when_they_cannot_run() {
         "listing sessions on Engine::new should refuse as ephemeral"
     );
     assert!(
-        matches!(
-            ephemeral.resume(&SessionId::ascending()).await,
-            Err(EngineError::Ephemeral)
-        ),
+        matches!(ephemeral.resume(&SessionId::ascending()).await, Err(EngineError::Ephemeral)),
         "resuming on Engine::new should refuse as ephemeral"
     );
     assert!(ephemeral.current_session().is_none());
@@ -596,17 +499,11 @@ async fn session_operations_know_when_they_cannot_run() {
         "the turn should have started streaming"
     );
     assert!(
-        matches!(
-            engine.resume(&SessionId::ascending()).await,
-            Err(EngineError::Busy)
-        ),
+        matches!(engine.resume(&SessionId::ascending()).await, Err(EngineError::Busy)),
         "resume mid-turn should be Busy"
     );
 
-    engine
-        .send(Command::CancelTurn)
-        .await
-        .expect("a streaming turn accepts a cancel");
+    engine.send(Command::CancelTurn).await.expect("a streaming turn accepts a cancel");
     drain(&mut events).await;
 }
 
@@ -636,24 +533,14 @@ async fn usage_and_the_context_measure_survive_a_restart() {
         drain(&mut events).await;
     }
 
-    let sid = first
-        .current_session()
-        .expect("the first prompt created a session")
-        .id;
+    let sid = first.current_session().expect("the first prompt created a session").id;
     let after_two = stored_info(&storage, &sid);
     assert_eq!(
         after_two.usage,
-        Usage {
-            input_tokens: 8,
-            output_tokens: 6,
-            ..Usage::default()
-        },
+        Usage { input_tokens: 8, output_tokens: 6, ..Usage::default() },
         "turn one spent 2 in / 3 out, turn two 6 in / 3 out, summed"
     );
-    assert_eq!(
-        after_two.context_tokens, 6,
-        "the measure is the last request's input, not the sum"
-    );
+    assert_eq!(after_two.context_tokens, 6, "the measure is the last request's input, not the sum");
     drop(events);
     drop(first);
 
@@ -671,9 +558,7 @@ async fn usage_and_the_context_measure_survive_a_restart() {
 
     let transcript = second.resume(&sid).await.expect("the session resumes");
     assert_eq!(transcript.len(), 4, "two turns stored: {transcript:#?}");
-    let resumed = second
-        .current_session()
-        .expect("resume installs the session");
+    let resumed = second.current_session().expect("resume installs the session");
     assert_eq!(resumed.usage, after_two.usage);
     assert_eq!(resumed.context_tokens, 6);
 
@@ -693,11 +578,7 @@ async fn usage_and_the_context_measure_survive_a_restart() {
     let after_three = stored_info(&storage, &sid);
     assert_eq!(
         after_three.usage,
-        Usage {
-            input_tokens: 18,
-            output_tokens: 9,
-            ..Usage::default()
-        },
+        Usage { input_tokens: 18, output_tokens: 9, ..Usage::default() },
         "the resumed window carries both old turns, so turn three costs 10 in"
     );
     assert_eq!(after_three.context_tokens, 10);
@@ -721,16 +602,10 @@ async fn an_over_budget_session_is_summarized_before_the_turn() {
 
     let provider = LaneProvider::new(
         "anthropic",
-        vec![
-            Ok(reply("Summary of the early work.", 111)),
-            Ok(reply("Continuing now.", 222)),
-        ],
+        vec![Ok(reply("Summary of the early work.", 111)), Ok(reply("Continuing now.", 222))],
     );
-    let engine = persistent(
-        Arc::clone(&provider) as Arc<dyn Provider>,
-        "claude-haiku-4-5",
-        storage.clone(),
-    );
+    let engine =
+        persistent(Arc::clone(&provider) as Arc<dyn Provider>, "claude-haiku-4-5", storage.clone());
     engine.resume(&sid).await.expect("the session resumes");
 
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
@@ -773,47 +648,27 @@ async fn an_over_budget_session_is_summarized_before_the_turn() {
         progress.windows(2).all(|pair| pair[0].0 < pair[1].0),
         "the estimate only ever grows: {progress:?}"
     );
-    let Some(Event::MessageStarted {
-        session_id: _,
-        message: summary,
-    }) = seen.get(progress.len())
+    let Some(Event::MessageStarted { session_id: _, message: summary }) = seen.get(progress.len())
     else {
         panic!("the summary should follow its own gauge, got {seen:#?}");
     };
     assert_eq!(summary.role, Role::Assistant);
-    assert!(
-        summary.time.completed.is_some(),
-        "the summary arrives already complete"
-    );
+    assert!(summary.time.completed.is_some(), "the summary arrives already complete");
     assert_eq!(text_of(summary), "Summary of the early work.");
 
     let requests = provider.requests();
-    assert_eq!(
-        requests.len(),
-        2,
-        "one summarize request, then the turn: {requests:#?}"
-    );
+    assert_eq!(requests.len(), 2, "one summarize request, then the turn: {requests:#?}");
 
     let summarize = &requests[0];
-    assert!(
-        summarize.tools.is_empty(),
-        "the summarize request offers no tools"
-    );
-    assert_eq!(
-        summarize.messages.len(),
-        1,
-        "core's shape: one user message carrying everything"
-    );
+    assert!(summarize.tools.is_empty(), "the summarize request offers no tools");
+    assert_eq!(summarize.messages.len(), 1, "core's shape: one user message carrying everything");
     assert_eq!(summarize.messages[0].role, Role::User);
     let prompt = request_text(summarize);
     assert!(
         prompt.contains("Create a new anchored summary"),
         "no prior summary means the create instruction: {prompt}"
     );
-    assert!(
-        prompt.contains("## Objective"),
-        "the ported template rides along: {prompt}"
-    );
+    assert!(prompt.contains("## Objective"), "the ported template rides along: {prompt}");
     assert!(
         prompt.contains("[User]: the old objective was pruning the catalog")
             && prompt.contains("[Assistant]: we removed three rows"),
@@ -853,16 +708,10 @@ async fn an_over_budget_session_is_summarized_before_the_turn() {
     // each, against a seeded total of zero.
     assert_eq!(
         info.usage,
-        Usage {
-            input_tokens: 333,
-            output_tokens: 14,
-            ..Usage::default()
-        },
+        Usage { input_tokens: 333, output_tokens: 14, ..Usage::default() },
         "the summarize request's own tokens belong in the session's usage"
     );
-    let transcript = storage
-        .load_transcript(&sid)
-        .expect("the transcript reloads");
+    let transcript = storage.load_transcript(&sid).expect("the transcript reloads");
     assert!(
         transcript
             .iter()
@@ -889,10 +738,7 @@ async fn a_cancel_during_compaction_leaves_the_window_uninstalled() {
     // Forty fragments at 25ms give the cancel a full second of summarize to
     // land inside.
     let engine = persistent(
-        Arc::new(FakeProvider::new(
-            &"word ".repeat(40),
-            Duration::from_millis(25),
-        )),
+        Arc::new(FakeProvider::new(&"word ".repeat(40), Duration::from_millis(25))),
         "claude-haiku-4-5",
         storage.clone(),
     );
@@ -910,17 +756,13 @@ async fn a_cancel_during_compaction_leaves_the_window_uninstalled() {
         .await
         .expect("an idle engine accepts a prompt");
     tokio::time::sleep(Duration::from_millis(150)).await;
-    engine
-        .send(Command::CancelTurn)
-        .await
-        .expect("a compacting turn accepts a cancel");
+    engine.send(Command::CancelTurn).await.expect("a compacting turn accepts a cancel");
 
     let seen = drain(&mut events).await;
     // Past its own progress gauge (user directive, 2026-08-25), the finish
     // is still the first and only word: no summary, no half-grown message.
-    let mut after = seen
-        .iter()
-        .skip_while(|event| matches!(event, Event::CompactionProgress { .. }));
+    let mut after =
+        seen.iter().skip_while(|event| matches!(event, Event::CompactionProgress { .. }));
     let Some(Event::MessageFinished { reason, .. }) = after.next() else {
         panic!(
             "a cancel during compaction ends in a clean finish and nothing \
@@ -930,13 +772,8 @@ async fn a_cancel_during_compaction_leaves_the_window_uninstalled() {
     assert_eq!(*reason, FinishReason::Cancelled);
 
     let info = stored_info(&storage, &sid);
-    assert!(
-        info.summary.is_none(),
-        "no half-installed window: the pointer stays unset"
-    );
-    let transcript = storage
-        .load_transcript(&sid)
-        .expect("the transcript reloads");
+    assert!(info.summary.is_none(), "no half-installed window: the pointer stays unset");
+    let transcript = storage.load_transcript(&sid).expect("the transcript reloads");
     assert_eq!(
         transcript.len(),
         2,
@@ -953,10 +790,7 @@ async fn a_cancel_during_compaction_leaves_the_window_uninstalled() {
         })
         .await
         .expect("a cancelled turn leaves the engine idle");
-    engine
-        .send(Command::CancelTurn)
-        .await
-        .expect("cleanup cancel");
+    engine.send(Command::CancelTurn).await.expect("cleanup cancel");
     drain(&mut events).await;
 }
 
@@ -967,11 +801,7 @@ async fn the_fake_provider_titles_from_the_prompt_without_a_request() {
     // The provider claims the fake id, so the title rule applies — and its
     // request log proves no title request ever happens.
     let provider = LaneProvider::new("fake", vec![Ok(reply("canned words", 3))]);
-    let engine = persistent(
-        Arc::clone(&provider) as Arc<dyn Provider>,
-        "canned",
-        storage.clone(),
-    );
+    let engine = persistent(Arc::clone(&provider) as Arc<dyn Provider>, "canned", storage.clone());
 
     // Forty-nine ASCII characters, then multibyte: character fifty lands
     // inside the Japanese run, so a byte-indexed clip would panic or tear.
@@ -991,10 +821,7 @@ async fn the_fake_provider_titles_from_the_prompt_without_a_request() {
         .expect("an idle engine accepts a prompt");
     drain(&mut events).await;
 
-    let sid = engine
-        .current_session()
-        .expect("the first prompt created a session")
-        .id;
+    let sid = engine.current_session().expect("the first prompt created a session").id;
     assert_eq!(
         stored_info(&storage, &sid).title.as_deref(),
         Some(expected.as_str()),
@@ -1018,16 +845,10 @@ async fn a_real_provider_titles_through_its_cheapest_stablemate() {
 
     let provider = LaneProvider::new(
         "anthropic",
-        vec![
-            Ok(reply("sure thing", 10)),
-            Ok(reply("Fixing the flux capacitor", 5)),
-        ],
+        vec![Ok(reply("sure thing", 10)), Ok(reply("Fixing the flux capacitor", 5))],
     );
-    let engine = persistent(
-        Arc::clone(&provider) as Arc<dyn Provider>,
-        "claude-sonnet-5",
-        storage.clone(),
-    );
+    let engine =
+        persistent(Arc::clone(&provider) as Arc<dyn Provider>, "claude-sonnet-5", storage.clone());
 
     let prompt = "fix the flux capacitor please";
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
@@ -1043,26 +864,17 @@ async fn a_real_provider_titles_through_its_cheapest_stablemate() {
         .expect("an idle engine accepts a prompt");
     drain(&mut events).await;
 
-    let sid = engine
-        .current_session()
-        .expect("the first prompt created a session")
-        .id;
+    let sid = engine.current_session().expect("the first prompt created a session").id;
 
     let title_request =
         eventually("the title request", || provider.requests().get(1).cloned()).await;
-    assert!(
-        title_request.tools.is_empty(),
-        "the title request offers no tools"
-    );
+    assert!(title_request.tools.is_empty(), "the title request offers no tools");
     assert_eq!(
         title_request.model, "claude-haiku-4-5",
         "the cheapest anthropic catalog entry by input price"
     );
     assert!(
-        title_request
-            .system
-            .as_deref()
-            .is_some_and(|system| system.contains("title generator")),
+        title_request.system.as_deref().is_some_and(|system| system.contains("title generator")),
         "the ported title prompt rides as the system prompt"
     );
     assert_eq!(title_request.messages.len(), 2);
@@ -1096,17 +908,11 @@ async fn a_configured_small_model_is_what_the_title_request_asks_for() {
 
     let provider = LaneProvider::new(
         "anthropic",
-        vec![
-            Ok(reply("sure thing", 10)),
-            Ok(reply("Titled by the small model", 5)),
-        ],
+        vec![Ok(reply("sure thing", 10)), Ok(reply("Titled by the small model", 5))],
     );
-    let engine = persistent(
-        Arc::clone(&provider) as Arc<dyn Provider>,
-        "claude-sonnet-5",
-        storage.clone(),
-    )
-    .with_small_model(Some("anthropic/claude-titler-9".to_owned()));
+    let engine =
+        persistent(Arc::clone(&provider) as Arc<dyn Provider>, "claude-sonnet-5", storage.clone())
+            .with_small_model(Some("anthropic/claude-titler-9".to_owned()));
 
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
     engine
@@ -1121,10 +927,7 @@ async fn a_configured_small_model_is_what_the_title_request_asks_for() {
         .expect("an idle engine accepts a prompt");
     drain(&mut events).await;
 
-    let sid = engine
-        .current_session()
-        .expect("the first prompt created a session")
-        .id;
+    let sid = engine.current_session().expect("the first prompt created a session").id;
     let title_request =
         eventually("the title request", || provider.requests().get(1).cloned()).await;
     assert_eq!(
@@ -1150,17 +953,11 @@ async fn a_small_model_naming_another_provider_leaves_the_title_alone() {
 
     let provider = LaneProvider::new(
         "anthropic",
-        vec![
-            Ok(reply("sure thing", 10)),
-            Ok(reply("Fixing the flux capacitor", 5)),
-        ],
+        vec![Ok(reply("sure thing", 10)), Ok(reply("Fixing the flux capacitor", 5))],
     );
-    let engine = persistent(
-        Arc::clone(&provider) as Arc<dyn Provider>,
-        "claude-sonnet-5",
-        storage.clone(),
-    )
-    .with_small_model(Some("openai/gpt-5-nano".to_owned()));
+    let engine =
+        persistent(Arc::clone(&provider) as Arc<dyn Provider>, "claude-sonnet-5", storage.clone())
+            .with_small_model(Some("openai/gpt-5-nano".to_owned()));
 
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
     engine
@@ -1195,18 +992,13 @@ async fn a_refused_small_model_falls_back_to_the_sessions_own_model() {
         "anthropic",
         vec![
             Ok(reply("sure thing", 10)),
-            Err(ProviderError::Transport(
-                "this model is not available".to_owned(),
-            )),
+            Err(ProviderError::Transport("this model is not available".to_owned())),
             Ok(reply("Titled on the retry", 5)),
         ],
     );
-    let engine = persistent(
-        Arc::clone(&provider) as Arc<dyn Provider>,
-        "claude-sonnet-5",
-        storage.clone(),
-    )
-    .with_small_model(Some("claude-a-wire-refuses".to_owned()));
+    let engine =
+        persistent(Arc::clone(&provider) as Arc<dyn Provider>, "claude-sonnet-5", storage.clone())
+            .with_small_model(Some("claude-a-wire-refuses".to_owned()));
 
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
     engine
@@ -1221,14 +1013,9 @@ async fn a_refused_small_model_falls_back_to_the_sessions_own_model() {
         .expect("an idle engine accepts a prompt");
     drain(&mut events).await;
 
-    let sid = engine
-        .current_session()
-        .expect("the first prompt created a session")
-        .id;
-    let retry = eventually("the retried title request", || {
-        provider.requests().get(2).cloned()
-    })
-    .await;
+    let sid = engine.current_session().expect("the first prompt created a session").id;
+    let retry =
+        eventually("the retried title request", || provider.requests().get(2).cloned()).await;
     assert_eq!(
         provider.requests()[1].model,
         "claude-a-wire-refuses",
@@ -1252,16 +1039,10 @@ async fn a_failed_title_request_falls_back_to_the_prompt() {
 
     let provider = LaneProvider::new(
         "anthropic",
-        vec![
-            Ok(reply("done", 4)),
-            Err(ProviderError::Transport("boom".to_owned())),
-        ],
+        vec![Ok(reply("done", 4)), Err(ProviderError::Transport("boom".to_owned()))],
     );
-    let engine = persistent(
-        Arc::clone(&provider) as Arc<dyn Provider>,
-        "claude-sonnet-5",
-        storage.clone(),
-    );
+    let engine =
+        persistent(Arc::clone(&provider) as Arc<dyn Provider>, "claude-sonnet-5", storage.clone());
 
     let prompt = "please refactor the parser module";
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
@@ -1277,18 +1058,9 @@ async fn a_failed_title_request_falls_back_to_the_prompt() {
         .expect("an idle engine accepts a prompt");
     drain(&mut events).await;
 
-    let sid = engine
-        .current_session()
-        .expect("the first prompt created a session")
-        .id;
-    let titled = eventually("the fallback title write", || {
-        stored_info(&storage, &sid).title
-    })
-    .await;
-    assert_eq!(
-        titled, prompt,
-        "a dead title request falls back to the clipped first prompt"
-    );
+    let sid = engine.current_session().expect("the first prompt created a session").id;
+    let titled = eventually("the fallback title write", || stored_info(&storage, &sid).title).await;
+    assert_eq!(titled, prompt, "a dead title request falls back to the clipped first prompt");
 }
 
 #[tokio::test]
@@ -1310,11 +1082,8 @@ async fn an_unsummarizable_history_skips_compaction_instead_of_failing() {
     ganja_testkit::seed_message(&storage, &sid, &huge);
 
     let provider = LaneProvider::new("anthropic", vec![Ok(reply("fine", 5))]);
-    let engine = persistent(
-        Arc::clone(&provider) as Arc<dyn Provider>,
-        "claude-haiku-4-5",
-        storage.clone(),
-    );
+    let engine =
+        persistent(Arc::clone(&provider) as Arc<dyn Provider>, "claude-haiku-4-5", storage.clone());
     engine.resume(&sid).await.expect("the session resumes");
 
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
@@ -1331,11 +1100,7 @@ async fn an_unsummarizable_history_skips_compaction_instead_of_failing() {
     drain(&mut events).await;
 
     let requests = provider.requests();
-    assert_eq!(
-        requests.len(),
-        1,
-        "no summarize request may be sent for a prompt that cannot fit"
-    );
+    assert_eq!(requests.len(), 1, "no summarize request may be sent for a prompt that cannot fit");
     assert_eq!(
         requests[0].messages.len(),
         3,
@@ -1398,15 +1163,9 @@ async fn a_finish_is_never_overtaken_by_the_next_turns_events() {
             .expect("the stream keeps moving")
             .expect("the engine outlives the drain");
         match &event {
-            Event::MessageStarted {
-                session_id: _,
-                message,
-            } if message.role == Role::User => {
+            Event::MessageStarted { session_id: _, message } if message.role == Role::User => {
                 open_turns += 1;
-                assert!(
-                    open_turns <= 1,
-                    "a turn opened before the previous finish was delivered"
-                );
+                assert!(open_turns <= 1, "a turn opened before the previous finish was delivered");
             }
             Event::MessageFinished { .. } => {
                 assert!(open_turns > 0, "a finish arrived with no turn open");

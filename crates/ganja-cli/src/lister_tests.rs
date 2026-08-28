@@ -18,10 +18,7 @@ async fn an_empty_registry_lists_as_complete_and_empty() {
 async fn an_unreadable_directory_answers_partial_with_no_rows() {
     let listing = list(std::path::Path::new("/nonexistent-ganja-registry")).await;
 
-    assert!(
-        matches!(&listing, Listing::Partial { rows, .. } if rows.is_empty()),
-        "{listing:?}"
-    );
+    assert!(matches!(&listing, Listing::Partial { rows, .. } if rows.is_empty()), "{listing:?}");
 }
 
 /// A stale record — nobody holds its stem's lock — is excluded, exactly
@@ -45,18 +42,10 @@ async fn a_stale_record_is_excluded_and_a_live_one_is_listed_with_its_health_pro
         started_at: 1_756_150_000_000,
     };
 
-    write(
-        dir.path(),
-        "0198c1a2",
-        &record("worker", "0198c1a2-0000-7000-8000-000000000001"),
-    )
-    .expect("a record writes");
-    write(
-        dir.path(),
-        "0299d2b3",
-        &record("stale", "0299d2b3-0000-7000-8000-000000000002"),
-    )
-    .expect("a record writes");
+    write(dir.path(), "0198c1a2", &record("worker", "0198c1a2-0000-7000-8000-000000000001"))
+        .expect("a record writes");
+    write(dir.path(), "0299d2b3", &record("stale", "0299d2b3-0000-7000-8000-000000000002"))
+        .expect("a record writes");
 
     // Only the first is live: its lock is held, unbound socket and all —
     // a socket the health probe then reaches nobody behind.

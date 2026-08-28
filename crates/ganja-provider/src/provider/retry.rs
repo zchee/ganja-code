@@ -21,11 +21,9 @@
 //! `RETRYABLE_MESSAGE_PATTERNS`, because a transient condition does not
 //! always arrive under a status anyone can classify.
 
-use std::{
-    fmt::Write as _,
-    sync::LazyLock,
-    time::{Duration, SystemTime},
-};
+use std::fmt::Write as _;
+use std::sync::LazyLock;
+use std::time::{Duration, SystemTime};
 
 use regex::Regex;
 use reqwest::header::HeaderMap;
@@ -99,9 +97,7 @@ static TRANSIENT_MESSAGES: LazyLock<Vec<Regex>> = LazyLock::new(|| {
 /// Whether `message` names a condition upstream's pattern list calls
 /// transient.
 fn transient_message(message: &str) -> bool {
-    TRANSIENT_MESSAGES
-        .iter()
-        .any(|pattern| pattern.is_match(message))
+    TRANSIENT_MESSAGES.iter().any(|pattern| pattern.is_match(message))
 }
 
 /// Longest error body kept for a status message; a status bar cannot hold more
@@ -367,9 +363,7 @@ pub fn retry_after(headers: &HeaderMap, now: SystemTime) -> Option<Duration> {
 /// The one form [`httpdate`] refuses and a reader here may not is the leap
 /// second, which keeps the branch below.
 fn http_date(value: &str) -> Option<SystemTime> {
-    httpdate::parse_http_date(value)
-        .ok()
-        .or_else(|| http_leap_second(value))
+    httpdate::parse_http_date(value).ok().or_else(|| http_leap_second(value))
 }
 
 /// The `:60` of a leap second, read as the instant it names.
@@ -381,9 +375,7 @@ fn http_date(value: &str) -> Option<SystemTime> {
 fn http_leap_second(value: &str) -> Option<SystemTime> {
     let head = value.trim_end().strip_suffix(":60 GMT")?;
 
-    httpdate::parse_http_date(&format!("{head}:59 GMT"))
-        .ok()?
-        .checked_add(Duration::from_secs(1))
+    httpdate::parse_http_date(&format!("{head}:59 GMT")).ok()?.checked_add(Duration::from_secs(1))
 }
 
 #[cfg(test)]

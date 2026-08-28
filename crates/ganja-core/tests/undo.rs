@@ -19,23 +19,20 @@
 //! `git` on `PATH` is a prerequisite rather than a skip, for the golden
 //! suite's reason: a run that snapshotted nothing would prove nothing.
 
-use std::{
-    path::{Path, PathBuf},
-    process::Command as Process,
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
-};
+use std::path::{Path, PathBuf};
+use std::process::Command as Process;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use futures::{StreamExt as _, stream::BoxStream};
-use ganja_core::{
-    Engine, EngineError, Snapshots, Storage,
-    permission::{Action, Permissions, Rule},
-    project::Project,
-    protocol::{Command, Event, Role},
-    provider::{ChatRequest, FakeProvider, Provider, ProviderError, ProviderEvent},
-    tool::Registry,
-};
+use futures::StreamExt as _;
+use futures::stream::BoxStream;
+use ganja_core::permission::{Action, Permissions, Rule};
+use ganja_core::project::Project;
+use ganja_core::protocol::{Command, Event, Role};
+use ganja_core::provider::{ChatRequest, FakeProvider, Provider, ProviderError, ProviderEvent};
+use ganja_core::tool::Registry;
+use ganja_core::{Engine, EngineError, Snapshots, Storage};
 use tokio_util::sync::CancellationToken;
 
 /// What the tracked file says before the turn, and what an undo has to put
@@ -77,10 +74,7 @@ impl Provider for Recorder {
         request: ChatRequest,
         cancel: CancellationToken,
     ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
-        self.seen
-            .lock()
-            .expect("the request log is never poisoned")
-            .push(request.clone());
+        self.seen.lock().expect("the request log is never poisoned").push(request.clone());
 
         self.inner.stream(request, cancel).await
     }
@@ -133,10 +127,7 @@ async fn an_undone_turn_leaves_neither_its_files_nor_its_prompt_behind() {
         snapshots.notice()
     );
     let storage = Storage::open(
-        resolved
-            .data_dir()
-            .expect("the redirected data home resolves")
-            .join("storage"),
+        resolved.data_dir().expect("the redirected data home resolves").join("storage"),
     );
     let engine = Engine::persistent(
         provider,
@@ -169,16 +160,9 @@ async fn an_undone_turn_leaves_neither_its_files_nor_its_prompt_behind() {
 
     // ---- undo -----------------------------------------------------------
 
-    settled(&engine, Command::Undo)
-        .await
-        .expect("there is a turn to undo");
+    settled(&engine, Command::Undo).await.expect("there is a turn to undo");
     let reverted = next(&mut events).await;
-    let Event::RevertChanged {
-        session_id: _,
-        revert: Some(revert),
-        prompt,
-    } = &reverted
-    else {
+    let Event::RevertChanged { session_id: _, revert: Some(revert), prompt } = &reverted else {
         panic!("an undo announces where the revert stands, got {reverted:?}");
     };
     assert_eq!(
@@ -205,9 +189,7 @@ async fn an_undone_turn_leaves_neither_its_files_nor_its_prompt_behind() {
 
     // ---- redo -----------------------------------------------------------
 
-    settled(&engine, Command::Redo)
-        .await
-        .expect("there is an undo to redo");
+    settled(&engine, Command::Redo).await.expect("there is an undo to redo");
     let restored = next(&mut events).await;
     assert!(
         matches!(restored, Event::RevertChanged { revert: None, .. }),
@@ -222,15 +204,10 @@ async fn an_undone_turn_leaves_neither_its_files_nor_its_prompt_behind() {
 
     // ---- undo again, then keep it ---------------------------------------
 
-    settled(&engine, Command::Undo)
-        .await
-        .expect("a redone turn can be undone again");
+    settled(&engine, Command::Undo).await.expect("a redone turn can be undone again");
     let _ = next(&mut events).await;
 
-    let before_the_second_prompt = seen
-        .lock()
-        .expect("the request log is never poisoned")
-        .len();
+    let before_the_second_prompt = seen.lock().expect("the request log is never poisoned").len();
     settled(
         &engine,
         Command::SendPrompt {
@@ -273,10 +250,7 @@ async fn an_undone_turn_leaves_neither_its_files_nor_its_prompt_behind() {
     // And the revert is over rather than merely quiet: what was hidden has
     // been deleted, so there is nothing left to step forward into.
     assert!(
-        matches!(
-            settled(&engine, Command::Redo).await,
-            Err(EngineError::NothingToRedo)
-        ),
+        matches!(settled(&engine, Command::Redo).await, Err(EngineError::NothingToRedo)),
         "a prompt after an undo makes the undo permanent"
     );
 }
@@ -342,12 +316,7 @@ async fn an_engine_never_handed_snapshots_refuses_an_undo_even_in_a_checkout() {
             .collect(),
     );
 
-    let engine = Engine::new(
-        provider,
-        "canned",
-        Arc::new(Registry::with_builtins()),
-        permissions,
-    );
+    let engine = Engine::new(provider, "canned", Arc::new(Registry::with_builtins()), permissions);
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     settled(
@@ -371,10 +340,7 @@ async fn an_engine_never_handed_snapshots_refuses_an_undo_even_in_a_checkout() {
     );
 
     assert!(
-        matches!(
-            settled(&engine, Command::Undo).await,
-            Err(EngineError::NoSnapshots)
-        ),
+        matches!(settled(&engine, Command::Undo).await, Err(EngineError::NoSnapshots)),
         "an engine nobody handed a Snapshots instance must refuse an undo even though \
          the directory underneath it is a real, committed git checkout"
     );
@@ -434,11 +400,9 @@ fn seed_repository(root: &Path) {
         "init.defaultBranch=main",
     ];
 
-    for arguments in [
-        vec!["init"],
-        vec!["add", "-A"],
-        vec!["commit", "-m", "the state before anything"],
-    ] {
+    for arguments in
+        [vec!["init"], vec!["add", "-A"], vec!["commit", "-m", "the state before anything"]]
+    {
         let status = Process::new("git")
             .args(common)
             .args(&arguments)
@@ -505,10 +469,7 @@ async fn next(events: &mut BoxStream<'static, Event>) -> Event {
 async fn finish(events: &mut BoxStream<'static, Event>) {
     loop {
         if let Event::MessageFinished { reason, error, .. } = next(events).await {
-            assert!(
-                error.is_none(),
-                "the scripted turn finished {reason:?}: {error:?}"
-            );
+            assert!(error.is_none(), "the scripted turn finished {reason:?}: {error:?}");
 
             return;
         }

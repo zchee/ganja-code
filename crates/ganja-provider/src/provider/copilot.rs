@@ -37,12 +37,10 @@ use futures::stream::BoxStream;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use tokio_util::sync::CancellationToken;
 
-use crate::{
-    auth::{self, AuthError, OauthCredential, RefreshOauth},
-    provider::{
-        ChatRequest, CredentialSource, OpenAiProvider, Provider, ProviderError, ProviderEvent,
-        check_base_url,
-    },
+use crate::auth::{self, AuthError, OauthCredential, RefreshOauth};
+use crate::provider::{
+    ChatRequest, CredentialSource, OpenAiProvider, Provider, ProviderError, ProviderEvent,
+    check_base_url,
 };
 
 /// Value of [`PROVIDER_ENV`](super::PROVIDER_ENV) that selects this provider.
@@ -138,10 +136,7 @@ impl CopilotProvider {
 
         Ok(Self(
             OpenAiProvider::with_credential(
-                CredentialSource::Oauth {
-                    provider_id: ID,
-                    refresh: Arc::new(NeverRenews),
-                },
+                CredentialSource::Oauth { provider_id: ID, refresh: Arc::new(NeverRenews) },
                 base_url,
             )?
             .with_headers(headers()),
@@ -172,12 +167,10 @@ fn stored_api_base() -> String {
         }
     };
 
-    stored
-        .and_then(|credential| credential.enterprise_url)
-        .map_or_else(
-            || auth::copilot::DEFAULT_API_BASE.to_owned(),
-            |domain| auth::copilot::api_base_for(&domain),
-        )
+    stored.and_then(|credential| credential.enterprise_url).map_or_else(
+        || auth::copilot::DEFAULT_API_BASE.to_owned(),
+        |domain| auth::copilot::api_base_for(&domain),
+    )
 }
 
 /// The headers every Copilot request carries beside the bearer.
@@ -197,14 +190,8 @@ fn headers() -> HeaderMap {
         // Upstream's own product name, for the reason `UPSTREAM_USER_AGENT`
         // records: the token was minted against a client registration that
         // belongs to that project.
-        (
-            reqwest::header::USER_AGENT,
-            auth::device::UPSTREAM_USER_AGENT,
-        ),
-        (
-            HeaderName::from_static(API_VERSION_HEADER),
-            auth::copilot::API_VERSION,
-        ),
+        (reqwest::header::USER_AGENT, auth::device::UPSTREAM_USER_AGENT),
+        (HeaderName::from_static(API_VERSION_HEADER), auth::copilot::API_VERSION),
         (HeaderName::from_static(INTENT_HEADER), INTENT),
         (HeaderName::from_static(INITIATOR_HEADER), INITIATOR),
     ] {

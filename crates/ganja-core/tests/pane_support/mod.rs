@@ -31,24 +31,21 @@
 // unused half differs per binary and a targeted allow cannot name it.
 #![allow(dead_code)]
 
-use std::{ffi::OsString, path::Path, sync::Arc, time::Duration};
+use std::ffi::OsString;
+use std::path::Path;
+use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
-use ganja_core::{
-    Caller, Storage, Teammates,
-    teammate::{
-        TeammateRegistry,
-        lead_inbox::LeadInbox,
-        pane::{AGENT_COLOR, AGENT_ID, AGENT_NAME, PARENT_SESSION_ID, TEAM_NAME},
-    },
-    tool::{
-        Credentials, FileTimes, Tool as _, ToolCtx,
-        task::{
-            Delegated, Delegation, NotSpawned, Offered, Subagents, TaskTool, TeammateSpawn,
-            Teammated, Unanswered,
-        },
-    },
+use ganja_core::teammate::TeammateRegistry;
+use ganja_core::teammate::lead_inbox::LeadInbox;
+use ganja_core::teammate::pane::{AGENT_COLOR, AGENT_ID, AGENT_NAME, PARENT_SESSION_ID, TEAM_NAME};
+use ganja_core::tool::task::{
+    Delegated, Delegation, NotSpawned, Offered, Subagents, TaskTool, TeammateSpawn, Teammated,
+    Unanswered,
 };
+use ganja_core::tool::{Credentials, FileTimes, Tool as _, ToolCtx};
+use ganja_core::{Caller, Storage, Teammates};
 use ganja_team::{MailboxMessage, MemberName, MemberRecord, TeamName, TeamsRoot, mailbox, record};
 use ganja_testkit::AllowSpawn;
 use serde::{Deserialize, Serialize};
@@ -81,10 +78,7 @@ pub fn pane_child_if_asked() {
     if !args.iter().any(|arg| arg == AGENT_ID) {
         return;
     }
-    let argv: Vec<String> = args
-        .iter()
-        .map(|arg| arg.to_string_lossy().into_owned())
-        .collect();
+    let argv: Vec<String> = args.iter().map(|arg| arg.to_string_lossy().into_owned()).collect();
     let value_of = |flag: &str| -> String {
         argv.iter()
             .position(|arg| arg == flag)
@@ -103,15 +97,10 @@ pub fn pane_child_if_asked() {
     let root = TeammateRegistry::for_session(&home, SESSION_ID, std::env::current_dir().unwrap())
         .root()
         .clone();
-    let mut env_names: Vec<String> = std::env::vars_os()
-        .map(|(name, _)| name.to_string_lossy().into_owned())
-        .collect();
+    let mut env_names: Vec<String> =
+        std::env::vars_os().map(|(name, _)| name.to_string_lossy().into_owned()).collect();
     env_names.sort();
-    let report = Report {
-        argv,
-        config_home,
-        env_names,
-    };
+    let report = Report { argv, config_home, env_names };
     let inbox = root.inbox_path(&team, &MemberName::lead());
     mailbox::seed(&inbox).expect("the lead's inbox seeds");
     mailbox::write(
@@ -180,20 +169,14 @@ impl Subagents for Door {
     }
 
     async fn spawn_teammate(&self, request: TeammateSpawn) -> Result<Teammated, NotSpawned> {
-        self.teammates
-            .start(request, &self.caller, &AllowSpawn)
-            .await
+        self.teammates.start(request, &self.caller, &AllowSpawn).await
     }
 }
 
 /// The lead's team over `config_home`, exactly as a frontend installs it —
 /// [`TeammateRegistry::for_session`] — with production's three backends.
 pub fn lead(config_home: &Path, project: &Path) -> (Arc<TeammateRegistry>, Door) {
-    let registry = Arc::new(TeammateRegistry::for_session(
-        config_home,
-        SESSION_ID,
-        project,
-    ));
+    let registry = Arc::new(TeammateRegistry::for_session(config_home, SESSION_ID, project));
     let door = Door {
         teammates: Teammates::new(
             Arc::clone(&registry),
@@ -258,10 +241,7 @@ pub async fn spawn_pane_worker(config_home: &Path, project: &Path, prompt: &str)
     let (registry, door) = lead(config_home, project);
     let (root, team) = team_of(&registry);
     let door = Arc::new(door);
-    let tool = TaskTool::new(&[Offered {
-        name: "general".to_owned(),
-        description: None,
-    }]);
+    let tool = TaskTool::new(&[Offered { name: "general".to_owned(), description: None }]);
     let ctx = ctx(project, Arc::clone(&door));
 
     let output = tool
@@ -295,27 +275,16 @@ pub async fn spawn_pane_worker(config_home: &Path, project: &Path, prompt: &str)
         "the pane's report to reach the lead",
         async || {
             let pass = inbox.poll().await;
-            pass.messages
-                .into_iter()
-                .find(|message| message.from == "worker")
-                .map(|message| {
-                    serde_json::from_str::<Report>(&message.body).unwrap_or_else(|error| {
-                        panic!("the pane wrote a report: {error} in {message:?}")
-                    })
+            pass.messages.into_iter().find(|message| message.from == "worker").map(|message| {
+                serde_json::from_str::<Report>(&message.body).unwrap_or_else(|error| {
+                    panic!("the pane wrote a report: {error} in {message:?}")
                 })
+            })
         },
     )
     .await;
 
-    Spawned {
-        registry,
-        root,
-        team,
-        member,
-        pane_id,
-        report,
-        inbox,
-    }
+    Spawned { registry, root, team, member, pane_id, report, inbox }
 }
 
 /// The five spawn flags and their values, in `pane.rs`'s order — what the
@@ -329,11 +298,7 @@ pub fn expected_argv(team: &TeamName, member: &MemberRecord) -> [String; 10] {
         TEAM_NAME.to_owned(),
         team.as_str().to_owned(),
         AGENT_COLOR.to_owned(),
-        member
-            .color
-            .as_deref()
-            .expect("a spawn assigns a colour")
-            .to_owned(),
+        member.color.as_deref().expect("a spawn assigns a colour").to_owned(),
         PARENT_SESSION_ID.to_owned(),
         SESSION_ID.to_owned(),
     ]

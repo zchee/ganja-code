@@ -5,18 +5,14 @@ use tokio_util::sync::CancellationToken;
 use super::{
     Aliases, Body, Frame, Mapper as _, Mapping, NO_RESULT, OPENAI_CAP, OpenAiProvider, alias,
 };
-use crate::{
-    catalog,
-    protocol::{FinishReason, Message, Part, PartBody, PartId, ToolState, Usage},
-    provider::{ChatRequest, ProviderError, ProviderEvent, replay, splice_effort},
-    tool::ToolDefinition,
-};
+use crate::catalog;
+use crate::protocol::{FinishReason, Message, Part, PartBody, PartId, ToolState, Usage};
+use crate::provider::{ChatRequest, ProviderError, ProviderEvent, replay, splice_effort};
+use crate::tool::ToolDefinition;
 
 /// Runs a recorded transcript through the real splitter and mapper.
 async fn events(transcript: &'static str) -> Vec<ProviderEvent> {
-    replay(transcript, CancellationToken::new(), Mapping::default())
-        .collect()
-        .await
+    replay(transcript, CancellationToken::new(), Mapping::default()).collect().await
 }
 
 /// The reply text a transcript streams.
@@ -36,9 +32,7 @@ async fn a_happy_path_transcript_maps_to_text_reasoning_and_a_bill() {
 
     assert_eq!(text(&seen), "Hello, world!");
     assert!(
-        seen.contains(&ProviderEvent::ReasoningDelta(
-            "A greeting is enough.".to_owned()
-        )),
+        seen.contains(&ProviderEvent::ReasoningDelta("A greeting is enough.".to_owned())),
         "reasoning_content should not be dropped, got {seen:?}"
     );
     assert_eq!(
@@ -91,12 +85,7 @@ async fn a_cached_prompt_reports_only_its_fresh_half_as_input() {
                 r#""prompt_tokens_details":{"cached_tokens":900}}}"#,
                 "\n\ndata: [DONE]\n\n",
             ),
-            Usage {
-                input_tokens: 0,
-                output_tokens: 5,
-                cache_read_tokens: 900,
-                ..Usage::default()
-            },
+            Usage { input_tokens: 0, output_tokens: 5, cache_read_tokens: 900, ..Usage::default() },
         ),
         (
             "a prompt nothing was cached for is fresh in full",
@@ -105,21 +94,14 @@ async fn a_cached_prompt_reports_only_its_fresh_half_as_input() {
                 r#""usage":{"prompt_tokens":1000,"completion_tokens":20}}"#,
                 "\n\ndata: [DONE]\n\n",
             ),
-            Usage {
-                input_tokens: 1_000,
-                output_tokens: 20,
-                ..Usage::default()
-            },
+            Usage { input_tokens: 1_000, output_tokens: 20, ..Usage::default() },
         ),
     ];
 
     for (name, transcript, expected) in cases {
         let seen = events(transcript).await;
 
-        assert!(
-            seen.contains(&ProviderEvent::Usage(expected)),
-            "{name}: got {seen:?}"
-        );
+        assert!(seen.contains(&ProviderEvent::Usage(expected)), "{name}: got {seen:?}");
     }
 }
 
@@ -138,10 +120,7 @@ fn a_cached_prompt_is_billed_once_rather_than_twice() {
     // What the same response cost before the cached tokens came back out of
     // `prompt_tokens`: the whole million counted as fresh input *and* the
     // cached 800k counted again beside it.
-    let doubled = Usage {
-        input_tokens: 1_000_000,
-        ..corrected
-    };
+    let doubled = Usage { input_tokens: 1_000_000, ..corrected };
 
     let billed = catalog::cost(&corrected, &model).total_usd;
     let expected = model.pricing.input * 0.2 + model.pricing.cache_read * 0.8;
@@ -169,10 +148,7 @@ async fn tool_calls_are_opened_filled_and_closed() {
             .filter(|event| !matches!(event, ProviderEvent::TextDelta(_) | ProviderEvent::Usage(_)))
             .collect::<Vec<_>>(),
         vec![
-            &ProviderEvent::ToolCallStart {
-                id: "call_read".to_owned(),
-                name: "read".to_owned()
-            },
+            &ProviderEvent::ToolCallStart { id: "call_read".to_owned(), name: "read".to_owned() },
             &ProviderEvent::ToolCallDelta {
                 id: "call_read".to_owned(),
                 json: "{\"file".to_owned()
@@ -181,22 +157,15 @@ async fn tool_calls_are_opened_filled_and_closed() {
                 id: "call_read".to_owned(),
                 json: "Path\":\"src/main.rs\"}".to_owned()
             },
-            &ProviderEvent::ToolCallStart {
-                id: "call_glob".to_owned(),
-                name: "glob".to_owned()
-            },
+            &ProviderEvent::ToolCallStart { id: "call_glob".to_owned(), name: "glob".to_owned() },
             &ProviderEvent::ToolCallDelta {
                 id: "call_glob".to_owned(),
                 json: "{\"pattern\":\"**/*.rs\"}".to_owned()
             },
             // Chat completions has no per-call terminator, so both calls
             // close when the stream does, in index order.
-            &ProviderEvent::ToolCallEnd {
-                id: "call_read".to_owned()
-            },
-            &ProviderEvent::ToolCallEnd {
-                id: "call_glob".to_owned()
-            },
+            &ProviderEvent::ToolCallEnd { id: "call_read".to_owned() },
+            &ProviderEvent::ToolCallEnd { id: "call_glob".to_owned() },
             &ProviderEvent::Finish(FinishReason::Completed),
         ]
     );
@@ -208,10 +177,7 @@ async fn tool_calls_are_opened_filled_and_closed() {
 /// they belong to across everything in between.
 #[tokio::test]
 async fn text_and_a_fragmented_call_interleave_without_losing_either() {
-    let seen = events(include_str!(
-        "../../tests/fixtures/openai_tool_calls_interleaved.sse"
-    ))
-    .await;
+    let seen = events(include_str!("../../tests/fixtures/openai_tool_calls_interleaved.sse")).await;
 
     assert_eq!(text(&seen), "Reading the file first. Then the directory.");
     assert_eq!(
@@ -219,10 +185,7 @@ async fn text_and_a_fragmented_call_interleave_without_losing_either() {
             .filter(|event| !matches!(event, ProviderEvent::TextDelta(_)))
             .collect::<Vec<_>>(),
         vec![
-            &ProviderEvent::ToolCallStart {
-                id: "call_read".to_owned(),
-                name: "read".to_owned(),
-            },
+            &ProviderEvent::ToolCallStart { id: "call_read".to_owned(), name: "read".to_owned() },
             &ProviderEvent::ToolCallDelta {
                 id: "call_read".to_owned(),
                 json: "{\"file".to_owned(),
@@ -235,10 +198,7 @@ async fn text_and_a_fragmented_call_interleave_without_losing_either() {
                 id: "call_read".to_owned(),
                 json: "main.rs\"}".to_owned(),
             },
-            &ProviderEvent::ToolCallStart {
-                id: "call_glob".to_owned(),
-                name: "glob".to_owned(),
-            },
+            &ProviderEvent::ToolCallStart { id: "call_glob".to_owned(), name: "glob".to_owned() },
             &ProviderEvent::ToolCallDelta {
                 id: "call_glob".to_owned(),
                 json: "{\"pattern\"".to_owned(),
@@ -249,12 +209,8 @@ async fn text_and_a_fragmented_call_interleave_without_losing_either() {
             },
             // Chat completions has no per-call terminator, so both calls
             // close when the stream does, in index order.
-            &ProviderEvent::ToolCallEnd {
-                id: "call_read".to_owned(),
-            },
-            &ProviderEvent::ToolCallEnd {
-                id: "call_glob".to_owned(),
-            },
+            &ProviderEvent::ToolCallEnd { id: "call_read".to_owned() },
+            &ProviderEvent::ToolCallEnd { id: "call_glob".to_owned() },
             // 317 prompt tokens of which the cache served 256: 61 fresh.
             &ProviderEvent::Usage(Usage {
                 input_tokens: 61,
@@ -274,10 +230,7 @@ async fn text_and_a_fragmented_call_interleave_without_losing_either() {
 /// which for this API means the `[DONE]` that closes calls never came.
 #[tokio::test]
 async fn a_stream_that_dies_mid_call_never_closes_it() {
-    let seen = events(include_str!(
-        "../../tests/fixtures/openai_tool_call_cut_short.sse"
-    ))
-    .await;
+    let seen = events(include_str!("../../tests/fixtures/openai_tool_call_cut_short.sse")).await;
 
     assert_eq!(text(&seen), "Let me read that file.");
     assert_eq!(
@@ -285,16 +238,10 @@ async fn a_stream_that_dies_mid_call_never_closes_it() {
             .filter(|event| !matches!(event, ProviderEvent::TextDelta(_)))
             .collect::<Vec<_>>(),
         vec![
-            &ProviderEvent::ToolCallStart {
-                id: "call_cut".to_owned(),
-                name: "read".to_owned(),
-            },
+            &ProviderEvent::ToolCallStart { id: "call_cut".to_owned(), name: "read".to_owned() },
             // The chunk the body was cut in half of never arrives: an
             // incomplete frame is not a frame.
-            &ProviderEvent::ToolCallDelta {
-                id: "call_cut".to_owned(),
-                json: "{\"file".to_owned(),
-            },
+            &ProviderEvent::ToolCallDelta { id: "call_cut".to_owned(), json: "{\"file".to_owned() },
             &ProviderEvent::Failed(ProviderError::Transport(
                 "the response body ended before the model finished".to_owned()
             )),
@@ -309,24 +256,14 @@ async fn a_stream_that_dies_mid_call_never_closes_it() {
 /// says it broke.
 #[tokio::test]
 async fn a_malformed_chunk_ends_the_turn_rather_than_being_skipped() {
-    let seen = events(include_str!(
-        "../../tests/fixtures/openai_malformed_frame.sse"
-    ))
-    .await;
+    let seen = events(include_str!("../../tests/fixtures/openai_malformed_frame.sse")).await;
 
     assert_eq!(text(&seen), "Hello", "text before the break is kept");
     assert!(
-        matches!(
-            seen.last(),
-            Some(ProviderEvent::Failed(ProviderError::Parse(_)))
-        ),
+        matches!(seen.last(), Some(ProviderEvent::Failed(ProviderError::Parse(_)))),
         "got {seen:?}"
     );
-    assert_eq!(
-        seen.len(),
-        2,
-        "nothing after the broken chunk is read, got {seen:?}"
-    );
+    assert_eq!(seen.len(), 2, "nothing after the broken chunk is read, got {seen:?}");
 }
 
 #[tokio::test]
@@ -335,10 +272,7 @@ async fn a_body_that_stops_mid_reply_fails_rather_than_completing() {
 
     assert_eq!(text(&seen), "The connection drops right");
     assert!(
-        matches!(
-            seen.last(),
-            Some(ProviderEvent::Failed(ProviderError::Transport(_)))
-        ),
+        matches!(seen.last(), Some(ProviderEvent::Failed(ProviderError::Transport(_)))),
         "a dropped connection must never read as a finished turn, got {seen:?}"
     );
 }
@@ -356,10 +290,7 @@ async fn a_missing_done_sentinel_after_a_finish_reason_still_completes() {
     .await;
 
     assert_eq!(text(&seen), "hi");
-    assert_eq!(
-        seen.last(),
-        Some(&ProviderEvent::Finish(FinishReason::Completed))
-    );
+    assert_eq!(seen.last(), Some(&ProviderEvent::Finish(FinishReason::Completed)));
 }
 
 #[tokio::test]
@@ -393,9 +324,7 @@ async fn a_cancel_mid_transcript_ends_the_stream_without_a_verdict() {
 
     assert_eq!(
         stream.next().await,
-        Some(ProviderEvent::ReasoningDelta(
-            "A greeting is enough.".to_owned()
-        ))
+        Some(ProviderEvent::ReasoningDelta("A greeting is enough.".to_owned()))
     );
     cancel.cancel();
 
@@ -447,11 +376,7 @@ fn a_transcript_held_thought_is_absent_from_the_body_this_wire_sends() {
     let mut turn = Message::assistant("gpt-test");
     turn.parts.push(Part::reasoning_text(THOUGHT));
     turn.parts.push(Part::text("Hello!"));
-    turn.parts.push(Part::reasoning(
-        "openai",
-        "rs_1",
-        Some("sealed-blob-0001".to_owned()),
-    ));
+    turn.parts.push(Part::reasoning("openai", "rs_1", Some("sealed-blob-0001".to_owned())));
 
     let request = ChatRequest {
         effort_options: Default::default(),
@@ -489,10 +414,7 @@ fn a_request_without_a_system_prompt_starts_with_the_user() {
     };
     let body = serde_json::to_value(Body::new(&request)).expect("the body serializes");
 
-    assert_eq!(
-        body["messages"],
-        serde_json::json!([{"role": "user", "content": "hi"}])
-    );
+    assert_eq!(body["messages"], serde_json::json!([{"role": "user", "content": "hi"}]));
 }
 
 /// The splice order at this wire's send site: the map passes through
@@ -536,11 +458,7 @@ fn an_effort_passes_through_but_cannot_claim_the_model() {
 fn tool_part(call_id: &str, tool: &str, state: ToolState) -> Part {
     Part {
         id: PartId::ascending(),
-        body: PartBody::Tool {
-            call_id: call_id.to_owned(),
-            tool: tool.to_owned(),
-            state,
-        },
+        body: PartBody::Tool { call_id: call_id.to_owned(), tool: tool.to_owned(), state },
     }
 }
 
@@ -550,10 +468,7 @@ fn tool_part(call_id: &str, tool: &str, state: ToolState) -> Part {
 fn a_turn_with_two_calls() -> Message {
     let mut assistant = Message::assistant("gpt-test");
 
-    assistant.parts.push(Part {
-        id: PartId::ascending(),
-        body: PartBody::StepStart,
-    });
+    assistant.parts.push(Part { id: PartId::ascending(), body: PartBody::StepStart });
     assistant.parts.push(Part::text("Reading the file first."));
     assistant.parts.push(tool_part(
         "call_read",
@@ -579,9 +494,7 @@ fn a_turn_with_two_calls() -> Message {
     ));
     assistant.parts.push(Part {
         id: PartId::ascending(),
-        body: PartBody::StepFinish {
-            usage: Usage::default(),
-        },
+        body: PartBody::StepFinish { usage: Usage::default() },
     });
 
     assistant
@@ -640,19 +553,14 @@ const REFUSED_NAME: &str = "mcp__plugin:mcp-gemini-search:mcp-gemini-search__dee
 
 /// [`a_tool`] under the name that got a live turn killed.
 fn a_refused_tool() -> ToolDefinition {
-    ToolDefinition {
-        name: REFUSED_NAME.to_owned(),
-        ..a_tool()
-    }
+    ToolDefinition { name: REFUSED_NAME.to_owned(), ..a_tool() }
 }
 
 /// Whether `name` is one this API's `^[a-zA-Z0-9_-]{1,64}$` accepts.
 fn conforms(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= OPENAI_CAP
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+        && name.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 #[test]
@@ -666,14 +574,9 @@ fn a_tool_name_this_api_refuses_is_advertised_under_a_conforming_alias() {
     };
 
     let body = serde_json::to_value(Body::new(&request)).expect("the body serializes");
-    let advertised = body["tools"][0]["function"]["name"]
-        .as_str()
-        .expect("the tool is advertised");
+    let advertised = body["tools"][0]["function"]["name"].as_str().expect("the tool is advertised");
 
-    assert_ne!(
-        advertised, REFUSED_NAME,
-        "the refused name must not go out again"
-    );
+    assert_ne!(advertised, REFUSED_NAME, "the refused name must not go out again");
     assert!(conforms(advertised), "{advertised} is still refusable");
     assert_eq!(
         body["tools"][0]["function"]["description"], "Reads a file from disk.",
@@ -689,10 +592,7 @@ fn a_tool_name_this_api_refuses_is_advertised_under_a_conforming_alias() {
 fn a_call_answering_with_the_alias_comes_back_out_under_the_registry_name() {
     let tools = vec![a_refused_tool()];
     let advertised = alias(REFUSED_NAME, OPENAI_CAP).into_owned();
-    let mut mapping = Mapping {
-        aliases: Aliases::of(&tools, OPENAI_CAP),
-        ..Mapping::default()
-    };
+    let mut mapping = Mapping { aliases: Aliases::of(&tools, OPENAI_CAP), ..Mapping::default() };
     let mut seen = Vec::new();
 
     mapping.frame(
@@ -752,10 +652,7 @@ fn a_completed_call_replays_under_the_same_alias_the_roster_advertises() {
     let body = serde_json::to_value(Body::new(&request)).expect("the body serializes");
     let advertised = &body["tools"][0]["function"]["name"];
 
-    assert!(
-        conforms(advertised.as_str().expect("a name")),
-        "got {advertised}"
-    );
+    assert!(conforms(advertised.as_str().expect("a name")), "got {advertised}");
     assert_eq!(
         body["messages"][1]["tool_calls"][0]["function"]["name"], *advertised,
         "the replayed call has to name exactly what the roster named: {body}"
@@ -833,10 +730,7 @@ fn a_turn_of_two_steps() -> Message {
             "1 replacement",
         ),
     ] {
-        assistant.parts.push(Part {
-            id: PartId::ascending(),
-            body: PartBody::StepStart,
-        });
+        assistant.parts.push(Part { id: PartId::ascending(), body: PartBody::StepStart });
         assistant.parts.push(Part::text(text));
         assistant.parts.push(tool_part(
             call_id,
@@ -852,9 +746,7 @@ fn a_turn_of_two_steps() -> Message {
         ));
         assistant.parts.push(Part {
             id: PartId::ascending(),
-            body: PartBody::StepFinish {
-                usage: Usage::default(),
-            },
+            body: PartBody::StepFinish { usage: Usage::default() },
         });
     }
 
@@ -1030,23 +922,13 @@ fn a_step_marker_starts_a_new_message_rather_than_being_dropped() {
     assistant.parts.push(Part::text("Reading the file."));
     assistant.parts.push(Part {
         id: PartId::ascending(),
-        body: PartBody::StepFinish {
-            usage: Usage::default(),
-        },
+        body: PartBody::StepFinish { usage: Usage::default() },
     });
-    assistant.parts.push(Part {
-        id: PartId::ascending(),
-        body: PartBody::StepStart,
-    });
-    assistant
-        .parts
-        .push(Part::text("It holds a main function."));
+    assistant.parts.push(Part { id: PartId::ascending(), body: PartBody::StepStart });
+    assistant.parts.push(Part::text("It holds a main function."));
 
     let mut markers_only = Message::assistant("gpt-test");
-    markers_only.parts.push(Part {
-        id: PartId::ascending(),
-        body: PartBody::StepStart,
-    });
+    markers_only.parts.push(Part { id: PartId::ascending(), body: PartBody::StepStart });
 
     let request = ChatRequest {
         effort_options: Default::default(),
@@ -1075,14 +957,9 @@ fn a_step_marker_starts_a_new_message_rather_than_being_dropped() {
 #[test]
 fn text_fragments_within_one_step_are_joined_into_one_message() {
     let mut assistant = Message::assistant("gpt-test");
-    assistant.parts.push(Part {
-        id: PartId::ascending(),
-        body: PartBody::StepStart,
-    });
+    assistant.parts.push(Part { id: PartId::ascending(), body: PartBody::StepStart });
     assistant.parts.push(Part::text("Reading the file."));
-    assistant
-        .parts
-        .push(Part::text("It holds a main function."));
+    assistant.parts.push(Part::text("It holds a main function."));
 
     let request = ChatRequest {
         effort_options: Default::default(),
@@ -1118,10 +995,7 @@ fn a_provider_never_renders_its_credential() {
             "https://ganja:sk-url-canary-9999@gateway.invalid:8443/v1?token=sk-query-canary-7777",
             "gateway.invalid:8443",
         ),
-        (
-            "http://ganja:sk-url-canary-9999@127.0.0.1:8080",
-            "127.0.0.1:8080",
-        ),
+        ("http://ganja:sk-url-canary-9999@127.0.0.1:8080", "127.0.0.1:8080"),
     ];
 
     for (base_url, endpoint) in cases {
@@ -1131,16 +1005,9 @@ fn a_provider_never_renders_its_credential() {
 
         let rendered = format!("{provider:?}");
 
-        for secret in [
-            "sk-test-canary-XYZ",
-            "sk-url-canary-9999",
-            "sk-query-canary-7777",
-            "ganja:",
-        ] {
-            assert!(
-                !rendered.contains(secret),
-                "a provider leaked {secret}: {rendered}"
-            );
+        for secret in ["sk-test-canary-XYZ", "sk-url-canary-9999", "sk-query-canary-7777", "ganja:"]
+        {
+            assert!(!rendered.contains(secret), "a provider leaked {secret}: {rendered}");
         }
         assert!(rendered.contains("[redacted]"), "got {rendered}");
         assert!(

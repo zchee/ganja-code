@@ -8,14 +8,12 @@
 
 #![cfg(unix)]
 
-use std::{
-    io::{BufRead as _, BufReader, Read as _, Write as _},
-    net::TcpStream,
-    path::Path,
-    process::{Child, Command, Stdio},
-    sync::mpsc,
-    time::{Duration, Instant},
-};
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::net::TcpStream;
+use std::path::Path;
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use ganja_testkit::temp_dir as temporary;
 use tempfile::TempDir;
@@ -91,12 +89,7 @@ impl Served {
             .parse()
             .expect("the port is a number");
 
-        Self {
-            child,
-            port,
-            _data: data,
-            _config: config,
-        }
+        Self { child, port, _data: data, _config: config }
     }
 
     /// One `ganja run --attach` against this server, answering its stdout.
@@ -111,11 +104,7 @@ impl Served {
         let config = temporary();
 
         let output = Command::new(env!("CARGO_BIN_EXE_ganja"))
-            .args([
-                "run",
-                "--attach",
-                &format!("http://127.0.0.1:{}", self.port),
-            ])
+            .args(["run", "--attach", &format!("http://127.0.0.1:{}", self.port)])
             .args(arguments)
             .current_dir(elsewhere.path())
             .env("XDG_DATA_HOME", data.path())
@@ -155,10 +144,7 @@ impl Served {
             if let Some(status) = self.child.try_wait().expect("the child is waitable") {
                 break status;
             }
-            assert!(
-                Instant::now() < deadline,
-                "the server should exit on SIGTERM"
-            );
+            assert!(Instant::now() < deadline, "the server should exit on SIGTERM");
             std::thread::sleep(Duration::from_millis(50));
         };
         assert!(status.success(), "a clean shutdown exits 0: {status:?}");
@@ -190,24 +176,14 @@ fn serve_comes_up_answers_health_and_dies_cleanly_on_sigterm() {
     // The reported address answers: one raw HTTP request, closed after.
     let mut socket =
         TcpStream::connect(("127.0.0.1", served.port)).expect("the reported address accepts");
-    socket
-        .set_read_timeout(Some(DEADLINE))
-        .expect("a read timeout installs");
+    socket.set_read_timeout(Some(DEADLINE)).expect("a read timeout installs");
     socket
         .write_all(b"GET /global/health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
         .expect("the request writes");
     let mut answer = String::new();
-    socket
-        .read_to_string(&mut answer)
-        .expect("the response reads");
-    assert!(
-        answer.starts_with("HTTP/1.1 200"),
-        "health answers 200: {answer:?}"
-    );
-    assert!(
-        answer.contains("\"healthy\":true"),
-        "health says so: {answer:?}"
-    );
+    socket.read_to_string(&mut answer).expect("the response reads");
+    assert!(answer.starts_with("HTTP/1.1 200"), "health answers 200: {answer:?}");
+    assert!(answer.contains("\"healthy\":true"), "health says so: {answer:?}");
 
     // A supervisor's SIGTERM ends it cleanly — exit 0, not a kill — and the
     // diagnostics went to stderr: the unsecured warning names the variable

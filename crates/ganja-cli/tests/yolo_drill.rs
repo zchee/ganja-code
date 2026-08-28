@@ -39,18 +39,15 @@
 //! being broken everywhere.
 #![cfg(unix)]
 
-use std::{
-    fs,
-    ops::{Deref, DerefMut},
-    path::PathBuf,
-    process::Command,
-    thread,
-    time::{Duration, Instant},
-};
+use std::ops::{Deref, DerefMut};
+use std::path::PathBuf;
+use std::process::Command;
+use std::time::{Duration, Instant};
+use std::{fs, thread};
 
-use expectrl::{
-    ControlCode, Eof, Expect as _, Session, process::unix::WaitStatus, session::OsSession,
-};
+use expectrl::process::unix::WaitStatus;
+use expectrl::session::OsSession;
+use expectrl::{ControlCode, Eof, Expect as _, Session};
 use ganja_testkit::temp_dir as temporary;
 use serde_json::json;
 use tempfile::TempDir;
@@ -115,35 +112,19 @@ impl Ganja {
 
         let mut session = Session::spawn(command).expect("failed to spawn `ganja` in a pty");
         session.set_expect_timeout(Some(EXIT_DEADLINE));
-        session
-            .get_process_mut()
-            .set_window_size(COLUMNS, ROWS)
-            .expect("failed to size the pty");
-        session
-            .expect(ALT_SCREEN)
-            .expect("`ganja` never took the terminal over");
+        session.get_process_mut().set_window_size(COLUMNS, ROWS).expect("failed to size the pty");
+        session.expect(ALT_SCREEN).expect("`ganja` never took the terminal over");
 
-        Self {
-            session: Some(session),
-        }
+        Self { session: Some(session) }
     }
 
     fn quit_and_assert_clean_exit(mut self) {
-        self.send(ControlCode::EndOfText)
-            .expect("failed to send Ctrl-C");
+        self.send(ControlCode::EndOfText).expect("failed to send Ctrl-C");
 
-        let mut session = self
-            .session
-            .take()
-            .expect("a session is only ever taken once");
-        session
-            .expect(Eof)
-            .expect("`ganja` did not exit within the deadline");
+        let mut session = self.session.take().expect("a session is only ever taken once");
+        session.expect(Eof).expect("`ganja` did not exit within the deadline");
 
-        let status = session
-            .get_process()
-            .wait()
-            .expect("failed to reap the `ganja` process");
+        let status = session.get_process().wait().expect("failed to reap the `ganja` process");
         assert!(
             matches!(status, WaitStatus::Exited(_, 0)),
             "expected a clean exit, got {status:?}"
@@ -202,11 +183,8 @@ fn script() -> serde_json::Value {
 /// under `data`.
 fn scripted(project: &TempDir, data: &TempDir, spelled: &[&str]) -> Ganja {
     let path = project.path().join(SCRIPT);
-    fs::write(
-        &path,
-        serde_json::to_vec_pretty(&script()).expect("a script serializes"),
-    )
-    .expect("the script is writable");
+    fs::write(&path, serde_json::to_vec_pretty(&script()).expect("a script serializes"))
+        .expect("the script is writable");
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_ganja"));
     command
@@ -281,18 +259,12 @@ fn a_yolo_session_runs_an_asked_about_command_without_a_dialog_or_a_stored_rule(
 
     // Before anything is asked of the model: whoever is looking at this
     // terminal is told what kind of session it is (**D479**).
-    session
-        .expect(MARKER)
-        .expect("a bypassed session says so on its status bar");
+    session.expect(MARKER).expect("a bypassed session says so on its status bar");
 
     session.send(PROMPT).expect("failed to type the prompt");
     session.send("\r").expect("failed to send Enter");
 
-    expect_absent(
-        &mut session,
-        DIALOG_OPTIONS,
-        "a bypassed session raises no permission dialog",
-    );
+    expect_absent(&mut session, DIALOG_OPTIONS, "a bypassed session raises no permission dialog");
     wait_for(&mut session, &project, RAN);
 
     assert!(
@@ -312,18 +284,12 @@ fn the_documented_spelling_bypasses_exactly_as_the_hidden_one_does() {
     let data = temporary();
     let mut session = scripted(&project, &data, &["--auto"]);
 
-    session
-        .expect(MARKER)
-        .expect("`--auto` is the same session `--yolo` is");
+    session.expect(MARKER).expect("`--auto` is the same session `--yolo` is");
 
     session.send(PROMPT).expect("failed to type the prompt");
     session.send("\r").expect("failed to send Enter");
 
-    expect_absent(
-        &mut session,
-        DIALOG_OPTIONS,
-        "a bypassed session raises no permission dialog",
-    );
+    expect_absent(&mut session, DIALOG_OPTIONS, "a bypassed session raises no permission dialog");
     wait_for(&mut session, &project, RAN);
 
     session.quit_and_assert_clean_exit();

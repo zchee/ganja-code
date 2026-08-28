@@ -12,20 +12,18 @@
 //! test *can* pin is that the seed a session hands over comes back verbatim,
 //! and that is what `external_tests.rs`'s round-trip test does.
 
-use std::{
-    io::{self, Write as _},
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::io::{self, Write as _};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use anyhow::{Context as _, Result};
-use ratatui::crossterm::{
-    event::{
-        DisableMouseCapture, EnableMouseCapture, KeyboardEnhancementFlags,
-        PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
-    },
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+use ratatui::crossterm::event::{
+    DisableMouseCapture, EnableMouseCapture, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
+};
+use ratatui::crossterm::execute;
+use ratatui::crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 
 /// What is run when the environment names no editor. Upstream falls back the
@@ -100,11 +98,7 @@ pub fn read_back(path: &Path) -> io::Result<String> {
 #[must_use]
 pub fn command(shell: &Path, program: &str, path: &Path) -> Command {
     let mut command = Command::new(shell);
-    command
-        .arg("-c")
-        .arg(format!("{program} \"$@\""))
-        .arg(program)
-        .arg(path);
+    command.arg("-c").arg(format!("{program} \"$@\"")).arg(program).arg(path);
 
     command
 }
@@ -131,9 +125,8 @@ pub fn edit(text: &str, kitty: bool) -> Result<String> {
         .context("failed to find a shell to run the editor under")?;
 
     let released = release(kitty);
-    let status = command(&shell, &configured_program(), &path)
-        .status()
-        .context("failed to run the editor");
+    let status =
+        command(&shell, &configured_program(), &path).status().context("failed to run the editor");
     let taken = take(kitty);
 
     // The terminal comes first: a refusal the user cannot read is worse than

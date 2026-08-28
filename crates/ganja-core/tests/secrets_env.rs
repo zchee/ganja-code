@@ -29,18 +29,14 @@
 use std::env;
 
 use futures::StreamExt as _;
-use ganja_core::{
-    auth::{self, AuthErrorKind, OauthCredential, RefreshOauth as _, grok},
-    provider::{
-        self, AnthropicProvider, ChatRequest, OpenAiProvider, Provider as _, ProviderEvent,
-    },
+use ganja_core::auth::{self, AuthErrorKind, OauthCredential, RefreshOauth as _, grok};
+use ganja_core::provider::{
+    self, AnthropicProvider, ChatRequest, OpenAiProvider, Provider as _, ProviderEvent,
 };
 use ganja_testkit::LogCapture as Capture;
 use secrecy::SecretString;
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::TcpListener,
-};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 /// The key planted in the environment. Nothing may render it.
@@ -60,15 +56,8 @@ const MEMORY_CANARY: &str = "mk-test-canary-OPQ";
 
 /// Serves `responses`, one per connection, then closes.
 async fn serve(responses: Vec<String>) -> (String, tokio::task::JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("loopback is bindable");
-    let url = format!(
-        "http://{}",
-        listener
-            .local_addr()
-            .expect("a bound socket has an address")
-    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("loopback is bindable");
+    let url = format!("http://{}", listener.local_addr().expect("a bound socket has an address"));
 
     let server = tokio::spawn(async move {
         for response in responses {
@@ -114,10 +103,7 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
     let selection = provider::select(&ganja_core::Config::default())
         .expect("the planted key selects anthropic");
     assert_eq!(selection.provider.id(), "anthropic");
-    assert!(
-        selection.notice.is_none(),
-        "a provider that was asked for by name needs no notice"
-    );
+    assert!(selection.notice.is_none(), "a provider that was asked for by name needs no notice");
 
     let (url, _server) = serve(vec![
         response(
@@ -178,10 +164,7 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
         // First turn: refused, with the key quoted back at us. Matched rather
         // than `expect_err`, because the success type is a stream and streams
         // have no `Debug`.
-        let Err(refusal) = anthropic
-            .stream(request.clone(), CancellationToken::new())
-            .await
-        else {
+        let Err(refusal) = anthropic.stream(request.clone(), CancellationToken::new()).await else {
             panic!("a 401 is not answerable");
         };
 
@@ -194,9 +177,7 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
             .collect()
             .await;
         assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, ProviderEvent::TextDelta(_))),
+            events.iter().any(|event| matches!(event, ProviderEvent::TextDelta(_))),
             "the answered turn should have streamed text, got {events:?}"
         );
 
@@ -316,10 +297,7 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
         .expect("the index is writable");
 
         ganja_core::instruction::suffix(
-            &ganja_core::Config {
-                memory: Some(true),
-                ..ganja_core::Config::default()
-            },
+            &ganja_core::Config { memory: Some(true), ..ganja_core::Config::default() },
             &checkout,
             "fake-1",
         )
@@ -355,15 +333,9 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
         );
     }
     for secret in [CANARY, ACCESS_CANARY, REFRESH_CANARY, MEMORY_CANARY] {
-        assert!(
-            !logged.contains(secret),
-            "a credential reached the log:\n{logged}"
-        );
+        assert!(!logged.contains(secret), "a credential reached the log:\n{logged}");
     }
-    assert!(
-        !rendered.contains(CANARY),
-        "a credential reached a rendering: {rendered}"
-    );
+    assert!(!rendered.contains(CANARY), "a credential reached a rendering: {rendered}");
     assert!(
         rendered.contains("[redacted]"),
         "the echoed key should be masked rather than dropped: {rendered}"

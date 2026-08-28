@@ -65,7 +65,8 @@ pub mod sse;
 #[cfg(unix)]
 use std::path::Path;
 
-use futures::{Stream, StreamExt as _, stream::BoxStream};
+use futures::stream::BoxStream;
+use futures::{Stream, StreamExt as _};
 pub use ganja_protocol::{Event, Mention, PermissionId, PermissionReply, SessionId};
 use serde::{Deserialize, Serialize};
 
@@ -86,10 +87,7 @@ pub struct Credentials {
 impl Credentials {
     /// The pair a server started with.
     pub fn new(username: impl Into<String>, password: impl Into<String>) -> Self {
-        Self {
-            username: username.into(),
-            password: password.into(),
-        }
+        Self { username: username.into(), password: password.into() }
     }
 }
 
@@ -272,10 +270,7 @@ impl Prompt {
     /// A plain prompt: text, and nothing switched.
     #[must_use]
     pub fn new(text: impl Into<String>) -> Self {
-        Self {
-            text: text.into(),
-            ..Self::default()
-        }
+        Self { text: text.into(), ..Self::default() }
     }
 
     /// Runs the turn as `agent`, when one was named.
@@ -377,12 +372,7 @@ impl Client {
         // the way the router spells it.
         let address = address.trim_end_matches('/').to_owned();
 
-        Ok(Self {
-            http: reqwest::Client::new(),
-            base: address.clone(),
-            address,
-            credentials,
-        })
+        Ok(Self { http: reqwest::Client::new(), base: address.clone(), address, credentials })
     }
 
     /// A client bound to the session socket at `path` (**D505**).
@@ -414,10 +404,7 @@ impl Client {
         let path = path.as_ref();
         let shown = path.display().to_string();
         if shown.is_empty() {
-            return Err(ClientError::SocketPath {
-                path: shown,
-                reason: "it is empty".to_owned(),
-            });
+            return Err(ClientError::SocketPath { path: shown, reason: "it is empty".to_owned() });
         }
         if path.as_os_str().as_encoded_bytes().contains(&0) {
             return Err(ClientError::SocketPath {
@@ -503,12 +490,8 @@ impl Client {
         let body = serde_json::to_value(prompt).map_err(|error| ClientError::Skew {
             detail: format!("a prompt does not serialize: {error}"),
         })?;
-        self.send_empty(
-            "POST",
-            &format!("/session/{}/prompt_async", session.as_str()),
-            Some(body),
-        )
-        .await
+        self.send_empty("POST", &format!("/session/{}/prompt_async", session.as_str()), Some(body))
+            .await
     }
 
     /// `GET /permission`: every request the engine is waiting on, oldest
@@ -613,10 +596,7 @@ impl Client {
     }
 
     fn transport(&self, source: reqwest::Error) -> ClientError {
-        ClientError::Transport {
-            address: self.address.clone(),
-            source,
-        }
+        ClientError::Transport { address: self.address.clone(), source }
     }
 
     /// The status half every call shares: a credential refusal is named as
@@ -628,20 +608,13 @@ impl Client {
         response: reqwest::Response,
     ) -> Result<reqwest::Response, ClientError> {
         if response.status() == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(ClientError::Unauthorized {
-                address: self.address.clone(),
-            });
+            return Err(ClientError::Unauthorized { address: self.address.clone() });
         }
         if !response.status().is_success() {
             let status = response.status().as_u16();
             let body = self.bounded(method, path, response).await?;
 
-            return Err(ClientError::Refused {
-                method,
-                path: path.to_owned(),
-                status,
-                body,
-            });
+            return Err(ClientError::Refused { method, path: path.to_owned(), status, body });
         }
 
         Ok(response)
@@ -656,23 +629,12 @@ impl Client {
         path: &str,
         mut response: reqwest::Response,
     ) -> Result<String, ClientError> {
-        let oversized = || ClientError::Oversized {
-            method,
-            path: path.to_owned(),
-            cap: BODY_CAP,
-        };
-        if response
-            .content_length()
-            .is_some_and(|length| length > BODY_CAP as u64)
-        {
+        let oversized = || ClientError::Oversized { method, path: path.to_owned(), cap: BODY_CAP };
+        if response.content_length().is_some_and(|length| length > BODY_CAP as u64) {
             return Err(oversized());
         }
         let mut body: Vec<u8> = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|source| self.transport(source))?
-        {
+        while let Some(chunk) = response.chunk().await.map_err(|source| self.transport(source))? {
             if body.len() + chunk.len() > BODY_CAP {
                 return Err(oversized());
             }
@@ -723,10 +685,7 @@ impl Client {
             builder = builder.json(&body);
         }
 
-        let response = builder
-            .send()
-            .await
-            .map_err(|source| self.transport(source))?;
+        let response = builder.send().await.map_err(|source| self.transport(source))?;
         let response = self.checked(method, path, response).await?;
 
         self.bounded(method, path, response).await
@@ -756,12 +715,7 @@ impl Events {
         S: Stream<Item = reqwest::Result<B>> + Send + 'static,
         B: AsRef<[u8]>,
     {
-        let state = Reading {
-            address,
-            bytes: Box::pin(bytes),
-            frames,
-            done: false,
-        };
+        let state = Reading { address, bytes: Box::pin(bytes), frames, done: false };
 
         Self {
             inner: futures::stream::unfold(state, |mut state| async move {
@@ -778,9 +732,7 @@ impl Events {
                             Ok(sse::Frame::Connected | sse::Frame::Heartbeat) => continue,
                             Ok(sse::Frame::Evicted(notice)) => {
                                 state.done = true;
-                                let evicted = ClientError::Evicted {
-                                    notice: notice.message,
-                                };
+                                let evicted = ClientError::Evicted { notice: notice.message };
 
                                 return Some((Err(evicted), state));
                             }
@@ -799,10 +751,8 @@ impl Events {
                         Some(Ok(chunk)) => state.frames.push(chunk.as_ref()),
                         Some(Err(source)) => {
                             state.done = true;
-                            let error = ClientError::Transport {
-                                address: state.address.clone(),
-                                source,
-                            };
+                            let error =
+                                ClientError::Transport { address: state.address.clone(), source };
 
                             return Some((Err(error), state));
                         }

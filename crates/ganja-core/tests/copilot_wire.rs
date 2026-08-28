@@ -41,27 +41,21 @@
 //! `GANJA_PROVIDER`, and a plain `cargo test` runs the tests inside a binary on
 //! parallel threads.
 
-use std::{
-    env,
-    sync::{Arc, Mutex},
-};
+use std::env;
+use std::sync::{Arc, Mutex};
 
-use ganja_core::{
-    Engine,
-    auth::{self, OauthCredential},
-    config::Config,
-    permission::Permissions,
-    protocol::{Command, Event, FinishReason, PartBody, Role},
-    provider::{CopilotProvider, copilot, select},
-    tool::Registry,
-};
+use ganja_core::Engine;
+use ganja_core::auth::{self, OauthCredential};
+use ganja_core::config::Config;
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{Command, Event, FinishReason, PartBody, Role};
+use ganja_core::provider::{CopilotProvider, copilot, select};
+use ganja_core::tool::Registry;
 use ganja_testkit::{RecorderTool, drain};
 use secrecy::SecretString;
 use serde_json::json;
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::TcpListener,
-};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::TcpListener;
 
 /// Where a Copilot turn goes, under the endpoint's base URL.
 const COMPLETIONS: &str = "/chat/completions";
@@ -109,10 +103,7 @@ impl Recorded {
     fn header(&self, name: &str) -> Option<String> {
         self.head.lines().find_map(|line| {
             let (found, value) = line.split_once(':')?;
-            found
-                .trim()
-                .eq_ignore_ascii_case(name)
-                .then(|| value.trim().to_owned())
+            found.trim().eq_ignore_ascii_case(name).then(|| value.trim().to_owned())
         })
     }
 
@@ -141,11 +132,7 @@ struct Endpoint {
 impl Endpoint {
     /// Every request served so far, oldest first.
     fn seen(&self) -> Vec<Recorded> {
-        self.state
-            .seen
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+        self.state.seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
     }
 
     /// The one request this phase produced.
@@ -160,36 +147,21 @@ impl Endpoint {
 
     /// Forgets what has been served, so a phase counts only its own traffic.
     fn forget(&self) {
-        self.state
-            .seen
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
+        self.state.seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
     }
 
     /// Sets the event-stream body every turn is answered with from now on.
     fn answers_turns_with(&self, body: impl Into<String>) {
-        *self
-            .state
-            .reply
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = body.into();
+        *self.state.reply.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = body.into();
     }
 }
 
 /// Starts an endpoint that answers every connection for as long as the test
 /// holds it.
 async fn serve() -> Endpoint {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("loopback is bindable");
-    let address = listener
-        .local_addr()
-        .expect("a bound socket has an address");
-    let state = Arc::new(State {
-        seen: Mutex::new(Vec::new()),
-        reply: Mutex::new(transcript()),
-    });
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("loopback is bindable");
+    let address = listener.local_addr().expect("a bound socket has an address");
+    let state = Arc::new(State { seen: Mutex::new(Vec::new()), reply: Mutex::new(transcript()) });
 
     let served = Arc::clone(&state);
     let server = tokio::spawn(async move {
@@ -203,16 +175,9 @@ async fn serve() -> Endpoint {
                 let Some(request) = read_request(&mut socket).await else {
                     return;
                 };
-                let body = state
-                    .reply
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .clone();
-                state
-                    .seen
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .push(request);
+                let body =
+                    state.reply.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+                state.seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(request);
 
                 let _ = socket
                     .write_all(
@@ -229,11 +194,7 @@ async fn serve() -> Endpoint {
         }
     });
 
-    Endpoint {
-        base_url: format!("http://{address}"),
-        state,
-        _server: server,
-    }
+    Endpoint { base_url: format!("http://{address}"), state, _server: server }
 }
 
 /// Reads one whole request: head to the blank line, then whatever
@@ -254,9 +215,7 @@ async fn read_request(socket: &mut tokio::net::TcpStream) -> Option<Recorded> {
         .lines()
         .find_map(|line| {
             let (name, value) = line.split_once(':')?;
-            name.trim()
-                .eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse().ok())?
+            name.trim().eq_ignore_ascii_case("content-length").then(|| value.trim().parse().ok())?
         })
         .unwrap_or(0);
     let mut body = vec![0_u8; length];
@@ -264,10 +223,7 @@ async fn read_request(socket: &mut tokio::net::TcpStream) -> Option<Recorded> {
         return None;
     }
 
-    Some(Recorded {
-        head,
-        body: String::from_utf8_lossy(&body).into_owned(),
-    })
+    Some(Recorded { head, body: String::from_utf8_lossy(&body).into_owned() })
 }
 
 /// A whole chat-completions turn, as `api.githubcopilot.com` streams one.
@@ -320,9 +276,8 @@ fn store(token: &str, deployment: &auth::copilot::Deployment) {
 fn stored_token() -> String {
     use secrecy::ExposeSecret as _;
 
-    let credential: OauthCredential = auth::oauth_for(copilot::ID)
-        .expect("the store reads")
-        .expect("a login was stored");
+    let credential: OauthCredential =
+        auth::oauth_for(copilot::ID).expect("the store reads").expect("a login was stored");
 
     credential.access.expose_secret().to_owned()
 }
@@ -367,10 +322,7 @@ async fn a_copilot_subscription_drives_a_turn_with_the_headers_and_the_raw_token
     .with_system_parts(Some("be brief".to_owned()), None);
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
-    engine
-        .send(prompt("say hello"))
-        .await
-        .expect("an idle engine accepts");
+    engine.send(prompt("say hello")).await.expect("an idle engine accepts");
     let seen = drain(&mut events).await;
 
     let sent = endpoint.only();
@@ -396,10 +348,7 @@ async fn a_copilot_subscription_drives_a_turn_with_the_headers_and_the_raw_token
         "the version as a literal too, so moving the date is a decision \
          somebody has to make on purpose"
     );
-    assert_eq!(
-        sent.header("openai-intent").as_deref(),
-        Some("conversation-edits")
-    );
+    assert_eq!(sent.header("openai-intent").as_deref(), Some("conversation-edits"));
     assert_eq!(sent.header("x-initiator").as_deref(), Some("user"));
     assert_eq!(
         sent.header("user-agent").as_deref(),
@@ -439,10 +388,7 @@ async fn a_copilot_subscription_drives_a_turn_with_the_headers_and_the_raw_token
          {body}"
     );
     assert!(
-        calls
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .is_empty(),
+        calls.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).is_empty(),
         "the transcript calls nothing, so nothing should have run"
     );
 
@@ -456,10 +402,8 @@ async fn a_copilot_subscription_drives_a_turn_with_the_headers_and_the_raw_token
         .collect();
     assert_eq!(text, "Hello, world!");
     assert!(
-        seen.iter().any(
-            |event| matches!(event, Event::MessageStarted { message, .. }
-                if message.role == Role::Assistant)
-        ),
+        seen.iter().any(|event| matches!(event, Event::MessageStarted { message, .. }
+                if message.role == Role::Assistant)),
         "the turn should have reached the event stream as a message: {seen:?}"
     );
 
@@ -506,10 +450,7 @@ async fn a_copilot_subscription_drives_a_turn_with_the_headers_and_the_raw_token
     endpoint.forget();
     endpoint.answers_turns_with(out_of_room_transcript());
 
-    engine
-        .send(prompt("think hard"))
-        .await
-        .expect("an idle engine accepts");
+    engine.send(prompt("think hard")).await.expect("an idle engine accepts");
     let seen = drain(&mut events).await;
 
     let finished = seen
@@ -529,10 +470,7 @@ async fn a_copilot_subscription_drives_a_turn_with_the_headers_and_the_raw_token
     assert!(
         !seen.iter().any(|event| matches!(
             event,
-            Event::MessageFinished {
-                reason: FinishReason::Failed,
-                ..
-            }
+            Event::MessageFinished { reason: FinishReason::Failed, .. }
         )),
         "nothing about an empty reply is a failure: {seen:?}"
     );
@@ -541,10 +479,7 @@ async fn a_copilot_subscription_drives_a_turn_with_the_headers_and_the_raw_token
     // `from_stored` is what a real session builds, and the only thing it reads
     // from the store is which GitHub this login was against.
     store(TOKEN, &auth::copilot::Deployment::enterprise(ENTERPRISE));
-    let enterprise = format!(
-        "{:?}",
-        CopilotProvider::from_stored().expect("a client builds")
-    );
+    let enterprise = format!("{:?}", CopilotProvider::from_stored().expect("a client builds"));
     assert!(
         enterprise.contains("https://copilot-api.company.ghe.com"),
         "an enterprise login must not send its turns to github.com: \
@@ -552,10 +487,7 @@ async fn a_copilot_subscription_drives_a_turn_with_the_headers_and_the_raw_token
     );
 
     store(TOKEN, &auth::copilot::Deployment::Public);
-    let public = format!(
-        "{:?}",
-        CopilotProvider::from_stored().expect("a client builds")
-    );
+    let public = format!("{:?}", CopilotProvider::from_stored().expect("a client builds"));
     assert!(
         public.contains(auth::copilot::DEFAULT_API_BASE),
         "and a public one goes to GitHub's own API base: {public}"
@@ -566,10 +498,7 @@ async fn a_copilot_subscription_drives_a_turn_with_the_headers_and_the_raw_token
     endpoint.answers_turns_with(transcript());
     store(SECOND_TOKEN, &auth::copilot::Deployment::Public);
 
-    engine
-        .send(prompt("again"))
-        .await
-        .expect("an idle engine accepts");
+    engine.send(prompt("again")).await.expect("an idle engine accepts");
     drain(&mut events).await;
 
     assert_eq!(
@@ -592,10 +521,7 @@ async fn a_copilot_subscription_drives_a_turn_with_the_headers_and_the_raw_token
         "a session that names no model gets the catalog's copilot pin — the \
          measured fixture above stays on the model the recording was taken with"
     );
-    assert!(
-        chosen.notice.is_none(),
-        "a provider that was asked for by name was not defaulted to"
-    );
+    assert!(chosen.notice.is_none(), "a provider that was asked for by name was not defaulted to");
 
     // A session with no credential at all is still built — grok's posture,
     // inherited — and fails at the request, with the message that names the
@@ -631,10 +557,7 @@ async fn a_copilot_subscription_drives_a_turn_with_the_headers_and_the_raw_token
         "the message is what a status bar shows, and only a login fixes this: \
          {said}"
     );
-    assert!(
-        endpoint.seen().is_empty(),
-        "a turn with no credential must not have reached the wire"
-    );
+    assert!(endpoint.seen().is_empty(), "a turn with no credential must not have reached the wire");
 
     // Nothing that was rendered along the way may hold the token — not the
     // provider, not the selection, not the refusal.
@@ -645,10 +568,7 @@ async fn a_copilot_subscription_drives_a_turn_with_the_headers_and_the_raw_token
         CopilotProvider::from_stored().expect("a client builds"),
     );
     for secret in [TOKEN, SECOND_TOKEN] {
-        assert!(
-            !rendered.contains(secret),
-            "a token reached a rendering: {rendered}"
-        );
+        assert!(!rendered.contains(secret), "a token reached a rendering: {rendered}");
     }
 
     // SAFETY: as above.

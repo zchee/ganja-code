@@ -105,21 +105,17 @@
 //! profile the rollout above records. Enumeration is what closes it, the same
 //! way it closes grok's three.
 
-use std::{
-    ffi::OsString,
-    path::{Path, PathBuf},
-    process::Stdio,
-    time::Duration,
-};
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use ganja_protocol::team::MemberBackend;
 use ganja_team::ShimCli;
 
-use crate::teammate::{
-    readback,
-    shim::{Door, Driver, Launch, Reply, Shape, Turn},
-};
+use crate::teammate::readback;
+use crate::teammate::shim::{Door, Driver, Launch, Reply, Shape, Turn};
 
 /// The executable a spawn looks for on `PATH`.
 pub const BINARY: &str = "codex";
@@ -397,10 +393,9 @@ impl Driver for Codex {
             Ok(Err(error)) => Err(format!("`{AUTH_CHECK}` could not be run: {error}")),
             // `kill_on_drop` is set by `Launch::command`, so the child goes with
             // the dropped future rather than outliving the spawn that gave up.
-            Err(_) => Err(format!(
-                "`{AUTH_CHECK}` did not answer within {}s",
-                READY_DEADLINE.as_secs()
-            )),
+            Err(_) => {
+                Err(format!("`{AUTH_CHECK}` did not answer within {}s", READY_DEADLINE.as_secs()))
+            }
         }
     }
 
@@ -434,10 +429,9 @@ impl Driver for Codex {
                 }
                 ITEM_COMPLETED => {
                     let item = event.get("item");
-                    let is_message = item
-                        .and_then(|item| item.get("type"))
-                        .and_then(serde_json::Value::as_str)
-                        == Some(AGENT_MESSAGE);
+                    let is_message =
+                        item.and_then(|item| item.get("type")).and_then(serde_json::Value::as_str)
+                            == Some(AGENT_MESSAGE);
                     if is_message
                         && let Some(text) = item
                             .and_then(|item| item.get("text"))

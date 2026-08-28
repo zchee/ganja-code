@@ -102,17 +102,13 @@
 //! ignored with a warning and the session falls back to the defaults; a store
 //! that cannot be written costs the answer its persistence and nothing else.
 
-use std::{
-    borrow::Cow,
-    fmt, fs, io,
-    path::{Component, Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
-};
+use std::borrow::Cow;
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::{fmt, fs, io};
 
-use serde::{
-    Deserialize, Serialize,
-    de::{self, MapAccess, Visitor},
-};
+use serde::de::{self, MapAccess, Visitor};
+use serde::{Deserialize, Serialize};
 
 use crate::project::Project;
 
@@ -223,14 +219,7 @@ const HERE: &str = ".";
 /// Commands that only move the shell around. Upstream leaves them out of the
 /// patterns a call is checked against (`tool/shell.ts`, `CWD`), so `cd build`
 /// on its own needs no permission and `cd build && make` is judged on `make`.
-const CWD_COMMANDS: &[&str] = &[
-    "cd",
-    "chdir",
-    "popd",
-    "pushd",
-    "push-location",
-    "set-location",
-];
+const CWD_COMMANDS: &[&str] = &["cd", "chdir", "popd", "pushd", "push-location", "set-location"];
 
 /// Commands whose arguments name files, so that what they are handed says
 /// *where* a call would work and not only what it would do.
@@ -628,10 +617,7 @@ impl<'de> Deserialize<'de> for PermissionConfig {
                     entries.push((tool, set));
                 }
 
-                Ok(PermissionConfig {
-                    entries,
-                    scalar: false,
-                })
+                Ok(PermissionConfig { entries, scalar: false })
             }
         }
 
@@ -978,10 +964,7 @@ impl Permissions {
     /// hands the model when it refuses a call
     /// (`packages/core/src/v1/permission.ts`, `DeniedError`).
     fn relevant(&self, tool: &str) -> Vec<Rule> {
-        self.ordered()
-            .filter(|rule| matches(tool, &rule.permission))
-            .cloned()
-            .collect()
+        self.ordered().filter(|rule| matches(tool, &rule.permission)).cloned().collect()
     }
 
     /// Loads the rules stored at `path`, deciding along the way whether this
@@ -1020,13 +1003,7 @@ impl Permissions {
         // Where the project is comes from [`Permissions::load`], which is the
         // only caller that knows: opening a ruleset says nothing about which
         // directory the session was started in.
-        Self {
-            baseline: Vec::new(),
-            rules,
-            store,
-            root: None,
-            cwd: None,
-        }
+        Self { baseline: Vec::new(), rules, store, root: None, cwd: None }
     }
 
     /// Every rule that applies, weakest first — the build's beneath the
@@ -1116,11 +1093,7 @@ impl Permissions {
     /// its file, anything else the pattern its whole-tool rules are written
     /// with.
     fn patterns(&self, tool: &str, args: &serde_json::Value) -> Vec<String> {
-        let argument = |name| {
-            args.get(name)
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-        };
+        let argument = |name| args.get(name).and_then(serde_json::Value::as_str).map(str::to_owned);
 
         if SHELL_LIKE.contains(&tool) {
             return argument(COMMAND)
@@ -1194,10 +1167,7 @@ struct Document {
 
 impl Default for Document {
     fn default() -> Self {
-        Self {
-            version: VERSION,
-            rules: Vec::new(),
-        }
+        Self { version: VERSION, rules: Vec::new() }
     }
 }
 
@@ -1431,7 +1401,8 @@ fn plain(path: PathBuf) -> PathBuf {
 /// The rewrite [`plain`] documents, which only Windows has a use for.
 #[cfg(windows)]
 fn unverbatim(path: PathBuf) -> PathBuf {
-    use std::{ffi::OsString, path::Prefix};
+    use std::ffi::OsString;
+    use std::path::Prefix;
 
     let Some(Component::Prefix(prefix)) = path.components().next() else {
         return path;
@@ -1485,11 +1456,8 @@ fn lexical(path: &Path) -> PathBuf {
 
 /// The rules an "always allow" answer to this call leaves behind.
 fn always_rules(tool: &str, args: &serde_json::Value) -> Vec<Rule> {
-    let allow = |pattern: String| Rule {
-        permission: tool.to_owned(),
-        pattern,
-        action: Action::Allow,
-    };
+    let allow =
+        |pattern: String| Rule { permission: tool.to_owned(), pattern, action: Action::Allow };
 
     if SHELL_LIKE.contains(&tool)
         && let Some(command) = args.get(COMMAND).and_then(serde_json::Value::as_str)
@@ -1536,10 +1504,7 @@ fn always_rules(tool: &str, args: &serde_json::Value) -> Vec<Rule> {
 /// `!CWD.has(cmd)` guard on pattern collection (`tool/shell.ts`, `collect`).
 /// The path scan does **not** use this view — see [`chunks`].
 fn commands(command: &str) -> Vec<String> {
-    chunks(command)
-        .into_iter()
-        .filter(|chunk| !moves_only(chunk))
-        .collect()
+    chunks(command).into_iter().filter(|chunk| !moves_only(chunk)).collect()
 }
 
 /// Every chunk `command` splits into at the operators that separate one command
@@ -1622,9 +1587,7 @@ fn means_itself(text: &str) -> bool {
 
 /// Whether `command` names one of the commands that move the shell around.
 fn names_a_directory(command: &str) -> bool {
-    tokens(command)
-        .first()
-        .is_some_and(|first| CWD_COMMANDS.contains(&first.as_str()))
+    tokens(command).first().is_some_and(|first| CWD_COMMANDS.contains(&first.as_str()))
 }
 
 /// Characters a directory move may be spelled with.
@@ -1634,9 +1597,8 @@ fn names_a_directory(command: &str) -> bool {
 /// in someone's own script is still a directory. The rest is what a path is
 /// written with: separators, the characters that appear in real file names,
 /// quotes, and the space they exist to protect.
-const MOVE_CHARACTERS: &[char] = &[
-    '_', '-', '.', '/', '\\', '~', ':', '+', ',', '@', '\'', '"', ' ', '\t',
-];
+const MOVE_CHARACTERS: &[char] =
+    &['_', '-', '.', '/', '\\', '~', ':', '+', ',', '@', '\'', '"', ' ', '\t'];
 
 /// Whether `command` does nothing but move the shell to another directory,
 /// and so needs no permission of its own.
@@ -1872,11 +1834,7 @@ fn against(base: &Path, named: &str) -> PathBuf {
 
     let path = Path::new(named);
 
-    if path.is_absolute() {
-        resolve(path)
-    } else {
-        resolve(&base.join(path))
-    }
+    if path.is_absolute() { resolve(path) } else { resolve(&base.join(path)) }
 }
 
 /// `text` read as one of the POSIX spellings a Windows drive is reached by
@@ -1903,10 +1861,7 @@ fn against(base: &Path, named: &str) -> PathBuf {
 #[cfg_attr(not(windows), allow(dead_code))]
 fn from_posix_drive(text: &str) -> Option<PathBuf> {
     let rest = text.strip_prefix('/')?;
-    let rest = rest
-        .strip_prefix("cygdrive/")
-        .or_else(|| rest.strip_prefix("mnt/"))
-        .unwrap_or(rest);
+    let rest = rest.strip_prefix("cygdrive/").or_else(|| rest.strip_prefix("mnt/")).unwrap_or(rest);
 
     let (head, tail) = rest.split_once('/').unwrap_or((rest, ""));
     // `/c` and `/c:` name the drive itself; the colon is Git Bash's own second
@@ -1956,9 +1911,7 @@ pub fn matches(text: &str, pattern: &str) -> bool {
     }
 
     // The optional-tail case: `ls *` is `ls( .*)?`, so `ls` matches too.
-    pattern
-        .strip_suffix(OPTIONAL_TAIL)
-        .is_some_and(|head| glob(&text, head))
+    pattern.strip_suffix(OPTIONAL_TAIL).is_some_and(|head| glob(&text, head))
 }
 
 /// A string as the matcher compares it: one kind of separator, and on Windows,
@@ -2011,9 +1964,7 @@ fn glob(text: &[char], pattern: &[char]) -> bool {
         }
     }
 
-    pattern[against.min(pattern.len())..]
-        .iter()
-        .all(|character| *character == '*')
+    pattern[against.min(pattern.len())..].iter().all(|character| *character == '*')
 }
 
 #[cfg(test)]

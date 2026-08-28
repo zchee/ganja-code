@@ -36,10 +36,8 @@
 
 mod pane_support;
 
-use ganja_core::{
-    config::CONFIG_HOME_ENV,
-    teammate::tmux::{self, Server},
-};
+use ganja_core::config::CONFIG_HOME_ENV;
+use ganja_core::teammate::tmux::{self, Server};
 use ganja_team::{MemberName, mailbox};
 use ganja_testkit::tmux::PrivateServer;
 use pane_support::{expected_argv, pane_child_if_asked, run_one, spawn_pane_worker};
@@ -62,11 +60,8 @@ fn main() {
 async fn a_pane_joins_the_team_when_the_tmux_server_predates_the_config_home_export() {
     // The server first, born without the variable and without the credentials
     // — whatever this process inherited of them is kept out of it.
-    let server = PrivateServer::start(
-        &["sleep", "3600"],
-        &[CONFIG_HOME_ENV, API_KEY, SERVER_PASSWORD],
-        &[],
-    );
+    let server =
+        PrivateServer::start(&["sleep", "3600"], &[CONFIG_HOME_ENV, API_KEY, SERVER_PASSWORD], &[]);
     let config_home = ganja_testkit::temp_dir();
     let project = ganja_testkit::temp_dir();
     // SAFETY: this binary holds exactly one test, so nothing else in this
@@ -101,11 +96,7 @@ async fn a_pane_joins_the_team_when_the_tmux_server_predates_the_config_home_exp
 
     // What travelled, by name: the carried variable, and neither credential.
     assert!(
-        spawned
-            .report
-            .env_names
-            .iter()
-            .any(|name| name == CONFIG_HOME_ENV),
+        spawned.report.env_names.iter().any(|name| name == CONFIG_HOME_ENV),
         "the config home is in the pane's environment: {:?}",
         spawned.report.env_names
     );
@@ -119,10 +110,7 @@ async fn a_pane_joins_the_team_when_the_tmux_server_predates_the_config_home_exp
 
     // What is on the line: the five flags, and no canary anywhere tmux or the
     // pane can see it.
-    assert_eq!(
-        spawned.report.argv,
-        expected_argv(&spawned.team, &spawned.member)
-    );
+    assert_eq!(spawned.report.argv, expected_argv(&spawned.team, &spawned.member));
     let line = server.start_command(&pane_id);
     assert!(
         !line.contains(CANARY),
@@ -156,10 +144,8 @@ async fn a_pane_joins_the_team_when_the_tmux_server_predates_the_config_home_exp
 
     // The way out through the registry: shutdown kills the pane it made.
     spawned.registry.shutdown().await;
-    let after = Server::at(server.socket(), None)
-        .panes()
-        .await
-        .expect("the private server still lists");
+    let after =
+        Server::at(server.socket(), None).panes().await.expect("the private server still lists");
     assert!(
         !after.iter().any(|live| live.id == pane_id),
         "the registry's shutdown ended the pane: {after:?}"

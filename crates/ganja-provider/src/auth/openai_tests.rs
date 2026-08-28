@@ -1,6 +1,7 @@
 use std::time::Duration;
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use secrecy::ExposeSecret as _;
 use serde_json::json;
 
@@ -37,26 +38,14 @@ fn an_authorize_url_carries_every_parameter_the_issuer_requires() {
         .map(|(key, value)| (key.into_owned(), value.into_owned()))
         .collect();
 
-    assert!(
-        url.starts_with("https://issuer.invalid/oauth/authorize?"),
-        "{url}"
-    );
+    assert!(url.starts_with("https://issuer.invalid/oauth/authorize?"), "{url}");
     assert_eq!(
         query,
         vec![
             ("response_type".to_owned(), "code".to_owned()),
-            (
-                "client_id".to_owned(),
-                "app_EMoamEEZ73f0CkXaXp7hrann".to_owned()
-            ),
-            (
-                "redirect_uri".to_owned(),
-                "http://localhost:1455/auth/callback".to_owned()
-            ),
-            (
-                "scope".to_owned(),
-                "openid profile email offline_access".to_owned()
-            ),
+            ("client_id".to_owned(), "app_EMoamEEZ73f0CkXaXp7hrann".to_owned()),
+            ("redirect_uri".to_owned(), "http://localhost:1455/auth/callback".to_owned()),
+            ("scope".to_owned(), "openid profile email offline_access".to_owned()),
             ("code_challenge".to_owned(), "the-challenge".to_owned()),
             ("code_challenge_method".to_owned(), "S256".to_owned()),
             ("id_token_add_organizations".to_owned(), "true".to_owned()),
@@ -99,10 +88,7 @@ async fn a_browser_login_names_the_port_it_is_actually_listening_on() {
         .map(|(_, value)| value.into_owned())
         .expect("the authorize URL names a redirect");
 
-    assert_eq!(
-        redirect,
-        format!("http://localhost:{}/auth/callback", browser.port())
-    );
+    assert_eq!(redirect, format!("http://localhost:{}/auth/callback", browser.port()));
     assert_ne!(
         browser.port(),
         CALLBACK_PORT,
@@ -112,11 +98,7 @@ async fn a_browser_login_names_the_port_it_is_actually_listening_on() {
 
 #[test]
 fn an_issuer_that_would_put_the_tokens_in_the_clear_is_refused() {
-    for allowed in [
-        "https://auth.openai.com",
-        "http://127.0.0.1:8080",
-        "http://localhost:9",
-    ] {
+    for allowed in ["https://auth.openai.com", "http://127.0.0.1:8080", "http://localhost:9"] {
         assert!(Login::with_issuer(allowed).is_ok(), "{allowed}");
     }
     for refused in [
@@ -126,10 +108,7 @@ fn an_issuer_that_would_put_the_tokens_in_the_clear_is_refused() {
         "ftp://auth.openai.com",
         "not a url",
     ] {
-        assert!(
-            matches!(Login::with_issuer(refused), Err(LoginError::Issuer)),
-            "{refused}"
-        );
+        assert!(matches!(Login::with_issuer(refused), Err(LoginError::Issuer)), "{refused}");
     }
 }
 
@@ -145,10 +124,7 @@ fn an_issuer_carrying_a_secret_is_refused_before_it_can_reach_a_browser() {
         &format!("https://issuer.invalid?token={CANARY}"),
         &format!("https://issuer.invalid#{CANARY}"),
     ] {
-        assert!(
-            matches!(Login::with_issuer(carrying), Err(LoginError::Issuer)),
-            "{carrying}"
-        );
+        assert!(matches!(Login::with_issuer(carrying), Err(LoginError::Issuer)), "{carrying}");
     }
 }
 
@@ -174,25 +150,16 @@ fn an_account_id_is_read_from_each_claim_shape_in_priority_order() {
         "https://api.openai.com/auth": { "chatgpt_account_id": "namespaced" },
         "organizations": [{ "id": "organization" }],
     });
-    assert_eq!(
-        claimed_account(&token(&all_three)).as_deref(),
-        Some(ACCOUNT)
-    );
+    assert_eq!(claimed_account(&token(&all_three)).as_deref(), Some(ACCOUNT));
 
     let namespaced = json!({
         "https://api.openai.com/auth": { "chatgpt_account_id": ACCOUNT },
         "organizations": [{ "id": "organization" }],
     });
-    assert_eq!(
-        claimed_account(&token(&namespaced)).as_deref(),
-        Some(ACCOUNT)
-    );
+    assert_eq!(claimed_account(&token(&namespaced)).as_deref(), Some(ACCOUNT));
 
     let organizations = json!({ "organizations": [{ "id": ACCOUNT }, { "id": "second" }] });
-    assert_eq!(
-        claimed_account(&token(&organizations)).as_deref(),
-        Some(ACCOUNT)
-    );
+    assert_eq!(claimed_account(&token(&organizations)).as_deref(), Some(ACCOUNT));
 }
 
 #[test]
@@ -214,10 +181,7 @@ fn a_padded_payload_decodes_like_an_unpadded_one() {
     let payload = base64::engine::general_purpose::URL_SAFE.encode(claims.to_string());
 
     assert!(payload.ends_with('='), "the fixture has to be padded");
-    assert_eq!(
-        claimed_account(&format!("header.{payload}.signature")).as_deref(),
-        Some(ACCOUNT)
-    );
+    assert_eq!(claimed_account(&format!("header.{payload}.signature")).as_deref(), Some(ACCOUNT));
 }
 
 #[test]
@@ -289,10 +253,8 @@ fn a_refusal_and_a_transport_failure_are_never_the_same_answer() {
     .into_auth(PROVIDER_ID);
     assert_eq!(limited.kind(), AuthErrorKind::RefreshUnavailable);
 
-    let malformed = LoginError::Malformed {
-        step: "renewing the credential",
-    }
-    .into_auth(PROVIDER_ID);
+    let malformed =
+        LoginError::Malformed { step: "renewing the credential" }.into_auth(PROVIDER_ID);
     assert_eq!(malformed.kind(), AuthErrorKind::RefreshUnavailable);
 
     let cancelled = LoginError::Cancelled.into_auth(PROVIDER_ID);
@@ -310,26 +272,18 @@ fn no_failure_message_renders_a_token() {
         }
         .into_auth(PROVIDER_ID)
         .to_string(),
-        LoginError::Malformed {
-            step: "exchanging the authorization code",
-        }
-        .into_auth(PROVIDER_ID)
-        .to_string(),
+        LoginError::Malformed { step: "exchanging the authorization code" }
+            .into_auth(PROVIDER_ID)
+            .to_string(),
         // A `Login` is held for the length of a login and lands in a
         // `tracing` field the moment anybody adds one, so its own rendering
         // has to be safe too. It is, because nothing it holds may carry a
         // secret — see the issuer check.
-        format!(
-            "{:?}",
-            Login::with_issuer("https://issuer.invalid").expect("https is allowed")
-        ),
+        format!("{:?}", Login::with_issuer("https://issuer.invalid").expect("https is allowed")),
     ];
 
     for message in messages {
-        assert!(
-            !message.contains(CANARY),
-            "a secret reached a message: {message}"
-        );
+        assert!(!message.contains(CANARY), "a secret reached a message: {message}");
     }
 }
 
@@ -345,17 +299,8 @@ fn the_poll_interval_is_the_one_the_issuer_named() {
         Duration::from_secs(7),
         "and a number is not a reason to fail a login"
     );
-    for absent in [
-        None,
-        Some(&json!("0")),
-        Some(&json!("")),
-        Some(&json!(null)),
-    ] {
-        assert_eq!(
-            poll_interval(absent),
-            Duration::from_secs(DEFAULT_POLL_SECONDS),
-            "{absent:?}"
-        );
+    for absent in [None, Some(&json!("0")), Some(&json!("")), Some(&json!(null))] {
+        assert_eq!(poll_interval(absent), Duration::from_secs(DEFAULT_POLL_SECONDS), "{absent:?}");
     }
 }
 

@@ -47,7 +47,8 @@
 //! resolving it would mean renaming one of two tools a person deliberately
 //! installed. It is left as the documented bound rather than papered over.
 
-use std::{borrow::Cow, collections::HashMap};
+use std::borrow::Cow;
+use std::collections::HashMap;
 
 use sha2::{Digest as _, Sha256};
 
@@ -89,25 +90,14 @@ const fn conforming(byte: u8) -> bool {
 /// Debug-only: `cap` must leave room for the suffix a truncation appends.
 #[must_use]
 pub fn alias(name: &str, cap: usize) -> Cow<'_, str> {
-    debug_assert!(
-        cap > HASH + 1,
-        "a cap with no room for the disambiguating suffix"
-    );
+    debug_assert!(cap > HASH + 1, "a cap with no room for the disambiguating suffix");
 
     if name.len() <= cap && name.bytes().all(conforming) {
         return Cow::Borrowed(name);
     }
 
-    let mut out: String = name
-        .chars()
-        .map(|c| {
-            if u8::try_from(c).is_ok_and(conforming) {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
+    let mut out: String =
+        name.chars().map(|c| if u8::try_from(c).is_ok_and(conforming) { c } else { '_' }).collect();
 
     if out.len() > cap {
         out.truncate(cap - HASH - 1);

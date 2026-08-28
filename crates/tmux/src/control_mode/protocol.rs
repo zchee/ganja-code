@@ -30,10 +30,8 @@
 //! active block (see `mismatched_end_marker_remains_output` in
 //! `protocol_tests.rs`).
 
-use crate::{
-    control_mode::notification::{self, Notification},
-    error::ProtocolError,
-};
+use crate::control_mode::notification::{self, Notification};
+use crate::error::ProtocolError;
 
 /// A tmux `%begin`, `%end`, or `%error` response marker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,18 +123,12 @@ impl Parser {
 
         match parse_begin(line) {
             Ok(Some(marker)) => {
-                self.active = Some(ResponseBuilder {
-                    begin: marker,
-                    lines: Vec::new(),
-                });
+                self.active = Some(ResponseBuilder { begin: marker, lines: Vec::new() });
                 return Ok(None);
             }
             Ok(None) => {}
             Err(message) => {
-                return Err(ProtocolError {
-                    line: Some(line.to_string()),
-                    message,
-                });
+                return Err(ProtocolError { line: Some(line.to_string()), message });
             }
         }
 
@@ -220,11 +212,7 @@ fn parse_marker(line: &str, prefix: &str) -> Result<BlockMarker, String> {
     let flags: i64 = fields[3]
         .parse()
         .map_err(|source| format!("invalid marker flags {:?}: {source}", fields[3]))?;
-    Ok(BlockMarker {
-        time,
-        command,
-        flags,
-    })
+    Ok(BlockMarker { time, command, flags })
 }
 
 /// Reports whether two [`BlockMarker`]s share the timestamp and command

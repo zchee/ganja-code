@@ -65,13 +65,11 @@
 //! ```no_run
 //! # async fn run() -> Result<(), tmux::Error> {
 //! use std::time::Duration;
+//!
 //! use tmux::control_mode::{Client, Options};
 //!
 //! let mut client = Client::new(Options::new().with_session_name("work")).await?;
-//! if tokio::time::timeout(Duration::from_secs(2), client.exec_raw("list-panes"))
-//!     .await
-//!     .is_err()
-//! {
+//! if tokio::time::timeout(Duration::from_secs(2), client.exec_raw("list-panes")).await.is_err() {
 //!     // The timeout dropped the exec future while it was waiting on tmux's
 //!     // reply; per the rule above, the client is now poisoned. Every
 //!     // further call returns `Error::Closed` — reconnect instead of retrying.
@@ -83,32 +81,22 @@
 //! # }
 //! ```
 
-use std::{
-    collections::VecDeque,
-    process::Stdio,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    },
-    time::Duration,
-};
+use std::collections::VecDeque;
+use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use futures::Stream;
-use tokio::{
-    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
-    process::Child,
-    sync::{Notify, oneshot},
-};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::process::Child;
+use tokio::sync::{Notify, oneshot};
 
-use crate::{
-    control_mode::{
-        flow::DETACH_CLIENT,
-        notification::{Notification, NotificationKind},
-        options::Options,
-        protocol::{Event, Parser, Response},
-    },
-    error::Error,
-};
+use crate::control_mode::flow::DETACH_CLIENT;
+use crate::control_mode::notification::{Notification, NotificationKind};
+use crate::control_mode::options::Options;
+use crate::control_mode::protocol::{Event, Parser, Response};
+use crate::error::Error;
 
 /// A boxed, type-erased half of a duplex byte stream — see the module doc's
 /// "no public `Transport` trait" section.
@@ -169,10 +157,7 @@ impl Shared {
         Self {
             pending: std::sync::Mutex::new(None),
             next_id: AtomicU64::new(0),
-            state: std::sync::Mutex::new(ClosedState {
-                closed: false,
-                error: None,
-            }),
+            state: std::sync::Mutex::new(ClosedState { closed: false, error: None }),
             close_notify: Notify::new(),
             events: EventQueue::new(event_buffer),
             stderr: StderrRing::new(stderr_line_limit),
@@ -190,10 +175,7 @@ impl Shared {
     /// serializes every caller across the whole of `exec_raw` — the check
     /// stays as the same defensive backstop Go's does.
     fn register_pending(&self, pending: Pending) -> Result<(), Error> {
-        let mut guard = self
-            .pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if guard.is_some() {
             return Err(Error::AlreadyPending);
         }
@@ -205,10 +187,7 @@ impl Shared {
     /// whether it did — see the module doc's cancellation section for why
     /// this identity check is what makes the delivery/drop race safe.
     fn clear_pending_by_id(&self, id: u64) -> bool {
-        let mut guard = self
-            .pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if guard.as_ref().is_some_and(|pending| pending.id == id) {
             *guard = None;
             true
@@ -221,17 +200,10 @@ impl Shared {
     ///
     /// Ports Go's `deliverResponse`.
     fn deliver_response(&self, response: Response) {
-        let pending = self
-            .pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
+        let pending = self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
         if let Some(pending) = pending {
             let result = if response.error {
-                Err(Error::Command(crate::error::CommandError {
-                    line: pending.line,
-                    response,
-                }))
+                Err(Error::Command(crate::error::CommandError { line: pending.line, response }))
             } else {
                 Ok(response)
             };
@@ -243,11 +215,7 @@ impl Shared {
     ///
     /// Ports Go's `failPending`.
     fn fail_pending(&self, err: Error) {
-        let pending = self
-            .pending
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
+        let pending = self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
         if let Some(pending) = pending {
             let _ = pending.sender.send(Err(err));
         }
@@ -259,10 +227,7 @@ impl Shared {
     /// the only time this ever fires.
     fn mark_closed(&self, err: Error) {
         {
-            let mut guard = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut guard = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if guard.closed {
                 return;
             }
@@ -275,10 +240,7 @@ impl Shared {
     /// Ports Go's `closedError`: `None` while open, else the stored cause
     /// (cloned — see the module doc) or [`Error::Closed`] as the default.
     fn closed_error(&self) -> Option<Error> {
-        let guard = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let guard = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if !guard.closed {
             return None;
         }
@@ -327,10 +289,7 @@ impl EventQueue {
     /// Ports Go's `deliverEvent`.
     fn push(&self, notification: Notification) {
         {
-            let mut queue = self
-                .queue
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut queue = self.queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if queue.len() >= self.capacity && queue.pop_front().is_some() {
                 self.dropped.fetch_add(1, Ordering::Relaxed);
             }
@@ -359,11 +318,8 @@ impl EventQueue {
     async fn recv(&self) -> Option<Notification> {
         loop {
             let notified = self.notify.notified();
-            if let Some(notification) = self
-                .queue
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .pop_front()
+            if let Some(notification) =
+                self.queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner).pop_front()
             {
                 return Some(notification);
             }
@@ -391,20 +347,14 @@ struct StderrRing {
 
 impl StderrRing {
     fn new(limit: usize) -> Self {
-        Self {
-            lines: std::sync::Mutex::new(VecDeque::new()),
-            limit,
-        }
+        Self { lines: std::sync::Mutex::new(VecDeque::new()), limit }
     }
 
     fn push(&self, line: String) {
         if self.limit == 0 {
             return;
         }
-        let mut lines = self
-            .lines
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut lines = self.lines.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         lines.push_back(line);
         while lines.len() > self.limit {
             lines.pop_front();
@@ -474,23 +424,11 @@ impl Client {
             source: Arc::new(source),
         })?;
 
-        let stdin = child
-            .stdin
-            .take()
-            .expect("Stdio::piped() guarantees a stdin pipe");
-        let stdout = child
-            .stdout
-            .take()
-            .expect("Stdio::piped() guarantees a stdout pipe");
-        let stderr = child
-            .stderr
-            .take()
-            .expect("Stdio::piped() guarantees a stderr pipe");
+        let stdin = child.stdin.take().expect("Stdio::piped() guarantees a stdin pipe");
+        let stdout = child.stdout.take().expect("Stdio::piped() guarantees a stdout pipe");
+        let stderr = child.stderr.take().expect("Stdio::piped() guarantees a stderr pipe");
 
-        let shared = Arc::new(Shared::new(
-            options.event_buffer(),
-            options.stderr_line_limit(),
-        ));
+        let shared = Arc::new(Shared::new(options.event_buffer(), options.stderr_line_limit()));
 
         let (tx, rx) = oneshot::channel();
         let startup_id = shared.next_pending_id();
@@ -502,10 +440,8 @@ impl Client {
             })
             .expect("a freshly constructed client has no pending registration yet");
 
-        let stderr_task = tokio::spawn(stderr_drain(
-            Box::new(stderr) as BoxedRead,
-            Arc::clone(&shared),
-        ));
+        let stderr_task =
+            tokio::spawn(stderr_drain(Box::new(stderr) as BoxedRead, Arc::clone(&shared)));
         let read_task = tokio::spawn(read_loop(
             BufReader::new(Box::new(stdout) as BoxedRead),
             Arc::clone(&shared),
@@ -513,9 +449,7 @@ impl Client {
 
         let client = Client {
             shared,
-            write: tokio::sync::Mutex::new(WriteState {
-                writer: Some(Box::new(stdin)),
-            }),
+            write: tokio::sync::Mutex::new(WriteState { writer: Some(Box::new(stdin)) }),
             child: std::sync::Mutex::new(Some(child)),
             read_task: std::sync::Mutex::new(Some(read_task)),
             stderr_task: std::sync::Mutex::new(Some(stderr_task)),
@@ -527,15 +461,11 @@ impl Client {
             Ok(Ok(_response)) => Ok(client),
             Ok(Err(err)) => {
                 let _ = client.close().await;
-                Err(Error::Startup {
-                    source: Box::new(err),
-                })
+                Err(Error::Startup { source: Box::new(err) })
             }
             Err(_sender_dropped) => {
                 let _ = client.close().await;
-                Err(Error::Startup {
-                    source: Box::new(Error::Closed),
-                })
+                Err(Error::Startup { source: Box::new(Error::Closed) })
             }
         }
     }
@@ -565,10 +495,7 @@ impl Client {
         stderr: Option<tokio::io::DuplexStream>,
     ) -> Client {
         let (read_half, write_half) = tokio::io::split(io);
-        let shared = Arc::new(Shared::new(
-            options.event_buffer(),
-            options.stderr_line_limit(),
-        ));
+        let shared = Arc::new(Shared::new(options.event_buffer(), options.stderr_line_limit()));
 
         let read_task = tokio::spawn(read_loop(
             BufReader::new(Box::new(read_half) as BoxedRead),
@@ -576,17 +503,12 @@ impl Client {
         ));
         let stderr_task = stderr.map(|stderr| {
             let (stderr_read, _stderr_write) = tokio::io::split(stderr);
-            tokio::spawn(stderr_drain(
-                Box::new(stderr_read) as BoxedRead,
-                Arc::clone(&shared),
-            ))
+            tokio::spawn(stderr_drain(Box::new(stderr_read) as BoxedRead, Arc::clone(&shared)))
         });
 
         Client {
             shared,
-            write: tokio::sync::Mutex::new(WriteState {
-                writer: Some(Box::new(write_half)),
-            }),
+            write: tokio::sync::Mutex::new(WriteState { writer: Some(Box::new(write_half)) }),
             child: std::sync::Mutex::new(None),
             read_task: std::sync::Mutex::new(Some(read_task)),
             stderr_task: std::sync::Mutex::new(stderr_task),
@@ -609,10 +531,7 @@ impl Client {
         command: crate::control_mode::commandline::Command,
         args: impl IntoIterator<Item = crate::control_mode::commandline::Arg>,
     ) -> Result<Response, Error> {
-        self.exec_line(crate::control_mode::commandline::CommandLine::new(
-            command, args,
-        ))
-        .await
+        self.exec_line(crate::control_mode::commandline::CommandLine::new(command, args)).await
     }
 
     /// Sends a pre-built [`crate::control_mode::CommandLine`] and waits for
@@ -653,18 +572,10 @@ impl Client {
 
         let id = self.shared.next_pending_id();
         let (tx, rx) = oneshot::channel();
-        self.shared.register_pending(Pending {
-            id,
-            line: line.to_string(),
-            sender: tx,
-        })?;
+        self.shared.register_pending(Pending { id, line: line.to_string(), sender: tx })?;
 
-        let mut drop_guard = PendingDropGuard {
-            shared: &self.shared,
-            id,
-            poison: false,
-            completed: false,
-        };
+        let mut drop_guard =
+            PendingDropGuard { shared: &self.shared, id, poison: false, completed: false };
 
         let Some(writer) = guard.writer.as_mut() else {
             self.shared.clear_pending_by_id(id);
@@ -748,9 +659,10 @@ impl Client {
     /// caller drives with `futures::StreamExt` (`.next()`, `while let
     /// Some(_) = stream.next().await`, …).
     pub fn events(&self) -> impl Stream<Item = Notification> + '_ {
-        futures::stream::unfold(self, |client| async move {
-            client.recv().await.map(|n| (n, client))
-        })
+        futures::stream::unfold(
+            self,
+            |client| async move { client.recv().await.map(|n| (n, client)) },
+        )
     }
 
     /// Returns the notification backpressure counter: how many buffered
@@ -841,25 +753,18 @@ impl Client {
             Err(_would_block) => errors.push(Error::DetachSkippedWriteLocked),
         }
 
-        let taken_child = self
-            .child
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
+        let taken_child =
+            self.child.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
         if let Some(mut child) = taken_child
             && let Err(err) = wait_process(&mut child, self.shutdown_timeout).await
         {
             errors.push(err);
         }
 
-        for (name, task) in [
-            ("stdout read loop", &self.read_task),
-            ("stderr drain", &self.stderr_task),
-        ] {
-            let handle = task
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
+        for (name, task) in
+            [("stdout read loop", &self.read_task), ("stderr drain", &self.stderr_task)]
+        {
+            let handle = task.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
             if let Some(handle) = handle
                 && let Err(err) = wait_task(name, handle, self.shutdown_timeout).await
             {
@@ -867,11 +772,7 @@ impl Client {
             }
         }
 
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(Error::Close { errors })
-        }
+        if errors.is_empty() { Ok(()) } else { Err(Error::Close { errors }) }
     }
 }
 
@@ -895,14 +796,8 @@ async fn write_command(
     writer: &mut BoxedWrite,
     payload: &[u8],
 ) -> Result<(), (WriteStage, std::io::Error)> {
-    writer
-        .write_all(payload)
-        .await
-        .map_err(|source| (WriteStage::Write, source))?;
-    writer
-        .flush()
-        .await
-        .map_err(|source| (WriteStage::Flush, source))
+    writer.write_all(payload).await.map_err(|source| (WriteStage::Write, source))?;
+    writer.flush().await.map_err(|source| (WriteStage::Flush, source))
 }
 
 /// A local guard on `exec_raw`'s stack. See the module doc's cancellation
@@ -939,10 +834,7 @@ async fn wait_task(
         }),
         Err(_elapsed) => Err(Error::Io {
             context: format!("wait for {name}"),
-            source: Arc::new(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "timed out",
-            )),
+            source: Arc::new(std::io::Error::new(std::io::ErrorKind::TimedOut, "timed out")),
         }),
     }
 }
@@ -1040,9 +932,7 @@ async fn read_loop(mut reader: BufReader<BoxedRead>, shared: Arc<Shared>) {
                         let exit = notification.exit();
                         shared.events.push(notification);
                         if let Some(exit) = exit {
-                            shared.abort(Error::Exit {
-                                reason: exit.reason,
-                            });
+                            shared.abort(Error::Exit { reason: exit.reason });
                             break;
                         }
                     }
@@ -1094,8 +984,7 @@ async fn stderr_drain(source: BoxedRead, shared: Arc<Shared>) {
 /// Strips a trailing `\n`, and then a trailing `\r`, from `line`. Ports
 /// Go's `trimLineEnding`.
 pub(crate) fn trim_line_ending(line: &str) -> &str {
-    line.strip_suffix('\n')
-        .map_or(line, |rest| rest.strip_suffix('\r').unwrap_or(rest))
+    line.strip_suffix('\n').map_or(line, |rest| rest.strip_suffix('\r').unwrap_or(rest))
 }
 
 #[cfg(test)]

@@ -22,15 +22,11 @@
 
 use std::borrow::Cow;
 
-use crate::{
-    control_mode::{
-        client::Client,
-        commandline::{Arg, Command, RenderError},
-        protocol::Response,
-    },
-    error::Error,
-    ids::PaneId,
-};
+use crate::control_mode::client::Client;
+use crate::control_mode::commandline::{Arg, Command, RenderError};
+use crate::control_mode::protocol::Response;
+use crate::error::Error;
+use crate::ids::PaneId;
 
 /// The tmux `detach-client` command; its alias is `detach`.
 pub const DETACH_CLIENT: Command = Command::from_static("detach-client");
@@ -148,9 +144,7 @@ pub(crate) fn validate_refresh_fragment(value: &str, name: &str) -> Result<(), S
 pub(crate) fn validate_subscription_name(name: &str) -> Result<(), String> {
     validate_refresh_fragment(name, "subscription name")?;
     if name.contains(':') {
-        return Err(format!(
-            "tmux: subscription name {name:?} must not contain colon"
-        ));
+        return Err(format!("tmux: subscription name {name:?} must not contain colon"));
     }
     Ok(())
 }
@@ -169,11 +163,7 @@ impl Client {
         if width == 0 || height == 0 {
             return Err(RenderError::new("tmux: client size must be positive").into());
         }
-        self.exec(
-            REFRESH_CLIENT,
-            [Arg::raw("-C"), Arg::string(format!("{width}x{height}"))],
-        )
-        .await
+        self.exec(REFRESH_CLIENT, [Arg::raw("-C"), Arg::string(format!("{width}x{height}"))]).await
     }
 
     /// Replaces the control-mode client's flags with `flags`.
@@ -190,13 +180,8 @@ impl Client {
         for flag in flags {
             validate_refresh_fragment(flag.as_str(), "client flag").map_err(RenderError::new)?;
         }
-        let values = flags
-            .iter()
-            .map(ClientFlag::as_str)
-            .collect::<Vec<_>>()
-            .join(",");
-        self.exec(REFRESH_CLIENT, [Arg::raw("-f"), Arg::string(values)])
-            .await
+        let values = flags.iter().map(ClientFlag::as_str).collect::<Vec<_>>().join(",");
+        self.exec(REFRESH_CLIENT, [Arg::raw("-f"), Arg::string(values)]).await
     }
 
     /// Pauses client output after `d` whole seconds of backpressure.
@@ -279,12 +264,11 @@ impl Client {
         }
         if format.contains(['\r', '\n']) {
             return Err(
-                RenderError::new("tmux: subscription format must not contain a newline").into(),
+                RenderError::new("tmux: subscription format must not contain a newline").into()
             );
         }
         let subscription = format!("{name}:{}:{format}", target.as_str());
-        self.exec(REFRESH_CLIENT, [Arg::raw("-B"), Arg::string(subscription)])
-            .await
+        self.exec(REFRESH_CLIENT, [Arg::raw("-B"), Arg::string(subscription)]).await
     }
 
     /// Removes the format subscription named `name`.
@@ -296,8 +280,7 @@ impl Client {
     /// failure.
     pub async fn unsubscribe_format(&self, name: &str) -> Result<Response, Error> {
         validate_subscription_name(name).map_err(RenderError::new)?;
-        self.exec(REFRESH_CLIENT, [Arg::raw("-B"), Arg::string(name)])
-            .await
+        self.exec(REFRESH_CLIENT, [Arg::raw("-B"), Arg::string(name)]).await
     }
 
     /// Applies a flow-control state to an already validated pane id.
@@ -313,11 +296,7 @@ impl Client {
     /// avoids that lexer ambiguity. The validated pane id and fixed states
     /// make this raw quoting safe.
     async fn pane_flow(&self, pane: &PaneId, state: &str) -> Result<Response, Error> {
-        self.exec(
-            REFRESH_CLIENT,
-            [Arg::raw("-A"), Arg::raw(format!("'{pane}:{state}'"))],
-        )
-        .await
+        self.exec(REFRESH_CLIENT, [Arg::raw("-A"), Arg::raw(format!("'{pane}:{state}'"))]).await
     }
 }
 

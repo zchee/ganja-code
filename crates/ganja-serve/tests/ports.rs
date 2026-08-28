@@ -26,10 +26,7 @@ async fn healthy(handle: &ganja_serve::Handle) {
 async fn an_explicit_port_that_is_taken_is_refused_rather_than_replaced() {
     // Hold a port, then ask for exactly it.
     let holder = std::net::TcpListener::bind("127.0.0.1:0").expect("a free port exists");
-    let taken = holder
-        .local_addr()
-        .expect("the holder has an address")
-        .port();
+    let taken = holder.local_addr().expect("the holder has an address").port();
 
     let mut config = loopback_config();
     config.listen = tcp(Some(taken));
@@ -48,9 +45,8 @@ async fn an_explicit_port_that_is_taken_is_refused_rather_than_replaced() {
 
 #[tokio::test]
 async fn an_os_assigned_port_is_reported_truthfully() {
-    let handle = ganja_serve::serve(engine(), loopback_config())
-        .await
-        .expect("a loopback server comes up");
+    let handle =
+        ganja_serve::serve(engine(), loopback_config()).await.expect("a loopback server comes up");
 
     assert_ne!(port(&handle), 0, "the truth, not the ask");
     healthy(&handle).await;
@@ -78,11 +74,7 @@ async fn no_port_tries_4096_first_and_falls_back_when_it_is_taken() {
     .await
     .expect("a taken 4096 is a fallback, not a failure");
     if holder.is_ok() {
-        assert_ne!(
-            port(&fallback),
-            DEFAULT_PORT,
-            "4096 is held, so the fallback lands elsewhere"
-        );
+        assert_ne!(port(&fallback), DEFAULT_PORT, "4096 is held, so the fallback lands elsewhere");
     }
     healthy(&fallback).await;
     fallback.shutdown().await.expect("a clean stop");
@@ -92,9 +84,7 @@ async fn no_port_tries_4096_first_and_falls_back_when_it_is_taken() {
     // has already proven the fallback half above.
     if let Ok(holder) = holder {
         drop(holder);
-        let preferred = ganja_serve::serve(engine(), config)
-            .await
-            .expect("a free 4096 binds");
+        let preferred = ganja_serve::serve(engine(), config).await.expect("a free 4096 binds");
         assert_eq!(port(&preferred), DEFAULT_PORT);
         healthy(&preferred).await;
         preferred.shutdown().await.expect("a clean stop");

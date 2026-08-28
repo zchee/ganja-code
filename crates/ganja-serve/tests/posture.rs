@@ -12,10 +12,7 @@ use support::{base_url, credentials, engine, loopback_config};
 #[tokio::test]
 async fn a_non_loopback_bind_with_no_password_is_refused_at_startup() {
     let mut config = loopback_config();
-    config.listen = Listen::Tcp {
-        hostname: "0.0.0.0".to_owned(),
-        port: Some(0),
-    };
+    config.listen = Listen::Tcp { hostname: "0.0.0.0".to_owned(), port: Some(0) };
     config.credentials = None;
 
     let refused = ganja_serve::serve(engine(), config).await;
@@ -43,14 +40,11 @@ async fn a_non_loopback_bind_with_no_password_is_refused_at_startup() {
 
 #[tokio::test]
 async fn a_request_naming_another_directory_is_refused_with_400() {
-    let handle = ganja_serve::serve(engine(), loopback_config())
-        .await
-        .expect("a loopback server comes up");
+    let handle =
+        ganja_serve::serve(engine(), loopback_config()).await.expect("a loopback server comes up");
     let base = base_url(&handle);
-    let served = std::env::current_dir()
-        .expect("the working directory resolves")
-        .display()
-        .to_string();
+    let served =
+        std::env::current_dir().expect("the working directory resolves").display().to_string();
 
     // The right directory — by header, by query, or unstated — is served.
     for request in [
@@ -74,26 +68,17 @@ async fn a_request_naming_another_directory_is_refused_with_400() {
         .await
         .expect("the route answers");
     assert_eq!(by_header.status(), 400);
-    let body = by_header
-        .json::<serde_json::Value>()
-        .await
-        .expect("the refusal is tagged JSON");
+    let body = by_header.json::<serde_json::Value>().await.expect("the refusal is tagged JSON");
     assert_eq!(body["type"], "invalid_request");
     assert!(
-        body["message"]
-            .as_str()
-            .is_some_and(|message| message.contains(&elsewhere)),
+        body["message"].as_str().is_some_and(|message| message.contains(&elsewhere)),
         "the refusal names the directory it refused: {body}"
     );
 
     let by_query = reqwest::get(format!("{base}/global/health?directory={elsewhere}"))
         .await
         .expect("the route answers");
-    assert_eq!(
-        by_query.status(),
-        400,
-        "the query spelling is the same refusal"
-    );
+    assert_eq!(by_query.status(), 400, "the query spelling is the same refusal");
 
     handle.shutdown().await.expect("a clean stop");
 }
@@ -102,21 +87,14 @@ async fn a_request_naming_another_directory_is_refused_with_400() {
 async fn a_configured_password_gates_every_route() {
     let mut config = loopback_config();
     config.credentials = Some(credentials());
-    let handle = ganja_serve::serve(engine(), config)
-        .await
-        .expect("a loopback server comes up");
+    let handle = ganja_serve::serve(engine(), config).await.expect("a loopback server comes up");
     let base = base_url(&handle);
 
     // No credential: the Basic challenge, empty-bodied.
-    let refused = reqwest::get(format!("{base}/global/health"))
-        .await
-        .expect("the route answers");
+    let refused = reqwest::get(format!("{base}/global/health")).await.expect("the route answers");
     assert_eq!(refused.status(), 401);
     assert_eq!(
-        refused
-            .headers()
-            .get("www-authenticate")
-            .and_then(|value| value.to_str().ok()),
+        refused.headers().get("www-authenticate").and_then(|value| value.to_str().ok()),
         Some("Basic realm=\"Secure Area\"")
     );
     assert!(refused.bytes().await.expect("a body").is_empty());
@@ -142,15 +120,11 @@ async fn a_configured_password_gates_every_route() {
     // So does the query escape hatch an EventSource is limited to; the event
     // stream is the route it exists for, so that is the one it is proven on.
     let token = base64::engine::general_purpose::STANDARD.encode("ganja:hunter2");
-    let by_token = reqwest::get(format!("{base}/event?auth_token={token}"))
-        .await
-        .expect("the route answers");
+    let by_token =
+        reqwest::get(format!("{base}/event?auth_token={token}")).await.expect("the route answers");
     assert_eq!(by_token.status(), 200);
     assert_eq!(
-        by_token
-            .headers()
-            .get("content-type")
-            .and_then(|value| value.to_str().ok()),
+        by_token.headers().get("content-type").and_then(|value| value.to_str().ok()),
         Some("text/event-stream")
     );
     drop(by_token);

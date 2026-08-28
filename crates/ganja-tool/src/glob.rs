@@ -57,10 +57,7 @@ impl Tool for GlobTool {
     }
 
     fn describe(&self, args: &serde_json::Value) -> String {
-        let pattern = args
-            .get("pattern")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
+        let pattern = args.get("pattern").and_then(serde_json::Value::as_str).unwrap_or_default();
 
         match args.get("path").and_then(serde_json::Value::as_str) {
             Some(path) => format!("glob {pattern} in {path}"),
@@ -84,11 +81,10 @@ impl Tool for GlobTool {
         let pattern = args.pattern;
         let cancel = ctx.cancel.clone();
         let walked = search.clone();
-        let matches = tokio::task::spawn_blocking(move || walk(&walked, &pattern, &cancel))
-            .await
-            .map_err(|error| {
-                ToolError::Failed(format!("the glob walk did not finish: {error}"))
-            })??;
+        let matches =
+            tokio::task::spawn_blocking(move || walk(&walked, &pattern, &cancel)).await.map_err(
+                |error| ToolError::Failed(format!("the glob walk did not finish: {error}")),
+            )??;
 
         // Upstream's own quirk, preserved rather than fixed: `tool/glob.ts`
         // reconstructs `truncated` from `files.length === limit` after the
@@ -165,10 +161,7 @@ fn walk(
             return Err(ToolError::Cancelled);
         }
         let Ok(entry) = entry else { continue };
-        if !entry
-            .file_type()
-            .is_some_and(|file_type| file_type.is_file())
-        {
+        if !entry.file_type().is_some_and(|file_type| file_type.is_file()) {
             continue;
         }
         let relative = entry.path().strip_prefix(search).unwrap_or(entry.path());

@@ -78,10 +78,7 @@ pub(crate) fn decode_output_value_partial(value: &str) -> (Vec<u8>, Option<Decod
             if !(b'0'..=b'7').contains(&digit) {
                 return (
                     out,
-                    Some(DecodeError::InvalidOctalDigit {
-                        digit: digit as char,
-                        byte: i + offset,
-                    }),
+                    Some(DecodeError::InvalidOctalDigit { digit: digit as char, byte: i + offset }),
                 );
             }
             v = v * 8 + u32::from(digit - b'0');

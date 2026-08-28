@@ -10,15 +10,14 @@
 //! [`FRAME`], while a keystroke always redraws immediately — the two rules that
 //! keep streaming cheap without making typing feel laggy.
 
-use std::{
-    collections::{HashMap, VecDeque},
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
-use etcetera::{BaseStrategy as _, base_strategy::Xdg};
+use etcetera::BaseStrategy as _;
+use etcetera::base_strategy::Xdg;
 use futures::StreamExt as _;
 use ganja_core::{
     Engine, EngineError, SessionId, attachment, catalog,
@@ -39,55 +38,43 @@ use ganja_protocol::{
     MessageId, PartBody, PeerMessageId, PeerReceiptStatus, PermissionId, PermissionReply,
     RevertScope, Role, ToolState, Usage,
 };
-use ganja_tool::{Credentials, FileTimes, ToolCtx, job::Jobs as _, registry};
-use ratatui::{
-    DefaultTerminal, Terminal,
-    backend::Backend,
-    crossterm::event::{
-        Event as TermEvent, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
-        MouseEventKind,
-    },
-    layout::{Constraint, Layout},
+use ganja_tool::job::Jobs as _;
+use ganja_tool::{Credentials, FileTimes, ToolCtx, registry};
+use ratatui::backend::Backend;
+use ratatui::crossterm::event::{
+    Event as TermEvent, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
 };
+use ratatui::layout::{Constraint, Layout};
+use ratatui::{DefaultTerminal, Terminal};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+use crate::component::chat::{self, Chat, WHEEL_LINES, Working};
+use crate::component::dropdown::{self, Dropdown};
+use crate::component::editor::{self, Editor, Mode};
+use crate::component::files::{Files, Row as MenuRow};
+use crate::component::help::Help;
+use crate::component::inspector::{Feed, Inspector, TurnUsage};
+use crate::component::list::{self, ListDialog};
+use crate::component::palette::Palette;
+use crate::component::permission::Permission;
+use crate::component::question::Question;
+use crate::component::queue::Queue;
+use crate::component::rewind::Rewind;
+use crate::component::search::HistorySearch;
+use crate::component::sessions::{self, Sessions};
+use crate::component::skill_menu::SkillMenu;
+use crate::component::status::{Activity, Status, Todos, Totals};
+use crate::component::themes::ThemeList;
+use crate::component::{context, effort, held, mcp, plugin, team, usage};
+use crate::escrepair::EscRepair;
+use crate::event::AppEvent;
+use crate::history::{self, History};
+use crate::keybind::{self, Keybinds};
+use crate::theme::{Theme, Themes};
 use crate::{
-    NOTICE_SEPARATOR, binder, clipboard, command,
-    component::{
-        chat::{self, Chat, WHEEL_LINES, Working},
-        context,
-        dropdown::{self, Dropdown},
-        editor::{self, Editor, Mode},
-        effort,
-        files::{Files, Row as MenuRow},
-        held,
-        help::Help,
-        inspector::{Feed, Inspector, TurnUsage},
-        list::{self, ListDialog},
-        mcp,
-        palette::Palette,
-        permission::Permission,
-        plugin,
-        question::Question,
-        queue::Queue,
-        rewind::Rewind,
-        search::HistorySearch,
-        sessions::{self, Sessions},
-        skill_menu::SkillMenu,
-        status::{Activity, Status, Todos, Totals},
-        team,
-        themes::ThemeList,
-        usage,
-    },
-    escrepair::EscRepair,
-    event::AppEvent,
-    external, graphics,
-    history::{self, History},
-    keybind::{self, Keybinds},
-    lister, member, mention, notify,
-    theme::{Theme, Themes},
-    transcript,
+    NOTICE_SEPARATOR, binder, clipboard, command, external, graphics, lister, member, mention,
+    notify, transcript,
 };
 
 /// Shortest gap between frames: roughly 60 FPS.
@@ -98,9 +85,7 @@ pub const FRAME: Duration = Duration::from_millis(16);
 fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| {
-            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
-        })
+        .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// The incumbent's own collision re-scan runs at most this often (**S1**,
@@ -111,9 +96,8 @@ const COLLISION_RESCAN_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Modifiers that turn Enter into a line break. Terminals disagree about which
 /// of these they can report, so all of them mean the same thing.
-const NEWLINE_MODIFIERS: KeyModifiers = KeyModifiers::SHIFT
-    .union(KeyModifiers::ALT)
-    .union(KeyModifiers::CONTROL);
+const NEWLINE_MODIFIERS: KeyModifiers =
+    KeyModifiers::SHIFT.union(KeyModifiers::ALT).union(KeyModifiers::CONTROL);
 
 /// Modifiers that stop a printable key from reaching a filter line: they mean
 /// the key is a shortcut rather than a character.
@@ -229,10 +213,9 @@ fn mcp_notice(
     let failures: Vec<String> = status
         .iter()
         .filter_map(|(name, status)| match status {
-            ganja_core::McpStatus::Failed { error } => Some(format!(
-                "mcp {name}: {}",
-                error.lines().next().unwrap_or(error).trim()
-            )),
+            ganja_core::McpStatus::Failed { error } => {
+                Some(format!("mcp {name}: {}", error.lines().next().unwrap_or(error).trim()))
+            }
             ganja_core::McpStatus::Connected | ganja_core::McpStatus::Disabled => None,
         })
         .collect();
@@ -356,11 +339,7 @@ fn todo_progress(metadata: &serde_json::Value) -> Option<Todos> {
         Some(todo.get("content")?.as_str()?.to_owned())
     });
 
-    Some(Todos {
-        done,
-        total: todos.len(),
-        current,
-    })
+    Some(Todos { done, total: todos.len(), current })
 }
 
 fn wire_rows(models: &[provider::ListedModel], current: &str) -> Vec<list::Row> {
@@ -1497,11 +1476,7 @@ impl App {
         // moment the record moves is the third moment the wire's address
         // does, and routing both through one function is what keeps them
         // from drifting.
-        if self
-            .registered
-            .as_ref()
-            .is_some_and(|(previous, _)| *previous != wanted)
-        {
+        if self.registered.as_ref().is_some_and(|(previous, _)| *previous != wanted) {
             self.unregister_self();
         }
         let synced = {
@@ -1543,10 +1518,7 @@ impl App {
     /// holder's stem and cwd and registers anyway (**user-ratified
     /// 2026-08-26**).
     fn register_self(&mut self, session_id: SessionId, path: PathBuf) {
-        let Some(stem) = path
-            .file_stem()
-            .and_then(std::ffi::OsStr::to_str)
-            .map(str::to_owned)
+        let Some(stem) = path.file_stem().and_then(std::ffi::OsStr::to_str).map(str::to_owned)
         else {
             return;
         };
@@ -1664,9 +1636,8 @@ impl App {
         let Some((session_id, _)) = &self.registered else {
             return;
         };
-        let due = self
-            .collision_scanned
-            .is_none_or(|last| last.elapsed() >= COLLISION_RESCAN_INTERVAL);
+        let due =
+            self.collision_scanned.is_none_or(|last| last.elapsed() >= COLLISION_RESCAN_INTERVAL);
         if !due {
             return;
         }
@@ -1695,11 +1666,8 @@ impl App {
 
     /// The loop itself; see [`App::run`], which owns what happens after it.
     async fn drive(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
-        let mut core_events = self
-            .engine
-            .subscribe()
-            .await
-            .context("failed to subscribe to engine events")?;
+        let mut core_events =
+            self.engine.subscribe().await.context("failed to subscribe to engine events")?;
         let mut term_events = EventStream::new();
 
         loop {
@@ -1707,10 +1675,7 @@ impl App {
                 self.draw(terminal)?;
             }
 
-            let repair_wake = self
-                .escrepair
-                .deadline()
-                .map(tokio::time::Instant::from_std);
+            let repair_wake = self.escrepair.deadline().map(tokio::time::Instant::from_std);
 
             let events: Vec<AppEvent> = tokio::select! {
                 incoming = term_events.next() => match incoming {
@@ -2002,11 +1967,8 @@ impl App {
         // offers the same message again. Re-offering is the durable half of
         // the design working; delivering it again is the same words reaching
         // the model N times over one long step.
-        let fresh: Vec<Delivered> = pass
-            .messages
-            .into_iter()
-            .filter(|message| !self.in_flight(message))
-            .collect();
+        let fresh: Vec<Delivered> =
+            pass.messages.into_iter().filter(|message| !self.in_flight(message)).collect();
         // One command for the whole pass, rather than one per message. The
         // engine takes a batch of peers on a single `Steer`, and sending them
         // one at a time made the second refuse: `Busy` is what the engine says
@@ -2056,9 +2018,7 @@ impl App {
             // inbox; nothing that arrives after the request is delivered.
             return;
         }
-        let due = self
-            .member_polled
-            .is_none_or(|last| last.elapsed() >= member::POLL);
+        let due = self.member_polled.is_none_or(|last| last.elapsed() >= member::POLL);
         if !due {
             return;
         }
@@ -2083,11 +2043,8 @@ impl App {
 
             return;
         }
-        let fresh: Vec<Delivered> = pass
-            .messages
-            .into_iter()
-            .filter(|message| !self.in_flight(message))
-            .collect();
+        let fresh: Vec<Delivered> =
+            pass.messages.into_iter().filter(|message| !self.in_flight(message)).collect();
         self.deliver_peers(fresh).await;
         self.dirty = true;
     }
@@ -2133,10 +2090,7 @@ impl App {
             tracing::warn!(request = id.as_str(), %error, "an ask was refused instead of forwarded");
             if let Err(error) = self
                 .engine
-                .send(Command::ReplyPermission {
-                    id,
-                    reply: PermissionReply::Reject,
-                })
+                .send(Command::ReplyPermission { id, reply: PermissionReply::Reject })
                 .await
             {
                 tracing::warn!(%error, "the refusal of an unforwarded ask was itself refused");
@@ -2151,13 +2105,8 @@ impl App {
         id: ganja_protocol::PermissionId,
         reply: PermissionReply,
     ) {
-        if let Err(error) = self
-            .engine
-            .send(Command::ReplyPermission {
-                id: id.clone(),
-                reply,
-            })
-            .await
+        if let Err(error) =
+            self.engine.send(Command::ReplyPermission { id: id.clone(), reply }).await
         {
             tracing::warn!(
                 request = id.as_str(),
@@ -2171,10 +2120,7 @@ impl App {
     /// The bar's activity once a forwarded ask is answered: streaming again
     /// only when no ask is waiting on the lead and no dialog is on screen.
     fn settle_member_activity(&mut self) {
-        let waiting = self
-            .member
-            .as_ref()
-            .is_some_and(|inbox| inbox.asks().waiting() > 0);
+        let waiting = self.member.as_ref().is_some_and(|inbox| inbox.asks().waiting() > 0);
         if !waiting && self.permission.is_none() {
             self.status.set_activity(Activity::Streaming);
         }
@@ -2200,11 +2146,8 @@ impl App {
             return;
         }
         self.status.set_notice(Some(SHUTTING_DOWN.to_owned()));
-        self.member_shutdown = Some(MemberShutdown {
-            request_id,
-            since: Instant::now(),
-            cancelled: false,
-        });
+        self.member_shutdown =
+            Some(MemberShutdown { request_id, since: Instant::now(), cancelled: false });
     }
 
     /// Cancels the turn a shutdown has waited [`ganja_core::teammate::SETTLE`]
@@ -2318,10 +2261,7 @@ impl App {
     /// its own — a teammate that shut itself down clears its own flag — and a
     /// count that has not changed costs a lock and nothing else.
     fn poll_teammate_count(&mut self) {
-        let running = self
-            .engine
-            .teammates()
-            .map_or(0, |team| team.registry().running());
+        let running = self.engine.teammates().map_or(0, |team| team.registry().running());
         if running == self.teammates {
             return;
         }
@@ -2367,10 +2307,7 @@ impl App {
             return;
         };
         let rows = team::rows(&view);
-        let moved = self
-            .team_dialog
-            .as_mut()
-            .is_some_and(|dialog| dialog.refresh(rows));
+        let moved = self.team_dialog.as_mut().is_some_and(|dialog| dialog.refresh(rows));
         self.dirty |= moved;
     }
 
@@ -2431,8 +2368,7 @@ impl App {
     async fn run_rename_line(&mut self, line: command::Rename) {
         match line {
             command::Rename::Missing => {
-                self.status
-                    .set_notice(Some("/rename needs a name: /rename <name>".to_owned()));
+                self.status.set_notice(Some("/rename needs a name: /rename <name>".to_owned()));
                 self.dirty = true;
             }
             command::Rename::To(name) => self.rename_self(name),
@@ -2529,18 +2465,12 @@ impl App {
                 // 2026-08-20). Before the spawn, which may stop to ask a
                 // person: what is remembered is what was typed, not whether
                 // the team took it — the rule every `/team` line follows.
-                self.history
-                    .append(history::PromptInfo::text(format!("/team spawn {typed}")));
+                self.history.append(history::PromptInfo::text(format!("/team spawn {typed}")));
                 self.spawn_teammate(request);
             }
             team::Effect::Message { to, text } => {
-                let said = self.post_to_member(
-                    &to,
-                    ganja_tool::team::Body::Text {
-                        text,
-                        summary: None,
-                    },
-                );
+                let said =
+                    self.post_to_member(&to, ganja_tool::team::Body::Text { text, summary: None });
                 self.tell_team(said.await);
             }
             team::Effect::Shutdown(member) => self.ask_shutdown(&member).await,
@@ -2578,9 +2508,7 @@ impl App {
             // anti-laundering rule rather than a detail.
             project_root: self.root.clone(),
         };
-        let asker = DialogAsker {
-            asks: self.spawn_asker.clone(),
-        };
+        let asker = DialogAsker { asks: self.spawn_asker.clone() };
         self.team_spawn = Some(tokio::spawn(async move {
             teammates
                 .start(spawn, &caller, &asker)
@@ -2601,17 +2529,12 @@ impl App {
     /// the status bar takes it instead — a teammate that started while nobody
     /// was looking is still a fact worth one line.
     async fn poll_team_spawn(&mut self) {
-        if !self
-            .team_spawn
-            .as_ref()
-            .is_some_and(JoinHandle::is_finished)
-        {
+        if !self.team_spawn.as_ref().is_some_and(JoinHandle::is_finished) {
             return;
         }
         let handle = self.team_spawn.take().expect("checked finished above");
-        let outcome = handle
-            .await
-            .unwrap_or_else(|error| Err(format!("the spawn task failed: {error}")));
+        let outcome =
+            handle.await.unwrap_or_else(|error| Err(format!("the spawn task failed: {error}")));
 
         if let Some(dialog) = &mut self.team_dialog {
             dialog.set_busy(false);
@@ -2639,9 +2562,7 @@ impl App {
                     // keep its documents is not a thing that happens; the
                     // shorter line is here so it could not be a panic if it
                     // did.
-                    None => self
-                        .status
-                        .set_notice(Some(format!("teammate {name} started"))),
+                    None => self.status.set_notice(Some(format!("teammate {name} started"))),
                 }
             }
             Err(refusal) => self.tell_team(refusal),
@@ -2656,11 +2577,7 @@ impl App {
         self.engine.teammates().map(|team| {
             let registry = team.registry();
 
-            registry
-                .root()
-                .config_path(registry.team())
-                .display()
-                .to_string()
+            registry.root().config_path(registry.team()).display().to_string()
         })
     }
 
@@ -2700,9 +2617,7 @@ impl App {
         // resolved one — the D528 identity index is `None` here for the same
         // reason `Teammates::ask_shutdown`'s internal use is.
         let postbox = ganja_core::Postbox::lead(teammates.registry(), None);
-        let outcome = postbox
-            .deliver(ganja_tool::team::Address::Local(to.to_owned()), body)
-            .await;
+        let outcome = postbox.deliver(ganja_tool::team::Address::Local(to.to_owned()), body).await;
 
         said(to, outcome.as_ref())
     }
@@ -2774,10 +2689,7 @@ impl App {
                 SPAWN_TOOL.to_owned(),
                 ask.title,
                 ask.args,
-                ask.directories
-                    .iter()
-                    .map(|directory| directory.display().to_string())
-                    .collect(),
+                ask.directories.iter().map(|directory| directory.display().to_string()).collect(),
             );
             self.spawn_dialogs.insert(id, reply);
             self.raise_permission(&summary, asked);
@@ -2811,14 +2723,8 @@ impl App {
     /// Raises one teammate's dialog, or answers it where nobody is going to be
     /// asked.
     fn raise_teammate_dialog(&mut self, forwarded: Forwarded) {
-        let CoreEvent::PermissionRequested {
-            id,
-            tool,
-            title,
-            args,
-            directories,
-            ..
-        } = forwarded.request
+        let CoreEvent::PermissionRequested { id, tool, title, args, directories, .. } =
+            forwarded.request
         else {
             // The channel carries permission requests and nothing else, and
             // the type that fills it says so. An event of another shape is a
@@ -2874,10 +2780,7 @@ impl App {
         // answered by the same keys and retired the same way, and which map a
         // reply belongs to is decided by which one is holding the id rather than
         // by anything the key press knows.
-        let sender = self
-            .forwarded_dialogs
-            .remove(id)
-            .or_else(|| self.spawn_dialogs.remove(id));
+        let sender = self.forwarded_dialogs.remove(id).or_else(|| self.spawn_dialogs.remove(id));
         let Some(sender) = sender else {
             return false;
         };
@@ -3016,9 +2919,8 @@ impl App {
         // One command, two kinds of sender: what the engine now holds is one
         // batch, and how long each message stays claimed is still its own
         // backend's answer.
-        let (acknowledged, fire_and_forget): (Vec<Delivered>, Vec<Delivered>) = messages
-            .into_iter()
-            .partition(|message| message.delivery == Delivery::Acknowledged);
+        let (acknowledged, fire_and_forget): (Vec<Delivered>, Vec<Delivered>) =
+            messages.into_iter().partition(|message| message.delivery == Delivery::Acknowledged);
         // The sender's backend gives the lead a consumption fact it can wait
         // for, so the strip renders these entries **pending until consumed**
         // and the mailbox keeps them until then.
@@ -3130,11 +3032,7 @@ impl App {
     /// arm clears the slot: a retry is another `/model` away, never
     /// automatic.
     async fn poll_wire_models(&mut self) {
-        if !self
-            .wire_fetch
-            .as_ref()
-            .is_some_and(JoinHandle::is_finished)
-        {
+        if !self.wire_fetch.as_ref().is_some_and(JoinHandle::is_finished) {
             return;
         }
         let handle = self.wire_fetch.take().expect("checked finished above");
@@ -3219,10 +3117,8 @@ impl App {
                 // Sized before the split so the strip holds this frame's
                 // lines, and capped so a long checklist cannot squeeze the
                 // conversation itself off the screen.
-                let working_height = self
-                    .chat
-                    .lay_out_working(area.width, &self.theme)
-                    .min(area.height / 2);
+                let working_height =
+                    self.chat.lay_out_working(area.width, &self.theme).min(area.height / 2);
                 let [transcript, working, prompt, status] = Layout::vertical([
                     Constraint::Min(1),
                     // What the running turn is doing now, pinned above the
@@ -3495,8 +3391,7 @@ impl App {
                         self.pasted_images.push((number, path));
                         self.editor.insert(&format!("[Image #{number}] "));
                     } else {
-                        self.editor
-                            .insert(&format!("{} ", mention::token(&path, None, None)));
+                        self.editor.insert(&format!("{} ", mention::token(&path, None, None)));
                     }
                 }
             }
@@ -3687,8 +3582,7 @@ impl App {
         let text = self.editor.text();
         let (row, column) = self.editor.cursor();
         let token = image_token_at(&text, char_offset(&text, row, column));
-        self.editor
-            .set_token_highlight(token.map(|(_, _, number)| number));
+        self.editor.set_token_highlight(token.map(|(_, _, number)| number));
     }
 
     /// Backspace over an `[Image #N]` token takes the whole token — Claude
@@ -3710,8 +3604,7 @@ impl App {
 
         // A token never spans lines, so its `[` sits on the cursor's own
         // row, `offset - start` columns back.
-        self.editor
-            .delete_span(row, column - (offset - start), end + 1 - start);
+        self.editor.delete_span(row, column - (offset - start), end + 1 - start);
 
         true
     }
@@ -3723,16 +3616,12 @@ impl App {
     /// in-process read at a focus boundary is cheap enough to take inline.
     fn hint_clipboard_image(&mut self) {
         const EVERY: Duration = Duration::from_secs(30);
-        if self
-            .image_hint_last
-            .is_some_and(|last| last.elapsed() < EVERY)
-        {
+        if self.image_hint_last.is_some_and(|last| last.elapsed() < EVERY) {
             return;
         }
         if self.clipboard.read_image().is_ok() {
             self.image_hint_last = Some(Instant::now());
-            self.status
-                .set_notice(Some("Image in clipboard \u{b7} ctrl+v to paste".to_owned()));
+            self.status.set_notice(Some("Image in clipboard \u{b7} ctrl+v to paste".to_owned()));
             self.dirty = true;
         }
     }
@@ -3741,20 +3630,14 @@ impl App {
     /// images this session has pasted, whichever door they came through —
     /// the scratch-PNG counter names files, this names tokens.
     fn next_image_number(&self) -> u32 {
-        u32::try_from(self.pasted_images.len())
-            .unwrap_or(u32::MAX)
-            .saturating_add(1)
+        u32::try_from(self.pasted_images.len()).unwrap_or(u32::MAX).saturating_add(1)
     }
 
     fn pasted_images_in(&self, text: &str) -> Vec<ganja_protocol::Mention> {
         self.pasted_images
             .iter()
             .filter(|(number, _)| text.contains(&format!("[Image #{number}]")))
-            .map(|(_, path)| ganja_protocol::Mention {
-                path: path.clone(),
-                start: None,
-                end: None,
-            })
+            .map(|(_, path)| ganja_protocol::Mention { path: path.clone(), start: None, end: None })
             .collect()
     }
 
@@ -3782,9 +3665,7 @@ impl App {
         encoder.set_color(png::ColorType::Rgba);
         encoder.set_depth(png::BitDepth::Eight);
         let mut writer = encoder.write_header().map_err(|error| error.to_string())?;
-        writer
-            .write_image_data(&image.rgba)
-            .map_err(|error| error.to_string())?;
+        writer.write_image_data(&image.rgba).map_err(|error| error.to_string())?;
         drop(writer);
 
         Ok(bytes)
@@ -3838,9 +3719,7 @@ impl App {
                     // way: which conversation raised a question is not
                     // something a person answering it should have to know.
                     if !self.answer_teammate_dialog(&id, reply) {
-                        self.engine
-                            .send(Command::ReplyPermission { id, reply })
-                            .await?;
+                        self.engine.send(Command::ReplyPermission { id, reply }).await?;
                     }
                 }
 
@@ -3855,9 +3734,7 @@ impl App {
                 // this either way (**D524**).
                 if let Some(decision) = held_decision(key.code) {
                     let id = held.id().clone();
-                    self.engine
-                        .send(Command::SettleHeld { id, decision })
-                        .await?;
+                    self.engine.send(Command::SettleHeld { id, decision }).await?;
                 }
 
                 return Ok(());
@@ -3873,10 +3750,7 @@ impl App {
                 let answer = question.submit();
                 if let Some(answer) = answer {
                     self.engine
-                        .send(Command::ReplyQuestion {
-                            id,
-                            answers: vec![vec![answer]],
-                        })
+                        .send(Command::ReplyQuestion { id, answers: vec![vec![answer]] })
                         .await?;
                 }
 
@@ -4168,11 +4042,7 @@ impl App {
                 self.last_esc = None;
                 self.engine.send(Command::CancelTurn).await?;
             }
-            KeyCode::Esc
-                if self
-                    .last_esc
-                    .is_some_and(|pressed| pressed.elapsed() <= ESC_CHORD) =>
-            {
+            KeyCode::Esc if self.last_esc.is_some_and(|pressed| pressed.elapsed() <= ESC_CHORD) => {
                 self.last_esc = None;
                 self.open_backtrack();
             }
@@ -4274,8 +4144,7 @@ impl App {
 
     /// Switches the composer between sending prompts and running commands.
     fn set_shell(&mut self, shell: bool) {
-        self.editor
-            .set_mode(if shell { Mode::Shell } else { Mode::Prompt });
+        self.editor.set_mode(if shell { Mode::Shell } else { Mode::Prompt });
         self.status.set_shell(shell);
         // A shell command is neither a slash command nor a mention, so
         // whatever was being offered is not being offered any more.
@@ -4471,10 +4340,7 @@ impl App {
 
     /// Opens the palette on whatever filter it was last closed with.
     fn open_palette(&mut self) {
-        self.palette = Some(Palette::reopened(
-            self.keys.clone(),
-            self.palette_filter.clone(),
-        ));
+        self.palette = Some(Palette::reopened(self.keys.clone(), self.palette_filter.clone()));
     }
 
     /// Closes the palette, remembering what had been typed into it.
@@ -4655,8 +4521,7 @@ impl App {
         let Some(slot) = self.completion.take() else {
             return;
         };
-        self.editor
-            .delete_span(0, slot.start, slot.partial.chars().count());
+        self.editor.delete_span(0, slot.start, slot.partial.chars().count());
         self.editor.insert(&format!("{value} "));
     }
 
@@ -4698,12 +4563,7 @@ impl App {
                     // wins any collision at resolution (**D528**) — so a
                     // teammate's completion is always the bare name.
                     Some(MenuRow::Teammate { name, .. }) => self.insert_at_mention(&name),
-                    Some(MenuRow::Session {
-                        name,
-                        address,
-                        colliding,
-                        ..
-                    }) => {
+                    Some(MenuRow::Session { name, address, colliding, .. }) => {
                         if colliding {
                             self.insert_at_mention(&address);
                         } else {
@@ -4772,12 +4632,8 @@ impl App {
         };
 
         let characters: Vec<char> = line.chars().collect();
-        let head: String = characters[..fragment.start.min(characters.len())]
-            .iter()
-            .collect();
-        let rest = characters
-            .get(fragment.start + fragment.width()..)
-            .unwrap_or_default();
+        let head: String = characters[..fragment.start.min(characters.len())].iter().collect();
+        let rest = characters.get(fragment.start + fragment.width()..).unwrap_or_default();
         let tail: String = rest.iter().collect();
         let inserted = match rest.first() {
             Some(next) if next.is_whitespace() => token,
@@ -4815,11 +4671,8 @@ impl App {
                 true
             }
             KeyCode::Enter | KeyCode::Tab if !key.modifiers.intersects(NEWLINE_MODIFIERS) => {
-                let chosen = self
-                    .skill_menu
-                    .as_ref()
-                    .and_then(SkillMenu::selected)
-                    .map(str::to_owned);
+                let chosen =
+                    self.skill_menu.as_ref().and_then(SkillMenu::selected).map(str::to_owned);
                 if let Some(name) = chosen {
                     self.insert_skill(&name);
                 } else {
@@ -4890,11 +4743,7 @@ impl App {
             self.skill_menu = None;
             return;
         };
-        if self
-            .skill_menu
-            .as_ref()
-            .is_some_and(|menu| menu.answers(&fragment))
-        {
+        if self.skill_menu.as_ref().is_some_and(|menu| menu.answers(&fragment)) {
             return;
         }
 
@@ -4970,19 +4819,11 @@ impl App {
         self.skill_menu = None;
         // The list depends on the fragment and on nothing else, so a keystroke
         // that left it alone must not walk the project again.
-        if self
-            .files
-            .as_ref()
-            .is_some_and(|files| files.answers(&fragment))
-        {
+        if self.files.as_ref().is_some_and(|files| files.answers(&fragment)) {
             self.cancel_file_walk();
             return;
         }
-        if self
-            .file_walk
-            .as_ref()
-            .is_some_and(|walk| walk.fragment == fragment)
-        {
+        if self.file_walk.as_ref().is_some_and(|walk| walk.fragment == fragment) {
             return;
         }
 
@@ -5005,11 +4846,7 @@ impl App {
     /// Installs a finished walk's rows — while the composer still shows the
     /// fragment they answer. Polled on Tick exactly as `wire_fetch` is.
     async fn poll_file_walk(&mut self) {
-        if !self
-            .file_walk
-            .as_ref()
-            .is_some_and(|walk| walk.task.is_finished())
-        {
+        if !self.file_walk.as_ref().is_some_and(|walk| walk.task.is_finished()) {
             return;
         }
         let walk = self.file_walk.take().expect("checked finished above");
@@ -5064,10 +4901,7 @@ impl App {
             .map(|view| team::rows(&view))
             .unwrap_or_default()
             .into_iter()
-            .map(|row| MenuRow::Teammate {
-                name: row.name,
-                lead: row.is_lead,
-            })
+            .map(|row| MenuRow::Teammate { name: row.name, lead: row.is_lead })
             .collect();
 
         // Every name in play, so a session's collision check sees teammates
@@ -5086,11 +4920,9 @@ impl App {
         let mut rows: Vec<MenuRow> = paths.iter().cloned().map(MenuRow::File).collect();
         rows.extend(teammates);
         rows.extend(sessions.into_iter().map(|session| {
-            let colliding = all_names
-                .iter()
-                .filter(|name| registry::same_name(name, &session.name))
-                .count()
-                > 1;
+            let colliding =
+                all_names.iter().filter(|name| registry::same_name(name, &session.name)).count()
+                    > 1;
             let shadowed = paths.contains(&session.name);
 
             MenuRow::Session {
@@ -5150,10 +4982,7 @@ impl App {
         let task = tokio::spawn(async move {
             // A fragment is typed, not written: half of one is a pattern that
             // does not parse yet, and a menu is not the place to say so.
-            let paths = match glob
-                .run(serde_json::json!({ "pattern": wanted }), &ctx)
-                .await
-            {
+            let paths = match glob.run(serde_json::json!({ "pattern": wanted }), &ctx).await {
                 Ok(found) => relative_paths(&cwd, &found.output),
                 Err(_) => Vec::new(),
             };
@@ -5164,11 +4993,7 @@ impl App {
 
             (paths, listing)
         });
-        self.file_walk = Some(FileWalk {
-            fragment,
-            cancel,
-            task,
-        });
+        self.file_walk = Some(FileWalk { fragment, cancel, task });
     }
 
     /// Opens the model list over the roster this session's *wire* owns where
@@ -5221,11 +5046,9 @@ impl App {
 
         // The task owns its provider id because the seam borrows.
         let id = self.provider.clone();
-        self.wire_fetch = Some(tokio::spawn(async move {
-            provider::wire_model_listing(&id).await
-        }));
-        self.status
-            .set_notice(Some(format!("fetching {} models…", self.provider)));
+        self.wire_fetch =
+            Some(tokio::spawn(async move { provider::wire_model_listing(&id).await }));
+        self.status.set_notice(Some(format!("fetching {} models…", self.provider)));
     }
 
     /// Opens the flat effort picker over the active model's catalog names.
@@ -5274,13 +5097,7 @@ impl App {
     fn selectable_agents(&self) -> Vec<&ganja_core::agent::Agent> {
         self.engine
             .agents()
-            .map(|registry| {
-                registry
-                    .agents()
-                    .iter()
-                    .filter(|agent| agent.selectable())
-                    .collect()
-            })
+            .map(|registry| registry.agents().iter().filter(|agent| agent.selectable()).collect())
             .unwrap_or_default()
     }
 
@@ -5290,11 +5107,8 @@ impl App {
     /// a list: it is one key pressed repeatedly to get somewhere, and stopping
     /// at the end would mean reaching for the mouse.
     async fn cycle_agent(&mut self) {
-        let names: Vec<String> = self
-            .selectable_agents()
-            .into_iter()
-            .map(|agent| agent.name.clone())
-            .collect();
+        let names: Vec<String> =
+            self.selectable_agents().into_iter().map(|agent| agent.name.clone()).collect();
         if names.is_empty() {
             return;
         }
@@ -5314,11 +5128,7 @@ impl App {
     /// lands in the status bar and leaves the list open, so the user still has
     /// what they were choosing from.
     async fn switch_agent(&mut self, name: String) {
-        match self
-            .engine
-            .send(Command::SwitchAgent { name: name.clone() })
-            .await
-        {
+        match self.engine.send(Command::SwitchAgent { name: name.clone() }).await {
             Ok(()) => {
                 // Redundant but harmless: `AgentChanged` is now the source of
                 // truth for every adoption, including this manual one, so its
@@ -5340,13 +5150,7 @@ impl App {
 
     /// Asks the rest of the session of `model`.
     async fn switch_model(&mut self, model: String) {
-        match self
-            .engine
-            .send(Command::SwitchModel {
-                model: model.clone(),
-            })
-            .await
-        {
+        match self.engine.send(Command::SwitchModel { model: model.clone() }).await {
             Ok(()) => {
                 self.model = model;
                 self.status.set_model(Some(self.model.clone()));
@@ -5388,11 +5192,8 @@ impl App {
     /// together — an effort shown against the wrong model would name a
     /// selection that does not exist.
     fn sync_effort_status(&mut self) {
-        self.status.set_effort(
-            self.effort
-                .as_ref()
-                .map(|effort| (self.model.clone(), effort.clone())),
-        );
+        self.status
+            .set_effort(self.effort.as_ref().map(|effort| (self.model.clone(), effort.clone())));
     }
 
     /// Opens the theme picker with the cursor on the theme already in use.
@@ -5478,10 +5279,7 @@ impl App {
                 // the description the model wrote, and resuming into one would
                 // put the user inside a delegated turn with no way to see what
                 // asked for it (upstream lists `roots: true` here too).
-                let roots = entries
-                    .into_iter()
-                    .filter(|info| info.parent.is_none())
-                    .collect();
+                let roots = entries.into_iter().filter(|info| info.parent.is_none()).collect();
 
                 self.sessions = Some(Sessions::new(roots, sessions::now()));
             }
@@ -5643,22 +5441,15 @@ impl App {
     /// A transcript with no user message has nothing to walk, so the gesture
     /// is a no-op there rather than a mode with nothing highlighted.
     fn open_backtrack(&mut self) {
-        let candidates: Vec<MessageId> = self
-            .chat
-            .checkpoints()
-            .into_iter()
-            .map(|checkpoint| checkpoint.message_id)
-            .collect();
+        let candidates: Vec<MessageId> =
+            self.chat.checkpoints().into_iter().map(|checkpoint| checkpoint.message_id).collect();
         let Some(newest) = candidates.first().cloned() else {
             return;
         };
 
         self.chat.set_backtrack(Some(newest));
         self.status.set_notice(Some(BACKTRACK_HINT.to_owned()));
-        self.backtrack = Some(Backtrack {
-            candidates,
-            index: 0,
-        });
+        self.backtrack = Some(Backtrack { candidates, index: 0 });
     }
 
     /// One more Esc in the walk: the highlight steps one user message older,
@@ -5667,8 +5458,7 @@ impl App {
     fn step_backtrack(&mut self) {
         if let Some(backtrack) = &mut self.backtrack {
             backtrack.index = (backtrack.index + 1).min(backtrack.candidates.len() - 1);
-            self.chat
-                .set_backtrack(Some(backtrack.candidates[backtrack.index].clone()));
+            self.chat.set_backtrack(Some(backtrack.candidates[backtrack.index].clone()));
         }
     }
 
@@ -5767,11 +5557,7 @@ impl App {
         }
         self.code_only_rewind = !scope.touches_conversation();
 
-        if let Err(refusal) = self
-            .engine
-            .send(Command::RevertTo { message_id, scope })
-            .await
-        {
+        if let Err(refusal) = self.engine.send(Command::RevertTo { message_id, scope }).await {
             // Nothing was reverted, so no event is coming to consume the flag.
             self.code_only_rewind = false;
             self.status.set_notice(Some(refusal.to_string()));
@@ -5804,26 +5590,21 @@ impl App {
     /// turn, resumes included — and from summing the in-memory turn rows on
     /// an engine that stores nothing.
     fn open_usage(&mut self) {
-        let splits = self
-            .engine
-            .current_session()
-            .map(|session| session.usage)
-            .unwrap_or_else(|| {
-                self.turn_usages
-                    .iter()
-                    .fold(Usage::default(), |sum, row| Usage {
-                        input_tokens: sum.input_tokens.saturating_add(row.usage.input_tokens),
-                        output_tokens: sum.output_tokens.saturating_add(row.usage.output_tokens),
-                        reasoning_tokens: sum
-                            .reasoning_tokens
-                            .saturating_add(row.usage.reasoning_tokens),
-                        cache_read_tokens: sum
-                            .cache_read_tokens
-                            .saturating_add(row.usage.cache_read_tokens),
-                        cache_write_tokens: sum
-                            .cache_write_tokens
-                            .saturating_add(row.usage.cache_write_tokens),
-                    })
+        let splits =
+            self.engine.current_session().map(|session| session.usage).unwrap_or_else(|| {
+                self.turn_usages.iter().fold(Usage::default(), |sum, row| Usage {
+                    input_tokens: sum.input_tokens.saturating_add(row.usage.input_tokens),
+                    output_tokens: sum.output_tokens.saturating_add(row.usage.output_tokens),
+                    reasoning_tokens: sum
+                        .reasoning_tokens
+                        .saturating_add(row.usage.reasoning_tokens),
+                    cache_read_tokens: sum
+                        .cache_read_tokens
+                        .saturating_add(row.usage.cache_read_tokens),
+                    cache_write_tokens: sum
+                        .cache_write_tokens
+                        .saturating_add(row.usage.cache_write_tokens),
+                })
             });
         let estimate = self.engine.context_estimate();
 
@@ -5898,13 +5679,7 @@ impl App {
                 }
                 let tools = counts.get(&name).copied();
 
-                mcp::Row {
-                    name,
-                    status: label,
-                    tools,
-                    detail,
-                    actions,
-                }
+                mcp::Row { name, status: label, tools, detail, actions }
             })
             .collect()
     }
@@ -6104,8 +5879,7 @@ impl App {
         let decision = action.decision();
         dialog.back_to_rows();
         if let Err(error) = self.engine.send(Command::SettleHeld { id, decision }).await {
-            self.status
-                .set_notice(Some(format!("the settle was refused: {error}")));
+            self.status.set_notice(Some(format!("the settle was refused: {error}")));
         }
         self.poll_held();
     }
@@ -6136,9 +5910,7 @@ impl App {
     /// so an environment that changes homes between sessions is never read
     /// through a stale path.
     fn resolve_plugin_store(&self) -> Option<ganja_core::plugin::Store> {
-        self.plugin_store
-            .clone()
-            .or_else(ganja_core::plugin::Store::discover)
+        self.plugin_store.clone().or_else(ganja_core::plugin::Store::discover)
     }
 
     /// The `/plugin` dialog's rows, fresh off the store, with anything the
@@ -6234,9 +6006,8 @@ impl App {
         };
 
         let pending = pending_notice(&effect);
-        self.plugin_task = Some(tokio::task::spawn_blocking(move || {
-            run_store_effect(&store, effect)
-        }));
+        self.plugin_task =
+            Some(tokio::task::spawn_blocking(move || run_store_effect(&store, effect)));
         if let Some(dialog) = &mut self.plugin_dialog {
             dialog.set_busy(true);
             dialog.set_notice(pending);
@@ -6257,11 +6028,7 @@ impl App {
     /// stage-validate-move is what guarantees a killed or refused add left
     /// nothing half-written behind.
     async fn poll_plugin_task(&mut self) {
-        if !self
-            .plugin_task
-            .as_ref()
-            .is_some_and(JoinHandle::is_finished)
-        {
+        if !self.plugin_task.as_ref().is_some_and(JoinHandle::is_finished) {
             return;
         }
         let handle = self.plugin_task.take().expect("checked finished above");
@@ -6314,21 +6081,16 @@ impl App {
             Err(error) => return format!("reload failed: {error}"),
         };
 
-        self.engine
-            .replace_hooks(ganja_core::hook::Hooks::new(&config.hooks, &self.root));
+        self.engine.replace_hooks(ganja_core::hook::Hooks::new(&config.hooks, &self.root));
 
         // The startup path's own composition, re-run: `crate::run` builds
         // exactly these three layers before handing the registry over.
         let mut tools = ganja_tool::Registry::with_builtins();
         if config.webfetch_allows_private() {
-            tools = tools.with(Arc::new(
-                ganja_tool::webfetch::WebfetchTool::allowing_private(),
-            ));
+            tools = tools.with(Arc::new(ganja_tool::webfetch::WebfetchTool::allowing_private()));
         }
         let skill_roots = ganja_core::instruction::skill_roots(&config, &self.cwd);
-        tools = tools.with(Arc::new(ganja_tool::skill::SkillTool::over(
-            skill_roots.clone(),
-        )));
+        tools = tools.with(Arc::new(ganja_tool::skill::SkillTool::over(skill_roots.clone())));
         self.engine.replace_base_tools(Arc::new(tools));
         // Swapped beside the registry so the next turn's `$` invocations read
         // the same list its rebuilt skill tool does.
@@ -6676,12 +6438,7 @@ impl App {
     /// stopped forever, and silence about it would be worse than the error.
     async fn answer_for_the_absent(&mut self) -> Result<()> {
         while let Some(id) = self.auto_permissions.pop_front() {
-            self.engine
-                .send(Command::ReplyPermission {
-                    id,
-                    reply: PermissionReply::Once,
-                })
-                .await?;
+            self.engine.send(Command::ReplyPermission { id, reply: PermissionReply::Once }).await?;
         }
 
         Ok(())
@@ -6689,8 +6446,7 @@ impl App {
 
     /// Tells the bar how many dialogs are waiting behind the one on screen.
     fn sync_dialog_status(&mut self) {
-        self.status
-            .set_queued_dialogs(self.queued_permissions.len());
+        self.status.set_queued_dialogs(self.queued_permissions.len());
     }
 
     /// Tells the bar how many delegated children the running turn has in
@@ -6782,9 +6538,7 @@ impl App {
             .filter(|token| !mentions.iter().any(|mention| mention.path == token.path))
             .filter(|token| {
                 token.path.starts_with(ADDRESS_SCHEME)
-                    || roster
-                        .iter()
-                        .any(|name| registry::same_name(name, &token.path))
+                    || roster.iter().any(|name| registry::same_name(name, &token.path))
                     || self
                         .session_listing
                         .iter()
@@ -6871,10 +6625,7 @@ impl App {
 
     fn handle_core(&mut self, event: CoreEvent) {
         match event {
-            CoreEvent::MessageStarted {
-                session_id: _,
-                message,
-            } => {
+            CoreEvent::MessageStarted { session_id: _, message } => {
                 if message.role == Role::Assistant {
                     self.status.set_activity(Activity::Streaming);
                     // The turn now holds the engine's slot, which is what
@@ -6902,22 +6653,13 @@ impl App {
                 }
                 self.chat.start_message(message);
             }
-            CoreEvent::PartStarted {
-                session_id: _,
-                message_id,
-                part,
-            } => self.chat.start_part(&message_id, part),
-            CoreEvent::PartDelta {
-                session_id: _,
-                message_id,
-                part_id,
-                delta,
-            } => self.chat.append_delta(&message_id, &part_id, &delta),
-            CoreEvent::PartUpdated {
-                session_id: _,
-                message_id,
-                part,
-            } => {
+            CoreEvent::PartStarted { session_id: _, message_id, part } => {
+                self.chat.start_part(&message_id, part)
+            }
+            CoreEvent::PartDelta { session_id: _, message_id, part_id, delta } => {
+                self.chat.append_delta(&message_id, &part_id, &delta)
+            }
+            CoreEvent::PartUpdated { session_id: _, message_id, part } => {
                 if let PartBody::Tool { tool, state, .. } = &part.body {
                     self.status.set_activity(match state {
                         ToolState::Pending { .. } | ToolState::Running { .. } => {
@@ -6969,8 +6711,7 @@ impl App {
                 // §5's frame and the answer comes back through the inbox. The
                 // bar still says the turn is waiting on somebody, and on whom.
                 if self.forwards_asks_to_lead() {
-                    self.status
-                        .set_notice(Some(format!("asked the lead to allow: {title}")));
+                    self.status.set_notice(Some(format!("asked the lead to allow: {title}")));
                     self.status.set_activity(Activity::Permission);
                     self.member_asks.push(CoreEvent::PermissionRequested {
                         session_id,
@@ -7011,11 +6752,7 @@ impl App {
                 // A forwarded ask answered by any route — the lead's frame,
                 // or a cancel refusing every open dialog — is no longer
                 // waiting on the lead (D-5).
-                if self
-                    .member
-                    .as_ref()
-                    .is_some_and(|inbox| inbox.asks().retire(&id))
-                {
+                if self.member.as_ref().is_some_and(|inbox| inbox.asks().retire(&id)) {
                     self.settle_member_activity();
                 }
                 let names_open_request = self
@@ -7036,8 +6773,7 @@ impl App {
                     // happens — retires from the queue rather than being asked
                     // about after the fact. A held item can never match: it
                     // has no permission id to answer by (B1).
-                    self.queued_permissions
-                        .retain(|waiting| waiting.permission_id() != Some(&id));
+                    self.queued_permissions.retain(|waiting| waiting.permission_id() != Some(&id));
                 }
                 self.sync_dialog_status();
             }
@@ -7046,11 +6782,7 @@ impl App {
             // means "show those messages again" or "they are gone": this
             // frontend sent the command that decides it, and remembered which
             // (**R10**).
-            CoreEvent::RevertChanged {
-                session_id: _,
-                revert,
-                prompt,
-            } => {
+            CoreEvent::RevertChanged { session_id: _, revert, prompt } => {
                 // A code-only rewind announces a revert the engine does not
                 // hold: the files moved and nothing was hidden, so there is
                 // nothing outstanding for the fallback lane to wait on — and
@@ -7096,16 +6828,12 @@ impl App {
                     NotificationEvent::ApprovalRequested,
                     "a question is waiting for an answer",
                 );
-                self.question = questions
-                    .into_iter()
-                    .next()
-                    .map(|question| Question::new(id, question));
+                self.question =
+                    questions.into_iter().next().map(|question| Question::new(id, question));
             }
             CoreEvent::QuestionReplied { id, .. } | CoreEvent::QuestionRejected { id, .. } => {
-                let names_open_request = self
-                    .question
-                    .as_ref()
-                    .is_some_and(|question| *question.id() == id);
+                let names_open_request =
+                    self.question.as_ref().is_some_and(|question| *question.id() == id);
                 if names_open_request {
                     self.question = None;
                     self.status.set_activity(Activity::Streaming);
@@ -7146,15 +6874,7 @@ impl App {
             // a variant the drain that answers [`PermissionId`]s cannot
             // name — and unattended inbound is spelled
             // `cross_session_inbound: "accept"`, never a flag.
-            CoreEvent::PeerHeld {
-                id,
-                from,
-                cause,
-                summary,
-                preview,
-                expires_in_ms,
-                ..
-            } => {
+            CoreEvent::PeerHeld { id, from, cause, summary, preview, expires_in_ms, .. } => {
                 match cause {
                     HoldCause::ModeMismatch | HoldCause::NoModeAsserted => {
                         let notice = format!("held for review: a message from {from}");
@@ -7176,10 +6896,8 @@ impl App {
             // the deadline's — so the modal it raised retires, shown or
             // still queued, and the listing's next poll drops its row.
             CoreEvent::PeerHoldSettled { id, .. } => {
-                let names_open_dialog = self
-                    .permission
-                    .as_ref()
-                    .is_some_and(|dialog| dialog.held_id() == Some(&id));
+                let names_open_dialog =
+                    self.permission.as_ref().is_some_and(|dialog| dialog.held_id() == Some(&id));
                 if names_open_dialog {
                     self.permission = self.queued_permissions.pop_front();
                     if self.permission.is_none() {
@@ -7193,8 +6911,7 @@ impl App {
                     // A hold settled while its dialog was still queued — the
                     // deadline, a mode change, or `/held` — retires from the
                     // queue rather than being asked about after the fact.
-                    self.queued_permissions
-                        .retain(|waiting| waiting.held_id() != Some(&id));
+                    self.queued_permissions.retain(|waiting| waiting.held_id() != Some(&id));
                 }
                 self.sync_dialog_status();
                 self.poll_held();
@@ -7208,8 +6925,7 @@ impl App {
             // model reads its own `<peer_receipt>` batch at the next prompt
             // intake regardless of whether anybody was looking at the bar.
             CoreEvent::PeerReceipt { id, status, to, .. } => {
-                self.status
-                    .set_notice(Some(Self::receipt_notice(&id, status, &to)));
+                self.status.set_notice(Some(Self::receipt_notice(&id, status, &to)));
                 self.dirty = true;
             }
             // A compaction reporting how far its summary has streamed (user
@@ -7222,13 +6938,7 @@ impl App {
                 self.status.set_activity(Activity::Streaming);
                 self.chat.set_compacting(tokens, budget);
             }
-            CoreEvent::MessageFinished {
-                message_id,
-                reason,
-                usage,
-                error,
-                ..
-            } => {
+            CoreEvent::MessageFinished { message_id, reason, usage, error, .. } => {
                 // A pane teammate's lead hears about every turn's end, and
                 // how it ended (§10.3-3). Carried rather than written: this
                 // arm cannot reach the disk.
@@ -7309,10 +7019,7 @@ impl App {
             .saturating_add(usage.cache_write_tokens);
 
         self.totals.input_tokens = self.totals.input_tokens.saturating_add(input);
-        self.totals.output_tokens = self
-            .totals
-            .output_tokens
-            .saturating_add(usage.output_tokens);
+        self.totals.output_tokens = self.totals.output_tokens.saturating_add(usage.output_tokens);
 
         if let Some(model) = catalog::model(&self.model) {
             *self.totals.cost_usd.get_or_insert(0.0) += catalog::cost(usage, &model).total_usd;
@@ -7475,11 +7182,7 @@ impl App {
 /// The character offset of the editor's `(row, column)` cursor in its text,
 /// lines rejoined the way [`Editor::text`] joins them.
 fn char_offset(text: &str, row: usize, column: usize) -> usize {
-    text.split('\n')
-        .take(row)
-        .map(|line| line.chars().count() + 1)
-        .sum::<usize>()
-        + column
+    text.split('\n').take(row).map(|line| line.chars().count() + 1).sum::<usize>() + column
 }
 
 /// The `[Image #N]` token `offset` sits on — inside it, or directly after
@@ -7579,10 +7282,7 @@ fn drive_two_step<D: crate::component::TwoStep>(
 ///
 /// A pair rather than a struct: it never leaves this file, and the two halves
 /// are exactly what [`ganja_core::SpawnAsker`] is handed and hands back.
-type SpawnQuestion = (
-    ganja_core::SpawnAsk,
-    tokio::sync::oneshot::Sender<PermissionReply>,
-);
+type SpawnQuestion = (ganja_core::SpawnAsk, tokio::sync::oneshot::Sender<PermissionReply>);
 
 /// What a session leading no team answers to every `/team` action.
 ///
@@ -7637,10 +7337,8 @@ impl FreshHolders {
     /// classification, and one that cannot be made leaves the token where
     /// [`mention::scan`] found it, exactly as an unmatched one is left.
     fn holds(&mut self, app: &App, token: &str) -> bool {
-        if let Some((_, held)) = self
-            .asked
-            .iter()
-            .find(|(asked, _)| registry::same_name(asked, token))
+        if let Some((_, held)) =
+            self.asked.iter().find(|(asked, _)| registry::same_name(asked, token))
         {
             return *held;
         }
@@ -7796,11 +7494,7 @@ fn pattern(fragment: &str) -> String {
     let fragment = fragment.rsplit_once('#').map_or(fragment, |(base, _)| base);
 
     let Some((directory, leaf)) = fragment.rsplit_once('/') else {
-        return if fragment.is_empty() {
-            "**/*".to_owned()
-        } else {
-            format!("**/*{fragment}*")
-        };
+        return if fragment.is_empty() { "**/*".to_owned() } else { format!("**/*{fragment}*") };
     };
 
     match (directory.is_empty(), leaf.is_empty()) {

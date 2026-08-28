@@ -1,4 +1,5 @@
-use std::{path::Path, sync::Arc};
+use std::path::Path;
+use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
@@ -93,9 +94,7 @@ async fn an_edit_inside_a_linked_directory_that_leaves_the_project_is_refused() 
     let context = ctx(project.path());
     // Recorded under the name the call spells, so read-before-write is
     // satisfied and the refusal below can only be the escape guard's.
-    context
-        .files
-        .record(&project.path().join("escape").join("secret.txt"));
+    context.files.record(&project.path().join("escape").join("secret.txt"));
     let refused = failure(
         &context,
         serde_json::json!({
@@ -110,10 +109,7 @@ async fn an_edit_inside_a_linked_directory_that_leaves_the_project_is_refused() 
         refused.contains("symbolic link"),
         "a linked parent leads out of the project just as well: {refused}"
     );
-    assert_eq!(
-        std::fs::read_to_string(&secret).expect("the file outside still exists"),
-        "alpha\n"
-    );
+    assert_eq!(std::fs::read_to_string(&secret).expect("the file outside still exists"), "alpha\n");
 }
 
 /// `..` is not resolved by `std::path::absolute`, so a path can carry one
@@ -135,9 +131,7 @@ async fn a_dot_dot_path_that_climbs_out_through_a_link_is_refused() {
     std::os::unix::fs::symlink(&inner, project.path().join("link")).expect("the link is creatable");
 
     let context = ctx(project.path());
-    context
-        .files
-        .record(&project.path().join("link").join("..").join("secret.txt"));
+    context.files.record(&project.path().join("link").join("..").join("secret.txt"));
     let refused = failure(
         &context,
         serde_json::json!({
@@ -170,9 +164,7 @@ async fn a_dot_dot_path_that_lands_back_inside_the_project_is_edited() {
     std::fs::write(&file, "alpha\n").expect("the fixture writes");
 
     let context = ctx(project.path());
-    context
-        .files
-        .record(&project.path().join("nested").join("..").join("a.rs"));
+    context.files.record(&project.path().join("nested").join("..").join("a.rs"));
     run(
         &context,
         serde_json::json!({
@@ -184,10 +176,7 @@ async fn a_dot_dot_path_that_lands_back_inside_the_project_is_edited() {
     .await
     .expect("a `..` that comes back inside the project is not an escape");
 
-    assert_eq!(
-        std::fs::read_to_string(&file).expect("the file is readable"),
-        "omega\n"
-    );
+    assert_eq!(std::fs::read_to_string(&file).expect("the file is readable"), "omega\n");
 }
 
 /// The case the guard must not break: a link that stays inside the project
@@ -205,9 +194,7 @@ async fn an_edit_through_a_link_that_stays_inside_the_project_still_applies() {
     let context = ctx(project.path());
     // Recorded under the name the edit uses: read-before-write keys on the
     // path as the call spells it, which is a link away from `file`.
-    context
-        .files
-        .record(&project.path().join("link").join("notes.txt"));
+    context.files.record(&project.path().join("link").join("notes.txt"));
     run(
         &context,
         serde_json::json!({
@@ -219,10 +206,7 @@ async fn an_edit_through_a_link_that_stays_inside_the_project_still_applies() {
     .await
     .expect("a link that goes nowhere new is not an escape");
 
-    assert_eq!(
-        std::fs::read_to_string(&file).expect("the file is readable"),
-        "omega\n"
-    );
+    assert_eq!(std::fs::read_to_string(&file).expect("the file is readable"), "omega\n");
 }
 
 /// The window the guard could only narrow, now closed — the edit half of
@@ -504,12 +488,7 @@ fn every_strategy_offers_the_candidates_upstream_offers() {
     let cases: std::collections::BTreeMap<&str, Offer> = [
         (
             "simple offers the string whether or not it is there",
-            Offer {
-                replacer: "simple",
-                content: "anything",
-                find: "zz",
-                candidates: &["zz"],
-            },
+            Offer { replacer: "simple", content: "anything", find: "zz", candidates: &["zz"] },
         ),
         (
             "line-trimmed offers every line whose trimmed form matches",
@@ -576,12 +555,7 @@ fn every_strategy_offers_the_candidates_upstream_offers() {
         ),
         (
             "trimmed-boundary declines a string with nothing to trim",
-            Offer {
-                replacer: "trimmed-boundary",
-                content: "x\ny\nz",
-                find: "y",
-                candidates: &[],
-            },
+            Offer { replacer: "trimmed-boundary", content: "x\ny\nz", find: "y", candidates: &[] },
         ),
         (
             "context-aware offers the framed block of the same length",
@@ -651,10 +625,7 @@ fn a_match_far_larger_than_the_model_asked_for_is_refused() {
 
     let refused = replace(&content, "head\n  keep()\n  x()\ntail", "head\ntail", false)
         .expect_err("the span is disproportionate");
-    assert!(
-        refused.to_string().contains("much larger than oldString"),
-        "got {refused}"
-    );
+    assert!(refused.to_string().contains("much larger than oldString"), "got {refused}");
 }
 
 #[test]
@@ -666,10 +637,7 @@ fn a_match_is_disproportionate_by_lines_or_by_length() {
     // A single-line request is never measured by length.
     assert!(!is_disproportionate_match(&"x".repeat(5_000), "x"));
     // A multi-line one is.
-    assert!(is_disproportionate_match(
-        &format!("a\n{}", "x".repeat(5_000)),
-        "a\nx"
-    ));
+    assert!(is_disproportionate_match(&format!("a\n{}", "x".repeat(5_000)), "a\nx"));
     assert!(!is_disproportionate_match("a\nb", "a\nb"));
 }
 
@@ -700,10 +668,7 @@ fn the_two_strings_being_the_same_is_refused_before_anything_is_searched() {
 fn an_empty_old_string_never_reaches_a_strategy() {
     let refused =
         replace("content", "", "new", false).expect_err("an empty string matches everywhere");
-    assert!(
-        refused.to_string().contains("oldString cannot be empty"),
-        "got {refused}"
-    );
+    assert!(refused.to_string().contains("oldString cannot be empty"), "got {refused}");
 }
 
 #[test]
@@ -713,13 +678,9 @@ fn a_loose_block_anchor_match_is_declined_rather_than_guessed_at() {
     let content = "function configure() {\n  keepImportantState()\n  removeAllUserData()\n  archiveBackups()\n  auditLog()\n}";
     let old = "function configure() {\n  const enabled = true\n}";
 
-    let refused = replace(
-        content,
-        old,
-        "function configure() {\n  const enabled = false\n}",
-        false,
-    )
-    .expect_err("the block is not the one the model meant");
+    let refused =
+        replace(content, old, "function configure() {\n  const enabled = false\n}", false)
+            .expect_err("the block is not the one the model meant");
     assert_eq!(refused.to_string(), NOT_FOUND);
 }
 
@@ -728,13 +689,9 @@ fn a_block_anchor_match_with_unrelated_middle_content_is_declined() {
     let content = "function configure() {\n  removeAllUserData()\n}";
     let old = "function configure() {\n  const enabled = true\n}";
 
-    let refused = replace(
-        content,
-        old,
-        "function configure() {\n  const enabled = false\n}",
-        false,
-    )
-    .expect_err("the middle line shares nothing with the one asked for");
+    let refused =
+        replace(content, old, "function configure() {\n  const enabled = false\n}", false)
+            .expect_err("the middle line shares nothing with the one asked for");
     assert_eq!(refused.to_string(), NOT_FOUND);
 }
 
@@ -758,10 +715,7 @@ fn a_block_of_lines_is_the_slice_joining_them_would_be() {
     assert_eq!(spans.len(), lines.len());
     for first in 0..lines.len() {
         for count in 1..=lines.len() - first {
-            assert_eq!(
-                block(text, &spans, first, count),
-                lines[first..first + count].join("\n")
-            );
+            assert_eq!(block(text, &spans, first, count), lines[first..first + count].join("\n"));
         }
     }
 }
@@ -771,14 +725,8 @@ fn line_spans_survive_multi_byte_characters() {
     let text = "\u{3053}\u{3093}\u{306b}\u{3061}\u{306f}\nsecond\n";
     let spans = line_spans(text);
 
-    assert_eq!(
-        block(text, &spans, 0, 1),
-        "\u{3053}\u{3093}\u{306b}\u{3061}\u{306f}"
-    );
-    assert_eq!(
-        block(text, &spans, 0, 2),
-        "\u{3053}\u{3093}\u{306b}\u{3061}\u{306f}\nsecond"
-    );
+    assert_eq!(block(text, &spans, 0, 1), "\u{3053}\u{3093}\u{306b}\u{3061}\u{306f}");
+    assert_eq!(block(text, &spans, 0, 2), "\u{3053}\u{3093}\u{306b}\u{3061}\u{306f}\nsecond");
 }
 
 #[test]
@@ -817,10 +765,7 @@ fn levenshtein_counts_single_character_edits() {
 
 #[test]
 fn a_character_slice_never_lands_inside_a_character() {
-    assert_eq!(
-        chars_from("\u{3042}\u{3044}\u{3046}", 1),
-        "\u{3044}\u{3046}"
-    );
+    assert_eq!(chars_from("\u{3042}\u{3044}\u{3046}", 1), "\u{3044}\u{3046}");
     assert_eq!(chars_from("ab", 5), "");
 }
 
@@ -828,15 +773,9 @@ fn a_character_slice_never_lands_inside_a_character() {
 fn a_patch_loses_the_indentation_all_of_its_lines_share() {
     let diff = "Index: a\n--- a\n+++ a\n@@ -1,2 +1,2 @@\n     kept\n-    old\n+    new\n";
 
-    assert_eq!(
-        trim_diff(diff),
-        "Index: a\n--- a\n+++ a\n@@ -1,2 +1,2 @@\n kept\n-old\n+new\n"
-    );
+    assert_eq!(trim_diff(diff), "Index: a\n--- a\n+++ a\n@@ -1,2 +1,2 @@\n kept\n-old\n+new\n");
     // Nothing shared, nothing taken.
-    assert_eq!(
-        trim_diff("--- a\n+++ a\n-old\n+new\n"),
-        "--- a\n+++ a\n-old\n+new\n"
-    );
+    assert_eq!(trim_diff("--- a\n+++ a\n-old\n+new\n"), "--- a\n+++ a\n-old\n+new\n");
     assert_eq!(SEPARATOR.len(), 67);
 }
 
@@ -847,36 +786,24 @@ fn a_patch_loses_the_indentation_all_of_its_lines_share() {
 #[test]
 fn the_description_is_upstreams_prompt_file() {
     assert_eq!(EditTool.description(), DESCRIPTION);
-    assert!(
-        EditTool
-            .description()
-            .starts_with("Performs exact string replacements in files.")
-    );
+    assert!(EditTool.description().starts_with("Performs exact string replacements in files."));
     assert!(EditTool.description().contains("replaceAll"));
 }
 
 #[test]
 fn the_schema_is_the_one_the_model_was_trained_against() {
     let schema = serde_json::to_value(EditTool.schema()).expect("a schema is JSON");
-    let properties = schema["properties"]
-        .as_object()
-        .expect("an object of properties");
+    let properties = schema["properties"].as_object().expect("an object of properties");
 
     let mut names: Vec<&String> = properties.keys().collect();
     names.sort();
     assert_eq!(names, ["filePath", "newString", "oldString", "replaceAll"]);
-    assert_eq!(
-        schema["required"],
-        serde_json::json!(["filePath", "oldString", "newString"])
-    );
+    assert_eq!(schema["required"], serde_json::json!(["filePath", "oldString", "newString"]));
     assert_eq!(
         properties["filePath"]["description"],
         serde_json::json!("The absolute path to the file to modify")
     );
-    assert_eq!(
-        properties["oldString"]["description"],
-        serde_json::json!("The text to replace")
-    );
+    assert_eq!(properties["oldString"]["description"], serde_json::json!("The text to replace"));
     assert_eq!(
         properties["newString"]["description"],
         serde_json::json!("The text to replace it with (must be different from oldString)")
@@ -928,10 +855,7 @@ async fn an_empty_old_string_creates_the_file_it_names() {
 
     assert_eq!(read(&path), "new content");
     assert!(
-        output.metadata["diff"]
-            .as_str()
-            .expect("a patch")
-            .contains("new content"),
+        output.metadata["diff"].as_str().expect("a patch").contains("new content"),
         "got {}",
         output.metadata["diff"]
     );
@@ -943,12 +867,9 @@ async fn creating_a_file_makes_the_directories_it_sits_in() {
     let ctx = ctx(dir.path());
     let path = dir.path().join("nested").join("dir").join("file.txt");
 
-    run(
-        &ctx,
-        serde_json::json!({"filePath": path, "oldString": "", "newString": "nested file"}),
-    )
-    .await
-    .expect("the directories are made");
+    run(&ctx, serde_json::json!({"filePath": path, "oldString": "", "newString": "nested file"}))
+        .await
+        .expect("the directories are made");
 
     assert_eq!(read(&path), "nested file");
 }
@@ -967,10 +888,7 @@ async fn an_empty_old_string_against_an_existing_file_is_refused_and_changes_not
     )
     .await;
 
-    assert!(
-        refused.contains("oldString cannot be empty"),
-        "got {refused}"
-    );
+    assert!(refused.contains("oldString cannot be empty"), "got {refused}");
     assert_eq!(read(&path), original);
 }
 
@@ -997,11 +915,7 @@ async fn an_edit_replaces_the_text_it_names() {
 async fn a_file_with_a_byte_order_mark_keeps_it_and_the_patch_does_not_show_it() {
     let dir = tempfile::tempdir().expect("a scratch directory");
     let ctx = ctx(dir.path());
-    let path = seed(
-        dir.path(),
-        "existing.cs",
-        &format!("{BOM}using System;\nclass Test {{}}\n"),
-    );
+    let path = seed(dir.path(), "existing.cs", &format!("{BOM}using System;\nclass Test {{}}\n"));
     ctx.files.record(&path);
 
     let output = run(
@@ -1085,10 +999,7 @@ async fn an_edit_that_finds_nothing_leaves_the_file_byte_for_byte_as_it_was() {
         .await;
 
     assert_eq!(refused, NOT_FOUND);
-    assert_eq!(
-        std::fs::read(&path).expect("the file is still there"),
-        before
-    );
+    assert_eq!(std::fs::read(&path).expect("the file is still there"), before);
 }
 
 #[tokio::test]
@@ -1106,10 +1017,7 @@ async fn an_ambiguous_edit_leaves_the_file_byte_for_byte_as_it_was() {
     .await;
 
     assert_eq!(refused, MULTIPLE_MATCHES);
-    assert_eq!(
-        std::fs::read(&path).expect("the file is still there"),
-        before
-    );
+    assert_eq!(std::fs::read(&path).expect("the file is still there"), before);
 }
 
 #[tokio::test]
@@ -1180,18 +1088,12 @@ async fn a_successful_edit_records_the_file_so_the_next_one_may_follow_it() {
     let path = seed(dir.path(), "file.txt", "one\ntwo\n");
     ctx.files.record(&path);
 
-    run(
-        &ctx,
-        serde_json::json!({"filePath": path, "oldString": "one", "newString": "uno"}),
-    )
-    .await
-    .expect("the first edit applies");
-    run(
-        &ctx,
-        serde_json::json!({"filePath": path, "oldString": "two", "newString": "dos"}),
-    )
-    .await
-    .expect("the second edit follows without another read");
+    run(&ctx, serde_json::json!({"filePath": path, "oldString": "one", "newString": "uno"}))
+        .await
+        .expect("the first edit applies");
+    run(&ctx, serde_json::json!({"filePath": path, "oldString": "two", "newString": "dos"}))
+        .await
+        .expect("the second edit follows without another read");
 
     assert_eq!(read(&path), "uno\ndos\n");
 }
@@ -1250,10 +1152,7 @@ async fn the_metadata_carries_the_patch_and_what_it_counts() {
         .expect("the edit applies");
 
     let filediff = &output.metadata["filediff"];
-    assert_eq!(
-        filediff["file"],
-        serde_json::json!(path.display().to_string())
-    );
+    assert_eq!(filediff["file"], serde_json::json!(path.display().to_string()));
     assert_eq!(filediff["patch"], output.metadata["diff"]);
     assert_eq!(filediff["additions"], serde_json::json!(2));
     assert_eq!(filediff["deletions"], serde_json::json!(1));
@@ -1405,12 +1304,9 @@ async fn a_crlf_file_edited_by_a_single_line_stays_crlf() {
     let path = seed(dir.path(), "file.txt", "line1\r\nold\r\nline3");
     ctx.files.record(&path);
 
-    run(
-        &ctx,
-        serde_json::json!({"filePath": path, "oldString": "old", "newString": "new"}),
-    )
-    .await
-    .expect("the edit applies");
+    run(&ctx, serde_json::json!({"filePath": path, "oldString": "old", "newString": "new"}))
+        .await
+        .expect("the edit applies");
 
     assert_eq!(read(&path), "line1\r\nnew\r\nline3");
 }
@@ -1463,10 +1359,7 @@ async fn text_outside_ascii_is_matched_through_the_looser_strategies_too() {
 
     // The indented span is what matched, so the replacement stands where
     // it stood without its indentation — upstream does the same.
-    assert_eq!(
-        read(&path),
-        "\u{3055}\u{3088}\u{3046}\u{306a}\u{3089}\n\u{4e16}\u{754c}\n"
-    );
+    assert_eq!(read(&path), "\u{3055}\u{3088}\u{3046}\u{306a}\u{3089}\n\u{4e16}\u{754c}\n");
 }
 
 #[tokio::test]
@@ -1485,21 +1378,14 @@ async fn a_file_that_is_not_text_is_refused_rather_than_rewritten() {
     .await;
 
     assert!(refused.contains("not valid UTF-8"), "got {refused}");
-    assert_eq!(
-        std::fs::read(&path).expect("the file is still there"),
-        before
-    );
+    assert_eq!(std::fs::read(&path).expect("the file is still there"), before);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_edits_to_one_file_both_survive() {
     let dir = tempfile::tempdir().expect("a scratch directory");
     let ctx = Arc::new(ctx(dir.path()));
-    let path = seed(
-        dir.path(),
-        "file.txt",
-        "top = 0\nmiddle = keep\nbottom = 0\n",
-    );
+    let path = seed(dir.path(), "file.txt", "top = 0\nmiddle = keep\nbottom = 0\n");
     ctx.files.record(&path);
 
     let top = {
@@ -1525,13 +1411,8 @@ async fn two_edits_to_one_file_both_survive() {
         })
     };
 
-    top.await
-        .expect("the task runs")
-        .expect("the first edit applies");
-    bottom
-        .await
-        .expect("the task runs")
-        .expect("the second edit applies");
+    top.await.expect("the task runs").expect("the first edit applies");
+    bottom.await.expect("the task runs").expect("the second edit applies");
 
     assert_eq!(read(&path), "top = 1\nmiddle = keep\nbottom = 2\n");
 }

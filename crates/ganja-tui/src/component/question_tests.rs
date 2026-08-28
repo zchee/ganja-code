@@ -1,15 +1,11 @@
 use ganja_protocol::{QuestionId, QuestionInfo, QuestionOption};
-use ratatui::{buffer::Buffer, layout::Rect};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 
 use super::Question;
 use crate::theme::Theme;
 
-const AREA: Rect = Rect {
-    x: 0,
-    y: 0,
-    width: 60,
-    height: 14,
-};
+const AREA: Rect = Rect { x: 0, y: 0, width: 60, height: 14 };
 
 fn question(options: Vec<QuestionOption>) -> Question {
     question_with_custom(options, None)
@@ -33,11 +29,7 @@ fn rendered(question: &Question) -> String {
     question.render(AREA, &mut buffer, &Theme::default());
 
     (0..AREA.height)
-        .map(|row| {
-            (0..AREA.width)
-                .map(|column| buffer[(column, row)].symbol())
-                .collect::<String>()
-        })
+        .map(|row| (0..AREA.width).map(|column| buffer[(column, row)].symbol()).collect::<String>())
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -49,10 +41,7 @@ fn the_dialog_renders_the_question_header_labels_and_descriptions() {
             label: "Postgres".to_owned(),
             description: "Relational database".to_owned(),
         },
-        QuestionOption {
-            label: "SQLite".to_owned(),
-            description: "One local file".to_owned(),
-        },
+        QuestionOption { label: "SQLite".to_owned(), description: "One local file".to_owned() },
     ]));
 
     for expected in [
@@ -131,10 +120,7 @@ fn custom_false_hides_the_free_text_row() {
                 label: "Postgres".to_owned(),
                 description: "Relational database".to_owned(),
             },
-            QuestionOption {
-                label: "SQLite".to_owned(),
-                description: "One local file".to_owned(),
-            },
+            QuestionOption { label: "SQLite".to_owned(), description: "One local file".to_owned() },
         ],
         Some(false),
     );

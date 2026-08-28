@@ -108,16 +108,15 @@
 //!   renamed row inventing a name nobody typed — **user-ratified
 //!   2026-08-26, not reopened**.
 
-use std::{
-    io,
-    path::{Path, PathBuf},
-};
+use std::io;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use crate::{Tool, ToolCtx, ToolError, ToolOutput, registry, socket, team::Peer};
+use crate::team::Peer;
+use crate::{Tool, ToolCtx, ToolError, ToolOutput, registry, socket};
 
 /// The tool id, which is also the permission key.
 pub const ID: &str = "list_sessions";
@@ -212,12 +211,7 @@ impl LiveSession {
 /// `ganja-core`'s `identity::address_of` for the same crate-boundary reason
 /// as everything else duplicated here.
 fn address_of(directory: &Path, stem: &str) -> String {
-    format!(
-        "{UDS_SCHEME}{}",
-        directory
-            .join(format!("{stem}.{}", socket::EXTENSION))
-            .display()
-    )
+    format!("{UDS_SCHEME}{}", directory.join(format!("{stem}.{}", socket::EXTENSION)).display())
 }
 
 /// A same-uid-written field, made safe to print: control characters and the
@@ -228,11 +222,7 @@ fn address_of(directory: &Path, stem: &str) -> String {
 /// them.
 fn neutralize(value: &str) -> String {
     let admits = |point: &char| !point.is_control() && *point != '<' && *point != '>';
-    let kept: String = value
-        .chars()
-        .filter(admits)
-        .take(MOST_SHOWN_POINTS)
-        .collect();
+    let kept: String = value.chars().filter(admits).take(MOST_SHOWN_POINTS).collect();
 
     if value.chars().filter(admits).count() > MOST_SHOWN_POINTS {
         format!("{kept}…")
@@ -284,10 +274,7 @@ fn render(teammates: &[Peer], sessions: &[LiveSession]) -> String {
 
         let mut lines = vec![TEAMMATES_HEADER.to_owned()];
         lines.extend(listed.into_iter().map(|peer| {
-            let about = peer
-                .description
-                .as_deref()
-                .unwrap_or(NO_TEAMMATE_DESCRIPTION);
+            let about = peer.description.as_deref().unwrap_or(NO_TEAMMATE_DESCRIPTION);
             if peer.lead {
                 format!("- {}: {about} ({LEAD_MARK})", peer.name)
             } else {
@@ -338,10 +325,7 @@ impl ListSessionsTool {
     /// them over like any other value.
     #[must_use]
     pub fn new(directory: PathBuf, own_session: String) -> Self {
-        Self {
-            directory,
-            own_session,
-        }
+        Self { directory, own_session }
     }
 }
 
@@ -363,10 +347,7 @@ impl Tool for ListSessionsTool {
         let _: Args = serde_json::from_value(args)
             .map_err(|error| ToolError::InvalidArgs(error.to_string()))?;
 
-        let teammates = ctx
-            .postbox
-            .as_ref()
-            .map_or_else(Vec::new, |postbox| postbox.roster());
+        let teammates = ctx.postbox.as_ref().map_or_else(Vec::new, |postbox| postbox.roster());
 
         let sessions = live_sessions(&self.directory, &self.own_session)
             .map_err(|error| ToolError::Failed(format!("{DIRECTORY_UNREADABLE} {error}")))?;
@@ -375,11 +356,7 @@ impl Tool for ListSessionsTool {
             .map(|registered| LiveSession::from_registered(&self.directory, registered))
             .collect();
 
-        let title = format!(
-            "{} teammate(s), {} live session(s)",
-            teammates.len(),
-            sessions.len()
-        );
+        let title = format!("{} teammate(s), {} live session(s)", teammates.len(), sessions.len());
         let output = render(&teammates, &sessions);
 
         Ok(ToolOutput {

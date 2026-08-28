@@ -27,17 +27,18 @@
 //! transfer framing — asserted below, so a transport change fails loudly here
 //! instead of quietly mis-parsing.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
 
 use futures::StreamExt as _;
 use ganja_client::sse::{self, Frame, Frames};
-use ganja_core::{Engine, provider::fake::FakeProvider, tool::Registry};
+use ganja_core::Engine;
+use ganja_core::provider::fake::FakeProvider;
+use ganja_core::tool::Registry;
 use ganja_permission::Permissions;
 use ganja_protocol::{Command, Event};
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::TcpStream,
-};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::TcpStream;
 
 /// How long any single wait may take before the fixture is declared broken.
 const DEADLINE: Duration = Duration::from_secs(60);
@@ -117,10 +118,7 @@ impl Reader {
         };
 
         let response = String::from_utf8_lossy(&buffer[..head]).to_ascii_lowercase();
-        assert!(
-            response.contains(" 200 "),
-            "the stream answers 200: {response}"
-        );
+        assert!(response.contains(" 200 "), "the stream answers 200: {response}");
         assert!(
             response.contains("content-type: text/event-stream"),
             "and says what it is: {response}"
@@ -133,12 +131,7 @@ impl Reader {
         let mut frames = Frames::new();
         frames.push(&buffer[head + 4..]);
 
-        Self {
-            socket,
-            frames,
-            names: Vec::new(),
-            seen: Vec::new(),
-        }
+        Self { socket, frames, names: Vec::new(), seen: Vec::new() }
     }
 
     /// Splits whatever has arrived, recording each frame — and asserting, for
@@ -221,9 +214,7 @@ async fn a_running_server_writes_the_frames_the_client_declares() {
 
     // A turn's last event, which is where a message frame is guaranteed to
     // have carried something the client could parse into a protocol event.
-    reader
-        .read_until(|names| names.iter().filter(|name| *name == sse::MESSAGE).count() > 3)
-        .await;
+    reader.read_until(|names| names.iter().filter(|name| *name == sse::MESSAGE).count() > 3).await;
     let finished = reader.seen.iter().any(|frame| {
         matches!(frame, Frame::Message(event) if matches!(**event, Event::MessageStarted { .. }))
     });
@@ -231,9 +222,7 @@ async fn a_running_server_writes_the_frames_the_client_declares() {
 
     // A silent stream still proves it is alive.
     tokio::time::sleep(FAST_HEARTBEAT * 4).await;
-    reader
-        .read_until(|names| names.iter().any(|name| name == sse::HEARTBEAT))
-        .await;
+    reader.read_until(|names| names.iter().any(|name| name == sse::HEARTBEAT)).await;
 
     for wanted in [sse::CONNECTED, sse::MESSAGE, sse::HEARTBEAT] {
         assert!(
@@ -265,19 +254,14 @@ async fn a_subscriber_that_stops_reading_is_told_it_was_evicted() {
     // hundreds of frames rather than hundreds of thousands.
     let word = "w".repeat(4096);
     let burst = EVENT_CAPACITY * 3;
-    let reply = std::iter::repeat_n(word.as_str(), burst)
-        .collect::<Vec<_>>()
-        .join(" ");
+    let reply = std::iter::repeat_n(word.as_str(), burst).collect::<Vec<_>>().join(" ");
 
     let (engine, handle) = served(&reply).await;
     let mut reader = Reader::open(&handle).await;
     // The connected frame, and then nothing is read from this socket until the
     // turn is over.
     reader.read_until(|names| !names.is_empty()).await;
-    assert_eq!(
-        reader.names.first().map(String::as_str),
-        Some(sse::CONNECTED)
-    );
+    assert_eq!(reader.names.first().map(String::as_str), Some(sse::CONNECTED));
 
     // A second reader on the engine itself, which is what makes this
     // deterministic rather than a sleep: it is lossless, so following it to the
@@ -307,9 +291,7 @@ async fn a_subscriber_that_stops_reading_is_told_it_was_evicted() {
     // Now read: whatever the queue still held arrives first — every event
     // before the eviction is real and in order — and the eviction is last,
     // after which the server closes the stream.
-    reader
-        .read_until(|names| names.iter().any(|name| name == sse::EVICTED))
-        .await;
+    reader.read_until(|names| names.iter().any(|name| name == sse::EVICTED)).await;
 
     let last = reader.seen.last().expect("the stream said something");
     let Frame::Evicted(notice) = last else {
@@ -324,11 +306,7 @@ async fn a_subscriber_that_stops_reading_is_told_it_was_evicted() {
         "the notice carries the engine's own account: {notice:?}"
     );
     assert_eq!(
-        reader
-            .names
-            .iter()
-            .filter(|name| *name == sse::EVICTED)
-            .count(),
+        reader.names.iter().filter(|name| *name == sse::EVICTED).count(),
         1,
         "an eviction is terminal: nothing follows it"
     );
@@ -341,10 +319,7 @@ async fn a_subscriber_that_stops_reading_is_told_it_was_evicted() {
 /// the two tests above unable to observe it.
 #[test]
 fn the_declared_vocabulary_is_the_four_names_the_pin_covers() {
-    assert_eq!(
-        sse::FRAMES,
-        [sse::CONNECTED, sse::MESSAGE, sse::HEARTBEAT, sse::EVICTED]
-    );
+    assert_eq!(sse::FRAMES, [sse::CONNECTED, sse::MESSAGE, sse::HEARTBEAT, sse::EVICTED]);
     assert_eq!(
         sse::FRAMES,
         ["connected", "message", "heartbeat", "evicted"],

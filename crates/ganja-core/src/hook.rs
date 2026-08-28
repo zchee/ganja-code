@@ -70,21 +70,17 @@
 //!   not through a new protocol event — P13 defers `Event` growth by name, and
 //!   a hook that failed must not be able to fail a turn.
 
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-    process::Stdio,
-    sync::Arc,
-    time::Duration,
-};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::Arc;
+use std::time::Duration;
 
 use ganja_tool::shell::{NoPosixShell, kill_tree, posix_shell};
 use serde_json::{Value, json};
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    process::Command,
-    task::JoinSet,
-};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::process::Command;
+use tokio::task::JoinSet;
 
 use crate::config::{HookHandler, HookMatcher};
 
@@ -344,18 +340,10 @@ impl Payload {
     /// Everything this event adds to the three common fields.
     fn fields(&self) -> Vec<(&'static str, Value)> {
         match self {
-            Self::PreToolUse {
-                tool_name,
-                tool_input,
-            } => vec![
-                ("tool_name", json!(tool_name)),
-                ("tool_input", tool_input.clone()),
-            ],
-            Self::PostToolUse {
-                tool_name,
-                tool_input,
-                tool_response,
-            } => vec![
+            Self::PreToolUse { tool_name, tool_input } => {
+                vec![("tool_name", json!(tool_name)), ("tool_input", tool_input.clone())]
+            }
+            Self::PostToolUse { tool_name, tool_input, tool_response } => vec![
                 ("tool_name", json!(tool_name)),
                 ("tool_input", tool_input.clone()),
                 ("tool_response", tool_response.clone()),
@@ -363,11 +351,7 @@ impl Payload {
             Self::UserPromptSubmit { prompt } => vec![("prompt", json!(prompt))],
             Self::Notification { message } => vec![("message", json!(message))],
             Self::Stop { stop_hook_active } => vec![("stop_hook_active", json!(stop_hook_active))],
-            Self::SubagentStop {
-                stop_hook_active,
-                agent,
-                outcome,
-            } => vec![
+            Self::SubagentStop { stop_hook_active, agent, outcome } => vec![
                 ("stop_hook_active", json!(stop_hook_active)),
                 ("agent", json!(agent)),
                 ("outcome", json!(outcome)),
@@ -477,14 +461,7 @@ impl std::fmt::Debug for Hooks {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("Hooks")
-            .field(
-                "events",
-                &self
-                    .groups
-                    .keys()
-                    .map(|event| event.name())
-                    .collect::<Vec<_>>(),
-            )
+            .field("events", &self.groups.keys().map(|event| event.name()).collect::<Vec<_>>())
             .field("cwd", &self.cwd)
             .finish_non_exhaustive()
     }
@@ -506,10 +483,7 @@ impl Hooks {
         let mut groups: BTreeMap<HookEvent, Vec<Group>> = BTreeMap::new();
         for (name, configured) in config {
             let Some(event) = HookEvent::from_name(name) else {
-                tracing::warn!(
-                    event = name.as_str(),
-                    "no hook event by that name; ignoring it"
-                );
+                tracing::warn!(event = name.as_str(), "no hook event by that name; ignoring it");
                 continue;
             };
             for group in configured {
@@ -551,21 +525,14 @@ impl Hooks {
                     (_, compiled) => compiled,
                 };
 
-                groups
-                    .entry(event)
-                    .or_default()
-                    .push(Group { matcher, handlers });
+                groups.entry(event).or_default().push(Group { matcher, handlers });
             }
         }
         if groups.is_empty() {
             return None;
         }
 
-        Some(Arc::new(Self {
-            groups,
-            cwd: cwd.to_owned(),
-            shell: posix_shell(),
-        }))
+        Some(Arc::new(Self { groups, cwd: cwd.to_owned(), shell: posix_shell() }))
     }
 
     /// Whether anything at all is configured for `event`, which is what lets a
@@ -674,11 +641,7 @@ fn matches(group: &Group, subject: Option<&str>) -> bool {
 #[derive(Debug)]
 enum Ran {
     /// It finished. [`None`] as the code is a process a signal ended.
-    Finished {
-        code: Option<i32>,
-        stdout: String,
-        stderr: String,
-    },
+    Finished { code: Option<i32>, stdout: String, stderr: String },
     /// It never ran, or it ran too long and was killed. Carries the sentence
     /// the notice is built from.
     Failed(String),
@@ -712,10 +675,7 @@ async fn run(shell: &Path, cwd: &Path, handler: &Handler, text: &str) -> Ran {
     let mut child = match spawner.spawn() {
         Ok(child) => child,
         Err(error) => {
-            return Ran::Failed(format!(
-                "could not be started by {}: {error}",
-                shell.display()
-            ));
+            return Ran::Failed(format!("could not be started by {}: {error}", shell.display()));
         }
     };
 
@@ -778,16 +738,10 @@ async fn run(shell: &Path, cwd: &Path, handler: &Handler, text: &str) -> Ran {
 fn absorb(outcome: &mut Outcome, event: HookEvent, command: &str, ran: Ran) {
     match ran {
         Ran::Failed(why) => outcome.notices.push(format!("hook `{command}` {why}")),
-        Ran::Finished {
-            code: Some(0),
-            stdout,
-            ..
-        } => absorb_stdout(outcome, event, command, &stdout),
-        Ran::Finished {
-            code: Some(2),
-            stderr,
-            ..
-        } => {
+        Ran::Finished { code: Some(0), stdout, .. } => {
+            absorb_stdout(outcome, event, command, &stdout)
+        }
+        Ran::Finished { code: Some(2), stderr, .. } => {
             let reason = stderr.trim();
             outcome.block(if reason.is_empty() {
                 format!("a {} hook (`{command}`) refused it", event.name())
@@ -895,9 +849,9 @@ fn absorb_envelope(
         // The documented default flow: the call is judged by the rules exactly
         // as it would have been with no hook at all.
         "ask" => {}
-        other => outcome.notices.push(format!(
-            "hook `{command}` asked for an unknown permissionDecision \"{other}\""
-        )),
+        other => outcome
+            .notices
+            .push(format!("hook `{command}` asked for an unknown permissionDecision \"{other}\"")),
     }
 }
 

@@ -33,11 +33,9 @@
 //! person's own config on the way (measured; the Phase-4 security review's
 //! finding 1). The throwaway server these calls start is killed on drop.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    path::PathBuf,
-    process::Command,
-};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
+use std::process::Command;
 
 use tmux::commands::{EXCLUDED, REGISTRY};
 
@@ -54,11 +52,7 @@ impl PrivateTmux {
         let config = dir.path().join("empty.conf");
         std::fs::write(&config, b"").expect("an empty config is written");
 
-        Self {
-            socket: dir.path().join("inventory.sock"),
-            config,
-            _dir: dir,
-        }
+        Self { socket: dir.path().join("inventory.sock"), config, _dir: dir }
     }
 
     /// A client invocation against the private server and nothing else.
@@ -83,16 +77,15 @@ impl PrivateTmux {
     /// need one running. [`Drop`] kills it like any other.
     fn serving() -> Self {
         let tmux = Self::start();
-        let started = tmux
-            .client()
-            .args(["new-session", "-d", "-s", "flag-probe"])
-            .output()
-            .unwrap_or_else(|error| {
-                panic!(
-                    "the tmux crate's inventory test requires a runnable tmux binary on PATH; \
+        let started =
+            tmux.client().args(["new-session", "-d", "-s", "flag-probe"]).output().unwrap_or_else(
+                |error| {
+                    panic!(
+                        "the tmux crate's inventory test requires a runnable tmux binary on PATH; \
                      `tmux new-session` could not start: {error}"
-                )
-            });
+                    )
+                },
+            );
         assert!(
             started.status.success(),
             "the private tmux server could not be started, so nothing could be asked to parse \
@@ -106,27 +99,19 @@ impl PrivateTmux {
 
 impl Drop for PrivateTmux {
     fn drop(&mut self) {
-        let _ = Command::new("tmux")
-            .arg("-S")
-            .arg(&self.socket)
-            .arg("kill-server")
-            .output();
+        let _ = Command::new("tmux").arg("-S").arg(&self.socket).arg("kill-server").output();
     }
 }
 
 /// One command as the running tmux describes it: its name, and its own
 /// abbreviation when it has one.
 fn installed(tmux: &PrivateTmux) -> BTreeMap<String, Option<String>> {
-    let output = tmux
-        .client()
-        .arg("list-commands")
-        .output()
-        .unwrap_or_else(|error| {
-            panic!(
-                "the tmux crate's inventory test requires a runnable tmux binary on PATH; \
+    let output = tmux.client().arg("list-commands").output().unwrap_or_else(|error| {
+        panic!(
+            "the tmux crate's inventory test requires a runnable tmux binary on PATH; \
                  `tmux list-commands` could not start: {error}"
-            )
-        });
+        )
+    });
     assert!(
         output.status.success(),
         "the tmux crate's inventory test requires a runnable tmux binary on PATH; \
@@ -152,10 +137,7 @@ fn installed(tmux: &PrivateTmux) -> BTreeMap<String, Option<String>> {
             Some((name, alias))
         })
         .collect();
-    assert!(
-        !commands.is_empty(),
-        "`tmux list-commands` printed nothing this test could read"
-    );
+    assert!(!commands.is_empty(), "`tmux list-commands` printed nothing this test could read");
 
     commands
 }
@@ -169,15 +151,10 @@ fn every_command_this_tmux_has_is_either_typed_or_excluded_by_name() {
     let mut excluded = 0usize;
 
     for (name, alias) in &installed {
-        let claimed = REGISTRY
-            .iter()
-            .find(|entry| entry.name == name)
-            .map(|entry| ("typed", entry.alias));
+        let claimed =
+            REGISTRY.iter().find(|entry| entry.name == name).map(|entry| ("typed", entry.alias));
         let claimed = claimed.or_else(|| {
-            EXCLUDED
-                .iter()
-                .find(|entry| entry.name == name)
-                .map(|entry| ("excluded", entry.alias))
+            EXCLUDED.iter().find(|entry| entry.name == name).map(|entry| ("excluded", entry.alias))
         });
 
         match claimed {
@@ -230,16 +207,12 @@ fn every_command_this_tmux_has_is_either_typed_or_excluded_by_name() {
 /// about the installed version, not a verdict, for the same reason the test
 /// above runs one-way.
 fn resolve(tmux: &PrivateTmux, word: &str) -> Option<(String, Option<String>)> {
-    let output = tmux
-        .client()
-        .args(["list-commands", word])
-        .output()
-        .unwrap_or_else(|error| {
-            panic!(
-                "the tmux crate's inventory test requires a runnable tmux binary on PATH; \
+    let output = tmux.client().args(["list-commands", word]).output().unwrap_or_else(|error| {
+        panic!(
+            "the tmux crate's inventory test requires a runnable tmux binary on PATH; \
                  `tmux list-commands {word}` could not start: {error}"
-            )
-        });
+        )
+    });
     if !output.status.success() {
         let refusal = String::from_utf8_lossy(&output.stderr).trim().to_string();
         // tmux tells the two refusals apart itself, and only one of them is
@@ -262,9 +235,7 @@ fn resolve(tmux: &PrivateTmux, word: &str) -> Option<(String, Option<String>)> {
     // dialect, so it reads as the same `None`.
     let name = words.next()?;
     let alias = words.next().and_then(|word| {
-        word.strip_prefix('(')
-            .and_then(|word| word.strip_suffix(')'))
-            .map(ToOwned::to_owned)
+        word.strip_prefix('(').and_then(|word| word.strip_suffix(')')).map(ToOwned::to_owned)
     });
 
     Some((name.to_owned(), alias))
@@ -701,9 +672,5 @@ fn every_declared_flag_is_one_this_tmux_takes_the_same_way() {
 
 /// A list for the summary lines, or the word for an empty one.
 fn list(names: &[String]) -> String {
-    if names.is_empty() {
-        "none".to_owned()
-    } else {
-        names.join(", ")
-    }
+    if names.is_empty() { "none".to_owned() } else { names.join(", ") }
 }

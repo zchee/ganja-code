@@ -1,28 +1,23 @@
-use std::{
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use futures::{
-    StreamExt as _,
-    stream::{self, BoxStream},
-};
+use futures::StreamExt as _;
+use futures::stream::{self, BoxStream};
 use tokio_util::sync::CancellationToken;
 
 use super::{
     Engine, EngineError, STALE_FILES, message_chars, send_message, stale_notice, teammate,
 };
-use crate::{
-    config::TeamlessSend,
-    permission::Permissions,
-    protocol::{
-        Command, Event, FinishReason, Message, Part, PermissionReply, RevertScope, Role, Usage,
-    },
-    provider::{ChatRequest, FakeProvider, Provider, ProviderError, ProviderEvent, fake::MODEL},
-    storage::{self, SessionId, SessionInfo, Storage},
-    tool::{FileTimes, Registry},
+use crate::config::TeamlessSend;
+use crate::permission::Permissions;
+use crate::protocol::{
+    Command, Event, FinishReason, Message, Part, PermissionReply, RevertScope, Role, Usage,
 };
+use crate::provider::fake::MODEL;
+use crate::provider::{ChatRequest, FakeProvider, Provider, ProviderError, ProviderEvent};
+use crate::storage::{self, SessionId, SessionInfo, Storage};
+use crate::tool::{FileTimes, Registry};
 
 /// How long a drain that should complete promptly is given before the
 /// test calls it wedged. Generous against a loaded machine, and reached
@@ -32,22 +27,11 @@ const DRAIN_PATIENCE: std::time::Duration = std::time::Duration::from_secs(10);
 /// An engine over `provider` with no tools and default rules, which is
 /// all these tests need: they prove the turn lifecycle, not the loop.
 fn bare(provider: Arc<dyn Provider>, model: &str) -> Engine {
-    Engine::new(
-        provider,
-        model,
-        Arc::new(Registry::new(Vec::new())),
-        Permissions::default(),
-    )
+    Engine::new(provider, model, Arc::new(Registry::new(Vec::new())), Permissions::default())
 }
 
 fn engine() -> Engine {
-    bare(
-        Arc::new(FakeProvider::new(
-            "one two",
-            std::time::Duration::from_millis(1),
-        )),
-        MODEL,
-    )
+    bare(Arc::new(FakeProvider::new("one two", std::time::Duration::from_millis(1))), MODEL)
 }
 
 /// Records what it was asked and answers with a scripted stream.
@@ -59,19 +43,11 @@ struct ScriptedProvider {
 
 impl ScriptedProvider {
     fn new(events: Vec<ProviderEvent>) -> Self {
-        Self {
-            events,
-            failure: None,
-            seen: Arc::default(),
-        }
+        Self { events, failure: None, seen: Arc::default() }
     }
 
     fn failing(failure: ProviderError) -> Self {
-        Self {
-            events: Vec::new(),
-            failure: Some(failure),
-            seen: Arc::default(),
-        }
+        Self { events: Vec::new(), failure: Some(failure), seen: Arc::default() }
     }
 }
 
@@ -86,10 +62,7 @@ impl Provider for ScriptedProvider {
         request: ChatRequest,
         _cancel: CancellationToken,
     ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
-        self.seen
-            .lock()
-            .expect("the request log is never poisoned")
-            .push(request);
+        self.seen.lock().expect("the request log is never poisoned").push(request);
 
         match &self.failure {
             Some(failure) => Err(failure.clone()),
@@ -200,24 +173,13 @@ async fn a_turn_reports_both_messages_and_streams_the_reply_into_one_part() {
 
     let seen = drain(&mut events).await;
 
-    let Some(Event::MessageStarted {
-        session_id: _,
-        message: user,
-    }) = seen.first()
-    else {
+    let Some(Event::MessageStarted { session_id: _, message: user }) = seen.first() else {
         panic!("a turn should open with the user's message, got {seen:?}");
     };
     assert_eq!(user.role, Role::User);
-    assert_eq!(
-        user.parts.first().and_then(|part| part.as_text()),
-        Some("hi")
-    );
+    assert_eq!(user.parts.first().and_then(|part| part.as_text()), Some("hi"));
 
-    let Some(Event::MessageStarted {
-        session_id: _,
-        message: assistant,
-    }) = seen.get(1)
-    else {
+    let Some(Event::MessageStarted { session_id: _, message: assistant }) = seen.get(1) else {
         panic!("the reply's envelope should follow, got {seen:?}");
     };
     assert_eq!(assistant.role, Role::Assistant);
@@ -236,27 +198,14 @@ async fn a_turn_reports_both_messages_and_streams_the_reply_into_one_part() {
     );
     assert_eq!(replay(&seen), "hione two");
 
-    let Some(Event::MessageFinished {
-        session_id: _,
-        message_id,
-        reason,
-        usage,
-        error,
-        completed,
-    }) = seen.last()
+    let Some(Event::MessageFinished { session_id: _, message_id, reason, usage, error, completed }) =
+        seen.last()
     else {
         panic!("a turn always ends with a finish, got {seen:?}");
     };
     assert_eq!(*message_id, assistant.id);
     assert_eq!(*reason, FinishReason::Completed);
-    assert_eq!(
-        *usage,
-        Some(Usage {
-            input_tokens: 1,
-            output_tokens: 2,
-            ..Usage::default()
-        })
-    );
+    assert_eq!(*usage, Some(Usage { input_tokens: 1, output_tokens: 2, ..Usage::default() }));
     assert!(error.is_none());
     assert!(*completed >= assistant.time.created);
 }
@@ -288,10 +237,7 @@ async fn a_second_turn_carries_the_first_one_in_its_request() {
     let requests = seen.lock().expect("the request log is never poisoned");
     let first = requests.first().expect("the first turn asked the provider");
     assert_eq!(first.model, "scripted-model");
-    assert!(
-        first.system.is_none(),
-        "an engine nobody configured asks without a system prompt"
-    );
+    assert!(first.system.is_none(), "an engine nobody configured asks without a system prompt");
     assert_eq!(first.messages.len(), 1, "the first turn has no history");
 
     let second = requests.get(1).expect("the second turn asked too");
@@ -303,20 +249,13 @@ async fn a_second_turn_carries_the_first_one_in_its_request() {
                 message.model.as_deref().unwrap_or("user"),
                 // The first text part: an assistant message now opens
                 // with a step marker before anything it said.
-                message
-                    .parts
-                    .iter()
-                    .find_map(crate::protocol::Part::as_text),
+                message.parts.iter().find_map(crate::protocol::Part::as_text),
             )
         })
         .collect();
     assert_eq!(
         transcript,
-        vec![
-            ("user", Some("first")),
-            ("scripted-model", Some("sure")),
-            ("user", Some("second")),
-        ],
+        vec![("user", Some("first")), ("scripted-model", Some("sure")), ("user", Some("second")),],
         "the second turn should carry the first one"
     );
 }
@@ -349,9 +288,7 @@ async fn a_provider_that_cannot_answer_still_finishes_the_turn() {
 
     assert_eq!(*reason, FinishReason::Failed);
     assert!(
-        error
-            .as_deref()
-            .is_some_and(|error| error.contains("ANTHROPIC_API_KEY")),
+        error.as_deref().is_some_and(|error| error.contains("ANTHROPIC_API_KEY")),
         "the refusal should explain itself, got {error:?}"
     );
 
@@ -418,9 +355,8 @@ async fn a_configured_system_prompt_reaches_the_agent_and_the_summarize_requests
     // the next turn compacts before it asks anything.
     let model = crate::catalog::default_model("anthropic")
         .expect("the catalog has a default for a provider this build ships");
-    let window = crate::catalog::model(model)
-        .expect("the default model is in the catalog")
-        .context_window;
+    let window =
+        crate::catalog::model(model).expect("the default model is in the catalog").context_window;
 
     let directory = tempfile::tempdir().expect("a temporary directory");
     let storage = Storage::open(directory.path().join("storage"));
@@ -445,13 +381,9 @@ async fn a_configured_system_prompt_reaches_the_agent_and_the_summarize_requests
     };
     storage.save_info(&info).expect("the seeded record writes");
     let earlier = Message::user("the objective");
-    storage
-        .save_message(&session, &earlier)
-        .expect("the seeded envelope writes");
+    storage.save_message(&session, &earlier).expect("the seeded envelope writes");
     for part in &earlier.parts {
-        storage
-            .save_part(&session, &earlier.id, part)
-            .expect("the seeded part writes");
+        storage.save_part(&session, &earlier.id, part).expect("the seeded part writes");
     }
 
     let engine = Engine::persistent(
@@ -478,11 +410,7 @@ async fn a_configured_system_prompt_reaches_the_agent_and_the_summarize_requests
     drain(&mut events).await;
 
     let requests = seen.lock().expect("the request log is never poisoned");
-    assert_eq!(
-        requests.len(),
-        2,
-        "a compacting turn asks twice: summarize, then the model itself"
-    );
+    assert_eq!(requests.len(), 2, "a compacting turn asks twice: summarize, then the model itself");
     assert!(
         requests[0].tools.is_empty(),
         "the summarize request is the toolless one, got {:?}",
@@ -500,9 +428,8 @@ async fn a_configured_system_prompt_reaches_the_agent_and_the_summarize_requests
 async fn the_context_estimate_reports_the_stored_measure_against_the_catalog_window() {
     let model = crate::catalog::default_model("anthropic")
         .expect("the catalog has a default for a provider this build ships");
-    let window = crate::catalog::model(model)
-        .expect("the default model is in the catalog")
-        .context_window;
+    let window =
+        crate::catalog::model(model).expect("the default model is in the catalog").context_window;
 
     let directory = tempfile::tempdir().expect("a temporary directory");
     let storage = Storage::open(directory.path().join("storage"));
@@ -534,19 +461,13 @@ async fn the_context_estimate_reports_the_stored_measure_against_the_catalog_win
     );
 
     let before = engine.context_estimate();
-    assert_eq!(
-        before.tokens, 0,
-        "before a resume there is no session to have measured anything"
-    );
+    assert_eq!(before.tokens, 0, "before a resume there is no session to have measured anything");
     assert_eq!(before.window, Some(window));
 
     engine.resume(&session).await.expect("the session loads");
 
     let after = engine.context_estimate();
-    assert_eq!(
-        after.tokens, 1_234,
-        "the stored measure is what the bar shows"
-    );
+    assert_eq!(after.tokens, 1_234, "the stored measure is what the bar shows");
     assert_eq!(after.window, Some(window));
 }
 
@@ -573,10 +494,7 @@ fn furnished(model: &str) -> Engine {
                       \nSkills provide specialized instructions and workflows for specific tasks.\n<available_skills>\n</available_skills>";
 
     Engine::new(
-        Arc::new(FakeProvider::new(
-            "one two",
-            std::time::Duration::from_millis(1),
-        )),
+        Arc::new(FakeProvider::new("one two", std::time::Duration::from_millis(1))),
         model,
         Arc::new(Registry::with_builtins()),
         Permissions::default(),
@@ -632,11 +550,8 @@ fn the_counts_are_metadata_and_move_no_token_figure() {
         reserve: Some(1_000),
         ..ContextBreakdown::default()
     };
-    let counted = ContextBreakdown {
-        tools_builtin_count: 12,
-        tools_mcp_count: 193,
-        ..bare.clone()
-    };
+    let counted =
+        ContextBreakdown { tools_builtin_count: 12, tools_mcp_count: 193, ..bare.clone() };
 
     assert_eq!(bare.total(), counted.total());
     assert_eq!(bare.free(), counted.free());
@@ -648,9 +563,8 @@ fn the_counts_are_metadata_and_move_no_token_figure() {
 async fn free_space_is_the_window_minus_the_total_minus_the_reserve() {
     let model = crate::catalog::default_model("anthropic")
         .expect("the catalog has a default for a provider this build ships");
-    let window = crate::catalog::model(model)
-        .expect("the default model is in the catalog")
-        .context_window;
+    let window =
+        crate::catalog::model(model).expect("the default model is in the catalog").context_window;
 
     let engine = furnished(model);
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
@@ -744,23 +658,14 @@ async fn a_breakdown_right_after_a_revert_reflects_the_truncated_conversation() 
     );
 
     engine
-        .send(Command::RevertTo {
-            message_id: anchor,
-            scope: RevertScope::Conversation,
-        })
+        .send(Command::RevertTo { message_id: anchor, scope: RevertScope::Conversation })
         .await
         .expect("a checkpoint that exists is revertable");
 
     let after_revert = engine.context_breakdown().await;
     assert_eq!(
-        (
-            after_revert.conversation_user,
-            after_revert.conversation_assistant
-        ),
-        (
-            after_one_turn.conversation_user,
-            after_one_turn.conversation_assistant
-        ),
+        (after_revert.conversation_user, after_revert.conversation_assistant),
+        (after_one_turn.conversation_user, after_one_turn.conversation_assistant),
         "what the revert hid is already left out"
     );
 }
@@ -813,14 +718,9 @@ async fn the_breakdown_prices_by_the_compaction_estimators_own_convention() {
 #[tokio::test]
 async fn a_second_subscriber_sees_the_same_events_the_first_does() {
     let engine = engine();
-    let mut first = engine
-        .subscribe()
-        .await
-        .expect("the first subscriber claims the birth queue");
-    let mut second = engine
-        .subscribe()
-        .await
-        .expect("a later subscriber registers a queue of its own");
+    let mut first = engine.subscribe().await.expect("the first subscriber claims the birth queue");
+    let mut second =
+        engine.subscribe().await.expect("a later subscriber registers a queue of its own");
 
     engine
         .send(Command::SendPrompt {
@@ -857,10 +757,7 @@ async fn a_second_subscriber_sees_the_same_events_the_first_does() {
 #[tokio::test]
 async fn every_event_of_a_turn_carries_the_engines_session_id() {
     let engine = engine();
-    let mut events = engine
-        .subscribe()
-        .await
-        .expect("the first subscriber claims the birth queue");
+    let mut events = engine.subscribe().await.expect("the first subscriber claims the birth queue");
 
     let session = engine.session_id();
     assert!(
@@ -900,10 +797,7 @@ async fn every_event_of_a_turn_carries_the_engines_session_id() {
 async fn two_conversations_on_one_engine_store_two_distinct_sessions() {
     let directory = tempfile::tempdir().expect("a temporary directory");
     let engine = Engine::persistent(
-        Arc::new(FakeProvider::new(
-            "one two",
-            std::time::Duration::from_millis(1),
-        )),
+        Arc::new(FakeProvider::new("one two", std::time::Duration::from_millis(1))),
         MODEL,
         Arc::new(Registry::new(Vec::new())),
         Permissions::default(),
@@ -922,25 +816,18 @@ async fn two_conversations_on_one_engine_store_two_distinct_sessions() {
         .await
         .expect("an idle engine accepts a prompt");
     let first_turn = drain(&mut events).await;
-    let first = engine
-        .current_session()
-        .expect("the first prompt created a session");
+    let first = engine.current_session().expect("the first prompt created a session");
     assert_eq!(
         engine.session_id(),
         first.id,
         "the stored row adopted the id the engine was already using"
     );
     assert!(
-        first_turn
-            .iter()
-            .all(|event| event.session_id() == &first.id),
+        first_turn.iter().all(|event| event.session_id() == &first.id),
         "the first conversation's events name its session: {first_turn:?}"
     );
 
-    engine
-        .send(Command::NewSession)
-        .await
-        .expect("an idle engine forgets its session");
+    engine.send(Command::NewSession).await.expect("an idle engine forgets its session");
     engine
         .send(Command::SendPrompt {
             text: "second".to_owned(),
@@ -952,15 +839,11 @@ async fn two_conversations_on_one_engine_store_two_distinct_sessions() {
         .await
         .expect("a fresh conversation accepts a prompt");
     let second_turn = drain(&mut events).await;
-    let second = engine
-        .current_session()
-        .expect("the second prompt created a session");
+    let second = engine.current_session().expect("the second prompt created a session");
 
     assert_ne!(first.id, second.id, "a new conversation is a new session");
     assert!(
-        second_turn
-            .iter()
-            .all(|event| event.session_id() == &second.id),
+        second_turn.iter().all(|event| event.session_id() == &second.id),
         "the second conversation's events name its own session: {second_turn:?}"
     );
 
@@ -988,10 +871,7 @@ async fn a_prompt_sent_mid_turn_is_refused() {
         })
         .await
         .expect("an idle engine accepts a prompt");
-    assert!(matches!(
-        events.next().await,
-        Some(Event::MessageStarted { .. })
-    ));
+    assert!(matches!(events.next().await, Some(Event::MessageStarted { .. })));
 
     assert!(matches!(
         engine
@@ -1027,19 +907,10 @@ async fn an_undo_during_a_turn_is_refused_rather_than_stopping_it() {
         })
         .await
         .expect("an idle engine accepts a prompt");
-    assert!(matches!(
-        events.next().await,
-        Some(Event::MessageStarted { .. })
-    ));
+    assert!(matches!(events.next().await, Some(Event::MessageStarted { .. })));
 
-    assert!(matches!(
-        engine.send(Command::Undo).await,
-        Err(EngineError::Busy)
-    ));
-    assert!(matches!(
-        engine.send(Command::Redo).await,
-        Err(EngineError::Busy)
-    ));
+    assert!(matches!(engine.send(Command::Undo).await, Err(EngineError::Busy)));
+    assert!(matches!(engine.send(Command::Redo).await, Err(EngineError::Busy)));
 }
 
 /// An engine that takes no snapshots says so rather than moving the
@@ -1063,10 +934,7 @@ async fn an_undo_without_snapshots_refuses_instead_of_half_happening() {
         .expect("an idle engine accepts a prompt");
     drain(&mut events).await;
 
-    assert!(matches!(
-        engine.send(Command::Undo).await,
-        Err(EngineError::NoSnapshots)
-    ));
+    assert!(matches!(engine.send(Command::Undo).await, Err(EngineError::NoSnapshots)));
     assert_eq!(
         engine.history.lock().await.len(),
         2,
@@ -1109,10 +977,7 @@ async fn cancelling_while_idle_does_nothing() {
     let engine = engine();
     let _events = engine.subscribe().await.expect("the first subscriber wins");
 
-    engine
-        .send(Command::CancelTurn)
-        .await
-        .expect("an idle cancel is a no-op");
+    engine.send(Command::CancelTurn).await.expect("an idle cancel is a no-op");
 }
 
 /// The context meter's half of the display-only invariant (bead `pwe`).
@@ -1129,9 +994,7 @@ fn readable_thinking_counts_nothing_toward_a_window_it_never_reaches() {
     assistant.parts.push(Part::text("Hello!"));
     let (said, results) = message_chars(&assistant);
 
-    assistant
-        .parts
-        .push(Part::reasoning_text("a".repeat(10_000)));
+    assistant.parts.push(Part::reasoning_text("a".repeat(10_000)));
     assert_eq!(
         message_chars(&assistant),
         (said, results),
@@ -1141,9 +1004,7 @@ fn readable_thinking_counts_nothing_toward_a_window_it_never_reaches() {
 
     // And the contrast that keeps this from passing by measuring nothing:
     // sealed state is handed back, so it counts.
-    assistant
-        .parts
-        .push(Part::reasoning("openai", "rs_1", Some("b".repeat(64))));
+    assistant.parts.push(Part::reasoning("openai", "rs_1", Some("b".repeat(64))));
     assert_eq!(
         message_chars(&assistant),
         (said + 64, results),
@@ -1319,18 +1180,9 @@ async fn files_that_went_stale_are_named_to_the_model_once() {
 
     let requests = seen.lock().expect("the request log is never poisoned");
     let first = last_user_text(requests.first().expect("the first turn asked"));
-    assert_eq!(
-        first.first(),
-        Some(&"first"),
-        "the user's own text comes first: {first:?}"
-    );
-    let notice = first
-        .get(1)
-        .expect("the turn after the change carries the notice");
-    assert!(
-        notice.starts_with(STALE_FILES) && notice.contains("notes.md"),
-        "got {notice:?}"
-    );
+    assert_eq!(first.first(), Some(&"first"), "the user's own text comes first: {first:?}");
+    let notice = first.get(1).expect("the turn after the change carries the notice");
+    assert!(notice.starts_with(STALE_FILES) && notice.contains("notes.md"), "got {notice:?}");
 
     assert_eq!(
         last_user_text(requests.get(1).expect("the second turn asked too")),
@@ -1357,9 +1209,7 @@ async fn a_passthrough_between_the_change_and_the_prompt_does_not_spend_the_noti
     condemn(&engine.files, &path);
 
     engine
-        .send(Command::RunShell {
-            command: "true".to_owned(),
-        })
+        .send(Command::RunShell { command: "true".to_owned() })
         .await
         .expect("an idle engine accepts a passthrough");
     drain(&mut events).await;
@@ -1377,16 +1227,10 @@ async fn a_passthrough_between_the_change_and_the_prompt_does_not_spend_the_noti
     drain(&mut events).await;
 
     let requests = seen.lock().expect("the request log is never poisoned");
-    assert_eq!(
-        requests.len(),
-        1,
-        "a passthrough asks the provider nothing, got {requests:?}"
-    );
+    assert_eq!(requests.len(), 1, "a passthrough asks the provider nothing, got {requests:?}");
     let carried = last_user_text(&requests[0]);
     assert!(
-        carried
-            .iter()
-            .any(|text| text.starts_with(STALE_FILES) && text.contains("notes.md")),
+        carried.iter().any(|text| text.starts_with(STALE_FILES) && text.contains("notes.md")),
         "the notice waited for the turn that could deliver it: {carried:?}"
     );
 }
@@ -1402,15 +1246,10 @@ async fn an_effort_on_an_uncataloged_provider_is_refused_naming_the_catalog() {
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     let refusal = engine
-        .send(Command::SwitchEffort {
-            effort: Some("max".to_owned()),
-        })
+        .send(Command::SwitchEffort { effort: Some("max".to_owned()) })
         .await
         .expect_err("the fake provider has no catalog rows");
-    assert!(
-        matches!(refusal, EngineError::UncatalogedEffort { .. }),
-        "got {refusal:?}"
-    );
+    assert!(matches!(refusal, EngineError::UncatalogedEffort { .. }), "got {refusal:?}");
     assert!(
         refusal.to_string().contains("not in the catalog"),
         "the refusal names the reason: {refusal}"
@@ -1422,10 +1261,7 @@ async fn an_effort_on_an_uncataloged_provider_is_refused_naming_the_catalog() {
         .await
         .expect("clearing needs no catalog: it asks for the state every session starts in");
     let event = events.next().await.expect("the adoption is announced");
-    assert!(
-        matches!(event, Event::EffortChanged { effort: None, .. }),
-        "got {event:?}"
-    );
+    assert!(matches!(event, Event::EffortChanged { effort: None, .. }), "got {event:?}");
 }
 
 // ---- D474: the `/plugin` Reload seam ----
@@ -1512,10 +1348,7 @@ fn a_member_engine_with_a_postbox_is_offered_send_message_and_leads_no_team() {
         "a member is offered the tool that addresses its team"
     );
     assert!(engine.teammates().is_none(), "and leads no team of its own");
-    assert!(
-        engine.teammate_dialogs().is_none(),
-        "so no dialog channel is opened for it"
-    );
+    assert!(engine.teammate_dialogs().is_none(), "so no dialog channel is opened for it");
 
     engine.replace_base_tools(Arc::new(Registry::with_builtins()));
 
@@ -1532,13 +1365,9 @@ fn a_member_engine_with_a_postbox_is_offered_send_message_and_leads_no_team() {
 fn a_solo_postbox_is_offered_send_message_with_the_teamless_description() {
     let engine = engine().with_solo_postbox();
     let tools = engine.tools();
-    let tool = tools
-        .get(send_message::ID)
-        .expect("a solo session is offered it");
+    let tool = tools.get(send_message::ID).expect("a solo session is offered it");
     assert!(
-        !tool
-            .description()
-            .contains("Teammates this session can address"),
+        !tool.description().contains("Teammates this session can address"),
         "no roster is claimed, unlike a team of one: {}",
         tool.description()
     );
@@ -1576,22 +1405,14 @@ fn teamless(
     let mut permissions = Permissions::default();
     permissions.set_baseline(rules);
 
-    Engine::new(
-        provider,
-        MODEL,
-        Arc::new(Registry::new(Vec::new())),
-        permissions,
-    )
-    .with_solo_postbox()
-    .with_teamless_send(posture)
+    Engine::new(provider, MODEL, Arc::new(Registry::new(Vec::new())), permissions)
+        .with_solo_postbox()
+        .with_teamless_send(posture)
 }
 
 /// A `send_message` call to a name nobody answers to, one turn's worth.
 fn send_call(to: &str, message: &str) -> Vec<ProviderEvent> {
-    ganja_testkit::tool_call(
-        send_message::ID,
-        serde_json::json!({ "to": to, "message": message }),
-    )
+    ganja_testkit::tool_call(send_message::ID, serde_json::json!({ "to": to, "message": message }))
 }
 
 async fn prompt(engine: &Engine, text: &str) {
@@ -1635,9 +1456,7 @@ async fn a_teamless_send_is_unasked_by_default() {
     let seen = drain(&mut events).await;
 
     assert!(
-        !seen
-            .iter()
-            .any(|event| matches!(event, Event::PermissionRequested { .. })),
+        !seen.iter().any(|event| matches!(event, Event::PermissionRequested { .. })),
         "a teamless session's default send is unasked: {seen:?}"
     );
 }
@@ -1662,10 +1481,7 @@ async fn teamless_ask_raises_a_dialog_and_a_stored_always_answer_silences_the_ne
     prompt(&engine, "one").await;
     let waiting = until_requested(&mut events).await;
     engine
-        .send(Command::ReplyPermission {
-            id: waiting,
-            reply: PermissionReply::Always,
-        })
+        .send(Command::ReplyPermission { id: waiting, reply: PermissionReply::Always })
         .await
         .expect("the dialog this turn raised is answerable");
     drain(&mut events).await;
@@ -1673,9 +1489,7 @@ async fn teamless_ask_raises_a_dialog_and_a_stored_always_answer_silences_the_ne
     prompt(&engine, "two").await;
     let second = drain(&mut events).await;
     assert!(
-        !second
-            .iter()
-            .any(|event| matches!(event, Event::PermissionRequested { .. })),
+        !second.iter().any(|event| matches!(event, Event::PermissionRequested { .. })),
         "a stored always answer outranks the handed-in default: {second:?}"
     );
 }
@@ -1699,9 +1513,7 @@ async fn a_deny_rule_outranks_the_teamless_ask_default() {
     let seen = drain(&mut events).await;
 
     assert!(
-        !seen
-            .iter()
-            .any(|event| matches!(event, Event::PermissionRequested { .. })),
+        !seen.iter().any(|event| matches!(event, Event::PermissionRequested { .. })),
         "a rule already answered this; nobody is asked: {seen:?}"
     );
 }
@@ -1730,10 +1542,7 @@ async fn a_team_installed_mid_session_reverts_to_unasked_and_retiring_it_reverts
     prompt(&engine, "one").await;
     let waiting = until_requested(&mut events).await;
     engine
-        .send(Command::ReplyPermission {
-            id: waiting,
-            reply: PermissionReply::Once,
-        })
+        .send(Command::ReplyPermission { id: waiting, reply: PermissionReply::Once })
         .await
         .expect("the dialog this turn raised is answerable");
     drain(&mut events).await;
@@ -1753,9 +1562,7 @@ async fn a_team_installed_mid_session_reverts_to_unasked_and_retiring_it_reverts
     prompt(&engine, "two").await;
     let second = drain(&mut events).await;
     assert!(
-        !second
-            .iter()
-            .any(|event| matches!(event, Event::PermissionRequested { .. })),
+        !second.iter().any(|event| matches!(event, Event::PermissionRequested { .. })),
         "in-team D498 stays unasked regardless of the key: {second:?}"
     );
 
@@ -1767,20 +1574,14 @@ async fn a_team_installed_mid_session_reverts_to_unasked_and_retiring_it_reverts
     prompt(&engine, "three").await;
     let waiting = until_requested(&mut events).await;
     engine
-        .send(Command::ReplyPermission {
-            id: waiting,
-            reply: PermissionReply::Once,
-        })
+        .send(Command::ReplyPermission { id: waiting, reply: PermissionReply::Once })
         .await
         .expect("the dialog this turn raised is answerable");
     let third = drain(&mut events).await;
     assert!(
         !third.iter().any(|event| matches!(
             event,
-            Event::PermissionReplied {
-                reply: PermissionReply::Reject,
-                ..
-            }
+            Event::PermissionReplied { reply: PermissionReply::Reject, .. }
         )),
         "the send was not rejected: {third:?}"
     );
@@ -1794,16 +1595,9 @@ async fn new_session_clears_the_identity_pin_map() {
     engine.identity.pin("backend", "ses-far", "0198c1a2");
     assert!(engine.identity.pinned("backend").is_some());
 
-    engine
-        .new_session()
-        .await
-        .expect("an idle engine accepts a new session");
+    engine.new_session().await.expect("an idle engine accepts a new session");
 
-    assert_eq!(
-        engine.identity.pinned("backend"),
-        None,
-        "a new conversation has addressed nobody"
-    );
+    assert_eq!(engine.identity.pinned("backend"), None, "a new conversation has addressed nobody");
 }
 
 /// An engine with no store has no honest way to run an in-process
@@ -1887,21 +1681,17 @@ fn replacing_the_hooks_installs_for_the_next_fire_and_none_uninstalls() {
         "Stop".to_owned(),
         vec![crate::config::HookMatcher {
             matcher: None,
-            hooks: vec![crate::config::HookHandler::Command(
-                crate::config::HookCommand {
-                    command: "true".to_owned(),
-                    timeout: None,
-                },
-            )],
+            hooks: vec![crate::config::HookHandler::Command(crate::config::HookCommand {
+                command: "true".to_owned(),
+                timeout: None,
+            })],
         }],
     )]);
     let hooks = crate::hook::Hooks::new(&table, &PathBuf::from("."))
         .expect("one Stop handler is a hooks table");
     engine.replace_hooks(Some(hooks));
     assert!(
-        engine
-            .hooks()
-            .is_some_and(|hooks| hooks.fires(crate::hook::HookEvent::Stop)),
+        engine.hooks().is_some_and(|hooks| hooks.fires(crate::hook::HookEvent::Stop)),
         "the swapped-in table is the one the next fire reads"
     );
 
@@ -1938,11 +1728,7 @@ fn replacing_the_environment_recomposes_the_suffix_immediately() {
 #[test]
 fn the_peer_address_seam_sets_and_clears_both_readings_at_once() {
     let engine = engine();
-    assert_eq!(
-        engine.peer_address(),
-        None,
-        "an unbound session has neither"
-    );
+    assert_eq!(engine.peer_address(), None, "an unbound session has neither");
 
     let socket = std::path::Path::new("/tmp/ganja-501/0198c1a2.sock");
     engine.set_peer_address(Some(socket));
@@ -1953,11 +1739,7 @@ fn the_peer_address_seam_sets_and_clears_both_readings_at_once() {
     );
 
     engine.set_peer_address(None);
-    assert_eq!(
-        engine.peer_address(),
-        None,
-        "and one call takes both away again"
-    );
+    assert_eq!(engine.peer_address(), None, "and one call takes both away again");
 }
 
 /// A path with no readable stem records **nothing** rather than half of the
@@ -1986,10 +1768,8 @@ fn the_peer_facts_read_the_cells_rather_than_a_snapshot() {
     assert_eq!(facts.reply_to(), None);
     assert!(facts.hop_chain().is_empty());
 
-    *engine
-        .permission_mode
-        .lock()
-        .expect("the permission mode is never poisoned") = crate::protocol::PermissionMode::Bypass;
+    *engine.permission_mode.lock().expect("the permission mode is never poisoned") =
+        crate::protocol::PermissionMode::Bypass;
     let socket = std::path::Path::new("/tmp/ganja-501/0198c1a2.sock");
     engine.set_peer_address(Some(socket));
 
@@ -2013,10 +1793,8 @@ fn the_sender_cap_drops_the_oldest_entries_first() {
 
     let engine = engine();
     let inherited: Vec<String> = (0..40).map(|index| format!("0198c{index:03}")).collect();
-    *engine
-        .inbound_chain
-        .lock()
-        .expect("the inbound chain cell is never poisoned") = inherited.clone();
+    *engine.inbound_chain.lock().expect("the inbound chain cell is never poisoned") =
+        inherited.clone();
     engine.set_peer_address(Some(std::path::Path::new("/tmp/ganja-501/0198ffff.sock")));
 
     let carried = engine.peer_facts().hop_chain();

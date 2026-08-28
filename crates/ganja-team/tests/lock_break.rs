@@ -25,16 +25,12 @@
 
 mod support;
 
-use std::{
-    fs::{self, File},
-    path::Path,
-    time::{Duration, Instant, SystemTime},
-};
+use std::fs::{self, File};
+use std::path::Path;
+use std::time::{Duration, Instant, SystemTime};
 
-use ganja_team::{
-    lock::{self, LockError},
-    mailbox::{self, MailboxError},
-};
+use ganja_team::lock::{self, LockError};
+use ganja_team::mailbox::{self, MailboxError};
 
 /// What a fully contended acquire sleeps through: 5 + 10 + 20 + 40 + 80 +
 /// 100 × 5 ms — **less three nanoseconds**.
@@ -64,10 +60,7 @@ fn a_lock_directory_older_than_ten_seconds_is_broken_and_the_write_proceeds() {
     mailbox::write(&inbox, support::message("second")).expect("a stale lock does not stop a write");
     let waited = started.elapsed();
 
-    assert!(
-        waited < LADDER,
-        "a stale lock is broken, not waited out: {waited:?}",
-    );
+    assert!(waited < LADDER, "a stale lock is broken, not waited out: {waited:?}",);
     let inbox_contents = mailbox::read(&inbox).expect("the inbox reads");
     assert_eq!(inbox_contents.valid.len(), 2, "the write landed");
     assert!(!held.exists(), "the write released the lock it took");
@@ -91,14 +84,8 @@ fn a_fresh_lock_directory_held_by_a_peer_is_waited_for_not_broken() {
         mailbox::write(&inbox, support::message("second")).expect_err("a held inbox refuses");
     let waited = started.elapsed();
 
-    assert!(
-        waited >= LADDER,
-        "the whole ladder ran before the refusal: {waited:?}",
-    );
-    assert!(
-        matches!(refusal, MailboxError::Lock(LockError::Held { .. })),
-        "{refusal:?}",
-    );
+    assert!(waited >= LADDER, "the whole ladder ran before the refusal: {waited:?}",);
+    assert!(matches!(refusal, MailboxError::Lock(LockError::Held { .. })), "{refusal:?}",);
     // The sentence a wedged team is diagnosed by, so it is asserted rather than
     // left to drift: it names the lock and how many retries went into it.
     let said = refusal.to_string();
@@ -141,10 +128,7 @@ fn the_lock_is_a_directory_never_a_file() {
         "the two spellings are the same lock",
     );
     assert!(
-        fs::read_dir(&held)
-            .expect("a lock is a readable directory")
-            .next()
-            .is_none(),
+        fs::read_dir(&held).expect("a lock is a readable directory").next().is_none(),
         "and an empty one: anything inside would make a peer's rmdir fail ENOTEMPTY",
     );
     drop(hold);
@@ -161,10 +145,7 @@ fn the_lock_is_a_directory_never_a_file() {
 
     let refusal =
         mailbox::write(&contested, support::message("second")).expect_err("a fresh file holds");
-    assert!(
-        matches!(refusal, MailboxError::Lock(LockError::Held { .. })),
-        "{refusal:?}",
-    );
+    assert!(matches!(refusal, MailboxError::Lock(LockError::Held { .. })), "{refusal:?}",);
 
     // Stale, it cannot be broken: `remove_dir` on a file is `ENOTDIR`, which is
     // what proper-lockfile's own cleanup would hit too — its `rmdir` fails and
@@ -173,20 +154,14 @@ fn the_lock_is_a_directory_never_a_file() {
     backdate(&file, Duration::from_secs(30));
     let refusal =
         mailbox::write(&contested, support::message("second")).expect_err("a file is not a lock");
-    assert!(
-        matches!(refusal, MailboxError::Lock(LockError::NotADirectory { .. })),
-        "{refusal:?}",
-    );
+    assert!(matches!(refusal, MailboxError::Lock(LockError::NotADirectory { .. })), "{refusal:?}",);
     assert_eq!(
         fs::read_to_string(&file).expect("the file is readable"),
         "1234\n",
         "what was not a lock was not touched",
     );
     assert_eq!(
-        mailbox::read(&contested)
-            .expect("the inbox reads")
-            .valid
-            .len(),
+        mailbox::read(&contested).expect("the inbox reads").valid.len(),
         1,
         "and neither was the inbox",
     );
@@ -207,7 +182,5 @@ fn the_lock_is_a_directory_never_a_file() {
 #[cfg(unix)]
 fn backdate(path: &Path, by: Duration) {
     let handle = File::open(path).expect("a lock is openable");
-    handle
-        .set_modified(SystemTime::now() - by)
-        .expect("a lock's modification time is settable");
+    handle.set_modified(SystemTime::now() - by).expect("a lock's modification time is settable");
 }

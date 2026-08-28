@@ -25,13 +25,11 @@
 
 use std::sync::Arc;
 
-use ganja_core::{
-    Engine,
-    permission::Permissions,
-    protocol::{Command, Event, FinishReason, PartBody},
-    provider::ProviderEvent,
-    tool::Registry,
-};
+use ganja_core::Engine;
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{Command, Event, FinishReason, PartBody};
+use ganja_core::provider::ProviderEvent;
+use ganja_core::tool::Registry;
 use ganja_testkit::{RecorderTool, ScriptedProvider, drain};
 use serde_json::json;
 
@@ -106,9 +104,7 @@ async fn a_provider_run_tool_is_recorded_rendered_and_never_executed() {
 
     // 3. Nobody was asked about it.
     assert!(
-        !seen
-            .iter()
-            .any(|event| matches!(event, Event::PermissionRequested { .. })),
+        !seen.iter().any(|event| matches!(event, Event::PermissionRequested { .. })),
         "a dialog about another machine's work has no honest answer: {seen:?}"
     );
 

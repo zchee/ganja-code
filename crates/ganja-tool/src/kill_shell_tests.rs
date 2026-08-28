@@ -3,10 +3,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use super::{ID, KillShellTool};
-use crate::{
-    Tool as _, ToolCtx, ToolError,
-    job::{JobRead, JobStatus, Jobs, JobsError, State},
-};
+use crate::job::{JobRead, JobStatus, Jobs, JobsError, State};
+use crate::{Tool as _, ToolCtx, ToolError};
 
 /// A [`Jobs`] whose `kill` answer is scripted, so this module's tests
 /// exercise the tool's own shaping without a real process anywhere.
@@ -55,9 +53,8 @@ async fn a_call_with_no_jobs_handle_is_refused_politely() {
 
 #[tokio::test]
 async fn an_unknown_id_is_refused_by_name() {
-    let jobs: Arc<dyn Jobs> = Arc::new(Scripted {
-        answer: Err(JobsError::NotFound("bash_9".to_owned())),
-    });
+    let jobs: Arc<dyn Jobs> =
+        Arc::new(Scripted { answer: Err(JobsError::NotFound("bash_9".to_owned())) });
 
     let refused = KillShellTool
         .run(serde_json::json!({ "bash_id": "bash_9" }), &ctx(Some(jobs)))
@@ -106,11 +103,7 @@ async fn an_already_exited_job_reports_that_rather_than_erroring() {
         .await
         .expect("an already-terminal job is still answered, not refused");
 
-    assert!(
-        out.output.contains("exited with code 0"),
-        "got {:?}",
-        out.output
-    );
+    assert!(out.output.contains("exited with code 0"), "got {:?}", out.output);
 }
 
 #[test]

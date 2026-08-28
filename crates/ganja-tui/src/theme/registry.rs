@@ -16,16 +16,12 @@
 //!   Upstream's walk lets a directory *above* the project override the one
 //!   inside it, which its own documentation contradicts.
 
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 
-use super::{
-    Mode, Palette, Theme, ThemeJson,
-    selection::{self, SelectionError},
-};
+use super::selection::{self, SelectionError};
+use super::{Mode, Palette, Theme, ThemeJson};
 
 /// The theme a run starts on, and what an unknown name falls back to.
 ///
@@ -47,14 +43,8 @@ const EXTENSION: &str = "json";
 /// `packages/tui/src/theme/assets/`. Each is enumerated in
 /// `THIRD_PARTY_NOTICES.md`.
 const BUILTIN_FILES: [(&str, &str); 4] = [
-    (
-        DEFAULT_THEME,
-        include_str!("../../assets/themes/opencode.json"),
-    ),
-    (
-        "tokyonight",
-        include_str!("../../assets/themes/tokyonight.json"),
-    ),
+    (DEFAULT_THEME, include_str!("../../assets/themes/opencode.json")),
+    ("tokyonight", include_str!("../../assets/themes/tokyonight.json")),
     ("gruvbox", include_str!("../../assets/themes/gruvbox.json")),
     ("aura", include_str!("../../assets/themes/aura.json")),
 ];
@@ -81,10 +71,7 @@ impl Entry {
     fn parse(text: &str) -> Result<Self, super::ThemeError> {
         let file = ThemeJson::parse(text)?;
 
-        Ok(Self::Json {
-            dark: file.resolve(Mode::Dark)?,
-            light: file.resolve(Mode::Light)?,
-        })
+        Ok(Self::Json { dark: file.resolve(Mode::Dark)?, light: file.resolve(Mode::Light)? })
     }
 
     fn theme(&self, name: &str, mode: Mode, revision: u64) -> Theme {
@@ -193,10 +180,7 @@ impl Themes {
         let mut files: Vec<PathBuf> = listing
             .filter_map(Result::ok)
             .map(|entry| entry.path())
-            .filter(|path| {
-                path.extension()
-                    .is_some_and(|extension| extension == EXTENSION)
-            })
+            .filter(|path| path.extension().is_some_and(|extension| extension == EXTENSION))
             .collect();
         files.sort();
 
@@ -251,9 +235,7 @@ impl Themes {
     pub fn names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.entries.keys().cloned().collect();
         names.sort_by(|left, right| {
-            left.to_lowercase()
-                .cmp(&right.to_lowercase())
-                .then_with(|| left.cmp(right))
+            left.to_lowercase().cmp(&right.to_lowercase()).then_with(|| left.cmp(right))
         });
 
         names

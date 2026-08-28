@@ -15,11 +15,9 @@
 //! engine's own message as the body, because the engine already says what went
 //! wrong better than a translation would.
 
-use axum::{
-    Json,
-    http::StatusCode,
-    response::{IntoResponse, Response},
-};
+use axum::Json;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use ganja_core::EngineError;
 
 /// A refusal on its way to the wire.

@@ -2,12 +2,10 @@
 //! informational routes answer from, and the pending-permission map the
 //! tracker keeps current.
 
-use std::{
-    collections::BTreeMap,
-    path::PathBuf,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use ganja_core::{Config, Engine, Storage};
 use ganja_protocol::{PermissionId, SessionId};
@@ -80,20 +78,12 @@ impl Pending {
     }
 
     pub(crate) fn remove(&self, id: &PermissionId) {
-        self.0
-            .lock()
-            .expect("the pending map is never poisoned")
-            .remove(id.as_str());
+        self.0.lock().expect("the pending map is never poisoned").remove(id.as_str());
     }
 
     /// Every request still waiting, oldest first.
     pub(crate) fn list(&self) -> Vec<PendingPermission> {
-        self.0
-            .lock()
-            .expect("the pending map is never poisoned")
-            .values()
-            .cloned()
-            .collect()
+        self.0.lock().expect("the pending map is never poisoned").values().cloned().collect()
     }
 }
 
@@ -122,9 +112,7 @@ impl ServedDirectory {
             return true;
         }
 
-        asked
-            .canonicalize()
-            .is_ok_and(|resolved| resolved == self.canonical)
+        asked.canonicalize().is_ok_and(|resolved| resolved == self.canonical)
     }
 
     pub(crate) fn given(&self) -> &PathBuf {

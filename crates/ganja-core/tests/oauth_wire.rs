@@ -33,24 +33,21 @@
 //! One test, one binary, on purpose: it mutates `XDG_DATA_HOME`, and a plain
 //! `cargo test` runs the tests inside a binary on parallel threads.
 
-use std::{
-    collections::HashMap,
-    env,
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::collections::HashMap;
+use std::env;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use futures::StreamExt as _;
-use ganja_core::{
-    auth::{self, OauthCredential, grok::Refresh},
-    protocol::Message,
-    provider::{ChatRequest, GrokProvider, Provider as _, ProviderError, ProviderEvent},
+use ganja_core::auth::grok::Refresh;
+use ganja_core::auth::{self, OauthCredential};
+use ganja_core::protocol::Message;
+use ganja_core::provider::{
+    ChatRequest, GrokProvider, Provider as _, ProviderError, ProviderEvent,
 };
 use secrecy::{ExposeSecret as _, SecretString};
-use tokio::{
-    io::{AsyncReadExt as _, AsyncWriteExt as _},
-    net::TcpListener,
-};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 /// Where the chat request goes, under the endpoint's base URL.
@@ -109,19 +106,14 @@ impl Recorded {
     /// Whether the request carried `name: value`, compared case-insensitively
     /// the way a header name is.
     fn has_header(&self, name: &str, value: &str) -> bool {
-        self.head.lines().any(|line| {
-            line.trim()
-                .eq_ignore_ascii_case(&format!("{name}: {value}"))
-        })
+        self.head.lines().any(|line| line.trim().eq_ignore_ascii_case(&format!("{name}: {value}")))
     }
 
     /// Whether the request carried `name` at all, whatever its value.
     fn has_header_named(&self, name: &str) -> bool {
         let prefix = format!("{name}:");
 
-        self.head
-            .lines()
-            .any(|line| line.trim().to_ascii_lowercase().starts_with(&prefix))
+        self.head.lines().any(|line| line.trim().to_ascii_lowercase().starts_with(&prefix))
     }
 
     /// The form fields a token request presented.
@@ -202,46 +194,27 @@ struct Endpoint {
 impl Endpoint {
     /// Every request served so far, oldest first.
     fn seen(&self) -> Vec<Recorded> {
-        self.state
-            .seen
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+        self.state.seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
     }
 
     /// How many requests reached `path`.
     fn count(&self, path: &str) -> usize {
-        self.seen()
-            .iter()
-            .filter(|request| request.path() == path)
-            .count()
+        self.seen().iter().filter(|request| request.path() == path).count()
     }
 
     /// Forgets what has been served, so a phase counts only its own traffic.
     fn forget(&self) {
-        self.state
-            .seen
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clear();
+        self.state.seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clear();
     }
 
     /// Sets what the token endpoint answers with from now on.
     fn answers_renewals_with(&self, reply: Reply) {
-        *self
-            .state
-            .token
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = reply;
+        *self.state.token.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = reply;
     }
 
     /// Sets what the chat endpoint answers with from now on.
     fn answers_turns_with(&self, reply: Reply) {
-        *self
-            .state
-            .chat
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = reply;
+        *self.state.chat.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = reply;
     }
 }
 
@@ -252,12 +225,8 @@ impl Endpoint {
 /// phase deliberately has eight requests in the air at once and a server that
 /// served them one at a time would be proving something about the server.
 async fn serve() -> Endpoint {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("loopback is bindable");
-    let address = listener
-        .local_addr()
-        .expect("a bound socket has an address");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("loopback is bindable");
+    let address = listener.local_addr().expect("a bound socket has an address");
     let state = Arc::new(State {
         seen: Mutex::new(Vec::new()),
         chat: Mutex::new(Reply::ok(
@@ -286,21 +255,10 @@ async fn serve() -> Endpoint {
                     return;
                 };
                 let reply = {
-                    let chosen = if request.path() == TOKEN {
-                        &state.token
-                    } else {
-                        &state.chat
-                    };
-                    chosen
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .clone()
+                    let chosen = if request.path() == TOKEN { &state.token } else { &state.chat };
+                    chosen.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
                 };
-                state
-                    .seen
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .push(request);
+                state.seen.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(request);
 
                 if !reply.delay.is_zero() {
                     tokio::time::sleep(reply.delay).await;
@@ -338,9 +296,7 @@ async fn read_request(socket: &mut tokio::net::TcpStream) -> Option<Recorded> {
         .lines()
         .find_map(|line| {
             let (name, value) = line.split_once(':')?;
-            name.trim()
-                .eq_ignore_ascii_case("content-length")
-                .then(|| value.trim().parse().ok())?
+            name.trim().eq_ignore_ascii_case("content-length").then(|| value.trim().parse().ok())?
         })
         .unwrap_or(0);
     let mut body = vec![0_u8; length];
@@ -348,10 +304,7 @@ async fn read_request(socket: &mut tokio::net::TcpStream) -> Option<Recorded> {
         return None;
     }
 
-    Some(Recorded {
-        head,
-        body: String::from_utf8_lossy(&body).into_owned(),
-    })
+    Some(Recorded { head, body: String::from_utf8_lossy(&body).into_owned() })
 }
 
 /// Puts `credential` in the store as grok's, replacing whatever was there.
@@ -424,16 +377,10 @@ async fn an_oauth_credential_is_resolved_afresh_for_every_request_and_renewed_on
     let streamed = turn(&provider).await;
 
     assert!(
-        streamed
-            .iter()
-            .any(|event| matches!(event, ProviderEvent::TextDelta(_))),
+        streamed.iter().any(|event| matches!(event, ProviderEvent::TextDelta(_))),
         "the turn should have streamed a reply: {streamed:?}"
     );
-    assert_eq!(
-        endpoint.count(TOKEN),
-        0,
-        "a credential that is not due must not be renewed"
-    );
+    assert_eq!(endpoint.count(TOKEN), 0, "a credential that is not due must not be renewed");
     let sent = endpoint.seen();
     let [chat] = sent.as_slice() else {
         panic!("one turn is one request, got {}", sent.len());
@@ -625,10 +572,7 @@ async fn an_oauth_credential_is_resolved_afresh_for_every_request_and_renewed_on
         panic!("a 401 is not answerable");
     };
 
-    assert!(
-        matches!(rejected, ProviderError::Status { status: 401, .. }),
-        "{rejected:?}"
-    );
+    assert!(matches!(rejected, ProviderError::Status { status: 401, .. }), "{rejected:?}");
     assert!(
         format!("{rejected}").contains("[redacted]"),
         "the quoted token should be masked rather than dropped: {rejected}"
@@ -639,17 +583,8 @@ async fn an_oauth_credential_is_resolved_afresh_for_every_request_and_renewed_on
     let rendered = format!(
         "{provider:?} {unreachable:?} {refused} {refused:?} {rejected} {rejected:?} {unavailable} {unavailable:?}"
     );
-    for secret in [
-        LIVE_ACCESS,
-        REFRESH,
-        RENEWED_ACCESS,
-        ROTATED,
-        ETERNAL_ACCESS,
-    ] {
-        assert!(
-            !rendered.contains(secret),
-            "a token reached a rendering: {rendered}"
-        );
+    for secret in [LIVE_ACCESS, REFRESH, RENEWED_ACCESS, ROTATED, ETERNAL_ACCESS] {
+        assert!(!rendered.contains(secret), "a token reached a rendering: {rendered}");
     }
 }
 
@@ -658,12 +593,8 @@ async fn an_oauth_credential_is_resolved_afresh_for_every_request_and_renewed_on
 /// Bound and released rather than guessed, so the port is one the kernel just
 /// confirmed was free instead of one that might belong to something else.
 async fn dead_endpoint() -> String {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("loopback is bindable");
-    let address = listener
-        .local_addr()
-        .expect("a bound socket has an address");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("loopback is bindable");
+    let address = listener.local_addr().expect("a bound socket has an address");
     drop(listener);
 
     format!("http://{address}{TOKEN}")

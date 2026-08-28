@@ -1,7 +1,5 @@
-use std::{
-    ffi::{OsStr, OsString},
-    sync::Arc,
-};
+use std::ffi::{OsStr, OsString};
+use std::sync::Arc;
 
 use ganja_protocol::team::MemberBackend;
 
@@ -9,16 +7,13 @@ use super::{
     HEARD_BACK, LAUNCH_TAIL, ShimTui, TuiDriver, composer_shown, environment_names, last_words,
     launch_line, launch_needle, pane_line, paste_body, preamble, spawn_lines,
 };
-use crate::teammate::{
-    TeammateBackend as _,
-    agy::{self, Agy},
-    codex::{self, Codex},
-    grok::{self, Grok},
-    pane::CARRIED_ENV,
-    preamble::Names,
-    readback,
-    shim::{self, Driver as _},
-};
+use crate::teammate::agy::{self, Agy};
+use crate::teammate::codex::{self, Codex};
+use crate::teammate::grok::{self, Grok};
+use crate::teammate::pane::CARRIED_ENV;
+use crate::teammate::preamble::Names;
+use crate::teammate::shim::{self, Driver as _};
+use crate::teammate::{TeammateBackend as _, readback};
 
 /// **D515.** The cursor a poll advances is the cursor the next poll
 /// starts from: what was carried once is never carried again, and what a
@@ -41,11 +36,7 @@ async fn a_poll_starts_where_the_last_one_ended_instead_of_repeating_it() {
     };
     std::fs::write(
         &path,
-        format!(
-            "{}{}",
-            record("mapping the workspace"),
-            record("probes failed")
-        ),
+        format!("{}{}", record("mapping the workspace"), record("probes failed")),
     )
     .expect("the rollout is writable");
 
@@ -55,24 +46,16 @@ async fn a_poll_starts_where_the_last_one_ended_instead_of_repeating_it() {
         .expect("the first poll reads");
     assert_eq!(first, vec!["mapping the workspace", "probes failed"]);
 
-    let (second, cursor) = super::carried(reader, path.clone(), cursor)
-        .await
-        .expect("the second poll reads");
-    assert_eq!(
-        second,
-        Vec::<String>::new(),
-        "nothing new means nothing carried"
-    );
+    let (second, cursor) =
+        super::carried(reader, path.clone(), cursor).await.expect("the second poll reads");
+    assert_eq!(second, Vec::<String>::new(), "nothing new means nothing carried");
 
-    let mut file = std::fs::OpenOptions::new()
-        .append(true)
-        .open(&path)
-        .expect("the rollout reopens");
+    let mut file =
+        std::fs::OpenOptions::new().append(true).open(&path).expect("the rollout reopens");
     std::io::Write::write_all(&mut file, record("the grounded report").as_bytes())
         .expect("the rollout appends");
-    let (third, _) = super::carried(reader, path.clone(), cursor)
-        .await
-        .expect("the third poll reads");
+    let (third, _) =
+        super::carried(reader, path.clone(), cursor).await.expect("the third poll reads");
     assert_eq!(third, vec!["the grounded report"]);
 }
 
@@ -81,11 +64,7 @@ async fn a_poll_starts_where_the_last_one_ended_instead_of_repeating_it() {
 /// CLI's own name, and the task is what the message ends with (**D514**).
 #[test]
 fn the_pane_preamble_says_the_cli_cannot_answer_and_ends_with_the_task() {
-    let who = Names {
-        name: "w1",
-        team: "session-abcd1234",
-        lead: "team-lead",
-    };
+    let who = Names { name: "w1", team: "session-abcd1234", lead: "team-lead" };
     for (backend, cli) in [
         (MemberBackend::Codex, "codex"),
         (MemberBackend::Agy, "agy"),
@@ -113,10 +92,7 @@ fn the_pane_preamble_says_the_cli_cannot_answer_and_ends_with_the_task() {
             ),
             "{cli}: and it is the one clause the headless door uses too: {text}"
         );
-        assert!(
-            text.ends_with("Your task:\n\nhold the fort"),
-            "{cli}: {text}"
-        );
+        assert!(text.ends_with("Your task:\n\nhold the fort"), "{cli}: {text}");
     }
 }
 
@@ -152,17 +128,11 @@ fn the_codex_launch_line_round_trips_its_toml_values_through_the_shell() {
         "exec codex -c 'sandbox_mode=\"read-only\"' -c 'approval_policy=\"never\"' || exit"
     );
 
-    let exec = line
-        .strip_suffix(LAUNCH_TAIL)
-        .expect("the line closes on the tail");
+    let exec = line.strip_suffix(LAUNCH_TAIL).expect("the line closes on the tail");
     let words = shlex::split(exec).expect("the line is a shell line");
     let mut expected = vec!["exec".to_owned(), "codex".to_owned()];
-    expected.extend(
-        Codex::new()
-            .tui_argv()
-            .into_iter()
-            .map(|word| word.into_string().expect("ascii")),
-    );
+    expected
+        .extend(Codex::new().tui_argv().into_iter().map(|word| word.into_string().expect("ascii")));
     assert_eq!(words, expected);
 }
 
@@ -171,24 +141,14 @@ fn the_codex_launch_line_round_trips_its_toml_values_through_the_shell() {
 /// driver's own words between — no prompt, no identity flag.
 #[test]
 fn every_drivers_launch_line_is_exec_the_binary_and_its_floors() {
-    let drivers: [(&dyn TuiDriver, &str); 3] = [
-        (&Codex::new(), codex::BINARY),
-        (&Grok::new(), grok::BINARY),
-        (&Agy::new(), agy::BINARY),
-    ];
+    let drivers: [(&dyn TuiDriver, &str); 3] =
+        [(&Codex::new(), codex::BINARY), (&Grok::new(), grok::BINARY), (&Agy::new(), agy::BINARY)];
     for (driver, binary) in drivers {
-        let line = launch_line(OsStr::new(binary), driver)
-            .expect("no NUL")
-            .into_string()
-            .expect("ascii");
+        let line =
+            launch_line(OsStr::new(binary), driver).expect("no NUL").into_string().expect("ascii");
         assert!(line.starts_with(&format!("exec {binary} ")), "{line}");
         assert!(line.ends_with(LAUNCH_TAIL), "{line}");
-        for forbidden in [
-            "--agent-id",
-            "--parent-session-id",
-            "--prompt",
-            "exec resume",
-        ] {
+        for forbidden in ["--agent-id", "--parent-session-id", "--prompt", "exec resume"] {
             assert!(!line.contains(forbidden), "{line} carries {forbidden}");
         }
     }
@@ -211,24 +171,15 @@ fn a_marker_on_or_above_the_launch_row_is_the_shells_and_only_one_below_it_count
     assert!(!composer_shown(&typed, needle, "❯", true));
     // A glyph on a row above the launch row — a taller prompt — is the
     // shell's too.
-    let above = format!(
-        "❯ ~\n$ {}\n",
-        launch_row
-            .strip_prefix("❯ ")
-            .expect("the row opens on the glyph")
-    );
+    let above =
+        format!("❯ ~\n$ {}\n", launch_row.strip_prefix("❯ ").expect("the row opens on the glyph"));
     assert!(!composer_shown(&above, needle, "❯", true));
     // The CLI drawing under the launch row is the composer.
     let drawn = format!("{typed}\n  main sandbox:read-only ~/rust\n\n❯ \n");
     assert!(composer_shown(&drawn, needle, "❯", true));
     assert!(composer_shown(&drawn, needle, "❯", false));
     // And a marker nowhere is no composer.
-    assert!(!composer_shown(
-        &format!("{typed}\n  starting\n"),
-        needle,
-        "❯",
-        true
-    ));
+    assert!(!composer_shown(&format!("{typed}\n  starting\n"), needle, "❯", true));
 }
 
 /// A screen with no launch row on it is the CLI's cleared screen or the
@@ -276,9 +227,8 @@ fn the_pane_environment_is_the_carried_list_then_the_admitted_additions() {
     assert_eq!(&filtered[CARRIED_ENV.len()..], ["CODEX_HOME"]);
 
     assert_eq!(environment_names(&[]), CARRIED_ENV.to_vec());
-    for name in environment_names(agy.additions())
-        .into_iter()
-        .chain(environment_names(grok.additions()))
+    for name in
+        environment_names(agy.additions()).into_iter().chain(environment_names(grok.additions()))
     {
         assert!(
             !name.contains("KEY") && !name.contains("PASSWORD") && !name.contains("TOKEN"),
@@ -425,11 +375,7 @@ const GROK_TUI_PROBE: &str = include_str!("../../tests/fixtures/grok-tui-probe.t
 /// one, and no other surface does (**D512**).
 #[test]
 fn every_shim_pane_sentence_opens_on_the_send_only_clause_and_nothing_else_has_one() {
-    for backend in [
-        MemberBackend::Codex,
-        MemberBackend::Agy,
-        MemberBackend::Grok,
-    ] {
+    for backend in [MemberBackend::Codex, MemberBackend::Agy, MemberBackend::Grok] {
         let line = pane_line(backend).expect("a shim pane states what the pane adds");
         // Opens on it — the dialog and the ring both cut from the right.
         assert!(line.starts_with(HEARD_BACK), "{line}");
@@ -441,11 +387,7 @@ fn every_shim_pane_sentence_opens_on_the_send_only_clause_and_nothing_else_has_o
         // keys and the ring stacks lines, so "above" is true of one only.
         assert!(!line.contains("above"), "{line}");
     }
-    for backend in [
-        MemberBackend::InProcess,
-        MemberBackend::Ganja,
-        MemberBackend::Claude,
-    ] {
+    for backend in [MemberBackend::InProcess, MemberBackend::Ganja, MemberBackend::Claude] {
         assert_eq!(pane_line(backend), None);
     }
     assert!(HEARD_BACK.contains("mailed back to you"));
@@ -467,19 +409,13 @@ fn the_agy_and_codex_pane_clauses_are_the_ones_their_probes_recorded() {
         "{agy_outcome}"
     );
     let agy = pane_line(MemberBackend::Agy).expect("agy states what the pane adds");
-    assert!(
-        agy.contains("accept-edits mode") && agy.contains("file edits auto-approved"),
-        "{agy}"
-    );
+    assert!(agy.contains("accept-edits mode") && agy.contains("file edits auto-approved"), "{agy}");
 
     let codex_launch = CODEX_TUI_PROBE
         .lines()
         .find_map(|line| line.strip_prefix("launch: "))
         .expect("codex's recording states its launch line");
-    assert!(
-        codex_launch.contains(r#"approval_policy="never""#),
-        "{codex_launch}"
-    );
+    assert!(codex_launch.contains(r#"approval_policy="never""#), "{codex_launch}");
     let codex = pane_line(MemberBackend::Codex).expect("codex states what the pane adds");
     assert!(codex.contains("approval_policy=never"), "{codex}");
     assert!(codex.contains("asks no approval"), "{codex}");
@@ -499,9 +435,7 @@ fn the_grok_pane_sentence_is_the_approval_behaviour_its_probe_recorded() {
     assert!(probe.contains("did NOT create the file"), "{probe}");
     assert!(probe.contains("rejecting that ended the turn"), "{probe}");
     assert!(
-        GROK_TUI_PROBE
-            .lines()
-            .any(|line| line.starts_with("composer capture")),
+        GROK_TUI_PROBE.lines().any(|line| line.starts_with("composer capture")),
         "the sentence rests on a probe that reached the composer"
     );
     let grok = pane_line(MemberBackend::Grok).expect("grok states what the pane adds");
@@ -515,16 +449,10 @@ fn the_grok_pane_sentence_is_the_approval_behaviour_its_probe_recorded() {
     let ends = grok.find("only your no ends the turn").expect(&grok);
     let preamble = grok.find("own TUI in a tmux pane").expect(&grok);
     let flag = grok.find("dontAsk").expect(&grok);
-    assert!(
-        asks < holds && holds < ends && ends < preamble && preamble < flag,
-        "{grok}"
-    );
+    assert!(asks < holds && holds < ends && ends < preamble && preamble < flag, "{grok}");
     // And the headless rider about that flag is not borrowed onto this door.
     let lines = spawn_lines(MemberBackend::Grok);
-    assert!(
-        !lines.iter().any(|line| line == shim::GROK_MODE_LINE),
-        "{lines:?}"
-    );
+    assert!(!lines.iter().any(|line| line == shim::GROK_MODE_LINE), "{lines:?}");
 }
 
 /// The ring a pane spawn opens with is the shared posture pair, then the
@@ -532,10 +460,7 @@ fn the_grok_pane_sentence_is_the_approval_behaviour_its_probe_recorded() {
 #[test]
 fn a_pane_spawns_ring_closes_on_the_sentence_its_dialog_carried() {
     for (backend, driver) in [
-        (
-            MemberBackend::Codex,
-            Arc::new(Codex::new()) as Arc<dyn TuiDriver>,
-        ),
+        (MemberBackend::Codex, Arc::new(Codex::new()) as Arc<dyn TuiDriver>),
         (MemberBackend::Agy, Arc::new(Agy::new())),
         (MemberBackend::Grok, Arc::new(Grok::new())),
     ] {
@@ -543,9 +468,8 @@ fn a_pane_spawns_ring_closes_on_the_sentence_its_dialog_carried() {
         let shared = shim::posture_lines(backend);
         assert_eq!(lines.len(), 3, "{lines:?}");
         assert_eq!(&lines[..2], &shared[..], "{lines:?}");
-        let dialog = ShimTui::new(driver)
-            .surface_line()
-            .expect("a shim pane backend discloses its surface");
+        let dialog =
+            ShimTui::new(driver).surface_line().expect("a shim pane backend discloses its surface");
         assert_eq!(lines[2], dialog);
     }
     assert!(spawn_lines(MemberBackend::Ganja).is_empty());

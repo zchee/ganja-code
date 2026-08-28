@@ -81,10 +81,8 @@ impl Tool for TodoWriteTool {
     fn describe(&self, args: &serde_json::Value) -> String {
         // Read straight off the arguments, because a description is wanted
         // before the call runs and the stored list is still the previous one.
-        let remaining = args
-            .get("todos")
-            .and_then(serde_json::Value::as_array)
-            .map_or(0, |todos| {
+        let remaining =
+            args.get("todos").and_then(serde_json::Value::as_array).map_or(0, |todos| {
                 todos
                     .iter()
                     .filter(|todo| todo.get("status") != Some(&serde_json::json!("completed")))
@@ -101,21 +99,14 @@ impl Tool for TodoWriteTool {
 
         let output = serde_json::to_string_pretty(&args.todos)
             .expect("a list of todos is JSON by construction");
-        let remaining = args
-            .todos
-            .iter()
-            .filter(|todo| todo.status != TodoStatus::Completed)
-            .count();
+        let remaining =
+            args.todos.iter().filter(|todo| todo.status != TodoStatus::Completed).count();
 
         // The metadata carries the whole list, which is what a frontend
         // renders the call with.
         let metadata = serde_json::json!({ "todos": args.todos });
 
-        Ok(ToolOutput {
-            title: title(remaining),
-            output,
-            metadata,
-        })
+        Ok(ToolOutput { title: title(remaining), output, metadata })
     }
 }
 

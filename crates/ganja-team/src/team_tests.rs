@@ -19,9 +19,7 @@ fn a_colliding_name_gets_a_counter_suffix() {
         MemberName::parse("worker").expect("a valid name")
     );
     assert_eq!(
-        resolve_unique("worker", ["worker"])
-            .expect("one counter is enough")
-            .as_str(),
+        resolve_unique("worker", ["worker"]).expect("one counter is enough").as_str(),
         "worker-2"
     );
     assert_eq!(
@@ -34,9 +32,7 @@ fn a_colliding_name_gets_a_counter_suffix() {
     // cased sibling still collides — which is what keeps two members off
     // one inbox file on a case-insensitive filesystem.
     assert_eq!(
-        resolve_unique("Worker", ["worker"])
-            .expect("the collision is case-insensitive")
-            .as_str(),
+        resolve_unique("Worker", ["worker"]).expect("the collision is case-insensitive").as_str(),
         "Worker-2"
     );
     // A name with no room left for a counter is refused rather than
@@ -82,10 +78,7 @@ fn a_model_supplied_name_cannot_escape_the_teams_root() {
     // property the refusals above are protecting.
     let agent = MemberName::parse("demo-worker-1").expect("a valid member name");
     let inbox = root.inbox_path(&team, &agent);
-    assert_eq!(
-        inbox,
-        Path::new("/tmp/teams/session-224cbeab/inboxes/demo-worker-1.json")
-    );
+    assert_eq!(inbox, Path::new("/tmp/teams/session-224cbeab/inboxes/demo-worker-1.json"));
     assert!(inbox.starts_with("/tmp/teams"));
     assert!(
         !inbox
@@ -98,8 +91,5 @@ fn a_model_supplied_name_cannot_escape_the_teams_root() {
 #[test]
 fn an_agent_id_is_the_name_and_the_team() {
     let team = TeamName::parse("session-224cbeab").expect("a valid team name");
-    assert_eq!(
-        MemberName::lead().agent_id(&team),
-        "team-lead@session-224cbeab"
-    );
+    assert_eq!(MemberName::lead().agent_id(&team), "team-lead@session-224cbeab");
 }

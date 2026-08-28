@@ -28,10 +28,7 @@ fn a_large_transmission_chunks_at_the_icat_size() {
 fn virtual_placement_and_deletion_speak_the_documented_keys() {
     let emitter = Emitter::direct();
 
-    assert_eq!(
-        emitter.virtual_placement(3, 10, 5),
-        "\x1b_Ga=p,U=1,i=3,c=10,r=5,q=2\x1b\\"
-    );
+    assert_eq!(emitter.virtual_placement(3, 10, 5), "\x1b_Ga=p,U=1,i=3,c=10,r=5,q=2\x1b\\");
     assert_eq!(emitter.delete_all(), "\x1b_Ga=d,d=a,q=2\x1b\\");
 }
 
@@ -41,10 +38,7 @@ fn virtual_placement_and_deletion_speak_the_documented_keys() {
 fn placeholders_carry_kittys_own_diacritics_and_the_id_rides_the_color() {
     assert_eq!(super::placeholder(0, 0), "\u{10EEEE}\u{0305}\u{0305}");
     assert_eq!(super::placeholder(1, 2), "\u{10EEEE}\u{030D}\u{030E}");
-    assert_eq!(
-        super::id_color(0x0001_0203),
-        ratatui::style::Color::Rgb(1, 2, 3)
-    );
+    assert_eq!(super::id_color(0x0001_0203), ratatui::style::Color::Rgb(1, 2, 3));
 }
 
 /// Under tmux the whole APC rides the passthrough envelope with every
@@ -53,10 +47,7 @@ fn placeholders_carry_kittys_own_diacritics_and_the_id_rides_the_color() {
 fn tmux_wraps_the_apc_in_a_passthrough_envelope() {
     let emitter = Emitter { tmux: true };
 
-    assert_eq!(
-        emitter.delete_all(),
-        "\x1bPtmux;\x1b\x1b_Ga=d,d=a,q=2\x1b\x1b\\\x1b\\"
-    );
+    assert_eq!(emitter.delete_all(), "\x1bPtmux;\x1b\x1b_Ga=d,d=a,q=2\x1b\x1b\\\x1b\\");
 }
 
 /// A real 6×3 lossless WebP, encoded once with `cwebp` and carried as
@@ -76,24 +67,15 @@ fn every_attachment_image_format_loads_and_garbage_does_not() {
     // channel; the loader hands back RGBA regardless.
     let source = image::RgbImage::from_pixel(6, 3, image::Rgb([250, 100, 20]));
     for name in ["a.png", "a.jpg", "a.gif"] {
-        source
-            .save(dir.path().join(name))
-            .expect("the fixture encodes");
+        source.save(dir.path().join(name)).expect("the fixture encodes");
     }
     std::fs::write(dir.path().join("a.webp"), WEBP).expect("the webp fixture writes");
 
     for name in ["a.png", "a.jpg", "a.gif", "a.webp"] {
         let path = dir.path().join(name).display().to_string();
         let preview = load(&path).expect("the four formats all decode");
-        assert_eq!(
-            (preview.width, preview.height),
-            (6, 3),
-            "{name} keeps its box"
-        );
-        assert!(
-            preview.png.starts_with(&[0x89, b'P', b'N', b'G']),
-            "{name} re-encodes as PNG"
-        );
+        assert_eq!((preview.width, preview.height), (6, 3), "{name} keeps its box");
+        assert!(preview.png.starts_with(&[0x89, b'P', b'N', b'G']), "{name} re-encodes as PNG");
     }
 
     let garbage = dir.path().join("garbage.webp");

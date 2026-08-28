@@ -74,12 +74,7 @@ enum State {
     ///
     /// `keys` holds the original events — opener included — so a mismatch or
     /// expiry replays exactly what arrived, modifiers and all.
-    Seq {
-        esc: KeyEvent,
-        since: Instant,
-        kind: SeqKind,
-        keys: Vec<KeyEvent>,
-    },
+    Seq { esc: KeyEvent, since: Instant, kind: SeqKind, keys: Vec<KeyEvent> },
 }
 
 /// Which escape-sequence family the opener announced.
@@ -103,19 +98,13 @@ pub struct EscRepair {
 impl EscRepair {
     /// A machine that repairs splits: bare Escs are held per `HOLDOFF`.
     pub fn active() -> Self {
-        Self {
-            passthrough: false,
-            state: State::Idle,
-        }
+        Self { passthrough: false, state: State::Idle }
     }
 
     /// A machine that holds nothing, for terminals speaking the kitty
     /// keyboard protocol (**D517**) where the ambiguity cannot occur.
     pub fn passthrough() -> Self {
-        Self {
-            passthrough: true,
-            state: State::Idle,
-        }
+        Self { passthrough: true, state: State::Idle }
     }
 
     /// Feeds one terminal event through; returns the events to dispatch now,
@@ -170,20 +159,10 @@ impl EscRepair {
             }
             State::Held { esc, since } => match continuation(&event) {
                 Some(('[', key)) => {
-                    self.state = State::Seq {
-                        esc,
-                        since,
-                        kind: SeqKind::Csi,
-                        keys: vec![key],
-                    };
+                    self.state = State::Seq { esc, since, kind: SeqKind::Csi, keys: vec![key] };
                 }
                 Some(('O', key)) => {
-                    self.state = State::Seq {
-                        esc,
-                        since,
-                        kind: SeqKind::Ss3,
-                        keys: vec![key],
-                    };
+                    self.state = State::Seq { esc, since, kind: SeqKind::Ss3, keys: vec![key] };
                 }
                 // Not an opener: the Esc was real. Release it, then let the
                 // new event start over — it may itself be an Esc to hold.
@@ -192,23 +171,13 @@ impl EscRepair {
                     self.feed(event, now, out);
                 }
             },
-            State::Seq {
-                esc,
-                since,
-                kind,
-                mut keys,
-            } => match (kind, continuation(&event)) {
+            State::Seq { esc, since, kind, mut keys } => match (kind, continuation(&event)) {
                 (SeqKind::Csi, Some((c, key))) if is_csi_param(c) => {
                     keys.push(key);
                     if keys.len() > MAX_SEQ {
                         release(esc, keys, out);
                     } else {
-                        self.state = State::Seq {
-                            esc,
-                            since,
-                            kind,
-                            keys,
-                        };
+                        self.state = State::Seq { esc, since, kind, keys };
                     }
                 }
                 (SeqKind::Csi, Some((c, _))) if is_csi_final(c) => {
@@ -308,10 +277,9 @@ fn csi_key(params: &str, final_char: char) -> Option<TermEvent> {
             Some(TermEvent::Key(KeyEvent::new(code, modifiers)))
         }
         // `ESC [ Z` is Shift+Tab, and crossterm spells the shift out.
-        'Z' if params.is_empty() => Some(TermEvent::Key(KeyEvent::new(
-            KeyCode::BackTab,
-            KeyModifiers::SHIFT,
-        ))),
+        'Z' if params.is_empty() => {
+            Some(TermEvent::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)))
+        }
         'I' if params.is_empty() => Some(TermEvent::FocusGained),
         'O' if params.is_empty() => Some(TermEvent::FocusLost),
         '~' => {

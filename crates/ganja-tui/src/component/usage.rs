@@ -58,27 +58,19 @@
 //! closes it; [`crate::app::App`] owns that key, the same split every other
 //! dialog keeps.
 
-use ganja_core::{
-    catalog::{self, compact_tokens},
-    provider::{PlanWindow, RateWindow},
-};
+use ganja_core::catalog::{self, compact_tokens};
+use ganja_core::provider::{PlanWindow, RateWindow};
 use ganja_protocol::Usage as TokenUsage;
-use ratatui::{
-    buffer::Buffer,
-    layout::{Constraint, Rect},
-    style::Modifier,
-    text::{Line, Span, Text},
-    widgets::{Block, Clear, Paragraph, Widget as _},
-};
+use ratatui::buffer::Buffer;
+use ratatui::layout::{Constraint, Rect};
+use ratatui::style::Modifier;
+use ratatui::text::{Line, Span, Text};
+use ratatui::widgets::{Block, Clear, Paragraph, Widget as _};
 
-use crate::{
-    component::{
-        chat::clip,
-        inspector::{TurnUsage, short_id, turn_cost},
-        status::Totals,
-    },
-    theme::Theme,
-};
+use crate::component::chat::clip;
+use crate::component::inspector::{TurnUsage, short_id, turn_cost};
+use crate::component::status::Totals;
+use crate::theme::Theme;
 
 /// Widest the modal grows. Wider than the house 76: the pinned per-model
 /// line — model id, five comma-separated counters, the cost tail — runs to
@@ -243,15 +235,12 @@ impl Usage {
                     usage.input_tokens = usage.input_tokens.saturating_add(turn.usage.input_tokens);
                     usage.output_tokens =
                         usage.output_tokens.saturating_add(turn.usage.output_tokens);
-                    usage.reasoning_tokens = usage
-                        .reasoning_tokens
-                        .saturating_add(turn.usage.reasoning_tokens);
-                    usage.cache_read_tokens = usage
-                        .cache_read_tokens
-                        .saturating_add(turn.usage.cache_read_tokens);
-                    usage.cache_write_tokens = usage
-                        .cache_write_tokens
-                        .saturating_add(turn.usage.cache_write_tokens);
+                    usage.reasoning_tokens =
+                        usage.reasoning_tokens.saturating_add(turn.usage.reasoning_tokens);
+                    usage.cache_read_tokens =
+                        usage.cache_read_tokens.saturating_add(turn.usage.cache_read_tokens);
+                    usage.cache_write_tokens =
+                        usage.cache_write_tokens.saturating_add(turn.usage.cache_write_tokens);
                     *total = match (*total, cost) {
                         (Some(sum), Some(add)) => Some(sum + add),
                         (kept, added) => kept.or(added),
@@ -313,10 +302,7 @@ impl Usage {
                 theme.fg,
             ));
         }
-        lines.push(Line::styled(
-            clip("  Usage by model:", inner_width),
-            theme.fg,
-        ));
+        lines.push(Line::styled(clip("  Usage by model:", inner_width), theme.fg));
         let models = self.by_model();
         if models.is_empty() {
             lines.push(Line::styled(clip("    none yet", inner_width), theme.dim));
@@ -388,18 +374,12 @@ impl Usage {
             for plan in plans.iter().take(PLAN_ROWS) {
                 let mut spans = vec![Span::raw("  ")];
                 spans.extend(Self::bar(plan.used(), theme));
-                spans.push(Span::styled(
-                    format!(" {}", plan_label(plan, now)),
-                    theme.fg,
-                ));
+                spans.push(Span::styled(format!(" {}", plan_label(plan, now)), theme.fg));
                 lines.push(Line::from(spans));
             }
             if let Some(rest) = plans.len().checked_sub(PLAN_ROWS).filter(|rest| *rest > 0) {
                 lines.push(Line::styled(
-                    clip(
-                        &format!("  ({rest} roomier plan windows not shown)"),
-                        inner_width,
-                    ),
+                    clip(&format!("  ({rest} roomier plan windows not shown)"), inner_width),
                     theme.dim,
                 ));
             }
@@ -449,16 +429,9 @@ impl Usage {
                 ));
                 lines.push(Line::from(spans));
             }
-            if let Some(rest) = windows
-                .len()
-                .checked_sub(RATE_ROWS)
-                .filter(|rest| *rest > 0)
-            {
+            if let Some(rest) = windows.len().checked_sub(RATE_ROWS).filter(|rest| *rest > 0) {
                 lines.push(Line::styled(
-                    clip(
-                        &format!("  ({rest} roomier windows not shown)"),
-                        inner_width,
-                    ),
+                    clip(&format!("  ({rest} roomier windows not shown)"), inner_width),
                     theme.dim,
                 ));
             }
@@ -475,10 +448,7 @@ impl Usage {
                 spans.push(Span::styled(" of input read from cache", theme.fg));
                 lines.push(Line::from(spans));
             }
-            None => lines.push(Line::styled(
-                clip("  nothing sent yet", inner_width),
-                theme.dim,
-            )),
+            None => lines.push(Line::styled(clip("  nothing sent yet", inner_width), theme.dim)),
         }
         lines.push(Line::raw(""));
 
@@ -486,10 +456,7 @@ impl Usage {
         // a ganja addition Claude's panel has no equivalent of.
         lines.push(Line::styled(clip("Turns", inner_width), header));
         if self.data.turns.is_empty() {
-            lines.push(Line::styled(
-                clip("  no finished turns yet", inner_width),
-                theme.dim,
-            ));
+            lines.push(Line::styled(clip("  no finished turns yet", inner_width), theme.dim));
         } else {
             lines.push(Line::styled(
                 clip(
@@ -527,10 +494,7 @@ impl Usage {
             }
             if skipped > 0 {
                 lines.push(Line::styled(
-                    clip(
-                        &format!("  ({skipped} earlier turns not shown)"),
-                        inner_width,
-                    ),
+                    clip(&format!("  ({skipped} earlier turns not shown)"), inner_width),
                     theme.dim,
                 ));
             }
@@ -547,9 +511,8 @@ impl Usage {
         }
         lines.push(Line::styled(clip(HINTS, inner_width), theme.dim));
 
-        let height = u16::try_from(lines.len().saturating_add(2))
-            .unwrap_or(available)
-            .min(available);
+        let height =
+            u16::try_from(lines.len().saturating_add(2)).unwrap_or(available).min(available);
         let popup = area.centered(Constraint::Length(width), Constraint::Length(height));
 
         Clear.render(popup, buffer);
@@ -563,11 +526,7 @@ impl Usage {
 /// How many rows the panel's foot costs: the blank before it, the hints, and
 /// the honest-absence tail when it is drawn at all (**D485**).
 fn tail_height(plans: &[PlanWindow]) -> usize {
-    if plans.is_empty() {
-        NO_PLAN_LIMITS.len()
-    } else {
-        0
-    }
+    if plans.is_empty() { NO_PLAN_LIMITS.len() } else { 0 }
 }
 
 /// What one plan window says after its bar: what it is, how long its window
@@ -589,10 +548,9 @@ fn plan_label(plan: &PlanWindow, now: std::time::SystemTime) -> String {
     }
     clauses.push(match plan.resets_at {
         Some(_) if plan.expired(now) => EXPIRED.to_owned(),
-        Some(reset) => format!(
-            "resets in {}",
-            compact_duration(reset.duration_since(now).unwrap_or_default())
-        ),
+        Some(reset) => {
+            format!("resets in {}", compact_duration(reset.duration_since(now).unwrap_or_default()))
+        }
         None => "no reset reported".to_owned(),
     });
 

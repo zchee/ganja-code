@@ -36,32 +36,26 @@
 
 #![cfg(unix)]
 
-use std::{
-    env, fs,
-    os::unix::fs::PermissionsExt as _,
-    path::{Path, PathBuf},
-    process::Stdio,
-    sync::Arc,
-    time::Duration,
-};
+use std::os::unix::fs::PermissionsExt as _;
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use std::sync::Arc;
+use std::time::Duration;
+use std::{env, fs};
 
 use futures::StreamExt as _;
 use ganja_client::Client;
-use ganja_core::{
-    Engine, Postbox,
-    provider::fake::FakeProvider,
-    teammate::{TeammateRegistry, lead_inbox::LeadInbox},
-    tool::{
-        Registry, registry,
-        team::{Address, Body, Postbox as _, Undelivered},
-    },
-};
+use ganja_core::provider::fake::FakeProvider;
+use ganja_core::teammate::TeammateRegistry;
+use ganja_core::teammate::lead_inbox::LeadInbox;
+use ganja_core::tool::team::{Address, Body, Postbox as _, Undelivered};
+use ganja_core::tool::{Registry, registry};
+use ganja_core::{Engine, Postbox};
 use ganja_permission::Permissions;
-use ganja_protocol::{Command, Event, PartBody, Role, SessionId, team::PeerPayload};
-use ganja_serve::{
-    Handle, Listen, ServeConfig,
-    socket::{self, EXTENSION, LOCK_EXTENSION},
-};
+use ganja_protocol::team::PeerPayload;
+use ganja_protocol::{Command, Event, PartBody, Role, SessionId};
+use ganja_serve::socket::{self, EXTENSION, LOCK_EXTENSION};
+use ganja_serve::{Handle, Listen, ServeConfig};
 use tempfile::TempDir;
 
 /// How long any single wait here — a child process, an event, a health
@@ -124,16 +118,9 @@ fn led_engine(home: &Path) -> (Arc<Engine>, Arc<TeammateRegistry>) {
         Permissions::default(),
     );
     let cwd = env::current_dir().expect("the working directory resolves");
-    let registry = Arc::new(TeammateRegistry::for_session(
-        home,
-        engine.session_id().as_str(),
-        cwd,
-    ));
+    let registry = Arc::new(TeammateRegistry::for_session(home, engine.session_id().as_str(), cwd));
 
-    (
-        Arc::new(engine.with_teammates(Arc::clone(&registry))),
-        registry,
-    )
+    (Arc::new(engine.with_teammates(Arc::clone(&registry))), registry)
 }
 
 /// `engine`'s own session socket, bound under `directory` — `Listen::Session`,
@@ -141,10 +128,7 @@ fn led_engine(home: &Path) -> (Arc<Engine>, Arc<TeammateRegistry>) {
 async fn serve_session(engine: &Arc<Engine>, directory: &Path) -> Handle {
     let mut config =
         ServeConfig::in_directory(env::current_dir().expect("the working directory resolves"));
-    config.listen = Listen::Session {
-        id: engine.session_id(),
-        directory: directory.to_path_buf(),
-    };
+    config.listen = Listen::Session { id: engine.session_id(), directory: directory.to_path_buf() };
 
     ganja_serve::serve(Arc::clone(engine), config)
         .await
@@ -236,21 +220,15 @@ async fn send_as_child(socket: PathBuf, home: PathBuf, report: PathBuf) {
         DEADLINE,
         postbox.deliver(
             Address::Uds { path: socket },
-            Body::Text {
-                text: TEXT.to_owned(),
-                summary: Some(SUMMARY.to_owned()),
-            },
+            Body::Text { text: TEXT.to_owned(), summary: Some(SUMMARY.to_owned()) },
         ),
     )
     .await
     .expect("the socket answers within the deadline")
     .expect("a listening session takes the message");
 
-    fs::write(
-        &report,
-        serde_json::json!({ "to": sent.to, "note": sent.note }).to_string(),
-    )
-    .expect("the report writes");
+    fs::write(&report, serde_json::json!({ "to": sent.to, "note": sent.note }).to_string())
+        .expect("the report writes");
 }
 
 /// A `send_message` tool call, one turn's worth — the same scripted-provider
@@ -304,10 +282,7 @@ async fn resolve_and_send_as_child(directory: PathBuf, target: String) {
         })
         .await
         .expect("an idle engine accepts the first prompt");
-    assert!(
-        engine.settle(DEADLINE).await,
-        "the first send's turn settles"
-    );
+    assert!(engine.settle(DEADLINE).await, "the first send's turn settles");
 
     // **AC-40**'s far half: renamed before the second send, so the far
     // inbox's second entry has to carry the new self-name or the assertion
@@ -324,10 +299,7 @@ async fn resolve_and_send_as_child(directory: PathBuf, target: String) {
         })
         .await
         .expect("an idle engine accepts the second prompt");
-    assert!(
-        engine.settle(DEADLINE).await,
-        "the second send's turn settles"
-    );
+    assert!(engine.settle(DEADLINE).await, "the second send's turn settles");
 }
 
 /// **AC-19**, **AC-32**, **AC-40** (far half): session A registers as
@@ -387,11 +359,7 @@ async fn a_bare_name_resolves_across_a_socket_directory_and_carries_a_solo_ident
     assert!(status.success(), "the resolving sender failed: {status}");
 
     let inbox = lead_inbox(&team_registry);
-    assert_eq!(
-        inbox.len(),
-        2,
-        "both bare-name-resolved sends landed: {inbox:?}"
-    );
+    assert_eq!(inbox.len(), 2, "both bare-name-resolved sends landed: {inbox:?}");
     assert_eq!(
         inbox[0]["from"], "frontend@solo",
         "**AC-32**: a teamless sender's far-inbox `from` is its derived solo identity"
@@ -421,11 +389,9 @@ async fn a_bare_name_resolves_across_a_socket_directory_and_carries_a_solo_ident
 #[tokio::test]
 async fn a_message_addressed_uds_reaches_the_peers_next_turn() {
     // The child's role, when this binary was re-executed as the sender.
-    if let (Some(socket), Some(home), Some(report)) = (
-        env::var_os(SEND_TO),
-        env::var_os(SENDER_HOME),
-        env::var_os(SENDER_REPORT),
-    ) {
+    if let (Some(socket), Some(home), Some(report)) =
+        (env::var_os(SEND_TO), env::var_os(SENDER_HOME), env::var_os(SENDER_REPORT))
+    {
         send_as_child(socket.into(), home.into(), report.into()).await;
 
         return;
@@ -492,11 +458,7 @@ async fn a_message_addressed_uds_reaches_the_peers_next_turn() {
     // The lead's own pass over its inbox hands the message back as a
     // delivery, which is what a frontend puts on the next turn.
     let pass = LeadInbox::reading(Arc::clone(&registry), None).poll().await;
-    assert_eq!(
-        pass.messages.len(),
-        1,
-        "the pass hands back the one plain message: {pass:?}"
-    );
+    assert_eq!(pass.messages.len(), 1, "the pass hands back the one plain message: {pass:?}");
     let delivered = &pass.messages[0];
     assert_eq!(delivered.from, sender_identity);
     assert_eq!(delivered.body, TEXT);
@@ -542,10 +504,7 @@ async fn a_message_addressed_uds_reaches_the_peers_next_turn() {
         user.parts
     );
 
-    assert!(
-        engine.settle(DEADLINE).await,
-        "the fake provider's turn settles"
-    );
+    assert!(engine.settle(DEADLINE).await, "the fake provider's turn settles");
     handle.shutdown().await.expect("a clean stop");
 }
 
@@ -572,40 +531,22 @@ async fn a_structured_message_does_not_cross_a_socket() {
     // The core arm, a frame as the body: refused as a rule, before a client
     // is even built.
     let cwd = env::current_dir().expect("the working directory resolves");
-    let sender = Arc::new(TeammateRegistry::for_session(
-        sender_home.path(),
-        SENDER_SESSION,
-        cwd,
-    ));
+    let sender = Arc::new(TeammateRegistry::for_session(sender_home.path(), SENDER_SESSION, cwd));
     let postbox = Postbox::lead(&sender, None);
-    let refused = postbox
-        .deliver(
-            Address::Uds {
-                path: socket.clone(),
-            },
-            Body::Frame(frame.clone()),
-        )
-        .await;
+    let refused =
+        postbox.deliver(Address::Uds { path: socket.clone() }, Body::Frame(frame.clone())).await;
     let Err(Undelivered::Failed { reason }) = refused else {
         panic!("a frame body is refused, not {refused:?}");
     };
-    assert!(
-        reason.contains("does not cross a socket"),
-        "the refusal names the rule: {reason}"
-    );
+    assert!(reason.contains("does not cross a socket"), "the refusal names the rule: {reason}");
 
     // The core arm, a frame as the text: the server classifies it and answers
     // 400, and that answer reaches the sender with the server's own sentence.
     let refused = tokio::time::timeout(
         DEADLINE,
         postbox.deliver(
-            Address::Uds {
-                path: socket.clone(),
-            },
-            Body::Text {
-                text: frame.to_string(),
-                summary: None,
-            },
+            Address::Uds { path: socket.clone() },
+            Body::Text { text: frame.to_string(), summary: None },
         ),
     )
     .await
@@ -660,20 +601,14 @@ async fn a_socket_directory_that_is_not_private_is_refused_end_to_end() {
         .expect("the listing finishes within the deadline")
         .expect("the listing runs");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !output.status.success(),
-        "a loose directory is refused, not listed: {stderr}"
-    );
+    assert!(!output.status.success(), "a loose directory is refused, not listed: {stderr}");
     assert!(
         stderr.contains(&loose.path().display().to_string())
             && stderr.contains("0755")
             && stderr.contains("0700"),
         "the sentence says which directory, what it is, and what it must be: {stderr}"
     );
-    assert!(
-        planted.exists(),
-        "nothing inside a refused directory is unlinked"
-    );
+    assert!(planted.exists(), "nothing inside a refused directory is unlinked");
 
     // A link to a perfectly good private directory is refused too — a link
     // is what somebody plants in a world-writable /tmp — and nothing behind
@@ -689,10 +624,7 @@ async fn a_socket_directory_that_is_not_private_is_refused_end_to_end() {
         .expect("the listing finishes within the deadline")
         .expect("the listing runs");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !output.status.success(),
-        "a link is refused, however good its target: {stderr}"
-    );
+    assert!(!output.status.success(), "a link is refused, however good its target: {stderr}");
     assert!(
         stderr.contains(&link.display().to_string()) && stderr.contains("not a directory"),
         "the sentence names the link: {stderr}"
@@ -713,10 +645,7 @@ async fn sessions_live_lists_the_living_and_unlinks_the_dead() {
     let handle = serve_session(&engine, directory.path()).await;
     let living = bound(&handle);
     let living_lock = socket::lock_path(&living);
-    assert!(
-        living_lock.exists(),
-        "a served socket has its lock beside it"
-    );
+    assert!(living_lock.exists(), "a served socket has its lock beside it");
 
     // The dead one: bound and dropped, with the lock file a binder would
     // have left — unheld, since its holder is gone.
@@ -740,10 +669,7 @@ async fn sessions_live_lists_the_living_and_unlinks_the_dead() {
         .expect("the listing runs");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "the listing succeeds:\n{stdout}\n{stderr}"
-    );
+    assert!(output.status.success(), "the listing succeeds:\n{stdout}\n{stderr}");
 
     // The living, listed under its session and its socket.
     let session: &SessionId = &health.session_id;
@@ -751,10 +677,7 @@ async fn sessions_live_lists_the_living_and_unlinks_the_dead() {
         .lines()
         .find(|line| line.contains(session.as_str()))
         .unwrap_or_else(|| panic!("the living session is listed by id:\n{stdout}"));
-    assert!(
-        row.contains(&living.display().to_string()),
-        "on the same row as its socket: {row}"
-    );
+    assert!(row.contains(&living.display().to_string()), "on the same row as its socket: {row}");
     assert!(
         stdout.contains("SESSION") && stdout.contains("SOCKET"),
         "under the listing's own header:\n{stdout}"
@@ -809,15 +732,9 @@ async fn a_held_name_that_does_not_answer_is_listed_and_left_in_place() {
         .expect("the listing runs");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "the listing succeeds:\n{stdout}\n{stderr}"
-    );
+    assert!(output.status.success(), "the listing succeeds:\n{stdout}\n{stderr}");
 
-    assert!(
-        held.exists(),
-        "a held name is never unlinked, whatever the silence: {stderr}"
-    );
+    assert!(held.exists(), "a held name is never unlinked, whatever the silence: {stderr}");
     assert!(lock_file.exists(), "nor is its lock");
     assert!(
         stderr.contains("held by a live server that did not answer")
@@ -832,10 +749,7 @@ async fn a_held_name_that_does_not_answer_is_listed_and_left_in_place() {
         row.trim_start().starts_with("(held)"),
         "under the held mark — nothing answered, which is not an unreadable answer: {row}"
     );
-    assert!(
-        !stdout.contains("no live sessions"),
-        "stdout and stderr tell one story:\n{stdout}"
-    );
+    assert!(!stdout.contains("no live sessions"), "stdout and stderr tell one story:\n{stdout}");
 
     drop(lock);
 }
@@ -862,9 +776,7 @@ async fn a_socket_that_vanishes_mid_walk_does_not_end_the_listing() {
     // Sorts before every UUIDv7-named socket: the walk meets it first.
     let stalled = directory.path().join(format!("00000000.{EXTENSION}"));
     let silent = std::os::unix::net::UnixListener::bind(&stalled).expect("the silent socket binds");
-    silent
-        .set_nonblocking(true)
-        .expect("the listener goes nonblocking");
+    silent.set_nonblocking(true).expect("the listener goes nonblocking");
     let silent =
         tokio::net::UnixListener::from_std(silent).expect("the listener joins the runtime");
     // The binder's own token, held for as long as the flock must stand.
@@ -881,10 +793,8 @@ async fn a_socket_that_vanishes_mid_walk_does_not_end_the_listing() {
         // read and inside the stall, so the entry vanishes exactly then. The
         // accepted stream is answered nothing and handed back alive, so the
         // client waits its deadline out instead of reading a close.
-        let (stream, _) = silent
-            .accept()
-            .await
-            .expect("the listing connects to the stalled socket");
+        let (stream, _) =
+            silent.accept().await.expect("the listing connects to the stalled socket");
         fs::remove_file(&vanishing).expect("the peer unlinks its own socket");
 
         stream
@@ -959,10 +869,7 @@ async fn sessions_live_shows_a_registered_name_and_gcs_it_with_its_dead_socket()
         .expect("the listing runs");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "the listing succeeds:\n{stdout}\n{stderr}"
-    );
+    assert!(output.status.success(), "the listing succeeds:\n{stdout}\n{stderr}");
 
     assert!(
         stdout.contains("NAME") && stdout.contains("Backend"),
@@ -974,10 +881,7 @@ async fn sessions_live_shows_a_registered_name_and_gcs_it_with_its_dead_socket()
         .unwrap_or_else(|| panic!("the living session is listed by socket:\n{stdout}"));
     assert!(row.contains("Backend"), "on the same row: {row}");
 
-    assert!(
-        !dead_record.exists(),
-        "the dead socket's own record is removed with it"
-    );
+    assert!(!dead_record.exists(), "the dead socket's own record is removed with it");
     assert!(
         stderr.contains("removed the stale record")
             && stderr.contains(&dead_record.display().to_string()),
@@ -986,10 +890,7 @@ async fn sessions_live_shows_a_registered_name_and_gcs_it_with_its_dead_socket()
     assert!(dead_lock.exists(), "the dead socket's lock file is left");
 
     let living_record = registry::record_path(directory.path(), &living_stem);
-    assert!(
-        living_record.exists(),
-        "the living socket's record is untouched"
-    );
+    assert!(living_record.exists(), "the living socket's record is untouched");
 
     handle.shutdown().await.expect("a clean stop");
 }
@@ -1014,24 +915,15 @@ async fn sessions_live_claims_and_removes_an_orphaned_record_with_no_socket_sibl
         .expect("the listing runs");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "the listing succeeds:\n{stdout}\n{stderr}"
-    );
+    assert!(output.status.success(), "the listing succeeds:\n{stdout}\n{stderr}");
 
-    assert!(
-        !record_path.exists(),
-        "the orphaned record is removed: {stderr}"
-    );
+    assert!(!record_path.exists(), "the orphaned record is removed: {stderr}");
     assert!(
         stderr.contains("removed the orphaned record")
             && stderr.contains(&record_path.display().to_string()),
         "the removal is said, by path: {stderr}"
     );
-    assert!(
-        lock_path.exists(),
-        "the claim created this name's lock, and it is never removed"
-    );
+    assert!(lock_path.exists(), "the claim created this name's lock, and it is never removed");
     assert!(
         stdout.contains("no live sessions"),
         "no socket ever answered, so nothing is listed as live:\n{stdout}"

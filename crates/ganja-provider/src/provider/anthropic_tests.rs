@@ -6,14 +6,12 @@ use super::{
     ANTHROPIC_CAP, Aliases, AnthropicProvider, Body, DEFAULT_MAX_TOKENS, Frame, ID, Mapper as _,
     Mapping, NO_RESULT, alias,
 };
-use crate::{
-    catalog,
-    protocol::{FinishReason, Message, Part, PartBody, PartId, ToolState, Usage},
-    provider::{
-        ChatRequest, PROVIDERS, Provider as _, ProviderError, ProviderEvent, replay, splice_effort,
-    },
-    tool::ToolDefinition,
+use crate::catalog;
+use crate::protocol::{FinishReason, Message, Part, PartBody, PartId, ToolState, Usage};
+use crate::provider::{
+    ChatRequest, PROVIDERS, Provider as _, ProviderError, ProviderEvent, replay, splice_effort,
 };
+use crate::tool::ToolDefinition;
 
 /// The obligation `catalog`'s own table test states per *tier* and each
 /// wire states for itself: a provider a session can select has to be one
@@ -40,9 +38,7 @@ fn an_anthropic_session_that_names_no_model_gets_one_the_catalog_can_price() {
 
 /// Runs a recorded transcript through the real splitter and mapper.
 async fn events(transcript: &'static str) -> Vec<ProviderEvent> {
-    replay(transcript, CancellationToken::new(), Mapping::default())
-        .collect()
-        .await
+    replay(transcript, CancellationToken::new(), Mapping::default()).collect().await
 }
 
 /// The reply text a transcript streams.
@@ -58,10 +54,7 @@ fn text(events: &[ProviderEvent]) -> String {
 
 #[tokio::test]
 async fn a_happy_path_transcript_maps_to_text_reasoning_and_a_bill() {
-    let seen = events(include_str!(
-        "../../tests/fixtures/anthropic_happy_path.sse"
-    ))
-    .await;
+    let seen = events(include_str!("../../tests/fixtures/anthropic_happy_path.sse")).await;
 
     assert_eq!(text(&seen), "Hello, world!");
     assert_eq!(
@@ -89,9 +82,7 @@ async fn a_happy_path_transcript_maps_to_text_reasoning_and_a_bill() {
         "the bill is reported before the finish, got {seen:?}"
     );
     assert!(
-        !seen
-            .iter()
-            .any(|event| matches!(event, ProviderEvent::Failed(_))),
+        !seen.iter().any(|event| matches!(event, ProviderEvent::Failed(_))),
         "ping, comments, signature deltas and an unknown event type are all skipped, \
              not fatal: {seen:?}"
     );
@@ -99,10 +90,7 @@ async fn a_happy_path_transcript_maps_to_text_reasoning_and_a_bill() {
 
 #[tokio::test]
 async fn an_error_frame_ends_the_turn_as_a_failure() {
-    let seen = events(include_str!(
-        "../../tests/fixtures/anthropic_mid_stream_error.sse"
-    ))
-    .await;
+    let seen = events(include_str!("../../tests/fixtures/anthropic_mid_stream_error.sse")).await;
 
     assert_eq!(text(&seen), "Let me start by", "partial text is kept");
     assert_eq!(
@@ -117,15 +105,10 @@ async fn an_error_frame_ends_the_turn_as_a_failure() {
 
 #[tokio::test]
 async fn tool_blocks_interleave_with_text_without_losing_either() {
-    let seen = events(include_str!(
-        "../../tests/fixtures/anthropic_tool_use_interleaved.sse"
-    ))
-    .await;
+    let seen =
+        events(include_str!("../../tests/fixtures/anthropic_tool_use_interleaved.sse")).await;
 
-    assert_eq!(
-        text(&seen),
-        "Reading the file first. And listing the directory."
-    );
+    assert_eq!(text(&seen), "Reading the file first. And listing the directory.");
     assert_eq!(
         seen.iter()
             .filter(|event| !matches!(event, ProviderEvent::TextDelta(_)))
@@ -143,9 +126,7 @@ async fn tool_blocks_interleave_with_text_without_losing_either() {
                 id: "toolu_01Read".to_owned(),
                 json: "Path\":\"src/main.rs\"}".to_owned()
             },
-            &ProviderEvent::ToolCallEnd {
-                id: "toolu_01Read".to_owned()
-            },
+            &ProviderEvent::ToolCallEnd { id: "toolu_01Read".to_owned() },
             &ProviderEvent::ToolCallStart {
                 id: "toolu_01Glob".to_owned(),
                 name: "glob".to_owned()
@@ -154,9 +135,7 @@ async fn tool_blocks_interleave_with_text_without_losing_either() {
                 id: "toolu_01Glob".to_owned(),
                 json: "{\"pattern\":\"**/*.rs\"}".to_owned()
             },
-            &ProviderEvent::ToolCallEnd {
-                id: "toolu_01Glob".to_owned()
-            },
+            &ProviderEvent::ToolCallEnd { id: "toolu_01Glob".to_owned() },
             &ProviderEvent::Usage(Usage {
                 input_tokens: 211,
                 output_tokens: 94,
@@ -174,10 +153,7 @@ async fn tool_blocks_interleave_with_text_without_losing_either() {
 /// that died mid-call has to end as a failure with the call still open.
 #[tokio::test]
 async fn a_stream_that_dies_mid_call_never_closes_it() {
-    let seen = events(include_str!(
-        "../../tests/fixtures/anthropic_tool_call_cut_short.sse"
-    ))
-    .await;
+    let seen = events(include_str!("../../tests/fixtures/anthropic_tool_call_cut_short.sse")).await;
 
     assert_eq!(text(&seen), "Let me read that file.");
     assert_eq!(
@@ -185,10 +161,7 @@ async fn a_stream_that_dies_mid_call_never_closes_it() {
             .filter(|event| !matches!(event, ProviderEvent::TextDelta(_)))
             .collect::<Vec<_>>(),
         vec![
-            &ProviderEvent::ToolCallStart {
-                id: "toolu_01Cut".to_owned(),
-                name: "read".to_owned(),
-            },
+            &ProviderEvent::ToolCallStart { id: "toolu_01Cut".to_owned(), name: "read".to_owned() },
             // The fragment the body was cut in half of never arrives: an
             // incomplete frame is not a frame.
             &ProviderEvent::ToolCallDelta {
@@ -209,10 +182,7 @@ async fn a_body_that_stops_mid_reply_fails_rather_than_completing() {
 
     assert_eq!(text(&seen), "The connection drops right");
     assert!(
-        matches!(
-            seen.last(),
-            Some(ProviderEvent::Failed(ProviderError::Transport(_)))
-        ),
+        matches!(seen.last(), Some(ProviderEvent::Failed(ProviderError::Transport(_)))),
         "a dropped connection must never read as a finished turn, got {seen:?}"
     );
 }
@@ -228,10 +198,7 @@ async fn a_malformed_frame_ends_the_turn_rather_than_silently_skipping_it() {
     .await;
 
     assert!(
-        matches!(
-            seen.as_slice(),
-            [ProviderEvent::Failed(ProviderError::Parse(_))]
-        ),
+        matches!(seen.as_slice(), [ProviderEvent::Failed(ProviderError::Parse(_))]),
         "got {seen:?}"
     );
 }
@@ -247,9 +214,7 @@ async fn a_cancel_mid_transcript_ends_the_stream_without_a_verdict() {
 
     assert_eq!(
         stream.next().await,
-        Some(ProviderEvent::ReasoningDelta(
-            "The user wants a greeting.".to_owned()
-        ))
+        Some(ProviderEvent::ReasoningDelta("The user wants a greeting.".to_owned()))
     );
     cancel.cancel();
 
@@ -314,11 +279,7 @@ fn a_transcript_held_thought_is_absent_from_the_body_this_wire_sends() {
     let mut turn = Message::assistant("claude");
     turn.parts.push(Part::reasoning_text(THOUGHT));
     turn.parts.push(Part::text("Hello!"));
-    turn.parts.push(Part::reasoning(
-        "anthropic",
-        "rs_1",
-        Some("sealed-blob-0001".to_owned()),
-    ));
+    turn.parts.push(Part::reasoning("anthropic", "rs_1", Some("sealed-blob-0001".to_owned())));
 
     let request = ChatRequest {
         effort_options: Default::default(),
@@ -470,13 +431,7 @@ fn an_attachment_becomes_the_source_block_its_mime_names() {
 fn the_wire_accepts_the_mimes_the_api_documents_and_no_others() {
     let provider = AnthropicProvider::new("sk-test-canary-XYZ").expect("a client builds");
 
-    for mime in [
-        "image/jpeg",
-        "image/png",
-        "image/gif",
-        "image/webp",
-        "application/pdf",
-    ] {
+    for mime in ["image/jpeg", "image/png", "image/gif", "image/webp", "application/pdf"] {
         assert!(provider.accepts_attachment(mime), "{mime} is documented");
     }
     for mime in ["image/avif", "image/svg+xml", "text/plain", "video/mp4"] {
@@ -488,11 +443,7 @@ fn the_wire_accepts_the_mimes_the_api_documents_and_no_others() {
 fn tool_part(call_id: &str, tool: &str, state: ToolState) -> Part {
     Part {
         id: PartId::ascending(),
-        body: PartBody::Tool {
-            call_id: call_id.to_owned(),
-            tool: tool.to_owned(),
-            state,
-        },
+        body: PartBody::Tool { call_id: call_id.to_owned(), tool: tool.to_owned(), state },
     }
 }
 
@@ -502,10 +453,7 @@ fn tool_part(call_id: &str, tool: &str, state: ToolState) -> Part {
 fn a_turn_with_two_calls() -> Message {
     let mut assistant = Message::assistant("claude-test");
 
-    assistant.parts.push(Part {
-        id: PartId::ascending(),
-        body: PartBody::StepStart,
-    });
+    assistant.parts.push(Part { id: PartId::ascending(), body: PartBody::StepStart });
     assistant.parts.push(Part::text("Reading the file first."));
     assistant.parts.push(tool_part(
         "toolu_01Read",
@@ -531,9 +479,7 @@ fn a_turn_with_two_calls() -> Message {
     ));
     assistant.parts.push(Part {
         id: PartId::ascending(),
-        body: PartBody::StepFinish {
-            usage: Usage::default(),
-        },
+        body: PartBody::StepFinish { usage: Usage::default() },
     });
 
     assistant
@@ -566,10 +512,7 @@ const ADVERTISED: &str = "mcp__plugin_mcp-gemini-search_mcp-gemini-search__deep_
 
 /// [`a_tool`] under the name that got a live turn killed.
 fn a_refused_tool() -> ToolDefinition {
-    ToolDefinition {
-        name: REFUSED_NAME.to_owned(),
-        ..a_tool()
-    }
+    ToolDefinition { name: REFUSED_NAME.to_owned(), ..a_tool() }
 }
 
 #[test]
@@ -600,10 +543,7 @@ fn a_tool_name_this_api_refuses_is_advertised_under_a_conforming_alias() {
 #[test]
 fn a_call_answering_with_the_alias_comes_back_out_under_the_registry_name() {
     let tools = vec![a_refused_tool()];
-    let mut mapping = Mapping {
-        aliases: Aliases::of(&tools, ANTHROPIC_CAP),
-        ..Mapping::default()
-    };
+    let mut mapping = Mapping { aliases: Aliases::of(&tools, ANTHROPIC_CAP), ..Mapping::default() };
     let mut seen = Vec::new();
 
     mapping.frame(
@@ -783,10 +723,7 @@ fn a_turn_of_two_steps() -> Message {
             "1 replacement",
         ),
     ] {
-        assistant.parts.push(Part {
-            id: PartId::ascending(),
-            body: PartBody::StepStart,
-        });
+        assistant.parts.push(Part { id: PartId::ascending(), body: PartBody::StepStart });
         assistant.parts.push(Part::text(text));
         assistant.parts.push(tool_part(
             call_id,
@@ -802,9 +739,7 @@ fn a_turn_of_two_steps() -> Message {
         ));
         assistant.parts.push(Part {
             id: PartId::ascending(),
-            body: PartBody::StepFinish {
-                usage: Usage::default(),
-            },
+            body: PartBody::StepFinish { usage: Usage::default() },
         });
     }
 
@@ -947,10 +882,7 @@ fn a_turn_without_step_markers_is_one_step() {
 fn two_steps_that_called_nothing_stay_one_message() {
     let mut assistant = Message::assistant("claude-test");
     for text in ["Thinking about it.", "Here is the answer."] {
-        assistant.parts.push(Part {
-            id: PartId::ascending(),
-            body: PartBody::StepStart,
-        });
+        assistant.parts.push(Part { id: PartId::ascending(), body: PartBody::StepStart });
         assistant.parts.push(Part::text(text));
     }
 
@@ -997,9 +929,7 @@ fn a_call_that_never_finished_is_answered_rather_than_left_dangling() {
     ] {
         let running = matches!(state, ToolState::Running { .. });
         let mut assistant = Message::assistant("claude-test");
-        assistant
-            .parts
-            .push(tool_part("toolu_01Read", "read", state));
+        assistant.parts.push(tool_part("toolu_01Read", "read", state));
 
         let request = ChatRequest {
             effort_options: Default::default(),
@@ -1043,15 +973,10 @@ fn a_call_that_never_finished_is_answered_rather_than_left_dangling() {
 #[test]
 fn step_markers_are_not_sent() {
     let mut assistant = Message::assistant("claude-test");
+    assistant.parts.push(Part { id: PartId::ascending(), body: PartBody::StepStart });
     assistant.parts.push(Part {
         id: PartId::ascending(),
-        body: PartBody::StepStart,
-    });
-    assistant.parts.push(Part {
-        id: PartId::ascending(),
-        body: PartBody::StepFinish {
-            usage: Usage::default(),
-        },
+        body: PartBody::StepFinish { usage: Usage::default() },
     });
 
     let request = ChatRequest {
@@ -1065,11 +990,7 @@ fn step_markers_are_not_sent() {
     let body =
         serde_json::to_value(Body::new(&request, DEFAULT_MAX_TOKENS)).expect("the body serializes");
 
-    assert_eq!(
-        body["messages"],
-        json!([{"role": "user", "content": "hi"}]),
-        "got {body}"
-    );
+    assert_eq!(body["messages"], json!([{"role": "user", "content": "hi"}]), "got {body}");
 }
 
 /// Asking a model for more than it will generate is a 400 rather than a
@@ -1131,10 +1052,7 @@ fn a_provider_never_renders_its_credential() {
             "https://ganja:sk-url-canary-9999@gateway.invalid:8443/v1?token=sk-query-canary-7777",
             "gateway.invalid:8443",
         ),
-        (
-            "http://ganja:sk-url-canary-9999@127.0.0.1:8080",
-            "127.0.0.1:8080",
-        ),
+        ("http://ganja:sk-url-canary-9999@127.0.0.1:8080", "127.0.0.1:8080"),
     ];
 
     for (base_url, endpoint) in cases {
@@ -1144,16 +1062,9 @@ fn a_provider_never_renders_its_credential() {
 
         let rendered = format!("{provider:?}");
 
-        for secret in [
-            "sk-test-canary-XYZ",
-            "sk-url-canary-9999",
-            "sk-query-canary-7777",
-            "ganja:",
-        ] {
-            assert!(
-                !rendered.contains(secret),
-                "a provider leaked {secret}: {rendered}"
-            );
+        for secret in ["sk-test-canary-XYZ", "sk-url-canary-9999", "sk-query-canary-7777", "ganja:"]
+        {
+            assert!(!rendered.contains(secret), "a provider leaked {secret}: {rendered}");
         }
         assert!(rendered.contains("[redacted]"), "got {rendered}");
         // Still worth reading: which endpoint this provider is pointed at
@@ -1203,12 +1114,7 @@ async fn a_request_that_cannot_be_built_reports_why_without_the_endpoint() {
     };
 
     let rendered = format!("{error} / {error:?}");
-    for secret in [
-        "sk-test-canary-XYZ",
-        "sk-url-canary-9999",
-        "sk-query-canary-7777",
-        "ganja:",
-    ] {
+    for secret in ["sk-test-canary-XYZ", "sk-url-canary-9999", "sk-query-canary-7777", "ganja:"] {
         assert!(!rendered.contains(secret), "leaked {secret}: {rendered}");
     }
     assert!(

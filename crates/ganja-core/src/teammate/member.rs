@@ -93,7 +93,9 @@
 //! [`Asks::retire`]: crate::teammate::member::Asks::retire
 //! [`LeadFrame`]: ganja_protocol::team::LeadFrame
 
-use std::{collections::HashMap, path::PathBuf, sync::Mutex};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use ganja_protocol::team::{
@@ -105,11 +107,9 @@ use ganja_team::{
 };
 use serde_json::{Value, json};
 
-use crate::{
-    protocol::{Event, PermissionId, PermissionReply, SessionId},
-    teammate::postbox::{self, LEADS, NO_SOCKET},
-    tool::team::{self, Address, Body, Peer, Reserved, Sent, Undelivered},
-};
+use crate::protocol::{Event, PermissionId, PermissionReply, SessionId};
+use crate::teammate::postbox::{self, LEADS, NO_SOCKET};
+use crate::tool::team::{self, Address, Body, Peer, Reserved, Sent, Undelivered};
 
 /// What is logged when a `permission_response` answers a request this member
 /// is not waiting on — the runner's `IGNORED_STALE`, for this frame.
@@ -170,11 +170,7 @@ impl MemberPostbox {
     /// already been through it by the time anything can be built here.
     #[must_use]
     pub fn new(name: MemberName, team: TeamName, root: TeamsRoot) -> Self {
-        Self {
-            sender: name,
-            team,
-            root,
-        }
+        Self { sender: name, team, root }
     }
 
     /// The team file, or [`None`] where there is not one to read.
@@ -213,11 +209,8 @@ impl MemberPostbox {
     /// listed first, once, whatever the file says, which is the invariant the
     /// tool's last rung reads (`ganja-tool`'s [`Peer::lead`]).
     fn peers(&self, file: Option<&TeamFile>) -> Vec<Peer> {
-        let mut peers = vec![Peer {
-            name: LEAD.to_owned(),
-            description: Some(LEADS.to_owned()),
-            lead: true,
-        }];
+        let mut peers =
+            vec![Peer { name: LEAD.to_owned(), description: Some(LEADS.to_owned()), lead: true }];
         let Some(file) = file else {
             return peers;
         };
@@ -244,9 +237,7 @@ impl MemberPostbox {
     /// The member `name` names, matched as the team's own names are: case
     /// insensitively, with the canonical spelling coming back off the roster.
     fn recipient(&self, file: Option<&TeamFile>, name: &str) -> Option<Peer> {
-        self.peers(file)
-            .into_iter()
-            .find(|peer| peer.name.eq_ignore_ascii_case(name))
+        self.peers(file).into_iter().find(|peer| peer.name.eq_ignore_ascii_case(name))
     }
 }
 
@@ -260,33 +251,23 @@ impl team::Postbox for MemberPostbox {
         let name = match to {
             Address::Local(name) => name,
             Address::Uds { .. } => {
-                return Err(Undelivered::NoTransport {
-                    reason: NO_SOCKET.to_owned(),
-                });
+                return Err(Undelivered::NoTransport { reason: NO_SOCKET.to_owned() });
             }
         };
         // Off the runtime's worker threads, like every other read of these
         // documents from inside a turn: `ganja-team` is synchronous on
         // purpose.
         let this = self.clone_for_read();
-        let file = tokio::task::spawn_blocking(move || this.read_team())
-            .await
-            .unwrap_or_default();
+        let file = tokio::task::spawn_blocking(move || this.read_team()).await.unwrap_or_default();
         let Some(recipient) = self.recipient(file.as_ref(), &name) else {
             return Err(Undelivered::Unknown);
         };
 
-        postbox::write_to_peer(
-            self.sender.as_str(),
-            &self.root,
-            &self.team,
-            &recipient,
-            body,
-        )
-        .await
-        // The minted identity is the admission gate's key (M6), and a member
-        // gates nothing: only the lead's socket door records it.
-        .map(|(sent, _)| sent)
+        postbox::write_to_peer(self.sender.as_str(), &self.root, &self.team, &recipient, body)
+            .await
+            // The minted identity is the admission gate's key (M6), and a member
+            // gates nothing: only the lead's socket door records it.
+            .map(|(sent, _)| sent)
     }
 
     fn roster(&self) -> Vec<Peer> {
@@ -299,11 +280,7 @@ impl MemberPostbox {
     /// three fields are all owned values, and this is the only reason a
     /// postbox is ever duplicated.
     fn clone_for_read(&self) -> Self {
-        Self {
-            sender: self.sender.clone(),
-            team: self.team.clone(),
-            root: self.root.clone(),
-        }
+        Self { sender: self.sender.clone(), team: self.team.clone(), root: self.root.clone() }
     }
 }
 
@@ -426,10 +403,7 @@ impl Asks {
         )
         .map_err(|error| Unforwarded::Unwritten(error.to_string()))?;
 
-        self.pending
-            .lock()
-            .expect("the asks are never poisoned")
-            .insert(id.clone(), tool.clone());
+        self.pending.lock().expect("the asks are never poisoned").insert(id.clone(), tool.clone());
 
         let path = self.lead_inbox.clone();
         let written = crate::teammate::blocking_io(move || {
@@ -437,10 +411,7 @@ impl Asks {
         })
         .await;
         if let Err(reason) = written {
-            self.pending
-                .lock()
-                .expect("the asks are never poisoned")
-                .remove(&id);
+            self.pending.lock().expect("the asks are never poisoned").remove(&id);
             tracing::warn!(
                 member = self.name.as_str(),
                 request = id.as_str(),
@@ -481,11 +452,7 @@ impl Asks {
             return Resolved::NotAnAnswer { kind };
         };
         let id = PermissionId::from(response.request_id().to_owned());
-        let waited = self
-            .pending
-            .lock()
-            .expect("the asks are never poisoned")
-            .remove(&id);
+        let waited = self.pending.lock().expect("the asks are never poisoned").remove(&id);
         let Some(tool) = waited else {
             tracing::info!(
                 member = self.name.as_str(),
@@ -493,9 +460,7 @@ impl Asks {
                 "{IGNORED_STALE_ANSWER}"
             );
 
-            return Resolved::Stale {
-                request_id: id.as_str().to_owned(),
-            };
+            return Resolved::Stale { request_id: id.as_str().to_owned() };
         };
         let reply = reply_of(&response);
         tracing::info!(
@@ -517,20 +482,13 @@ impl Asks {
     /// [`Asks::resolve`] already answered is retired twice, and that is what
     /// keeps a later copy of the same answer stale rather than a leak.
     pub fn retire(&self, id: &PermissionId) -> bool {
-        self.pending
-            .lock()
-            .expect("the asks are never poisoned")
-            .remove(id)
-            .is_some()
+        self.pending.lock().expect("the asks are never poisoned").remove(id).is_some()
     }
 
     /// How many asks are waiting on the lead.
     #[must_use]
     pub fn waiting(&self) -> usize {
-        self.pending
-            .lock()
-            .expect("the asks are never poisoned")
-            .len()
+        self.pending.lock().expect("the asks are never poisoned").len()
     }
 }
 
@@ -542,15 +500,7 @@ impl Asks {
 /// sides cannot drift.
 #[must_use]
 pub fn ask_of(agent_id: &str, request: &Event) -> Option<PermissionRequest> {
-    let Event::PermissionRequested {
-        id,
-        call_id,
-        tool,
-        title,
-        args,
-        directories,
-        ..
-    } = request
+    let Event::PermissionRequested { id, call_id, tool, title, args, directories, .. } = request
     else {
         return None;
     };
@@ -610,10 +560,7 @@ pub fn response_of(
     match reply {
         PermissionReply::Once => PermissionResponse::success(
             request_id,
-            PermissionResponseBody {
-                updated_input: input.clone(),
-                permission_updates: Vec::new(),
-            },
+            PermissionResponseBody { updated_input: input.clone(), permission_updates: Vec::new() },
         ),
         PermissionReply::Always => PermissionResponse::success(
             request_id,
@@ -653,11 +600,7 @@ pub fn reply_of(response: &PermissionResponse) -> PermissionReply {
                         && update.get("behavior").and_then(Value::as_str) == Some(ALLOW)
                 })
             });
-            if always {
-                PermissionReply::Always
-            } else {
-                PermissionReply::Once
-            }
+            if always { PermissionReply::Always } else { PermissionReply::Once }
         }
     }
 }

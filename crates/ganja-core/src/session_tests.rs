@@ -1,4 +1,6 @@
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -8,22 +10,18 @@ use super::{
     context_carried, parse_args, peer_envelope, resolve, resolve_mentions, serialize_message,
     session_mention_parts, sliced, title_model, user_message,
 };
-use crate::{
-    catalog,
-    engine::Fanout,
-    permission::Permissions,
-    protocol::{
-        FinishReason, Message, Part, PartBody, PermissionId, PermissionReply, QuestionId,
-        SessionId, ToolState, Usage,
-    },
-    provider::{FakeProvider, fake},
-    subagent::{Host, Spawn},
-    teammate::identity::{Identity, TAG},
-    tool::{
-        Credentials, FileTimes, Registry, Tool, ToolCtx, ToolError, ToolOutput,
-        team::{Address, Body, Peer, Postbox, Reserved, Sent, Undelivered},
-    },
+use crate::catalog;
+use crate::engine::Fanout;
+use crate::permission::Permissions;
+use crate::protocol::{
+    FinishReason, Message, Part, PartBody, PermissionId, PermissionReply, QuestionId, SessionId,
+    ToolState, Usage,
 };
+use crate::provider::{FakeProvider, fake};
+use crate::subagent::{Host, Spawn};
+use crate::teammate::identity::{Identity, TAG};
+use crate::tool::team::{Address, Body, Peer, Postbox, Reserved, Sent, Undelivered};
+use crate::tool::{Credentials, FileTimes, Registry, Tool, ToolCtx, ToolError, ToolOutput};
 
 /// Two dialogs stand open together, and each reply reaches the one it
 /// names.
@@ -62,14 +60,8 @@ fn two_open_permission_requests_are_each_answered_by_their_own_id() {
     // Newest first: routing is by id, not by arrival.
     assert!(pending.answer_permission(&beta, PermissionReply::Reject));
     assert!(pending.answer_permission(&alpha, PermissionReply::Once));
-    assert_eq!(
-        first_reply.try_recv().expect("alpha was answered"),
-        PermissionReply::Once
-    );
-    assert_eq!(
-        second_reply.try_recv().expect("beta was answered"),
-        PermissionReply::Reject
-    );
+    assert_eq!(first_reply.try_recv().expect("alpha was answered"), PermissionReply::Once);
+    assert_eq!(second_reply.try_recv().expect("beta was answered"), PermissionReply::Reject);
     assert_eq!(pending.len(), 0, "an answered request is closed");
 }
 
@@ -88,18 +80,12 @@ fn closing_one_request_leaves_its_sibling_open() {
 
     pending.close_permission(&alpha);
 
-    assert!(
-        !pending.answer_permission(&alpha, PermissionReply::Once),
-        "the retracted one is gone"
-    );
+    assert!(!pending.answer_permission(&alpha, PermissionReply::Once), "the retracted one is gone");
     assert!(
         pending.answer_permission(&beta, PermissionReply::Once),
         "and the one beside it is not"
     );
-    assert_eq!(
-        second_reply.try_recv().expect("beta was answered"),
-        PermissionReply::Once
-    );
+    assert_eq!(second_reply.try_recv().expect("beta was answered"), PermissionReply::Once);
 }
 
 /// The property the discriminated single cell had, kept by holding the two
@@ -118,12 +104,7 @@ fn a_reply_of_one_kind_never_reaches_a_wait_of_the_other() {
         !pending.answer_question(&QuestionId::ascending(), Answered::Rejected),
         "an id nothing answers to delivers nothing"
     );
-    assert_eq!(
-        pending.len(),
-        2,
-        "and takes neither open request with it: {}",
-        pending.len()
-    );
+    assert_eq!(pending.len(), 2, "and takes neither open request with it: {}", pending.len());
     assert!(pending.answer_question(&question_id, Answered::Rejected));
     assert!(pending.answer_permission(&asked, PermissionReply::Once));
 }
@@ -190,9 +171,7 @@ fn turn_with(
         },
         tools: Arc::new(Registry::new(vec![tool])),
         skill_roots: crate::tool::skill::Roots::none(),
-        identity: Arc::new(crate::teammate::identity::Identity::new(
-            std::env::temp_dir(),
-        )),
+        identity: Arc::new(crate::teammate::identity::Identity::new(std::env::temp_dir())),
         receipts: Arc::default(),
         teamless: false,
         teamless_send: crate::config::TeamlessSend::default(),
@@ -246,12 +225,7 @@ async fn a_call_cancelled_before_it_starts_never_runs_the_tool() {
 
     let cancel = CancellationToken::new();
     cancel.cancel();
-    let (turn, _received) = turn_with(
-        cancel,
-        Arc::new(Effectful {
-            marker: marker.clone(),
-        }),
-    );
+    let (turn, _received) = turn_with(cancel, Arc::new(Effectful { marker: marker.clone() }));
 
     let mut assistant = Message::assistant("canned");
     let mut part = Part::tool("call_1", "effectful");
@@ -275,10 +249,7 @@ async fn a_call_cancelled_before_it_starts_never_runs_the_tool() {
 
     let flow = resolve(&turn, &mut assistant, &call).await;
 
-    assert!(
-        !marker.exists(),
-        "the tool body ran for a call that was cancelled before it started"
-    );
+    assert!(!marker.exists(), "the tool body ran for a call that was cancelled before it started");
     match flow {
         std::ops::ControlFlow::Break(Some(outcome)) => {
             assert_eq!(outcome.reason, FinishReason::Cancelled);
@@ -294,12 +265,8 @@ async fn a_call_on_a_live_turn_still_runs_the_tool() {
     let dir = tempfile::tempdir().expect("a scratch directory");
     let marker = dir.path().join("ran");
 
-    let (turn, _received) = turn_with(
-        CancellationToken::new(),
-        Arc::new(Effectful {
-            marker: marker.clone(),
-        }),
-    );
+    let (turn, _received) =
+        turn_with(CancellationToken::new(), Arc::new(Effectful { marker: marker.clone() }));
 
     let mut assistant = Message::assistant("canned");
     let part = Part::tool("call_1", "effectful");
@@ -316,22 +283,13 @@ async fn a_call_on_a_live_turn_still_runs_the_tool() {
     let flow = resolve(&turn, &mut assistant, &call).await;
 
     assert!(marker.exists(), "an uncancelled call has to actually run");
-    assert!(
-        flow.is_continue(),
-        "a tool that succeeded lets the turn carry on"
-    );
+    assert!(flow.is_continue(), "a tool that succeeded lets the turn carry on");
 }
 
 #[test]
 fn arguments_parse_leniently_and_fail_loudly() {
-    assert_eq!(
-        parse_args("").expect("no fragments is a no-argument call"),
-        serde_json::json!({})
-    );
-    assert_eq!(
-        parse_args("   \n").expect("whitespace is still empty"),
-        serde_json::json!({})
-    );
+    assert_eq!(parse_args("").expect("no fragments is a no-argument call"), serde_json::json!({}));
+    assert_eq!(parse_args("   \n").expect("whitespace is still empty"), serde_json::json!({}));
     assert_eq!(
         parse_args(r#"{"path":"a.rs"}"#).expect("an object passes through"),
         serde_json::json!({"path": "a.rs"})
@@ -377,14 +335,8 @@ fn usage_sums_field_by_field_and_saturates() {
     );
     assert_eq!(
         add_usage(
-            Usage {
-                input_tokens: u64::MAX,
-                ..Usage::default()
-            },
-            Usage {
-                input_tokens: 1,
-                ..Usage::default()
-            },
+            Usage { input_tokens: u64::MAX, ..Usage::default() },
+            Usage { input_tokens: 1, ..Usage::default() },
         )
         .input_tokens,
         u64::MAX,
@@ -448,11 +400,7 @@ fn a_ranged_mention_inlines_exactly_the_lines_it_names() {
 fn a_range_a_client_sent_backwards_reads_from_start_to_the_end() {
     assert_eq!(sliced("a\nb\nc\nd", 3, Some(2)), "c\nd");
     assert_eq!(sliced("a\nb\nc\nd", 3, Some(3)), "c\nd");
-    assert_eq!(
-        sliced("a\nb\nc\nd", 0, None),
-        "a\nb\nc\nd",
-        "a zero start is the top"
-    );
+    assert_eq!(sliced("a\nb\nc\nd", 0, None), "a\nb\nc\nd", "a zero start is the top");
 }
 
 /// Resolution replaces the reference in the request's own copy. What it
@@ -468,28 +416,20 @@ fn resolving_a_mention_is_not_a_read() {
         id: crate::protocol::MessageId::ascending(),
         role: crate::protocol::Role::User,
         parts: vec![Part::file("a.txt", "text/plain")],
-        time: crate::protocol::MessageTime {
-            created: 1,
-            completed: Some(1),
-        },
+        time: crate::protocol::MessageTime { created: 1, completed: Some(1) },
         model: None,
         usage: None,
     }];
     resolve_mentions(&mut messages, root.path(), &|_| false);
 
     assert!(
-        messages[0].parts[0]
-            .as_text()
-            .is_some_and(|text| text.contains("one")),
+        messages[0].parts[0].as_text().is_some_and(|text| text.contains("one")),
         "the reference became content: {:?}",
         messages[0].parts[0]
     );
 
     let times = FileTimes::default();
-    assert!(
-        times.check_fresh(&path).is_err(),
-        "and nothing recorded the file as read"
-    );
+    assert!(times.check_fresh(&path).is_err(), "and nothing recorded the file as read");
 }
 
 /// One user message carrying one file part for `path`, for the resolution
@@ -499,10 +439,7 @@ fn message_mentioning(path: &str) -> Vec<Message> {
         id: crate::protocol::MessageId::ascending(),
         role: crate::protocol::Role::User,
         parts: vec![Part::file(path, crate::attachment::mime(path))],
-        time: crate::protocol::MessageTime {
-            created: 1,
-            completed: Some(1),
-        },
+        time: crate::protocol::MessageTime { created: 1, completed: Some(1) },
         model: None,
         usage: None,
     }]
@@ -520,23 +457,16 @@ fn a_binary_mention_becomes_base64_when_the_wire_carries_it() {
     let mut messages = message_mentioning("shot.png");
     resolve_mentions(&mut messages, root.path(), &|mime| mime == "image/png");
 
-    let PartBody::File {
-        path,
-        mime,
-        content: Some(content),
-        ..
-    } = &messages[0].parts[0].body
+    let PartBody::File { path, mime, content: Some(content), .. } = &messages[0].parts[0].body
     else {
         panic!("the part stays a file part: {:?}", messages[0].parts[0]);
     };
     assert_eq!(path, "shot.png");
     assert_eq!(mime, "image/png");
     {
-        use base64::{Engine as _, engine::general_purpose::STANDARD};
-        assert_eq!(
-            STANDARD.decode(content).expect("the payload is base64"),
-            b"png-bytes"
-        );
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD;
+        assert_eq!(STANDARD.decode(content).expect("the payload is base64"), b"png-bytes");
     }
 }
 
@@ -550,13 +480,8 @@ fn a_binary_mention_the_wire_cannot_carry_degrades_to_its_name() {
     let mut messages = message_mentioning("shot.png");
     resolve_mentions(&mut messages, root.path(), &|_| false);
 
-    let text = messages[0].parts[0]
-        .as_text()
-        .expect("the part degraded to text");
-    assert!(
-        text.contains("shot.png"),
-        "the model learns the name: {text}"
-    );
+    let text = messages[0].parts[0].as_text().expect("the part degraded to text");
+    assert!(text.contains("shot.png"), "the model learns the name: {text}");
     assert!(
         text.contains("image/png") && text.contains("does not carry"),
         "and why the bytes are not there: {text}"
@@ -574,9 +499,7 @@ fn an_svg_mention_is_inlined_as_text_whatever_the_wire_accepts() {
     resolve_mentions(&mut messages, root.path(), &|_| false);
 
     assert!(
-        messages[0].parts[0]
-            .as_text()
-            .is_some_and(|text| text.contains("<svg/>")),
+        messages[0].parts[0].as_text().is_some_and(|text| text.contains("<svg/>")),
         "the markup itself is inlined: {:?}",
         messages[0].parts[0]
     );
@@ -589,12 +512,8 @@ fn an_svg_mention_is_inlined_as_text_whatever_the_wire_accepts() {
 /// never agreed to.
 #[test]
 fn an_attribute_cannot_break_out_of_its_quotes() {
-    let envelope = peer_envelope(
-        "w1\" color=\"forged",
-        Some("<b>&\"done\"</b>"),
-        Some("red\">"),
-        "plain",
-    );
+    let envelope =
+        peer_envelope("w1\" color=\"forged", Some("<b>&\"done\"</b>"), Some("red\">"), "plain");
 
     assert_eq!(
         envelope,
@@ -681,19 +600,12 @@ async fn a_peer_part_is_carried_into_the_request() {
     let provider = Arc::new(FakeProvider::new("ok", Duration::ZERO));
     let (mut turn, _received) = turn_with(
         CancellationToken::new(),
-        Arc::new(Effectful {
-            marker: PathBuf::from("/nonexistent"),
-        }),
+        Arc::new(Effectful { marker: PathBuf::from("/nonexistent") }),
     );
     turn.provider = provider.clone();
 
     let mut prompt = Message::user("what did w1 say");
-    prompt.parts.push(Part::peer(
-        "w1",
-        Some("picked up W2".to_owned()),
-        None,
-        "on the protocol",
-    ));
+    prompt.parts.push(Part::peer("w1", Some("picked up W2".to_owned()), None, "on the protocol"));
     turn.history.lock().await.push(prompt);
 
     let mut assistant = Message::assistant("canned");
@@ -703,21 +615,15 @@ async fn a_peer_part_is_carried_into_the_request() {
     let carried = recorded.first().expect("the step asked the provider");
     let asked = carried.messages.last().expect("the prompt is on it");
     assert!(
-        asked
-            .parts
-            .iter()
-            .any(|part| part.as_text().is_some_and(|text| text
-                == "<teammate-message teammate_id=\"w1\" summary=\"picked up W2\">\n\
+        asked.parts.iter().any(|part| part.as_text().is_some_and(|text| text
+            == "<teammate-message teammate_id=\"w1\" summary=\"picked up W2\">\n\
                         on the protocol\n\
                         </teammate-message>")),
         "the envelope rides the user turn's text: {:?}",
         asked.parts
     );
     assert!(
-        !asked
-            .parts
-            .iter()
-            .any(|part| matches!(part.body, PartBody::Peer { .. })),
+        !asked.parts.iter().any(|part| matches!(part.body, PartBody::Peer { .. })),
         "and nothing hands a wire a part it has no message for: {:?}",
         asked.parts
     );
@@ -731,26 +637,16 @@ async fn a_peer_part_is_carried_into_the_request() {
 async fn a_steered_teammate_message_becomes_a_part_of_the_running_turn() {
     let (turn, _received) = turn_with(
         CancellationToken::new(),
-        Arc::new(Effectful {
-            marker: PathBuf::from("/nonexistent"),
-        }),
+        Arc::new(Effectful { marker: PathBuf::from("/nonexistent") }),
     );
-    turn.steer
-        .lock()
-        .expect("the steer mailbox is never poisoned")
-        .push(super::SteerInput {
-            id: "steer-1".to_owned(),
-            text: String::new(),
-            mentions: Vec::new(),
-            skills: Vec::new(),
-            peers: vec![crate::protocol::team::PeerPayload::new(
-                "w2",
-                None,
-                None,
-                "and I have it",
-            )],
-            session_mentions: Vec::new(),
-        });
+    turn.steer.lock().expect("the steer mailbox is never poisoned").push(super::SteerInput {
+        id: "steer-1".to_owned(),
+        text: String::new(),
+        mentions: Vec::new(),
+        skills: Vec::new(),
+        peers: vec![crate::protocol::team::PeerPayload::new("w2", None, None, "and I have it")],
+        session_mentions: Vec::new(),
+    });
 
     let drained = super::drain_steers(&turn).await;
 
@@ -758,15 +654,8 @@ async fn a_steered_teammate_message_becomes_a_part_of_the_running_turn() {
         matches!(drained, std::ops::ControlFlow::Continue(true)),
         "the mailbox had one message to take"
     );
-    let taken = turn
-        .steer
-        .lock()
-        .expect("the steer mailbox is never poisoned")
-        .consumed
-        .clone();
-    let [message] = taken.as_slice() else {
-        panic!("one steer, one message, got {taken:?}")
-    };
+    let taken = turn.steer.lock().expect("the steer mailbox is never poisoned").consumed.clone();
+    let [message] = taken.as_slice() else { panic!("one steer, one message, got {taken:?}") };
     assert!(
         matches!(
             message.parts.as_slice(),
@@ -787,26 +676,16 @@ async fn a_steered_teammate_message_becomes_a_part_of_the_running_turn() {
 async fn a_whitespace_only_steer_with_peers_drops_its_text_part() {
     let (turn, _received) = turn_with(
         CancellationToken::new(),
-        Arc::new(Effectful {
-            marker: PathBuf::from("/nonexistent"),
-        }),
+        Arc::new(Effectful { marker: PathBuf::from("/nonexistent") }),
     );
-    turn.steer
-        .lock()
-        .expect("the steer mailbox is never poisoned")
-        .push(super::SteerInput {
-            id: "steer-1".to_owned(),
-            text: "  ".to_owned(),
-            mentions: Vec::new(),
-            skills: Vec::new(),
-            peers: vec![crate::protocol::team::PeerPayload::new(
-                "w2",
-                None,
-                None,
-                "and I have it",
-            )],
-            session_mentions: Vec::new(),
-        });
+    turn.steer.lock().expect("the steer mailbox is never poisoned").push(super::SteerInput {
+        id: "steer-1".to_owned(),
+        text: "  ".to_owned(),
+        mentions: Vec::new(),
+        skills: Vec::new(),
+        peers: vec![crate::protocol::team::PeerPayload::new("w2", None, None, "and I have it")],
+        session_mentions: Vec::new(),
+    });
 
     let drained = super::drain_steers(&turn).await;
     assert!(
@@ -814,15 +693,8 @@ async fn a_whitespace_only_steer_with_peers_drops_its_text_part() {
         "the mailbox had one message to take"
     );
 
-    let taken = turn
-        .steer
-        .lock()
-        .expect("the steer mailbox is never poisoned")
-        .consumed
-        .clone();
-    let [message] = taken.as_slice() else {
-        panic!("one steer, one message, got {taken:?}")
-    };
+    let taken = turn.steer.lock().expect("the steer mailbox is never poisoned").consumed.clone();
+    let [message] = taken.as_slice() else { panic!("one steer, one message, got {taken:?}") };
     assert!(
         matches!(
             message.parts.as_slice(),
@@ -843,16 +715,12 @@ async fn a_whitespace_only_steer_with_peers_drops_its_text_part() {
 async fn a_message_with_text_and_peers_keeps_the_text_part_first() {
     let (turn, _received) = turn_with(
         CancellationToken::new(),
-        Arc::new(Effectful {
-            marker: PathBuf::from("/nonexistent"),
-        }),
+        Arc::new(Effectful { marker: PathBuf::from("/nonexistent") }),
     );
     let user = super::user_message(
         &turn,
         "what did w1 say".to_owned(),
-        &[crate::protocol::team::PeerPayload::new(
-            "w1", None, None, "done",
-        )],
+        &[crate::protocol::team::PeerPayload::new("w1", None, None, "done")],
         &[],
         &[],
         &[],
@@ -915,9 +783,7 @@ fn parent_spawn(
         jobs: None,
         hooks: None,
         teammates: None,
-        identity: Arc::new(crate::teammate::identity::Identity::new(
-            std::env::temp_dir(),
-        )),
+        identity: Arc::new(crate::teammate::identity::Identity::new(std::env::temp_dir())),
     };
 
     let spawn = Spawn {
@@ -1017,10 +883,7 @@ async fn a_child_turn_gets_a_turn_handle_cell_of_its_own() {
     let (spawn, _parent) = parent_spawn(None);
     let (turn, _events) = child_of(&spawn);
 
-    assert!(
-        turn.slot.lock().await.is_none(),
-        "nothing is holding the child's cell when it starts"
-    );
+    assert!(turn.slot.lock().await.is_none(), "nothing is holding the child's cell when it starts");
     assert_eq!(
         Arc::strong_count(&turn.slot),
         1,
@@ -1081,9 +944,7 @@ fn a_child_turn_shares_the_parents_language_servers() {
     let (spawn, _parent) = parent_spawn(Some(Arc::clone(&lsp)));
     let (turn, _events) = child_of(&spawn);
 
-    let shared = turn
-        .lsp
-        .expect("a child of a session that has servers is given them");
+    let shared = turn.lsp.expect("a child of a session that has servers is given them");
     assert!(
         Arc::ptr_eq(&shared, &lsp),
         "the same service, not a second one started behind the parent's back"
@@ -1198,12 +1059,7 @@ fn a_configured_small_model_is_what_the_title_asks_for() {
     // key like this earns the most: there is no cheapest row to fall back
     // to, so without it every cursor session titles on its own model.
     assert_eq!(
-        title_model(
-            openai_rows().into_iter(),
-            "cursor",
-            "default",
-            Some("cursor/composer-1")
-        ),
+        title_model(openai_rows().into_iter(), "cursor", "default", Some("cursor/composer-1")),
         "composer-1"
     );
 }
@@ -1223,11 +1079,7 @@ fn a_thought_never_reaches_the_summary_that_becomes_the_history() {
     let mut assistant = Message::assistant("claude-test");
     assistant.parts.push(Part::reasoning_text(THOUGHT));
     assistant.parts.push(Part::text("Hello!"));
-    assistant.parts.push(Part::reasoning(
-        "openai",
-        "rs_1",
-        Some("sealed-blob-0001".to_owned()),
-    ));
+    assistant.parts.push(Part::reasoning("openai", "rs_1", Some("sealed-blob-0001".to_owned())));
 
     let serialized = serialize_message(&assistant);
 
@@ -1355,9 +1207,7 @@ async fn a_session_mention_never_delivers_or_pins() {
     let _held = live_record(dir.path(), "0198c1a2", "backend");
     let (mut turn, _events) = turn_with(
         CancellationToken::new(),
-        Arc::new(Effectful {
-            marker: PathBuf::from("/nonexistent"),
-        }),
+        Arc::new(Effectful { marker: PathBuf::from("/nonexistent") }),
     );
     turn.identity = Arc::new(Identity::new(dir.path()));
     let spy = Arc::new(SpyPostbox::default());
@@ -1366,11 +1216,7 @@ async fn a_session_mention_never_delivers_or_pins() {
     let parts = session_mention_parts(&turn, &["backend".to_owned()]).await;
 
     assert_eq!(*spy.delivered.lock().expect("no panic"), 0);
-    assert_eq!(
-        turn.identity.pinned("backend"),
-        None,
-        "a mention never pins"
-    );
+    assert_eq!(turn.identity.pinned("backend"), None, "a mention never pins");
     assert_eq!(parts.len(), 1);
     let text = parts[0].as_text().expect("a mention becomes text");
     assert!(text.contains(&format!("<{TAG}")), "got {text}");
@@ -1389,17 +1235,11 @@ async fn a_roster_hit_outranks_a_same_named_live_session() {
     let _held = live_record(dir.path(), "0198c1a2", "w1");
     let (mut turn, _events) = turn_with(
         CancellationToken::new(),
-        Arc::new(Effectful {
-            marker: PathBuf::from("/nonexistent"),
-        }),
+        Arc::new(Effectful { marker: PathBuf::from("/nonexistent") }),
     );
     turn.identity = Arc::new(Identity::new(dir.path()));
     turn.postbox = Some(Arc::new(SpyPostbox {
-        roster: vec![Peer {
-            name: "w1".to_owned(),
-            description: None,
-            lead: false,
-        }],
+        roster: vec![Peer { name: "w1".to_owned(), description: None, lead: false }],
         delivered: std::sync::Mutex::new(0),
     }));
 
@@ -1421,9 +1261,7 @@ async fn a_roster_hit_outranks_a_same_named_live_session() {
 async fn a_peers_own_words_are_never_scanned_for_a_session_mention() {
     let (turn, _events) = turn_with(
         CancellationToken::new(),
-        Arc::new(Effectful {
-            marker: PathBuf::from("/nonexistent"),
-        }),
+        Arc::new(Effectful { marker: PathBuf::from("/nonexistent") }),
     );
 
     let message = user_message(
@@ -1442,11 +1280,7 @@ async fn a_peers_own_words_are_never_scanned_for_a_session_mention() {
     .await;
 
     assert!(
-        message
-            .parts
-            .iter()
-            .filter_map(Part::as_text)
-            .all(|text| !text.contains(TAG)),
+        message.parts.iter().filter_map(Part::as_text).all(|text| !text.contains(TAG)),
         "no session-mention block is rendered from a peer's own words: {:?}",
         message.parts
     );

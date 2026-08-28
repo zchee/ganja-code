@@ -15,10 +15,7 @@ struct Scripted {
 
 impl Scripted {
     fn new(reply: Result<Vec<Answer>, Unanswered>) -> Arc<Self> {
-        Arc::new(Self {
-            reply,
-            seen: Mutex::new(Vec::new()),
-        })
+        Arc::new(Self { reply, seen: Mutex::new(Vec::new()) })
     }
 }
 
@@ -63,32 +60,18 @@ async fn an_answered_question_reaches_the_model_as_the_labels_that_were_picked()
         "User has answered your questions: \"Which database?\"=\"Postgres\". \
              You can now continue with the user's answers in mind."
     );
-    assert_eq!(
-        output.metadata,
-        serde_json::json!({"answers": [["Postgres"]]})
-    );
-    assert_eq!(
-        asker
-            .seen
-            .lock()
-            .expect("the record is never poisoned")
-            .len(),
-        1
-    );
+    assert_eq!(output.metadata, serde_json::json!({"answers": [["Postgres"]]}));
+    assert_eq!(asker.seen.lock().expect("the record is never poisoned").len(), 1);
 }
 
 #[tokio::test]
 async fn a_multiple_choice_answer_is_joined_the_way_upstream_joins_it() {
     let asker = Scripted::new(Ok(vec![vec!["Postgres".to_owned(), "SQLite".to_owned()]]));
-    let output = QuestionTool
-        .run(one(), &ctx(Some(asker)))
-        .await
-        .expect("an answered question completes");
+    let output =
+        QuestionTool.run(one(), &ctx(Some(asker))).await.expect("an answered question completes");
 
     assert!(
-        output
-            .output
-            .contains("\"Which database?\"=\"Postgres, SQLite\""),
+        output.output.contains("\"Which database?\"=\"Postgres, SQLite\""),
         "{}",
         output.output
     );
@@ -102,11 +85,7 @@ async fn a_question_nobody_picked_anything_for_reads_as_unanswered() {
         .await
         .expect("a skipped question still completes");
 
-    assert!(
-        output.output.contains("\"Which database?\"=\"Unanswered\""),
-        "{}",
-        output.output
-    );
+    assert!(output.output.contains("\"Which database?\"=\"Unanswered\""), "{}", output.output);
 }
 
 /// A short answer list is upstream's `answers[i]?.length` case: the model
@@ -114,16 +93,10 @@ async fn a_question_nobody_picked_anything_for_reads_as_unanswered() {
 #[tokio::test]
 async fn a_question_the_reply_never_reached_reads_as_unanswered_too() {
     let asker = Scripted::new(Ok(Vec::new()));
-    let output = QuestionTool
-        .run(one(), &ctx(Some(asker)))
-        .await
-        .expect("a short reply still completes");
+    let output =
+        QuestionTool.run(one(), &ctx(Some(asker))).await.expect("a short reply still completes");
 
-    assert!(
-        output.output.contains("\"Which database?\"=\"Unanswered\""),
-        "{}",
-        output.output
-    );
+    assert!(output.output.contains("\"Which database?\"=\"Unanswered\""), "{}", output.output);
 }
 
 #[tokio::test]
@@ -155,10 +128,7 @@ async fn a_cancelled_question_is_a_cancelled_call_and_not_failure_text() {
 /// in words rather than panicking.
 #[tokio::test]
 async fn a_build_with_nobody_to_ask_says_so_in_the_words_a_dismissal_uses() {
-    let error = QuestionTool
-        .run(one(), &ctx(None))
-        .await
-        .expect_err("there is nobody to answer");
+    let error = QuestionTool.run(one(), &ctx(None)).await.expect_err("there is nobody to answer");
 
     assert_eq!(error.to_string(), DISMISSED);
 }
@@ -210,9 +180,8 @@ fn a_dialog_is_titled_by_the_first_headers_and_how_many_follow() {
 fn the_schema_asks_for_everything_but_the_multiple_flag() {
     let schema = serde_json::to_value(QuestionTool.schema()).expect("a schema is JSON");
     let prompt = &schema["$defs"]["Prompt"];
-    let required = prompt["required"]
-        .as_array()
-        .expect("the question shape names its required fields");
+    let required =
+        prompt["required"].as_array().expect("the question shape names its required fields");
 
     assert!(required.contains(&serde_json::json!("question")));
     assert!(required.contains(&serde_json::json!("header")));
@@ -224,10 +193,7 @@ fn the_schema_asks_for_everything_but_the_multiple_flag() {
 /// a label with no explanation is not a choice anybody can weigh.
 #[test]
 fn a_choice_offers_both_a_label_and_the_reason_for_it() {
-    let choice = Choice {
-        label: "Postgres".to_owned(),
-        description: "Relational".to_owned(),
-    };
+    let choice = Choice { label: "Postgres".to_owned(), description: "Relational".to_owned() };
 
     assert_eq!(
         serde_json::to_value(&choice).expect("a choice is JSON"),

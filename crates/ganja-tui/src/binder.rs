@@ -61,14 +61,13 @@
 //! retried for the same id, which would be a warning per tick, and is tried
 //! again the next time the slot moves.
 
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::Result;
 use futures::future::BoxFuture;
-use ganja_core::{Engine, SessionId, Storage, config::Config};
+use ganja_core::config::Config;
+use ganja_core::{Engine, SessionId, Storage};
 
 /// What the socket serves beside the engine: the read-only context the
 /// server's informational routes answer from, assembled once by the startup
@@ -140,12 +139,7 @@ impl SessionSocket {
     /// nothing until the first [`SessionSocket::sync`].
     #[must_use]
     pub fn new(binder: Box<dyn Binder>, served: Served) -> Self {
-        Self {
-            binder,
-            served,
-            bound: None,
-            refused: None,
-        }
+        Self { binder, served, bound: None, refused: None }
     }
 
     /// The path bound right now, when one is.
@@ -172,11 +166,7 @@ impl SessionSocket {
         // sequencing — the two names may share a stem.
         self.shutdown().await;
 
-        match self
-            .binder
-            .bind(Arc::clone(engine), wanted.clone(), self.served.clone())
-            .await
-        {
+        match self.binder.bind(Arc::clone(engine), wanted.clone(), self.served.clone()).await {
             Ok(bound) => {
                 let path = bound.path().to_path_buf();
                 tracing::info!(session = wanted.as_str(), path = %path.display(), "session socket bound");
@@ -216,15 +206,12 @@ impl SessionSocket {
 /// refuses while told to.
 #[cfg(test)]
 pub(crate) mod fake {
-    use std::{
-        path::{Path, PathBuf},
-        sync::{
-            Arc, Mutex,
-            atomic::{AtomicBool, AtomicUsize, Ordering},
-        },
-    };
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
-    use futures::{FutureExt as _, future::BoxFuture};
+    use futures::FutureExt as _;
+    use futures::future::BoxFuture;
     use ganja_core::{Engine, SessionId};
 
     use super::{Binder, Bound, Served};
@@ -259,10 +246,7 @@ pub(crate) mod fake {
         }
 
         fn shutdown(self: Box<Self>) -> BoxFuture<'static, anyhow::Result<()>> {
-            self.closed
-                .lock()
-                .expect("not poisoned")
-                .push(self.path.clone());
+            self.closed.lock().expect("not poisoned").push(self.path.clone());
             async { Ok(()) }.boxed()
         }
     }
@@ -279,10 +263,8 @@ pub(crate) mod fake {
                 return async { Err(anyhow::anyhow!("the directory is not ours")) }.boxed();
             }
             self.bound.lock().expect("not poisoned").push(id.clone());
-            let fake: Box<dyn Bound> = Box::new(Fake {
-                path: Recording::path_for(&id),
-                closed: Arc::clone(&self.closed),
-            });
+            let fake: Box<dyn Bound> =
+                Box::new(Fake { path: Recording::path_for(&id), closed: Arc::clone(&self.closed) });
             async move { Ok(fake) }.boxed()
         }
     }

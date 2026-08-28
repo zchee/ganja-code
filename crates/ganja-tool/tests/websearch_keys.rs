@@ -8,9 +8,11 @@
 //! environment decides which service is asked and whether anything is asked at
 //! all.
 
-use std::{path::PathBuf, sync::Arc};
+use std::path::PathBuf;
+use std::sync::Arc;
 
-use ganja_tool::{Credentials, FileTimes, Tool as _, ToolCtx, ToolError, websearch::WebsearchTool};
+use ganja_tool::websearch::WebsearchTool;
+use ganja_tool::{Credentials, FileTimes, Tool as _, ToolCtx, ToolError};
 use tokio_util::sync::CancellationToken;
 
 /// A context with nothing to guard: no file is read on this path.

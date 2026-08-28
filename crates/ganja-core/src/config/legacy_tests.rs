@@ -8,7 +8,8 @@
 //! the command that converts a file cannot hand somebody a `ganja.toml` whose
 //! first launch declines it.
 
-use std::{fs, path::Path};
+use std::fs;
+use std::path::Path;
 
 use tempfile::TempDir;
 
@@ -41,10 +42,7 @@ fn comments_and_trailing_commas_are_part_of_the_dialect() {
     .expect("JSONC is what these files were written in");
 
     assert_eq!(config.model.as_deref(), Some("anthropic/claude-sonnet-5"));
-    assert_eq!(
-        config.small_model.as_deref(),
-        Some("anthropic/claude-haiku-4.5")
-    );
+    assert_eq!(config.small_model.as_deref(), Some("anthropic/claude-haiku-4.5"));
 }
 
 /// The `Option` in the decode is what makes this an empty config rather than a
@@ -86,10 +84,7 @@ fn an_unknown_top_level_key_is_refused_by_name_here_too() {
 fn a_source_the_loader_would_refuse_is_refused_at_the_legacy_read() {
     let cases = [
         // check_mcp
-        (
-            r#"{"mcp": {"docs": {"type": "local", "command": []}}}"#,
-            "command",
-        ),
+        (r#"{"mcp": {"docs": {"type": "local", "command": []}}}"#, "command"),
         // check_lsp
         (r#"{"lsp": {"zls": {"extensions": [".zig"]}}}"#, "command"),
         // check_providers
@@ -106,15 +101,9 @@ fn a_source_the_loader_would_refuse_is_refused_at_the_legacy_read() {
         // check_agents
         (r#"{"agents": {"concurrency": 0}}"#, "concurrency"),
         // check_teammates
-        (
-            r#"{"teammates": {"shim_turn_timeout": 0}}"#,
-            "shim_turn_timeout",
-        ),
+        (r#"{"teammates": {"shim_turn_timeout": 0}}"#, "shim_turn_timeout"),
         // check_openrouter
-        (
-            r#"{"openrouter": {"server_tools": ["not_a_tool"]}}"#,
-            "not_a_tool",
-        ),
+        (r#"{"openrouter": {"server_tools": ["not_a_tool"]}}"#, "not_a_tool"),
     ];
 
     for (text, named) in cases {
@@ -211,9 +200,8 @@ fn the_same_config_in_both_dialects_loads_to_the_same_value() {
         "#,
     )
     .expect("the fixture file is writable");
-    let new = super::super::read(&path)
-        .expect("the TOML fixture parses")
-        .expect("the fixture exists");
+    let new =
+        super::super::read(&path).expect("the TOML fixture parses").expect("the fixture exists");
 
     assert_eq!(old, new);
 }
@@ -238,17 +226,11 @@ fn the_file_read_is_the_file_named() {
     let named = directory.path().join("ganja.json");
     fs::write(&named, r#"{"model": "anthropic/claude-sonnet-5"}"#)
         .expect("the fixture file is writable");
-    fs::write(
-        directory.path().join("ganja.jsonc"),
-        r#"{"model": "openai/gpt-5.6"}"#,
-    )
-    .expect("the fixture file is writable");
+    fs::write(directory.path().join("ganja.jsonc"), r#"{"model": "openai/gpt-5.6"}"#)
+        .expect("the fixture file is writable");
 
     let config = read(&named).expect("the named file parses");
 
     assert_eq!(config.model.as_deref(), Some("anthropic/claude-sonnet-5"));
-    assert!(
-        Path::new(&named).is_file(),
-        "and the read left it exactly where it was"
-    );
+    assert!(Path::new(&named).is_file(), "and the read left it exactly where it was");
 }

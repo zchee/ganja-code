@@ -8,7 +8,9 @@
 //! `persist_noclobber`), while staging a file beside a path differs in nothing
 //! at all.
 
-use std::{fs, io::Write as _, path::Path};
+use std::fs;
+use std::io::Write as _;
+use std::path::Path;
 
 use anyhow::{Context as _, Result};
 use tempfile::NamedTempFile;
@@ -34,9 +36,7 @@ pub(crate) fn stage(path: &Path, bytes: &[u8]) -> Result<NamedTempFile> {
     // to write.
     let mut staged = NamedTempFile::new_in(directory)
         .with_context(|| format!("{} could not be written", path.display()))?;
-    staged
-        .write_all(bytes)
-        .with_context(|| format!("{} could not be written", path.display()))?;
+    staged.write_all(bytes).with_context(|| format!("{} could not be written", path.display()))?;
     // The rename publishes the file as complete, so its bytes must reach the
     // backing store before that atomic namespace change makes them current.
     staged

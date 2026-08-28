@@ -5,9 +5,7 @@ fn the_default_row_comes_first_and_is_active_when_nothing_is_selected() {
     let rows = rows(["max", "mini"], None);
 
     assert_eq!(
-        rows.iter()
-            .map(|row| row.value.as_str())
-            .collect::<Vec<_>>(),
+        rows.iter().map(|row| row.value.as_str()).collect::<Vec<_>>(),
         [DEFAULT, "max", "mini"]
     );
     assert_eq!(rows[0].label, "Default");

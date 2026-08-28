@@ -14,43 +14,35 @@
 //! scaffolding above, because "private server, unique session, hard-fail" is
 //! a property of this file rather than of either transport.
 
-use std::{
-    ffi::OsString,
-    fs,
-    path::{Path, PathBuf},
-    process::Command as ProcessCommand,
-    sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
-};
+use std::ffi::OsString;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use tempfile::TempDir;
-use tmux::{
-    Error, PaneId, Server, SessionId, WindowId,
-    commands::{
-        CapturePane, HasSession, Invocation, KillPane, KillServer, KillWindow, ListPanes,
-        ListSessions, ListWindows, NewSession, NewWindow, PasteBuffer, RenameSession, ResizePane,
-        SendKeys, SetBuffer, SetEnvironment, SetOption, ShowBuffer, ShowEnvironment, ShowOptions,
-        SplitWindow,
-    },
-    control_mode::{
-        Arg, Client, Command, DISPLAY_MESSAGE, LIST_PANES, Notification, NotificationKind, Options,
-        SubscriptionTarget,
-    },
+use tmux::commands::{
+    CapturePane, HasSession, Invocation, KillPane, KillServer, KillWindow, ListPanes, ListSessions,
+    ListWindows, NewSession, NewWindow, PasteBuffer, RenameSession, ResizePane, SendKeys,
+    SetBuffer, SetEnvironment, SetOption, ShowBuffer, ShowEnvironment, ShowOptions, SplitWindow,
 };
+use tmux::control_mode::{
+    Arg, Client, Command, DISPLAY_MESSAGE, LIST_PANES, Notification, NotificationKind, Options,
+    SubscriptionTarget,
+};
+use tmux::{Error, PaneId, Server, SessionId, WindowId};
 use tokio::time::{Instant, sleep, timeout};
 
 static NEXT_TEST_ID: AtomicU64 = AtomicU64::new(0);
 
 fn require_tmux() {
-    let output = ProcessCommand::new("tmux")
-        .arg("-V")
-        .output()
-        .unwrap_or_else(|error| {
-            panic!(
-                "the tmux crate's real integration tests require a runnable tmux binary on PATH; \
+    let output = ProcessCommand::new("tmux").arg("-V").output().unwrap_or_else(|error| {
+        panic!(
+            "the tmux crate's real integration tests require a runnable tmux binary on PATH; \
                  `tmux -V` could not start: {error}"
-            )
-        });
+        )
+    });
     assert!(
         output.status.success(),
         "the tmux crate's real integration tests require a runnable tmux binary on PATH; \
@@ -66,11 +58,7 @@ struct KillServerGuard {
 
 impl Drop for KillServerGuard {
     fn drop(&mut self) {
-        let _ = ProcessCommand::new("tmux")
-            .arg("-S")
-            .arg(&self.socket)
-            .arg("kill-server")
-            .status();
+        let _ = ProcessCommand::new("tmux").arg("-S").arg(&self.socket).arg("kill-server").status();
     }
 }
 
@@ -96,9 +84,7 @@ impl Scratch {
         let session = format!("ganja-live-{}-{test_id}-{label}", std::process::id());
 
         Self {
-            _server_guard: KillServerGuard {
-                socket: socket.clone(),
-            },
+            _server_guard: KillServerGuard { socket: socket.clone() },
             temp_dir,
             socket,
             config,
@@ -147,11 +133,7 @@ async fn created_pane(client: &Client) -> PaneId {
         .exec(LIST_PANES, [Arg::raw("-F"), Arg::string("#{pane_id}")])
         .await
         .expect("list-panes should succeed for the private session");
-    assert_eq!(
-        response.lines.len(),
-        1,
-        "the private session should contain exactly one pane"
-    );
+    assert_eq!(response.lines.len(), 1, "the private session should contain exactly one pane");
     PaneId::new(response.lines[0].clone())
         .expect("list-panes -F #{pane_id} should return a valid pane id")
 }
@@ -246,10 +228,7 @@ async fn handshake_creates_an_isolated_session() {
     let client = new_client(&scratch).await;
 
     let response = client
-        .exec(
-            DISPLAY_MESSAGE,
-            [Arg::raw("-p"), Arg::string("#{session_name}")],
-        )
+        .exec(DISPLAY_MESSAGE, [Arg::raw("-p"), Arg::string("#{session_name}")])
         .await
         .expect("display-message should read the private session name");
     assert_eq!(response.lines.join("\n"), scratch.session_name());
@@ -307,17 +286,13 @@ async fn send_keys_output_arrives_and_decodes() {
         .expect("send-keys should run the marker command in the private pane");
 
     let notification =
-        recv_until(
-            &client,
-            Duration::from_secs(10),
-            |notification| match notification.output() {
-                Some(Ok(output)) => output.pane == pane && output.text_lossy().contains(&marker),
-                Some(Err(error)) => {
-                    panic!("tmux emitted a malformed %output notification: {error}")
-                }
-                None => false,
-            },
-        )
+        recv_until(&client, Duration::from_secs(10), |notification| match notification.output() {
+            Some(Ok(output)) => output.pane == pane && output.text_lossy().contains(&marker),
+            Some(Err(error)) => {
+                panic!("tmux emitted a malformed %output notification: {error}")
+            }
+            None => false,
+        })
         .await
         .unwrap_or_else(|| {
             panic!(
@@ -344,34 +319,27 @@ async fn subscribe_format_roundtrip() {
     let name = "live-test";
 
     client
-        .subscribe_format(
-            name,
-            &SubscriptionTarget::ATTACHED_SESSION,
-            "#{session_name}",
-        )
+        .subscribe_format(name, &SubscriptionTarget::ATTACHED_SESSION, "#{session_name}")
         .await
         .expect("refresh-client -B should register the format subscription");
 
-    let notification =
-        recv_until(
-            &client,
-            Duration::from_secs(10),
-            |notification| match notification.subscription_changed() {
-                Some(Ok(changed)) => changed.name == name,
-                Some(Err(error)) => {
-                    panic!("tmux emitted a malformed %subscription-changed notification: {error}")
-                }
-                None => false,
-            },
+    let notification = recv_until(&client, Duration::from_secs(10), |notification| {
+        match notification.subscription_changed() {
+            Some(Ok(changed)) => changed.name == name,
+            Some(Err(error)) => {
+                panic!("tmux emitted a malformed %subscription-changed notification: {error}")
+            }
+            None => false,
+        }
+    })
+    .await
+    .unwrap_or_else(|| {
+        panic!(
+            "no %subscription-changed arrived for {name:?}; drops={} stderr={:?}",
+            client.dropped_notifications(),
+            client.stderr_tail()
         )
-        .await
-        .unwrap_or_else(|| {
-            panic!(
-                "no %subscription-changed arrived for {name:?}; drops={} stderr={:?}",
-                client.dropped_notifications(),
-                client.stderr_tail()
-            )
-        });
+    });
     let changed = notification
         .subscription_changed()
         .expect("the matched notification should be %subscription-changed")
@@ -393,27 +361,15 @@ async fn flow_control_commands_are_accepted() {
     let pane = created_pane(&client).await;
 
     let pause_after = client.set_pause_after(Duration::from_secs(2)).await;
-    assert!(
-        pause_after.is_ok(),
-        "set_pause_after should be accepted: {pause_after:?}"
-    );
+    assert!(pause_after.is_ok(), "set_pause_after should be accepted: {pause_after:?}");
     let pause = client.pause_pane(&pane).await;
     assert!(pause.is_ok(), "pause_pane should be accepted: {pause:?}");
     let continue_ = client.continue_pane(&pane).await;
-    assert!(
-        continue_.is_ok(),
-        "continue_pane should be accepted: {continue_:?}"
-    );
+    assert!(continue_.is_ok(), "continue_pane should be accepted: {continue_:?}");
     let disable = client.disable_pane_output(&pane).await;
-    assert!(
-        disable.is_ok(),
-        "disable_pane_output should be accepted: {disable:?}"
-    );
+    assert!(disable.is_ok(), "disable_pane_output should be accepted: {disable:?}");
     let enable = client.enable_pane_output(&pane).await;
-    assert!(
-        enable.is_ok(),
-        "enable_pane_output should be accepted: {enable:?}"
-    );
+    assert!(enable.is_ok(), "enable_pane_output should be accepted: {enable:?}");
 
     close_client(&client).await;
 }
@@ -427,11 +383,7 @@ async fn close_leaves_no_tmux_process() {
         .exec(DISPLAY_MESSAGE, [Arg::raw("-p"), Arg::string("#{pid}")])
         .await
         .expect("display-message should report the private tmux server PID");
-    assert_eq!(
-        response.lines.len(),
-        1,
-        "display-message -p #{{pid}} should return one server PID"
-    );
+    assert_eq!(response.lines.len(), 1, "display-message -p #{{pid}} should return one server PID");
     let server_pid = response.lines[0]
         .parse::<u32>()
         .expect("the tmux server PID should be an unsigned integer");
@@ -454,11 +406,7 @@ async fn an_unclosed_dropped_client_reaps_its_subprocess() {
 
     drop(client);
 
-    wait_for_pid_exit(
-        client_pid,
-        "an_unclosed_dropped_client_reaps_its_subprocess",
-    )
-    .await;
+    wait_for_pid_exit(client_pid, "an_unclosed_dropped_client_reaps_its_subprocess").await;
 }
 
 /// This scratch's private server, addressed by socket alone: nothing here
@@ -499,13 +447,7 @@ async fn a_client_invocation_creates_a_session_and_reads_it_back() {
     start_private_server(&scratch, &server).await;
 
     let named = server
-        .run([
-            "display-message",
-            "-p",
-            "-t",
-            scratch.session_name(),
-            "#{session_name}",
-        ])
+        .run(["display-message", "-p", "-t", scratch.session_name(), "#{session_name}"])
         .await
         .expect("display-message -p should read the private session back");
     assert_eq!(
@@ -514,14 +456,9 @@ async fn a_client_invocation_creates_a_session_and_reads_it_back() {
         "the round trip must return the session this test created and no other"
     );
 
-    server
-        .run(["kill-server"])
-        .await
-        .expect("kill-server should end the private server");
+    server.run(["kill-server"]).await.expect("kill-server should end the private server");
 
-    let after = server
-        .run(["display-message", "-p", "#{session_name}"])
-        .await;
+    let after = server.run(["display-message", "-p", "#{session_name}"]).await;
     assert!(
         matches!(after, Err(Error::ClientRefused { .. })),
         "a killed server answers nothing: {after:?}"
@@ -611,10 +548,7 @@ async fn the_typed_builders_split_list_and_kill_a_real_pane() {
         after.text_lossy()
     );
 
-    server
-        .run(["kill-server"])
-        .await
-        .expect("kill-server should end the private server");
+    server.run(["kill-server"]).await.expect("kill-server should end the private server");
 }
 
 /// Polls `capture-pane` until the pane's visible contents hold `needle`.
@@ -706,14 +640,7 @@ async fn the_typed_builders_round_trip_a_buffer_and_type_it_into_a_pane() {
     // marker, and without it the return key, which would end the line instead
     // of appearing in it.
     server
-        .run(
-            SendKeys::new()
-                .target(&pane)
-                .literal()
-                .key(&marker)
-                .key("Enter")
-                .args(),
-        )
+        .run(SendKeys::new().target(&pane).literal().key(&marker).key("Enter").args())
         .await
         .expect("send-keys -l should type the marker and the word Enter into the pane");
     let typed = format!("{marker}Enter");
@@ -726,10 +653,7 @@ async fn the_typed_builders_round_trip_a_buffer_and_type_it_into_a_pane() {
     )
     .await;
 
-    server
-        .run(["kill-server"])
-        .await
-        .expect("kill-server should end the private server");
+    server.run(["kill-server"]).await.expect("kill-server should end the private server");
 }
 
 #[tokio::test]
@@ -741,16 +665,9 @@ async fn a_refused_client_invocation_carries_tmuxs_own_stderr() {
     // tmux resolves a command name only once it has a server to resolve it
     // against — an unknown command on a dead socket fails at connect instead,
     // which is why this runs against the live private server.
-    let refused = server
-        .run(["bogus-subcommand"])
-        .await
-        .expect_err("tmux has no such command");
+    let refused = server.run(["bogus-subcommand"]).await.expect_err("tmux has no such command");
     match refused {
-        Error::ClientRefused {
-            command,
-            status,
-            stderr,
-        } => {
+        Error::ClientRefused { command, status, stderr } => {
             assert_eq!(
                 command.as_deref(),
                 Some("bogus-subcommand"),
@@ -765,10 +682,7 @@ async fn a_refused_client_invocation_carries_tmuxs_own_stderr() {
         other => panic!("a running server should refuse in its own words, not: {other}"),
     }
 
-    server
-        .run(["kill-server"])
-        .await
-        .expect("kill-server should end the private server");
+    server.run(["kill-server"]).await.expect("kill-server should end the private server");
 }
 
 /// One round trip driven by the session family's builders, in the shape a
@@ -787,10 +701,7 @@ async fn the_typed_builders_create_rename_and_list_a_real_session() {
     // `-f` is a client flag, read when a server is created rather than when a
     // running one is asked something, so it leads the words the builder
     // assembles instead of living among them.
-    let mut argv = vec![
-        OsString::from("-f"),
-        scratch.config.clone().into_os_string(),
-    ];
+    let mut argv = vec![OsString::from("-f"), scratch.config.clone().into_os_string()];
     argv.extend(
         NewSession::new()
             .detached()
@@ -812,21 +723,12 @@ async fn the_typed_builders_create_rename_and_list_a_real_session() {
 
     let renamed = format!("{}-renamed", scratch.session_name());
     server
-        .run(
-            RenameSession::new()
-                .target(&session)
-                .new_name(renamed.as_str())
-                .args(),
-        )
+        .run(RenameSession::new().target(&session).new_name(renamed.as_str()).args())
         .await
         .expect("rename-session should rename the session new-session made");
 
     let listed = server
-        .run(
-            ListSessions::new()
-                .format("#{session_id} #{session_name}")
-                .args(),
-        )
+        .run(ListSessions::new().format("#{session_id} #{session_name}").args())
         .await
         .expect("list-sessions should list the private server's sessions");
     let row = format!("{session} {renamed}");
@@ -836,10 +738,7 @@ async fn the_typed_builders_create_rename_and_list_a_real_session() {
         listed.text_lossy()
     );
 
-    server
-        .run(KillServer::new().args())
-        .await
-        .expect("kill-server should end the private server");
+    server.run(KillServer::new().args()).await.expect("kill-server should end the private server");
 
     let after = server.run(HasSession::new().target(&session).args()).await;
     assert!(
@@ -904,27 +803,16 @@ async fn the_option_and_environment_builders_round_trip_on_a_real_server() {
         .expect("set-environment should set the session variable");
 
     let environment = server
-        .run(
-            ShowEnvironment::new()
-                .target(scratch.session_name())
-                .variable("GANJA_LIVE_W6")
-                .args(),
-        )
+        .run(ShowEnvironment::new().target(scratch.session_name()).variable("GANJA_LIVE_W6").args())
         .await
         .expect("show-environment should read the session variable back");
     assert_eq!(
-        environment
-            .text()
-            .expect("an environment listing is text")
-            .trim(),
+        environment.text().expect("an environment listing is text").trim(),
         "GANJA_LIVE_W6=set-by-the-typed-builder",
         "tmux answers one NAME=value line for a named variable"
     );
 
-    server
-        .run(["kill-server"])
-        .await
-        .expect("kill-server should end the private server");
+    server.run(["kill-server"]).await.expect("kill-server should end the private server");
 }
 
 /// Adds one window running `cat` to the scratch session, and answers with the
@@ -960,9 +848,7 @@ async fn cat_window(server: &Server, session: &str, name: &str) -> WindowId {
 /// The id is one word and everything after the first space is the value, so
 /// a window name or a path holding spaces still arrives whole.
 fn listed_pairs(text: &str) -> Vec<(&str, &str)> {
-    text.lines()
-        .map(|line| line.split_once(' ').unwrap_or((line, "")))
-        .collect()
+    text.lines().map(|line| line.split_once(' ').unwrap_or((line, ""))).collect()
 }
 
 /// The two transports against one server: the world built entirely through
@@ -1032,12 +918,7 @@ async fn both_transports_see_one_server() {
     .await;
 
     let paths = server
-        .run(
-            ListPanes::new()
-                .format("#{pane_id} #{pane_current_path}")
-                .target(&second)
-                .args(),
-        )
+        .run(ListPanes::new().format("#{pane_id} #{pane_current_path}").target(&second).args())
         .await
         .expect("list-panes should report where each pane's process is");
     let paths = paths.text_lossy();
@@ -1058,13 +939,7 @@ async fn both_transports_see_one_server() {
         .await
         .expect("set-buffer should take the marker as its data");
     server
-        .run(
-            PasteBuffer::new()
-                .buffer("w7")
-                .delete()
-                .target(&pane)
-                .args(),
-        )
+        .run(PasteBuffer::new().buffer("w7").delete().target(&pane).args())
         .await
         .expect("paste-buffer should paste the marker into the split pane");
     capture_until(
@@ -1084,19 +959,12 @@ async fn both_transports_see_one_server() {
         .await
         .expect("resize-pane -y should resize the split pane");
     let heights = server
-        .run(
-            ListPanes::new()
-                .format("#{pane_id} #{pane_height}")
-                .target(&second)
-                .args(),
-        )
+        .run(ListPanes::new().format("#{pane_id} #{pane_height}").target(&second).args())
         .await
         .expect("list-panes should report each pane's height");
     let heights = heights.text_lossy();
     assert!(
-        listed_pairs(&heights)
-            .iter()
-            .any(|(id, height)| *id == pane.as_str() && *height == "5"),
+        listed_pairs(&heights).iter().any(|(id, height)| *id == pane.as_str() && *height == "5"),
         "the split pane should be the five rows resize-pane asked for: {heights:?}"
     );
 
@@ -1107,10 +975,7 @@ async fn both_transports_see_one_server() {
     // that an attach to the session the one-shot side already built rather
     // than a second session beside it. Everything below rests on this.
     let named = client
-        .exec(
-            DISPLAY_MESSAGE,
-            [Arg::raw("-p"), Arg::string("#{session_name}")],
-        )
+        .exec(DISPLAY_MESSAGE, [Arg::raw("-p"), Arg::string("#{session_name}")])
         .await
         .expect("display-message should name the session the control client is in");
     assert_eq!(
@@ -1216,14 +1081,9 @@ async fn both_transports_see_one_server() {
     // two-second shutdown budget, so its `Ok` is the reap assertion.
     close_client(&client).await;
 
-    server
-        .run(KillServer::new().args())
-        .await
-        .expect("kill-server should end the private server");
+    server.run(KillServer::new().args()).await.expect("kill-server should end the private server");
 
-    let after = server
-        .run(ListWindows::new().target(scratch.session_name()).args())
-        .await;
+    let after = server.run(ListWindows::new().target(scratch.session_name()).args()).await;
     assert!(
         matches!(after, Err(Error::ClientRefused { .. })),
         "a killed server answers nothing: {after:?}"

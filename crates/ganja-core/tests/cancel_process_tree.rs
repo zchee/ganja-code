@@ -35,20 +35,16 @@
 
 #![cfg(windows)]
 
-use std::{
-    path::Path,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::path::Path;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
-use ganja_core::{
-    Engine,
-    permission::Permissions,
-    protocol::{Command, Event, FinishReason, PartBody, PermissionReply, ToolState},
-    provider::{FakeProvider, fake},
-    tool::Registry,
-};
+use ganja_core::Engine;
+use ganja_core::permission::Permissions;
+use ganja_core::protocol::{Command, Event, FinishReason, PartBody, PermissionReply, ToolState};
+use ganja_core::provider::{FakeProvider, fake};
+use ganja_core::tool::Registry;
 use tokio::sync::mpsc;
 
 /// How long the command is given to fork the witness and say so. Generous,
@@ -222,10 +218,7 @@ async fn drill() {
         {
             stage("permission asked");
             engine
-                .send(Command::ReplyPermission {
-                    id,
-                    reply: PermissionReply::Once,
-                })
+                .send(Command::ReplyPermission { id, reply: PermissionReply::Once })
                 .await
                 .expect("a reply is always accepted");
             stage("permission answered");
@@ -242,10 +235,7 @@ async fn drill() {
     );
 
     let issued = Instant::now();
-    engine
-        .send(Command::CancelTurn)
-        .await
-        .expect("a running engine accepts a cancel");
+    engine.send(Command::CancelTurn).await.expect("a running engine accepts a cancel");
     stage("cancel issued");
 
     // The turn is drained to its finish *first*. What the cancel looks like
@@ -263,11 +253,8 @@ async fn drill() {
         {
             Event::MessageFinished { reason, .. } => break reason,
             Event::PartUpdated { part, .. } => {
-                if let PartBody::Tool {
-                    tool,
-                    state: ToolState::Error { error, .. },
-                    ..
-                } = part.body
+                if let PartBody::Tool { tool, state: ToolState::Error { error, .. }, .. } =
+                    part.body
                     && tool == "bash"
                 {
                     call_error = Some(error);

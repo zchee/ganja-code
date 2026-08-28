@@ -79,10 +79,7 @@ impl Tool for GrepTool {
     }
 
     fn describe(&self, args: &serde_json::Value) -> String {
-        let pattern = args
-            .get("pattern")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default();
+        let pattern = args.get("pattern").and_then(serde_json::Value::as_str).unwrap_or_default();
 
         format!("grep {pattern}")
     }
@@ -102,9 +99,7 @@ impl Tool for GrepTool {
         let base_dir = if requested.is_dir() {
             requested
         } else {
-            requested
-                .parent()
-                .map_or_else(|| PathBuf::from("."), Path::to_owned)
+            requested.parent().map_or_else(|| PathBuf::from("."), Path::to_owned)
         };
         // What the model does with a match is read the file, and `read`
         // resolves a relative argument against the *session* directory, not
@@ -127,13 +122,7 @@ impl Tool for GrepTool {
         // compares every file in the tree against it.
         let store = ctx.credentials.guarded().map(Path::to_owned);
         let matches = tokio::task::spawn_blocking(move || {
-            search(
-                &searched,
-                &pattern,
-                include.as_deref(),
-                store.as_deref(),
-                &cancel,
-            )
+            search(&searched, &pattern, include.as_deref(), store.as_deref(), &cancel)
         })
         .await
         .map_err(|error| ToolError::Failed(format!("the grep search did not finish: {error}")))??;
@@ -155,11 +144,7 @@ impl Tool for GrepTool {
 
         let mut lines = vec![format!(
             "Found {total} matches{}",
-            if truncated {
-                " (more matches available)"
-            } else {
-                ""
-            }
+            if truncated { " (more matches available)" } else { "" }
         )];
 
         let mut current: Option<&str> = None;
@@ -239,10 +224,7 @@ fn search(
             return Err(ToolError::Cancelled);
         }
         let Ok(entry) = entry else { continue };
-        if entry
-            .file_type()
-            .is_some_and(|file_type| file_type.is_file())
-        {
+        if entry.file_type().is_some_and(|file_type| file_type.is_file()) {
             let path = entry.into_path();
             if store.is_some_and(|store| is_same_file(&path, store)) {
                 continue;
@@ -296,11 +278,7 @@ fn search(
                 // exception. Changing the trim here without changing it there
                 // will fail that comparison.
                 let text = clamp_match_text(line.trim_end_matches(['\n', '\r']));
-                matches.push(Match {
-                    path: reported.clone(),
-                    line: line_number,
-                    text,
-                });
+                matches.push(Match { path: reported.clone(), line: line_number, text });
                 Ok(matches.len() <= LIMIT)
             }),
         );

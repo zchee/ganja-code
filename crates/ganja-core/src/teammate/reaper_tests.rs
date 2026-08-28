@@ -4,10 +4,7 @@ use super::{AGENT_ID, Fate, PARENT_SESSION_ID, Pane, argv_of, flagged, forget, v
 use crate::teammate::TeammateRegistry;
 
 fn pane(id: &str, birth: &str) -> Pane {
-    Pane {
-        id: id.to_owned(),
-        birth: birth.to_owned(),
-    }
+    Pane { id: id.to_owned(), birth: birth.to_owned() }
 }
 
 #[test]
@@ -62,11 +59,7 @@ fn a_flag_matches_the_word_after_it_and_never_a_substring_of_the_line() {
         !flagged(argv, AGENT_ID, "build@session-01998ad0"),
         "`build` is a suffix of `rebuild` and is not the same teammate"
     );
-    assert!(flagged(
-        argv,
-        PARENT_SESSION_ID,
-        "01998ad0-0000-7000-8000-000000000000"
-    ));
+    assert!(flagged(argv, PARENT_SESSION_ID, "01998ad0-0000-7000-8000-000000000000"));
     assert!(
         !flagged(argv, PARENT_SESSION_ID, "01998ad0-0000-7000-8000-0"),
         "a prefix of a session id is a different lead"
@@ -76,16 +69,8 @@ fn a_flag_matches_the_word_after_it_and_never_a_substring_of_the_line() {
     assert!(!flagged("/x/ganja --agent-id", AGENT_ID, "worker@t"));
     assert!(!flagged("/x/ganja worker@t", AGENT_ID, "worker@t"));
     // clap's other spelling, which a person may well type by hand.
-    assert!(flagged(
-        "/x/ganja --agent-id=worker@t",
-        AGENT_ID,
-        "worker@t"
-    ));
-    assert!(!flagged(
-        "/x/ganja --agent-id-of=worker@t",
-        AGENT_ID,
-        "worker@t"
-    ));
+    assert!(flagged("/x/ganja --agent-id=worker@t", AGENT_ID, "worker@t"));
+    assert!(!flagged("/x/ganja --agent-id-of=worker@t", AGENT_ID, "worker@t"));
 }
 
 /// The witness's own mechanism, against the one process this test is sure
@@ -93,15 +78,11 @@ fn a_flag_matches_the_word_after_it_and_never_a_substring_of_the_line() {
 /// machine can break without any test noticing.
 #[tokio::test]
 async fn a_processs_own_command_line_is_what_the_witness_reads() {
-    let argv = argv_of(&std::process::id().to_string())
-        .await
-        .expect("a live process has a command line");
+    let argv =
+        argv_of(&std::process::id().to_string()).await.expect("a live process has a command line");
 
     assert!(!argv.is_empty(), "and it is not empty: {argv:?}");
-    assert!(
-        argv_of("0").await.is_none(),
-        "a pid nothing answers for is unknown, never a 'no'"
-    );
+    assert!(argv_of("0").await.is_none(), "a pid nothing answers for is unknown, never a 'no'");
 }
 
 /// Dropping one member rewrites the document without it and leaves every
@@ -134,11 +115,8 @@ async fn dropping_a_record_leaves_the_rest_of_the_team_file_alone() {
     let path = root.config_path(&team);
     std::fs::create_dir_all(path.parent().expect("a team directory"))
         .expect("the team directory is made");
-    std::fs::write(
-        &path,
-        record::document(&file).expect("the team file encodes"),
-    )
-    .expect("the team file is written");
+    std::fs::write(&path, record::document(&file).expect("the team file encodes"))
+        .expect("the team file is written");
 
     let registry = TeammateRegistry::new(root, team, session, home.path());
     forget(&registry, "worker").await;
@@ -146,14 +124,6 @@ async fn dropping_a_record_leaves_the_rest_of_the_team_file_alone() {
     let written: TeamFile =
         serde_json::from_str(&std::fs::read_to_string(&path).expect("the team file is read"))
             .expect("the team file decodes");
-    let names: Vec<&str> = written
-        .members
-        .iter()
-        .map(|member| member.name.as_str())
-        .collect();
-    assert_eq!(
-        names,
-        vec!["team-lead", "scribe"],
-        "only the dropped member is gone: {written:?}"
-    );
+    let names: Vec<&str> = written.members.iter().map(|member| member.name.as_str()).collect();
+    assert_eq!(names, vec!["team-lead", "scribe"], "only the dropped member is gone: {written:?}");
 }

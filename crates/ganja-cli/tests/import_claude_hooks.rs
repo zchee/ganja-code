@@ -14,7 +14,8 @@
 //! That redirection is per-subprocess, never a `set_var`, so these can share a
 //! binary.
 
-use std::{fs, path::Path};
+use std::fs;
+use std::path::Path;
 
 use assert_cmd::Command;
 use ganja_testkit::temp_dir as temporary;
@@ -126,10 +127,7 @@ fn both_project_settings_files_are_read_and_the_result_loads() {
     let project = temporary();
     checkout(project.path());
     plant(&project.path().join(".claude/settings.json"), FIXTURE);
-    plant(
-        &project.path().join(".claude/settings.local.json"),
-        LOCAL_FIXTURE,
-    );
+    plant(&project.path().join(".claude/settings.local.json"), LOCAL_FIXTURE);
 
     import(&home, project.path())
         .assert()
@@ -143,9 +141,7 @@ fn both_project_settings_files_are_read_and_the_result_loads() {
             ))
             .and(predicate::str::contains("settings.json:hooks.PreResponse"))
             .and(predicate::str::contains("unrun"))
-            .and(predicate::str::contains(
-                "settings.json:hooks.Stop[0].hooks[0]",
-            ))
+            .and(predicate::str::contains("settings.json:hooks.Stop[0].hooks[0]"))
             .and(predicate::str::contains("unsupported"))
             .and(predicate::str::contains("settings.json:model"))
             .and(predicate::str::contains("unread")),
@@ -180,10 +176,7 @@ fn both_project_settings_files_are_read_and_the_result_loads() {
         "a group the loader would refuse is not written:\n{written}"
     );
 
-    ganja(&home, project.path())
-        .arg("skills")
-        .assert()
-        .success();
+    ganja(&home, project.path()).arg("skills").assert().success();
 }
 
 /// A target that is already there is edited, not replaced: every comment and
@@ -216,10 +209,7 @@ fn an_existing_target_keeps_its_comments_and_its_own_groups_come_first() {
         "an append lands after what was already there:\n{written}"
     );
 
-    ganja(&home, project.path())
-        .arg("skills")
-        .assert()
-        .success();
+    ganja(&home, project.path()).arg("skills").assert().success();
 }
 
 /// A dry run prints the table and the resolved target, and writes nothing —
@@ -231,22 +221,15 @@ fn a_dry_run_prints_the_target_and_writes_nothing() {
     checkout(project.path());
     plant(&project.path().join(".claude/settings.json"), FIXTURE);
 
-    import(&home, project.path())
-        .arg("--dry-run")
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::contains(format!(
-                "would write {}",
-                resolved(project.path()).join("ganja.toml").display()
-            ))
-            .and(predicate::str::contains("dry run — nothing written")),
-        );
-
-    assert!(
-        !project.path().join("ganja.toml").exists(),
-        "a dry run writes nothing"
+    import(&home, project.path()).arg("--dry-run").assert().success().stdout(
+        predicate::str::contains(format!(
+            "would write {}",
+            resolved(project.path()).join("ganja.toml").display()
+        ))
+        .and(predicate::str::contains("dry run — nothing written")),
     );
+
+    assert!(!project.path().join("ganja.toml").exists(), "a dry run writes nothing");
 }
 
 /// `--global` reads Claude's own home directory and writes ganja's, which are
@@ -263,19 +246,13 @@ fn a_global_import_reads_claudes_home_and_writes_ganjas() {
         r#"{ "hooks": { "Stop": [{ "hooks": [{ "type": "command", "command": "./project.sh" }] }] } }"#,
     );
 
-    import(&home, project.path())
-        .arg("--global")
-        .assert()
-        .success();
+    import(&home, project.path()).arg("--global").assert().success();
 
     let written =
         fs::read_to_string(config_home(&home).join("ganja.toml")).expect("it was written");
     assert!(written.contains("./guard.sh"), "{written}");
     assert!(!written.contains("./project.sh"), "{written}");
-    assert!(
-        !project.path().join("ganja.toml").exists(),
-        "the project tier was not the target"
-    );
+    assert!(!project.path().join("ganja.toml").exists(), "the project tier was not the target");
 }
 
 /// A named file is the whole import: a caller who said which file to read did
@@ -292,10 +269,7 @@ fn a_named_file_is_the_whole_import() {
         r#"{ "hooks": { "Stop": [{ "hooks": [{ "type": "command", "command": "./ignored.sh" }] }] } }"#,
     );
 
-    import(&home, project.path())
-        .args(["--file", &named.display().to_string()])
-        .assert()
-        .success();
+    import(&home, project.path()).args(["--file", &named.display().to_string()]).assert().success();
 
     let written = fs::read_to_string(project.path().join("ganja.toml")).expect("it was written");
     assert!(written.contains("./guard.sh"), "{written}");
@@ -319,10 +293,7 @@ fn no_settings_file_says_where_it_looked() {
                 .and(predicate::str::contains("writing ").not()),
         )
         .stderr(predicate::str::contains(
-            resolved(project.path())
-                .join(".claude")
-                .display()
-                .to_string(),
+            resolved(project.path()).join(".claude").display().to_string(),
         ));
 
     assert!(!project.path().join("ganja.toml").exists());
@@ -359,10 +330,7 @@ fn a_settings_file_that_is_not_json_is_refused_by_name() {
     let home = temporary();
     let project = temporary();
     checkout(project.path());
-    plant(
-        &project.path().join(".claude/settings.json"),
-        "{ // a comment\n  \"hooks\": {} }",
-    );
+    plant(&project.path().join(".claude/settings.json"), "{ // a comment\n  \"hooks\": {} }");
 
     import(&home, project.path())
         .assert()
@@ -426,17 +394,11 @@ fn a_dry_run_lists_the_command_lines_it_would_install() {
     checkout(project.path());
     plant(&project.path().join(".claude/settings.json"), TWO_COMMANDS);
 
-    import(&home, project.path())
-        .arg("--dry-run")
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::contains("./first.sh --audit")
-                .and(predicate::str::contains(
-                    "curl https://example.test/telemetry",
-                ))
-                .and(predicate::str::contains("dry run — nothing written")),
-        );
+    import(&home, project.path()).arg("--dry-run").assert().success().stdout(
+        predicate::str::contains("./first.sh --audit")
+            .and(predicate::str::contains("curl https://example.test/telemetry"))
+            .and(predicate::str::contains("dry run — nothing written")),
+    );
 
     assert!(!project.path().join("ganja.toml").exists());
 }
@@ -460,10 +422,7 @@ fn a_directory_holding_a_legacy_config_is_refused_and_nothing_is_written() {
             .and(predicate::str::contains("ganja config migrate")),
     );
 
-    assert!(
-        !project.path().join("ganja.toml").exists(),
-        "a refused run writes nothing"
-    );
+    assert!(!project.path().join("ganja.toml").exists(), "a refused run writes nothing");
 
     // The same invocation, once the legacy file is gone.
     fs::remove_file(project.path().join("ganja.jsonc")).expect("the fixture is removable");

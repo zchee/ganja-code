@@ -758,10 +758,7 @@ pub enum Tagged {
 /// One place, so [`Frame::reserved_kind`] and [`Frame::is_agent_sendable_kind`]
 /// cannot come to disagree about what the fifteen are called.
 fn reserved_name(tag: &str) -> Option<&'static str> {
-    AGENT_SENDABLE
-        .into_iter()
-        .chain(HARNESS_ONLY)
-        .find(|kind| *kind == tag)
+    AGENT_SENDABLE.into_iter().chain(HARNESS_ONLY).find(|kind| *kind == tag)
 }
 
 /// Whether the walk keeps the name of a `type` outside the fifteen.
@@ -839,9 +836,7 @@ impl<'de> de::Visitor<'de> for TagWalk {
         // it all is that no position in the object is privileged.
         while let Some(key) = map.next_key::<TagKey>()? {
             match key {
-                TagKey::Type => match map.next_value_seed(TagValue {
-                    naming: self.naming,
-                })? {
+                TagKey::Type => match map.next_value_seed(TagValue { naming: self.naming })? {
                     TagSeen::Reserved(kind) => reserved = reserved.or(Some(kind)),
                     // First unknown rather than last, so a decoy cannot change
                     // which kind a refusal names. It is reported only when no
@@ -890,11 +885,7 @@ impl<'de> Deserialize<'de> for TagKey {
             where
                 E: de::Error,
             {
-                Ok(if key == "type" {
-                    TagKey::Type
-                } else {
-                    TagKey::Other
-                })
+                Ok(if key == "type" { TagKey::Type } else { TagKey::Other })
             }
         }
 
@@ -1036,10 +1027,7 @@ impl<'de> de::Visitor<'de> for TagValue {
     where
         M: de::MapAccess<'de>,
     {
-        while map
-            .next_entry::<de::IgnoredAny, de::IgnoredAny>()?
-            .is_some()
-        {}
+        while map.next_entry::<de::IgnoredAny, de::IgnoredAny>()?.is_some() {}
 
         Ok(TagSeen::Unknown(None))
     }
@@ -1146,12 +1134,7 @@ impl PeerPayload {
         color: Option<String>,
         body: impl Into<String>,
     ) -> Self {
-        Self {
-            from: from.into(),
-            summary,
-            color,
-            body: body.into(),
-        }
+        Self { from: from.into(), summary, color, body: body.into() }
     }
 
     /// The one thing a payload becomes: the transcript part that says whose
@@ -1216,9 +1199,7 @@ pub fn cap_chars(text: &str, cap: usize) -> &str {
 /// so they cannot drift.
 #[must_use]
 pub fn display_summary(summary: Option<&str>) -> Option<&str> {
-    summary
-        .filter(|summary| !summary.trim().is_empty())
-        .map(cap_for_display)
+    summary.filter(|summary| !summary.trim().is_empty()).map(cap_for_display)
 }
 
 /// Identifies one peer-to-socket message the sender minted, so a receipt can

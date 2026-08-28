@@ -14,7 +14,8 @@
 //! real user's. That redirection is per-subprocess, never a `set_var`, so
 //! these can share a binary.
 
-use std::{fs, path::Path};
+use std::fs;
+use std::path::Path;
 
 use assert_cmd::Command;
 use ganja_testkit::temp_dir as temporary;
@@ -136,10 +137,7 @@ fn the_written_file_is_one_the_real_loader_reads() {
     );
 
     fs::remove_file(project.path().join("ganja.jsonc")).expect("the source is removable");
-    ganja(&home, project.path())
-        .arg("skills")
-        .assert()
-        .success();
+    ganja(&home, project.path()).arg("skills").assert().success();
 }
 
 /// The source is not this command's to remove, rename or rewrite — the loader
@@ -158,10 +156,7 @@ fn the_source_comes_out_byte_for_byte() {
         .success()
         .stdout(predicate::str::contains("was left exactly as it is"));
 
-    assert_eq!(
-        fs::read_to_string(&source).expect("the source is still there"),
-        FIXTURE
-    );
+    assert_eq!(fs::read_to_string(&source).expect("the source is still there"), FIXTURE);
 }
 
 /// A destination that already exists is refused rather than overwritten, and
@@ -172,10 +167,7 @@ fn an_occupied_destination_is_refused() {
     let project = temporary();
     checkout(project.path());
     plant(&project.path().join("ganja.jsonc"), FIXTURE);
-    plant(
-        &project.path().join("ganja.toml"),
-        "# written by hand\nmodel = \"anthropic/other\"\n",
-    );
+    plant(&project.path().join("ganja.toml"), "# written by hand\nmodel = \"anthropic/other\"\n");
 
     migrate(&home, project.path())
         .assert()
@@ -198,12 +190,9 @@ fn every_comment_line_is_named_in_a_warning() {
     checkout(project.path());
     plant(&project.path().join("ganja.jsonc"), FIXTURE);
 
-    migrate(&home, project.path())
-        .assert()
-        .success()
-        .stderr(predicate::str::contains(
-            "comments do not survive the translation; these lines held one: 2, 13, 14",
-        ));
+    migrate(&home, project.path()).assert().success().stderr(predicate::str::contains(
+        "comments do not survive the translation; these lines held one: 2, 13, 14",
+    ));
 }
 
 /// A dry run prints everything the real run would — the table, the warning and
@@ -215,23 +204,16 @@ fn a_dry_run_prints_the_destination_and_writes_nothing() {
     checkout(project.path());
     plant(&project.path().join("ganja.jsonc"), FIXTURE);
 
-    migrate(&home, project.path())
-        .arg("--dry-run")
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::contains(format!(
-                "would write {}",
-                resolved(project.path()).join("ganja.toml").display()
-            ))
-            .and(predicate::str::contains("dry run — nothing written"))
-            .and(predicate::str::contains("[permission]")),
-        );
-
-    assert!(
-        !project.path().join("ganja.toml").exists(),
-        "a dry run writes nothing"
+    migrate(&home, project.path()).arg("--dry-run").assert().success().stdout(
+        predicate::str::contains(format!(
+            "would write {}",
+            resolved(project.path()).join("ganja.toml").display()
+        ))
+        .and(predicate::str::contains("dry run — nothing written"))
+        .and(predicate::str::contains("[permission]")),
     );
+
+    assert!(!project.path().join("ganja.toml").exists(), "a dry run writes nothing");
 }
 
 /// The countermeasure to the pre-mortem's second failure: a refusal fires from
@@ -283,16 +265,10 @@ fn a_global_migration_writes_the_config_home() {
     // picking whichever is closer.
     plant(&project.path().join("ganja.json"), r#"{ "theme": "one" }"#);
 
-    migrate(&home, project.path())
-        .arg("--global")
-        .assert()
-        .success();
+    migrate(&home, project.path()).arg("--global").assert().success();
 
     assert!(config_home(&home).join("ganja.toml").is_file());
-    assert!(
-        !project.path().join("ganja.toml").exists(),
-        "the project tier was not the target"
-    );
+    assert!(!project.path().join("ganja.toml").exists(), "the project tier was not the target");
 }
 
 /// A named file is the whole import, and the result still lands beside it:
@@ -321,10 +297,7 @@ fn the_closest_file_in_the_walk_is_the_source() {
     let home = temporary();
     let project = temporary();
     checkout(project.path());
-    plant(
-        &project.path().join("ganja.jsonc"),
-        r#"{ "theme": "root" }"#,
-    );
+    plant(&project.path().join("ganja.jsonc"), r#"{ "theme": "root" }"#);
     let inner = project.path().join("crate");
     plant(&inner.join("ganja.jsonc"), r#"{ "theme": "inner" }"#);
 
@@ -396,9 +369,7 @@ fn a_source_the_loader_would_refuse_is_refused_before_anything_is_written() {
         migrate(&home, project.path())
             .assert()
             .failure()
-            .stderr(predicate::str::contains(
-                resolved(&source).display().to_string(),
-            ));
+            .stderr(predicate::str::contains(resolved(&source).display().to_string()));
 
         assert!(
             !project.path().join("ganja.toml").exists(),

@@ -9,15 +9,12 @@
 //! Run with:
 //! `RUN_REAL_TMUX_TESTS=1 cargo run -p tmux --example control_mode_session`.
 
-use std::{
-    env,
-    error::Error,
-    ffi::OsStr,
-    fs::{self, OpenOptions},
-    io,
-    path::{Path, PathBuf},
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::error::Error;
+use std::ffi::OsStr;
+use std::fs::{self, OpenOptions};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{env, io};
 
 use tmux::control_mode::{Arg, Client, Options};
 
