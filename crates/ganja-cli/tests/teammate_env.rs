@@ -5,7 +5,7 @@
 //! §10.10: a new pane inherits the tmux **server's** environment, not the
 //! client's, so a lead has to carry its config home to the pane explicitly —
 //! and must never carry a secret, because `argv` is `ps(1)`-visible to every
-//! user on the machine. `ganja-core/tests/teammate_pane_env.rs` pins the
+//! user on the machine. `ganja-teammate-local/tests/teammate_pane_env.rs` pins the
 //! mechanism with a fake pane child that reports what it received; this binary
 //! is the same two facts with **both** processes being the shipped binary,
 //! read off the outside: `ps` for the pane's argv, the store and the team file

@@ -246,7 +246,7 @@ impl BypassArgs {
 /// is the one optional member of the set (§4.3 assigns it, but a lead may
 /// have none to give), and it too is meaningless alone.
 ///
-/// The argv contract, spelled out because `ganja_core::teammate::pane`'s
+/// The argv contract, spelled out because `ganja_teammate_local::pane`'s
 /// `arguments` composes the line against it:
 ///
 /// ```text

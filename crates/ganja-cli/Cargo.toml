@@ -107,6 +107,11 @@ tracing-appender.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+# `tests/teammate_pane.rs` alone: the pane argv this binary is the child of is
+# that crate's contract, so the test reads its constants rather than restating
+# them. Dev-only — the shipped binary reaches the pane backends through
+# `ganja-tui`, which assembles them.
+ganja-teammate-local.workspace = true
 assert_cmd.workspace = true
 # The private tmux server, the project/data-home fixture and the team-file
 # seeder the pane and drill suites share with `ganja-core`'s.

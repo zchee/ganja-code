@@ -111,9 +111,6 @@ url.workspace = true
 # `CancellationToken` lives behind `rt`; the workspace declaration carries no
 # features so crates opt into exactly the modules they use.
 tokio-util = { workspace = true, features = ["rt"] }
-# A pane-backed Claude teammate must resolve a binary this process may execute,
-# so its PATH lookup asks the operating system rather than reading mode bits.
-which.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 # The LSP and MCP servers this crate spawns are ended by signalling their
@@ -122,6 +119,12 @@ which.workspace = true
 libc.workspace = true
 
 [dev-dependencies]
+# `tests/teammate_engine_door.rs` alone, for the two tmux environment variable
+# names it clears before asserting that an in-process door looks at no pane.
+# **Dev-only, and deliberately**: `-e normal` is what the boundary gate reads,
+# and this crate's shipped closure still names nothing above it — the same
+# dev-cycle shape `ganja-testkit` below already has.
+ganja-teammate-local.workspace = true
 # The scripted-provider/recorder-tool/storage-seeding scaffolding
 # `tests/*.rs` shares across binaries — see `crates/ganja-testkit`.
 ganja-testkit.workspace = true
@@ -145,16 +148,3 @@ tokio = { workspace = true, features = ["net", "test-util"] }
 # the receipt-vetting test whose observable is which refusal's trace line
 # fired.
 tracing-subscriber.workspace = true
-
-# The two pane binaries are their own `main`. The program `pane.rs` starts in a
-# teammate's pane is `current_exe()` — inside a test binary, the test binary
-# itself, carrying the spawn flags — and libtest would refuse those flags on
-# sight. So each opens by asking whether it is the pane child (see
-# `tests/pane_support/mod.rs`) and only otherwise runs its one test.
-[[test]]
-name = "teammate_pane_lifecycle"
-harness = false
-
-[[test]]
-name = "teammate_pane_env"
-harness = false

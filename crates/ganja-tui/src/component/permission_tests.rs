@@ -48,8 +48,8 @@ fn the_dialog_shows_the_tool_the_title_and_the_options() {
 #[test]
 fn a_shim_spawn_dialog_keeps_the_read_back_clause_on_screen() {
     use ganja_core::teammate::posture_line;
-    use ganja_core::teammate::shim_tui::pane_line;
     use ganja_protocol::team::MemberBackend;
+    use ganja_teammate_local::shim_tui::pane_line;
 
     for (backend, name) in [
         (MemberBackend::Codex, "codex"),

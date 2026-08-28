@@ -20,6 +20,7 @@ Dev-only scaffolding for `ganja-core`'s integration suites (`crates/ganja-core/t
 | `src/fs.rs` | [`temp_dir`] and [`redirect_xdg_data_home`] (`unsafe`, mutates process environment — see its doc comment for the invariant a caller must uphold). |
 | `src/subagent.rs` | [`ScriptedSubagents`] — the `Subagents` seam a `task` call delegates through, answering each delegation from a queued script and recording what it was asked. The second implementation of that trait, which is what makes it a seam: no provider, no agents, no turn. |
 | `src/agent.rs` | [`agent_registry`], building an `AgentRegistry` from a fixture `Config` for suites that need one to construct an engine but are not testing config resolution itself. |
+| `src/teammate.rs` | [`externals`] — the five backends that are not the engine's own, as a fixture lead assembles them (**D538**): `ganja_teammate_local`'s two native panes (`GanjaPane`, `ClaudePane`) plus its three foreign CLIs, each wrapped in the headless `ShimBackend` (never the pane-in-a-TUI door a real spawn uses) and pointed at an empty search path so a spawn is refused by naming the binary, exactly as it would be on a machine without one. What a suite hands `Engine::with_teammates` directly, which inserts its own in-process entry — the engine's own path. [`backends`] wraps `externals()` with a `FakeProvider`-backed `InProcess` entry added, which is what `Teammates::new` takes instead. |
 
 ## For AI Agents
 
@@ -47,7 +48,7 @@ cargo nextest run --workspace         # ganja-core's suites, rewired onto this c
 
 ### Internal
 
-`ganja-core` — the `Provider`/`Engine`/`Storage` surface the doubles are built on. `ganja-protocol` — the wire types they speak (`Message`, `Event`, `Usage`), named from their home crate rather than through the engine's root. `ganja-tool` — the `Tool` trait and the `task` seam the doubles implement, named the same way.
+`ganja-core` — the `Provider`/`Engine`/`Storage` surface the doubles are built on. `ganja-protocol` — the wire types they speak (`Message`, `Event`, `Usage`), named from their home crate rather than through the engine's root. `ganja-tool` — the `Tool` trait and the `task` seam the doubles implement, named the same way. `ganja-teammate-local` — a **normal**, not dev, dependency: the two native panes and three foreign-CLI backends `externals()` assembles are that crate's, so a fixture lead is production on a machine where none of the foreign CLIs is installed rather than a stub of one.
 
 ### External
 

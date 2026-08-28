@@ -294,6 +294,113 @@ async fn retiring_a_teammate_forgets_it_and_rewrites_the_team_file_without_it() 
     );
 }
 
+/// A spec `record` will write a row for, at its dullest — the registry's own
+/// team, lead and root, so the document it lands in is the one this test reads
+/// back.
+fn spec(registry: &TeammateRegistry, name: &str, home: &Path) -> SpawnSpec {
+    SpawnSpec {
+        name: MemberName::parse(name).expect("a member name"),
+        team: registry.team().clone(),
+        lead: registry.lead().clone(),
+        root: registry.root().clone(),
+        backend: MemberBackend::InProcess,
+        agent_type: "general".to_owned(),
+        model: "recorder-model".to_owned(),
+        color: "blue".to_owned(),
+        prompt: "hold the fort".to_owned(),
+        cwd: home.to_path_buf(),
+        plan_mode_required: false,
+        parent_session_id: registry.lead_session_id().to_owned(),
+    }
+}
+
+/// **U-7: the whole rewrite is one critical section, so a spawn that lands
+/// inside it is not lost.**
+///
+/// [`TeammateRegistry::mark_records_inactive`] is a read-modify-write of an
+/// entire document, and so is [`TeammateRegistry::record`]. Read the file
+/// *outside* the `team_file` lock and take the lock only for the write — which
+/// is what the reaper's retire path did until **Dv-13**, spelled out of the
+/// registry through five public items — and a `record` that lands between the
+/// two is written back over: a teammate that is running, holds a mailbox, and
+/// no team file remembers.
+///
+/// Pinned twice, and the first half is the one that cannot race. A predicate
+/// held open inside the mutation proves the lock is *already* held there, which
+/// a `try_lock` from outside answers with no timing at all; the second half
+/// then lets a real `record` contend for it and reads the document back with
+/// both rows in it. The predicate blocks a worker thread on purpose, which is
+/// why this test asks for more than one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retiring_records_holds_the_team_file_lock_across_read_and_write() {
+    let home = ganja_testkit::temp_dir();
+    let registry = registry(home.path());
+    registry
+        .record(&spec(&registry, "stale", home.path()), Surface::InProcess)
+        .await
+        .expect("a previous lead's row is in the document");
+
+    // Async on the way out so the test never blocks a worker waiting for it,
+    // blocking on the way in because the predicate is not a future.
+    let (reached, mut entered) = tokio::sync::mpsc::unbounded_channel();
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    let held = std::sync::Mutex::new(held);
+
+    let retiring = tokio::spawn({
+        let registry = Arc::clone(&registry);
+        async move {
+            registry
+                .mark_records_inactive(move |member| {
+                    if member.name != "stale" {
+                        return false;
+                    }
+                    reached.send(()).expect("the test is still listening");
+                    held.lock()
+                        .expect("the release is never poisoned")
+                        .recv()
+                        .expect("the test releases the retire");
+
+                    true
+                })
+                .await
+                .expect("the team file rewrites")
+        }
+    });
+
+    entered.recv().await.expect("the retire reached the stale row");
+    assert!(
+        registry.team_file.try_lock().is_err(),
+        "the lock is held while the document is being read and mutated, not only while it is \
+         written"
+    );
+
+    let recording = tokio::spawn({
+        let registry = Arc::clone(&registry);
+        let spec = spec(&registry, "w1", home.path());
+        async move { registry.record(&spec, Surface::InProcess).await }
+    });
+    // Long enough for the spawn above to reach the lock and wait on it, which
+    // is the interleave the assertion below is about. Nothing depends on it:
+    // the document is correct whether or not the two ever overlapped.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    release.send(()).expect("the retire is still waiting to be let go");
+
+    let retired = retiring.await.expect("the retire finishes");
+    recording.await.expect("the record finishes").expect("the team file rewrites");
+
+    assert_eq!(retired, vec!["stale".to_owned()], "the previous lead's row is the one retired");
+    let file = registry.read_team().await.expect("the team file reads back");
+    assert!(
+        file.members.iter().any(|member| member.name == "w1"),
+        "a record that landed during the retire is still in the document: {:?}",
+        file.members.iter().map(|member| member.name.clone()).collect::<Vec<_>>()
+    );
+    assert!(
+        file.members.iter().any(|member| member.name == "stale" && member.is_active == Some(false)),
+        "and the retired row is marked inactive rather than dropped"
+    );
+}
+
 /// The team file is somebody else's document too, so the write that
 /// replaces it may not leave its own scaffolding in the directory a real
 /// `claude` walks.

@@ -30,17 +30,10 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result};
 use ganja_core::config::{Config, Overrides, ThemeMode};
 use ganja_core::teammate::TeammateRegistry;
-use ganja_core::teammate::agy::Agy;
-use ganja_core::teammate::claude::ClaudePane;
-use ganja_core::teammate::codex::Codex;
-use ganja_core::teammate::grok::Grok;
-use ganja_core::teammate::pane::{GanjaPane, PaneShare, PaneShell};
-use ganja_core::teammate::shim_tui::ShimTui;
-use ganja_core::{
-    AgentRegistry, Backends, Engine, SessionId, Storage, catalog, instruction, provider,
-};
+use ganja_core::{AgentRegistry, Engine, SessionId, Storage, catalog, instruction, provider};
 use ganja_permission::Project;
 use ganja_protocol::Message;
+use ganja_teammate_local::pane::{PaneShare, PaneShell};
 use ratatui::crossterm::event::{
     DisableBracketedPaste, DisableFocusChange, DisableMouseCapture, EnableBracketedPaste,
     EnableFocusChange, EnableMouseCapture, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
@@ -70,36 +63,6 @@ pub enum Resume {
     Latest,
     /// The session with this stored id.
     Session(String),
-}
-
-/// The surfaces this build can spawn a teammate onto, except the engine's own
-/// (**D538**).
-///
-/// Assembled here because a pane needs a tmux server and the shell a spawn
-/// splits into, and a foreign CLI's TUI needs those plus a binary on `PATH` —
-/// none of which an engine holds. `Engine::with_teammates` adds the in-process
-/// implementation it *can* build, out of that session's own provider, tool set
-/// and store.
-///
-/// **D512 (P28)**: all three shim slots open the CLI's own native TUI in a
-/// pane, spoken to through bracketed paste, and **no spawn door in this build
-/// reaches the headless `teammate::shim::ShimBackend`** any more — that
-/// machinery stays in the tree, unit-tested, reachable only by the tests that
-/// drive it against a fake CLI. Which is also why `teammates.shim_turn_timeout`
-/// is not read here: a pane-mode shim has no per-turn deadline (the module doc
-/// owns why), and the key governs only the headless machinery it was written
-/// for (**D509**).
-///
-/// These slots search the real `PATH`; a test that reached one would spawn the
-/// developer's own CLI. Tests assemble their backends through
-/// `ganja_testkit`, never through this.
-fn local_backends(shell: PaneShell, share: PaneShare) -> Backends {
-    Backends::new()
-        .with(Arc::new(GanjaPane::new(shell.clone(), share)))
-        .with(Arc::new(ClaudePane::new(shell.clone(), share)))
-        .with(Arc::new(ShimTui::new(Arc::new(Codex::new()), shell.clone(), share)))
-        .with(Arc::new(ShimTui::new(Arc::new(Agy::new()), shell.clone(), share)))
-        .with(Arc::new(ShimTui::new(Arc::new(Grok::new()), shell, share)))
 }
 
 /// Runs the interactive terminal UI until the user quits.
@@ -454,7 +417,7 @@ pub async fn run(
                     config.teammates.pane_shell().map(PaneShell::configured).unwrap_or_default();
                 let share =
                     config.teammates.pane_share().map(PaneShare::configured).unwrap_or_default();
-                let backends = local_backends(shell, share);
+                let backends = ganja_teammate_local::backends(shell, share);
                 // **D506**: panes a previous lead of this team left running,
                 // before this one spawns anything of its own. Best-effort by
                 // construction — it returns a `Swept` and never an error, and a
@@ -467,7 +430,7 @@ pub async fn run(
                 // (AC-12), which drives `reaper::sweep_on` against a private tmux
                 // server: `run` opens a real terminal, so there is no headless
                 // seam in this file to assert the call from.
-                let swept = ganja_core::teammate::reaper::sweep(&registry).await;
+                let swept = ganja_teammate_local::reaper::sweep(&registry).await;
                 if !swept.is_empty() {
                     tracing::info!(?swept, "a previous lead's panes were swept at startup");
                 }
@@ -478,11 +441,11 @@ pub async fn run(
                 // case has no tmux at all — and hoisting that gate would
                 // change the pane arm's own contract. Unconditional here, and
                 // asserted so at the function level by
-                // `ganja-core/tests/teammate_shim_sweep.rs`; the call itself
+                // `ganja-teammate-local/tests/teammate_shim_sweep.rs`; the call itself
                 // has the same no-headless-seam gap the pane sweep's does.
-                let orphans = ganja_core::teammate::reaper::sweep_shims(
+                let orphans = ganja_teammate_local::reaper::sweep_shims(
                     &registry,
-                    ganja_core::teammate::shim::default_directory(),
+                    ganja_teammate_local::shim::default_directory(),
                 )
                 .await;
                 if !orphans.is_empty() {
@@ -846,7 +809,7 @@ fn capture_input() -> Result<()> {
 /// and announce nothing (**D468**). A tmux that will not answer leaves the
 /// default.
 async fn initial_focus() -> bool {
-    use ganja_core::teammate::tmux::{Server, TMUX_PANE};
+    use ganja_teammate_local::tmux::{Server, TMUX_PANE};
 
     let Ok(pane) = std::env::var(TMUX_PANE) else {
         return true;

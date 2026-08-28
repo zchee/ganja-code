@@ -41,6 +41,12 @@ ganja-permission.workspace = true
 # the engine to render a transcript, and depending on it that way is what keeps
 # that true.
 ganja-protocol.workspace = true
+# The machine-bound teammate backends this frontend assembles (**D539**): a
+# pane needs a tmux server and the shell to split into, which is a property of
+# the terminal this crate owns and not of the engine it drives. Named here
+# rather than reached through `ganja-core`, which may not name a crate above
+# it.
+ganja-teammate-local.workspace = true
 # The `@` file menu runs the glob tool in-process, which is why the frontend
 # links the tool crate rather than asking the engine to walk the tree for it: it
 # preserves today's documented behavior at no latency cost. Rerouting the menu

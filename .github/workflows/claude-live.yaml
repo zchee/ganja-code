@@ -1,7 +1,7 @@
 name: claude-live
 
 # AC-13's live half: a real `claude` pane round-tripping over the shared
-# inbox (`crates/ganja-core/tests/teammate_claude_live.rs`). Deliberately not
+# inbox (`crates/ganja-teammate-local/tests/teammate_claude_live.rs`). Deliberately not
 # part of ci.yaml — the binary is proprietary and versioned outside this
 # repository, and a green run spends a real model turn on the
 # ANTHROPIC_API_KEY secret — so it runs on a weekly clock (this is the
@@ -89,4 +89,4 @@ jobs:
           GANJA_LIVE_TEST: "1"
         run: |
           GANJA_LIVE_CLAUDE_SEED="$RUNNER_TEMP/claude-seed.json" \
-            cargo test -p ganja-core --test teammate_claude_live -- --ignored --nocapture
+            cargo test -p ganja-teammate-local --test teammate_claude_live -- --ignored --nocapture

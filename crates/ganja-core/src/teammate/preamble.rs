@@ -18,11 +18,11 @@
 //! paragraph is the only thing that differs between backends, and it is each
 //! backend's own: [`native`](crate::teammate::preamble::native) here, for the two surfaces that hold ganja's
 //! `send_message` tool (the in-process teammate and the `ganja` pane);
-//! [`crate::teammate::claude::preamble`] for a real `claude`'s `SendMessage`;
-//! [`crate::teammate::shim_tui::preamble`] for a CLI's native TUI in a pane,
+//! `ganja_teammate_local::claude::preamble` for a real `claude`'s `SendMessage`;
+//! `ganja_teammate_local::shim_tui::preamble` for a CLI's native TUI in a pane,
 //! whose answers are read back out of that CLI's own transcript (**D515**,
 //! which retired D512's send-only pane); and
-//! [`crate::teammate::shim::preamble`] for a headless child, whose answers are
+//! `ganja_teammate_local::shim::preamble` for a headless child, whose answers are
 //! mail. The words are ganja's own throughout.
 //!
 //! The member record keeps the bare prompt: what is persisted verbatim is what
@@ -59,7 +59,7 @@ impl<'a> Names<'a> {
 ///
 /// Two readers, one spelling. A pane teammate's answers are read back out of
 /// the transcript its CLI writes for itself
-/// ([`crate::teammate::readback`]), and the only honest way to know which of
+/// (`ganja_teammate_local::readback`), and the only honest way to know which of
 /// that CLI's sessions is *this member's* is that the session opens with the
 /// message this side pasted: name and team together are unique to one member
 /// of one team, and a CLI records what it was handed verbatim. Composing that

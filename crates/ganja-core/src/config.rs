@@ -1129,10 +1129,10 @@ pub struct TeammateConfig {
     ///
     /// # What it governs, and what it no longer reaches (**D512**)
     ///
-    /// It is the deadline of [`crate::teammate::shim`], the machinery that
+    /// It is the deadline of `ganja_teammate_local::shim`, the machinery that
     /// drives a foreign CLI *headlessly* through a pipe. Since P28 every
     /// codex, agy and grok spawn instead opens that CLI's own native TUI in a
-    /// tmux pane ([`crate::teammate::shim_tui`]), and a pane-mode shim runs
+    /// tmux pane (`ganja_teammate_local::shim_tui`), and a pane-mode shim runs
     /// under **no per-turn deadline at all** — nothing on that path reads this
     /// key, so on this build the number a config writes here moves nothing a
     /// session does. Since **D538** it is not even read at assembly: the
@@ -1157,7 +1157,7 @@ pub struct TeammateConfig {
     /// indistinguishable from one that is thinking. The deadline is what
     /// turned that ambiguity into mail — which is also why a pane took it
     /// away rather than inheriting it: the CLI's own TUI is a thing a person
-    /// can look at. [`crate::teammate::shim_tui`]'s module doc owns that half.
+    /// can look at. `ganja_teammate_local::shim_tui`'s module doc owns that half.
     pub shim_turn_timeout: Option<u64>,
     /// The shell a fresh teammate pane holds until its launch line is typed
     /// into it (**D520**), as a command line: `"/bin/zsh -f"`, or just
@@ -1166,7 +1166,7 @@ pub struct TeammateConfig {
     /// Resolved **once** by the frontend that assembles this session's
     /// backends and handed to the two pane backends there (**D538**; it rode
     /// the registry and every `SpawnSpec` until then), as
-    /// [`crate::teammate::pane::PaneShell`] rather than as a config type — the
+    /// `ganja_teammate_local::pane::PaneShell` rather than as a config type — the
     /// D520 rule that no backend names one is kept while the state moves.
     ///
     /// Split into words the way a shell would (`shlex`), and kept at two
@@ -1189,7 +1189,7 @@ pub struct TeammateConfig {
     ///
     /// Resolved once and handed to the pane backends at assembly, exactly as
     /// [`TeammateConfig::shell`] is and for the same reason (**D538**), as
-    /// [`crate::teammate::pane::PaneShare`].
+    /// `ganja_teammate_local::pane::PaneShare`.
     pub pane_share: Option<u8>,
 }
 

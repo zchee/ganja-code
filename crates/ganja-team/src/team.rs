@@ -59,7 +59,7 @@ pub const NAME_MAX: usize = 64;
 /// The observation is what settles it, because a live test cannot: the
 /// question needs a `claude` that *registers* a teammate, and a pane teammate
 /// is refused that by its own tool surface (see
-/// `ganja-core/tests/teammate_claude_live.rs`).
+/// `crates/ganja-teammate-local/tests/teammate_claude_live.rs`).
 pub const COLLISION_SEPARATOR: &str = "-";
 
 /// Why a name was refused. Ganja's own sentences — nothing here is copied from

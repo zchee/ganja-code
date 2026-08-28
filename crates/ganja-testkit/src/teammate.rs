@@ -22,16 +22,16 @@ use ganja_core::team::{
     MailboxMessage, MemberName, MemberRecord, Spawn, Surface, TeamFile, TeamName, TeamsRoot,
     mailbox, record,
 };
-use ganja_core::teammate::claude::ClaudePane;
-use ganja_core::teammate::pane::GanjaPane;
 use ganja_core::teammate::runner::Runner;
-use ganja_core::teammate::shim::{ShimBackend, ShimRecords};
 use ganja_core::teammate::{InProcess, SpawnSpec, Teammate, TeammateRegistry};
 use ganja_core::tool::Registry;
 use ganja_core::tool::task::TeammateSpawn;
 use ganja_core::{Backends, Caller, SpawnAsk, SpawnAsker, Storage, Teammates};
 use ganja_protocol::team::Frame;
 use ganja_protocol::{Event, PermissionReply};
+use ganja_teammate_local::claude::ClaudePane;
+use ganja_teammate_local::pane::GanjaPane;
+use ganja_teammate_local::shim::{ShimBackend, ShimRecords};
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
@@ -140,21 +140,21 @@ pub fn externals() -> Backends {
     Backends::new()
         .with(Arc::new(GanjaPane::default()))
         .with(Arc::new(ClaudePane::default()))
-        .with(Arc::new(shim_backend(Arc::new(ganja_core::teammate::codex::Codex::new()))))
-        .with(Arc::new(shim_backend(Arc::new(ganja_core::teammate::agy::Agy::new()))))
-        .with(Arc::new(shim_backend(Arc::new(ganja_core::teammate::grok::Grok::new()))))
+        .with(Arc::new(shim_backend(Arc::new(ganja_teammate_local::codex::Codex::new()))))
+        .with(Arc::new(shim_backend(Arc::new(ganja_teammate_local::agy::Agy::new()))))
+        .with(Arc::new(shim_backend(Arc::new(ganja_teammate_local::grok::Grok::new()))))
 }
 
 /// One headless shim backend that can find no binary, over records in a
 /// directory nothing else walks.
 ///
 /// The records go to a temporary directory rather than to
-/// [`ganja_core::teammate::shim::default_directory`]'s `/tmp/ganja-<uid>`,
+/// [`ganja_teammate_local::shim::default_directory`]'s `/tmp/ganja-<uid>`,
 /// because a suite writing there would leave a `.shims` file per test process
 /// in a directory `ganja sessions --live` walks. Nothing writes one anyway —
 /// every spawn is refused before a child exists — which is why the path may be
 /// a bare join rather than a `TempDir` somebody has to keep alive.
-fn shim_backend(driver: Arc<dyn ganja_core::teammate::shim::Driver>) -> ShimBackend {
+fn shim_backend(driver: Arc<dyn ganja_teammate_local::shim::Driver>) -> ShimBackend {
     ShimBackend::new(
         driver,
         Arc::new(Mutex::new(ShimRecords::new(

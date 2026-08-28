@@ -432,7 +432,7 @@ async fn a_shutdown_approved_takes_the_member_out_of_the_roster_and_the_team_fil
 
 /// A backend that answers `claude` and makes a pane out of nothing.
 ///
-/// A fixture rather than [`crate::teammate::claude::ClaudePane`], which would
+/// A fixture rather than `ganja_teammate_local::claude::ClaudePane`, which would
 /// need a tmux server and a `claude` on the machine to reach this test's one
 /// question: what a lead does when the **roster** holds a claude-backed
 /// member. `owns_inbox` mirrors the real one so no stray prompt lands under

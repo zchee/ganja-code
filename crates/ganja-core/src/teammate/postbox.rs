@@ -1,7 +1,7 @@
 //! What every postbox shares, spelled once.
 //!
 //! Three implementations of [`crate::tool::team::Postbox`] exist — the lead's
-//! and a teammate's in [`crate::subagent`], and a pane member's in
+//! and a teammate's in `crate::subagent`, and a pane member's in
 //! [`crate::teammate::member`] — and each binds its sender its own way, which
 //! is the anti-forgery rule and stays theirs. What they answer *identically*
 //! lives here instead of three times: the one classification of the frame
@@ -29,7 +29,7 @@ use crate::tool::team::{Body, Peer, Reserved, Sent, Undelivered};
 /// draining, and growing the file further buys nobody anything. A refusal
 /// is [`mailbox::MailboxError::Full`] naming the counts, the file left
 /// byte-identical, surfaced on the write-failure arm each door already has.
-pub(crate) const INBOX_CEILING: mailbox::Ceiling =
+pub const INBOX_CEILING: mailbox::Ceiling =
     mailbox::Ceiling { max_messages: 256, max_bytes: 1 << 20 };
 
 /// A member of the team whose name the name grammar refuses — impossible
@@ -53,7 +53,7 @@ pub(crate) const RUNS_ON: &str = "a teammate on the";
 /// postbox that still does not speak the socket, a pane member's
 /// ([`crate::teammate::member::MemberPostbox`]). The lead's and an in-process
 /// teammate's do (**D505**, `Postbox::deliver_over_socket` in
-/// [`crate::subagent`]).
+/// `crate::subagent`).
 pub(crate) const NO_SOCKET: &str = "A message to another session travels over that session's socket, and this teammate's postbox does not speak it yet. A member of this team is reached by its bare name; another session, through the lead.";
 
 /// One parse and one lookup, both `ganja-protocol`'s: the tool may not name

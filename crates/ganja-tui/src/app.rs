@@ -558,8 +558,8 @@ pub struct App {
     /// second spawn off the team file while one is being written.
     ///
     /// A pane-mode shim spawn (`--backend codex|agy|grok`, **D512**) holds
-    /// this handle for up to [`ganja_core::teammate::shim_tui::READY_WAIT`]
-    /// plus [`ganja_core::teammate::shim_tui::READY_SETTLE`] — about sixteen
+    /// this handle for up to `ganja_teammate_local::shim_tui::READY_WAIT`
+    /// plus `ganja_teammate_local::shim_tui::READY_SETTLE` — about sixteen
     /// seconds — while its readiness poll waits for the CLI's own composer
     /// and then lets it settle, or times out into a paste nobody submits, so
     /// a second `/team spawn` typed meanwhile is answered [`team::BUSY`] for
@@ -1984,7 +1984,7 @@ impl App {
             let notice = pass
                 .exited
                 .iter()
-                .map(ganja_core::teammate::shim_tui::Exited::notice)
+                .map(ganja_core::teammate::Exited::notice)
                 .collect::<Vec<_>>()
                 .join(" · ");
             self.tell_team(notice);

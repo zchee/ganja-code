@@ -25,9 +25,10 @@ use std::sync::Arc;
 use ganja_core::permission::Permissions;
 use ganja_core::protocol::{Command, Event, PartBody, PermissionReply, ToolState};
 use ganja_core::team::{TeamName, TeamsRoot};
-use ganja_core::teammate::{TeammateRegistry, tmux};
+use ganja_core::teammate::TeammateRegistry;
 use ganja_core::tool::Registry;
 use ganja_core::{Config, Engine, Storage};
+use ganja_teammate_local::tmux;
 use ganja_testkit::{ScriptedProvider, drain_answering, says, tool_call};
 use serde_json::json;
 

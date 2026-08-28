@@ -133,7 +133,7 @@ pub const POLL: Duration = runner::POLL;
 ///
 /// Read rather than passed: §4.1's launch line carries no pane id, and the
 /// pane is the one process that can ask its own environment which `%N` it is.
-pub use ganja_core::teammate::tmux::TMUX_PANE;
+pub use ganja_teammate_local::tmux::TMUX_PANE;
 
 /// How long a pane waits for its own member record before refusing.
 ///

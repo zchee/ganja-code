@@ -22,6 +22,11 @@ ganja-core.workspace = true
 # their home crate, not through `ganja-core`'s root, which names only the
 # engine's own types.
 ganja-protocol.workspace = true
+# The five external backends `externals()` assembles are that crate's, so a
+# fixture lead is production on a machine where none of the foreign CLIs is
+# installed rather than a stub of one. A normal dependency, not a dev one: the
+# fixtures are this crate's public surface.
+ganja-teammate-local.workspace = true
 # Same rule for the `Tool` trait and the task seam the doubles implement: the
 # tool crate is where they live, so it is the crate this one names.
 ganja-tool.workspace = true

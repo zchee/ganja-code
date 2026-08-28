@@ -53,6 +53,15 @@ ganja-serve = { path = "crates/ganja-serve" }
 # is to refuse a field it does not know. Its internal dependency list is
 # exactly the protocol, and CI asserts it.
 ganja-team = { path = "crates/ganja-team" }
+# The teammate backends bound to the lead's own machine: tmux panes, the
+# `ganja` and `claude` panes split into them, and the three foreign CLIs driven
+# in their own TUIs. A member *above* the engine (**D539**), the way a frontend
+# is: every one of these adapters needs a tmux server, a shell to split into or
+# somebody else's binary on `PATH`, and an engine holds none of that. Its own
+# crate so the compiler holds the promise the cloud axis rests on — CI asserts
+# `ganja-serve` never links it, because the closure `ganja serve` ships is the
+# closure a worker will ship.
+ganja-teammate-local = { path = "crates/ganja-teammate-local" }
 # Dev-only: the scripted-provider/recorder-tool/storage-seeding scaffolding
 # `ganja-core`'s own `tests/*.rs` binaries pulled in as a path dev-dependency,
 # so the duplication across those files has one place to live instead of
@@ -69,7 +78,10 @@ ganja-tui = { path = "crates/ganja-tui" }
 # There is deliberately no `tmux` workspace dependency: that entry would be
 # the opt-in handle another crate uses to consume it, which the sealed-leaf
 # P26 user directive (2026-08-18) forbids; `.github/workflows/ci.yaml`'s
-# `lint` job asserts both directions.
+# `lint` job asserts both directions. The `tmux` module inside
+# `ganja-teammate-local` is not that crate: it is this workspace's own
+# control-mode driver for the two pane backends, and the same gate proves it
+# links nothing of the sealed leaf.
 
 anyhow = "1.0.104"
 # Clipboard read and write through each platform's native surface.

@@ -96,10 +96,12 @@ pub fn shutdown_ahead(
 /// place a delivered message becomes words, so there is one place for that
 /// envelope to arrive.
 ///
-/// `pub(crate)` since P27: [`crate::teammate::shim`] delivers into a foreign
-/// CLI's prompt rather than into an engine, and a second spelling of "who said
-/// this" would be two ways a teammate learns who it is answering.
-pub(crate) fn envelope(from: &str, text: &str) -> String {
+/// `pub` since **D539**, `pub(crate)` before it and for the same reason:
+/// `ganja-teammate-local`'s `shim` delivers into a foreign CLI's prompt rather
+/// than into an engine, and a second spelling of "who said this" would be two
+/// ways a teammate learns who it is answering. The crate that needs it now
+/// sits outside this one, so crate-private no longer reaches it.
+pub fn envelope(from: &str, text: &str) -> String {
     format!("A message from {from}:\n{text}")
 }
 

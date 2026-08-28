@@ -272,14 +272,32 @@ jobs:
           internal="$(cargo tree -p ganja-client -e normal --prefix none | awk '{print $1}' | grep '^ganja-' | grep -v '^ganja-client$' | sort -u | tr '\n' ' ')"
           test "$internal" = "ganja-protocol "
 
+      # ganja-teammate-local sits *above* the engine, the way a frontend does
+      # (**D539**): every backend in it needs a tmux server, a shell to split
+      # into, or somebody else's binary on `PATH` — none of which an engine
+      # may hold. Allowlist form for the same reason every other internal set
+      # here is one: a `∌ ganja-core` grep could not see this crate widen its
+      # own internal list, only an exact set closes. What this line proves is
+      # the crate's own half of the split's promise — it reaches nothing
+      # beyond the engine and the five crates beneath it.
+      - name: ganja-teammate-local's internal dependencies are exactly the six beneath it
+        run: |
+          internal="$(cargo tree -p ganja-teammate-local -e normal --prefix none | awk '{print $1}' | grep '^ganja-' | grep -v '^ganja-teammate-local$' | sort -u | tr '\n' ' ')"
+          test "$internal" = "ganja-core ganja-permission ganja-protocol ganja-provider ganja-team ganja-tool "
+
       # The frontends' own lanes, previously true but unasserted: the
       # terminal frontend never grows the HTTP server, the HTTP frontend
-      # never grows the terminal, and the client grows neither.
+      # never grows the terminal, and the client grows neither. The fourth
+      # line is the split's other half and its whole point (**D539**): the
+      # closure `ganja serve` ships is the closure a cloud worker will ship,
+      # so the machine-bound backends — tmux panes, foreign-CLI shims — must
+      # never enter it.
       - name: the frontends stay in their lanes
         run: |
           ! cargo tree -p ganja-tui -e normal | grep -q axum
           ! cargo tree -p ganja-serve -e normal | grep -q ratatui
           ! cargo tree -p ganja-client -e normal | grep -q axum
+          ! cargo tree -p ganja-serve -e normal | grep -q ganja-teammate-local
 
       # `tmux` is deliberately outside this workspace's ganja-* dependency
       # graph, not merely unused by today's callers. The consuming-direction

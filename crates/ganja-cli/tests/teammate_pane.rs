@@ -16,7 +16,7 @@
 //! the lead's shutdown request by leaving. Both screens are read back with
 //! `capture-pane`, which is what makes a full-screen application's state a
 //! thing a test can assert on. The engine-side half of this claim, over the
-//! registry alone, is `ganja-core/tests/teammate_pane_lifecycle.rs`; this is
+//! registry alone, is `ganja-teammate-local/tests/teammate_pane_lifecycle.rs`; this is
 //! the door a person uses.
 //!
 //! **Hard-fails without tmux.** A pane test that skipped where there was no
@@ -72,8 +72,9 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use ganja_core::team::{MemberName, Spawn, Surface, TeamFile, TeamName, TeamsRoot, mailbox};
-use ganja_core::teammate::{SpawnSpec, pane};
+use ganja_core::teammate::SpawnSpec;
 use ganja_protocol::team::{Frame, MemberBackend};
+use ganja_teammate_local::pane;
 use ganja_testkit::Homes;
 use ganja_testkit::tmux::{PrivateServer, require_tmux};
 use serde_json::json;

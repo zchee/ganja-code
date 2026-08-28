@@ -1,0 +1,86 @@
+[package]
+name = "ganja-teammate-local"
+description = "The teammate backends bound to the lead's own machine: tmux panes, the ganja and claude panes split into them, and the three foreign CLIs driven in their own TUIs."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Never published to crates.io. Also load-bearing for deny.toml: with every
+# member unpublished, `allow-wildcard-paths` exempts the workspace's own path
+# dependencies from `wildcards = "deny"`.
+publish = false
+
+[dependencies]
+# `TeammateBackend` and `Spawned` are dyn-safe async traits, and every backend
+# here is held as an `Arc<dyn _>` because which one runs is decided at spawn by
+# a name a person typed.
+async-trait.workspace = true
+# The engine this crate is an adapter *for* (**D539**): `TeammateBackend`,
+# `Spawned`, `Lent`, `SpawnSpec` and the `Backends` map `backends()` fills. The
+# dependency runs one way only — CI asserts `ganja-core`'s own internal list is
+# unchanged by this crate's existence, which is the proof the engine names
+# nothing above it.
+ganja-core.workspace = true
+# `MemberBackend` and the team frames a preamble and a delivery are spelled in,
+# named directly rather than through the engine's re-export: an adapter speaks
+# the wire vocabulary, and depending on it that way is what keeps that true.
+ganja-protocol.workspace = true
+# Claude Code's teams directory: a pane teammate's record, and the mailbox a
+# delivery writes into. Named here because a spawn is what writes a record, and
+# `ganja-team` is where that document's format lives.
+ganja-team.workspace = true
+# `socket`'s session-socket directory scheme (D505/D509): where a headless
+# shim's orphan records are kept, and the vetting a sweep runs before it walks
+# that directory. Named here because the records share the scheme rather than
+# because a teammate is a tool.
+ganja-tool.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# A pane's launch line is a shell command line, and the config-named shell it
+# splits into arrives already split; `shlex` is the one lexer both halves agree
+# on with tmux's own.
+shlex.workspace = true
+# A shim child's records and a pane's staged files are written through a
+# temporary and renamed, so a reader sharing the directory never sees a partial
+# document — the same rule, against the same reader, the team file follows.
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+# `CancellationToken` lives behind `rt`; a backend's own token is a child of
+# the registry's, so cancelling a turn never ends a teammate.
+tokio-util = { workspace = true, features = ["rt"] }
+tracing.workspace = true
+# A pane-backed teammate must resolve a binary this process may execute, so its
+# PATH lookup asks the operating system rather than reading mode bits. Moved
+# here with the backends: nothing left in `ganja-core` looks a binary up.
+which.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# A shim child is ended by signalling its process group, and `killpg` is that
+# call; Windows support arrives with its own mechanism later.
+libc.workspace = true
+
+[dev-dependencies]
+# The scripted-provider/recorder-tool/storage-seeding scaffolding this crate's
+# `tests/*.rs` shares across binaries. The cycle is dev-only and deliberate —
+# the same shape `ganja-core` ↔ `ganja-testkit` already has, since testkit
+# assembles the very backends declared here.
+ganja-testkit.workspace = true
+# `net` is for the pane and shim suites: they answer a fake CLI over a loopback
+# socket rather than mocking the child, so the spawn really is composed, run
+# and read back.
+tokio = { workspace = true, features = ["net"] }
+
+# The two pane binaries are their own `main`. The program `pane.rs` starts in a
+# teammate's pane is `current_exe()` — inside a test binary, the test binary
+# itself, carrying the spawn flags — and libtest would refuse those flags on
+# sight. So each opens by asking whether it is the pane child (see
+# `tests/pane_support/mod.rs`) and only otherwise runs its one test.
+[[test]]
+name = "teammate_pane_lifecycle"
+harness = false
+
+[[test]]
+name = "teammate_pane_env"
+harness = false

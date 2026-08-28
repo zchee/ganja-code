@@ -91,7 +91,7 @@
 //! what a session with no tmux gets for an **unnamed** backend too, since
 //! `ganja` is what unnamed means. Both pane values refuse
 //! **identically** — one [`crate::teammate::Unsupported`] carrying
-//! [`crate::teammate::tmux::REFUSED_NO_TMUX`], since a door that spawned where
+//! `ganja_teammate_local::tmux::REFUSED_NO_TMUX`, since a door that spawned where
 //! the other refused would be two behaviours wearing one argument — and an
 //! unknown value is refused by name listing the three
 //! ([`crate::teammate::parse_backend`]).
@@ -108,10 +108,14 @@
 //! The construction path, the backend trait, the registry that owns a
 //! teammate's lifetime and the §6.1 runner ([`crate::teammate::runner`]). What
 //! a teammate is allowed to do, and who answers when it asks, is
-//! [`crate::teammate::posture`]'s; the two pane bodies are
-//! [`crate::teammate::pane`]'s and [`crate::teammate::claude`]'s — both shipped,
-//! both real, one splitting a `ganja` of this very build and one a `claude` off
-//! `PATH` — declared here because this module owns every `mod` line in it.
+//! [`crate::teammate::posture`]'s. The pane and foreign-CLI bodies are **not**
+//! here at all since **D539**: they live in `ganja-teammate-local`, a member
+//! *above* this crate, because every one of them needs a tmux server, a shell
+//! to split into or somebody else's binary on `PATH` — machine-bound facts an
+//! engine has no business holding. Both pane values are shipped and real, one
+//! splitting a `ganja` of this very build and one a `claude` off `PATH`; what
+//! stays here is the vocabulary they are named by and the seam they plug
+//! into.
 //!
 //! [`Registry`]: crate::tool::Registry
 
@@ -143,15 +147,6 @@ use crate::provider::Provider;
 use crate::tool::Registry;
 use crate::{Engine, Storage};
 
-/// The `agy` backend: a name that parses and a spawn that refuses, because
-/// W4's ship test measured `--sandbox` as terminal-only (**D508(a)**).
-pub mod agy;
-/// A teammate that is a real `claude` pane (P25b).
-pub mod claude;
-/// A teammate that is a headless `codex exec` child (**D508**, **D509**).
-pub mod codex;
-/// A teammate that is a headless `grok` child (**D508**, **D509**, **D510**).
-pub mod grok;
 /// Which session a name points at, and what a person is told about the name
 /// they typed (**D528**, **D529**'s reminder half).
 pub mod identity;
@@ -163,36 +158,26 @@ pub mod lead_inbox;
 /// What a process that *is* a member holds: its postbox, and its asks on their
 /// way to the lead over §5's frames.
 pub mod member;
-/// A teammate in a `ganja` pane of its own (P25b).
-pub mod pane;
 /// What every postbox shares: one classification of the frame vocabulary, and
 /// the write tail a local delivery ends in.
-pub(crate) mod postbox;
+///
+/// `pub` rather than crate-private since **D539**: the two shim deliveries in
+/// `ganja-teammate-local` write a foreign teammate's inbox under this module's
+/// own `INBOX_CEILING`, so the ceiling every postbox bounds a write by has one
+/// spelling across the split.
+pub mod postbox;
 /// What a teammate may do, and who answers when it asks (**D-5**).
 pub mod posture;
 /// What a teammate is told before its task (**D514**): the frame every
 /// backend's preamble shares, and the `send_message` one the two native
 /// surfaces seed.
 pub mod preamble;
-/// Carrying a shim pane teammate's answers back to its lead (**D515**): the
-/// per-CLI transcript readers, and the one clause that says what each carries.
-pub mod readback;
-/// Killing panes the lead left behind when it died (P25b).
-pub mod reaper;
 /// Held-settlement receipts (**D534**): the sender-side outstanding-id
 /// registry, the receiver-side `HeldId` association, and the best-effort
 /// client that carries a settlement back over the sender's own socket.
 pub mod receipts;
 /// The §6.1 loop that drives one in-process teammate.
 pub mod runner;
-/// A teammate that is another vendor's CLI, driven through its own
-/// non-interactive door (**D508**, **D509**).
-pub mod shim;
-/// The same three CLIs rendered in their own native TUI, in a pane of their
-/// own, spoken to through bracketed paste (P28, **D512**).
-pub mod shim_tui;
-/// The tmux calls the two pane backends are built on (P25b).
-pub mod tmux;
 
 /// One teammate: the name it answers to, and the engine its turns run on.
 ///
@@ -488,16 +473,16 @@ pub(crate) fn claude_root_under(
 
 /// Pushes one line onto a member's ring.
 ///
-/// Shared by every writer — [`fold_calls`] here, and the two shim loops that
+/// Shared by every writer — `fold_calls` here, and the two shim loops that
 /// have no engine stream to fold from — so they cannot come to disagree about
 /// the cap or about what counts as a repeat: a line identical to the one
 /// already at the back says nothing the first said, and the ring is a live view
 /// rather than a log.
 ///
 /// **In core rather than in the shim module that used to own it**, since D538:
-/// the ring belongs to [`Member`], and a function writing the registry's own
+/// the ring belongs to `Member`, and a function writing the registry's own
 /// state had no business living inside one backend's file.
-pub(crate) fn push_recent(ring: &Mutex<VecDeque<String>>, line: String) {
+pub fn push_recent(ring: &Mutex<VecDeque<String>>, line: String) {
     let mut ring = ring.lock().expect("the call ring is never poisoned");
     if ring.back() == Some(&line) {
         return;
@@ -1077,10 +1062,10 @@ pub trait TeammateBackend: fmt::Debug + Send + Sync {
     /// and 5 there before it spawns, and unwinds that write on every failing
     /// path.
     ///
-    /// [`crate::teammate::claude::ClaudePane`] answers [`true`], because its
+    /// `ganja_teammate_local::claude::ClaudePane` answers [`true`], because its
     /// teammate reads a **different root** — `$CLAUDE_CONFIG_DIR/teams`, which
     /// nothing will persuade a real `claude` to look away from (§2.1) — and it
-    /// writes a different message there, [`crate::teammate::claude::preamble`]'s
+    /// writes a different message there, `ganja_teammate_local::claude::preamble`'s
     /// rather than the bare prompt. Two writers over one spawn were a defect
     /// both ways round: with the two roots pointed at one
     /// directory (AC-13's own configuration) the teammate's inbox held the bare
@@ -1553,6 +1538,13 @@ pub struct TeammateRegistry {
     reserved: Mutex<BTreeSet<String>>,
     /// Held across the team file's whole read-modify-write; see
     /// [`TeammateRegistry::record`] for what is lost without it.
+    ///
+    /// Private, and it has to be (**Dv-13**): a public lock is a public licence
+    /// to hold the registry's one write barrier for an arbitrary span. Every
+    /// read-modify-write a caller outside this crate needs is a method here
+    /// that takes it — [`TeammateRegistry::unrecord`] and
+    /// [`TeammateRegistry::mark_records_inactive`] — so the section's length is
+    /// this file's to decide.
     team_file: tokio::sync::Mutex<()>,
     /// How many colours §4.3's palette has handed out, which is the whole of
     /// the assignment: a member's name is unique for the life of the registry
@@ -1914,7 +1906,15 @@ impl TeammateRegistry {
     /// The half of a retire that outlives this process, and the unwind a
     /// refused launch owes — the one failing spawn path that runs after the
     /// record was written.
-    async fn unrecord(&self, teammate: &str) -> Result<bool, SpawnError> {
+    ///
+    /// `pub` since **D539** for a third caller outside this crate:
+    /// `ganja_teammate_local::reaper` drops the record of a pane it swept, once
+    /// it has proved what became of the pane. The whole read-modify-write is
+    /// inside this method rather than spread across the caller, which is the
+    /// shape every door onto this document takes — see
+    /// [`TeammateRegistry::mark_records_inactive`] for the race that is what
+    /// happens when it is not.
+    pub async fn unrecord(&self, teammate: &str) -> Result<bool, SpawnError> {
         let writing = self.team_file.lock().await;
         let mut file = self.read_team().await?;
         let before = file.members.len();
@@ -1928,6 +1928,99 @@ impl TeammateRegistry {
         self.write_team(file, &writing).await?;
 
         Ok(true)
+    }
+
+    /// Marks every record `recognized` claims inactive — not dropped — and
+    /// answers the names it marked, in one hold of the team file's lock.
+    ///
+    /// The one door outside this crate onto a read-modify-write of the whole
+    /// document (**D539**, **Dv-13**). Its caller is
+    /// `ganja_teammate_local::reaper::retire_shim_records`, which recognizes
+    /// the foreign-CLI teammates a *previous* lead left behind — a fact about
+    /// somebody else's binary that this crate deliberately does not know, which
+    /// is why the test arrives as a predicate rather than as a comparison
+    /// written here.
+    ///
+    /// **Why the lock spans the whole operation.** This is a read-modify-write
+    /// of an entire document, exactly as this registry's own `record` is, and
+    /// the two run against each other: a read taken *outside* the lock can be
+    /// written back over a `record` that landed in between, and the member row
+    /// that spawn wrote is gone — a teammate that is running, holds a mailbox,
+    /// and no team file remembers. So the lock is taken before the read and
+    /// released after the write, with the caller's predicate running inside it.
+    ///
+    /// **Marked, not dropped**: a row already carrying `isActive: false` is
+    /// left alone and not answered, so a second pass over the same document
+    /// retires nothing. What that costs is stated at the caller — a retired
+    /// name is not freed, because dropping the row would hand a dead
+    /// teammate's identity to the next live one in a document a real `claude`
+    /// may be reading.
+    ///
+    /// Two guards refuse ahead of any write, both by answering the empty list:
+    ///
+    /// * **Before the first spawn, and only then.** A registry that already
+    ///   holds members would be marking its *own* live teammates inactive, so a
+    ///   non-empty member map retires nothing. The precondition is enforced
+    ///   here rather than asked of the caller, because it is this method's
+    ///   safety property and not that caller's discipline.
+    /// * **The co-tenant guard.** Two leads that start inside one 65-second
+    ///   UUIDv7 bucket share a team name and therefore a team file, so a
+    ///   document naming another lead's session is left entirely alone rather
+    ///   than have a live co-tenant's members marked dead.
+    ///
+    /// # Errors
+    ///
+    /// [`SpawnError::TeamFile`] when the document could not be read or written,
+    /// and [`SpawnError::Lost`] when the blocking hop that does it did not come
+    /// back. Neither guard is an error: a refusal to touch the document is an
+    /// empty answer, since every caller of this is best-effort startup work.
+    pub async fn mark_records_inactive(
+        &self,
+        recognized: impl Fn(&MemberRecord) -> bool + Send,
+    ) -> Result<Vec<String>, SpawnError> {
+        // Bound to a `let` rather than tested inline, so the member map's guard
+        // is released at the end of this statement and cannot be held across
+        // the awaits below.
+        let already_spawning = !self.members().is_empty();
+        if already_spawning {
+            tracing::debug!(
+                "this lead has already spawned into its team, so no member record was retired"
+            );
+
+            return Ok(Vec::new());
+        }
+
+        let writing = self.team_file.lock().await;
+        let mut file = self.read_team().await?;
+        if file.lead_session_id != self.lead_session_id {
+            tracing::info!(
+                team = self.team.as_str(),
+                "the team file names another lead's session, so its records were left alone"
+            );
+
+            return Ok(Vec::new());
+        }
+
+        let mut retired = Vec::new();
+        for member in &mut file.members {
+            if member.is_lead() {
+                continue;
+            }
+            if !recognized(member) || member.is_active == Some(false) {
+                continue;
+            }
+            member.is_active = Some(false);
+            retired.push(member.name.clone());
+        }
+        if retired.is_empty() {
+            // Nothing to rewrite, and rewriting anyway would stage and rename a
+            // byte-identical document over a directory a real `claude` may be
+            // reading — `unrecord`'s rule, for `unrecord`'s reason.
+            return Ok(retired);
+        }
+        self.write_team(file, &writing).await?;
+
+        Ok(retired)
     }
 
     /// Tells `teammate` that it is waiting on the lead's answer to
@@ -1972,7 +2065,7 @@ impl TeammateRegistry {
     ///
     /// The inbox half of that is skipped for a backend that
     /// [`owns`](TeammateBackend::owns_inbox) its own — one writer per inbox, and
-    /// therefore one unwinder: [`crate::teammate::claude::ClaudePane`] seeds in
+    /// therefore one unwinder: `ganja_teammate_local::claude::ClaudePane` seeds in
     /// its `launch` and prunes there too. Which also moves those two steps to
     /// where §4.1 puts them for that backend (record, then inbox, then prompt,
     /// then the launch line), rather than ahead of the surface.
@@ -2207,7 +2300,15 @@ impl TeammateRegistry {
     }
 
     /// The team file, or the team it would be if nothing has written one yet.
-    async fn read_team(&self) -> Result<TeamFile, SpawnError> {
+    ///
+    /// `pub` since **D539**: `ganja_teammate_local::reaper`'s pane sweep reads
+    /// the document to learn which members claim a pane, and every fact it
+    /// needs — a record's name, agent id, `backendType` and surface, and the
+    /// file's own `leadSessionId` — is [`ganja_team`]'s public shape already.
+    /// A **read** door and nothing more: it takes no lock and hands out no way
+    /// to write, so a caller that reads here and writes elsewhere is writing
+    /// through a method that takes the lock itself.
+    pub async fn read_team(&self) -> Result<TeamFile, SpawnError> {
         let path = self.root.config_path(&self.team);
         let team = self.team.clone();
         let session = self.lead_session_id.clone();
@@ -2371,7 +2472,7 @@ where
 /// The same hop for every caller whose failure is a sentence rather than a
 /// [`SpawnError`]: a lost blocking task and the work's own error collapse to
 /// one string, which is what each call site was spelling by hand.
-pub(crate) async fn blocking_io<T, E, F>(work: F) -> Result<T, String>
+pub async fn blocking_io<T, E, F>(work: F) -> Result<T, String>
 where
     T: Send + 'static,
     E: std::fmt::Display + Send + 'static,
@@ -2389,9 +2490,9 @@ where
 /// is what makes "here is your task" and "here is a follow-up" one channel with
 /// one ordering and one lock. Returns what identifies the entry, so a spawn
 /// that fails afterwards can take it back out. Over values rather than a
-/// [`SpawnSpec`], because [`crate::teammate::claude::ClaudePane`] seeds a
+/// [`SpawnSpec`], because `ganja_teammate_local::claude::ClaudePane` seeds a
 /// different root with a different message through this same body.
-pub(super) async fn seed_inbox(
+pub async fn seed_inbox(
     inbox: PathBuf,
     from: String,
     text: String,
@@ -2418,15 +2519,11 @@ pub(super) async fn seed_inbox(
 /// [`None`] is nothing to do rather than an error: a backend that
 /// [`owns`](TeammateBackend::owns_inbox) its inbox was never seeded here, and
 /// unwinding what it wrote goes through this same body with its own root and
-/// identity ([`crate::teammate::claude::ClaudePane`]).
+/// identity (`ganja_teammate_local::claude::ClaudePane`).
 ///
 /// Reported rather than returned: the spawn has already failed, and a cleanup
 /// that failed too is a line in the log rather than a second error to explain.
-pub(super) async fn unseed_inbox(
-    inbox: PathBuf,
-    seeded: Option<mailbox::Identity>,
-    teammate: &str,
-) {
+pub async fn unseed_inbox(inbox: PathBuf, seeded: Option<mailbox::Identity>, teammate: &str) {
     let Some(seeded) = seeded else {
         return;
     };

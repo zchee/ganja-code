@@ -21,7 +21,7 @@
 //! asked, since a member watches the roster move under it rather than holding
 //! the registry that moves it — and one standing entry: **the lead is always
 //! addressable**, whether or not the file names it yet. The launch line is
-//! typed only once the record is on disk ([`crate::teammate::pane`]), so an
+//! typed only once the record is on disk (`ganja_teammate_local::pane`), so an
 //! absent file is defence in depth rather than the ordinary path — the lead's
 //! inbox path is derivable from the team name alone, and a teammate that
 //! could not reach its lead until the file was readable would be a teammate

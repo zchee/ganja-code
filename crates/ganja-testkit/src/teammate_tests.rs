@@ -38,7 +38,7 @@ fn a_seeded_team_file_reads_back_with_its_members() {
 #[test]
 fn the_fixture_codex_backend_resolves_no_binary_at_all() {
     assert!(
-        ganja_core::teammate::shim::resolve(&std::ffi::OsString::new(), "codex").is_none(),
+        ganja_teammate_local::shim::resolve(&std::ffi::OsString::new(), "codex").is_none(),
         "an empty search path must resolve nothing, or the fixture lead spawns a real codex"
     );
 }
