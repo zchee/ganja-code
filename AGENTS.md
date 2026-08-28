@@ -290,7 +290,7 @@ br sync --status      # Check sync status
 git status              # Check what changed
 git add <files>         # Stage code changes
 br sync --flush-only    # Export beads changes to JSONL
-git commit -m "..."     # Commit everything
+git commit --gpg-sign -F <msg-file>  # Commit everything: signed, message from a file
 git push                # Push to remote
 ```
 
