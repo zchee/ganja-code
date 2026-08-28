@@ -1,0 +1,7 @@
+# Commits blame should read through, not attribute. git consumes this file
+# only when configured (blame.ignoreRevsFile = .git-blame-ignore-revs, or
+# --ignore-revs-file per invocation); GitHub's blame view honors it on its
+# own.
+
+# all: adopt the rustfmt profile tuned for parallel worktree lanes
+b536cd158f6affc0e35a349bef7ee84eefa0ef21
