@@ -124,6 +124,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use etcetera::base_strategy::{BaseStrategy as _, Xdg};
 use futures::StreamExt as _;
 use ganja_protocol::team::{MemberBackend, MemberView, TeamView};
 use ganja_team::team::resolve_unique;
@@ -406,10 +407,106 @@ pub const RECENT_CALLS: usize = 8;
 /// §4.3's palette, assigned round-robin and memoized per name.
 const PALETTE: [&str; 4] = ["blue", "green", "pink", "purple"];
 
-/// Where the teams live under this build's own config home — Claude's
-/// `$CLAUDE_CONFIG_DIR/teams` (§2.1), read and written under ganja's home
-/// rather than under somebody else's.
-const TEAMS_DIR: &str = "teams";
+/// Where the teams live under a config home — Claude's
+/// `$CLAUDE_CONFIG_DIR/teams` (§2.1), read and written under ganja's own home
+/// by [`TeammateRegistry::for_session`] and under claude's by
+/// [`teams_root`].
+///
+/// One constant for both, because it is one fact about somebody else's
+/// document: a build that spelled the directory twice could come to spell it
+/// two ways, and the two sides of a round trip would then never meet.
+pub const TEAMS_DIR: &str = "teams";
+
+/// The variable naming the directory a real `claude` keeps its own things in,
+/// and therefore the parent of the teams directory it reads (§2.1).
+///
+/// It reaches further than the teams directory, and a caller that sets one for
+/// a session should know it: a real `claude` derives the identity of its
+/// **credential store** from this path too — on macOS the keychain service is
+/// `Claude Code-credentials` under the default home and
+/// `Claude Code-credentials-<eight hex of the path>` under any other — which is
+/// how one variable serves several accounts. Nothing here needs to act on that,
+/// because a pane under the user's own config home reads the store that user
+/// logged into; it is recorded because a *fresh* config home is a fresh login,
+/// and a pane that starts, reads its inbox and then refuses to take a turn looks
+/// nothing like an authentication problem until somebody knows this.
+pub const CLAUDE_CONFIG_DIR_ENV: &str = "CLAUDE_CONFIG_DIR";
+
+/// Where a `claude` with no [`CLAUDE_CONFIG_DIR_ENV`] keeps them, under the
+/// user's home.
+///
+/// **This plan's assumption, not the reference's**: §2.1 spells the root as
+/// `$CLAUDE_CONFIG_DIR/teams` and never says what an unset variable falls back
+/// to. It is recorded as a constant so that being wrong costs one line, and so
+/// that a reader can see it is a guess rather than a citation.
+pub const CLAUDE_CONFIG_HOME_DIRECTORY: &str = ".claude";
+
+/// What a lead or a claude spawn says when there is no directory to reach
+/// claude's teams through.
+pub const REFUSED_NO_CONFIG_DIR: &str = "there is no directory to reach claude's teams through: neither CLAUDE_CONFIG_DIR nor a home \
+     directory could be resolved";
+
+/// Where a real `claude` reads and writes its teams (§2.1).
+///
+/// `$CLAUDE_CONFIG_DIR/teams`, else `~/.claude/teams`. [`None`] when neither
+/// the variable nor a home directory can be had, which is what
+/// [`REFUSED_NO_CONFIG_DIR`] says out loud.
+///
+/// **In core rather than in the claude backend that spawns against it**, since
+/// D538: the two readers that are not that backend are the lead's own inbox
+/// pass ([`crate::teammate::lead_inbox::LeadInbox`]) and the engine's held-entry
+/// prune, and both need it whether or not this session ever spawns a `claude`
+/// pane. Where a foreign agent keeps its documents is a fact about the machine,
+/// not a fact about one way of starting a teammate.
+#[must_use]
+pub fn teams_root() -> Option<TeamsRoot> {
+    // The home comes off the same strategy `config::config_home` asks, rather
+    // than off `$HOME` directly: one answer about where this machine's home is,
+    // whichever of the two directories is being resolved.
+    let home = Xdg::new().ok().map(|base| base.home_dir().to_path_buf());
+
+    claude_root_under(std::env::var_os(CLAUDE_CONFIG_DIR_ENV), home)
+}
+
+/// [`teams_root`]'s decision, over values rather than over the environment, so
+/// a test can hold both cases without touching the process it runs in.
+///
+/// An empty variable is treated as unset — the shape every other environment
+/// read in this tree keeps (`config_home`'s `CONFIG_HOME_ENV`), because
+/// `CLAUDE_CONFIG_DIR=` in a shell profile means "I did not set this" far more
+/// often than it means "the root directory".
+pub(crate) fn claude_root_under(
+    config_dir: Option<std::ffi::OsString>,
+    home: Option<PathBuf>,
+) -> Option<TeamsRoot> {
+    let named = config_dir.filter(|value| !value.is_empty()).map(PathBuf::from);
+
+    named
+        .or_else(|| home.map(|home| home.join(CLAUDE_CONFIG_HOME_DIRECTORY)))
+        .map(|home| TeamsRoot::new(home.join(TEAMS_DIR)))
+}
+
+/// Pushes one line onto a member's ring.
+///
+/// Shared by every writer — [`fold_calls`] here, and the two shim loops that
+/// have no engine stream to fold from — so they cannot come to disagree about
+/// the cap or about what counts as a repeat: a line identical to the one
+/// already at the back says nothing the first said, and the ring is a live view
+/// rather than a log.
+///
+/// **In core rather than in the shim module that used to own it**, since D538:
+/// the ring belongs to [`Member`], and a function writing the registry's own
+/// state had no business living inside one backend's file.
+pub(crate) fn push_recent(ring: &Mutex<VecDeque<String>>, line: String) {
+    let mut ring = ring.lock().expect("the call ring is never poisoned");
+    if ring.back() == Some(&line) {
+        return;
+    }
+    if ring.len() == RECENT_CALLS {
+        ring.pop_front();
+    }
+    ring.push_back(line);
+}
 
 /// How much of a session id §2.1's implicit team name is built from.
 const TEAM_HEX: usize = 8;
@@ -693,14 +790,13 @@ pub struct SpawnSpec {
     /// Whether it must start in plan mode.
     pub plan_mode_required: bool,
     /// The lead's session, which §4.1 passes a pane as `--parent-session-id`.
+    ///
+    /// The last field, and the last two left with it: the shell a pane is split
+    /// into (**D520**) and the column's share of the width used to ride here
+    /// too, and left with **D538** — they are properties of the *runtime* a
+    /// frontend resolved once, not of one spawn, and they now reach the pane
+    /// backends at assembly instead of through every spec.
     pub parent_session_id: String,
-    /// The shell a pane backend splits, until its launch line arrives
-    /// (**D520**): the registry's, resolved once from `teammates.shell`.
-    pub shell: pane::PaneShell,
-    /// The teammates' column's share of the width when this spawn opens it
-    /// (2026-08-25): the registry's, resolved once from
-    /// `teammates.pane_share`.
-    pub share: pane::PaneShare,
 }
 
 /// Renders everything except the prompt, which is rendered as a size — the
@@ -723,8 +819,6 @@ impl fmt::Debug for SpawnSpec {
             .field("cwd", &self.cwd)
             .field("plan_mode_required", &self.plan_mode_required)
             .field("parent_session_id", &self.parent_session_id)
-            .field("shell", &self.shell)
-            .field("share", &self.share)
             .finish()
     }
 }
@@ -743,176 +837,237 @@ impl SpawnSpec {
     }
 }
 
-/// What a spawn produced: the thing that has to be torn down again.
+/// What a spawn produced: the thing that has to be torn down again, and the
+/// thing that knows how (**D538**).
 ///
-/// Four shapes since P28, and each pane's identity is a **pair** rather than
-/// an id: `%N` recycles,
-/// so a lead that killed panes by id alone would eventually kill somebody
-/// else's window. What tmux reports beside the id is `#{pane_pid}` — there is no
-/// `pane_start_time` format, as [`crate::teammate::tmux`]'s module doc records
-/// against `man tmux` and against a live server — so **birth is that pid**, and
-/// it is what makes the identity stable for as long as the machine keeps
-/// running. [`crate::teammate::reaper`] is where the comparison lives, and where
-/// the cold-start case that pid cannot answer for is dealt with.
-pub enum Handle {
-    /// A teammate running in this process, holding its own engine.
-    InProcess(Arc<Teammate>),
-    /// A teammate with a pane of its own: the recorded `(pane_id, birth)`
-    /// pair, as [`reaper::Pane`] spells it for every identity-checked kill.
-    Pane(reaper::Pane),
-    /// A teammate that is a foreign CLI child this process shims for
-    /// (**D508**): the group a signal goes to, and the state that says whether
-    /// there is anything to signal.
-    ///
-    /// Deliberately holds no `tokio::process::Child`. [`TeammateBackend::kill`]
-    /// takes a **shared** reference and a member is reached only through an
-    /// [`Arc`], while a child's `kill`/`wait` all want `&mut` — so the child is
-    /// owned by the task that drives it, under `kill_on_drop(true)`, and what
-    /// is here is what a signal needs. See [`shim::Child`].
-    Child(Arc<shim::Child>),
-    /// A shim teammate in a pane of its own, running its CLI's native TUI
-    /// (P28, **D512**): the recorded `(pane_id, birth)` pair, the server it
-    /// is on, and the token that ends the runner pasting into it. See
-    /// [`shim_tui::TuiPane`] — a fourth shape rather than a [`Handle::Pane`],
-    /// because ending it is not a `kill-pane`: the group is signalled first,
-    /// while the pane still vouches for the pid.
-    TuiPane(Arc<shim_tui::TuiPane>),
-}
-
-impl fmt::Debug for Handle {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InProcess(teammate) => {
-                formatter.debug_tuple("InProcess").field(&teammate.name()).finish()
-            }
-            Self::Pane(pane) => formatter
-                .debug_struct("Pane")
-                .field("pane_id", &pane.id)
-                .field("birth", &pane.birth)
-                .finish(),
-            Self::Child(child) => child.fmt(formatter),
-            Self::TuiPane(tui) => tui.fmt(formatter),
-        }
-    }
-}
-
-impl Handle {
-    /// The teammate behind an in-process handle.
-    #[must_use]
-    pub fn teammate(&self) -> Option<&Arc<Teammate>> {
-        match self {
-            Self::InProcess(teammate) => Some(teammate),
-            Self::Pane(_) | Self::Child(_) | Self::TuiPane(_) => None,
-        }
-    }
-
-    /// The foreign child behind a shim handle.
-    ///
-    /// The sibling of [`Handle::teammate`], and the reason it exists is that
-    /// every *call site* of that one is guard-shaped: a third variant falling
-    /// through an `if let Some(teammate) = handle.teammate()` compiles silently
-    /// and behaves wrongly, so each such site now asks both questions rather
-    /// than one.
-    #[must_use]
-    pub fn child(&self) -> Option<&Arc<shim::Child>> {
-        match self {
-            Self::Child(child) => Some(child),
-            Self::InProcess(_) | Self::Pane(_) | Self::TuiPane(_) => None,
-        }
-    }
-
-    /// The TUI pane behind a pane-mode shim handle — the third of the three
-    /// guard-shaped accessors, for [`Handle::child`]'s reason.
-    #[must_use]
-    pub fn tui(&self) -> Option<&Arc<shim_tui::TuiPane>> {
-        match self {
-            Self::TuiPane(tui) => Some(tui),
-            Self::InProcess(_) | Self::Pane(_) | Self::Child(_) => None,
-        }
-    }
-
-    /// What §2.2's overloaded `tmuxPaneId` records for this handle.
-    #[must_use]
-    pub fn surface(&self) -> Surface {
-        match self {
-            Self::InProcess(_) => Surface::InProcess,
-            Self::Pane(pane) => Surface::Pane { id: pane.id.clone() },
-            // Which is what makes the registry's record write produce W1's
-            // shape with no change of its own: `Surface::Shim` puts the
-            // in-process sentinel in `tmuxPaneId` and the CLI's name in
-            // `backendType`, so every older reader classifies the member
-            // safely and the one reader that needs shim-ness reads the field
-            // that says so.
-            Self::Child(child) => Surface::Shim { cli: child.cli(), pane: None },
-            // The same `backendType`, and the **real** pane id where the
-            // headless shape writes the sentinel: the pane is there, and a
-            // reader acting on panes acts on something real (**D512**).
-            Self::TuiPane(tui) => {
-                Surface::Shim { cli: tui.cli(), pane: Some(tui.pane().id.clone()) }
-            }
-        }
-    }
-}
-
-/// One way of running a teammate.
+/// The registry holds one of these per member and asks it every question it
+/// used to answer by knowing which *kind* of member it had started. Which is
+/// the whole ruling: a backend owns what it spawned, so adding a seventh
+/// surface edits that surface's own file and nothing here.
 ///
-/// A backend holds the host's own handles — the provider, the tool registry,
-/// the store — and turns a [`SpawnSpec`] into a [`Handle`]. It knows nothing
-/// about the team file or the mailbox: registration is the registry's, so a
-/// backend that refuses leaves nothing behind to unwind but what the registry
-/// itself wrote.
+/// # `Arc<Self>` receivers only
 ///
-/// Every method is `async` because one implementation of each genuinely is:
-/// killing an in-process teammate settles its turn, and spawning a pane waits
-/// on a `tmux` process. The three call sites this signature is fixed against
-/// from the start are [`InProcess`], [`crate::teammate::pane`] and
-/// [`crate::teammate::claude`].
+/// [`Spawned::start`] takes `self: Arc<Self>` rather than `&Arc<Self>`, which
+/// is not a shape a trait object can dispatch on; the registry holds an
+/// [`Arc<dyn Spawned>`](Spawned) and hands a clone of it in, because the tasks
+/// that method spawns outlive the call.
+///
+/// # Why the in-process-only method has a default rather than a downcast
+///
+/// [`Spawned::awaiting_plan_approval`] is a question only the in-process
+/// member can answer, and the answer for every other member is honestly
+/// "nothing here". A downcast in the registry would put the kind test back
+/// exactly where this ruling took it out.
 #[async_trait]
-pub trait TeammateBackend: fmt::Debug + Send + Sync {
-    /// Which surface this backend is the implementation of.
-    fn backend(&self) -> MemberBackend;
+pub trait Spawned: fmt::Debug + Send + Sync {
+    /// What §2.2's overloaded `tmuxPaneId` records for this member.
+    fn surface(&self) -> Surface;
 
-    /// Runs a teammate, or says why it cannot.
+    /// §4.1's step 6, called once, right after the member record is written,
+    /// and nowhere else.
     ///
-    /// # Errors
+    /// The default does nothing, and that is the right answer for a member
+    /// that is already running when it is spawned. A `claude` pane splits its
+    /// window in [`TeammateBackend::spawn`] — that is what yields the identity
+    /// a record has to name — and types its launch line **here**, because the
+    /// record is the first thing the pane's process reads and a process
+    /// launched before its record exists would read a team it is not yet a
+    /// member of.
     ///
-    /// [`Unsupported`] when this build, or this session, cannot have the
-    /// surface asked for — a pane in a session with no tmux.
-    async fn spawn(&self, spec: &SpawnSpec) -> Result<Handle, Unsupported>;
-
-    /// Starts what [`TeammateBackend::spawn`] produced, once the team file
-    /// names it (§4.1's step 6, after its step 2).
-    ///
-    /// The default does nothing, and that is the right answer for the
-    /// in-process backend: a teammate is running from the moment it is
-    /// spawned. A pane backend splits its window in `spawn` — that is what
-    /// yields the handle a record has to name — and types the launch line
-    /// **here**, because the record is the first thing the pane's process
-    /// reads, and a process launched before its record exists would read a
-    /// team it is not yet a member of. The registry calls this right after
-    /// its record write, and nowhere else.
-    ///
-    /// A hook rather than a watch for the record from inside `spawn`, because
-    /// a call has an unwind path and a poll does not: a launch line that could
-    /// not be typed after the record was written would otherwise be a
-    /// registered member holding an idle shell that nothing cleans up. That is
-    /// the intent, not yet a description of the shipped pane backend: this
-    /// build's [`crate::teammate::pane::GanjaPane`] still launches off its own
-    /// internal record-watch — typing the line only once the team file names
-    /// the member — and this hook is the migration target it moves onto
-    /// (bead `ganja-code-ipg`).
+    /// A call rather than a watch from inside `spawn`, because a call has an
+    /// unwind path and a poll does not: a launch line that could not be typed
+    /// after the record was written would otherwise be a registered member
+    /// holding an idle shell that nothing cleans up.
     ///
     /// # Errors
     ///
     /// [`Unsupported`] when the surface could not be started — the same
     /// vocabulary a refused `spawn` answers in, because to whoever asked it is
     /// the same fact: this surface cannot be had. The registry unwinds exactly
-    /// as it does for a record that would not write — the handle is killed,
-    /// the record and the seeded prompt are taken back out, the name is given
-    /// back — and the caller reads one refusal.
-    async fn launch(&self, _spec: &SpawnSpec, _handle: &Handle) -> Result<(), Unsupported> {
+    /// as it does for a record that would not write.
+    async fn launch(&self) -> Result<(), Unsupported> {
         Ok(())
     }
+
+    /// Starts whatever watches this member, once [`Spawned::launch`] has
+    /// succeeded, and hands back every task the registry must hold on its
+    /// list.
+    ///
+    /// Empty for a member that runs itself in a process of its own. A task
+    /// that is not returned is a task `shutdown` will not wait for, which is
+    /// how a child gets reaped after the process it belonged to has returned.
+    fn start(self: Arc<Self>) -> Vec<JoinHandle<()>>;
+
+    /// Whether this member is still running, which is what the roster and the
+    /// status bar count.
+    fn alive(&self) -> bool;
+
+    /// **D503**'s ring: what this member most recently did, newest last.
+    fn recent(&self) -> Vec<String>;
+
+    /// Ends it. Idempotent: a member that has already gone is nothing to end.
+    async fn kill(&self);
+
+    /// Tells this member it is waiting on the lead's answer to `request_id`,
+    /// so that answer is applied rather than ignored as stale. Answers whether
+    /// anybody was told.
+    ///
+    /// [`false`] for every member that keeps its own wait in its own process.
+    fn awaiting_plan_approval(&self, _request_id: &str) -> bool {
+        false
+    }
+}
+
+/// What the registry lends a backend at spawn, so what it spawned can go on
+/// answering to the team without holding the registry that holds it
+/// (**D538**).
+///
+/// One value rather than five arguments, for the reason the two shim `Lent`s
+/// it absorbs already gave: every field here is the *registry's*, and a
+/// backend handed them one by one is a backend somebody could build with one
+/// of them missing.
+#[derive(Clone, Debug)]
+pub struct Lent {
+    /// Where this member answers.
+    pub lead_inbox: PathBuf,
+    /// A child of the registry's own token, so one cancel ends every member
+    /// and no turn's cancel ends any of them.
+    ///
+    /// Every backend takes a [`CancellationToken::child_token`] of this per
+    /// task it spawns rather than a clone, so the three shapes cancel at one
+    /// depth and a member that later wants to end one of its own tasks can.
+    pub cancel: CancellationToken,
+    /// Where a member's permission dialogs are handed to the lead (**D-5**).
+    /// [`None`] until a frontend attaches a surface, which every reader takes
+    /// as a refusal rather than leaving an ask hanging.
+    pub dialogs: Option<tokio::sync::mpsc::Sender<posture::Forwarded>>,
+    /// Where a member whose pane stopped running puts the fact, for the lead's
+    /// next pass to retire it on ([`TeammateRegistry::take_exited`]).
+    pub exits: tokio::sync::mpsc::UnboundedSender<Exited>,
+    /// The registry itself, for the one thing a member needs it for: a postbox
+    /// is bound to the team it belongs to ([`crate::subagent::Postbox::of`]).
+    ///
+    /// [`Weak`](std::sync::Weak), and it has to be: the registry owns the member, so a strong
+    /// reference here would be a cycle through the member map.
+    pub registry: std::sync::Weak<TeammateRegistry>,
+}
+
+/// A member whose pane stopped running **after** readiness — the CLI quit,
+/// crashed, or a person closed the pane (bead g9u's case, **D512** as
+/// amended): what the loop that noticed hands the registry, for the lead's
+/// next pass to retire the member on.
+///
+/// Carried through the registry rather than written as a frame because no
+/// frame says it honestly: a `shutdown_approved` answers a request nobody
+/// sent, and `teammate_terminated` is the lead's word to a teammate, never a
+/// teammate's to the lead (§5). The lead's *model* is told in prose beside
+/// this, by the loop itself, so the harness's bookkeeping and the model's
+/// knowledge do not depend on each other arriving.
+///
+/// Backend-neutral, and in core since **D538**: the registry drains these
+/// without knowing which kind of member posted one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Exited {
+    /// Which member.
+    pub name: String,
+    /// Which CLI it ran.
+    pub cli: ganja_team::ShimCli,
+    /// Its backend, for a frontend that names members by it.
+    pub backend: MemberBackend,
+    /// The pane it ran in.
+    pub pane_id: String,
+    /// What the loop left of that pane — read off the pane itself, never
+    /// assumed: a corpse tmux would not take away, or an id that now names
+    /// somebody else's pane, is said rather than called closed.
+    pub pane: PaneFate,
+    /// The last non-empty line the pane showed, where the pane was still this
+    /// member's to read and the capture found one: the CLI's own parting
+    /// words. Never a recycled pane's screen.
+    pub last_words: Option<String>,
+}
+
+impl Exited {
+    /// The one sentence a frontend shows for this.
+    #[must_use]
+    pub fn notice(&self) -> String {
+        let cli = backend_name(self.backend);
+        let said = self
+            .last_words
+            .as_deref()
+            .map(|words| format!(" — last line: {words}"))
+            .unwrap_or_default();
+        format!(
+            "{name} ({cli}) exited in its pane{said}; {fate}",
+            name = self.name,
+            fate = self.pane_sentence(),
+        )
+    }
+
+    /// What became of the pane and the member, as one clause.
+    #[must_use]
+    pub fn pane_sentence(&self) -> &'static str {
+        match self.pane {
+            PaneFate::Closed => "the pane was closed and the teammate retired",
+            PaneFate::Left => {
+                "the teammate is retired, and its dead pane could not be closed from here — close \
+                 it by hand"
+            }
+            PaneFate::Recycled => {
+                "the teammate is retired; its pane id now names another pane, which was left alone"
+            }
+        }
+    }
+}
+
+/// What ending a member's pane left of it — the fact a sentence about "the
+/// pane was closed" has to be read off rather than assumed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaneFate {
+    /// Gone from the server: closed here, or already gone.
+    Closed,
+    /// Still on the server, dead, and not taken away — the kill was refused,
+    /// or no listing could be had to check it against — so a person closes
+    /// it; logged as such.
+    Left,
+    /// Its id now names a live pane under another pid: recycled, somebody
+    /// else's, and not touched.
+    Recycled,
+}
+
+/// One way of running a teammate: how one is *started*, and nothing about
+/// what happens afterwards (**D538**).
+///
+/// A backend holds the host's own handles — the provider, the tool registry,
+/// the store, a tmux server, a resolved binary — and turns a [`SpawnSpec`]
+/// into a [`Spawned`], which owns everything from that moment on. It knows
+/// nothing about the team file or the mailbox: registration is the registry's,
+/// so a backend that refuses leaves nothing behind to unwind but what the
+/// registry itself wrote.
+///
+/// The split is what lets the registry stop knowing which kind of member it
+/// started. A backend is a *factory* that lives for the session; what it makes
+/// lives for one teammate, holds that teammate's own ring, liveness and tasks,
+/// and answers the four questions the registry used to answer by matching on a
+/// handle's shape.
+#[async_trait]
+pub trait TeammateBackend: fmt::Debug + Send + Sync {
+    /// Which surface this backend is the implementation of.
+    fn backend(&self) -> MemberBackend;
+
+    /// Yields a member the team file can name; nothing of the teammate's own
+    /// work runs yet (§4.1 step 2).
+    ///
+    /// `lent` is what the registry gives every member to go on answering to
+    /// the team with — see [`Lent`], and note the [`Weak`](std::sync::Weak)
+    /// registry in it: a member holding a strong one would be a cycle through
+    /// the map that owns it.
+    ///
+    /// # Errors
+    ///
+    /// [`Unsupported`] when this build, or this session, cannot have the
+    /// surface asked for — a pane in a session with no tmux. Refused by name,
+    /// never fallen back to.
+    async fn spawn(&self, spec: &SpawnSpec, lent: Lent) -> Result<Arc<dyn Spawned>, Unsupported>;
 
     /// Whether this backend seeds its teammate's inbox itself, and the registry
     /// must therefore not.
@@ -953,10 +1108,6 @@ pub trait TeammateBackend: fmt::Debug + Send + Sync {
     /// and the native channel are [`crate::teammate::preamble`]'s; each
     /// backend supplies its own sentence, in ganja's own words (**D497**).
     fn preamble(&self, spec: &SpawnSpec) -> String;
-
-    /// Ends what [`TeammateBackend::spawn`] produced. Idempotent: a handle
-    /// whose teammate has already gone is nothing to end.
-    async fn kill(&self, handle: &Handle);
 
     /// What this backend can tell the lead about a message it handed over.
     fn delivery(&self) -> Delivery;
@@ -1084,35 +1235,23 @@ impl TeammateBackend for InProcess {
         preamble::native(preamble::Names::of(spec), &spec.prompt)
     }
 
-    async fn spawn(&self, spec: &SpawnSpec) -> Result<Handle, Unsupported> {
-        Ok(Handle::InProcess(Arc::new(Teammate::deferring(
-            spec.name.as_str(),
-            Arc::clone(&self.provider),
-            spec.model.clone(),
-            (self.tools)(),
-            (self.permissions)(spec),
-            self.storage.clone(),
-            self.defer_threshold,
-        ))))
-    }
-
-    async fn kill(&self, handle: &Handle) {
-        // The guard is the other-shape check every backend's `kill` keeps: a
-        // handle that is not this backend's — a pane, or since P27 a shim
-        // child — never reaches here through the registry, which hands back
-        // the handle this backend's own `spawn` returned. It falls through
-        // silently rather than being named, and that is the one difference
-        // from `pane::kill_pane`'s spelling: there is nothing here to end and
-        // nothing to warn about that the registry has not already gone wrong
-        // about.
-        if let Some(teammate) = handle.teammate()
-            && !teammate.shutdown(SETTLE).await
-        {
-            tracing::warn!(
-                teammate = teammate.name(),
-                "a teammate was still working when its lifetime ended"
-            );
-        }
+    async fn spawn(&self, spec: &SpawnSpec, lent: Lent) -> Result<Arc<dyn Spawned>, Unsupported> {
+        Ok(Arc::new(InProcessMember {
+            teammate: Arc::new(Teammate::deferring(
+                spec.name.as_str(),
+                Arc::clone(&self.provider),
+                spec.model.clone(),
+                (self.tools)(),
+                (self.permissions)(spec),
+                self.storage.clone(),
+                self.defer_threshold,
+            )),
+            spec: spec.clone(),
+            lent,
+            recent: Arc::new(Mutex::new(VecDeque::with_capacity(RECENT_CALLS))),
+            alive: Arc::new(AtomicBool::new(true)),
+            runner: Mutex::new(None),
+        }))
     }
 
     fn delivery(&self) -> Delivery {
@@ -1120,6 +1259,135 @@ impl TeammateBackend for InProcess {
         // turn, so the lead can retire its queue entry on having watched that
         // happen rather than on having written it.
         Delivery::Acknowledged
+    }
+}
+
+/// One teammate running in the lead's own process, from the moment
+/// [`InProcess::spawn`] made it.
+///
+/// Everything the registry's own `start` used to do for this shape lives here
+/// since **D538**, in the same order and for the same reasons.
+struct InProcessMember {
+    teammate: Arc<Teammate>,
+    spec: SpawnSpec,
+    lent: Lent,
+    /// **D503**'s ring, folded from this teammate's own event stream.
+    recent: Arc<Mutex<VecDeque<String>>>,
+    /// Cleared when the runner's task ends, so a teammate that shut itself
+    /// down stops being listed without the registry having to be told.
+    alive: Arc<AtomicBool>,
+    /// Kept beyond the task that drives it, which is what makes
+    /// [`runner::Runner::awaiting_plan_approval`] a seam rather than a method
+    /// nothing can reach: the loop borrows the value it runs on. Filled by
+    /// [`Spawned::start`], which the registry calls exactly once.
+    runner: Mutex<Option<Arc<runner::Runner>>>,
+}
+
+impl fmt::Debug for InProcessMember {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_tuple("InProcess").field(&self.teammate.name()).finish()
+    }
+}
+
+#[async_trait]
+impl Spawned for InProcessMember {
+    fn surface(&self) -> Surface {
+        Surface::InProcess
+    }
+
+    /// **The order is the contract**, and U-3 pins it: the postbox is
+    /// installed before anything can prompt, the forwarding is *built* before
+    /// either task is spawned because building it is what registers its
+    /// subscription (**D-5**), the droppable ring subscription is registered
+    /// before the runner can take a turn, and only then does the runner start.
+    /// A subscription registered inside its own task would race the very first
+    /// event it exists to see.
+    ///
+    /// Two subscribers, each with its own reason. The ring reads a
+    /// **droppable** one (**D503**), so a reader that falls behind is evicted
+    /// rather than allowed to backpressure the teammate's turn. The runner
+    /// claims a **lossless** one, and must: the engine's birth queue is a
+    /// lossless lane registered at construction, and an unclaimed one fills
+    /// and then makes the teammate's own first turn wait on nobody.
+    fn start(self: Arc<Self>) -> Vec<JoinHandle<()>> {
+        let mut tasks = Vec::new();
+        // The registry is `Weak` because it owns this member; a session tearing
+        // down between the spawn and the start has nothing left to bind an
+        // outbound identity to, and a member with no postbox is better than a
+        // panic on the way out.
+        let Some(registry) = self.lent.registry.upgrade() else {
+            tracing::warn!(
+                teammate = self.spec.name.as_str(),
+                "the registry went away before its teammate could be started"
+            );
+            self.alive.store(false, Ordering::Relaxed);
+
+            return tasks;
+        };
+        // This is where a teammate's outbound identity is installed, and it has
+        // to be here: [`crate::subagent::Postbox::of`] takes the [`Teammate`]
+        // itself so that nobody building one can choose the name it stamps, and
+        // this is the first place the team and that value exist together.
+        self.teammate
+            .engine()
+            .install_postbox(Arc::new(crate::subagent::Postbox::of(&registry, &self.teammate)));
+
+        let forwarding =
+            posture::Forwarding::new(Arc::clone(&self.teammate), self.lent.dialogs.clone());
+        tasks.push(tokio::spawn(forwarding.run(self.lent.cancel.child_token())));
+
+        let events = self.teammate.engine().subscribe_droppable();
+        tasks.push(tokio::spawn(fold_calls(
+            events,
+            Arc::clone(&self.teammate.tools),
+            Arc::clone(&self.recent),
+            self.spec.name.as_str().to_owned(),
+            self.lent.cancel.child_token(),
+        )));
+
+        let runner = Arc::new(runner::Runner::new(
+            Arc::clone(&self.teammate),
+            self.spec.lead.clone(),
+            self.spec.inbox(),
+            self.lent.lead_inbox.clone(),
+            self.surface(),
+            self.lent.cancel.child_token(),
+        ));
+        *self.runner.lock().expect("the runner slot is never poisoned") = Some(Arc::clone(&runner));
+        let alive = Arc::clone(&self.alive);
+        tasks.push(tokio::spawn(async move {
+            runner.run().await;
+            alive.store(false, Ordering::Relaxed);
+        }));
+
+        tasks
+    }
+
+    fn alive(&self) -> bool {
+        self.alive.load(Ordering::Relaxed)
+    }
+
+    fn recent(&self) -> Vec<String> {
+        self.recent.lock().expect("the call ring is never poisoned").iter().cloned().collect()
+    }
+
+    async fn kill(&self) {
+        if !self.teammate.shutdown(SETTLE).await {
+            tracing::warn!(
+                teammate = self.teammate.name(),
+                "a teammate was still working when its lifetime ended"
+            );
+        }
+    }
+
+    fn awaiting_plan_approval(&self, request_id: &str) -> bool {
+        let Some(runner) = self.runner.lock().expect("the runner slot is never poisoned").clone()
+        else {
+            return false;
+        };
+        runner.awaiting_plan_approval(request_id);
+
+        true
     }
 }
 
@@ -1163,8 +1431,11 @@ impl fmt::Debug for SpawnRequest {
 }
 
 /// What a door tells the model after a spawn.
+///
+/// Named for the report it is rather than for the act, since **D538** gave
+/// [`Spawned`] to the trait a backend answers a spawn with.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Spawned {
+pub struct SpawnReport {
     /// The name the teammate really answers to, which is not always the one
     /// that was asked for.
     pub name: MemberName,
@@ -1291,44 +1562,23 @@ pub struct TeammateRegistry {
     /// The tasks a spawn started, kept so a shutdown can wait for them to
     /// actually finish rather than only ask them to.
     tasks: Mutex<Vec<JoinHandle<()>>>,
-    /// The one writer of this session's shim orphan records (**D508**).
+    /// Where a member whose surface stopped running posts the fact, and where
+    /// [`TeammateRegistry::take_exited`] drains it from ([`Exited`], **D512**
+    /// as amended for bead g9u).
     ///
-    /// Behind a `std::sync::Mutex` and nothing else, which is the whole of the
-    /// write-concurrency answer: a per-message shim registers once per *turn*,
-    /// so several turn tasks would otherwise read-modify-write one file. They
-    /// do not — every mutation goes through this one value under this one
-    /// lock, the same single-writer discipline [`TeammateRegistry::tasks`]
-    /// already keeps. Nothing inside it awaits, so no guard is ever held
-    /// across one.
+    /// A channel rather than the `Vec` this was until **D538**, for the reason
+    /// the ruling moved the state at all: the writer is the member's own loop,
+    /// which is now the member's to own, and an unbounded sender is what it can
+    /// be handed without also being handed the registry that holds it. The
+    /// contract the drain keeps is unchanged — every entry is acted on exactly
+    /// once, by the one pass that takes it.
+    exits: tokio::sync::mpsc::UnboundedSender<Exited>,
+    /// The receiving half, behind a lock because a drain takes `&self`.
     ///
-    /// An [`Arc`] because the shim loops hold it directly rather than through
-    /// the registry: a loop holding an `Arc<TeammateRegistry>` would be a
-    /// cycle through the member map that owns its handle.
-    shims: Arc<Mutex<shim::ShimRecords>>,
-    /// The TUI members whose panes stopped running after readiness, put here
-    /// by their own loops for the lead's next pass to retire
-    /// ([`shim_tui::Exited`], **D512** as amended for bead g9u).
-    ///
-    /// An [`Arc`] for `shims`' reason — the loop that writes it would
-    /// otherwise hold the registry that holds the loop — and drained, not
-    /// read, by [`TeammateRegistry::take_exited`]: each entry is acted on
-    /// exactly once, by the one pass that takes it.
-    exited: Arc<Mutex<Vec<shim_tui::Exited>>>,
-    /// What a foreign-CLI turn's deadline is when a config named one, resolved
-    /// **once** at construction (**D509**).
-    ///
-    /// [`crate::Engine::seed_effort`]'s shape: a curated config value handed to
-    /// the runtime once rather than re-read from a `Config` the runtime does
-    /// not hold. [`None`] leaves each CLI's own default alone, which is where
-    /// the real numbers live — this type has no business knowing that `agy` is
-    /// four minutes.
-    shim_turn_timeout: Option<Duration>,
-    /// The shell every pane teammate is spawned into (**D520**), resolved
-    /// once from `teammates.shell` the way the deadline above is.
-    pane_shell: pane::PaneShell,
-    /// The teammates' column's share of the width (2026-08-25), resolved
-    /// once from `teammates.pane_share` the same way.
-    pane_share: pane::PaneShare,
+    /// `try_recv` in a loop rather than an `await`, so a pass that finds
+    /// nothing returns rather than parking — and so no guard is ever held
+    /// across an await.
+    exited: Mutex<tokio::sync::mpsc::UnboundedReceiver<Exited>>,
     /// Where a teammate's permission dialogs are handed to the lead (**D-5**).
     ///
     /// [`None`] until a frontend attaches one, and a registry that never gets
@@ -1351,25 +1601,21 @@ impl fmt::Debug for TeammateRegistry {
 }
 
 /// One teammate, as the registry holds it.
+///
+/// Five facts the registry minted and one object it did not (**D538**): the
+/// ring, the liveness and the loop that used to sit here belong to whatever
+/// the backend spawned, and are read through it.
 struct Member {
     name: MemberName,
     agent_id: String,
     backend: MemberBackend,
     color: String,
-    handle: Handle,
-    /// The backend that made [`Member::handle`], so the same implementation
-    /// that spawned it is the one that ends it.
+    /// What the backend made, and what ends it.
+    spawned: Arc<dyn Spawned>,
+    /// The backend that made [`Member::spawned`], for the one question that is
+    /// the *implementation's* rather than the member's: what it can tell the
+    /// lead about a delivery.
     surface: Arc<dyn TeammateBackend>,
-    /// **D503**'s ring: what this teammate most recently did, newest last.
-    recent: Arc<Mutex<VecDeque<String>>>,
-    /// Cleared when the runner's task ends, so a teammate that shut itself
-    /// down stops being listed without the registry having to be told.
-    alive: Arc<AtomicBool>,
-    /// The mailbox loop driving this teammate, for the one thing a caller has
-    /// to be able to tell it: what it is waiting for
-    /// ([`TeammateRegistry::awaiting_plan_approval`]). [`None`] for a pane,
-    /// which runs its own loop in its own process.
-    runner: Option<Arc<runner::Runner>>,
 }
 
 impl TeammateRegistry {
@@ -1384,17 +1630,13 @@ impl TeammateRegistry {
         lead_session_id: impl Into<String>,
         cwd: impl Into<PathBuf>,
     ) -> Self {
-        let lead_session_id = lead_session_id.into();
-        let shims = Arc::new(Mutex::new(shim::ShimRecords::new(
-            ganja_tool::socket::directory(),
-            &lead_session_id,
-        )));
+        let (exits, exited) = tokio::sync::mpsc::unbounded_channel();
 
         Self {
             root,
             team,
             lead: MemberName::lead(),
-            lead_session_id,
+            lead_session_id: lead_session_id.into(),
             cwd: cwd.into(),
             cancel: CancellationToken::new(),
             members: Mutex::new(BTreeMap::new()),
@@ -1402,101 +1644,45 @@ impl TeammateRegistry {
             team_file: tokio::sync::Mutex::new(()),
             next_color: Mutex::new(0),
             tasks: Mutex::new(Vec::new()),
-            shims,
-            exited: Arc::default(),
-            shim_turn_timeout: None,
-            pane_shell: pane::PaneShell::default(),
-            pane_share: pane::PaneShare::default(),
+            exits,
+            exited: Mutex::new(exited),
             dialogs: Mutex::new(None),
         }
     }
 
-    /// The TUI members whose panes stopped running since the last call, each
+    /// The members whose surfaces stopped running since the last call, each
     /// taken out so it is retired once (**D512** as amended for bead g9u).
     ///
     /// The lead's pass ([`lead_inbox::LeadInbox::poll`]) is the one caller: it
     /// retires each through [`TeammateRegistry::retire`], the same door a
     /// `shutdown_approved` takes, so a member that ended on its own and one
     /// that was asked to end leave the roster and the team file the same way.
-    #[must_use]
-    pub fn take_exited(&self) -> Vec<shim_tui::Exited> {
-        std::mem::take(&mut *self.exited.lock().expect("the exited list is never poisoned"))
-    }
-
-    /// The per-turn deadline a foreign-CLI teammate runs under (**D509**).
     ///
-    /// Resolved once and carried, rather than read per turn: the deadline is a
-    /// property of the runtime, not of one spawn, and a `SpawnSpec` field would
-    /// let two teammates of the same backend disagree about it for a reason
-    /// nobody asked for.
+    /// **Drains everything posted since the last call** — the contract the
+    /// `Vec` this replaced kept, and the one U-5 pins.
     #[must_use]
-    pub fn with_shim_turn_timeout(mut self, timeout: Option<Duration>) -> Self {
-        self.shim_turn_timeout = timeout;
+    pub fn take_exited(&self) -> Vec<Exited> {
+        let mut exited = self.exited.lock().expect("the exit channel is never poisoned");
+        let mut taken = Vec::new();
+        while let Ok(entry) = exited.try_recv() {
+            taken.push(entry);
+        }
 
-        self
+        taken
     }
 
-    /// Names the shell every pane teammate of this session is spawned into
-    /// (**D520**), on the same consuming builder as the deadline: a property
-    /// of the runtime, resolved once, so no backend names a config type.
-    #[must_use]
-    pub fn with_pane_shell(mut self, shell: pane::PaneShell) -> Self {
-        self.pane_shell = shell;
-
-        self
-    }
-
-    /// The shell a pane teammate of this session is spawned into.
-    #[must_use]
-    pub fn pane_shell(&self) -> &pane::PaneShell {
-        &self.pane_shell
-    }
-
-    /// Names how much of the width the teammates' column takes when the
-    /// first teammate of this session opens it (2026-08-25), on the same
-    /// consuming builder as the shell, for the same reason.
-    #[must_use]
-    pub fn with_pane_share(mut self, share: pane::PaneShare) -> Self {
-        self.pane_share = share;
-
-        self
-    }
-
-    /// The share the teammates' column takes when it opens.
-    #[must_use]
-    pub fn pane_share(&self) -> pane::PaneShare {
-        self.pane_share
-    }
-
-    /// How long one `cli` turn may run in this session.
-    #[must_use]
-    pub fn shim_turn_timeout(&self, cli: ganja_team::ShimCli) -> Duration {
-        self.shim_turn_timeout.unwrap_or_else(|| shim::default_turn_timeout(cli))
-    }
-
-    /// The directory this session's shim orphan records live in (**D508**).
-    ///
-    /// The socket scheme's own `/tmp/ganja-<uid>` unless somebody says
-    /// otherwise, and the reason to say otherwise is a test: a suite that
-    /// spawned shim members against the real directory would leave one
-    /// `.shims` file per test process in a directory `ganja sessions --live`
-    /// walks, and a records file is exactly the kind of litter whose owner is
-    /// gone by the time anybody looks.
-    ///
-    /// On the same consuming builder as [`TeammateRegistry::with_shim_turn_timeout`]
-    /// and for the same reason: where the records live is a property of the
-    /// runtime, settled once, before anything can have written one.
-    #[must_use]
-    pub fn with_shim_directory(mut self, directory: PathBuf) -> Self {
-        self.shims = Arc::new(Mutex::new(shim::ShimRecords::new(directory, &self.lead_session_id)));
-
-        self
-    }
-
-    /// This session's shim orphan records, for the one writer and the sweep.
-    #[must_use]
-    pub fn shims(&self) -> &Arc<Mutex<shim::ShimRecords>> {
-        &self.shims
+    /// What every backend is lent at spawn (**D538**): the team's own address,
+    /// a cancellation of the registry's, the dialog surface a frontend
+    /// attached, the exit channel, and a [`Weak`](std::sync::Weak) back to
+    /// here for the one thing a postbox needs.
+    fn lend(self: &Arc<Self>) -> Lent {
+        Lent {
+            lead_inbox: self.lead_inbox(),
+            cancel: self.cancel.child_token(),
+            dialogs: self.dialog_surface(),
+            exits: self.exits.clone(),
+            registry: Arc::downgrade(self),
+        }
     }
 
     /// The registry a frontend installs for the session it has just opened.
@@ -1598,7 +1784,7 @@ impl TeammateRegistry {
     /// counts.
     #[must_use]
     pub fn running(&self) -> usize {
-        self.members().values().filter(|member| member.alive.load(Ordering::Relaxed)).count()
+        self.members().values().filter(|member| member.spawned.alive()).count()
     }
 
     /// The team as a frontend renders it (**D503**).
@@ -1618,24 +1804,16 @@ impl TeammateRegistry {
             is_lead: true,
             recent_calls: Vec::new(),
         }];
-        members.extend(
-            self.members().values().filter(|member| member.alive.load(Ordering::Relaxed)).map(
-                |member| MemberView {
-                    name: member.name.as_str().to_owned(),
-                    agent_id: member.agent_id.clone(),
-                    backend: member.backend,
-                    color: Some(member.color.clone()),
-                    is_lead: false,
-                    recent_calls: member
-                        .recent
-                        .lock()
-                        .expect("the call ring is never poisoned")
-                        .iter()
-                        .cloned()
-                        .collect(),
-                },
-            ),
-        );
+        members.extend(self.members().values().filter(|member| member.spawned.alive()).map(
+            |member| MemberView {
+                name: member.name.as_str().to_owned(),
+                agent_id: member.agent_id.clone(),
+                backend: member.backend,
+                color: Some(member.color.clone()),
+                is_lead: false,
+                recent_calls: member.spawned.recent(),
+            },
+        ));
 
         TeamView {
             team: self.team.as_str().to_owned(),
@@ -1674,7 +1852,7 @@ impl TeammateRegistry {
     /// The pane backend compares that recorded `(pane_id, birth)` pair against
     /// what is live before it sends `kill-pane` (the reaper's rule, AC-12: a
     /// mismatch never kills), and the in-process one settles a teammate that
-    /// has already settled itself — idempotent by [`TeammateBackend::kill`]'s
+    /// has already settled itself — idempotent by [`Spawned::kill`]'s
     /// own contract, so a teammate that tore itself down costs a look and
     /// nothing else.
     ///
@@ -1719,10 +1897,10 @@ impl TeammateRegistry {
         if let Some(member) = removed {
             tracing::info!(
                 teammate,
-                handle = ?member.handle,
+                spawned = ?member.spawned,
                 "ending a retired teammate's surface"
             );
-            member.surface.kill(&member.handle).await;
+            member.spawned.kill().await;
         }
 
         self.unrecord(teammate).await?;
@@ -1762,13 +1940,11 @@ impl TeammateRegistry {
     /// Answers whether anybody was told — [`false`] for a name this team has
     /// never had, and for a pane, which keeps its own wait in its own process.
     pub fn awaiting_plan_approval(&self, teammate: &str, request_id: impl Into<String>) -> bool {
-        let member = self.members().get(teammate).map(Arc::clone);
-        let Some(runner) = member.as_ref().and_then(|member| member.runner.as_ref()) else {
+        let Some(member) = self.members().get(teammate).map(Arc::clone) else {
             return false;
         };
-        runner.awaiting_plan_approval(request_id);
 
-        true
+        member.spawned.awaiting_plan_approval(&request_id.into())
     }
 
     /// Registers a teammate, seeds its mailbox with the task it was given, and
@@ -1781,10 +1957,11 @@ impl TeammateRegistry {
     /// is what yields the surface a record has to name, so the record is
     /// written **after** the backend answers — a refused spawn leaves no
     /// member behind rather than one somebody has to clean up — and
-    /// [`TeammateBackend::launch`] is what starts the surface **after** the
-    /// record exists, since a pane's process reads its record first. What a
-    /// pane needs before either — its inbox and the task in it — is still
-    /// written first.
+    /// [`Spawned::launch`] is what starts the surface **after** the record
+    /// exists, since a pane's process reads its record first. What a pane
+    /// needs before either — its inbox and the task in it — is still written
+    /// first. [`Spawned::start`] runs last, and every task it hands back joins
+    /// the list a shutdown drains.
     ///
     /// A refused spawn also takes the prompt back out of the inbox: leaving
     /// somebody's instructions in a mailbox nothing will ever read is the one
@@ -1829,7 +2006,7 @@ impl TeammateRegistry {
         self: &Arc<Self>,
         backend: Arc<dyn TeammateBackend>,
         request: SpawnRequest,
-    ) -> Result<Spawned, SpawnError> {
+    ) -> Result<SpawnReport, SpawnError> {
         let name = self.claim(&request.name).await?;
         let color = request.color.clone().unwrap_or_else(|| self.color_for());
         let spec = SpawnSpec {
@@ -1845,8 +2022,6 @@ impl TeammateRegistry {
             cwd: request.cwd,
             plan_mode_required: request.plan_mode_required,
             parent_session_id: self.lead_session_id.clone(),
-            shell: self.pane_shell.clone(),
-            share: self.pane_share,
         };
 
         // Skipped outright for a backend that seeds its own — see
@@ -1869,22 +2044,22 @@ impl TeammateRegistry {
                 }
             }
         };
-        let handle = match backend.spawn(&spec).await {
-            Ok(handle) => handle,
+        let spawned = match backend.spawn(&spec, self.lend()).await {
+            Ok(spawned) => spawned,
             Err(unsupported) => {
                 unseed_inbox(spec.inbox(), seeded, spec.name.as_str()).await;
                 self.release(&spec.name);
                 return Err(SpawnError::Unsupported(unsupported));
             }
         };
-        if let Err(error) = self.record(&spec, &handle).await {
-            backend.kill(&handle).await;
+        if let Err(error) = self.record(&spec, spawned.surface()).await {
+            spawned.kill().await;
             unseed_inbox(spec.inbox(), seeded, spec.name.as_str()).await;
             self.release(&spec.name);
             return Err(error);
         }
-        if let Err(unsupported) = backend.launch(&spec, &handle).await {
-            backend.kill(&handle).await;
+        if let Err(unsupported) = spawned.launch().await {
+            spawned.kill().await;
             match self.unrecord(spec.name.as_str()).await {
                 Ok(_) => {}
                 // Not fatal to the unwind and not retried: what is left is a
@@ -1901,19 +2076,37 @@ impl TeammateRegistry {
             return Err(SpawnError::Unsupported(unsupported));
         }
 
-        let spawned = Spawned {
+        let report = SpawnReport {
             name: spec.name.clone(),
             agent_id: spec.agent_id(),
             backend: request.backend,
             delivery: backend.delivery(),
             note: SPAWNED,
         };
+        // Every task the member started is registered here, which is what makes
+        // `shutdown()` correct: it cancels, `join_all`s every kill, **and then
+        // drains this list**. A task that was never pushed would leave a child
+        // being reaped after the process it belonged to had returned.
+        self.tasks
+            .lock()
+            .expect("the task list is never poisoned")
+            .extend(Arc::clone(&spawned).start());
         // Registered, and never given back: a spent name stays reserved for
         // the life of the registry. Why that is the fix rather than an
         // oversight is on [`TeammateRegistry::reserved`].
-        self.start(&spec, handle, backend);
+        self.members().insert(
+            spec.name.as_str().to_owned(),
+            Arc::new(Member {
+                name: spec.name.clone(),
+                agent_id: spec.agent_id(),
+                backend: spec.backend,
+                color: spec.color.clone(),
+                spawned,
+                surface: backend,
+            }),
+        );
 
-        Ok(spawned)
+        Ok(report)
     }
 
     /// Resolves a free name and holds it until the spawn is registered.
@@ -1974,8 +2167,7 @@ impl TeammateRegistry {
         self.cancel.cancel();
 
         let members: Vec<Arc<Member>> = self.members().values().map(Arc::clone).collect();
-        futures::future::join_all(members.iter().map(|member| member.surface.kill(&member.handle)))
-            .await;
+        futures::future::join_all(members.iter().map(|member| member.spawned.kill())).await;
 
         let tasks =
             std::mem::take(&mut *self.tasks.lock().expect("the task list is never poisoned"));
@@ -2057,7 +2249,7 @@ impl TeammateRegistry {
     /// which at least never shows anybody half a document. Locking the file
     /// across processes is the pane phase's problem, where a second writer
     /// starts existing.
-    async fn record(&self, spec: &SpawnSpec, handle: &Handle) -> Result<(), SpawnError> {
+    async fn record(&self, spec: &SpawnSpec, surface: Surface) -> Result<(), SpawnError> {
         let record = MemberRecord::teammate(
             &spec.name,
             &spec.team,
@@ -2067,7 +2259,7 @@ impl TeammateRegistry {
                 color: spec.color.clone(),
                 prompt: spec.prompt.clone(),
                 plan_mode_required: spec.plan_mode_required,
-                surface: handle.surface(),
+                surface,
                 cwd: spec.cwd.to_string_lossy().into_owned(),
             },
             record::now_millis(),
@@ -2159,157 +2351,6 @@ impl TeammateRegistry {
             Ok(())
         })
         .await
-    }
-
-    /// Registers the teammate in memory and starts what watches it.
-    ///
-    /// Two subscribers, each with its own reason. The ring reads a
-    /// **droppable** subscription (**D503**), so a reader that falls behind is
-    /// evicted rather than allowed to backpressure the teammate's turn. The
-    /// runner claims a **lossless** one, and must: the engine's birth queue is
-    /// a lossless lane registered at construction, and an unclaimed one fills
-    /// and then makes the teammate's own first turn wait on nobody. Both are
-    /// registered before the runner's first pass can prompt.
-    ///
-    /// This is also where a teammate's outbound identity is installed, and it
-    /// has to be here: [`crate::subagent::Postbox::of`] takes the
-    /// [`Teammate`] itself so that nobody building one can choose the name it
-    /// stamps, and this is the first place the team and that value exist
-    /// together. Installed before the runner starts, so the teammate's first
-    /// turn already has somewhere to post.
-    fn start(
-        self: &Arc<Self>,
-        spec: &SpawnSpec,
-        handle: Handle,
-        backend: Arc<dyn TeammateBackend>,
-    ) {
-        let recent = Arc::new(Mutex::new(VecDeque::with_capacity(RECENT_CALLS)));
-        let alive = Arc::new(AtomicBool::new(true));
-        let mut held: Option<Arc<runner::Runner>> = None;
-        let mut tasks = self.tasks.lock().expect("the task list is never poisoned");
-
-        if let Some(teammate) = handle.teammate() {
-            teammate
-                .engine()
-                .install_postbox(Arc::new(crate::subagent::Postbox::of(self, teammate)));
-
-            // Built before either task below is spawned, because building it is
-            // what registers its subscription: a forwarding that subscribed
-            // inside its own task would race the teammate's very first dialog
-            // (**D-5**).
-            let forwarding = posture::Forwarding::new(
-                Arc::clone(teammate),
-                self.dialogs.lock().expect("the dialog surface is never poisoned").clone(),
-            );
-            tasks.push(tokio::spawn(forwarding.run(self.cancel.child_token())));
-
-            let events = teammate.engine().subscribe_droppable();
-            tasks.push(tokio::spawn(fold_calls(
-                events,
-                Arc::clone(&teammate.tools),
-                Arc::clone(&recent),
-                spec.name.as_str().to_owned(),
-                self.cancel.child_token(),
-            )));
-
-            // Kept beyond the task that drives it, which is what makes
-            // `Runner::awaiting_plan_approval` a seam rather than a method
-            // nothing can reach: the loop borrows the value it runs on, so the
-            // registry can still tell this teammate what it is waiting for.
-            let runner = Arc::new(runner::Runner::new(
-                Arc::clone(teammate),
-                self.lead.clone(),
-                spec.inbox(),
-                self.lead_inbox(),
-                handle.surface(),
-                self.cancel.child_token(),
-            ));
-            let running = Arc::clone(&runner);
-            let alive = Arc::clone(&alive);
-            tasks.push(tokio::spawn(async move {
-                running.run().await;
-                alive.store(false, Ordering::Relaxed);
-            }));
-            held = Some(runner);
-        } else if let Some(child) = handle.child() {
-            // **The seam a `Handle::Child` would otherwise fall straight
-            // through**, silently, with no loop and no postbox: every arm above
-            // is guarded on `handle.teammate()`, which a shim answers `None`
-            // to. What a shim member gets instead is one task — its own mailbox
-            // loop — and three things that task owns rather than inherits.
-            //
-            // The ring is written by the shim itself, because `fold_calls`
-            // folds from an engine event stream a shim member has none of; the
-            // spawn's own posture lines go on before the loop starts, so a
-            // person opening `/team` sees what was granted even if the first
-            // turn has not happened yet (**AC-17**). `alive` is cleared by the
-            // loop when it ends, for the same reason the in-process runner's
-            // task clears it: nothing else is watching. And `runner` stays
-            // `None` — `Member.runner` is typed to the in-process loop, and
-            // everything that one does past reading the inbox is exactly what
-            // a shim has no engine for.
-            for line in shim::spawn_lines(spec.backend) {
-                shim::push_recent(&recent, line);
-            }
-            let loop_ = shim::ShimRunner::new(
-                Arc::clone(child),
-                spec.clone(),
-                shim::Lent {
-                    lead_inbox: self.lead_inbox(),
-                    recent: Arc::clone(&recent),
-                    alive: Arc::clone(&alive),
-                    shims: Arc::clone(&self.shims),
-                    cancel: self.cancel.child_token(),
-                },
-                self.shim_turn_timeout(child.cli()),
-            );
-            // Registered in `tasks`, which is what makes `shutdown()` correct:
-            // it cancels, `join_all`s every `kill`, **and then drains this
-            // list**. A shim task that was never pushed would leave a child
-            // being reaped after the process it belonged to had returned.
-            tasks.push(tokio::spawn(loop_.run()));
-        } else if let Some(tui) = handle.tui() {
-            // The pane-mode shim (P28, **D512**): the same one-task shape as
-            // the headless shim above, for the same reasons — a ring the loop
-            // writes itself, `alive` the loop clears, `runner` staying `None`
-            // — and **no deadline**: the loop is handed nothing to bound a
-            // turn with, because a native TUI in a pane is a thing a person
-            // can look at (the module doc owns why). The posture lines go on
-            // first, as above — this door's own set, which ends on the pane
-            // sentence the spawn dialog carried under `surface` rather than
-            // on the headless grok rider — and the loop adds the spawn's own
-            // readiness finding before its first delivery.
-            for line in shim_tui::spawn_lines(spec.backend) {
-                shim::push_recent(&recent, line);
-            }
-            let loop_ = shim_tui::TuiRunner::new(
-                Arc::clone(tui),
-                spec.clone(),
-                shim_tui::Lent {
-                    lead_inbox: self.lead_inbox(),
-                    recent: Arc::clone(&recent),
-                    alive: Arc::clone(&alive),
-                    exited: Arc::clone(&self.exited),
-                    cancel: self.cancel.child_token(),
-                },
-            );
-            tasks.push(tokio::spawn(loop_.run()));
-        }
-
-        self.members().insert(
-            spec.name.as_str().to_owned(),
-            Arc::new(Member {
-                name: spec.name.clone(),
-                agent_id: spec.agent_id(),
-                backend: spec.backend,
-                color: spec.color.clone(),
-                handle,
-                surface: backend,
-                recent,
-                alive,
-                runner: held,
-            }),
-        );
     }
 }
 
@@ -2456,7 +2497,7 @@ async fn fold_calls(
             // two of the same line say nothing the one line did not. Shared
             // with the shim's own writer since P27, so the two cannot come to
             // disagree about the cap or about what counts as a repeat.
-            shim::push_recent(&recent, line);
+            push_recent(&recent, line);
         }
     }
 }

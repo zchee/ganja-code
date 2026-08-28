@@ -86,8 +86,6 @@ fn spec(cwd: &std::path::Path) -> SpawnSpec {
         cwd: cwd.to_path_buf(),
         plan_mode_required: false,
         parent_session_id: "live-probe".to_owned(),
-        shell: ganja_core::teammate::pane::PaneShell::default(),
-        share: ganja_core::teammate::pane::PaneShare::default(),
     }
 }
 

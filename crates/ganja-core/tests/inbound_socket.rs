@@ -69,7 +69,7 @@ impl Lead {
         )
         .with_inbound_policy(policy, expiry)
         .with_inbound_bypass(seeded)
-        .with_teammates(Arc::clone(&registry));
+        .with_teammates(Arc::clone(&registry), ganja_testkit::externals());
 
         Self { engine: Arc::new(engine), registry, _home: home }
     }

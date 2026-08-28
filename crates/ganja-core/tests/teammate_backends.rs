@@ -39,8 +39,8 @@ use ganja_core::teammate::agy::Agy;
 use ganja_core::teammate::claude::ClaudePane;
 use ganja_core::teammate::codex::Codex;
 use ganja_core::teammate::grok::Grok;
-use ganja_core::teammate::pane::GanjaPane;
-use ganja_core::teammate::shim::ShimBackend;
+use ganja_core::teammate::pane::{GanjaPane, PaneShare, PaneShell};
+use ganja_core::teammate::shim::{ShimBackend, ShimRecords};
 use ganja_core::teammate::shim_tui::ShimTui;
 use ganja_core::teammate::{
     BACKENDS, DEFAULT_BACKEND, Delivery, InProcess, SpawnSpec, TeammateBackend, backend_name,
@@ -49,6 +49,18 @@ use ganja_core::teammate::{
 use ganja_core::tool::Registry;
 use ganja_team::{MemberName, TeamName, TeamsRoot};
 use ganja_testkit::{AllowSpawn, caller, spawn, team, teammates_recorded};
+
+/// A shim backend's orphan records, over a directory nothing else walks.
+///
+/// Never `/tmp/ganja-<uid>`: nothing here spawns a child, so nothing is ever
+/// written, but a suite that pointed at the real directory would be one edit
+/// away from littering it.
+fn records() -> Arc<std::sync::Mutex<ShimRecords>> {
+    Arc::new(std::sync::Mutex::new(ShimRecords::new(
+        std::env::temp_dir().join("ganja-teammate-backends"),
+        "01998ad0-0000-7000-8000-000000000000",
+    )))
+}
 
 /// P25's **AC-27**, and P27's **AC-1**. A value outside the six is refused *by
 /// name*, and the refusal carries the list — because the useful half of "no
@@ -130,12 +142,12 @@ async fn each_backend_says_what_it_can_promise_about_a_delivery() {
     );
 
     assert_eq!(in_process.delivery(), Delivery::Acknowledged);
-    assert_eq!(GanjaPane.delivery(), Delivery::Acknowledged);
-    assert_eq!(ClaudePane.delivery(), Delivery::FireAndForget);
+    assert_eq!(GanjaPane::default().delivery(), Delivery::Acknowledged);
+    assert_eq!(ClaudePane::default().delivery(), Delivery::FireAndForget);
 
     assert_eq!(in_process.backend(), MemberBackend::InProcess);
-    assert_eq!(GanjaPane.backend(), MemberBackend::Ganja);
-    assert_eq!(ClaudePane.backend(), MemberBackend::Claude);
+    assert_eq!(GanjaPane::default().backend(), MemberBackend::Ganja);
+    assert_eq!(ClaudePane::default().backend(), MemberBackend::Claude);
 
     // **AC-2.** All three shims acknowledge, and the reason is the same one
     // the in-process backend acknowledges for: the shim itself reads the
@@ -152,9 +164,9 @@ async fn each_backend_says_what_it_can_promise_about_a_delivery() {
     // children themselves. All three are one `ShimBackend` over one driver
     // now — agy's slot stopped being the exception when it stopped refusing.
     let shims: [(MemberBackend, Arc<dyn TeammateBackend>); 3] = [
-        (MemberBackend::Codex, Arc::new(ShimBackend::new(Arc::new(Codex::new())))),
-        (MemberBackend::Agy, Arc::new(ShimBackend::new(Arc::new(Agy::new())))),
-        (MemberBackend::Grok, Arc::new(ShimBackend::new(Arc::new(Grok::new())))),
+        (MemberBackend::Codex, Arc::new(ShimBackend::new(Arc::new(Codex::new()), records(), None))),
+        (MemberBackend::Agy, Arc::new(ShimBackend::new(Arc::new(Agy::new()), records(), None))),
+        (MemberBackend::Grok, Arc::new(ShimBackend::new(Arc::new(Grok::new()), records(), None))),
     ];
     for (backend, shim) in shims {
         assert_eq!(shim.backend(), backend);
@@ -190,8 +202,6 @@ fn each_backend_tells_its_teammate_how_it_answers_before_the_task() {
         cwd: home.path().to_path_buf(),
         plan_mode_required: false,
         parent_session_id: "01998ad0-0000-7000-8000-000000000000".to_owned(),
-        shell: ganja_core::teammate::pane::PaneShell::default(),
-        share: ganja_core::teammate::pane::PaneShare::default(),
     };
     let in_process = InProcess::new(
         Arc::new(FakeProvider::new("on it", Duration::ZERO)),
@@ -201,36 +211,48 @@ fn each_backend_tells_its_teammate_how_it_answers_before_the_task() {
     );
     let channels: Vec<(&str, Arc<dyn TeammateBackend>, &str)> = vec![
         ("in-process", Arc::new(in_process), "`send_message`"),
-        ("ganja", Arc::new(GanjaPane), "`send_message`"),
-        ("claude", Arc::new(ClaudePane), "`SendMessage(to: \"team-lead\")`"),
+        ("ganja", Arc::new(GanjaPane::default()), "`send_message`"),
+        ("claude", Arc::new(ClaudePane::default()), "`SendMessage(to: \"team-lead\")`"),
         (
             "codex (pane)",
-            Arc::new(ShimTui::new(Arc::new(Codex::new()))),
+            Arc::new(ShimTui::new(
+                Arc::new(Codex::new()),
+                PaneShell::default(),
+                PaneShare::default(),
+            )),
             "every message you print in answer is carried to the lead as mail, in order",
         ),
         (
             "agy (pane)",
-            Arc::new(ShimTui::new(Arc::new(Agy::new()))),
+            Arc::new(ShimTui::new(
+                Arc::new(Agy::new()),
+                PaneShell::default(),
+                PaneShare::default(),
+            )),
             "every message you print in answer is carried to the lead as mail, in order",
         ),
         (
             "grok (pane)",
-            Arc::new(ShimTui::new(Arc::new(Grok::new()))),
+            Arc::new(ShimTui::new(
+                Arc::new(Grok::new()),
+                PaneShell::default(),
+                PaneShare::default(),
+            )),
             "only your final answer for the turn is carried to the lead",
         ),
         (
             "codex (headless)",
-            Arc::new(ShimBackend::new(Arc::new(Codex::new()))),
+            Arc::new(ShimBackend::new(Arc::new(Codex::new()), records(), None)),
             "every message you print in answer is carried to the lead as mail, in order",
         ),
         (
             "agy (headless)",
-            Arc::new(ShimBackend::new(Arc::new(Agy::new()))),
+            Arc::new(ShimBackend::new(Arc::new(Agy::new()), records(), None)),
             "only your final answer for the turn is carried to the lead",
         ),
         (
             "grok (headless)",
-            Arc::new(ShimBackend::new(Arc::new(Grok::new()))),
+            Arc::new(ShimBackend::new(Arc::new(Grok::new()), records(), None)),
             "only your final answer for the turn is carried to the lead",
         ),
     ];

@@ -7,7 +7,8 @@ use futures::stream::{self, BoxStream};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    Engine, EngineError, STALE_FILES, message_chars, send_message, stale_notice, teammate,
+    Engine, EngineError, STALE_FILES, STORELESS, message_chars, send_message, stale_notice,
+    teammate,
 };
 use crate::config::TeamlessSend;
 use crate::permission::Permissions;
@@ -1304,12 +1305,15 @@ fn a_reload_of_the_base_tools_keeps_the_teams_messaging_tool() {
         "a session with no team has nobody to address"
     );
 
-    let engine = engine().with_teammates(Arc::new(teammate::TeammateRegistry::new(
-        ganja_team::TeamsRoot::new(std::path::PathBuf::from("/nonexistent/teams")),
-        ganja_team::TeamName::parse("session-abcd1234").expect("a team name"),
-        "session-abcd1234",
-        std::path::PathBuf::from("/nonexistent/project"),
-    )));
+    let engine = engine().with_teammates(
+        Arc::new(teammate::TeammateRegistry::new(
+            ganja_team::TeamsRoot::new(std::path::PathBuf::from("/nonexistent/teams")),
+            ganja_team::TeamName::parse("session-abcd1234").expect("a team name"),
+            "session-abcd1234",
+            std::path::PathBuf::from("/nonexistent/project"),
+        )),
+        crate::subagent::Backends::new(),
+    );
     assert!(
         engine.tools().get(send_message::ID).is_some(),
         "a session with a team is offered the tool that addresses it"
@@ -1320,6 +1324,70 @@ fn a_reload_of_the_base_tools_keeps_the_teams_messaging_tool() {
     assert!(
         engine.tools().get(send_message::ID).is_some(),
         "a reload rebuilds through the shared composition path, which offers it again"
+    );
+}
+
+/// **U-2, D538.** An assembled map carrying no in-process entry gains the
+/// engine's own.
+///
+/// Observed through the refusal, which is the one place the difference shows:
+/// a session with no store answers a spawn on that surface with the storeless
+/// sentence, where a map with no in-process entry at all would answer with the
+/// absent-backend one. The point is that the frontend never supplies this
+/// entry and never has to.
+#[tokio::test]
+async fn with_teammates_inserts_the_engines_own_in_process_entry() {
+    let home = ganja_testkit::temp_dir();
+    let engine = engine().with_teammates(
+        Arc::new(teammate::TeammateRegistry::for_session(
+            home.path(),
+            "01998ad0-0000-7000-8000-000000000000",
+            home.path(),
+        )),
+        crate::subagent::Backends::new(),
+    );
+
+    // Built here rather than out of `ganja_testkit`: that crate links its own
+    // build of this one, so its `Caller` is a different type from the one this
+    // method takes.
+    #[derive(Debug)]
+    struct Allow;
+
+    #[async_trait::async_trait]
+    impl crate::subagent::SpawnAsker for Allow {
+        async fn ask(&self, _request: crate::subagent::SpawnAsk) -> PermissionReply {
+            PermissionReply::Once
+        }
+    }
+
+    let refused = engine
+        .teammates()
+        .expect("a session with a team has a door")
+        .start(
+            crate::tool::task::TeammateSpawn {
+                name: "worker".to_owned(),
+                backend: Some("in-process".to_owned()),
+                agent_type: "general".to_owned(),
+                prompt: "have a look at the parser".to_owned(),
+            },
+            &crate::subagent::Caller {
+                model: MODEL.to_owned(),
+                cwd: home.path().to_path_buf(),
+                permissions: Arc::new(std::sync::Mutex::new(Permissions::default())),
+                project_root: home.path().to_path_buf(),
+            },
+            &Allow,
+        )
+        .await
+        .expect_err("this engine has no store to keep a teammate's transcript in");
+
+    assert!(
+        refused.reason.contains(STORELESS),
+        "the entry the engine inserted is what answered: {refused:?}"
+    );
+    assert!(
+        !refused.reason.contains("has no in-process backend"),
+        "and not the refusal a map with no such entry would give: {refused:?}"
     );
 }
 
@@ -1619,12 +1687,15 @@ async fn a_storeless_engine_refuses_an_in_process_teammate_by_name() {
     }
 
     let home = tempfile::tempdir().expect("a temp teams root");
-    let engine = engine().with_teammates(Arc::new(teammate::TeammateRegistry::new(
-        ganja_team::TeamsRoot::new(home.path().join("teams")),
-        ganja_team::TeamName::parse("session-abcd1234").expect("a team name"),
-        "session-abcd1234",
-        home.path().join("project"),
-    )));
+    let engine = engine().with_teammates(
+        Arc::new(teammate::TeammateRegistry::new(
+            ganja_team::TeamsRoot::new(home.path().join("teams")),
+            ganja_team::TeamName::parse("session-abcd1234").expect("a team name"),
+            "session-abcd1234",
+            home.path().join("project"),
+        )),
+        crate::subagent::Backends::new(),
+    );
 
     let refused = engine
         .teammates()

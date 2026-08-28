@@ -107,6 +107,7 @@
 //! rung 6, the outbound arm refuses it again, and the inbound arm classifies
 //! the text before anything is written.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
@@ -453,49 +454,87 @@ impl SpawnAsker for Spawn {
     }
 }
 
-/// One implementation per surface a teammate can run on (**D501**, **D508**).
+/// The implementations this session has, one per surface a teammate can run
+/// on (**D501**, **D508**, **D538**).
 ///
-/// A field per surface rather than a lookup, so [`Teammates`] picks one by an
-/// exhaustive match: a seventh surface is then a build failure here instead of
-/// a `backend` value that resolves to nothing at run time. Which implementation
-/// sits in each slot is the engine's to decide — this build's are
-/// [`crate::teammate::InProcess`], [`crate::teammate::pane::GanjaPane`] and
-/// [`crate::teammate::claude::ClaudePane`], and only the first of the three
-/// holds anything of the host's. The three shim slots no longer answer alike:
-/// `codex` holds a real [`crate::teammate::shim::ShimBackend`] as of W3; `agy`
-/// holds [`crate::teammate::agy::Agy`], which is equally real and refuses
-/// every spawn, because W4's ship test measured that CLI's `--sandbox` as a
-/// bound on its terminal and not on its filesystem; and `grok` holds a real
-/// [`crate::teammate::shim::ShimBackend`] as of W5, which is the wave that
-/// left no stub behind.
-#[derive(Debug)]
-pub struct Backends {
-    /// The teammate that runs in the lead's own process.
-    pub in_process: Arc<dyn TeammateBackend>,
-    /// The teammate with a `ganja` pane of its own.
-    pub pane: Arc<dyn TeammateBackend>,
-    /// The teammate that is a real `claude`.
-    pub claude: Arc<dyn TeammateBackend>,
-    /// The teammate that is a headless `codex exec` child.
-    pub codex: Arc<dyn TeammateBackend>,
-    /// The `agy` surface: named, and refusing every spawn.
-    pub agy: Arc<dyn TeammateBackend>,
-    /// The teammate that is a headless `grok` child.
-    pub grok: Arc<dyn TeammateBackend>,
-}
+/// A map rather than a field per surface since D538, and assembled **outside**
+/// the engine: what a `ganja` pane or a `codex` TUI needs is a tmux server, a
+/// resolved shell and a column width, none of which an engine holds or should.
+/// The engine inserts its own in-process entry and nothing else.
+///
+/// **The trade this makes, stated.** A field per surface meant [`Backends::of`]
+/// was an exhaustive `match` and a seventh [`MemberBackend`] variant nobody
+/// wired was a build failure. With a map it is a spawn-time refusal naming the
+/// backend instead. That is the price of the whole ruling — a seventh surface
+/// now edits its own adapter and the frontend that assembles one, rather than
+/// six places in the engine — and what buys the check back is a test over
+/// [`crate::teammate::BACKENDS`], which is where the roster is spelled.
+#[derive(Debug, Default)]
+pub struct Backends(BTreeMap<MemberBackend, Arc<dyn TeammateBackend>>);
 
 impl Backends {
-    /// The implementation of `backend`.
-    fn of(&self, backend: MemberBackend) -> Arc<dyn TeammateBackend> {
-        match backend {
-            MemberBackend::InProcess => Arc::clone(&self.in_process),
-            MemberBackend::Ganja => Arc::clone(&self.pane),
-            MemberBackend::Claude => Arc::clone(&self.claude),
-            MemberBackend::Codex => Arc::clone(&self.codex),
-            MemberBackend::Agy => Arc::clone(&self.agy),
-            MemberBackend::Grok => Arc::clone(&self.grok),
-        }
+    /// No backends at all: a session that assembles nothing spawns nothing but
+    /// what [`crate::Engine::with_teammates`] puts in.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
     }
+
+    /// Adds `backend` under the surface it says it is.
+    ///
+    /// # Panics
+    ///
+    /// When handed a [`MemberBackend::InProcess`] implementation. That entry is
+    /// the engine's own — it holds the lead's provider, tool set and store, and
+    /// only the engine has those honestly — so an assembler offering one is a
+    /// mistake to name at the offending call rather than a collision to resolve
+    /// silently.
+    #[must_use]
+    pub fn with(mut self, backend: Arc<dyn TeammateBackend>) -> Self {
+        let named = backend.backend();
+        assert!(
+            named != MemberBackend::InProcess,
+            "the in-process backend is the engine's own and is inserted by \
+             `Engine::with_teammates`; an assembled `Backends` must not carry one"
+        );
+        self.0.insert(named, backend);
+
+        self
+    }
+
+    /// The implementation of `backend`, or [`None`] where this session
+    /// assembled none — which every caller refuses by name rather than falling
+    /// back to another surface.
+    #[must_use]
+    pub fn of(&self, backend: MemberBackend) -> Option<Arc<dyn TeammateBackend>> {
+        self.0.get(&backend).map(Arc::clone)
+    }
+
+    /// Puts the in-process implementation in — the one entry
+    /// [`Backends::with`] refuses.
+    ///
+    /// Its own door rather than part of the builder, because supplying this
+    /// entry is a different act: it is built out of a session's own provider,
+    /// tool set and store, so its caller is [`crate::Engine::with_teammates`],
+    /// or a harness standing in for one where a suite drives
+    /// [`Teammates::new`] directly.
+    #[must_use]
+    pub fn with_in_process(mut self, backend: Arc<dyn TeammateBackend>) -> Self {
+        self.0.insert(MemberBackend::InProcess, backend);
+
+        self
+    }
+}
+
+/// What a spawn is refused with when this session assembled no backend for the
+/// surface it named.
+///
+/// Refused by name, never fallen back to: a person who asked for a teammate
+/// and got a different *kind* of teammate has been told something untrue about
+/// their own session (**D501**'s rule, which the map does not relax).
+#[must_use]
+fn no_backend(backend: MemberBackend) -> String {
+    format!("this session has no {} backend", backend_name(backend))
 }
 
 /// What the calling turn brings to a spawn.
@@ -643,6 +682,24 @@ impl Teammates {
             &caller.cwd,
             backend,
         );
+        // Refused by name here, at the one place a surface becomes an
+        // implementation, and reported as the ordinary spawn refusal a model
+        // reads and may retry on. The warn line beside it names the session,
+        // because an assembled map missing a surface is a wiring fault in
+        // whoever assembled it rather than something the model did.
+        //
+        // **Ahead of the dialog**, because a teammate this session cannot
+        // start is not a thing to ask a person to approve: the answer changes
+        // nothing and the question describes a surface that does not exist.
+        let Some(implementation) = self.backends.of(backend) else {
+            tracing::warn!(
+                backend = backend_name(backend),
+                session = self.registry.lead_session_id(),
+                "a spawn named a backend this session did not assemble"
+            );
+
+            return Err(NotSpawned { reason: no_backend(backend) });
+        };
         match gate.action() {
             Decision::Deny => {
                 return Err(NotSpawned {
@@ -679,7 +736,7 @@ impl Teammates {
                 // the wired backend's fact — the headless one answers `None`
                 // — and the same answer closes the registry's ring lines, so
                 // the dialog and `/team` cannot describe one pane differently.
-                if let Some(surface) = self.backends.of(backend).surface_line() {
+                if let Some(surface) = implementation.surface_line() {
                     args["surface"] = serde_json::Value::from(surface);
                 }
 
@@ -719,7 +776,7 @@ impl Teammates {
         let spawned = self
             .registry
             .spawn(
-                self.backends.of(backend),
+                implementation,
                 SpawnRequest {
                     name: request.name,
                     backend,

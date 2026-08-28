@@ -1295,7 +1295,10 @@ pub enum PeerReceiptStatus {
 ///
 /// Growing this enum is version skew with a wide blast radius; the module doc
 /// says how wide and why the posture is still the right one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+// `Ord` so the six can key a `BTreeMap`: since **D538** the implementations a
+// session assembled are a map from this vocabulary, and the order it imposes is
+// this declaration's — a total order over a closed roster, never a ranking.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum MemberBackend {
     /// A teammate running inside this process.

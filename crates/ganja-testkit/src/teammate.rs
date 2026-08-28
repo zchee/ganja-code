@@ -25,6 +25,7 @@ use ganja_core::team::{
 use ganja_core::teammate::claude::ClaudePane;
 use ganja_core::teammate::pane::GanjaPane;
 use ganja_core::teammate::runner::Runner;
+use ganja_core::teammate::shim::{ShimBackend, ShimRecords};
 use ganja_core::teammate::{InProcess, SpawnSpec, Teammate, TeammateRegistry};
 use ganja_core::tool::Registry;
 use ganja_core::tool::task::TeammateSpawn;
@@ -100,8 +101,10 @@ impl SpawnAsker for RecordedSpawns {
 
 /// The default backends over `storage`: the real in-process backend — a fake
 /// provider over a real store, which is what a teammate needs to have a
-/// session at all — and production's own two pane values, which a test that
-/// controls no tmux never asks to spawn.
+/// session at all — beside [`externals`]' five.
+///
+/// What [`Teammates::new`] takes, where the engine's own path takes
+/// [`externals`] and inserts its in-process entry itself (**D538**).
 pub fn backends(storage: Storage) -> Backends {
     backends_with(
         Arc::new(FakeProvider::new("on it", Duration::ZERO)),
@@ -111,60 +114,65 @@ pub fn backends(storage: Storage) -> Backends {
     )
 }
 
+/// The five backends that are not the engine's own, as a fixture lead
+/// assembles them (**D538**).
+///
+/// What a suite hands [`ganja_core::Engine::with_teammates`], which inserts the
+/// in-process entry itself. Production's own two pane values, which a test that
+/// controls no tmux never asks to spawn, and the three shim CLIs under the rule
+/// below.
+///
+/// **The rule for all three shim CLIs**, stated once here because the three
+/// arrive one wave apart and the reason is the same each time: a fixture lead
+/// is *production on a machine where the foreign CLI is not installed*. Never a
+/// stub once that CLI's wave has landed — the not-built-yet sentence stops
+/// being true, and a fixture asserting a retired refusal is a fixture asserting
+/// a lie. W5 was the wave that retired the last of them, so no slot below is a
+/// stub any more. Never this process's own `PATH` either: a spawn there would
+/// find the developer's real binary, take a real turn and spend somebody's
+/// quota from inside the ordinary test suite. A suite that wants a child which
+/// answers points the backend at a fake one, the way `shim_support` does.
+///
+/// All three search, so all three are given an empty search path: the spawn is
+/// refused by naming the binary, exactly as it would be on a machine without
+/// one.
+pub fn externals() -> Backends {
+    Backends::new()
+        .with(Arc::new(GanjaPane::default()))
+        .with(Arc::new(ClaudePane::default()))
+        .with(Arc::new(shim_backend(Arc::new(ganja_core::teammate::codex::Codex::new()))))
+        .with(Arc::new(shim_backend(Arc::new(ganja_core::teammate::agy::Agy::new()))))
+        .with(Arc::new(shim_backend(Arc::new(ganja_core::teammate::grok::Grok::new()))))
+}
+
+/// One headless shim backend that can find no binary, over records in a
+/// directory nothing else walks.
+///
+/// The records go to a temporary directory rather than to
+/// [`ganja_core::teammate::shim::default_directory`]'s `/tmp/ganja-<uid>`,
+/// because a suite writing there would leave a `.shims` file per test process
+/// in a directory `ganja sessions --live` walks. Nothing writes one anyway —
+/// every spawn is refused before a child exists — which is why the path may be
+/// a bare join rather than a `TempDir` somebody has to keep alive.
+fn shim_backend(driver: Arc<dyn ganja_core::teammate::shim::Driver>) -> ShimBackend {
+    ShimBackend::new(
+        driver,
+        Arc::new(Mutex::new(ShimRecords::new(
+            std::env::temp_dir().join("ganja-testkit-shims"),
+            LEAD_SESSION_ID,
+        ))),
+        None,
+    )
+    .searching(std::ffi::OsString::new())
+}
+
 fn backends_with(
     provider: Arc<dyn Provider>,
     tools: Arc<Registry>,
     storage: Storage,
     posture: impl Fn(&SpawnSpec) -> Permissions + Send + Sync + 'static,
 ) -> Backends {
-    Backends {
-        in_process: Arc::new(InProcess::new(provider, tools, storage, posture)),
-        pane: Arc::new(GanjaPane),
-        claude: Arc::new(ClaudePane),
-        // **The rule for all three shim CLIs**, stated once here because the
-        // three arrive one wave apart and the reason is the same each time: a
-        // fixture lead is *production on a machine where the foreign CLI is
-        // not installed*. Never a stub once that CLI's wave has landed — the
-        // not-built-yet sentence stops being true, and a fixture asserting a
-        // retired refusal is a fixture asserting a lie. W5 was the wave that
-        // retired the last of them, so no slot below is a stub any more.
-        // Never this process's own
-        // `PATH` either: a spawn there would find the developer's real binary,
-        // take a real turn and spend somebody's quota from inside the ordinary
-        // test suite. A suite that wants a child which answers points the
-        // backend at a fake one, the way `shim_support` does.
-        //
-        // How a backend is made harmless depends on what it does with a
-        // `PATH`, which is why the three slots below do not look alike.
-
-        // codex searches, so it is given an empty search path: the spawn is
-        // refused by naming the binary, exactly as it would be on a machine
-        // without one.
-        codex: Arc::new(
-            ganja_core::teammate::shim::ShimBackend::new(Arc::new(
-                ganja_core::teammate::codex::Codex::new(),
-            ))
-            .searching(std::ffi::OsString::new()),
-        ),
-        // agy searches too, as of Dv-7 — its backend ships and spawns a real
-        // resident child — so it gets the same empty search path and refuses
-        // by naming the binary. The clause that used to stand here, that agy
-        // was harmless by construction, retired with the no-ship arm.
-        agy: Arc::new(
-            ganja_core::teammate::shim::ShimBackend::new(Arc::new(
-                ganja_core::teammate::agy::Agy::new(),
-            ))
-            .searching(std::ffi::OsString::new()),
-        ),
-        // grok searches, exactly as codex does, so it gets the same empty
-        // search path and refuses by naming the binary.
-        grok: Arc::new(
-            ganja_core::teammate::shim::ShimBackend::new(Arc::new(
-                ganja_core::teammate::grok::Grok::new(),
-            ))
-            .searching(std::ffi::OsString::new()),
-        ),
-    }
+    externals().with_in_process(Arc::new(InProcess::new(provider, tools, storage, posture)))
 }
 
 /// A team over `home`, and the gated door onto it, with every default:

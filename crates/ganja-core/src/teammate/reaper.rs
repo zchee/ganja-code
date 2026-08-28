@@ -643,14 +643,13 @@ impl ShimsSwept {
 /// has ever spawned, and making a private directory in order to enumerate
 /// nothing is a directory made for no reason; the first *record write* is what
 /// creates it.
-pub async fn sweep_shims(registry: &TeammateRegistry) -> ShimsSwept {
-    let directory = registry
-        .shims()
-        .lock()
-        .expect("the shim records are never poisoned")
-        .directory()
-        .to_path_buf();
-
+///
+/// `directory` is handed in since **D538**, where it used to be read off the
+/// registry's own records: the records moved onto the backend that writes them,
+/// and this sweep is about the files a *previous* lead left rather than about
+/// anything this session holds. Production passes
+/// [`crate::teammate::shim::default_directory`].
+pub async fn sweep_shims(registry: &TeammateRegistry, directory: PathBuf) -> ShimsSwept {
     let mut swept = sweep_shims_in(directory).await;
     // The other half of the same startup pass, and a different document: the
     // `/tmp` records say which *processes* a dead lead owned, while the team

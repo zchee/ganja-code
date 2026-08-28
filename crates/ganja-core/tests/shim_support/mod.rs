@@ -44,7 +44,9 @@ use std::time::Duration;
 
 use ganja_core::teammate::claude::ClaudePane;
 use ganja_core::teammate::pane::GanjaPane;
-use ganja_core::teammate::shim::{Door, Driver, Read, Reply, Shape, ShimBackend, Turn};
+use ganja_core::teammate::shim::{
+    Door, Driver, Read, Reply, Shape, ShimBackend, ShimRecords, Turn,
+};
 use ganja_core::teammate::{SpawnSpec, TeammateRegistry};
 use ganja_core::{Backends, Storage, Teammates};
 use ganja_protocol::team::MemberBackend;
@@ -403,64 +405,73 @@ pub fn lead_with_timeout(
     path: OsString,
     timeout: Option<Duration>,
 ) -> (Arc<TeammateRegistry>, Arc<Teammates>) {
-    let registry = Arc::new(
-        TeammateRegistry::for_session(home, SESSION_ID, project)
-            .with_shim_turn_timeout(timeout)
-            // Never the real `/tmp/ganja-<uid>`: a suite that spawned against it
-            // would leave one `.shims` file per test process in the directory
-            // `ganja sessions --live` walks, each naming an owner that is gone
-            // by the time anybody looks.
-            .with_shim_directory(home.join("shims")),
-    );
+    let (registry, door, _) = lead_recording(home, project, driver, path, timeout);
+
+    (registry, door)
+}
+
+/// [`lead_with_timeout`], handing back this lead's shim orphan records too.
+///
+/// The records used to be the registry's and are the *backend's* since D538,
+/// so a suite that asserts what a member wrote reaches them here instead of
+/// through `TeammateRegistry`. One handle shared by all four shim backends,
+/// exactly as the one registry-held writer was.
+pub fn lead_recording(
+    home: &Path,
+    project: &Path,
+    driver: Arc<dyn Driver>,
+    path: OsString,
+    timeout: Option<Duration>,
+) -> (Arc<TeammateRegistry>, Arc<Teammates>, Arc<std::sync::Mutex<ShimRecords>>) {
+    let registry = Arc::new(TeammateRegistry::for_session(home, SESSION_ID, project));
     let backend = driver.backend();
-    // The deadline goes to the backend as well as to the registry, and from
-    // the same value, because a resident driver composes a vendor timeout of
-    // its own on the launch line and the two numbers have to be one number.
-    // Production wires this in `Engine::with_teammates`, off the registry's
-    // own resolved answer; a fixture that skipped it would be testing a launch
-    // line the real one never composes.
-    let deadline =
-        timeout.unwrap_or_else(|| ganja_core::teammate::shim::default_turn_timeout(driver.cli()));
+    match backend {
+        MemberBackend::Codex | MemberBackend::Agy | MemberBackend::Grok => {}
+        other => panic!("{other:?} is not a shim backend"),
+    }
+    // Never the real `/tmp/ganja-<uid>`: a suite that spawned against it would
+    // leave one `.shims` file per test process in the directory
+    // `ganja sessions --live` walks, each naming an owner that is gone by the
+    // time anybody looks.
+    let records = Arc::new(std::sync::Mutex::new(ShimRecords::new(home.join("shims"), SESSION_ID)));
+    // The deadline reaches the backend, which is both what composes a resident
+    // driver's vendor timeout on the launch line and what the runner enforces,
+    // so the two numbers cannot come from two places and disagree.
     let fake: Arc<dyn ganja_core::teammate::TeammateBackend> =
-        Arc::new(ShimBackend::new(driver).searching(path).with_deadline(deadline));
+        Arc::new(ShimBackend::new(driver, Arc::clone(&records), timeout).searching(path));
+    // The two slots this lead is *not* pointing at its fake hold the real
+    // backends made harmless the way `ganja_testkit::externals` makes them
+    // harmless, and for the same reason: no stub is truthful any more, and a
+    // real backend on this process's own `PATH` would spawn the developer's own
+    // CLI. As of Dv-7 all three of them search, so all three get an empty
+    // search path and refuse by naming the binary.
+    let harmless = |driver: Arc<dyn Driver>| -> Arc<dyn ganja_core::teammate::TeammateBackend> {
+        Arc::new(ShimBackend::new(driver, Arc::clone(&records), None).searching(OsString::new()))
+    };
     let storage = Storage::open(project.join("storage"));
-    let mut backends = Backends {
-        in_process: Arc::new(ganja_core::teammate::InProcess::new(
+    let mut backends = Backends::new()
+        .with_in_process(Arc::new(ganja_core::teammate::InProcess::new(
             Arc::new(ganja_core::provider::FakeProvider::new("on it", Duration::ZERO)),
             Arc::new(ganja_core::tool::Registry::new(Vec::new())),
             storage,
             |_: &SpawnSpec| ganja_core::permission::Permissions::default(),
-        )),
-        pane: Arc::new(GanjaPane),
-        claude: Arc::new(ClaudePane),
-        // The two slots this lead is *not* pointing at its fake hold the
-        // real backends made harmless the way `ganja_testkit::backends` makes
-        // them harmless, and for the same reason: no stub is truthful any
-        // more, and a real backend on this process's own `PATH` would spawn
-        // the developer's own CLI. As of Dv-7 all three of them search, so all
-        // three get an empty search path and refuse by naming the binary.
-        codex: Arc::new(
-            ShimBackend::new(Arc::new(ganja_core::teammate::codex::Codex::new()))
-                .searching(OsString::new()),
-        ),
-        agy: Arc::new(
-            ShimBackend::new(Arc::new(ganja_core::teammate::agy::Agy::new()))
-                .searching(OsString::new()),
-        ),
-        grok: Arc::new(
-            ShimBackend::new(Arc::new(ganja_core::teammate::grok::Grok::new()))
-                .searching(OsString::new()),
-        ),
-    };
-    match backend {
-        MemberBackend::Codex => backends.codex = fake,
-        MemberBackend::Agy => backends.agy = fake,
-        MemberBackend::Grok => backends.grok = fake,
-        other => panic!("{other:?} is not a shim backend"),
+        )))
+        .with(Arc::new(GanjaPane::default()))
+        .with(Arc::new(ClaudePane::default()));
+    for other in [MemberBackend::Codex, MemberBackend::Agy, MemberBackend::Grok] {
+        backends = backends.with(if other == backend {
+            Arc::clone(&fake)
+        } else {
+            harmless(match other {
+                MemberBackend::Codex => Arc::new(ganja_core::teammate::codex::Codex::new()),
+                MemberBackend::Agy => Arc::new(ganja_core::teammate::agy::Agy::new()),
+                _ => Arc::new(ganja_core::teammate::grok::Grok::new()),
+            })
+        });
     }
     let door = Arc::new(Teammates::new(Arc::clone(&registry), backends));
 
-    (registry, door)
+    (registry, door, records)
 }
 
 /// Where this team's documents live.

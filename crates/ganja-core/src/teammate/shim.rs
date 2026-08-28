@@ -106,10 +106,11 @@ use ganja_team::{MailboxMessage, MemberName, ShimCli, Surface, mailbox, record};
 pub use records::ShimRecords;
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::teammate::{
-    Handle, RECENT_CALLS, SETTLE, SpawnSpec, Unsupported, backend_name, posture_line, runner,
+    RECENT_CALLS, SETTLE, SpawnSpec, Unsupported, backend_name, posture_line, push_recent, runner,
 };
 
 /// The config key that moves every CLI's deadline at once.
@@ -504,6 +505,22 @@ pub fn on_path(binary: &str) -> Option<PathBuf> {
     resolve(&std::env::var_os("PATH")?, binary)
 }
 
+/// Where this build keeps a session's shim orphan records (**D508**).
+///
+/// The socket scheme's own `/tmp/ganja-<uid>`, which is what
+/// [`crate::teammate::reaper::sweep_shims`] enumerates at a lead's startup and
+/// what the first record write creates. A test names its own instead, so a
+/// suite does not leave one `.shims` file per test process in a directory
+/// `ganja sessions --live` walks.
+///
+/// **The directory does not depend on which session is leading** — the session
+/// id decides the *stem* of the file inside it ([`records::stem_of`]), which is
+/// what keeps two leads' records apart.
+#[must_use]
+pub fn default_directory() -> PathBuf {
+    ganja_tool::socket::directory()
+}
+
 /// [`on_path`]'s decision over an explicit path list.
 ///
 /// The split lets a test hold a `PATH` of its own without mutating the process
@@ -650,15 +667,16 @@ pub enum Running {
     Ended,
 }
 
-/// What [`crate::teammate::Handle::Child`] holds.
+/// What a headless shim member holds: the group a signal goes to, and the
+/// state that says whether there is anything to signal.
 ///
-/// Deliberately holds no `tokio::process::Child`: `TeammateBackend::kill` takes
+/// Deliberately holds no `tokio::process::Child`: `Spawned::kill` takes
 /// a **shared** reference and a member is reached only through an `Arc`, while
 /// a child's `kill`/`wait` all want `&mut`. So the handle holds what a signal
 /// needs — the group — and the child itself is owned by the task that drives
 /// it, under `kill_on_drop(true)`.
 ///
-/// Every shape carries which CLI it is, because `Handle::surface` has to answer
+/// Every shape carries which CLI it is, because `Spawned::surface` has to answer
 /// `Surface::Shim` with that CLI: "and nothing else" was never available.
 pub struct Child {
     /// The per-CLI rules, held here rather than on the backend value so that
@@ -754,7 +772,7 @@ impl Child {
         &self.launch
     }
 
-    /// Which CLI drives this member — what `Handle::surface` answers with.
+    /// Which CLI drives this member — what `Spawned::surface` answers with.
     #[must_use]
     pub fn cli(&self) -> ShimCli {
         self.driver().cli()
@@ -925,23 +943,6 @@ pub fn posture_lines(backend: MemberBackend) -> Vec<String> {
     ]
 }
 
-/// Pushes one line onto a member's ring, the way the engine-folded one does.
-///
-/// Shared with `fold_calls` so the two writers cannot come to disagree about
-/// the cap or about what counts as a repeat: a line identical to the one
-/// already at the back says nothing the first said, and the ring is a live view
-/// rather than a log.
-pub(crate) fn push_recent(ring: &Mutex<VecDeque<String>>, line: String) {
-    let mut ring = ring.lock().expect("the call ring is never poisoned");
-    if ring.back() == Some(&line) {
-        return;
-    }
-    if ring.len() == RECENT_CALLS {
-        ring.pop_front();
-    }
-    ring.push_back(line);
-}
-
 /// Everything one shim member's turns need that is not the [`Driver`].
 pub struct Launch {
     /// The resolved binary, so a `PATH` that changed mid-session cannot move
@@ -1062,16 +1063,16 @@ pub fn start_resident(
     driver: Arc<dyn Driver>,
     launch: Launch,
     argv: &[OsString],
-) -> Result<Handle, Unsupported> {
+) -> Result<Arc<Child>, Unsupported> {
     let cannot = |reason: String| Unsupported { backend: driver.backend(), reason };
     let (started, pid) = open_resident(&launch, argv, driver.binary()).map_err(cannot)?;
 
-    Ok(Handle::Child(Arc::new(Child::resident(
+    Ok(Arc::new(Child::resident(
         driver, launch,
         // Spawned with `process_group(0)`, so the child leads its own group and
         // the group id is its pid.
         pid, started,
-    ))))
+    )))
 }
 
 /// One resident child, started, with its three pipes taken.
@@ -1109,8 +1110,8 @@ fn open_resident(
 /// A [`Shape::PerMessage`] member's handle: nothing is running yet, and the
 /// first inbox message is what starts anything.
 #[must_use]
-pub fn start_per_message(driver: Arc<dyn Driver>, launch: Launch) -> Handle {
-    Handle::Child(Arc::new(Child::per_message(driver, launch)))
+pub fn start_per_message(driver: Arc<dyn Driver>, launch: Launch) -> Arc<Child> {
+    Arc::new(Child::per_message(driver, launch))
 }
 
 /// One [`Driver`] as a [`crate::teammate::TeammateBackend`].
@@ -1129,14 +1130,26 @@ pub struct ShimBackend {
     /// a test points a child at a fake CLI without mutating the process it
     /// runs in.
     path: Option<OsString>,
-    /// The deadline a turn on this backend runs under, for the one thing a
-    /// spawn needs it for: composing a [`Shape::Resident`] launch line.
+    /// This session's orphan records (**D508**): one writer for every member
+    /// this backend starts.
+    ///
+    /// Behind a `std::sync::Mutex` and nothing else, which is the whole of the
+    /// write-concurrency answer: a per-message shim registers once per *turn*,
+    /// so several turn tasks would otherwise read-modify-write one file. They
+    /// do not — every mutation goes through this one value under this one
+    /// lock. Nothing inside it awaits, so no guard is ever held across one.
+    ///
+    /// On the backend since **D538** rather than on the registry: the records
+    /// are a fact about headless shim children, and nothing else this session
+    /// starts has one.
+    records: Arc<Mutex<ShimRecords>>,
+    /// The deadline a turn on this backend runs under (**D509**).
     ///
     /// [`None`] means [`default_turn_timeout`], which is right for every
-    /// caller that has no config to consult. The production caller passes the
-    /// registry's **own** resolved answer rather than re-reading the config,
-    /// so the number in the launch line and the number the runner enforces
-    /// cannot come from two places and disagree.
+    /// caller that has no config to consult. A caller that has one passes its
+    /// **own** resolved answer rather than re-reading the config, so the number
+    /// in a resident launch line and the number the runner enforces cannot come
+    /// from two places and disagree.
     deadline: Option<Duration>,
 }
 
@@ -1147,11 +1160,27 @@ impl std::fmt::Debug for ShimBackend {
 }
 
 impl ShimBackend {
-    /// The backend for `driver`, resolving its binary on this process's own
-    /// `PATH`.
+    /// The backend for `driver`, over the orphan-records directory this
+    /// session writes into and the per-turn deadline it runs under.
+    ///
+    /// `records` is built over [`default_directory`]'s answer in production; a
+    /// test names a private directory, because a suite spawning shim members
+    /// against the real one would leave a `.shims` file per test process in a
+    /// directory `ganja sessions --live` walks. `deadline` is [`None`] to leave
+    /// each CLI's own default alone.
+    ///
+    /// The records arrive **built** rather than as the directory alone, because
+    /// a [`ShimRecords`] needs the lead's session id for its file's stem and a
+    /// backend has no business knowing which conversation installed it; and
+    /// **shared**, so a caller holding several backends over one session gives
+    /// them one writer, as this session's registry used to.
     #[must_use]
-    pub fn new(driver: Arc<dyn Driver>) -> Self {
-        Self { driver, path: None, deadline: None }
+    pub fn new(
+        driver: Arc<dyn Driver>,
+        records: Arc<Mutex<ShimRecords>>,
+        deadline: Option<Duration>,
+    ) -> Self {
+        Self { driver, path: None, records, deadline }
     }
 
     /// The same backend against an explicit search path.
@@ -1162,36 +1191,29 @@ impl ShimBackend {
         self
     }
 
-    /// The same backend composing its launch line for `deadline`.
+    /// The deadline this backend composes a launch line for, and enforces.
     ///
-    /// Only a [`Shape::Resident`] driver reads it — a per-message one composes
-    /// a fresh argv per turn, where the runner's own deadline is already in
-    /// hand — so the two backends that never call this lose nothing by it.
-    #[must_use]
-    pub fn with_deadline(mut self, deadline: Duration) -> Self {
-        self.deadline = Some(deadline);
-
-        self
-    }
-
-    /// The deadline this backend composes a launch line for.
+    /// Only a [`Shape::Resident`] driver reads the composed half — a
+    /// per-message one composes a fresh argv per turn, where the runner's own
+    /// deadline is already in hand.
     fn deadline(&self) -> Duration {
         self.deadline.unwrap_or_else(|| default_turn_timeout(self.driver.cli()))
     }
-}
 
-#[async_trait]
-impl crate::teammate::TeammateBackend for ShimBackend {
-    fn backend(&self) -> MemberBackend {
-        self.driver.backend()
-    }
-
-    /// The headless channel, in this CLI's name: answers are mail.
-    fn preamble(&self, spec: &SpawnSpec) -> String {
-        preamble(crate::teammate::preamble::Names::of(spec), self.driver.backend(), &spec.prompt)
-    }
-
-    async fn spawn(&self, spec: &SpawnSpec) -> Result<Handle, Unsupported> {
+    /// Starts the child alone, without the member that would own its loop.
+    ///
+    /// The concrete half of [`crate::teammate::TeammateBackend::spawn`], which
+    /// wraps whatever this returns in a [`ShimMember`]. Its own entry point so
+    /// that a caller driving [`ShimRunner`] by hand — which is how the loop's
+    /// frame table is asserted a tick at a time — can hold the [`Child`]
+    /// itself, where the trait would hand back an `Arc<dyn Spawned>` that has
+    /// already spawned the loop being taken apart.
+    ///
+    /// # Errors
+    ///
+    /// [`Unsupported`] for a binary that is not there, a readiness check the
+    /// CLI failed, or a child that could not be started.
+    pub async fn start(&self, spec: &SpawnSpec) -> Result<Arc<Child>, Unsupported> {
         let launch = prepare(&*self.driver, spec, self.path.as_deref())?;
         // After `prepare` rather than inside it: the check is a *subprocess*,
         // and `prepare` is the sync half every backend shares.
@@ -1216,22 +1238,31 @@ impl crate::teammate::TeammateBackend for ShimBackend {
             Shape::PerMessage => Ok(start_per_message(Arc::clone(&self.driver), launch)),
         }
     }
+}
 
-    async fn kill(&self, handle: &Handle) {
-        let Some(child) = handle.child() else {
-            // Not reachable through the registry, which hands back the handle
-            // this backend's own `spawn` returned — but a handle of another
-            // shape arriving here would mean a registry had crossed two
-            // backends, and that is worth saying rather than ignoring.
-            tracing::warn!(
-                ?handle,
-                backend = backend_name(self.driver.backend()),
-                "a shim backend was asked to end something it did not start"
-            );
+#[async_trait]
+impl crate::teammate::TeammateBackend for ShimBackend {
+    fn backend(&self) -> MemberBackend {
+        self.driver.backend()
+    }
 
-            return;
-        };
-        child.end().await;
+    /// The headless channel, in this CLI's name: answers are mail.
+    fn preamble(&self, spec: &SpawnSpec) -> String {
+        preamble(crate::teammate::preamble::Names::of(spec), self.driver.backend(), &spec.prompt)
+    }
+
+    async fn spawn(
+        &self,
+        spec: &SpawnSpec,
+        lent: crate::teammate::Lent,
+    ) -> Result<Arc<dyn crate::teammate::Spawned>, Unsupported> {
+        Ok(Arc::new(ShimMember::new(
+            self.start(spec).await?,
+            spec.clone(),
+            lent,
+            Arc::clone(&self.records),
+            self.deadline(),
+        )))
     }
 
     fn delivery(&self) -> crate::teammate::Delivery {
@@ -1240,6 +1271,98 @@ impl crate::teammate::TeammateBackend for ShimBackend {
         // `claude` pane, where a foreign process reads at its own pace and
         // there is nothing to watch.
         crate::teammate::Delivery::Acknowledged
+    }
+}
+
+/// One headless shim member, from the moment its child exists.
+///
+/// **The seam a shim would otherwise fall straight through**, and the reason
+/// it is a type of its own: a shim member gets one task — its own mailbox loop
+/// — and three things that task owns rather than inherits. The ring is written
+/// by the shim itself, because the engine-folding writer folds from an event
+/// stream a shim member has none of; the spawn's own posture lines go on
+/// before the loop starts, so a person opening `/team` sees what was granted
+/// even if the first turn has not happened yet (**AC-17**). `alive` is cleared
+/// by the loop when it ends, for the same reason the in-process runner's task
+/// clears it: nothing else is watching.
+pub struct ShimMember {
+    child: Arc<Child>,
+    spec: SpawnSpec,
+    lent: crate::teammate::Lent,
+    records: Arc<Mutex<ShimRecords>>,
+    deadline: Duration,
+    recent: Arc<Mutex<VecDeque<String>>>,
+    alive: Arc<AtomicBool>,
+}
+
+impl std::fmt::Debug for ShimMember {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.child.fmt(formatter)
+    }
+}
+
+impl ShimMember {
+    /// The member over a child that is already started.
+    #[must_use]
+    pub fn new(
+        child: Arc<Child>,
+        spec: SpawnSpec,
+        lent: crate::teammate::Lent,
+        records: Arc<Mutex<ShimRecords>>,
+        deadline: Duration,
+    ) -> Self {
+        Self {
+            child,
+            spec,
+            lent,
+            records,
+            deadline,
+            recent: Arc::new(Mutex::new(VecDeque::with_capacity(RECENT_CALLS))),
+            alive: Arc::new(AtomicBool::new(true)),
+        }
+    }
+}
+
+#[async_trait]
+impl crate::teammate::Spawned for ShimMember {
+    fn surface(&self) -> Surface {
+        // `Surface::Shim` puts the in-process sentinel in `tmuxPaneId` and the
+        // CLI's name in `backendType`, so every older reader classifies the
+        // member safely and the one reader that needs shim-ness reads the field
+        // that says so.
+        Surface::Shim { cli: self.child.cli(), pane: None }
+    }
+
+    fn start(self: Arc<Self>) -> Vec<JoinHandle<()>> {
+        for line in spawn_lines(self.spec.backend) {
+            push_recent(&self.recent, line);
+        }
+        let loop_ = ShimRunner::new(
+            Arc::clone(&self.child),
+            self.spec.clone(),
+            Lent {
+                lead_inbox: self.lent.lead_inbox.clone(),
+                recent: Arc::clone(&self.recent),
+                alive: Arc::clone(&self.alive),
+                shims: Arc::clone(&self.records),
+                cancel: self.lent.cancel.child_token(),
+            },
+            self.deadline,
+        );
+
+        vec![tokio::spawn(loop_.run())]
+    }
+
+    fn alive(&self) -> bool {
+        self.alive.load(Ordering::Relaxed)
+    }
+
+    fn recent(&self) -> Vec<String> {
+        self.recent.lock().expect("the call ring is never poisoned").iter().cloned().collect()
+    }
+
+    async fn kill(&self) {
+        self.child.end().await;
     }
 }
 

@@ -50,7 +50,7 @@ impl Lead {
             Permissions::default(),
         )
         .with_inbound_policy(policy, DialogExpiry::default())
-        .with_teammates(Arc::clone(&registry));
+        .with_teammates(Arc::clone(&registry), ganja_testkit::externals());
         let engine = Arc::new(engine);
         let gate = Arc::clone(&engine);
         let inbox = LeadInbox::reading(Arc::clone(&registry), None)

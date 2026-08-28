@@ -132,7 +132,7 @@
 //! the messages still in that member's inbox are answered to their senders
 //! rather than left unread, the corpse is closed through the same dead-only
 //! door, the lead's model is told in prose, and the registry is handed an
-//! [`Exited`](crate::teammate::shim_tui::Exited) the lead's next pass retires the member on — the record out of
+//! [`Exited`] the lead's next pass retires the member on — the record out of
 //! the team file, the row off the roster. The spawn-window death stays what
 //! it was, a refusal carrying the CLI's last words; this is the other half,
 //! for a member that was live and then was not.
@@ -157,6 +157,7 @@ use std::time::{Duration, SystemTime};
 use async_trait::async_trait;
 use ganja_protocol::team::{Frame, MemberBackend, ShutdownApproved, ShutdownRequest, Tagged};
 use ganja_team::{MailboxMessage, MemberName, ShimCli, Surface, mailbox, record};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::teammate::agy::Agy;
@@ -166,9 +167,13 @@ use crate::teammate::reaper::Pane;
 use crate::teammate::shim::{self, Driver};
 use crate::teammate::tmux::{self, Closed, Killed, Server, TmuxError};
 use crate::teammate::{
-    Delivery, Handle, SETTLE, SpawnSpec, TeammateBackend, Unsupported, backend_name, pane,
-    readback, runner,
+    Delivery, RECENT_CALLS, SETTLE, SpawnSpec, Spawned, TeammateBackend, Unsupported, backend_name,
+    pane, push_recent, readback, runner,
 };
+// Backend-neutral since **D538**, and re-exported here so a reader who knows
+// them by this module's name still finds them. W2 drops the re-export with the
+// module.
+pub use crate::teammate::{Exited, PaneFate};
 
 /// How long a spawn waits for the CLI's composer to show before it proceeds
 /// without having seen it.
@@ -611,7 +616,7 @@ pub enum Readiness {
     TimedOut,
 }
 
-/// What [`Handle::TuiPane`] holds: the pane's identity, the server it is
+/// What a pane-mode shim member holds: the pane's identity, the server it is
 /// on, and the token that ends its runner.
 ///
 /// The [`Server`] is held rather than re-read off `$TMUX` at kill time, for
@@ -864,21 +869,6 @@ impl TuiPane {
     }
 }
 
-/// What [`TuiPane::end`] left of the pane — the fact a sentence about "the
-/// pane was closed" has to be read off rather than assumed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PaneFate {
-    /// Gone from the server: closed here, or already gone.
-    Closed,
-    /// Still on the server, dead, and not taken away — the kill was refused,
-    /// or no listing could be had to check it against — so a person closes
-    /// it; logged as such.
-    Left,
-    /// Its id now names a live pane under another pid: recycled, somebody
-    /// else's, and not touched.
-    Recycled,
-}
-
 /// One [`TuiDriver`] as a [`TeammateBackend`] that opens its CLI's native
 /// TUI in a pane.
 ///
@@ -896,6 +886,13 @@ pub struct ShimTui {
     /// Where the binary is looked for. [`None`] is this process's `PATH`; a
     /// value is how a test points a spawn at a stub TUI.
     path: Option<OsString>,
+    /// The idle shell a fresh pane holds until its launch line arrives
+    /// (**D520**) and the column's share of the width, both resolved once by
+    /// the frontend that assembled this backend (**D538**) — as
+    /// [`crate::teammate::pane`]'s own value types, so no backend names a
+    /// config type.
+    shell: pane::PaneShell,
+    share: pane::PaneShare,
 }
 
 impl std::fmt::Debug for ShimTui {
@@ -906,10 +903,11 @@ impl std::fmt::Debug for ShimTui {
 
 impl ShimTui {
     /// The pane-mode backend for `driver`, splitting the server `$TMUX` names
-    /// and resolving the binary on this process's own `PATH`.
+    /// and resolving the binary on this process's own `PATH`, into the shell
+    /// and at the width this session resolved.
     #[must_use]
-    pub fn new(driver: Arc<dyn TuiDriver>) -> Self {
-        Self { driver, server: None, path: None }
+    pub fn new(driver: Arc<dyn TuiDriver>, shell: pane::PaneShell, share: pane::PaneShare) -> Self {
+        Self { driver, server: None, path: None, shell, share }
     }
 
     /// The same backend against an explicit server.
@@ -1070,7 +1068,11 @@ impl TeammateBackend for ShimTui {
         preamble(crate::teammate::preamble::Names::of(spec), self.driver.backend(), &spec.prompt)
     }
 
-    async fn spawn(&self, spec: &SpawnSpec) -> Result<Handle, Unsupported> {
+    async fn spawn(
+        &self,
+        spec: &SpawnSpec,
+        lent: crate::teammate::Lent,
+    ) -> Result<Arc<dyn Spawned>, Unsupported> {
         let backend = self.driver.backend();
         let cli = backend_name(backend);
         // D501's capability check, at the moment of asking rather than at
@@ -1093,8 +1095,16 @@ impl TeammateBackend for ShimTui {
             launch_needle(launch.binary.as_os_str()).map_err(|error| self.refused(&error))?;
 
         let environment = tmux::environment(environment_names(self.driver.additions()));
-        let pane =
-            pane::split_idle_shell(&server, spec, &environment, backend, "shim teammate").await?;
+        let pane = pane::split_idle_shell(
+            &server,
+            spec,
+            &environment,
+            &self.shell,
+            self.share,
+            backend,
+            "shim teammate",
+        )
+        .await?;
 
         // Kept on exit **before** the launch line: a CLI that refuses to
         // start says why and exits, and a pane that closed with it would take
@@ -1164,30 +1174,11 @@ impl TeammateBackend for ShimTui {
             }
         };
 
-        Ok(Handle::TuiPane(Arc::new(TuiPane::new(
-            self.driver.cli(),
-            backend,
-            pane,
-            server,
-            readiness,
-        ))))
-    }
-
-    async fn kill(&self, handle: &Handle) {
-        let Some(tui) = handle.tui() else {
-            // Not reachable through the registry, which hands back the handle
-            // this backend's own `spawn` returned — but a handle of another
-            // shape arriving here would mean a registry had crossed two
-            // backends, and that is worth saying rather than ignoring.
-            tracing::warn!(
-                ?handle,
-                backend = backend_name(self.driver.backend()),
-                "a shim TUI backend was asked to end something it did not start"
-            );
-
-            return;
-        };
-        tui.end().await;
+        Ok(Arc::new(TuiMember::new(
+            Arc::new(TuiPane::new(self.driver.cli(), backend, pane, server, readiness)),
+            spec.clone(),
+            lent,
+        )))
     }
 
     fn delivery(&self) -> Delivery {
@@ -1200,6 +1191,85 @@ impl TeammateBackend for ShimTui {
 
     fn surface_line(&self) -> Option<String> {
         pane_line(self.driver.backend())
+    }
+}
+
+/// One shim member in its CLI's own native TUI, in a pane (**D512**).
+///
+/// The same one-task shape [`crate::teammate::shim::ShimMember`] has, for the
+/// same reasons — a ring the loop writes itself, `alive` the loop clears — and
+/// **no deadline**: the loop is handed nothing to bound a turn with, because a
+/// native TUI in a pane is a thing a person can look at (the module doc owns
+/// why). The posture lines go on before the loop starts, this door's own set,
+/// which ends on the pane sentence the spawn dialog carried under `surface`
+/// rather than on the headless grok rider; the loop adds the spawn's own
+/// readiness finding before its first delivery.
+pub struct TuiMember {
+    pane: Arc<TuiPane>,
+    spec: SpawnSpec,
+    lent: crate::teammate::Lent,
+    recent: Arc<Mutex<VecDeque<String>>>,
+    alive: Arc<AtomicBool>,
+}
+
+impl std::fmt::Debug for TuiMember {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.pane.fmt(formatter)
+    }
+}
+
+impl TuiMember {
+    /// The member over a pane that is already running its CLI's TUI.
+    #[must_use]
+    pub fn new(pane: Arc<TuiPane>, spec: SpawnSpec, lent: crate::teammate::Lent) -> Self {
+        Self {
+            pane,
+            spec,
+            lent,
+            recent: Arc::new(Mutex::new(VecDeque::with_capacity(RECENT_CALLS))),
+            alive: Arc::new(AtomicBool::new(true)),
+        }
+    }
+}
+
+#[async_trait]
+impl Spawned for TuiMember {
+    fn surface(&self) -> Surface {
+        // The same `backendType` the headless shape writes, and the **real**
+        // pane id where that one writes the sentinel: the pane is there, and a
+        // reader acting on panes acts on something real (**D512**).
+        Surface::Shim { cli: self.pane.cli(), pane: Some(self.pane.pane().id.clone()) }
+    }
+
+    fn start(self: Arc<Self>) -> Vec<JoinHandle<()>> {
+        for line in spawn_lines(self.spec.backend) {
+            push_recent(&self.recent, line);
+        }
+        let loop_ = TuiRunner::new(
+            Arc::clone(&self.pane),
+            self.spec.clone(),
+            Lent {
+                lead_inbox: self.lent.lead_inbox.clone(),
+                recent: Arc::clone(&self.recent),
+                alive: Arc::clone(&self.alive),
+                exited: self.lent.exits.clone(),
+                cancel: self.lent.cancel.child_token(),
+            },
+        );
+
+        vec![tokio::spawn(loop_.run())]
+    }
+
+    fn alive(&self) -> bool {
+        self.alive.load(Ordering::Relaxed)
+    }
+
+    fn recent(&self) -> Vec<String> {
+        self.recent.lock().expect("the call ring is never poisoned").iter().cloned().collect()
+    }
+
+    async fn kill(&self) {
+        self.pane.end().await;
     }
 }
 
@@ -1220,73 +1290,9 @@ pub struct Lent {
     pub alive: Arc<AtomicBool>,
     /// Where a loop that saw its pane stop running puts the fact, for the
     /// lead's next pass to retire the member on ([`Exited`]).
-    pub exited: Arc<Mutex<Vec<Exited>>>,
+    pub exited: tokio::sync::mpsc::UnboundedSender<Exited>,
     /// The registry's own cancellation, beside the handle's own.
     pub cancel: CancellationToken,
-}
-
-/// A TUI member whose pane stopped running **after** readiness — the CLI
-/// quit, crashed, or a person closed the pane (bead g9u's case, **D512** as
-/// amended): what the loop that noticed hands the registry, for the lead's
-/// next pass to retire the member on.
-///
-/// Carried through the registry rather than written as a frame because no
-/// frame says it honestly: a `shutdown_approved` answers a request nobody
-/// sent, and `teammate_terminated` is the lead's word to a teammate, never a
-/// teammate's to the lead (§5). The lead's *model* is told in prose beside
-/// this, by the loop itself, so the harness's bookkeeping and the model's
-/// knowledge do not depend on each other arriving.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Exited {
-    /// Which member.
-    pub name: String,
-    /// Which CLI it ran.
-    pub cli: ShimCli,
-    /// Its backend, for a frontend that names members by it.
-    pub backend: MemberBackend,
-    /// The pane it ran in.
-    pub pane_id: String,
-    /// What the loop left of that pane — read off [`TuiPane::end`], never
-    /// assumed: a corpse tmux would not take away, or an id that now names
-    /// somebody else's pane, is said rather than called closed.
-    pub pane: PaneFate,
-    /// The last non-empty line the pane showed, where the pane was still this
-    /// member's to read and the capture found one: the CLI's own parting
-    /// words. Never a recycled pane's screen.
-    pub last_words: Option<String>,
-}
-
-impl Exited {
-    /// The one sentence a frontend shows for this.
-    #[must_use]
-    pub fn notice(&self) -> String {
-        let cli = backend_name(self.backend);
-        let said = self
-            .last_words
-            .as_deref()
-            .map(|words| format!(" — last line: {words}"))
-            .unwrap_or_default();
-        format!(
-            "{name} ({cli}) exited in its pane{said}; {fate}",
-            name = self.name,
-            fate = self.pane_sentence(),
-        )
-    }
-
-    /// What became of the pane and the member, as one clause.
-    #[must_use]
-    pub fn pane_sentence(&self) -> &'static str {
-        match self.pane {
-            PaneFate::Closed => "the pane was closed and the teammate retired",
-            PaneFate::Left => {
-                "the teammate is retired, and its dead pane could not be closed from here — close \
-                 it by hand"
-            }
-            PaneFate::Recycled => {
-                "the teammate is retired; its pane id now names another pane, which was left alone"
-            }
-        }
-    }
 }
 
 /// How a pane stopped being this member's ([`TuiRunner::gone`]).
@@ -1336,7 +1342,7 @@ pub struct TuiRunner {
     lead_inbox: PathBuf,
     recent: Arc<Mutex<VecDeque<String>>>,
     alive: Arc<AtomicBool>,
-    exited: Arc<Mutex<Vec<Exited>>>,
+    exited: tokio::sync::mpsc::UnboundedSender<Exited>,
     /// The registry's own token, beside the handle's — [`shim::ShimRunner`]
     /// says why there are two.
     registry: CancellationToken,
@@ -1579,7 +1585,9 @@ impl TuiRunner {
             ),
         )
         .await;
-        self.exited.lock().expect("the exited list is never poisoned").push(exited);
+        // A send that fails is a registry that has already gone, which is a
+        // session on its way out: there is nobody left to retire the member.
+        let _ = self.exited.send(exited);
     }
 
     /// Answers every message still in this member's inbox, now that nothing
@@ -1979,7 +1987,7 @@ impl TuiRunner {
 
     /// One line onto this member's ring.
     fn remember(&self, line: String) {
-        shim::push_recent(&self.recent, line);
+        crate::teammate::push_recent(&self.recent, line);
     }
 
     /// Writes one plain message into an inbox, as this member.

@@ -68,6 +68,13 @@ pub mod storage;
 /// [`Postbox`], re-exported at the root below — because those are values a
 /// frontend leading a team **assembles**, where a subagent is one it only ever
 /// reads the answer of.
+///
+/// Since **D538** [`Backends`] is assembled *outside* the engine and is the
+/// clearest case of that split: what a pane or a foreign CLI's TUI needs — a
+/// tmux server, the shell a pane is split into, how wide the column opens — is
+/// a frontend's to hold, so the frontend builds those implementations and
+/// [`Engine::with_teammates`] adds only the in-process one it can build out of
+/// what it already has.
 pub(crate) mod subagent;
 /// A teammate's own conversation, running in the lead's process: a second
 /// [`Engine`] over a clone of the lead's [`Storage`] (**D500**). Public where

@@ -1,13 +1,15 @@
 use std::collections::BTreeSet;
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use ganja_team::{MemberName, TeamName, TeamsRoot, mailbox};
 
 use super::{
-    Delivery, Handle, InProcess, MemberBackend, SpawnRequest, SpawnSpec, TeammateBackend,
-    TeammateRegistry, Unsupported, session_team,
+    Delivery, Exited, InProcess, Lent, MemberBackend, PaneFate, SpawnRequest, SpawnSpec, Spawned,
+    Surface, TEAMS_DIR, TeammateBackend, TeammateRegistry, Unsupported, claude_root_under,
+    session_team,
 };
 use crate::Storage;
 use crate::permission::Permissions;
@@ -33,7 +35,7 @@ impl TeammateBackend for Never {
         self.0
     }
 
-    async fn spawn(&self, _spec: &SpawnSpec) -> Result<Handle, Unsupported> {
+    async fn spawn(&self, _spec: &SpawnSpec, _lent: Lent) -> Result<Arc<dyn Spawned>, Unsupported> {
         Err(Unsupported { backend: self.0, reason: NEVER.to_owned() })
     }
 
@@ -42,8 +44,6 @@ impl TeammateBackend for Never {
     fn preamble(&self, spec: &SpawnSpec) -> String {
         crate::teammate::preamble::native(crate::teammate::preamble::Names::of(spec), &spec.prompt)
     }
-
-    async fn kill(&self, _handle: &Handle) {}
 
     fn delivery(&self) -> Delivery {
         Delivery::FireAndForget
@@ -422,9 +422,11 @@ fn the_team_file_is_synced_before_it_is_renamed_into_place() {
 /// there yet.
 #[derive(Debug, Default)]
 struct Recording {
-    killed: std::sync::Mutex<Vec<(String, String)>>,
+    /// Shared with every pane this backend hands back, because the logs are
+    /// the *backend's* and the kill is the member's since **D538**.
+    killed: Arc<std::sync::Mutex<Vec<(String, String)>>>,
     /// `(name, whether the team file named it at launch time)`.
-    launched: std::sync::Mutex<Vec<(String, bool)>>,
+    launched: Arc<std::sync::Mutex<Vec<(String, bool)>>>,
     /// Refuse every launch, so the unwind can be watched.
     refuse_launch: bool,
 }
@@ -454,18 +456,42 @@ impl TeammateBackend for Recording {
         crate::teammate::preamble::native(crate::teammate::preamble::Names::of(spec), &spec.prompt)
     }
 
-    async fn spawn(&self, _spec: &SpawnSpec) -> Result<Handle, Unsupported> {
-        Ok(Handle::Pane(crate::teammate::reaper::Pane {
+    async fn spawn(&self, spec: &SpawnSpec, _lent: Lent) -> Result<Arc<dyn Spawned>, Unsupported> {
+        Ok(Arc::new(RecordedPane {
             id: "%7".to_owned(),
             birth: "48213".to_owned(),
+            spec: spec.clone(),
+            refuse_launch: self.refuse_launch,
+            launched: Arc::clone(&self.launched),
+            killed: Arc::clone(&self.killed),
         }))
     }
 
-    async fn launch(&self, spec: &SpawnSpec, handle: &Handle) -> Result<(), Unsupported> {
-        assert!(
-            matches!(handle, Handle::Pane(pane) if pane.id == "%7"),
-            "launched with the handle spawn minted: {handle:?}"
-        );
+    fn delivery(&self) -> Delivery {
+        Delivery::Acknowledged
+    }
+}
+
+/// What [`Recording`] hands back: a pane that never was, holding the logs the
+/// backend reads.
+#[derive(Debug)]
+struct RecordedPane {
+    id: String,
+    birth: String,
+    spec: SpawnSpec,
+    refuse_launch: bool,
+    launched: Arc<std::sync::Mutex<Vec<(String, bool)>>>,
+    killed: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+}
+
+#[async_trait::async_trait]
+impl Spawned for RecordedPane {
+    fn surface(&self) -> Surface {
+        Surface::Pane { id: self.id.clone() }
+    }
+
+    async fn launch(&self) -> Result<(), Unsupported> {
+        let spec = &self.spec;
         let recorded = std::fs::read_to_string(spec.root.config_path(&spec.team))
             .is_ok_and(|document| document.contains(&format!("\"{}\"", spec.name)));
         self.launched
@@ -482,18 +508,23 @@ impl TeammateBackend for Recording {
         Ok(())
     }
 
-    async fn kill(&self, handle: &Handle) {
-        let Handle::Pane(pane) = handle else {
-            panic!("a pane backend was asked to end something it did not start: {handle:?}");
-        };
+    fn start(self: Arc<Self>) -> Vec<tokio::task::JoinHandle<()>> {
+        Vec::new()
+    }
+
+    fn alive(&self) -> bool {
+        true
+    }
+
+    fn recent(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    async fn kill(&self) {
         self.killed
             .lock()
             .expect("the kill log is never poisoned")
-            .push((pane.id.clone(), pane.birth.clone()));
-    }
-
-    fn delivery(&self) -> Delivery {
-        Delivery::Acknowledged
+            .push((self.id.clone(), self.birth.clone()));
     }
 }
 
@@ -653,4 +684,269 @@ async fn a_surface_is_launched_after_its_record_exists_and_a_refused_launch_unwi
         "and the seeded prompt is gone from an inbox nothing will read"
     );
     assert_eq!(registry.view().members.len(), 2, "the roster holds the lead and w1, never w2");
+}
+
+/// The root is the variable when there is one, the home when there is not,
+/// and nothing at all when there is neither — with an empty variable read
+/// as unset.
+#[test]
+fn the_teams_root_follows_the_config_dir_and_falls_back_to_the_home() {
+    let named = claude_root_under(
+        Some(OsString::from("/tmp/claude-home")),
+        Some(PathBuf::from("/home/somebody")),
+    )
+    .expect("a named config dir is a root");
+    assert_eq!(
+        named.inbox_path(
+            &TeamName::parse("session-abcd1234").expect("a team name"),
+            &MemberName::lead(),
+        ),
+        PathBuf::from("/tmp/claude-home")
+            .join(TEAMS_DIR)
+            .join("session-abcd1234")
+            .join("inboxes")
+            .join("team-lead.json")
+    );
+
+    let fallen = claude_root_under(None, Some(PathBuf::from("/home/somebody")))
+        .expect("a home is a root when the variable is unset");
+    assert_eq!(
+        fallen.config_path(&TeamName::parse("session-abcd1234").expect("a team name")),
+        PathBuf::from("/home/somebody/.claude/teams/session-abcd1234/config.json")
+    );
+
+    assert_eq!(
+        claude_root_under(Some(OsString::new()), Some(PathBuf::from("/home/somebody"))),
+        Some(fallen),
+        "an empty variable is unset, not the root directory"
+    );
+    assert!(claude_root_under(None, None).is_none());
+}
+
+/// **U-3, D538.** An in-process member's ring subscription is registered
+/// before its runner can take a turn.
+///
+/// The order the four steps of `Spawned::start` run in is this backend's
+/// responsibility since the ruling moved them out of the registry, and this is
+/// the half of it with a cost: a droppable subscription registered inside its
+/// own task, or after the runner's, would miss the very first call the
+/// teammate's first turn makes — a ring that is empty for one turn and then
+/// silently correct, which is exactly the kind of regression nothing else
+/// here would catch.
+///
+/// Driven through a scripted fake whose first turn calls a tool, so what is
+/// asserted is the ring holding that call rather than the shape of the code
+/// that fills it.
+#[tokio::test]
+async fn an_in_process_start_subscribes_before_its_runner_takes_a_turn() {
+    let home = tempfile::tempdir().expect("a temporary home");
+    let script = home.path().join("script.json");
+    std::fs::write(
+        &script,
+        r#"{"cadence_ms":0,"turns":[
+             {"tool_calls":[{"name":"read","args":{"filePath":"src/main.rs"}}]},
+             {"text":"done"}
+           ]}"#,
+    )
+    .expect("the script is written");
+
+    let registry = registry(home.path());
+    let backend: Arc<dyn TeammateBackend> = Arc::new(InProcess::new(
+        Arc::new(FakeProvider::new("on it", Duration::ZERO).with_script(&script)),
+        Arc::new(Tools::with_builtins()),
+        Storage::open(home.path().join("storage")),
+        |_| Permissions::default(),
+    ));
+    registry
+        .spawn(backend, request("w1", MemberBackend::InProcess, home.path()))
+        .await
+        .expect("the teammate starts");
+
+    // The teammate's first turn is what fills the ring, and it begins as soon
+    // as its runner reads the seeded prompt — so this waits on the ring rather
+    // than on a clock.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let ring = loop {
+        let ring: Vec<String> =
+            registry.view().members.iter().flat_map(|member| member.recent_calls.clone()).collect();
+        if !ring.is_empty() || tokio::time::Instant::now() >= deadline {
+            break ring;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+
+    assert!(
+        ring.iter().any(|line| line.contains("read")),
+        "the first turn's own call is in the ring, so the subscription preceded the runner: {ring:?}"
+    );
+
+    registry.shutdown().await;
+}
+
+/// **U-4, D538.** `spawn`, `launch` and `start` each run once, in that order,
+/// and a refused launch is killed rather than started.
+///
+/// The sequence the registry keeps is the whole of what a backend may rely on,
+/// and it is the thing this ruling made a backend's business: what used to be
+/// three arms of one `match` on a handle's shape is now three methods on one
+/// object, and nothing but a test says they are called the way their docs
+/// promise.
+#[tokio::test]
+async fn spawn_launch_start_run_once_each_in_that_order() {
+    /// Every call the registry made, in order.
+    #[derive(Debug, Default)]
+    struct Log(std::sync::Mutex<Vec<&'static str>>);
+
+    impl Log {
+        fn record(&self, what: &'static str) {
+            self.0.lock().expect("the call log is never poisoned").push(what);
+        }
+
+        fn calls(&self) -> Vec<&'static str> {
+            self.0.lock().expect("the call log is never poisoned").clone()
+        }
+    }
+
+    #[derive(Debug)]
+    struct Watching {
+        log: Arc<Log>,
+        refuse_launch: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl TeammateBackend for Watching {
+        fn backend(&self) -> MemberBackend {
+            MemberBackend::Ganja
+        }
+
+        fn preamble(&self, spec: &SpawnSpec) -> String {
+            crate::teammate::preamble::native(
+                crate::teammate::preamble::Names::of(spec),
+                &spec.prompt,
+            )
+        }
+
+        async fn spawn(
+            &self,
+            _spec: &SpawnSpec,
+            _lent: Lent,
+        ) -> Result<Arc<dyn Spawned>, Unsupported> {
+            self.log.record("spawn");
+
+            Ok(Arc::new(Watched { log: Arc::clone(&self.log), refuse_launch: self.refuse_launch }))
+        }
+
+        fn delivery(&self) -> Delivery {
+            Delivery::Acknowledged
+        }
+    }
+
+    #[derive(Debug)]
+    struct Watched {
+        log: Arc<Log>,
+        refuse_launch: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl Spawned for Watched {
+        fn surface(&self) -> Surface {
+            Surface::Pane { id: "%3".to_owned() }
+        }
+
+        async fn launch(&self) -> Result<(), Unsupported> {
+            self.log.record("launch");
+            if self.refuse_launch {
+                return Err(Unsupported {
+                    backend: MemberBackend::Ganja,
+                    reason: UNLAUNCHABLE.to_owned(),
+                });
+            }
+
+            Ok(())
+        }
+
+        fn start(self: Arc<Self>) -> Vec<tokio::task::JoinHandle<()>> {
+            self.log.record("start");
+
+            Vec::new()
+        }
+
+        fn alive(&self) -> bool {
+            true
+        }
+
+        fn recent(&self) -> Vec<String> {
+            Vec::new()
+        }
+
+        async fn kill(&self) {
+            self.log.record("kill");
+        }
+    }
+
+    let home = tempfile::tempdir().expect("a temporary home");
+    let registry = registry(home.path());
+    let log = Arc::new(Log::default());
+    registry
+        .spawn(
+            Arc::new(Watching { log: Arc::clone(&log), refuse_launch: false }),
+            request("w1", MemberBackend::Ganja, home.path()),
+        )
+        .await
+        .expect("the teammate starts");
+
+    assert_eq!(
+        log.calls(),
+        vec!["spawn", "launch", "start"],
+        "each once, and the launch is between the surface and what watches it"
+    );
+
+    let refused = Arc::new(Log::default());
+    registry
+        .spawn(
+            Arc::new(Watching { log: Arc::clone(&refused), refuse_launch: true }),
+            request("w2", MemberBackend::Ganja, home.path()),
+        )
+        .await
+        .expect_err("a refused launch is a refused spawn");
+
+    assert_eq!(
+        refused.calls(),
+        vec!["spawn", "launch", "kill"],
+        "a launch that would not run is killed and never started"
+    );
+}
+
+/// **U-5, D538.** A drain takes everything posted since the last one, and a
+/// second drain of the same exits finds nothing.
+///
+/// The contract the `Vec` this replaced kept, restated over the channel that
+/// replaced it: the lead's pass acts on each entry exactly once, so an entry
+/// left behind would retire a member twice and an entry dropped would leave a
+/// dead pane on the roster forever.
+#[tokio::test]
+async fn take_exited_drains_everything_posted_since_the_last_call() {
+    let home = tempfile::tempdir().expect("a temporary home");
+    let registry = registry(home.path());
+    let exits = registry.lend().exits;
+
+    assert!(registry.take_exited().is_empty(), "nothing has ended yet");
+
+    for name in ["w1", "w2"] {
+        exits
+            .send(Exited {
+                name: name.to_owned(),
+                cli: ganja_team::ShimCli::Codex,
+                backend: MemberBackend::Codex,
+                pane_id: "%4".to_owned(),
+                pane: PaneFate::Closed,
+                last_words: None,
+            })
+            .expect("the registry is still holding the receiving half");
+    }
+
+    let taken: Vec<String> = registry.take_exited().into_iter().map(|exit| exit.name).collect();
+
+    assert_eq!(taken, vec!["w1", "w2"], "both, in the order they were posted");
+    assert!(registry.take_exited().is_empty(), "and each is taken exactly once");
 }

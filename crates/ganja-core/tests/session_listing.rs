@@ -79,7 +79,7 @@ async fn the_listing_reaches_the_postboxes_that_can_cross_a_session_and_no_other
             Arc::new(Registry::new(Vec::new())),
             Permissions::default(),
         )
-        .with_teammates(Arc::clone(&registry));
+        .with_teammates(Arc::clone(&registry), ganja_testkit::externals());
 
         let request = offered(&engine, &requests).await;
         assert!(
@@ -179,7 +179,7 @@ async fn installing_a_member_postbox_over_a_lead_takes_the_listing_away() {
         Arc::new(Registry::new(Vec::new())),
         Permissions::default(),
     )
-    .with_teammates(Arc::clone(&registry));
+    .with_teammates(Arc::clone(&registry), ganja_testkit::externals());
 
     assert!(
         offers(&offered(&engine, &requests).await, list_sessions::ID),

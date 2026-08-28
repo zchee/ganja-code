@@ -74,7 +74,7 @@ impl Sender {
             Permissions::default(),
         )
         .with_inbound_bypass(seeded)
-        .with_teammates(Arc::clone(&registry));
+        .with_teammates(Arc::clone(&registry), ganja_testkit::externals());
 
         Self { engine: Arc::new(engine), provider, requests, _home: home }
     }
@@ -132,7 +132,7 @@ impl Receiver {
         )
         .with_inbound_policy(policy, DialogExpiry::default())
         .with_inbound_bypass(seeded)
-        .with_teammates(Arc::clone(&registry));
+        .with_teammates(Arc::clone(&registry), ganja_testkit::externals());
 
         Self { engine: Arc::new(engine), registry, _home: home }
     }

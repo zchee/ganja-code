@@ -21,8 +21,6 @@ fn spec() -> SpawnSpec {
         cwd: PathBuf::from("/nowhere/project"),
         plan_mode_required: true,
         parent_session_id: "01998ad0-0000-7000-8000-000000000000".to_owned(),
-        shell: crate::teammate::pane::PaneShell::default(),
-        share: crate::teammate::pane::PaneShare::default(),
     }
 }
 

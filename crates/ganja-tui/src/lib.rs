@@ -30,8 +30,15 @@ use std::sync::Arc;
 use anyhow::{Context as _, Result};
 use ganja_core::config::{Config, Overrides, ThemeMode};
 use ganja_core::teammate::TeammateRegistry;
-use ganja_core::teammate::pane::{PaneShare, PaneShell};
-use ganja_core::{AgentRegistry, Engine, SessionId, Storage, catalog, instruction, provider};
+use ganja_core::teammate::agy::Agy;
+use ganja_core::teammate::claude::ClaudePane;
+use ganja_core::teammate::codex::Codex;
+use ganja_core::teammate::grok::Grok;
+use ganja_core::teammate::pane::{GanjaPane, PaneShare, PaneShell};
+use ganja_core::teammate::shim_tui::ShimTui;
+use ganja_core::{
+    AgentRegistry, Backends, Engine, SessionId, Storage, catalog, instruction, provider,
+};
 use ganja_permission::Project;
 use ganja_protocol::Message;
 use ratatui::crossterm::event::{
@@ -63,6 +70,36 @@ pub enum Resume {
     Latest,
     /// The session with this stored id.
     Session(String),
+}
+
+/// The surfaces this build can spawn a teammate onto, except the engine's own
+/// (**D538**).
+///
+/// Assembled here because a pane needs a tmux server and the shell a spawn
+/// splits into, and a foreign CLI's TUI needs those plus a binary on `PATH` —
+/// none of which an engine holds. `Engine::with_teammates` adds the in-process
+/// implementation it *can* build, out of that session's own provider, tool set
+/// and store.
+///
+/// **D512 (P28)**: all three shim slots open the CLI's own native TUI in a
+/// pane, spoken to through bracketed paste, and **no spawn door in this build
+/// reaches the headless `teammate::shim::ShimBackend`** any more — that
+/// machinery stays in the tree, unit-tested, reachable only by the tests that
+/// drive it against a fake CLI. Which is also why `teammates.shim_turn_timeout`
+/// is not read here: a pane-mode shim has no per-turn deadline (the module doc
+/// owns why), and the key governs only the headless machinery it was written
+/// for (**D509**).
+///
+/// These slots search the real `PATH`; a test that reached one would spawn the
+/// developer's own CLI. Tests assemble their backends through
+/// `ganja_testkit`, never through this.
+fn local_backends(shell: PaneShell, share: PaneShare) -> Backends {
+    Backends::new()
+        .with(Arc::new(GanjaPane::new(shell.clone(), share)))
+        .with(Arc::new(ClaudePane::new(shell.clone(), share)))
+        .with(Arc::new(ShimTui::new(Arc::new(Codex::new()), shell.clone(), share)))
+        .with(Arc::new(ShimTui::new(Arc::new(Agy::new()), shell.clone(), share)))
+        .with(Arc::new(ShimTui::new(Arc::new(Grok::new()), shell, share)))
 }
 
 /// Runs the interactive terminal UI until the user quits.
@@ -405,32 +442,19 @@ pub async fn run(
     let (engine, teammates, socket) =
         match ganja_core::config::config_home().filter(|_| membership.is_none()) {
             Some(home) => {
-                let registry = Arc::new(
-                    TeammateRegistry::for_session(&home, engine.session_id().as_str(), &cwd)
-                        // Resolved **once**, here, rather than read per turn
-                        // (**D509**): the deadline is a property of the
-                        // runtime, not of one spawn, and `shim.rs` therefore
-                        // names no config type at all.
-                        .with_shim_turn_timeout(config.teammates.shim_turn_timeout())
-                        // The idle shell every pane teammate is spawned
-                        // into (**D520**), resolved here for the same reason.
-                        .with_pane_shell(
-                            config
-                                .teammates
-                                .pane_shell()
-                                .map(PaneShell::configured)
-                                .unwrap_or_default(),
-                        )
-                        // And how wide the teammates' column opens
-                        // (2026-08-25), the same way.
-                        .with_pane_share(
-                            config
-                                .teammates
-                                .pane_share()
-                                .map(PaneShare::configured)
-                                .unwrap_or_default(),
-                        ),
-                );
+                let id = engine.session_id();
+                let registry = Arc::new(TeammateRegistry::for_session(&home, id.as_str(), &cwd));
+                // Resolved **once**, here, and handed to the backends that read
+                // them rather than to the registry (**D538**, keeping **D520**'s
+                // intent): the idle shell a pane is split into and how wide the
+                // teammates' column opens are properties of this *runtime*, and
+                // a backend must name no config type — so they cross as
+                // `ganja-core`'s own value types.
+                let shell =
+                    config.teammates.pane_shell().map(PaneShell::configured).unwrap_or_default();
+                let share =
+                    config.teammates.pane_share().map(PaneShare::configured).unwrap_or_default();
+                let backends = local_backends(shell, share);
                 // **D506**: panes a previous lead of this team left running,
                 // before this one spawns anything of its own. Best-effort by
                 // construction — it returns a `Swept` and never an error, and a
@@ -456,7 +480,11 @@ pub async fn run(
                 // asserted so at the function level by
                 // `ganja-core/tests/teammate_shim_sweep.rs`; the call itself
                 // has the same no-headless-seam gap the pane sweep's does.
-                let orphans = ganja_core::teammate::reaper::sweep_shims(&registry).await;
+                let orphans = ganja_core::teammate::reaper::sweep_shims(
+                    &registry,
+                    ganja_core::teammate::shim::default_directory(),
+                )
+                .await;
                 if !orphans.is_empty() {
                     tracing::info!(
                         ?orphans,
@@ -465,7 +493,7 @@ pub async fn run(
                 }
 
                 (
-                    engine.with_teammates(Arc::clone(&registry)),
+                    engine.with_teammates(Arc::clone(&registry), backends),
                     Some(registry),
                     // The lead's socket rides the same gate as its team
                     // (**D505**): a session that leads is one a peer session

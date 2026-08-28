@@ -611,7 +611,7 @@ async fn a_turn_past_its_deadline_is_ended_and_the_mail_names_the_key_that_moves
 async fn a_resident_turn_past_its_deadline_is_ended_and_the_mail_names_the_key_too() {
     let home = ganja_testkit::temp_dir();
     let cli = FakeCli::install();
-    let (registry, door) = shim_support::lead_with_timeout(
+    let (registry, door, records) = shim_support::lead_recording(
         home.path(),
         home.path(),
         Arc::new(Resident::new(&cli.log, Mode::Hang)),
@@ -636,7 +636,7 @@ async fn a_resident_turn_past_its_deadline_is_ended_and_the_mail_names_the_key_t
         cli.received()
     );
     // The pid of the child that is about to wedge, read before it does.
-    let wedged = pids(&registry);
+    let wedged = pids(&records);
     assert_eq!(wedged.len(), 1, "one child so far: {wedged:?}");
     assert!(
         until(ANSWERS, || lead_mail(&root, &team)
@@ -661,13 +661,13 @@ async fn a_resident_turn_past_its_deadline_is_ended_and_the_mail_names_the_key_t
     // for free by starting a process per message.
     assert!(
         until(ANSWERS, || {
-            let now = pids(&registry);
+            let now = pids(&records);
 
             now.len() == 1 && now != wedged
         })
         .await,
         "the wedged child is forgotten and its replacement recorded: {:?}",
-        pids(&registry)
+        pids(&records)
     );
     assert!(!shim_support::alive(wedged[0]), "and the wedged one is really gone");
 
@@ -925,16 +925,17 @@ async fn a_shim_spawn_writes_its_posture_onto_the_members_ring() {
 /// Exactly two are turns.
 #[tokio::test]
 async fn one_pass_sorts_its_inbox_into_turns_and_drops() {
+    use ganja_core::teammate::SpawnSpec;
     use ganja_core::teammate::shim::{Lent, ShimBackend, ShimRunner};
-    use ganja_core::teammate::{SpawnSpec, TeammateBackend as _};
 
     let home = ganja_testkit::temp_dir();
     let cli = FakeCli::install();
-    let (registry, _door) = shim_support::lead(
+    let (registry, _door, records) = shim_support::lead_recording(
         home.path(),
         home.path(),
         Arc::new(PerMessage::new(&cli.log, Mode::Answer)),
         cli.path(),
+        None,
     );
     let (root, team) = shim_support::team_of(&registry);
 
@@ -954,13 +955,18 @@ async fn one_pass_sorts_its_inbox_into_turns_and_drops() {
         cwd: home.path().to_path_buf(),
         plan_mode_required: false,
         parent_session_id: shim_support::SESSION_ID.to_owned(),
-        shell: ganja_core::teammate::pane::PaneShell::default(),
-        share: ganja_core::teammate::pane::PaneShare::default(),
     };
-    let backend =
-        ShimBackend::new(Arc::new(PerMessage::new(&cli.log, Mode::Answer))).searching(cli.path());
-    let handle = backend.spawn(&spec).await.expect("the fake codex starts");
-    let child = Arc::clone(handle.child().expect("a shim handle"));
+    // Started through the concrete door rather than the trait's, because what
+    // this drives by hand is the loop under one child: the trait answers with
+    // an `Arc<dyn Spawned>` that owns its own loop, which is the thing being
+    // taken apart here.
+    let backend = ShimBackend::new(
+        Arc::new(PerMessage::new(&cli.log, Mode::Answer)),
+        Arc::clone(&records),
+        None,
+    )
+    .searching(cli.path());
+    let child = backend.start(&spec).await.expect("the fake codex starts");
 
     for (from, text) in [
         ("team-lead", "prose, which is a turn"),
@@ -981,7 +987,7 @@ async fn one_pass_sorts_its_inbox_into_turns_and_drops() {
             lead_inbox: root.inbox_path(&team, &ganja_team::MemberName::lead()),
             recent: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
             alive: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            shims: Arc::clone(registry.shims()),
+            shims: Arc::clone(&records),
             cancel: tokio_util::sync::CancellationToken::new(),
         },
         Duration::from_secs(30),
@@ -1157,11 +1163,12 @@ async fn another_leads_shim_members_are_never_retired() {
 async fn a_registry_shutdown_ends_every_shim_child_and_waits_for_the_reap() {
     let home = ganja_testkit::temp_dir();
     let cli = FakeCli::install();
-    let (registry, door) = shim_support::lead(
+    let (registry, door, records) = shim_support::lead_recording(
         home.path(),
         home.path(),
         Arc::new(Resident::new(&cli.log, Mode::Answer)),
         cli.path(),
+        None,
     );
 
     door.start(
@@ -1176,14 +1183,7 @@ async fn a_registry_shutdown_ends_every_shim_child_and_waits_for_the_reap() {
     // The child's pid, read off the records file the shim itself keeps — which
     // is also the evidence that a resident child is recorded from the moment it
     // starts rather than at a turn boundary.
-    let recorded: Vec<i32> = registry
-        .shims()
-        .lock()
-        .expect("the records are never poisoned")
-        .children()
-        .iter()
-        .map(|child| child.process.pid)
-        .collect();
+    let recorded: Vec<i32> = pids(&records);
     assert_eq!(recorded.len(), 1, "one child is recorded: {recorded:?}");
     let pid = recorded[0];
     assert!(shim_support::alive(pid), "and it is running");
@@ -1192,15 +1192,14 @@ async fn a_registry_shutdown_ends_every_shim_child_and_waits_for_the_reap() {
 
     assert!(!shim_support::alive(pid), "the shutdown returned only once the child was really gone");
     assert!(
-        registry.shims().lock().expect("the records are never poisoned").children().is_empty(),
+        records.lock().expect("the records are never poisoned").children().is_empty(),
         "and its record went with it"
     );
 }
 
 /// The pids of the children this session's shim records currently hold.
-fn pids(registry: &ganja_core::teammate::TeammateRegistry) -> Vec<i32> {
-    registry
-        .shims()
+fn pids(records: &std::sync::Mutex<shim::ShimRecords>) -> Vec<i32> {
+    records
         .lock()
         .expect("the records are never poisoned")
         .children()
@@ -1218,11 +1217,12 @@ fn pids(registry: &ganja_core::teammate::TeammateRegistry) -> Vec<i32> {
 async fn retiring_one_member_ends_its_child_and_returns_without_waiting_out_settle() {
     let home = ganja_testkit::temp_dir();
     let cli = FakeCli::install();
-    let (registry, door) = shim_support::lead(
+    let (registry, door, records) = shim_support::lead_recording(
         home.path(),
         home.path(),
         Arc::new(PerMessage::new(&cli.log, Mode::Answer)),
         cli.path(),
+        None,
     );
 
     door.start(
@@ -1235,8 +1235,7 @@ async fn retiring_one_member_ends_its_child_and_returns_without_waiting_out_sett
     // Its one turn is over, so nothing of this member's is running.
     assert!(until(ANSWERS, || cli.records("argv").len() == 1).await);
     assert!(
-        until(ANSWERS, || registry
-            .shims()
+        until(ANSWERS, || records
             .lock()
             .expect("the records are never poisoned")
             .children()

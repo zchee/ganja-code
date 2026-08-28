@@ -1135,7 +1135,9 @@ pub struct TeammateConfig {
     /// tmux pane ([`crate::teammate::shim_tui`]), and a pane-mode shim runs
     /// under **no per-turn deadline at all** — nothing on that path reads this
     /// key, so on this build the number a config writes here moves nothing a
-    /// session does.
+    /// session does. Since **D538** it is not even read at assembly: the
+    /// deadline is a headless backend's own constructor argument, and no
+    /// production caller builds one.
     ///
     /// It stays curated anyway, and not out of sentiment: the headless
     /// machinery is still in the tree and still driven by the testkit, and a
@@ -1161,6 +1163,12 @@ pub struct TeammateConfig {
     /// into it (**D520**), as a command line: `"/bin/zsh -f"`, or just
     /// `"/bin/bash"`. Absent is `/bin/sh -s`.
     ///
+    /// Resolved **once** by the frontend that assembles this session's
+    /// backends and handed to the two pane backends there (**D538**; it rode
+    /// the registry and every `SpawnSpec` until then), as
+    /// [`crate::teammate::pane::PaneShell`] rather than as a config type — the
+    /// D520 rule that no backend names one is kept while the state moves.
+    ///
     /// Split into words the way a shell would (`shlex`), and kept at two
     /// words or more by the pane door — `-s` is appended to a lone program —
     /// because tmux runs a one-word command through the person's login
@@ -1178,6 +1186,10 @@ pub struct TeammateConfig {
     /// Absent is 65 (`| lead 35% | teammates 65% |`, user directive
     /// 2026-08-25; 70 before that). Refused at load outside 1..=99: a column
     /// of nothing or of everything is a lead with no screen or no teammate.
+    ///
+    /// Resolved once and handed to the pane backends at assembly, exactly as
+    /// [`TeammateConfig::shell`] is and for the same reason (**D538**), as
+    /// [`crate::teammate::pane::PaneShare`].
     pub pane_share: Option<u8>,
 }
 
@@ -1185,6 +1197,8 @@ impl TeammateConfig {
     /// The pane shell's words, when the config names one — the command line
     /// split as a shell would split it. [`None`] leaves the pane door's own
     /// default alone.
+    ///
+    /// Read once, where this session's backends are assembled.
     #[must_use]
     pub fn pane_shell(&self) -> Option<Vec<String>> {
         self.shell.as_deref().and_then(shlex::split).filter(|words| !words.is_empty())
@@ -1192,6 +1206,8 @@ impl TeammateConfig {
 
     /// The teammates' column's share of the width, in percent, when the
     /// config names one. [`None`] leaves the pane door's own default alone.
+    ///
+    /// Read once, beside [`TeammateConfig::pane_shell`].
     #[must_use]
     pub fn pane_share(&self) -> Option<u8> {
         self.pane_share

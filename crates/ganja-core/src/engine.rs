@@ -1962,14 +1962,24 @@ impl Engine {
     /// told.
     ///
     /// Four things are wired here because this is the one moment they all
-    /// exist: the three backends a `task` call may name, of which only the
-    /// in-process one holds anything of this engine's; the lead's own postbox,
+    /// exist: the in-process backend, which is the **only** implementation
+    /// built here and the only one that could be, since it is made out of this
+    /// engine's own provider, tool set and store; the lead's own postbox,
     /// stamped with the lead's name and no other; the dialog channel a
     /// teammate's asks travel to the lead on ([`Engine::teammate_dialogs`]),
     /// attached before anything can be spawned into it; and the tool set,
     /// recomposed because a team is what puts `send_message` in front of the
     /// model at all — presence is ability, the same rule `task` is registered
     /// under.
+    ///
+    /// **Every other surface arrives in `backends`, assembled by the frontend**
+    /// (**D538**). A pane needs a tmux server and a shell, and a foreign CLI's
+    /// TUI needs those plus a binary on `PATH`; an engine holds none of that,
+    /// and the six places a seventh surface used to edit are now that surface's
+    /// own adapter and the one assembly site. A backend the frontend did not
+    /// assemble is refused by name at spawn rather than falling back to
+    /// another, and an `InProcess` entry in the map handed in is a panic at the
+    /// offending `Backends::with`, because that entry is this method's.
     ///
     /// **What a teammate is offered** is the *lent* set — this build's tools
     /// plus whatever the MCP servers are lending **at the moment that teammate
@@ -1991,7 +2001,11 @@ impl Engine {
     /// there is nowhere to write one; the surface refuses by name rather than
     /// running a teammate whose transcript evaporates.
     #[must_use]
-    pub fn with_teammates(mut self, registry: Arc<teammate::TeammateRegistry>) -> Self {
+    pub fn with_teammates(
+        mut self,
+        registry: Arc<teammate::TeammateRegistry>,
+        backends: subagent::Backends,
+    ) -> Self {
         let lead = Arc::new(
             subagent::Postbox::lead(&registry, Some((&self.identity, Arc::clone(&self.session))))
                 .with_peer_facts(self.peer_facts())
@@ -2016,50 +2030,13 @@ impl Engine {
 
         self.teammates = Some(Arc::new(subagent::Teammates::new(
             registry,
-            subagent::Backends {
-                in_process,
-                pane: Arc::new(teammate::pane::GanjaPane),
-                claude: Arc::new(teammate::claude::ClaudePane),
-                // **D512 (P28)**: all three shim slots open the CLI's own
-                // native TUI in a pane (`teammate::shim_tui`), spoken to
-                // through bracketed paste, and **no spawn door in this build
-                // reaches the headless `teammate::shim::ShimBackend`** any
-                // more — that machinery stays in the tree, unit-tested,
-                // reachable only by the tests that drive it against a fake
-                // CLI. Which is also why `teammates.shim_turn_timeout` is
-                // not read here: a pane-mode shim has no per-turn deadline
-                // (the module doc owns why), and the key governs only the
-                // headless machinery it was written for (**D509**).
-                //
-                // This slot searches the real `PATH`; a test that reaches it
-                // spawns the developer's own `codex`. Tests spawn shim
-                // teammates through `ganja_testkit::backends` or
-                // `tests/shim_support::lead`, never through `with_teammates`.
-                //
-                // The trap worth naming: a `#[cfg(test)]` guard would not fire
-                // here. Integration tests link this lib as an ordinary
-                // dependency with `cfg(test)` unset, so the guard is this
-                // comment and those two safe doors rather than anything the
-                // compiler checks.
-                codex: Arc::new(teammate::shim_tui::ShimTui::new(Arc::new(
-                    teammate::codex::Codex::new(),
-                ))),
-                // Real as of Dv-7, and carrying the codex slot's hazard for
-                // the same reason. No deadline is handed over any more: the
-                // `--print-timeout` a resident launch line derived from one
-                // belongs to the headless shape, and a TUI is launched with
-                // its floors alone.
-                agy: Arc::new(teammate::shim_tui::ShimTui::new(
-                    Arc::new(teammate::agy::Agy::new()),
-                )),
-                // Real as of W5, and carrying the codex slot's hazard for the
-                // same reason: it searches the real `PATH`, so a test that
-                // reached it would spawn the developer's own `grok`. The two
-                // safe doors are the same two.
-                grok: Arc::new(teammate::shim_tui::ShimTui::new(Arc::new(
-                    teammate::grok::Grok::new(),
-                ))),
-            },
+            // Its own entry, and only its own (**D538**): what a pane or a
+            // foreign CLI's TUI needs — a tmux server, a resolved shell, a
+            // column width — is the frontend's to hold, so the frontend
+            // assembles those and hands them in. This is the one implementation
+            // an engine can build honestly, because it is built out of what
+            // this engine already holds.
+            backends.with_in_process(in_process),
         )));
         self.install_postbox(lead);
         // A lead's postbox reaches `deliver_over_socket` and the resolver, so
@@ -5565,18 +5542,12 @@ impl teammate::TeammateBackend for Storeless {
     async fn spawn(
         &self,
         _spec: &teammate::SpawnSpec,
-    ) -> Result<teammate::Handle, teammate::Unsupported> {
+        _lent: teammate::Lent,
+    ) -> Result<std::sync::Arc<dyn teammate::Spawned>, teammate::Unsupported> {
         Err(teammate::Unsupported {
             backend: crate::protocol::team::MemberBackend::InProcess,
             reason: STORELESS.to_owned(),
         })
-    }
-
-    async fn kill(&self, handle: &teammate::Handle) {
-        // Nothing this backend made can be here to end. Named rather than
-        // ignored, because a handle arriving here would mean a registry had
-        // crossed two backends.
-        tracing::warn!(?handle, "a storeless backend was asked to end something it did not start");
     }
 
     fn delivery(&self) -> teammate::Delivery {
@@ -6062,7 +6033,7 @@ async fn prune_lead_inboxes(
     let own = registry.root().clone();
     let mut roots = vec![own.clone()];
     if registry.holds_backend(ganja_protocol::team::MemberBackend::Claude)
-        && let Some(claude) = teammate::claude::teams_root()
+        && let Some(claude) = teammate::teams_root()
         && claude != own
     {
         roots.push(claude);

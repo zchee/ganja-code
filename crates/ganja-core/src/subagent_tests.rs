@@ -410,6 +410,20 @@ impl SpawnAsker for Asked {
     }
 }
 
+/// An asker that must never be reached.
+///
+/// The refusals that precede the dialog are what this proves: a `SpawnAsk`
+/// arriving here is the defect, so it panics where it happens rather than
+/// recording an answer a later assertion would have to notice was wrong.
+struct NeverAsked;
+
+#[async_trait]
+impl SpawnAsker for NeverAsked {
+    async fn ask(&self, request: SpawnAsk) -> PermissionReply {
+        panic!("nobody may be asked about this spawn, and one was: {request:?}");
+    }
+}
+
 /// A `task` call's request, at its dullest.
 fn wanted() -> TeammateSpawn {
     TeammateSpawn {
@@ -448,15 +462,84 @@ fn door(home: &std::path::Path) -> Teammates {
 
     Teammates::new(
         team_registry(home),
-        Backends {
-            in_process: Arc::new(Never(MemberBackend::InProcess)),
-            pane: Arc::new(Never(MemberBackend::InProcess)),
-            claude: Arc::new(Never(MemberBackend::InProcess)),
-            codex: Arc::new(Never(MemberBackend::Codex)),
-            agy: Arc::new(Never(MemberBackend::Agy)),
-            grok: Arc::new(Never(MemberBackend::Grok)),
-        },
+        // Every surface answers `Never`, and the two pane slots answer for the
+        // surfaces they stand in for rather than for `in-process`: the map is
+        // keyed by what a backend says it is, so a `Never(InProcess)` in the
+        // `ganja` slot would key over the engine's own entry.
+        Backends::new()
+            .with_in_process(Arc::new(Never(MemberBackend::InProcess)))
+            .with(Arc::new(Never(MemberBackend::Ganja)))
+            .with(Arc::new(Never(MemberBackend::Claude)))
+            .with(Arc::new(Never(MemberBackend::Codex)))
+            .with(Arc::new(Never(MemberBackend::Agy)))
+            .with(Arc::new(Never(MemberBackend::Grok))),
     )
+}
+
+/// **U-1, D538.** A surface this session assembled no implementation for is
+/// refused *by name*, and never quietly served another.
+///
+/// The exhaustiveness a field-per-surface `Backends` used to buy is the one
+/// thing this ruling traded away, so what replaces it is asserted rather than
+/// described: the sentence the model reads names the backend it asked for, and
+/// a `tracing::warn!` beside it names the backend and the session, because a
+/// map missing a surface is a wiring fault in whoever assembled it rather than
+/// something the model did.
+///
+/// And the refusal comes **before** the dialog: the asker here panics rather
+/// than answering, so a spawn that asked a person to approve a teammate this
+/// session cannot start fails the test instead of passing it.
+#[tokio::test]
+async fn a_backend_absent_from_the_map_is_refused_by_name() {
+    let home = ganja_testkit::temp_dir();
+    let capture = ganja_testkit::LogCapture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(capture.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .finish();
+
+    // Scoped rather than global: this binary holds many tests, and a global
+    // default would be installed once and read by all of them.
+    let refused = tracing::subscriber::with_default(subscriber, || {
+        futures::executor::block_on(async {
+            let registry = team_registry(home.path());
+            let door = Teammates::new(
+                Arc::clone(&registry),
+                Backends::new().with_in_process(Arc::new(Never(MemberBackend::InProcess))),
+            );
+            let mut wanted = wanted();
+            wanted.backend = Some("codex".to_owned());
+
+            door.start(wanted, &caller(Vec::new(), home.path(), home.path()), &NeverAsked)
+                .await
+                .expect_err("no codex backend was assembled")
+        })
+    });
+
+    assert_eq!(
+        refused.reason, "this session has no codex backend",
+        "the refusal names the surface asked for and nothing else"
+    );
+    let logged = capture.logged();
+    assert!(logged.contains("codex"), "the warn line names the backend: {logged}");
+    assert!(
+        logged.contains("did not assemble"),
+        "and says the assembly is what is missing: {logged}"
+    );
+}
+
+/// **U-2, D538.** The in-process entry is the engine's own, and an assembler
+/// offering one is a mistake named at the offending call.
+///
+/// A panic rather than a silent overwrite because the two are not the same
+/// value: the engine's is built out of that session's provider, tool set and
+/// store, and an assembled one that quietly won would hand every teammate of
+/// that session somebody else's conversation.
+#[test]
+#[should_panic(expected = "the in-process backend is the engine's own")]
+fn backends_with_refuses_the_in_process_entry() {
+    let _ = Backends::new().with(Arc::new(Never(MemberBackend::InProcess)));
 }
 
 /// A teammate that would work outside the lead's project is not routine,

@@ -9211,7 +9211,7 @@ async fn leading(
         ganja_permission::Permissions::default(),
         Storage::open(directory.path().join("storage")),
     )
-    .with_teammates(Arc::clone(&registry));
+    .with_teammates(Arc::clone(&registry), ganja_testkit::externals());
     let events = engine.subscribe().await.expect("the test subscribes first");
 
     (App::new(engine, None, Themes::builtin()), registry, events)

@@ -12,8 +12,8 @@ use crate::Storage;
 use crate::permission::Permissions;
 use crate::provider::FakeProvider;
 use crate::teammate::{
-    Delivery, Handle, InProcess, MemberBackend, SpawnRequest, SpawnSpec, TeammateBackend,
-    TeammateRegistry, Unsupported, member,
+    Delivery, InProcess, Lent, MemberBackend, SpawnRequest, SpawnSpec, Spawned, Surface,
+    TeammateBackend, TeammateRegistry, Unsupported, member,
 };
 use crate::tool::Registry as Tools;
 
@@ -450,23 +450,45 @@ impl TeammateBackend for AsClaude {
         true
     }
 
-    // The real claude words, since this stands in for that backend.
-    fn preamble(&self, spec: &SpawnSpec) -> String {
-        crate::teammate::claude::preamble(spec)
+    /// Never read, and that is this backend's own contract: a backend that
+    /// [owns its inbox](TeammateBackend::owns_inbox) seeds the message itself,
+    /// so the registry never asks for one.
+    fn preamble(&self, _spec: &SpawnSpec) -> String {
+        String::new()
     }
 
-    async fn spawn(&self, _spec: &SpawnSpec) -> Result<Handle, Unsupported> {
-        Ok(Handle::Pane(crate::teammate::reaper::Pane {
-            id: "%17".to_owned(),
-            birth: "48213".to_owned(),
-        }))
+    async fn spawn(&self, _spec: &SpawnSpec, _lent: Lent) -> Result<Arc<dyn Spawned>, Unsupported> {
+        Ok(Arc::new(AsPane))
     }
-
-    async fn kill(&self, _handle: &Handle) {}
 
     fn delivery(&self) -> Delivery {
         Delivery::FireAndForget
     }
+}
+
+/// What [`AsClaude`] hands back: a pane on the roster that nothing runs.
+#[derive(Debug)]
+struct AsPane;
+
+#[async_trait::async_trait]
+impl Spawned for AsPane {
+    fn surface(&self) -> Surface {
+        Surface::Pane { id: "%17".to_owned() }
+    }
+
+    fn start(self: Arc<Self>) -> Vec<tokio::task::JoinHandle<()>> {
+        Vec::new()
+    }
+
+    fn alive(&self) -> bool {
+        true
+    }
+
+    fn recent(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    async fn kill(&self) {}
 }
 
 /// Puts a claude-backed `w1` in the roster.

@@ -108,7 +108,7 @@ async fn lead(provider: Arc<dyn Provider>) -> Lead {
         Permissions::default(),
         storage,
     )
-    .with_teammates(Arc::clone(&registry));
+    .with_teammates(Arc::clone(&registry), ganja_testkit::externals());
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
     tokio::spawn(async move { while events.next().await.is_some() {} });
 

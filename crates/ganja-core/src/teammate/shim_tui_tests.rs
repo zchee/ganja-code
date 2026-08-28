@@ -468,8 +468,13 @@ fn a_pane_spawns_ring_closes_on_the_sentence_its_dialog_carried() {
         let shared = shim::posture_lines(backend);
         assert_eq!(lines.len(), 3, "{lines:?}");
         assert_eq!(&lines[..2], &shared[..], "{lines:?}");
-        let dialog =
-            ShimTui::new(driver).surface_line().expect("a shim pane backend discloses its surface");
+        let dialog = ShimTui::new(
+            driver,
+            crate::teammate::pane::PaneShell::default(),
+            crate::teammate::pane::PaneShare::default(),
+        )
+        .surface_line()
+        .expect("a shim pane backend discloses its surface");
         assert_eq!(lines[2], dialog);
     }
     assert!(spawn_lines(MemberBackend::Ganja).is_empty());

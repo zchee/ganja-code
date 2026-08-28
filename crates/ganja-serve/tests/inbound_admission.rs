@@ -61,7 +61,7 @@ fn led_engine(
         Permissions::default(),
     )
     .with_inbound_policy(policy, DialogExpiry::default())
-    .with_teammates(Arc::clone(&registry));
+    .with_teammates(Arc::clone(&registry), ganja_testkit::externals());
 
     (Arc::new(engine), registry)
 }

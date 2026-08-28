@@ -120,7 +120,7 @@ fn led_engine(home: &Path) -> (Arc<Engine>, Arc<TeammateRegistry>) {
     let cwd = env::current_dir().expect("the working directory resolves");
     let registry = Arc::new(TeammateRegistry::for_session(home, engine.session_id().as_str(), cwd));
 
-    (Arc::new(engine.with_teammates(Arc::clone(&registry))), registry)
+    (Arc::new(engine.with_teammates(Arc::clone(&registry), ganja_testkit::externals())), registry)
 }
 
 /// `engine`'s own session socket, bound under `directory` — `Listen::Session`,

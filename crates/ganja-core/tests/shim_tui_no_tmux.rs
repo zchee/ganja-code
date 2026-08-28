@@ -18,7 +18,7 @@ use std::time::Duration;
 use ganja_core::teammate::TeammateRegistry;
 use ganja_core::teammate::claude::ClaudePane;
 use ganja_core::teammate::codex::Codex;
-use ganja_core::teammate::pane::GanjaPane;
+use ganja_core::teammate::pane::{GanjaPane, PaneShare, PaneShell};
 use ganja_core::teammate::shim_tui::ShimTui;
 use ganja_core::teammate::tmux::{self, REFUSED_NO_TMUX};
 use ganja_core::{Backends, Storage, Teammates};
@@ -40,30 +40,27 @@ fn lead(
     home: &Path,
     path: OsString,
 ) -> (Arc<TeammateRegistry>, Arc<Teammates>, TeamsRoot, TeamName) {
-    let registry = Arc::new(
-        TeammateRegistry::for_session(home, SESSION_ID, home)
-            .with_shim_directory(home.join("shims")),
-    );
+    let registry = Arc::new(TeammateRegistry::for_session(home, SESSION_ID, home));
     let storage = Storage::open(home.join("storage"));
-    let backends = Backends {
-        in_process: Arc::new(ganja_core::teammate::InProcess::new(
+    let (shell, share) = (PaneShell::default(), PaneShare::default());
+    let backends = Backends::new()
+        .with_in_process(Arc::new(ganja_core::teammate::InProcess::new(
             Arc::new(ganja_core::provider::FakeProvider::new("on it", Duration::ZERO)),
             Arc::new(ganja_core::tool::Registry::new(Vec::new())),
             storage,
             |_: &ganja_core::teammate::SpawnSpec| ganja_core::permission::Permissions::default(),
-        )),
-        pane: Arc::new(GanjaPane),
-        claude: Arc::new(ClaudePane),
-        codex: Arc::new(ShimTui::new(Arc::new(Codex::new())).searching(path)),
-        agy: Arc::new(
-            ShimTui::new(Arc::new(ganja_core::teammate::agy::Agy::new()))
+        )))
+        .with(Arc::new(GanjaPane::default()))
+        .with(Arc::new(ClaudePane::default()))
+        .with(Arc::new(ShimTui::new(Arc::new(Codex::new()), shell.clone(), share).searching(path)))
+        .with(Arc::new(
+            ShimTui::new(Arc::new(ganja_core::teammate::agy::Agy::new()), shell.clone(), share)
                 .searching(OsString::new()),
-        ),
-        grok: Arc::new(
-            ShimTui::new(Arc::new(ganja_core::teammate::grok::Grok::new()))
+        ))
+        .with(Arc::new(
+            ShimTui::new(Arc::new(ganja_core::teammate::grok::Grok::new()), shell, share)
                 .searching(OsString::new()),
-        ),
-    };
+        ));
     let door = Arc::new(Teammates::new(Arc::clone(&registry), backends));
     let root = registry.root().clone();
     let team = registry.team().clone();

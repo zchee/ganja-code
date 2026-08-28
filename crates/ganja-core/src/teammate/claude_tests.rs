@@ -6,7 +6,6 @@ use ganja_team::{MemberName, TeamName, TeamsRoot, mailbox};
 
 use super::{
     BINARY, ClaudePane, PLAN_MODE_REQUIRED, TEAMS_DIRECTORY, arguments, carried_env, preamble,
-    root_under,
 };
 // `shim::resolve` is the hoisted walk. These tests stayed here because what
 // they pin is what *this* backend's binary resolution must refuse — a
@@ -35,8 +34,6 @@ fn spec() -> SpawnSpec {
         cwd: PathBuf::from("/nowhere/project"),
         plan_mode_required: false,
         parent_session_id: "01998ad0-0000-7000-8000-000000000000".to_owned(),
-        shell: crate::teammate::pane::PaneShell::default(),
-        share: crate::teammate::pane::PaneShare::default(),
     }
 }
 
@@ -112,41 +109,6 @@ fn the_carried_environment_adds_the_claude_config_dir_and_nothing_else() {
     }
 }
 
-/// The root is the variable when there is one, the home when there is not,
-/// and nothing at all when there is neither — with an empty variable read
-/// as unset.
-#[test]
-fn the_teams_root_follows_the_config_dir_and_falls_back_to_the_home() {
-    let named =
-        root_under(Some(OsString::from("/tmp/claude-home")), Some(PathBuf::from("/home/somebody")))
-            .expect("a named config dir is a root");
-    assert_eq!(
-        named.inbox_path(
-            &TeamName::parse("session-abcd1234").expect("a team name"),
-            &MemberName::lead(),
-        ),
-        PathBuf::from("/tmp/claude-home")
-            .join(TEAMS_DIRECTORY)
-            .join("session-abcd1234")
-            .join("inboxes")
-            .join("team-lead.json")
-    );
-
-    let fallen = root_under(None, Some(PathBuf::from("/home/somebody")))
-        .expect("a home is a root when the variable is unset");
-    assert_eq!(
-        fallen.config_path(&TeamName::parse("session-abcd1234").expect("a team name")),
-        PathBuf::from("/home/somebody/.claude/teams/session-abcd1234/config.json")
-    );
-
-    assert_eq!(
-        root_under(Some(OsString::new()), Some(PathBuf::from("/home/somebody"))),
-        Some(fallen),
-        "an empty variable is unset, not the root directory"
-    );
-    assert!(root_under(None, None).is_none());
-}
-
 /// §5.5.1, as the thing a worker actually reads: its lead by name, and
 /// `main` named as the address that will not work.
 #[test]
@@ -203,7 +165,7 @@ fn a_session_without_tmux_is_refused_in_the_sentence_the_other_pane_uses() {
 #[test]
 fn a_claude_pane_owns_its_inbox_so_the_registry_must_not_seed_it() {
     assert!(
-        ClaudePane.owns_inbox(),
+        ClaudePane::default().owns_inbox(),
         "the registry must not write a second message into this inbox"
     );
 }

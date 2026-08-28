@@ -14,9 +14,9 @@
 //! ([`crate::teammate::TeammateRegistry`]'s `spawn`): the inbox is made and
 //! the prompt written into it *before* this runs, the member record is written
 //! *after* this returns with the pane's identity in hand, and a record that
-//! cannot be written has the registry call [`TeammateBackend::kill`] on what
-//! this made — which is §4.1's failure-cleanup closure in the shape a backend
-//! that returns a handle needs. What is this backend's own is the surface and
+//! cannot be written has the registry call [`Spawned::kill`] on what this made
+//! — which is §4.1's failure-cleanup closure in the shape a backend that hands
+//! back a live member needs. What is this backend's own is the surface and
 //! the launch, in §4.1's own order: one `split-window` carrying the working
 //! directory and the environment, holding an idle `sh`, answered with the
 //! `(pane_id, pid)` pair the record and the reaper identify the pane by; the
@@ -87,16 +87,18 @@
 //! roster is the one that gets to say so.
 
 use std::ffi::{OsStr, OsString};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use ganja_protocol::team::MemberBackend;
 use ganja_team::TeamFile;
+use tokio::task::JoinHandle;
 
 use crate::config::CONFIG_HOME_ENV;
 use crate::teammate::reaper::Pane;
 use crate::teammate::tmux::{self, Killed, Launch, Placement, Server, TmuxError};
-use crate::teammate::{Delivery, Handle, SpawnSpec, TeammateBackend, Unsupported};
+use crate::teammate::{Delivery, Lent, SpawnSpec, Spawned, Surface, TeammateBackend, Unsupported};
 
 /// The environment a `ganja` pane is started with, by name (**D502**).
 ///
@@ -298,16 +300,18 @@ pub(super) async fn split_idle_shell(
     server: &Server,
     spec: &SpawnSpec,
     environment: &[OsString],
+    shell: &PaneShell,
+    share: PaneShare,
     refused_as: MemberBackend,
     whose: &'static str,
 ) -> Result<Pane, Unsupported> {
-    let shell = spec.shell.argv();
+    let shell = shell.argv();
     // Where it goes is read off the screen, not remembered: the first
     // teammate opens a column beside the lead and every later one stacks
     // under that column's bottom. A listing that fails is not a spawn that
     // fails — where a pane sits is cosmetic — so it falls back to the
     // placement a lead with no column would have given it anyway.
-    let beside = Placement::Beside { share: spec.share.percent() };
+    let beside = Placement::Beside { share: share.percent() };
     let placement = match server.column_bottom().await {
         Ok(Some(bottom)) => Placement::Under(bottom),
         Ok(None) => beside,
@@ -349,18 +353,14 @@ pub(super) async fn split_idle_shell(
 }
 
 /// Ends what a pane backend's `spawn` produced, identity-checked, in the four
-/// answers both backends log alike: `backend` is the word for the backend
-/// asked, `whose` the word for the teammate whose pane it was.
-pub(super) async fn kill_pane(handle: &Handle, backend: &'static str, whose: &'static str) {
-    let Handle::Pane(pane) = handle else {
-        // Named rather than ignored, because a handle of another shape
-        // arriving here would mean a registry had crossed two backends. Two
-        // other shapes since P27 — an in-process teammate and a shim child —
-        // and the answer is the same for both: this backend made neither, so
-        // ending either would be ending somebody else's teammate.
-        tracing::warn!(?handle, "a {backend} backend was asked to end something it did not start");
-        return;
-    };
+/// answers both backends log alike; `whose` is the word for the teammate whose
+/// pane it was.
+///
+/// Takes the pane itself since **D538**: the other-shape guard this used to
+/// open with was a `Handle` variant test, and there is no handle to be of
+/// another shape any more — a backend is handed back exactly what its own
+/// `spawn` made.
+pub(super) async fn kill_pane(pane: &Pane, whose: &'static str) {
     let server = match Server::current() {
         Ok(server) => server,
         Err(error) => {
@@ -386,10 +386,26 @@ pub(super) async fn kill_pane(handle: &Handle, backend: &'static str, whose: &'s
 }
 
 /// The `ganja`-pane backend.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct GanjaPane;
+///
+/// Carries the shell and the column share since **D538**: they are properties
+/// of the *runtime* a frontend resolved once from `teammates.shell` and
+/// `teammates.pane_share`, and they arrive here as this module's own value
+/// types, so no backend names a config type (**D520**'s intent, kept while the
+/// state moved off the registry).
+#[derive(Clone, Debug, Default)]
+pub struct GanjaPane {
+    shell: PaneShell,
+    share: PaneShare,
+}
 
 impl GanjaPane {
+    /// The backend a frontend assembles, over the shell and share this session
+    /// resolved.
+    #[must_use]
+    pub fn new(shell: PaneShell, share: PaneShare) -> Self {
+        Self { shell, share }
+    }
+
     /// A tmux failure as the trait's refusal: this session cannot have the
     /// surface, and here is why. For [`TmuxError::NotHosted`] the reason is
     /// exactly [`tmux::REFUSED_NO_TMUX`], the D501 sentence.
@@ -401,10 +417,10 @@ impl GanjaPane {
     ///
     /// A launch that cannot be typed is a pane holding a shell nobody will
     /// use, so it is ended here, by identity — the one failure past the split
-    /// that this backend can still clean up after itself. Not the trait's
-    /// [`TeammateBackend::launch`], which this backend does not implement yet
-    /// (bead `ganja-code-ipg`).
-    async fn type_launch_line(self, spec: &SpawnSpec, pane: &Pane, line: &OsStr, server: &Server) {
+    /// that this backend can still clean up after itself. Not the
+    /// [`Spawned::launch`] hook, which this backend does not use yet (bead
+    /// `ganja-code-ipg`).
+    async fn type_launch_line(spec: &SpawnSpec, pane: &Pane, line: &OsStr, server: &Server) {
         match server.type_line(&pane.id, line).await {
             Ok(()) => tracing::info!(
                 teammate = spec.name.as_str(),
@@ -439,7 +455,7 @@ impl TeammateBackend for GanjaPane {
         crate::teammate::preamble::native(crate::teammate::preamble::Names::of(spec), &spec.prompt)
     }
 
-    async fn spawn(&self, spec: &SpawnSpec) -> Result<Handle, Unsupported> {
+    async fn spawn(&self, spec: &SpawnSpec, _lent: Lent) -> Result<Arc<dyn Spawned>, Unsupported> {
         // D501's capability check, at the moment of asking rather than at
         // install: whether there is a server to put a pane in.
         let server = Server::current().map_err(|error| Self::refused(&error))?;
@@ -458,38 +474,44 @@ impl TeammateBackend for GanjaPane {
         // travels here (D502), through tmux's own door; the launch line is
         // typed later, once the record this pane will read exists.
         let environment = tmux::environment(CARRIED_ENV);
-        let pane =
-            split_idle_shell(&server, spec, &environment, MemberBackend::Ganja, "teammate").await?;
+        let pane = split_idle_shell(
+            &server,
+            spec,
+            &environment,
+            &self.shell,
+            self.share,
+            MemberBackend::Ganja,
+            "teammate",
+        )
+        .await?;
 
         // §4.1 step 6, sequenced after step 2 by watching for step 2 itself:
         // the record is what the pane's process reads first, so the record's
         // arrival on disk is the moment the launch line is typed. Watched
-        // rather than called, because the trait this backend implements has
-        // no seam after the registry's record write; the wait is bounded, and
-        // a record that never comes is a spawn the registry has already
-        // unwound — its own kill takes the idle shell with it, and the
-        // identity-checked kill below is what keeps a timed-out watcher from
-        // ending a pane that has since been reissued.
+        // rather than called, because this backend's body predates the
+        // [`Spawned::launch`] hook; the wait is bounded, and a record that
+        // never comes is a spawn the registry has already unwound — its own
+        // kill takes the idle shell with it, and the identity-checked kill
+        // below is what keeps a timed-out watcher from ending a pane that has
+        // since been reissued.
         //
         // The gap this shape leaves, stated rather than hidden: a launch that
         // fails *after* the record was written — tmux gone between the split
         // and the send-keys — ends the pane but cannot unregister the member,
         // because nothing here can reach the registry back. What bounds it is
-        // this wave's own reaper: a record over a pane that is not there is
-        // exactly what it drops at the next lead's startup (D506). And the
-        // task is detached from the registry's shutdown: a lead that dies
-        // inside the wait leaves a pane holding an idle shell that no record
-        // ever named — invisible to a reaper that walks the team file — until
-        // a person closes it. Moving the send-keys into a
-        // `TeammateBackend::launch` the registry calls after its record write,
-        // with the registry's own unwind, is the follow-up that closes both
-        // (bead ganja-code-ipg); the body here is that method's body already.
-        let handle = Handle::Pane(pane.clone());
-        let watched = Self;
+        // the reaper: a record over a pane that is not there is exactly what
+        // it drops at the next lead's startup (D506). And the task is detached
+        // from the registry's shutdown: a lead that dies inside the wait
+        // leaves a pane holding an idle shell that no record ever named —
+        // invisible to a reaper that walks the team file — until a person
+        // closes it. Moving the send-keys onto [`Spawned::launch`], with the
+        // registry's own unwind, is the follow-up that closes both (bead
+        // ganja-code-ipg); the body here is that method's body already.
+        let member = Arc::new(PaneMember::new(pane.clone(), "teammate"));
         let owned = spec.clone();
         tokio::spawn(async move {
             match wait_for_record(&owned, &pane.id, RECORD_WAIT).await {
-                Ok(()) => watched.type_launch_line(&owned, &pane, &line, &server).await,
+                Ok(()) => Self::type_launch_line(&owned, &pane, &line, &server).await,
                 Err(reason) => {
                     tracing::warn!(
                         teammate = owned.name.as_str(),
@@ -507,15 +529,71 @@ impl TeammateBackend for GanjaPane {
             }
         });
 
-        Ok(handle)
-    }
-
-    async fn kill(&self, handle: &Handle) {
-        kill_pane(handle, "pane", "teammate").await;
+        Ok(member)
     }
 
     fn delivery(&self) -> Delivery {
         Delivery::Acknowledged
+    }
+}
+
+/// One teammate in a pane of its own, as either pane backend holds it after
+/// the split.
+///
+/// Nothing of this session's runs for it: the pane is a whole process with its
+/// own loop, its own ring and its own liveness, so [`Spawned::start`] hands
+/// back no task, [`Spawned::recent`] is empty and [`Spawned::alive`] is
+/// [`true`] until the member is retired out of the map.
+///
+/// Its identity is a **pair** rather than an id: `%N` recycles, so a lead that
+/// killed panes by id alone would eventually kill somebody else's window. What
+/// tmux reports beside the id is `#{pane_pid}` — there is no `pane_start_time`
+/// format, as [`crate::teammate::tmux`]'s module doc records against
+/// `man tmux` and against a live server — so **birth is that pid**, and it is
+/// what makes the identity stable for as long as the machine keeps running.
+/// [`crate::teammate::reaper`] is where the comparison lives, and where the
+/// cold-start case that pid cannot answer for is dealt with.
+#[derive(Debug)]
+pub struct PaneMember {
+    pane: Pane,
+    /// The word the kill's four log lines know this teammate by.
+    whose: &'static str,
+}
+
+impl PaneMember {
+    /// The member over a pane that is already split.
+    #[must_use]
+    pub fn new(pane: Pane, whose: &'static str) -> Self {
+        Self { pane, whose }
+    }
+
+    /// The recorded `(pane_id, birth)` pair.
+    #[must_use]
+    pub fn pane(&self) -> &Pane {
+        &self.pane
+    }
+}
+
+#[async_trait]
+impl Spawned for PaneMember {
+    fn surface(&self) -> Surface {
+        Surface::Pane { id: self.pane.id.clone() }
+    }
+
+    fn start(self: Arc<Self>) -> Vec<JoinHandle<()>> {
+        Vec::new()
+    }
+
+    fn alive(&self) -> bool {
+        true
+    }
+
+    fn recent(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    async fn kill(&self) {
+        kill_pane(&self.pane, self.whose).await;
     }
 }
 

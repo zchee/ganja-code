@@ -46,7 +46,7 @@ fn led_engine(home: &std::path::Path) -> (Arc<Engine>, Arc<TeammateRegistry>) {
     );
     let registry = Arc::new(TeammateRegistry::for_session(home, SESSION, home));
 
-    (Arc::new(engine.with_teammates(Arc::clone(&registry))), registry)
+    (Arc::new(engine.with_teammates(Arc::clone(&registry), ganja_testkit::externals())), registry)
 }
 
 /// The same lead with the admission gate dialled, for the two tests that
@@ -66,7 +66,7 @@ fn led_engine_with_policy(
         Permissions::default(),
     )
     .with_inbound_policy(Some(policy), DialogExpiry::default())
-    .with_teammates(Arc::clone(&registry));
+    .with_teammates(Arc::clone(&registry), ganja_testkit::externals());
 
     (Arc::new(engine), registry)
 }

@@ -176,7 +176,7 @@ fn receiving_engine(
     let cwd = env::current_dir().expect("the working directory resolves");
     let registry = Arc::new(TeammateRegistry::for_session(home, engine.session_id().as_str(), cwd));
 
-    (Arc::new(engine.with_teammates(Arc::clone(&registry))), registry)
+    (Arc::new(engine.with_teammates(Arc::clone(&registry), ganja_testkit::externals())), registry)
 }
 
 /// `engine`'s own session socket, bound under `directory` — `Listen::Session`,
@@ -319,7 +319,8 @@ async fn send_as_child(
     // all, and its every send says so in as many words. Driving the receipt
     // half from a solo postbox would mean assembling a session this build
     // cannot produce and then quoting its answer as evidence.
-    let engine = Arc::new(engine.with_teammates(Arc::clone(&sender_registry)));
+    let engine =
+        Arc::new(engine.with_teammates(Arc::clone(&sender_registry), ganja_testkit::externals()));
 
     // A sender binds and serves its own socket for one reason: a receipt is a
     // `POST` back, and a session with nowhere to be posted to emits no

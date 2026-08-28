@@ -80,12 +80,15 @@ async fn a_scripted_task_name_call_starts_a_teammate_through_the_engine() {
         Storage::open(home.path().join("storage")),
     )
     .with_agents(ganja_testkit::agent_registry(&Config::default()))
-    .with_teammates(Arc::new(TeammateRegistry::new(
-        TeamsRoot::new(home.path().join("teams")),
-        TeamName::parse("session-abcd1234").expect("a team name"),
-        "session-abcd1234",
-        home.path().to_path_buf(),
-    )));
+    .with_teammates(
+        Arc::new(TeammateRegistry::new(
+            TeamsRoot::new(home.path().join("teams")),
+            TeamName::parse("session-abcd1234").expect("a team name"),
+            "session-abcd1234",
+            home.path().to_path_buf(),
+        )),
+        ganja_testkit::externals(),
+    );
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
     engine

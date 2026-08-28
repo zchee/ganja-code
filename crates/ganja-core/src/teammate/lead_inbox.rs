@@ -67,7 +67,8 @@
 //! which is where [`crate::teammate::TeammateRegistry`] keeps its documents. A
 //! real `claude` writes into `$CLAUDE_CONFIG_DIR/teams` and nothing will
 //! persuade it otherwise (§2.1), which is why
-//! [`crate::teammate::claude::teams_root`] is public. So a lead whose roster
+//! [`crate::teammate::teams_root`] sits in core rather than in the backend
+//! that spawns one. So a lead whose roster
 //! holds a claude-backed member reads **both** `team-lead` inboxes each pass
 //! (`LeadInbox::inboxes`), and a lead whose roster holds none reads only its
 //! own — reading, and on a delivery writing, inside another program's config
@@ -111,8 +112,7 @@ use tokio::sync::{mpsc, oneshot};
 use super::inbound::{Inbound, MailboxAdmission, PassDisposition, ReceiverClass};
 use super::posture::Forwarded;
 use super::runner::{drop_frame, prune_inbox, read_inbox};
-use super::shim_tui::Exited;
-use super::{Delivery, TeammateRegistry, claude, member};
+use super::{Delivery, Exited, REFUSED_NO_CONFIG_DIR, TeammateRegistry, member, teams_root};
 use crate::protocol::{PermissionReply, SessionId};
 
 /// §6's lead cadence, and deliberately half the teammate's own
@@ -318,13 +318,13 @@ impl std::fmt::Debug for Gate {
 pub struct LeadInbox {
     registry: Arc<TeammateRegistry>,
     /// Where a real `claude` teammate answers, when this machine resolves such a
-    /// root at all ([`claude::teams_root`]).
+    /// root at all ([`teams_root`]).
     ///
     /// Resolved once, at construction, because `CLAUDE_CONFIG_DIR` does not
     /// change under a running process — and *held* rather than re-read per pass
     /// so a tick does not touch the environment a thousand times an hour.
     /// [`None`] only when neither that variable nor a home directory resolves,
-    /// which is [`claude::REFUSED_NO_CONFIG_DIR`]'s own case and one in which no
+    /// which is [`REFUSED_NO_CONFIG_DIR`]'s own case and one in which no
     /// claude teammate could have been spawned either.
     claude: Option<TeamsRoot>,
     /// The admission gate, once [`LeadInbox::gated`] installed it. [`None`]
@@ -340,13 +340,13 @@ impl LeadInbox {
     /// answers into as this machine resolves it.
     #[must_use]
     pub fn new(registry: Arc<TeammateRegistry>) -> Self {
-        Self::reading(registry, claude::teams_root())
+        Self::reading(registry, teams_root())
     }
 
     /// The same, over a claude root given as a **value**.
     ///
     /// [`LeadInbox::new`] reads that root off the environment; this takes it,
-    /// which is the split [`claude::teams_root`] and its own `root_under` already
+    /// which is the split [`teams_root`] and its own `claude_root_under` already
     /// keep — a caller that holds a root of its own (a test, or a lead told where
     /// to look) does not have to mutate the process it runs in to be heard.
     #[must_use]
@@ -406,7 +406,7 @@ impl LeadInbox {
             // member exists when this root cannot be had — so it is said once at
             // debug rather than warned about on every tick.
             tracing::debug!(
-                reason = claude::REFUSED_NO_CONFIG_DIR,
+                reason = REFUSED_NO_CONFIG_DIR,
                 "a claude teammate is in the roster but its root cannot be resolved"
             );
 

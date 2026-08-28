@@ -9,9 +9,9 @@
 //!
 //! §4.1's six steps, split between this backend and the registry exactly as
 //! [`crate::teammate::pane`]'s are: [`TeammateBackend::spawn`] makes the
-//! surface, the registry writes the member record, and
-//! [`TeammateBackend::launch`] runs afterwards — which is why the inbox work
-//! sits *there* rather than in `spawn`. That ordering is §4.1's own —
+//! surface, the registry writes the member record, and [`Spawned::launch`]
+//! runs afterwards — which is why the inbox work sits *there* rather than in
+//! `spawn`. That ordering is §4.1's own —
 //! surface (1), member record (2), pane title (3), `ensureInboxDirectory` (4),
 //! the prompt written into the inbox (5), the launch line (6) — **with one
 //! departure, and it is step 3**: the title is set inside `spawn`, so it lands
@@ -32,7 +32,7 @@
 //!   `claude` reads `$CLAUDE_CONFIG_DIR/teams` (§2.1) and nothing will
 //!   persuade it otherwise, so that is where this backend seeds the inbox —
 //!   *the same `ganja-team` code, a different value*, which is the whole of
-//!   what D-1 buys. [`teams_root`](crate::teammate::claude::teams_root) is
+//!   what D-1 buys. [`teams_root`] is
 //!   that value, and it is public because the lead side needs it too: a lead
 //!   that polls only its own root never sees what a `claude` pane wrote. See
 //!   "the shared inbox" below.
@@ -58,7 +58,7 @@
 //! `$CLAUDE_CONFIG_DIR/teams/<team>/inboxes/<name>.json` and the pane answers
 //! into `…/inboxes/<lead>.json` beside it. Three consequences, all of them
 //! stated rather than hidden — the first two are why
-//! [`teams_root`](crate::teammate::claude::teams_root) is public.
+//! [`teams_root`] is public.
 //!
 //! 1. **The lead has to read that root too.** A lead polling only
 //!    `<ganja config home>/teams` would never see the answer, because the answer
@@ -151,48 +151,30 @@
 //! sits pending in the lead's UI forever.
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use etcetera::base_strategy::{BaseStrategy as _, Xdg};
 use ganja_protocol::team::MemberBackend;
 use ganja_team::{TeamsRoot, mailbox};
+use tokio::task::JoinHandle;
 
+// Where a real `claude` keeps its teams is core's own answer since D538: the
+// lead's inbox pass and the engine's prune need it whether or not this backend
+// ever runs. Re-exported under the names this module has always spelled them
+// with, so nothing that reads them through `teammate::claude` had to move.
+pub use crate::teammate::{
+    CLAUDE_CONFIG_DIR_ENV as CONFIG_DIR_ENV, CLAUDE_CONFIG_HOME_DIRECTORY as CONFIG_HOME_DIRECTORY,
+    REFUSED_NO_CONFIG_DIR, TEAMS_DIR as TEAMS_DIRECTORY, teams_root,
+};
 // `shim::on_path` is the `PATH` walk this module used to own: it moved to the
 // shim core in P27, where four backends now need it, so that two of them cannot
 // come to disagree about what counts as a runnable teammate binary.
 use crate::teammate::{
-    Delivery, Handle, SpawnSpec, TeammateBackend, Unsupported, pane,
+    Delivery, Lent, SpawnSpec, Spawned, Surface, TeammateBackend, Unsupported,
+    pane::{self, PaneMember, PaneShare, PaneShell},
     shim::on_path,
     tmux::{self, Server, TmuxError},
 };
-
-/// The variable naming the directory a real `claude` keeps its own things in,
-/// and therefore the parent of the teams directory it reads (§2.1).
-///
-/// It reaches further than the teams directory, and a caller that sets one for
-/// a session should know it: a real `claude` derives the identity of its
-/// **credential store** from this path too — on macOS the keychain service is
-/// `Claude Code-credentials` under the default home and
-/// `Claude Code-credentials-<eight hex of the path>` under any other — which is
-/// how one variable serves several accounts. Nothing here needs to act on that,
-/// because a pane under the user's own config home reads the store that user
-/// logged into; it is recorded because a *fresh* config home is a fresh login,
-/// and a pane that starts, reads its inbox and then refuses to take a turn looks
-/// nothing like an authentication problem until somebody knows this.
-pub const CONFIG_DIR_ENV: &str = "CLAUDE_CONFIG_DIR";
-
-/// Where a `claude` with no [`CONFIG_DIR_ENV`] keeps them, under the user's
-/// home.
-///
-/// **This plan's assumption, not the reference's**: §2.1 spells the root as
-/// `$CLAUDE_CONFIG_DIR/teams` and never says what an unset variable falls back
-/// to. It is recorded as a constant so that being wrong costs one line, and so
-/// that a reader can see it is a guess rather than a citation.
-pub const CONFIG_HOME_DIRECTORY: &str = ".claude";
-
-/// The directory holding teams under a config home (§2.1).
-pub const TEAMS_DIRECTORY: &str = "teams";
 
 /// The binary a `claude` pane runs, resolved on `PATH` — see the module doc for
 /// why this one and not `current_exe()`.
@@ -207,42 +189,6 @@ pub const PLAN_MODE_REQUIRED: &str = "--plan-mode-required";
 /// of what somebody reading this can act on.
 pub const REFUSED_NO_BINARY: &str = "no `claude` on PATH, and ganja will not guess at where one \
      might be; install it, put it on this session's PATH, or spawn this teammate in-process";
-
-/// What a claude spawn says when there is no directory to put the team in.
-pub const REFUSED_NO_CONFIG_DIR: &str = "there is no directory to reach claude's teams through: neither CLAUDE_CONFIG_DIR nor a home \
-     directory could be resolved";
-
-/// Where a real `claude` reads and writes its teams (§2.1).
-///
-/// `$CLAUDE_CONFIG_DIR/teams`, else `~/.claude/teams`. Public because the two
-/// sides of a round trip have to agree about it and only one of them is this
-/// backend: a lead that wants to hear from a `claude` teammate reads the team
-/// under what this answers. [`None`] when neither the variable nor a home
-/// directory can be had, which is what [`REFUSED_NO_CONFIG_DIR`] says out loud.
-#[must_use]
-pub fn teams_root() -> Option<TeamsRoot> {
-    // The home comes off the same strategy `config::config_home` asks, rather
-    // than off `$HOME` directly: one answer about where this machine's home is,
-    // whichever of the two directories is being resolved.
-    let home = Xdg::new().ok().map(|base| base.home_dir().to_path_buf());
-
-    root_under(std::env::var_os(CONFIG_DIR_ENV), home)
-}
-
-/// [`teams_root`]'s decision, over values rather than over the environment, so
-/// a test can hold both cases without touching the process it runs in.
-///
-/// An empty variable is treated as unset — the shape every other environment
-/// read in this tree keeps (`config_home`'s `CONFIG_HOME_ENV`), because
-/// `CLAUDE_CONFIG_DIR=` in a shell profile means "I did not set this" far more
-/// often than it means "the root directory".
-fn root_under(config_dir: Option<OsString>, home: Option<PathBuf>) -> Option<TeamsRoot> {
-    let named = config_dir.filter(|value| !value.is_empty()).map(PathBuf::from);
-
-    named
-        .or_else(|| home.map(|home| home.join(CONFIG_HOME_DIRECTORY)))
-        .map(|home| TeamsRoot::new(home.join(TEAMS_DIRECTORY)))
-}
 
 /// The environment a `claude` pane is started with, by name (**D502**).
 ///
@@ -303,10 +249,24 @@ pub fn arguments(spec: &SpawnSpec) -> Vec<OsString> {
 }
 
 /// The real-`claude` pane backend.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ClaudePane;
+///
+/// Carries the shell and the column share for [`crate::teammate::pane`]'s
+/// reason (**D538**): a frontend resolved them once, and they arrive as that
+/// module's own value types rather than as a config.
+#[derive(Clone, Debug, Default)]
+pub struct ClaudePane {
+    shell: PaneShell,
+    share: PaneShare,
+}
 
 impl ClaudePane {
+    /// The backend a frontend assembles, over the shell and share this session
+    /// resolved.
+    #[must_use]
+    pub fn new(shell: PaneShell, share: PaneShare) -> Self {
+        Self { shell, share }
+    }
+
     /// A tmux failure as the trait's refusal: this session cannot have the
     /// surface, and here is why. For [`TmuxError::NotHosted`] the reason is
     /// exactly [`tmux::REFUSED_NO_TMUX`], the D501 sentence — the same one
@@ -391,7 +351,7 @@ impl TeammateBackend for ClaudePane {
         preamble(spec)
     }
 
-    async fn spawn(&self, spec: &SpawnSpec) -> Result<Handle, Unsupported> {
+    async fn spawn(&self, spec: &SpawnSpec, _lent: Lent) -> Result<Arc<dyn Spawned>, Unsupported> {
         // D501's capability check, at the moment of asking rather than at
         // install: whether there is a server to put a pane in.
         let server = Server::current().map_err(|error| Self::refused(&error))?;
@@ -411,39 +371,68 @@ impl TeammateBackend for ClaudePane {
             &server,
             spec,
             &environment,
+            &self.shell,
+            self.share,
             MemberBackend::Claude,
             "claude teammate",
         )
         .await?;
 
-        Ok(Handle::Pane(pane))
+        Ok(Arc::new(ClaudeMember {
+            pane: PaneMember::new(pane, "claude teammate"),
+            spec: spec.clone(),
+        }))
     }
 
-    async fn launch(&self, spec: &SpawnSpec, handle: &Handle) -> Result<(), Unsupported> {
-        let Handle::Pane(pane) = handle else {
-            // Not reachable through the registry, which hands back the handle
-            // this backend's own `spawn` returned — but a handle of another
-            // shape arriving here would mean a registry had crossed two
-            // backends, and that is worth a refusal rather than a silent skip.
-            // Two other shapes since P27, and a refusal is right for both: a
-            // shim child has no pane to type a launch line into any more than
-            // an in-process teammate does.
-            return Err(Self::cannot("this backend was asked to launch something it did not make"));
-        };
-        let server = Server::current().map_err(|error| Self::refused(&error))?;
-        let binary = on_path(BINARY).ok_or_else(|| Self::cannot(REFUSED_NO_BINARY))?;
-        let root = teams_root().ok_or_else(|| Self::cannot(REFUSED_NO_CONFIG_DIR))?;
+    fn delivery(&self) -> Delivery {
+        Delivery::FireAndForget
+    }
+}
+
+/// One real `claude` in a pane of its own.
+///
+/// [`PaneMember`]'s behaviour throughout — a whole process runs in the pane,
+/// so nothing of this session's watches it — with the one thing that is this
+/// backend's own: §4.1's steps 4, 5 and 6, run on [`Spawned::launch`] once the
+/// registry's record write has happened.
+#[derive(Debug)]
+struct ClaudeMember {
+    pane: PaneMember,
+    /// Held because the launch needs it: the flags, the inbox and the root are
+    /// all read off the spec at the moment the line is typed.
+    spec: SpawnSpec,
+}
+
+#[async_trait]
+impl Spawned for ClaudeMember {
+    fn surface(&self) -> Surface {
+        self.pane.surface()
+    }
+
+    /// §4.1 steps 4, 5 and 6, in that order, after the record write.
+    ///
+    /// # Errors
+    ///
+    /// [`Unsupported`] when the inbox could not be seeded or the launch line
+    /// could not be typed. The registry unwinds — the pane killed, the record
+    /// taken back out, the name given back — and the one thing it cannot
+    /// unwind, this backend's own inbox write, is unwound here.
+    async fn launch(&self) -> Result<(), Unsupported> {
+        let spec = &self.spec;
+        let server = Server::current().map_err(|error| ClaudePane::refused(&error))?;
+        let binary = on_path(BINARY).ok_or_else(|| ClaudePane::cannot(REFUSED_NO_BINARY))?;
+        let root = teams_root().ok_or_else(|| ClaudePane::cannot(REFUSED_NO_CONFIG_DIR))?;
         // Composed before the seed, so its one refusal — a word no shell
         // quoting can carry — leaves no inbox to unseed.
-        let line =
-            tmux::launch_line(&binary, &arguments(spec)).map_err(|error| Self::refused(&error))?;
+        let line = tmux::launch_line(&binary, &arguments(spec))
+            .map_err(|error| ClaudePane::refused(&error))?;
 
         // §4.1 steps 4 and 5 before step 6, which is the order that matters:
         // the pane reads its inbox on its way up, so a process launched before
         // the task was in it would either idle or ask what it is for.
-        let seeded = Self::seed(spec, &root).await?;
+        let seeded = ClaudePane::seed(spec, &root).await?;
 
-        if let Err(error) = server.type_line(&pane.id, &line).await {
+        if let Err(error) = server.type_line(&self.pane.pane().id, &line).await {
             // The one failing path past the seed, and this backend's to unwind:
             // the registry seeded nothing here and cannot prune what it does not
             // know the root of (`TeammateBackend::owns_inbox`). A prompt left in
@@ -456,23 +445,31 @@ impl TeammateBackend for ClaudePane {
             )
             .await;
 
-            return Err(Self::refused(&error));
+            return Err(ClaudePane::refused(&error));
         }
         tracing::info!(
             teammate = spec.name.as_str(),
-            pane = pane.id,
+            pane = self.pane.pane().id,
             "a claude teammate's pane was launched"
         );
 
         Ok(())
     }
 
-    async fn kill(&self, handle: &Handle) {
-        pane::kill_pane(handle, "claude", "claude teammate").await;
+    fn start(self: Arc<Self>) -> Vec<JoinHandle<()>> {
+        Vec::new()
     }
 
-    fn delivery(&self) -> Delivery {
-        Delivery::FireAndForget
+    fn alive(&self) -> bool {
+        self.pane.alive()
+    }
+
+    fn recent(&self) -> Vec<String> {
+        self.pane.recent()
+    }
+
+    async fn kill(&self) {
+        self.pane.kill().await;
     }
 }
 
