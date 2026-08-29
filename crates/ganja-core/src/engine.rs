@@ -1240,6 +1240,11 @@ pub struct Engine {
     /// afterward by [`Engine::install_solo_postbox`] alone, so installing
     /// any other kind of postbox — a lead's, a member's — always clears it.
     ///
+    /// Never `true` in a shipped binary since **D542**: the only production
+    /// caller of that installer was an assembly arm deleted as unreachable,
+    /// so the D531 posture this feeds is read and inert until bead
+    /// `ganja-code-3tng` rules on the surface.
+    ///
     /// A separate atomic beside [`Engine::postbox`]'s own mutex rather than
     /// a field inside it: a reader (`Engine::team_messaging`, a turn's own
     /// construction) takes the two locks one after the other, so a
@@ -2493,6 +2498,13 @@ impl Engine {
     /// addressing other live sessions by name or by `uds:` address, bound to
     /// this engine's own self-name cell, identity resolver and live session
     /// id. Consuming, like every other assembly-time installer here.
+    ///
+    /// **Reachable by no shipped binary since D542** (2026-08-29): the one
+    /// production caller was `ganja-tui`'s no-config-home assembly arm, and
+    /// that arm selected on a condition `run` had already exited on. What
+    /// calls this now is the engine's own tests and `ganja-testkit`'s
+    /// fixtures; bead `ganja-code-3tng` decides whether the seam becomes
+    /// live or is deleted.
     #[must_use]
     pub fn with_solo_postbox(self) -> Self {
         self.install_solo_postbox();
@@ -2502,7 +2514,9 @@ impl Engine {
 
     /// [`Engine::with_solo_postbox`]'s mechanism, and [`Engine::retire_team`]'s
     /// — the one place a [`subagent::SoloPostbox`] is built, so the two
-    /// callers cannot drift into building it two different ways.
+    /// callers cannot drift into building it two different ways. Both are
+    /// reachable by no shipped binary since **D542**; bead `ganja-code-3tng`
+    /// decides what becomes of the seam.
     fn install_solo_postbox(&self) {
         let solo = Arc::new(
             subagent::SoloPostbox::new(
@@ -2557,6 +2571,11 @@ impl Engine {
     /// send — `subagent::SoloPostbox` holds no
     /// `Weak<teammate::TeammateRegistry>` to fail upgrading in the first
     /// place, which is the structural half of **AC-42**.
+    ///
+    /// Production-callerless since it landed, and since **D542** so is
+    /// everything it installs: no shipped binary can produce a
+    /// `<self-name>@solo` send by any route. Bead `ganja-code-3tng` is where
+    /// that is settled.
     pub fn retire_team(&self) {
         self.install_solo_postbox();
     }

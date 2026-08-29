@@ -820,12 +820,13 @@ pub struct App {
     /// The socket a lead session serves under its current id (**D505**),
     /// kept in step with the engine's session slot after every event and
     /// closed at the tail of the run. [`None`] for every session that is not
-    /// a lead handed a binder — a pane member, a build with no config home,
-    /// every test — which binds nothing and costs nothing.
+    /// a lead handed a binder — a pane member, a caller that handed no
+    /// binder in, every test — which binds nothing and costs nothing.
     socket: Option<binder::SessionSocket>,
     /// The live-session listing the `@` menu and the incumbent collision
     /// scan read (**D527**–**D530**), handed in for every interactive
-    /// non-member session — wider than [`App::socket`]'s lead-only gate.
+    /// non-member session — since **D542** the same test [`App::socket`]'s
+    /// own gate reads, where this one used to be the wider of the two.
     /// [`None`] degrades to files and roster only (**AC-27**).
     lister: Option<Box<dyn lister::Lister>>,
     /// The engine's session id and the bound socket path this session's own
@@ -7286,10 +7287,17 @@ type SpawnQuestion = (ganja_core::SpawnAsk, tokio::sync::oneshot::Sender<Permiss
 
 /// What a session leading no team answers to every `/team` action.
 ///
-/// One sentence rather than a silence: `/team` on a build with no config home
-/// is a person asking about something that genuinely is not there, and a dialog
-/// that simply refused to open would look like a broken key.
-const NO_TEAM: &str = "this session leads no team \u{b7} there is no config home to keep one in";
+/// One sentence rather than a silence: `/team` in a pane member is a person
+/// asking about something that genuinely is not there, and a dialog that
+/// simply refused to open would look like a broken key.
+///
+/// Since **D542** a pane member is the *only* shipped session that reaches
+/// this — every other interactive session leads a team of its own — so the
+/// sentence names that membership rather than the config home it used to
+/// blame, which was the cause of an assembly arm that no longer exists
+/// (**D505** §10.3: a teammate is not a place to nest a second team).
+const NO_TEAM: &str =
+    "this session leads no team \u{b7} it is a member of the one that launched it";
 
 /// What `/team shutdown` answers when the team is only the lead.
 const NOBODY_TO_STOP: &str = "this team has no teammates to stop";

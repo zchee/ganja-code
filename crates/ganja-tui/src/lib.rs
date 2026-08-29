@@ -78,12 +78,14 @@ pub enum Resume {
 /// how a **lead** session's socket gets bound (**D505**, [`binder`]): the
 /// binary that links the server hands one in, and this crate — which may not
 /// name that server — decides when it is asked, which is only for a session
-/// that leads a team; a pane member and a build with no config home hand it
-/// back unused, and a caller with no server passes [`None`]. `lister` is the
+/// that leads a team; a pane member hands it back unused, and a caller with no
+/// server passes [`None`]. `lister` is the
 /// `@` menu's and the send resolver's live-session listing (**D529** Axis 5,
 /// **D530**'s re-derived gate, [`lister`]): every **interactive non-member**
-/// session is handed one — team or none, wider than `binder`'s lead-only
-/// gate — and a pane member or a caller with no server passes [`None`].
+/// session is handed one — since **D542** the same gate `binder`'s reads, the
+/// no-config-home arm that used to make the lister's the wider of the two
+/// having been deleted — and a pane member or a caller with no server passes
+/// [`None`].
 /// `name` is `--name`'s value, already validated by the CLI boundary
 /// (**D527**'s grammar) — this function only asserts that in a debug build,
 /// never re-refuses it; [`None`] falls back to the project root's derived
@@ -297,7 +299,8 @@ pub async fn run(
         .with_base_for_model();
 
     // **D527/D530, REVISION-3 P5**: the self-name every registration, every
-    // `@` menu label and every solo send reads (`Engine::self_name`,
+    // `@` menu label and every cross-session send's `from` reads
+    // (`Engine::self_name`,
     // `App::self_name_source`), resolved once here. `--name` is the
     // person's own choice, already vetted at the CLI boundary before it
     // reaches this signature — asserted, never re-refused, since a second
@@ -328,14 +331,15 @@ pub async fn run(
     // (**D530**'s gate, restated at each): a pane member speaks through its
     // own `MemberPostbox`, never registers, and is handed no lister — its
     // self-name cell, socket directory and `teamless_send` posture go
-    // unread, so seeding them would be work with no reader.
+    // unread, so seeding them would be work with no reader. Since **D542**
+    // this is also the assembly match's own predicate below, there being
+    // nothing else left for that match to ask.
     let interactive = membership.is_none();
     // The identity resolver's own directory (**D528**), seeded **before**
     // anything below captures `&Engine::identity` — `with_teammates`' lead
-    // postbox and `with_solo_postbox`'s solo one both do, in the match
-    // that follows, so this has to run first or either would capture the
-    // engine's un-seeded default instead of the hidden `--socket-dir`
-    // override.
+    // postbox does, in the match that follows, so this has to run first or it
+    // would capture the engine's un-seeded default instead of the hidden
+    // `--socket-dir` override.
     let engine = if interactive {
         engine
             .with_socket_directory(socket_dir.clone().unwrap_or_else(ganja_tool::socket::directory))
@@ -388,122 +392,133 @@ pub async fn run(
     // Re-minting on `NewSession` would need a seam the engine does not have
     // and would strand every running teammate in a team nothing was reading.
     //
-    // A build with no config home has nowhere to keep a team, so it leads
-    // none: `Engine::teammates()` answers `None` and the frontend's whole
-    // lead side is inert. Since **D530** it still speaks, though: the solo
-    // postbox below opens `send_message` to named live sessions and `uds:`
-    // addresses, sending as `<self-name>@solo` with the one-way note — a
-    // sender, never an addressee, because only a socket-binding lead
-    // registers a name.
+    // **A pane teammate leads no team** (§10.3): it is a member of the one
+    // that launched it, and a teammate is not a place to nest a second team —
+    // the same line the engine draws for an in-process one. So the registry is
+    // skipped outright, which is also what keeps the lead's `send_message`
+    // from being offered under the lead's name to a process that is not the
+    // lead.
     //
-    // **A pane teammate leads no team either** (§10.3): it is a member of the
-    // one that launched it, and a teammate is not a place to nest a second
-    // team — the same line the engine draws for an in-process one. So the
-    // registry is skipped outright, which is also what keeps the lead's
-    // `send_message` from being offered under the lead's name to a process
-    // that is not the lead.
-    let (engine, teammates, socket) =
-        match ganja_core::config::config_home().filter(|_| membership.is_none()) {
-            Some(home) => {
-                let id = engine.session_id();
-                let registry = Arc::new(TeammateRegistry::for_session(&home, id.as_str(), &cwd));
-                // Resolved **once**, here, and handed to the backends that read
-                // them rather than to the registry (**D538**, keeping **D520**'s
-                // intent): the idle shell a pane is split into and how wide the
-                // teammates' column opens are properties of this *runtime*, and
-                // a backend must name no config type — so they cross as
-                // `ganja-core`'s own value types.
-                let shell =
-                    config.teammates.pane_shell().map(PaneShell::configured).unwrap_or_default();
-                let share =
-                    config.teammates.pane_share().map(PaneShare::configured).unwrap_or_default();
-                let backends = ganja_teammate_local::backends(shell, share);
-                // **D506**: panes a previous lead of this team left running,
-                // before this one spawns anything of its own. Best-effort by
-                // construction — it returns a `Swept` and never an error, and a
-                // session outside tmux sweeps nothing — so it is awaited here
-                // rather than guarded: the one thing it must be is *before* the
-                // first spawn, since that is what makes a pane member found in
-                // the file certainly not this lead's.
-                //
-                // The behavioural witness is `ganja-cli/tests/teammate_reaper.rs`
-                // (AC-12), which drives `reaper::sweep_on` against a private tmux
-                // server: `run` opens a real terminal, so there is no headless
-                // seam in this file to assert the call from.
-                let swept = ganja_teammate_local::reaper::sweep(&registry).await;
-                if !swept.is_empty() {
-                    tracing::info!(?swept, "a previous lead's panes were swept at startup");
-                }
-                // **D508**: and the shim children a previous lead left,
-                // which is a *separate* call rather than a branch inside the
-                // one above. `sweep` is gated on there being a tmux server to
-                // look at — correct for panes, fatal for shims, whose common
-                // case has no tmux at all — and hoisting that gate would
-                // change the pane arm's own contract. Unconditional here, and
-                // asserted so at the function level by
-                // `ganja-teammate-local/tests/teammate_shim_sweep.rs`; the call itself
-                // has the same no-headless-seam gap the pane sweep's does.
-                let orphans = ganja_teammate_local::reaper::sweep_shims(
-                    &registry,
-                    ganja_teammate_local::shim::default_directory(),
-                )
-                .await;
-                if !orphans.is_empty() {
-                    tracing::info!(
-                        ?orphans,
-                        "a previous lead's foreign-CLI children were swept at startup"
-                    );
-                }
-
-                (
-                    engine.with_teammates(Arc::clone(&registry), backends),
-                    Some(registry),
-                    // The lead's socket rides the same gate as its team
-                    // (**D505**): a session that leads is one a peer session
-                    // has a reason to reach, and the socket's team routes have
-                    // something to answer. Not bound here — the app binds on
-                    // its first pass, so the id it binds under is the one the
-                    // resume above installed.
-                    binder.map(|binder| {
-                        (
-                            binder,
-                            binder::Served {
-                                directory: cwd.clone(),
-                                root: project.root().to_path_buf(),
-                                data: Some(data),
-                                storage: Some(storage),
-                                config: Some(config.clone()),
-                            },
-                        )
-                    }),
-                )
+    // And that is the **whole** predicate since **D542** (2026-08-29): a
+    // session this frontend runs either is a pane member or leads and
+    // registers, binding when its caller handed a binder in (`lib.rs`'s own
+    // registry-directory seam below says the same thing from the other
+    // side), and there is no third answer here — `ganja run` and
+    // `ganja serve` install no teammates and bind nothing, but neither of
+    // them enters this function. There used to be one — an arm for a build whose config
+    // home could not be located — and it was unreachable rather than rare:
+    // `config_home` answers `None` only where `GANJA_CONFIG_HOME` is unset or
+    // blank *and* `Xdg::new()` errs, and `Project::data_dir` above resolves
+    // through that same `Xdg::new()` behind a hard `?`, so a run that reaches
+    // this line has already exited on that condition. The home is still
+    // *asked* for below rather than assumed, so the impossible case would be
+    // refused readably rather than panicked through if it ever stopped being
+    // impossible.
+    //
+    // What went with that arm is the solo postbox, and with it every
+    // production witness for the teamless sender surface **D530** and
+    // **D531** describe: no shipped binary now sends under that identity,
+    // appends its not-addressable-back note, or reaches the `teamless_send`
+    // dialog. That machinery stays in the engine as a seam its own tests
+    // drive; whether it becomes live — a session holding no teammates being
+    // teamless in earnest — or is deleted outright is bead
+    // `ganja-code-3tng`, and not this file's to decide. This crate's own
+    // `AGENTS.md` states D542 in full, carrying the literal spellings this
+    // comment deliberately leaves to it.
+    let home = ganja_core::config::config_home()
+        .context("failed to locate the config home this session's team is kept in")?;
+    let (engine, teammates, socket) = match &membership {
+        // A member speaks as itself: its `send_message` posts through the
+        // postbox stamped with the name its launch line carried, over the
+        // same teams root its lead writes into — the roster read off the team
+        // file per call, the lead always addressable, and this session still
+        // leading no team of its own. And it binds no socket: a member is
+        // addressed through its lead's team, by the same line that keeps it
+        // from leading one (**D505**).
+        Some((membership, _)) => (
+            engine.with_postbox(Arc::new(ganja_core::teammate::member::MemberPostbox::new(
+                membership.name().clone(),
+                membership.team().clone(),
+                membership.root().clone(),
+            ))),
+            None,
+            None,
+        ),
+        None => {
+            let id = engine.session_id();
+            let registry = Arc::new(TeammateRegistry::for_session(&home, id.as_str(), &cwd));
+            // Resolved **once**, here, and handed to the backends that read
+            // them rather than to the registry (**D538**, keeping **D520**'s
+            // intent): the idle shell a pane is split into and how wide the
+            // teammates' column opens are properties of this *runtime*, and
+            // a backend must name no config type — so they cross as
+            // `ganja-core`'s own value types.
+            let shell =
+                config.teammates.pane_shell().map(PaneShell::configured).unwrap_or_default();
+            let share =
+                config.teammates.pane_share().map(PaneShare::configured).unwrap_or_default();
+            let backends = ganja_teammate_local::backends(shell, share);
+            // **D506**: panes a previous lead of this team left running,
+            // before this one spawns anything of its own. Best-effort by
+            // construction — it returns a `Swept` and never an error, and a
+            // session outside tmux sweeps nothing — so it is awaited here
+            // rather than guarded: the one thing it must be is *before* the
+            // first spawn, since that is what makes a pane member found in
+            // the file certainly not this lead's.
+            //
+            // The behavioural witness is `ganja-cli/tests/teammate_reaper.rs`
+            // (AC-12), which drives `reaper::sweep_on` against a private tmux
+            // server: `run` opens a real terminal, so there is no headless
+            // seam in this file to assert the call from.
+            let swept = ganja_teammate_local::reaper::sweep(&registry).await;
+            if !swept.is_empty() {
+                tracing::info!(?swept, "a previous lead's panes were swept at startup");
             }
-            // A member speaks as itself: its `send_message` posts through the
-            // postbox stamped with the name its launch line carried, over the
-            // same teams root its lead writes into — the roster read off the team
-            // file per call, the lead always addressable, and this session still
-            // leading no team of its own. And it binds no socket: a member is
-            // addressed through its lead's team, by the same line that keeps
-            // it from leading one (**D505**).
-            None if let Some((membership, _)) = &membership => (
-                engine.with_postbox(Arc::new(ganja_core::teammate::member::MemberPostbox::new(
-                    membership.name().clone(),
-                    membership.team().clone(),
-                    membership.root().clone(),
-                ))),
-                None,
-                None,
-            ),
-            None => {
-                tracing::warn!(
-                    "no config home, so this session leads no team and cannot spawn \
-                     teammates; cross-session sending stays open through the solo \
-                     postbox (D530)"
+            // **D508**: and the shim children a previous lead left,
+            // which is a *separate* call rather than a branch inside the
+            // one above. `sweep` is gated on there being a tmux server to
+            // look at — correct for panes, fatal for shims, whose common
+            // case has no tmux at all — and hoisting that gate would
+            // change the pane arm's own contract. Unconditional here, and
+            // asserted so at the function level by
+            // `ganja-teammate-local/tests/teammate_shim_sweep.rs`; the call itself
+            // has the same no-headless-seam gap the pane sweep's does.
+            let orphans = ganja_teammate_local::reaper::sweep_shims(
+                &registry,
+                ganja_teammate_local::shim::default_directory(),
+            )
+            .await;
+            if !orphans.is_empty() {
+                tracing::info!(
+                    ?orphans,
+                    "a previous lead's foreign-CLI children were swept at startup"
                 );
-
-                (engine.with_solo_postbox(), None, None)
             }
-        };
+
+            (
+                engine.with_teammates(Arc::clone(&registry), backends),
+                Some(registry),
+                // The lead's socket rides the same gate as its team
+                // (**D505**): a session that leads is one a peer session
+                // has a reason to reach, and the socket's team routes have
+                // something to answer. Not bound here — the app binds on
+                // its first pass, so the id it binds under is the one the
+                // resume above installed.
+                binder.map(|binder| {
+                    (
+                        binder,
+                        binder::Served {
+                            directory: cwd.clone(),
+                            root: project.root().to_path_buf(),
+                            data: Some(data),
+                            storage: Some(storage),
+                            config: Some(config.clone()),
+                        },
+                    )
+                }),
+            )
+        }
+    };
     // What the status bar says about who this process is, beside the provider
     // and theme notices: a person looking at a pane should be able to tell it
     // from the lead's window at a glance.
@@ -608,10 +623,11 @@ pub async fn run(
             // seeded from, above.
             .with_self_name_source(name_source)
             .watching_mcp(config.mcp.len());
-            // The lister's gate is wider than the socket's (**D530**): every
-            // interactive session that is not a pane member gets one — team
-            // or none — so it is read off `membership` before that value
-            // moves into `with_member` below.
+            // The lister's gate and the socket's are one test since **D542**
+            // — a session that is not a pane member — where the lister's used
+            // to be the wider of the two (**D530**), back when a build with no
+            // config home led no team and bound nothing. Read off `membership`
+            // before that value moves into `with_member` below.
             let is_member = membership.is_some();
             // The member's inbox, on the tick that already polls everything
             // else here; a session nobody launched as a teammate installs
@@ -625,10 +641,11 @@ pub async fn run(
             if !is_member && let Some(lister) = lister {
                 app = app.with_lister(lister);
             }
-            // A **teamless** session binds no socket, so its own collision
-            // scan has no bound path to read a directory off — an explicit
-            // `--socket-dir` reaches it only through this seam (a lead's own
-            // scan already gets the override for free, off its bound path).
+            // A session whose caller handed in no binder binds no socket, so
+            // its own collision scan has no bound path to read a directory
+            // off — an explicit `--socket-dir` reaches it only through this
+            // seam (a lead that did bind already gets the override for free,
+            // off its bound path).
             if !is_member && let Some(socket_dir) = socket_dir {
                 app = app.with_registry_directory(socket_dir);
             }

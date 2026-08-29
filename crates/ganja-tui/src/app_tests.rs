@@ -9716,8 +9716,10 @@ async fn only_asking_for_the_roster_raises_the_team_dialog() {
     assert!(app.team_dialog.is_some(), "the typed door onto the roster");
 }
 
-/// A session with nowhere to keep a team says so once, rather than opening
-/// a dialog about nothing.
+/// A session that leads no team says so once, rather than opening a dialog
+/// about nothing. Since **D542** that is a pane member — a member of the team
+/// that launched it, and no place to nest a second one — where the sentence
+/// used to blame a missing config home.
 #[tokio::test]
 async fn team_on_a_session_leading_none_refuses_readably_instead_of_opening() {
     let mut app = app();

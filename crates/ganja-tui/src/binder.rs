@@ -22,9 +22,11 @@
 //!
 //! # Which sessions bind
 //!
-//! Decided in [`crate::run`], where the gate is: a lead binds, and a pane
-//! member, a build with no config home and a headless `ganja run` hand the
-//! binder back unused.
+//! Decided in [`crate::run`], where the gate since **D542** is: a session
+//! that is not a pane member binds, and a pane member and a headless
+//! `ganja run` hand the binder back unused. A build with no config home was
+//! a third case until D542 deleted it — `run` requires that home the way it
+//! already required the data directory, both off one `Xdg::new()`.
 //!
 //! # Which moments rebind
 //!

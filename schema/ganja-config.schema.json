@@ -84,7 +84,7 @@
     },
     "teamless_send": {
       "$ref": "#/$defs/TeamlessSend",
-      "description": "Whether a session that leads no team asks a person before its send_message leaves for another session: unasked sends as any tool call the rules allow, ask raises the ordinary permission dialog on each send. Absent is \"unasked\" — every cross-session delivery already terminates in the receiver's admission gate, cross_session_inbound's machinery, so the sender-side dialog is optional oversight rather than the boundary — and the key has no effect in a session that holds a team. Tighten-only in a project file (unasked < ask): a checkout can demand dialogs but never silence a person's ask, while the file GANJA_CONFIG names outranks the global config home ordinarily. Not a key a plugin can contribute."
+      "description": "Whether a session that leads no team asks a person before its send_message leaves for another session: unasked sends as any tool call the rules allow, ask raises the ordinary permission dialog on each send. Absent is \"unasked\" — every cross-session delivery already terminates in the receiver's admission gate, cross_session_inbound's machinery, so the sender-side dialog is optional oversight rather than the boundary — and the key has no effect in a session that holds a team. Tighten-only in a project file (unasked < ask): a checkout can demand dialogs but never silence a person's ask, while the file GANJA_CONFIG names outranks the global config home ordinarily. Not a key a plugin can contribute. Read and inert in this build: since D542 no shipped session leads no team in this key's sense, so neither spelling changes what a send does — the key stays curated so a file carrying it still loads."
     },
     "permission": {
       "$ref": "#/$defs/PermissionConfig",
@@ -392,7 +392,7 @@
     },
     "TeamlessSend": {
       "title": "Teamless send posture",
-      "description": "Sender-side posture of a teamless session's send_message: unasked sends without a dialog, ask raises one per send. unasked < ask is the tightening order the project tier merges under. Absent is \"unasked\".",
+      "description": "Sender-side posture of a teamless session's send_message: unasked sends without a dialog, ask raises one per send. unasked < ask is the tightening order the project tier merges under. Absent is \"unasked\". No shipped session is teamless since D542, so the posture is read and has no effect.",
       "$comment": "crates/ganja-core/src/config.rs:1313-1328 (TeamlessSend; Deserialize is hand-written so a bad value names the key).",
       "type": "string",
       "enum": [

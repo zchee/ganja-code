@@ -2204,15 +2204,28 @@ const TEAM_GONE: &str =
 /// only in display — `from` is unauthenticated routing data on the
 /// receiving side regardless (the admission gate's own axiom), so the
 /// collision adds no confusion the gate does not already price in.
+///
+/// Reachable by no shipped binary since **D542**; bead `ganja-code-3tng`.
 pub const SOLO_TEAM: &str = "solo";
 
 /// Appended to a teamless send's success note (**D530**'s asymmetry rule): a
 /// session with no registered record and no bound socket cannot be answered
 /// back, and no text this build ships may imply otherwise.
+///
+/// No shipped binary reaches this sentence since **D542** — nothing in one
+/// installs a [`SoloPostbox`] any more — which also retires the coupling
+/// `ganja-code-e99` flagged, that its truth was a property of the assembly
+/// rather than of the postbox. Bead `ganja-code-3tng`.
 const ONE_WAY_NOTE: &str = " This session is not addressable back — it binds no socket.";
 
 /// A session that leads no team, addressing other live sessions by name or by
 /// `uds:` address (**D530**).
+///
+/// **Built by no shipped binary since D542** (2026-08-29): the one production
+/// installer was `ganja-tui`'s no-config-home assembly arm, deleted because
+/// the condition it selected on is one `run` has already exited on. What
+/// remains is a seam this crate's own tests and `ganja-testkit` drive; bead
+/// `ganja-code-3tng` decides whether it becomes live or goes.
 ///
 /// No roster, and — the structural half of **AC-42** — no
 /// `Weak<TeammateRegistry>` to fail upgrading: [`TEAM_GONE`] can answer

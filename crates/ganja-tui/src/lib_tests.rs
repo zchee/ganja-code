@@ -311,39 +311,63 @@ fn the_opening_notice_carries_whatever_startup_had_to_say() {
     }
 }
 
-// ---- D533/AC-11: which assemblies ask the binder ----
+// ---- D533/D542/AC-11: which assemblies ask the binder ----
 
-/// The gate the engine assembly branches on, spelled here exactly as
-/// `run` spells it — the pin's whole point (**AC-11**, narrowed by user
-/// ruling 2026-08-27, OQ1 option (b)): the predicate is asserted **once, by
-/// name**, so a later widening or narrowing of it reddens this test instead
-/// of quietly changing which sessions become addressable.
-const BIND_GATE: &str = "ganja_core::config::config_home().filter(|_| membership.is_none())";
+/// The gate the engine assembly branches on, spelled here exactly as `run`
+/// spells it — the pin's whole point (**AC-11**, narrowed by user ruling
+/// 2026-08-27, OQ1 option (b); re-pinned by **D542**, 2026-08-29): the
+/// predicate is asserted **once, by name**, so a later widening or narrowing
+/// of it reddens this test instead of quietly changing which sessions become
+/// addressable.
+const BIND_GATE: &str = "let (engine, teammates, socket) = match &membership {";
 
-/// **AC-11**, as the user's ruling narrowed it to a regression pin: the
-/// three assemblies this build can actually reach, and the predicate that
-/// decides between them.
+/// The config home that gate no longer asks about, and the shape **D542**
+/// left it in: a context'd `?` rather than an `unwrap` on a value `run` has
+/// already proved it holds. Pinned because the shape is the whole argument —
+/// an unreachable refusal that stays a refusal is one nobody has to re-derive
+/// the day it stops being unreachable.
+const HOME_REQUIREMENT: &str =
+    ".context(\"failed to locate the config home this session's team is kept in\")?;";
+
+/// The clause **D542** folded out of the predicate, spelled in two halves
+/// joined at compile time. The halves are the point: the landing's own check
+/// greps `src/` for this literal to prove the clause is gone, and a pin
+/// carrying it verbatim would be the one hit — a test that answers its own
+/// search is worse than no search.
+const FOLDED_CLAUSE: &str = concat!(".filter(|_| membership", ".is_none())");
+
+/// **AC-11**, as the user's ruling narrowed it to a regression pin, and as
+/// **D542** narrowed the predicate underneath it: the assemblies this build
+/// can reach, and the one question that decides between them.
 ///
-/// - **(ii)** An interactive non-member assembly *with* a config home asks
-///   the binder — byte-identically to what it has done since **D527**, with
-///   zero teammates or a hundred, since the gate does not ask about the
-///   roster. Pinned so a later change to the population cannot regress the
-///   ordinary case silently.
+/// - **(ii)** An interactive non-member assembly asks the binder —
+///   byte-identically to what it has done since **D527**, with zero teammates
+///   or a hundred, since the gate does not ask about the roster. Pinned so a
+///   later change to the population cannot regress the ordinary case
+///   silently.
 /// - **(iii)** A **member pane** binds nothing: it is addressed through its
 ///   lead's team, by the same line that keeps it from leading one (**D505**).
 /// - **(iv)** A **headless** turn binds nothing, for a reason no gate in this
 ///   file could express — it never enters this crate at all. Asserted where
 ///   the fact lives: `ganja-cli`'s headless driver names no binder.
 ///
-/// The no-config-home arm — v1 of the plan's case (i) — is **not** here: the
-/// user's ruling selected option (b), so the solo receiving surface was not
-/// built and that arm still binds nothing.
+/// The no-config-home arm — v1 of the plan's case (i) — is **gone** rather
+/// than merely unasserted (**D542**): it selected on a condition `run` had
+/// already exited on, so the solo postbox behind it was a production install
+/// nothing could reach. What this pins now is that absence, which is the half
+/// a reader can get wrong. Four things, and the list is exhaustive on purpose:
+/// the match line itself, read whole; **no guard on either arm**, since a
+/// condition can come back as `None if home.is_some() =>` without touching
+/// that line; no config-home clause left anywhere in the predicate; and no
+/// `with_solo_postbox` in the file, with the home still asked for behind a
+/// `?`. Whether the teamless surface **D530** and **D531** describe becomes
+/// live or is deleted outright is bead `ganja-code-3tng`.
 ///
 /// This is a source pin rather than a behavioral drill because `run` opens a
 /// real terminal: there is no headless seam in that function to drive the
 /// assembly match from, the same gap `lib.rs`'s own reaper comments record.
 #[test]
-fn the_bind_predicate_is_interactive_non_member() {
+fn the_bind_predicate_is_membership_alone() {
     let source = include_str!("lib.rs");
 
     assert_eq!(
@@ -351,45 +375,69 @@ fn the_bind_predicate_is_interactive_non_member() {
         1,
         "the bind predicate is spelled once, and this is that spelling"
     );
-    // Two conditions, and no more: a config home, and not being a member. A
-    // third would have to be added to that line, which is what this counts.
+    // One condition, and no more. Comparing the whole line reads half of that
+    // — a second condition joined to the scrutinee — and the arm heads below
+    // read the other half, because a condition can also come back as a guard
+    // (`None if home.is_some() =>`) on a line this comparison never touches.
     let gate_line = source
         .lines()
         .find(|line| line.contains(BIND_GATE))
         .expect("the gate is on a line of its own");
+    assert_eq!(gate_line.trim(), BIND_GATE, "the gate asks about membership and nothing else");
+    // The arm heads sit at exactly one indent inside the match, which is what
+    // tells them from the `None,` tuple slots in the member arm's own body.
+    let gate_at = source.find(BIND_GATE).expect("the gate is in this file");
+    let arms = &source[gate_at..];
+    for pattern in ["Some((membership, _))", "None"] {
+        let head = arms
+            .lines()
+            .find(|line| {
+                line.strip_prefix("        ").is_some_and(|rest| rest.starts_with(pattern))
+            })
+            .unwrap_or_else(|| panic!("the `{pattern}` arm head is in this file"));
+
+        assert!(
+            !head.contains(" if "),
+            "neither arm takes a guard, which is the other place a condition would come back: {head}"
+        );
+    }
     assert!(
-        gate_line.trim().starts_with("match ") && gate_line.trim().ends_with('{'),
-        "the gate is the match's own scrutinee, not one arm of a wider test: {gate_line}"
+        !source.contains(FOLDED_CLAUSE),
+        "D542 folded the config-home clause out of the predicate"
+    );
+    assert!(
+        !source.contains("with_solo_postbox"),
+        "D542 deleted the arm that installed the solo postbox; ganja-code-3tng \
+         decides what becomes of the engine machinery behind it"
+    );
+    assert!(
+        source.contains(HOME_REQUIREMENT),
+        "the assembly resolves its config home behind a context'd `?`"
     );
 
     // (ii) The binder is consumed at exactly one place in this file, and that
-    // place is inside the arm the gate's `Some(home)` opens.
+    // place is inside the arm the gate's `None` opens.
     assert_eq!(
         source.matches("binder.map(|binder| {").count(),
         1,
         "the binder is asked for in one arm only"
     );
-    let gate_at = source.find(BIND_GATE).expect("the gate is in this file");
-    let member_at = source
-        .find("None if let Some((membership, _)) = &membership =>")
-        .expect("the member arm is in this file");
+    let member_at =
+        source.find("Some((membership, _)) => (").expect("the member arm is in this file");
     let binder_at =
         source.find("binder.map(|binder| {").expect("the binder is asked for in this file");
     assert!(
-        gate_at < binder_at && binder_at < member_at,
-        "the one hand-in sits in the config-home, non-member arm, ahead of the member arm"
+        gate_at < member_at && member_at < binder_at,
+        "the one hand-in sits in the leading arm, which the member arm precedes"
     );
 
     // (iii) The member arm hands back no socket at all — its tuple's third
-    // slot is `None`, and so is the no-config-home arm's.
+    // slot is `None`, and it names no binder between its own head and the
+    // leading arm that follows it.
     let member_arm = &source[member_at..];
     let member_arm = &member_arm
-        [..member_arm.find("None => {").expect("the no-config-home arm follows the member arm")];
+        [..member_arm.find("None => {").expect("the leading arm follows the member arm")];
     assert!(!member_arm.contains("binder"), "a member pane binds nothing: {member_arm}");
-    assert!(
-        source.contains("(engine.with_solo_postbox(), None, None)"),
-        "the no-config-home arm binds nothing either, and OQ1(b) left it that way"
-    );
 
     // (iv) A headless turn never reaches this crate: `ganja-cli`'s own
     // headless driver names no binder anywhere.

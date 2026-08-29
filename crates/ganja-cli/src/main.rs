@@ -802,13 +802,15 @@ async fn main() -> Result<()> {
             // itself whether to open it. **Handed in unconditionally** —
             // this binary takes no view of what the session turns out to
             // be, and never has: which sessions actually bind is
-            // `ganja-tui`'s own gate (`lib.rs`'s assembly match — a session
-            // that locates a config home and is not a pane member), which
-            // is not "lead only" and was not on the day D505 shipped. The
-            // lister below is handed in on exactly the same terms; the two
-            // gates behind them differ by one condition, and both live over
-            // there. Windows is parked, and a build there hands the UI
-            // nothing rather than a door that would refuse.
+            // `ganja-tui`'s own gate (`lib.rs`'s assembly match — since
+            // **D542**, a session that is not a pane member; it read "and
+            // locates a config home" until that condition was found to be
+            // one the process has already exited on), which is not "lead
+            // only" and was not on the day D505 shipped. The lister below
+            // is handed in on exactly the same terms, and since D542 is
+            // gated on the very same test; both gates live over there.
+            // Windows is parked, and a build there hands the UI nothing
+            // rather than a door that would refuse.
             #[cfg(unix)]
             let binder: Option<Box<dyn ganja_tui::binder::Binder>> =
                 Some(Box::new(binder::SocketBinder::new(cli.socket_dir.clone())));
@@ -817,11 +819,11 @@ async fn main() -> Result<()> {
 
             // The live-session listing the `@` menu offers beside files and
             // roster (**D529** Axis 5, **D530**'s re-derived gate): handed
-            // in unconditionally, exactly as the binder above is. What
-            // differs is downstream — `ganja-tui` gates the lister on
-            // membership alone, one condition wider than the gate it puts
-            // in front of the binder — and the difference is stated where
-            // both gates are read rather than guessed at from here. The
+            // in unconditionally, exactly as the binder above is. Nothing
+            // differs downstream any more — `ganja-tui` gates both on
+            // membership alone since **D542**, where this one used to be
+            // the wider by a config-home condition — and the gate is stated
+            // where it is read rather than guessed at from here. The
             // same directory the binder binds under, so the two can never
             // read a different `--socket-dir`.
             #[cfg(unix)]
