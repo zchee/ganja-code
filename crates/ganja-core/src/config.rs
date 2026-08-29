@@ -830,10 +830,11 @@ pub struct Config {
     /// Not a key a plugin can contribute: [`crate::plugin`]'s `apply` merges
     /// per surface, and D473's six surfaces do not include it.
     ///
-    /// The sender-side sibling is [`Config::teamless_send`] (**D531**):
-    /// `"hold"` here configures **receiver-side** human review of what
-    /// arrives, while that key's `"ask"` adds **sender-side** dialogs on
-    /// what leaves — two independent knobs on the two ends of one wire.
+    /// The sender-side sibling is [`Config::teamless_send`] (**D531**, live
+    /// since **D543**): `"hold"` here configures **receiver-side** human
+    /// review of what arrives, while that key's `"ask"` adds **sender-side**
+    /// dialogs on what leaves — two independent knobs on the two ends of one
+    /// wire.
     pub cross_session_inbound: Option<InboundPolicy>,
     /// How long a **held** peer message's review dialog waits for a person
     /// before it expires (**D523**): `"60s"`, `"5m"`, `"10m"`, or
@@ -916,16 +917,17 @@ pub struct Config {
     ///
     /// # What it does in this build
     ///
-    /// Nothing, and the honest place to say so is here. Since **D542**
-    /// (2026-08-29) no shipped session is teamless in this key's sense:
-    /// `ganja-tui`'s no-config-home assembly arm — the only production
-    /// caller that ever installed a solo postbox — was deleted as
-    /// structurally unreachable, so [`crate::Engine`]'s `teamless` flag is
-    /// never set and the computed default this key feeds never returns
-    /// `Ask`. The key stays curated, refused-unknown, merged and read
-    /// exactly as written above, the way `teammates.shim_turn_timeout` is:
-    /// a file already carrying it must still load. Whether the surface
-    /// becomes live or is deleted is bead `ganja-code-3tng`.
+    /// It acts — since **D543** (2026-08-30, bead `ganja-code-3tng`), and
+    /// this paragraph is kept because for two days it said the opposite.
+    /// **D542** had found the key inert: the only assembly that ever
+    /// installed a solo postbox was deleted as structurally unreachable, and
+    /// a flag no installer set meant the computed default never returned
+    /// `Ask`. D543 removed the flag rather than the key: a session is
+    /// teamless when **its own registry holds no members**, read live at
+    /// each call, which every interactive session that has spawned no
+    /// teammate is. So `"ask"` now really does put a dialog in front of each
+    /// `send_message` that leaves such a session, and a teammate spawning
+    /// mid-session really does revert it to D498's ladder.
     pub teamless_send: Option<TeamlessSend>,
     /// Permission rules layered over the built-in ones.
     #[serde(default)]
@@ -1377,10 +1379,13 @@ impl<'de> Deserialize<'de> for DialogExpiry {
 /// [`TeamlessSend::severity`] carries the tightening order the project tier
 /// merges under; the config spellings are the lowercase variant names.
 ///
-/// Read and inert in this build: no shipped session is teamless since
-/// **D542**, so neither spelling changes what a `send_message` does — the
-/// key's own doc on [`Config::teamless_send`] carries why, and bead
-/// `ganja-code-3tng` is where that is settled.
+/// **Live since D543** (2026-08-30): a session is teamless when its own
+/// registry holds no members, read at each call, which every session that
+/// has spawned no teammate is — so `Ask` really does raise a dialog per
+/// send there. It read *inert* for two days, between **D542** finding no
+/// shipped session teamless in this key's sense and D543 deriving the state
+/// instead of latching it; [`Config::teamless_send`]'s own doc carries that
+/// history in full.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TeamlessSend {
     /// Send without a dialog, what an absent key means.
@@ -1838,9 +1843,9 @@ impl Config {
     /// under, or the default when no tier says — [`TeamlessSend::Unasked`],
     /// the `teamless_send` key's own doc carries why (**D531**). The engine
     /// computes the tool's effective default from this and the live team
-    /// state; in a session that holds a team the value changes nothing —
-    /// which since **D542** is every shipped session, so what this answers
-    /// reaches no dialog until bead `ganja-code-3tng` rules.
+    /// state (**D543**): in a session that holds a team the value changes
+    /// nothing, and in one leading nobody it decides whether each
+    /// `send_message` raises an ordinary storable dialog.
     #[must_use]
     pub fn teamless_send(&self) -> TeamlessSend {
         self.teamless_send.unwrap_or_default()

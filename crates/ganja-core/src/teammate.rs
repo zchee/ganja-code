@@ -1781,6 +1781,21 @@ impl TeammateRegistry {
         self.members().values().any(|member| member.backend == backend)
     }
 
+    /// Whether this registry holds **nobody** — the live state a session's
+    /// teamless posture is read off (**D543**, 2026-08-30, `Engine::teamless`).
+    ///
+    /// Counts every member this registry holds rather than only the live
+    /// ones, [`TeammateRegistry::holds_backend`]'s rule and for that rule's
+    /// reason: a teammate whose surface has stopped is still a teammate
+    /// until a retire drops it, and whatever it wrote is still owed a read.
+    /// So a team does not flicker back to leading nobody in the window
+    /// between an exit and the inbox pass that retires it; the state follows
+    /// the retire, which is where the team really ends.
+    #[must_use]
+    pub fn leads_nobody(&self) -> bool {
+        self.members().is_empty()
+    }
+
     /// How many teammates are still running, which is what the status bar
     /// counts.
     #[must_use]

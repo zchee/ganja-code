@@ -83,10 +83,13 @@
 //! section, evidence 658949-658990); a miss is information the model reads,
 //! never control flow, the `skill::not_found` posture.
 //!
-//! Two things no reminder does. It **names no reply channel** — the D530
-//! asymmetry rule: a teamless session can send and cannot be addressed back,
-//! so no text here may imply a road that does not exist, and a test scans
-//! every rendering for the claim. And it **lists nothing the person did not
+//! Two things no reminder does. It **names no reply channel** — **D529**'s
+//! own rule, which is that **a mention sends nothing**: there is no message
+//! for anybody to answer, so a road home would be a road out of nothing, and
+//! a test scans every rendering for the claim. (This paragraph cited D530's
+//! asymmetry rule — a teamless session can send and cannot be addressed back
+//! — until **D543**, 2026-08-30, retired that clause: such a session binds a
+//! socket and registers a name. The rule stands on its own reason.) And it **lists nothing the person did not
 //! point at**: a miss names no other session, because a model-facing roster
 //! of live sessions is its own tool with its own trust story and this build
 //! ships none.

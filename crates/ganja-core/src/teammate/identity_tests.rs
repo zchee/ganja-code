@@ -602,9 +602,11 @@ fn every_resolution_lands_in_the_reminders_vocabulary() {
     ));
 }
 
-/// D530's asymmetry rule, pinned across every rendering: a teamless
-/// session can send and cannot be addressed back, so no reminder may
-/// imply a road home.
+/// **D529**'s own rule, pinned across every rendering: a mention sends
+/// nothing, so there is no message for anybody to answer and no reminder
+/// may imply a road home. Pinned under D530's asymmetry rule until
+/// **D543** (2026-08-30) retired it; the assertions are unchanged,
+/// because the reason they were always right is this one.
 #[test]
 fn no_reminder_names_a_reply_channel() {
     let renderings = [

@@ -360,8 +360,10 @@ const FOLDED_CLAUSE: &str = concat!(".filter(|_| membership", ".is_none())");
 /// condition can come back as `None if home.is_some() =>` without touching
 /// that line; no config-home clause left anywhere in the predicate; and no
 /// `with_solo_postbox` in the file, with the home still asked for behind a
-/// `?`. Whether the teamless surface **D530** and **D531** describe becomes
-/// live or is deleted outright is bead `ganja-code-3tng`.
+/// `?`. Bead `ganja-code-3tng` settled the teamless surface on 2026-08-30
+/// (**D543**): teamless became a live read of the session's own registry
+/// and the solo postbox was deleted, so that last assertion now holds for a
+/// second reason — there is no such method to name.
 ///
 /// This is a source pin rather than a behavioral drill because `run` opens a
 /// real terminal: there is no headless seam in that function to drive the
@@ -407,8 +409,8 @@ fn the_bind_predicate_is_membership_alone() {
     );
     assert!(
         !source.contains("with_solo_postbox"),
-        "D542 deleted the arm that installed the solo postbox; ganja-code-3tng \
-         decides what becomes of the engine machinery behind it"
+        "D542 deleted the arm that installed the solo postbox, and D543 the \
+         method itself, so this holds for a second reason"
     );
     assert!(
         source.contains(HOME_REQUIREMENT),

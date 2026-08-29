@@ -62,13 +62,21 @@ async fn offered(
         .clone()
 }
 
-/// **AC-33**, all four assemblies in one test, so a fifth condition cannot be
-/// added without reddening it — and the companion pin beside it: a member
-/// pane keeps `send_message`, so the two gates are visibly different rather
-/// than accidentally divergent.
+/// **AC-33**, every assembly this build has in one test, so a new condition
+/// cannot be added without reddening it — and the companion pin beside it: a
+/// member pane keeps `send_message`, so the two gates are visibly different
+/// rather than accidentally divergent.
+///
+/// Three, not the four this test held until **D543** (2026-08-30): the
+/// fourth was "an interactive non-member session on the solo arm", and the
+/// solo arm turned out to be a postbox no shipped binary installed. Such a
+/// session leads a team of nobody and holds the lead postbox of case (i),
+/// which is why the two rows collapsed into one rather than one of them
+/// being dropped as untested.
 #[tokio::test]
 async fn the_listing_reaches_the_postboxes_that_can_cross_a_session_and_no_others() {
-    // (i) A lead.
+    // (i) A lead — of nobody here, which since D543 is the same assembly
+    // a session that has spawned no teammate really runs.
     {
         let (provider, requests) = ScriptedProvider::new(vec![says("ok")]);
         let home = ganja_testkit::temp_dir();
@@ -92,29 +100,7 @@ async fn the_listing_reaches_the_postboxes_that_can_cross_a_session_and_no_other
         );
     }
 
-    // (ii) An interactive non-member session on the solo arm.
-    {
-        let (provider, requests) = ScriptedProvider::new(vec![says("ok")]);
-        let engine = Engine::new(
-            provider,
-            "recorder-model",
-            Arc::new(Registry::new(Vec::new())),
-            Permissions::default(),
-        )
-        .with_solo_postbox();
-
-        let request = offered(&engine, &requests).await;
-        assert!(
-            offers(&request, list_sessions::ID),
-            "the solo postbox resolves names and crosses a socket too"
-        );
-        assert!(
-            offers(&request, send_message::ID),
-            "and it is offered the tool the listing is paired with"
-        );
-    }
-
-    // (iii) A member pane.
+    // (ii) A member pane.
     {
         let (provider, requests) = ScriptedProvider::new(vec![says("ok")]);
         let home = ganja_testkit::temp_dir();
@@ -144,7 +130,7 @@ async fn the_listing_reaches_the_postboxes_that_can_cross_a_session_and_no_other
         );
     }
 
-    // (iv) A headless run: no postbox at all.
+    // (iii) A headless run: no postbox at all.
     {
         let (provider, requests) = ScriptedProvider::new(vec![says("ok")]);
         let engine = Engine::new(

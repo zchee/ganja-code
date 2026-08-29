@@ -5,13 +5,13 @@
 //!
 //! `crates/ganja-cli/tests/uds.rs` is this file's pattern and its neighbour:
 //! that binary pins the socket crossing itself (a `uds:` address, a bare
-//! name, the identity a solo sender is stamped with), and this one picks up
-//! where its accept path stops — at the gate that may hold the message
-//! instead, and at the receipt that follows the hold. The two share the same
-//! shape deliberately: a receiving session assembled here and served on a
-//! real socket, a sending session that is **this binary re-executed**, and a
-//! socket directory that is a fresh `0700` `tempfile` one rather than the
-//! developer's own `/tmp/ganja-<uid>/`.
+//! name, the identity a session leading nobody is stamped with), and this
+//! one picks up where its accept path stops — at the gate that may hold the
+//! message instead, and at the receipt that follows the hold. The two share
+//! the same shape deliberately: a receiving session assembled here and served
+//! on a real socket, a sending session that is **this binary re-executed**,
+//! and a socket directory that is a fresh `0700` `tempfile` one rather than
+//! the developer's own `/tmp/ganja-<uid>/`.
 //!
 //! # What each side of a drill is, said plainly
 //!
@@ -24,11 +24,13 @@
 //! sender (**B**) is a real second process throughout, so every byte a drill
 //! asserts on crossed a socket between two operating-system processes.
 //!
-//! B leads a team of its own and binds its own socket, which is what a
-//! *reply-capable* sender is in a shipped build: the solo postbox `uds.rs`
-//! sends its bare-name drill from binds nothing at all and says so in every
-//! success note, so driving a settlement back to one would mean assembling a
-//! session this build cannot produce and then quoting its answer as evidence.
+//! B leads a team of its own **and binds its own socket**, and since
+//! **D543** the first of those is what every shipped interactive session
+//! does: `uds.rs`'s bare-name drill sends from the same kind of engine, a
+//! lead whose team holds nobody. What separates the two files is the
+//! binding, which is what makes a sender *reply-capable*: a settlement is a
+//! `POST` back, so a sender that serves no socket has nowhere for one to
+//! land.
 //!
 //! # What is pinned here, and what is pinned elsewhere
 //!
@@ -251,8 +253,9 @@ fn team_of(engine: &Engine) -> TeamView {
 // The sender, in the child process
 // ---------------------------------------------------------------------------
 
-/// A `send_message` tool call, one turn's worth — `uds.rs`'s own idiom, since
-/// `SoloPostbox` itself is crate-private and unreachable from here.
+/// A `send_message` tool call, one turn's worth — `uds.rs`'s own idiom: the
+/// tool is what a model reaches the postbox through, and a test binary
+/// cannot name the postbox itself.
 fn send_call(to: &str, message: &str) -> Vec<ganja_core::provider::ProviderEvent> {
     ganja_testkit::tool_call(
         ganja_core::tool::send_message::ID,
@@ -312,13 +315,11 @@ async fn send_as_child(
         SENDER_SESSION,
         env::current_dir().expect("the working directory resolves"),
     ));
-    // A session that **leads a team**, deliberately, rather than the solo
-    // postbox `uds.rs`'s own bare-name drill sends from: what these drills
-    // need is a sender that is *reply-capable*, and in a shipped build a bound
-    // socket and a team are the same condition — the solo arm binds nothing at
-    // all, and its every send says so in as many words. Driving the receipt
-    // half from a solo postbox would mean assembling a session this build
-    // cannot produce and then quoting its answer as evidence.
+    // The same assembly `uds.rs`'s bare-name sender uses since **D543** — a
+    // lead over its own team — and the same one a shipped interactive
+    // session runs. What these drills add is the second half of being
+    // *reply-capable*: the socket bound below, without which a settlement
+    // has nowhere to be posted back to.
     let engine =
         Arc::new(engine.with_teammates(Arc::clone(&sender_registry), ganja_testkit::externals()));
 

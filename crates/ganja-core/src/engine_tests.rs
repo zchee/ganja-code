@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     Engine, EngineError, STALE_FILES, STORELESS, message_chars, send_message, stale_notice,
-    teammate,
+    subagent, teammate,
 };
 use crate::config::TeamlessSend;
 use crate::permission::Permissions;
@@ -1426,29 +1426,84 @@ fn a_member_engine_with_a_postbox_is_offered_send_message_and_leads_no_team() {
     );
 }
 
-/// **D530**: a session with no team gets the solo postbox and the
-/// teamless-described tool — not the empty-roster ("team of one")
-/// variant, which must not read alike.
+/// **D530**, as **D543** makes it reachable: a session whose team holds
+/// nobody is offered the teamless-described tool — not the empty-roster
+/// ("team of one") variant, which must not read alike. The two are told
+/// apart by a live read of the registry, so this is the description a
+/// shipped session that has spawned nobody really gets.
 #[test]
-fn a_solo_postbox_is_offered_send_message_with_the_teamless_description() {
-    let engine = engine().with_solo_postbox();
+fn a_session_leading_nobody_is_offered_send_message_with_the_teamless_description() {
+    let home = ganja_testkit::temp_dir();
+    let registry = crate::teammate::tests::registry(home.path());
+    let engine = engine().with_teammates(registry, subagent::Backends::new());
+
     let tools = engine.tools();
-    let tool = tools.get(send_message::ID).expect("a solo session is offered it");
+    let tool = tools.get(send_message::ID).expect("a session leading nobody is offered it");
     assert!(
         !tool.description().contains("Teammates this session can address"),
         "no roster is claimed, unlike a team of one: {}",
         tool.description()
     );
-    assert!(engine.teammates().is_none(), "and leads no team of its own");
+    assert!(engine.teamless(), "a team nobody has joined is what teamless means (D543)");
+}
+
+/// **D543**'s reachability half, end to end at the composition seam: the
+/// road-back sentence is absent while nothing is bound, and the first
+/// refresh after a bind brings it in.
+///
+/// The bind is what a frontend does *after* assembly, so this is also the
+/// pin on the memo carrying reachability: were the shape only roster and
+/// solitude, the refresh below would see no change and the session would
+/// describe itself as unanswerable for the rest of its life.
+#[test]
+fn a_bound_socket_adds_the_road_back_to_the_teamless_description() {
+    let home = ganja_testkit::temp_dir();
+    let registry = crate::teammate::tests::registry(home.path());
+    let engine = engine().with_teammates(registry, subagent::Backends::new());
+    let described = |engine: &Engine| {
+        engine
+            .tools()
+            .get(send_message::ID)
+            .expect("a session leading nobody is offered it")
+            .description()
+            .to_owned()
+    };
+
+    assert!(
+        !described(&engine).contains("answer by addressing this one back"),
+        "nothing is bound, so no road home is claimed: {}",
+        described(&engine)
+    );
+
+    engine.set_peer_address(Some(std::path::Path::new("/tmp/ganja-501/0198c1a2.sock")));
+    engine.refresh_team();
+
+    assert!(
+        described(&engine).contains("answer by addressing this one back"),
+        "the first refresh after the bind names the road home: {}",
+        described(&engine)
+    );
+}
+
+/// **D543**'s other half at the same seam: an engine with **no team at
+/// all** — a pane member, a fixture holding a bare postbox — is not
+/// teamless, because leading nobody is a thing only a lead does.
+#[test]
+fn a_session_with_no_team_at_all_is_not_teamless() {
+    let engine = engine();
+
+    assert!(engine.teammates().is_none());
+    assert!(!engine.teamless(), "no team is not a team of nobody");
 }
 
 /// **AC-40's engine-cell half (ADJ-2)**: `/rename` sets the self-name
-/// cell the solo postbox reads at send time, moving the *next* send's
-/// `from` without this cell holding a stale copy — [`Engine::self_name`]
-/// answers it back exactly as set.
+/// cell a frontend writes its registration record from — the name other
+/// sessions resolve this one by — and [`Engine::self_name`] answers it
+/// back exactly as set. Since **D543** that cell stamps no wire identity
+/// of its own: a send carries the session's team identity either way.
 #[test]
-fn set_self_name_moves_the_cell_the_solo_postbox_reads() {
-    let engine = engine().with_solo_postbox();
+fn set_self_name_moves_the_cell_a_registration_record_is_written_from() {
+    let engine = engine();
     assert_eq!(
         engine.self_name(),
         crate::tool::registry::FALLBACK_NAME,
@@ -1460,22 +1515,38 @@ fn set_self_name_moves_the_cell_the_solo_postbox_reads() {
     assert_eq!(engine.self_name(), "fresh");
 }
 
-/// A solo-postbox engine over one script per step, ready for a
-/// `send_message` call — D530/D531's fixture. Distinct from this
-/// module's own single-script [`ScriptedProvider`] because a posture test
-/// needs a different script for each of several turns.
+/// A session leading a team of **nobody**, over one script per step,
+/// ready for a `send_message` call — D531/D543's fixture. Distinct from
+/// this module's own single-script [`ScriptedProvider`] because a posture
+/// test needs a different script for each of several turns.
+///
+/// The registry and the home come back with the engine because the
+/// posture is read off that registry at every call (**D543**): a test
+/// that wants the posture to move spawns into this handle, and the tree
+/// its team file is written under has to outlive the engine.
+struct Alone {
+    engine: Engine,
+    registry: Arc<teammate::TeammateRegistry>,
+    /// Where the team file lands, and dropping it takes that tree with it.
+    home: tempfile::TempDir,
+}
+
 fn teamless(
     scripts: Vec<Vec<ProviderEvent>>,
     rules: Vec<crate::permission::Rule>,
     posture: TeamlessSend,
-) -> Engine {
+) -> Alone {
     let (provider, _requests) = ganja_testkit::ScriptedProvider::new(scripts);
     let mut permissions = Permissions::default();
     permissions.set_baseline(rules);
+    let home = ganja_testkit::temp_dir();
+    let registry = crate::teammate::tests::registry(home.path());
 
-    Engine::new(provider, MODEL, Arc::new(Registry::new(Vec::new())), permissions)
-        .with_solo_postbox()
-        .with_teamless_send(posture)
+    let engine = Engine::new(provider, MODEL, Arc::new(Registry::new(Vec::new())), permissions)
+        .with_teammates(Arc::clone(&registry), subagent::Backends::new())
+        .with_teamless_send(posture);
+
+    Alone { engine, registry, home }
 }
 
 /// A `send_message` call to a name nobody answers to, one turn's worth.
@@ -1513,7 +1584,7 @@ async fn until_requested(events: &mut BoxStream<'static, Event>) -> crate::proto
 /// posture at all.
 #[tokio::test]
 async fn a_teamless_send_is_unasked_by_default() {
-    let engine = teamless(
+    let Alone { engine, .. } = teamless(
         vec![send_call("nobody", "hi"), ganja_testkit::says("done")],
         Vec::new(),
         TeamlessSend::Unasked,
@@ -1534,7 +1605,7 @@ async fn a_teamless_send_is_unasked_by_default() {
 /// the computed default sits *beneath* every rule, never above it.
 #[tokio::test]
 async fn teamless_ask_raises_a_dialog_and_a_stored_always_answer_silences_the_next() {
-    let engine = teamless(
+    let Alone { engine, .. } = teamless(
         vec![
             send_call("nobody", "first"),
             ganja_testkit::says("first done"),
@@ -1566,7 +1637,7 @@ async fn teamless_ask_raises_a_dialog_and_a_stored_always_answer_silences_the_ne
 /// beneath every rule, never above one.
 #[tokio::test]
 async fn a_deny_rule_outranks_the_teamless_ask_default() {
-    let engine = teamless(
+    let Alone { engine, .. } = teamless(
         vec![send_call("nobody", "hi"), ganja_testkit::says("done")],
         vec![crate::permission::Rule {
             permission: send_message::ID.to_owned(),
@@ -1586,13 +1657,22 @@ async fn a_deny_rule_outranks_the_teamless_ask_default() {
     );
 }
 
-/// **AC-35's mid-session clause, and AC-42**: a team installed mid-session
-/// flips the computed default back to `allow` with the key still `ask` —
-/// in-team D498 stays byte-untouched — and retiring the team swaps the
-/// solo postbox back, so asking resumes.
+/// **AC-35's mid-session clause, and AC-42**, driven through the
+/// mechanism **D543** turned them into: the computed default is a read of
+/// this session's own registry, so a teammate **joining** flips it back to
+/// allow with the key still `ask` — in-team D498 stays byte-untouched —
+/// and **retiring** that teammate leaves the session leading nobody
+/// again, so asking resumes.
+///
+/// A real spawn and a real retire, rather than the two installer seams
+/// D530 landed for this: `install_team`/`retire_team` were
+/// production-callerless from the day they shipped and went with D543,
+/// and what a shipped session really does to its team is spawn into it
+/// and retire out of it. The posture therefore has to follow those, which
+/// is the whole claim under test.
 #[tokio::test]
-async fn a_team_installed_mid_session_reverts_to_unasked_and_retiring_it_reverts_to_teamless() {
-    let engine = teamless(
+async fn a_teammate_joining_stops_the_ask_and_retiring_it_resumes() {
+    let Alone { engine, registry, home } = teamless(
         vec![
             send_call("nobody", "one"),
             ganja_testkit::says("one done"),
@@ -1606,7 +1686,7 @@ async fn a_team_installed_mid_session_reverts_to_unasked_and_retiring_it_reverts
     );
     let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
-    // Teamless, ask key set: the first send is asked about.
+    // Leading nobody, ask key set: the first send is asked about.
     prompt(&engine, "one").await;
     let waiting = until_requested(&mut events).await;
     engine
@@ -1615,17 +1695,19 @@ async fn a_team_installed_mid_session_reverts_to_unasked_and_retiring_it_reverts
         .expect("the dialog this turn raised is answerable");
     drain(&mut events).await;
 
-    // A team is installed mid-session (D530/F10's seam): the key still
-    // says `ask`, but a session that holds a team is D498's static
-    // ladder again, key regardless.
-    let home = tempfile::tempdir().expect("a temp teams root");
-    let registry = Arc::new(teammate::TeammateRegistry::new(
-        ganja_team::TeamsRoot::new(home.path().join("teams")),
-        ganja_team::TeamName::parse("session-abcd1234").expect("a team name"),
-        "session-abcd1234",
-        home.path(),
-    ));
-    engine.install_team(&registry);
+    // A teammate joins: the key still says `ask`, but a session that
+    // holds somebody is D498's static ladder again, key regardless.
+    registry
+        .spawn(
+            crate::teammate::tests::in_process(home.path()),
+            crate::teammate::tests::request(
+                "worker",
+                crate::protocol::team::MemberBackend::InProcess,
+                home.path(),
+            ),
+        )
+        .await
+        .expect("a teammate joins");
 
     prompt(&engine, "two").await;
     let second = drain(&mut events).await;
@@ -1634,10 +1716,8 @@ async fn a_team_installed_mid_session_reverts_to_unasked_and_retiring_it_reverts
         "in-team D498 stays unasked regardless of the key: {second:?}"
     );
 
-    // The team ends: the solo postbox swaps back, and asking resumes —
-    // `TEAM_GONE` never answers this, because the reinstalled postbox
-    // holds no registry to fail upgrading at all.
-    engine.retire_team();
+    // It is retired: the registry holds nobody again, and asking resumes.
+    assert!(registry.retire("worker").await.expect("the retire lands"), "a member was retired");
 
     prompt(&engine, "three").await;
     let waiting = until_requested(&mut events).await;

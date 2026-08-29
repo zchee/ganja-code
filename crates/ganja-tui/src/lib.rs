@@ -417,14 +417,15 @@ pub async fn run(
     //
     // What went with that arm is the solo postbox, and with it every
     // production witness for the teamless sender surface **D530** and
-    // **D531** describe: no shipped binary now sends under that identity,
-    // appends its not-addressable-back note, or reaches the `teamless_send`
-    // dialog. That machinery stays in the engine as a seam its own tests
-    // drive; whether it becomes live — a session holding no teammates being
-    // teamless in earnest — or is deleted outright is bead
-    // `ganja-code-3tng`, and not this file's to decide. This crate's own
-    // `AGENTS.md` states D542 in full, carrying the literal spellings this
-    // comment deliberately leaves to it.
+    // **D531** describe. Bead `ganja-code-3tng` ruled on that surface on
+    // 2026-08-30 (**D543**): the `<name>@solo` identity and its
+    // not-addressable-back note are **deleted**, since a session leading
+    // nobody binds the socket this very function asks for and is addressable
+    // by the name it registers, while the `teamless_send` dialog is now
+    // **reached** — teamless became a live read of the session's own
+    // registry rather than a flag an installer set. This crate's own
+    // `AGENTS.md` states D542 in full and what D543 did next, carrying the
+    // literal spellings this comment deliberately leaves to it.
     let home = ganja_core::config::config_home()
         .context("failed to locate the config home this session's team is kept in")?;
     let (engine, teammates, socket) = match &membership {

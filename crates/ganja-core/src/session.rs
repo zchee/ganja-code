@@ -845,11 +845,13 @@ pub(crate) struct Turn {
     /// mid-turn reaches the next steer rather than waiting for the next
     /// prompt.
     pub(crate) receipts: Arc<std::sync::Mutex<Vec<crate::teammate::receipts::Settled>>>,
-    /// Whether this turn's own `send_message` posts through the solo postbox
-    /// rather than a team's (**D530**), read once at the turn's start beside
+    /// Whether this turn's session leads a team that holds **nobody**
+    /// (**D530**, **D543**), read once at the turn's start beside
     /// [`Turn::teamless_send`] for the call-time posture computation
     /// (**D531**) — the two together are the `(has-team, resolved key)` pair
-    /// `prepare`'s default hand-in reads.
+    /// `prepare`'s default hand-in reads. Read off the registry rather than
+    /// a flag, so a turn that begins after a spawn or a retire sees what the
+    /// team is now.
     pub(crate) teamless: bool,
     /// The resolved `teamless_send` posture this turn runs under (**D531**).
     pub(crate) teamless_send: crate::config::TeamlessSend,
@@ -3850,8 +3852,10 @@ async fn resolve_batch(
 
 /// The call-time effective default [`prepare`] hands `gate_with_default`
 /// (**D531**): [`Decision::Ask`] for exactly `send_message`, in exactly a
-/// teamless session whose resolved posture asks — otherwise [`None`], the
-/// static ladder untouched.
+/// session that leads nobody and whose resolved posture asks — otherwise
+/// [`None`], the static ladder untouched. Reachable since **D543** made
+/// [`Turn::teamless`] a read of the session's own registry; before it, the
+/// flag that fed this was set by an installer no shipped binary called.
 ///
 /// A function of `turn`'s own two fields rather than a value baked in at the
 /// turn's start, so the wording stays literal to the ruling's own "the

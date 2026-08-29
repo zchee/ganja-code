@@ -1144,12 +1144,21 @@ pub struct Engine {
     /// Every teammate's permission dialogs, waiting for the lead side to claim
     /// the receiver (**D-5**). See [`Engine::teammate_dialogs`].
     teammate_dialogs: std::sync::Mutex<Option<mpsc::Receiver<teammate::posture::Forwarded>>>,
-    /// The roster the offered `send_message` was last described against, so a
-    /// teammate spawned mid-session is addressable at the next turn rather
-    /// than never. The same once-per-turn-start memo `mcp_installed` keeps,
-    /// for the same reason: a rebuild happens exactly when what it renders
-    /// moved.
-    team_roster: std::sync::Mutex<Vec<Peer>>,
+    /// What the offered `send_message` was last composed against, as one
+    /// [`TeamShape`] — [`None`] until a postbox is installed. The same
+    /// once-per-turn-start memo `mcp_installed` keeps, for the same reason —
+    /// a rebuild happens exactly when what it renders moved — so a teammate
+    /// spawned mid-session is addressable at the next turn rather than never.
+    ///
+    /// **Written by [`Engine::refresh_team`] alone**, from the same single
+    /// read it hands down to the composition (**D543**): the three fields
+    /// come off three different cells, so a memo assembled by one read and a
+    /// description built by another could disagree — and since this memo is
+    /// what decides whether to rebuild at all, that pair would stand for the
+    /// session's whole life rather than one turn. Every other composition
+    /// path reads a shape of its own and stores nothing, which costs at most
+    /// one extra rebuild at the next turn start.
+    team_shape: std::sync::Mutex<Option<TeamShape>>,
     /// The posture the **next** turn runs under (**D-15**, **D496**).
     ///
     /// Written the moment a [`Command::SetPermissionMode`] arrives, mid-turn
@@ -1223,45 +1232,28 @@ pub struct Engine {
     /// ([`Engine::with_socket_directory`]), so the hidden `--socket-dir`
     /// override reaches every reader the same way.
     identity: Arc<Identity>,
-    /// This session's own self-name (**D530**, **ADJ-2**): the value
-    /// [`Engine::with_solo_postbox`]'s postbox stamps `from` with as
-    /// `<self-name>@solo`, read fresh at send time so `/rename` moves the
-    /// *next* send without this cell holding a stale copy. Every interactive
-    /// session gets one — a lead's own registration name rides the same
-    /// value — set through the one seam, [`Engine::set_self_name`], that
-    /// only a frontend calls; a model's arguments cannot reach it. Defaults
-    /// to [`crate::tool::registry::FALLBACK_NAME`] until seeded, the same
-    /// fallback the D527 name grammar's own sanitizer falls back to.
+    /// This session's own self-name (**D530**, **ADJ-2**): the name a
+    /// person gave this session, read fresh by every reader so `/rename`
+    /// moves the *next* one without a stale copy of its own. Every
+    /// interactive session gets one — a lead's own registration name is
+    /// this value — set through the one seam, [`Engine::set_self_name`],
+    /// that only a frontend calls; a model's arguments cannot reach it.
+    /// Defaults to [`crate::tool::registry::FALLBACK_NAME`] until seeded,
+    /// the same fallback the D527 name grammar's own sanitizer falls back
+    /// to.
+    ///
+    /// **Not what a send is stamped with** (**D543**): a session's wire
+    /// identity is its team's derived `<lead>@<team>`, whether or not that
+    /// team holds anybody, so what this cell moves is what other sessions
+    /// *resolve* this one by — never what a message it sends claims to come
+    /// from.
     self_name: Arc<std::sync::Mutex<String>>,
-    /// Whether this session's `send_message` posts through the solo postbox
-    /// rather than a team's (**D530**, **D531**): the input the call-time
-    /// posture computation reads alongside [`Engine::teamless_send`]. Set
-    /// `false` by every [`Engine::install_postbox`] call and `true`
-    /// afterward by [`Engine::install_solo_postbox`] alone, so installing
-    /// any other kind of postbox — a lead's, a member's — always clears it.
-    ///
-    /// Never `true` in a shipped binary since **D542**: the only production
-    /// caller of that installer was an assembly arm deleted as unreachable,
-    /// so the D531 posture this feeds is read and inert until bead
-    /// `ganja-code-3tng` rules on the surface.
-    ///
-    /// A separate atomic beside [`Engine::postbox`]'s own mutex rather than
-    /// a field inside it: a reader (`Engine::team_messaging`, a turn's own
-    /// construction) takes the two locks one after the other, so a
-    /// concurrent installer could in principle be observed mid-swap — the
-    /// postbox already moved, this flag not yet (or the reverse). Left as
-    /// is rather than merged under one lock because nothing reaches either
-    /// installer mid-session today (`Engine::install_team` and
-    /// `Engine::retire_team` are production-callerless, the plan's own
-    /// ratified narrowing); the day a caller lands, that seam's own tests
-    /// are the place to decide whether the pairing needs to be atomic.
-    teamless: AtomicBool,
     /// The resolved `teamless_send` posture (**D531**): `Unasked` unless a
     /// frontend's config named `ask` through
     /// [`Engine::with_teamless_send`]. Consulted only while
-    /// [`Engine::teamless`] is set — in-team `send_message` stays D498's
-    /// static ladder regardless of this value, the ruling's own "in a
-    /// session that holds a team, this key has no effect at all".
+    /// [`Engine::teamless`] answers `true` — in-team `send_message` stays
+    /// D498's static ladder regardless of this value, the ruling's own "in
+    /// a session that holds a team, this key has no effect at all".
     teamless_send: TeamlessSend,
     /// The socket this session answers on, when a frontend has bound one
     /// (**D532**): the `reply_to` a send stamps and the `own_marker` the hop
@@ -1305,21 +1297,46 @@ pub struct Engine {
     /// the path itself rather than a resolution over it.
     socket_directory: PathBuf,
     /// Whether the installed postbox can **cross-session send** (**D535**'s
-    /// registration gate): a lead's and the solo one can, a
-    /// [`teammate::member::MemberPostbox`] and a teammate's own
-    /// [`subagent::Postbox::of`] cannot — the first refuses
-    /// `Address::Uds` outright and resolves a name only against its own team
-    /// file, so handing it a directory of this user's sessions, cwds and
-    /// `uds:` addresses would hand it a list of addresses it structurally
-    /// cannot use.
+    /// registration gate): a lead's can — leading nobody included, since
+    /// D543 leaves such a session exactly the lead postbox it always had —
+    /// while a [`teammate::member::MemberPostbox`] and a teammate's own
+    /// [`subagent::Postbox::of`] cannot: the first refuses `Address::Uds`
+    /// outright and resolves a name only against its own team file, so
+    /// handing it a directory of this user's sessions, cwds and `uds:`
+    /// addresses would hand it a list of addresses it structurally cannot
+    /// use.
     ///
-    /// A flag beside [`Engine::teamless`] rather than a query on the trait,
-    /// and kept in lockstep the same way: [`Engine::install_postbox`] clears
-    /// it, and the two installers that put a cross-session-capable postbox in
-    /// place set it back afterwards. Deliberately **not** `send_message`'s
-    /// gate, which is postbox presence alone — a member is offered
-    /// `send_message` from its first turn and must keep it.
+    /// A flag rather than a query on the trait, kept in lockstep by the two
+    /// halves of one seam: [`Engine::install_postbox`] clears it, and
+    /// [`Engine::with_teammates`] — the one assembly that installs a
+    /// cross-session-capable postbox — sets it back afterwards.
+    /// Deliberately **not** `send_message`'s gate, which is postbox presence
+    /// alone: a member is offered `send_message` from its first turn and
+    /// must keep it.
     cross_session_postbox: AtomicBool,
+}
+
+/// This session's team as the offered `send_message` describes it
+/// (**D543**): who it may address, whether it leads anybody, and whether it
+/// can be answered.
+///
+/// One value rather than three reads, because the three are read together,
+/// compared together and rendered together — see [`Engine::team_shape`],
+/// which is the only place it is built, and [`Engine::team_shape`]'s field
+/// of the same name, which is the only place it is stored.
+#[derive(Clone, Debug, PartialEq)]
+struct TeamShape {
+    /// Everybody this session may address by name, as the installed postbox
+    /// answers it — empty for a session leading nobody, which is why it is
+    /// not on its own enough to tell that case from a team of one.
+    roster: Vec<Peer>,
+    /// Whether this session leads a team that holds nobody
+    /// ([`Engine::teamless`]).
+    teamless: bool,
+    /// Whether this session answers on a socket of its own, so a peer it
+    /// writes to can write back (**D532**'s bound cell). Decides one
+    /// sentence of the teamless description and nothing else.
+    addressable: bool,
 }
 
 /// The socket one session answers on, in the two spellings a send needs
@@ -1465,7 +1482,7 @@ impl Engine {
             teammates: None,
             postbox: std::sync::Mutex::new(None),
             teammate_dialogs: std::sync::Mutex::new(None),
-            team_roster: std::sync::Mutex::new(Vec::new()),
+            team_shape: std::sync::Mutex::new(None),
             permission_mode: Arc::new(std::sync::Mutex::new(PermissionMode::Ask)),
             hooks: std::sync::Mutex::new(None),
             hook_context: std::sync::Mutex::new(Vec::new()),
@@ -1479,7 +1496,6 @@ impl Engine {
             self_name: Arc::new(std::sync::Mutex::new(
                 crate::tool::registry::FALLBACK_NAME.to_owned(),
             )),
-            teamless: AtomicBool::new(false),
             teamless_send: TeamlessSend::default(),
             peer_address: Arc::default(),
             inbound_chain: Arc::default(),
@@ -1655,7 +1671,7 @@ impl Engine {
 
         let start = agents.default_agent().to_owned();
         if let Some(agent) = agents.get(&start) {
-            self.install(agent);
+            self.install(agent, self.team_shape().as_ref());
             {
                 let mut active = self.active();
                 active.agent = Some(start);
@@ -2185,6 +2201,29 @@ impl Engine {
         self.teammates.as_ref()
     }
 
+    /// Whether this session leads a team that holds **nobody** — the live
+    /// state the D531 posture and the teamless description are made of
+    /// (**D543**, 2026-08-30).
+    ///
+    /// Read off the registry at every ask rather than latched by an
+    /// installer, which is the whole of the decision: a team that grows or
+    /// empties mid-session moves the posture and the description with it, at
+    /// the next turn, with no seam to call and nothing to keep in lockstep.
+    /// **F10**'s rule ("a team spawning mid-session flips the computed
+    /// default back to allow; a team that ends flips it back") is therefore
+    /// a consequence rather than a pair of installers.
+    ///
+    /// A session with no team at all — a pane member, a fixture holding a
+    /// bare postbox — is **not** teamless here, and the asymmetry is
+    /// deliberate: this answers "does this session lead nobody", and a
+    /// member leads nothing because leading is not its job. Its
+    /// [`teammate::member::MemberPostbox`] cannot cross a session in the
+    /// first place, so the sender-side posture has nothing to decide about
+    /// it.
+    fn teamless(&self) -> bool {
+        self.teammates.as_ref().is_some_and(|teammates| teammates.registry().leads_nobody())
+    }
+
     /// The team this session leads, as anything that only *renders* it reads
     /// it — `GET /team` on either of `ganja-serve`'s transports (D-13,
     /// **D505**), and the same value the `/team` dialog draws.
@@ -2474,121 +2513,34 @@ impl Engine {
     /// is the consuming builder above, which can only run before the engine
     /// is anybody's to hold.
     ///
-    /// Also clears [`Engine::teamless`] (**D530**, **D531**): every kind
-    /// this hands the postbox mutex — a lead's, a member's, a real
-    /// teammate's — is a session that holds *something other than* the solo
-    /// postbox, so the call-time posture computation must stop reading
-    /// [`Engine::teamless_send`] the moment any of them lands. Only
-    /// [`Engine::install_solo_postbox`] sets the flag back, and it does so
-    /// **after** calling this, which is what makes the two calls compose
-    /// into "team spawns ⇒ this clears it; team ends ⇒ that sets it again"
-    /// without either seam needing to know the other ran.
+    /// Says nothing about the teamless posture, which since **D543** is not
+    /// a thing an installer latches: [`Engine::teamless`] reads the registry
+    /// this session leads, so a postbox swap moves it only in as much as it
+    /// comes with a team.
     pub(crate) fn install_postbox(&self, postbox: Arc<dyn crate::tool::team::Postbox>) {
         *self.postbox.lock().expect("the postbox is never poisoned") = Some(postbox);
-        self.teamless.store(false, Ordering::Relaxed);
-        // Cleared for the same reason `teamless` is, and set back by the same
-        // two installers (**D535**): the kinds that land here directly — a
-        // member pane's `MemberPostbox`, a teammate's own `Postbox::of` —
-        // cannot cross-session send at all, and a listing they could not act
-        // on is noise.
+        // Cleared here and set back by the one installer that puts a
+        // cross-session-capable postbox in place (**D535**): the kinds that
+        // land here directly — a member pane's `MemberPostbox`, a teammate's
+        // own `Postbox::of` — cannot cross-session send at all, and a
+        // listing they could not act on is noise.
         self.cross_session_postbox.store(false, Ordering::Relaxed);
     }
 
-    /// Installs the solo postbox (**D530**): a session that leads no team,
-    /// addressing other live sessions by name or by `uds:` address, bound to
-    /// this engine's own self-name cell, identity resolver and live session
-    /// id. Consuming, like every other assembly-time installer here.
+    /// Sets this session's self-name (**D530**, **ADJ-2**): the name a
+    /// frontend's own registration record carries, and so the name another
+    /// session resolves this one by. The one seam every `/rename` calls,
+    /// whether or not this session leads anybody. Only a frontend calls it —
+    /// a model's arguments cannot reach it, the same property
+    /// [`crate::tool::team::Postbox`]'s own doc states of `from`.
     ///
-    /// **Reachable by no shipped binary since D542** (2026-08-29): the one
-    /// production caller was `ganja-tui`'s no-config-home assembly arm, and
-    /// that arm selected on a condition `run` had already exited on. What
-    /// calls this now is the engine's own tests and `ganja-testkit`'s
-    /// fixtures; bead `ganja-code-3tng` decides whether the seam becomes
-    /// live or is deleted.
-    #[must_use]
-    pub fn with_solo_postbox(self) -> Self {
-        self.install_solo_postbox();
-
-        self
-    }
-
-    /// [`Engine::with_solo_postbox`]'s mechanism, and [`Engine::retire_team`]'s
-    /// — the one place a [`subagent::SoloPostbox`] is built, so the two
-    /// callers cannot drift into building it two different ways. Both are
-    /// reachable by no shipped binary since **D542**; bead `ganja-code-3tng`
-    /// decides what becomes of the seam.
-    fn install_solo_postbox(&self) {
-        let solo = Arc::new(
-            subagent::SoloPostbox::new(
-                Arc::clone(&self.self_name),
-                Arc::clone(&self.identity),
-                Arc::clone(&self.session),
-            )
-            .with_peer_facts(self.peer_facts())
-            .with_receipts(Arc::clone(&self.receipts)),
-        );
-        self.install_postbox(solo);
-        // After `install_postbox`'s own reset, which is what makes this the
-        // "swaps back" half of D530/F10's bidirectional seam.
-        self.teamless.store(true, Ordering::Relaxed);
-        // The solo postbox is the other half of D535's gate: it resolves
-        // names against the registry and crosses a socket, so it too may be
-        // handed the listing.
-        self.cross_session_postbox.store(true, Ordering::Relaxed);
-        self.recompose_tools();
-    }
-
-    /// Installs `registry`'s lead postbox on this session (**D530**, **F10**:
-    /// "a team spawning mid-session flips the **D531** computed default back
-    /// to allow, with no rule mutation"), reusing `Engine::install_postbox`'s
-    /// own anti-forgery shape — the caller hands a [`teammate::TeammateRegistry`],
-    /// never a bare identity, so nothing here can stamp an arbitrary sender
-    /// name. [`Engine::with_teammates`] calls this at assembly; nothing else
-    /// in this build calls it mid-session yet, because nothing yet *has* a
-    /// team to hand over after assembling teamless — the seam exists so the
-    /// posture computation is provably correct the day something does, and
-    /// [`Engine::retire_team`] is its exact reverse.
-    ///
-    /// Narrower than [`Engine::with_teammates`] on purpose: it does not touch
-    /// [`Engine::teammates`] (the `task` door) or the dialog-forwarding
-    /// channel, so a caller after this method alone still cannot spawn a
-    /// teammate — only `send_message`'s posture and roster description move.
-    pub fn install_team(&self, registry: &Arc<teammate::TeammateRegistry>) {
-        let lead = Arc::new(
-            subagent::Postbox::lead(registry, Some((&self.identity, Arc::clone(&self.session))))
-                .with_peer_facts(self.peer_facts())
-                .with_receipts(Arc::clone(&self.receipts)),
-        );
-        self.install_postbox(lead);
-        self.cross_session_postbox.store(true, Ordering::Relaxed);
-        self.recompose_tools();
-    }
-
-    /// The reverse of [`Engine::install_team`] (**D530**, **F10**'s "team
-    /// ends ⇒ solo postbox swaps back"): reinstalls the solo postbox, so a
-    /// send afterward stamps `from` as `<self-name>@solo` again and carries
-    /// the one-way note. `subagent::TEAM_GONE` cannot answer such a
-    /// send — `subagent::SoloPostbox` holds no
-    /// `Weak<teammate::TeammateRegistry>` to fail upgrading in the first
-    /// place, which is the structural half of **AC-42**.
-    ///
-    /// Production-callerless since it landed, and since **D542** so is
-    /// everything it installs: no shipped binary can produce a
-    /// `<self-name>@solo` send by any route. Bead `ganja-code-3tng` is where
-    /// that is settled.
-    pub fn retire_team(&self) {
-        self.install_solo_postbox();
-    }
-
-    /// Sets this session's self-name (**D530**, **ADJ-2**): the value the
-    /// solo postbox stamps `from` with, and — for a lead — the name a
-    /// frontend's own registration record carries. The one seam every
-    /// `/rename` calls, whether or not this session leads: a lead's own
-    /// wire identity (`<name>@<team>`) is untouched, because `/rename` never
-    /// renames a team member, but its self-name still moves so a team-end
-    /// swap-back sends under the name the person last chose. Only a
-    /// frontend calls this — a model's arguments cannot reach it, the same
-    /// property [`crate::tool::team::Postbox`]'s own doc states of `from`.
+    /// **It moves no wire identity** (**D543**): what a send is stamped with
+    /// is this session's team identity, `<lead>@<team>`, and a team of
+    /// nobody has one exactly as a team of five does. So a rename changes
+    /// where a peer's *next* resolution lands and nothing about what a
+    /// message already claims to be from — which is also why the two are
+    /// separate seams ([`Engine::set_peer_address`] is the third reading of
+    /// the same session).
     pub fn set_self_name(&self, name: impl Into<String>) {
         *self.self_name.lock().expect("the self-name cell is never poisoned") = name.into();
     }
@@ -3143,7 +3095,7 @@ impl Engine {
             .zip(name.as_deref())
             .and_then(|(registry, name)| registry.get(name))
         {
-            Some(agent) => self.install(agent),
+            Some(agent) => self.install(agent, self.team_shape().as_ref()),
             None => self
                 .permissions
                 .lock()
@@ -3563,7 +3515,7 @@ impl Engine {
                 .filter(|agent| agent.mode != AgentMode::Subagent)
             {
                 Some(agent) => {
-                    self.install(agent);
+                    self.install(agent, self.team_shape().as_ref());
                     self.active().agent = Some(agent.name.clone());
                 }
                 None => tracing::warn!(
@@ -4353,7 +4305,7 @@ impl Engine {
     /// Installs `agent`'s ruleset as the permission baseline, and rebuilds the
     /// tool set the model is offered so the task tool lists what *this* agent
     /// may delegate to.
-    fn install(&self, agent: &Agent) {
+    fn install(&self, agent: &Agent, shape: Option<&TeamShape>) {
         self.permissions
             .lock()
             .expect("the permission rules are never poisoned")
@@ -4380,7 +4332,7 @@ impl Engine {
         if agents.get(agent::PLAN).is_some() {
             rebuilt = rebuilt.with(Arc::new(plan::PlanEnterTool));
         }
-        let rebuilt = self.compose(Arc::new(rebuilt));
+        let rebuilt = self.compose(Arc::new(rebuilt), shape);
         *self.tools.lock().expect("the tool registry is never poisoned") = rebuilt;
     }
 
@@ -4420,7 +4372,7 @@ impl Engine {
 
         let lent = Arc::new(self.base_tools().with_all(servers.tools()));
         *self.lent_tools.lock().expect("the tool registry is never poisoned") = Arc::clone(&lent);
-        self.rebuild_offered(lent);
+        self.rebuild_offered(lent, self.team_shape().as_ref());
     }
 
     /// Rebuilds the offered set from a freshly composed lent set.
@@ -4429,7 +4381,7 @@ impl Engine {
     /// through `install`, which is the one place that knows how. Shared by
     /// the MCP-generation rebuild above and [`Engine::replace_base_tools`],
     /// so the two cannot disagree about what riding the rebuild means.
-    fn rebuild_offered(&self, lent: Arc<Registry>) {
+    fn rebuild_offered(&self, lent: Arc<Registry>, shape: Option<&TeamShape>) {
         let name = self.active().agent.clone();
         let agent = self
             .agents
@@ -4437,12 +4389,12 @@ impl Engine {
             .zip(name.as_deref())
             .and_then(|(registry, name)| registry.get(name));
         match agent {
-            Some(agent) => self.install(agent),
+            Some(agent) => self.install(agent, shape),
             // No agents means no task tool, so the offered set *is* the lent
             // set — still through the deferral half, which is what keeps the
             // two arms one composition path.
             None => {
-                let composed = self.compose(lent);
+                let composed = self.compose(lent, shape);
                 *self.tools.lock().expect("the tool registry is never poisoned") = composed;
             }
         }
@@ -4466,11 +4418,11 @@ impl Engine {
             None => tools,
         };
         *self.lent_tools.lock().expect("the tool registry is never poisoned") = Arc::clone(&lent);
-        self.rebuild_offered(lent);
+        self.rebuild_offered(lent, self.team_shape().as_ref());
     }
 
-    /// Rebuilds the offered set if the team's roster has moved since the last
-    /// composition.
+    /// Rebuilds the offered set if the team has moved since the last
+    /// composition — in its roster, or in whether it holds anybody at all.
     ///
     /// [`Engine::refresh_mcp`]'s shape, at the same seam and for the same
     /// reason: `send_message`'s description **is** the roster, so a teammate
@@ -4478,18 +4430,36 @@ impl Engine {
     /// rather than changing the tool set under a request already sent. And
     /// like that one it is a memo rather than an unconditional rebuild — a
     /// team whose membership has not moved costs a lock and a comparison.
+    ///
+    /// What moves is a [`TeamShape`]'s three fields rather than the roster
+    /// alone (**D543**), because they are read off three different cells and
+    /// each can move without the others. The solitude is the sharpest case:
+    /// between a teammate's exit and its retirement the roster has already
+    /// lost it while [`Engine::teamless`] has not, so a memo on the roster
+    /// alone would let the retirement that flips the posture back leave the
+    /// in-team description standing. The reachability moves later still — a
+    /// frontend binds its socket after assembly — which is what brings the
+    /// road-back sentence in at the first turn after the bind.
+    ///
+    /// **One read**, handed down (**D543**): the value this compares, the
+    /// value it stores and the value the description below is built from are
+    /// the same [`TeamShape`], never three reads of three cells. Two reads
+    /// here would let a spawn and a retire landing between them leave the
+    /// memo equal to a shape nothing is offering — and since the memo is
+    /// what decides whether to rebuild at all, that stale pair would stand
+    /// for the session's whole life rather than one turn.
     fn refresh_team(&self) {
-        let Some(roster) = self.postbox_roster() else {
+        let Some(shape) = self.team_shape() else {
             return;
         };
-        let mut installed = self.team_roster.lock().expect("the team roster is never poisoned");
-        if *installed == roster {
+        let mut installed = self.team_shape.lock().expect("the team shape is never poisoned");
+        if installed.as_ref() == Some(&shape) {
             return;
         }
-        *installed = roster;
+        *installed = Some(shape.clone());
         drop(installed);
 
-        self.rebuild_offered(self.lent());
+        self.rebuild_offered(self.lent(), Some(&shape));
     }
 
     /// The tools the next turn offers the model.
@@ -4511,13 +4481,37 @@ impl Engine {
     /// about what the model is offered. Order matters in one direction only:
     /// the team tool joins before the arithmetic that reads the composed set's
     /// names, so it is in the definitions snapshot `tool_search` answers from.
-    fn compose(&self, registry: Arc<Registry>) -> Arc<Registry> {
-        self.compose_deferral(self.team_messaging(registry))
+    fn compose(&self, registry: Arc<Registry>, shape: Option<&TeamShape>) -> Arc<Registry> {
+        self.compose_deferral(self.team_messaging(registry, shape))
     }
 
-    /// Adds `send_message` when this session has a postbox — a team's, or a
-    /// teamless interactive session's solo one (**D498**, **D530**) — and
-    /// nothing at all when it has none.
+    /// This session's team as the offered `send_message` describes it, read
+    /// **once**, or [`None`] where no postbox is installed and there is
+    /// nothing to describe.
+    ///
+    /// Three cells, three locks, taken here and nowhere else on the
+    /// composition path (**D543**), and the value is then **handed down**
+    /// rather than re-read. What that buys is not atomicity — a spawn can
+    /// still land between the roster read and the solitude read — but
+    /// *agreement*: what [`Engine::refresh_team`] stores is what the model
+    /// was offered, so the worst a race can cost is one turn of staleness
+    /// the next refresh corrects, rather than a memo that matches nothing
+    /// and therefore never asks for another rebuild.
+    fn team_shape(&self) -> Option<TeamShape> {
+        Some(TeamShape {
+            roster: self.postbox_roster()?,
+            teamless: self.teamless(),
+            addressable: self.peer_address().is_some(),
+        })
+    }
+
+    /// Adds `send_message` when this session has a postbox — a lead's, a
+    /// member's, a teammate's own (**D498**, **D530**) — and nothing at all
+    /// when it has none, which is exactly a `shape` of [`None`].
+    ///
+    /// Everything it renders comes off `shape` rather than off the engine
+    /// (**D543**), so what the memo records and what the model reads are one
+    /// read; [`Engine::team_shape`] says why that matters.
     ///
     /// Registered here rather than in `Registry::with_builtins` for `task`'s
     /// reason: presence is ability. A session with no postbox has nobody to
@@ -4526,32 +4520,31 @@ impl Engine {
     /// session that has one is offered it again on every rebuild, so a
     /// `/plugin` Reload cannot quietly drop it.
     ///
-    /// A teamless session's description carries no roster claim at all
-    /// ([`send_message::SendMessageTool::teamless`]) rather than the empty
-    /// roster a team-of-one renders — the two must not read alike (D530's own
-    /// distinction) — decided by [`Engine::teamless`], which
-    /// [`Engine::install_postbox`] and [`Engine::install_solo_postbox`]
-    /// keep in lockstep with whichever postbox is actually installed. Both
-    /// non-teamless halves come off the one postbox this engine posts
-    /// through, which is what keeps the roster the model *reads* and the
-    /// roster its call is *judged against* the same answer: the description
-    /// lists everybody the sender may address, and the last rung of the
-    /// tool's ladder asks that same value which of them leads.
+    /// A session leading nobody gets the description that claims no roster
+    /// at all ([`send_message::SendMessageTool::teamless`]) rather than the
+    /// empty roster a team-of-one renders — the two must not read alike
+    /// (D530's own distinction) — decided by [`Engine::teamless`], which is
+    /// a **read of the registry** rather than a flag an installer set
+    /// (**D543**), so nothing has to be kept in lockstep with the postbox.
+    /// Both halves of the in-team case come off the one postbox this engine
+    /// posts through, which is what keeps the roster the model *reads* and
+    /// the roster its call is *judged against* the same answer: the
+    /// description lists everybody the sender may address, and the last rung
+    /// of the tool's ladder asks that same value which of them leads.
     ///
     /// A subagent is offered the *lent* set rather than the composed one, so
     /// it does not get this — deliberately, and for the reason it does not get
     /// `task` either: a delegated turn runs inside the lead's own turn, and
     /// the identity it would send under is the lead's.
-    fn team_messaging(&self, registry: Arc<Registry>) -> Arc<Registry> {
-        let postbox = self.postbox.lock().expect("the postbox is never poisoned").clone();
-        let Some(postbox) = postbox else {
+    fn team_messaging(&self, registry: Arc<Registry>, shape: Option<&TeamShape>) -> Arc<Registry> {
+        let Some(shape) = shape else {
             return registry;
         };
 
-        let tool: Arc<dyn Tool> = if self.teamless.load(Ordering::Relaxed) {
-            Arc::new(send_message::SendMessageTool::teamless())
+        let tool: Arc<dyn Tool> = if shape.teamless {
+            Arc::new(send_message::SendMessageTool::teamless(shape.addressable))
         } else {
-            Arc::new(send_message::SendMessageTool::new(&postbox.roster()))
+            Arc::new(send_message::SendMessageTool::new(&shape.roster))
         };
         let registry = Arc::new(registry.with(tool));
 
@@ -4643,7 +4636,7 @@ impl Engine {
     /// construction) and for `NewSession`, whose cleared activated set puts
     /// never-touched names back under the arithmetic.
     fn recompose_tools(&self) {
-        let composed = self.compose(self.tools());
+        let composed = self.compose(self.tools(), self.team_shape().as_ref());
         *self.tools.lock().expect("the tool registry is never poisoned") = composed;
     }
 
@@ -4721,7 +4714,7 @@ impl Engine {
     /// whether adopting the agent's preferred model cleared the effort, for
     /// the announcing caller to say so.
     fn apply_agent(&self, agent: &Agent) -> bool {
-        self.install(agent);
+        self.install(agent, self.team_shape().as_ref());
         {
             let mut active = self.active();
             active.agent = Some(agent.name.clone());
@@ -5304,7 +5297,7 @@ impl Engine {
             skill_roots: self.skill_roots(),
             identity: Arc::clone(&self.identity),
             receipts: Arc::clone(&self.settled_receipts),
-            teamless: self.teamless.load(Ordering::Relaxed),
+            teamless: self.teamless(),
             teamless_send: self.teamless_send,
             deferral: self.deferral(),
             permissions,

@@ -39,7 +39,7 @@
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use std::{env, fs};
 
@@ -86,15 +86,39 @@ const SUMMARY: &str = "release";
 const RESOLVE_DIR: &str = "GANJA_UDS_TEST_RESOLVE_DIR";
 const RESOLVE_NAME: &str = "GANJA_UDS_TEST_RESOLVE_NAME";
 
-/// The teamless sender's self-name across its two sends — **AC-40**'s far
-/// half: a rename moves the *next* send's `from`. Driven through the one
-/// seam a frontend calls (`Engine::set_self_name`, **ADJ-2**) rather than a
-/// real `/rename` command, which needs a terminal this binary is not one —
-/// stated exactly so in the test's own doc.
+/// The resolving sender's self-name across its two sends — **AC-40**, as
+/// **D543** leaves it: a rename moves what other sessions **resolve** this
+/// one by, and moves no wire identity at all, because a send is stamped
+/// with the session's own team identity whether that team holds anybody or
+/// not. Driven through the one seam a frontend calls
+/// (`Engine::set_self_name`, **ADJ-2**) rather than a real `/rename`
+/// command, which needs a terminal this binary is not one — stated exactly
+/// so in the test's own doc.
 const FIRST_SELF_NAME: &str = "frontend";
 const SECOND_SELF_NAME: &str = "frontend-renamed";
 
-/// What the resolving sender says on its first and second sends.
+/// The **second** name the receiving session is registered under, for bead
+/// `ganja-code-e99`'s open observation (b): a name `ganja_tool::registry`'s
+/// own `vet_name` admits and `ganja_team::MemberName` refuses, because of
+/// the dot. Registered names and member names are different grammars, and
+/// this is the drill that says whether a session holding one of the first
+/// kind can still be reached — the answer being yes, since a sender posts
+/// to the *lead* name it reads back from `GET /team`, never to the name it
+/// typed.
+const DOTTED_SELF_NAME: &str = "my-app.v2";
+
+/// What the tool answers with when a message really crossed — the near half
+/// of `ganja-tool`'s own private `DELIVERED`, spelled here because a test
+/// binary cannot name it and an unasserted delivery is what this test was
+/// missing.
+const DELIVERED: &str = "Message sent to";
+
+/// What the resolving sender says on its first and second sends, prefixed
+/// per run with the name that run resolved. The prefix is load-bearing:
+/// both runs post to one receiver under the same `from` — `session_team`
+/// reads a UUIDv7's millisecond hex, which two children started a moment
+/// apart share — so the second run's bodies would be dropped as duplicates
+/// by `PeerGuard`'s identical-body window if they read alike.
 const RESOLVE_TEXT_1: &str = "first: resolved by bare name";
 const RESOLVE_TEXT_2: &str = "second: after a rename";
 
@@ -232,9 +256,8 @@ async fn send_as_child(socket: PathBuf, home: PathBuf, report: PathBuf) {
 }
 
 /// A `send_message` tool call, one turn's worth — the same scripted-provider
-/// idiom `ganja-core`'s own D530/D531 engine tests drive a solo postbox
-/// through, since [`ganja_core::subagent::SoloPostbox`] itself is
-/// crate-private and unreachable from here.
+/// idiom `ganja-core`'s own D531/D543 engine tests drive a session leading
+/// nobody through.
 fn send_call(to: &str, message: &str) -> Vec<ganja_core::provider::ProviderEvent> {
     ganja_testkit::tool_call(
         ganja_core::tool::send_message::ID,
@@ -243,34 +266,57 @@ fn send_call(to: &str, message: &str) -> Vec<ganja_core::provider::ProviderEvent
 }
 
 /// **AC-19** (D528's resolver, over a real process boundary), **AC-32**
-/// (a teamless sender's far-inbox `from`) and **AC-40**'s far half (a
-/// rename moving the *next* send's `from`), all in the child process a bare
-/// name is resolved from: a solo-postbox engine — no roster, no `uds:`
-/// address typed anywhere — over the shared `--socket-dir`, sending twice
-/// with a `set_self_name` in between.
+/// (the far-inbox `from` of a session that leads nobody) and **AC-40**'s
+/// far half (what a rename moves and what it does not), all in the child
+/// process a bare name is resolved from: an engine leading a **team of
+/// nobody** — no roster, no `uds:` address typed anywhere — over the shared
+/// `--socket-dir`, sending twice with a `set_self_name` in between.
+///
+/// The engine is assembled the way a shipped interactive session is
+/// (**D543**): `with_socket_directory` **before** `with_teammates`, because
+/// the lead postbox is bound to the resolver the first of those installs.
+/// Its own team is empty and stays empty, which is exactly the condition
+/// D543 makes the teamless posture out of.
 ///
 /// The rename is driven through the one seam a frontend calls
 /// (`Engine::set_self_name`, **ADJ-2**) rather than a real `/rename`
 /// command: this binary is not a terminal, and the seam is exactly what
 /// `/rename` itself calls, so exercising it here is exercising `/rename`'s
-/// own mechanism minus the keystroke.
+/// own mechanism minus the keystroke. What it can assert from **inside**
+/// the child is the half a rename really moves — the cell a frontend writes
+/// its registration record from — while the half it does *not* move, the
+/// wire identity, is asserted by the parent off the far inbox.
 async fn resolve_and_send_as_child(directory: PathBuf, target: String) {
     let (provider, _requests) = ganja_testkit::ScriptedProvider::new(vec![
-        send_call(&target, RESOLVE_TEXT_1),
+        send_call(&target, &format!("{target} {RESOLVE_TEXT_1}")),
         ganja_testkit::says("first done"),
-        send_call(&target, RESOLVE_TEXT_2),
+        send_call(&target, &format!("{target} {RESOLVE_TEXT_2}")),
         ganja_testkit::says("second done"),
     ]);
+    let home = TempDir::new().expect("a home for the sending session's own team");
     let engine = Engine::new(
         provider,
         "canned",
         Arc::new(Registry::new(Vec::new())),
         Permissions::default(),
     )
-    .with_socket_directory(directory)
-    .with_solo_postbox();
+    .with_socket_directory(directory);
+    let cwd = env::current_dir().expect("the working directory resolves");
+    let registry =
+        Arc::new(TeammateRegistry::for_session(home.path(), engine.session_id().as_str(), cwd));
+    let engine = engine.with_teammates(registry, ganja_testkit::externals());
     engine.set_self_name(FIRST_SELF_NAME);
-    let _events = engine.subscribe().await.expect("a subscriber joins");
+    // Kept, not dropped: this child asserts its **own** sends landed, so a
+    // refusal fails here — naming the rung — instead of arriving at the
+    // parent as an empty inbox with nothing to read.
+    let seen: Arc<Mutex<Vec<Event>>> = Arc::default();
+    let mut events = engine.subscribe().await.expect("a subscriber joins");
+    let log = Arc::clone(&seen);
+    tokio::spawn(async move {
+        while let Some(event) = events.next().await {
+            log.lock().expect("the child's event log is never poisoned").push(event);
+        }
+    });
 
     engine
         .send(Command::SendPrompt {
@@ -284,10 +330,13 @@ async fn resolve_and_send_as_child(directory: PathBuf, target: String) {
         .expect("an idle engine accepts the first prompt");
     assert!(engine.settle(DEADLINE).await, "the first send's turn settles");
 
-    // **AC-40**'s far half: renamed before the second send, so the far
-    // inbox's second entry has to carry the new self-name or the assertion
-    // in the parent fails.
+    // **AC-40**, as D543 leaves it: renamed before the second send. What
+    // moved is this cell — what a frontend registers, and so what a peer
+    // resolves this session by — and the parent asserts from the far inbox
+    // that the wire identity did *not* move with it.
     engine.set_self_name(SECOND_SELF_NAME);
+    assert_eq!(engine.self_name(), SECOND_SELF_NAME, "the rename moved the cell it moves");
+    assert_delivered(&seen, 1, &target);
 
     engine
         .send(Command::SendPrompt {
@@ -300,19 +349,73 @@ async fn resolve_and_send_as_child(directory: PathBuf, target: String) {
         .await
         .expect("an idle engine accepts the second prompt");
     assert!(engine.settle(DEADLINE).await, "the second send's turn settles");
+    assert_delivered(&seen, 2, &target);
 }
 
-/// **AC-19**, **AC-32**, **AC-40** (far half): session A registers as
-/// `backend` — the D527 record a real `--name backend` launch's TUI would
-/// have written on `Synced::Bound` (`ganja-tui`'s to build; this fixture
-/// stands in for it, exactly as [`led_engine`] already stands in for "a real
-/// lead's engine") — and leads a team; session B, this binary re-executed
-/// and **teamless**, resolves `backend` by bare name through `send_message`
-/// twice, renaming itself between the two sends. Nothing here types a
-/// `uds:` address: the D528 resolver, seeded with the shared
-/// `--socket-dir`, is what finds session A.
+/// Every `send_message` this child's model has completed, in order, as the
+/// sentence the tool answered with.
+fn sends(seen: &Arc<Mutex<Vec<Event>>>) -> Vec<String> {
+    seen.lock()
+        .expect("the child's event log is never poisoned")
+        .iter()
+        .filter_map(|event| match event {
+            Event::PartUpdated { part, .. } => match &part.body {
+                PartBody::Tool {
+                    tool,
+                    state: ganja_protocol::ToolState::Completed { output, .. },
+                    ..
+                } if tool == ganja_core::tool::send_message::ID => Some(output.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+/// Fails the child — and so the parent's `status.success()` — where the
+/// `nth` send did not land, naming the sentence the tool answered with.
+///
+/// The parent can only see an inbox; a refused send leaves it empty and says
+/// nothing about which rung refused. Asserted here so a regression reports
+/// its own reason, which is what bead `ganja-code-e99`'s open observation (b)
+/// needed to be driven rather than argued.
+fn assert_delivered(seen: &Arc<Mutex<Vec<Event>>>, nth: usize, target: &str) {
+    let sends = sends(seen);
+    assert_eq!(sends.len(), nth, "send {nth} to {target:?} has completed: {sends:?}");
+    assert!(
+        sends[nth - 1].contains(DELIVERED),
+        "send {nth} to {target:?} landed: {:?}",
+        sends[nth - 1]
+    );
+}
+
+/// **AC-19**, **AC-32**, **AC-40** (far half) and bead `ganja-code-e99`'s
+/// open observation (b): session A registers a name — the D527 record a
+/// real `--name` launch's TUI would have written on `Synced::Bound`
+/// (`ganja-tui`'s to build; this fixture stands in for it, exactly as
+/// [`led_engine`] already stands in for "a real lead's engine") — and leads
+/// a team; session B, this binary re-executed and **leading nobody**,
+/// resolves that name by bare name through `send_message` twice, renaming
+/// itself between the two sends. Nothing here types a `uds:` address: the
+/// D528 resolver, seeded with the shared `--socket-dir`, is what finds
+/// session A.
+///
+/// It runs the child **twice**, against two registrations of the one live
+/// socket. The first is an ordinary name. The second is `my-app.v2`, which
+/// `vet_name` admits and `ganja_team::MemberName` refuses — e99's question,
+/// driven rather than reasoned: a session registered under a name no member
+/// name could be is still reachable, because the sender posts to the *lead*
+/// name it reads back from `GET /team` and never to the name it typed.
+///
+/// **What the far inbox proves about identity** (**D543**): every entry's
+/// `from` is the sender's own `team-lead@session-<hex>` — the lead identity
+/// of its own team of nobody — and the two entries of one run carry the
+/// *same* one across the rename between them. Until 2026-08-30 this
+/// asserted `frontend@solo` and `frontend-renamed@solo` instead, over an
+/// engine assembled with a postbox no shipped binary installed; the names
+/// moved with the postbox.
 #[tokio::test]
-async fn a_bare_name_resolves_across_a_socket_directory_and_carries_a_solo_identity() {
+async fn a_bare_name_resolves_across_a_socket_directory_and_carries_its_team_identity() {
     // The child's role, when this binary was re-executed as the resolving
     // sender.
     if let (Some(directory), Some(target)) = (env::var_os(RESOLVE_DIR), env::var_os(RESOLVE_NAME)) {
@@ -335,41 +438,60 @@ async fn a_bare_name_resolves_across_a_socket_directory_and_carries_a_solo_ident
         .and_then(|stem| stem.to_str())
         .expect("the bound socket has a stem")
         .to_owned();
-    // The D527 record a `--name backend` launch would have registered —
-    // this test's fixture for the TUI's own writer.
-    write_registered(directory.path(), &living_stem, "backend");
 
-    let status = tokio::time::timeout(
-        DEADLINE,
-        tokio::process::Command::new(env::current_exe().expect("a test binary knows its own path"))
+    for target in ["backend", DOTTED_SELF_NAME] {
+        // The D527 record a `--name <target>` launch would have registered —
+        // this test's fixture for the TUI's own writer, rewritten between
+        // the runs because one live socket answers under whichever name its
+        // record currently claims.
+        write_registered(directory.path(), &living_stem, target);
+
+        let status = tokio::time::timeout(
+            DEADLINE,
+            tokio::process::Command::new(
+                env::current_exe().expect("a test binary knows its own path"),
+            )
             .args([
-                "a_bare_name_resolves_across_a_socket_directory_and_carries_a_solo_identity",
+                "a_bare_name_resolves_across_a_socket_directory_and_carries_its_team_identity",
                 "--exact",
                 "--test-threads=1",
             ])
             .env(RESOLVE_DIR, directory.path())
-            .env(RESOLVE_NAME, "backend")
+            .env(RESOLVE_NAME, target)
             .stdin(Stdio::null())
             .kill_on_drop(true)
             .status(),
-    )
-    .await
-    .expect("the resolving sender finishes within the deadline")
-    .expect("the sender process is waitable");
-    assert!(status.success(), "the resolving sender failed: {status}");
+        )
+        .await
+        .expect("the resolving sender finishes within the deadline")
+        .expect("the sender process is waitable");
+        assert!(status.success(), "the resolving sender for {target:?} failed: {status}");
+    }
 
     let inbox = lead_inbox(&team_registry);
-    assert_eq!(inbox.len(), 2, "both bare-name-resolved sends landed: {inbox:?}");
-    assert_eq!(
-        inbox[0]["from"], "frontend@solo",
-        "**AC-32**: a teamless sender's far-inbox `from` is its derived solo identity"
-    );
-    assert_eq!(inbox[0]["text"], RESOLVE_TEXT_1);
-    assert_eq!(
-        inbox[1]["from"], "frontend-renamed@solo",
-        "**AC-40**'s far half: the rename between the two sends moved this one's `from`"
-    );
-    assert_eq!(inbox[1]["text"], RESOLVE_TEXT_2);
+    assert_eq!(inbox.len(), 4, "both runs' bare-name-resolved sends landed: {inbox:?}");
+    let (runs, _) = inbox.as_chunks::<2>();
+    for (pair, target) in runs.iter().zip(["backend", DOTTED_SELF_NAME]) {
+        let sender = pair[0]["from"].as_str().expect("a `from` is a string");
+        assert!(
+            sender.starts_with("team-lead@session-"),
+            "**AC-32**, **D543**: the run resolving {target:?} sent under the lead identity \
+             of its own team of nobody, not under a self-name: {sender:?}"
+        );
+        assert_eq!(pair[0]["text"], format!("{target} {RESOLVE_TEXT_1}"));
+        assert_eq!(
+            pair[1]["from"], pair[0]["from"],
+            "**AC-40**'s far half, as D543 leaves it: the rename between that run's two \
+             sends moved what a peer resolves this session by, and moved no wire identity"
+        );
+        assert_eq!(pair[1]["text"], format!("{target} {RESOLVE_TEXT_2}"));
+    }
+    // e99 (b) is answered by the second pair existing at all: a session
+    // registered under a name `MemberName` refuses was resolved by that
+    // name, posted to, and its message written. The two runs' identities
+    // are deliberately **not** compared with each other — `session_team`
+    // takes a UUIDv7's leading hex, which is its millisecond stamp, so two
+    // children started a moment apart legitimately share a team name.
 
     handle.shutdown().await.expect("a clean stop");
 }

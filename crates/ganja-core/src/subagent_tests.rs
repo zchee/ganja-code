@@ -5,15 +5,14 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 
 use super::{
-    Address, Backends, Body, Caller, FRAME_OVER_SOCKET, FRAME_OVER_SOCKET_SOLO, HeldWire, Host,
-    Incoming, MAX_HOP_CHAIN_ENTRIES, MESSAGE_ROUTE, MemberBackend, NOT_A_SESSION_SOCKET,
-    NotReceived, NotSpawned, ONE_WAY_NOTE, PeerFacts, PermissionReply, Postbox, RECEIVED,
-    ReceiptStatus, Reserved, SOCKET_LEAD_UNNAMED, SOCKET_OVERSIZED, SOCKET_REFUSED,
-    SOCKET_UNREACHABLE, SenderMode, Sent, SocketDelivered, SocketMessage, SocketReceipt,
-    SoloPostbox, Spawn, SpawnAsk, SpawnAsker, SpawnRequest, TEAM_GONE, TEAM_ROUTE, Teammate,
-    TeammateRegistry, TeammateSpawn, Teammated, Teammates, Undelivered, Watched, async_trait,
-    deliver_to_lead, denies_task, held_note, identity, receive_ladder, roster, subagent_rules,
-    team, watch,
+    Address, Backends, Body, Caller, FRAME_OVER_SOCKET, HeldWire, Host, Incoming,
+    MAX_HOP_CHAIN_ENTRIES, MESSAGE_ROUTE, MemberBackend, NOT_A_SESSION_SOCKET, NotReceived,
+    NotSpawned, PeerFacts, PermissionReply, Postbox, RECEIVED, ReceiptStatus, Reserved,
+    SOCKET_LEAD_UNNAMED, SOCKET_OVERSIZED, SOCKET_REFUSED, SOCKET_UNREACHABLE, SenderMode, Sent,
+    SocketDelivered, SocketMessage, SocketReceipt, Spawn, SpawnAsk, SpawnAsker, SpawnRequest,
+    TEAM_GONE, TEAM_ROUTE, Teammate, TeammateRegistry, TeammateSpawn, Teammated, Teammates,
+    Undelivered, Watched, async_trait, deliver_to_lead, denies_task, held_note, identity,
+    receive_ladder, roster, subagent_rules, team, watch,
 };
 use crate::agent::{self, Registry};
 use crate::config::Config;
@@ -1768,36 +1767,44 @@ async fn a_frame_body_to_a_resolved_name_is_refused_and_pins_nothing() {
     assert_eq!(identity.pinned("relay"), None, "a refused frame body pins nothing");
 }
 
-/// **D530**: the solo postbox has no roster to consult first, resolves
-/// straight through the identity index, stamps `from` as
-/// `<self-name>@solo` on the wire, and appends the one-way clause to
-/// every success note — and a frame body earns the solo-worded refusal
-/// rather than the lead's "member of this team" phrasing.
+/// **D543** (2026-08-30), the shape D530 described with a postbox nobody
+/// installed: a lead whose team holds **nobody** has no roster to consult
+/// first, so an `Address::Local` goes straight to the identity index — and
+/// what crosses the wire is this session's own team identity,
+/// `team-lead@<team>`, with no clause anywhere claiming it cannot be
+/// answered. It can: the session reading this description binds a socket
+/// and registers a name.
+///
+/// The frame-body refusal is the lead's one wording now, `FRAME_OVER_SOCKET`
+/// — the solo-worded twin went with the postbox that fed it.
 #[tokio::test]
-async fn the_solo_postbox_resolves_directly_stamps_solo_and_appends_the_one_way_note() {
+async fn a_lead_of_nobody_resolves_directly_and_stamps_its_own_team_identity() {
+    let home = ganja_testkit::temp_dir();
+    let registry = crate::teammate::tests::registry(home.path());
     let registry_dir = private_dir();
     let identity = Arc::new(identity::Identity::new(registry_dir.path()));
-    let own_session = Arc::new(std::sync::Mutex::new(SessionId::from("ses-solo-own".to_owned())));
-    let self_name = Arc::new(std::sync::Mutex::new("frank".to_owned()));
-    let solo =
-        SoloPostbox::new(Arc::clone(&self_name), Arc::clone(&identity), Arc::clone(&own_session));
+    let own_session = Arc::new(std::sync::Mutex::new(SessionId::from("ses-alone".to_owned())));
+    let lead = Postbox::lead(&registry, Some((&identity, Arc::clone(&own_session))));
 
-    assert!(team::Postbox::roster(&solo).is_empty(), "a teamless session has no roster");
+    assert!(
+        team::Postbox::roster(&lead).is_empty(),
+        "a team nobody has joined lists nobody, which is what sends this to the resolver"
+    );
 
     let (_id, _held) = live_record(registry_dir.path(), "06660006", "backend");
     let socket = registry_dir.path().join("06660006.sock");
     let peer = PeerStub::listen(&socket).await;
 
     let sent = team::Postbox::deliver(
-        &solo,
+        &lead,
         Address::Local("backend".to_owned()),
         Body::Text { text: "hi".to_owned(), summary: None },
     )
     .await
     .expect("a unique live session resolves");
     assert!(
-        sent.note.ends_with(ONE_WAY_NOTE),
-        "the not-addressable-back clause is appended: {:?}",
+        !sent.note.contains("not addressable"),
+        "no one-way clause survives D543: {:?}",
         sent.note
     );
     assert_eq!(identity.pinned("backend").expect("the pin stands").stem, "06660006");
@@ -1809,19 +1816,19 @@ async fn the_solo_postbox_resolves_directly_stamps_solo_and_appends_the_one_way_
         .collect();
     assert_eq!(posted.len(), 1, "exactly one message posted: {posted:?}");
     assert!(
-        posted[0].2.contains("\"from\":\"frank@solo\""),
-        "the wire carries the reserved solo identity: {}",
+        posted[0].2.contains("\"from\":\"team-lead@session-abcd1234\""),
+        "the wire carries the session's own team identity: {}",
         posted[0].2
     );
 
-    // A frame body earns the solo-worded refusal, not the team-worded one.
+    // A frame body earns the lead's refusal, which is now the only one.
     let refused = team::Postbox::deliver(
-        &solo,
+        &lead,
         Address::Uds { path: socket.clone() },
         Body::Frame(serde_json::json!({"anything": "goes"})),
     )
     .await;
-    assert_eq!(refused, Err(Undelivered::Failed { reason: FRAME_OVER_SOCKET_SOLO.to_owned() }));
+    assert_eq!(refused, Err(Undelivered::Failed { reason: FRAME_OVER_SOCKET.to_owned() }));
 }
 
 // D532/D534's own wire types and the `PeerFacts` composition seam
@@ -1904,24 +1911,25 @@ impl PeerFacts for StubFacts {
 /// above, which never installs a `PeerFacts` beyond the `Unbound` default.
 #[tokio::test]
 async fn the_sender_side_composition_reads_only_what_peer_facts_answers() {
+    let home = ganja_testkit::temp_dir();
+    let registry = crate::teammate::tests::registry(home.path());
     let registry_dir = private_dir();
     let identity = Arc::new(identity::Identity::new(registry_dir.path()));
     let own_session =
         Arc::new(std::sync::Mutex::new(SessionId::from("ses-composed-own".to_owned())));
-    let self_name = Arc::new(std::sync::Mutex::new("composer".to_owned()));
-    let solo = SoloPostbox::new(Arc::clone(&self_name), identity, own_session).with_peer_facts(
-        Arc::new(StubFacts {
+    let lead = Postbox::lead(&registry, Some((&identity, own_session))).with_peer_facts(Arc::new(
+        StubFacts {
             sender_mode: Some(SenderMode::Bypass),
             reply_to: Some(std::path::PathBuf::from("/tmp/ganja-501/deadbeef.sock")),
             hop_chain: vec!["abcd1234".to_owned(), "ef012345".to_owned()],
-        }),
-    );
+        },
+    ));
 
     let socket = registry_dir.path().join("06660007.sock");
     let peer = PeerStub::listen(&socket).await;
 
     let _sent = team::Postbox::deliver(
-        &solo,
+        &lead,
         Address::Uds { path: socket.clone() },
         Body::Text { text: "carrying a chain".to_owned(), summary: None },
     )

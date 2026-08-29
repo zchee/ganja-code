@@ -998,8 +998,7 @@ impl Postbox {
     }
 
     /// Installs the engine's own `PeerFacts` (**D532**), the one seam the
-    /// engine calls once it exists to implement anything — see
-    /// `SoloPostbox::with_peer_facts`, this postbox's twin.
+    /// engine calls once it exists to implement anything.
     #[must_use]
     pub fn with_peer_facts(mut self, peer_facts: Arc<dyn PeerFacts>) -> Self {
         self.peer_facts = peer_facts;
@@ -1153,14 +1152,16 @@ impl Postbox {
 }
 
 /// The vet-connect-answer sequence every socket-crossing send shares
-/// (**D530**, **F1**): [`Postbox::deliver_over_socket`]'s own body until this
-/// plan, factored out and **parameterized by `from`** because that method's
-/// `from` is composed off the upgraded team registry
-/// (`<sender>@<team>`) — a composition a registry-less caller cannot repeat.
-/// The lead's own arm above feeds it exactly that; [`SoloPostbox`] feeds the
-/// self-name cell's `<self-name>@solo` instead, and both is why `frame_refusal`
-/// is a parameter too — the sentence a frame body earns names "a member of
-/// this team" for the lead and has no team to name for a teamless sender.
+/// (**D530**, **F1**): [`Postbox::deliver_over_socket`]'s own body until the
+/// sender-trio plan, factored out and **parameterized by `from`** and by
+/// `frame_refusal` because a second postbox — a session leading nobody,
+/// stamped with a self-name and refused in that session's own words — was
+/// expected to feed it different values. **D543** deleted that second
+/// postbox as a phantom: a session leading nobody has a team of its own and
+/// sends under its `<lead>@<team>` identity like any other lead, so both
+/// parameters have exactly one distinct value today. Left parameterized rather than
+/// re-inlined, because what they abstract over is the sender's *identity*,
+/// which is the one thing a second transport would arrive with.
 ///
 /// Two requests, and the first is not overhead: `GET /team` is how this side
 /// learns the peer's lead's name and team without assuming either, and it is
@@ -1585,14 +1586,14 @@ pub enum ReceiptStatus {
 ///
 /// A trait rather than a plain field, because the facts live on the
 /// [`Engine`](crate::engine::Engine) — the receiver class, the inbound-chain
-/// cell, the bound socket's own path — while both postbox constructors are
+/// cell, the bound socket's own path — while the postbox constructors are
 /// called from `engine.rs` before the engine exists to implement anything
 /// (moving the composition into a later wave was considered and rejected:
 /// it would have left this wave's own new wire fields untested until the
-/// wave after they land). [`Postbox::with_peer_facts`] and
-/// [`SoloPostbox::with_peer_facts`] are the one seam the engine installs its
-/// own implementation through; every constructor above keeps building
-/// against [`Unbound`] and never has to change to make room for it.
+/// wave after they land). [`Postbox::with_peer_facts`] is the one seam the
+/// engine installs its own implementation through; every constructor above
+/// keeps building against [`Unbound`] and never has to change to make room
+/// for it.
 ///
 /// Every method returns an owned value with its lock already dropped:
 /// nothing implementing this may hold a `std::sync::Mutex` guard across
@@ -2164,11 +2165,6 @@ const REFUSED_BY_HAND: &str =
 /// without the tool in front of it (§5.2-6).
 const FRAME_OVER_SOCKET: &str = "A protocol frame does not cross a socket: a session reached at a uds: address takes plain text. Send prose, or address a member of this team by name.";
 
-/// [`FRAME_OVER_SOCKET`]'s solo-postbox variant (**D530**, the D528 table's
-/// frame-body row): there is no team to point a teamless caller at, so the
-/// sentence names a live session instead.
-const FRAME_OVER_SOCKET_SOLO: &str = "A protocol frame does not cross a socket: a session reached at a uds: address takes plain text. Send prose, or address a live session by name.";
-
 /// A client that would not build for a socket path — ahead of what reqwest
 /// said, and unreachable for any path the tool's rung 3 let through.
 const SOCKET_CLIENT_FAILED: &str = "The socket could not be opened at";
@@ -2198,155 +2194,6 @@ const SOCKET_OVERSIZED: &str = "The session at that socket answered more than a 
 /// had a team at all — this one is a team that has ended.
 const TEAM_GONE: &str =
     "The team this session led has been shut down; there is nobody left to deliver to.";
-
-/// The reserved team-shape word marking the absence of a team in a teamless
-/// sender's derived identity (**D530**): a real team named `solo` collides
-/// only in display — `from` is unauthenticated routing data on the
-/// receiving side regardless (the admission gate's own axiom), so the
-/// collision adds no confusion the gate does not already price in.
-///
-/// Reachable by no shipped binary since **D542**; bead `ganja-code-3tng`.
-pub const SOLO_TEAM: &str = "solo";
-
-/// Appended to a teamless send's success note (**D530**'s asymmetry rule): a
-/// session with no registered record and no bound socket cannot be answered
-/// back, and no text this build ships may imply otherwise.
-///
-/// No shipped binary reaches this sentence since **D542** — nothing in one
-/// installs a [`SoloPostbox`] any more — which also retires the coupling
-/// `ganja-code-e99` flagged, that its truth was a property of the assembly
-/// rather than of the postbox. Bead `ganja-code-3tng`.
-const ONE_WAY_NOTE: &str = " This session is not addressable back — it binds no socket.";
-
-/// A session that leads no team, addressing other live sessions by name or by
-/// `uds:` address (**D530**).
-///
-/// **Built by no shipped binary since D542** (2026-08-29): the one production
-/// installer was `ganja-tui`'s no-config-home assembly arm, deleted because
-/// the condition it selected on is one `run` has already exited on. What
-/// remains is a seam this crate's own tests and `ganja-testkit` drive; bead
-/// `ganja-code-3tng` decides whether it becomes live or goes.
-///
-/// No roster, and — the structural half of **AC-42** — no
-/// `Weak<TeammateRegistry>` to fail upgrading: [`TEAM_GONE`] can answer
-/// [`Postbox`]'s send because a lead's postbox holds a registry that can go
-/// away underneath it, and this one holds no registry at all, so that arm has
-/// nothing here to be unreachable *from* rather than merely never taken.
-#[derive(Debug)]
-pub struct SoloPostbox {
-    /// Where this session's self-name lives, read at send time so a
-    /// `/rename` moves the next send's `from` without this postbox holding a
-    /// stale copy of its own (**ADJ-2**; `Engine::set_self_name`'s cell).
-    self_name: Arc<std::sync::Mutex<String>>,
-    /// The D528 identity index this session's sends and mentions share.
-    identity: Arc<identity::Identity>,
-    /// This engine's live session id — the same cell [`Engine::session_id`]
-    /// reads, shared rather than snapshotted so a resume or a `NewSession`
-    /// moves this postbox's own-session exclusion with it.
-    own_session: Arc<std::sync::Mutex<SessionId>>,
-    /// See [`Postbox`]'s own field of the same name — [`Unbound`] until
-    /// [`SoloPostbox::with_peer_facts`] installs the engine's.
-    peer_facts: Arc<dyn PeerFacts>,
-    /// Where a held answer registers an outstanding send (**D534**): the
-    /// engine's own receipt state, shared with every other reader of it.
-    /// [`None`] until the engine installs one, which is every fixture and
-    /// every teammate's own postbox — a send from one of those simply
-    /// registers nothing and expects no settlement.
-    receipts: Option<Arc<crate::teammate::receipts::Receipts>>,
-}
-
-impl SoloPostbox {
-    /// A postbox for a session that leads no team, bound to the engine's own
-    /// self-name cell, identity resolver and live session id.
-    #[must_use]
-    pub fn new(
-        self_name: Arc<std::sync::Mutex<String>>,
-        identity: Arc<identity::Identity>,
-        own_session: Arc<std::sync::Mutex<SessionId>>,
-    ) -> Self {
-        Self { self_name, identity, own_session, peer_facts: Arc::new(Unbound), receipts: None }
-    }
-
-    /// Installs the engine's own [`PeerFacts`] (**D532**); see
-    /// [`Postbox::with_peer_facts`], this postbox's twin.
-    #[must_use]
-    pub fn with_peer_facts(mut self, peer_facts: Arc<dyn PeerFacts>) -> Self {
-        self.peer_facts = peer_facts;
-        self
-    }
-
-    /// Installs the engine's own receipt state (**D534**); see
-    /// [`Postbox::with_receipts`], this postbox's twin.
-    #[must_use]
-    pub fn with_receipts(mut self, receipts: Arc<crate::teammate::receipts::Receipts>) -> Self {
-        self.receipts = Some(receipts);
-        self
-    }
-
-    /// See [`Postbox::sender_side`], this postbox's twin.
-    fn sender_side(&self) -> SenderSide<'_> {
-        SenderSide { facts: self.peer_facts.as_ref(), receipts: self.receipts.as_deref() }
-    }
-
-    /// The derived identity every send through this stamps `from` with:
-    /// `<self-name>@solo`, read fresh so a `/rename` since construction is
-    /// honoured.
-    fn from(&self) -> String {
-        format!(
-            "{}@{SOLO_TEAM}",
-            self.self_name.lock().expect("the self-name cell is never poisoned")
-        )
-    }
-
-    fn own_session(&self) -> String {
-        self.own_session.lock().expect("the session id is never poisoned").as_str().to_owned()
-    }
-}
-
-#[async_trait]
-impl team::Postbox for SoloPostbox {
-    fn classify(&self, text: &str) -> Reserved {
-        crate::teammate::postbox::classify_reserved(text)
-    }
-
-    async fn deliver(&self, to: Address, body: Body) -> Result<Sent, Undelivered> {
-        let sent = match to {
-            Address::Local(name) => {
-                let resolution = resolve_blocking(&self.identity, &name, self.own_session()).await;
-
-                deliver_resolved(
-                    &self.identity,
-                    &name,
-                    resolution,
-                    body,
-                    self.from(),
-                    FRAME_OVER_SOCKET_SOLO,
-                    self.sender_side(),
-                )
-                .await?
-            }
-            Address::Uds { path } => {
-                deliver_over_socket(
-                    &path,
-                    body,
-                    self.from(),
-                    FRAME_OVER_SOCKET_SOLO,
-                    self.sender_side(),
-                )
-                .await?
-            }
-        };
-
-        Ok(Sent { note: format!("{}{ONE_WAY_NOTE}", sent.note), ..sent })
-    }
-
-    fn roster(&self) -> Vec<Peer> {
-        // There is no team, so there is no roster to consult before the
-        // resolver: every `Address::Local` name goes straight to `identity`
-        // (Axis 11 / D530).
-        Vec::new()
-    }
-}
 
 /// The reason a lead gives a teammate it is asking to stop.
 ///

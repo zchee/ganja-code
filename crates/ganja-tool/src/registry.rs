@@ -28,10 +28,12 @@
 //! anyway, and *resolution* refuses duplicate live names as ambiguous. That
 //! collision rule is ganja's own, **user-ratified 2026-08-26**, because
 //! v2's collision behavior is flag-gated and therefore unportable. And the
-//! record never crosses the wire: a lead's `from` on a socket message stays
-//! its team identity, a record-less teamless session's self-name crosses as
-//! unauthenticated `from` display data (**D530**), and nothing a receiver
-//! trusts is fed from here — the registry changes how a *sender* finds an
+//! record never crosses the wire at all: every session's `from` on a socket
+//! message is its team identity, a session leading nobody included
+//! (**D543**, 2026-08-30, which retired D530's `<name>@solo` spelling), so
+//! what a name in a record decides is which address a *sender* resolves to
+//! and what a person reads in a listing — never what crosses. Nothing a
+//! receiver trusts is fed from here — the registry changes how a *sender* finds an
 //! address, never what a *receiver* may believe.
 //!
 //! # Who registers, and what the name is

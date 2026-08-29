@@ -61,7 +61,7 @@ pub(crate) fn registry(home: &Path) -> Arc<TeammateRegistry> {
 }
 
 /// A backend that really starts a teammate, over a store under `home`.
-fn in_process(home: &Path) -> Arc<dyn TeammateBackend> {
+pub(crate) fn in_process(home: &Path) -> Arc<dyn TeammateBackend> {
     Arc::new(InProcess::new(
         Arc::new(FakeProvider::new("on it", Duration::ZERO)),
         Arc::new(Tools::new(Vec::new())),
@@ -71,7 +71,7 @@ fn in_process(home: &Path) -> Arc<dyn TeammateBackend> {
 }
 
 /// A spawn asking for `name` on `backend`, at its dullest.
-fn request(name: &str, backend: MemberBackend, home: &Path) -> SpawnRequest {
+pub(crate) fn request(name: &str, backend: MemberBackend, home: &Path) -> SpawnRequest {
     SpawnRequest {
         name: name.to_owned(),
         backend,
@@ -87,6 +87,28 @@ fn request(name: &str, backend: MemberBackend, home: &Path) -> SpawnRequest {
 /// What the registry is still holding names for.
 fn reserved(registry: &TeammateRegistry) -> BTreeSet<String> {
     registry.reserved.lock().expect("the reserved names are never poisoned").clone()
+}
+
+/// **D543**: "leads nobody" is the live state a session's teamless
+/// posture and its `send_message` description are read off, so it has to
+/// follow a spawn and a retire — and it follows the **member map**, not
+/// the alive-filtered view a roster is rendered from, so the window
+/// between a teammate's exit and its retirement is not a team that
+/// briefly ends.
+#[tokio::test]
+async fn leading_nobody_follows_a_spawn_and_a_retire() {
+    let home = ganja_testkit::temp_dir();
+    let registry = registry(home.path());
+    assert!(registry.leads_nobody(), "a registry nobody has joined holds no members");
+
+    registry
+        .spawn(in_process(home.path()), request("worker", MemberBackend::InProcess, home.path()))
+        .await
+        .expect("a teammate joins");
+    assert!(!registry.leads_nobody(), "a member in the map is a team of somebody");
+
+    assert!(registry.retire("worker").await.expect("the retire lands"), "the member was there");
+    assert!(registry.leads_nobody(), "the last retire leaves this session leading nobody again");
 }
 
 /// **A name a completed spawn took is claimed for good.**

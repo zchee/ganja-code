@@ -2035,8 +2035,10 @@ pub enum Event {
         id: PeerMessageId,
         /// How it settled.
         status: PeerReceiptStatus,
-        /// Who it was sent to — `<name>@<team>` or `<name>@solo`, the same
-        /// identity a peer part or a hold's `from` already carries.
+        /// Who it was sent to — `<name>@<team>`, the same identity a peer
+        /// part or a hold's `from` already carries. A session leading nobody
+        /// is no exception: its team is its own `session-<hex>` and it sends
+        /// under that team's lead identity (**D543**).
         to: String,
     },
     /// A compaction is summarizing the window, and this is how far along it

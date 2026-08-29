@@ -371,43 +371,63 @@ async fn a_resolver_refusal_is_passed_through_in_the_deliverers_words() {
     }
 }
 
-/// AC-31's description half: the teamless variant claims no roster, labels
-/// a session's name self-chosen and unverified, and implies no reply
-/// channel anywhere (D530's asymmetry rule).
+/// AC-31's description half, as **D543** leaves it: the teamless variant
+/// claims no roster and labels a session's name self-chosen and unverified,
+/// whichever way it is built.
 #[test]
-fn the_teamless_description_claims_no_roster_and_names_no_reply_channel() {
-    let tool = SendMessageTool::teamless();
-    let described = tool.description();
+fn the_teamless_description_claims_no_roster_whether_or_not_it_is_reachable() {
+    for addressable in [false, true] {
+        let tool = SendMessageTool::teamless(addressable);
+        let described = tool.description();
 
-    assert!(!described.contains(ROSTER_HEADER), "no roster is claimed: {described}");
-    assert!(
-        described.contains("chose for itself") && described.contains("nothing verifies"),
-        "a registry name is labeled self-asserted: {described}"
-    );
-    // The no-reply-channel rule, as absence: no word of hearing back
-    // appears. The roster's absence is asserted on the rendered header
-    // above rather than on the word, because the description's own
-    // denial — "there is no teammate roster" — legitimately carries it.
-    let lowered = described.to_lowercase();
-    for claim in ["reply", "back"] {
-        assert!(!lowered.contains(claim), "no {claim:?} in the teamless description: {described}");
+        assert!(!described.contains(ROSTER_HEADER), "no roster is claimed: {described}");
+        assert!(
+            described.contains("chose for itself") && described.contains("nothing verifies"),
+            "a registry name is labeled self-asserted: {described}"
+        );
+
+        // Distinct from a team of one, whose empty roster is listed as such.
+        let team_of_one = SendMessageTool::new(&[]);
+        assert!(team_of_one.description().contains(super::NO_PEERS));
+        assert_ne!(described, team_of_one.description());
     }
+}
 
-    // Distinct from a team of one, whose empty roster is listed as such.
-    let team_of_one = SendMessageTool::new(&[]);
-    assert!(team_of_one.description().contains(super::NO_PEERS));
-    assert_ne!(described, team_of_one.description());
+/// **D543**'s correction to D530's asymmetry rule, and its bound: the road
+/// back is named **only** where this session really answers on a socket.
+///
+/// D530 held that a teamless sender cannot be addressed back and that no
+/// shipped text may imply it can. That rule described a postbox no binary
+/// ever installed — a session leading nobody binds its own socket — but the
+/// binding is a frontend's doing and arrives after assembly, so the claim
+/// is per session. Silence is still the honest answer with nothing bound;
+/// what D543 refuses is silence where a road exists.
+#[test]
+fn the_road_back_is_named_only_where_this_session_answers_on_a_socket() {
+    let bound = SendMessageTool::teamless(true).description().to_owned();
+    let unbound = SendMessageTool::teamless(false).description().to_owned();
+
+    assert!(bound.contains(super::ROAD_BACK), "a bound session says so: {bound}");
+    assert_eq!(
+        unbound.trim_end_matches(super::ROAD_BACK).trim_end(),
+        unbound,
+        "an unbound one implies no road at all: {unbound}"
+    );
+    assert_eq!(
+        bound,
+        format!("{unbound} {}", super::ROAD_BACK),
+        "the two differ by exactly that sentence"
+    );
 }
 
 /// AC-24, narrowed by the 2026-08-27 user ruling: `list_sessions` now
 /// answers "which names are live", so the teamless description's own claim
 /// that this build offers no listing tool is gone — replaced by a pointer
-/// to that tool — while the one-way silence this test does not touch stays
-/// exactly as it was (`ONE_WAY_NOTE` lives in `subagent.rs`, a different
-/// lane's file, and ships or does not on its own schedule).
+/// to that tool. The one-way clause this test never touched went with
+/// **D543**, which deleted the postbox that appended it.
 #[test]
 fn the_teamless_description_points_at_list_sessions_instead_of_claiming_no_listing_tool() {
-    let described = SendMessageTool::teamless().description().to_owned();
+    let described = SendMessageTool::teamless(true).description().to_owned();
 
     assert!(
         described.contains("list_sessions"),

@@ -12,8 +12,8 @@
 //! message to a named teammate is conversation, not authority: what changes
 //! is one entry in a mailbox this user already owns, whatever the recipient
 //! goes on to *do* is gated by the recipient's own rules, and the tool is
-//! offered wherever a postbox stands behind it — a team's, or the solo one a
-//! teamless interactive session gets (**D530**). The permission that matters
+//! offered wherever a postbox stands behind it, whether or not that team
+//! holds anybody (**D530**, **D543**). The permission that matters
 //! was answered elsewhere: for a teammate, at **spawn** — whether this
 //! session may run one, and under which posture — and for a cross-session
 //! send, at the receiver's own admission gate (**D523**–**D525**), which
@@ -120,13 +120,14 @@ a shutdown — by passing that answer's frame; anything else belongs in prose. \
 Use `summary` for the one line that should stand beside the message where it \
 is displayed.";
 
-/// What the model is told where this session leads no team (**D530**): no
-/// roster section — there is no team to claim — the live-session addressing
-/// with its honest label (a session's name is that session's own choice, and
-/// nothing verifies it), and where names come from: the `list_sessions` tool
-/// (**D535**), which now answers that question directly. Deliberately silent
-/// on any reply channel — a teamless sender cannot be addressed back, and no
-/// shipped text may imply it can.
+/// What the model is told where this session leads nobody (**D530**,
+/// **D543**): no roster section — there is a team, and it is empty, which is
+/// nobody to list — the live-session addressing with its honest label (a
+/// session's name is that session's own choice, and nothing verifies it),
+/// and where names come from (the `list_sessions` tool, **D535**). Whether
+/// an answer can come back is **not** in this constant: it is a fact about
+/// this session rather than about the tool, and [`ROAD_BACK`] is appended
+/// only where it holds.
 const TEAMLESS_DESCRIPTION: &str = "\
 Send a message to another live ganja session of this user's on this machine. \
 This session leads no team, so there is no teammate roster: `to` names a \
@@ -137,6 +138,21 @@ see which names are live.
 Name exactly one recipient in `to`: there is no broadcast, so reaching three \
 sessions is three calls. `message` is plain text. Use `summary` for the one \
 line that should stand beside the message where it is displayed.";
+
+/// Appended to [`TEAMLESS_DESCRIPTION`] where this session **is** reachable
+/// — **D543**'s correction to D530's asymmetry rule, and its whole content.
+///
+/// D530 held that a teamless sender could not be addressed back and that no
+/// shipped text may imply it can, so the description said nothing about a
+/// reply. That rule described a postbox no binary ever installed; a session
+/// leading nobody binds its own socket and registers its own name. But it
+/// binds one only if a frontend asked for it — `ganja run` binds nothing,
+/// and a session's own bind lands *after* assembly — so the claim is made
+/// per session rather than in the constant above, off the same cell D532's
+/// `reply_to` is spelled from. Silence is still the honest answer where
+/// nothing is bound: what D543 refuses is silence where a road exists.
+const ROAD_BACK: &str = "The session you write to can answer by addressing \
+this one back the same way, under the name this session registered.";
 
 /// Header the roster is listed under, so a description that grew a second
 /// paragraph still ends with the names a `to` argument may carry.
@@ -197,7 +213,8 @@ const DELIVERED: &str = "Message sent to";
 /// Rung zero: the tool was offered without a postbox behind it. Not
 /// reachable through the engine, whose registration follows the postbox and
 /// not the team (**D530**): it registers the tool only where it installed
-/// one — a team's, or a teamless interactive session's solo postbox.
+/// one, and a session leading nobody has a lead's postbox like any other
+/// lead (**D543**).
 const NO_TEAM: &str = "This session has no team to send a message to.";
 
 /// Rung 1: broadcast.
@@ -383,15 +400,34 @@ impl SendMessageTool {
         Self { description: describe(roster) }
     }
 
-    /// The tool as a session that leads no team sees it (**D530**): the
-    /// teamless description, with no roster to render. A separate
-    /// constructor rather than [`SendMessageTool::new`] over an empty
-    /// roster, because an empty roster already means something else — a
-    /// team of one, listed as having nobody yet — and the two must not read
-    /// alike.
+    /// The tool as a session leading **nobody** sees it (**D530**,
+    /// **D543**): the teamless description, with no roster to render. A
+    /// separate constructor rather than [`SendMessageTool::new`] over an
+    /// empty roster, because an empty roster already means something else —
+    /// a team of one, listed as having nobody yet — and the two must not
+    /// read alike.
+    ///
+    /// Which one a session gets is `Engine::teamless`'s answer, and since
+    /// **D543** that is a live read of the registry rather than a flag an
+    /// installer set: this description is what a session that has spawned
+    /// nobody (or whose last teammate has been retired) really reads, where
+    /// under D530 it was what no shipped binary ever showed.
+    ///
+    /// `addressable` is whether this session answers on a socket of its own,
+    /// and it decides one sentence — the road back, appended only when it
+    /// holds. A parameter rather than a constant clause because the answer
+    /// is per session and arrives *late* — a frontend binds after assembly —
+    /// so the caller passes the fact and the description follows it at the
+    /// next composition.
     #[must_use]
-    pub fn teamless() -> Self {
-        Self { description: TEAMLESS_DESCRIPTION.to_owned() }
+    pub fn teamless(addressable: bool) -> Self {
+        let mut description = TEAMLESS_DESCRIPTION.to_owned();
+        if addressable {
+            description.push(' ');
+            description.push_str(ROAD_BACK);
+        }
+
+        Self { description }
     }
 }
 

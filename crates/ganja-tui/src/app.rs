@@ -2402,8 +2402,8 @@ impl App {
             // fresh name, so nothing here duplicates it.
             Some((session_id, path)) => self.register_self(session_id, path),
             None => {
-                // No record of this session's own to rewrite — a teamless
-                // session, or a lead that has not bound yet — but the
+                // No record of this session's own to rewrite — a pane
+                // member, or a lead that has not bound yet — but the
                 // notice still fires (F9): the collision is about the name
                 // this session now answers to, record or not.
                 let own_session = self.engine.session_id();
