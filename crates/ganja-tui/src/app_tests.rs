@@ -1190,7 +1190,7 @@ fn stored_transcript(count: usize) -> Vec<Message> {
                             call_id: format!("call_{index}"),
                             tool: "read".to_owned(),
                             state: ToolState::Completed {
-                                input: serde_json::json!({"filePath": "crates/ganja-core/src/storage.rs"}),
+                                input: serde_json::json!({"filePath": "crates/ganja-storage/src/storage.rs"}),
                                 output: "read 412 lines".to_owned(),
                                 title: "storage.rs".to_owned(),
                                 metadata: serde_json::json!({}),

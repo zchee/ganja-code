@@ -147,7 +147,7 @@ This file maps the ganja-code build phases (P0–P13) to hands-on learning exerc
 
 ### Exercises
 
-- [ ] **Implement JSON storage**: Create `ganja-core/src/storage.rs` with versioned storage under `~/.local/share/ganja/project/<slug>/storage/`. Each session is a single JSON file. Add a `version` field (e.g., `"v1"`) to allow schema migrations later. Implement `save_session()` and `load_session()`. Test that a session round-trips losslessly through JSON serialization.
+- [ ] **Implement JSON storage**: Create `crates/ganja-storage/src/storage.rs` with versioned storage under `~/.local/share/ganja/project/<slug>/storage/`. Each session is a single JSON file. Add a `version` field (e.g., `"v1"`) to allow schema migrations later. Implement `save_session()` and `load_session()`. Test that a session round-trips losslessly through JSON serialization.
 
 - [ ] **Session list & resume**: Implement `ganja-cli` subcommands: `ganja --continue` (resume the most recent session) and `ganja --session <id>` (resume a specific session). If no session ID is provided, show an interactive picker. Test that a resumed session shows the previous transcript and can continue from where it left off.
 
@@ -208,7 +208,7 @@ This file maps the ganja-code build phases (P0–P13) to hands-on learning exerc
 
 - [ ] **Full markdown rendering**: Upgrade `ganja-tui/src/markdown.rs` to use `pulldown-cmark` for parsing and `syntect` for syntax highlighting (spec: `packages/tui/src/markdown.rs`). Implement a two-stage cache: (1) parse + highlight keyed by `(message_id, theme_rev)` → (2) line-wrap keyed by `(text_hash, width)`. On resize, re-wrap but skip the expensive parse/highlight. Test with a 10,000-line transcript; verify ≥30 FPS during scrolling (frame-time log).
 
-- [ ] **Git snapshots & /undo**: Implement `ganja-core/src/snapshot.rs` (spec: `src/snapshot/`, `session/revert.ts`). After each user turn, create a git snapshot (a commit with the session's current worktree state). Implement `/undo` and `/redo` commands that check out prior/next snapshots. Test that undoing a turn restores the pre-turn worktree byte-identically (git diff should show nothing).
+- [ ] **Git snapshots & /undo**: Implement `crates/ganja-storage/src/snapshot.rs` (spec: `src/snapshot/`, `session/revert.ts`). After each user turn, create a git snapshot (a commit with the session's current worktree state). Implement `/undo` and `/redo` commands that check out prior/next snapshots. Test that undoing a turn restores the pre-turn worktree byte-identically (git diff should show nothing).
 
 - [ ] **External file staleness warning**: Integrate `notify` crate to detect file modifications outside the session (spec: `packages/core/src/file.ts`, `filesystem.ts`). If a file is read this session and then modified externally, flag it for the model (e.g., "This file was modified externally since the session started."). Test by reading a file, modifying it in another terminal, and verifying the flag appears in the next tool result.
 
