@@ -127,7 +127,7 @@
 //!
 //! A pane whose process ends **after** readiness — the CLI quit on its own,
 //! crashed, or a person closed the pane — is noticed by the member's own loop
-//! ([`LIVENESS_POLL`](crate::shim_tui::LIVENESS_POLL)), not only by the next paste that would have failed
+//! ([`LIVENESS_POLL`](crate::liveness::LIVENESS_POLL)), not only by the next paste that would have failed
 //! into it: the pane's last line is read while the corpse is still on screen,
 //! the messages still in that member's inbox are answered to their senders
 //! rather than left unread, the corpse is closed through the same dead-only
@@ -167,6 +167,7 @@ use tokio_util::sync::CancellationToken;
 use crate::agy::Agy;
 use crate::codex::Codex;
 use crate::grok::Grok;
+use crate::liveness::{self, Gone, LIVENESS_POLL};
 use crate::reaper::Pane;
 use crate::shim::{self, Driver};
 use crate::tmux::{self, Closed, Killed, Server, TmuxError};
@@ -265,7 +266,7 @@ pub const RING_NO_TRANSCRIPT: &str =
 /// How often a member looks at its CLI's own transcript for new answers
 /// (**D515**).
 ///
-/// [`LIVENESS_POLL`]'s cadence, and for a related reason: a person watching
+/// [`liveness::LIVENESS_POLL`]'s cadence, and for a related reason: a person watching
 /// the pane sees an answer as it is drawn, so what this decides is how long
 /// the **lead** waits — a couple of seconds behind the screen, well inside
 /// the time its own model takes to read anything.
@@ -279,19 +280,6 @@ pub const READBACK_POLL: Duration = Duration::from_secs(2);
 /// still read from the moment it does. What this bounds is how long a ring
 /// stays silent about a pane whose answers nobody will hear.
 pub const READBACK_WAIT: Duration = Duration::from_secs(90);
-
-/// How often a member's loop asks whether its pane is still running.
-///
-/// A question a delivery cannot be the only thing to ask: under
-/// [`Delivery::FireAndForget`] a TUI that quits between messages is, to this
-/// side, indistinguishable from one that is thinking — until the next paste
-/// fails into it, which may be never. Two seconds is four inbox passes
-/// ([`shim::POLL`]): a dead pane is a matter of what is on a person's screen
-/// and of a roster row that no longer answers, not of a turn's correctness,
-/// so it need not be noticed faster than a person would notice it; and each
-/// ask is one `list-panes` client per member, which at this cadence costs
-/// less than the inbox read beside it.
-pub const LIVENESS_POLL: Duration = Duration::from_secs(2);
 
 /// The opening of a spawn refusal for a TUI that exited inside the readiness
 /// window; the CLI's own last words follow it.
@@ -1296,18 +1284,6 @@ pub struct Lent {
     pub cancel: CancellationToken,
 }
 
-/// How a pane stopped being this member's ([`TuiRunner::gone`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Gone {
-    /// Not listed live: dead under `remain-on-exit`, or closed. A corpse, if
-    /// tmux kept one, is still this member's, and its screen may be read.
-    Dead,
-    /// Listed live under another pid: the id was recycled, somebody respawned
-    /// something into it. Not ours any more and not ours to touch — no
-    /// capture, no close.
-    Recycled,
-}
-
 /// What one pass of [`TuiRunner`] did.
 ///
 /// Returned rather than only logged so a test can drive a single pass and
@@ -1489,32 +1465,13 @@ impl TuiRunner {
     /// **D512** as amended). [`None`] while the pane is still running under
     /// its recorded pair.
     ///
-    /// A pane that is dead under `remain-on-exit` or gone because a person
-    /// closed it is [`Gone::Dead`]; one wearing this id under another pid is
-    /// [`Gone::Recycled`] — either way a member whose CLI is not there to
-    /// paste into. A listing that *fails* says nothing either way and leaves
-    /// the member as it is — "no proof, no retire", the reaper's own rule —
-    /// because the cost of a wrong [`None`] is one more poll, and the cost of
-    /// a wrong [`Some`] is a teammate retired out from under a person.
+    /// The listing and the rule for reading it are [`liveness::gone`]'s,
+    /// shared with the pane backends since **D541**; what is this loop's own
+    /// is what follows a [`Gone`], which is everything a shim member has and a
+    /// pane member does not.
     async fn gone(&self) -> Option<Gone> {
-        let pane = self.handle.pane();
-        let live = match self.handle.server().panes().await {
-            Ok(live) => live,
-            Err(error) => {
-                tracing::debug!(
-                    teammate = self.spec.name.as_str(),
-                    pane = pane.id,
-                    %error,
-                    "a liveness listing failed; the member is left as it is"
-                );
-                return None;
-            }
-        };
-        let how = match live.iter().find(|listed| listed.id == pane.id) {
-            Some(listed) if pane.is(listed) => return None,
-            Some(_) => Gone::Recycled,
-            None => Gone::Dead,
-        };
+        let how = liveness::gone(self.handle.server(), self.handle.pane(), self.spec.name.as_str())
+            .await?;
         self.exited(how).await;
 
         Some(how)
@@ -1566,7 +1523,7 @@ impl TuiRunner {
         let fate = self.handle.end().await;
         let exited = Exited {
             name: name.to_owned(),
-            cli: self.handle.cli(),
+            cli: Some(self.handle.cli()),
             backend: self.handle.backend,
             pane_id: pane,
             pane: fate,

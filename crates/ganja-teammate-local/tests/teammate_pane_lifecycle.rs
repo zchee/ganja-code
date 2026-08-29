@@ -40,12 +40,22 @@
 
 mod pane_support;
 
+use std::time::Duration;
+
 use ganja_core::protocol::team::{Frame, ShutdownApproved};
 use ganja_team::{MailboxMessage, MemberName, mailbox, record};
+use ganja_teammate_local::liveness::LIVENESS_POLL;
 use ganja_teammate_local::reaper::Pane;
 use ganja_teammate_local::tmux::{self, Server};
 use ganja_testkit::tmux::PrivateServer;
-use pane_support::{expected_argv, pane_child_if_asked, run_one, spawn_pane_worker};
+use pane_support::{IDLE_WINDOW, expected_argv, pane_child_if_asked, run_one, spawn_pane_worker};
+
+/// How long the deliberate road is listened to after the member is retired,
+/// for a post that should never come: two [`LIVENESS_POLL`]s and a second, so
+/// a watch that outlived its member had every chance to speak. A leaked
+/// `Exited` arrives a poll *after* the kill rather than with it, which is why
+/// this is a window rather than one more assertion.
+const SILENCE: Duration = Duration::from_secs(LIVENESS_POLL.as_secs() * 2 + 1);
 
 fn main() {
     pane_child_if_asked();
@@ -56,7 +66,7 @@ fn main() {
 }
 
 async fn a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shutdown_approved() {
-    let server = PrivateServer::start(&["sleep", "3600"], &[], &[]);
+    let server = PrivateServer::start(&IDLE_WINDOW, &[], &[]);
     let config_home = ganja_testkit::temp_dir();
     let project = ganja_testkit::temp_dir();
     // SAFETY: this binary holds exactly one test, so nothing else in this
@@ -154,6 +164,23 @@ async fn a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shu
     let file = ganja_testkit::team_file(&spawned.root, &spawned.team)
         .expect("the team file is still there");
     assert!(file.member("worker").is_none(), "and so did the team file: {file:?}");
+
+    // **D541**'s other half, and the regression guard for the race its watch
+    // could lose: the road the lead *chose* stays silent. A watch that
+    // outlived this retirement would find the pane gone on its next listing
+    // and post an `Exited` about it, and the next pass would hand the lead a
+    // second `Retired` row and an "exited in its pane" notice for a teammate
+    // that said goodbye properly. Accumulated across passes over [`SILENCE`],
+    // because such a post is late by construction.
+    let mut spoke: Vec<String> = Vec::new();
+    let listen_until = std::time::Instant::now() + SILENCE;
+    while std::time::Instant::now() < listen_until {
+        let pass = spawned.inbox.poll().await;
+        spoke.extend(pass.exited.iter().map(|gone| format!("exited {}", gone.name)));
+        spoke.extend(pass.retired.iter().map(|gone| format!("retired {}", gone.name)));
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert!(spoke.is_empty(), "a deliberately retired member said nothing more: {spoke:?}");
 
     // Idempotent on the way out: killing what is already gone is nothing.
     let killed = Server::at(server.socket(), None)

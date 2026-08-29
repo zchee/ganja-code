@@ -70,6 +70,46 @@
 //! `ganja` session does: from the config files under that home, and from the
 //! server's environment, which is the shell the person started tmux from.
 //!
+//! # D541 — a pane teammate watches its own pane, and reports its exit
+//!
+//! Until 2026-08-28 nothing here watched anything: `alive()` answered [`true`]
+//! forever, `start` handed the registry no task, and both pane backends threw
+//! their [`Lent`](ganja_core::teammate::Lent) away. So a pane a person closed
+//! — or `tmux kill-pane`, which is how the W2 live check found it — left a
+//! teammate on the lead's roster and in the team file until the *next* lead
+//! started, since [`crate::reaper`] is a cold-start sweep of a **previous**
+//! lead's orphans (**D506**) and never a liveness poll of this one's own
+//! panes. `/team` kept listing the member for as long as the session ran, and
+//! a `/team shutdown` aimed at it only queued a request nobody was left to
+//! read.
+//!
+//! So [`PaneMember`](crate::pane::PaneMember) now runs the poll the shim TUI
+//! members already ran ([`crate::liveness`], one cadence and one listing rule
+//! for every shape that holds a pane) and, when the pane stops being its own,
+//! posts an [`Exited`](ganja_core::teammate::Exited) on the channel the
+//! registry lent it. Retirement then rides the path that already existed:
+//! [`TeammateRegistry::take_exited`](ganja_core::teammate::TeammateRegistry::take_exited)
+//! → `LeadInbox::retire_exited` → the same
+//! [`retire`](ganja_core::teammate::TeammateRegistry::retire) a
+//! `shutdown_approved` takes, so a teammate that died and one that was asked
+//! to stop leave the roster and the team file the same way.
+//!
+//! Three properties of that poll are the decision rather than the
+//! implementation. It **only reports**: it never kills a *live* pane by id,
+//! because `%N` recycles and a pane that has stopped being this member's may
+//! already be somebody else's window (**D506**'s rule). A corpse it finds goes
+//! through the dead-only door instead — one command in which tmux itself
+//! decides deadness and closes what it decided about, so this side never
+//! races its own listing. It reports a fate rather than a verdict — closed,
+//! left for a person, or recycled — the way [`crate::shim_tui`] does, and for
+//! the same reason: "the pane was closed" is a claim, and a claim has to be
+//! read off tmux, a recycled id off the listing and everything else through
+//! that door. And `alive()` is a
+//! **flag**, not a listing: it is asked on every `/team` render and in every
+//! roster count, so the subprocess belongs on the two-second timer and the
+//! answer belongs in an [`AtomicBool`](std::sync::atomic::AtomicBool) the
+//! timer flips.
+//!
 //! # What the launch line carries, and what it does *not*
 //!
 //! The five spawn flags — `--agent-id`, `--agent-name`, `--team-name`,
@@ -88,17 +128,22 @@
 
 use std::ffi::{OsStr, OsString};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use ganja_core::config::CONFIG_HOME_ENV;
-use ganja_core::teammate::{Delivery, Lent, SpawnSpec, Spawned, TeammateBackend, Unsupported};
+use ganja_core::teammate::{
+    Delivery, Exited, Lent, PaneFate, SpawnSpec, Spawned, TeammateBackend, Unsupported,
+};
 use ganja_protocol::team::MemberBackend;
 use ganja_team::{Surface, TeamFile};
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
+use crate::liveness::{self, Gone, LIVENESS_POLL};
 use crate::reaper::Pane;
-use crate::tmux::{self, Killed, Launch, Placement, Server, TmuxError};
+use crate::tmux::{self, Closed, Killed, Launch, Placement, Server, TmuxError};
 
 /// The environment a `ganja` pane is started with, by name (**D502**).
 ///
@@ -359,18 +404,11 @@ pub(super) async fn split_idle_shell(
 /// Takes the pane itself since **D538**: the other-shape guard this used to
 /// open with was a `Handle` variant test, and there is no handle to be of
 /// another shape any more — a backend is handed back exactly what its own
-/// `spawn` made.
-pub(super) async fn kill_pane(pane: &Pane, whose: &'static str) {
-    let server = match Server::current() {
-        Ok(server) => server,
-        Err(error) => {
-            // A lead that had a pane to spawn into and now has no `$TMUX` is
-            // not a case this build makes: the pane outlives this process
-            // either way, and the reaper is what finds it.
-            tracing::warn!(pane = pane.id, %error, "a pane could not be ended");
-            return;
-        }
-    };
+/// `spawn` made. And the **server** since **D541**, which gave the member one
+/// to hold anyway: this used to re-read `$TMUX` at kill time, which asked a
+/// question the spawn had already answered and left an arm for an answer
+/// ("this lead is no longer in tmux") that no path in this build produces.
+pub(super) async fn kill_pane(server: &Server, pane: &Pane, whose: &'static str) {
     match server.kill(pane).await {
         Ok(Killed::Yes) => tracing::info!(pane = pane.id, "a {whose}'s pane was ended"),
         Ok(Killed::AlreadyGone) => {
@@ -458,7 +496,7 @@ impl TeammateBackend for GanjaPane {
         )
     }
 
-    async fn spawn(&self, spec: &SpawnSpec, _lent: Lent) -> Result<Arc<dyn Spawned>, Unsupported> {
+    async fn spawn(&self, spec: &SpawnSpec, lent: Lent) -> Result<Arc<dyn Spawned>, Unsupported> {
         // D501's capability check, at the moment of asking rather than at
         // install: whether there is a server to put a pane in.
         let server = Server::current().map_err(|error| Self::refused(&error))?;
@@ -510,7 +548,17 @@ impl TeammateBackend for GanjaPane {
         // closes it. Moving the send-keys onto [`Spawned::launch`], with the
         // registry's own unwind, is the follow-up that closes both (bead
         // ganja-code-ipg); the body here is that method's body already.
-        let member = Arc::new(PaneMember::new(pane.clone(), "teammate"));
+        //
+        // The member is watching from the moment it is made (D541), so a wait
+        // that times out and ends the pane is noticed by that watch a poll
+        // later and reported as an ordinary exit. Deliberately not cancelled
+        // here: the member is already in the registry — `spawn` returned it
+        // before this task ran — and a cancelled watch would leave it on the
+        // roster with nothing ever coming for it, which is the failure D541
+        // exists to end. An exit for a spawn that failed is the smaller
+        // wrong, and it is the true one: the pane really is gone.
+        let member =
+            Arc::new(PaneMember::new(pane.clone(), "teammate", server.clone(), spec, &lent));
         let owned = spec.clone();
         tokio::spawn(async move {
             match wait_for_record(&owned, &pane.id, RECORD_WAIT).await {
@@ -543,10 +591,13 @@ impl TeammateBackend for GanjaPane {
 /// One teammate in a pane of its own, as either pane backend holds it after
 /// the split.
 ///
-/// Nothing of this session's runs for it: the pane is a whole process with its
-/// own loop, its own ring and its own liveness, so [`Spawned::start`] hands
-/// back no task, [`Spawned::recent`] is empty and [`Spawned::alive`] is
-/// [`true`] until the member is retired out of the map.
+/// Almost nothing of this session's runs for it: the pane is a whole process
+/// with its own loop and its own ring, so [`Spawned::recent`] is empty. The
+/// one thing that does is the liveness poll `watch` runs
+/// (**D541**), which is what [`Spawned::start`] hands the registry and what
+/// makes [`Spawned::alive`] answerable at all — before it, that method said
+/// [`true`] until somebody else took the member out of the map, which for a
+/// pane closed out from under the lead was nobody.
 ///
 /// Its identity is a **pair** rather than an id: `%N` recycles, so a lead that
 /// killed panes by id alone would eventually kill somebody else's window. What
@@ -561,19 +612,176 @@ pub struct PaneMember {
     pane: Pane,
     /// The word the kill's four log lines know this teammate by.
     whose: &'static str,
+    /// The server the pane was split on, held rather than re-read from `$TMUX`
+    /// so the watch and the kill ask the same server the spawn asked.
+    server: Server,
+    /// Which member, for the [`Exited`] and for the log.
+    name: String,
+    /// Which backend, for the [`Exited`]: it is what the lead's notice names
+    /// this teammate's surface by.
+    backend: MemberBackend,
+    /// Where a watch that saw the pane stop running puts the fact.
+    exits: tokio::sync::mpsc::UnboundedSender<Exited>,
+    /// A child of the registry's own, so a registry shutdown ends the watch —
+    /// and its own, so [`Spawned::kill`] can end it without waiting for one.
+    cancel: CancellationToken,
+    /// What [`Spawned::alive`] answers: cleared when the watch ends, on every
+    /// road out of it. A flag rather than a listing because that method is
+    /// asked on every `/team` render.
+    ///
+    /// [`Ordering::Relaxed`] at both ends of it, deliberately: the flag
+    /// publishes no other data — the [`Exited`] that carries the facts travels
+    /// by mpsc, which orders itself — and a reader that lags it by
+    /// microseconds is reading a two-second poll's answer, where the lag is
+    /// smaller than the question's own resolution.
+    alive: AtomicBool,
 }
 
 impl PaneMember {
-    /// The member over a pane that is already split.
+    /// The member over a pane that is already split, watching it on the
+    /// registry's behalf (**D541**).
     #[must_use]
-    pub fn new(pane: Pane, whose: &'static str) -> Self {
-        Self { pane, whose }
+    pub fn new(
+        pane: Pane,
+        whose: &'static str,
+        server: Server,
+        spec: &SpawnSpec,
+        lent: &Lent,
+    ) -> Self {
+        Self {
+            pane,
+            whose,
+            server,
+            name: spec.name.as_str().to_owned(),
+            backend: spec.backend,
+            exits: lent.exits.clone(),
+            cancel: lent.cancel.child_token(),
+            alive: AtomicBool::new(true),
+        }
     }
 
     /// The recorded `(pane_id, birth)` pair.
     #[must_use]
     pub fn pane(&self) -> &Pane {
         &self.pane
+    }
+
+    /// Asks every [`LIVENESS_POLL`] whether the pane is still this member's,
+    /// and reports the first answer that says it is not (**D541**).
+    ///
+    /// Starting one period out, so a member whose pane was listed at the split
+    /// moments ago does not open with a `list-panes` that can only answer what
+    /// is already known. It ends on the first exit it reports, or on either
+    /// cancellation — the registry's shutdown, or this member's own kill — and
+    /// clears [`Self::alive`] on the way out of all three, because a member
+    /// this loop has stopped watching is a member nothing else will notice the
+    /// death of.
+    ///
+    /// Cancellation is read **twice**, and the second read is the whole reason
+    /// the first is not enough: a kill that lands while a listing is already
+    /// in flight is a kill this loop cannot see until that listing answers,
+    /// and the answer it then gives is `Dead` — about a pane the kill itself
+    /// took away. Posting on it would report a death for a teammate the lead
+    /// deliberately retired, which [`Spawned::kill`]'s own doc says must not
+    /// happen; so the token is checked once more between the answer and the
+    /// post, where the ordering makes it decisive — a kill cancels *before* it
+    /// touches the pane, so a listing that saw the pane gone is a listing that
+    /// ran after the cancel it is about to find.
+    async fn watch(self: Arc<Self>) {
+        let mut poll =
+            tokio::time::interval_at(tokio::time::Instant::now() + LIVENESS_POLL, LIVENESS_POLL);
+        poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                () = self.cancel.cancelled() => break,
+                _ = poll.tick() => {
+                    let gone = tokio::select! {
+                        () = self.cancel.cancelled() => break,
+                        gone = liveness::gone(&self.server, &self.pane, &self.name) => gone,
+                    };
+                    if let Some(how) = gone {
+                        if self.cancel.is_cancelled() {
+                            break;
+                        }
+                        self.exited(how).await;
+                        break;
+                    }
+                }
+            }
+        }
+        self.alive.store(false, Ordering::Relaxed);
+    }
+
+    /// The pane stopped being this member's: read what became of it, and hand
+    /// the fact to the registry for the lead's next pass to retire the member
+    /// on.
+    ///
+    /// Nothing is quoted back from the screen. A shim pane is kept after its
+    /// process dies (`remain-on-exit`) precisely so its CLI's refusal can be
+    /// read; neither pane backend here sets that, so a `ganja` or `claude`
+    /// pane whose process ended is gone from the server and there is no screen
+    /// left to capture — `last_words: None` is the measurement, not an
+    /// omission.
+    async fn exited(&self, how: Gone) {
+        let fate = self.fate(how).await;
+        tracing::info!(
+            teammate = self.name,
+            pane = self.pane.id,
+            ?how,
+            ?fate,
+            "a {whose}'s pane stopped being its own; the member is retired",
+            whose = self.whose,
+        );
+        let exited = Exited {
+            name: self.name.clone(),
+            // No CLI: a `ganja` or `claude` pane runs a whole agent of its own
+            // rather than something this build shims for (**D541**).
+            cli: None,
+            backend: self.backend,
+            pane_id: self.pane.id.clone(),
+            pane: fate,
+            last_words: None,
+        };
+        // A send that fails is a registry that has already gone, which is a
+        // session on its way out: there is nobody left to retire the member.
+        let _ = self.exits.send(exited);
+    }
+
+    /// What is left of the pane, read off tmux — a recycled id off the
+    /// listing that already answered, everything else through the dead-only
+    /// door — rather than assumed.
+    ///
+    /// A recycled id is somebody else's pane and is not touched. A pane that
+    /// is merely *not listed* may still be a corpse somebody left
+    /// `remain-on-exit` on by hand, so it goes through the dead-only door,
+    /// which closes a corpse and refuses a live pane — and a pane that door
+    /// finds **alive** is one something was respawned into between the two
+    /// listings, which is a recycled id by another road.
+    async fn fate(&self, how: Gone) -> PaneFate {
+        match how {
+            Gone::Recycled => PaneFate::Recycled,
+            Gone::Dead => match self.server.close_dead(&self.pane.id).await {
+                Ok(Closed::Yes | Closed::AlreadyGone) => PaneFate::Closed,
+                Ok(Closed::Alive) => PaneFate::Recycled,
+                Ok(Closed::Refused) => {
+                    tracing::warn!(
+                        teammate = self.name,
+                        pane = self.pane.id,
+                        "a teammate's dead pane would not close; it is dead, and a person closes it"
+                    );
+                    PaneFate::Left
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        teammate = self.name,
+                        pane = self.pane.id,
+                        %error,
+                        "a teammate's dead pane could not be closed"
+                    );
+                    PaneFate::Left
+                }
+            },
+        }
     }
 }
 
@@ -584,19 +792,35 @@ impl Spawned for PaneMember {
     }
 
     fn start(self: Arc<Self>) -> Vec<JoinHandle<()>> {
-        Vec::new()
+        vec![tokio::spawn(self.watch())]
     }
 
     fn alive(&self) -> bool {
-        true
+        self.alive.load(Ordering::Relaxed)
     }
 
     fn recent(&self) -> Vec<String> {
         Vec::new()
     }
 
+    /// Ends the pane, and the watch with it.
+    ///
+    /// The watch is cancelled **first**, and that order is the whole of why
+    /// this is not two statements in either order: a kill is how a member the
+    /// lead has already retired is ended, and a watch left running would post
+    /// an [`Exited`] for the pane it just saw this call take away — a
+    /// retirement of a name the registry no longer holds, and a second
+    /// `Retired` row with an "exited in its pane" notice for a teammate that
+    /// left on purpose.
+    ///
+    /// Cancelling first is what makes that impossible rather than merely
+    /// unlikely, because the watch reads the token again after its listing
+    /// answers (`watch`): a listing that returns `Dead` about
+    /// this kill's own pane necessarily started before the pane was ended and
+    /// therefore after the cancel, which the re-read then finds.
     async fn kill(&self) {
-        kill_pane(&self.pane, self.whose).await;
+        self.cancel.cancel();
+        kill_pane(&self.server, &self.pane, self.whose).await;
     }
 }
 

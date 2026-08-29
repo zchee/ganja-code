@@ -35,10 +35,11 @@ use ganja_protocol::team::MemberBackend;
 use ganja_team::{MailboxMessage, MemberName, ShimCli, TeamName, TeamsRoot, mailbox, record};
 use ganja_teammate_local::claude::ClaudePane;
 use ganja_teammate_local::codex::{APPROVAL_OVERRIDE, Codex, READY_MARKER, SANDBOX_OVERRIDE};
+use ganja_teammate_local::liveness::LIVENESS_POLL;
 use ganja_teammate_local::pane::{GanjaPane, PaneShare, PaneShell};
 use ganja_teammate_local::reaper::Pane;
 use ganja_teammate_local::shim_tui::{
-    self, LIVENESS_POLL, REFUSED_DIED, RING_DELIVERED, RING_DELIVERY_FAILED, RING_NOT_READY,
+    self, REFUSED_DIED, RING_DELIVERED, RING_DELIVERY_FAILED, RING_NOT_READY,
     RING_PASTED_UNSUBMITTED, RING_READY, Readiness, ShimTui, TuiPane,
 };
 use ganja_teammate_local::tmux::Server;
@@ -795,7 +796,7 @@ async fn a_scripted_pane_exit_reaches_take_exited_carrying_every_field() {
         .expect("the exit reaches take_exited");
 
     assert_eq!(exited.name, "w1");
-    assert_eq!(exited.cli, ShimCli::Codex);
+    assert_eq!(exited.cli, Some(ShimCli::Codex));
     assert_eq!(exited.backend, MemberBackend::Codex);
     assert_eq!(exited.pane_id, pane_id);
     assert_eq!(exited.pane, PaneFate::Closed, "what `end` left is reported, not assumed");

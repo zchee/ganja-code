@@ -1,9 +1,10 @@
-//! What the two pane binaries share: the pane child, the spawn-and-report
+//! What the three pane binaries share: the pane child, the spawn-and-report
 //! spine, and the `task` door.
 //!
 //! Not a test binary of its own — cargo does not discover `tests/*/mod.rs` as
-//! one — but a module both `teammate_pane_lifecycle.rs` and
-//! `teammate_pane_env.rs` declare, so the child a pane runs is written once.
+//! one — but a module `teammate_pane_lifecycle.rs`, `teammate_pane_env.rs` and
+//! `teammate_pane_exit.rs` all declare, so the child a pane runs is written
+//! once.
 //! The private tmux server itself is [`ganja_testkit::tmux::PrivateServer`].
 //!
 //! # The pane child is this very binary
@@ -12,12 +13,14 @@
 //! test binary itself, so it is the test binary that gets started in the pane,
 //! carrying `--agent-id` and the other four flags on its command line. libtest
 //! would refuse those flags on sight and the pane would close in milliseconds,
-//! which is why both binaries are `harness = false` in `Cargo.toml` and open by
-//! asking [`pane_child_if_asked`] whether they are the child. The child does
+//! which is why all three binaries are `harness = false` in `Cargo.toml` and
+//! open by asking [`pane_child_if_asked`] whether they are the child. The child does
 //! what a `ganja` pane's first breath does: it finds its team through
 //! `GANJA_CONFIG_HOME` — the D502 variable — and writes to the lead's inbox.
 //! Then it waits to be killed, because a pane that exits on its own is a pane
-//! `kill-pane` never gets to prove anything about.
+//! `kill-pane` never gets to prove anything about — for [`CHILD_LIFE`], which
+//! is long past any run of these tests and is what keeps a server orphaned by
+//! a signal from outliving the day.
 //!
 //! What the child writes is a report a test can read back: its argv as it
 //! received it, the config home it resolved, and the **names** — never the
@@ -58,6 +61,31 @@ pub const SESSION_ID: &str = "01998ad0-0000-7000-8000-000000000000";
 /// debug test binary being exec'd cold on a machine running the rest of the
 /// suite.
 pub const CHILD_STARTS: Duration = Duration::from_secs(30);
+
+/// How long the pane child waits to be killed before ending on its own, and
+/// the same bound spelled the way tmux takes it, for the first window every
+/// pane binary's private server is born with.
+///
+/// Both are hygiene rather than behaviour, and the two together are the whole
+/// of it: [`ganja_testkit::tmux::PrivateServer`] kills its server when it is
+/// dropped, which covers every road out of a test that *unwinds* — a pass, a
+/// failed assertion, a panic — but no `Drop` runs for a process killed by a
+/// signal, which is what nextest's `terminate-after` cap does to a wedged
+/// test and what a harness does to a lane it tears down. Such a server was
+/// then immortal: tmux exits when its last pane does, and a first window
+/// sleeping an hour beside a child sleeping forever meant it never did, so
+/// the orphans had to be found and killed by hand. Bounded, the same orphan
+/// empties itself and the server goes with it.
+///
+/// Five minutes is picked from both sides: far past any run of these tests
+/// (seconds, with the longest wait in one 30 seconds) and past nextest's own
+/// four-minute kill, so it can never end a pane a live test still wants;
+/// short enough that an orphan is a nuisance for one coffee rather than
+/// until the machine reboots.
+pub const CHILD_LIFE: Duration = Duration::from_secs(300);
+
+/// What the first window runs — see [`CHILD_LIFE`], whose number this is.
+pub const IDLE_WINDOW: [&str; 2] = ["sleep", "300"];
 
 /// What the pane child tells the lead about itself.
 #[derive(Debug, Serialize, Deserialize)]
@@ -113,10 +141,13 @@ pub fn pane_child_if_asked() {
     )
     .expect("the pane child reports to its lead");
 
-    // Wait to be killed. A pane teammate lives until its lead ends it.
-    loop {
-        std::thread::sleep(Duration::from_secs(3600));
-    }
+    // Wait to be killed. A pane teammate lives until its lead ends it — and
+    // this one until [`CHILD_LIFE`] is up, so that a server whose test was
+    // killed by a signal rather than dropped is left holding a pane that ends
+    // on its own. The exit is explicit because returning from here would fall
+    // into `run_one` and run the test a second time, in the pane.
+    std::thread::sleep(CHILD_LIFE);
+    std::process::exit(0);
 }
 
 /// Runs this binary's one test under the libtest-shaped protocol nextest
@@ -233,7 +264,7 @@ pub struct Spawned {
     pub inbox: LeadInbox,
 }
 
-/// The spine both pane binaries walk: a lead over `config_home`, a `worker`
+/// The spine every pane binary walks: a lead over `config_home`, a `worker`
 /// spawned on the `pane` surface through the `task` door with `prompt`, the
 /// member record it wrote, and the child's report read back through the
 /// lead's own §6.2 pass. Each binary keeps only what it asserts beyond that.

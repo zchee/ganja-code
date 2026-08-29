@@ -950,13 +950,22 @@ pub struct Lent {
 /// knowledge do not depend on each other arriving.
 ///
 /// Backend-neutral, and in core since **D538**: the registry drains these
-/// without knowing which kind of member posted one.
+/// without knowing which kind of member posted one. That claim only became
+/// true of the *type* with **D541**, which gave the `ganja` and `claude` pane
+/// backends the same poll — until then the shape carried a mandatory
+/// [`ganja_team::ShimCli`], which a pane running no CLI of ours had no honest
+/// value for, so the one kind of member that could post one was a shim.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Exited {
     /// Which member.
     pub name: String,
-    /// Which CLI it ran.
-    pub cli: ganja_team::ShimCli,
+    /// Which CLI it ran, and [`None`] for a `ganja` or `claude` pane, which
+    /// runs no CLI this build shims for (**D541**). It is what
+    /// [`lead_inbox::LeadInbox`]'s retirement rebuilds the member's surface
+    /// from — [`ganja_team::Surface::Shim`] for a CLI, and
+    /// [`ganja_team::Surface::Pane`] for none — so the record it takes out of
+    /// the team file is the one the spawn put in.
+    pub cli: Option<ganja_team::ShimCli>,
     /// Its backend, for a frontend that names members by it.
     pub backend: MemberBackend,
     /// The pane it ran in.

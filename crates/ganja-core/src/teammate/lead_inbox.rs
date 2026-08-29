@@ -452,8 +452,9 @@ impl LeadInbox {
         pass
     }
 
-    /// Retires every TUI member whose own loop saw its pane stop running since
-    /// the last pass (**D512** as amended for bead g9u).
+    /// Retires every member whose own loop saw its pane stop running since the
+    /// last pass (**D512** as amended for bead g9u; **D541** for the `ganja`
+    /// and `claude` panes).
     ///
     /// The same door a `shutdown_approved` takes ([`LeadInbox::retire`]):
     /// [`TeammateRegistry::retire`] ends the surface — whose `end` answers the
@@ -462,6 +463,18 @@ impl LeadInbox {
     /// frontend's roster shrinks the way it does for any retirement, and
     /// `exited`, so it can say what the pane said. The loop that noticed has
     /// already told the lead's model in prose; this is the harness's half.
+    ///
+    /// The surface is rebuilt from [`Exited::cli`] rather than named, which is
+    /// what keeps `backend_type` the word the roster already holds for this
+    /// member: a shim's is its CLI's own name whether or not it ran in a pane,
+    /// and a `ganja` or `claude` pane's is [`ganja_team::record::BACKEND_TMUX`] — the
+    /// same string [`ganja_team::Surface::backend_type`] gave the spawn that
+    /// wrote the record, and the same one that member's own
+    /// `shutdown_approved` would have carried. Deliberately not
+    /// [`crate::teammate::backend_name`], which spells those two `ganja` and
+    /// `claude`: that is ganja's word for *which backend*, and this field is
+    /// Claude Code's for *which surface*, which is why the record has only
+    /// ever held the latter.
     async fn retire_exited(&self, pass: &mut Pass) {
         for exited in self.registry.take_exited() {
             if let Err(error) = self.registry.retire(&exited.name).await {
@@ -477,7 +490,10 @@ impl LeadInbox {
                 last = ?exited.last_words,
                 "a teammate's TUI exited and the lead has forgotten it"
             );
-            let surface = Surface::Shim { cli: exited.cli, pane: Some(exited.pane_id.clone()) };
+            let surface = match exited.cli {
+                Some(cli) => Surface::Shim { cli, pane: Some(exited.pane_id.clone()) },
+                None => Surface::Pane { id: exited.pane_id.clone() },
+            };
             pass.retired.push(Retired {
                 name: exited.name.clone(),
                 pane_id: Some(exited.pane_id.clone()),

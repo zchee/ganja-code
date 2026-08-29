@@ -1043,7 +1043,7 @@ async fn take_exited_drains_everything_posted_since_the_last_call() {
         exits
             .send(Exited {
                 name: name.to_owned(),
-                cli: ganja_team::ShimCli::Codex,
+                cli: Some(ganja_team::ShimCli::Codex),
                 backend: MemberBackend::Codex,
                 pane_id: "%4".to_owned(),
                 pane: PaneFate::Closed,
@@ -1056,4 +1056,35 @@ async fn take_exited_drains_everything_posted_since_the_last_call() {
 
     assert_eq!(taken, vec!["w1", "w2"], "both, in the order they were posted");
     assert!(registry.take_exited().is_empty(), "and each is taken exactly once");
+}
+
+/// **D541.** The one sentence a frontend shows is read off the **backend**,
+/// never off the CLI, which is what let that field become optional without
+/// moving a byte of what a shim member's exit says.
+///
+/// Both rows here rather than only the new one: the pane member's sentence is
+/// the thing being added, and the shim member's is the thing that must not
+/// have changed — a `notice()` that reached for the CLI would have had to grow
+/// a fallback, and the fallback is what this refuses to let anybody write.
+#[test]
+fn an_exit_names_its_backend_whether_or_not_it_ran_a_cli() {
+    let exited = |cli, backend| Exited {
+        name: "w1".to_owned(),
+        cli,
+        backend,
+        pane_id: "%4".to_owned(),
+        pane: PaneFate::Closed,
+        last_words: Some("bye from the stub".to_owned()),
+    };
+
+    assert_eq!(
+        exited(Some(ganja_team::ShimCli::Codex), MemberBackend::Codex).notice(),
+        "w1 (codex) exited in its pane — last line: bye from the stub; the pane was closed and \
+         the teammate retired"
+    );
+    assert_eq!(
+        exited(None, MemberBackend::Ganja).notice(),
+        "w1 (ganja) exited in its pane — last line: bye from the stub; the pane was closed and \
+         the teammate retired"
+    );
 }

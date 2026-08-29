@@ -349,7 +349,7 @@ impl TeammateBackend for ClaudePane {
         preamble(spec)
     }
 
-    async fn spawn(&self, spec: &SpawnSpec, _lent: Lent) -> Result<Arc<dyn Spawned>, Unsupported> {
+    async fn spawn(&self, spec: &SpawnSpec, lent: Lent) -> Result<Arc<dyn Spawned>, Unsupported> {
         // D501's capability check, at the moment of asking rather than at
         // install: whether there is a server to put a pane in.
         let server = Server::current().map_err(|error| Self::refused(&error))?;
@@ -377,7 +377,7 @@ impl TeammateBackend for ClaudePane {
         .await?;
 
         Ok(Arc::new(ClaudeMember {
-            pane: PaneMember::new(pane, "claude teammate"),
+            pane: Arc::new(PaneMember::new(pane, "claude teammate", server, spec, &lent)),
             spec: spec.clone(),
         }))
     }
@@ -389,13 +389,17 @@ impl TeammateBackend for ClaudePane {
 
 /// One real `claude` in a pane of its own.
 ///
-/// [`PaneMember`]'s behaviour throughout — a whole process runs in the pane,
-/// so nothing of this session's watches it — with the one thing that is this
-/// backend's own: §4.1's steps 4, 5 and 6, run on [`Spawned::launch`] once the
-/// registry's record write has happened.
+/// [`PaneMember`]'s behaviour throughout — including, since **D541**, the
+/// liveness watch that pane member runs over its own pane — with the one thing
+/// that is this backend's own: §4.1's steps 4, 5 and 6, run on
+/// [`Spawned::launch`] once the registry's record write has happened.
+///
+/// The pane member is behind an [`Arc`] for exactly one reason: its watch is
+/// what [`Spawned::start`] hands the registry, and that method takes the member
+/// by `Arc<Self>`.
 #[derive(Debug)]
 struct ClaudeMember {
-    pane: PaneMember,
+    pane: Arc<PaneMember>,
     /// Held because the launch needs it: the flags, the inbox and the root are
     /// all read off the spec at the moment the line is typed.
     spec: SpawnSpec,
@@ -454,8 +458,11 @@ impl Spawned for ClaudeMember {
         Ok(())
     }
 
+    /// The pane member's own liveness watch (**D541**), which is this
+    /// backend's too: a `claude` pane a person closes leaves the lead's roster
+    /// on the same path a `ganja` one does.
     fn start(self: Arc<Self>) -> Vec<JoinHandle<()>> {
-        Vec::new()
+        Arc::clone(&self.pane).start()
     }
 
     fn alive(&self) -> bool {

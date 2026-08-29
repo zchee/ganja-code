@@ -40,7 +40,7 @@ use ganja_core::config::CONFIG_HOME_ENV;
 use ganja_team::{MemberName, mailbox};
 use ganja_teammate_local::tmux::{self, Server};
 use ganja_testkit::tmux::PrivateServer;
-use pane_support::{expected_argv, pane_child_if_asked, run_one, spawn_pane_worker};
+use pane_support::{IDLE_WINDOW, expected_argv, pane_child_if_asked, run_one, spawn_pane_worker};
 
 /// A credential a lead might well hold, planted after the server started.
 const API_KEY: &str = "ANTHROPIC_API_KEY";
@@ -61,7 +61,7 @@ async fn a_pane_joins_the_team_when_the_tmux_server_predates_the_config_home_exp
     // The server first, born without the variable and without the credentials
     // — whatever this process inherited of them is kept out of it.
     let server =
-        PrivateServer::start(&["sleep", "3600"], &[CONFIG_HOME_ENV, API_KEY, SERVER_PASSWORD], &[]);
+        PrivateServer::start(&IDLE_WINDOW, &[CONFIG_HOME_ENV, API_KEY, SERVER_PASSWORD], &[]);
     let config_home = ganja_testkit::temp_dir();
     let project = ganja_testkit::temp_dir();
     // SAFETY: this binary holds exactly one test, so nothing else in this

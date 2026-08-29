@@ -45,6 +45,9 @@ pub mod claude;
 pub mod codex;
 /// A teammate that is a headless `grok` child (**D508**, **D509**, **D510**).
 pub mod grok;
+/// Whether a teammate's pane is still that teammate's, on one cadence for
+/// every shape that holds a pane (**D541**).
+pub mod liveness;
 /// A teammate in a `ganja` pane of its own (P25b).
 pub mod pane;
 /// Carrying a shim pane teammate's answers back to its lead (**D515**): the

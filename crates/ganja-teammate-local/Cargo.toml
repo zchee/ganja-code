@@ -72,8 +72,8 @@ ganja-testkit.workspace = true
 # and read back.
 tokio = { workspace = true, features = ["net"] }
 
-# The two pane binaries are their own `main`. The program `pane.rs` starts in a
-# teammate's pane is `current_exe()` — inside a test binary, the test binary
+# The three pane binaries are their own `main`. The program `pane.rs` starts in
+# a teammate's pane is `current_exe()` — inside a test binary, the test binary
 # itself, carrying the spawn flags — and libtest would refuse those flags on
 # sight. So each opens by asking whether it is the pane child (see
 # `tests/pane_support/mod.rs`) and only otherwise runs its one test.
@@ -83,4 +83,8 @@ harness = false
 
 [[test]]
 name = "teammate_pane_env"
+harness = false
+
+[[test]]
+name = "teammate_pane_exit"
 harness = false

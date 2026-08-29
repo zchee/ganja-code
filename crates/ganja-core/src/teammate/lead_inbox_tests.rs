@@ -5,15 +5,15 @@ use ganja_protocol::team::{
     Frame, IdleNotification, PermissionRequest, PermissionResponse, PermissionResponseBody,
     ShutdownApproved, TaskAssignment, TeamPermissionUpdate,
 };
-use ganja_team::{LEAD, MailboxMessage, MemberName, mailbox, record};
+use ganja_team::{LEAD, MailboxMessage, MemberName, ShimCli, mailbox, record};
 
 use super::{DIALOG_QUEUE_FULL, Delivered, LeadInbox, NO_DIALOG_SURFACE};
 use crate::Storage;
 use crate::permission::Permissions;
 use crate::provider::FakeProvider;
 use crate::teammate::{
-    Delivery, InProcess, Lent, MemberBackend, SpawnRequest, SpawnSpec, Spawned, Surface,
-    TeammateBackend, TeammateRegistry, Unsupported, member,
+    Delivery, Exited as MemberExited, InProcess, Lent, MemberBackend, PaneFate, SpawnRequest,
+    SpawnSpec, Spawned, Surface, TeammateBackend, TeammateRegistry, Unsupported, member,
 };
 use crate::tool::Registry as Tools;
 
@@ -684,5 +684,57 @@ fn a_delivered_entry_derives_the_identity_it_will_be_pruned_by() {
         Delivered::new("w2", "2026-08-17T00:00:00.000Z", "done", Delivery::Acknowledged).identity(),
         mailbox::identity(&message),
         "the sender is part of what a message is"
+    );
+}
+
+/// **D541.** An exit retires under the `backendType` the roster already holds
+/// for that member, and the field the surface is rebuilt from is what says
+/// which: a `ganja` pane posts no CLI and comes back a
+/// [`Surface::Pane`] — `tmux`, the word its own record was written with and
+/// the word its own `shutdown_approved` would have carried — while an exit
+/// naming a CLI comes back exactly what it came back before that field became
+/// an [`Option`], the CLI's own name beside its pane.
+///
+/// Both rows in one pass, because the thing worth pinning is that they differ:
+/// one arm reporting the other's word would put a member on the roster under a
+/// surface it never ran on, and nothing downstream would notice.
+#[tokio::test]
+async fn an_exit_retires_under_the_backend_type_its_own_surface_records() {
+    let home = tempfile::tempdir().expect("a temporary home");
+    let registry = registry(home.path());
+    let exits = registry.lend().exits;
+    for (name, cli, backend, pane_id) in [
+        ("w1", None, MemberBackend::Ganja, "%7"),
+        ("w2", Some(ShimCli::Codex), MemberBackend::Codex, "%8"),
+    ] {
+        exits
+            .send(MemberExited {
+                name: name.to_owned(),
+                cli,
+                backend,
+                pane_id: pane_id.to_owned(),
+                pane: PaneFate::Closed,
+                last_words: None,
+            })
+            .expect("the registry is still holding the receiving half");
+    }
+
+    let pass = LeadInbox::new(Arc::clone(&registry)).poll().await;
+
+    let retired: Vec<(&str, Option<&str>, Option<&str>)> = pass
+        .retired
+        .iter()
+        .map(|gone| (gone.name.as_str(), gone.pane_id.as_deref(), gone.backend_type.as_deref()))
+        .collect();
+
+    assert_eq!(
+        retired,
+        vec![("w1", Some("%7"), Some("tmux")), ("w2", Some("%8"), Some("codex")),],
+        "the pane member under its record's own word, the shim under its CLI's: {pass:?}"
+    );
+    assert_eq!(
+        pass.exited.iter().map(|gone| gone.name.as_str()).collect::<Vec<_>>(),
+        vec!["w1", "w2"],
+        "and both are reported so a frontend can say what happened"
     );
 }
