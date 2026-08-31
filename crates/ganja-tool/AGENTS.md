@@ -42,10 +42,10 @@ Hoisted out of the workspace root's `AGENTS.md` so that file stays inside Claude
 ```sh
 cargo test -p ganja-tool                      # the in-module suites, which travelled with the files
 cargo nextest run --workspace                 # and the engine's, which drive these through a turn
-! cargo tree -p ganja-tool -e normal | grep -q ganja-core   # the boundary, asserted
+cargo depgate check --config depgate.toml     # the boundary, asserted from the repository root
 ```
 
-The last one is inverted for the same reason the core-purity gate is: a plain `grep -c` exits non-zero on *zero* matches, and would fail exactly when the boundary holds.
+The last one reads the root `depgate.toml`, whose `ganja-tool` rule closes this crate's internal set at exactly `ganja-permission` — an exact-set allowlist that fails closed, where a `! grep ganja-core` would go quiet the day a new internal crate appeared.
 
 ### Common Patterns
 

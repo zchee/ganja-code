@@ -29,6 +29,7 @@ The types every side of the app speaks: the `Command`s a frontend sends, the `Ev
 ```sh
 cargo test -p ganja-protocol          # its unit tests
 cargo tree -p ganja-protocol -e normal   # the boundary, visible: serde, serde_json and uuid
+cargo depgate check --config depgate.toml   # the boundary, gated from the repository root: leaf, plus the exact depth-1 set
 ```
 
 ### Common Patterns

@@ -1,0 +1,164 @@
+# Dependency policy for zchee/ganja-code, evaluated in CI's lint job by
+# `cargo depgate check --config depgate.toml` (zchee/cargo-depgate, pinned by
+# commit there). It replaces the seventeen shell steps — nineteen assertions —
+# that stood at .github/workflows/ci.yaml L176-355 as of commit 382763f.
+#
+# 7 internal + 5 deny + 3 leaf + 2 direct + 1 sealed + 1 manifest = 19 rules.
+# Each rule carries, directly above it, the retired step it replaces and that
+# step's reasoning; read the comment before editing the rule. Two shapes recur:
+#
+# - `internal` and `direct` are exact-set allowlists, never blocklists: a
+#   `! grep -q ganja-core` names one crate and silently weakens the day a new
+#   internal crate appears — a tool -> ganja-provider edge would pass it while
+#   inverting the same layering. Asserting the exact set fails closed instead:
+#   a new edge fails until the rule is edited deliberately.
+# - `deny` patterns are prefix globs (`axum*` covers axum and axum-core):
+#   family semantics on purpose, where the retired greps were unanchored
+#   substrings. Every crate those greps ever caught still matches.
+#
+# depgate resolves the all-platform, feature-unified graph (the
+# `superset_extra_edges` count in its summary). That superset can only *add*
+# findings for deny/leaf/sealed rules, but an internal or direct equality rule
+# could someday report a resolver-artifact `+extra` edge no real build
+# compiles — judge such a finding before widening a set to admit it.
+schema = 1
+
+# "internal" is workspace membership plus these name patterns. Membership
+# alone is stronger than the retired `grep '^ganja-'` in one direction (the
+# member `tmux` counts as internal) and weaker in the other (a non-member
+# `ganja-*` crate would pass as external); the pattern closes that hole.
+[internal]
+patterns = ["ganja-*"]
+
+# Retired: the awk over crates/*/Cargo.toml. The workspace rule "every
+# dependency version lives in the root manifest" was convention only; this
+# keeps it a gate. Member manifests opt in with `x.workspace = true` and
+# never name a version.
+[manifest]
+versions-in-root = true
+
+# Retired: "ganja-core stays free of terminal dependencies" / "... of the http
+# server" (deny), and "ganja-core's internal dependencies are exactly the six
+# beneath it" (internal). The engine must be testable headless and servable
+# over a socket, so it may reach neither a terminal nor an HTTP server;
+# anything the UI must render is a serde type in ganja-protocol. A crate
+# joining the internal list is a deliberate edit to this line, never an
+# accident a grep missed — ganja-team joined in P25 because a teammate's
+# lifetime is the engine's, ganja-storage in W3 (D540) when the session store
+# and the working-tree snapshots became a leaf of their own.
+[rules."ganja-core"]
+deny = ["ratatui*", "axum*"]
+internal = ["ganja-permission", "ganja-protocol", "ganja-provider", "ganja-storage", "ganja-team", "ganja-tool"]
+
+# Retired: "ganja-tool's internal dependencies are exactly the permission
+# crate". The engine is deliberately outside this crate's graph: a tool that
+# seems to need the loop needs another value in its ToolCtx instead.
+[rules."ganja-tool"]
+internal = ["ganja-permission"]
+
+# Retired: "ganja-team's internal dependencies are exactly the protocol". The
+# teams directory is file I/O over a document format ganja does not own, so
+# the list that matters is the one it must never grow: the engine (its answers
+# would end up underneath it), the permission crate (a mailbox decides
+# nothing), the tools. It reads the protocol for the frames a message body
+# carries and the id a write is stamped with, and that is all — asserted
+# closed from the crate's first commit, before there is a convenient edge to
+# add.
+[rules."ganja-team"]
+internal = ["ganja-protocol"]
+
+# Retired: "ganja-provider stays free of terminal and clipboard dependencies"
+# (deny) and "ganja-provider's internal dependencies are exactly the three
+# beneath it" (internal). A wire renders nothing and copies nothing: the deny
+# is what keeps a future login flow from reaching for a TUI prompt or the
+# clipboard instead of handing the question back to whoever asked.
+# ganja-permission arrives transitively, through ganja-tool: a request offers
+# the model ToolDefinitions, the only thing this crate wants of the tools.
+# What the allowlist forbids is the edge back — a wire that named the engine
+# would put a vendor's HTTP inside the loop it is supposed to be driven by.
+# (A prost/tonic fence once stood beside the retired step, forcing a gRPC
+# stack into a crate of its own while the cursor wire was a stub; it was
+# removed when the real wire landed, under a ruling that dependency weight is
+# not this project's constraint — what keeps a vendor's HTTP *server* out of
+# the engine is these layering rules: direction, not weight.)
+[rules."ganja-provider"]
+deny = ["ratatui*", "crossterm*", "arboard*"]
+internal = ["ganja-permission", "ganja-protocol", "ganja-tool"]
+
+# Retired: the first half of "the bottom crates stay leaves". The rules need
+# nothing of ours.
+[rules."ganja-permission"]
+leaf = true
+
+# Retired: the second half of "the bottom crates stay leaves" (leaf) and
+# "ganja-protocol's direct dependencies are exactly serde, serde_json and
+# uuid" (direct). The leaf shape only sees internal names, so it cannot notice
+# the protocol quietly widening its external list — measured: a scratch
+# `schemars.workspace = true` resolved cleanly, dragged six transitive crates
+# into what was then a two-dependency leaf, and left the leaf gate green. The
+# root manifest's comment forbids widening; `direct` makes the comment a gate.
+# uuid joined deliberately in P25 (D493, the id mint) and is depth-1 only —
+# its own getrandom is below this rule's horizon.
+[rules."ganja-protocol"]
+leaf = true
+direct = ["serde", "serde_json", "uuid"]
+
+# Retired: "ganja-storage's internal dependencies are exactly the two leaves".
+# The session store and the working-tree snapshots need a project's worktree
+# root (ganja-permission::project) and the wire types a stored record is
+# (ganja-protocol), and nothing else — the engine reaches this crate only
+# through the re-export ganja-core's lib.rs carries (D540).
+[rules."ganja-storage"]
+internal = ["ganja-permission", "ganja-protocol"]
+
+# Retired: "ganja-client's internal dependencies are exactly the protocol"
+# (internal) and the client line of "the frontends stay in their lanes"
+# (deny). The client's whole reason to exist is what it does *not* link: an
+# engine (it would become a second frontend rather than a consumer of the
+# served one) or the server (it would drag axum into every build that only
+# wanted to talk to one). Allowlist form from birth, so a ganja-serve creep —
+# which a "does not name ganja-core" grep could not see — fails closed too.
+[rules."ganja-client"]
+deny = ["axum*"]
+internal = ["ganja-protocol"]
+
+# Retired: "ganja-teammate-local's internal dependencies are exactly the seven
+# beneath it". This crate sits *above* the engine the way a frontend does
+# (D539): every backend in it needs a tmux server, a shell to split into, or
+# somebody else's binary on PATH — none of which an engine may hold. The exact
+# set proves the crate's own half of the split's promise: it reaches nothing
+# beyond the engine and the six crates beneath it, ganja-storage (D540) among
+# them since W3. The other half is ganja-serve's deny below.
+[rules."ganja-teammate-local"]
+internal = ["ganja-core", "ganja-permission", "ganja-protocol", "ganja-provider", "ganja-storage", "ganja-team", "ganja-tool"]
+
+# Retired: the ganja-tui line of "the frontends stay in their lanes". The
+# terminal frontend never grows the HTTP server.
+[rules."ganja-tui"]
+deny = ["axum*"]
+
+# Retired: the two ganja-serve lines of "the frontends stay in their lanes".
+# The HTTP frontend never grows the terminal, and — the D539 split's whole
+# point — never links ganja-teammate-local: the closure `ganja serve` ships is
+# the closure a cloud worker will ship, so the machine-bound backends (tmux
+# panes, foreign-CLI shims) must be provably unable to enter it.
+[rules."ganja-serve"]
+deny = ["ratatui*", "ganja-teammate-local"]
+
+# Retired: "tmux consumes no ganja crate" (leaf), "no workspace member
+# consumes tmux" (sealed), and "tmux's direct dependencies are exactly
+# futures, thiserror and tokio" (direct). The sealed leaf is the P26 user
+# directive (2026-08-18): `tmux` is deliberately outside the ganja-*
+# dependency graph in both directions, not merely unused by today's callers.
+# The retired producing-direction step derived every member from
+# `cargo metadata` at gate time rather than freezing a consumer list that
+# would silently ignore the next workspace member; `sealed` keeps exactly that
+# property, since depgate resolves the member set when it runs. `leaf` proves
+# only that tmux names no internal crate, so `direct` is the analogous
+# external guard: depth one keeps transitive details and the dev-only
+# tempfile below the horizon, while an added normal dependency fails until
+# this exact set is edited deliberately.
+[rules.tmux]
+leaf = true
+sealed = true
+direct = ["futures", "thiserror", "tokio"]

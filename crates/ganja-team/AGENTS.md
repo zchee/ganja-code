@@ -44,13 +44,7 @@ Claude Code's teams directory: the member records a team file carries, and the f
 
 `cargo nextest run -p ganja-team`, and the workspace gates from the repository root. `tests/claude_format_interop.rs` reads the committed capture under `tests/fixtures/` and **hard-fails, never skips**, when it is missing or incomplete — a checkout without it is broken, not unsupported.
 
-The internal-dependency allowlist is a gate rather than a convention:
-
-```sh
-internal="$(cargo tree -p ganja-team -e normal --prefix none | awk '{print $1}' \
-  | grep '^ganja-' | grep -v '^ganja-team$' | sort -u | tr '\n' ' ')"
-test "$internal" = "ganja-protocol "
-```
+The internal-dependency allowlist is a gate rather than a convention: the root `depgate.toml` closes this crate's internal set at exactly `ganja-protocol` (its `ganja-team` rule, with the rationale in the comment above it), evaluated by CI's `cargo depgate check --config depgate.toml`.
 
 ### Common Patterns
 

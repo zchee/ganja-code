@@ -173,186 +173,51 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-      - name: ganja-core stays free of terminal dependencies
-        run: "! cargo tree -p ganja-core -e normal | grep -q ratatui"
+      # The seventeen shell steps that stood here, carrying nineteen
+      # assertions — nine inverted `cargo tree | grep` ban lines, seven exact
+      # internal-dependency sets, three leaf assertions, two exact
+      # direct-dependency sets, one reverse "nothing else depends on tmux"
+      # loop over `cargo metadata --no-deps | jq`, and one awk over the member
+      # manifests — are now one reviewable policy file, `depgate.toml`, and
+      # one run of the gate that reads it. Every assertion those lines made is
+      # still made; `ganja-cli` and `ganja-testkit` carry no rule because
+      # those lines never named them. Each rule's rationale and the retired
+      # step it replaces are comments in `depgate.toml` itself — read them
+      # before editing it.
+      #
+      # cargo-depgate never compiles this workspace: evaluating the whole
+      # policy costs one `cargo metadata` resolve, in place of the thirty-odd
+      # `cargo tree` invocations those steps paid for (the sealed-leaf loop
+      # alone ran one per member). Building the gate itself is a separate cost
+      # and is not paid per run: `cargo install` compiles cargo-depgate and
+      # its dependency tree from source, which is minutes, so the binary is
+      # restored from the cache and installed only on a miss. The `--rev` pins
+      # the exact commit — tag v0.1.0 points there today, but a tag is
+      # mutable and that repo publishes no GitHub Release, so the sha is the
+      # only pin that cannot move under the workflow's feet — and the same
+      # sha is in the cache key, so bumping the rev installs once and
+      # restores thereafter. rust-cache above also keeps `~/.cargo/bin` (its
+      # cache-bin default), but its key churns with the lockfile; this
+      # dedicated entry is a deliberate duplicate that survives that churn,
+      # and the restore order keeps it authoritative (rust-cache restores
+      # first, this cache overwrites). The install's `--locked` is `cargo
+      # install`'s: build the tool against the Cargo.lock it ships at that
+      # rev. `cargo depgate` itself passes `--locked` to its own
+      # `cargo metadata` by default, for the same reason clippy carries it,
+      # and the report auto-selects GitHub annotations under Actions.
+      - name: cache the dependency gate
+        id: depgate-cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/bin/cargo-depgate
+          key: cargo-depgate-${{ runner.os }}-${{ runner.arch }}-867e7c2d95515f76fb41a3a699270228b278fb4f
 
-      - name: ganja-core stays free of the http server
-        run: "! cargo tree -p ganja-core -e normal | grep -q axum"
+      - name: install the dependency gate
+        if: steps.depgate-cache.outputs.cache-hit != 'true'
+        run: cargo install --git https://github.com/zchee/cargo-depgate --rev 867e7c2d95515f76fb41a3a699270228b278fb4f --locked
 
-      # Allowlist form, not a blocklist grep: a `! grep -q ganja-core` names
-      # one crate and silently weakens the day a new internal crate appears —
-      # a tool → ganja-provider edge would pass it while inverting the same
-      # layering. Asserting the exact internal set fails closed instead: a new
-      # edge fails until this line is edited deliberately.
-      - name: ganja-tool's internal dependencies are exactly the permission crate
-        run: |
-          internal="$(cargo tree -p ganja-tool -e normal --prefix none | awk '{print $1}' | grep '^ganja-' | grep -v '^ganja-tool$' | sort -u | tr '\n' ' ')"
-          test "$internal" = "ganja-permission "
-
-      # The same closed form for the engine: its internal deps are exactly the
-      # six crates beneath it, in sorted order. A split crate joining this
-      # list is a deliberate edit here, never an accident the old greps missed
-      # — `ganja-team` joined in P25 because a teammate's lifetime is the
-      # engine's and the documents that lifetime is written into are that
-      # crate's; `ganja-storage` joined in W3 (**D540**) because the session
-      # store and the working-tree snapshots became a leaf of their own.
-      - name: ganja-core's internal dependencies are exactly the six beneath it
-        run: |
-          internal="$(cargo tree -p ganja-core -e normal --prefix none | awk '{print $1}' | grep '^ganja-' | grep -v '^ganja-core$' | sort -u | tr '\n' ' ')"
-          test "$internal" = "ganja-permission ganja-protocol ganja-provider ganja-storage ganja-team ganja-tool "
-
-      # The teams directory is file I/O over a document format ganja does not
-      # own, so the list that matters is the one it must never grow: the
-      # engine (its answers would end up underneath it), the permission crate
-      # (a mailbox decides nothing), the tools. It reads the protocol for the
-      # frames a message body carries and the id a write is stamped with, and
-      # that is all — asserted closed from the crate's first commit, before
-      # there is a convenient edge to add.
-      - name: ganja-team's internal dependencies are exactly the protocol
-        run: |
-          internal="$(cargo tree -p ganja-team -e normal --prefix none | awk '{print $1}' | grep '^ganja-' | grep -v '^ganja-team$' | sort -u | tr '\n' ' ')"
-          test "$internal" = "ganja-protocol "
-
-      # And for the wires. `ganja-permission` is here transitively, through
-      # `ganja-tool`: a request offers the model `ToolDefinition`s, which is the
-      # only thing this crate wants of the tools. What the allowlist forbids is
-      # the edge back — a wire that named the engine would put a vendor's HTTP
-      # inside the loop it is supposed to be driven by.
-      - name: ganja-provider's internal dependencies are exactly the three beneath it
-        run: |
-          internal="$(cargo tree -p ganja-provider -e normal --prefix none | awk '{print $1}' | grep '^ganja-' | grep -v '^ganja-provider$' | sort -u | tr '\n' ' ')"
-          test "$internal" = "ganja-permission ganja-protocol ganja-tool "
-
-      # A wire renders nothing and copies nothing. The engine is held to the
-      # terminal rule one level up; asserting it here as well is what keeps a
-      # future login flow from reaching for a TUI prompt or the clipboard
-      # instead of handing the question back to whoever asked.
-      - name: ganja-provider stays free of terminal and clipboard dependencies
-        run: |
-          ! cargo tree -p ganja-provider -e normal | grep -q ratatui
-          ! cargo tree -p ganja-provider -e normal | grep -q crossterm
-          ! cargo tree -p ganja-provider -e normal | grep -q arboard
-
-      # A prost/tonic fence stood here — `! grep -qE 'prost|tonic'` on the
-      # engine and the wires — while the cursor wire was a stub, to force a
-      # gRPC stack into a crate of its own the day it landed. It was removed
-      # when the real wire landed, under a ruling that dependency weight is not
-      # this project's constraint: a dependency is admitted when its license is
-      # valid (asserted by `cargo deny` below) and the workspace compiles. The
-      # cursor wire's messages ride `buffa` (pure-Rust protobuf) in the
-      # provider crate, and its transport rides the provider crate too; what
-      # keeps a vendor's HTTP *server* out of the engine is the layering
-      # allowlists below — direction, not weight.
-
-      # tail strips the crate's own header line, which would match the grep.
-      - name: the bottom crates stay leaves
-        run: |
-          ! cargo tree -p ganja-permission -e normal | tail -n +2 | grep -q ganja-
-          ! cargo tree -p ganja-protocol -e normal | tail -n +2 | grep -q ganja-
-
-      # ganja-storage sits one level above the two leaves: the session store
-      # and the working-tree snapshots need a project's worktree root
-      # (`ganja-permission::project`) and the wire types a stored record is
-      # (`ganja-protocol`), and nothing else — the engine reaches it only
-      # through the re-export `ganja-core`'s `lib.rs` carries (**D540**).
-      - name: ganja-storage's internal dependencies are exactly the two leaves
-        run: |
-          internal="$(cargo tree -p ganja-storage -e normal --prefix none | awk '{print $1}' | grep '^ganja-' | grep -v '^ganja-storage$' | sort -u | tr '\n' ' ')"
-          test "$internal" = "ganja-permission ganja-protocol "
-
-      # The leaf gate above only sees ganja-* crates, so it cannot notice the
-      # protocol quietly widening its external list — measured: a scratch
-      # `schemars.workspace = true` resolved cleanly, dragged six transitive
-      # crates into what was then a two-dependency leaf, and left that gate
-      # green. The manifest comment forbids widening; this makes the comment a
-      # gate. `uuid` joined deliberately in P25 (D493, the id mint) and is
-      # depth-1 only — its own `getrandom` is below this gate's horizon.
-      - name: ganja-protocol's direct dependencies are exactly serde, serde_json and uuid
-        run: |
-          external="$(cargo tree -p ganja-protocol -e normal --depth 1 --prefix none | tail -n +2 | awk '{print $1}' | sort -u | tr '\n' ' ')"
-          test "$external" = "serde serde_json uuid "
-
-      # The client's whole reason to exist is what it does *not* link: an
-      # engine (it would become a second frontend rather than a consumer of
-      # the served one) or the server (it would drag axum into every build
-      # that only wanted to talk to one). Allowlist form from birth, so a
-      # ganja-serve creep — which a `∌ ganja-core` grep could not see — fails
-      # closed too.
-      - name: ganja-client's internal dependencies are exactly the protocol
-        run: |
-          internal="$(cargo tree -p ganja-client -e normal --prefix none | awk '{print $1}' | grep '^ganja-' | grep -v '^ganja-client$' | sort -u | tr '\n' ' ')"
-          test "$internal" = "ganja-protocol "
-
-      # ganja-teammate-local sits *above* the engine, the way a frontend does
-      # (**D539**): every backend in it needs a tmux server, a shell to split
-      # into, or somebody else's binary on `PATH` — none of which an engine
-      # may hold. Allowlist form for the same reason every other internal set
-      # here is one: a `∌ ganja-core` grep could not see this crate widen its
-      # own internal list, only an exact set closes. What this line proves is
-      # the crate's own half of the split's promise — it reaches nothing
-      # beyond the engine and the six crates beneath it, `ganja-storage`
-      # (**D540**) among them since W3.
-      - name: ganja-teammate-local's internal dependencies are exactly the seven beneath it
-        run: |
-          internal="$(cargo tree -p ganja-teammate-local -e normal --prefix none | awk '{print $1}' | grep '^ganja-' | grep -v '^ganja-teammate-local$' | sort -u | tr '\n' ' ')"
-          test "$internal" = "ganja-core ganja-permission ganja-protocol ganja-provider ganja-storage ganja-team ganja-tool "
-
-      # The frontends' own lanes, previously true but unasserted: the
-      # terminal frontend never grows the HTTP server, the HTTP frontend
-      # never grows the terminal, and the client grows neither. The fourth
-      # line is the split's other half and its whole point (**D539**): the
-      # closure `ganja serve` ships is the closure a cloud worker will ship,
-      # so the machine-bound backends — tmux panes, foreign-CLI shims — must
-      # never enter it.
-      - name: the frontends stay in their lanes
-        run: |
-          ! cargo tree -p ganja-tui -e normal | grep -q axum
-          ! cargo tree -p ganja-serve -e normal | grep -q ratatui
-          ! cargo tree -p ganja-client -e normal | grep -q axum
-          ! cargo tree -p ganja-serve -e normal | grep -q ganja-teammate-local
-
-      # `tmux` is deliberately outside this workspace's ganja-* dependency
-      # graph, not merely unused by today's callers. The consuming-direction
-      # half of the sealed-leaf P26 user directive (2026-08-18) forbids any
-      # `ganja-*` crate beneath it; `tail` keeps this the same header-stripped
-      # inverted-grep shape as the bottom-crate leaf checks above.
-      - name: tmux consumes no ganja crate
-        run: |
-          ! cargo tree -p tmux -e normal | tail -n +2 | grep -q ganja-
-
-      # A fixed consumer list would prove only today's graph and quietly
-      # ignore the next workspace member. The producing-direction half of
-      # P26's sealed-leaf user directive (2026-08-18) therefore derives every
-      # member from `cargo metadata` at gate time and refuses `tmux` in each
-      # normal tree, so the prohibition stays closed as the workspace grows.
-      - name: no workspace member consumes tmux
-        run: |
-          for m in $(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name' | grep -v '^tmux$'); do
-            if cargo tree -p "$m" -e normal --prefix none | awk '{print $1}' | grep -qx tmux; then
-              echo "$m consumes tmux" >&2
-              exit 1
-            fi
-          done
-
-      # The inverted grep proves only that `tmux` names no `ganja-*` crate; it
-      # cannot notice the control client quietly widening its external list.
-      # This is the protocol gate's analogous external guard: depth one keeps
-      # transitive details and the dev-only `tempfile` below the horizon, while
-      # an added normal dependency fails until this exact set is edited
-      # deliberately.
-      - name: tmux's direct dependencies are exactly futures, thiserror and tokio
-        run: |
-          external="$(cargo tree -p tmux -e normal --depth 1 --prefix none | tail -n +2 | awk '{print $1}' | sort -u | tr '\n' ' ')"
-          test "$external" = "futures thiserror tokio "
-
-      # The workspace rule "every dependency version lives in the root
-      # manifest" was convention only; this makes it a gate. A member manifest
-      # naming a version inside any dependencies section fails, printed with
-      # its file and line. awk exits with bad=1 exactly when a match printed,
-      # so the step needs no inversion.
-      - name: every dependency version lives in the root manifest
-        run: |
-          awk 'FNR==1{sec=""} /^\[/{sec=$0} sec ~ /dependencies/ && /version[[:space:]]*=/ {print FILENAME ":" FNR ": " $0; bad=1} END{exit bad}' crates/*/Cargo.toml
+      - name: dependency policy
+        run: cargo depgate check --config depgate.toml
 
   # Advisories, licenses, bans and source-registry checks are static
   # analysis over Cargo.lock metadata, not compiled code, so the result

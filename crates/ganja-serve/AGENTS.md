@@ -5,7 +5,7 @@
 
 ## Purpose
 
-The engine over a socket: REST routes and an SSE event stream over `ganja-core`, so a remote client can drive the same sessions a terminal does. Spec: upstream `packages/opencode/src/server/server.ts` and `server/routes/instance/httpapi/*`, on the legacy `/session/…` path spellings. Its own crate for the same reason the engine carries no terminal dependency: a build that only wants the terminal must never pull an HTTP server, and CI asserts it the same inverted way (`! cargo tree -p ganja-core -e normal | grep -q axum`).
+The engine over a socket: REST routes and an SSE event stream over `ganja-core`, so a remote client can drive the same sessions a terminal does. Spec: upstream `packages/opencode/src/server/server.ts` and `server/routes/instance/httpapi/*`, on the legacy `/session/…` path spellings. Its own crate for the same reason the engine carries no terminal dependency: a build that only wants the terminal must never pull an HTTP server, and the root `depgate.toml` asserts it the same way — `ganja-core`'s deny rule lists `axum*` — gated in CI by `cargo depgate check`.
 
 ## Key Files
 
