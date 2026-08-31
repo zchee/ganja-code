@@ -501,10 +501,13 @@ impl TuiDriver for Agy {
 /// A tmux pane inherits the **server's** environment and `-e` only adds to
 /// it, so what travels here is what the headless child would have been
 /// *handed*: the config-home and XDG names every pane needs, and the CLI's
-/// own home pointer — `CODEX_HOME` today — which the headless runner carries
-/// through `additions()` and a pane would otherwise read off whatever shell
-/// started tmux. Run through [`shim::admits`] as the headless enumeration is,
-/// so a `GROK_*` name in an additions list travels on neither surface.
+/// own home pointer — `CODEX_HOME` and `GROK_HOME` — which the headless runner
+/// carries through `additions()` and a pane would otherwise read off whatever
+/// shell started tmux. That second one is the reason this filter matters most
+/// on this surface: a person who exports a `GROK_HOME` to escape the symlink
+/// refusal is usually exporting it into the very shell tmux was started from.
+/// Run through [`shim::admits`] as the headless enumeration is, so a posture
+/// door in an additions list travels on neither surface.
 ///
 /// Pure over the additions, so the composition is a thing a test can hold.
 #[must_use]

@@ -212,8 +212,9 @@ async fn a_shim_child_gets_exactly_the_enumerated_environment() {
     );
 
     // The class rule, asserted as a class rather than as three names: no
-    // `GROK_*` variable may ever reach a shim child, whatever an additions list
-    // grows to.
+    // `GROK_*` variable may reach a shim child but grok's own home, whatever an
+    // additions list grows to — and this child is codex's, which names no home
+    // of that vendor's, so nothing of the prefix may reach it at all.
     for name in &names {
         assert!(!name.starts_with("GROK_"), "{name}");
     }

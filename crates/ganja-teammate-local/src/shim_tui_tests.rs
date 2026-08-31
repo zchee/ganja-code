@@ -215,8 +215,8 @@ fn the_needle_is_the_launch_lines_own_opening() {
 }
 
 /// The pane's names are the `ganja` pane's closed list, then the driver's
-/// admitted additions — codex's `CODEX_HOME` travels, a `GROK_*` name
-/// never does, and nothing else is asked for.
+/// admitted additions — each CLI's own home travels, a posture door never
+/// does, and nothing else is asked for.
 #[test]
 fn the_pane_environment_is_the_carried_list_then_the_admitted_additions() {
     let (codex, agy, grok) = (Codex::new(), Agy::new(), Grok::new());
@@ -224,8 +224,14 @@ fn the_pane_environment_is_the_carried_list_then_the_admitted_additions() {
     assert_eq!(&names[..CARRIED_ENV.len()], &CARRIED_ENV[..]);
     assert_eq!(&names[CARRIED_ENV.len()..], ["CODEX_HOME"]);
 
+    // The surface the carve-out matters most on: a person escaping the
+    // symlink refusal exports `GROK_HOME` into the shell tmux was started
+    // from, so a pane that filtered it would read the home the class rule
+    // was never about.
+    assert_eq!(&environment_names(grok.additions())[CARRIED_ENV.len()..], ["GROK_HOME"]);
+
     let filtered = environment_names(&["CODEX_HOME", "GROK_SANDBOX", "GROK_HOME"]);
-    assert_eq!(&filtered[CARRIED_ENV.len()..], ["CODEX_HOME"]);
+    assert_eq!(&filtered[CARRIED_ENV.len()..], ["CODEX_HOME", "GROK_HOME"]);
 
     assert_eq!(environment_names(&[]), CARRIED_ENV.to_vec());
     for name in

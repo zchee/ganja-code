@@ -10,10 +10,13 @@
 //!
 //! It extends that file's canary discipline to the shim: a credential the lead
 //! holds must not reach another vendor's CLI, which is a foreign process that
-//! will do whatever it likes with its own environment, and a `GROK_*` variable
-//! must not reach one either — that vendor has at least three environment doors
-//! onto the very posture D508(a) pins, so inheriting one would silently undo
-//! the grant a person was asked about at spawn.
+//! will do whatever it likes with its own environment, and a `GROK_*` posture
+//! door must not reach one either — that vendor has at least three environment
+//! doors onto the very posture D508(a) pins, so inheriting one would silently
+//! undo the grant a person was asked about at spawn. The class rule's one
+//! carve-out, grok's own `GROK_HOME`, is a directory pointer no driver but
+//! grok's asks for, so the child driven here — codex's — inherits nothing of
+//! that prefix at all, whatever its lead holds.
 
 #![cfg(unix)]
 
@@ -92,7 +95,9 @@ async fn a_lead_holding_a_credential_hands_none_of_it_to_a_foreign_cli() {
         );
     }
     for name in &names {
-        assert!(!name.starts_with("GROK_"), "and the rule is the class, not the three: {name}");
+        // The rule is the class, not the three — and this child asks for no
+        // home of that vendor's, so the carve-out has nothing to admit here.
+        assert!(!name.starts_with("GROK_"), "{name}");
     }
     // Which is a property of the enumeration itself, not of this driver's
     // additions list: nothing may put such a name on one.

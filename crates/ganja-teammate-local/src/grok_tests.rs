@@ -174,12 +174,14 @@ fn no_prompt_text_is_ever_on_a_command_line() {
 
 #[test]
 fn the_environment_carries_no_door_onto_the_posture() {
-    // Empty rather than short: every flag this CLI needs is on the command
-    // line, and `GROK_SANDBOX` is `--sandbox`'s own documented environment
-    // source — carrying any `GROK_*` name would hand a person's exported
-    // variable the posture they consented to at spawn.
-    assert!(Grok.additions().is_empty());
-    assert!(!Grok.additions().iter().any(|name| name.starts_with("GROK_")));
+    // One name rather than none, and it is the home: every flag this CLI
+    // needs is on the command line, and `GROK_SANDBOX` is `--sandbox`'s own
+    // documented environment source — carrying that or anything else sharing
+    // the prefix would hand a person's exported variable the posture they
+    // consented to at spawn. The home moves no posture, and carrying it is
+    // what makes a symlinked `~/.grok` survivable.
+    assert_eq!(Grok.additions(), [shim::GROK_HOME]);
+    assert!(Grok.additions().iter().all(|name| shim::admits(name)));
 }
 
 /// The shapes a probed `grok 1.0.6` actually printed, for a turn that

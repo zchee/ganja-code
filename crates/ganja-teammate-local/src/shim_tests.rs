@@ -7,10 +7,11 @@ use ganja_protocol::team::{DISPLAY_FIELD_CAP, MemberBackend};
 use ganja_team::ShimCli;
 
 use super::{
-    AGY_TURN_TIMEOUT, CARRIED, CODEX_TURN_TIMEOUT, Failure, GROK_MODE_LINE, GROK_TURN_TIMEOUT,
-    TIMEOUT_KEY, admits, default_turn_timeout, environment, first_line, preamble, resolve,
-    spawn_lines,
+    AGY_TURN_TIMEOUT, CARRIED, CODEX_TURN_TIMEOUT, Driver as _, Failure, GROK_HOME, GROK_MODE_LINE,
+    GROK_TURN_TIMEOUT, TIMEOUT_KEY, admits, default_turn_timeout, environment, first_line,
+    preamble, resolve, spawn_lines,
 };
+use crate::grok::Grok;
 
 /// The headless channel says that answers are mail and that there is no
 /// door to go looking for, in the CLI's own name — and says **how much**
@@ -81,7 +82,8 @@ fn a_child_gets_exactly_the_enumerated_names() {
 }
 
 /// The class rule, **enforced**: a driver that names a `GROK_*` variable
-/// does not get it, whatever its additions list says.
+/// other than the home carved out below does not get it, whatever its
+/// additions list says.
 ///
 /// The loud half of the same rule is a `debug_assert` at `prepare`, where a
 /// driver's own list is first consulted. It is there rather than here for
@@ -89,7 +91,7 @@ fn a_child_gets_exactly_the_enumerated_names() {
 /// on the call below, and then the safe fallback — the thing that actually
 /// protects a person's consent in a release build — would be untested.
 #[test]
-fn no_grok_variable_is_ever_in_the_enumeration() {
+fn no_grok_posture_door_is_ever_in_the_enumeration() {
     for name in CARRIED {
         assert!(!name.starts_with("GROK_"), "{name}");
     }
@@ -109,6 +111,56 @@ fn no_grok_variable_is_ever_in_the_enumeration() {
     assert!(
         environment(&["GROK_SANDBOX"], None).iter().all(|(name, _)| name != "GROK_SANDBOX"),
         "a driver naming one does not get it"
+    );
+}
+
+/// The one exception to that class, and it is **exact**: `GROK_HOME` is a
+/// pointer at the directory grok keeps its credential and sessions in, where
+/// every other name sharing the prefix is a door onto the pinned posture.
+///
+/// Pinned as an equality rather than a prefix on purpose. A `GROK_HOME_MODE`
+/// the vendor mints tomorrow is a name nobody has measured, so it has to fall
+/// on the refusing side of this rule until somebody does — which is exactly
+/// what a `starts_with("GROK_HOME")` carve-out would have got wrong.
+#[test]
+fn grok_s_home_is_the_one_name_of_that_class_a_child_may_be_handed() {
+    assert!(admits(GROK_HOME));
+    assert_eq!(GROK_HOME, "GROK_HOME");
+
+    for near_miss in ["GROK_HOME2", "GROK_HOMEX", "GROK_HOME_MODE", "GROK_HOME_SANDBOX"] {
+        assert!(!admits(near_miss), "the carve-out is the name, not a prefix of it: {near_miss}");
+    }
+
+    // And the driver that needs it is the one that names it, so the pane and
+    // the headless surfaces compose the same list from the same place.
+    assert_eq!(Grok.additions(), [GROK_HOME]);
+}
+
+/// What the carve-out is *for*: a person who exports `GROK_HOME` — because
+/// their `~/.grok` is a symlink the pinned `read-only` profile refuses to
+/// start under — has it reach the child, and a person who exports nothing has
+/// nothing invented for them.
+///
+/// Its own binary would be the honest place for a `set_var`; this reads the
+/// process it is already in instead, asserting the branch either way without
+/// mutating anything, which is what keeps it beside the rule it is about.
+#[test]
+fn a_grok_child_is_handed_the_home_its_lead_has_and_no_home_its_lead_lacks() {
+    let carried = environment(Grok.additions(), None);
+    let handed = carried.iter().find(|(name, _)| name == GROK_HOME).map(|(_, value)| value.clone());
+
+    match std::env::var_os(GROK_HOME) {
+        Some(set) => assert_eq!(handed, Some(set), "the lead's own value, unaltered"),
+        None => assert_eq!(handed, None, "absent rather than empty: an empty home reads worse"),
+    }
+
+    // The rest of the class is refused whatever this process holds, which is
+    // the half of the rule that protects the grant.
+    assert!(
+        environment(&[GROK_HOME, "GROK_SANDBOX"], None)
+            .iter()
+            .all(|(name, _)| name != "GROK_SANDBOX"),
+        "the carve-out opens one name, not the prefix"
     );
 }
 

@@ -584,12 +584,18 @@ async fn a_grok_spawn_dialog_carries_the_posture_the_ring_and_the_table_carry() 
 }
 
 /// **AC-11**'s class rule, at the one place a driver could break it: no
-/// `GROK_*` variable travels to the child, whatever this process holds.
+/// `GROK_*` variable travels to the child but that CLI's own home, whatever
+/// this process holds.
 ///
 /// That vendor's `--sandbox` documents `GROK_SANDBOX` as its own environment
 /// source, so an inherited one would silently move the posture a person
 /// consented to at spawn. Enumeration is what closes it, and this asserts the
 /// enumeration rather than the intention.
+///
+/// The one carve-out is asserted *by name* rather than by prefix, which is the
+/// difference this test has to keep: a machine that exports `GROK_HOME` — the
+/// symlinked-home machine the carve-out exists for — must still see every door
+/// refused here, and a prefix assertion would have gone red on it instead.
 #[tokio::test]
 async fn no_grok_environment_door_reaches_a_grok_child() {
     let home = ganja_testkit::temp_dir();
@@ -606,13 +612,33 @@ async fn no_grok_environment_door_reaches_a_grok_child() {
     assert!(until(ANSWERS, || !cli.records("env").is_empty()).await, "{:?}", cli.received());
 
     let names = cli.records("env").join(" ");
-    assert!(!names.contains("GROK_"), "no door onto the posture travels: {names}");
+    for name in names.split_ascii_whitespace().filter(|name| name.starts_with("GROK_")) {
+        assert_eq!(
+            name,
+            ganja_teammate_local::shim::GROK_HOME,
+            "no door onto the posture travels; only the home does: {names}"
+        );
+    }
+    // And on the machine the carve-out is *for* — one that exports the name
+    // because its `~/.grok` is a symlink — the other half is asserted too:
+    // the home really does survive the spawn rather than merely being allowed
+    // to. A read of this process, never a write to it: this binary holds many
+    // tests, so it may not mutate what they share.
+    if std::env::var_os(ganja_teammate_local::shim::GROK_HOME).is_some() {
+        assert!(
+            names
+                .split_ascii_whitespace()
+                .any(|name| name == ganja_teammate_local::shim::GROK_HOME),
+            "a lead holding the home hands it on: {names}"
+        );
+    }
     assert!(
         names.contains("HOME") && names.contains("PATH"),
         "and the enumeration is what does: {names}"
     );
-    // The driver's own list is empty, which is the half a `PATH` cannot show:
-    // every flag this CLI needs is on the command line.
+    // The driver's own list is one name long, which is the half a `PATH`
+    // cannot show: every flag this CLI needs is on the command line, and the
+    // home it may carry moves none of them.
     assert!(
         !ganja_teammate_local::shim::admits("GROK_SANDBOX")
             && ganja_teammate_local::shim::admits("HOME"),

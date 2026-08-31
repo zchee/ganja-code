@@ -109,9 +109,12 @@
 //! allowed under sandbox write-deny"*. A grok teammate there refused every
 //! turn with that sentence, which is the honest outcome — the alternative
 //! would be starting with the protections missing. The user un-symlinked the
-//! directory and the same launch line then ran real turns; the `GROK_HOME`
-//! carve-out that would have spared the symlink stays filed as bead
-//! `ganja-code-q98` for a machine that keeps one.
+//! directory and the same launch line then ran real turns. The carve-out that
+//! spares the symlink is carried now — [`shim::GROK_HOME`] is on this driver's
+//! own additions list (bead `ganja-code-q98`) — so a machine that keeps one
+//! exports that name at the resolved target and its teammate starts under the
+//! same pinned profile, which is the shape a live `--sandbox read-only` turn
+//! was measured in before this landed.
 //!
 //! # The parser, and the door it did not take (**D510**)
 //!
@@ -143,14 +146,17 @@
 //!
 //! # What travels in the environment
 //!
-//! Nothing beyond [`crate::shim::CARRIED`], and the emptiness is the
-//! design rather than an omission: every flag this CLI needs is on the command
-//! line, and **no `GROK_*` variable may ever be carried** — that vendor has at
-//! least three environment doors onto the very posture pinned above,
-//! `GROK_SANDBOX` (named in `--sandbox`'s own help as its env source) among
-//! them. The rule is a class rule in [`crate::shim::admits`], enforced
-//! by the enumeration and asserted at [`crate::shim::prepare`], so
-//! adding one here is a caught mistake rather than a silent posture change.
+//! [`crate::shim::CARRIED`] and this CLI's home ([`shim::GROK_HOME`], on this
+//! driver's own additions list), and the shortness of that list is the design
+//! rather than an omission: every flag this CLI needs is on the command line,
+//! and **no `GROK_*` variable may ever be carried but `GROK_HOME`** — that
+//! vendor has at least three environment doors onto the very posture pinned
+//! above, `GROK_SANDBOX` (named in `--sandbox`'s own help as its env source)
+//! among them, where the home is a pointer at a directory and moves none of
+//! it. The rule is a class rule with that one exact carve-out in
+//! [`crate::shim::admits`], enforced by the enumeration and asserted at
+//! [`crate::shim::prepare`], so adding a second one here is a caught mistake
+//! rather than a silent posture change.
 //!
 //! # No auth pre-check
 //!
@@ -549,6 +555,10 @@ impl Driver for Grok {
         Shape::PerMessage
     }
 
+    fn additions(&self) -> &[&str] {
+        &ADDITIONS
+    }
+
     fn door(&self) -> Door {
         // The prompt travels in a `0600` file whose path the argv names, never
         // in argv itself — and the flag is what makes the child non-interactive
@@ -791,15 +801,24 @@ fn remember(tools: &mut Vec<String>, tool: String) {
 
 /// Where this CLI keeps its sessions, as **this** process reads it.
 ///
-/// Not a contradiction of the class rule that bans every `GROK_*` name from a
-/// child's environment (**D508**): that rule is about what ganja *hands* the
-/// CLI, because a `GROK_SANDBOX` travelling in would move the posture a
-/// person consented to. Reading this one here moves nothing — it only says
-/// where to look for what the pane already wrote. A tmux server started with
-/// a different `GROK_HOME` than the lead's own is the case this cannot see,
-/// and it shows up as a session that is never found rather than as somebody
-/// else's conversation.
-const HOME_ENV: &str = "GROK_HOME";
+/// One name, two readers, the way `CODEX_HOME` already is: [`ADDITIONS`]
+/// carries it into a child's enumerated environment and [`Transcript`] looks
+/// under it for the conversation a pane wrote, so the CLI and the reader
+/// cannot end up pointed at two homes. Spelled once in [`shim::GROK_HOME`],
+/// where the class rule's carve-out for it lives, because a second literal
+/// here could drift from the one `admits` compares against.
+const HOME_ENV: &str = crate::shim::GROK_HOME;
+
+/// What this CLI needs beyond [`crate::shim::CARRIED`].
+///
+/// Exactly its home, and it is the class rule's single exception rather than a
+/// hole in it (**D508** as amended, bead `ganja-code-q98`): every *other*
+/// `GROK_*` name is a door onto the posture pinned on every turn, and
+/// [`crate::shim::admits`] still refuses all of them here as everywhere. This
+/// one is a pointer at a directory, which is why it is carried and why a
+/// person whose `~/.grok` is a symlink can point it at the real one and have a
+/// teammate at all.
+const ADDITIONS: [&str; 1] = [HOME_ENV];
 
 /// grok's own record of a conversation, as this side reads it (**D515**).
 ///

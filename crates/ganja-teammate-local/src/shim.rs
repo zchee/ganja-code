@@ -55,12 +55,16 @@
 //!
 //! The child's environment is **enumerated** rather than inherited
 //! ([`environment`](crate::shim::environment)), and one clause of that enumeration is a class rule
-//! rather than a list: **no `GROK_*` variable is ever in the additions list**.
-//! That vendor has at least three environment doors onto its own posture, and
-//! inheriting a person's `GROK_SANDBOX=off` would silently undo the pinned
-//! profile. Enumeration already excludes all three; the class rule is what
-//! keeps the fourth one excluded the day the vendor adds it. No ganja
-//! credential variable is ever in the set either.
+//! rather than a list: **no `GROK_*` variable travels but
+//! [`GROK_HOME`](crate::shim::GROK_HOME)**. That vendor has at least three
+//! environment doors onto its own posture, and inheriting a person's
+//! `GROK_SANDBOX=off` would silently undo the pinned profile. Enumeration
+//! already excludes all three; the class rule is what keeps the fourth one
+//! excluded the day the vendor adds it. The one carve-out is a *home pointer*
+//! rather than a posture door — where that CLI keeps its credential and its
+//! sessions, `CODEX_HOME`'s exact counterpart — and it is an exact name rather
+//! than a prefix of its own, so the class still closes over everything nobody
+//! has measured. No ganja credential variable is ever in the set either.
 //!
 //! Prompt text never appears in a child's argv ([`Prompt`](crate::shim::Prompt)): argv is for flags
 //! only, because argv is world-readable through `ps` and a teammate's task is
@@ -314,8 +318,8 @@ pub trait Driver: std::fmt::Debug + Send + Sync + 'static {
 
     /// Which environment variables it needs beyond [`CARRIED`].
     ///
-    /// **Never a `GROK_*` name** — see the module doc for why that is a class
-    /// rule rather than a list of three.
+    /// **Never a `GROK_*` name but [`GROK_HOME`]** — see the module doc for why
+    /// that is a class rule with one carve-out rather than a list of three.
     fn additions(&self) -> &[&str] {
         &[]
     }
@@ -555,8 +559,9 @@ pub fn environment(additions: &[&str], path: Option<&OsStr>) -> Vec<(OsString, O
         // The class rule, **enforced** rather than only documented. Until this
         // filter existed the exclusion held only because no additions list
         // happened to name one, which is a property of today's drivers rather
-        // than of the mechanism — and the day a grok driver names any `GROK_*`
-        // variable, the posture a person consented to at spawn moves silently.
+        // than of the mechanism — and the day a grok driver names a `GROK_*`
+        // variable other than [`GROK_HOME`], the posture a person consented to
+        // at spawn moves silently.
         // A driver that names one is caught loudly at [`prepare`]; here the
         // answer is simply that it does not travel.
         if !admits(name) {
@@ -576,20 +581,49 @@ pub fn environment(additions: &[&str], path: Option<&OsStr>) -> Vec<(OsString, O
     carried
 }
 
+/// The one `GROK_*` name a shim child may be handed: that CLI's own home.
+///
+/// A **pointer**, not a door. It says where grok keeps its credential and its
+/// sessions; moving it moves nothing about the sandbox profile D508(a) pins on
+/// every turn, which is composed on the command line and nowhere else.
+/// `CODEX_HOME` is the precedent — the same fact for the other vendor, carried
+/// through that driver's own additions since P28 without anybody calling it a
+/// posture question — and the only reason this one needs a carve-out at all is
+/// that grok spells its home with the prefix it spells its sandbox switches
+/// with (**D508** amended 2026-08-20 on the user's approval, bead
+/// `ganja-code-q98`).
+///
+/// It earns the exception on measurement rather than on the reading of a name:
+/// the vendor's own source honors `$GROK_HOME` (1.0.5,
+/// `clipboard/mod.rs:543`, *"~/.grok (or $GROK_HOME when overridden)"*), and a
+/// live `--sandbox read-only` turn answered with it pointed at a resolved
+/// symlink target on the machine where the bare launch refuses to start at all
+/// — *"hook write-deny ensure failed: symlinked GROK_HOME is not allowed under
+/// sandbox write-deny"*. Carrying it is what lets a person whose `~/.grok` is a
+/// symlink have a grok teammate; it is not what lets them weaken one.
+pub const GROK_HOME: &str = "GROK_HOME";
+
 /// Whether a variable may reach a shim child at all.
 ///
-/// One clause, and it is a **class** rather than a list: no `GROK_*` name,
-/// ever. That vendor has at least three environment doors onto the very
-/// posture D508(a) pins — the sandbox profile itself, the auto-allow-bash
-/// switch, and the workspace server's own profile variable — and the list is
-/// expected to grow. Naming the three would be excluding the three; naming the
-/// prefix excludes the fourth one the day the vendor adds it.
+/// One clause and one exception, and the clause is a **class** rather than a
+/// list: no `GROK_*` name but [`GROK_HOME`]. That vendor has at least three
+/// environment doors onto the very posture D508(a) pins — the sandbox profile
+/// itself, the auto-allow-bash switch, and the workspace server's own profile
+/// variable — and the list is expected to grow. Naming the three would be
+/// excluding the three; naming the prefix excludes the fourth one the day the
+/// vendor adds it.
+///
+/// The exception is **exact**, never a prefix of its own: a `GROK_HOME_MODE`
+/// the vendor mints tomorrow is a name nobody has read yet, so it is refused
+/// with the rest of the class until somebody measures it.
 ///
 /// Deliberately not a judgement about *which* of them are dangerous: a rule
-/// that has to be re-derived per variable is a rule somebody gets wrong once.
+/// that has to be re-derived per variable is a rule somebody gets wrong once —
+/// which is why the exception is one named constant carrying its own evidence
+/// rather than a second clause of judgement.
 #[must_use]
 pub fn admits(name: &str) -> bool {
-    !name.starts_with("GROK_")
+    name == GROK_HOME || !name.starts_with("GROK_")
 }
 
 /// One turn's prompt, in a `0600` file inside a private directory of this
@@ -1023,8 +1057,9 @@ pub fn prepare(
     // unwritable.
     debug_assert!(
         driver.additions().iter().all(|name| admits(name)),
-        "no GROK_* variable may ever be in a shim driver's additions list: it is a door onto \
-         the posture a person consented to at spawn, and enumeration is what closes it"
+        "no GROK_* variable but GROK_HOME may be in a shim driver's additions list: every other \
+         one is a door onto the posture a person consented to at spawn, and enumeration is what \
+         closes it"
     );
     let binary = match path {
         Some(path) => resolve(path, driver.binary()),

@@ -65,7 +65,10 @@
 //! `.grok` is a real directory, and the tests below say so rather than
 //! reporting a vendor refusal as a measurement of anything else. `HOME` is a
 //! variable the shim already carries, so nothing about the shipped enumeration
-//! is bent to make this run.
+//! is bent to make this run — and since the D508 amendment
+//! ([`shim::GROK_HOME`], bead `ganja-code-q98`) a machine that keeps its
+//! symlink has the other route: export that name at the resolved target and
+//! the shipped enumeration carries it here too.
 
 mod shim_support;
 
