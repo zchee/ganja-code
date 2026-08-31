@@ -293,6 +293,12 @@ fn ganja(project: &TempDir, data: &TempDir, arguments: &[&str]) -> Ganja {
         // decides which project's store the run opens.
         .current_dir(project.path())
         .args(arguments)
+        // **D505**: a session binds a socket, and one that named no directory
+        // binds it in the developer's own `/tmp/ganja-<uid>/`, where their
+        // `ganja sessions --live` would list this drill's runs and the files
+        // it left behind would outlive them.
+        .arg("--socket-dir")
+        .arg(data.path().join("sockets"))
         .env("GANJA_PROVIDER", "fake")
         // The kitty keyboard probe (D517) would stall 2s unanswered here.
         .env("GANJA_DISABLE_TERM_PROBE", "1")

@@ -192,6 +192,12 @@ fn scripted(project: &TempDir, data: &TempDir, spelled: &[&str]) -> Ganja {
         // which is the one the binary was started in.
         .current_dir(project.path())
         .args(spelled)
+        // **D505**: a session binds a socket, and one that named no directory
+        // binds it in the developer's own `/tmp/ganja-<uid>/`, where their
+        // `ganja sessions --live` would list this drill's runs and the files
+        // it left behind would outlive them.
+        .arg("--socket-dir")
+        .arg(data.path().join("sockets"))
         .env("GANJA_FAKE_SCRIPT", &path)
         // Permission answers land under the data home, so this scenario keeps
         // its own — which is also what makes "the store is empty" a claim

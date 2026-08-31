@@ -335,6 +335,14 @@ fn a_pane_teammates_own_process_writes_a_row_that_is_listed_and_resumable() {
             "--parent-session-id",
             LEAD_SESSION,
         ])
+        // A member binds no socket whatever this says (**D542**); it is named
+        // so that a launch line which stopped being read as a member's binds
+        // here rather than in the developer's own `/tmp/ganja-<uid>/`. Only
+        // this launch line carries the flag — it is a root one, and clap
+        // refuses it beside the `run` and `sessions` subcommands above, which
+        // never enter the frontend and so bind nothing to isolate.
+        .arg("--socket-dir")
+        .arg(fixture.homes.data().join("sockets"))
         .env("GANJA_CONFIG_HOME", &config_home)
         .env("TMUX_PANE", PANE)
         // The kitty keyboard probe (D517) would stall 2s unanswered here.

@@ -198,6 +198,12 @@ fn scripted(project: &TempDir, data: &TempDir) -> Ganja {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ganja"));
     command
         .current_dir(project.path())
+        // **D505**: a session binds a socket, and one that named no directory
+        // binds it in the developer's own `/tmp/ganja-<uid>/`, where their
+        // `ganja sessions --live` would list this drill's runs and the files
+        // it left behind would outlive them.
+        .arg("--socket-dir")
+        .arg(data.path().join("sockets"))
         .env("GANJA_FAKE_SCRIPT", &path)
         .env("XDG_DATA_HOME", data.path())
         // The global config home moves with the data home: a developer's real

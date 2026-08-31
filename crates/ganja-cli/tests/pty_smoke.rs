@@ -36,6 +36,7 @@ use std::{fs, thread};
 use expectrl::process::unix::WaitStatus;
 use expectrl::session::OsSession;
 use expectrl::{ControlCode, Eof, Expect as _, Session};
+use ganja_serve::socket::EXTENSION;
 use ganja_testkit::temp_dir as temporary;
 use serde_json::json;
 use tempfile::TempDir;
@@ -116,6 +117,9 @@ struct Ganja {
     /// way [`scripted`] does with directories the test owns. Underscored:
     /// held for its `Drop` alone.
     _homes: Option<TempDir>,
+    /// Where this process was told to bind its session socket, under whichever
+    /// data home isolates it.
+    sockets: PathBuf,
 }
 
 impl Ganja {
@@ -154,6 +158,21 @@ impl Ganja {
         if !probing {
             command.env("GANJA_DISABLE_TERM_PROBE", "1");
         }
+        // **D505**: an interactive session binds a socket, and one that named
+        // no directory binds it in this user's own `/tmp/ganja-<uid>/` — where
+        // the developer's `ganja sessions --live` would then list a test's
+        // session, and where a suite's sockets pile up and contend. The data
+        // home already isolating this spawn is where it goes instead; it is
+        // read back off the command so that both a bare spawn and a caller
+        // that pinned its own directories are covered by one rule.
+        let data = command
+            .get_envs()
+            .find(|(key, _)| *key == std::ffi::OsStr::new("XDG_DATA_HOME"))
+            .and_then(|(_, value)| value)
+            .expect("every spawn is isolated by here")
+            .to_owned();
+        let sockets = PathBuf::from(data).join("sockets");
+        command.arg("--socket-dir").arg(&sockets);
 
         let mut session = Session::spawn(command).expect("failed to spawn `ganja` in a pty");
         session.set_expect_timeout(Some(EXIT_DEADLINE));
@@ -161,7 +180,7 @@ impl Ganja {
 
         session.expect(ALT_SCREEN).expect("`ganja` never took the terminal over");
 
-        Self { session: Some(session), _homes: homes }
+        Self { session: Some(session), _homes: homes, sockets }
     }
 
     /// Keeps the pty drained for `ms` milliseconds so the app stays live.
@@ -254,6 +273,46 @@ fn ganja() -> Ganja {
 #[test]
 fn control_c_quits_the_tui_cleanly() {
     ganja().quit_and_assert_clean_exit();
+}
+
+/// The isolation every spawn in this file rests on (**D505**): a session's
+/// socket lands in the directory it was told to bind in.
+///
+/// A flag silently dropped would leave this suite binding in the developer's
+/// own `/tmp/ganja-<uid>/` again, which nothing else here would notice — the
+/// runs would still pass, and their sockets would still be listed by that
+/// person's `ganja sessions --live`. So the claim is made where it can
+/// redden. The real directory is never read: other processes own it.
+#[test]
+fn a_session_binds_its_socket_in_the_directory_it_was_told_to() {
+    let mut session = ganja();
+    let sockets = session.sockets.clone();
+
+    // The bind is one of startup's own awaits rather than something the
+    // alternate screen implies, so it is waited for — draining the pty
+    // between looks, since an app whose frames nobody reads blocks on its
+    // own stdout.
+    let deadline = std::time::Instant::now() + EXIT_DEADLINE;
+    let bound = loop {
+        let bound: Vec<PathBuf> = fs::read_dir(&sockets)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some(EXTENSION))
+            .collect();
+        if !bound.is_empty() {
+            break bound;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "nothing was bound under {sockets:?} within {EXIT_DEADLINE:?}"
+        );
+        session.breathe(50);
+    };
+    assert_eq!(bound.len(), 1, "one session, one socket: {bound:?}");
+
+    session.quit_and_assert_clean_exit();
 }
 
 /// A `ganja` whose kitty keyboard probe (**D517**) runs: "0" is falsy, so
