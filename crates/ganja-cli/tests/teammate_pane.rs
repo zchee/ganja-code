@@ -84,6 +84,9 @@ use tempfile::TempDir;
 /// then a second one starting cold in another, then both leaving.
 const DEADLINE: Duration = Duration::from_secs(45);
 
+/// How many lines of the lead's log a timed-out wait quotes.
+const LOG_TAIL: usize = 80;
+
 /// What the member's fake provider says, appearing nowhere else — so finding
 /// it on the pane's screen means the member ran the seeded turn.
 const REPLY: &str = "pane-teammate-reply-zarquon";
@@ -172,7 +175,22 @@ impl Fixture {
             ("XDG_DATA_HOME", self.homes.data().display().to_string()),
             ("XDG_CONFIG_HOME", self.homes.data().join("config").display().to_string()),
             ("XDG_CACHE_HOME", self.homes.data().join("cache").display().to_string()),
+            // What every other pty drill sets (**D517**): a private tmux
+            // server born from `-f /dev/null` is a terminal whose answer to
+            // the kitty query depends on which tmux the host ships, and the
+            // probe blocks up to two seconds where there is none. The keys
+            // this suite types are plain ones, which need no flag pushed.
+            ("GANJA_DISABLE_TERM_PROBE", "1".to_owned()),
         ]
+    }
+
+    /// Where the lead's `tracing` output lands — the data home's rolling
+    /// log, one file per local date — so a wait that times out can say what
+    /// the lead was doing instead. The member's pane inherits the same data
+    /// home (D502) and writes the same file, which is what a failing spawn
+    /// needs read anyway: both halves of it, in one order.
+    fn log_dir(&self) -> PathBuf {
+        self.homes.data().join("ganja").join("log")
     }
 
     /// The team directory the lead made — the only one under the config
@@ -205,17 +223,51 @@ impl Fixture {
 /// send-keys/capture glue this suite drives both panes through.
 struct Tmux {
     server: PrivateServer,
+    /// [`Fixture::log_dir`], kept here because [`wait_for`] has the server
+    /// and the lead's pane in hand and nothing else.
+    logs: PathBuf,
 }
 
 impl Tmux {
-    /// Starts a detached server from `env` less `remove` (§10.10: what every
-    /// pane inherits), whose first pane sleeps so the server outlives every
-    /// pane the test watches.
-    fn start(env: &[(&str, String)], remove: &[&str]) -> Self {
+    /// Starts a detached server from the fixture's server environment less
+    /// `remove` (§10.10: what every pane inherits), whose first pane sleeps
+    /// so the server outlives every pane the test watches.
+    fn start(fixture: &Fixture, remove: &[&str]) -> Self {
+        let env = fixture.server_env();
         let pairs: Vec<(&str, &str)> =
             env.iter().map(|(name, value)| (*name, value.as_str())).collect();
 
-        Self { server: PrivateServer::start(&["sleep", "3600"], remove, &pairs) }
+        Self {
+            server: PrivateServer::start(&["sleep", "3600"], remove, &pairs),
+            logs: fixture.log_dir(),
+        }
+    }
+
+    /// The tail of what the lead (and the member sharing its data home)
+    /// traced so far, for a wait that timed out — or the reason there is
+    /// none, which is itself a finding when a lead was expected to be
+    /// running.
+    fn log_tail(&self) -> String {
+        let mut files: Vec<PathBuf> = match fs::read_dir(&self.logs) {
+            Ok(entries) => entries.filter_map(Result::ok).map(|entry| entry.path()).collect(),
+            Err(error) => return format!("(no log under {}: {error})", self.logs.display()),
+        };
+        files.sort();
+        let text: String = files
+            .iter()
+            .filter_map(|path| fs::read_to_string(path).ok())
+            .collect::<Vec<_>>()
+            .join("");
+        let lines: Vec<&str> = text.lines().collect();
+        let kept = lines.len().saturating_sub(LOG_TAIL);
+
+        format!(
+            "{} of {} lines from {}:\n{}",
+            lines.len() - kept,
+            lines.len(),
+            self.logs.display(),
+            lines[kept..].join("\n")
+        )
     }
 
     /// Splits a pane in `cwd` running `argv` with `env` added, and returns
@@ -279,8 +331,13 @@ impl Tmux {
     }
 }
 
-/// Polls `read` every 50ms until it answers, or panics with `what` and the
-/// lead's screen after [`DEADLINE`].
+/// Polls `read` every 50ms until it answers, or panics with `what`, the
+/// lead's screen and the tail of its log after [`DEADLINE`].
+///
+/// The log beside the screen because the screen alone has already been read
+/// twice on CI (runs 33261878445 and 33368776921) and each time it showed a
+/// lead that looked idle with a line it never acted on; what the lead
+/// *traced* in that window is the half of the picture the screen cannot give.
 fn wait_for<T>(what: &str, tmux: &Tmux, lead: &str, mut read: impl FnMut() -> Option<T>) -> T {
     let started = Instant::now();
     loop {
@@ -289,8 +346,10 @@ fn wait_for<T>(what: &str, tmux: &Tmux, lead: &str, mut read: impl FnMut() -> Op
         }
         assert!(
             started.elapsed() < DEADLINE,
-            "waited {DEADLINE:?} for {what} and it did not happen; the lead's screen:\n{}",
-            tmux.screen(lead)
+            "waited {DEADLINE:?} for {what} and it did not happen; the lead's screen:\n{}\n\
+             the lead's log, last {}",
+            tmux.screen(lead),
+            tmux.log_tail()
         );
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -360,7 +419,7 @@ fn a_configured_pane_shell_still_execs_the_launch_line() {
     fs::create_dir_all(fixture.config_home()).expect("the config home is creatable");
     fs::write(fixture.config_home().join("ganja.toml"), "[teammates]\nshell = \"/bin/bash\"\n")
         .expect("the config is writable");
-    let tmux = Tmux::start(&fixture.server_env(), WITHHELD);
+    let tmux = Tmux::start(&fixture, WITHHELD);
 
     let lead = tmux.split(
         fixture.homes.project(),
@@ -393,7 +452,7 @@ fn a_configured_pane_shell_still_execs_the_launch_line() {
 fn a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shutdown_approved() {
     require_tmux();
     let fixture = Fixture::new();
-    let tmux = Tmux::start(&fixture.server_env(), WITHHELD);
+    let tmux = Tmux::start(&fixture, WITHHELD);
 
     // The lead, in a pane of its own in the project directory — so tmux
     // gives it `TMUX` and `TMUX_PANE` itself. Two words on purpose (`env` and
@@ -605,7 +664,7 @@ fn spawn_pane(tmux: &Tmux, lead: &str, fixture: &Fixture, name: &str) -> String 
 fn teammates_stack_in_one_column_beside_the_lead() {
     require_tmux();
     let fixture = Fixture::new();
-    let tmux = Tmux::start(&fixture.server_env(), WITHHELD);
+    let tmux = Tmux::start(&fixture, WITHHELD);
     let lead = tmux.split(
         fixture.homes.project(),
         &fixture.lead_env(),
