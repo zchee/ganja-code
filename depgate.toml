@@ -1,6 +1,6 @@
 # Dependency policy for zchee/ganja-code, evaluated in CI's lint job by
-# `cargo depgate check --config depgate.toml` (zchee/cargo-depgate, pinned by
-# commit there). It replaces the seventeen shell steps — nineteen assertions —
+# `cargo depgate check --config depgate.toml` (zchee/cargo-depgate, pinned at
+# its released tag there). It replaces the seventeen shell steps — nineteen assertions —
 # that stood at .github/workflows/ci.yaml L176-355 as of commit 382763f.
 #
 # 7 internal + 5 deny + 3 leaf + 2 direct + 1 sealed + 1 manifest = 19 rules.

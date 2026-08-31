@@ -191,12 +191,13 @@ jobs:
       # alone ran one per member). Building the gate itself is a separate cost
       # and is not paid per run: `cargo install` compiles cargo-depgate and
       # its dependency tree from source, which is minutes, so the binary is
-      # restored from the cache and installed only on a miss. The `--rev` pins
-      # the exact commit — tag v0.1.0 points there today, but a tag is
-      # mutable and that repo publishes no GitHub Release, so the sha is the
-      # only pin that cannot move under the workflow's feet — and the same
-      # sha is in the cache key, so bumping the rev installs once and
-      # restores thereafter. rust-cache above also keeps `~/.cargo/bin` (its
+      # restored from the cache and installed only on a miss. The `--rev`
+      # names the v0.1.1 tag, backed by that repo's published GitHub Release
+      # of the same name (it resolves to c1fae0969e02 today): a release makes
+      # a moved tag a visible event rather than a silent swap, which is what
+      # made the earlier bare-sha pin unnecessary. The same tag is in the
+      # cache key, so bumping it installs once and restores thereafter.
+      # rust-cache above also keeps `~/.cargo/bin` (its
       # cache-bin default), but its key churns with the lockfile; this
       # dedicated entry is a deliberate duplicate that survives that churn,
       # and the restore order keeps it authoritative (rust-cache restores
@@ -210,14 +211,14 @@ jobs:
         uses: actions/cache@v6
         with:
           path: ~/.cargo/bin/cargo-depgate
-          key: cargo-depgate-${{ runner.os }}-${{ runner.arch }}-867e7c2d95515f76fb41a3a699270228b278fb4f
+          key: cargo-depgate-${{ runner.os }}-${{ runner.arch }}-v0.1.1
 
       - name: install the dependency gate
         if: steps.depgate-cache.outputs.cache-hit != 'true'
         # The trailing package name is required: the repo's test fixtures
         # carry other binary packages, and `cargo install --git` refuses to
         # guess among them.
-        run: cargo install --git https://github.com/zchee/cargo-depgate --rev 867e7c2d95515f76fb41a3a699270228b278fb4f --locked cargo-depgate
+        run: cargo install --git https://github.com/zchee/cargo-depgate --rev v0.1.1 --locked cargo-depgate
 
       - name: dependency policy
         run: cargo depgate check --config depgate.toml
