@@ -562,13 +562,24 @@ fn seed_record(spec: &SpawnSpec) {
 }
 
 /// Types one `/team spawn <name> --backend ganja` at the lead and answers with
-/// the pane the team file names for it, once it names one.
+/// the pane the team file names for it, once the lead has reported the spawn
+/// **finished**.
 ///
-/// The record rather than the screen, because the notice a spawn leaves on
-/// the bar stays there: waiting for it again would be reading the *previous*
-/// teammate's line and calling it this one's.
+/// The bar's notice first, and only then the record. The record alone is too
+/// early: the registry writes it *before* the launch, and the lead's own
+/// spawn task is still running — and being polled by the tick — after it is
+/// on disk. A second `/team spawn` typed inside that window is refused as
+/// busy by design (`App::spawn_teammate`), which on a loaded runner is exactly
+/// where the next line landed: the second teammate never existed, and the
+/// first one's notice, arriving a tick later, overwrote the refusal. The
+/// notice names the teammate, so waiting on `<name> started` cannot read the
+/// previous teammate's line as this one's.
 fn spawn_pane(tmux: &Tmux, lead: &str, fixture: &Fixture, name: &str) -> String {
     tmux.type_line(lead, &format!("/team spawn {name} --backend ganja"));
+
+    wait_for(&format!("the spawn of {name} to be reported"), tmux, lead, || {
+        tmux.screen(lead).contains(&format!("{name} {SPAWN_NOTICE}")).then_some(())
+    });
 
     wait_for(&format!("the record for {name}"), tmux, lead, || {
         fixture
