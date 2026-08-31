@@ -214,7 +214,10 @@ jobs:
 
       - name: install the dependency gate
         if: steps.depgate-cache.outputs.cache-hit != 'true'
-        run: cargo install --git https://github.com/zchee/cargo-depgate --rev 867e7c2d95515f76fb41a3a699270228b278fb4f --locked
+        # The trailing package name is required: the repo's test fixtures
+        # carry other binary packages, and `cargo install --git` refuses to
+        # guess among them.
+        run: cargo install --git https://github.com/zchee/cargo-depgate --rev 867e7c2d95515f76fb41a3a699270228b278fb4f --locked cargo-depgate
 
       - name: dependency policy
         run: cargo depgate check --config depgate.toml
