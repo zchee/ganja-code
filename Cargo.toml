@@ -207,7 +207,7 @@ jsonc-parser = "0.33.1"
 # `$ref`s that live over HTTP or on disk; the schema has neither, only local
 # `#/$defs/...` refs, so they are off and nothing here gains a network
 # dependency.
-jsonschema = { version = "0.49.9", default-features = false }
+jsonschema = { version = "0.52.0", default-features = false }
 # `killpg`, so cancelling a shell command takes its whole process group with
 # it without shelling out to `kill(1)`.
 libc = "0.2.189"
