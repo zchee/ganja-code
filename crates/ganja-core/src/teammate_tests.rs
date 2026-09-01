@@ -316,6 +316,82 @@ async fn retiring_a_teammate_forgets_it_and_rewrites_the_team_file_without_it() 
     );
 }
 
+/// A sweep answers what it really did, which is what the lead's own pass reads
+/// to decide who to say goodbye to.
+///
+/// The names go in as one list and come back as the subset this registry was
+/// holding — the widening of [`TeammateRegistry::retire`]'s [`bool`] rather
+/// than a second question — so a name nobody ever started is not reported as
+/// retired and does not spoil the answer for the ones beside it.
+#[tokio::test]
+async fn a_sweep_of_retires_answers_only_the_names_it_was_holding() {
+    let home = ganja_testkit::temp_dir();
+    let registry = registry(home.path());
+    for name in ["w1", "w2"] {
+        registry
+            .spawn(in_process(home.path()), request(name, MemberBackend::InProcess, home.path()))
+            .await
+            .expect("the teammate starts");
+    }
+
+    let swept = ["w1".to_owned(), "never-started".to_owned(), "w2".to_owned()];
+    let retired = registry.retire_all(&swept).await.expect("the team file rewrites");
+
+    assert_eq!(
+        retired,
+        vec!["w1".to_owned(), "w2".to_owned()],
+        "the two this registry held, and not the name it never had"
+    );
+    assert_eq!(registry.view().members.len(), 1, "only the lead is left in the roster");
+    let file = registry.read_team().await.expect("the team file reads back");
+    assert_eq!(
+        file.members.iter().map(|member| member.name.clone()).collect::<Vec<_>>(),
+        vec![registry.lead().as_str().to_owned()],
+        "and one rewrite took both rows out of the document"
+    );
+    assert!(
+        registry.retire_all(&swept).await.expect("a second sweep is fine").is_empty(),
+        "a sweep read twice is ordinary rather than an error"
+    );
+}
+
+/// The document's own door answers the rows the document really named.
+///
+/// [`TeammateRegistry::unrecord_all`] is what the reaper reaches for when a
+/// sweep proved several panes gone, and its answer is read back to the person
+/// who asked. So it names what it dropped rather than what it was handed: the
+/// registry's roster has nothing to do with it — these rows were written by a
+/// lead that is no longer running — and a name the file does not carry is not
+/// a failure, it is a row somebody already took out.
+#[tokio::test]
+async fn dropping_records_in_one_sweep_answers_the_rows_the_document_named() {
+    let home = ganja_testkit::temp_dir();
+    let registry = registry(home.path());
+    for name in ["w1", "w2", "w3"] {
+        registry
+            .record(&spec(&registry, name, home.path()), Surface::InProcess)
+            .await
+            .expect("the row is in the document");
+    }
+
+    let dropped = registry
+        .unrecord_all(&["w3".to_owned(), "w1".to_owned(), "never-recorded".to_owned()])
+        .await
+        .expect("the team file rewrites");
+
+    assert_eq!(
+        dropped,
+        vec!["w1".to_owned(), "w3".to_owned()],
+        "the rows that were there, in the order the document held them"
+    );
+    let file = registry.read_team().await.expect("the team file reads back");
+    assert_eq!(
+        file.members.iter().map(|member| member.name.clone()).collect::<Vec<_>>(),
+        vec![registry.lead().as_str().to_owned(), "w2".to_owned()],
+        "and the row nobody asked about is untouched"
+    );
+}
+
 /// A spec `record` will write a row for, at its dullest — the registry's own
 /// team, lead and root, so the document it lands in is the one this test reads
 /// back.
@@ -351,8 +427,9 @@ fn spec(registry: &TeammateRegistry, name: &str, home: &Path) -> SpawnSpec {
 /// held open inside the mutation proves the lock is *already* held there, which
 /// a `try_lock` from outside answers with no timing at all; the second half
 /// then lets a real `record` contend for it and reads the document back with
-/// both rows in it. The predicate blocks a worker thread on purpose, which is
-/// why this test asks for more than one.
+/// both rows in it. The predicate blocks the blocking-pool thread its whole
+/// read-modify-write runs on, on purpose, and the test asks for more than one
+/// worker so the half of it that waits is never the runtime itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn retiring_records_holds_the_team_file_lock_across_read_and_write() {
     let home = ganja_testkit::temp_dir();
@@ -429,9 +506,10 @@ async fn retiring_records_holds_the_team_file_lock_across_read_and_write() {
 ///
 /// The failure is forced rather than injected: a **directory** at the
 /// target path is a rename `persist` cannot complete, and it reaches that
-/// step with everything before it having succeeded. `write_team` is called
-/// straight rather than through `record`, because [`read_team`] would
-/// refuse the same directory first and the write would never run.
+/// step with everything before it having succeeded. The writer is called
+/// straight rather than through `record`, because the read inside
+/// [`edit_team`] would refuse the same directory first and the write would
+/// never run.
 ///
 /// This is the half the old code got wrong. It staged at
 /// `config.json.new-<pid>` with [`std::fs::write`] and renamed, and a
@@ -439,23 +517,17 @@ async fn retiring_records_holds_the_team_file_lock_across_read_and_write() {
 /// fell — permanently, since the name is per-process and the next run of
 /// this build would write the same one.
 ///
-/// [`read_team`]: TeammateRegistry::read_team
-#[tokio::test]
-async fn a_team_file_write_that_cannot_rename_leaves_nothing_behind() {
+/// [`edit_team`]: TeammateRegistry::edit_team
+#[test]
+fn a_team_file_write_that_cannot_rename_leaves_nothing_behind() {
     let home = tempfile::tempdir().expect("a temporary home");
     let registry = registry(home.path());
     let path = registry.root().config_path(registry.team());
     std::fs::create_dir_all(&path).expect("the target is a directory nothing can rename onto");
 
-    let refused = {
-        let writing = registry.team_file.lock().await;
-        let file = ganja_team::TeamFile::new(registry.team(), "01998ad0", "/tmp", 1);
-
-        registry
-            .write_team(file, &writing)
-            .await
-            .expect_err("a rename onto a directory cannot succeed")
-    };
+    let file = ganja_team::TeamFile::new(registry.team(), "01998ad0", "/tmp", 1);
+    let refused =
+        super::write_team_file(&path, &file).expect_err("a rename onto a directory cannot succeed");
 
     assert!(
         matches!(refused, super::SpawnError::TeamFile { doing: "written", .. }),
@@ -481,22 +553,21 @@ async fn a_team_file_write_that_cannot_rename_leaves_nothing_behind() {
 /// `ganja-team`'s mailbox defends the same property for the same reason
 /// — `a_rewrite_keeps_the_inboxes_existing_mode` is this test's twin.
 #[cfg(unix)]
-#[tokio::test]
-async fn a_team_file_rewrite_keeps_the_documents_existing_mode() {
+#[test]
+fn a_team_file_rewrite_keeps_the_documents_existing_mode() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let home = tempfile::tempdir().expect("a temporary home");
     let registry = registry(home.path());
     let path = registry.root().config_path(registry.team());
 
-    let write = async || {
-        let writing = registry.team_file.lock().await;
+    let write = || {
         let file = ganja_team::TeamFile::new(registry.team(), "01998ad0", "/tmp", 1);
 
-        registry.write_team(file, &writing).await.expect("the team file writes");
+        super::write_team_file(&path, &file).expect("the team file writes");
     };
 
-    write().await;
+    write();
     assert_eq!(
         std::fs::metadata(&path).expect("the team file is there").permissions().mode() & 0o777,
         0o600,
@@ -505,7 +576,7 @@ async fn a_team_file_rewrite_keeps_the_documents_existing_mode() {
 
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))
         .expect("the mode is settable");
-    write().await;
+    write();
 
     assert_eq!(
         std::fs::metadata(&path).expect("the team file is there").permissions().mode() & 0o777,
@@ -530,18 +601,68 @@ fn the_team_file_is_synced_before_it_is_renamed_into_place() {
     // Bounded to the one function, and it has to be: this test's own
     // source carries both needles, so a search over the rest of the file
     // would find them here and pass against a writer that syncs nothing.
-    // A method's closing brace is the only `}` this file indents by four
-    // spaces, which is what makes the end of a body findable at all.
+    // A free function's closing brace is the only `}` this file writes at
+    // column zero, which is what makes the end of a body findable at all.
     let body = include_str!("teammate.rs")
-        .split_once("    async fn write_team(")
+        .split_once("fn write_team_file(")
         .expect("the writer is still called that")
         .1;
-    let body = body.split_once("\n    }\n").expect("the writer still ends").0;
+    let body = body.split_once("\n}\n").expect("the writer still ends").0;
 
     let synced = body.find(".sync_all()").expect("the bytes are still synced");
     let renamed = body.find(".persist(").expect("the file is still renamed");
 
     assert!(synced < renamed, "the sync is what the rename publishes, so it comes first");
+}
+
+/// A **co-tenant lead** is another process, and the in-process mutex above is
+/// nothing to it: what holds one off is the lock directory beside the document,
+/// taken by [`ganja_team::lock::acquire_unseeded`].
+///
+/// The peer here is the protocol rather than a process — a bare `mkdir` on the
+/// path §2.5 names, which is exactly what a second lead's acquire does, and
+/// what makes this test an interop pin rather than a test of ganja talking to
+/// itself: the write below has to compute the same path from the same document
+/// or it would sail past a held lock. What it costs is the ladder's ≈655 ms,
+/// spent once, and the alternative is a document two leads take turns
+/// overwriting.
+///
+/// The refusal is a sentence naming the file, not a write that waited its turn:
+/// a lock still held after the ladder means a peer that is alive and slow, or
+/// dead for less than [`ganja_team::lock::STALE`] — and either way the honest
+/// answer is that this record was not written.
+#[tokio::test]
+async fn a_record_refuses_rather_than_write_under_a_peers_lock() {
+    let home = ganja_testkit::temp_dir();
+    let registry = registry(home.path());
+    let path = registry.root().config_path(registry.team());
+    let team_dir = path.parent().expect("a team file has a directory");
+    std::fs::create_dir_all(team_dir).expect("the team directory is makeable");
+
+    // Canonical, because the protocol locks a real path and a temporary
+    // directory on macOS is reached through a symlink.
+    let peers = std::fs::canonicalize(team_dir)
+        .expect("the team directory is real")
+        .join(format!("config.json{}", ganja_team::lock::LOCK_SUFFIX));
+    std::fs::create_dir(&peers).expect("a peer takes the lock");
+
+    let refused = registry
+        .record(&spec(&registry, "w1", home.path()), Surface::InProcess)
+        .await
+        .expect_err("a held document is not written");
+
+    assert!(
+        matches!(refused, super::SpawnError::TeamFile { doing: "locked", .. }),
+        "the failure names the hold it could not take: {refused}"
+    );
+    assert!(!path.exists(), "and nothing of the record reached the document");
+
+    std::fs::remove_dir(&peers).expect("the peer releases");
+    registry
+        .record(&spec(&registry, "w1", home.path()), Surface::InProcess)
+        .await
+        .expect("a released document is written");
+    assert!(path.exists(), "the same write lands once the lock is free");
 }
 
 /// A backend that hands out a pane-shaped handle and remembers every

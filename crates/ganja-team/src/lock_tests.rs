@@ -5,7 +5,7 @@ use std::{fs, io, thread};
 
 use backon::BackoffBuilder as _;
 
-use super::{LOCK_SUFFIX, LockError, acquire, lock_path_of, schedule};
+use super::{LOCK_SUFFIX, LockError, acquire, acquire_unseeded, lock_path_of, schedule};
 
 /// An inbox that exists, because the protocol locks a real path.
 fn inbox(home: &Path) -> PathBuf {
@@ -85,6 +85,81 @@ fn an_unseeded_target_is_refused_as_not_found() {
     // `realpath` failure it is, and it is not contention, so the ladder is
     // not spent on it.
     let refusal = acquire(&missing).expect_err("a target with no real path has no lock");
+    assert!(
+        matches!(&refusal, LockError::Io(error) if error.kind() == io::ErrorKind::NotFound),
+        "{refusal:?}"
+    );
+    assert!(!lock_path_of(&missing).exists(), "nothing was made on the way to the refusal");
+}
+
+/// The team file (§2.2) has no seed step, and the door it takes instead has to
+/// name the very lock a seeded acquire would — otherwise two writers of one
+/// document would hold two different directories and neither would ever see the
+/// other.
+///
+/// Asserted through the filesystem rather than through the guard's own field,
+/// because agreeing about a path is only worth anything if it is the path that
+/// really appears: the second and third holds below are what a peer takes once
+/// the document exists, and all three make and remove the same directory.
+#[test]
+fn an_unseeded_hold_takes_the_lock_its_seeded_self_would_name() {
+    let home = tempfile::tempdir().expect("a temp directory");
+    let path = home.path().join("config.json");
+    // What `acquire` will compute once the document is there — the target's own
+    // real path plus the suffix. Built from the *directory*'s real path here
+    // because the target has none yet, which is the whole difference between
+    // the two doors.
+    let lock = lock_path_of(
+        &fs::canonicalize(home.path()).expect("the directory is real").join("config.json"),
+    );
+
+    {
+        let _unseeded = acquire_unseeded(&path).expect("a document nobody wrote yet is takeable");
+        assert!(lock.is_dir(), "the unseeded hold made {}", lock.display());
+    }
+    assert!(!lock.exists(), "and released it");
+
+    fs::write(&path, "{}").expect("the document is writable");
+    {
+        let _unseeded = acquire_unseeded(&path).expect("the same door once the document exists");
+        assert!(lock.is_dir(), "the same lock, now that there is a real path to name it from");
+    }
+    {
+        let _seeded = acquire(&path).expect("the seeded door takes it too");
+        assert!(lock.is_dir(), "which is the agreement: one document, one lock");
+    }
+    assert!(!lock.exists(), "every hold released what it made");
+}
+
+/// A target that is not there **and** does not name a file is the one case the
+/// unseeded door has to answer for itself.
+///
+/// A path ending in `..` names a directory rather than a document inside one,
+/// so there is nothing to append the suffix to — and the one thing that must
+/// not happen is inventing something: the parent of `<dir>/..` is `<dir>`, so a
+/// lenient reading would take the lock of a file called `..` beside it.
+#[test]
+fn a_target_that_names_no_file_is_refused_rather_than_locked() {
+    let home = tempfile::tempdir().expect("a temp directory");
+    let nameless = home.path().join("no-such-team").join("..");
+
+    let refusal = acquire_unseeded(&nameless).expect_err("a directory names no document");
+    assert!(
+        matches!(&refusal, LockError::Io(error) if error.kind() == io::ErrorKind::InvalidInput),
+        "{refusal:?}"
+    );
+}
+
+/// A target whose *directory* is missing is the unseeded door's own `ENOENT`,
+/// and it is the same refusal for the same reason [`acquire`] gives one: a lock
+/// is named from a real path, and this door has moved which path that is rather
+/// than stopped needing one.
+#[test]
+fn an_unseeded_target_in_a_directory_that_is_not_there_is_refused_as_not_found() {
+    let home = tempfile::tempdir().expect("a temp directory");
+    let missing = home.path().join("no-such-team").join("config.json");
+
+    let refusal = acquire_unseeded(&missing).expect_err("a directory with no real path has none");
     assert!(
         matches!(&refusal, LockError::Io(error) if error.kind() == io::ErrorKind::NotFound),
         "{refusal:?}"

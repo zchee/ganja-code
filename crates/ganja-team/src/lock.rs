@@ -56,6 +56,15 @@
 //! `Mutex` answers immediately. The two are taken in that order — in-process,
 //! then disk — and released in the mirror of it.
 //!
+//! **The inbox is not the only document two processes rewrite.** §2.2's team
+//! file is the other half of the same interop pair, and a lead and a co-tenant
+//! lead race it the way two writers race an inbox. It rides this same protocol
+//! through [`acquire_unseeded`], which differs from [`acquire`] in one thing
+//! only: a team file has no seed step for its lock path to be read out of. The
+//! module keeps saying *inbox* throughout because that is §2.5's own word for
+//! whatever is under the lock, not because a second kind of document would be
+//! served differently.
+//!
 //! Nothing here logs a message body: a lock line carries a path, an age and a
 //! count. `tests/no_bodies_in_logs.rs` is the canary that keeps it true.
 
@@ -217,7 +226,58 @@ impl Drop for Guard {
 /// anything the filesystem refused — including the `ENOENT` of a target that
 /// was never seeded.
 pub fn acquire(target: &Path) -> Result<Guard, LockError> {
-    let key = fs::canonicalize(target)?;
+    hold(fs::canonicalize(target)?)
+}
+
+/// [`acquire`], for a document nobody seeds.
+///
+/// The team file (§2.2) is the other document of this interop pair, and it has
+/// no seed step: an inbox's empty state is `[]`, which [`crate::mailbox::seed`]
+/// can write without knowing anything, while a team file's is a whole record of
+/// who leads the team and when it was made. So a writer that seeded one before
+/// locking it would be inventing the very document the read-modify-write is
+/// about — and two writers doing that would clobber each other in exactly the
+/// window the lock exists to close.
+///
+/// The lock is therefore named from the target's **parent**, which does exist:
+/// `realpath(parent)/<name>.lock`. That is byte-for-byte the path [`acquire`]
+/// computes once the target is there, so the two agree about who holds what
+/// across the first write — with one bound worth naming, since the difference
+/// is a `realpath` that is not run: a target that is itself a **symlink**
+/// resolves to its own real path under [`acquire`] and to its link's directory
+/// here, so the two would name different locks. Nothing in this crate points a
+/// document at a symlink, and a caller that did would be sharing a document by
+/// a route the peer has no word for.
+///
+/// # Errors
+///
+/// [`acquire`]'s three, and [`LockError::Io`] with `InvalidInput` for a target
+/// that has no file name to append a suffix to (`/`, or a path ending in `..`).
+pub fn acquire_unseeded(target: &Path) -> Result<Guard, LockError> {
+    let key = match fs::canonicalize(target) {
+        Ok(real) => real,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let name = target.file_name().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{} names no file to lock", target.display()),
+                )
+            })?;
+            let parent = match target.parent() {
+                Some(parent) if !parent.as_os_str().is_empty() => parent,
+                _ => Path::new("."),
+            };
+
+            fs::canonicalize(parent)?.join(name)
+        }
+        Err(error) => return Err(error.into()),
+    };
+
+    hold(key)
+}
+
+/// Both doors' common tail: the in-process claim, then the ladder on disk.
+fn hold(key: PathBuf) -> Result<Guard, LockError> {
     let dir = lock_path_of(&key);
 
     // In-process first. Held across the whole disk acquire, and released by

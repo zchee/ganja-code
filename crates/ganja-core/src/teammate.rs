@@ -134,7 +134,7 @@ use ganja_protocol::team::{MemberBackend, MemberView, TeamView};
 use ganja_team::team::resolve_unique;
 use ganja_team::{
     MailboxMessage, MemberName, MemberRecord, NameError, Spawn, Surface, TeamFile, TeamName,
-    TeamsRoot, mailbox, record,
+    TeamsRoot, lock, mailbox, record,
 };
 use tempfile::NamedTempFile;
 use tokio::task::JoinHandle;
@@ -1545,15 +1545,23 @@ pub struct TeammateRegistry {
     /// ([`TeammateRegistry::release`]): nothing was registered under it, so
     /// nothing would be evicted by handing it to somebody else.
     reserved: Mutex<BTreeSet<String>>,
-    /// Held across the team file's whole read-modify-write; see
-    /// [`TeammateRegistry::record`] for what is lost without it.
+    /// The in-process half of the team file's hold, taken by
+    /// [`TeammateRegistry::edit_team`] before the on-disk one and released
+    /// after it.
+    ///
+    /// It is not what keeps two *processes* off one document — only
+    /// [`ganja_team::lock`]'s directory does that, and a co-tenant lead is
+    /// exactly such a process. What it buys is that crate's own in-process
+    /// step, one layer up: this registry's threads queue on a mutex that
+    /// answers immediately rather than each occupying a blocking-pool thread
+    /// parked in the condvar behind [`ganja_team::lock::acquire_unseeded`].
     ///
     /// Private, and it has to be (**Dv-13**): a public lock is a public licence
     /// to hold the registry's one write barrier for an arbitrary span. Every
-    /// read-modify-write a caller outside this crate needs is a method here
-    /// that takes it — [`TeammateRegistry::unrecord`] and
-    /// [`TeammateRegistry::mark_records_inactive`] — so the section's length is
-    /// this file's to decide.
+    /// read-modify-write a caller outside this crate needs is a door built on
+    /// [`TeammateRegistry::edit_team`] — [`TeammateRegistry::unrecord`] and
+    /// [`TeammateRegistry::mark_records_inactive`] among them — so the
+    /// section's length is this file's to decide.
     team_file: tokio::sync::Mutex<()>,
     /// How many colours §4.3's palette has handed out, which is the whole of
     /// the assignment: a member's name is unique for the life of the registry
@@ -1907,21 +1915,49 @@ impl TeammateRegistry {
     /// and [`SpawnError::Lost`] when the blocking hop that does it did not come
     /// back.
     pub async fn retire(&self, teammate: &str) -> Result<bool, SpawnError> {
-        let removed =
-            self.members.lock().expect("the member map is never poisoned").remove(teammate);
-        let held = removed.is_some();
-        if let Some(member) = removed {
+        Ok(!self.retire_all(&[teammate.to_owned()]).await?.is_empty())
+    }
+
+    /// [`TeammateRegistry::retire`] over a whole sweep: every surface ended,
+    /// and **one** read-modify-write of the team file rather than one per name.
+    ///
+    /// Answers the names this registry was holding, which is
+    /// [`TeammateRegistry::retire`]'s answer widened rather than a second
+    /// question.
+    ///
+    /// The batch is not a convenience. A sweep's drops are N whole
+    /// read-modify-writes of one small document under N acquires of one lock,
+    /// and every one of them is a window a co-tenant lead's `record` can land
+    /// in and be waited out of; folding them into one hold shortens the sweep
+    /// to a single window and does the same work. The kills stay per member and
+    /// run **together**, for [`TeammateRegistry::shutdown`]'s reason: each waits
+    /// out one teammate's [`SETTLE`], and nothing about those waits owes them an
+    /// order.
+    ///
+    /// # Errors
+    ///
+    /// [`TeammateRegistry::unrecord`]'s, and the surfaces are ended either way
+    /// — a failed rewrite leaves stale rows, never live panes.
+    pub async fn retire_all(&self, teammates: &[String]) -> Result<Vec<String>, SpawnError> {
+        let removed: Vec<(String, Arc<Member>)> = {
+            let mut members = self.members();
+            teammates
+                .iter()
+                .filter_map(|name| members.remove(name).map(|member| (name.clone(), member)))
+                .collect()
+        };
+        for (teammate, member) in &removed {
             tracing::info!(
                 teammate,
                 spawned = ?member.spawned,
                 "ending a retired teammate's surface"
             );
-            member.spawned.kill().await;
         }
+        futures::future::join_all(removed.iter().map(|(_, member)| member.spawned.kill())).await;
 
-        self.unrecord(teammate).await?;
+        self.unrecord_all(teammates).await?;
 
-        Ok(held)
+        Ok(removed.into_iter().map(|(teammate, _)| teammate).collect())
     }
 
     /// Takes `teammate`'s record out of the team file, under the same lock a
@@ -1937,21 +1973,41 @@ impl TeammateRegistry {
     /// inside this method rather than spread across the caller, which is the
     /// shape every door onto this document takes — see
     /// [`TeammateRegistry::mark_records_inactive`] for the race that is what
-    /// happens when it is not.
+    /// happens when it is not. A caller dropping *several* records has
+    /// [`TeammateRegistry::unrecord_all`] rather than a loop over this one.
     pub async fn unrecord(&self, teammate: &str) -> Result<bool, SpawnError> {
-        let writing = self.team_file.lock().await;
-        let mut file = self.read_team().await?;
-        let before = file.members.len();
-        file.members.retain(|member| member.name != teammate);
-        if file.members.len() == before {
-            // Nothing to rewrite, and rewriting anyway would stage and rename a
-            // byte-identical document over a directory a real `claude` may be
-            // reading.
-            return Ok(false);
-        }
-        self.write_team(file, &writing).await?;
+        Ok(!self.unrecord_all(&[teammate.to_owned()]).await?.is_empty())
+    }
 
-        Ok(true)
+    /// [`TeammateRegistry::unrecord`] for a sweep: every name in one hold of
+    /// the lock, answering the ones the document really named.
+    ///
+    /// The one this crate's own doors are written on — `unrecord` is this with
+    /// a single name — so a caller outside it that drops records in a loop is
+    /// paying N acquires and N rewrites for what one hold does.
+    pub async fn unrecord_all(&self, teammates: &[String]) -> Result<Vec<String>, SpawnError> {
+        let dropping: BTreeSet<String> = teammates.iter().cloned().collect();
+
+        Ok(self
+            .edit_team(move |file| {
+                let mut dropped = Vec::new();
+                file.members.retain(|member| {
+                    if dropping.contains(&member.name) {
+                        dropped.push(member.name.clone());
+
+                        return false;
+                    }
+
+                    true
+                });
+
+                // Nothing to rewrite, and rewriting anyway would stage and
+                // rename a byte-identical document over a directory a real
+                // `claude` may be reading.
+                (!dropped.is_empty()).then_some(dropped)
+            })
+            .await?
+            .unwrap_or_default())
     }
 
     /// Marks every record `recognized` claims inactive — not dropped — and
@@ -2000,7 +2056,7 @@ impl TeammateRegistry {
     /// empty answer, since every caller of this is best-effort startup work.
     pub async fn mark_records_inactive(
         &self,
-        recognized: impl Fn(&MemberRecord) -> bool + Send,
+        recognized: impl Fn(&MemberRecord) -> bool + Send + 'static,
     ) -> Result<Vec<String>, SpawnError> {
         // Bound to a `let` rather than tested inline, so the member map's guard
         // is released at the end of this statement and cannot be held across
@@ -2014,37 +2070,41 @@ impl TeammateRegistry {
             return Ok(Vec::new());
         }
 
-        let writing = self.team_file.lock().await;
-        let mut file = self.read_team().await?;
-        if file.lead_session_id != self.lead_session_id {
-            tracing::info!(
-                team = self.team.as_str(),
-                "the team file names another lead's session, so its records were left alone"
-            );
+        let team = self.team.clone();
+        let session = self.lead_session_id.clone();
 
-            return Ok(Vec::new());
-        }
+        Ok(self
+            .edit_team(move |file| {
+                if file.lead_session_id != session {
+                    tracing::info!(
+                        team = team.as_str(),
+                        "the team file names another lead's session, so its records were left \
+                         alone"
+                    );
 
-        let mut retired = Vec::new();
-        for member in &mut file.members {
-            if member.is_lead() {
-                continue;
-            }
-            if !recognized(member) || member.is_active == Some(false) {
-                continue;
-            }
-            member.is_active = Some(false);
-            retired.push(member.name.clone());
-        }
-        if retired.is_empty() {
-            // Nothing to rewrite, and rewriting anyway would stage and rename a
-            // byte-identical document over a directory a real `claude` may be
-            // reading — `unrecord`'s rule, for `unrecord`'s reason.
-            return Ok(retired);
-        }
-        self.write_team(file, &writing).await?;
+                    return None;
+                }
 
-        Ok(retired)
+                let mut retired = Vec::new();
+                for member in &mut file.members {
+                    if member.is_lead() {
+                        continue;
+                    }
+                    if !recognized(member) || member.is_active == Some(false) {
+                        continue;
+                    }
+                    member.is_active = Some(false);
+                    retired.push(member.name.clone());
+                }
+
+                // Nothing to rewrite, and rewriting anyway would stage and
+                // rename a byte-identical document over a directory a real
+                // `claude` may be reading — `unrecord`'s rule, for `unrecord`'s
+                // reason.
+                (!retired.is_empty()).then_some(retired)
+            })
+            .await?
+            .unwrap_or_default())
     }
 
     /// Tells `teammate` that it is waiting on the lead's answer to
@@ -2331,49 +2391,126 @@ impl TeammateRegistry {
     /// file's own `leadSessionId` — is [`ganja_team`]'s public shape already.
     /// A **read** door and nothing more: it takes no lock and hands out no way
     /// to write, so a caller that reads here and writes elsewhere is writing
-    /// through a method that takes the lock itself.
+    /// through a method that takes the lock itself. Locking a read would buy
+    /// nothing anyway — every writer of this document replaces it by rename, so
+    /// a reader sees one whole version or another and never half of one, which
+    /// is the guarantee every foreign reader of the file already relies on.
     pub async fn read_team(&self) -> Result<TeamFile, SpawnError> {
         let path = self.root.config_path(&self.team);
         let team = self.team.clone();
         let session = self.lead_session_id.clone();
         let cwd = self.cwd.to_string_lossy().into_owned();
 
-        blocking(move || match std::fs::read_to_string(&path) {
-            Ok(text) => serde_json::from_str(&text).map_err(|error| SpawnError::TeamFile {
-                doing: "read",
-                path: path.display().to_string(),
-                source: Box::new(error),
-            }),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Ok(TeamFile::new(&team, session, cwd, record::now_millis()))
-            }
-            Err(error) => Err(SpawnError::TeamFile {
-                doing: "read",
-                path: path.display().to_string(),
-                source: Box::new(error),
-            }),
+        blocking(move || {
+            read_team_file(&path, || TeamFile::new(&team, session, cwd, record::now_millis()))
         })
         .await
     }
 
-    /// Adds this teammate to the team file, re-reading it under the same
-    /// blocking hop that writes it back.
+    /// The team file's one write door: read the document, hand it to `edit`,
+    /// and write back exactly when `edit` asks for one.
     ///
     /// The read and the write are **one critical section**, and they have to
-    /// be: this is a read-modify-write of a whole document, so two spawns
-    /// running it at once both read a file without the other's member in it
+    /// be: this is a read-modify-write of a whole document, so two writers
+    /// running it at once both read a file without the other's change in it
     /// and the second write puts back a document missing the first — a
     /// teammate that is running, holds a mailbox, and no team file remembers.
-    /// The reservation in [`TeammateRegistry::claim`] keeps their *names*
-    /// apart; nothing about that keeps their *records* apart.
     ///
-    /// A [`tokio::sync::Mutex`] because the section spans two blocking hops.
-    /// It covers this process only — a real `claude` sharing the directory is
-    /// held off by nothing here, and what keeps that case from being worse
-    /// than a lost record is [`TeammateRegistry::write_team`]'s staged rename,
-    /// which at least never shows anybody half a document. Locking the file
-    /// across processes is the pane phase's problem, where a second writer
-    /// starts existing.
+    /// **Two locks, in [`ganja_team::lock`]'s own order** — in-process first,
+    /// disk second — because there are two kinds of racer and only one of them
+    /// is a thread. This registry's own are held off by `team_file`; a
+    /// **co-tenant lead** is another process, and the only thing that holds one
+    /// of those off is §2.5's lock directory, the protocol a real `claude`
+    /// sharing this directory takes for the inbox beside it. It is taken here
+    /// through [`ganja_team::lock::acquire_unseeded`], which names the lock
+    /// from the team's *directory* rather than from the document's real path,
+    /// because a team file has no seed step for that path to be read out of.
+    /// Both halves are released on every way out of the hop below, the
+    /// directory's by its guard's [`Drop`].
+    ///
+    /// **A closure answering [`None`] stops the write**, which is what the
+    /// callers here use to say "nothing changed": staging and renaming a
+    /// byte-identical document over a directory a real `claude` may be reading
+    /// is a rewrite with a reader and no change in it.
+    ///
+    /// One blocking hop covers lock, read, edit and write together, rather than
+    /// a hop each: the guard waits a peer out by sleeping and releases by
+    /// `rmdir`, so every part of its life belongs off the runtime. That is also
+    /// why `edit` is `'static` and [`Send`] — it runs on that thread — and the
+    /// reason a caller that wants the *names* it touched has it answer them
+    /// rather than reach back into the document afterwards, when the hold is
+    /// gone.
+    ///
+    /// # Hazards
+    ///
+    /// **`edit` runs under both halves of the hold**, so a closure that reached
+    /// back into this document would wait for itself: the in-process mutex is
+    /// already taken, and [`ganja_team::lock`] is not reentrant by that crate's
+    /// own design. Everything the closures here need is in the [`TeamFile`]
+    /// they are handed, which is the shape that keeps the section short as well
+    /// as safe.
+    ///
+    /// # Errors
+    ///
+    /// [`SpawnError::TeamFile`] when the lock could not be taken or the
+    /// document could not be read or written, and [`SpawnError::Lost`] when the
+    /// blocking hop that does it did not come back.
+    async fn edit_team<T>(
+        &self,
+        edit: impl FnOnce(&mut TeamFile) -> Option<T> + Send + 'static,
+    ) -> Result<Option<T>, SpawnError>
+    where
+        T: Send + 'static,
+    {
+        let path = self.root.config_path(&self.team);
+        let team = self.team.clone();
+        let session = self.lead_session_id.clone();
+        let cwd = self.cwd.to_string_lossy().into_owned();
+
+        // Named rather than `_`, which would drop the guard where it stands and
+        // hold nothing at all. The same is true of `_hold` below.
+        let _writing = self.team_file.lock().await;
+
+        blocking(move || {
+            let failed = |doing: &'static str, source: Box<dyn std::error::Error + Send + Sync>| {
+                SpawnError::TeamFile { doing, path: path.display().to_string(), source }
+            };
+            // The team's directory is what a team file has instead of a seed:
+            // a lock named from a directory that is not there is `ENOENT`, and
+            // the first spawn of a session is exactly the case where it is not.
+            let parent = path.parent().unwrap_or_else(|| Path::new("."));
+            std::fs::create_dir_all(parent).map_err(|error| failed("written", Box::new(error)))?;
+
+            let _hold =
+                lock::acquire_unseeded(&path).map_err(|error| failed("locked", Box::new(error)))?;
+
+            let mut file =
+                read_team_file(&path, || TeamFile::new(&team, session, cwd, record::now_millis()))?;
+            let Some(answer) = edit(&mut file) else {
+                return Ok(None);
+            };
+            write_team_file(&path, &file)?;
+
+            Ok(Some(answer))
+        })
+        .await
+    }
+
+    /// Adds this teammate to the team file, under
+    /// [`TeammateRegistry::edit_team`]'s hold.
+    ///
+    /// What this method knows is which record goes in; the read, both halves of
+    /// the hold and the write back are that door's. Which is the whole point of
+    /// there being a door: two spawns racing this would both read a file
+    /// without the other's member in it, and the second write would put back a
+    /// document missing the first — a teammate that is running, holds a
+    /// mailbox, and no team file remembers. The reservation in
+    /// [`TeammateRegistry::claim`] keeps their *names* apart; nothing about
+    /// that keeps their *records* apart.
+    ///
+    /// The edit never declines, because a spawn is not a change that can turn
+    /// out to be nothing: the record replaces whatever stood under its name, so
+    /// there is always a document to write.
     async fn record(&self, spec: &SpawnSpec, surface: Surface) -> Result<(), SpawnError> {
         let record = MemberRecord::teammate(
             &spec.name,
@@ -2389,94 +2526,128 @@ impl TeammateRegistry {
             },
             record::now_millis(),
         );
-        let writing = self.team_file.lock().await;
-        let mut file = self.read_team().await?;
-        file.members.retain(|member| member.name != record.name);
-        file.members.push(record);
-        self.write_team(file, &writing).await
-    }
+        self.edit_team(move |file| {
+            file.members.retain(|member| member.name != record.name);
+            file.members.push(record);
 
-    /// Writes the team file whole, through a temporary file and a rename: a
-    /// reader sharing this directory — a real `claude` among them — sees the
-    /// old document or the new one and never half of either.
-    ///
-    /// This is [`ganja_team::mailbox`]'s `write_atomically` against the other
-    /// document of the same interop pair, and it is deliberately the same
-    /// steps in the same order — temporary beside the target, `sync_all`, the
-    /// mode copy, `persist` — because the reader they are defending against is
-    /// literally the same process. Two properties are worth naming out loud:
-    ///
-    /// * **The bytes are fsynced before the rename.** Without it a crash can
-    ///   leave the *renamed* file present and empty, which is the one outcome
-    ///   a foreign reader cannot tell from "the team has no members" — the
-    ///   torn-write failure the rename exists to prevent, arriving through the
-    ///   back door. The parent directory is **not** fsynced, for the reason
-    ///   spelled out at the mailbox's own copy: a lost rename is
-    ///   indistinguishable from the spawn never having happened, and a reader
-    ///   still sees one whole document or the other.
-    /// * **The temporary cannot outlive the failure.** The staged name used to
-    ///   be `<path>.json.new-<pid>`, and a rename that failed left it in the
-    ///   team directory for good — beside a document a real `claude` walks.
-    ///   Its life is now the value's: dropped on every path out, including
-    ///   the one where `persist` hands it back.
-    ///
-    /// Uniqueness per *process* used to be the staged name's job and is now
-    /// the crate's, but what makes concurrent writes safe was never the name:
-    /// it is the `team_file` lock — taken as an **argument** rather than
-    /// described in a sentence, so a second caller cannot forget to hold it.
-    /// The guard is unused inside and borrowing it is the point; `_writing`
-    /// names what it is because the compiler is the reader that matters here.
-    async fn write_team(
-        &self,
-        file: TeamFile,
-        _writing: &tokio::sync::MutexGuard<'_, ()>,
-    ) -> Result<(), SpawnError> {
-        let path = self.root.config_path(&self.team);
-
-        blocking(move || {
-            let failed = |doing: &'static str, source: Box<dyn std::error::Error + Send + Sync>| {
-                SpawnError::TeamFile { doing, path: path.display().to_string(), source }
-            };
-            let document =
-                record::document(&file).map_err(|error| failed("encoded", Box::new(error)))?;
-            // The temporary has to land in the directory the target is in, or
-            // `persist` is a cross-device copy rather than a rename and the
-            // atomicity this exists for is gone.
-            let parent = path.parent().unwrap_or_else(|| Path::new("."));
-            std::fs::create_dir_all(parent).map_err(|error| failed("written", Box::new(error)))?;
-
-            let mut staged = NamedTempFile::new_in(parent)
-                .map_err(|error| failed("written", Box::new(error)))?;
-            staged
-                .write_all(document.as_bytes())
-                .map_err(|error| failed("written", Box::new(error)))?;
-            staged.as_file().sync_all().map_err(|error| failed("written", Box::new(error)))?;
-            // A temporary is created `0600` and a rename carries that mode
-            // onto the target. The team file is *shared* — that is the whole
-            // premise of the crate it belongs to — so an existing document's
-            // bits are copied across rather than narrowed under a peer that
-            // was reading it.
-            //
-            // A file this *creates* keeps the `0600`, where the `fs::write`
-            // this replaces took the umask's answer. Named rather than
-            // inherited from the crate's default: the document records every
-            // teammate's prompt, model and working directory, and the only
-            // reader that has ever mattered — a real `claude` sharing the
-            // directory — runs as this same user.
-            if let Ok(existing) = std::fs::symlink_metadata(&path)
-                && existing.file_type().is_file()
-            {
-                staged
-                    .as_file()
-                    .set_permissions(existing.permissions())
-                    .map_err(|error| failed("written", Box::new(error)))?;
-            }
-            staged.persist(&path).map_err(|error| failed("written", Box::new(error.error)))?;
-
-            Ok(())
+            Some(())
         })
-        .await
+        .await?;
+
+        Ok(())
     }
+}
+
+/// The team file at `path`, or `absent`'s answer where nothing has written one
+/// yet.
+///
+/// Synchronous, and that is what it is for: the read a hold covers
+/// ([`TeammateRegistry::edit_team`]) and the read that takes no hold
+/// ([`TeammateRegistry::read_team`]) are this one body rather than two that
+/// could come to disagree about what a missing document means.
+///
+/// `absent` is a closure rather than a value because a team file that is not
+/// there is the ordinary case for exactly one read of a session — the first —
+/// and the document it would be costs three clones and a clock read that every
+/// other call would throw away.
+///
+/// # Errors
+///
+/// [`SpawnError::TeamFile`] when a document that is there cannot be read or
+/// does not decode. A missing one is not an error: a team with no file yet is
+/// a team with no members yet.
+fn read_team_file(path: &Path, absent: impl FnOnce() -> TeamFile) -> Result<TeamFile, SpawnError> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text).map_err(|error| SpawnError::TeamFile {
+            doing: "read",
+            path: path.display().to_string(),
+            source: Box::new(error),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(absent()),
+        Err(error) => Err(SpawnError::TeamFile {
+            doing: "read",
+            path: path.display().to_string(),
+            source: Box::new(error),
+        }),
+    }
+}
+
+/// Writes the team file whole, through a temporary file and a rename: a
+/// reader sharing this directory — a real `claude` among them — sees the
+/// old document or the new one and never half of either.
+///
+/// This is [`ganja_team::mailbox`]'s `write_atomically` against the other
+/// document of the same interop pair, and it is deliberately the same
+/// steps in the same order — temporary beside the target, `sync_all`, the
+/// mode copy, `persist` — because the reader they are defending against is
+/// literally the same process. Two properties are worth naming out loud:
+///
+/// * **The bytes are fsynced before the rename.** Without it a crash can
+///   leave the *renamed* file present and empty, which is the one outcome
+///   a foreign reader cannot tell from "the team has no members" — the
+///   torn-write failure the rename exists to prevent, arriving through the
+///   back door. The parent directory is **not** fsynced, for the reason
+///   spelled out at the mailbox's own copy: a lost rename is
+///   indistinguishable from the spawn never having happened, and a reader
+///   still sees one whole document or the other.
+/// * **The temporary cannot outlive the failure.** The staged name used to
+///   be `<path>.json.new-<pid>`, and a rename that failed left it in the
+///   team directory for good — beside a document a real `claude` walks.
+///   Its life is now the value's: dropped on every path out, including
+///   the one where `persist` hands it back.
+///
+/// Uniqueness per *process* used to be the staged name's job and is now the
+/// crate's, but what makes concurrent writes safe was never the name — and is
+/// no longer a witness argument either. It used to take the `team_file` guard
+/// by reference so a caller could not forget to hold it; a witness only ever
+/// proves something about a caller in *this* process, and the writer this
+/// document really has to survive is a co-tenant lead in another one. So the
+/// parameter was traded for a door: this is private, and
+/// [`TeammateRegistry::edit_team`] — which takes both halves of the hold first
+/// — is the only thing that calls it.
+///
+/// # Errors
+///
+/// [`SpawnError::TeamFile`] when the document could not be encoded, staged,
+/// synced or renamed into place.
+fn write_team_file(path: &Path, file: &TeamFile) -> Result<(), SpawnError> {
+    let failed = |doing: &'static str, source: Box<dyn std::error::Error + Send + Sync>| {
+        SpawnError::TeamFile { doing, path: path.display().to_string(), source }
+    };
+    let document = record::document(file).map_err(|error| failed("encoded", Box::new(error)))?;
+    // The temporary has to land in the directory the target is in, or
+    // `persist` is a cross-device copy rather than a rename and the
+    // atomicity this exists for is gone.
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|error| failed("written", Box::new(error)))?;
+
+    let mut staged =
+        NamedTempFile::new_in(parent).map_err(|error| failed("written", Box::new(error)))?;
+    staged.write_all(document.as_bytes()).map_err(|error| failed("written", Box::new(error)))?;
+    staged.as_file().sync_all().map_err(|error| failed("written", Box::new(error)))?;
+    // A temporary is created `0600` and a rename carries that mode
+    // onto the target. The team file is *shared* — that is the whole
+    // premise of the crate it belongs to — so an existing document's
+    // bits are copied across rather than narrowed under a peer that
+    // was reading it.
+    //
+    // A file this *creates* keeps the `0600`, where the `fs::write`
+    // this replaces took the umask's answer. Named rather than
+    // inherited from the crate's default: the document records every
+    // teammate's prompt, model and working directory, and the only
+    // reader that has ever mattered — a real `claude` sharing the
+    // directory — runs as this same user.
+    if let Ok(existing) = std::fs::symlink_metadata(path)
+        && existing.file_type().is_file()
+    {
+        staged
+            .as_file()
+            .set_permissions(existing.permissions())
+            .map_err(|error| failed("written", Box::new(error)))?;
+    }
+    staged.persist(path).map_err(|error| failed("written", Box::new(error.error)))?;
+
+    Ok(())
 }
 
 /// Runs one piece of `ganja-team`'s synchronous file I/O off the runtime's
