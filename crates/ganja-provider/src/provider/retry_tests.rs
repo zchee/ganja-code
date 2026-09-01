@@ -2,8 +2,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reqwest::header::{HeaderMap, HeaderValue};
 
-use super::{MAX_ATTEMPTS, MAX_DELAY, delay, http_date, jitter, retry_after, scattered, summarize};
-use crate::provider::ProviderError;
+use super::{
+    BODY_LIMIT, MAX_ATTEMPTS, MAX_DELAY, delay, http_date, jitter, masked, retry_after, scattered,
+    summarize,
+};
+use crate::provider::{Presented, ProviderError};
 
 /// One `retry-after` case: what it is called, the headers a response
 /// carried, and how long they ask to be left alone for.
@@ -211,6 +214,30 @@ fn an_error_body_is_trimmed_to_something_a_status_bar_can_hold() {
     let long = summarize(&"é".repeat(1_000));
     assert!(long.ends_with('…'));
     assert_eq!(long.chars().count(), 401);
+}
+
+/// The canary for the order of the mask and the trim. A credential quoted
+/// across the cut is the one arrangement where the two orders disagree: trim
+/// first and its head survives in text that has already been through a
+/// masking pass, so nothing downstream will look at it again.
+#[test]
+fn a_credential_quoted_across_the_trim_leaves_no_head_behind() {
+    const KEY: &str = "sk-canary-0123456789";
+
+    let presented = Presented::new(KEY).expect("a non-blank credential");
+    // Filler in a character the credential never spells, so a surviving
+    // fragment below can only be the credential's, and long enough to leave
+    // the cut falling through the middle of the quote.
+    let quoted = format!("{}{KEY} was rejected", "z".repeat(BODY_LIMIT - KEY.len() / 2));
+    let message = masked(&quoted, &presented);
+
+    assert!(message.contains("[redacted]"), "the quote is masked at all: {message}");
+    for length in 1..=KEY.len() {
+        assert!(
+            !message.contains(&KEY[..length]),
+            "{length} characters of the credential survived the trim: {message}"
+        );
+    }
 }
 
 #[test]

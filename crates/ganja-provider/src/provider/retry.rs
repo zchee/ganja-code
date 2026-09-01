@@ -221,7 +221,7 @@ async fn refusal(response: reqwest::Response, presented: &Presented) -> Provider
     // A provider that quotes the credential it refused is a real shape, and
     // this is the one place that text becomes an error message and a log line,
     // so it is the one place the quote has to be masked.
-    let message = presented.redact(&summarize(&body));
+    let message = masked(&body, presented);
     // The unmasked body was one of those quotes; the masked copy is the only
     // one anything downstream should be able to find.
     body.zeroize();
@@ -233,6 +233,19 @@ async fn refusal(response: reqwest::Response, presented: &Presented) -> Provider
     tracing::warn!(status, message, "the provider refused the request");
 
     ProviderError::Status { status, message }
+}
+
+/// The message a refusal reports: `body` masked, and only then trimmed.
+///
+/// The order is the whole guarantee. Trimming first can cut a quoted
+/// credential in half, and half a credential is nothing for the replacement to
+/// match — its head stays in the kept text, past a masking pass that found
+/// nothing and said so, which is worse than an obvious leak because the result
+/// still reads as scrubbed. Masking the body whole means whatever the mask
+/// covers is already gone before a byte is discarded, so widening what
+/// [`Presented::redact`] covers needs no second thought here.
+fn masked(body: &str, presented: &Presented) -> String {
+    summarize(&presented.redact(body))
 }
 
 /// Trims an error body to something a status bar can hold, on a char boundary.
