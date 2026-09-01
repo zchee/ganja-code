@@ -181,7 +181,7 @@ ignore = "0.4.33"
 # `Map` in the workspace. Already resolved in `Cargo.lock` (h2 → hyper →
 # reqwest/axum, process-wrap → rmcp), so the `serde` feature is the only thing
 # this line actually adds.
-indexmap = { version = "2.14.0", features = ["serde"] }
+indexmap = { version = "2.14.1", features = ["serde"] }
 # The one date/time vocabulary, retiring the six-plus hand-rolled
 # civil-calendar copies whose docs each cited "the workspace carries no date
 # crate" — one of them through an `unsafe localtime_r`. Chosen over the
@@ -207,7 +207,7 @@ jsonc-parser = "0.33.1"
 # `$ref`s that live over HTTP or on disk; the schema has neither, only local
 # `#/$defs/...` refs, so they are off and nothing here gains a network
 # dependency.
-jsonschema = { version = "0.49.9", default-features = false }
+jsonschema = { version = "0.52.1", default-features = false }
 # `killpg`, so cancelling a shell command takes its whole process group with
 # it without shelling out to `kill(1)`.
 libc = "0.2.189"
@@ -219,7 +219,9 @@ lsp-types = "0.97.0"
 # write backslashes into filenames the model then reads as real — so the
 # text path walks html5ever's own tree instead, through the rcdom types htmd
 # re-exports only partially. Already in the lock beneath htmd; declaring it
-# adds no vendor, only the right to name `NodeData`.
+# adds no vendor, only the right to name `NodeData`. The version must track
+# htmd's own `^0.38` requirement — bumping it ahead (0.39) splits the crate
+# into two versions and the shared `Node` type stops unifying (E0308).
 markup5ever_rcdom = "0.38.0"
 # The command palette and @-file mention rank candidates in-process with the
 # same matcher helix uses, instead of hand-rolling a scorer.
@@ -293,7 +295,7 @@ reqwest = { version = "0.13.4", default-features = false, features = [
 # Client-side only — the default `server` feature stays off, because nothing
 # in this workspace serves MCP: the test fixture is a bun server on the
 # reference SDK, which is the point of it.
-rmcp = { version = "3.1.3", default-features = false, features = [
+rmcp = { version = "3.2.0", default-features = false, features = [
     "client",
     # Spawns and speaks to a config-named local server as a child process.
     "transport-child-process",
@@ -394,7 +396,7 @@ toml_edit = { version = "0.25.13", features = ["serde"] }
 tower = "0.5.3"
 # Tower's HTTP-specific middleware, admitted with the pair above; a member
 # opts in only where a hand-written layer would otherwise duplicate it.
-tower-http = "0.7.0"
+tower-http = "0.7.1"
 tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
@@ -415,13 +417,13 @@ unicode-width = "0.2.2"
 # is what puts that context behind the crate's own mutex; with defaults off,
 # the other six UUID versions and their generators stay out. No `serde`
 # feature: ids stay `String` newtypes, so nothing here serializes a `Uuid`.
-uuid = { version = "1.24.1", default-features = false, features = ["v7", "std"] }
+uuid = { version = "1.26.0", default-features = false, features = ["v7", "std"] }
 # PATH resolution with access(2) semantics: the hand walk answered "somebody
 # could run this" (`mode & 0o111`) where a spawn needs "this process can run
 # it", so a binary exec-only for another owner died at spawn with EACCES
 # instead of the documented refusal sentence. Unix dependency list is libc
 # alone.
-which = "8.0.5"
+which = "8.0.6"
 # Owner-only DACLs on the two secret-bearing surfaces whose unix modes are
 # already enforced — the credential store and spilled tool output: create
 # handles sealed via `SetSecurityInfo` before the first secret byte, the
