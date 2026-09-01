@@ -1210,7 +1210,7 @@ fn pids(records: &std::sync::Mutex<shim::ShimRecords>) -> Vec<i32> {
 }
 
 /// The individual-kill path, which never touches the registry's task list: a
-/// `/team` retire of one member ends that member's child and waits for it. The
+/// `/teammate` retire of one member ends that member's child and waits for it. The
 /// state the wait reads is a **state and not an edge**, which is what keeps a
 /// per-message member sitting between turns from waiting out the whole of
 /// `SETTLE` for an event that is never coming.

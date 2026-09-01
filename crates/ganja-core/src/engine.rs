@@ -2217,7 +2217,7 @@ impl Engine {
         });
     }
 
-    /// The team this session leads, for a status display, the `/team` dialog
+    /// The team this session leads, for a status display, the `/teammate` dialog
     /// or a turn's `task` call — polled exactly as [`Engine::jobs`] is.
     ///
     /// [`None`] is a session that leads no team, which is a different answer
@@ -2255,7 +2255,7 @@ impl Engine {
 
     /// The team this session leads, as anything that only *renders* it reads
     /// it — `GET /team` on either of `ganja-serve`'s transports (D-13,
-    /// **D505**), and the same value the `/team` dialog draws.
+    /// **D505**), and the same value the `/teammate` dialog draws.
     ///
     /// Polled, exactly as [`Engine::teammates`] is, and derived from it: one
     /// [`view`](teammate::TeammateRegistry::view) over the registry, so a

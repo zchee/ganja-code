@@ -33,7 +33,7 @@
 //! the CLI answers is carried back out of its own transcript
 //! ([`crate::readback`], **D515**) as ordinary mail from this
 //! member — the pane still renders them for the person watching it, and the
-//! mailbox now carries them too. The spawn dialog and the `/team` ring say
+//! mailbox now carries them too. The spawn dialog and the `/teammate` ring say
 //! so, in the sentence that used to say the opposite:
 //! [`pane_line`](crate::shim_tui::pane_line) is that
 //! sentence, per CLI, read by both through [`TeammateBackend::surface_line`](ganja_core::teammate::TeammateBackend::surface_line)
@@ -192,7 +192,7 @@ pub const READY_POLL: Duration = Duration::from_millis(250);
 /// A marker on screen is a composer that *draws*; it is not yet one that
 /// *submits*. The live walkthrough spawned a real codex, saw its composer
 /// line at 0.2–0.3 s, pasted and pressed Enter at once — and the text sat in
-/// the composer unsubmitted while the `/team` ring said "delivered": codex
+/// the composer unsubmitted while the `/teammate` ring said "delivered": codex
 /// takes the paste but drops an Enter that arrives inside its first moments
 /// (4 of 5 runs at 0.2 s; the one that submitted was the slowest marker, at
 /// 0.29 s), where the same paste-and-Enter half a second after the marker
@@ -301,7 +301,7 @@ const PANE_IS_DEAD: &str = "Pane is dead";
 ///
 /// First, and short, because of where the sentence is read: the spawn dialog
 /// is the generic permission modal, whose clamp leaves a seventh argument
-/// about two rows at its widest, and a `/team` ring row is one line cut at
+/// about two rows at its widest, and a `/teammate` ring row is one line cut at
 /// the dialog's width — so whatever must survive has to be inside the first
 /// forty characters, and the per-CLI clause after it is the part that may be
 /// cut. `ganja-tui`'s permission test renders the real sentences at 80x24
@@ -393,7 +393,7 @@ const PANE_AGY: &str = "agy's own TUI in a tmux pane beside you, opening in acce
 /// pushed behind the facts, the flag's name last — because of where it is
 /// read: the spawn dialog is 76 columns at its widest, its argument preview
 /// is clamped, and grok's four-row bound sentence leaves this row exactly
-/// one line there, about twenty characters past [`HEARD_BACK`]; the `/team`
+/// one line there, about twenty characters past [`HEARD_BACK`]; the `/teammate`
 /// ring cuts at the same width. Codex's and agy's per-CLI clauses are the
 /// kind that may fall off that edge (ruling 15's HIGH-2); grok's ask is the
 /// fact a person has to act on — a pane that is waiting for them — so it is

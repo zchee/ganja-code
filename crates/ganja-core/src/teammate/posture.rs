@@ -8,7 +8,7 @@
 //! outside the project does. The plan is
 //! `.omc/plans/2026-08-17-teammates-first-landing.md`. Its other guard,
 //! §10.11-10 — a spawn that asks to skip dialogs is itself something to be
-//! asked about — was built as P25's `/team spawn --bypass` and **retired on
+//! asked about — was built as P25's `/teammate spawn --bypass` and **retired on
 //! 2026-08-22** (**D513**, user directive): there is one spawn request on both
 //! doors, a `task` call's and a person's, and nothing on it about dialogs, so
 //! there is no such spawn left to gate.

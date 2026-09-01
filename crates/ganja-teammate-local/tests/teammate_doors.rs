@@ -6,7 +6,7 @@
 //! AC-14's claim is "both doors, one sequence", and it is pinned in three
 //! places because no one binary can see all three: this file holds the `task`
 //! door's engine-side half, `crates/ganja-tui/src/component/team.rs` holds the
-//! `/team spawn` dialog's half, and `teammate_backends.rs` holds the
+//! `/teammate spawn` dialog's half, and `teammate_backends.rs` holds the
 //! per-backend refusals on their own. What this file has to show is that the
 //! **door** reaches [`Teammates::start`] and that a refusal propagates
 //! through it in exactly the sentence the other door refuses in — one door

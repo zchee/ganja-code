@@ -1590,7 +1590,7 @@ pub enum StatuslineElement {
     /// waits on. It earns its place more than either: the default backend is
     /// in-process and has no window of its own, so without a count a teammate
     /// that is thinking and a teammate that has wedged look identical — which
-    /// is what the segment, and `/team`'s ring under it, exist to tell apart.
+    /// is what the segment, and `/teammate`'s ring under it, exist to tell apart.
     Teammates,
     /// How much of the team's **shared task list** is still open, as
     /// `open/total team tasks` — present only while the list holds a task.

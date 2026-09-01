@@ -837,7 +837,7 @@ impl LeadInbox {
     /// A teammate reporting itself available.
     ///
     /// Recorded and logged rather than delivered: what a teammate did is
-    /// already under its row in `/team`, and putting the harness's own
+    /// already under its row in `/teammate`, and putting the harness's own
     /// bookkeeping into the model's context would be telling it something
     /// nobody said.
     ///

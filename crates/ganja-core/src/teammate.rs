@@ -80,7 +80,7 @@
 //! | Door | Argument | Default |
 //! |---|---|---|
 //! | the `task` tool | `name`, `backend: "in-process" \| "ganja" \| "claude" \| "codex" \| "agy" \| "grok"` | `ganja` |
-//! | `/team spawn <name>` | `--backend in-process\|ganja\|claude\|codex\|agy\|grok` | `ganja` |
+//! | `/teammate spawn <name>` | `--backend in-process\|ganja\|claude\|codex\|agy\|grok` | `ganja` |
 //!
 //! **The backend is an explicit argument on both doors, never inferred**, and
 //! the default is a fixed value rather than a guess (**Dv-1**).
@@ -391,7 +391,7 @@ pub const SPAWNED: &str = "the teammate is running; this instruction and \
 /// How many recent calls one teammate's ring holds (**D503**).
 ///
 /// Small on purpose: it is a live view of what a teammate is doing now, drawn
-/// under a row in `/team`, not a log. The full account of a teammate's work is
+/// under a row in `/teammate`, not a log. The full account of a teammate's work is
 /// its own transcript, which is a root session anybody can open.
 pub const RECENT_CALLS: usize = 8;
 
@@ -2752,7 +2752,7 @@ pub async fn unseed_inbox(inbox: PathBuf, seeded: Option<mailbox::Identity>, tea
     }
 }
 
-/// Folds a teammate's own event stream into the ring `/team` draws (**D503**).
+/// Folds a teammate's own event stream into the ring `/teammate` draws (**D503**).
 ///
 /// A running call is named the way a permission dialog would name it, which is
 /// the same trick `task`'s watcher plays: the tool describes its own arguments,

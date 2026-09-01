@@ -289,7 +289,7 @@ fn live_pane(server: &PrivateServer, pane_id: &str) -> Option<Pane> {
         .next()
 }
 
-/// The member's recent-calls ring, as `/team` would render it.
+/// The member's recent-calls ring, as `/teammate` would render it.
 fn ring(registry: &TeammateRegistry, name: &str) -> Vec<String> {
     registry
         .view()

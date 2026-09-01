@@ -3,7 +3,7 @@
 //! Neither upstream opencode nor Claude Code has a counterpart: no other build
 //! here runs somebody else's CLI as a teammate, so every sentence is ganja's
 //! own. **D512** shipped the pane as send-only and said so in every place a
-//! person reads — the spawn dialog, the `/team` ring, the preamble the pane is
+//! person reads — the spawn dialog, the `/teammate` ring, the preamble the pane is
 //! handed — and recorded the missing half as bead `ganja-code-9u1`. This is
 //! that half, on a user directive of 2026-08-24, and it is the reason those
 //! sentences changed rather than grew a footnote.

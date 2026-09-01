@@ -6,7 +6,7 @@
 //! handshake, read against this tree in §10.2 and §10.4. Upstream opencode has
 //! no teammates and no counterpart to any of it.
 //!
-//! AC-11 as the spec spells it — `/team spawn w1 --backend ganja` in a real
+//! AC-11 as the spec spells it — `/teammate spawn w1 --backend ganja` in a real
 //! `ganja`, in a PTY — is `crates/ganja-cli/tests/teammate_pane.rs`, which needs
 //! the pane child to be the real binary parsing the spawn flags. This binary is
 //! the half a core test can hold: the same door, the same registry, the same

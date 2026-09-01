@@ -79,8 +79,8 @@
 //! teammate on the lead's roster and in the team file until the *next* lead
 //! started, since [`crate::reaper`] is a cold-start sweep of a **previous**
 //! lead's orphans (**D506**) and never a liveness poll of this one's own
-//! panes. `/team` kept listing the member for as long as the session ran, and
-//! a `/team shutdown` aimed at it only queued a request nobody was left to
+//! panes. `/teammate` kept listing the member for as long as the session ran, and
+//! a `/teammate shutdown` aimed at it only queued a request nobody was left to
 //! read.
 //!
 //! So [`PaneMember`](crate::pane::PaneMember) now runs the poll the shim TUI
@@ -105,7 +105,7 @@
 //! the same reason: "the pane was closed" is a claim, and a claim has to be
 //! read off tmux, a recycled id off the listing and everything else through
 //! that door. And `alive()` is a
-//! **flag**, not a listing: it is asked on every `/team` render and in every
+//! **flag**, not a listing: it is asked on every `/teammate` render and in every
 //! roster count, so the subprocess belongs on the two-second timer and the
 //! answer belongs in an [`AtomicBool`](std::sync::atomic::AtomicBool) the
 //! timer flips.
@@ -627,7 +627,7 @@ pub struct PaneMember {
     cancel: CancellationToken,
     /// What [`Spawned::alive`] answers: cleared when the watch ends, on every
     /// road out of it. A flag rather than a listing because that method is
-    /// asked on every `/team` render.
+    /// asked on every `/teammate` render.
     ///
     /// [`Ordering::Relaxed`] at both ends of it, deliberately: the flag
     /// publishes no other data — the [`Exited`] that carries the facts travels
