@@ -93,6 +93,33 @@ const BLOCK: [&str; 38] = [
     "ul",
 ];
 
+/// The deepest chain of nodes [`to_markdown`] hands to htmd's converter.
+///
+/// That converter walks a tree by recursion: `walk_node` descends through
+/// `walk_children` and back into `walk_node`, a frame pair per level, and an
+/// element handler that re-walks its own subtree — a table's, a list's — adds
+/// frames on top of that (htmd 0.5.5, `src/dom_walker.rs:16` and `:237`). It
+/// carries no depth guard, and nobody has asked it for one: its tracker at
+/// <https://github.com/letmutex/htmd/issues> held fourteen issues on
+/// 2026-09-01, none of them about recursion or stack depth. The bound
+/// therefore belongs to this caller, because the page is not this caller's:
+/// `webfetch` fetches a URL a *model* chose after reading pages a stranger may
+/// have written, so how deeply the document nests is an attacker's to decide,
+/// and a stack that runs out ends the **process** rather than the call — the
+/// one failure a tool result cannot carry back to the model.
+///
+/// The number is measured rather than argued. On the 2 MiB stack a
+/// `spawn_blocking` thread gets, the walker survives a chain of 324 nodes of
+/// nested `<div>` and dies at 356, survives 260 of `<ul><li>` and dies at 324,
+/// and survives 244 of nested `<table>` and dies at 260 — the heaviest of the
+/// three, because that handler re-walks what it buffers. So the ceiling is not
+/// one number but a range ending near 250, and a cap has to sit under the
+/// worst of it rather than the best. 128 is half that worst case and still
+/// several times deeper than prose reaches; markup that nests past it was far
+/// likelier built to nest than written to be read. Being wrong in this
+/// direction costs the page's formatting, not the page.
+const MAX_NESTING: usize = 128;
+
 /// Most redirects one fetch will follow, which is reqwest's own default. Spelled
 /// out because guarding each hop means policing the chain here rather than
 /// leaving it to the client.
@@ -501,20 +528,67 @@ fn accept(format: Format) -> &'static str {
 ///
 /// A conversion that fails falls back to the text rendering. Returning nothing
 /// because a renderer gave up would be a worse answer than the page's words in
-/// plain text, and the model asked for the page rather than for markdown.
+/// plain text, and the model asked for the page rather than for markdown. A
+/// document nested past [`MAX_NESTING`] takes that same arm, and takes it for
+/// the same reason: [`strip_tags`] reaches every word of the page through an
+/// explicit worklist rather than the call stack, so it answers at any depth,
+/// and refusing the call outright would cost the model the page over a
+/// formatting choice it did not make. That arm parses a second time, which is
+/// the price of leaving the ordinary path exactly as it was.
 fn to_markdown(html: &str) -> String {
-    htmd::HtmlToMarkdown::builder()
-        .skip_tags(SKIPPED.to_vec())
-        .build()
-        .convert(html)
-        .unwrap_or_else(|error| {
+    let converter = htmd::HtmlToMarkdown::builder().skip_tags(SKIPPED.to_vec()).build();
+    // `convert` is these two halves called back to back, and splitting them is
+    // what puts the depth check between the parse and the recursive walk. The
+    // check reads the parsed tree rather than the bytes because a scan for
+    // `<`/`</` disagrees with the parser exactly where it would matter: a
+    // `</div>` inside an attribute value, or a `<div>` inside a `<script>`, is
+    // text to html5ever and a tag to a scanner, so a counter over the source
+    // is something the very document that overflows the walker can walk past.
+    let tree = match converter.html_to_tree(html) {
+        Ok(tree) => tree,
+        Err(error) => {
             tracing::warn!(
                 %error,
                 "the page would not convert to markdown; handing over its text instead"
             );
 
-            strip_tags(html)
-        })
+            return strip_tags(html);
+        }
+    };
+    let depth = nesting_depth(&tree);
+    // Rendered while the tree is still owned here, so the walk and the drop
+    // stay in the order the borrow demands.
+    let rendered = (depth <= MAX_NESTING).then(|| converter.tree_to_markdown(&tree));
+    drop_tree_iteratively(tree);
+
+    rendered.unwrap_or_else(|| {
+        tracing::warn!(
+            depth,
+            cap = MAX_NESTING,
+            "the page nests deeper than the markdown converter may recurse over; handing over \
+             its text instead"
+        );
+
+        strip_tags(html)
+    })
+}
+
+/// The longest chain of nodes in `tree`, counted the way htmd's walker
+/// descends it — every node and not only every element, since that walker
+/// recurses into each child whatever kind of node it is.
+///
+/// Iterative for the reason [`MAX_NESTING`] exists at all: a recursive
+/// measurement would overflow on exactly the documents worth measuring.
+fn nesting_depth(tree: &Rc<Node>) -> usize {
+    let mut deepest = 0;
+    let mut work = vec![(Rc::clone(tree), 0_usize)];
+
+    while let Some((node, depth)) = work.pop() {
+        deepest = deepest.max(depth);
+        work.extend(node.children.borrow().iter().map(|child| (Rc::clone(child), depth + 1)));
+    }
+
+    deepest
 }
 
 /// The text a reader would see in `html`.

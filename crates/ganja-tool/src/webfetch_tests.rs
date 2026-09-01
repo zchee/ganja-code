@@ -580,3 +580,77 @@ fn deeply_nested_template_contents_do_not_overflow_the_stack() {
 
     assert_eq!(super::strip_tags(&html), "");
 }
+
+/// A `<div>` chain of `chain` levels wrapped around one heading.
+///
+/// The heading is what tells the two renderings apart: htmd's walker writes it
+/// as `# Deep`, while the text fallback writes the word alone, so a test can
+/// name which arm ran without reaching for the log.
+fn nested_divs(chain: usize) -> String {
+    format!("{}<h1>Deep</h1>{}", "<div>".repeat(chain), "</div>".repeat(chain))
+}
+
+/// The depth the guard would measure for `html`, through the guard's own scan.
+///
+/// html5ever wraps what it parses in a document, an `<html>` and a `<body>`, so
+/// a fixture's chain is shorter than the depth the walker descends. Measuring
+/// rather than restating that arithmetic keeps these tests honest if the parser
+/// ever wraps differently.
+fn measured_depth(html: &str) -> usize {
+    let tree = htmd::HtmlToMarkdown::new().html_to_tree(html).expect("the fixture parses");
+    let depth = super::nesting_depth(&tree);
+    super::drop_tree_iteratively(tree);
+
+    depth
+}
+
+/// The scan counts every node the walker descends through, so ten more levels
+/// of markup are ten more levels of depth whatever the parser wrapped them in.
+#[test]
+fn the_depth_scan_grows_one_for_one_with_the_chain_it_measures() {
+    assert_eq!(measured_depth(&nested_divs(20)) - measured_depth(&nested_divs(10)), 10);
+}
+
+/// A document the walker can safely descend is still converted by it.
+#[test]
+fn a_document_within_the_cap_is_converted_by_the_markdown_walker() {
+    let html = nested_divs(super::MAX_NESTING / 2);
+
+    assert!(
+        measured_depth(&html) <= super::MAX_NESTING,
+        "the fixture is meant to sit under the cap"
+    );
+    assert_eq!(super::to_markdown(&html), "# Deep");
+}
+
+/// Past the cap the page still comes back — as its text, since the words are a
+/// better answer than a refusal over a formatting choice the model did not make.
+#[test]
+fn a_document_nested_past_the_cap_is_rendered_as_text_rather_than_walked() {
+    let html = nested_divs(super::MAX_NESTING + 1);
+
+    assert!(measured_depth(&html) > super::MAX_NESTING, "the fixture is meant to clear the cap");
+    assert_eq!(super::to_markdown(&html), "Deep");
+}
+
+/// A passing result proves the guard rather than the stack decides what htmd's
+/// recursive walker is handed. Without it this fixture ends the **process**: a
+/// stack overflow is not an unwind, so no test failure could report it.
+///
+/// Sixteen times the cap, which is roughly six times the shallowest depth the
+/// walker was measured to die at, and no deeper: html5ever is itself quadratic
+/// on a nested-`<div>` chain — it rescans the whole open-element stack for each
+/// open tag — so the 100,000-level fixture the neighbouring `strip_tags` tests
+/// use never finishes parsing here, and would be measuring that parser rather
+/// than this guard.
+#[test]
+fn a_document_deep_enough_to_overflow_the_walker_answers_on_a_two_mebibyte_stack() {
+    let rendered = std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| super::to_markdown(&nested_divs(super::MAX_NESTING * 16)))
+        .expect("the bounded-stack webfetch test thread starts")
+        .join()
+        .expect("the bounded-stack webfetch test thread returns");
+
+    assert_eq!(rendered, "Deep");
+}
