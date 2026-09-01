@@ -25,6 +25,10 @@ max_width = 100
 # the edits that caused them.
 use_small_heuristics = "Max"
 
+# Always emit LF line endings regardless of platform or checkout state, so a
+# Windows checkout (or a stray CRLF file) cannot leak CRLF into the tree.
+newline_style = "Unix"
+
 # Group `use` blocks as standard library, then external crates, then this
 # crate's own modules, each separated by a blank line — the ordering the code
 # is already written in, now enforced instead of maintained by hand.
