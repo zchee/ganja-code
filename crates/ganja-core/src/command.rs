@@ -6,12 +6,22 @@
 //! nothing into the model, it fills its placeholders from whatever the user
 //! typed after the name and sends the result the way a typed message is sent.
 //!
-//! `/init` is the one builtin this build ships. Its template is upstream's
-//! `command/template/initialize.txt` with ganja's identity substituted
-//! (**D522**), and everything it does about `AGENTS.md` — create it if it is
-//! absent, improve it in place if it is there — is *prompt* semantics. There
-//! is no file handling here and none upstream: the model reaches for `write`
-//! and `edit` like it would for any other file.
+//! `/init` and `/team` are the two builtins this build ships. `/init`'s
+//! template is upstream's `command/template/initialize.txt` with ganja's
+//! identity substituted (**D522**), and everything it does about `AGENTS.md` —
+//! create it if it is absent, improve it in place if it is there — is *prompt*
+//! semantics. There is no file handling here and none upstream: the model
+//! reaches for `write` and `edit` like it would for any other file.
+//!
+//! `/team` is the same shape and none of the same lineage: upstream opencode
+//! has no teams and no second agent to address, so its template is ganja's own
+//! prose written from this port's behavior specification, and every stage,
+//! file and rule it describes is carried out by the model through tools this
+//! build already lends it — the four task tools, `task`, `send_message`,
+//! `write` and `read`. Nothing about the pipeline is machinery here; what *is*
+//! machinery is the two engine-native guards beside it (the continuation
+//! blocker and the name nag, both in [`crate::session`]), because neither can
+//! be a sentence in a prompt and still be true.
 //!
 //! Expansion keeps upstream's order: fill the argument placeholders, run each
 //! ``!`command` `` the filled template names, trim the result, then resolve the
@@ -45,10 +55,50 @@ const INIT_TEMPLATE: &str = include_str!("prompt/initialize.txt");
 /// (`command/index.ts`).
 const INIT_DESCRIPTION: &str = "guided AGENTS.md setup";
 
+/// Name of the builtin that runs a staged team pipeline.
+pub const TEAM: &str = "team";
+
+/// What `/team` sends. Ganja's own prose throughout — behavior modelled on
+/// oh-my-claudecode's team skill, no sentence taken from it — written from the
+/// behavior specification in `.omc/plans/2026-09-02-team-orchestration.md`,
+/// which is why it earns no `THIRD_PARTY_NOTICES.md` entry the way
+/// [`INIT_TEMPLATE`] does.
+const TEAM_TEMPLATE: &str = include_str!("prompt/team.txt");
+
+/// `/team`'s one-line description.
+const TEAM_DESCRIPTION: &str = "run a staged team pipeline over a shared task list";
+
+/// What the composer draws dim after a typed `/team` (**D518**). The grammar
+/// itself, because the model — not this crate — is what parses it.
+const TEAM_ARGUMENT_HINT: &str = "[N[:agent]] [--backend <surface>] <task>";
+
 /// The placeholder `/init`'s template carries for the worktree it is being run
 /// in. Upstream substitutes it with a plain string replace, which in JavaScript
 /// replaces the **first** occurrence only; the file holds exactly one.
 const PATH_PLACEHOLDER: &str = "${path}";
+
+/// The placeholder `/team`'s template carries for the directory this project's
+/// pipeline state files live in.
+const STATE_PLACEHOLDER: &str = "${state}";
+
+/// The placeholder `/team`'s template carries for the directory this project's
+/// stage handoffs live in.
+const HANDOFFS_PLACEHOLDER: &str = "${handoffs}";
+
+/// Where a project's team pipeline artefacts hang off its data directory
+/// (decisions 7, 8 and 19 of the team-orchestration plan): operational state
+/// lives in the data home, and `.ganja/` stays a committable-config namespace.
+const TEAM_DIR: &str = "team";
+
+/// What is written where when neither directory can be resolved — a machine
+/// with no home for [`crate::project::data_home`] to answer from.
+///
+/// The template says the two paths are absolute and already correct, so the
+/// honest fallback is to say what the shape is rather than to fill in a
+/// relative path the model would then create in the worktree. A session in
+/// that state has no data home to write a session row into either, so this is
+/// unreachable short of a machine ganja cannot store anything on.
+const UNRESOLVED_HOME: &str = "<data home>/ganja/project/<slug>/team";
 
 /// The placeholder that stands for everything the user typed, untokenized.
 const ARGUMENTS: &str = "$ARGUMENTS";
@@ -649,17 +699,52 @@ fn opens_frontmatter(text: &str) -> bool {
 }
 
 /// The commands this build ships, with `${path}` already pointing at the
-/// worktree the session is working in.
+/// worktree the session is working in and `/team`'s two directory
+/// placeholders already pointing into this project's data directory.
+///
+/// The paths are resolved **here**, at roster build, rather than left for the
+/// model to assemble from a description of the layout: an instruction that
+/// says "write your state under the data home" is one every session gets to
+/// guess about, and two sessions that guess differently do not resume each
+/// other. `/init` fills its own worktree placeholder for the same reason.
 fn builtins(worktree: &Path) -> Vec<Definition> {
-    vec![Definition {
-        name: INIT.to_owned(),
-        description: Some(INIT_DESCRIPTION.to_owned()),
-        template: INIT_TEMPLATE.replacen(PATH_PLACEHOLDER, &worktree.to_string_lossy(), 1),
-        agent: None,
-        model: None,
-        argument_hint: None,
-        source: None,
-    }]
+    let team = crate::project::Project::resolve(worktree)
+        .data_dir()
+        .map_or_else(|_| PathBuf::from(UNRESOLVED_HOME), |data| data.join(TEAM_DIR));
+    let team_dir = |leaf: &str| team.join(leaf).to_string_lossy().into_owned();
+
+    vec![
+        Definition {
+            name: INIT.to_owned(),
+            description: Some(INIT_DESCRIPTION.to_owned()),
+            template: INIT_TEMPLATE.replacen(PATH_PLACEHOLDER, &worktree.to_string_lossy(), 1),
+            agent: None,
+            model: None,
+            argument_hint: None,
+            source: None,
+        },
+        Definition {
+            name: TEAM.to_owned(),
+            description: Some(TEAM_DESCRIPTION.to_owned()),
+            // Every occurrence, not the first: `/init`'s `replacen` mirrors
+            // a JavaScript `String.replace` over a file that holds exactly
+            // one placeholder, and this template names its handoffs
+            // directory twice — once to say where it is and once to say what
+            // to write into it. A survivor would reach the model as literal
+            // `${handoffs}`, which is a path nothing on the machine answers
+            // to.
+            template: TEAM_TEMPLATE
+                .replace(STATE_PLACEHOLDER, &team_dir("state"))
+                .replace(HANDOFFS_PLACEHOLDER, &team_dir("handoffs")),
+            // Deliberately not an agent of its own: the pipeline runs as
+            // whoever the session already is, because it spawns the agents it
+            // needs rather than becoming one.
+            agent: None,
+            model: None,
+            argument_hint: Some(TEAM_ARGUMENT_HINT.to_owned()),
+            source: None,
+        },
+    ]
 }
 
 /// One command as a config file described it.

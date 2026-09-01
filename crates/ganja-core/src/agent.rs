@@ -101,6 +101,22 @@ pub const GENERAL: &str = "general";
 /// Name of the search subagent.
 pub const EXPLORE: &str = "explore";
 
+/// Name of the requirements subagent, the first of the five roles the `/team`
+/// pipeline routes its stages to.
+pub const ANALYST: &str = "analyst";
+
+/// Name of the implementation subagent.
+pub const EXECUTOR: &str = "executor";
+
+/// Name of the evidence-checking subagent.
+pub const VERIFIER: &str = "verifier";
+
+/// Name of the plan-challenging subagent.
+pub const CRITIC: &str = "critic";
+
+/// Name of the root-cause subagent.
+pub const DEBUGGER: &str = "debugger";
+
 /// The subdirectory of each home an agent definition file lives in (**D482**).
 const AGENTS_SUBDIR: &str = "agents";
 
@@ -148,6 +164,22 @@ const CONVERSATION_TOOLS: &[&str] = &["question", "plan_exit", "plan_enter"];
 /// The search subagent's prompt, ported verbatim (MIT; see
 /// `THIRD_PARTY_NOTICES.md`).
 const EXPLORE_PROMPT: &str = include_str!("prompt/explore.txt");
+
+/// The five team-role prompts. Ganja's own prose, written from this port's
+/// team-orchestration behavior specification and modelled on no other
+/// project's text, which is why none of them earns a
+/// `THIRD_PARTY_NOTICES.md` entry the way [`EXPLORE_PROMPT`] does.
+///
+/// Each says what the role *is* and nothing about how a team coordinates: the
+/// pipeline's protocol — the stages, the shared list, the claim discipline,
+/// the shutdown — is `/team`'s template's to state, and a copy of it here
+/// would be a second place for it to drift. An agent spawned outside a team
+/// is then still a coherent agent.
+const ANALYST_PROMPT: &str = include_str!("prompt/analyst.txt");
+const EXECUTOR_PROMPT: &str = include_str!("prompt/executor.txt");
+const VERIFIER_PROMPT: &str = include_str!("prompt/verifier.txt");
+const CRITIC_PROMPT: &str = include_str!("prompt/critic.txt");
+const DEBUGGER_PROMPT: &str = include_str!("prompt/debugger.txt");
 
 /// Injected as a synthetic user part on every turn the [`PLAN`] agent runs,
 /// ported verbatim from upstream `session/prompt/plan.txt`.
@@ -309,12 +341,18 @@ impl Registry {
     }
 }
 
-/// The seven-agent roster upstream ships, minus the three ganja does not have.
+/// The nine agents this build ships: upstream's roster, and ganja's own five.
 ///
+/// Four of them are upstream's seven minus the three ganja does not have.
 /// `compaction`, `title` and `summary` are hidden agents upstream because its
 /// pipeline runs *every* request through an agent. Ganja's title and
 /// compaction requests are direct — they carry their own prompt and no tools —
 /// so there is nothing for an agent to add (**D7**).
+///
+/// The other five — [`ANALYST`], [`EXECUTOR`], [`VERIFIER`], [`CRITIC`],
+/// [`DEBUGGER`] — are the roles `/team`'s stage routing names, and have no
+/// upstream counterpart at all: opencode has no teams. Their prompts are
+/// ganja's own.
 fn builtins(config: &Config) -> Vec<Agent> {
     let user = config.permission.rules();
     // `attended` is what decides whether the memory door is opened for an
@@ -453,6 +491,93 @@ fn builtins(config: &Config) -> Vec<Agent> {
                     rule(EXTERNAL_DIRECTORY, ANY, Action::Ask),
                 ],
             ),
+        },
+        // The five roles `/team` routes its stages to. Nothing upstream has a
+        // counterpart to any of them.
+        //
+        // Each is `Subagent` mode and not hidden, which is exactly what
+        // `general` and `explore` above are: spawnable by a `task` call —
+        // either as a disposable subagent or, with a `name`, as a teammate —
+        // and never offered as a primary a person switches the session to.
+        // A `/team` run is driven by whoever the session already is; these are
+        // who it delegates to.
+        //
+        // They take the shared defaults and **no rule delta at all**, and that
+        // is a decision rather than an omission: a role here is a prompt, not
+        // a permission posture. `explore` earns its allow-list by being a
+        // search agent that must not act, and `general` denies `todowrite`
+        // because upstream does; an executor or a debugger that could not run
+        // what every other agent can run would be a different agent from the
+        // one its prompt describes. A project that wants a narrower one says
+        // so in `.ganja/agents/`, whose same-named definition outranks the
+        // builtin.
+        Agent {
+            name: ANALYST.to_owned(),
+            description: Some(
+                "Turns a request into acceptance criteria somebody else can build against and \
+                 check. Use before implementation when the scope is ambiguous, or to write down \
+                 what \"done\" means."
+                    .to_owned(),
+            ),
+            mode: AgentMode::Subagent,
+            hidden: false,
+            prompt: Some(ANALYST_PROMPT.to_owned()),
+            model: None,
+            rules: assemble(false, Vec::new()),
+        },
+        Agent {
+            name: EXECUTOR.to_owned(),
+            description: Some(
+                "Implements one scoped task and stops there. Use for a change whose shape is \
+                 already decided, when the work should not grow past what was asked."
+                    .to_owned(),
+            ),
+            mode: AgentMode::Subagent,
+            hidden: false,
+            prompt: Some(EXECUTOR_PROMPT.to_owned()),
+            model: None,
+            rules: assemble(false, Vec::new()),
+        },
+        Agent {
+            name: VERIFIER.to_owned(),
+            description: Some(
+                "Checks finished work against its acceptance criteria and reports a verdict per \
+                 criterion with the evidence for it. Use to decide whether something is really \
+                 done rather than to build it."
+                    .to_owned(),
+            ),
+            mode: AgentMode::Subagent,
+            hidden: false,
+            prompt: Some(VERIFIER_PROMPT.to_owned()),
+            model: None,
+            rules: assemble(false, Vec::new()),
+        },
+        Agent {
+            name: CRITIC.to_owned(),
+            description: Some(
+                "Attacks a plan or a scope before it is built: unstated assumptions, unhandled \
+                 cases, work that is bigger or smaller than the problem. Use to stress a plan, \
+                 not to write one."
+                    .to_owned(),
+            ),
+            mode: AgentMode::Subagent,
+            hidden: false,
+            prompt: Some(CRITIC_PROMPT.to_owned()),
+            model: None,
+            rules: assemble(false, Vec::new()),
+        },
+        Agent {
+            name: DEBUGGER.to_owned(),
+            description: Some(
+                "Isolates the root cause of a failing build, test or behavior and reports the \
+                 evidence for it. Use when something is broken and why is not yet known."
+                    .to_owned(),
+            ),
+            mode: AgentMode::Subagent,
+            hidden: false,
+            prompt: Some(DEBUGGER_PROMPT.to_owned()),
+            model: None,
+            rules: assemble(false, Vec::new()),
         },
     ]
 }

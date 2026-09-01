@@ -386,6 +386,17 @@ pub(crate) struct PendingReplies {
 }
 
 impl PendingReplies {
+    /// Whether this session is waiting on nobody: no permission dialog and no
+    /// question is open.
+    ///
+    /// Read by the continuation blocker, which must never put a synthetic
+    /// instruction in front of a question the user has not answered yet — see
+    /// `continue_for_the_team`, which also says why that arm is defensive
+    /// rather than reachable today.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.permissions.is_empty() && self.questions.is_empty()
+    }
+
     /// Registers a permission dialog nobody has answered yet.
     ///
     /// Crate-visible rather than module-private since P25: `subagent.rs`'s
@@ -954,6 +965,27 @@ pub(crate) struct Turn {
     /// team machinery — and on every turn a subagent runs, which is offered
     /// none of the four tools to call.
     pub(crate) tasks: Option<Arc<dyn crate::tool::tasklist::TaskList>>,
+    /// The team this session leads, for the two guards that read it — engine
+    /// owned, and shared rather than snapshotted so both read it **live**: the
+    /// `/team` pipeline's own first step is to spawn the members, so a turn
+    /// that began leading nobody is exactly the turn either guard is about.
+    ///
+    /// Carried here rather than reached through [`Turn::spawn`], which holds
+    /// the same registry: that field is [`None`] on an engine with no agents
+    /// to spawn, and whether a session was given an agent roster says nothing
+    /// about whether it leads a team. [`None`] is a session with no team
+    /// machinery — and every turn a subagent runs, which leads nothing.
+    pub(crate) team: Option<Arc<crate::teammate::TeammateRegistry>>,
+    /// The two team guards this turn runs under (the continuation blocker and
+    /// the name nag), and the counters they keep.
+    ///
+    /// A turn's own, never the engine's — [`discipline`] argues why — so a
+    /// child turn simply gets a fresh one it never consults: a subagent is
+    /// offered neither `task` nor the task tools, so neither guard has
+    /// anything to notice there.
+    ///
+    /// [`discipline`]: crate::teammate::discipline
+    pub(crate) discipline: std::sync::Mutex<crate::teammate::discipline::Discipline>,
     /// Whether this turn is a subagent's.
     ///
     /// One question, one field, and it decides exactly one thing: which of the
@@ -1118,6 +1150,8 @@ impl Turn {
             // the four task tools, and a delegated turn claiming the team's
             // work under the lead's name would be a claim nobody made.
             tasks: None,
+            team: None,
+            discipline: std::sync::Mutex::default(),
             delegated: true,
             persist: parts.persist,
         }
@@ -1517,6 +1551,123 @@ struct BufferedCall {
     json: String,
     /// The `Pending` part opened for the call when it started.
     part_id: PartId,
+}
+
+/// Records, at most once for the whole step, that `calls` delegated without
+/// naming anybody while this session's team was live (**the name nag**).
+///
+/// Silent for a session that leads nobody, and silent for a step whose `task`
+/// calls all carried a name. The registry is read *now* rather than off the
+/// turn's opening [`Turn::teamless`]: the `/team` pipeline's own first step
+/// spawns the members, so a turn that began leading nobody is exactly the turn
+/// this has to notice about.
+fn note_anonymous_delegations(turn: &Turn, calls: &[BufferedCall]) {
+    if !leads_a_live_team(turn) {
+        return;
+    }
+
+    let anonymous = calls.iter().any(|call| {
+        delegates(call) && crate::teammate::discipline::delegates_anonymously(&call.json)
+    });
+    if anonymous {
+        turn.discipline
+            .lock()
+            .expect("the turn guards are never poisoned")
+            .note_anonymous_delegation();
+    }
+}
+
+/// Whether this turn's session is leading a team that still has somebody
+/// running in it.
+///
+/// The registry is read *now* rather than snapshotted, so a member spawned
+/// earlier in this very turn counts and one that has exited does not. False on
+/// every turn with no teammate machinery — a subagent's, every scripted and
+/// golden run — where both guards are inert by construction.
+fn leads_a_live_team(turn: &Turn) -> bool {
+    turn.team.as_ref().is_some_and(|registry| registry.running() > 0)
+}
+
+/// Whether this turn should keep going because the team it leads still holds
+/// unfinished work (**the continuation blocker**).
+///
+/// Every clause is a typed fact, and none of them is the state JSON the model
+/// writes for itself: a live member in the registry, no dialog waiting for an
+/// answer, a pending or in-progress document on the shared list, and a breaker
+/// that has not tripped. What to do with those four is
+/// [`Discipline::should_continue`]'s, so the truth table is one expression a
+/// test can walk exhaustively; what is here is the gathering.
+///
+/// Called at the one point the loop would otherwise return, and after the
+/// steer drain — see [`crate::teammate::discipline`] for why each of those is
+/// where it is.
+///
+/// [`Discipline::should_continue`]: crate::teammate::discipline::Discipline::should_continue
+async fn continue_for_the_team(turn: &Turn) -> bool {
+    use crate::teammate::discipline::Facts;
+
+    let live_team = !turn.cancel.is_cancelled() && leads_a_live_team(turn);
+    // Unreachable as the loop stands — a call that opened a dialog has been
+    // awaited by the time a step reports no calls at all — and gathered
+    // anyway, because "never while the user is being asked something" is a
+    // promise about this behavior rather than about the shape of the loop that
+    // happens to keep it.
+    let dialog_open =
+        !turn.pending.lock().expect("the pending replies are never poisoned").is_empty();
+    let budget = turn.discipline.lock().expect("the turn guards are never poisoned").may_continue();
+
+    if live_team && !budget {
+        // The breaker: said at the moment it trips, and not again, because the
+        // turn ends here.
+        tracing::info!(
+            limit = crate::teammate::discipline::MAX_CONTINUATIONS,
+            "the turn stopped auto-continuing and handed the session back",
+        );
+    }
+
+    // The list is the one fact that costs a read off the disk, so it is the
+    // one gated on the three that do not: a turn already refused by those has
+    // no use for the answer.
+    let open = if live_team && !dialog_open && budget {
+        match turn.tasks.as_ref() {
+            None => Vec::new(),
+            Some(tasks) => match tasks.list().await {
+                Ok(open) => open,
+                Err(failure) => {
+                    // A list that could not be read is not evidence of work:
+                    // saying so and stopping hands the session back to the
+                    // person, which is the safe direction for a guard whose
+                    // failure mode is talking to itself.
+                    tracing::warn!(
+                        reason = %failure.reason,
+                        "the team's task list could not be read",
+                    );
+                    Vec::new()
+                }
+            },
+        }
+    } else {
+        Vec::new()
+    };
+
+    let facts = Facts {
+        live_team,
+        dialog_open,
+        unfinished_work: crate::teammate::discipline::holds_unfinished_work(&open),
+    };
+    let mut discipline = turn.discipline.lock().expect("the turn guards are never poisoned");
+    if !discipline.should_continue(facts) {
+        return false;
+    }
+
+    let spent = discipline.continue_turn();
+    drop(discipline);
+    tracing::info!(
+        note = %crate::teammate::discipline::continuation_note(spent, open.len()),
+        "the team still holds work, so the turn continues",
+    );
+
+    true
 }
 
 /// Runs one turn to its finish event.
@@ -2127,6 +2278,21 @@ async fn drive(turn: &Turn) -> (Message, Option<Outcome>) {
                         }
                         ControlFlow::Continue(false) => {
                             record_patch(turn, &mut assistant, before.take()).await;
+
+                            // Nobody typed, so this is where the turn ends —
+                            // unless the team this session leads is still
+                            // running with work on its list, which is the one
+                            // thing a prompt cannot be trusted to notice about
+                            // itself (`teammate::discipline`). Checked after
+                            // the steer drain, deliberately: a continuation
+                            // loses to a person every time. Continuing takes
+                            // the same boundary bookkeeping a steer's arm
+                            // below does, for the same reason.
+                            if continue_for_the_team(turn).await {
+                                before = track(turn).await;
+                                continue;
+                            }
+
                             return (assistant, Some(Outcome::finished(reason)));
                         }
                         // The same bookkeeping a tool step's boundary does, so
@@ -2134,6 +2300,14 @@ async fn drive(turn: &Turn) -> (Message, Option<Outcome>) {
                         // the tree as it stands rather than against the one
                         // this step opened on.
                         ControlFlow::Continue(true) => {
+                            // A steer carried the turn, so the auto-continuation
+                            // budget is not the thing keeping it alive and is
+                            // put back — "five *consecutive*" counted from
+                            // here.
+                            turn.discipline
+                                .lock()
+                                .expect("the turn guards are never poisoned")
+                                .user_took_over();
                             record_patch(turn, &mut assistant, before.take()).await;
                             before = track(turn).await;
                             continue;
@@ -2154,6 +2328,14 @@ async fn drive(turn: &Turn) -> (Message, Option<Outcome>) {
                 // in a file read. Everything else, including a `task` call with
                 // an ordinary call between it and the next one, keeps the
                 // promise above word for word.
+
+                // Over the whole step's batch and before any of it runs, which
+                // is what makes the nag one block rather than one per call in
+                // a fan-out (`teammate::discipline`). Nothing is refused here:
+                // an anonymous subagent is still a first-class thing to want
+                // (**D462**), and the model reads this on its next request.
+                note_anonymous_delegations(turn, &calls);
+
                 let mut queued: std::collections::VecDeque<BufferedCall> = calls.into();
                 while let Some(first) = queued.pop_front() {
                     let mut batch = vec![first];
@@ -3070,6 +3252,24 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
             && let Some(user) = messages.iter_mut().rev().find(|message| message.role == Role::User)
         {
             user.parts.push(Part::text(listing));
+        }
+
+        // The team guards' blocks, on the same seam and for the same reason:
+        // they belong to the REQUEST and never to the transcript. That is
+        // load-bearing here in a way it is not above — a continuation block
+        // persisted as a user part would be this session showing the person
+        // words they never typed, and a resumed transcript would read as
+        // though they had asked the model to carry on. Taken rather than read,
+        // so each block appears in exactly one request however many steps
+        // follow it; empty on every turn of every session that leads no team,
+        // which is every scripted and golden run.
+        for block in
+            turn.discipline.lock().expect("the turn guards are never poisoned").take_blocks()
+        {
+            if let Some(user) = messages.iter_mut().rev().find(|message| message.role == Role::User)
+            {
+                user.parts.push(Part::text(block));
+            }
         }
         // **D492** (`deferred-mcp-tools-advertise-filtered`): what is
         // *advertised* is a subset of what is *registered* — whole MCP

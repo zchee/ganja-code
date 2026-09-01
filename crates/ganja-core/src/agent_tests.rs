@@ -3,7 +3,10 @@ use std::path::Path;
 
 use serde_json::json;
 
-use super::{AgentError, BUILD, EXPLORE, EXPLORE_PROMPT, GENERAL, PLAN, Registry};
+use super::{
+    ANALYST, AgentError, BUILD, CRITIC, DEBUGGER, EXECUTOR, EXPLORE, EXPLORE_PROMPT, GENERAL, PLAN,
+    Registry, VERIFIER,
+};
 use crate::config::{AgentConfig, AgentMode, Config, Overrides};
 use crate::permission::{Action, PermissionConfig, Permissions, Rule};
 
@@ -40,12 +43,43 @@ fn registry(config: &Config) -> Registry {
 }
 
 #[test]
-fn the_builtins_are_the_four_upstream_agents_this_build_can_run() {
+fn the_builtins_are_the_four_upstream_agents_this_build_can_run_and_ganjas_own_five() {
     let registry = registry(&Config::default());
     let names: Vec<&str> = registry.agents().iter().map(|agent| agent.name.as_str()).collect();
 
-    assert_eq!(names, vec![BUILD, PLAN, GENERAL, EXPLORE]);
-    assert_eq!(registry.default_agent(), BUILD);
+    assert_eq!(
+        names,
+        vec![BUILD, PLAN, GENERAL, EXPLORE, ANALYST, EXECUTOR, VERIFIER, CRITIC, DEBUGGER],
+        "upstream's four, then the five `/team`'s stage routing names",
+    );
+    assert_eq!(registry.default_agent(), BUILD, "and the five changed nothing about that");
+}
+
+/// The five carry prompts of their own, and none of them carries the team
+/// work-protocol text: the pipeline's stages, claim discipline and shutdown
+/// belong to `/team`'s template, so a copy here would be a second place for
+/// them to drift — and an agent spawned outside a team would be reading
+/// instructions about a team it is not in.
+#[test]
+fn the_five_team_roles_carry_their_own_prompts_and_no_protocol() {
+    let registry = registry(&Config::default());
+
+    for name in [ANALYST, EXECUTOR, VERIFIER, CRITIC, DEBUGGER] {
+        let agent = registry.get(name).unwrap_or_else(|| panic!("{name} is builtin"));
+        let prompt = agent.prompt.as_deref().unwrap_or_else(|| panic!("{name} has a prompt"));
+
+        assert!(prompt.starts_with("You are a"), "{name}: {prompt}");
+        assert!(
+            agent.description.as_deref().is_some_and(|line| !line.is_empty()),
+            "{name} is offered to the task tool by a line the model reads",
+        );
+        for protocol in ["task_create", "task_list", "shutdown_request", "team-exec"] {
+            assert!(
+                !prompt.contains(protocol),
+                "{name}'s prompt says {protocol}, which is `/team`'s template's to say",
+            );
+        }
+    }
 }
 
 #[test]
@@ -64,6 +98,14 @@ fn only_the_subagents_may_be_spawned_and_only_the_others_may_be_selected() {
             (PLAN, false, true),
             (GENERAL, true, false),
             (EXPLORE, true, false),
+            // The five are subagents for the same reason `general` is: a
+            // `/team` run delegates to them, and nobody switches a session to
+            // one.
+            (ANALYST, true, false),
+            (EXECUTOR, true, false),
+            (VERIFIER, true, false),
+            (CRITIC, true, false),
+            (DEBUGGER, true, false),
         ]
     );
 }

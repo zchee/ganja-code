@@ -196,6 +196,8 @@ fn turn_with(
         hooks: None,
         postbox: None,
         tasks: None,
+        team: None,
+        discipline: std::sync::Mutex::default(),
         delegated: false,
         persist: None,
     };

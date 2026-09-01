@@ -147,6 +147,9 @@ use crate::provider::Provider;
 use crate::tool::Registry;
 use crate::{Engine, Storage};
 
+/// The two engine-native guards a lead's turn loop runs under while it holds
+/// a team: the continuation blocker and the name nag.
+pub(crate) mod discipline;
 /// Which session a name points at, and what a person is told about the name
 /// they typed (**D528**, **D529**'s reminder half).
 pub mod identity;

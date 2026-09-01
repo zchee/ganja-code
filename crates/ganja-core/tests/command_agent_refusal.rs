@@ -82,6 +82,9 @@ async fn a_command_naming_an_agent_nobody_has_is_refused_by_file_at_load_and_by_
             "init".to_owned(),
             "plain".to_owned(),
             "planned".to_owned(),
+            // The second builtin, which names no agent of its own: the `/team`
+            // pipeline runs as whoever the session already is.
+            "team".to_owned(),
         ],
         "the roster the loader builds knows nothing about agents yet"
     );
@@ -98,9 +101,15 @@ async fn a_command_naming_an_agent_nobody_has_is_refused_by_file_at_load_and_by_
 
     assert_eq!(
         engine.commands().names(),
-        vec!["declared".to_owned(), "init".to_owned(), "plain".to_owned(), "planned".to_owned(),],
+        vec![
+            "declared".to_owned(),
+            "init".to_owned(),
+            "plain".to_owned(),
+            "planned".to_owned(),
+            "team".to_owned(),
+        ],
         "the file naming nobody is gone; the file naming a real agent, the \
-         file naming none, and the config entry all stay"
+         file naming none, the config entry and both builtins all stay"
     );
 
     // The refusal named the file somebody has to edit, and the agent that is

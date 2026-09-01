@@ -5425,6 +5425,8 @@ impl Engine {
             hooks: self.hooks(),
             postbox: self.postbox.lock().expect("the postbox is never poisoned").clone(),
             tasks: self.tasks.lock().expect("the task list is never poisoned").clone(),
+            team: self.teammates.as_ref().map(|team| Arc::clone(team.registry())),
+            discipline: std::sync::Mutex::default(),
             delegated: false,
             persist,
         };

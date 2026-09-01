@@ -1,0 +1,226 @@
+You are running a team pipeline. Read this whole instruction before acting.
+
+What the user typed after `/team` is between the markers below. It may be
+empty.
+
+<team-arguments>
+$ARGUMENTS
+</team-arguments>
+
+## First, decide which of three things was asked
+
+1. **Nothing at all** — the arguments are empty or whitespace. Print the usage
+   below, verbatim in substance, and stop. Do not start a pipeline, do not
+   file tasks, do not spawn anybody.
+
+       /team [N[:agent]] [--backend <surface>] <task>
+
+       Runs a staged pipeline over a shared task list: plan, decompose, spawn
+       teammates, verify, fix, shut down.
+
+         N          how many teammates to start; omitted, size it from the
+                    decomposition (two to four is usually right)
+         :agent     the agent every spawned teammate runs as, overriding the
+                    per-stage routing
+         --backend  the surface they run on: ganja, claude, codex, grok, agy,
+                    in-process. Omitted, the registry's default is used.
+
+       Example:
+         /team 3 port the config loader to TOML and keep the old files loading
+
+       Managing teammates one at a time — listing the roster, starting one,
+       shutting one down — is `/teammate`, not this command.
+
+2. **Roster management wearing this command's old spelling** — the arguments
+   begin with `spawn`, `shutdown`, `list`, or otherwise read as a request to
+   start, stop or enumerate a single teammate rather than to run a task. Tell
+   the user that those moved to `/teammate` and show them the line they meant,
+   with `/teammate` in place of `/team`. Stop there. Do not run a pipeline for
+   an argument list that was never a task description.
+
+3. **A task** — anything else. Parse it as
+   `[N[:agent]] [--backend <surface>] <task>` and run the pipeline below.
+   Parse leniently: a leading integer is N, a `:name` glued to it is the agent
+   override, `--backend <surface>` may appear before or after the task text,
+   and everything left over is the task. If the leftover is empty, treat it as
+   case 1.
+
+## Where this pipeline keeps its state
+
+Two directories, both absolute, both already correct for this checkout:
+
+- Pipeline state: `${state}`
+  One file per lead session, named `<lead-session-id>.json`. Use this
+  session's own id, which is on the session row you are running in.
+- Stage handoffs: `${handoffs}`
+  One file per stage, named `<stage>.md`, flat and shared across runs in this
+  project.
+
+Create either directory with the `write` tool as you would any file; write and
+read these files with `write` and `read`. Nothing else manages them.
+
+### The state file
+
+A JSON object with exactly these keys, as real JSON types — a number is a
+number, a list is a list:
+
+    {
+      "task": "<the task text you parsed>",
+      "agent_count": 3,
+      "agent_types": ["executor", "verifier"],
+      "current_phase": "team-exec",
+      "fix_loop_count": 0,
+      "max_fix_loops": 3,
+      "stage_history": ["team-plan", "team-prd", "team-exec"]
+    }
+
+`max_fix_loops` is 3 unless the user asked for something else. Rewrite the
+whole file at every stage transition; do not append.
+
+### Resuming
+
+Before anything else, read the state file for this session. If it exists and
+its `current_phase` is not a terminal one — not `completed`, not `failed` —
+this is a resume: continue from that phase, using the handoff files for what
+earlier stages decided. Never restart a pipeline that has a non-terminal
+phase; the tasks it filed are still on the list and the teammates it started
+may still be running.
+
+### Handoff files
+
+At every stage transition, write `${handoffs}/<stage>.md` for the stage you
+are leaving, with these five headings and nothing invented beyond them:
+
+    # Decided
+    # Rejected
+    # Risks
+    # Files
+    # Remaining
+
+Read the previous stage's handoff before spawning anybody for the next one.
+Handoffs survive cancellation on purpose: they are what a later run reads to
+avoid redoing settled work.
+
+## The stages
+
+Run them in this order. Each one ends by writing its handoff and updating
+`current_phase` and `stage_history` in the state file.
+
+**team-plan** — understand the task and decompose it. Read the code before
+deciding anything. Exit when you can name the subtasks, their dependencies,
+and how many teammates the work actually wants.
+
+**team-prd** — only when the scope is genuinely ambiguous. Produce acceptance
+criteria: what must be true for this to be done. Skip it outright for a task
+whose success condition is already obvious, and say in the handoff that you
+skipped it. Exit when the acceptance criteria are written down.
+
+**team-exec** — build it. In this order:
+
+1. `task_create` every subtask. The subject is imperative and short; the
+   description is self-contained, because whoever picks it up has not read
+   this conversation. Wire dependencies with `blockedBy` so nobody claims work
+   that cannot start.
+2. Pre-assign owners with `task_update` where you already know who should do
+   what. Leave the rest ownerless for whoever is free.
+3. Spawn the teammates with the `task` tool, giving each one a `name`, a
+   `subagent_type` from the routing table below, and the `backend` the user
+   asked for if they asked for one.
+
+Filing the tasks before spawning is deliberate: a member that starts with an
+empty list has nothing to claim.
+
+Every spawn prompt must carry all four of these:
+
+- **Who it is** — its own name, and one sentence on the part of the task it
+  owns.
+- **Claim discipline** — work only tasks it owns; set `in_progress` with
+  `task_update` before starting and `completed` after finishing; report back
+  with `send_message`; then call `task_list` and take the next thing it can.
+- **What it may not do** — it does not spawn teammates of its own, and it does
+  not touch tasks somebody else owns.
+- **What its backend can see** — the capability line for its surface, from the
+  matrix below.
+
+**team-verify** — a `verifier` teammate checks the built result against the
+acceptance criteria, with evidence: commands run, output seen. Anything that
+fails becomes a new task, filed with `task_create` and described well enough
+to fix without re-reading the failure.
+
+**team-fix** — the fix tasks go back through team-exec. Increment
+`fix_loop_count` each time round. When it reaches `max_fix_loops`, stop
+looping: set `current_phase` to `failed`, and report what is still broken with
+the evidence for it. A pipeline that fails honestly after three attempts is
+worth more than one that circles forever.
+
+## While members are working
+
+React to signals; never poll. The two signals are the `idle_notification` a
+member emits when it finishes a turn, which carries its result, and the
+messages members send you. Between signals, `task_list` is your reconciliation
+view — what is really claimed, done and blocked.
+
+Do not sleep, do not busy-wait, and do not re-run `task_list` in a loop hoping
+something changed. Nothing changes while you are looping.
+
+**When a member looks dead** — a task has been `in_progress` for a long time
+and that member has sent nothing — ask it directly with `send_message` for a
+status. If it does not answer, reassign the task with `task_update` and stop
+giving that member new work.
+
+**When work backs up** — many pending tasks and every member busy — spawn
+another one, the same way you spawned the first. There is no cap. Names must
+be unique.
+
+**When a member has nothing left to do** — no pending task it could claim —
+let it finish whatever it holds, then send it `shutdown_request`. Draining an
+idle member is better than leaving it running.
+
+## Finishing
+
+When every real task is `completed` or has been terminally failed with its
+reason recorded:
+
+1. Send each member a `shutdown_request` frame through `send_message`.
+2. Wait for `shutdown_approved`, and for the `teammate_terminated` that
+   follows.
+3. Delete the state file.
+4. Report to the user: what was built, what was verified and how, and anything
+   left undone.
+
+If the user cancels instead, leave the handoff files where they are. They are
+what makes the next run a resume rather than a restart.
+
+## Which agent runs which stage
+
+    team-plan     plan       (explore for read-only scouting)
+    team-prd      analyst    (critic to challenge the scope)
+    team-exec     general    (debugger for build and type errors)
+    team-verify   verifier
+    team-fix      executor, or debugger when the cause is unknown
+
+An `N:agent` override on the command line replaces this table for the members
+it spawns. A definition in `.ganja/agents/` with one of these names outranks
+the built-in of the same name — if this project defines its own `verifier`,
+that is the one to use. Roles this project may have defined and this table
+does not name — a designer, a writer, a test engineer, a security or code
+reviewer, an architect — are worth using when the work calls for them, and
+only if the user has actually defined them. Do not ask for an agent that does
+not exist.
+
+## What each backend can see
+
+- **in-process** and **ganja** members hold the task tools. They read and
+  write the same list you do, and they claim their own work.
+- **claude** members run Claude Code's own task list, which is a different
+  list. They cannot see this one. Give them their work in the spawn prompt and
+  in messages, and record their progress on this list yourself.
+- **codex**, **grok** and **agy** members hold no ganja tools at all. Push work
+  to them by message and read their answers the same way.
+
+## One thing to expect
+
+Each spawn is permission-gated. Starting several members may put several
+dialogs in front of the user, one after another, unless they have already
+stored an answer that covers them. This is normal. Wait for each one and carry
+on; do not try to route around it, and do not treat a dialog as a failure.

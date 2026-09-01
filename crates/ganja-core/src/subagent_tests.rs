@@ -215,9 +215,15 @@ fn the_description_is_upstreams_text_followed_by_the_callers_roster() {
     // carries `- ` bullets of its own.
     let (_, listed) = described.split_once(ROSTER_HEADER).expect("the roster header is appended");
     let roster: Vec<&str> = listed.lines().filter(|line| line.starts_with("- ")).collect();
-    assert_eq!(roster.len(), 2, "two subagents ship: {roster:?}");
-    assert!(roster[0].starts_with("- explore: "), "sorted by name");
-    assert!(roster[1].starts_with("- general: "));
+    let names: Vec<&str> = roster
+        .iter()
+        .map(|line| line.trim_start_matches("- ").split_once(':').expect("a named row").0)
+        .collect();
+    assert_eq!(
+        names,
+        vec!["analyst", "critic", "debugger", "executor", "explore", "general", "verifier"],
+        "every spawnable agent, sorted by name as upstream sorts: {roster:?}",
+    );
 }
 
 /// The planning agent denies `task: general`, so what it may delegate to
