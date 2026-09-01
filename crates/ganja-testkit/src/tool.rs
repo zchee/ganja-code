@@ -38,6 +38,7 @@ pub fn tool_ctx(spawn: Arc<dyn Subagents>) -> ToolCtx {
         credentials: Credentials::Unguarded,
         spawn: Some(spawn),
         postbox: None,
+        tasks: None,
         ask: None,
         switch: None,
         jobs: None,

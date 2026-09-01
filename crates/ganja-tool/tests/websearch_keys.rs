@@ -25,6 +25,7 @@ fn ctx() -> ToolCtx {
         credentials: Credentials::Unguarded,
         spawn: None,
         postbox: None,
+        tasks: None,
         ask: None,
         switch: None,
         jobs: None,

@@ -195,6 +195,7 @@ fn turn_with(
         jobs: None,
         hooks: None,
         postbox: None,
+        tasks: None,
         delegated: false,
         persist: None,
     };

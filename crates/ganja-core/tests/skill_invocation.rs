@@ -49,6 +49,7 @@ async fn tool_output(roots: Roots, name: &str) -> String {
         credentials: Credentials::Unguarded,
         spawn: None,
         postbox: None,
+        tasks: None,
         ask: None,
         switch: None,
         jobs: None,

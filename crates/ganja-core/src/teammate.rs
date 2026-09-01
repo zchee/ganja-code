@@ -178,6 +178,9 @@ pub mod preamble;
 pub mod receipts;
 /// The §6.1 loop that drives one in-process teammate.
 pub mod runner;
+/// The engine's half of the shared task list: `ganja-team`'s store behind
+/// `ganja-tool`'s four task tools, acted on under one bound identity.
+pub mod tasklist;
 
 /// One teammate: the name it answers to, and the engine its turns run on.
 ///
@@ -1325,6 +1328,17 @@ impl Spawned for InProcessMember {
         self.teammate
             .engine()
             .install_postbox(Arc::new(crate::subagent::Postbox::of(&registry, &self.teammate)));
+        // And the team's shared list under this teammate's own name, for the
+        // same reason and at the same moment: the team and the teammate first
+        // exist together here, and a list built anywhere else could be given a
+        // name its holder did not earn. The four tools it serves were lent by
+        // `Engine::teammate_tools`, which says why they join there rather than
+        // through the composition path the lead's own registration takes.
+        self.teammate.engine().install_tasks(Arc::new(tasklist::TeamTasks::of(
+            registry.root(),
+            registry.team(),
+            self.teammate.name(),
+        )));
 
         let forwarding =
             posture::Forwarding::new(Arc::clone(&self.teammate), self.lent.dialogs.clone());

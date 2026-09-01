@@ -142,6 +142,7 @@ async fn the_task_door_starts_a_teammate_at_once_and_refuses_a_pane_as_the_other
         credentials: Credentials::Unguarded,
         spawn: Some(Arc::new(door) as Arc<dyn Subagents>),
         postbox: None,
+        tasks: None,
         ask: None,
         switch: None,
         jobs: None,

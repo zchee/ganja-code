@@ -944,6 +944,16 @@ pub(crate) struct Turn {
     /// leads no team and belongs to none — and on every turn a subagent runs,
     /// which is offered no `send_message` to call.
     pub(crate) postbox: Option<Arc<dyn crate::tool::team::Postbox>>,
+    /// The shared task list this turn's task tools drive — engine-owned, and
+    /// carrying the identity *that engine* claims and comments under, which
+    /// is the same anti-forgery rule the postbox above states: no method on it
+    /// takes a `from`.
+    ///
+    /// Cloned at the turn's start like everything else here, so a team
+    /// installed mid-turn reaches the next one. [`None`] on a session with no
+    /// team machinery — and on every turn a subagent runs, which is offered
+    /// none of the four tools to call.
+    pub(crate) tasks: Option<Arc<dyn crate::tool::tasklist::TaskList>>,
     /// Whether this turn is a subagent's.
     ///
     /// One question, one field, and it decides exactly one thing: which of the
@@ -1104,6 +1114,10 @@ impl Turn {
             // offered no `send_message`, and a delegated turn writing to the
             // team under the lead's name would be a message nobody sent.
             postbox: None,
+            // None, for the reason the postbox is: a child is offered none of
+            // the four task tools, and a delegated turn claiming the team's
+            // work under the lead's name would be a claim nobody made.
+            tasks: None,
             delegated: true,
             persist: parts.persist,
         }
@@ -2327,6 +2341,9 @@ async fn drive_shell(turn: &Turn, command: String) -> (Message, Option<Outcome>)
         credentials: turn.credentials.clone(),
         spawn: None,
         postbox: None,
+        // Nor a task list: the four tools are the model's doors, and this is
+        // not the model.
+        tasks: None,
         // A `!` passthrough is the person at the terminal running a command,
         // not the model calling a tool. There is no call to ask about and
         // nothing that could ask — and nothing that could approve a plan, so
@@ -4050,6 +4067,9 @@ async fn start(
         // the engine running it sends as. A subagent's turn carries none, and
         // is offered no `send_message` to want one.
         postbox: turn.postbox.clone(),
+        // The turn's own, so a claim and a comment are recorded under the name
+        // the engine running them acts as. A subagent's turn carries none.
+        tasks: turn.tasks.clone(),
         // Built per call for the same reason, and out of the same three
         // pieces the permission wait uses: a dialog names the call it came
         // from, and a reply has to reach the turn that is blocked in it.

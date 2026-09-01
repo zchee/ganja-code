@@ -151,6 +151,7 @@ async fn a_files_own_write_does_not_condemn_it() {
         credentials: Credentials::Unguarded,
         spawn: None,
         postbox: None,
+        tasks: None,
         ask: None,
         switch: None,
         jobs: None,

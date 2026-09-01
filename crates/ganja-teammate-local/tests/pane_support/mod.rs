@@ -229,6 +229,7 @@ pub fn ctx(project: &Path, door: Arc<Door>) -> ToolCtx {
         credentials: Credentials::Unguarded,
         spawn: Some(door as Arc<dyn Subagents>),
         postbox: None,
+        tasks: None,
         ask: None,
         switch: None,
         jobs: None,

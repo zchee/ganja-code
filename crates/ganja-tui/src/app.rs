@@ -4965,10 +4965,12 @@ impl App {
             call_id: MENTION_CALL.to_owned(),
             files: Arc::new(FileTimes::default()),
             // The menu is a file walk, not a conversation: it has no
-            // credentials to guard, nothing to delegate to, and nobody to ask.
+            // credentials to guard, nothing to delegate to, nobody to ask, and
+            // no team list to act on.
             credentials: Credentials::Unguarded,
             spawn: None,
             postbox: None,
+            tasks: None,
             ask: None,
             switch: None,
             jobs: None,

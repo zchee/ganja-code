@@ -1141,6 +1141,20 @@ pub struct Engine {
     /// is after this engine was built. That last one's own doc says why it is the
     /// exception and why it is not public.
     postbox: std::sync::Mutex<Option<Arc<dyn crate::tool::team::Postbox>>>,
+    /// The shared task list this session's four task tools drive, acted on
+    /// under **this engine's own** identity — the lead's name on a lead, the
+    /// member's own on either kind of member, exactly as `postbox` above.
+    ///
+    /// Three installers for the same three kinds of session, and the parallel
+    /// is deliberate: [`Engine::with_teammates`] for the lead, whose registry
+    /// names the team the list belongs to; [`Engine::with_tasks`] for a pane
+    /// teammate, whose frontend holds the teams root its lead wrote; and
+    /// [`Engine::install_tasks`] for an in-process teammate, whose name and
+    /// team only exist together after this engine was built.
+    ///
+    /// [`None`] on a session with no team machinery at all, where the four
+    /// tools are not registered either.
+    tasks: std::sync::Mutex<Option<Arc<dyn crate::tool::tasklist::TaskList>>>,
     /// Every teammate's permission dialogs, waiting for the lead side to claim
     /// the receiver (**D-5**). See [`Engine::teammate_dialogs`].
     teammate_dialogs: std::sync::Mutex<Option<mpsc::Receiver<teammate::posture::Forwarded>>>,
@@ -1481,6 +1495,7 @@ impl Engine {
             jobs: Arc::new(job::JobRegistry::new()),
             teammates: None,
             postbox: std::sync::Mutex::new(None),
+            tasks: std::sync::Mutex::new(None),
             teammate_dialogs: std::sync::Mutex::new(None),
             team_shape: std::sync::Mutex::new(None),
             permission_mode: Arc::new(std::sync::Mutex::new(PermissionMode::Ask)),
@@ -2045,6 +2060,15 @@ impl Engine {
             None => Arc::new(Storeless),
         };
 
+        // Built before the registry moves into the door below, and installed
+        // after: the documents live in the team directory this registry names,
+        // so this is the first moment the list exists to be built at all.
+        let tasks = Arc::new(teammate::tasklist::TeamTasks::of(
+            registry.root(),
+            registry.team(),
+            registry.lead().as_str(),
+        ));
+
         let (dialogs, waiting) = mpsc::channel(TEAMMATE_DIALOGS);
         registry.forward_dialogs_to(dialogs);
         *self.teammate_dialogs.lock().expect("the dialog queue is never poisoned") = Some(waiting);
@@ -2060,6 +2084,11 @@ impl Engine {
             backends.with_in_process(in_process),
         )));
         self.install_postbox(lead);
+        // And the team's own shared list, under the lead's name. Unconditional
+        // on the team holding anybody: a lead files the work before it spawns
+        // whoever will do it, so a list withheld until the first member would
+        // be withheld at exactly the moment it is used first.
+        self.install_tasks(tasks);
         // A lead's postbox reaches `deliver_over_socket` and the resolver, so
         // this session may be handed the model-facing listing (**D535**).
         self.cross_session_postbox.store(true, Ordering::Relaxed);
@@ -2527,6 +2556,41 @@ impl Engine {
         self.cross_session_postbox.store(false, Ordering::Relaxed);
     }
 
+    /// Gives this session the shared task list its four task tools drive —
+    /// the door for a process that **is** a teammate, beside
+    /// [`Engine::with_postbox`], which the same assembly calls.
+    ///
+    /// Consuming, like every other installer here: which team's list a session
+    /// works on is decided once, before anything can be streaming. A pane
+    /// launched by some other session's lead installs one over the teams root
+    /// its launch line carried, and is offered the four tools from its first
+    /// turn — presence is ability, the same rule the lead's own list is
+    /// registered under.
+    ///
+    /// The identity a comment is written under is the list's own, bound when
+    /// it was built and never a parameter here, exactly as a postbox's sender
+    /// is.
+    #[must_use]
+    pub fn with_tasks(self, tasks: Arc<dyn crate::tool::tasklist::TaskList>) -> Self {
+        self.install_tasks(tasks);
+        self.recompose_tools();
+
+        self
+    }
+
+    /// Installs the shared task list one engine's task tools drive.
+    ///
+    /// `&self` and `pub(crate)` for [`Engine::install_postbox`]'s reasons, in
+    /// both halves: an in-process teammate's list can only be built once
+    /// [`teammate::TeammateRegistry`] holds both the team and the teammate,
+    /// which is after that engine was built and while it is reachable by
+    /// shared reference alone; and a public setter on `&self` would hand back
+    /// the choice of whose name a comment carries, which is exactly what
+    /// binding the identity at construction exists to prevent.
+    pub(crate) fn install_tasks(&self, tasks: Arc<dyn crate::tool::tasklist::TaskList>) {
+        *self.tasks.lock().expect("the task list is never poisoned") = Some(tasks);
+    }
+
     /// Sets this session's self-name (**D530**, **ADJ-2**): the name a
     /// frontend's own registration record carries, and so the name another
     /// session resolves this one by. The one seam every `/rename` calls,
@@ -2767,6 +2831,16 @@ impl Engine {
     /// the lead is the one peer that exists before any teammate does and
     /// cannot go away, and who *else* a teammate may address is answered per
     /// call by its own postbox.
+    ///
+    /// The four task tools join the set **here** rather than through
+    /// [`Engine::compose`], and the asymmetry with the lead's own registration
+    /// is the timing again: a teammate engine composes once, when
+    /// [`teammate::Teammate::deferring`] builds it, and its list is installed
+    /// a moment later by [`teammate::Spawned::start`] — the same moment its
+    /// postbox is, which is why `send_message` is added here too. Their
+    /// descriptions carry no roster, so nothing about them varies per
+    /// teammate; what varies is the identity behind them, and that arrives in
+    /// the [`crate::tool::ToolCtx`] rather than in the tool.
     fn teammate_tools(
         &self,
         registry: &Arc<teammate::TeammateRegistry>,
@@ -2777,11 +2851,11 @@ impl Engine {
 
         move || {
             let base = Arc::clone(&lent.lock().expect("the tool registry is never poisoned"));
+            let messaging: Arc<dyn Tool> =
+                Arc::new(send_message::SendMessageTool::new(std::slice::from_ref(&lead)));
 
             Arc::new(
-                base.with(Arc::new(send_message::SendMessageTool::new(std::slice::from_ref(
-                    &lead,
-                )))),
+                base.with_all(std::iter::once(messaging).chain(crate::tool::tasklist::tools())),
             )
         }
     }
@@ -3816,6 +3890,9 @@ impl Engine {
             credentials: self.credentials.clone(),
             spawn: None,
             postbox: None,
+            // A command template expands outside any turn, so there is no
+            // team identity to act on a list under.
+            tasks: None,
             ask: None,
             switch: None,
             jobs: None,
@@ -4482,7 +4559,34 @@ impl Engine {
     /// the team tool joins before the arithmetic that reads the composed set's
     /// names, so it is in the definitions snapshot `tool_search` answers from.
     fn compose(&self, registry: Arc<Registry>, shape: Option<&TeamShape>) -> Arc<Registry> {
-        self.compose_deferral(self.team_messaging(registry, shape))
+        self.compose_deferral(self.team_tasks(self.team_messaging(registry, shape)))
+    }
+
+    /// Adds the four task tools wherever this session has a shared list
+    /// installed, and nothing at all where it has none.
+    ///
+    /// Registered here rather than in `Registry::with_builtins` for `task`'s
+    /// and `send_message`'s reason: presence is ability. A session with no
+    /// team machinery has no list to keep — which is also what keeps the
+    /// golden differential comparing two agents rather than two teams — and a
+    /// session that has one is offered the four again on every rebuild, so a
+    /// `/plugin` Reload cannot quietly drop them.
+    ///
+    /// Deliberately **not** gated on the team holding anybody. A lead files
+    /// the work before it spawns the members that will do it, so refusing a
+    /// list to a session that leads nobody yet would refuse it at exactly the
+    /// moment it is used first.
+    ///
+    /// A subagent is offered the *lent* set rather than the composed one, so
+    /// it does not get these — deliberately, and for the reason it gets no
+    /// `send_message`: a delegated turn runs inside its parent's, and the
+    /// identity it would claim and comment under is the parent's.
+    fn team_tasks(&self, registry: Arc<Registry>) -> Arc<Registry> {
+        if self.tasks.lock().expect("the task list is never poisoned").is_none() {
+            return registry;
+        }
+
+        Arc::new(registry.with_all(crate::tool::tasklist::tools()))
     }
 
     /// This session's team as the offered `send_message` describes it, read
@@ -5320,6 +5424,7 @@ impl Engine {
             jobs: Some(Arc::clone(&self.jobs) as Arc<dyn crate::tool::job::Jobs>),
             hooks: self.hooks(),
             postbox: self.postbox.lock().expect("the postbox is never poisoned").clone(),
+            tasks: self.tasks.lock().expect("the task list is never poisoned").clone(),
             delegated: false,
             persist,
         };

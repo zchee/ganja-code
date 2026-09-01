@@ -40,6 +40,11 @@ pub mod shell;
 pub mod skill;
 pub mod socket;
 pub mod task;
+/// The team's **shared task list** and the four tools that drive it — never
+/// [`task`], which is the spawn door. The names are one letter apart and the
+/// meanings are not related at all, which is why each module's own first
+/// paragraph says which it is.
+pub mod tasklist;
 pub mod team;
 pub mod todo;
 pub mod truncate;
@@ -130,6 +135,20 @@ pub struct ToolCtx {
     /// argument: one postbox per engine, carrying the name that engine sends
     /// as. See [`team::Postbox`] for why that is a mechanism and not a taste.
     pub postbox: Option<Arc<dyn team::Postbox>>,
+    /// The shared task list a call reads and writes, which only
+    /// [`tasklist`]'s four tools do.
+    ///
+    /// [`None`] wherever there is no team to keep a list for — every fixture,
+    /// every session that installed no team machinery — and the four are then
+    /// not registered at all, so a call reaching a `None` here is a build that
+    /// offered a tool it cannot serve and gets told so in words rather than a
+    /// panic.
+    ///
+    /// Whose name a comment is written under is **inside** this value rather
+    /// than in any argument, exactly as the sender's is inside
+    /// [`ToolCtx::postbox`]. See [`tasklist::TaskList`] for why that is a
+    /// mechanism and not a taste.
+    pub tasks: Option<Arc<dyn tasklist::TaskList>>,
     /// What a call asks the person a question through, which only
     /// [`question::QuestionTool`] does.
     ///
@@ -203,6 +222,7 @@ impl ToolCtx {
             credentials: Credentials::Unguarded,
             spawn: None,
             postbox: None,
+            tasks: None,
             ask: None,
             switch: None,
             jobs: None,
