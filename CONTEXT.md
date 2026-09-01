@@ -39,7 +39,9 @@ _Avoid_: provider (that is a model vendor), worker type, execution mode
 
 **Agent** (persona):
 A named prompt-and-rules identity a session or teammate runs as — `build`,
-`plan`, `general`, `explore`, or one the config adds.
+`plan`, `general`, `explore`, the five roles a team run routes its stages to
+(`analyst`, `executor`, `verifier`, `critic`, `debugger`), or one the config
+adds.
 _Avoid_: role, agent-type (OMC's word, which mixes personas and providers)
 
 **task tool**:
@@ -53,8 +55,10 @@ carrying an owner, dependencies, and a lifecycle from pending to completed.
 _Avoid_: todo (the private per-session list), ticket, work item
 
 **Task list**:
-The shared, per-team list of Tasks that the lead and teammates coordinate
-through.
+The shared list of Tasks that the lead and teammates coordinate through, kept
+in the team's own directory. It belongs to a team but does not wait for one:
+it is created with its first Task, which a lead files before spawning whoever
+will do the work.
 _Avoid_: todo list
 
 **Stage**:
