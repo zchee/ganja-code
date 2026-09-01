@@ -735,7 +735,7 @@ impl Teammates {
                 // keyed on `backend`, because which door a shim spawns on is
                 // the wired backend's fact — the headless one answers `None`
                 // — and the same answer closes the registry's ring lines, so
-                // the dialog and `/team` cannot describe one pane differently.
+                // the dialog and `/teammate` cannot describe one pane differently.
                 if let Some(surface) = implementation.surface_line() {
                     args["surface"] = serde_json::Value::from(surface);
                 }

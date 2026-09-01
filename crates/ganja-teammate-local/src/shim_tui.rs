@@ -1405,7 +1405,7 @@ impl TuiRunner {
     /// completes — which is the fourth clause of ruling 8 by construction.
     pub async fn run(self) {
         // The spawn's own finding goes on the ring first, so a person opening
-        // `/team` learns whether the composer was seen before the first
+        // `/teammate` learns whether the composer was seen before the first
         // delivery was ever attempted.
         self.remember(match self.handle.readiness() {
             Readiness::Seen => RING_READY.to_owned(),

@@ -91,14 +91,14 @@ async fn a_pane_teammate_whose_pane_is_killed_reports_its_own_exit_and_leaves_th
 
     // 3. Nothing here has touched the member: no pass has run, and nothing
     // called its kill. So the only thing that can have taken it off the roster
-    // is its own watch clearing the flag `/team` reads.
+    // is its own watch clearing the flag `/teammate` reads.
     ganja_testkit::eventually(NOTICES, "the pane's own watch to stop counting it", async || {
         (spawned.registry.running() == 0).then_some(())
     })
     .await;
     assert!(
         !spawned.registry.view().members.iter().any(|member| member.name == "worker"),
-        "and `/team` stopped listing it"
+        "and `/teammate` stopped listing it"
     );
 
     // 4. The lead's pass drains the exit and retires the member on it. Each
