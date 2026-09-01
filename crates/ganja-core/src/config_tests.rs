@@ -886,6 +886,33 @@ fn an_element_name_nothing_renders_is_refused_by_name() {
     );
 }
 
+/// W5's element joins the roster vocabulary the same way: a roster may name
+/// `task-list`, and the name is its own rather than a second spelling of
+/// `tasks` — the two count different things, and a config that meant one and
+/// got the other would be told nothing.
+#[test]
+fn a_statusline_roster_may_name_the_shared_task_list() {
+    let config = parse(r#"tui = { statusline = { elements = ["tasks", "task-list"] } }"#)
+        .expect("it parses");
+
+    assert_eq!(
+        config.tui.statusline.expect("the table was written").elements,
+        Some(vec![StatuslineElement::Tasks, StatuslineElement::TaskList]),
+    );
+}
+
+/// And the near-misses of it are refused by name, the discipline every
+/// widening of this enum is held to.
+#[test]
+fn a_near_miss_of_the_task_list_element_is_refused_by_name() {
+    for near_miss in ["tasklist", "task_list", "tasks-list"] {
+        let error = parse(&format!(r#"tui = {{ statusline = {{ elements = ["{near_miss}"] }} }}"#))
+            .expect_err("only the name something renders is accepted");
+
+        assert!(error.to_string().contains(near_miss), "the refusal names it: {error}");
+    }
+}
+
 /// The statusline table is curated like the `tui` table above it.
 #[test]
 fn a_key_the_statusline_table_does_not_have_is_refused_by_name() {

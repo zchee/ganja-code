@@ -240,6 +240,15 @@ pub struct Status {
     /// no window of its own: without a count, a session leading four teammates
     /// looks exactly like one leading none.
     teammates: usize,
+    /// `(open, total)` of the team's **shared task list** — the list the four
+    /// `task_*` tools drive, not the delegated children `running_tasks`
+    /// counts. Polled off `Engine::task_list` on a coarse clock rather than
+    /// on the tick every other count here rides, because the list is
+    /// documents on disk that another process writes too.
+    ///
+    /// `(0, 0)` until something has been filed, which is what keeps the
+    /// segment absent on every session that never files one.
+    task_list: (usize, usize),
     /// Whether this session answers its own permission dialogs (**D479**).
     ///
     /// Standing, not transient: every other segment here says what is
@@ -309,6 +318,7 @@ impl Status {
             queued_dialogs: 0,
             held: 0,
             teammates: 0,
+            task_list: (0, 0),
             yolo: false,
             elements: None,
             max_width: None,
@@ -464,6 +474,31 @@ impl Status {
     /// Records how many teammates this session is leading (**D503**).
     pub fn set_teammates(&mut self, teammates: usize) {
         self.teammates = teammates;
+    }
+
+    /// Records how much of the team's shared task list is still open: how
+    /// many tasks are pending or in progress, and how many there are at all.
+    ///
+    /// Both numbers rather than one, because the segment says how far along
+    /// the team is and a bare count of open work cannot: `0/7` is a list
+    /// finished and `7/7` is one nobody has started, and they are not the
+    /// same news.
+    pub fn set_task_list(&mut self, open: usize, total: usize) {
+        self.task_list = (open, total);
+    }
+
+    /// Whether this bar would draw the team's shared task list at all.
+    ///
+    /// What a caller asks before paying for the list: reading it is a
+    /// directory read rather than a lock, so a session whose roster never
+    /// names the element should never poll for it. The absent-config bar is
+    /// one of those — `task-list` is opt-in, so a config that says nothing
+    /// answers `false` here and no disk is touched for it.
+    #[must_use]
+    pub fn draws_task_list(&self) -> bool {
+        self.elements
+            .as_ref()
+            .is_some_and(|elements| elements.contains(&StatuslineElement::TaskList))
     }
 
     /// Records what the engine is doing now.
@@ -771,6 +806,18 @@ impl Status {
                     ))
                 })
                 .flatten(),
+            // The team's own work, beside the count of who is doing it — and
+            // the one element here that is not about this process at all: the
+            // list is on disk and every member of the team writes to it, so
+            // the number can move while this session sits idle. From an empty
+            // list rather than from no open work, because a team that has
+            // finished everything it filed is exactly what somebody watching
+            // this segment is waiting to see.
+            StatuslineElement::TaskList => {
+                let (open, total) = self.task_list;
+
+                (total > 0).then(|| plain(format!("{open}/{total} team tasks"))).flatten()
+            }
             // Spend where its width is predictable, and the notice after
             // it: the notice is the one segment with no length limit.
             StatuslineElement::Tokens => {

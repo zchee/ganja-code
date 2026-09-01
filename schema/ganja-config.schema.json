@@ -968,7 +968,7 @@
     },
     "StatuslineElement": {
       "title": "Status bar element",
-      "description": "One thing the status bar can render: today's segments (activity, agent, effort, queued, jobs, tasks, dialogs, held, teammates, tokens, notice, hints - held is the admission gate's count, D524), the HUD vocabulary the P14 screenshot pinned (git, model, context, session, cwd, todos), and rate, the tightest of the vendor's own rate-limit windows (D484). Plan and account meters are still absent: those need a vendor usage API ganja does not speak.",
+      "description": "One thing the status bar can render: today's segments (activity, agent, effort, queued, jobs, tasks, dialogs, held, teammates, tokens, notice, hints - held is the admission gate's count, D524), task-list, how much of the team's shared task list is still open (open/total, opt-in: the default bar never draws it, and it is not tasks, which counts the delegated children of the running turn), the HUD vocabulary the P14 screenshot pinned (git, model, context, session, cwd, todos), and rate, the tightest of the vendor's own rate-limit windows (D484). Plan and account meters are still absent: those need a vendor usage API ganja does not speak.",
       "$comment": "crates/ganja-core/src/config.rs (StatuslineElement, rename_all = kebab-case).",
       "type": "string",
       "enum": [
@@ -981,6 +981,7 @@
         "dialogs",
         "held",
         "teammates",
+        "task-list",
         "tokens",
         "notice",
         "hints",

@@ -269,6 +269,63 @@ fn a_roster_naming_held_shows_the_count_only_while_something_is_held() {
     assert!(!rendered(&status, 120).contains("held"));
 }
 
+/// The team's shared list is opt-in vocabulary (W5): a roster that names
+/// `task-list` draws how much of it is still open, and only while the team
+/// has filed anything at all.
+#[test]
+fn a_roster_naming_the_task_list_shows_it_only_while_the_team_has_filed_work() {
+    let mut status = roster(&[StatuslineElement::Activity, StatuslineElement::TaskList]);
+    assert!(!rendered(&status, 120).contains("team tasks"));
+
+    status.set_task_list(3, 7);
+    let line = rendered(&status, 120);
+    assert!(line.contains("3/7 team tasks"), "got {line:?}");
+
+    // A list nobody has anything left on still draws: a team that finished
+    // what it filed is the news somebody watching this was waiting for.
+    status.set_task_list(0, 7);
+    assert!(rendered(&status, 120).contains("0/7 team tasks"));
+
+    status.set_task_list(0, 0);
+    assert!(!rendered(&status, 120).contains("team tasks"));
+}
+
+/// And the default bar is untouched by the name existing — `task-list` is
+/// opt-in, unlike `held`, whose segment was already on the bar when D524
+/// gave it one.
+#[test]
+fn the_default_bar_never_draws_the_task_list() {
+    let mut status = Status::new(None);
+    status.set_task_list(3, 7);
+    let line = rendered(&status, 120);
+
+    assert!(!line.contains("team tasks"), "got {line:?}");
+    assert!(!status.draws_task_list(), "and nothing polls for it");
+}
+
+/// The predicate a caller checks before paying for a directory read: true
+/// exactly where the roster names the element.
+#[test]
+fn only_a_roster_naming_the_task_list_asks_for_one() {
+    assert!(!Status::new(None).draws_task_list());
+    assert!(!roster(&[StatuslineElement::Activity, StatuslineElement::Tasks]).draws_task_list());
+    assert!(roster(&[StatuslineElement::TaskList]).draws_task_list());
+}
+
+/// The two `tasks` counts are different news and never each other: the
+/// delegated children of the running turn, and the team's shared list.
+#[test]
+fn the_running_task_count_and_the_shared_list_are_separate_segments() {
+    let mut status = roster(&[StatuslineElement::Tasks, StatuslineElement::TaskList]);
+    status.set_running_tasks(3);
+    status.set_task_list(1, 4);
+
+    let line = rendered(&status, 120);
+
+    assert!(line.contains("3 tasks running"), "got {line:?}");
+    assert!(line.contains("1/4 team tasks"), "got {line:?}");
+}
+
 /// The element name retired the dialogs piggyback: a roster that leaves
 /// `held` out never draws the count — not even beside `dialogs`, where
 /// the then-nameless segment used to ride.

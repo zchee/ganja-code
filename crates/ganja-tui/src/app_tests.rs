@@ -9811,7 +9811,12 @@ fn team_row(
 /// what is pinned is layout and key routing rather than a registry's
 /// timing.
 fn team_dialog() -> component::team::Team {
-    component::team::Team::new(vec![
+    component::team::Team::new(team_members(), Vec::new())
+}
+
+/// The roster both dialogs below open over.
+fn team_members() -> Vec<component::team::Row> {
+    vec![
         team_row("team-lead", ganja_protocol::MemberBackend::InProcess, true, &[]),
         team_row(
             "w1",
@@ -9820,7 +9825,37 @@ fn team_dialog() -> component::team::Team {
             &["read(src/lib.rs)", "grep(fn spawn)"],
         ),
         team_row("w2", ganja_protocol::MemberBackend::Claude, false, &[]),
-    ])
+    ]
+}
+
+/// The same dialog over a team that has filed work: the Tasks section under
+/// the roster, and the line naming the member that cannot see it.
+fn team_dialog_with_tasks() -> component::team::Team {
+    let tasks = vec![
+        ganja_tool::tasklist::Summary {
+            id: "1".to_owned(),
+            subject: "Read the plan".to_owned(),
+            status: ganja_tool::tasklist::Status::Completed,
+            owner: "w1".to_owned(),
+            blocked_by: Vec::new(),
+        },
+        ganja_tool::tasklist::Summary {
+            id: "2".to_owned(),
+            subject: "Wire the parser".to_owned(),
+            status: ganja_tool::tasklist::Status::InProgress,
+            owner: "w1".to_owned(),
+            blocked_by: Vec::new(),
+        },
+        ganja_tool::tasklist::Summary {
+            id: "3".to_owned(),
+            subject: "Draw the section".to_owned(),
+            status: ganja_tool::tasklist::Status::Pending,
+            owner: String::new(),
+            blocked_by: vec!["2".to_owned()],
+        },
+    ];
+
+    component::team::Team::new(team_members(), component::team::task_rows(&tasks))
 }
 
 /// The `/teammate` dialog's members step: every member with its backend and
@@ -9833,6 +9868,125 @@ async fn snapshot_team_dialog_open() {
     let mut terminal = terminal(80, 24);
     app.draw(&mut terminal).expect("a frame draws");
     insta::assert_snapshot!(screen(&terminal));
+}
+
+/// The same dialog over a team's shared task list (W5): every task with its
+/// id, status, owner and blockers under the roster, and the one line saying
+/// which member cannot see any of it.
+#[tokio::test]
+async fn snapshot_team_dialog_tasks() {
+    let mut app = app();
+    app.team_dialog = Some(team_dialog_with_tasks());
+
+    let mut terminal = terminal(80, 30);
+    app.draw(&mut terminal).expect("a frame draws");
+    insta::assert_snapshot!(screen(&terminal));
+}
+
+/// An app whose engine drives a **real** shared task list under
+/// `directory`, holding one completed task and one still in progress.
+///
+/// The store rather than a double, for the reason every other store test
+/// here uses one: what these tests are about is whether the poll reads at
+/// all, and a stand-in that answered instantly would be the one thing that
+/// cannot tell a directory read from no directory read.
+async fn app_with_tasks(directory: &TempDir) -> App {
+    use ganja_tool::tasklist::{Draft, Owner, TaskList as _};
+
+    let tasks = ganja_core::teammate::tasklist::TeamTasks::new(directory.path(), "team-lead");
+    for (subject, done) in [("Read the plan", true), ("Wire the parser", false)] {
+        let filed = tasks
+            .create(Draft {
+                subject: subject.to_owned(),
+                description: "written for whoever picks it up".to_owned(),
+                ..Draft::default()
+            })
+            .await
+            .expect("the task is filed");
+        let change = ganja_tool::tasklist::Change {
+            status: Some(if done {
+                ganja_tool::tasklist::Status::Completed
+            } else {
+                ganja_tool::tasklist::Status::InProgress
+            }),
+            owner: Some(Owner::Claim("w1".to_owned())),
+            ..ganja_tool::tasklist::Change::default()
+        };
+        tasks.update(&filed.id, change).await.expect("the task moves");
+    }
+
+    App::new(
+        engine().with_tasks(Arc::new(tasks) as Arc<dyn ganja_tool::tasklist::TaskList>),
+        None,
+        Themes::builtin(),
+    )
+}
+
+/// The team's shared list is polled on a clock and **only when something
+/// would draw it** (W5): the ordinary session, with the default bar and no
+/// dialog open, reads nothing however many ticks go by.
+#[tokio::test]
+async fn a_session_that_draws_no_task_list_never_reads_one() {
+    let directory = TempDir::new().expect("a temporary directory");
+    let mut app = app_with_tasks(&directory).await;
+
+    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+
+    assert!(app.tasks.is_empty(), "nothing asked, so nothing was read");
+    let mut terminal = terminal(80, 24);
+    app.draw(&mut terminal).expect("a frame draws");
+    assert!(!screen(&terminal).contains("team tasks"), "and the default bar is unchanged");
+}
+
+/// An open `/teammate` dialog is the other thing that asks: the tick reads
+/// the list for it even where no roster names the element.
+///
+/// What the dialog then *draws* is [`component::team`]'s own tests and the
+/// snapshot above; the poll's own repaint runs off the roster this engine
+/// has none of, which is exactly the state a dialog is never open in.
+#[tokio::test]
+async fn an_open_teammate_dialog_polls_the_shared_task_list() {
+    let directory = TempDir::new().expect("a temporary directory");
+    let mut app = app_with_tasks(&directory).await;
+    app.team_dialog = Some(team_dialog());
+
+    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+
+    assert_eq!(app.tasks.len(), 2, "the open dialog asked");
+    assert!(app.tasks.iter().any(|task| task.subject == "Wire the parser"), "and got the list");
+
+    // Closed again, the next tick drops what nothing is watching rather
+    // than drawing an old list the moment somebody reopens the dialog.
+    app.team_dialog = None;
+    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+
+    assert!(app.tasks.is_empty(), "nothing draws it now");
+}
+
+/// The other asker is a roster naming the element, dialog or no dialog: the
+/// count reaches the bar as open-of-total, and a second tick inside the
+/// same window re-reads nothing.
+#[tokio::test]
+async fn a_roster_naming_the_task_list_polls_it_and_counts_the_open_work() {
+    let directory = TempDir::new().expect("a temporary directory");
+    let mut app = app_with_tasks(&directory).await;
+    app.status.set_statusline(Some(&ganja_core::config::StatuslineConfig {
+        elements: Some(vec![ganja_core::config::StatuslineElement::TaskList]),
+        max_width: None,
+        detail: None,
+    }));
+
+    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+
+    let polled = app.tasks_polled.expect("the poll ran");
+    let mut terminal = terminal(80, 24);
+    app.draw(&mut terminal).expect("a frame draws");
+    let screen = screen(&terminal);
+    // Two tasks, one of them still open.
+    assert!(screen.contains("1/2 team tasks"), "got:\n{screen}");
+
+    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+    assert_eq!(app.tasks_polled, Some(polled), "the poll is on a clock, not on the tick");
 }
 
 /// The `/teammate` dialog's per-member action step: whose actions these are,

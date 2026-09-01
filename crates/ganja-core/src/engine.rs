@@ -2479,6 +2479,47 @@ impl Engine {
         self.inbound.held_messages()
     }
 
+    /// The team's shared task list as it stands right now, lowest id first —
+    /// what the `/teammate` dialog's Tasks section and the `task-list` status
+    /// segment read, in the [`Engine::team_view`]/[`Engine::held_messages`]
+    /// family.
+    ///
+    /// **Read-through and `async`, where its neighbours are neither**, and
+    /// both halves are the store rather than a preference: the list is
+    /// documents in the team's own directory, which another process writes
+    /// too, so a cached count would be a count of what this session last did
+    /// rather than of what the team has. `ganja_team::task::Store` is
+    /// synchronous and every method of [`teammate::tasklist::TeamTasks`]
+    /// wraps it in `spawn_blocking`, so awaiting this never parks the
+    /// runtime's own thread — but it **is** a directory read, and a caller on
+    /// a render loop is expected to poll it on a coarse clock the way the
+    /// lead's §6.2 pass is polled, never once a frame.
+    ///
+    /// [`None`] on a session with no list installed — which is every session
+    /// with no team machinery — **and** where the list could not be read at
+    /// all. The two are one answer on purpose: what a status surface can
+    /// honestly draw for either is nothing, and a failure is traced rather
+    /// than rendered because a bar is not where somebody would look for the
+    /// reason a directory would not open.
+    pub async fn task_list(&self) -> Option<Vec<crate::tool::tasklist::Summary>> {
+        // Cloned out of the lock before anything is awaited: no guard may
+        // cross an await here, which clippy's `await_holding_lock` asserts at
+        // `-D warnings`.
+        let tasks = {
+            let installed = self.tasks.lock().expect("the task list is never poisoned");
+            installed.as_ref().map(Arc::clone)
+        }?;
+
+        match tasks.list().await {
+            Ok(summaries) => Some(summaries),
+            Err(failure) => {
+                tracing::debug!(reason = %failure.reason, "the team task list could not be read");
+
+                None
+            }
+        }
+    }
+
     /// The queue this session's teammates raise their permission dialogs on
     /// (**D-5**), claimed once by whoever is going to answer them.
     ///

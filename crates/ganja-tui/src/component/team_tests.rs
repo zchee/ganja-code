@@ -4,10 +4,11 @@ use ganja_protocol::{MemberBackend, MemberView, TeamView};
 use ganja_testkit::RecordingSpawner;
 use ganja_tool::Tool as _;
 use ganja_tool::task::{Offered, Subagents, TaskTool, TeammateSpawn, Teammated};
+use ganja_tool::tasklist::{Status, Summary};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
-use super::{BUSY, Effect, Row, Spawned, Team, rows, spawn_request};
+use super::{BUSY, Effect, Row, Spawned, Team, rows, spawn_request, task_rows};
 use crate::command;
 use crate::theme::Theme;
 
@@ -33,12 +34,38 @@ fn lead() -> Row {
     }
 }
 
-fn dialog() -> Team {
-    Team::new(vec![
+/// The roster every dialog here opens over: this session, one in-process
+/// teammate and one running a real `claude`.
+fn members() -> Vec<Row> {
+    vec![
         lead(),
         row("w1", MemberBackend::InProcess, &["read(src/lib.rs)", "grep(fn spawn)"]),
         row("w2", MemberBackend::Claude, &[]),
-    ])
+    ]
+}
+
+fn dialog() -> Team {
+    Team::new(members(), Vec::new())
+}
+
+/// One task on the shared list, as the engine's listing hands it over.
+fn task(id: &str, status: Status, owner: &str, subject: &str, blocked_by: &[&str]) -> Summary {
+    Summary {
+        id: id.to_owned(),
+        subject: subject.to_owned(),
+        status,
+        owner: owner.to_owned(),
+        blocked_by: blocked_by.iter().map(|id| (*id).to_owned()).collect(),
+    }
+}
+
+/// The three-task list the section tests draw.
+fn tasks() -> Vec<Summary> {
+    vec![
+        task("1", Status::Completed, "w1", "Read the plan", &[]),
+        task("2", Status::InProgress, "w1", "Wire the parser", &[]),
+        task("3", Status::Pending, "", "Draw the section", &["2"]),
+    ]
 }
 
 fn rendered(dialog: &Team, area: Rect) -> String {
@@ -221,7 +248,8 @@ fn every_member_lists_with_its_backend_and_its_recent_calls() {
 #[test]
 fn a_ring_longer_than_the_row_shows_admits_the_cut() {
     let calls: Vec<&str> = vec!["a", "b", "c", "d", "e", "f"];
-    let screen = rendered(&Team::new(vec![row("w1", MemberBackend::InProcess, &calls)]), AREA);
+    let screen =
+        rendered(&Team::new(vec![row("w1", MemberBackend::InProcess, &calls)], Vec::new()), AREA);
 
     assert!(screen.contains("+2 earlier calls"), "got:\n{screen}");
     assert!(screen.contains("\u{23bf} f"), "the newest is shown:\n{screen}");
@@ -325,11 +353,14 @@ fn backspace_takes_a_character_off_the_typed_line() {
 fn refreshing_keeps_the_cursor_where_it_was_and_reclamps_a_shrink() {
     let mut dialog = dialog();
     dialog.move_selection(1);
-    dialog.refresh(vec![
-        lead(),
-        row("w1", MemberBackend::InProcess, &["write(src/main.rs)"]),
-        row("w2", MemberBackend::Claude, &[]),
-    ]);
+    dialog.refresh(
+        vec![
+            lead(),
+            row("w1", MemberBackend::InProcess, &["write(src/main.rs)"]),
+            row("w2", MemberBackend::Claude, &[]),
+        ],
+        Vec::new(),
+    );
     assert_eq!(dialog.selected_member().map(|row| row.name.as_str()), Some("w1"));
     assert_eq!(
         dialog.selected_member().map(|row| row.recent.len()),
@@ -338,7 +369,7 @@ fn refreshing_keeps_the_cursor_where_it_was_and_reclamps_a_shrink() {
     );
 
     dialog.move_selection(2);
-    dialog.refresh(vec![lead()]);
+    dialog.refresh(vec![lead()], Vec::new());
     assert!(dialog.selected_member().is_none(), "the cursor reclamps onto the Spawn row");
 }
 
@@ -350,19 +381,25 @@ fn a_refresh_that_found_the_same_roster_reports_nothing_moved() {
     let mut dialog = dialog();
 
     assert!(
-        !dialog.refresh(vec![
-            lead(),
-            row("w1", MemberBackend::InProcess, &["read(src/lib.rs)", "grep(fn spawn)"],),
-            row("w2", MemberBackend::Claude, &[]),
-        ]),
+        !dialog.refresh(
+            vec![
+                lead(),
+                row("w1", MemberBackend::InProcess, &["read(src/lib.rs)", "grep(fn spawn)"],),
+                row("w2", MemberBackend::Claude, &[]),
+            ],
+            Vec::new(),
+        ),
         "an identical poll is not a reason to redraw"
     );
     assert!(
-        dialog.refresh(vec![
-            lead(),
-            row("w1", MemberBackend::InProcess, &["write(src/main.rs)"]),
-            row("w2", MemberBackend::Claude, &[]),
-        ]),
+        dialog.refresh(
+            vec![
+                lead(),
+                row("w1", MemberBackend::InProcess, &["write(src/main.rs)"]),
+                row("w2", MemberBackend::Claude, &[]),
+            ],
+            Vec::new(),
+        ),
         "a ring that moved is"
     );
 }
@@ -380,12 +417,15 @@ fn an_action_chosen_for_one_member_still_names_it_after_the_roster_moved() {
 
     // w0 joined the team while the action menu was up, so w1 is no longer
     // the row the cursor's old index named.
-    dialog.refresh(vec![
-        lead(),
-        row("w0", MemberBackend::InProcess, &[]),
-        row("w1", MemberBackend::InProcess, &[]),
-        row("w2", MemberBackend::Claude, &[]),
-    ]);
+    dialog.refresh(
+        vec![
+            lead(),
+            row("w0", MemberBackend::InProcess, &[]),
+            row("w1", MemberBackend::InProcess, &[]),
+            row("w2", MemberBackend::Claude, &[]),
+        ],
+        Vec::new(),
+    );
     assert!(dialog.is_choosing_action(), "the step is still w1's");
     let screen = rendered(&dialog, AREA);
     assert!(screen.contains("w1"), "and says so:\n{screen}");
@@ -409,7 +449,7 @@ fn an_action_step_whose_member_left_the_roster_drops_back_to_it() {
     assert!(dialog.is_choosing_action());
 
     assert!(
-        dialog.refresh(vec![lead(), row("w2", MemberBackend::Claude, &[])]),
+        dialog.refresh(vec![lead(), row("w2", MemberBackend::Claude, &[])], Vec::new()),
         "a dropped step is something moved"
     );
 
@@ -521,9 +561,119 @@ fn the_lead_is_the_first_row_however_the_registry_ordered_it() {
     assert_eq!(projected[1].recent, vec!["read(src/lib.rs)".to_owned()]);
 }
 
+/// The Tasks section draws the team's shared list under the roster: which
+/// task, where it is, who holds it, what it waits on and what it is.
+#[test]
+fn the_tasks_section_lists_every_task_with_its_status_owner_and_blockers() {
+    let mut dialog = dialog();
+    assert!(dialog.refresh(members(), task_rows(&tasks())), "a fresh list repaints");
+
+    let screen = rendered(&dialog, Rect::new(0, 0, 76, 40));
+
+    assert!(screen.contains("tasks"), "the section is headed:\n{screen}");
+    assert!(screen.contains("Wire the parser"), "got:\n{screen}");
+    assert!(screen.contains("in_progress"), "got:\n{screen}");
+    assert!(screen.contains("completed"), "got:\n{screen}");
+    assert!(screen.contains("unowned"), "the unclaimed task says so:\n{screen}");
+    assert!(screen.contains("(blocked by 2)"), "got:\n{screen}");
+}
+
+/// The list is drawn in the order it arrived — the store's own lowest-id
+/// first, which is the order `task_list` answers a model with. Two
+/// renderings of one listing must not disagree about which task is next.
+#[test]
+fn the_tasks_section_keeps_the_order_the_list_arrived_in() {
+    let mut dialog = dialog();
+    dialog.refresh(members(), task_rows(&tasks()));
+
+    let screen = rendered(&dialog, Rect::new(0, 0, 76, 40));
+    let position =
+        |needle: &str| screen.find(needle).unwrap_or_else(|| panic!("{needle} is drawn"));
+
+    assert!(position("Read the plan") < position("Wire the parser"));
+    assert!(position("Wire the parser") < position("Draw the section"));
+}
+
+/// The plan's third risk, drawn: a `claude` member runs its own task store
+/// and the foreign CLIs hold no ganja tools at all, so a section under a
+/// roster holding one names it rather than letting the list read as
+/// everybody's.
+#[test]
+fn the_tasks_section_names_the_members_that_cannot_see_the_list() {
+    let mut dialog = dialog();
+    dialog.refresh(members(), task_rows(&tasks()));
+
+    let screen = rendered(&dialog, Rect::new(0, 0, 76, 40));
+
+    assert!(screen.contains("not visible to w2"), "the claude member is named:\n{screen}");
+    assert!(
+        !screen.contains("not visible to w1"),
+        "the in-process member reads the same list:\n{screen}"
+    );
+}
+
+/// And says nothing at all where every member shares the list: a standing
+/// disclaimer under a roster it is not true of would be read past.
+#[test]
+fn a_roster_that_all_shares_the_list_draws_no_such_line() {
+    let dialog = Team::new(
+        vec![
+            lead(),
+            row("w1", MemberBackend::InProcess, &[]),
+            row("w2", MemberBackend::Ganja, &[]),
+        ],
+        task_rows(&tasks()),
+    );
+
+    let screen = rendered(&dialog, Rect::new(0, 0, 76, 40));
+
+    assert!(screen.contains("Wire the parser"), "the list is drawn:\n{screen}");
+    assert!(!screen.contains("not visible to"), "and nothing is disclaimed:\n{screen}");
+}
+
+/// An empty list draws no section at all — no heading over nothing.
+#[test]
+fn a_team_that_has_filed_no_task_draws_no_tasks_section() {
+    let screen = rendered(&dialog(), AREA);
+
+    assert!(!screen.contains("tasks"), "got:\n{screen}");
+    assert!(!screen.contains("unowned"), "got:\n{screen}");
+}
+
+/// The section is data, not a row: the cursor still walks the members and
+/// the Spawn row and nothing else, however long the list is.
+#[test]
+fn the_tasks_section_takes_no_cursor_position() {
+    let mut dialog = dialog();
+    dialog.refresh(members(), task_rows(&tasks()));
+
+    // Three members, then the Spawn row: four positions, and the fourth is
+    // still the last however many tasks hang under it.
+    dialog.move_selection(3);
+    assert!(dialog.selected_member().is_none(), "the Spawn row is last");
+    dialog.move_selection(1);
+    assert!(dialog.selected_member().is_none(), "and nothing is past it");
+    assert_eq!(dialog.submit(), None, "Enter there still opens the spawn step");
+    assert!(dialog.is_typing());
+}
+
+/// A list that did not move repaints nothing, the roster's own rule: a
+/// dialog left open would otherwise redraw at frame rate for a list nobody
+/// touched.
+#[test]
+fn a_task_list_that_did_not_move_is_not_a_repaint() {
+    let mut dialog = dialog();
+    assert!(dialog.refresh(members(), task_rows(&tasks())), "the first list is news");
+    assert!(!dialog.refresh(members(), task_rows(&tasks())), "the same list is not");
+
+    let mut moved = tasks();
+    moved[2].owner = "w1".to_owned();
+    assert!(dialog.refresh(members(), task_rows(&moved)), "a claim is news again");
+}
+
 #[test]
 fn a_team_with_nobody_in_it_says_so_and_still_offers_a_spawn() {
-    let dialog = Team::new(Vec::new());
+    let dialog = Team::new(Vec::new(), Vec::new());
     let screen = rendered(&dialog, AREA);
 
     assert!(dialog.selected_member().is_none());
@@ -534,7 +684,10 @@ fn a_team_with_nobody_in_it_says_so_and_still_offers_a_spawn() {
 #[test]
 fn a_row_too_wide_for_the_column_is_cut_rather_than_wrapped() {
     let long = "very long call ".repeat(20);
-    let dialog = Team::new(vec![row(&"w".repeat(90), MemberBackend::InProcess, &[long.as_str()])]);
+    let dialog = Team::new(
+        vec![row(&"w".repeat(90), MemberBackend::InProcess, &[long.as_str()])],
+        task_rows(&tasks()),
+    );
 
     for line in rendered(&dialog, Rect::new(0, 0, 60, 20)).lines() {
         assert!(line.chars().count() <= 60, "a row must not overflow the dialog: {line:?}");

@@ -39,6 +39,7 @@ use ganja_protocol::{
     RevertScope, Role, ToolState, Usage,
 };
 use ganja_tool::job::Jobs as _;
+use ganja_tool::tasklist::{Status as TaskStatus, Summary};
 use ganja_tool::{Credentials, FileTimes, ToolCtx, registry};
 use ratatui::backend::Backend;
 use ratatui::crossterm::event::{
@@ -765,6 +766,20 @@ pub struct App {
     /// How many teammates the bar last reported, for [`App::running_jobs`]'s
     /// reason on the sibling count.
     teammates: usize,
+    /// The team's shared task list as the last poll found it, lowest id
+    /// first — what the `/teammate` dialog's Tasks section draws and what the
+    /// `task-list` status segment counts.
+    ///
+    /// Held here rather than read where it is drawn because reading it is a
+    /// directory read that another process may be writing to: the poll below
+    /// is on a clock, and a render takes whatever that clock last found.
+    tasks: Vec<Summary>,
+    /// When that poll last ran, gating it to [`App::team_polled`]'s cadence
+    /// for that field's reason — and its own field rather than that one
+    /// because the two are due independently: a session with no lead mailbox
+    /// still has a list, and a member polls its own inbox far faster than a
+    /// list needs re-reading.
+    tasks_polled: Option<Instant>,
     /// The queue a teammate's permission dialogs arrive on (**D-5**), claimed
     /// once from the engine when the app was built.
     ///
@@ -1089,6 +1104,8 @@ impl App {
             lead_inbox,
             team_polled: None,
             teammates: 0,
+            tasks: Vec::new(),
+            tasks_polled: None,
             teammate_dialogs,
             forwarded_dialogs: HashMap::new(),
             peer_steers: HashMap::new(),
@@ -1945,6 +1962,9 @@ impl App {
         self.poll_teammate_count();
         self.drain_teammate_dialogs();
         self.drain_spawn_asks();
+        // Ahead of the dialog poll, so an open dialog repaints from the list
+        // this same tick found rather than from the one before it.
+        self.poll_tasks().await;
         self.poll_team_dialog();
         self.poll_team_spawn().await;
         if self.lead_inbox.is_none() {
@@ -2272,6 +2292,56 @@ impl App {
         self.dirty = true;
     }
 
+    /// Re-reads the team's shared task list, on a clock rather than on the
+    /// tick.
+    ///
+    /// The list is documents in the team's directory and every member of the
+    /// team writes to them, so there is no event to wait for — a poll is the
+    /// only way this session learns that a teammate claimed something. It is
+    /// gated to the lead pass's own cadence for that gate's reason: the loop
+    /// ticks far faster than a directory needs re-reading, and
+    /// `Engine::task_list` is a disk read however cheaply it is wrapped.
+    ///
+    /// **Nothing is read at all unless something would draw it** — an open
+    /// `/teammate` dialog, or a configured roster naming `task-list`. The
+    /// element is opt-in, so the ordinary session with the default bar and no
+    /// dialog open pays one boolean per tick and touches no disk.
+    async fn poll_tasks(&mut self) {
+        if self.team_dialog.is_none() && !self.status.draws_task_list() {
+            // Whatever was last read is stale the moment nothing is watching
+            // it; dropping it is what keeps a dialog reopened an hour later
+            // from drawing an hour-old list for a frame.
+            if !self.tasks.is_empty() {
+                self.tasks = Vec::new();
+                self.status.set_task_list(0, 0);
+                self.dirty = true;
+            }
+            self.tasks_polled = None;
+
+            return;
+        }
+        let due = self
+            .tasks_polled
+            .is_none_or(|last| last.elapsed() >= ganja_core::teammate::lead_inbox::POLL);
+        if !due {
+            return;
+        }
+        self.tasks_polled = Some(Instant::now());
+
+        let tasks = self.engine.task_list().await.unwrap_or_default();
+        if tasks == self.tasks {
+            return;
+        }
+        self.tasks = tasks;
+        let open = self
+            .tasks
+            .iter()
+            .filter(|task| matches!(task.status, TaskStatus::Pending | TaskStatus::InProgress))
+            .count();
+        self.status.set_task_list(open, self.tasks.len());
+        self.dirty = true;
+    }
+
     /// Opens the `/teammate` dialog over the roster as it stands (**D504**).
     fn open_team(&mut self) {
         let Some(view) = self.team_roster() else {
@@ -2279,7 +2349,7 @@ impl App {
 
             return;
         };
-        let mut dialog = team::Team::new(team::rows(&view));
+        let mut dialog = team::Team::new(team::rows(&view), team::task_rows(&self.tasks));
         dialog.set_busy(self.team_spawn.is_some());
         self.team_dialog = Some(dialog);
     }
@@ -2308,7 +2378,8 @@ impl App {
             return;
         };
         let rows = team::rows(&view);
-        let moved = self.team_dialog.as_mut().is_some_and(|dialog| dialog.refresh(rows));
+        let tasks = team::task_rows(&self.tasks);
+        let moved = self.team_dialog.as_mut().is_some_and(|dialog| dialog.refresh(rows, tasks));
         self.dirty |= moved;
     }
 

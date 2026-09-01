@@ -1544,8 +1544,11 @@ pub struct StatuslineConfig {
 
 /// One thing the status bar can render, named the way a config names it.
 ///
-/// The first block is today's bar, segment for segment; the second is the
-/// HUD vocabulary the P14 screenshot pinned; the last is [`Self::Rate`].
+/// The first block is today's bar, segment for segment, with
+/// [`Self::TaskList`] sitting among it beside the team family it belongs to
+/// rather than at the end — it draws on no bar nobody configured; the second
+/// is the HUD vocabulary the P14 screenshot pinned; the last is
+/// [`Self::Rate`].
 ///
 /// P14 recorded here that rate-bucket elements were deliberately absent for
 /// want of a data source. **P16 found one that is not the missing usage API**
@@ -1589,6 +1592,25 @@ pub enum StatuslineElement {
     /// that is thinking and a teammate that has wedged look identical — which
     /// is what the segment, and `/team`'s ring under it, exist to tell apart.
     Teammates,
+    /// How much of the team's **shared task list** is still open, as
+    /// `open/total team tasks` — present only while the list holds a task.
+    ///
+    /// Spelled `task-list` rather than `tasks`, and the difference is the
+    /// port's own glossary rather than a near-miss: [`Self::Tasks`] counts the
+    /// delegated children **this turn** has in flight — the `task` tool's
+    /// spawns — where this counts entries on the list a whole team
+    /// coordinates through, which outlives every turn on it. The modules
+    /// behind the two are named apart for the same reason
+    /// (`ganja_tool::task` is the spawn door, `ganja_tool::tasklist` is the
+    /// list), and a config that had to guess which `tasks` it was naming
+    /// would be a config that guessed wrong once.
+    ///
+    /// **Opt-in, like [`Self::Rate`] and unlike [`Self::Held`]**: the
+    /// absent-config bar is unchanged by this name existing, because there
+    /// was no segment here before it. `held` reads the other way only
+    /// because D524's count was already on the default bar when it was
+    /// given a name.
+    TaskList,
     /// The session's token and dollar totals.
     Tokens,
     /// The notice beside the state — failures, MCP servers out of reach.

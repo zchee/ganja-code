@@ -1,7 +1,11 @@
 //! The `/teammate` dialog: one row per member of this session's team — its name,
 //! the surface it runs on, whether it is the lead, and the ring of what it
 //! most recently did — with the actions a row offers behind Enter, and a
-//! Spawn row that belongs to the team rather than to any member.
+//! Spawn row that belongs to the team rather than to any member. Under all of
+//! it, the team's **shared task list**: what has been filed, where each task
+//! is, who holds it and what it waits on, drawn from the same listing
+//! `task_list` answers a model with and naming, when there is somebody to
+//! name, the members that cannot see it.
 //!
 //! Upstream opencode has no team, no teammates and no surface for either, so
 //! nothing here cites an upstream file. What it ports is Claude Code's
@@ -34,6 +38,7 @@
 
 use ganja_protocol::{MemberBackend, MemberView, TeamView};
 use ganja_tool::task::TeammateSpawn;
+use ganja_tool::tasklist::Summary;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::text::{Line, Text};
@@ -79,6 +84,26 @@ const CLEARTEXT: &str = "prompt persisted in cleartext at";
 
 /// What the lead's row is marked with.
 const LEAD: &str = "lead";
+
+/// What the tasks section is headed with, when there is one.
+const TASKS: &str = "tasks";
+
+/// How a task nobody has claimed is listed, where an owner would be — the
+/// same word `task_list` answers the model with, so the dialog and the tool
+/// do not name one state two ways.
+const UNOWNED: &str = "unowned";
+
+/// What the dim line under the heading says about the members that cannot see
+/// this list, ahead of their names.
+///
+/// The one sentence this section exists to be honest about (the plan's third
+/// risk): a `claude` member runs Claude Code's own task store and a `codex`,
+/// `grok` or `agy` member holds no ganja tools at all, so a section drawn
+/// under a roster holding any of them would otherwise read as work the whole
+/// roster can see. It says *that they cannot*, and nothing about what they
+/// keep instead: what a foreign surface does with its own work is not
+/// something this dialog is in a position to state.
+const UNSHARED: &str = "not visible to";
 
 /// One member of the team, as the dialog shows it.
 ///
@@ -129,6 +154,72 @@ pub fn rows(view: &TeamView) -> Vec<Row> {
     rows.sort_by_key(|row| !row.is_lead);
 
     rows
+}
+
+/// One task on the team's shared list, as the dialog shows it.
+///
+/// A projection for [`Row`]'s reason, and it buys the same thing: what a line
+/// needs is an id, a subject, where the task is, who has it and what it waits
+/// on, which is exactly [`Summary`] today and would still be exactly this if
+/// that value grew a field tomorrow.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskRow {
+    /// Which task, as `task_create` and `task_list` reported it.
+    pub id: String,
+    /// Its imperative one-liner.
+    pub subject: String,
+    /// Where it is: pending, in progress or completed, in the list's own
+    /// spelling.
+    pub status: String,
+    /// Who holds it, empty when nobody does.
+    pub owner: String,
+    /// The ids that hold it up.
+    pub blocked_by: Vec<String>,
+}
+
+impl TaskRow {
+    /// One task, as this dialog shows it.
+    fn of(summary: &Summary) -> Self {
+        Self {
+            id: summary.id.clone(),
+            subject: summary.subject.clone(),
+            status: summary.status.as_str().to_owned(),
+            owner: summary.owner.clone(),
+            blocked_by: summary.blocked_by.clone(),
+        }
+    }
+}
+
+/// The team's shared list, as this dialog shows it — what a caller polling
+/// `Engine::task_list` hands to [`Team::new`] and [`Team::refresh`].
+///
+/// **In the order it arrived**, which is the store's own lowest-id-first, and
+/// deliberately not re-sorted here: the dialog and the `task_list` a model
+/// reads are two renderings of one listing, and a second ordering would be a
+/// second answer to "which is the next task".
+#[must_use]
+pub fn task_rows(summaries: &[Summary]) -> Vec<TaskRow> {
+    summaries.iter().map(TaskRow::of).collect()
+}
+
+/// Whether a member running on `backend` reads the same list this section
+/// draws.
+///
+/// Exhaustive rather than a catch-all, so a seventh surface is a decision
+/// somebody makes here rather than a member quietly listed as seeing work it
+/// cannot: the two arms below are ganja's own task tools reaching a shared
+/// directory, and every other surface is somebody else's agent.
+const fn shares_the_list(backend: MemberBackend) -> bool {
+    match backend {
+        // This process's own teammate, and a `ganja` pane: both are offered
+        // the four `task_*` tools over this same team directory.
+        MemberBackend::InProcess | MemberBackend::Ganja => true,
+        // Claude Code keeps its task list inside its own process, and the
+        // three foreign CLIs hold no ganja tools at all.
+        MemberBackend::Claude | MemberBackend::Codex | MemberBackend::Agy | MemberBackend::Grok => {
+            false
+        }
+    }
 }
 
 /// A spawn as this dialog asks for it.
@@ -287,6 +378,9 @@ enum Step {
 #[derive(Clone, Debug)]
 pub struct Team {
     rows: Vec<Row>,
+    /// The team's shared task list, newest poll first to arrive — drawn under
+    /// the roster, selected by nothing. Empty draws no section at all.
+    tasks: Vec<TaskRow>,
     /// Index over the member rows *and* the Spawn row after them; always in
     /// range, because the Spawn row makes the list non-empty.
     selected: usize,
@@ -299,14 +393,21 @@ pub struct Team {
 }
 
 impl Team {
-    /// Opens the dialog over `rows`, cursor on the first member — or on the
-    /// Spawn row when the team holds nobody.
+    /// Opens the dialog over `rows` and the team's `tasks`, cursor on the
+    /// first member — or on the Spawn row when the team holds nobody.
+    ///
+    /// The tasks travel beside the roster rather than through a setter of
+    /// their own because they arrive together: one tick polls both, and a
+    /// dialog that could hold a roster from now and a list from a minute ago
+    /// would be a dialog able to show a member owning a task that no longer
+    /// exists.
     #[must_use]
-    pub fn new(rows: Vec<Row>) -> Self {
-        Self { rows, selected: 0, step: Step::Members, notice: None, busy: false }
+    pub fn new(rows: Vec<Row>, tasks: Vec<TaskRow>) -> Self {
+        Self { rows, tasks, selected: 0, step: Step::Members, notice: None, busy: false }
     }
 
-    /// Replaces the rows with a fresh poll, keeping the cursor and the step
+    /// Replaces the rows and the task list with a fresh poll, keeping the
+    /// cursor and the step
     /// where they were — reclamped, because a shutdown shrinks the roster
     /// under it. A ring growing under a person mid-decision must not move what
     /// their next keypress lands on, which is the whole reason this is not a
@@ -321,9 +422,10 @@ impl Team {
     /// repaints only when it did. A `/teammate` dialog left open would otherwise
     /// mark every one of those ticks dirty and redraw the screen at frame rate
     /// for a roster nobody touched.
-    pub fn refresh(&mut self, rows: Vec<Row>) -> bool {
-        let mut moved = rows != self.rows;
+    pub fn refresh(&mut self, rows: Vec<Row>, tasks: Vec<TaskRow>) -> bool {
+        let mut moved = rows != self.rows || tasks != self.tasks;
         self.rows = rows;
+        self.tasks = tasks;
         self.selected = self.selected.min(self.total_rows().saturating_sub(1));
         let orphaned = match &self.step {
             Step::Actions { member, .. } => self.row_named(member).is_none(),
@@ -652,9 +754,82 @@ impl Team {
             style,
         ));
 
+        lines.extend(self.task_lines(width, theme));
+
         let first = first_visible(selected_line, rows);
 
         lines.into_iter().skip(first).take(rows).collect()
+    }
+
+    /// The Tasks section: the team's shared list under the roster, one line
+    /// per task — its id, where it is, who holds it, what it waits on and
+    /// what it is.
+    ///
+    /// **Under the Spawn row rather than between it and the members**, so the
+    /// rows a cursor can land on stay one unbroken run: a section nothing
+    /// selects sitting inside that run would put lines between a person's eye
+    /// and the row their next keypress moves to. It is drawn inside the same
+    /// scroll window as everything else, so a long list scrolls with the
+    /// roster instead of pushing it off the top.
+    ///
+    /// An empty list draws **nothing at all** — no heading, no placeholder.
+    /// A team that has filed no task is the ordinary state of every session
+    /// that never uses the list, and a heading over nothing would cost those
+    /// two rows forever to say what their absence already says. (`no team
+    /// members` is the other way round for the other reason: a roster is the
+    /// thing this dialog is *for*, so an empty one is news.)
+    fn task_lines(&self, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+        if self.tasks.is_empty() {
+            return Vec::new();
+        }
+
+        let id_width = self.tasks.iter().map(|task| task.id.width()).max().unwrap_or(0);
+        let status_width = self.tasks.iter().map(|task| task.status.width()).max().unwrap_or(0);
+        let owner_width =
+            self.tasks.iter().map(|task| owner_label(&task.owner).width()).max().unwrap_or(0);
+
+        let mut lines = vec![Line::raw(""), Line::styled(clip(TASKS, width), theme.fg)];
+        if let Some(unshared) = self.unshared_line() {
+            lines.push(Line::styled(clip(&unshared, width), theme.dim));
+        }
+        for task in &self.tasks {
+            let blocked = if task.blocked_by.is_empty() {
+                String::new()
+            } else {
+                format!("  (blocked by {})", task.blocked_by.join(", "))
+            };
+            let line = format!(
+                "  {id:<id_width$}  {status:<status_width$}  {owner:<owner_width$}  {subject}{blocked}",
+                id = task.id,
+                status = task.status,
+                owner = owner_label(&task.owner),
+                subject = task.subject,
+            );
+            lines.push(Line::styled(clip(line.trim_end(), width), theme.fg));
+        }
+
+        lines
+    }
+
+    /// The dim line naming the members that cannot see this list, or [`None`]
+    /// when every member can.
+    ///
+    /// Named rather than counted, and drawn only when there is somebody to
+    /// name: a standing disclaimer under every team would be read past, where
+    /// two names beside the list are the fact somebody needs at the moment
+    /// they are wondering why a member has not picked anything up.
+    fn unshared_line(&self) -> Option<String> {
+        let unshared: Vec<&str> = self
+            .rows
+            .iter()
+            // The lead is this session, which is the session drawing the
+            // list; whatever its own row says it runs on, it is looking at
+            // the list right now.
+            .filter(|row| !row.is_lead && !shares_the_list(row.backend))
+            .map(|row| row.name.as_str())
+            .collect();
+
+        (!unshared.is_empty()).then(|| format!("  {UNSHARED} {}", unshared.join(", ")))
     }
 
     /// The per-member action step: which member it is about, then what can be
@@ -708,6 +883,12 @@ impl Team {
             ),
         ]
     }
+}
+
+/// How a task's owner is listed: the member's name, or the word the
+/// `task_list` tool answers with for a task nobody holds.
+fn owner_label(owner: &str) -> &str {
+    if owner.is_empty() { UNOWNED } else { owner }
 }
 
 /// A member's recent calls, newest last, hung under its row (**D503**) behind
