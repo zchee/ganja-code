@@ -43,7 +43,7 @@ pub enum Row {
     /// same string the walk always returned.
     File(String),
     /// A roster member. `lead` marks the session leading the team, the same
-    /// fact `/team`'s own dialog marks (`component/team.rs`'s `Row`).
+    /// fact `/teammate`'s own dialog marks (`component/team.rs`'s `Row`).
     Teammate {
         /// The name as the roster holds it.
         name: String,

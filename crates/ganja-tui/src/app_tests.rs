@@ -3840,7 +3840,7 @@ async fn the_palette_reaches_every_command_it_lists() {
 #[tokio::test]
 async fn tab_completes_a_backend_from_the_parsers_own_list() {
     let mut app = app();
-    for event in typing("/team spawn foo --backend g") {
+    for event in typing("/teammate spawn foo --backend g") {
         app.handle(event).await.expect("typing is handled");
     }
     assert!(app.dropdown.is_some(), "the backend slot should raise the menu");
@@ -3848,7 +3848,7 @@ async fn tab_completes_a_backend_from_the_parsers_own_list() {
 
     app.handle(key(KeyCode::Tab, KeyModifiers::NONE)).await.expect("tab is handled");
 
-    assert_eq!(app.editor.text(), "/team spawn foo --backend ganja ");
+    assert_eq!(app.editor.text(), "/teammate spawn foo --backend ganja ");
     assert!(app.dropdown.is_none(), "choosing closes the menu");
     assert!(app.completion.is_none());
 }
@@ -3858,7 +3858,7 @@ async fn tab_completes_a_backend_from_the_parsers_own_list() {
 #[tokio::test]
 async fn a_fully_typed_backend_closes_the_menu_before_enter() {
     let mut app = app();
-    for event in typing("/team spawn w1 --backend ganj") {
+    for event in typing("/teammate spawn w1 --backend ganj") {
         app.handle(event).await.expect("typing is handled");
     }
     assert!(app.dropdown.is_some());
@@ -3866,22 +3866,22 @@ async fn a_fully_typed_backend_closes_the_menu_before_enter() {
         app.handle(event).await.expect("typing is handled");
     }
     assert!(app.dropdown.is_none(), "nothing left to complete");
-    assert_eq!(app.editor.text(), "/team spawn w1 --backend ganja");
+    assert_eq!(app.editor.text(), "/teammate spawn w1 --backend ganja");
 }
 
-/// **D519.** The slot after `/team` is the subcommand, and Enter fills it
+/// **D519.** The slot after `/teammate` is the subcommand, and Enter fills it
 /// the way Tab does — a subcommand is not a thing to run by itself.
 #[tokio::test]
 async fn enter_fills_a_team_subcommand_without_submitting() {
     let mut app = app();
-    for event in typing("/team sh") {
+    for event in typing("/teammate sh") {
         app.handle(event).await.expect("typing is handled");
     }
     assert!(app.dropdown.is_some());
 
     app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
-    assert_eq!(app.editor.text(), "/team shutdown ");
+    assert_eq!(app.editor.text(), "/teammate shutdown ");
     assert!(app.dropdown.is_none());
 }
 
@@ -3890,7 +3890,7 @@ async fn enter_fills_a_team_subcommand_without_submitting() {
 #[tokio::test]
 async fn free_words_raise_no_values_menu_and_esc_keeps_the_text() {
     let mut app = app();
-    for event in typing("/team spawn fo") {
+    for event in typing("/teammate spawn fo") {
         app.handle(event).await.expect("typing is handled");
     }
     assert!(app.dropdown.is_none(), "a member name is anyone's to choose");
@@ -3902,7 +3902,7 @@ async fn free_words_raise_no_values_menu_and_esc_keeps_the_text() {
 
     app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("esc is handled");
     assert!(app.dropdown.is_none());
-    assert_eq!(app.editor.text(), "/team spawn fo --agent ");
+    assert_eq!(app.editor.text(), "/teammate spawn fo --agent ");
 }
 
 /// The trigger, at the level the user meets it: a slash that starts the
@@ -7896,7 +7896,7 @@ async fn a_tall_terminal_shows_the_whole_help_card_at_once() {
     app.run_command(command::Action::Help).await;
 
     // Taller than it once was, because the roster this card lists gained
-    // `/team` (**D504**), then `/held` (**D524**), then `/rename`
+    // `/teammate` (**D504**), then `/held` (**D524**), then `/rename`
     // (**D527**) — the card grows with the commands, which is what "the
     // whole card" means.
     let mut terminal = terminal(90, 43);
@@ -9699,7 +9699,7 @@ async fn only_asking_for_the_roster_raises_the_team_dialog() {
     assert!(app.team_dialog.is_some(), "the palette's door asks for the roster");
     app.team_dialog = None;
 
-    app.editor.set_text("/team wat");
+    app.editor.set_text("/teammate wat");
     app.submit().await;
 
     assert!(app.team_dialog.is_none(), "a line that did not ask for the roster does not raise it");
@@ -9709,9 +9709,9 @@ async fn only_asking_for_the_roster_raises_the_team_dialog() {
     assert!(screen.contains("wat"), "and the refusal is still said, on the bar instead:\n{screen}");
     assert!(app.editor.prompt().is_none(), "and the line it came from is out of the composer");
 
-    // `/team list` is the typed spelling of the very same ask, so it
+    // `/teammate list` is the typed spelling of the very same ask, so it
     // raises the dialog exactly as the palette's row does.
-    app.editor.set_text("/team list");
+    app.editor.set_text("/teammate list");
     app.submit().await;
     assert!(app.team_dialog.is_some(), "the typed door onto the roster");
 }
@@ -9733,9 +9733,9 @@ async fn team_on_a_session_leading_none_refuses_readably_instead_of_opening() {
     assert!(screen.contains("leads no team"), "{screen}");
 }
 
-/// Every `/team` line with arguments joins the prompt history — accepted
+/// Every `/teammate` line with arguments joins the prompt history — accepted
 /// or refused by the grammar — because the words leave the composer either
-/// way and the history is where Up finds them again. A bare `/team` is the
+/// way and the history is where Up finds them again. A bare `/teammate` is the
 /// palette's own door, like `/help`, and is remembered no more than those
 /// are.
 #[tokio::test]
@@ -9743,7 +9743,9 @@ async fn a_team_line_is_remembered_whatever_it_turned_out_to_mean() {
     let directory = temporary();
     let mut app = app_with_history(&directory, &[]);
 
-    for line in ["/team spawn w1 --backend in-process explain this crate", "/team wat", "/team"] {
+    for line in
+        ["/teammate spawn w1 --backend in-process explain this crate", "/teammate wat", "/teammate"]
+    {
         app.editor.set_text(line);
         app.submit().await;
         app.team_dialog = None;
@@ -9754,26 +9756,26 @@ async fn a_team_line_is_remembered_whatever_it_turned_out_to_mean() {
         app.history.entries().into_iter().map(|recalled| recalled.prompt.input).collect();
     assert_eq!(
         remembered,
-        ["/team wat", "/team spawn w1 --backend in-process explain this crate",],
+        ["/teammate wat", "/teammate spawn w1 --backend in-process explain this crate",],
         "newest first, every argument-bearing line as typed, the bare ask not"
     );
     assert_eq!(
         app.history.step(history::Direction::Older, "").map(|recalled| recalled.input).as_deref(),
-        Some("/team wat"),
+        Some("/teammate wat"),
         "and Up brings the newest one back to fix"
     );
 }
 
-/// A spawn decided in the `/team` dialog is remembered as the composer
+/// A spawn decided in the `/teammate` dialog is remembered as the composer
 /// line it is equivalent to, so the two doors leave the same thing behind.
 #[tokio::test]
 async fn a_spawn_from_the_team_dialog_is_remembered_as_its_team_spawn_line() {
     let directory = temporary();
     let mut app = app_with_history(&directory, &[]);
     let Some(command::Team::Spawn(line)) =
-        command::team("/team spawn w2 --backend in-process hold the fort")
+        command::team("/teammate spawn w2 --backend in-process hold the fort")
     else {
-        panic!("a /team spawn line parses");
+        panic!("a /teammate spawn line parses");
     };
 
     app.run_team_effect(component::team::Effect::Spawn {
@@ -9784,11 +9786,11 @@ async fn a_spawn_from_the_team_dialog_is_remembered_as_its_team_spawn_line() {
 
     assert_eq!(
         app.history.entries().first().map(|recalled| recalled.prompt.input.as_str()),
-        Some("/team spawn w2 --backend in-process hold the fort")
+        Some("/teammate spawn w2 --backend in-process hold the fort")
     );
 }
 
-/// One `/team` dialog row, as the fixture below hand-builds them.
+/// One `/teammate` dialog row, as the fixture below hand-builds them.
 fn team_row(
     name: &str,
     backend: ganja_protocol::MemberBackend,
@@ -9804,7 +9806,7 @@ fn team_row(
     }
 }
 
-/// The `/team` dialog the tests below open: a lead and two members, one
+/// The `/teammate` dialog the tests below open: a lead and two members, one
 /// with a ring — hand-built, the way the plugin snapshots build theirs, so
 /// what is pinned is layout and key routing rather than a registry's
 /// timing.
@@ -9821,7 +9823,7 @@ fn team_dialog() -> component::team::Team {
     ])
 }
 
-/// The `/team` dialog's members step: every member with its backend and
+/// The `/teammate` dialog's members step: every member with its backend and
 /// its ring, the lead marked, the Spawn row after them.
 #[tokio::test]
 async fn snapshot_team_dialog_open() {
@@ -9833,7 +9835,7 @@ async fn snapshot_team_dialog_open() {
     insta::assert_snapshot!(screen(&terminal));
 }
 
-/// The `/team` dialog's per-member action step: whose actions these are,
+/// The `/teammate` dialog's per-member action step: whose actions these are,
 /// then Message and Shutdown.
 #[tokio::test]
 async fn snapshot_team_action_menu() {
@@ -9848,7 +9850,7 @@ async fn snapshot_team_action_menu() {
     insta::assert_snapshot!(screen(&terminal));
 }
 
-/// Esc walks the `/team` dialog back out from every step: the free-text
+/// Esc walks the `/teammate` dialog back out from every step: the free-text
 /// step consumes the first press as "cancel the edit", and the other two
 /// close the dialog — the `/mcp` and `/plugin` dialogs' own Esc.
 #[tokio::test]
@@ -9879,7 +9881,7 @@ async fn esc_closes_the_team_dialog_from_either_step() {
     assert!(app.team_dialog.is_none(), "and the second closes");
 }
 
-/// While the `/team` dialog is open it owns every key: a list-step press
+/// While the `/teammate` dialog is open it owns every key: a list-step press
 /// moves the cursor or is swallowed, and the free-text step's characters
 /// land in the dialog's own buffer — none of it reaches the composer.
 #[tokio::test]
@@ -9983,8 +9985,10 @@ async fn a_spawns_own_dialog_is_raised_on_the_tick_and_answered_back_to_the_aske
 /// — a member the registry holds, so the tick and the dialog have a roster
 /// that moved — and that is now said rather than inherited from a default.
 async fn registry_holds_w1(app: &mut App, registry: &ganja_core::teammate::TeammateRegistry) {
-    app.run_team_line(command::team("/team spawn w1 --backend in-process").expect("a /team line"))
-        .await;
+    app.run_team_line(
+        command::team("/teammate spawn w1 --backend in-process").expect("a /teammate line"),
+    )
+    .await;
     assert!(app.team_spawn.is_some(), "the spawn runs off the loop");
     for _ in 0..500 {
         if registry.view().members.len() == 2 {
@@ -9995,7 +9999,7 @@ async fn registry_holds_w1(app: &mut App, registry: &ganja_core::teammate::Teamm
     panic!("the registry never recorded the spawn");
 }
 
-/// An open `/team` dialog repaints when the roster really moved, and
+/// An open `/teammate` dialog repaints when the roster really moved, and
 /// leaves the frame alone when it did not — `poll_team_dialog`'s
 /// changed-only rule.
 #[tokio::test]
@@ -10088,7 +10092,7 @@ async fn answering_a_dialog_whose_teammate_stopped_waiting_still_advances_the_qu
     assert!(app.permission.is_none());
 }
 
-/// `/team shutdown` with nobody named is the whole team, and a team that is
+/// `/teammate shutdown` with nobody named is the whole team, and a team that is
 /// only its lead is told so rather than silently doing nothing.
 #[tokio::test]
 async fn shutting_down_a_team_of_nobody_says_so_rather_than_writing_to_the_lead() {

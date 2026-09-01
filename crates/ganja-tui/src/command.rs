@@ -66,7 +66,7 @@ pub enum Action {
     /// Open the `/plugin` dialog: every installed plugin's state and
     /// components, with the store's own actions beside them (**D474**).
     Plugin,
-    /// Open the `/team` dialog: every member of this session's team, what it
+    /// Open the `/teammate` dialog: every member of this session's team, what it
     /// has been doing, and the doors onto starting, messaging and shutting
     /// one down (**D503**, **D504**).
     Team,
@@ -90,7 +90,7 @@ pub enum Action {
     Rewind,
     /// Give this session a name (**D527**). Bare `/rename` names nothing to
     /// rename to; [`rename`] is the door that reads the argument off the
-    /// buffer, the same shape [`team`] reads `/team spawn`'s off.
+    /// buffer, the same shape [`team`] reads `/teammate spawn`'s off.
     Rename,
 }
 
@@ -333,8 +333,8 @@ pub const COMMANDS: &[Entry] = &[
     // running beside this session, which is what `System` is for.
     Entry {
         action: Action::Team,
-        name: "team",
-        aliases: &[],
+        name: "teammate",
+        aliases: &["teammates"],
         title: "Teammates",
         description: "See this session's team; start, message or shut down a member",
         category: Category::System,
@@ -342,7 +342,7 @@ pub const COMMANDS: &[Entry] = &[
     },
     // The admission gate's listing dialog (**D524**), and the *only* review
     // surface an explicit or mode-unknown hold has — those raise no approval
-    // modal. `System` for `/team`'s reason: the hold buffer is a facility
+    // modal. `System` for `/teammate`'s reason: the hold buffer is a facility
     // running beside this session, not the conversation itself.
     Entry {
         action: Action::Held,
@@ -431,9 +431,9 @@ pub const COMMANDS: &[Entry] = &[
         category: Category::Session,
         suggested: false,
     },
-    // `System` for `/team`'s reason: naming this session is a facility
+    // `System` for `/teammate`'s reason: naming this session is a facility
     // beside the conversation, not something done to it. The one other
-    // builtin besides `/team` that reads an argument off the buffer — see
+    // builtin besides `/teammate` that reads an argument off the buffer — see
     // [`rename`].
     Entry {
         action: Action::Rename,
@@ -479,7 +479,7 @@ pub fn lookup(name: &str) -> Option<&'static Entry> {
 /// follows has to read the text itself, which is how Claude Code and Codex
 /// both dispatch a slash command. Only a leading `/name` (or alias) with
 /// nothing but whitespace after it qualifies: these commands take no
-/// arguments — `/team` is the one exception, whose argument-carrying lines
+/// arguments — `/teammate` is the one exception, whose argument-carrying lines
 /// [`team`] reads off the same buffer — so `/models gpt` stays text, under
 /// the same ruling that keeps an unknown slash command out of the UI's hands.
 #[must_use]
@@ -492,21 +492,21 @@ pub fn submitted(text: &str) -> Option<&'static Entry> {
     lookup(name)
 }
 
-/// What a submitted `/team` line asked for.
+/// What a submitted `/teammate` line asked for.
 ///
 /// The second door onto what [`Action::Team`] opens, and the only one that
 /// can carry arguments: the palette has nowhere to type them and the dropdown
 /// closes the moment a space follows the name, so a line with a subcommand
 /// has to be read off the buffer on submit exactly as [`submitted`] reads an
-/// argument-less one. That is what lets `/team spawn w1 --backend ganja` — the
+/// argument-less one. That is what lets `/teammate spawn w1 --backend ganja` — the
 /// spec's own spelling — reach the same spawn sequence the `task` tool's
 /// teammate door reaches (**D504**).
 ///
-/// [`Team::List`] and [`Action::Team`] mean the same thing, so a bare `/team`
+/// [`Team::List`] and [`Action::Team`] mean the same thing, so a bare `/teammate`
 /// opens the dialog whichever of the two doors the app reads first.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Team {
-    /// Show the roster: a bare `/team`, and `/team list`.
+    /// Show the roster: a bare `/teammate`, and `/teammate list`.
     List,
     /// Start a teammate.
     Spawn(TeamSpawn),
@@ -515,7 +515,7 @@ pub enum Team {
         /// The member named, or [`None`] for the whole team.
         member: Option<String>,
     },
-    /// The line said `/team` and then something this grammar has not got.
+    /// The line said `/teammate` and then something this grammar has not got.
     ///
     /// One sentence rather than a kind, for [`crate::component::team::Team`]'s
     /// notice line to show: nothing downstream branches on which mistake it
@@ -523,7 +523,7 @@ pub enum Team {
     Refused(String),
 }
 
-/// A `/team spawn` line, parsed.
+/// A `/teammate spawn` line, parsed.
 ///
 /// Deliberately strings and [`Option`]s: which surfaces exist, which agent
 /// kinds are spawnable, and which names a team will take are every one of
@@ -542,25 +542,27 @@ pub struct TeamSpawn {
     pub agent_type: Option<String>,
     /// What the teammate is being asked to do, verbatim from the first word
     /// that is not a flag. Empty is allowed — AC-11's own spelling
-    /// (`/team spawn w1 --backend ganja`) carries no prompt, and a teammate
+    /// (`/teammate spawn w1 --backend ganja`) carries no prompt, and a teammate
     /// started to be messaged afterwards is a real thing to want.
     pub prompt: String,
 }
 
-/// `/team spawn`'s grammar, spelled once: the refusal a nameless spawn reads
-/// names it, and the `/team` dialog's own input step shows it, because
+/// `/teammate spawn`'s grammar, spelled once: the refusal a nameless spawn reads
+/// names it, and the `/teammate` dialog's own input step shows it, because
 /// [`team_spawn`] is the one parser both doors feed.
 pub const SPAWN_GRAMMAR: &str = "<name> [--backend <surface>] [--agent <kind>] [what it should do]";
 
 /// The inline hint a builtin command shows once its name is typed (**D518**).
 ///
-/// `/team` and `/rename` are the only builtins that read arguments off the
+/// `/teammate` and `/rename` are the only builtins that read arguments off the
 /// buffer; everything else answers [`None`] and shows nothing. Display-only,
 /// like a command file's `argument-hint` — the grammar that actually
 /// decides is [`team`]'s and [`rename`]'s respectively.
 fn builtin_hint(name: &str) -> Option<&'static str> {
     match name {
-        "team" => Some("list | spawn <name> [--backend] [--agent] [prompt] | shutdown [member]"),
+        "teammate" => {
+            Some("list | spawn <name> [--backend] [--agent] [prompt] | shutdown [member]")
+        }
         "rename" => Some("<name>"),
         _ => None,
     }
@@ -573,8 +575,8 @@ fn builtin_hint(name: &str) -> Option<&'static str> {
 /// standing beside the cursor until the grammar runs out, or a word it has
 /// not got arrives.
 ///
-/// `/team` refines per subcommand: a `spawn` line's hint is [`SPAWN_GRAMMAR`]
-/// — the same one spelling the refusal and the `/team` dialog's input step
+/// `/teammate` refines per subcommand: a `spawn` line's hint is [`SPAWN_GRAMMAR`]
+/// — the same one spelling the refusal and the `/teammate` dialog's input step
 /// already use — consumed the same way.
 #[must_use]
 pub fn inline_hint(text: &str, engine: &[EngineCommand]) -> Option<String> {
@@ -589,21 +591,27 @@ pub fn inline_hint(text: &str, engine: &[EngineCommand]) -> Option<String> {
     if name.is_empty() {
         return None;
     }
-    if name == "team" {
+    // Through [`lookup`] rather than against the typed spelling, for
+    // [`team`]'s own reason: an alias reaches the hint its command shows
+    // rather than showing nothing beside the cursor. Only the builtin half
+    // is resolved — an engine command is still asked for by the name that
+    // was typed, since it is a different roster and knows nothing of these.
+    let builtin = lookup(name).map_or(name, |entry| entry.name);
+    if builtin == "teammate" {
         return team_hint(tail);
     }
-    let hint = builtin_hint(name).map(str::to_owned).or_else(|| {
+    let hint = builtin_hint(builtin).map(str::to_owned).or_else(|| {
         engine.iter().find(|command| command.name == name).and_then(|command| command.hint.clone())
     })?;
     remaining(&hint, tail)
 }
 
-/// The `/team` line's own hint: the overview while nothing follows the name,
+/// The `/teammate` line's own hint: the overview while nothing follows the name,
 /// then the chosen subcommand's remaining grammar as its arguments fill in.
 fn team_hint(tail: &str) -> Option<String> {
     let trimmed = tail.trim_start();
     if trimmed.is_empty() {
-        return builtin_hint("team").map(str::to_owned);
+        return builtin_hint("teammate").map(str::to_owned);
     }
     let (first, rest) = match trimmed.split_once(char::is_whitespace) {
         Some((first, rest)) => (first, rest),
@@ -724,12 +732,12 @@ const BACKEND_NEEDS_A_VALUE: &str =
 const AGENT_NEEDS_A_VALUE: &str =
     "`--agent` names the kind of agent a teammate runs as, and this line ends before naming one";
 
-/// The `/team` command a submitted buffer names, or [`None`] when the buffer
-/// is not a `/team` line at all — in which case it is prose, and nothing here
+/// The `/teammate` command a submitted buffer names, or [`None`] when the buffer
+/// is not a `/teammate` line at all — in which case it is prose, and nothing here
 /// has an opinion about it.
 ///
 /// A refused subcommand or flag comes back as [`Team::Refused`] rather than as
-/// [`None`]: a line that plainly says `/team` and then gets something wrong
+/// [`None`]: a line that plainly says `/teammate` and then gets something wrong
 /// should be told so, not sent to the model as a question about itself.
 #[must_use]
 pub fn team(text: &str) -> Option<Team> {
@@ -749,7 +757,7 @@ pub fn team(text: &str) -> Option<Team> {
         "list" => match rest {
             "" => Team::List,
             extra => Team::Refused(format!(
-                "`/team list` takes nothing after it, and this line adds {extra:?}"
+                "`/teammate list` takes nothing after it, and this line adds {extra:?}"
             )),
         },
         "spawn" => match team_spawn(rest) {
@@ -768,12 +776,12 @@ pub fn team(text: &str) -> Option<Team> {
                 }
             } else {
                 Team::Refused(format!(
-                    "`/team shutdown` names one member, or nobody for the whole team, and this line adds {extra:?}"
+                    "`/teammate shutdown` names one member, or nobody for the whole team, and this line adds {extra:?}"
                 ))
             }
         }
         other => Team::Refused(format!(
-            "`/team` has no {other:?} subcommand: it lists the team, and takes `spawn`, `list` and `shutdown`"
+            "`/teammate` has no {other:?} subcommand: it lists the team, and takes `spawn`, `list` and `shutdown`"
         )),
     })
 }
@@ -783,8 +791,8 @@ pub fn team(text: &str) -> Option<Team> {
 /// [`Action::Rename`]'s second door, and the only one that can carry an
 /// argument — the palette has nowhere to type one and the dropdown closes
 /// the moment a space follows the name — so a line naming a target has to be
-/// read off the buffer on submit exactly as [`team`] reads `/team spawn`'s.
-/// Unlike `/team`'s grammar this one takes no subcommands: everything after
+/// read off the buffer on submit exactly as [`team`] reads `/teammate spawn`'s.
+/// Unlike `/teammate`'s grammar this one takes no subcommands: everything after
 /// the name, trimmed, is the name asked for — a name may carry no whitespace
 /// (`registry::vet_name`'s own clause), so there is nothing here to split on.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -810,7 +818,7 @@ pub fn rename(text: &str) -> Option<Rename> {
     Some(if rest.is_empty() { Rename::Missing } else { Rename::To(rest.to_owned()) })
 }
 
-/// The arguments after `/team spawn`, parsed — the same grammar the dialog's
+/// The arguments after `/teammate spawn`, parsed — the same grammar the dialog's
 /// own free-text step takes, so there is one spelling of a spawn rather than
 /// two that could drift.
 ///
@@ -832,7 +840,7 @@ pub fn team_spawn(text: &str) -> Result<TeamSpawn, String> {
     let (name, mut rest) = split_word(text);
     if name.is_empty() || name.starts_with('-') {
         return Err(format!(
-            "`/team spawn` starts a teammate under a name: /team spawn {SPAWN_GRAMMAR}"
+            "`/teammate spawn` starts a teammate under a name: /teammate spawn {SPAWN_GRAMMAR}"
         ));
     }
 
@@ -860,7 +868,7 @@ pub fn team_spawn(text: &str) -> Result<TeamSpawn, String> {
             }
             unknown if unknown.starts_with("--") => {
                 return Err(format!(
-                    "`/team spawn` has no {unknown:?} flag: it takes `--backend` and `--agent`"
+                    "`/teammate spawn` has no {unknown:?} flag: it takes `--backend` and `--agent`"
                 ));
             }
             // Not a flag, so the prompt starts here and runs to the end.
@@ -929,7 +937,7 @@ pub enum Choice {
     Ui(&'static Entry),
     /// An engine command, which is inserted as `/name ` and runs on Enter.
     Engine(EngineCommand),
-    /// A value for a `/team` argument slot, which replaces the partial word
+    /// A value for a `/teammate` argument slot, which replaces the partial word
     /// under the cursor (**D519**).
     Value(Completion),
 }
@@ -966,7 +974,7 @@ impl Choice {
     }
 }
 
-/// One value a `/team` argument slot completes to (**D519**).
+/// One value a `/teammate` argument slot completes to (**D519**).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Completion {
     /// What replaces the partial word under the cursor.
@@ -975,7 +983,7 @@ pub struct Completion {
     pub detail: String,
 }
 
-/// A `/team` slot the cursor is standing in, and what could fill it
+/// A `/teammate` slot the cursor is standing in, and what could fill it
 /// (**D519**).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Slot {
@@ -989,8 +997,8 @@ pub struct Slot {
     pub candidates: Vec<Completion>,
 }
 
-/// The `/team` slot the cursor is in, if it is in one the composer can fill
-/// (**D519**): a subcommand after `/team`, a flag after `spawn`, the surface
+/// The `/teammate` slot the cursor is in, if it is in one the composer can fill
+/// (**D519**): a subcommand after `/teammate`, a flag after `spawn`, the surface
 /// after `--backend`, the kind after `--agent`.
 ///
 /// The surfaces are [`BACKENDS`] — the one spelling the spawn door's refusal
@@ -1005,7 +1013,7 @@ pub struct Slot {
 /// replaces only the word being typed. A word that already **is** one of the
 /// candidates raises nothing: there is nothing left to complete, and a menu
 /// still up there would take the Enter that means "send this line" — which
-/// is exactly what `/team spawn w1 --backend ganja` + Enter means, and what
+/// is exactly what `/teammate spawn w1 --backend ganja` + Enter means, and what
 /// the pane drills type.
 #[must_use]
 pub fn team_completion(text: &str, cursor: (usize, usize), agents: &[Completion]) -> Option<Slot> {
@@ -1022,7 +1030,10 @@ pub fn team_completion(text: &str, cursor: (usize, usize), agents: &[Completion]
     let partial: String = line[start..column].iter().collect();
     let before: String = line[..start].iter().collect();
     let mut words = before.split_whitespace();
-    if words.next() != Some("/team") {
+    // Through [`lookup`] for [`team`]'s reason: the alias completes exactly
+    // as the name does, rather than a second spelling of it living here.
+    let named = words.next().and_then(|word| word.strip_prefix('/')).and_then(lookup);
+    if named.is_none_or(|entry| entry.action != Action::Team) {
         return None;
     }
     let words: Vec<&str> = words.collect();
@@ -1045,7 +1056,7 @@ pub fn team_completion(text: &str, cursor: (usize, usize), agents: &[Completion]
     }
 }
 
-/// What follows `/team`, in the order [`team`] reads them.
+/// What follows `/teammate`, in the order [`team`] reads them.
 fn subcommands() -> Vec<Completion> {
     [
         ("spawn", "start a teammate"),

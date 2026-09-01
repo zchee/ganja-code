@@ -4,7 +4,7 @@
 //! `teammate_env.rs`), which are the end-to-end half of what
 //! `ganja-teammate-local/tests/pane_support` pins with a fake pane child: here **both**
 //! processes are the shipped binary — the lead is the terminal UI running
-//! inside a private tmux server, and the pane is whatever that lead's `/team
+//! inside a private tmux server, and the pane is whatever that lead's `/teammate
 //! spawn w1 --backend ganja` split off — and the test reaches them the way a
 //! person would, through `send-keys` and `capture-pane`.
 //!

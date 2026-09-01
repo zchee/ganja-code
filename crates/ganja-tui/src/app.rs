@@ -546,9 +546,9 @@ pub struct App {
     held_dialog: Option<held::HeldList>,
     /// The `/plugin` dialog, while it is open (**D474**).
     plugin_dialog: Option<plugin::Plugin>,
-    /// The `/team` dialog, while it is open (**D504**).
+    /// The `/teammate` dialog, while it is open (**D504**).
     team_dialog: Option<team::Team>,
-    /// A `/team spawn` while it is in flight, carrying the name it started or
+    /// A `/teammate spawn` while it is in flight, carrying the name it started or
     /// the sentence that refused it.
     ///
     /// Reaped on the tick beside [`App::plugin_task`] and for its reason, with
@@ -562,7 +562,7 @@ pub struct App {
     /// plus `ganja_teammate_local::shim_tui::READY_SETTLE` — about sixteen
     /// seconds — while its readiness poll waits for the CLI's own composer
     /// and then lets it settle, or times out into a paste nobody submits, so
-    /// a second `/team spawn` typed meanwhile is answered [`team::BUSY`] for
+    /// a second `/teammate spawn` typed meanwhile is answered [`team::BUSY`] for
     /// that long. That is the design and not a hang: the wait is off this loop,
     /// which keeps drawing, and the guard is exactly what stops two spawns
     /// writing the team file at once.
@@ -611,9 +611,9 @@ pub struct App {
     /// collapse them.
     turn_usages: VecDeque<TurnUsage>,
     /// The inline command menu, while the buffer is a command being typed —
-    /// or, in values mode, a `/team` slot being filled (**D519**).
+    /// or, in values mode, a `/teammate` slot being filled (**D519**).
     dropdown: Option<Dropdown>,
-    /// The `/team` slot the values menu is over, for the span a chosen value
+    /// The `/teammate` slot the values menu is over, for the span a chosen value
     /// replaces; [`None`] whenever the menu is the command menu or closed.
     completion: Option<command::Slot>,
     /// The agent kinds `--agent` may name, read off the engine's registry
@@ -1927,7 +1927,7 @@ impl App {
     ///
     /// Six things, and only the last is rate-limited *here*. Counting
     /// teammates, carrying their dialogs and the spawn gate's asks, and
-    /// repainting the open `/team` dialog are reads of memory this process
+    /// repainting the open `/teammate` dialog are reads of memory this process
     /// already holds; reaping a finished spawn awaits a handle that already
     /// reported finished. The §6.2 pass **is** a file read — one
     /// `read_to_string` and, when it finds anything, a locked
@@ -2272,7 +2272,7 @@ impl App {
         self.dirty = true;
     }
 
-    /// Opens the `/team` dialog over the roster as it stands (**D504**).
+    /// Opens the `/teammate` dialog over the roster as it stands (**D504**).
     fn open_team(&mut self) {
         let Some(view) = self.team_roster() else {
             self.status.set_notice(Some(NO_TEAM.to_owned()));
@@ -2289,7 +2289,7 @@ impl App {
         self.engine.team_view()
     }
 
-    /// Repaints the open `/team` dialog off a fresh roster.
+    /// Repaints the open `/teammate` dialog off a fresh roster.
     ///
     /// [`App::poll_mcp_dialog`]'s pattern, and it earns it twice over: a
     /// member's ring of recent calls (**D503**) moves on every tool call its
@@ -2312,7 +2312,7 @@ impl App {
         self.dirty |= moved;
     }
 
-    /// One keypress while the `/team` dialog is open, which owns every key —
+    /// One keypress while the `/teammate` dialog is open, which owns every key —
     /// [`drive_two_step`], the same driver the `/plugin` dialog reads.
     async fn handle_team_key(&mut self, key: KeyEvent) {
         let Some(dialog) = &mut self.team_dialog else {
@@ -2325,7 +2325,7 @@ impl App {
         }
     }
 
-    /// Runs a typed `/team` line (**D504**).
+    /// Runs a typed `/teammate` line (**D504**).
     ///
     /// **Only asking for the roster raises the dialog** (user directive,
     /// 2026-08-20). Every arm used to open it first so that a spawn's notice,
@@ -2416,7 +2416,7 @@ impl App {
         }
     }
 
-    /// Asks every teammate to shut down — `/team shutdown` with nobody named.
+    /// Asks every teammate to shut down — `/teammate shutdown` with nobody named.
     ///
     /// The fan-out and the frames are [`ganja_core::Teammates`]'s, for
     /// [`App::ask_shutdown`]'s reason; what is here is the one sentence a
@@ -2450,7 +2450,7 @@ impl App {
         });
     }
 
-    /// Runs what the `/team` dialog decided.
+    /// Runs what the `/teammate` dialog decided.
     ///
     /// The two mailbox effects are awaited here, and the spawn is not. That is
     /// not an inconsistency: a message and a shutdown are one locked
@@ -2465,8 +2465,8 @@ impl App {
                 // Up-arrow or Ctrl+R to bring back (user directive,
                 // 2026-08-20). Before the spawn, which may stop to ask a
                 // person: what is remembered is what was typed, not whether
-                // the team took it — the rule every `/team` line follows.
-                self.history.append(history::PromptInfo::text(format!("/team spawn {typed}")));
+                // the team took it — the rule every `/teammate` line follows.
+                self.history.append(history::PromptInfo::text(format!("/teammate spawn {typed}")));
                 self.spawn_teammate(request);
             }
             team::Effect::Message { to, text } => {
@@ -2522,7 +2522,7 @@ impl App {
         }
     }
 
-    /// Reaps a finished `/team spawn` and says on the dialog what it did.
+    /// Reaps a finished `/teammate spawn` and says on the dialog what it did.
     ///
     /// [`App::poll_plugin_task`]'s shape: polled on the tick, awaited only once
     /// the handle reports finished, so the loop never waits on the spawn it
@@ -2614,7 +2614,7 @@ impl App {
         let Some(teammates) = self.engine.teammates() else {
             return NO_TEAM.to_owned();
         };
-        // Always a known roster name from the `/team` dialog, never a
+        // Always a known roster name from the `/teammate` dialog, never a
         // resolved one — the D528 identity index is `None` here for the same
         // reason `Teammates::ask_shutdown`'s internal use is.
         let postbox = ganja_core::Postbox::lead(teammates.registry(), None);
@@ -2662,7 +2662,7 @@ impl App {
         self.dirty = true;
     }
 
-    /// Raises the permission dialogs `/team spawn` put in front of a person.
+    /// Raises the permission dialogs `/teammate spawn` put in front of a person.
     ///
     /// [`App::drain_teammate_dialogs`]'s twin on the other question — may this
     /// teammate *run*, rather than may its call run — and it shares that one's
@@ -3889,7 +3889,7 @@ impl App {
             return Ok(());
         }
 
-        // The same, for the same reason: `/team spawn` and a message to a
+        // The same, for the same reason: `/teammate spawn` and a message to a
         // member are both typed into a step of the dialog (**D504**).
         if self.team_dialog.is_some() {
             self.handle_team_key(key).await;
@@ -4215,7 +4215,7 @@ impl App {
             // Bare `/rename` names nothing to rename to — reached only
             // through a dropdown Tab-complete that stops at the name, since
             // `command::rename` intercepts an argument-carrying line before
-            // this dispatch is ever reached (D527, the `/team` precedent) —
+            // this dispatch is ever reached (D527, the `/teammate` precedent) —
             // so it answers with the missing-name notice, spelled once.
             command::Action::Rename => self.run_rename_line(command::Rename::Missing).await,
         }
@@ -4515,7 +4515,7 @@ impl App {
         }
     }
 
-    /// Puts `value` where the partial word of the current `/team` slot was,
+    /// Puts `value` where the partial word of the current `/teammate` slot was,
     /// followed by the space that ends the slot (**D519**): only the word
     /// under the cursor goes, so a line completed mid-sentence keeps its tail.
     fn complete_value(&mut self, value: &str) {
@@ -4795,7 +4795,7 @@ impl App {
             self.completion = None;
             return;
         }
-        // A `/team` argument slot raises the same box over what could fill
+        // A `/teammate` argument slot raises the same box over what could fill
         // it (**D519**), rebuilt per keystroke because the slot itself moves
         // with the cursor.
         if let Some(slot) = command::team_completion(&text, cursor, &self.agent_kinds) {
@@ -5944,7 +5944,7 @@ impl App {
     }
 
     /// One keypress while the `/plugin` dialog is open, which owns every key —
-    /// [`drive_two_step`], the same driver the `/team` dialog reads.
+    /// [`drive_two_step`], the same driver the `/teammate` dialog reads.
     fn handle_plugin_key(&mut self, key: KeyEvent) {
         let Some(dialog) = &mut self.plugin_dialog else {
             return;
@@ -6143,9 +6143,9 @@ impl App {
             return;
         }
 
-        // `/team`'s own grammar, read here because it is the one UI command
+        // `/teammate`'s own grammar, read here because it is the one UI command
         // that takes arguments: `command::Action` is `Copy` and carries none, so
-        // a bare `/team` reaches `run_command` above while `/team spawn w1
+        // a bare `/teammate` reaches `run_command` above while `/teammate spawn w1
         // --backend ganja` reaches this (**D504**, AC-11's own spelling). Both
         // doors end up in the same dialog, which is what keeps the palette and
         // the typed line one thing rather than two.
@@ -6157,7 +6157,7 @@ impl App {
             // them again: a long spawn prompt behind a mistyped flag is
             // edited, not retyped (user directive, 2026-08-20). Unlike a
             // prompt, which is remembered only once the engine took it, there
-            // is no engine here to take or refuse it first. A bare `/team`
+            // is no engine here to take or refuse it first. A bare `/teammate`
             // never reaches this: it is the palette's own door above, and is
             // remembered no more than `/help` is.
             self.history.append(history::PromptInfo::text(&prompt));
@@ -6165,7 +6165,7 @@ impl App {
             return;
         }
 
-        // `/rename`'s own grammar, for `/team`'s exact reason: it is the
+        // `/rename`'s own grammar, for `/teammate`'s exact reason: it is the
         // other UI command that carries an argument, so a bare `/rename`
         // reaches `run_command` above while `/rename fresh` reaches this
         // (**D527**).
@@ -7116,7 +7116,7 @@ impl App {
             // is waiting on a person, so neither is a reason to keep the loop
             // spinning at frame rate.
             || (self.queue.has_fallback() && !self.turn_running && !self.revert_pending)
-            // The `/team` dialog polls the roster and each member's ring on
+            // The `/teammate` dialog polls the roster and each member's ring on
             // every tick, exactly as the `/mcp` dialog polls its statuses.
             || self.team_dialog.is_some()
             // A teammate that is running may hand this loop a permission
@@ -7234,7 +7234,7 @@ enum Driven<E> {
 /// takes the printable characters, the way the question dialog's editor does;
 /// everywhere else the keys are the `/mcp` dialog's, Esc closing the dialog
 /// except where the input step consumes it as "cancel the edit". Written once
-/// over [`crate::component::TwoStep`] so the `/plugin` and `/team` dialogs
+/// over [`crate::component::TwoStep`] so the `/plugin` and `/teammate` dialogs
 /// cannot drift apart key by key.
 fn drive_two_step<D: crate::component::TwoStep>(
     dialog: &mut D,
@@ -7285,9 +7285,9 @@ fn drive_two_step<D: crate::component::TwoStep>(
 /// are exactly what [`ganja_core::SpawnAsker`] is handed and hands back.
 type SpawnQuestion = (ganja_core::SpawnAsk, tokio::sync::oneshot::Sender<PermissionReply>);
 
-/// What a session leading no team answers to every `/team` action.
+/// What a session leading no team answers to every `/teammate` action.
 ///
-/// One sentence rather than a silence: `/team` in a pane member is a person
+/// One sentence rather than a silence: `/teammate` in a pane member is a person
 /// asking about something that genuinely is not there, and a dialog that
 /// simply refused to open would look like a broken key.
 ///
@@ -7299,7 +7299,7 @@ type SpawnQuestion = (ganja_core::SpawnAsk, tokio::sync::oneshot::Sender<Permiss
 const NO_TEAM: &str =
     "this session leads no team \u{b7} it is a member of the one that launched it";
 
-/// What `/team shutdown` answers when the team is only the lead.
+/// What `/teammate shutdown` answers when the team is only the lead.
 const NOBODY_TO_STOP: &str = "this team has no teammates to stop";
 
 /// What the status bar says while a pane teammate waits for its turn to end
@@ -7391,7 +7391,7 @@ fn said(
 /// What a spawn's own dialog is filed under, where a call's dialog names its
 /// tool. Not a registry id — no tool raised this — and named for the door it
 /// came through so a person reading the dialog knows it is not a call.
-const SPAWN_TOOL: &str = "/team spawn";
+const SPAWN_TOOL: &str = "/teammate spawn";
 
 /// How many spawn dialogs may be waiting to be raised.
 ///
@@ -7400,7 +7400,7 @@ const SPAWN_TOOL: &str = "/team spawn";
 /// spawn asks plus room for a tick that has not drained it yet.
 const SPAWN_ASKS: usize = 4;
 
-/// Puts a `/team spawn`'s own permission dialog in front of the person who
+/// Puts a `/teammate spawn`'s own permission dialog in front of the person who
 /// typed it (**D-5**, Resolution 4).
 ///
 /// The engine's spawn gate is `async` and asks through this seam, which is what

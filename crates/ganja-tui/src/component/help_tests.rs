@@ -16,7 +16,7 @@ const AREA: Rect = Rect {
     x: 0,
     y: 0,
     width: 76,
-    // One row per command, so this grows with the roster: `/team`
+    // One row per command, so this grows with the roster: `/teammate`
     // (**D504**) made 34 one short of the whole card, `/held`
     // (**D524**) did the same to 35, and `/rename` (**D527**) to 36.
     height: 37,

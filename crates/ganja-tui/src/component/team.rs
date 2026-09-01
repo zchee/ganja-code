@@ -1,4 +1,4 @@
-//! The `/team` dialog: one row per member of this session's team — its name,
+//! The `/teammate` dialog: one row per member of this session's team — its name,
 //! the surface it runs on, whether it is the lead, and the ring of what it
 //! most recently did — with the actions a row offers behind Enter, and a
 //! Spawn row that belongs to the team rather than to any member.
@@ -22,7 +22,7 @@
 //!   `MemberView::recent_calls` — ganja's own protocol projection — and never
 //!   through Claude's member record, which is somebody else's document.
 //! - **Nothing stands in front of a spawn.** Resolution 4 of the landing:
-//!   `/team spawn` raises no confirmation dialog, because a person typing a
+//!   `/teammate spawn` raises no confirmation dialog, because a person typing a
 //!   spawn is the consent. What a person cannot see is where the prompt they
 //!   just typed came to rest, so the one thing said afterwards is that —
 //!   [`Team::spawned`]'s notice, naming the cleartext path (D-7).
@@ -181,7 +181,7 @@ impl Spawned {
     /// reported.
     ///
     /// A method rather than a `format!` at each caller because the dialog is
-    /// not always open to hold it: a `/team spawn` line typed at the composer
+    /// not always open to hold it: a `/teammate spawn` line typed at the composer
     /// raises no dialog at all and reports into the status bar instead. The
     /// half of this sentence that must survive that is the second one —
     /// Resolution 4's disclosure that the prompt is on disk in cleartext — and
@@ -206,7 +206,7 @@ pub enum Effect {
         /// The spawn, parsed — the `task` door's own value ([`spawn_request`]).
         request: TeammateSpawn,
         /// The words as typed into the step — [`crate::command::SPAWN_GRAMMAR`]'s
-        /// shape, without the `/team spawn` a composer line carries — so the
+        /// shape, without the `/teammate spawn` a composer line carries — so the
         /// app can remember the spawn in the prompt history as the line it
         /// is equivalent to, and an Up-arrow can bring it back to edit.
         typed: String,
@@ -248,7 +248,7 @@ impl RowAction {
 /// What a free-text step is collecting.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Asking {
-    /// A spawn line, in `/team spawn`'s own grammar.
+    /// A spawn line, in `/teammate spawn`'s own grammar.
     Spawn,
     /// A message for the named member.
     Message(String),
@@ -318,7 +318,7 @@ impl Team {
     /// chooses again.
     ///
     /// Answers whether anything really changed, so a caller polling every tick
-    /// repaints only when it did. A `/team` dialog left open would otherwise
+    /// repaints only when it did. A `/teammate` dialog left open would otherwise
     /// mark every one of those ticks dirty and redraw the screen at frame rate
     /// for a roster nobody touched.
     pub fn refresh(&mut self, rows: Vec<Row>) -> bool {
@@ -593,7 +593,7 @@ impl Team {
 
         Clear.render(popup, buffer);
         Paragraph::new(Text::from(lines))
-            .block(Block::bordered().title(" team "))
+            .block(Block::bordered().title(" teammate "))
             .style(theme.fg.patch(theme.background_panel))
             .render(popup, buffer);
     }
@@ -693,7 +693,7 @@ impl Team {
         theme: &Theme,
     ) -> Vec<Line<'static>> {
         let prompt = match asking {
-            // The same grammar `/team spawn` takes, spelled by the constant
+            // The same grammar `/teammate spawn` takes, spelled by the constant
             // its refusal names, because [`crate::command::team_spawn`] is the
             // one parser both doors feed.
             Asking::Spawn => format!("Spawn: {}", crate::command::SPAWN_GRAMMAR),

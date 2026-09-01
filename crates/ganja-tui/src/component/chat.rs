@@ -120,7 +120,7 @@ fn point_glyph(level: u8) -> &'static str {
 const POINT_BRIGHT: u8 = 4;
 
 /// What leads what a call answered, one step under the header it answers —
-/// and, in the `/team` dialog, a member's ring of recent calls: a call log is
+/// and, in the `/teammate` dialog, a member's ring of recent calls: a call log is
 /// the same thing there and here and should read the same way.
 pub(crate) const RESULT: &str = "  \u{23bf} ";
 

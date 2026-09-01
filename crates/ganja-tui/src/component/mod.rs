@@ -52,7 +52,7 @@ pub(crate) fn action_row(
 /// The keys its free-text step answers to.
 pub(crate) const INPUT_HINTS: &str = "[type/backspace] edit   [Enter] submit   [Esc] cancel";
 
-/// The key surface the `/plugin` and `/team` dialogs share: a list, a per-row
+/// The key surface the `/plugin` and `/teammate` dialogs share: a list, a per-row
 /// action step, and a free-text step that takes the printable keys. One
 /// driver in `app.rs` reads it, so the two dialogs cannot answer the same
 /// keypress two ways. What stays each dialog's own — the step enums, and what

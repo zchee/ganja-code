@@ -100,7 +100,7 @@ async fn spawn_through_the_task_door(args: serde_json::Value) -> TeammateSpawn {
     recorder.started().into_iter().next().expect("one spawn was recorded")
 }
 
-/// **AC-14**, the `/team spawn` half: the two doors are one sequence
+/// **AC-14**, the `/teammate spawn` half: the two doors are one sequence
 /// because they build one request. The `task` door's value is taken from
 /// the door itself, so this cannot pass by both sides sharing a mistake.
 ///
@@ -467,14 +467,14 @@ fn the_spawn_prompt_shows_the_grammar_the_refusal_names() {
     );
 }
 
-/// The command grammar is the dialog's grammar, so a `/team` line and the
+/// The command grammar is the dialog's grammar, so a `/teammate` line and the
 /// dialog's own step cannot mean two different things.
 #[test]
 fn a_typed_team_line_and_the_dialogs_step_build_the_same_request() {
     let Some(command::Team::Spawn(line)) =
-        command::team("/team spawn w3 --agent explore --backend claude go")
+        command::team("/teammate spawn w3 --agent explore --backend claude go")
     else {
-        panic!("`/team spawn` should parse");
+        panic!("`/teammate spawn` should parse");
     };
 
     assert_eq!(

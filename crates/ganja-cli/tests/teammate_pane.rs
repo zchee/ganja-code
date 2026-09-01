@@ -1,4 +1,4 @@
-//! `/team spawn w1 --backend ganja` makes a real pane teammate, and its
+//! `/teammate spawn w1 --backend ganja` makes a real pane teammate, and its
 //! `shutdown_approved` ends it (**AC-11**, as the spec spells it).
 //!
 //! Spec: Claude Code's teammates — §4.1's spawn sequence and §6.2's shutdown
@@ -34,7 +34,7 @@
 //!    the lead — seen present in the lead's inbox while the lead is held
 //!    still, then seen gone once the lead is let go and its pass has read
 //!    it.
-//! 4. `/team shutdown w1` — the lead asks, the member approves and leaves, the
+//! 4. `/teammate shutdown w1` — the lead asks, the member approves and leaves, the
 //!    lead reads the approval: the pane is gone from tmux and `w1` from the
 //!    team file, with nothing here having killed anything.
 //!
@@ -430,7 +430,7 @@ fn a_configured_pane_shell_still_execs_the_launch_line() {
         tmux.screen(&lead).contains(COMPOSER).then_some(())
     });
 
-    tmux.type_line(&lead, &format!("/team spawn {MEMBER} --backend ganja"));
+    tmux.type_line(&lead, &format!("/teammate spawn {MEMBER} --backend ganja"));
     let member = wait_for("the member record", &tmux, &lead, || {
         fixture
             .team_file()?
@@ -444,9 +444,9 @@ fn a_configured_pane_shell_still_execs_the_launch_line() {
     });
 }
 
-/// **AC-11.** `/team spawn w1 --backend ganja` in a real lead makes a real pane
+/// **AC-11.** `/teammate spawn w1 --backend ganja` in a real lead makes a real pane
 /// teammate on a private tmux server; the member runs its seeded task and
-/// reports; `/team shutdown w1` ends in the lead reading the approval and the
+/// reports; `/teammate shutdown w1` ends in the lead reading the approval and the
 /// pane being gone.
 #[test]
 fn a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shutdown_approved() {
@@ -469,7 +469,7 @@ fn a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shutdown_
     // 1. The spec's own line, typed. The bar says where the prompt went — no
     // dialog is raised for a line that already said what it wanted — and the
     // team file names the member on its pane.
-    tmux.type_line(&lead, &format!("/team spawn {MEMBER} --backend ganja"));
+    tmux.type_line(&lead, &format!("/teammate spawn {MEMBER} --backend ganja"));
     wait_for("the spawn to be reported", &tmux, &lead, || {
         tmux.screen(&lead).contains(&format!("{MEMBER} {SPAWN_NOTICE}")).then_some(())
     });
@@ -537,13 +537,13 @@ fn a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shutdown_
     // 4. The handshake through the lead: it asks, the member approves and
     // leaves, and reading the approval is what kills the pane and retires the
     // record. Nothing here touches tmux to make that so. Nothing is dismissed
-    // first: a typed `/team spawn` raises no dialog, so the composer never
+    // first: a typed `/teammate spawn` raises no dialog, so the composer never
     // stopped owning the keyboard — it is waited for all the same, because
     // typing the next line into a frame that has not caught up is a race.
     wait_for("the composer to take the next line", &tmux, &lead, || {
         tmux.screen(&lead).contains(COMPOSER).then_some(())
     });
-    tmux.type_line(&lead, &format!("/team shutdown {MEMBER}"));
+    tmux.type_line(&lead, &format!("/teammate shutdown {MEMBER}"));
     wait_for("the pane to be killed on the approval", &tmux, &lead, || {
         (!tmux.panes().contains(&pane)).then_some(())
     });
@@ -620,21 +620,21 @@ fn seed_record(spec: &SpawnSpec) {
     );
 }
 
-/// Types one `/team spawn <name> --backend ganja` at the lead and answers with
+/// Types one `/teammate spawn <name> --backend ganja` at the lead and answers with
 /// the pane the team file names for it, once the lead has reported the spawn
 /// **finished**.
 ///
 /// The bar's notice first, and only then the record. The record alone is too
 /// early: the registry writes it *before* the launch, and the lead's own
 /// spawn task is still running — and being polled by the tick — after it is
-/// on disk. A second `/team spawn` typed inside that window is refused as
+/// on disk. A second `/teammate spawn` typed inside that window is refused as
 /// busy by design (`App::spawn_teammate`), which on a loaded runner is exactly
 /// where the next line landed: the second teammate never existed, and the
 /// first one's notice, arriving a tick later, overwrote the refusal. The
 /// notice names the teammate, so waiting on `<name> started` cannot read the
 /// previous teammate's line as this one's.
 fn spawn_pane(tmux: &Tmux, lead: &str, fixture: &Fixture, name: &str) -> String {
-    tmux.type_line(lead, &format!("/team spawn {name} --backend ganja"));
+    tmux.type_line(lead, &format!("/teammate spawn {name} --backend ganja"));
 
     wait_for(&format!("the spawn of {name} to be reported"), tmux, lead, || {
         tmux.screen(lead).contains(&format!("{name} {SPAWN_NOTICE}")).then_some(())

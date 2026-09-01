@@ -93,7 +93,7 @@ impl Dropdown {
         dropdown
     }
 
-    /// Opens the menu over a `/team` argument slot (**D519**): the same box,
+    /// Opens the menu over a `/teammate` argument slot (**D519**): the same box,
     /// titled after the slot, holding what could fill it narrowed by the
     /// partial word. Rebuilt by the app on every keystroke rather than
     /// refreshed, since the slot itself may have changed.

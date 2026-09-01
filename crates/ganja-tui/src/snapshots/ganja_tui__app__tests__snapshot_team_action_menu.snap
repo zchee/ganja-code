@@ -1,5 +1,5 @@
 ---
-source: crates/ganja-tui/src/app.rs
+source: crates/ganja-tui/src/app_tests.rs
 expression: screen(&terminal)
 ---
                                                                                 
@@ -8,7 +8,7 @@ expression: screen(&terminal)
                                                                                 
                                                                                 
                                                                                 
-  ┌ team ────────────────────────────────────────────────────────────────────┐  
+  ┌ teammate ────────────────────────────────────────────────────────────────┐  
   │w1                                                                        │  
   │> Message…                                                                │  
   │  Shutdown                                                                │  

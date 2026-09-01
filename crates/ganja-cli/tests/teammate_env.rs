@@ -70,7 +70,7 @@ fn a_secret_the_lead_holds_never_reaches_a_panes_command_line() {
         &[("ANTHROPIC_API_KEY", CANARY), ("GANJA_SERVER_PASSWORD", CANARY)],
     );
 
-    lead.type_line(&format!("/team spawn {TEAMMATE} --backend ganja {PROMPT}"));
+    lead.type_line(&format!("/teammate spawn {TEAMMATE} --backend ganja {PROMPT}"));
     let argv = pane_argv(&lead);
 
     assert!(
@@ -119,7 +119,7 @@ fn a_pane_joins_the_team_when_the_tmux_server_predates_the_config_home_export() 
         "the server predates the export, by construction"
     );
 
-    lead.type_line(&format!("/team spawn {TEAMMATE} --backend ganja say the word"));
+    lead.type_line(&format!("/teammate spawn {TEAMMATE} --backend ganja say the word"));
     let (pane, _) = lead.wait_for_teammate_pane();
 
     // The pane's turn ran, which it can only have done from the lead's team's

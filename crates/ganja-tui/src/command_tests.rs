@@ -18,21 +18,21 @@ fn engine() -> Vec<EngineCommand> {
 /// first argument character removes the hint.
 #[test]
 fn a_typed_team_hints_until_an_argument_arrives() {
-    assert!(inline_hint("/team", &[]).is_some());
-    assert!(inline_hint("/team ", &[]).is_some());
-    assert_eq!(inline_hint("/team s", &[]), None);
+    assert!(inline_hint("/teammate", &[]).is_some());
+    assert!(inline_hint("/teammate ", &[]).is_some());
+    assert_eq!(inline_hint("/teammate s", &[]), None);
     assert_eq!(inline_hint("/tea", &[]), None);
     assert_eq!(inline_hint("team", &[]), None);
 }
 
-/// **D518.** `/team spawn` with nothing named yet shows the one spelled
+/// **D518.** `/teammate spawn` with nothing named yet shows the one spelled
 /// spawn grammar — the refusal's and the dialog's own string.
 #[test]
 fn a_bare_team_spawn_hints_the_spawn_grammar() {
-    assert_eq!(inline_hint("/team spawn", &[]).as_deref(), Some(SPAWN_GRAMMAR));
-    assert_eq!(inline_hint("/team spawn ", &[]).as_deref(), Some(SPAWN_GRAMMAR));
+    assert_eq!(inline_hint("/teammate spawn", &[]).as_deref(), Some(SPAWN_GRAMMAR));
+    assert_eq!(inline_hint("/teammate spawn ", &[]).as_deref(), Some(SPAWN_GRAMMAR));
     assert_eq!(
-        inline_hint("/team spawn w1", &[]).as_deref(),
+        inline_hint("/teammate spawn w1", &[]).as_deref(),
         Some("[--backend <surface>] [--agent <kind>] [what it should do]")
     );
 }
@@ -43,24 +43,24 @@ fn a_bare_team_spawn_hints_the_spawn_grammar() {
 #[test]
 fn typed_arguments_consume_the_hint_front_to_back() {
     let flags = "[--backend <surface>] [--agent <kind>] [what it should do]";
-    assert_eq!(inline_hint("/team spawn w1", &[]).as_deref(), Some(flags));
-    assert_eq!(inline_hint("/team spawn w1 ", &[]).as_deref(), Some(flags));
+    assert_eq!(inline_hint("/teammate spawn w1", &[]).as_deref(), Some(flags));
+    assert_eq!(inline_hint("/teammate spawn w1 ", &[]).as_deref(), Some(flags));
     assert_eq!(
-        inline_hint("/team spawn w1 --backend ganja", &[]).as_deref(),
+        inline_hint("/teammate spawn w1 --backend ganja", &[]).as_deref(),
         Some("[--agent <kind>] [what it should do]")
     );
     assert_eq!(
-        inline_hint("/team spawn w1 --back", &[]).as_deref(),
+        inline_hint("/teammate spawn w1 --back", &[]).as_deref(),
         Some("[--agent <kind>] [what it should do]"),
         "a flag still being typed already names its slot"
     );
     assert_eq!(
-        inline_hint("/team spawn w1 fix the tests", &[]),
+        inline_hint("/teammate spawn w1 fix the tests", &[]),
         None,
         "the first prompt word takes the last slot, and the words after it are prose"
     );
     assert_eq!(
-        inline_hint("/team spawn w1 --bogus", &[]),
+        inline_hint("/teammate spawn w1 --bogus", &[]),
         None,
         "a flag the grammar has not got silences the hint rather than guessing"
     );
@@ -69,9 +69,9 @@ fn typed_arguments_consume_the_hint_front_to_back() {
 /// **D518.** `shutdown` hints its optional member until one is named.
 #[test]
 fn a_shutdown_line_hints_its_member_until_one_is_named() {
-    assert_eq!(inline_hint("/team shutdown", &[]).as_deref(), Some("[member]"));
-    assert_eq!(inline_hint("/team shutdown ", &[]).as_deref(), Some("[member]"));
-    assert_eq!(inline_hint("/team shutdown w1", &[]), None);
+    assert_eq!(inline_hint("/teammate shutdown", &[]).as_deref(), Some("[member]"));
+    assert_eq!(inline_hint("/teammate shutdown ", &[]).as_deref(), Some("[member]"));
+    assert_eq!(inline_hint("/teammate shutdown w1", &[]), None);
 }
 
 /// **D518.** A command file's own `argument-hint` reaches the composer,
@@ -96,7 +96,7 @@ fn an_engine_command_hints_what_its_file_declared() {
 /// command awaiting arguments.
 #[test]
 fn a_multiline_buffer_hints_nothing() {
-    assert_eq!(inline_hint("/team\nmore", &[]), None);
+    assert_eq!(inline_hint("/teammate\nmore", &[]), None);
 }
 
 fn kinds() -> Vec<Completion> {
@@ -114,7 +114,7 @@ fn texts(choices: &[Choice]) -> Vec<String> {
 /// narrowed by what has been typed, with the default saying so.
 #[test]
 fn the_backend_slot_offers_the_parsers_own_six() {
-    let text = "/team spawn foo --backend g";
+    let text = "/teammate spawn foo --backend g";
     let slot = team_completion(text, (0, text.len()), &kinds()).expect("a backend slot");
     assert_eq!(slot.title, " backends ");
     assert_eq!(slot.partial, "g");
@@ -139,32 +139,35 @@ fn the_backend_slot_offers_the_parsers_own_six() {
 fn every_team_slot_completes_and_free_words_do_not() {
     let at_end = |text: &str| team_completion(text, (0, text.len()), &kinds());
 
-    assert_eq!(at_end("/team sp").map(|s| (s.title, s.partial)), Some((" team ", "sp".to_owned())));
-    assert_eq!(at_end("/team spawn foo --").map(|s| s.title), Some(" flags "));
-    assert_eq!(at_end("/team spawn foo --agent ex").map(|s| s.title), Some(" agents "));
-    assert_eq!(at_end("/team spawn fo"), None, "a name is anyone's");
-    assert_eq!(at_end("/team spawn foo fix it"), None, "prompt words are prose");
-    assert_eq!(at_end("/team spawn foo --backend ganja "), None, "a filled slot is done");
+    assert_eq!(
+        at_end("/teammate sp").map(|s| (s.title, s.partial)),
+        Some((" team ", "sp".to_owned()))
+    );
+    assert_eq!(at_end("/teammate spawn foo --").map(|s| s.title), Some(" flags "));
+    assert_eq!(at_end("/teammate spawn foo --agent ex").map(|s| s.title), Some(" agents "));
+    assert_eq!(at_end("/teammate spawn fo"), None, "a name is anyone's");
+    assert_eq!(at_end("/teammate spawn foo fix it"), None, "prompt words are prose");
+    assert_eq!(at_end("/teammate spawn foo --backend ganja "), None, "a filled slot is done");
     assert_eq!(at_end("/skills sp"), None);
     assert_eq!(at_end("team spawn --backend "), None, "no slash, no command");
 }
 
 /// **D519.** A word that already is a candidate raises no menu, so the
 /// Enter after a fully typed value sends the line instead of feeding the
-/// menu — the pane drills' own `/team spawn w1 --backend ganja` + Enter.
+/// menu — the pane drills' own `/teammate spawn w1 --backend ganja` + Enter.
 #[test]
 fn a_fully_typed_value_leaves_enter_to_the_line() {
     let at_end = |text: &str| team_completion(text, (0, text.len()), &kinds());
-    assert_eq!(at_end("/team spawn w1 --backend ganja"), None);
-    assert_eq!(at_end("/team spawn"), None);
-    assert_eq!(at_end("/team spawn w1 --agent explore"), None);
-    assert!(at_end("/team spawn w1 --backend ganj").is_some());
+    assert_eq!(at_end("/teammate spawn w1 --backend ganja"), None);
+    assert_eq!(at_end("/teammate spawn"), None);
+    assert_eq!(at_end("/teammate spawn w1 --agent explore"), None);
+    assert!(at_end("/teammate spawn w1 --backend ganj").is_some());
 }
 
 /// **D519.** A flag the line already carries is not offered twice.
 #[test]
 fn a_flag_already_given_is_not_offered_again() {
-    let text = "/team spawn foo --backend ganja --";
+    let text = "/teammate spawn foo --backend ganja --";
     let slot = team_completion(text, (0, text.len()), &kinds()).expect("a flag slot");
     assert_eq!(
         slot.candidates.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
@@ -176,8 +179,8 @@ fn a_flag_already_given_is_not_offered_again() {
 /// nothing after it: the span is measured to the cursor, not to the end.
 #[test]
 fn the_slot_spans_only_the_word_under_the_cursor() {
-    let text = "/team spawn foo --backend gr fix it";
-    let cursor = "/team spawn foo --backend gr".len();
+    let text = "/teammate spawn foo --backend gr fix it";
+    let cursor = "/teammate spawn foo --backend gr".len();
     let slot = team_completion(text, (0, cursor), &kinds()).expect("a backend slot");
     assert_eq!(slot.partial, "gr");
     assert_eq!(slot.start, cursor - 2);
@@ -201,7 +204,7 @@ fn the_command_names_and_aliases_match_their_surface_contract() {
         ("context", &[][..], Action::Context),
         ("usage", &[][..], Action::Usage),
         ("plugin", &[][..], Action::Plugin),
-        ("team", &[][..], Action::Team),
+        ("teammate", &["teammates"][..], Action::Team),
         ("held", &[][..], Action::Held),
         ("help", &[][..], Action::Help),
         ("exit", &["quit", "q"][..], Action::Exit),
@@ -451,20 +454,41 @@ fn a_submitted_buffer_names_a_command_only_when_the_name_stands_alone() {
     }
 }
 
+/// The rename is a clean cut: `/team` names nothing here any more.
+///
+/// Every door onto a command is asked, because they are separate readers of
+/// the same buffer and a compatibility alias left in any one of them would
+/// keep the old spelling working through that door alone. What a submitted
+/// `/team` line does instead is the composer's ordinary fallthrough — no
+/// entry, no grammar, no hint — which leaves it to be read as prose, exactly
+/// as `/nonesuch` already is.
+#[test]
+fn the_old_team_spelling_names_no_command_at_all() {
+    assert!(lookup("team").is_none(), "the roster no longer holds `team`");
+    assert!(submitted("/team").is_none(), "a bare `/team` opens nothing");
+    assert!(inline_hint("/team", &[]).is_none(), "and shows nothing beside the cursor");
+    for text in ["/team", "/team list", "/team spawn w1 --backend ganja", "/team shutdown w1"] {
+        assert_eq!(team(text), None, "{text:?} is prose now, not even a refusal");
+    }
+}
+
 /// The one command here that takes arguments, and the subcommands it
-/// takes them for. A bare `/team` means the same thing as `/team list`,
+/// takes them for. A bare `/teammate` means the same thing as `/teammate list`,
 /// which is why both reach [`Team::List`] rather than two kinds of open.
 #[test]
 fn a_team_line_reaches_every_subcommand_the_grammar_has() {
-    for text in ["/team", "/team ", "/team\n", "/team list", "/team list  "] {
+    for text in ["/teammate", "/teammate ", "/teammate\n", "/teammate list", "/teammate list  "] {
         assert_eq!(team(text), Some(Team::List), "{text:?} should list");
     }
     assert_eq!(
-        team("/team shutdown"),
+        team("/teammate shutdown"),
         Some(Team::Shutdown { member: None }),
         "no name is the whole team"
     );
-    assert_eq!(team("/team shutdown w1"), Some(Team::Shutdown { member: Some("w1".to_owned()) }));
+    assert_eq!(
+        team("/teammate shutdown w1"),
+        Some(Team::Shutdown { member: Some("w1".to_owned()) })
+    );
 }
 
 /// Flags come before the prompt, and the first word that is not a flag
@@ -474,7 +498,7 @@ fn a_team_line_reaches_every_subcommand_the_grammar_has() {
 fn a_team_spawn_line_takes_its_flags_before_its_prompt() {
     let cases = [
         (
-            "/team spawn w1 --backend ganja",
+            "/teammate spawn w1 --backend ganja",
             TeamSpawn {
                 name: "w1".to_owned(),
                 backend: Some("ganja".to_owned()),
@@ -483,7 +507,7 @@ fn a_team_spawn_line_takes_its_flags_before_its_prompt() {
             },
         ),
         (
-            "/team spawn w1",
+            "/teammate spawn w1",
             TeamSpawn {
                 name: "w1".to_owned(),
                 backend: None,
@@ -492,7 +516,7 @@ fn a_team_spawn_line_takes_its_flags_before_its_prompt() {
             },
         ),
         (
-            "/team spawn w1 --agent explore --backend claude read the tree --carefully",
+            "/teammate spawn w1 --agent explore --backend claude read the tree --carefully",
             TeamSpawn {
                 name: "w1".to_owned(),
                 backend: Some("claude".to_owned()),
@@ -507,23 +531,23 @@ fn a_team_spawn_line_takes_its_flags_before_its_prompt() {
     }
 }
 
-/// Every way of getting a `/team` line wrong is answered with a sentence
+/// Every way of getting a `/teammate` line wrong is answered with a sentence
 /// naming what could not be taken, rather than being sent to the model as
 /// a question about itself.
 #[test]
 fn a_team_line_this_grammar_has_not_got_is_refused_by_name() {
     let cases = [
-        ("/team nonesuch", "nonesuch"),
-        ("/team spawn", "/team spawn"),
-        ("/team spawn --backend ganja", "/team spawn"),
-        ("/team spawn w1 --backend", "--backend"),
-        ("/team spawn w1 --agent", "--agent"),
-        ("/team spawn w1 --nonesuch go", "--nonesuch"),
+        ("/teammate nonesuch", "nonesuch"),
+        ("/teammate spawn", "/teammate spawn"),
+        ("/teammate spawn --backend ganja", "/teammate spawn"),
+        ("/teammate spawn w1 --backend", "--backend"),
+        ("/teammate spawn w1 --agent", "--agent"),
+        ("/teammate spawn w1 --nonesuch go", "--nonesuch"),
         // The flag P25 had and D513 retired is refused like any other
         // word this grammar has not got, not quietly swallowed.
-        ("/team spawn w1 --bypass go", "--bypass"),
-        ("/team list w1", "w1"),
-        ("/team shutdown w1 w2", "w2"),
+        ("/teammate spawn w1 --bypass go", "--bypass"),
+        ("/teammate list w1", "w1"),
+        ("/teammate shutdown w1 w2", "w2"),
     ];
 
     for (text, named) in cases {
@@ -534,12 +558,12 @@ fn a_team_line_this_grammar_has_not_got_is_refused_by_name() {
     }
 }
 
-/// Nothing that is not a `/team` line has an opinion here — it is prose,
+/// Nothing that is not a `/teammate` line has an opinion here — it is prose,
 /// or it is another command's.
 #[test]
 fn only_a_team_line_reaches_the_team_grammar() {
-    for text in ["/teammate w1", "/models", "team spawn w1", "tell /team spawn w1", ""] {
-        assert_eq!(team(text), None, "{text:?} is not a /team line");
+    for text in ["/team w1", "/models", "team spawn w1", "tell /teammate spawn w1", ""] {
+        assert_eq!(team(text), None, "{text:?} is not a /teammate line");
     }
 }
 
@@ -553,10 +577,10 @@ fn the_bare_words_that_quit_are_upstreams_three() {
     }
 }
 
-/// What the `/team` dialog's free-text step takes is the same grammar
-/// the composer line takes after `/team spawn `, so a spawn decided in the
+/// What the `/teammate` dialog's free-text step takes is the same grammar
+/// the composer line takes after `/teammate spawn `, so a spawn decided in the
 /// dialog is remembered in the prompt history as that line — and this is
-/// the invariant the remembering rests on: put `/team spawn ` back in
+/// the invariant the remembering rests on: put `/teammate spawn ` back in
 /// front of the dialog's words and the composer reads the very same
 /// spawn. A grammar that grew a positional flag, or a trim that moved,
 /// would otherwise recall a line that spawns something other than what
@@ -573,7 +597,7 @@ fn a_dialog_spawn_re_emitted_as_a_team_spawn_line_reads_back_the_same() {
     ] {
         let dialog = super::team_spawn(typed).expect("the dialog's grammar takes it");
         assert_eq!(
-            super::team(&format!("/team spawn {typed}")),
+            super::team(&format!("/teammate spawn {typed}")),
             Some(Team::Spawn(dialog)),
             "{typed:?}: the composer line reads back the dialog's spawn"
         );
