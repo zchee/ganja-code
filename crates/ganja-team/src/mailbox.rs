@@ -464,8 +464,10 @@ fn update<T>(
 /// that left `0600` behind would lock a peer out of a file it had been reading
 /// until something else recreated it, and one that widened the mode would hand
 /// out a conversation. So the target's existing bits are copied onto the temp
-/// file before the rename. There is always a target to copy from, because
-/// [`seed`] ran first.
+/// file before the rename. On this module's own path there is always a target
+/// to copy from, because [`seed`] ran first; [`crate::task`] writes documents
+/// that may not exist yet, and one of those lands with the temp file's own
+/// `0600`, which is what a fresh document should be born as anyway.
 ///
 /// **The parent directory is deliberately not fsynced**, and the asymmetry is
 /// worth naming because the temp file *is*. `sync_all` guarantees the new bytes
@@ -479,9 +481,12 @@ fn update<T>(
 /// durability for an inbox whose whole contents are transient backlog. A crash
 /// can never produce a *torn* file, which is the property that would actually
 /// matter — `persist` is a `rename(2)`, so a reader sees one array or the other.
-fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_atomically(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "an inbox path names a file inside a directory")
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a document path names a file inside a directory",
+        )
     })?;
 
     let mut temp = NamedTempFile::new_in(parent)?;

@@ -314,6 +314,20 @@ impl TeamsRoot {
     pub fn inbox_path(&self, team: &TeamName, agent: &MemberName) -> PathBuf {
         self.inbox_dir(team).join(format!("{}.json", agent.0))
     }
+
+    /// `<root>/<team>/tasks` — the shared task list.
+    ///
+    /// **Not §2.1's**, and the one thing in this file that is not Claude
+    /// Code's layout: a `claude` process keeps its own task list inside itself
+    /// and writes nothing here. This is ganja's own subdirectory beside
+    /// Claude's documents, which is a liberty taken deliberately and exactly
+    /// once — a ganja-only *directory* in a shared team directory, never a
+    /// ganja-only key inside a document somebody else also reads. What lives
+    /// under it is [`crate::task`]'s.
+    #[must_use]
+    pub fn tasks_dir(&self, team: &TeamName) -> PathBuf {
+        self.team_dir(team).join(crate::task::TASKS_DIR)
+    }
 }
 
 #[cfg(test)]
