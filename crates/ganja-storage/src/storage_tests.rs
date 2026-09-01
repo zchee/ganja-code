@@ -821,6 +821,13 @@ fn an_unreadable_database_is_set_aside_and_the_store_starts_fresh() {
         aside.iter().any(|name| name.contains(".corrupt-")),
         "the damaged database must be kept rather than deleted, got {aside:?}"
     );
+    // And the move was decided under the lock, which is what the file left
+    // behind says: a verdict taken on one connection and acted on unlocked is
+    // the race `a_corrupt_store_waits_for_the_lock…` drills.
+    assert!(
+        aside.iter().any(|name| name.ends_with(".quarantine.lock")),
+        "a damaged database must be set aside under the quarantine lock, got {aside:?}"
+    );
 }
 
 #[test]
@@ -915,6 +922,83 @@ fn a_quarantine_waits_for_the_lock_and_then_finds_nothing_left_to_do() {
     assert_eq!(
         left.iter()
             .filter(|name| name.contains(".preuuid-")
+                && !name.ends_with("-wal")
+                && !name.ends_with("-shm"))
+            .count(),
+        1,
+        "the store that waited must not set the winner's fresh store aside too, got {left:?}"
+    );
+}
+
+/// The corrupt-store quarantine waits for the lock, and then asks again.
+///
+/// The drill above through the other door. `Inner::start` used to decide
+/// damage on its own connection and rename on the path with no lock at all, so
+/// two processes meeting one damaged file could each set the other's fresh
+/// replacement aside — the same shape the pre-UUIDv7 quarantine was fixed for,
+/// and the last unlocked renamer in the crate.
+///
+/// Both halves are asserted, because either alone would pass on a build with
+/// no lock at all: that the waiting store does **not** rename while the lock is
+/// held, and that once it gets in it re-reads the path, finds the winner's
+/// sound store there, and leaves it alone.
+#[test]
+fn a_corrupt_store_waits_for_the_lock_and_leaves_the_replacement_alone() {
+    let directory = temporary();
+    let root = directory.path().join("storage");
+    {
+        let planted = storage(&directory);
+        planted.save_info(&info("ses_lost", 5)).expect("the record writes");
+    }
+    let database = Storage::open(root.clone()).database().to_path_buf();
+
+    // The log goes first and then the header, for the reason
+    // `an_unreadable_database_is_set_aside…` gives: a log beside a damaged
+    // database is not damage, because SQLite recovers the file out of it.
+    for suffix in ["-wal", "-shm"] {
+        let _ = fs::remove_file(directory.path().join(format!("{DATABASE}{suffix}")));
+    }
+    let mut bytes = fs::read(&database).expect("the database reads");
+    bytes[..16].copy_from_slice(b"not a database!!");
+    fs::write(&database, &bytes).expect("the database is damaged");
+
+    // Taken before anybody else can want it, and held across the whole
+    // interleaving below.
+    let held = super::QuarantineLock::take(&database).expect("the lock is available");
+
+    let waiting = Storage::open(root.clone());
+    std::thread::scope(|scope| {
+        let parked = scope.spawn(|| waiting.list_sessions());
+        // Long enough for that store to have met the damage, asked for the
+        // lock, and be waiting on it.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(
+            !names(directory.path()).iter().any(|name| name.contains(".corrupt-")),
+            "nothing may be set aside while another process holds the lock"
+        );
+
+        // The winner's move, played by this test: the damaged store renamed
+        // aside and a fresh one created at the name it left.
+        assert!(super::set_aside(&database, "for the test", super::QUARANTINE));
+        let fresh = minted(1);
+        Storage::open(root.clone()).save_info(&info(&fresh, 1)).expect("the fresh store writes");
+        drop(held);
+
+        let listed = parked
+            .join()
+            .expect("the waiting store does not panic")
+            .expect("the waiting store opens rather than failing");
+        assert_eq!(
+            listed.iter().map(|info| info.id.as_str()).collect::<Vec<_>>(),
+            vec![fresh.as_str()],
+            "the store that waited must go on with what the winner left"
+        );
+    });
+
+    let left = names(directory.path());
+    assert_eq!(
+        left.iter()
+            .filter(|name| name.contains(".corrupt-")
                 && !name.ends_with("-wal")
                 && !name.ends_with("-shm"))
             .count(),

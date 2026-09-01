@@ -1024,33 +1024,26 @@ impl Inner {
         let mut first = !self.database.exists();
 
         // Opening never fails on a corrupt database — it reads no pages — so
-        // one of these two is the first moment damage can be seen, and setting
-        // the file aside is the same reversible move a corrupt session file
-        // used to get. What replaces it is empty, which is worse than the
-        // sessions it held and better than a store that cannot open.
-        let mut sound = None;
-        match connect(&self.database) {
+        // one of these two is the first moment damage can be seen. Neither
+        // moves the file: the verdict is a read on *this* connection, and by
+        // the time a rename would happen another process may already have
+        // replaced what the path names. Both hand it to `set_aside_corrupt`,
+        // which decides again under the lock.
+        let sound = match connect(&self.database) {
             Ok(connection) => match integrity(&connection) {
-                Ok(()) => sound = Some(connection),
-                Err(reason) => {
+                Ok(()) => Some(connection),
+                Err(_) => {
                     drop(connection);
-                    set_aside(&self.database, &reason, QUARANTINE);
+                    set_aside_corrupt(&self.database)?
                 }
             },
             // A file so damaged that the pragmas cannot even be set: the same
             // damage `integrity` reports, arriving one statement earlier.
             // Anything else — a full disk, a directory that will not open — is
             // a passing condition and must not cost the file.
-            //
-            // Whether the move succeeded is not consulted on this path: what
-            // follows is an open of whatever is at the name, which is the
-            // right next step either way — a fresh file when it moved, and the
-            // damaged one failing loudly when it did not.
-            Err(error) if damaged(&error) => {
-                set_aside(&self.database, &error.to_string(), QUARANTINE);
-            }
+            Err(error) if damaged(&error) => set_aside_corrupt(&self.database)?,
             Err(error) => return Err(error),
-        }
+        };
 
         let mut connection = match sound {
             Some(connection) => connection,
@@ -1242,6 +1235,65 @@ fn set_aside(database: &Path, reason: &str, kind: &str) -> bool {
     true
 }
 
+/// Sets a store that will not read aside, and hands back the sound store the
+/// path names instead — or [`None`] when the caller must open a fresh one.
+///
+/// The verdict that gets us here was taken on a connection opened before this
+/// process waited for anything, and a rename is not a database operation: no
+/// SQLite lock spans one. Two processes can both meet the same damaged file,
+/// both be right, and the second then renames the *fresh* store the first has
+/// already put in the old one's place — [`set_aside_preuuid`]'s race arriving
+/// through the other door. So the decision is taken again under
+/// [`QuarantineLock`], against the file the path names at that moment, and
+/// only a store that is *still* unreadable is moved.
+///
+/// Whether the move itself succeeded is not consulted: what the caller does
+/// next is open whatever is at the name, which is the right step either way —
+/// a fresh file when it moved, and the damaged one failing loudly when it did
+/// not. What replaces a store that moved is empty, which is worse than the
+/// sessions it held and better than a project that will not open.
+///
+/// A lock that cannot be had leaves the file exactly where it is, for
+/// [`QuarantineLock::take`]'s reason: an uncoordinated quarantine is the
+/// failure this exists to prevent rather than a lesser version of it. The
+/// caller then reopens a store that will not read and fails loudly — which
+/// costs this session's persistence and nothing that cannot be recovered by
+/// hand, where renaming a store another process is writing into costs that
+/// process the session it is in the middle of.
+fn set_aside_corrupt(database: &Path) -> Result<Option<Connection>, StorageError> {
+    // Nothing of this process's is held while waiting, for the reason
+    // `set_aside_preuuid` gives at length: a descriptor does not follow a
+    // rename, so a connection kept open across the wait pins the very file the
+    // winner is about to move.
+    let Some(_lock) = QuarantineLock::take(database) else {
+        return Ok(None);
+    };
+
+    match connect(database) {
+        Ok(connection) => match integrity(&connection) {
+            Ok(()) => {
+                tracing::warn!(
+                    path = %database.display(),
+                    "the session database read as damaged and was sound again by the time the \
+                     quarantine lock was had, so it was left where it is"
+                );
+
+                return Ok(Some(connection));
+            }
+            Err(reason) => {
+                drop(connection);
+                set_aside(database, &reason, QUARANTINE);
+            }
+        },
+        Err(error) if damaged(&error) => {
+            set_aside(database, &error.to_string(), QUARANTINE);
+        }
+        Err(error) => return Err(error),
+    }
+
+    Ok(None)
+}
+
 /// Sets a store whose sessions predate UUIDv7 ids aside, and hands back the
 /// connection to go on with (**D493**).
 ///
@@ -1274,10 +1326,11 @@ fn set_aside(database: &Path, reason: &str, kind: &str) -> bool {
 /// and unlocked, so a store with nothing old in it — every store, after the
 /// first open that converts one — costs no lock and creates no lock file.
 ///
-/// [`still_named_by`] is kept as the last word before the rename. It is no
-/// longer what makes this correct, but it is not dead either: [`Inner::start`]
-/// also renames this database when it is *unreadable*, and that path holds no
-/// lock, so a rename here is still checked against the file it means to move.
+/// Nothing compares inodes before the rename any more. That check was the last
+/// word only while [`Inner::start`] could still rename this database without
+/// the lock; now that [`set_aside_corrupt`] takes it too, every renamer holds
+/// it, and a second guard behind the lock would claim to defend a window that
+/// no longer opens.
 ///
 /// A move that is *refused* — the name it would take is already in use, the
 /// rename fails, or the lock cannot be had at all — leaves the store where it
@@ -1317,7 +1370,6 @@ fn set_aside_preuuid(connection: Connection, database: &Path) -> Result<Connecti
     // Whether or not the lock was had, this process needs a store to go on
     // with, and the path is where one is.
     let mut connection = connect(database)?;
-    let held = fs::File::open(database).ok();
     migrate(&mut connection, database)?;
 
     // Held until this function returns, which is after the fresh store exists:
@@ -1346,19 +1398,8 @@ fn set_aside_preuuid(connection: Connection, database: &Path) -> Result<Connecti
         return Ok(connection);
     };
 
-    let ours = held.as_ref().is_some_and(|file| still_named_by(file, database));
     drop(connection);
-    drop(held);
-
-    if ours {
-        set_aside(database, &format!("session {old} predates UUIDv7 ids"), PREUUID);
-    } else {
-        tracing::warn!(
-            path = %database.display(),
-            "the session database was replaced while it was being read, so it was \
-             reopened rather than moved aside"
-        );
-    }
+    set_aside(database, &format!("session {old} predates UUIDv7 ids"), PREUUID);
 
     let mut connection = connect(database)?;
     migrate(&mut connection, database)?;
@@ -1457,35 +1498,6 @@ impl Drop for QuarantineLock {
     fn drop(&mut self) {
         let _ = self.0.unlock();
     }
-}
-
-/// Whether `path` still names the file `file` was opened on.
-///
-/// [`fs::File::metadata`] is an `fstat` on the descriptor and
-/// [`fs::metadata`] a `stat` on the path, so this is those two compared by
-/// identity — the device and inode pair, which is what a `rename(2)` under a
-/// held descriptor moves apart.
-#[cfg(unix)]
-fn still_named_by(file: &fs::File, path: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt as _;
-
-    let (Ok(held), Ok(named)) = (file.metadata(), fs::metadata(path)) else {
-        return false;
-    };
-
-    held.dev() == named.dev() && held.ino() == named.ino()
-}
-
-/// Windows answers "cannot tell", which the caller reads as "do not rename".
-///
-/// The identity a plain `stat` carries there is not the `st_dev`/`st_ino` pair
-/// — it needs a handle opened for it — and this tree's windows support is
-/// parked with no compile signal to keep such a path honest. Refusing to
-/// quarantine is the harmless direction: the store keeps its old ids rather
-/// than losing them.
-#[cfg(not(unix))]
-fn still_named_by(_file: &fs::File, _path: &Path) -> bool {
-    false
 }
 
 /// Whether SQLite refused because the file is damaged rather than because the
