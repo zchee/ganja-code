@@ -222,7 +222,7 @@ lsp-types = "0.97.0"
 # adds no vendor, only the right to name `NodeData`. The version must track
 # htmd's own `^0.38` requirement — bumping it ahead (0.39) splits the crate
 # into two versions and the shared `Node` type stops unifying (E0308).
-markup5ever_rcdom = "0.38.0"
+markup5ever_rcdom = "0.39.0"
 # The command palette and @-file mention rank candidates in-process with the
 # same matcher helix uses, instead of hand-rolling a scorer.
 nucleo-matcher = "0.3.1"
