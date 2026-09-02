@@ -8,7 +8,7 @@ use ganja_tool::tasklist::{Status, Summary};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
-use super::{BUSY, Effect, Row, Spawned, Team, rows, spawn_request, task_rows};
+use super::{BUSY, Effect, Row, Spawned, Team, rows, spawn_request};
 use crate::command;
 use crate::theme::Theme;
 
@@ -57,6 +57,13 @@ fn task(id: &str, status: Status, owner: &str, subject: &str, blocked_by: &[&str
         owner: owner.to_owned(),
         blocked_by: blocked_by.iter().map(|id| (*id).to_owned()).collect(),
     }
+}
+
+/// Whether a rendered line *is* the Tasks heading, once the dialog's border
+/// and padding are off it.
+fn heading(line: &str) -> bool {
+    line.trim_matches(|character: char| character.is_whitespace() || character == '\u{2502}')
+        == super::TASKS
 }
 
 /// The three-task list the section tests draw.
@@ -566,7 +573,7 @@ fn the_lead_is_the_first_row_however_the_registry_ordered_it() {
 #[test]
 fn the_tasks_section_lists_every_task_with_its_status_owner_and_blockers() {
     let mut dialog = dialog();
-    assert!(dialog.refresh(members(), task_rows(&tasks())), "a fresh list repaints");
+    assert!(dialog.refresh(members(), tasks()), "a fresh list repaints");
 
     let screen = rendered(&dialog, Rect::new(0, 0, 76, 40));
 
@@ -584,7 +591,7 @@ fn the_tasks_section_lists_every_task_with_its_status_owner_and_blockers() {
 #[test]
 fn the_tasks_section_keeps_the_order_the_list_arrived_in() {
     let mut dialog = dialog();
-    dialog.refresh(members(), task_rows(&tasks()));
+    dialog.refresh(members(), tasks());
 
     let screen = rendered(&dialog, Rect::new(0, 0, 76, 40));
     let position =
@@ -601,7 +608,7 @@ fn the_tasks_section_keeps_the_order_the_list_arrived_in() {
 #[test]
 fn the_tasks_section_names_the_members_that_cannot_see_the_list() {
     let mut dialog = dialog();
-    dialog.refresh(members(), task_rows(&tasks()));
+    dialog.refresh(members(), tasks());
 
     let screen = rendered(&dialog, Rect::new(0, 0, 76, 40));
 
@@ -622,7 +629,7 @@ fn a_roster_that_all_shares_the_list_draws_no_such_line() {
             row("w1", MemberBackend::InProcess, &[]),
             row("w2", MemberBackend::Ganja, &[]),
         ],
-        task_rows(&tasks()),
+        tasks(),
     );
 
     let screen = rendered(&dialog, Rect::new(0, 0, 76, 40));
@@ -636,8 +643,53 @@ fn a_roster_that_all_shares_the_list_draws_no_such_line() {
 fn a_team_that_has_filed_no_task_draws_no_tasks_section() {
     let screen = rendered(&dialog(), AREA);
 
-    assert!(!screen.contains("tasks"), "got:\n{screen}");
-    assert!(!screen.contains("unowned"), "got:\n{screen}");
+    // The heading as a whole line rather than as a word anywhere on screen:
+    // a member named `tasks` — or a ring entry mentioning one — is not this
+    // section, and a test that could not tell them apart would redden for
+    // the wrong reason.
+    assert!(!screen.lines().any(heading), "no heading over nothing:\n{screen}");
+    assert!(!screen.contains(super::UNOWNED), "and nothing under it:\n{screen}");
+}
+
+/// The window onto the list is the head of it: nothing under the Spawn row
+/// is selectable, so the scroll never travels down to these lines and a list
+/// longer than the rows left under the roster is cut at the bottom with no
+/// marker. The roster it hangs under stays on screen however long the list
+/// grows, which is what the placement is for.
+#[test]
+fn a_task_list_longer_than_the_window_is_cut_and_leaves_the_roster_standing() {
+    let many: Vec<Summary> = (1..=30)
+        .map(|index| task(&index.to_string(), Status::Pending, "", &format!("task {index}"), &[]))
+        .collect();
+    let screen = rendered(&Team::new(members(), many), AREA);
+
+    assert!(screen.contains("team-lead"), "the roster stays on screen:\n{screen}");
+    assert!(screen.contains(super::TASKS), "the section is drawn:\n{screen}");
+    assert!(screen.contains("task 1"), "from the head of the list:\n{screen}");
+    assert!(!screen.contains("task 30"), "and the tail is simply cut:\n{screen}");
+}
+
+/// A task's text is somebody else's, and the frame is not what a control
+/// character in it costs: ratatui skips a zero-width cell, so an unguarded
+/// newline is swallowed and the words either side of it are drawn joined.
+/// Both halves are pinned — the row still occupies one line, and both the
+/// characters that would have vanished, in the subject and in the blocker id
+/// beside it, are on screen.
+#[test]
+fn a_newline_in_a_subject_is_shown_rather_than_silently_swallowed() {
+    let clean =
+        rendered(&Team::new(members(), vec![task("1", Status::Pending, "", "ab", &["cd"])]), AREA);
+    let dirty = rendered(
+        &Team::new(members(), vec![task("1", Status::Pending, "", "a\nb", &["c\nd"])]),
+        AREA,
+    );
+
+    assert_eq!(dirty.lines().count(), clean.lines().count(), "the frame holds:\n{dirty}");
+    assert_eq!(
+        dirty.matches(char::REPLACEMENT_CHARACTER).count(),
+        2,
+        "and both are shown rather than swallowed:\n{dirty}"
+    );
 }
 
 /// The section is data, not a row: the cursor still walks the members and
@@ -645,7 +697,7 @@ fn a_team_that_has_filed_no_task_draws_no_tasks_section() {
 #[test]
 fn the_tasks_section_takes_no_cursor_position() {
     let mut dialog = dialog();
-    dialog.refresh(members(), task_rows(&tasks()));
+    dialog.refresh(members(), tasks());
 
     // Three members, then the Spawn row: four positions, and the fourth is
     // still the last however many tasks hang under it.
@@ -663,12 +715,12 @@ fn the_tasks_section_takes_no_cursor_position() {
 #[test]
 fn a_task_list_that_did_not_move_is_not_a_repaint() {
     let mut dialog = dialog();
-    assert!(dialog.refresh(members(), task_rows(&tasks())), "the first list is news");
-    assert!(!dialog.refresh(members(), task_rows(&tasks())), "the same list is not");
+    assert!(dialog.refresh(members(), tasks()), "the first list is news");
+    assert!(!dialog.refresh(members(), tasks()), "the same list is not");
 
     let mut moved = tasks();
     moved[2].owner = "w1".to_owned();
-    assert!(dialog.refresh(members(), task_rows(&moved)), "a claim is news again");
+    assert!(dialog.refresh(members(), moved), "a claim is news again");
 }
 
 #[test]
@@ -684,10 +736,8 @@ fn a_team_with_nobody_in_it_says_so_and_still_offers_a_spawn() {
 #[test]
 fn a_row_too_wide_for_the_column_is_cut_rather_than_wrapped() {
     let long = "very long call ".repeat(20);
-    let dialog = Team::new(
-        vec![row(&"w".repeat(90), MemberBackend::InProcess, &[long.as_str()])],
-        task_rows(&tasks()),
-    );
+    let dialog =
+        Team::new(vec![row(&"w".repeat(90), MemberBackend::InProcess, &[long.as_str()])], tasks());
 
     for line in rendered(&dialog, Rect::new(0, 0, 60, 20)).lines() {
         assert!(line.chars().count() <= 60, "a row must not overflow the dialog: {line:?}");

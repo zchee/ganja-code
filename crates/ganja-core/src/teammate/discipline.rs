@@ -18,21 +18,21 @@
 //!
 //! # Where each one sits
 //!
-//! The **continuation blocker** ([`Discipline::continuation`]) sits at the one
-//! point the agent loop calls a turn over: the model returned a step with no
-//! tool calls, and no steer was waiting. It is checked *after* the steer
+//! The **continuation blocker** ([`Discipline::should_continue`]) sits at the
+//! one point the agent loop calls a turn over: the model returned a step with
+//! no tool calls, and no steer was waiting. It is checked *after* the steer
 //! drain, which is the whole of "it loses to steering" — a person who typed
 //! while the model was finishing is answered, and their message resets the
 //! counter, because a turn that continued because somebody asked it to is not
 //! a turn that continued by itself.
 //!
-//! The **name nag** ([`Discipline::nag`]) sits one step earlier, over the
-//! calls a step produced and before any of them runs. Scanning the batch is
-//! what makes "once per assistant step" structural rather than a flag that
-//! happens to collapse: five anonymous `task` calls in one fan-out are one
-//! scan and one block. It is informational and blocks nothing — an anonymous
-//! subagent stays first-class (**D462**) — because the model is often right
-//! to want one.
+//! The **name nag** ([`Discipline::note_anonymous_delegation`]) sits one step
+//! earlier, over the calls a step produced and before any of them runs.
+//! Scanning the batch is what makes "once per assistant step" structural
+//! rather than a flag that happens to collapse: five anonymous `task` calls in
+//! one fan-out are one scan and one block. It is informational and blocks
+//! nothing — an anonymous subagent stays first-class (**D462**) — because the
+//! model is often right to want one.
 //!
 //! # Why the counter is a turn's and not a session's
 //!
@@ -196,15 +196,24 @@ impl Discipline {
     }
 }
 
-/// Whether a task list holds work that is neither finished nor abandoned.
+/// Whether one task is work that is neither finished nor abandoned.
 ///
 /// Half of the continuation blocker's typed condition, and the half worth
 /// naming: `completed` is done and a deleted task is not on the list at all,
-/// so what is left is precisely pending and in-progress. A list of nothing is
-/// not unfinished work, which is what makes a team that filed no tasks — or
-/// drained them all — end its turn like any other session.
+/// so what is left is precisely pending and in-progress. Named rather than
+/// inlined because the caller counts what this answers `true` for and reports
+/// the count in the log, and a guard whose sentence disagrees with its own
+/// decision is worse than no sentence.
+pub(crate) fn is_unfinished(task: &Summary) -> bool {
+    matches!(task.status, Status::Pending | Status::InProgress)
+}
+
+/// Whether a task list holds any [unfinished work](is_unfinished).
+///
+/// A list of nothing is not unfinished work, which is what makes a team that
+/// filed no tasks — or drained them all — end its turn like any other session.
 pub(crate) fn holds_unfinished_work(tasks: &[Summary]) -> bool {
-    tasks.iter().any(|task| matches!(task.status, Status::Pending | Status::InProgress))
+    tasks.iter().any(is_unfinished)
 }
 
 /// Renders one step's `task` calls into the question the nag asks: did any of

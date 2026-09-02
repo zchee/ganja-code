@@ -259,9 +259,19 @@ async fn the_text_states_the_backend_asymmetry_and_the_permission_cost() {
 async fn the_text_routes_every_stage_to_an_agent_this_build_ships() {
     let expanded = expand("port the loader").await;
 
-    for agent in ["analyst", "executor", "verifier", "critic", "debugger", "plan", "explore"] {
+    // `plan` is deliberately not among them: it is a primary agent the `task`
+    // tool refuses, so the table routes team-plan to the lead session itself.
+    for agent in ["analyst", "executor", "verifier", "critic", "debugger", "explore"] {
         assert!(expanded.contains(agent), "the routing table names {agent}: {expanded}");
     }
+    assert!(
+        expanded.contains("team-plan     the lead itself"),
+        "team-plan is the lead's own stage: {expanded}",
+    );
+    assert!(
+        !expanded.contains("team-plan     plan"),
+        "and is never routed to the agent the spawn door refuses: {expanded}",
+    );
     assert!(
         expanded.contains(".ganja/agents"),
         "and says a project's own definition outranks the builtin: {expanded}",

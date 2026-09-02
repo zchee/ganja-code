@@ -2349,7 +2349,7 @@ impl App {
 
             return;
         };
-        let mut dialog = team::Team::new(team::rows(&view), team::task_rows(&self.tasks));
+        let mut dialog = team::Team::new(team::rows(&view), self.tasks.clone());
         dialog.set_busy(self.team_spawn.is_some());
         self.team_dialog = Some(dialog);
     }
@@ -2378,7 +2378,7 @@ impl App {
             return;
         };
         let rows = team::rows(&view);
-        let tasks = team::task_rows(&self.tasks);
+        let tasks = self.tasks.clone();
         let moved = self.team_dialog.as_mut().is_some_and(|dialog| dialog.refresh(rows, tasks));
         self.dirty |= moved;
     }

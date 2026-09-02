@@ -53,9 +53,14 @@ use ganja_tool::tasklist::{
 /// reading "already claimed" and "the disk is full" in the same voice.
 const UNREACHABLE: &str = "The team's task list could not be read or written";
 
-/// What a blocking call that never finished reads as. Unreachable short of the
-/// runtime tearing down under a call, and said in words rather than unwrapped.
-const INTERRUPTED: &str = "The team's task list was left mid-operation and nothing was changed.";
+/// What a blocking call whose answer never came back reads as. Unreachable
+/// short of the runtime tearing down under a call, and said in words rather
+/// than unwrapped.
+///
+/// It does not claim the change landed nowhere, because it may have: a
+/// runtime shutting down loses the answer of a call that had already written
+/// its document, and only a read can settle which happened.
+const INTERRUPTED: &str = "The team's task list did not answer, so whether the change landed is unknown. Read the task back before deciding.";
 
 /// One team's shared task list, and the name this session acts on it under.
 pub struct TeamTasks {
@@ -213,7 +218,7 @@ impl TaskList for TeamTasks {
         self.blocking(move |store| store.create(new)).await.map(record_of)
     }
 
-    /// Ownership first, then everything else.
+    /// Every id read first, then ownership, then everything else.
     ///
     /// The order is the contract: a claim is the one part of a call that can
     /// be **refused**, and a call whose claim failed must leave the task
@@ -222,10 +227,18 @@ impl TaskList for TeamTasks {
     /// who is doing the work. So the claim goes first and a refusal returns
     /// before anything else is written; the second write is skipped entirely
     /// when the owner was the whole of what moved.
-    async fn update(&self, id: &str, change: Change) -> Result<Record, TaskFailure> {
+    ///
+    /// Which is why the blocker ids are read *before* the claim rather than
+    /// where they are used: they are the other way a call can be refused, and
+    /// a claim taken and then refused for a malformed id would leave exactly
+    /// the task this contract exists to prevent.
+    async fn update(&self, id: &str, mut change: Change) -> Result<Record, TaskFailure> {
         let id = id_of(id)?;
+        let add_blocks = ids_of(&change.add_blocks)?;
+        let add_blocked_by = ids_of(&change.add_blocked_by)?;
+
         let mut claimed = None;
-        if let Some(owner) = change.owner.clone() {
+        if let Some(owner) = change.owner.take() {
             claimed = Some(match owner {
                 Owner::Claim(owner) => self.blocking(move |store| store.claim(&id, &owner)).await?,
                 Owner::Release => {
@@ -248,8 +261,8 @@ impl TaskList for TeamTasks {
             // already written, through the door that cannot.
             owner: None,
             metadata: change.metadata.into_iter().collect(),
-            add_blocks: ids_of(&change.add_blocks)?,
-            add_blocked_by: ids_of(&change.add_blocked_by)?,
+            add_blocks,
+            add_blocked_by,
             add_comment: change.add_comment.map(|text| {
                 StoredComment::new(self.identity.to_string(), text, record::now_iso8601())
             }),

@@ -12,10 +12,10 @@
 //! - the nag is one block for a whole fan-out batch, because it is decided
 //!   over the step's calls rather than per call.
 //!
-//! The provider double answers by **what it was asked** rather than by
-//! position in a queue, for `team_tasks.rs`'s reason: a lead and an in-process
-//! teammate share one provider and a persistent engine asks for a title beside
-//! them, so a FIFO script would hand one conversation's answer to the other.
+//! The provider double is [`ganja_testkit::Director`] for the reason its own
+//! doc gives: a lead and an in-process teammate share one provider and a
+//! persistent engine asks for a title beside them, so a FIFO script would hand
+//! one conversation's answer to the other.
 //!
 //! Every root is handed in and nothing here reads or writes the environment,
 //! so this binary may hold more than one test.
@@ -23,19 +23,19 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use futures::StreamExt as _;
-use futures::stream::{self, BoxStream};
 use ganja_core::permission::Permissions;
-use ganja_core::protocol::{Command, Event, Part, Role};
-use ganja_core::provider::{ChatRequest, Provider, ProviderError, ProviderEvent};
+use ganja_core::protocol::{Command, Event, Part, PartBody, Role};
+use ganja_core::provider::{ChatRequest, ProviderEvent};
 use ganja_core::teammate::TeammateRegistry;
 use ganja_core::tool::Registry;
 use ganja_core::{Engine, Storage};
 use ganja_protocol::FinishReason;
 use ganja_team::task::{NewTask, Store, TaskStatus, Update};
 use ganja_team::{TeamName, TeamsRoot};
-use ganja_testkit::{LEAD_SESSION_ID, RecordedSpawns, TEAM, caller, says, spawn_with_prompt};
+use ganja_testkit::{
+    LEAD_SESSION_ID, RecordedSpawns, TEAM, caller, says, spawn_with_prompt, transcript,
+};
 use serde_json::json;
 
 /// How long a lead is given to settle. Generous against a loaded machine: the
@@ -72,31 +72,13 @@ enum Script {
     FansOutNamed,
 }
 
-/// A provider that answers the lead by its script and everybody else with a
-/// bare finish.
-struct Director {
-    script: Script,
-    seen: Arc<Mutex<Vec<ChatRequest>>>,
-}
-
-/// Everything a request's messages say, as plain text.
-fn transcript(request: &ChatRequest) -> String {
-    request
-        .messages
-        .iter()
-        .flat_map(|message| &message.parts)
-        .filter_map(|part| part.as_text())
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 /// Whether this conversation has already delegated.
 fn already_delegated(request: &ChatRequest) -> bool {
     request
         .messages
         .iter()
         .flat_map(|message| &message.parts)
-        .any(|part| matches!(&part.body, ganja_core::protocol::PartBody::Tool { tool, .. } if tool == "task"))
+        .any(|part| matches!(&part.body, PartBody::Tool { tool, .. } if tool == "task"))
 }
 
 /// Two `task` calls in **one** step, which is what makes this a fan-out rather
@@ -119,40 +101,8 @@ fn fan_out(named: bool) -> Vec<ProviderEvent> {
     script
 }
 
-#[async_trait]
-impl Provider for Director {
-    fn id(&self) -> &str {
-        "recorder"
-    }
-
-    async fn stream(
-        &self,
-        request: ChatRequest,
-        _cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
-        let text = transcript(&request);
-        let script = if !text.contains(PROMPT) {
-            // Somebody else's conversation: the teammate's own turn, or a
-            // title request. Neither is what this suite is about.
-            vec![ProviderEvent::Finish(FinishReason::Completed)]
-        } else if already_delegated(&request) {
-            says("talked")
-        } else {
-            match self.script {
-                Script::OnlyTalks => says("talked"),
-                Script::FansOutAnonymously => fan_out(false),
-                Script::FansOutNamed => fan_out(true),
-            }
-        };
-        self.seen.lock().expect("the request log is never poisoned").push(request);
-
-        Ok(stream::iter(script).boxed())
-    }
-}
-
 /// A lead over its own store, wired to a team, its birth queue drained.
 struct Lead {
-    home: tempfile::TempDir,
     root: TeamsRoot,
     team: TeamName,
     engine: Engine,
@@ -163,6 +113,10 @@ struct Lead {
     /// assertion does moves the engine it is asserting about.
     said: Arc<Mutex<Vec<String>>>,
     asker: RecordedSpawns,
+    /// Declared last so it is dropped last: the engine's storage lives under
+    /// it, and taking the directory away while the engine still holds it is
+    /// the reverse of the safe order.
+    home: tempfile::TempDir,
 }
 
 impl Lead {
@@ -177,8 +131,21 @@ impl Lead {
             LEAD_SESSION_ID,
             home.path(),
         ));
-        let requests: Arc<Mutex<Vec<ChatRequest>>> = Arc::default();
-        let provider = Arc::new(Director { script, seen: Arc::clone(&requests) });
+        let (provider, requests) = ganja_testkit::Director::answering(move |request| {
+            if !transcript(request).contains(PROMPT) {
+                // Somebody else's conversation: the teammate's own turn, or a
+                // title request. Neither is what this suite is about.
+                vec![ProviderEvent::Finish(FinishReason::Completed)]
+            } else if already_delegated(request) {
+                says("talked")
+            } else {
+                match script {
+                    Script::OnlyTalks => says("talked"),
+                    Script::FansOutAnonymously => fan_out(false),
+                    Script::FansOutNamed => fan_out(true),
+                }
+            }
+        });
 
         let engine = Engine::persistent(
             provider,
@@ -202,7 +169,7 @@ impl Lead {
             }
         });
 
-        Self { home, root, team, engine, requests, said, asker: RecordedSpawns::default() }
+        Self { root, team, engine, requests, said, asker: RecordedSpawns::default(), home }
     }
 
     /// The team's task documents, read the way any other process would.
@@ -289,16 +256,28 @@ impl Lead {
 
     async fn finish(self) {
         self.engine.shutdown_teammates().await;
-        drop(self.home);
     }
 }
 
-/// The blocker's whole reason to exist: the model stopped, the team had not.
+/// The blocker's whole reason to exist, its breaker, and the line neither may
+/// cross — three readings of the one run, because all three are properties of
+/// the same six round trips.
+///
+/// The model stopped and the team had not, so the turn is continued: five
+/// times, every continued request saying why and the opening one having
+/// nothing to say. Then the session goes back to the person rather than
+/// talking to itself, which is what `settle` returning says. The task is still
+/// on the list afterwards — the guard reports, it does not tidy — and not one
+/// of those five continuations was written into the transcript, where it would
+/// come back on the next resume as something the person had typed.
 #[tokio::test]
-async fn a_turn_that_would_end_with_open_work_and_a_live_member_keeps_going() {
+async fn open_work_and_a_live_member_continue_a_turn_five_times_and_never_the_transcript() {
     let lead = Lead::new(Script::OnlyTalks).await;
     lead.spawn_a_member().await;
-    lead.seed_task(TaskStatus::Pending);
+    // In progress rather than pending: the pty drill files its task through
+    // the model, so pending is driven through the guard end to end there;
+    // this binary is the one place an in-progress task is.
+    lead.seed_task(TaskStatus::InProgress);
 
     lead.prompt_and_settle(PROMPT).await;
 
@@ -312,47 +291,17 @@ async fn a_turn_that_would_end_with_open_work_and_a_live_member_keeps_going() {
     assert_eq!(
         lead.carrying(CONTINUATION_TAG),
         5,
-        "every continued request says why it is continuing, exactly once",
+        "every continued request says why it is continuing, exactly once, and the sixth is refused",
     );
     assert!(
         !transcript(&requests[0]).contains(CONTINUATION_TAG),
         "the opening request has nothing to continue",
     );
-
-    lead.finish().await;
-}
-
-/// The breaker: five, and then the session goes back to the person. The turn
-/// really ends — `settle` above returning is what says so — rather than
-/// continuing quietly with the block suppressed.
-#[tokio::test]
-async fn the_breaker_stops_the_loop_after_five_continuations() {
-    let lead = Lead::new(Script::OnlyTalks).await;
-    lead.spawn_a_member().await;
-    lead.seed_task(TaskStatus::InProgress);
-
-    lead.prompt_and_settle(PROMPT).await;
-
-    assert_eq!(lead.carrying(CONTINUATION_TAG), 5, "the sixth is refused");
     assert_eq!(
         lead.store().list().expect("the list reads").len(),
         1,
         "and the task is still there: the guard reports, it does not tidy",
     );
-
-    lead.finish().await;
-}
-
-/// A continuation belongs to the request and never to the transcript: a stored
-/// user part the person did not type would show up in the next resume as
-/// something they said.
-#[tokio::test]
-async fn a_continuation_is_never_written_into_the_transcript() {
-    let lead = Lead::new(Script::OnlyTalks).await;
-    lead.spawn_a_member().await;
-    lead.seed_task(TaskStatus::Pending);
-
-    lead.prompt_and_settle(PROMPT).await;
 
     let stored = lead.stored_user_text();
     assert_eq!(stored, vec![PROMPT.to_owned()], "one prompt was typed, so one is stored");

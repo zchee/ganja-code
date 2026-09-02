@@ -1045,7 +1045,7 @@ pub fn team_completion(text: &str, cursor: (usize, usize), agents: &[Completion]
         Some(Slot { title, start, partial: partial.clone(), candidates })
     };
     match words.as_slice() {
-        [] => slot(" team ", subcommands()),
+        [] => slot(" teammate ", subcommands()),
         ["spawn", rest @ ..] => match rest.last() {
             Some(&"--backend") => slot(" backends ", backends()),
             Some(&"--agent") => slot(" agents ", agents.to_vec()),

@@ -42,7 +42,7 @@
 //! profile.
 
 use std::collections::HashSet;
-use std::hash::{DefaultHasher, Hash as _, Hasher as _};
+use std::hash::{DefaultHasher, Hash, Hasher as _};
 use std::io::{self, Write as _};
 use std::path::Path;
 use std::sync::{LazyLock, Mutex};
@@ -63,12 +63,14 @@ pub const EMPTY_INBOX: &str = "[]";
 /// `MAX_REPORTED`).
 ///
 /// **A budget for the whole process, not per inbox and not per read.** The
-/// memory behind it is one process-wide set, so the hundredth distinct damage
-/// anywhere exhausts it for every inbox this process will ever open, for the
-/// life of the process — after that a dropped entry is still dropped and still
-/// counted in [`Contents::dropped`], it simply stops being narrated. That is
-/// §2.4's own design and the point of it: the alternative is a permanently
-/// broken inbox, polled twice a second, becoming the log.
+/// memory behind it is one process-wide set — shared with the task list's
+/// damaged-document reports, through `unreported` — so the hundredth
+/// distinct damage anywhere exhausts it for every inbox and every task list
+/// this process will ever open, for the life of the process — after that a
+/// dropped entry is still dropped and still counted in [`Contents::dropped`],
+/// it simply stops being narrated. That is §2.4's own design and the point of
+/// it: the alternative is a permanently broken inbox, polled twice a second,
+/// becoming the log.
 pub const MAX_REPORTED: usize = 100;
 
 /// How much of a dropped entry goes into its report key (§2.4's `kSS`).
@@ -641,33 +643,41 @@ static REPORTED: LazyLock<Mutex<HashSet<u64>>> = LazyLock::new(|| Mutex::new(Has
 
 /// `sentence`, unless this exact damage has already been reported.
 ///
-/// §2.4 keys the memory by `` `${path}\0${len}:${serialized[..2048]}` ``. That
-/// key holds a message body, so what is kept here is its **hash**: the dedupe
-/// is identical and the process does not sit on a copy of a conversation for
-/// its lifetime.
+/// §2.4 keys the memory by `` `${path}\0${len}:${serialized[..2048]}` ``.
 ///
 /// [`Option`] rather than a `Vec` of at most one, because "this was reported, or
 /// it was not" is the whole answer and a length is a question a caller should
 /// not have to ask. Both call sites collect it the same way a `Vec` was
 /// collected, since [`Option`] is itself an iterator of nought or one.
 fn report(path: &Path, serialized: &str, sentence: String) -> Option<String> {
+    if !unreported((path, serialized.len(), clamp(serialized, REPORT_KEY_CAP))) {
+        return None;
+    }
+
+    tracing::warn!(inbox = %path.display(), reason = %sentence, "dropped an unreadable inbox entry");
+
+    Some(sentence)
+}
+
+/// Whether `damage` is something this process has not complained about yet —
+/// and from now on, has.
+///
+/// The one door onto [`REPORTED`], so the task list's polled listing can
+/// share the memory rather than grow a second one. A key holds a message
+/// body, so what is kept is its **hash**: the dedupe is identical and the
+/// process does not sit on a copy of a conversation for its lifetime.
+pub(crate) fn unreported(damage: impl Hash) -> bool {
     let mut hasher = DefaultHasher::new();
-    (path, serialized.len(), clamp(serialized, REPORT_KEY_CAP)).hash(&mut hasher);
+    damage.hash(&mut hasher);
     let key = hasher.finish();
 
     let Ok(mut reported) = REPORTED.lock() else {
         // A poisoned set means some other thread panicked mid-report. Saying
         // it once more is a better failure than going quiet about corruption.
-        return Some(sentence);
+        return true;
     };
-    if !first_report(&mut reported, key) {
-        return None;
-    }
-    drop(reported);
 
-    tracing::warn!(inbox = %path.display(), reason = %sentence, "dropped an unreadable inbox entry");
-
-    Some(sentence)
+    first_report(&mut reported, key)
 }
 
 /// Whether this key is new *and* there is still room to remember it.

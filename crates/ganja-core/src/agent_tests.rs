@@ -4,8 +4,8 @@ use std::path::Path;
 use serde_json::json;
 
 use super::{
-    ANALYST, AgentError, BUILD, CRITIC, DEBUGGER, EXECUTOR, EXPLORE, EXPLORE_PROMPT, GENERAL, PLAN,
-    Registry, VERIFIER,
+    ANALYST, ANY, AgentError, BUILD, CRITIC, DEBUGGER, EXECUTOR, EXPLORE, EXPLORE_PROMPT, GENERAL,
+    PLAN, Registry, VERIFIER, rule,
 };
 use crate::config::{AgentConfig, AgentMode, Config, Overrides};
 use crate::permission::{Action, PermissionConfig, Permissions, Rule};
@@ -79,6 +79,34 @@ fn the_five_team_roles_carry_their_own_prompts_and_no_protocol() {
                 "{name}'s prompt says {protocol}, which is `/team`'s template's to say",
             );
         }
+    }
+}
+
+/// The five take the shared defaults and no rule delta at all, which
+/// [`super::builtins`] argues is a decision rather than an omission: a role
+/// here is a prompt, not a permission posture. Stated against `general` — the
+/// agent they are otherwise shaped like — so what is pinned is the one
+/// difference rather than a second copy of the assembled list, which would
+/// redden on every unrelated change to the shared defaults.
+#[test]
+fn the_five_team_roles_run_under_generals_rules_minus_its_todowrite_deny() {
+    let registry = registry(&Config::default());
+    let general = &registry.get(GENERAL).expect("general is builtin").rules;
+    let todowrite = rule("todowrite", ANY, Action::Deny);
+    let expected: Vec<Rule> =
+        general.iter().filter(|assembled| **assembled != todowrite).cloned().collect();
+
+    assert_eq!(
+        general.len() - expected.len(),
+        1,
+        "general's whole delta is the one `todowrite` deny it takes from upstream",
+    );
+    for name in [ANALYST, EXECUTOR, VERIFIER, CRITIC, DEBUGGER] {
+        let agent = registry.get(name).unwrap_or_else(|| panic!("{name} is builtin"));
+        assert_eq!(
+            agent.rules, expected,
+            "{name} runs what general runs, and may keep a todo list of its own",
+        );
     }
 }
 

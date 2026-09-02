@@ -141,7 +141,7 @@ fn every_team_slot_completes_and_free_words_do_not() {
 
     assert_eq!(
         at_end("/teammate sp").map(|s| (s.title, s.partial)),
-        Some((" team ", "sp".to_owned()))
+        Some((" teammate ", "sp".to_owned()))
     );
     assert_eq!(at_end("/teammate spawn foo --").map(|s| s.title), Some(" flags "));
     assert_eq!(at_end("/teammate spawn foo --agent ex").map(|s| s.title), Some(" agents "));
@@ -470,6 +470,37 @@ fn the_old_team_spelling_names_no_command_at_all() {
     for text in ["/team", "/team list", "/team spawn w1 --backend ganja", "/team shutdown w1"] {
         assert_eq!(team(text), None, "{text:?} is prose now, not even a refusal");
     }
+}
+
+/// And the alias reaches every one of those doors, not just the roster row
+/// the dropdown lists it on.
+///
+/// Each of these is a separate reader of the same buffer — [`lookup`] resolves
+/// for all four, but only because each one asks it — so an alias resolved in
+/// one of them alone would work through that door and nowhere else, which is
+/// exactly the shape the rename above had to be checked for.
+#[test]
+fn the_teammates_alias_reaches_every_door_the_name_does() {
+    let spawn = team("/teammate spawn w1");
+    assert!(spawn.is_some(), "the name itself parses a spawn");
+    assert_eq!(team("/teammates spawn w1"), spawn);
+
+    assert_eq!(
+        submitted("/teammates").map(|entry| entry.name),
+        Some("teammate"),
+        "a submitted alias names the command it abbreviates"
+    );
+
+    let hint = inline_hint("/teammate spawn", &[]);
+    assert!(hint.is_some(), "the name hints its spawn grammar");
+    assert_eq!(inline_hint("/teammates spawn", &[]), hint);
+
+    let slot = |text: &str| {
+        team_completion(text, (0, text.len()), &kinds()).map(|slot| (slot.title, slot.partial))
+    };
+    let subcommands = slot("/teammate sp");
+    assert!(subcommands.is_some(), "the name raises the subcommand menu");
+    assert_eq!(slot("/teammates sp"), subcommands);
 }
 
 /// The one command here that takes arguments, and the subcommands it

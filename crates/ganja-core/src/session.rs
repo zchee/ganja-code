@@ -970,11 +970,11 @@ pub(crate) struct Turn {
     /// `/team` pipeline's own first step is to spawn the members, so a turn
     /// that began leading nobody is exactly the turn either guard is about.
     ///
-    /// Carried here rather than reached through [`Turn::spawn`], which holds
-    /// the same registry: that field is [`None`] on an engine with no agents
-    /// to spawn, and whether a session was given an agent roster says nothing
-    /// about whether it leads a team. [`None`] is a session with no team
-    /// machinery — and every turn a subagent runs, which leads nothing.
+    /// Carried here rather than reached through [`Turn::spawn`], which can
+    /// reach the same registry: that field is [`None`] on an engine with no
+    /// agents to spawn, and whether a session was given an agent roster says
+    /// nothing about whether it leads a team. [`None`] is a session with no
+    /// team machinery — and every turn a subagent runs, which leads nothing.
     pub(crate) team: Option<Arc<crate::teammate::TeammateRegistry>>,
     /// The two team guards this turn runs under (the continuation blocker and
     /// the name nag), and the counters they keep.
@@ -1628,11 +1628,11 @@ async fn continue_for_the_team(turn: &Turn) -> bool {
     // The list is the one fact that costs a read off the disk, so it is the
     // one gated on the three that do not: a turn already refused by those has
     // no use for the answer.
-    let open = if live_team && !dialog_open && budget {
+    let listed = if live_team && !dialog_open && budget {
         match turn.tasks.as_ref() {
             None => Vec::new(),
             Some(tasks) => match tasks.list().await {
-                Ok(open) => open,
+                Ok(listed) => listed,
                 Err(failure) => {
                     // A list that could not be read is not evidence of work:
                     // saying so and stopping hands the session back to the
@@ -1653,7 +1653,7 @@ async fn continue_for_the_team(turn: &Turn) -> bool {
     let facts = Facts {
         live_team,
         dialog_open,
-        unfinished_work: crate::teammate::discipline::holds_unfinished_work(&open),
+        unfinished_work: crate::teammate::discipline::holds_unfinished_work(&listed),
     };
     let mut discipline = turn.discipline.lock().expect("the turn guards are never poisoned");
     if !discipline.should_continue(facts) {
@@ -1662,8 +1662,13 @@ async fn continue_for_the_team(turn: &Turn) -> bool {
 
     let spent = discipline.continue_turn();
     drop(discipline);
+    // What the note counts is what the decision was made on: the whole list
+    // includes everything already completed, and reporting that as open would
+    // make the log disagree with the guard that wrote it.
+    let open =
+        listed.iter().filter(|task| crate::teammate::discipline::is_unfinished(task)).count();
     tracing::info!(
-        note = %crate::teammate::discipline::continuation_note(spent, open.len()),
+        note = %crate::teammate::discipline::continuation_note(spent, open),
         "the team still holds work, so the turn continues",
     );
 

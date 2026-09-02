@@ -73,11 +73,17 @@ pub const GET_ID: &str = "task_get";
 /// What a call reads where this build offered a task tool with no list behind
 /// it.
 ///
-/// Not reachable through the engine, which registers the four only where it
-/// installed a list — [`crate::task`]'s own `NO_TEAM` precedent. `pub` for
-/// that module's reason too: a session that cannot reach a list should say so
-/// in one sentence wherever the answer is formed.
-pub const NO_LIST: &str = "This session has no team, so there is no shared task list to work on. Start a teammate first: the list belongs to the team, and is created with its first task.";
+/// Reachable only in the window between a teammate's tools being lent and its
+/// list being installed — the engine lends the four with the rest of a
+/// teammate's roster and the spawn installs the list a moment later — which is
+/// [`crate::task`]'s own `NO_TEAM` precedent. `pub` for that module's reason
+/// too: a session that cannot reach a list should say so in one sentence
+/// wherever the answer is formed.
+///
+/// So it names a fault rather than something to do about it: nothing the model
+/// can say next would install the list, and telling it to start a teammate
+/// would send it after a condition that is not the one it hit.
+pub const NO_LIST: &str = "This build offered the task tools without a shared list behind them, which is a wiring fault rather than anything this conversation can settle. Nothing was read or written; carry on without the list and say that it was unreachable.";
 
 /// What a call reads when it asked to remove a task and change it at once.
 ///
@@ -152,11 +158,10 @@ const UNOWNED: &str = "unowned";
 ///
 /// Three states, because removing a task is not a fourth: the document is
 /// gone. What the model may *ask for* is one wider — see the `status` argument of `task_update`.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
     /// Nobody has started it. What a create makes.
-    #[default]
     Pending,
     /// Somebody is on it now.
     InProgress,
@@ -237,6 +242,13 @@ pub struct Summary {
     pub blocked_by: Vec<String>,
 }
 
+impl Summary {
+    /// This row as a listing shows it.
+    fn line(&self) -> String {
+        summary_line(&self.id, &self.subject, self.status, &self.owner, &self.blocked_by)
+    }
+}
+
 /// A task somebody wants filed.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Draft {
@@ -247,6 +259,11 @@ pub struct Draft {
     /// The present-continuous form, when the call named one.
     pub active_form: Option<String>,
     /// Whatever the call wants carried beside the task.
+    ///
+    /// Sorted rather than as the call spelled it: this map is a `BTreeMap`,
+    /// so a key filed here lands in alphabetical order among the others. Only
+    /// new keys are placed — a key the document already holds keeps the
+    /// position the store gave it.
     pub metadata: serde_json::Map<String, serde_json::Value>,
 }
 
@@ -281,6 +298,10 @@ pub struct Change {
     /// Claim it, or let it go.
     pub owner: Option<Owner>,
     /// Keys to merge, a null value removing its key.
+    ///
+    /// Sorted rather than as the call spelled it, exactly as [`Draft`]'s is:
+    /// a key this merge introduces lands alphabetically, and one the task
+    /// already carries keeps where it already is.
     pub metadata: serde_json::Map<String, serde_json::Value>,
     /// Ids to add to what this task holds up.
     pub add_blocks: Vec<String>,
@@ -446,10 +467,10 @@ struct UpdateArgs {
     metadata: Option<serde_json::Map<String, serde_json::Value>>,
     /// Ids of tasks this one holds up
     #[serde(default)]
-    add_blocks: Vec<String>,
+    add_blocks: Option<Vec<String>>,
     /// Ids of tasks that hold this one up
     #[serde(default)]
-    add_blocked_by: Vec<String>,
+    add_blocked_by: Option<Vec<String>>,
     /// A comment to append; it is recorded under this session's own identity
     #[serde(default)]
     add_comment: Option<String>,
@@ -513,39 +534,45 @@ fn refused(failure: TaskFailure) -> ToolError {
     ToolError::Failed(failure.reason)
 }
 
-/// The argument named `task_id`, for a description rendered before the call
-/// runs.
-fn named(args: &serde_json::Value) -> &str {
-    args.get("task_id").and_then(serde_json::Value::as_str).unwrap_or_default()
+/// A call titled by the task it names, or by the tool alone where the
+/// arguments named none.
+///
+/// The title is what a transcript row and a permission dialog are headed
+/// with, so a call that arrived without a `task_id` must not read as the tool's
+/// name and a trailing space.
+fn describing(tool: &str, args: &serde_json::Value) -> String {
+    match args.get("task_id").and_then(serde_json::Value::as_str) {
+        Some(id) => format!("{tool} {id}"),
+        None => tool.to_owned(),
+    }
 }
 
 /// One task as a listing shows it: what it is, where it is, who has it, and
 /// what it is waiting on.
-fn summary_line(summary: &Summary) -> String {
-    let owner = if summary.owner.is_empty() {
-        UNOWNED.to_owned()
-    } else {
-        format!("owner {}", summary.owner)
-    };
-    let blocked = if summary.blocked_by.is_empty() {
+///
+/// The fields rather than a [`Summary`], so a whole [`Record`] renders as one
+/// too without being copied into one first.
+fn summary_line(
+    id: &str,
+    subject: &str,
+    status: Status,
+    owner: &str,
+    blocked_by: &[String],
+) -> String {
+    let owner = if owner.is_empty() { UNOWNED.to_owned() } else { format!("owner {owner}") };
+    let blocked = if blocked_by.is_empty() {
         String::new()
     } else {
-        format!(", blocked by {}", summary.blocked_by.join(", "))
+        format!(", blocked by {}", blocked_by.join(", "))
     };
 
-    format!("{} [{}] {owner}{blocked} — {}", summary.id, summary.status, summary.subject)
+    format!("{id} [{status}] {owner}{blocked} — {subject}")
 }
 
 /// A whole record as its own summary, for the one-line answer an update reads
 /// back as.
 fn line_of(record: &Record) -> String {
-    summary_line(&Summary {
-        id: record.id.clone(),
-        subject: record.subject.clone(),
-        status: record.status,
-        owner: record.owner.clone(),
-        blocked_by: record.blocked_by.clone(),
-    })
+    summary_line(&record.id, &record.subject, record.status, &record.owner, &record.blocked_by)
 }
 
 /// A record as the structured extra a frontend may render richer than text.
@@ -611,7 +638,7 @@ impl Tool for TaskUpdateTool {
     }
 
     fn describe(&self, args: &serde_json::Value) -> String {
-        format!("{UPDATE_ID} {}", named(args))
+        describing(UPDATE_ID, args)
     }
 
     async fn run(&self, args: serde_json::Value, ctx: &ToolCtx) -> Result<ToolOutput, ToolError> {
@@ -670,8 +697,11 @@ fn change_of(args: UpdateArgs) -> Change {
             if owner.trim().is_empty() { Owner::Release } else { Owner::Claim(owner) }
         }),
         metadata: args.metadata.unwrap_or_default(),
-        add_blocks: args.add_blocks,
-        add_blocked_by: args.add_blocked_by,
+        // An explicit `null` is the same as the argument being absent, the
+        // shape `metadata` already has: a model filling every field of a
+        // schema it was shown nulls the ones it is not using.
+        add_blocks: args.add_blocks.unwrap_or_default(),
+        add_blocked_by: args.add_blocked_by.unwrap_or_default(),
         add_comment: args.add_comment,
     }
 }
@@ -692,8 +722,10 @@ impl Tool for TaskListTool {
 
     async fn run(&self, args: serde_json::Value, ctx: &ToolCtx) -> Result<ToolOutput, ToolError> {
         let tasks = list_of(ctx)?;
-        // Parsed rather than ignored, so a model that invented an argument is
-        // told about it instead of being answered as though it had not.
+        // Parsed rather than ignored so that a payload which is not an
+        // arguments object at all is refused here. An invented key is dropped
+        // in silence, which is what every other tool in this crate does with
+        // one.
         let _: ListArgs = serde_json::from_value(args)
             .map_err(|error| ToolError::InvalidArgs(error.to_string()))?;
 
@@ -701,7 +733,7 @@ impl Tool for TaskListTool {
         let output = if summaries.is_empty() {
             EMPTY.to_owned()
         } else {
-            summaries.iter().map(summary_line).collect::<Vec<_>>().join("\n")
+            summaries.iter().map(Summary::line).collect::<Vec<_>>().join("\n")
         };
 
         Ok(ToolOutput {
@@ -736,7 +768,7 @@ impl Tool for TaskGetTool {
     }
 
     fn describe(&self, args: &serde_json::Value) -> String {
-        format!("{GET_ID} {}", named(args))
+        describing(GET_ID, args)
     }
 
     async fn run(&self, args: serde_json::Value, ctx: &ToolCtx) -> Result<ToolOutput, ToolError> {

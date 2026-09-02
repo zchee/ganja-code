@@ -9855,7 +9855,7 @@ fn team_dialog_with_tasks() -> component::team::Team {
         },
     ];
 
-    component::team::Team::new(team_members(), component::team::task_rows(&tasks))
+    component::team::Team::new(team_members(), tasks)
 }
 
 /// The `/teammate` dialog's members step: every member with its backend and

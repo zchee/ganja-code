@@ -126,6 +126,9 @@ fn both_blocks_ride_one_request_when_both_are_owed() {
     assert!(blocks[1].contains("team_still_working"), "the continuation is about what comes next");
 }
 
+/// The one arrangement of facts that continues a turn.
+const CONTINUES: Facts = Facts { live_team: true, dialog_open: false, unfinished_work: true };
+
 #[test]
 fn the_breaker_allows_exactly_five_continuations() {
     let mut discipline = Discipline::default();
@@ -140,6 +143,10 @@ fn the_breaker_allows_exactly_five_continuations() {
     assert!(
         !discipline.may_continue(),
         "the sixth is refused and the session goes back to the user",
+    );
+    assert!(
+        !discipline.should_continue(CONTINUES),
+        "the facts are unchanged; the budget is what ran out",
     );
 }
 
@@ -158,6 +165,7 @@ fn a_steer_resets_the_budget_and_withdraws_a_queued_continuation() {
     discipline.user_took_over();
 
     assert!(discipline.may_continue(), "a person driving resets consecutive auto-continuations");
+    assert!(discipline.should_continue(CONTINUES), "so the guard is armed again");
     assert!(
         discipline.take_blocks().is_empty(),
         "the steer says it better, and in the person's own words",
@@ -175,16 +183,8 @@ fn a_steer_leaves_a_pending_nag_alone() {
     assert!(blocks[0].contains("teammate_naming"), "{blocks:?}");
 }
 
-/// The one arrangement of facts that continues a turn.
-const CONTINUES: Facts = Facts { live_team: true, dialog_open: false, unfinished_work: true };
-
 #[test]
-fn a_live_team_with_open_work_and_nobody_being_asked_continues_the_turn() {
-    assert!(Discipline::default().should_continue(CONTINUES));
-}
-
-#[test]
-fn every_other_arrangement_of_the_three_facts_ends_the_turn() {
+fn every_arrangement_of_the_three_facts_decides_the_turn() {
     // Walked exhaustively rather than sampled: this is the whole condition,
     // and each of the three is somebody's subsystem that could start
     // answering differently.
@@ -201,46 +201,6 @@ fn every_other_arrangement_of_the_three_facts_ends_the_turn() {
             }
         }
     }
-}
-
-#[test]
-fn an_open_dialog_stops_a_continuation_that_everything_else_wanted() {
-    let facts = Facts { dialog_open: true, ..CONTINUES };
-    assert!(
-        !Discipline::default().should_continue(facts),
-        "a synthetic instruction never goes in front of a question nobody has answered",
-    );
-}
-
-#[test]
-fn a_spent_breaker_stops_a_continuation_that_the_facts_wanted() {
-    let mut discipline = Discipline::default();
-    for _ in 0..MAX_CONTINUATIONS {
-        assert!(discipline.should_continue(CONTINUES), "still inside the budget");
-        discipline.continue_turn();
-        let _ = discipline.take_blocks();
-    }
-
-    assert!(
-        !discipline.should_continue(CONTINUES),
-        "the facts are unchanged; the budget is what ran out",
-    );
-}
-
-#[test]
-fn a_steer_lets_a_stopped_turn_continue_again() {
-    let mut discipline = Discipline::default();
-    for _ in 0..MAX_CONTINUATIONS {
-        discipline.continue_turn();
-        let _ = discipline.take_blocks();
-    }
-    assert!(!discipline.should_continue(CONTINUES));
-
-    discipline.user_took_over();
-    assert!(
-        discipline.should_continue(CONTINUES),
-        "a person driving resets the budget, so the guard is armed again",
-    );
 }
 
 #[test]

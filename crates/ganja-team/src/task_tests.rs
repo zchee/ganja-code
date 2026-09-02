@@ -6,7 +6,8 @@ use indexmap::IndexMap;
 use serde_json::{Value, json};
 
 use super::{
-    COUNTER, Comment, NewTask, Store, TASK_KEYS, Task, TaskError, TaskId, TaskStatus, Update, write,
+    COUNTER, Comment, ID_MAX, NewTask, Store, TASK_KEYS, Task, TaskError, TaskId, TaskStatus,
+    Update, write,
 };
 use crate::lock::LockError;
 use crate::record::document;
@@ -98,6 +99,51 @@ fn a_counter_that_will_not_parse_is_repaired_rather_than_fatal() {
 
     let next = store.create(NewTask::new("subject", "description")).expect("a task is created");
     assert_eq!(next.id.to_string(), "2", "a list stays addable-to after somebody breaks a counter");
+}
+
+#[test]
+fn a_counter_past_the_grammar_is_repaired_like_one_that_will_not_parse() {
+    let (_home, store) = store();
+    store.create(NewTask::new("subject", "description")).expect("a task is created");
+    fs::write(store.counter_path(), u64::MAX.to_string()).expect("the counter is writable");
+
+    let next = store.create(NewTask::new("subject", "description")).expect("a task is created");
+    assert_eq!(
+        next.id.to_string(),
+        "2",
+        "a counter too large for the grammar is repaired like one that will not parse"
+    );
+}
+
+#[test]
+fn the_counter_refuses_rather_than_wraps_at_the_last_id_the_grammar_admits() {
+    let (_home, store) = store();
+    store.create(NewTask::new("subject", "description")).expect("a task is created");
+    fs::write(store.counter_path(), ID_MAX.to_string()).expect("the counter is writable");
+
+    let refused =
+        store.create(NewTask::new("subject", "description")).expect_err("the id space is spent");
+    assert!(matches!(refused, TaskError::CounterExhausted), "{refused}");
+    assert_eq!(store.list().expect("the list reads").len(), 1, "a refused create files nothing");
+}
+
+#[test]
+fn a_rebuilt_counter_reissues_the_ids_deleted_above_the_highest_survivor() {
+    let (_home, store) = store();
+    let ids: Vec<TaskId> = (0..3)
+        .map(|_| {
+            store.create(NewTask::new("subject", "description")).expect("a task is created").id
+        })
+        .collect();
+    store.delete(&ids[2]).expect("the task deletes");
+    fs::remove_file(store.counter_path()).expect("the counter is removable");
+
+    // The counter was the only record that 3 had ever been issued. This is the
+    // documented limit of rebuilding from the documents on disk, pinned so a
+    // reader of the module doc can see it is a measured cost and not a claim
+    // nobody checked.
+    let next = store.create(NewTask::new("subject", "description")).expect("a task is created");
+    assert_eq!(next.id, ids[2], "without the counter, the highest survivor decides");
 }
 
 #[test]

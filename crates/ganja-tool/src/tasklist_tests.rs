@@ -279,6 +279,20 @@ async fn a_removal_carrying_another_change_is_refused_and_removes_nothing() {
     assert!(list.calls().is_empty(), "nothing reached the list: {:?}", list.calls());
 }
 
+/// A model filling in every field of the schema it was shown nulls the ones it
+/// is not using, and a null list is no list rather than a refusal.
+#[tokio::test]
+async fn a_null_add_list_adds_nothing() {
+    let list = Arc::new(Fake::new());
+    run(&TaskUpdateTool, &list, json!({"task_id": "1", "add_blocks": null})).await;
+
+    assert_eq!(
+        list.calls(),
+        vec![Asked::Update("1".to_owned(), Change::default())],
+        "an explicit null adds what leaving the argument out adds: nothing"
+    );
+}
+
 #[tokio::test]
 async fn an_update_carries_every_add_only_field_through() {
     let list = Arc::new(Fake::new());
@@ -385,16 +399,47 @@ fn the_schemas_offer_what_the_descriptions_promise() {
 }
 
 /// The four statuses a model may ask for, and no fifth: `deleted` is offered
-/// because a removal is asked for that way, and a spelling nothing answers to
-/// is a schema error rather than a status quietly ignored.
+/// because a removal is asked for that way.
+///
+/// Read off the variants themselves rather than off the rendered schema,
+/// which also carries the argument's prose: a description listing the four
+/// would answer this question long after the enum had stopped agreeing with
+/// it.
 #[test]
 fn the_update_schema_offers_exactly_the_four_statuses() {
     let schema = serde_json::to_value(TaskUpdateTool.schema()).expect("a schema is JSON");
-    let rendered = schema.to_string();
+    let defined = schema["properties"]["status"]["anyOf"]
+        .as_array()
+        .expect("the status argument is a reference beside the null it may also be")
+        .iter()
+        .find_map(|branch| branch["$ref"].as_str())
+        .and_then(|reference| reference.strip_prefix("#/$defs/"))
+        .expect("and the reference names its own definition");
+    let offered: Vec<&str> = schema["$defs"][defined]["oneOf"]
+        .as_array()
+        .expect("which enumerates the spellings")
+        .iter()
+        .map(|variant| variant["const"].as_str().expect("each variant is one spelling"))
+        .collect();
 
-    for status in ["pending", "in_progress", "completed", "deleted"] {
-        assert!(rendered.contains(status), "the schema offers {status}: {rendered}");
-    }
+    assert_eq!(offered, ["pending", "in_progress", "completed", "deleted"]);
+}
+
+/// And a spelling nothing answers to is a schema error rather than a status
+/// quietly ignored: a model that asked for `done` must read that it did not
+/// happen.
+#[tokio::test]
+async fn a_status_outside_the_four_reaches_no_list() {
+    let list = Arc::new(Fake::new());
+    let outcome = TaskUpdateTool
+        .run(
+            json!({"task_id": "1", "status": "done"}),
+            &ctx(Some(Arc::clone(&list) as Arc<dyn TaskList>)),
+        )
+        .await;
+
+    assert!(matches!(outcome, Err(ToolError::InvalidArgs(_))), "got {outcome:?}");
+    assert!(list.calls().is_empty(), "nothing reached the list: {:?}", list.calls());
 }
 
 #[tokio::test]
@@ -454,9 +499,9 @@ async fn a_refusal_reaches_the_model_in_the_lists_own_words() {
     assert_eq!(refused, REFUSED, "the sentence is not rewritten on the way out");
 }
 
-/// A build that offered a tool with no list behind it says so in words. Not
-/// reachable through the engine, which registers the four only where it
-/// installed one.
+/// A build that offered a tool with no list behind it says so in words —
+/// reachable through the engine only in the window between a teammate's tools
+/// being lent and its list being installed.
 #[tokio::test]
 async fn a_call_with_no_list_behind_it_is_refused_in_one_sentence() {
     let cases: [(&dyn crate::Tool, serde_json::Value); 4] = [
@@ -497,7 +542,14 @@ fn a_call_describes_itself_by_the_task_it_names() {
     );
     assert_eq!(TaskUpdateTool.describe(&json!({"task_id": "3"})), "task_update 3");
     assert_eq!(TaskGetTool.describe(&json!({"task_id": "3"})), "task_get 3");
+    // A listing names no task, so its title is the tool alone: the trait's
+    // default, pinned because the other three override it.
     assert_eq!(TaskListTool.describe(&json!({})), "task_list");
+    assert_eq!(
+        TaskUpdateTool.describe(&json!({})),
+        "task_update",
+        "and never with a space after it"
+    );
 }
 
 /// The four ids are what a permission rule, a hook and a transcript key on,
@@ -526,13 +578,7 @@ fn none_of_the_four_asks_by_default() {
 /// model choosing work reads a word rather than a gap.
 #[test]
 fn an_unowned_task_is_listed_in_words() {
-    let line = super::summary_line(&Summary {
-        id: "7".to_owned(),
-        subject: "port".to_owned(),
-        status: Status::Pending,
-        owner: String::new(),
-        blocked_by: Vec::new(),
-    });
+    let line = super::summary_line("7", "port", Status::Pending, "", &[]);
 
     assert_eq!(line, format!("7 [pending] {UNOWNED} — port"));
 }

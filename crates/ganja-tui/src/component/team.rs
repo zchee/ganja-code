@@ -156,52 +156,6 @@ pub fn rows(view: &TeamView) -> Vec<Row> {
     rows
 }
 
-/// One task on the team's shared list, as the dialog shows it.
-///
-/// A projection for [`Row`]'s reason, and it buys the same thing: what a line
-/// needs is an id, a subject, where the task is, who has it and what it waits
-/// on, which is exactly [`Summary`] today and would still be exactly this if
-/// that value grew a field tomorrow.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TaskRow {
-    /// Which task, as `task_create` and `task_list` reported it.
-    pub id: String,
-    /// Its imperative one-liner.
-    pub subject: String,
-    /// Where it is: pending, in progress or completed, in the list's own
-    /// spelling.
-    pub status: String,
-    /// Who holds it, empty when nobody does.
-    pub owner: String,
-    /// The ids that hold it up.
-    pub blocked_by: Vec<String>,
-}
-
-impl TaskRow {
-    /// One task, as this dialog shows it.
-    fn of(summary: &Summary) -> Self {
-        Self {
-            id: summary.id.clone(),
-            subject: summary.subject.clone(),
-            status: summary.status.as_str().to_owned(),
-            owner: summary.owner.clone(),
-            blocked_by: summary.blocked_by.clone(),
-        }
-    }
-}
-
-/// The team's shared list, as this dialog shows it — what a caller polling
-/// `Engine::task_list` hands to [`Team::new`] and [`Team::refresh`].
-///
-/// **In the order it arrived**, which is the store's own lowest-id-first, and
-/// deliberately not re-sorted here: the dialog and the `task_list` a model
-/// reads are two renderings of one listing, and a second ordering would be a
-/// second answer to "which is the next task".
-#[must_use]
-pub fn task_rows(summaries: &[Summary]) -> Vec<TaskRow> {
-    summaries.iter().map(TaskRow::of).collect()
-}
-
 /// Whether a member running on `backend` reads the same list this section
 /// draws.
 ///
@@ -378,9 +332,15 @@ enum Step {
 #[derive(Clone, Debug)]
 pub struct Team {
     rows: Vec<Row>,
-    /// The team's shared task list, newest poll first to arrive — drawn under
-    /// the roster, selected by nothing. Empty draws no section at all.
-    tasks: Vec<TaskRow>,
+    /// The team's shared task list, exactly as `Engine::task_list` answered
+    /// it — drawn under the roster, selected by nothing. Empty draws no
+    /// section at all.
+    ///
+    /// **In the order it arrived**, which is the store's own lowest-id-first,
+    /// and deliberately not re-sorted here: the dialog and the `task_list` a
+    /// model reads are two renderings of one listing, and a second ordering
+    /// would be a second answer to "which is the next task".
+    tasks: Vec<Summary>,
     /// Index over the member rows *and* the Spawn row after them; always in
     /// range, because the Spawn row makes the list non-empty.
     selected: usize,
@@ -402,7 +362,7 @@ impl Team {
     /// would be a dialog able to show a member owning a task that no longer
     /// exists.
     #[must_use]
-    pub fn new(rows: Vec<Row>, tasks: Vec<TaskRow>) -> Self {
+    pub fn new(rows: Vec<Row>, tasks: Vec<Summary>) -> Self {
         Self { rows, tasks, selected: 0, step: Step::Members, notice: None, busy: false }
     }
 
@@ -422,7 +382,7 @@ impl Team {
     /// repaints only when it did. A `/teammate` dialog left open would otherwise
     /// mark every one of those ticks dirty and redraw the screen at frame rate
     /// for a roster nobody touched.
-    pub fn refresh(&mut self, rows: Vec<Row>, tasks: Vec<TaskRow>) -> bool {
+    pub fn refresh(&mut self, rows: Vec<Row>, tasks: Vec<Summary>) -> bool {
         let mut moved = rows != self.rows || tasks != self.tasks;
         self.rows = rows;
         self.tasks = tasks;
@@ -769,8 +729,12 @@ impl Team {
     /// rows a cursor can land on stay one unbroken run: a section nothing
     /// selects sitting inside that run would put lines between a person's eye
     /// and the row their next keypress moves to. It is drawn inside the same
-    /// scroll window as everything else, so a long list scrolls with the
-    /// roster instead of pushing it off the top.
+    /// scroll window as everything else, which makes it a window onto the
+    /// **head** of the list rather than a scrolling one: nothing below the
+    /// Spawn row is selectable, so the window never travels down to these
+    /// lines, and a list longer than the rows left under the roster is cut at
+    /// the bottom with no marker. The roster stays on screen however long the
+    /// list grows, which is what the placement is for.
     ///
     /// An empty list draws **nothing at all** — no heading, no placeholder.
     /// A team that has filed no task is the ordinary state of every session
@@ -783,10 +747,15 @@ impl Team {
             return Vec::new();
         }
 
-        let id_width = self.tasks.iter().map(|task| task.id.width()).max().unwrap_or(0);
-        let status_width = self.tasks.iter().map(|task| task.status.width()).max().unwrap_or(0);
-        let owner_width =
-            self.tasks.iter().map(|task| owner_label(&task.owner).width()).max().unwrap_or(0);
+        let id_width = self.tasks.iter().map(|task| printable(&task.id).width()).max().unwrap_or(0);
+        let status_width =
+            self.tasks.iter().map(|task| task.status.as_str().width()).max().unwrap_or(0);
+        let owner_width = self
+            .tasks
+            .iter()
+            .map(|task| printable(owner_label(&task.owner)).width())
+            .max()
+            .unwrap_or(0);
 
         let mut lines = vec![Line::raw(""), Line::styled(clip(TASKS, width), theme.fg)];
         if let Some(unshared) = self.unshared_line() {
@@ -796,14 +765,14 @@ impl Team {
             let blocked = if task.blocked_by.is_empty() {
                 String::new()
             } else {
-                format!("  (blocked by {})", task.blocked_by.join(", "))
+                format!("  (blocked by {})", printable(&task.blocked_by.join(", ")))
             };
             let line = format!(
                 "  {id:<id_width$}  {status:<status_width$}  {owner:<owner_width$}  {subject}{blocked}",
-                id = task.id,
-                status = task.status,
-                owner = owner_label(&task.owner),
-                subject = task.subject,
+                id = printable(&task.id),
+                status = task.status.as_str(),
+                owner = printable(owner_label(&task.owner)),
+                subject = printable(&task.subject),
             );
             lines.push(Line::styled(clip(line.trim_end(), width), theme.fg));
         }
@@ -883,6 +852,32 @@ impl Team {
             ),
         ]
     }
+}
+
+/// A task's text as this dialog draws it: every control character replaced,
+/// none dropped.
+///
+/// The member names on the rows above were vetted by `registry::vet_name`
+/// before they reached this file. A task's id, owner, subject and the ids it
+/// names as blockers were not: they were written by another process, and
+/// nothing between the task tools and the store refuses a `\n`, `\r` or `\t`
+/// in a task's text. What that costs was
+/// measured rather than assumed — the frame survives, because ratatui gives a
+/// control character zero width and skips the cell, so the character is
+/// **silently swallowed** and `fix a\nb` is drawn `fix ab`, two words joined
+/// with nothing on screen to say one ever separated them. Replacing rather
+/// than dropping is what puts the fact back where somebody reading the row
+/// can see it. (`ganja-cli`'s own `report::printable` guards the `mcp` tables
+/// against the same class of foreign text; mirrored rather than shared,
+/// because a frontend does not depend on that crate.)
+fn printable(text: &str) -> String {
+    text.chars()
+        .map(
+            |character| {
+                if character.is_control() { char::REPLACEMENT_CHARACTER } else { character }
+            },
+        )
+        .collect()
 }
 
 /// How a task's owner is listed: the member's name, or the word the

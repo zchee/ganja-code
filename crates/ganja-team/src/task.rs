@@ -28,11 +28,15 @@
 //! model expects, and a directory listing cannot issue the next one without a
 //! race: two creates that both read "the highest is 3" both write `4.json` and
 //! one of them silently loses its task. So the next id comes from
-//! [`COUNTER`], read-and-bumped under its own hold, and **an id is never
-//! reused**: deleting task 3 leaves a gap where 3 was, and the next create
-//! still gets 4. A counter that has gone missing is rebuilt from the highest
-//! id on disk rather than restarted at 1, so losing the file costs a gap
-//! rather than a collision.
+//! [`COUNTER`], read-and-bumped under its own hold, and **a standing counter
+//! never issues an id twice**: deleting task 3 leaves a gap where 3 was, and
+//! the next create still gets 4. A counter that has gone missing is rebuilt
+//! from the highest id on disk rather than restarted at 1, so losing the file
+//! cannot hand a fresh task the id of one that still exists. What it *can* do
+//! is issue again the ids of tasks deleted above the highest survivor — the
+//! counter was the only record those were ever issued — and a `blockedBy`
+//! still naming one of them then points at new work. That is pinned by test
+//! rather than left to be rediscovered.
 //!
 //! # What is somebody else's, and what is not
 //!
@@ -67,7 +71,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use serde_json::Value;
 
 use crate::lock::{self, LockError};
-use crate::mailbox::write_atomically;
+use crate::mailbox::{unreported, write_atomically};
 use crate::record::{Redacted, document, shadowed};
 
 /// The subdirectory a team's task documents live in (`<team dir>/tasks`).
@@ -90,6 +94,10 @@ const DOCUMENT_SUFFIX: &str = ".json";
 /// The largest id the grammar admits — nineteen digits, which is every value a
 /// [`u64`] counter can reach without growing a twentieth.
 const ID_MAX: u64 = 9_999_999_999_999_999_999;
+
+/// How many digits [`ID_MAX`] has — derived from it so the two cannot drift,
+/// and a constant so a parse allocates nothing to learn it.
+const ID_DIGITS: usize = ID_MAX.ilog10() as usize + 1;
 
 /// Why an id was refused.
 pub const REFUSED_ID_SHAPE: &str =
@@ -150,8 +158,8 @@ pub enum TaskError {
     /// The counter reached the last id the grammar admits.
     ///
     /// Unreachable in practice — a team would have to create ten quintillion
-    /// tasks — and returned rather than wrapped, because reusing an id is the
-    /// one thing this module promises not to do.
+    /// tasks — and returned rather than wrapped, because a standing counter
+    /// never issues an id twice, and wrapping to 1 would.
     #[error("{REFUSED_COUNTER_EXHAUSTED}")]
     CounterExhausted,
     /// A passthrough map carries a key the shape itself declares.
@@ -217,7 +225,7 @@ impl TaskId {
     /// exactly one spelling and `01.json` can never sit beside `1.json`.
     pub fn parse(id: &str) -> Result<Self, TaskError> {
         let refuse = || TaskError::Shape { id: id.to_owned() };
-        if id.is_empty() || id.len() > ID_MAX.to_string().len() {
+        if id.is_empty() || id.len() > ID_DIGITS {
             return Err(refuse());
         }
         let mut digits = id.chars();
@@ -635,9 +643,10 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// [`TaskError::CounterExhausted`] at the end of the id space,
-    /// [`TaskError::SchemaInvalid`] when the draft's metadata would shadow a
-    /// declared key, and whatever the locks or the filesystem returned.
+    /// [`TaskError::CounterExhausted`] at the end of the id space, and
+    /// whatever the locks or the filesystem returned. A draft carries no
+    /// passthrough map and no comment, so the schema check every write runs
+    /// has nothing here it could refuse.
     pub fn create(&self, draft: NewTask) -> Result<Task, TaskError> {
         fs::create_dir_all(&self.dir)?;
         let id = self.issue_id()?;
@@ -699,12 +708,18 @@ impl Store {
                 // with a winner and no loser.
                 Ok(None) => None,
                 Err(error) => {
-                    tracing::warn!(
-                        tasks = %self.dir.display(),
-                        %id,
-                        reason = dropped(&error),
-                        "a task document would not read and was left out of the list",
-                    );
+                    // Once per damage per process, on the mailbox's memory:
+                    // this listing is polled for as long as somebody is
+                    // watching it, and a document that stays broken must not
+                    // become the log.
+                    if unreported((&self.dir, id, error.to_string())) {
+                        tracing::warn!(
+                            tasks = %self.dir.display(),
+                            %id,
+                            reason = dropped(&error),
+                            "a task document would not read and was left out of the list",
+                        );
+                    }
 
                     None
                 }
@@ -724,8 +739,10 @@ impl Store {
     /// # Errors
     ///
     /// [`TaskError::NoSuchTask`] when nothing is filed under the id,
-    /// [`TaskError::SchemaInvalid`] when the merge would shadow a declared
-    /// key, and whatever the lock or the filesystem returned.
+    /// [`TaskError::SchemaInvalid`] when the comment being appended carries a
+    /// passthrough key the comment shape itself declares — the metadata merge
+    /// is a nested map and cannot shadow a top-level one — and whatever the
+    /// lock or the filesystem returned.
     pub fn update(&self, id: &TaskId, update: Update) -> Result<Task, TaskError> {
         let path = self.path_of(id);
         let _hold = self.hold(&path, id)?;
@@ -836,7 +853,8 @@ impl Store {
         let _hold = lock::acquire_unseeded(&path)?;
 
         let issued = self.last_issued(&path)?;
-        let next = issued.saturating_add(1);
+        // `last_issued` bounds `issued` at `ID_MAX`, well short of `u64::MAX`.
+        let next = issued + 1;
         if next > ID_MAX {
             return Err(TaskError::CounterExhausted);
         }

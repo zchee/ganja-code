@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use futures::StreamExt as _;
 use futures::stream::{self, BoxStream};
+use ganja_testkit::{StaticTasks, task_summary};
 use tokio_util::sync::CancellationToken;
 
 use super::{
@@ -1976,8 +1977,8 @@ async fn a_session_with_no_team_has_no_task_list_to_read() {
 #[tokio::test]
 async fn the_task_list_accessor_reads_the_installed_list_through() {
     let tasks = Arc::new(StaticTasks::new(vec![
-        summary("1", tasklist::Status::Completed, "w1"),
-        summary("2", tasklist::Status::Pending, ""),
+        task_summary("1", tasklist::Status::Completed, "w1"),
+        task_summary("2", tasklist::Status::Pending, ""),
     ]));
     let engine = engine().with_tasks(Arc::clone(&tasks) as Arc<dyn tasklist::TaskList>);
 
@@ -1986,7 +1987,7 @@ async fn the_task_list_accessor_reads_the_installed_list_through() {
     assert_eq!(listed.len(), 2);
     assert_eq!(listed[0].id, "1", "lowest id first, as the store gave it");
     assert_eq!(listed[1].owner, "", "and an unclaimed task travels unclaimed");
-    assert_eq!(*tasks.reads.lock().expect("the counter is never poisoned"), 1, "one read");
+    assert_eq!(tasks.reads(), 1, "one read");
 }
 
 /// A list that would not open is not a listing: the surfaces that poll this
@@ -1997,68 +1998,4 @@ async fn a_task_list_that_cannot_be_read_answers_as_no_list_at_all() {
     let engine = engine().with_tasks(tasks as Arc<dyn tasklist::TaskList>);
 
     assert!(engine.task_list().await.is_none());
-}
-
-/// One task, as the store would have summarized it.
-fn summary(id: &str, status: tasklist::Status, owner: &str) -> tasklist::Summary {
-    tasklist::Summary {
-        id: id.to_owned(),
-        subject: format!("task {id}"),
-        status,
-        owner: owner.to_owned(),
-        blocked_by: Vec::new(),
-    }
-}
-
-/// A shared list that answers with what it was built over, and counts how
-/// often it was asked.
-#[derive(Debug)]
-struct StaticTasks {
-    listed: Vec<tasklist::Summary>,
-    failure: Option<String>,
-    reads: Mutex<usize>,
-}
-
-impl StaticTasks {
-    fn new(listed: Vec<tasklist::Summary>) -> Self {
-        Self { listed, failure: None, reads: Mutex::new(0) }
-    }
-
-    fn failing(reason: &str) -> Self {
-        Self { listed: Vec::new(), failure: Some(reason.to_owned()), reads: Mutex::new(0) }
-    }
-}
-
-#[async_trait]
-impl tasklist::TaskList for StaticTasks {
-    async fn create(
-        &self,
-        _draft: tasklist::Draft,
-    ) -> Result<tasklist::Record, tasklist::TaskFailure> {
-        unreachable!("the accessor only ever reads")
-    }
-
-    async fn update(
-        &self,
-        _id: &str,
-        _change: tasklist::Change,
-    ) -> Result<tasklist::Record, tasklist::TaskFailure> {
-        unreachable!("the accessor only ever reads")
-    }
-
-    async fn delete(&self, _id: &str) -> Result<(), tasklist::TaskFailure> {
-        unreachable!("the accessor only ever reads")
-    }
-
-    async fn list(&self) -> Result<Vec<tasklist::Summary>, tasklist::TaskFailure> {
-        *self.reads.lock().expect("the counter is never poisoned") += 1;
-        match &self.failure {
-            Some(reason) => Err(tasklist::TaskFailure { reason: reason.clone() }),
-            None => Ok(self.listed.clone()),
-        }
-    }
-
-    async fn get(&self, _id: &str) -> Result<tasklist::Record, tasklist::TaskFailure> {
-        unreachable!("the accessor only ever reads")
-    }
 }

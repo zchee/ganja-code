@@ -7,13 +7,10 @@
 //! listing afterwards is the work its teammate did. The store's own guarantees
 //! are `ganja-team`'s to pin — this is the seam above them.
 //!
-//! The provider double answers by **what it was asked**, never by a position
-//! in a queue, and that is not a preference: a lead and its in-process
-//! teammate share one provider, both take turns of their own, and a persistent
-//! engine asks for a title beside them. A FIFO script would hand the
-//! teammate's answer to whichever engine got there first. Keyed on the
-//! conversation, every request is answered with the step that conversation is
-//! at, and a toolless request — a title — is answered as one.
+//! The provider double is [`ganja_testkit::Director`], which answers by what
+//! it was asked rather than by a position in a queue — its own doc gives the
+//! reason, and this suite is the one that had it first: a lead, its in-process
+//! teammate and a title request all reach the one provider here.
 //!
 //! Every root is handed in and nothing here reads or writes the environment,
 //! so this binary may hold more than one test.
@@ -21,12 +18,10 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use async_trait::async_trait;
 use futures::StreamExt as _;
-use futures::stream::{self, BoxStream};
 use ganja_core::permission::Permissions;
 use ganja_core::protocol::{Command, PartBody, ToolState};
-use ganja_core::provider::{ChatRequest, Provider, ProviderError, ProviderEvent};
+use ganja_core::provider::{ChatRequest, ProviderEvent};
 use ganja_core::teammate::TeammateRegistry;
 use ganja_core::tool::Registry;
 use ganja_core::{Engine, Storage};
@@ -35,6 +30,7 @@ use ganja_team::task::{Store, TaskId, TaskStatus};
 use ganja_team::{TeamName, TeamsRoot};
 use ganja_testkit::{
     LEAD_SESSION_ID, RecordedSpawns, TEAM, caller, eventually, says, spawn_with_prompt, tool_call,
+    transcript,
 };
 use serde_json::json;
 
@@ -63,29 +59,6 @@ const SUBJECT: &str = "port the parser";
 /// alone.
 const NOTE: &str = "the lexer was the hard half, zarquon";
 
-/// A provider that answers each request with the step that request's own
-/// conversation is at.
-struct Director {
-    seen: Arc<Mutex<Vec<ChatRequest>>>,
-}
-
-/// Everything a request's conversation says: the text of every part, and what
-/// every finished tool call answered — which is how a step knows what the
-/// previous one produced.
-fn transcript(request: &ChatRequest) -> String {
-    request
-        .messages
-        .iter()
-        .flat_map(|message| &message.parts)
-        .map(|part| match &part.body {
-            PartBody::Tool { state: ToolState::Completed { output, .. }, .. } => output.clone(),
-            PartBody::Tool { state: ToolState::Error { error, .. }, .. } => error.clone(),
-            _ => part.as_text().unwrap_or_default().to_owned(),
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 /// Whether this conversation has already called `tool`.
 fn called(request: &ChatRequest, tool: &str) -> bool {
     request
@@ -95,90 +68,73 @@ fn called(request: &ChatRequest, tool: &str) -> bool {
         .any(|part| matches!(&part.body, PartBody::Tool { tool: called, .. } if called == tool))
 }
 
-#[async_trait]
-impl Provider for Director {
-    fn id(&self) -> &str {
-        "recorder"
+/// What to answer this request with.
+///
+/// The arms are the conversations, and within a conversation the step is read
+/// off what the previous call answered rather than off a counter, so two
+/// engines interleaving cannot take each other's turn.
+fn script(request: &ChatRequest) -> Vec<ProviderEvent> {
+    // A title request carries no tools at all, and is the one kind of request
+    // neither conversation asked for.
+    if request.tools.is_empty() {
+        return says("a title");
+    }
+    let said = transcript(request);
+
+    if said.contains(WORK_PROMPT) {
+        // The teammate: claim it and start, then finish it with a word about
+        // what it did, then report.
+        if !called(request, "task_update") {
+            return tool_call(
+                "task_update",
+                json!({"task_id": "1", "owner": WORKER, "status": "in_progress"}),
+            );
+        }
+        if !said.contains("[completed]") {
+            return tool_call(
+                "task_update",
+                json!({"task_id": "1", "status": "completed", "add_comment": NOTE}),
+            );
+        }
+
+        return says("done");
+    }
+    if said.contains(LIST_PROMPT) {
+        // The lead, asking what became of it.
+        if !called(request, "task_list") {
+            return tool_call("task_list", json!({}));
+        }
+
+        return says("the team finished it");
+    }
+    if said.contains(FILE_PROMPT) {
+        // The lead, filing the work before anybody exists to do it.
+        if !called(request, "task_create") {
+            return tool_call(
+                "task_create",
+                json!({"subject": SUBJECT, "description": "start from the spec"}),
+            );
+        }
+
+        return says("filed");
     }
 
-    async fn stream(
-        &self,
-        request: ChatRequest,
-        _cancel: tokio_util::sync::CancellationToken,
-    ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
-        let script = self.script(&request);
-        self.seen.lock().expect("the request log is never poisoned").push(request);
-
-        Ok(stream::iter(script).boxed())
-    }
-}
-
-impl Director {
-    /// What to answer this request with.
-    ///
-    /// The arms are the conversations, and within a conversation the step is
-    /// read off what the previous call answered rather than off a counter, so
-    /// two engines interleaving cannot take each other's turn.
-    fn script(&self, request: &ChatRequest) -> Vec<ProviderEvent> {
-        // A title request carries no tools at all, and is the one kind of
-        // request neither conversation asked for.
-        if request.tools.is_empty() {
-            return says("a title");
-        }
-        let said = transcript(request);
-
-        if said.contains(WORK_PROMPT) {
-            // The teammate: claim it and start, then finish it with a word
-            // about what it did, then report.
-            if !called(request, "task_update") {
-                return tool_call(
-                    "task_update",
-                    json!({"task_id": "1", "owner": WORKER, "status": "in_progress"}),
-                );
-            }
-            if !said.contains("[completed]") {
-                return tool_call(
-                    "task_update",
-                    json!({"task_id": "1", "status": "completed", "add_comment": NOTE}),
-                );
-            }
-
-            return says("done");
-        }
-        if said.contains(LIST_PROMPT) {
-            // The lead, asking what became of it.
-            if !called(request, "task_list") {
-                return tool_call("task_list", json!({}));
-            }
-
-            return says("the team finished it");
-        }
-        if said.contains(FILE_PROMPT) {
-            // The lead, filing the work before anybody exists to do it.
-            if !called(request, "task_create") {
-                return tool_call(
-                    "task_create",
-                    json!({"subject": SUBJECT, "description": "start from the spec"}),
-                );
-            }
-
-            return says("filed");
-        }
-
-        vec![ProviderEvent::Finish(FinishReason::Completed)]
-    }
+    vec![ProviderEvent::Finish(FinishReason::Completed)]
 }
 
 /// The lead: a persistent engine over its own store, wired to a team, its
 /// birth queue drained.
 struct Lead {
-    home: tempfile::TempDir,
     root: TeamsRoot,
     team: TeamName,
     registry: Arc<TeammateRegistry>,
     engine: Engine,
     requests: Arc<Mutex<Vec<ChatRequest>>>,
     asker: RecordedSpawns,
+    /// Declared last so it is dropped last: the engine's storage lives under
+    /// it, and taking the directory away while the engine still holds it is
+    /// the reverse of the safe order.
+    home: tempfile::TempDir,
 }
 
 impl Lead {
@@ -193,8 +149,7 @@ impl Lead {
             LEAD_SESSION_ID,
             home.path(),
         ));
-        let requests: Arc<Mutex<Vec<ChatRequest>>> = Arc::default();
-        let provider = Arc::new(Director { seen: Arc::clone(&requests) });
+        let (provider, requests) = ganja_testkit::Director::answering(script);
 
         let engine = Engine::persistent(
             provider,
@@ -207,7 +162,7 @@ impl Lead {
         let mut events = engine.subscribe().await.expect("the first subscriber wins");
         tokio::spawn(async move { while events.next().await.is_some() {} });
 
-        Self { home, root, team, registry, engine, requests, asker: RecordedSpawns::default() }
+        Self { root, team, registry, engine, requests, asker: RecordedSpawns::default(), home }
     }
 
     /// The documents this team's list is kept in, read the way any other
@@ -268,7 +223,6 @@ async fn a_leads_own_call_files_a_task_in_the_teams_directory() {
     }
 
     lead.engine.shutdown_teammates().await;
-    drop(lead.home);
 }
 
 /// The whole wave, end to end in one process: the lead files the work, a
@@ -343,7 +297,6 @@ async fn a_teammate_claims_and_completes_the_task_its_lead_filed() {
     );
 
     lead.engine.shutdown_teammates().await;
-    drop(lead.home);
 }
 
 /// A session that leads **nobody** still has a list, and that is the ordinary
@@ -362,5 +315,4 @@ async fn a_session_that_leads_nobody_is_still_offered_the_list() {
     assert!(lead.registry.leads_nobody(), "nobody was ever spawned into this team");
 
     lead.engine.shutdown_teammates().await;
-    drop(lead.home);
 }

@@ -1,8 +1,8 @@
 //! A real `ganja` lead in a tmux pane of its own, driven from outside.
 //!
-//! Shared by the pane binaries in this directory (`teammate_permission.rs`,
-//! `teammate_env.rs`, `team_tasks_pane.rs`, `team_continuation_pane.rs`), which
-//! are the end-to-end half of what
+//! Shared by every pane binary in this directory — `teammate_permission.rs`,
+//! `teammate_env.rs`, `teammate_pane.rs`, `team_tasks_pane.rs` and
+//! `team_continuation_pane.rs` — which are the end-to-end half of what
 //! `ganja-teammate-local/tests/pane_support` pins with a fake pane child: here **both**
 //! processes are the shipped binary — the lead is the terminal UI running
 //! inside a private tmux server, and the pane is whatever that lead's `/teammate
@@ -16,8 +16,9 @@
 //! from. [`Tmux`] instead starts the server on an idle shell and splits the
 //! lead into a pane of its own, which is what a drill wants when the lead has
 //! to hold something the server does not — its own fake-provider script, so a
-//! pane it later spawns cannot play its conversation. The rest ([`WITHHELD`],
-//! [`lead_env`], [`log_dir`], [`log_text`]) is shared by both shapes.
+//! pane it later spawns cannot play its conversation. The rest — the names a
+//! server is born without, the two environments ([`server_env`], [`lead_env`]),
+//! the log reads and the team file — is shared by both shapes.
 //!
 //! # Where the environment goes
 //!
@@ -40,17 +41,21 @@
 
 #![allow(dead_code)]
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use ganja_core::team::TeamFile;
 pub use ganja_testkit::Homes;
 use ganja_testkit::tmux::{PrivateServer, require_tmux};
 
 /// The composer's placeholder, which the first frame of an idle lead draws —
 /// pinned to `ganja_tui::component::editor`. Once it is on screen raw mode is
-/// on, and a key sent to the pane is a key the app reads.
-pub const READY: &str = "Ask ganja something";
+/// on, and a key sent to the pane is a key the app reads; later in a drill it
+/// is the sign that the next line typed reaches the composer rather than an
+/// overlay that owns the keyboard.
+pub const COMPOSER: &str = "Ask ganja something";
 
 /// The permission dialog's options line — pinned to
 /// `ganja_tui::component::permission`, as `pty_smoke.rs` pins it.
@@ -67,9 +72,14 @@ const POLL: Duration = Duration::from_millis(100);
 /// The pane teammate every test here spawns.
 pub const TEAMMATE: &str = "w1";
 
+/// How many lines of a lead's log a timed-out wait quotes.
+const LOG_TAIL: usize = 80;
+
 /// What a private server is born **without**, so nothing a pane inherits can
-/// be this developer's rather than the fixture's.
-pub const WITHHELD: &[&str] = &[
+/// be this developer's rather than the fixture's (§10.10). One spelling,
+/// because a list that drifted between two drills would be two different
+/// experiments wearing one name.
+const WITHHELD: &[&str] = &[
     "GANJA_CONFIG_HOME",
     "GANJA_CONFIG",
     "GANJA_MODEL",
@@ -84,28 +94,56 @@ pub const WITHHELD: &[&str] = &[
     "OPENROUTER_API_KEY",
 ];
 
+/// The environment a private server is born from, and so what every pane it
+/// makes inherits: the shell a person started tmux from, pinned to `homes` the
+/// way the other pty drills pin theirs.
+///
+/// No config home and no XDG base — those are the lead's to be given and the
+/// launch's to carry. `script` is the fake provider's script the **panes** get,
+/// which a drill either has (its teammate's) or has not; a lead needing one of
+/// its own is handed it by [`lead_env`] instead, on its own process, so the two
+/// conversations cannot play each other's turns.
+pub fn server_env(homes: &Homes, script: Option<&Path>) -> Vec<(&'static str, String)> {
+    let mut env =
+        vec![("HOME", homes.data().display().to_string()), ("GANJA_PROVIDER", "fake".to_owned())];
+    if let Some(script) = script {
+        env.push(("GANJA_FAKE_SCRIPT", script.display().to_string()));
+    }
+    env.push(("GANJA_DISABLE_MODELS_FETCH", "1".to_owned()));
+
+    env
+}
+
 /// What a lead's own pane is additionally given (`-e`): where its things are,
 /// and the `script` it plays in place of whatever the server was born holding.
 ///
 /// Given to the lead's process alone rather than to the server, which is what
 /// keeps a pane the lead later spawns from inheriting the lead's own
-/// conversation.
-pub fn lead_env(homes: &Homes, script: &Path) -> Vec<(&'static str, String)> {
-    vec![
+/// conversation. A drill whose lead is content with the server's own script
+/// passes none.
+pub fn lead_env(homes: &Homes, script: Option<&Path>) -> Vec<(&'static str, String)> {
+    let mut env = vec![
         ("GANJA_CONFIG_HOME", homes.config_home().display().to_string()),
         ("XDG_DATA_HOME", homes.data().display().to_string()),
         ("XDG_CONFIG_HOME", homes.data().join("config").display().to_string()),
         ("XDG_CACHE_HOME", homes.data().join("cache").display().to_string()),
-        ("GANJA_FAKE_SCRIPT", script.display().to_string()),
-        // What every other pty drill sets (**D517**): a private server born
-        // from `-f /dev/null` is a terminal whose answer to the kitty query
-        // depends on which tmux the host ships, and the probe blocks up to
-        // two seconds where there is none.
-        ("GANJA_DISABLE_TERM_PROBE", "1".to_owned()),
-    ]
+    ];
+    if let Some(script) = script {
+        env.push(("GANJA_FAKE_SCRIPT", script.display().to_string()));
+    }
+    // What every other pty drill sets (**D517**): a private server born
+    // from `-f /dev/null` is a terminal whose answer to the kitty query
+    // depends on which tmux the host ships, and the probe blocks up to
+    // two seconds where there is none.
+    env.push(("GANJA_DISABLE_TERM_PROBE", "1".to_owned()));
+
+    env
 }
 
-/// Where a session under `homes` traces.
+/// Where a session under `homes` traces — the data home's rolling log, one
+/// file per local date. A member's pane inherits the same data home (D502) and
+/// writes the same file, which is what a failing spawn needs read anyway: both
+/// halves of it, in one order.
 pub fn log_dir(homes: &Homes) -> PathBuf {
     homes.data().join("ganja").join("log")
 }
@@ -114,26 +152,26 @@ pub fn log_dir(homes: &Homes) -> PathBuf {
 /// there is no log yet, which is every moment before the first session opens
 /// one.
 pub fn log_text(dir: &Path) -> String {
-    let Ok(entries) = std::fs::read_dir(dir) else {
+    let Ok(entries) = fs::read_dir(dir) else {
         return String::new();
     };
     let mut files: Vec<PathBuf> =
         entries.filter_map(Result::ok).map(|entry| entry.path()).collect();
     files.sort();
 
-    files.iter().filter_map(|path| std::fs::read_to_string(path).ok()).collect()
+    files.iter().filter_map(|path| fs::read_to_string(path).ok()).collect()
 }
 
-/// The last `lines` of what `dir` holds, named and counted, for a wait that
-/// timed out.
+/// The last [`LOG_TAIL`] lines of what `dir` holds, named and counted, for a
+/// wait that timed out.
 ///
 /// Names the directory because the most common way this reads empty is that
 /// nothing ever opened a log there — which is a different failure from a lead
 /// that ran and traced nothing.
-pub fn log_tail(dir: &Path, lines: usize) -> String {
+pub fn log_tail(dir: &Path) -> String {
     let text = log_text(dir);
     let held: Vec<&str> = text.lines().collect();
-    let kept = held.len().saturating_sub(lines);
+    let kept = held.len().saturating_sub(LOG_TAIL);
 
     format!(
         "last {} of {} lines from {}:\n{}",
@@ -142,6 +180,31 @@ pub fn log_tail(dir: &Path, lines: usize) -> String {
         dir.display(),
         held[kept..].join("\n")
     )
+}
+
+/// The team directory the lead made — the only one under the config home
+/// `homes` names, itself named `session-<8hex>` after a session id no drill
+/// here ever sees. The config home is the variable D502 exists to carry, so
+/// finding a team under it at all is that mechanism having worked.
+pub fn team_dir(homes: &Homes) -> Option<PathBuf> {
+    let mut dirs: Vec<PathBuf> = fs::read_dir(homes.config_home().join("teams"))
+        .ok()?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect();
+    dirs.sort();
+    assert!(dirs.len() <= 1, "one lead is one team: {dirs:?}");
+
+    dirs.into_iter().next()
+}
+
+/// The team file that directory holds, or nothing where no lead has written
+/// one yet.
+pub fn team_file(homes: &Homes) -> Option<TeamFile> {
+    let text = fs::read_to_string(team_dir(homes)?.join("config.json")).ok()?;
+
+    Some(serde_json::from_str(&text).expect("the team file this build wrote decodes"))
 }
 
 /// A private tmux server whose first window is a real `ganja` lead — the
@@ -220,8 +283,8 @@ impl Lead {
 
         let pane = server.first_pane().to_owned();
         let lead = Self { server, pane };
-        // The lead's first frame, for [`READY`]'s reason.
-        lead.wait_for_screen(&lead.pane, |screen| screen.contains(READY));
+        // The lead's first frame, for [`COMPOSER`]'s reason.
+        lead.wait_for_screen(&lead.pane, |screen| screen.contains(COMPOSER));
 
         lead
     }
@@ -309,19 +372,33 @@ impl Lead {
 /// to hold a fake-provider script the server does not.
 pub struct Tmux {
     server: PrivateServer,
+    /// [`log_dir`] of the homes the server was started over, kept here
+    /// because [`Tmux::wait_for`] has the server and the lead's pane in hand
+    /// and nothing else.
+    logs: PathBuf,
+    /// How long [`Tmux::wait_for`] gives any one thing — each drill's own,
+    /// since what they wait on ranges from one cold binary to seven provider
+    /// round trips.
+    deadline: Duration,
 }
 
 impl Tmux {
     /// Starts the server with `env` on its global environment — what every
-    /// pane it ever makes inherits — and [`WITHHELD`] taken out of it.
-    pub fn start(env: &[(&'static str, String)]) -> Self {
+    /// pane it ever makes inherits — and `WITHHELD` taken out of it, tracing
+    /// under `homes` and giving each [`Tmux::wait_for`] `deadline`.
+    pub fn start(homes: &Homes, env: &[(&'static str, String)], deadline: Duration) -> Self {
         require_tmux();
 
-        Self { server: PrivateServer::start(&["sleep", "3600"], WITHHELD, &borrowed(env)) }
+        Self {
+            server: PrivateServer::start(&["sleep", "3600"], WITHHELD, &borrowed(env)),
+            logs: log_dir(homes),
+            deadline,
+        }
     }
 
     /// Splits `argv` into a pane of its own under `cwd`, with `env` on that
-    /// process alone, and answers the pane's id.
+    /// process alone, and answers the pane's id. `argv` is at least two words,
+    /// for the reason `pane.rs` gives.
     pub fn split(&self, cwd: &Path, env: &[(&'static str, String)], argv: &[&str]) -> String {
         self.server.split(Some(cwd), &borrowed(env), argv)
     }
@@ -329,6 +406,28 @@ impl Tmux {
     /// The live pane ids.
     pub fn panes(&self) -> Vec<String> {
         self.server.panes()
+    }
+
+    /// Where a pane's top-left corner sits in the window, as tmux reports
+    /// it — the only honest way to ask which side of the lead a teammate
+    /// opened on, since what a person sees is the layout rather than the
+    /// argv that produced it.
+    pub fn corner(&self, pane: &str) -> (u16, u16) {
+        let reported =
+            self.server.run(&["display-message", "-p", "-t", pane, "#{pane_left} #{pane_top}"]);
+        let mut columns = reported.split_whitespace().map(|word| {
+            word.parse()
+                .unwrap_or_else(|_| panic!("tmux reports a corner as two numbers: {reported:?}"))
+        });
+        let left = columns.next().expect("a left column");
+        let top = columns.next().expect("a top row");
+
+        (left, top)
+    }
+
+    /// The pid of the pane's process — for the lead's pane, the lead.
+    pub fn pane_pid(&self, pane: &str) -> String {
+        self.server.run(&["display-message", "-p", "-t", pane, "#{pane_pid}"]).trim().to_owned()
     }
 
     /// The name of the process in `pane`'s foreground, as tmux sees it.
@@ -353,6 +452,31 @@ impl Tmux {
     /// Presses one key in `pane`.
     pub fn key(&self, pane: &str, name: &str) {
         self.server.run(&["send-keys", "-t", pane, name]);
+    }
+
+    /// Polls `read` every 50ms until it answers, or panics with `what`, the
+    /// lead's screen and the tail of the log the lead — and any member sharing
+    /// its data home — traced, after this server's deadline.
+    ///
+    /// The log beside the screen because the screen alone has already been read
+    /// twice on CI (runs 33261878445 and 33368776921) and each time it showed a
+    /// lead that looked idle with a line it never acted on; what the lead
+    /// *traced* in that window is the half of the picture the screen cannot give.
+    pub fn wait_for<T>(&self, what: &str, lead: &str, mut read: impl FnMut() -> Option<T>) -> T {
+        let started = Instant::now();
+        loop {
+            if let Some(found) = read() {
+                return found;
+            }
+            assert!(
+                started.elapsed() < self.deadline,
+                "waited {:?} for {what} and it did not happen; the lead's screen:\n{}\n{}",
+                self.deadline,
+                self.screen(lead),
+                log_tail(&self.logs)
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 }
 

@@ -291,6 +291,33 @@ async fn a_blocker_that_is_not_an_id_refuses_before_anything_is_written() {
     );
 }
 
+/// Including one that travels with a claim nobody else is racing for: the ids
+/// are read before the claim is written, so a call refused for a malformed
+/// blocker leaves the task unowned rather than taken by a call that did not
+/// land.
+#[tokio::test]
+async fn a_blocker_that_is_not_an_id_refuses_before_a_claim_that_would_have_won() {
+    let (_home, tasks) = list("team-lead");
+    let id = filed(&tasks, "port the parser").await;
+
+    let refused = tasks
+        .update(
+            &id,
+            Change {
+                owner: Some(Owner::Claim("worker-1".to_owned())),
+                add_blocked_by: vec!["not-an-id".to_owned()],
+                ..Change::default()
+            },
+        )
+        .await
+        .expect_err("a blocker outside the grammar is refused");
+    assert!(refused.reason.contains(REFUSED_ID_SHAPE), "{}", refused.reason);
+    assert!(
+        tasks.get(&id).await.expect("the task is still there").owner.is_empty(),
+        "and the claim that travelled with it took nothing"
+    );
+}
+
 /// A whole record comes back with everything a listing leaves out.
 #[tokio::test]
 async fn a_get_answers_with_what_a_listing_leaves_out() {

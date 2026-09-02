@@ -119,10 +119,11 @@ skipped it. Exit when the acceptance criteria are written down.
 
 1. `task_create` every subtask. The subject is imperative and short; the
    description is self-contained, because whoever picks it up has not read
-   this conversation. Wire dependencies with `blockedBy` so nobody claims work
-   that cannot start.
-2. Pre-assign owners with `task_update` where you already know who should do
-   what. Leave the rest ownerless for whoever is free.
+   this conversation.
+2. Set owners and dependencies with `task_update`: pre-assign where you
+   already know who should do what, leaving the rest ownerless for whoever is
+   free, and name what a task waits on with `add_blocked_by` so nobody claims
+   work that cannot start.
 3. Spawn the teammates with the `task` tool, giving each one a `name`, a
    `subagent_type` from the routing table below, and the `backend` the user
    asked for if they asked for one.
@@ -193,7 +194,7 @@ what makes the next run a resume rather than a restart.
 
 ## Which agent runs which stage
 
-    team-plan     plan       (explore for read-only scouting)
+    team-plan     the lead itself, with explore for read-only scouting
     team-prd      analyst    (critic to challenge the scope)
     team-exec     general    (debugger for build and type errors)
     team-verify   verifier

@@ -40,21 +40,17 @@
 #![cfg(unix)]
 
 use std::fs;
-use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::json;
 
 mod pane_lead;
 
-use pane_lead::{Homes, Tmux};
+use pane_lead::{COMPOSER, Homes, Tmux};
 
 /// How long each stage is given: a debug `ganja` starting cold in a pane, then
 /// seven provider round trips against a scripted provider.
 const DEADLINE: Duration = Duration::from_secs(60);
-
-/// How many lines of the lead's log a timed-out wait quotes.
-const LOG_TAIL: usize = 80;
 
 /// What the engine traces once per auto-continuation.
 const CONTINUED: &str = "the team still holds work, so the turn continues";
@@ -73,9 +69,6 @@ const MEMBER: &str = "w1";
 
 /// What the lead files.
 const SUBJECT: &str = "port the parser";
-
-/// What the composer draws when nothing else owns the screen.
-const COMPOSER: &str = "Ask ganja something";
 
 /// The lead's first prompt: the one turn that files the work.
 const FILE_PROMPT: &str = "file the work";
@@ -114,23 +107,16 @@ impl Fixture {
         Self { homes }
     }
 
-    fn config_home(&self) -> PathBuf {
-        self.homes.config_home()
-    }
-
     /// The environment the server is born from, and so what every pane
-    /// inherits.
+    /// inherits. No script: both conversations here are the lead's own, and
+    /// the one it plays is on its own process.
     fn server_env(&self) -> Vec<(&'static str, String)> {
-        vec![
-            ("HOME", self.homes.data().display().to_string()),
-            ("GANJA_PROVIDER", "fake".to_owned()),
-            ("GANJA_DISABLE_MODELS_FETCH", "1".to_owned()),
-        ]
+        pane_lead::server_env(&self.homes, None)
     }
 
     /// What the lead's own pane is additionally given (`-e`).
     fn lead_env(&self) -> Vec<(&'static str, String)> {
-        pane_lead::lead_env(&self.homes, &self.homes.project().join(SCRIPT))
+        pane_lead::lead_env(&self.homes, Some(&self.homes.project().join(SCRIPT)))
     }
 
     /// How many times the lead's log says `needle`.
@@ -140,12 +126,12 @@ impl Fixture {
 
     /// The tail of the log, for a wait that timed out.
     fn log_tail(&self) -> String {
-        pane_lead::log_tail(&pane_lead::log_dir(&self.homes), LOG_TAIL)
+        pane_lead::log_tail(&pane_lead::log_dir(&self.homes))
     }
 
     /// Whether the lead's team directory holds any task document yet.
     fn filed_anything(&self) -> bool {
-        let Ok(teams) = fs::read_dir(self.config_home().join("teams")) else {
+        let Ok(teams) = fs::read_dir(self.homes.config_home().join("teams")) else {
             return false;
         };
 
@@ -160,36 +146,12 @@ impl Fixture {
     }
 }
 
-/// Polls `read` every 50ms until it answers, or panics with `what`, the lead's
-/// screen and the tail of its log after [`DEADLINE`].
-fn wait_for<T>(
-    what: &str,
-    tmux: &Tmux,
-    fixture: &Fixture,
-    lead: &str,
-    mut read: impl FnMut() -> Option<T>,
-) -> T {
-    let started = Instant::now();
-    loop {
-        if let Some(found) = read() {
-            return found;
-        }
-        assert!(
-            started.elapsed() < DEADLINE,
-            "waited {DEADLINE:?} for {what} and it did not happen; the lead's screen:\n{}\n{}",
-            tmux.screen(lead),
-            fixture.log_tail(),
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
 /// A real `ganja` auto-continues while its team holds work, and the breaker
 /// stops it after five.
 #[test]
 fn a_lead_auto_continues_for_its_team_and_the_breaker_halts_it_at_five() {
     let fixture = Fixture::new();
-    let tmux = Tmux::start(&fixture.server_env());
+    let tmux = Tmux::start(&fixture.homes, &fixture.server_env(), DEADLINE);
 
     // The lead, in a pane of its own in the project directory. Two words on
     // purpose (`env` and the binary): a one-word command would go through the
@@ -199,7 +161,7 @@ fn a_lead_auto_continues_for_its_team_and_the_breaker_halts_it_at_five() {
         &fixture.lead_env(),
         &["/usr/bin/env", env!("CARGO_BIN_EXE_ganja")],
     );
-    wait_for("the lead to draw its composer", &tmux, &fixture, &lead, || {
+    tmux.wait_for("the lead to draw its composer", &lead, || {
         tmux.screen(&lead).contains(COMPOSER).then_some(())
     });
 
@@ -207,10 +169,8 @@ fn a_lead_auto_continues_for_its_team_and_the_breaker_halts_it_at_five() {
     // order the pipeline actually runs in — and that turn **ends**: open work
     // with nobody running is a list, not a stranded team.
     tmux.type_line(&lead, FILE_PROMPT);
-    wait_for("the lead to file the task", &tmux, &fixture, &lead, || {
-        fixture.filed_anything().then_some(())
-    });
-    wait_for("the first turn to end with no continuation", &tmux, &fixture, &lead, || {
+    tmux.wait_for("the lead to file the task", &lead, || fixture.filed_anything().then_some(()));
+    tmux.wait_for("the first turn to end with no continuation", &lead, || {
         tmux.screen(&lead).contains(COMPOSER).then_some(())
     });
     assert_eq!(
@@ -226,13 +186,11 @@ fn a_lead_auto_continues_for_its_team_and_the_breaker_halts_it_at_five() {
     tmux.type_line(&lead, &format!("/teammate spawn {MEMBER} --backend in-process"));
 
     // 3. The next turn would end exactly as the first one did. It does not.
-    wait_for("the composer to take the next line", &tmux, &fixture, &lead, || {
+    tmux.wait_for("the composer to take the next line", &lead, || {
         tmux.screen(&lead).contains(COMPOSER).then_some(())
     });
     tmux.type_line(&lead, CARRY_ON);
-    wait_for("the breaker to trip", &tmux, &fixture, &lead, || {
-        (fixture.logged(STOPPED) > 0).then_some(())
-    });
+    tmux.wait_for("the breaker to trip", &lead, || (fixture.logged(STOPPED) > 0).then_some(()));
 
     assert_eq!(
         fixture.logged(CONTINUED),
@@ -249,7 +207,7 @@ fn a_lead_auto_continues_for_its_team_and_the_breaker_halts_it_at_five() {
 
     // 4. And the session is back with the person: the turn really ended
     // rather than continuing quietly with the notice suppressed.
-    wait_for("the composer to come back after the breaker", &tmux, &fixture, &lead, || {
+    tmux.wait_for("the composer to come back after the breaker", &lead, || {
         tmux.screen(&lead).contains(COMPOSER).then_some(())
     });
 }

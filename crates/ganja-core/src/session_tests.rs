@@ -907,6 +907,18 @@ fn a_child_turn_cannot_spawn_anything() {
     );
 }
 
+/// Neither door onto the team is offered to a subagent, and for one reason:
+/// a delegated turn acts under the lead's name, so anything it wrote there
+/// would be attributed to somebody who never said it.
+#[test]
+fn a_child_turn_holds_neither_the_task_list_nor_a_postbox() {
+    let (spawn, _parent) = parent_spawn(None);
+    let (turn, _events) = child_of(&spawn);
+
+    assert!(turn.tasks.is_none(), "a claim on the team's work would be a claim nobody made (D546)");
+    assert!(turn.postbox.is_none(), "and a message to the team would be one nobody sent (D498)");
+}
+
 /// A subagent runs unattended, so it is the last conversation that should
 /// be able to read a key off the disk: it refuses the same store its parent
 /// does, and refuses it because it was told which one that is.

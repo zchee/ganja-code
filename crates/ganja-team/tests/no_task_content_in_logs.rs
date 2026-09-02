@@ -118,7 +118,10 @@ fn what_a_task_says_never_reaches_a_log_line() {
     let damaged = store.create(NewTask::new("subject", "description")).expect("a task is created");
     fs::write(
         store.path_of(&damaged.id),
-        format!("{{\"id\": \"2\", \"subject\": \"s\", \"status\": \"{DAMAGED_CANARY}\"}}"),
+        format!(
+            "{{\"id\": \"{}\", \"subject\": \"s\", \"status\": \"{DAMAGED_CANARY}\"}}",
+            damaged.id
+        ),
     )
     .expect("the document is writable");
     assert!(store.list().expect("a damaged document does not fail the list").is_empty());
