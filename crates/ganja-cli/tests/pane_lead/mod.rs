@@ -195,6 +195,16 @@ pub fn lead_env(homes: &Homes, script: Option<&Path>) -> Vec<(&'static str, Stri
     // depends on which tmux the host ships, and the probe blocks up to
     // two seconds where there is none.
     env.push(("GANJA_DISABLE_TERM_PROBE", "1".to_owned()));
+    // The frontend's own account of where a keypress went, for bead `mxqo`:
+    // a wait that times out quotes [`LOG_TAIL`] lines of this file, and what
+    // twice went missing on CI was an Enter nothing on the screen could
+    // explain. The **lead's** process alone — a member's pane inherits the
+    // server's environment and stays at `info`, so the shared log file does
+    // not double. Measured on a deliberate timeout before it was left here:
+    // `ganja_tui` at debug costs **two** lines per submitted line, and the
+    // whole log of the two-spawn drill was sixteen — a fifth of the tail, so
+    // it still reaches back past the spawn the drill is asking about.
+    env.push(("RUST_LOG", "info,ganja_tui=debug".to_owned()));
 
     env
 }
@@ -353,10 +363,10 @@ impl Lead {
         &self.pane
     }
 
-    /// Types `line` into the lead and presses Enter.
+    /// Types `line` into the lead and submits it, in one `send-keys` — see
+    /// [`submitted`].
     pub fn type_line(&self, line: &str) {
-        self.server.run(&["send-keys", "-t", &self.pane, "-l", line]);
-        self.server.run(&["send-keys", "-t", &self.pane, "Enter"]);
+        self.server.run(&["send-keys", "-t", &self.pane, "-l", "--", &submitted(line)]);
     }
 
     /// Presses one key in the lead.
@@ -502,10 +512,10 @@ impl Tmux {
         self.server.run(&["capture-pane", "-p", "-t", pane])
     }
 
-    /// Types `text` into `pane` literally, then Enter.
+    /// Types `text` into `pane` literally and submits it, in one `send-keys` —
+    /// see [`submitted`].
     pub fn type_line(&self, pane: &str, text: &str) {
-        self.server.run(&["send-keys", "-t", pane, "-l", "--", text]);
-        self.server.run(&["send-keys", "-t", pane, "Enter"]);
+        self.server.run(&["send-keys", "-t", pane, "-l", "--", &submitted(text)]);
     }
 
     /// Presses one key in `pane`.
@@ -562,6 +572,32 @@ pub fn wait_for<T>(what: &str, mut look: impl FnMut() -> Option<T>) -> T {
         assert!(started.elapsed() < DEADLINE, "{what} never happened");
         std::thread::sleep(POLL);
     }
+}
+
+/// `line` with the byte a terminal's Enter actually sends on the end, so that
+/// **one** `send-keys` both types it and submits it.
+///
+/// Two invocations per line — `-l <text>`, then `Enter` — is the widest race
+/// window this fixture controls, and the hypothesis under test for bead
+/// `mxqo`, not its settled cause: CI has twice shown only the end state (runs
+/// 33368776921 and 33411632466), a whole `/teammate spawn` line sitting in the
+/// composer with its Enter never acted on, and the one menu that could hold
+/// such an Enter is closed by the exact match one keystroke earlier. The
+/// second invocation is a fork, an exec and a round trip to the tmux server,
+/// measured here at a **7ms median on an idle sixteen-core host**, which is
+/// the floor: the runner that fails is four cores with the suite on them. That
+/// is the app's whole opportunity to read what was typed, redraw, and let
+/// something else arrive and claim the keyboard. One invocation means the app
+/// cannot see the text without the CR already queued behind it; the window is
+/// not zero, but it is no longer a process spawn wide — and the lead's own
+/// debug lines are what settle where an Enter went, if one goes astray again.
+///
+/// A literal CR rather than tmux's `Enter` key name because `-l` sends bytes
+/// and looks up no key names — and CR is what a terminal in raw mode sends
+/// anyway, which crossterm parses as an unmodified `KeyCode::Enter`
+/// (`event/sys/unix/parse.rs`), the key the composer submits on.
+fn submitted(line: &str) -> String {
+    format!("{line}\r")
 }
 
 /// `text` as one `sh` word, by the same crate the production launch line

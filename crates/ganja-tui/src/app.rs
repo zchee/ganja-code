@@ -3744,6 +3744,16 @@ impl App {
     }
 
     async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
+        // Bead `mxqo`: CI has twice held a typed line in the composer with its
+        // Enter never acted on, and a screen capture cannot say why — an
+        // overlay that claims the key and changes nothing visible looks
+        // exactly like a key that was never delivered. The dispatch below is a
+        // fixed order, so naming what is open when an Enter arrives names its
+        // claimant; [`App::submit`] says so from the other side, and no line
+        // here at all says the key never reached the application.
+        if key.code == KeyCode::Enter {
+            tracing::debug!(open = %self.open_overlays(), "an Enter reached the key handler");
+        }
         if self.exits(key) {
             self.quit = true;
             return Ok(());
@@ -4238,6 +4248,51 @@ impl App {
             && !(self.inspector.is_some() && half_page(key).is_some())
     }
 
+    /// Which key-claiming surfaces are open, in the order [`App::handle_key`]
+    /// consults them — empty where nothing stands between a key and the
+    /// composer.
+    ///
+    /// For bead `mxqo`'s next capture, and ordered on purpose: the dispatch is
+    /// first-match-wins, so the **first** name here is where a key went. For
+    /// the unmodified Enter the trace fires on that is a verdict, not a
+    /// suspect — every one of these, the three menus at the end included,
+    /// consumes such an Enter on every path of its arm, a menu holding no
+    /// selection too. For other keys the menus claim only what steers them.
+    fn open_overlays(&self) -> String {
+        let pending = match &self.permission {
+            Some(PendingDialog::Permission(_)) => "permission",
+            Some(PendingDialog::Held(_)) => "held-message",
+            None => "",
+        };
+
+        [
+            ("backtrack", self.backtrack.is_some()),
+            (pending, !pending.is_empty()),
+            ("question", self.question.is_some()),
+            ("help", self.help.is_some()),
+            ("inspector", self.inspector.is_some()),
+            ("sessions", self.sessions.is_some()),
+            ("themes", self.theme_list.is_some()),
+            ("history-search", self.history_search.is_some()),
+            ("rewind", self.rewind.is_some()),
+            ("mcp", self.mcp_dialog.is_some()),
+            ("held-list", self.held_dialog.is_some()),
+            ("plugin", self.plugin_dialog.is_some()),
+            ("teammate", self.team_dialog.is_some()),
+            ("context", self.context_dialog.is_some()),
+            ("usage", self.usage_dialog.is_some()),
+            ("chooser", self.chooser.is_some()),
+            ("palette", self.palette.is_some()),
+            ("dropdown", self.dropdown.is_some()),
+            ("files", self.files.is_some()),
+            ("skills", self.skill_menu.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(name, open)| open.then_some(name))
+        .collect::<Vec<_>>()
+        .join(",")
+    }
+
     /// Whether a modal is claiming the keys and the wheel.
     fn modal_open(&self) -> bool {
         self.permission.is_some()
@@ -4533,6 +4588,16 @@ impl App {
             KeyCode::Enter if !key.modifiers.intersects(NEWLINE_MODIFIERS) => {
                 let choice = self.dropdown.as_ref().and_then(Dropdown::selected);
                 self.dropdown = None;
+                // Bead `mxqo`, and the reason this arm is instrumented rather
+                // than the others: it consumes the Enter whatever it finds,
+                // and completing a value with the word already typed leaves
+                // the screen byte-identical. The spelling rather than the
+                // whole row, which carries a description nobody reading a log
+                // tail wants.
+                tracing::debug!(
+                    took = ?choice.as_ref().map(command::Choice::slash),
+                    "the command menu claimed an Enter"
+                );
 
                 match choice {
                     Some(command::Choice::Ui(entry)) => {
@@ -6184,6 +6249,22 @@ impl App {
     /// pushed here, so what the screen shows is exactly what the engine will
     /// send back to the model.
     async fn submit(&mut self) {
+        // The other side of the key handler's own line (bead `mxqo`): reaching
+        // here is an Enter nothing claimed. A few characters of the first word
+        // only — enough to tell one drill's line from another's in a log tail,
+        // and short of a whole token, since a line that is one word is still
+        // a person's prose or a name the composer never promised to log.
+        let head: String = self
+            .editor
+            .text()
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .take(8)
+            .collect();
+        tracing::debug!(head = %head, bytes = self.editor.text().len(), "the composer took a line");
+
         // Checked before anything else, as upstream checks it: the shell
         // branch runs ahead of the slash branch, because in shell mode a `/`
         // starts a path (`component/prompt/index.tsx:1058-1069`).

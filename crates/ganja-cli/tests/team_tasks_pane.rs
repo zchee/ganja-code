@@ -246,8 +246,17 @@ fn a_lead_and_a_pane_teammate_drive_one_task_list_end_to_end() {
 
     // 4. And the lead reads it back through its own `task_list`: the status
     // and the owner another process wrote, on the lead's screen.
-    tmux.wait_for("the composer to take the next line", &lead, || {
-        tmux.screen(&lead).contains(COMPOSER).then_some(())
+    // The status bar's own word rather than the composer's placeholder (bead
+    // `d61w`): the placeholder is drawn whenever the buffer is empty, a
+    // streaming reply included, so it is no sign that the filing turn ended —
+    // and this line is a **prompt**, which typed into a running turn is a
+    // steer instead. What makes `ready` mean "ended" here is the wait at step
+    // 1 having already proved that turn ran a tool; the bar reads `ready`
+    // before a turn starts too. The `/teammate` lines around it keep the
+    // placeholder: a UI command runs from `submit` ahead of the steer branch,
+    // so it is the same command whichever it lands in.
+    tmux.wait_for("the filing turn to have ended", &lead, || {
+        pane_lead::idle(&tmux.screen(&lead)).then_some(())
     });
     tmux.type_line(&lead, LIST_PROMPT);
     tmux.wait_for("the lead's listing to show the finished task", &lead, || {
