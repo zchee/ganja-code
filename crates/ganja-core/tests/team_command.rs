@@ -1,15 +1,18 @@
 //! The `/team` builtin: what it is in the roster, and what it expands to.
 //!
 //! The template is prose the model acts on, so nothing here asserts a
-//! rendering. What it pins is the four things the *code* is responsible for:
+//! rendering. What it pins is the five things the *code* is responsible for:
 //! the command exists as a builtin with its grammar as a hint; the two
 //! directory placeholders are filled at roster build with this project's real
 //! absolute paths, so two sessions in one checkout cannot disagree about where
-//! the state lives; whatever the user typed reaches the text intact, however
-//! the grammar spelled it, because the model is what parses it; and the three
-//! branches the text has to carry — usage, the `/teammate` redirect, and the
-//! pipeline — are all in front of the model on every run, since which one
-//! applies is the model's decision rather than a dispatch here.
+//! the state lives; the third placeholder — the session's own id — is filled
+//! at expansion instead, because one roster serves every session a process
+//! opens and no model can read that id for itself; whatever the user typed
+//! reaches the text intact, however the grammar spelled it, because the model
+//! is what parses it; and the three branches the text has to carry — usage,
+//! the `/teammate` redirect, and the pipeline — are all in front of the model
+//! on every run, since which one applies is the model's decision rather than a
+//! dispatch here.
 //!
 //! Its own test binary because it writes `XDG_DATA_HOME` and
 //! `GANJA_CONFIG_HOME` process-wide: the resolved paths are read off the first
@@ -63,11 +66,21 @@ fn roster() -> command::Registry {
     command::Registry::build(&Config::default(), Path::new(WORKTREE))
 }
 
-/// What `/team` sends for `arguments`.
+/// A session id shaped like the ones this build mints, so the tests that are
+/// not about the id read as a real run does.
+const SESSION: &str = "01997c4b-1d2e-7a10-9f3c-6b2e5d8a4c71";
+
+/// What `/team` sends for `arguments`, from a session that could be any of
+/// them.
+async fn expand(arguments: &str) -> String {
+    expand_as(arguments, SESSION).await
+}
+
+/// The same, from a session named `session`.
 ///
 /// The template names no `@file` and runs no ``!`command` ``, so expansion is
 /// pure text substitution and the context only has to be somewhere real.
-async fn expand(arguments: &str) -> String {
+async fn expand_as(arguments: &str, session: &str) -> String {
     let registry = roster();
     let team = registry.get("team").expect("`/team` is a builtin");
     let ctx = ToolCtx {
@@ -84,7 +97,7 @@ async fn expand(arguments: &str) -> String {
         jobs: None,
     };
 
-    team.expand(arguments, &ctx).await.prompt
+    team.expand(arguments, session, &ctx).await.prompt
 }
 
 /// Where this checkout's pipeline state belongs, computed the way anything
@@ -275,5 +288,69 @@ async fn the_text_routes_every_stage_to_an_agent_this_build_ships() {
     assert!(
         expanded.contains(".ganja/agents"),
         "and says a project's own definition outranks the builtin: {expanded}",
+    );
+}
+
+/// The state file's name is **given**, not derived: a session cannot read its
+/// own id — the `<env>` block does not carry it and `list_sessions` drops the
+/// caller's own row — so a template that said "use this session's id" was
+/// asking for the one thing the model on the other side of it has no way to
+/// find out.
+#[tokio::test]
+async fn the_session_placeholder_is_filled_with_the_id_the_expansion_runs_under() {
+    let expanded = expand("port the loader").await;
+
+    assert!(
+        !expanded.contains("${session}"),
+        "an unfilled placeholder would reach the model as literal text: {expanded}",
+    );
+    assert!(
+        expanded.contains(&format!("`{SESSION}.json`")),
+        "the state file is named outright, id and extension: {expanded}",
+    );
+}
+
+/// And it is filled at **expansion**, not at roster build, which is what makes
+/// one roster serve every session a process opens: two expansions of the same
+/// definition name two different files.
+#[tokio::test]
+async fn two_sessions_expanding_one_roster_name_two_different_state_files() {
+    let registry = roster();
+    let team = registry.get("team").expect("`/team` is a builtin");
+    assert!(
+        team.template.contains("${session}"),
+        "the roster leaves it standing, because a roster has no session: {}",
+        team.template,
+    );
+
+    let first = expand_as("port the loader", "session-one").await;
+    let second = expand_as("port the loader", "session-two").await;
+
+    assert!(first.contains("`session-one.json`"), "{first}");
+    assert!(second.contains("`session-two.json`"), "{second}");
+    assert!(!first.contains("session-two"), "neither expansion carries the other's: {first}");
+}
+
+/// The id goes in as the bytes it is — `str::replace`, one left-to-right pass,
+/// and nothing reads what it wrote afterwards.
+///
+/// A real session id is a UUIDv7 and would survive almost any substitution,
+/// which is exactly why the one here is spelled with the placeholder's own
+/// text, with an argument token, and with characters a pattern language would
+/// take an interest in. Each catches a different way of getting this wrong: a
+/// second pass would eat the first replacement, filling this before
+/// `$ARGUMENTS` would rewrite the `$1` into whatever the user typed, and a
+/// regex would mangle the rest. That the fill is *last* is the reason the
+/// middle one holds, and the reason worth having: every pass that reads this
+/// text for something to run or attach has already finished by then.
+#[tokio::test]
+async fn a_session_id_is_substituted_literally_however_it_is_spelled() {
+    let odd = "${session}-$1-.*-a+b";
+
+    let expanded = expand_as("port the loader", odd).await;
+
+    assert!(
+        expanded.contains(&format!("`{odd}.json`")),
+        "the id reaches the model exactly as it was spelled: {expanded}",
     );
 }

@@ -85,6 +85,20 @@ const STATE_PLACEHOLDER: &str = "${state}";
 /// stage handoffs live in.
 const HANDOFFS_PLACEHOLDER: &str = "${handoffs}";
 
+/// The placeholder `/team`'s template carries for the id of the session
+/// running it.
+///
+/// Filled at **expansion**, and last of all ([`Definition::expand`]), where
+/// the two directory ones are filled at roster build (**D547**). The
+/// difference is what it stands for: a directory is a fact about the checkout,
+/// the same for every session in it, while which session is running changes
+/// with every `NewSession`, every resume, and between two ganja processes in
+/// one worktree. It has to be filled by somebody because a session cannot read
+/// its own id — the `<env>` block does not carry it and `list_sessions` drops
+/// the caller's own row — so "use this session's id" is an instruction no
+/// model can follow.
+const SESSION_PLACEHOLDER: &str = "${session}";
+
 /// Where a project's team pipeline artefacts hang off its data directory
 /// (decisions 7, 8 and 19 of the team-orchestration plan): operational state
 /// lives in the data home, and `.ganja/` stays a committable-config namespace.
@@ -146,12 +160,24 @@ pub struct Definition {
 }
 
 impl Definition {
-    /// What this command sends when it is run with `arguments`.
+    /// What this command sends when it is run by `session` with `arguments`.
     ///
     /// `ctx.cwd` is the project root: it is both where shell substitutions run
     /// and where mentions resolve. One context keeps a template from running a
     /// command in one place while naming files in another.
-    pub async fn expand(&self, arguments: &str, ctx: &crate::tool::ToolCtx) -> Expanded {
+    ///
+    /// `session` is the id of the session about to send this, filled into the
+    /// template's `${session}` **after every other step below**. It is a
+    /// parameter rather than another `ctx` field because a `ToolCtx` is what a
+    /// *tool call* runs under and this expansion is not one; and it is filled
+    /// here rather than at roster build because one roster serves every
+    /// session a process opens.
+    pub async fn expand(
+        &self,
+        arguments: &str,
+        session: &str,
+        ctx: &crate::tool::ToolCtx,
+    ) -> Expanded {
         let filled = fill_template(&self.template, arguments);
         // The scan follows filling, so a command that arrived through
         // `$ARGUMENTS` runs too. The person who typed those arguments is the
@@ -212,6 +238,17 @@ impl Definition {
             // rather than becoming an attachment-error block.
             .filter(|mention| ctx.cwd.join(&mention.path).is_file())
             .collect();
+
+        // The session id goes in **last**, and the ordering is the safety
+        // property rather than a taste: every pass that reads this text for
+        // something to *run* or to *attach* has already run, so nothing an id
+        // happens to spell can become a shell command this template executes or
+        // a file it reads. A plain replace, so the id arrives as the bytes it
+        // is and its own text is never looked at again. The price is that a
+        // person who types the placeholder after the command name gets it
+        // filled too — which tells them their own session's id and nothing
+        // else, where the other order risks running their id as a command.
+        let prompt = prompt.replace(SESSION_PLACEHOLDER, session);
 
         Expanded { prompt, mentions }
     }

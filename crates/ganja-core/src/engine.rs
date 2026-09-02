@@ -3938,7 +3938,11 @@ impl Engine {
             switch: None,
             jobs: None,
         };
-        let expanded = definition.expand(args, &ctx).await;
+        // The session about to send this, which is the one thing about an
+        // expansion that a roster shared by every session in the process
+        // cannot know.
+        let session = self.session_id();
+        let expanded = definition.expand(args, session.as_str(), &ctx).await;
 
         self.start_turn(
             expanded.prompt,

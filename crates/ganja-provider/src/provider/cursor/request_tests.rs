@@ -9,8 +9,10 @@ use super::{
 };
 use crate::protocol::Part;
 
-/// A two-message conversation whose newest user message has two text
-/// parts, the richest shape this assembly reads.
+/// A three-message conversation — an older question and its reply, then a
+/// newest user message with two text parts, the richest shape this assembly
+/// reads. The reply between them is what makes the older question history
+/// rather than part of the newest turn.
 fn request() -> ChatRequest {
     let mut asked = Message::user("What does this crate do?");
     asked.parts.push(Part::text("Answer briefly."));
@@ -19,7 +21,11 @@ fn request() -> ChatRequest {
         effort_options: Default::default(),
         model: "gpt-5.3-codex".to_owned(),
         system: Some("You are terse.".to_owned()),
-        messages: vec![Message::user("An older question."), asked],
+        messages: vec![
+            Message::user("An older question."),
+            Message::assistant("gpt-5.3-codex"),
+            asked,
+        ],
         tools: Vec::new(),
     }
 }
@@ -256,11 +262,26 @@ fn a_kv_get_before_any_set_answers_not_found_without_inventing_bytes() {
 }
 
 #[test]
-fn the_newest_user_message_wins_and_other_roles_are_passed_over() {
+fn the_newest_user_turn_is_every_user_message_since_the_last_reply() {
     let conversation =
         [Message::user("first"), Message::assistant("gpt-5.3-codex"), Message::user("second")];
     assert_eq!(newest_user_text(&conversation), "second");
     assert_eq!(newest_user_text(&[]), "");
+
+    // The engine appends to a turn — a steer, the team guards' request-only
+    // block after a reply — and each of those is a message of its own, so
+    // the newest turn is the whole run back to the reply and not its last
+    // message alone (D547).
+    let appended = [
+        Message::user("first"),
+        Message::assistant("gpt-5.3-codex"),
+        Message::user("second"),
+        Message::user("<team_still_working>keep going</team_still_working>"),
+    ];
+    assert_eq!(
+        newest_user_text(&appended),
+        "second\n\n<team_still_working>keep going</team_still_working>"
+    );
 }
 
 #[test]

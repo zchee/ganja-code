@@ -298,45 +298,56 @@ fn blob_key(id: &[u8]) -> String {
     })
 }
 
-/// The text of the conversation's newest user message: its text parts in
-/// order, joined the way distinct parts read as distinct paragraphs.
+/// The text of the conversation's newest user **turn**: every user message
+/// from the last one back to the reply before it, their text parts in order,
+/// joined the way distinct parts read as distinct paragraphs.
+///
+/// A run rather than one message, because the engine adds to a turn by
+/// appending user messages rather than by editing the last one — a steer
+/// drained at a step boundary, and the team guards' request-only block after
+/// a reply (D547) — and a wire that sent only the newest of them would send
+/// that block without the prompt it is about, which is what this did until
+/// 2026-09-02. The reply the run follows is the boundary: what came before it
+/// is history this wire does not carry yet.
 ///
 /// Empty when the conversation holds no user message at all, which is not a
 /// request the engine builds — sending the empty message is more honest than
 /// refusing a request this module was still asked to encode.
 fn newest_user_text(messages: &[Message]) -> String {
-    messages
+    let Some(newest) = messages.iter().rposition(|message| matches!(message.role, Role::User))
+    else {
+        return String::new();
+    };
+    let first = messages[..newest]
         .iter()
-        .rev()
-        .find(|message| matches!(message.role, Role::User))
-        .map(|message| {
-            message
-                .parts
-                .iter()
-                // Every variant is named, and the wildcard that used to stand
-                // here is gone on purpose: this was the one place in the
-                // workspace where a new `PartBody` would compile silently into
-                // "not text", and a part this wire ought to send is not
-                // something to discover from a user's bug report.
-                .filter_map(|part| match &part.body {
-                    PartBody::Text { text } => Some(text.as_str()),
-                    // A peer's words are rendered into the user turn at
-                    // request assembly (D495); a wire never encodes a peer
-                    // part as a message of its own.
-                    PartBody::Peer { .. }
-                    | PartBody::File { .. }
-                    | PartBody::Tool { .. }
-                    | PartBody::ServerTool { .. }
-                    | PartBody::Reasoning { .. }
-                    | PartBody::ReasoningText { .. }
-                    | PartBody::StepStart
-                    | PartBody::StepFinish { .. }
-                    | PartBody::Patch { .. } => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n\n")
+        .rposition(|message| !matches!(message.role, Role::User))
+        .map_or(0, |reply| reply + 1);
+
+    messages[first..=newest]
+        .iter()
+        .flat_map(|message| message.parts.iter())
+        // Every variant is named, and the wildcard that used to stand here is
+        // gone on purpose: this was the one place in the workspace where a
+        // new `PartBody` would compile silently into "not text", and a part
+        // this wire ought to send is not something to discover from a user's
+        // bug report.
+        .filter_map(|part| match &part.body {
+            PartBody::Text { text } => Some(text.as_str()),
+            // A peer's words are rendered into the user turn at request
+            // assembly (D495); a wire never encodes a peer part as a message
+            // of its own.
+            PartBody::Peer { .. }
+            | PartBody::File { .. }
+            | PartBody::Tool { .. }
+            | PartBody::ServerTool { .. }
+            | PartBody::Reasoning { .. }
+            | PartBody::ReasoningText { .. }
+            | PartBody::StepStart
+            | PartBody::StepFinish { .. }
+            | PartBody::Patch { .. } => None,
         })
-        .unwrap_or_default()
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 #[cfg(test)]

@@ -654,8 +654,8 @@ async fn a_steered_teammate_message_becomes_a_part_of_the_running_turn() {
     let drained = super::drain_steers(&turn).await;
 
     assert!(
-        matches!(drained, std::ops::ControlFlow::Continue(true)),
-        "the mailbox had one message to take"
+        matches!(drained, std::ops::ControlFlow::Continue(super::Drained::Peers)),
+        "the mailbox had one message to take, and nobody typed it"
     );
     let taken = turn.steer.lock().expect("the steer mailbox is never poisoned").consumed.clone();
     let [message] = taken.as_slice() else { panic!("one steer, one message, got {taken:?}") };
@@ -692,8 +692,8 @@ async fn a_whitespace_only_steer_with_peers_drops_its_text_part() {
 
     let drained = super::drain_steers(&turn).await;
     assert!(
-        matches!(drained, std::ops::ControlFlow::Continue(true)),
-        "the mailbox had one message to take"
+        matches!(drained, std::ops::ControlFlow::Continue(super::Drained::Peers)),
+        "whitespace is not somebody typing, so this drains as a teammate's message does"
     );
 
     let taken = turn.steer.lock().expect("the steer mailbox is never poisoned").consumed.clone();

@@ -26,6 +26,14 @@
 //! counter, because a turn that continued because somebody asked it to is not
 //! a turn that continued by itself.
 //!
+//! A *teammate's* message arrives at that same mailbox and keeps the turn
+//! going the same way, and resets nothing ([`Discipline::user_took_over`]):
+//! the traffic a live team generates is what the breaker exists to count, so
+//! a team with something to say every step would otherwise refill the budget
+//! forever. What that does not bound is the turn itself: a team that speaks
+//! every step keeps it going one drained message at a time, and nothing here
+//! counts those, because the breaker counts what the model did on its own.
+//!
 //! The **name nag** ([`Discipline::note_anonymous_delegation`]) sits one step
 //! earlier, over the calls a step produced and before any of them runs.
 //! Scanning the batch is what makes "once per assistant step" structural
@@ -168,6 +176,11 @@ impl Discipline {
     /// "Consecutive" is the whole of it: a steer that keeps the turn alive is
     /// the user still driving, and the budget that exists to stop a model
     /// talking to itself should not be spent by a conversation.
+    ///
+    /// Called for a message somebody **typed** and for no other kind. A
+    /// teammate's message reaches the turn through the same mailbox and is
+    /// deliberately not that: it is the team running, which is the state this
+    /// breaker is counting rather than an interruption of it.
     pub(crate) fn user_took_over(&mut self) {
         self.continued = 0;
         // A continuation queued and not yet rendered is withdrawn with it: the

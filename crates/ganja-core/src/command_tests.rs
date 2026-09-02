@@ -7,6 +7,11 @@ use super::{
 };
 use crate::tool::{Credentials, FileTimes, ToolCtx};
 
+/// The session every expansion here runs under. Carries a `$` and a brace so
+/// that a substitution which ever became pattern-matching rather than a plain
+/// replace would show up as a mangled prompt rather than as nothing.
+const SESSION: &str = "session-${odd}-01";
+
 #[test]
 fn the_init_template_is_upstreams_with_ganjas_identity_and_the_worktree_filled_in() {
     let registry = Registry::builtin(Path::new("/repo/ganja"));
@@ -188,16 +193,16 @@ async fn template_expansion_runs_shells_and_attaches_only_files_that_exist() {
         source: None,
     };
 
-    let echoed = command(r#"!`echo hi`"#).expand("", &ctx).await;
+    let echoed = command(r#"!`echo hi`"#).expand("", SESSION, &ctx).await;
     assert_eq!(echoed.prompt, "hi");
 
-    let failed = command(r#"!`printf still-here; exit 7`"#).expand("", &ctx).await;
+    let failed = command(r#"!`printf still-here; exit 7`"#).expand("", SESSION, &ctx).await;
     assert_eq!(
         failed.prompt, "still-here",
         "a non-zero exit still substitutes what the command wrote"
     );
 
-    let attached = command("read @present.md and ask @alice").expand("", &ctx).await;
+    let attached = command("read @present.md and ask @alice").expand("", SESSION, &ctx).await;
     assert_eq!(attached.prompt, "read @present.md and ask @alice");
     assert_eq!(
         attached.mentions,
@@ -357,7 +362,7 @@ async fn a_file_command_expands_through_the_one_expansion_path() {
     };
 
     let commands = file_commands(dir.path());
-    let expanded = commands[0].expand("the port", &ctx).await;
+    let expanded = commands[0].expand("the port", SESSION, &ctx).await;
 
     assert_eq!(expanded.prompt, "hi about the port beside @present.md");
     assert_eq!(

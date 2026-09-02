@@ -6,7 +6,10 @@
 //! properties in particular are only visible from out here:
 //!
 //! - a continuation is a **request**, not a message — the transcript must
-//!   never grow a user part the person did not type;
+//!   never grow a user part the person did not type, and where the block sits
+//!   in that request is half of what it means: it answers the reply the model
+//!   just wrote, so it is the last thing the model reads rather than a part
+//!   folded into the prompt that opened the turn;
 //! - the breaker really stops the loop, so a team that cannot finish hands the
 //!   session back rather than talking to itself;
 //! - the nag is one block for a whole fan-out batch, because it is decided
@@ -31,7 +34,8 @@ use std::time::Duration;
 
 use futures::StreamExt as _;
 use ganja_core::permission::Permissions;
-use ganja_core::protocol::{Command, Event, Part, PartBody, Role};
+use ganja_core::protocol::team::PeerPayload;
+use ganja_core::protocol::{Command, Event, Message, Part, PartBody, Role};
 use ganja_core::provider::{ChatRequest, ProviderEvent};
 use ganja_core::teammate::TeammateRegistry;
 use ganja_core::tool::Registry;
@@ -63,6 +67,10 @@ const WORKER: &str = "worker-1";
 /// What a person types into a turn that is already running. Appears nowhere
 /// else, so the first request carrying it can be named exactly.
 const STEER: &str = "actually, start with the lexer";
+
+/// What a teammate says into a turn that is already running. Appears nowhere
+/// else, so the first request carrying it can be named exactly.
+const PEER_REPORT: &str = "alpha is done, taking beta";
 
 /// The tag the continuation block carries.
 const CONTINUATION_TAG: &str = "team_still_working";
@@ -377,6 +385,26 @@ impl Lead {
             .expect("a running turn takes a steer");
     }
 
+    /// Delivers a teammate's message into the turn that is already running.
+    ///
+    /// The same command a person's steer arrives as — that is the whole point
+    /// of the case this exists for. What tells the two apart is one field: a
+    /// teammate's carries an envelope and no text at all.
+    async fn peer_message(&self, id: &str) {
+        let sent = self.engine.send(Command::Steer {
+            id: id.to_owned(),
+            text: String::new(),
+            mentions: Vec::new(),
+            skills: Vec::new(),
+            session_mentions: Vec::new(),
+            peers: vec![PeerPayload::new(WORKER, None, None, PEER_REPORT)],
+        });
+        tokio::time::timeout(EVENTUALLY, sent)
+            .await
+            .expect("the teammate's message is taken inside its budget")
+            .expect("a running turn takes a teammate's message");
+    }
+
     /// Only the lead's own [step](is_lead_step) requests.
     fn lead_requests(&self) -> Vec<ChatRequest> {
         self.requests
@@ -391,6 +419,18 @@ impl Lead {
     /// How many of the lead's requests carried `tag`.
     fn carrying(&self, tag: &str) -> usize {
         self.lead_requests().iter().filter(|request| transcript(request).contains(tag)).count()
+    }
+
+    /// The lead's requests that carried `tag`, whole.
+    ///
+    /// Where [`Lead::carrying`] counts, this is for the assertions about
+    /// *where* in a request a block landed, which is a question only the
+    /// messages themselves answer.
+    fn requests_carrying(&self, tag: &str) -> Vec<ChatRequest> {
+        self.lead_requests()
+            .into_iter()
+            .filter(|request| transcript(request).contains(tag))
+            .collect()
     }
 
     /// Every user message this session announced.
@@ -649,6 +689,22 @@ async fn a_whole_anonymous_fan_out_is_nagged_once() {
     assert_eq!(lead.carrying(NAG_TAG), 1, "one block for the step, not one per call in the batch",);
     assert_eq!(lead.carrying(CONTINUATION_TAG), 0, "an empty list continues nothing");
 
+    let nagged = lead.requests_carrying(NAG_TAG);
+    let [nagged] = nagged.as_slice() else { panic!("exactly one request was nagged") };
+    let [.., before, last] = nagged.messages.as_slice() else {
+        panic!("a nagged request carries the step it is about and the block")
+    };
+    assert!(
+        last.role == Role::User && said(last).contains(NAG_TAG),
+        "the nag is the last thing the model reads, after the whole fan-out: {:?}",
+        said(last),
+    );
+    assert_eq!(
+        before.role,
+        Role::Assistant,
+        "sitting directly after the step whose calls it is about, results and all",
+    );
+
     lead.finish().await;
 }
 
@@ -674,6 +730,108 @@ async fn a_session_leading_nobody_is_never_nagged_about_a_name() {
     lead.prompt_and_settle(PROMPT).await;
 
     assert_eq!(lead.carrying(NAG_TAG), 0, "no team, no teammate to prefer");
+
+    lead.finish().await;
+}
+
+/// One message's text, however many parts carry it.
+///
+/// The whole-request [`transcript`] cannot answer a question about *which*
+/// message a block landed in, which is exactly the question the two placement
+/// tests ask.
+fn said(message: &Message) -> String {
+    message.parts.iter().filter_map(Part::as_text).collect::<Vec<_>>().join("\n")
+}
+
+/// Where the block sits is half of what it means, and the half a wire cares
+/// about: a continuation answers the reply the model just wrote, so it is a
+/// user message **after** that reply rather than parts folded into the prompt
+/// that opened the turn.
+///
+/// Folded, it would reach the model before the text it is about and leave the
+/// request ending on the assistant's own words — which the Anthropic wire
+/// sends as a prefill, and refuses outright when that text ends in
+/// whitespace. So this reads the five continued requests of the same run the
+/// suite's opening test counts, and asks of each one where the block is.
+#[tokio::test]
+async fn a_continued_request_ends_with_the_block_rather_than_with_the_reply() {
+    let lead = Lead::new(Script::OnlyTalks).await;
+    lead.spawn_a_member().await;
+    lead.seed_task(TaskStatus::InProgress);
+
+    lead.prompt_and_settle(PROMPT).await;
+
+    let continued = lead.requests_carrying(CONTINUATION_TAG);
+    assert_eq!(continued.len(), 5, "the five continued requests, this time read whole");
+    for request in &continued {
+        let [.., before, last] = request.messages.as_slice() else {
+            panic!("a continued request carries at least the reply and the block")
+        };
+        assert!(
+            last.role == Role::User && said(last).contains(CONTINUATION_TAG),
+            "the block is the last message and it is the user's: {:?}",
+            said(last),
+        );
+        assert_eq!(
+            before.role,
+            Role::Assistant,
+            "sitting directly after the reply it is telling the model to carry on from",
+        );
+        assert!(
+            !said(&request.messages[0]).contains(CONTINUATION_TAG),
+            "and never folded into the prompt that opened the turn: {:?}",
+            said(&request.messages[0]),
+        );
+    }
+
+    lead.finish().await;
+}
+
+/// A teammate reporting in is not a person taking over: it keeps the turn
+/// going like any other drained message and leaves the budget where it was.
+///
+/// It arrives as the same `Steer` command a person's does — no text, one
+/// envelope — so without that distinction a team with something to say every
+/// step would refill the five forever and the breaker would never trip. The
+/// mirror of the case above it, differing in one line: what the message
+/// carries.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_teammates_message_does_not_put_the_continuation_budget_back() {
+    // Held at the second step request, exactly as the person's case is: the
+    // turn has spent one auto-continuation by the time the teammate speaks.
+    let (lead, mut held) = Lead::holding(Script::OnlyTalks, 2).await;
+    lead.spawn_a_member().await;
+    lead.seed_task(TaskStatus::InProgress);
+
+    lead.prompt(PROMPT).await;
+    held.reached().await;
+    lead.still_turning().await;
+    lead.peer_message("peer-1").await;
+    held.release();
+    assert!(lead.engine.settle(EVENTUALLY).await, "one turn ended inside its budget");
+
+    let requests = lead.lead_requests();
+    assert_eq!(
+        requests.len(),
+        1 + 1 + 1 + 4,
+        "the opening request, one continuation, the teammate's message, then only the four \
+         the budget had left: {}",
+        requests.len(),
+    );
+    assert_eq!(
+        lead.carrying(CONTINUATION_TAG),
+        1 + 4,
+        "five in the one turn — the budget spent, never put back",
+    );
+    assert!(
+        transcript(&requests[2]).contains(PEER_REPORT),
+        "the request after the hold is the one carrying what the teammate said",
+    );
+    assert_eq!(
+        lead.stored_user_text(),
+        vec![PROMPT.to_owned()],
+        "and a teammate's words are not something a person typed",
+    );
 
     lead.finish().await;
 }

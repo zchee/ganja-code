@@ -1442,12 +1442,37 @@ async fn user_message(
     user
 }
 
+/// What one [`drain_steers`] pass took on.
+///
+/// Three answers rather than a `bool` because the turn's tail asks two
+/// different questions of one drain — whether to keep going at all, and
+/// whether a *person* is what kept it going — and only the second one may put
+/// the continuation budget back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Drained {
+    /// Nothing was waiting, so the turn ends here unless a guard keeps it
+    /// alive.
+    Nothing,
+    /// Something was taken on and every message of it was a teammate's.
+    ///
+    /// It keeps the turn going like any other drained message and buys it
+    /// nothing else: a team that reports in while its lead is finishing is
+    /// precisely the traffic the continuation breaker is counting, so letting
+    /// it reset the count would let a chatty team hold a lead's turn open for
+    /// as long as it kept talking.
+    Peers,
+    /// At least one drained message carried words somebody typed, which is
+    /// what "a continuation loses to a person" is made of.
+    Typed,
+}
+
 /// Takes whatever a [`Command::Steer`] left for this turn and turns each one
 /// into a real user message: announced, persisted, and appended to what the
 /// next request carries.
 ///
-/// Returns whether anything was drained — which the finish path reads as "do
-/// not end the turn yet" — or breaks when the turn is over.
+/// Answers with [what was drained](Drained) — anything but [`Drained::Nothing`]
+/// the finish path reads as "do not end the turn yet" — or breaks when the turn
+/// is over.
 ///
 /// **A cancelled turn drains nothing.** The check is first and deliberate: a
 /// turn that is stopping must not consume a message it will never answer, and
@@ -1457,17 +1482,25 @@ async fn user_message(
 /// dialog resolved, like any other.
 ///
 /// [`Command::Steer`]: crate::protocol::Command::Steer
-async fn drain_steers(turn: &Turn) -> ControlFlow<Option<Outcome>, bool> {
+async fn drain_steers(turn: &Turn) -> ControlFlow<Option<Outcome>, Drained> {
     if turn.cancel.is_cancelled() {
-        return ControlFlow::Continue(false);
+        return ControlFlow::Continue(Drained::Nothing);
     }
 
     let waiting = turn.steer.lock().expect("the steer mailbox is never poisoned").take_waiting();
     if waiting.is_empty() {
-        return ControlFlow::Continue(false);
+        return ControlFlow::Continue(Drained::Nothing);
     }
 
+    // A teammate's message reaches this mailbox as a `Steer` too, carrying its
+    // envelope and no text at all, so the text is what tells the two apart —
+    // read here, before it is moved into the message it becomes. Text that is
+    // only whitespace counts as nobody's: no frontend sends one (a composer
+    // refuses an empty line), so a blank here is a peer envelope and nothing
+    // else.
+    let mut typed = false;
     for input in waiting {
+        typed |= !input.text.trim().is_empty();
         // The id goes out first: a frontend retires its queue entry in the
         // same breath the message appears, and never before the engine has
         // committed to taking it.
@@ -1511,7 +1544,7 @@ async fn drain_steers(turn: &Turn) -> ControlFlow<Option<Outcome>, bool> {
         }
     }
 
-    ControlFlow::Continue(true)
+    ControlFlow::Continue(if typed { Drained::Typed } else { Drained::Peers })
 }
 
 /// Why a turn ended, and what to say about it.
@@ -2281,7 +2314,7 @@ async fn drive(turn: &Turn) -> (Message, Option<Outcome>) {
                             record_patch(turn, &mut assistant, before.take()).await;
                             return (assistant, stop);
                         }
-                        ControlFlow::Continue(false) => {
+                        ControlFlow::Continue(Drained::Nothing) => {
                             record_patch(turn, &mut assistant, before.take()).await;
 
                             // Nobody typed, so this is where the turn ends —
@@ -2303,16 +2336,23 @@ async fn drive(turn: &Turn) -> (Message, Option<Outcome>) {
                         // The same bookkeeping a tool step's boundary does, so
                         // the continued turn measures its next step against
                         // the tree as it stands rather than against the one
-                        // this step opened on.
-                        ControlFlow::Continue(true) => {
-                            // A steer carried the turn, so the auto-continuation
-                            // budget is not the thing keeping it alive and is
-                            // put back — "five *consecutive*" counted from
-                            // here.
-                            turn.discipline
-                                .lock()
-                                .expect("the turn guards are never poisoned")
-                                .user_took_over();
+                        // this step opened on. Both drained shapes take it;
+                        // only one of them touches the budget.
+                        ControlFlow::Continue(drained) => {
+                            if drained == Drained::Typed {
+                                // A person carried the turn, so the
+                                // auto-continuation budget is not the thing
+                                // keeping it alive and is put back — "five
+                                // *consecutive*" counted from here. A
+                                // teammate's message is not that: it keeps the
+                                // turn going without buying it another five,
+                                // or a team with something to say every step
+                                // would never let the breaker trip.
+                                turn.discipline
+                                    .lock()
+                                    .expect("the turn guards are never poisoned")
+                                    .user_took_over();
+                            }
                             record_patch(turn, &mut assistant, before.take()).await;
                             before = track(turn).await;
                             continue;
@@ -3268,13 +3308,28 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
         // so each block appears in exactly one request however many steps
         // follow it; empty on every turn of every session that leads no team,
         // which is every scripted and golden run.
-        for block in
-            turn.discipline.lock().expect("the turn guards are never poisoned").take_blocks()
-        {
-            if let Some(user) = messages.iter_mut().rev().find(|message| message.role == Role::User)
-            {
-                user.parts.push(Part::text(block));
-            }
+        //
+        // A **message** of their own, rather than parts pushed onto the last
+        // user message the two blocks above ride on, and that is the whole of
+        // where they belong: those two answer a message somebody sent, while
+        // these two answer what the assistant just did. On the continue arm
+        // nothing was steered, so the last user message is the prompt that
+        // opened the turn — folding a block into it would put the instruction
+        // *before* the reply it is about and leave the request ending on the
+        // assistant's own text, which the Anthropic wire sends as a prefill
+        // and refuses outright when it ends in whitespace. Appended after the
+        // reply and after anything steered, this is exactly the shape a steer
+        // already has: a user message the model reads last.
+        let mut blocks = turn
+            .discipline
+            .lock()
+            .expect("the turn guards are never poisoned")
+            .take_blocks()
+            .into_iter();
+        if let Some(first) = blocks.next() {
+            let mut guards = Message::user(first);
+            guards.parts.extend(blocks.map(Part::text));
+            messages.push(guards);
         }
         // **D492** (`deferred-mcp-tools-advertise-filtered`): what is
         // *advertised* is a subset of what is *registered* — whole MCP

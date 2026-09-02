@@ -50,8 +50,9 @@ $ARGUMENTS
 Two directories, both absolute, both already correct for this checkout:
 
 - Pipeline state: `${state}`
-  One file per lead session, named `<lead-session-id>.json`. Use this
-  session's own id, which is on the session row you are running in.
+  One file per lead session. This session's is `${session}.json`, already
+  filled in for you: read and write that exact name rather than deriving one,
+  because nothing you can read tells you which session you are.
 - Stage handoffs: `${handoffs}`
   One file per stage, named `<stage>.md`, flat and shared across runs in this
   project.
