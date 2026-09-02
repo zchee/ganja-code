@@ -205,7 +205,10 @@ fn a_configured_pane_shell_still_execs_the_launch_line() {
             .filter(|member| member.tmux_pane_id.starts_with('%'))
     });
     let pane = member.tmux_pane_id.clone();
-    tmux.wait_for("the launch line to reach the pane through bash", &lead, || {
+    // On the member's pane, since that is the process this waits on: a shell
+    // that read the line but did not exec it is only visible there. The
+    // lead's screen is quoted beside it anyway.
+    tmux.wait_for("the launch line to reach the pane through bash", &pane, || {
         (tmux.current_command(&pane) == "ganja").then_some(())
     });
 }
@@ -246,8 +249,10 @@ fn a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shutdown_
 
     // 2. tmux agrees, and the pane's process is this binary: the launch line
     // was typed into the idle shell and `exec`'d.
+    // The listing wait stays on the lead: a pane that never appeared has no
+    // screen to quote, and what would explain it is the lead's bar.
     tmux.wait_for("the pane to be listed", &lead, || tmux.panes().contains(&pane).then_some(()));
-    tmux.wait_for("the launch line to reach the pane", &lead, || {
+    tmux.wait_for("the launch line to reach the pane", &pane, || {
         (tmux.current_command(&pane) == "ganja").then_some(())
     });
 
@@ -274,7 +279,7 @@ fn a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shutdown_
     // it. Two facts in sequence, neither of them a race.
     let lead_pid = tmux.pane_pid(&lead);
     let held = Held::stop(&lead_pid);
-    tmux.wait_for("the member's seeded turn", &lead, || {
+    tmux.wait_for("the member's seeded turn", &pane, || {
         tmux.screen(&pane).contains(REPLY).then_some(())
     });
     let lead_inbox = fixture.lead_inbox().expect("the team exists by now");

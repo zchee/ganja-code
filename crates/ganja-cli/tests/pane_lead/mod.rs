@@ -41,6 +41,7 @@
 
 #![allow(dead_code)]
 
+use std::cell::OnceCell;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -137,11 +138,22 @@ const LOG_TAIL: usize = 80;
 /// What a private server is born **without**, so nothing a pane inherits can
 /// be this developer's rather than the fixture's (§10.10). One spelling,
 /// because a list that drifted between two drills would be two different
-/// experiments wearing one name.
+/// experiments wearing one name — and it reaches a server only through
+/// [`born_without`], which is what makes that one spelling true of both
+/// shapes rather than only of [`Tmux`].
+///
+/// Every credential a wire would present is here, not only the three a drill
+/// might plausibly spend: what an inherited key buys is a real request against
+/// a real vendor from a test nobody was watching, and a name on a list costs
+/// nothing. `GANJA_FAKE_SCRIPT` is on it for the mirror-image reason — a drill
+/// whose panes are meant to play no script (`server_env(_, None)`) must not
+/// inherit whichever one this developer had exported — and [`born_without`]
+/// is where that stops being a contradiction with the drills that do set one.
 const WITHHELD: &[&str] = &[
     "GANJA_CONFIG_HOME",
     "GANJA_CONFIG",
     "GANJA_MODEL",
+    "GANJA_FAKE_SCRIPT",
     "XDG_CONFIG_HOME",
     "XDG_DATA_HOME",
     "XDG_CACHE_HOME",
@@ -151,7 +163,38 @@ const WITHHELD: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
     "OPENROUTER_API_KEY",
+    "OPENCODE_API_KEY",
+    "EXA_API_KEY",
+    "PARALLEL_API_KEY",
+    "GANJA_SERVER_PASSWORD",
+    "GANJA_SERVER_USERNAME",
 ];
+
+/// [`WITHHELD`] as a server is actually born without it: every name on that
+/// list this drill does not set itself in `given`, plus `also`.
+///
+/// The subtraction is [`PrivateServer`]'s own order rather than a softening of
+/// the list. It puts the sets on the command first and the removals after, so
+/// a name in both ends up **unset** — a server born to play a script would
+/// lose the script — which is why one list can be both "nothing of the
+/// developer's" and "the fixture's own values" only if the overlap is taken
+/// out here.
+///
+/// `also` is deliberately not filtered: it is a drill saying "the server
+/// predates this export", and a caller asking for that against a name the
+/// fixture happens to set means the withholding. Answering otherwise would
+/// quietly run a different experiment than the one the drill asks for.
+fn born_without<'a>(given: &[(&'static str, String)], also: &[&'a str]) -> Vec<&'a str> {
+    let mut names: Vec<&'a str> = Vec::new();
+    for name in WITHHELD {
+        if !given.iter().any(|(set, _)| set == name) {
+            names.push(name);
+        }
+    }
+    names.extend(also.iter().copied());
+
+    names
+}
 
 /// The environment a private server is born from, and so what every pane it
 /// makes inherits: the shell a person started tmux from, pinned to `homes` the
@@ -169,6 +212,16 @@ pub fn server_env(homes: &Homes, script: Option<&Path>) -> Vec<(&'static str, St
         env.push(("GANJA_FAKE_SCRIPT", script.display().to_string()));
     }
     env.push(("GANJA_DISABLE_MODELS_FETCH", "1".to_owned()));
+    // On the **server**, so every pane it makes inherits it — the lead's own
+    // included (**D517**). A private server born from `-f /dev/null` is a
+    // terminal whose answer to the kitty query depends on which tmux the host
+    // ships, and the probe blocks up to two seconds where there is none: on
+    // the lead alone that was two seconds of one drill, and on every member
+    // pane a stage waits for it is two more each, spent before the binary
+    // draws anything. `pane.rs`'s carried environment does not name it, so
+    // the server's table is the only door a member's launch inherits it
+    // through.
+    env.push(("GANJA_DISABLE_TERM_PROBE", "1".to_owned()));
 
     env
 }
@@ -190,11 +243,11 @@ pub fn lead_env(homes: &Homes, script: Option<&Path>) -> Vec<(&'static str, Stri
     if let Some(script) = script {
         env.push(("GANJA_FAKE_SCRIPT", script.display().to_string()));
     }
-    // What every other pty drill sets (**D517**): a private server born
-    // from `-f /dev/null` is a terminal whose answer to the kitty query
-    // depends on which tmux the host ships, and the probe blocks up to
-    // two seconds where there is none.
-    env.push(("GANJA_DISABLE_TERM_PROBE", "1".to_owned()));
+    // No `GANJA_DISABLE_TERM_PROBE` here: [`server_env`] sets it, and a lead
+    // is a pane of the same server, so it arrives anyway — where a second
+    // spelling of it here would be one that could be right about the lead
+    // while the members it spawns quietly went on probing.
+    //
     // The frontend's own account of where a keypress went, for bead `mxqo`:
     // a wait that times out quotes [`LOG_TAIL`] lines of this file, and what
     // twice went missing on CI was an Enter nothing on the screen could
@@ -362,20 +415,17 @@ impl Lead {
         window.push_str(" --socket-dir ");
         window.push_str(&shell_quote(&sockets(homes).display().to_string()));
 
-        let script = pane_script.display().to_string();
-        let data = homes.data().display().to_string();
-        let config = homes.data().join("config").display().to_string();
-        let cache = homes.data().join("cache").display().to_string();
-        let mut removed = vec![
-            "GANJA_CONFIG_HOME",
-            "GANJA_CONFIG",
-            "GANJA_MODEL",
-            "ANTHROPIC_API_KEY",
-            "OPENAI_API_KEY",
-            "OPENROUTER_API_KEY",
-            "GANJA_SERVER_PASSWORD",
-        ];
-        removed.extend_from_slice(withheld);
+        // [`server_env`]'s list, plus the three XDG bases: this lead **is** the
+        // server's first window, so what it needs has to be on the server's own
+        // table, where the split-pane shape hands the same three to its lead
+        // through `-e` instead. Everything else — the provider, the script, the
+        // data home, the catalog switch, the terminal probe — is one spelling
+        // for both shapes, so a variable added there reaches this one too.
+        let mut given = server_env(homes, Some(pane_script));
+        given.push(("XDG_DATA_HOME", homes.data().display().to_string()));
+        given.push(("XDG_CONFIG_HOME", homes.data().join("config").display().to_string()));
+        given.push(("XDG_CACHE_HOME", homes.data().join("cache").display().to_string()));
+        let removed = born_without(&given, withheld);
         let server = PrivateServer::start_in(
             homes.project(),
             // Wide enough that the lead is still comfortable **after** a
@@ -387,15 +437,7 @@ impl Lead {
             (240, 48),
             &[&window],
             &removed,
-            &[
-                ("GANJA_PROVIDER", "fake"),
-                ("GANJA_FAKE_SCRIPT", &script),
-                ("XDG_DATA_HOME", &data),
-                ("HOME", &data),
-                ("XDG_CONFIG_HOME", &config),
-                ("XDG_CACHE_HOME", &cache),
-                ("GANJA_DISABLE_MODELS_FETCH", "1"),
-            ],
+            &borrowed(&given),
         );
 
         let pane = server.first_pane().to_owned();
@@ -497,19 +539,33 @@ pub struct Tmux {
     /// since what they wait on ranges from one cold binary to seven provider
     /// round trips.
     deadline: Duration,
+    /// The lead [`Tmux::lead`] started, so a wait that was about somebody
+    /// else's pane can quote the lead's screen beside it without every caller
+    /// having to hand it over twice.
+    ///
+    /// A [`OnceCell`] because the lead is born after the server and there is
+    /// exactly one: every drill here splits one lead and then members off it.
+    /// Nothing shares a `Tmux` across threads, so the cell needs no lock.
+    lead: OnceCell<String>,
 }
 
 impl Tmux {
     /// Starts the server with `env` on its global environment — what every
-    /// pane it ever makes inherits — and `WITHHELD` taken out of it, tracing
-    /// under `homes` and giving each [`Tmux::wait_for`] `deadline`.
+    /// pane it ever makes inherits — and everything [`born_without`] answers
+    /// taken out of it, tracing under `homes` and giving each
+    /// [`Tmux::wait_for`] `deadline`.
     pub fn start(homes: &Homes, env: &[(&'static str, String)], deadline: Duration) -> Self {
         require_tmux();
 
         Self {
-            server: PrivateServer::start(&["sleep", "3600"], WITHHELD, &borrowed(env)),
+            server: PrivateServer::start(
+                &["sleep", "3600"],
+                &born_without(env, &[]),
+                &borrowed(env),
+            ),
             logs: log_dir(homes),
             deadline,
+            lead: OnceCell::new(),
         }
     }
 
@@ -546,6 +602,11 @@ impl Tmux {
             env,
             &["/usr/bin/env", env!("CARGO_BIN_EXE_ganja"), "--socket-dir", &sockets],
         );
+        // Remembered for [`Tmux::wait_for`]'s failure message, before the
+        // first wait that could use it. A second lead would keep the first,
+        // which no drill here starts — and quoting the wrong lead is a
+        // better failure than the `expect` that would make it impossible.
+        let _ = self.lead.set(pane.clone());
         self.wait_for("the lead to draw its composer", &pane, || {
             self.screen(&pane).contains(COMPOSER).then_some(())
         });
@@ -605,14 +666,27 @@ impl Tmux {
     }
 
     /// Polls `read` every 50ms until it answers, or panics with `what`, the
-    /// lead's screen and the tail of the log the lead — and any member sharing
-    /// its data home — traced, after this server's deadline.
+    /// screens that can explain it and the tail of the log the lead — and any
+    /// member sharing its data home — traced, after this server's deadline.
     ///
-    /// The log beside the screen because the screen alone has already been read
-    /// twice on CI (runs 33261878445 and 33368776921) and each time it showed a
-    /// lead that looked idle with a line it never acted on; what the lead
-    /// *traced* in that window is the half of the picture the screen cannot give.
-    pub fn wait_for<T>(&self, what: &str, lead: &str, mut read: impl FnMut() -> Option<T>) -> T {
+    /// `pane` is the pane the wait is **about**: the one a reader would look
+    /// at first, which for a wait on a member's own turn is the member's and
+    /// not the lead's. Naming the lead there printed the wrong screen twice
+    /// over — a member that never started, quoted as a lead sitting at an idle
+    /// composer, which is exactly what it looks like when nothing is wrong
+    /// (bead `519d`).
+    ///
+    /// The lead's screen is quoted **beside** it when the two differ rather
+    /// than in place of it: half of what goes wrong in a member's pane is
+    /// reported on the lead's own bar — a spawn that was refused as busy, a
+    /// teammate that left — so a message that dropped the lead would lose the
+    /// half the pane cannot show.
+    ///
+    /// The log beside both because a screen alone has already been read twice
+    /// on CI (runs 33261878445 and 33368776921) and each time it showed a lead
+    /// that looked idle with a line it never acted on; what the lead *traced*
+    /// in that window is the half of the picture no screen can give.
+    pub fn wait_for<T>(&self, what: &str, pane: &str, mut read: impl FnMut() -> Option<T>) -> T {
         let started = Instant::now();
         loop {
             if let Some(found) = read() {
@@ -620,12 +694,52 @@ impl Tmux {
             }
             assert!(
                 started.elapsed() < self.deadline,
-                "waited {:?} for {what} and it did not happen; the lead's screen:\n{}\n{}",
+                "waited {:?} for {what} and it did not happen;{}\n{}",
                 self.deadline,
-                self.screen(lead),
+                self.quoted(pane),
                 log_tail(&self.logs)
             );
             std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// `pane`'s screen, and the lead's beside it where this wait was about
+    /// somebody else's — each named, since two unlabelled screens are worse
+    /// than one.
+    fn quoted(&self, pane: &str) -> String {
+        let mut said = format!("\npane {pane} shows:\n{}", self.captured(pane));
+        if let Some(lead) = self.lead.get().filter(|lead| lead.as_str() != pane) {
+            said.push_str(&format!("\nand the lead ({lead}) shows:\n{}", self.captured(lead)));
+        }
+
+        said
+    }
+
+    /// What `pane` shows, or why it does not.
+    ///
+    /// Not [`Tmux::screen`]: `capture-pane` against a pane that has already
+    /// gone is a tmux failure, and the testkit's client turns a failure into a
+    /// panic — which inside a panic message aborts the process and takes the
+    /// failure this was assembling with it. A pane that vanished is itself an
+    /// answer to most of these waits, so it is reported rather than raised.
+    fn captured(&self, pane: &str) -> String {
+        let shown = Command::new("tmux")
+            .arg("-S")
+            .arg(self.server.socket())
+            .args(["capture-pane", "-p", "-t", pane])
+            .output();
+
+        match shown {
+            Ok(shown) if shown.status.success() => {
+                String::from_utf8_lossy(&shown.stdout).into_owned()
+            }
+            Ok(shown) => {
+                format!(
+                    "(tmux would not show it: {})",
+                    String::from_utf8_lossy(&shown.stderr).trim()
+                )
+            }
+            Err(error) => format!("(tmux would not run: {error})"),
         }
     }
 }
@@ -677,7 +791,23 @@ pub fn wait_for<T>(what: &str, mut look: impl FnMut() -> Option<T>) -> T {
 /// and looks up no key names — and CR is what a terminal in raw mode sends
 /// anyway, which crossterm parses as an unmodified `KeyCode::Enter`
 /// (`event/sys/unix/parse.rs`), the key the composer submits on.
+///
+/// # The line's own contract
+///
+/// `line` is exactly what a person types before pressing Enter, so it carries
+/// neither a CR nor an LF of its own. Both would be sent as bytes and read as
+/// keys: a trailing CR would submit twice — the second submit landing in
+/// whatever the first one opened — and an embedded LF is Ctrl+J to crossterm,
+/// not Enter, so a two-line "line" would arrive as one line with a control
+/// character in the middle of it. No drill here does either, and the assertion
+/// is what keeps that a fact rather than a habit.
 fn submitted(line: &str) -> String {
+    debug_assert!(
+        !line.contains(['\r', '\n']),
+        "a typed line carries no CR and no LF of its own — the CR appended here is the submit, so \
+         a line holding one submits twice and a line holding an LF sends Ctrl+J: {line:?}"
+    );
+
     format!("{line}\r")
 }
 

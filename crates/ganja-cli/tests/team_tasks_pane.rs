@@ -240,7 +240,11 @@ fn a_lead_and_a_pane_teammate_drive_one_task_list_end_to_end() {
             .filter(|member| member.tmux_pane_id.starts_with('%'))
     });
     let pane = member.tmux_pane_id.clone();
-    tmux.wait_for("the launch line to reach the pane", &lead, || {
+    // Waited on the **member's** pane from here to the end of step 3: what
+    // these three watch is that process, so its screen is what a timeout has
+    // to quote. The lead's comes along beside it, since a spawn that was
+    // refused says so on the lead's bar and nowhere else.
+    tmux.wait_for("the launch line to reach the pane", &pane, || {
         (tmux.current_command(&pane) == "ganja").then_some(())
     });
 
@@ -248,7 +252,7 @@ fn a_lead_and_a_pane_teammate_drive_one_task_list_end_to_end() {
     // say so — the owner it wrote, and a comment stamped with the name it
     // claimed under, which is the name its launch line carried and not
     // anything its arguments could have chosen.
-    let done = tmux.wait_for("the teammate to finish the task", &lead, || {
+    let done = tmux.wait_for("the teammate to finish the task", &pane, || {
         task(&fixture, &one).filter(|task| task.status == TaskStatus::Completed)
     });
     assert_eq!(done.owner, MEMBER, "the claim wrote the teammate's own name: {done:?}");
@@ -258,7 +262,7 @@ fn a_lead_and_a_pane_teammate_drive_one_task_list_end_to_end() {
         "and so did the comment"
     );
     assert_eq!(done.comments[0].text, NOTE);
-    tmux.wait_for("the member's own turn to finish on its screen", &lead, || {
+    tmux.wait_for("the member's own turn to finish on its screen", &pane, || {
         tmux.screen(&pane).contains(REPLY).then_some(())
     });
 

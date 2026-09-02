@@ -326,6 +326,118 @@ fn a_configured_command_runs_as_a_turn_with_no_message_of_its_own() {
     assert_eq!(run.sessions().len(), 1, "the command started a turn");
 }
 
+/// The task a `/team` run is given. Ordinary task text on purpose: what the
+/// template does with `spawn`, `shutdown` or `list` at the head of its
+/// arguments is the roster-management branch, and that branch is settled where
+/// it is written rather than here.
+const TASK: &str = "port the config loader";
+
+/// What a `UserPromptSubmit` hook saw this run submit.
+///
+/// The only surface that carries the **whole** text the turn started with: the
+/// session's fallback title is the first fifty characters and the fake
+/// provider's transcript is what the model *answered*. The hook is the
+/// engine's own account of what it was about to send, taken before the model
+/// hears a word of it (`engine.rs`'s `start_turn`), which is exactly the
+/// question a `--command` run raises.
+///
+/// `args` is everything after `run`. The hook writes its envelope and nothing
+/// to standard output, so it adds no context of its own to the turn.
+fn submitted(run: &Run, args: &[&str]) -> String {
+    let ledger = run.path().join("prompts");
+    let record = format!("{{ cat; echo; }} >> {}", ledger.display());
+    fs::write(
+        run.path().join("ganja.toml"),
+        format!(
+            "[[hooks.UserPromptSubmit]]\nhooks = [{{ type = \"command\", command = {record:?} }}]\n"
+        ),
+    )
+    .expect("the project config is writable");
+
+    run.ganja_in_its_own_homes()
+        .args(["run"])
+        .args(args)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(CLOSING));
+
+    let written = fs::read_to_string(&ledger).expect("the hook ran and wrote its envelope");
+    let envelope: Value = serde_json::from_str(written.lines().next().expect("one envelope"))
+        .expect("the hook wrote one envelope per line");
+
+    envelope["prompt"].as_str().expect("the envelope names the prompt").to_owned()
+}
+
+/// **`ganja run --command team`.** A builtin reaches a headless turn as its
+/// *expanded* template, not as the line that named it.
+///
+/// The command path was pinned only against a project `command` table, whose
+/// template a test writes itself — so nothing held the one thing a builtin
+/// adds: placeholders filled at roster build and at expansion (**D547**), the
+/// session id among them, which is the one value no model could supply for
+/// itself. What the engine sends here is read off the engine's own
+/// `UserPromptSubmit` envelope rather than inferred from the reply.
+#[test]
+fn the_team_builtin_reaches_a_headless_turn_as_its_expanded_template() {
+    let run = Run::playing(&one_word());
+
+    let prompt = submitted(&run, &["--command", "team", TASK]);
+
+    // The template's own opening sentence, which nothing a person types
+    // carries — this is the whole difference between an expansion and a line.
+    assert!(
+        prompt.starts_with("You are running a team pipeline."),
+        "the turn started with something other than the template: {prompt:?}"
+    );
+    assert_ne!(prompt, format!("/team {TASK}"), "the typed line reached the model unexpanded");
+    // `$ARGUMENTS`: the task is inside the template rather than beside it.
+    assert!(prompt.contains(TASK), "the arguments never reached the template: {prompt}");
+    // `${state}` and `${handoffs}`, filled at roster build: absolute
+    // directories under this run's own data home, which is what stops two
+    // sessions in one checkout from disagreeing about where a resume reads.
+    //
+    // The two leaves alone would not tell a filled path from an unfilled one:
+    // `command.rs` falls back to the literal `<data home>/ganja/project/
+    // <slug>/team` when it cannot resolve the data directory, and that
+    // literal carries both tails around a home nothing on the machine answers
+    // to. So the home this run actually handed the binary is asserted beside
+    // them, and it is the only one of the three the fallback cannot produce.
+    assert!(prompt.contains("/team/state"), "the state directory is unfilled: {prompt}");
+    assert!(prompt.contains("/team/handoffs"), "the handoffs directory is unfilled: {prompt}");
+    assert!(
+        prompt.contains(&run.data.path().display().to_string()),
+        "the filled directories are not under this run's own data home: {prompt}"
+    );
+    // `${session}`, filled at expansion and last of all: this run's own
+    // session, named by the listing that is its independent witness.
+    let sessions = run.sessions();
+    assert_eq!(sessions.len(), 1, "the command started exactly one session");
+    assert!(
+        prompt.contains(&format!("{}.json", sessions[0])),
+        "the state file this session is told to use is not its own: {prompt}"
+    );
+    // And nothing was left for the model to resolve. A survivor would reach it
+    // as a literal `${…}`, a path nothing on the machine answers to.
+    assert!(!prompt.contains("${"), "a placeholder survived the expansion: {prompt}");
+}
+
+/// The other half, and the one the root `AGENTS.md` states: a `/team …`
+/// **message** is sent exactly as it was written.
+///
+/// `run` expands a command only where `--command` names one; a message is a
+/// message whatever it begins with, so the model reads the slash line itself.
+/// That is why the headless door is spelled `run --command team` rather than
+/// `run "/team …"` — measured here rather than by hand.
+#[test]
+fn a_slash_command_typed_as_a_message_is_sent_verbatim() {
+    let run = Run::playing(&one_word());
+    let typed = format!("/team {TASK}");
+
+    let prompt = submitted(&run, &[&typed]);
+
+    assert_eq!(prompt, typed, "a message was expanded when it should have been sent as it is");
+}
+
 /// The other side of the same branch: a command the engine will not accept is
 /// reported and the run stops, without waiting on a turn that never began
 /// (`run.ts:849-853`). This is the only test of that path, and the useful half

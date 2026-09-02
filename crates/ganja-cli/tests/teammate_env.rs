@@ -91,6 +91,19 @@ fn a_secret_the_lead_holds_never_reaches_a_panes_command_line() {
         !lead.global_has("ANTHROPIC_API_KEY"),
         "and the server the pane inherits from never had the credential"
     );
+    // The other direction, on the one table a member's launch actually
+    // inherits (§10.10): the kitty-probe kill switch (**D517**) is on the
+    // **server's** environment, so every pane spawned here starts with it.
+    // Set on the lead alone it was the lead's alone, and each member pane
+    // opened by blocking a stage for up to two seconds on a query this tmux
+    // never answers — `pane.rs`'s carried environment does not name the
+    // variable, so there is no other way in. Asserted through tmux's own
+    // record rather than by reading a pane's environment, which no portable
+    // call can do: `ps` shows argv, and this is not on it.
+    assert!(
+        lead.global_has("GANJA_DISABLE_TERM_PROBE"),
+        "every pane this server makes inherits the probe kill switch (D517)"
+    );
 }
 
 /// **The failure D502's allowlist fixes.** The tmux server is born without

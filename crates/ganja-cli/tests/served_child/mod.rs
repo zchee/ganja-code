@@ -127,7 +127,28 @@ impl Reaped {
 
         let started = Instant::now();
         let line = line_rx.recv_timeout(DEADLINE).unwrap_or_default();
-        assert!(!line.trim().is_empty(), "{}", self.gave_up(what, started));
+        if line.trim().is_empty() {
+            // The failure this is about is a server that exited instead of
+            // announcing itself, and what it exited *saying* is the whole
+            // diagnosis — so the drain is waited on before the message is
+            // built. [`Reaped::state`] reads whatever had arrived by now,
+            // which for a child that has only just died is a refusal cut off
+            // mid-sentence. Only once it has exited: waiting on a live
+            // server's drain would spend the bound on a pipe that is not going
+            // to close.
+            //
+            // On what is left of this wait's own [`DEADLINE`], and through
+            // [`Reaped::drained`] rather than [`Reaped::diagnostics`]: a drain
+            // that will not close is a detail missing from this failure, not
+            // the failure itself, so it may neither panic in place of the
+            // message below — the one that names what was being waited for —
+            // nor spend a second deadline on top of the one already gone.
+            // Whatever had arrived by then is what the message carries.
+            if self.exited().is_some() {
+                let _ = self.drained(DEADLINE.saturating_sub(started.elapsed()));
+            }
+            panic!("{}", self.gave_up(what, started));
+        }
 
         line
     }
@@ -156,20 +177,39 @@ impl Reaped {
             self.exited().is_some(),
             "the diagnostics are read once the child has exited"
         );
-        if let Some(draining) = self.draining.take() {
-            let started = Instant::now();
-            while !draining.is_finished() {
-                assert!(
-                    started.elapsed() < DEADLINE,
-                    "{}",
-                    self.gave_up("the server's standard error to close", started)
-                );
-                std::thread::sleep(POLL);
-            }
-            let _ = draining.join();
-        }
+        let started = Instant::now();
+        assert!(
+            self.drained(DEADLINE),
+            "{}",
+            self.gave_up("the server's standard error to close", started)
+        );
 
         self.said().clone()
+    }
+
+    /// Waits up to `within` for the drain to end, and answers whether it did.
+    ///
+    /// Nothing here panics, because the two callers disagree about what a
+    /// drain that will not close means: for [`Reaped::diagnostics`] it is the
+    /// failure, and for [`Reaped::announcement`] it is a detail missing from
+    /// one. A drain that outlasted `within` is put back, so a later caller
+    /// waits on the same thread rather than on nothing.
+    fn drained(&mut self, within: Duration) -> bool {
+        let Some(draining) = self.draining.take() else {
+            return true;
+        };
+
+        let started = Instant::now();
+        while !draining.is_finished() {
+            if started.elapsed() >= within {
+                self.draining = Some(draining);
+                return false;
+            }
+            std::thread::sleep(POLL);
+        }
+        let _ = draining.join();
+
+        true
     }
 
     /// What the server is doing and what it has said, for a failure message.
