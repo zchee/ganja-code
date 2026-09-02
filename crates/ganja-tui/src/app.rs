@@ -190,6 +190,24 @@ const CLIPBOARD_EMPTY: &str = "the clipboard holds neither text nor an image";
 /// upstream's toast message, reworded for ganja (`app.tsx:717`).
 const NO_EFFORTS: &str = "The current model does not support any efforts.";
 
+/// How long a shared task-list read may be in flight before the session says
+/// so.
+///
+/// Twice [`ganja_core::teammate::lead_inbox::POLL`], the cadence the read is
+/// started on: a store read that has not answered in two whole poll windows
+/// is not a slow disk, it is a read that is not coming back — a descriptor
+/// nothing writes to, a filesystem that stopped answering. What the deadline
+/// buys is the sentence below, never a second read: see
+/// [`App::reap_task_read`].
+const TASK_READ_DEADLINE: Duration = ganja_core::teammate::lead_inbox::POLL.saturating_mul(2);
+
+/// What that overrun says, once per read.
+///
+/// It names the last list as the thing being drawn, because a section that
+/// simply stopped moving is the failure this sentence exists to explain.
+const SLOW_TASK_READ: &str =
+    "the team's shared task list is not answering; showing the last one read";
+
 /// What the `/plugin` dialog's Reload answers when it worked (**D474**): the
 /// honest split, verbatim. Hooks and the skill roots really are rebuilt
 /// in-session; the agents roster, the MCP dials and the LSP servers are
@@ -780,6 +798,13 @@ pub struct App {
     /// still has a list, and a member polls its own inbox far faster than a
     /// list needs re-reading.
     tasks_polled: Option<Instant>,
+    /// That read while one is in flight, reaped on the tick exactly as
+    /// [`App::file_walk`] is and for its reason: the list is a file the store
+    /// opens, and awaiting it here would hand a stalled read — a planted
+    /// FIFO, a wedged lock, a disk that stopped answering — the power to stop
+    /// this loop drawing and answering keys. Also the guard that keeps a
+    /// second read off a store the first one has not come back from.
+    task_read: Option<TaskRead>,
     /// The queue a teammate's permission dialogs arrive on (**D-5**), claimed
     /// once from the engine when the app was built.
     ///
@@ -1106,6 +1131,7 @@ impl App {
             teammates: 0,
             tasks: Vec::new(),
             tasks_polled: None,
+            task_read: None,
             teammate_dialogs,
             forwarded_dialogs: HashMap::new(),
             peer_steers: HashMap::new(),
@@ -2306,8 +2332,22 @@ impl App {
     /// `/teammate` dialog, or a configured roster naming `task-list`. The
     /// element is opt-in, so the ordinary session with the default bar and no
     /// dialog open pays one boolean per tick and touches no disk.
+    ///
+    /// The read itself is [`App::spawn_task_read`]'s, never awaited here:
+    /// what the store opens is a file, and a file whose read does not return
+    /// would take this loop down with it. The dialog and the segment go on
+    /// drawing the last list that landed until a fresh one does.
     async fn poll_tasks(&mut self) {
-        if self.team_dialog.is_none() && !self.status.draws_task_list() {
+        // Reaped before anything else is decided, and whatever is watching
+        // now: a read started for a dialog that has since closed still has to
+        // be collected, or the next open would find one in flight and start
+        // none of its own. Whether anything is watching decides only what is
+        // *said* about a read that overran — a notice about a list nobody is
+        // drawing would be a sentence about nothing (bead `784f`).
+        let watched = self.team_dialog.is_some() || self.status.draws_task_list();
+        let landed = self.reap_task_read(watched).await;
+
+        if !watched {
             // Whatever was last read is stale the moment nothing is watching
             // it; dropping it is what keeps a dialog reopened an hour later
             // from drawing an hour-old list for a frame.
@@ -2320,15 +2360,90 @@ impl App {
 
             return;
         }
+        if let Some(tasks) = landed {
+            self.install_tasks(tasks);
+        }
+        if self.task_read.is_some() {
+            // One read at a time, and no clock can start a second: aborting a
+            // stalled one would not free the descriptor it is blocked on, so a
+            // retry ladder here would pile blocked reads up behind each other.
+            return;
+        }
         let due = self
             .tasks_polled
             .is_none_or(|last| last.elapsed() >= ganja_core::teammate::lead_inbox::POLL);
         if !due {
             return;
         }
-        self.tasks_polled = Some(Instant::now());
+        self.spawn_task_read();
+    }
 
-        let tasks = self.engine.task_list().await.unwrap_or_default();
+    /// Starts the one read [`App::poll_tasks`] reaps, on the clock that gates
+    /// it.
+    fn spawn_task_read(&mut self) {
+        self.tasks_polled = Some(Instant::now());
+        let engine = Arc::clone(&self.engine);
+        self.task_read = Some(TaskRead {
+            task: tokio::spawn(async move { engine.task_list().await }),
+            started: Instant::now(),
+            overdue: false,
+        });
+    }
+
+    /// Collects a finished shared-list read, or says once that the one in
+    /// flight has overrun.
+    ///
+    /// [`App::poll_plugin_task`]'s shape — polled with
+    /// [`JoinHandle::is_finished`], awaited only then, so the loop never waits
+    /// on the read it started — with the overrun arm this one needs on top: a
+    /// read is *left running* past its deadline rather than aborted, because
+    /// an abort cannot unblock a thread already inside the file read, and the
+    /// list it is a read of goes on being drawn from what last landed. What
+    /// the deadline changes is only that the person watching is told, once,
+    /// instead of being left to wonder why the section never moves.
+    async fn reap_task_read(&mut self, watched: bool) -> Option<Vec<Summary>> {
+        let read = self.task_read.as_mut()?;
+        if !read.task.is_finished() {
+            let overran = !read.overdue && read.started.elapsed() >= TASK_READ_DEADLINE;
+            read.overdue |= overran;
+            // Said only to somebody looking at the list it is about: with the
+            // dialog closed and no roster element drawing it, the sentence
+            // would name a list this frame does not show.
+            if overran && watched {
+                self.status.set_notice(Some(SLOW_TASK_READ.to_owned()));
+                self.dirty = true;
+            }
+
+            return None;
+        }
+        let read = self.task_read.take().expect("checked in flight above");
+        match read.task.await {
+            // `None` is the store's own answer for a list it could not read,
+            // which it has already said on the debug log; it clears the
+            // section for the same reason a genuinely empty list does.
+            Ok(tasks) => {
+                // A read that answered late has stopped being the thing the
+                // notice was about, so the notice goes with it.
+                if read.overdue {
+                    self.status.set_notice(None);
+                    self.dirty = true;
+                }
+
+                Some(tasks.unwrap_or_default())
+            }
+            Err(error) => {
+                // A panic inside the read; its message is all there is, and
+                // the last good list is better than an empty one.
+                tracing::debug!(%error, "the shared task list read failed");
+
+                None
+            }
+        }
+    }
+
+    /// Installs a list that landed, repainting only where it says something
+    /// the frame does not already say.
+    fn install_tasks(&mut self, tasks: Vec<Summary>) {
         if tasks == self.tasks {
             return;
         }
@@ -2349,6 +2464,11 @@ impl App {
 
             return;
         };
+        // The list was dropped the moment nothing was drawing it, so the
+        // dialog opens over nothing and the clock has to be due *now* rather
+        // than a poll window from now — otherwise the Tasks section would sit
+        // empty for a second of a dialog somebody just opened to read it.
+        self.tasks_polled = None;
         let mut dialog = team::Team::new(team::rows(&view), self.tasks.clone());
         dialog.set_busy(self.team_spawn.is_some());
         self.team_dialog = Some(dialog);
@@ -7260,6 +7380,15 @@ impl App {
             // A running store action has no event of its own either, and the
             // dialog is waiting on exactly the tick that reaps it.
             || self.plugin_task.is_some()
+            // A shared-list read lands on the tick that reaps it too, and a
+            // roster naming `task-list` with no dialog open has nothing else
+            // to wake the loop and move the count. Only while something is
+            // watching: a read that stalled is left running on purpose and
+            // may never land, and a loop woken every frame for a list nobody
+            // is drawing would be the idle cost this predicate exists to
+            // avoid — the lead's own clock reaps it once somebody looks again.
+            || (self.task_read.is_some()
+                && (self.team_dialog.is_some() || self.status.draws_task_list()))
             // A spawn in flight is reaped by the tick and by nothing else, and
             // while it runs it may be waiting on a dialog only the tick raises.
             || self.team_spawn.is_some()
@@ -7635,6 +7764,15 @@ fn payload(message: &Delivered) -> ganja_protocol::team::PeerPayload {
         message.color.clone(),
         &message.body,
     )
+}
+
+/// One in-flight read of the team's shared task list: the read itself, when
+/// it started, and whether its overrun has been said — [`SLOW_TASK_READ`] is
+/// one sentence about one read, not one per tick for as long as it hangs.
+struct TaskRead {
+    task: JoinHandle<Option<Vec<Summary>>>,
+    started: Instant,
+    overdue: bool,
 }
 
 /// One in-flight `@`-menu walk: the fragment it answers, the token that

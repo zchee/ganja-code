@@ -25,7 +25,7 @@ use tempfile::TempDir;
 use super::{
     App, BACKTRACK_HINT, Chooser, Cleared, Dropdown, ESC_CHORD, FRAME, Help, JoinHandle,
     ListDialog, MAX_EVENT_LOG, MessageId, Mode, NO_EFFORTS, Palette, PendingDialog, Permission,
-    RevertScope, Rewind, WireListing, permission_reply,
+    RevertScope, Rewind, SLOW_TASK_READ, TASK_READ_DEADLINE, WireListing, permission_reply,
 };
 
 /// The session every hand-built fixture event happens in. One pinned id,
@@ -5672,6 +5672,74 @@ async fn choosing_an_engine_command_types_its_name_instead_of_running_it() {
     assert!(app.dropdown.is_none());
 }
 
+/// The same for `/team`, where getting it wrong would be silent (**D544**).
+///
+/// A typed `/team` raises two rows that score *identically*: the engine's
+/// own `/team` and the UI's `/teammate` roster dialog. Only the tie-break on
+/// the name puts the pipeline first, so nothing about today's correct
+/// behavior is guaranteed by the ranking — a scoring change would let the
+/// dialog quietly shadow the command. This pins the order the tie resolves
+/// to; it does not pin the scores, which **D10** says are not parity.
+#[tokio::test]
+async fn choosing_team_types_the_engine_command_rather_than_the_roster_dialog() {
+    let (mut app, _events) = wired().await;
+    typed(&mut app, "/team").await;
+
+    let menu = app.dropdown.clone().expect("the menu is open");
+    let selected = menu.selected().expect("a row under the cursor");
+    assert!(
+        matches!(&selected, command::Choice::Engine(engine) if engine.name == "team"),
+        "the engine's own command should be under the cursor, got: {selected:?}"
+    );
+    // The row under it is the dialog's, on a clone so the app's own cursor
+    // is where the Enter below finds it.
+    let mut below = menu;
+    below.move_selection(1);
+    let next = below.selected().expect("a second row");
+    assert!(
+        matches!(&next, command::Choice::Ui(entry) if entry.name == "teammate"),
+        "and the roster dialog second, got: {next:?}"
+    );
+
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
+
+    assert_eq!(app.editor.text(), "/team ", "the name is typed, with room for the task it takes");
+    assert!(app.dropdown.is_none());
+    assert!(app.team_dialog.is_none(), "and no roster dialog was raised on the way");
+}
+
+/// And the second Enter reaches the engine as the command of that name,
+/// rather than the dialog or prose.
+///
+/// The expansion is what proves which door was taken: a `/teammate` line
+/// sends the engine nothing at all, and a line the UI declined to name would
+/// arrive as the text that was typed. What it is matched on is deliberately
+/// one word of the template rather than a sentence of it — this test is
+/// about the routing, and the prose is `ganja-core`'s to change.
+#[tokio::test]
+async fn submitting_team_runs_the_engine_command_of_that_name() {
+    let engine = engine();
+    let mut events = engine.subscribe().await.expect("the test subscribes first");
+    let mut app = App::new(engine, None, Themes::builtin());
+
+    typed(&mut app, "/team").await;
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
+    assert_eq!(app.editor.text(), "/team ", "the first Enter only types the name");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
+
+    let CoreEvent::MessageStarted { session_id: _, message } =
+        events.next().await.expect("the engine reports the prompt")
+    else {
+        panic!("the first event of a turn is the user's message");
+    };
+    let text: String = message.parts.iter().filter_map(ganja_protocol::Part::as_text).collect();
+
+    assert_ne!(text.trim(), "/team", "the command ran rather than being sent as the line it is");
+    assert!(text.contains("pipeline"), "the template should have been expanded, got: {text}");
+    assert!(app.team_dialog.is_none(), "and the roster dialog was never raised");
+    assert!(app.editor.is_empty(), "a command that ran clears the composer");
+}
+
 /// Tab reaches the identical outcome as Enter for an engine command:
 /// Tab's own "complete without running" only changes anything for the UI
 /// half of the roster, which already types-and-waits on Enter.
@@ -9933,6 +10001,7 @@ async fn a_session_that_draws_no_task_list_never_reads_one() {
     app.handle(AppEvent::Tick).await.expect("a tick is handled");
 
     assert!(app.tasks.is_empty(), "nothing asked, so nothing was read");
+    assert!(app.task_read.is_none(), "and no read was started to be read from");
     let mut terminal = terminal(80, 24);
     app.draw(&mut terminal).expect("a frame draws");
     assert!(!screen(&terminal).contains("team tasks"), "and the default bar is unchanged");
@@ -9950,7 +10019,7 @@ async fn an_open_teammate_dialog_polls_the_shared_task_list() {
     let mut app = app_with_tasks(&directory).await;
     app.team_dialog = Some(team_dialog());
 
-    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+    settle_task_read(&mut app).await;
 
     assert_eq!(app.tasks.len(), 2, "the open dialog asked");
     assert!(app.tasks.iter().any(|task| task.subject == "Wire the parser"), "and got the list");
@@ -9976,7 +10045,7 @@ async fn a_roster_naming_the_task_list_polls_it_and_counts_the_open_work() {
         detail: None,
     }));
 
-    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+    settle_task_read(&mut app).await;
 
     let polled = app.tasks_polled.expect("the poll ran");
     let mut terminal = terminal(80, 24);
@@ -9987,6 +10056,298 @@ async fn a_roster_naming_the_task_list_polls_it_and_counts_the_open_work() {
 
     app.handle(AppEvent::Tick).await.expect("a tick is handled");
     assert_eq!(app.tasks_polled, Some(polled), "the poll is on a clock, not on the tick");
+}
+
+/// Drives ticks until the read one of them started has landed, standing in
+/// for the loop that would be ticking anyway.
+///
+/// The read is spawned rather than awaited, so the tick that asks for the
+/// list is never the tick that has it: one starts the read and a later one
+/// reaps it. [`settle_file_menu`]'s shape, for the same reason.
+async fn settle_task_read(app: &mut App) {
+    for _ in 0..500 {
+        app.handle(AppEvent::Tick).await.expect("a tick is handled");
+        if app.task_read.is_none() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    panic!("the shared task list read never landed");
+}
+
+/// A shared list whose read does not come back: what a planted FIFO, a
+/// wedged lock or a filesystem that stopped answering leaves the store
+/// holding.
+///
+/// [`ganja_testkit::StaticTasks`] is the double for suites that want an
+/// answer; this one exists for the suite that wants no answer, and it is
+/// here rather than beside that one because a list that never returns is
+/// only ever interesting to the loop that must keep drawing anyway.
+#[derive(Debug)]
+struct StallingTasks {
+    listed: Vec<ganja_tool::tasklist::Summary>,
+    /// Whether the one answer this double has has been given. A first read
+    /// that lands is what a later stall can then be measured against — the
+    /// section goes on drawing it.
+    answered: std::sync::atomic::AtomicBool,
+}
+
+impl StallingTasks {
+    /// Answers the first read with `listed`, and never answers again.
+    fn answering_once(listed: Vec<ganja_tool::tasklist::Summary>) -> Self {
+        Self { listed, answered: std::sync::atomic::AtomicBool::new(false) }
+    }
+
+    /// Answers nothing at all, from the very first read.
+    fn stalled() -> Self {
+        Self { listed: Vec::new(), answered: std::sync::atomic::AtomicBool::new(true) }
+    }
+}
+
+/// Written in the shape `async_trait` desugars to, for the reason
+/// [`super::DialogAsker`]'s impl gives: this crate does not depend on that
+/// macro and should not start.
+impl ganja_tool::tasklist::TaskList for StallingTasks {
+    fn create<'a, 'b>(
+        &'a self,
+        _draft: ganja_tool::tasklist::Draft,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        ganja_tool::tasklist::Record,
+                        ganja_tool::tasklist::TaskFailure,
+                    >,
+                > + Send
+                + 'b,
+        >,
+    >
+    where
+        'a: 'b,
+        Self: 'b,
+    {
+        unreachable!("this double only ever reads")
+    }
+
+    fn update<'a, 'b, 'c>(
+        &'a self,
+        _id: &'b str,
+        _change: ganja_tool::tasklist::Change,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        ganja_tool::tasklist::Record,
+                        ganja_tool::tasklist::TaskFailure,
+                    >,
+                > + Send
+                + 'c,
+        >,
+    >
+    where
+        'a: 'c,
+        'b: 'c,
+        Self: 'c,
+    {
+        unreachable!("this double only ever reads")
+    }
+
+    fn delete<'a, 'b, 'c>(
+        &'a self,
+        _id: &'b str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<(), ganja_tool::tasklist::TaskFailure>>
+                + Send
+                + 'c,
+        >,
+    >
+    where
+        'a: 'c,
+        'b: 'c,
+        Self: 'c,
+    {
+        unreachable!("this double only ever reads")
+    }
+
+    fn list<'a, 'b>(
+        &'a self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        Vec<ganja_tool::tasklist::Summary>,
+                        ganja_tool::tasklist::TaskFailure,
+                    >,
+                > + Send
+                + 'b,
+        >,
+    >
+    where
+        'a: 'b,
+        Self: 'b,
+    {
+        let answer = (!self.answered.swap(true, std::sync::atomic::Ordering::SeqCst))
+            .then(|| self.listed.clone());
+
+        Box::pin(async move {
+            match answer {
+                Some(listed) => Ok(listed),
+                // The read that does not come back. `pending` rather than a
+                // long sleep, because a deadline a test can outwait is not
+                // the failure this stands for.
+                None => std::future::pending().await,
+            }
+        })
+    }
+
+    fn get<'a, 'b, 'c>(
+        &'a self,
+        _id: &'b str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        ganja_tool::tasklist::Record,
+                        ganja_tool::tasklist::TaskFailure,
+                    >,
+                > + Send
+                + 'c,
+        >,
+    >
+    where
+        'a: 'c,
+        'b: 'c,
+        Self: 'c,
+    {
+        unreachable!("this double only ever reads")
+    }
+}
+
+/// One pending task, as the store would have summarized it.
+fn pending_task(id: &str, subject: &str) -> ganja_tool::tasklist::Summary {
+    ganja_tool::tasklist::Summary {
+        id: id.to_owned(),
+        subject: subject.to_owned(),
+        status: ganja_tool::tasklist::Status::Pending,
+        owner: String::new(),
+        blocked_by: Vec::new(),
+    }
+}
+
+/// An app whose engine reads through `tasks`, with a roster that draws the
+/// count so the poll has a reason to run — and the notice beside it, since a
+/// roster draws only what it names and one of these tests is about what the
+/// bar says.
+fn app_reading(tasks: StallingTasks) -> App {
+    let mut app = App::new(
+        engine().with_tasks(Arc::new(tasks) as Arc<dyn ganja_tool::tasklist::TaskList>),
+        None,
+        Themes::builtin(),
+    );
+    app.status.set_statusline(Some(&ganja_core::config::StatuslineConfig {
+        elements: Some(vec![
+            ganja_core::config::StatuslineElement::TaskList,
+            ganja_core::config::StatuslineElement::Notice,
+        ]),
+        max_width: None,
+        detail: None,
+    }));
+
+    app
+}
+
+/// The read is the store's, and a store read can hang — a planted FIFO, a
+/// lock nobody drops. It runs off the loop for exactly that reason: the tick
+/// that finds it still running answers anyway, and the segment goes on
+/// drawing the last list that landed.
+#[tokio::test]
+async fn a_task_list_read_that_never_answers_leaves_the_tick_answering() {
+    let mut app = app_reading(StallingTasks::answering_once(vec![pending_task("1", "Wire it")]));
+
+    settle_task_read(&mut app).await;
+    assert_eq!(app.tasks.len(), 1, "the first read answered");
+
+    // What holds the second read back is the clock, not the reader; a
+    // session a poll window older is the state this test is about.
+    app.tasks_polled = None;
+    for _ in 0..2 {
+        tokio::time::timeout(Duration::from_secs(5), app.handle(AppEvent::Tick))
+            .await
+            .expect("the tick answers while the read hangs")
+            .expect("a tick is handled");
+    }
+
+    assert!(app.task_read.is_some(), "the read is in flight rather than awaited");
+    let mut terminal = terminal(80, 24);
+    app.draw(&mut terminal).expect("a frame draws");
+    assert!(screen(&terminal).contains("1/1 team tasks"), "got:\n{}", screen(&terminal));
+}
+
+/// One read at a time, whatever the clock says: a second would be a second
+/// descriptor blocked on the same store, and the first is not coming back to
+/// make room for it.
+#[tokio::test]
+async fn a_read_still_in_flight_is_never_joined_by_a_second() {
+    let mut app = app_reading(StallingTasks::stalled());
+
+    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+    assert!(app.task_read.is_some(), "the first tick started a read");
+    assert!(app.tasks_polled.is_some(), "and moved the clock with it");
+
+    // Dropping the clock is what a poll window later would do; the guard
+    // this test is about is the one that is not the clock.
+    app.tasks_polled = None;
+    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+
+    assert!(app.task_read.is_some(), "the first read is still the one in flight");
+    assert_eq!(app.tasks_polled, None, "and no second read was started to move the clock");
+}
+
+/// A read past its deadline is said once — one sentence about one read, not
+/// one a tick for as long as it hangs — and the list it could not refresh
+/// goes on being drawn.
+#[tokio::test]
+async fn a_read_past_its_deadline_is_said_once() {
+    // What the screen is matched on below, so the two cannot drift apart.
+    assert!(SLOW_TASK_READ.contains("not answering"));
+    let mut app = app_reading(StallingTasks::stalled());
+    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+
+    // Backdated rather than waited out: what the branch turns on is the age
+    // of the read, and a test that slept for it would only be pinning the
+    // clock.
+    let read = app.task_read.as_mut().expect("a read is in flight");
+    read.started =
+        read.started.checked_sub(TASK_READ_DEADLINE).expect("the machine has run that long");
+
+    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+    let mut terminal = terminal(80, 24);
+    app.draw(&mut terminal).expect("a frame draws");
+    assert!(screen(&terminal).contains("not answering"), "got:\n{}", screen(&terminal));
+
+    // Cleared by anything else the bar has to say, the next tick does not
+    // put it back: the read is the same read.
+    app.status.set_notice(None);
+    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+    app.draw(&mut terminal).expect("a frame draws");
+    assert!(!screen(&terminal).contains("not answering"), "got:\n{}", screen(&terminal));
+}
+
+/// Opening the dialog is somebody asking for the list *now*: the poll's
+/// clock is dropped with it, so the first frame of the dialog is not a whole
+/// poll window behind the ask.
+#[tokio::test]
+async fn opening_the_dialog_reads_the_list_without_waiting_the_clock_out() {
+    let directory = temporary();
+    let (mut app, _registry, _events) = leading(&directory).await;
+    app.tasks_polled = Some(Instant::now());
+
+    app.open_team();
+
+    assert_eq!(app.tasks_polled, None, "the clock is due the moment the dialog wants a list");
+    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+    assert!(app.task_read.is_some(), "so the very next tick starts the read");
 }
 
 /// The `/teammate` dialog's per-member action step: whose actions these are,
