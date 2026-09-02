@@ -43,9 +43,11 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use ganja_testkit::Homes;
-use ganja_testkit::tmux::{PrivateServer, require_tmux};
 use serde_json::json;
+
+mod pane_lead;
+
+use pane_lead::{Homes, Tmux};
 
 /// How long each stage is given: a debug `ganja` starting cold in a pane, then
 /// seven provider round trips against a scripted provider.
@@ -85,23 +87,6 @@ const CARRY_ON: &str = "anything else";
 /// The script both conversations play.
 const SCRIPT: &str = "turns.json";
 
-/// What the private server is born **without**, so nothing a pane inherits can
-/// be this developer's rather than the fixture's.
-const WITHHELD: &[&str] = &[
-    "GANJA_CONFIG_HOME",
-    "GANJA_CONFIG",
-    "GANJA_MODEL",
-    "XDG_CONFIG_HOME",
-    "XDG_DATA_HOME",
-    "XDG_CACHE_HOME",
-    "XDG_RUNTIME_DIR",
-    "TMUX",
-    "TMUX_PANE",
-    "ANTHROPIC_API_KEY",
-    "OPENAI_API_KEY",
-    "OPENROUTER_API_KEY",
-];
-
 /// The homes, the script, and this drill's reads of what the lead wrote.
 struct Fixture {
     homes: Homes,
@@ -133,10 +118,6 @@ impl Fixture {
         self.homes.config_home()
     }
 
-    fn log_dir(&self) -> PathBuf {
-        self.homes.data().join("ganja").join("log")
-    }
-
     /// The environment the server is born from, and so what every pane
     /// inherits.
     fn server_env(&self) -> Vec<(&'static str, String)> {
@@ -149,48 +130,17 @@ impl Fixture {
 
     /// What the lead's own pane is additionally given (`-e`).
     fn lead_env(&self) -> Vec<(&'static str, String)> {
-        vec![
-            ("GANJA_CONFIG_HOME", self.config_home().display().to_string()),
-            ("XDG_DATA_HOME", self.homes.data().display().to_string()),
-            ("XDG_CONFIG_HOME", self.homes.data().join("config").display().to_string()),
-            ("XDG_CACHE_HOME", self.homes.data().join("cache").display().to_string()),
-            ("GANJA_FAKE_SCRIPT", self.homes.project().join(SCRIPT).display().to_string()),
-            // What every other pty drill sets (**D517**): a private server born
-            // from `-f /dev/null` is a terminal whose answer to the kitty query
-            // depends on which tmux the host ships, and the probe blocks up to
-            // two seconds where there is none.
-            ("GANJA_DISABLE_TERM_PROBE", "1".to_owned()),
-        ]
+        pane_lead::lead_env(&self.homes, &self.homes.project().join(SCRIPT))
     }
 
-    /// Everything the lead has traced so far.
-    fn log(&self) -> String {
-        let mut files: Vec<PathBuf> = match fs::read_dir(self.log_dir()) {
-            Ok(entries) => entries.filter_map(Result::ok).map(|entry| entry.path()).collect(),
-            Err(_) => return String::new(),
-        };
-        files.sort();
-
-        files.iter().filter_map(|path| fs::read_to_string(path).ok()).collect::<Vec<_>>().join("")
-    }
-
-    /// How many times the log says `needle`.
+    /// How many times the lead's log says `needle`.
     fn logged(&self, needle: &str) -> usize {
-        self.log().matches(needle).count()
+        pane_lead::log_text(&pane_lead::log_dir(&self.homes)).matches(needle).count()
     }
 
     /// The tail of the log, for a wait that timed out.
     fn log_tail(&self) -> String {
-        let text = self.log();
-        let lines: Vec<&str> = text.lines().collect();
-        let kept = lines.len().saturating_sub(LOG_TAIL);
-
-        format!(
-            "last {} of {} log lines:\n{}",
-            lines.len() - kept,
-            lines.len(),
-            lines[kept..].join("\n")
-        )
+        pane_lead::log_tail(&pane_lead::log_dir(&self.homes), LOG_TAIL)
     }
 
     /// Whether the lead's team directory holds any task document yet.
@@ -207,31 +157,6 @@ impl Fixture {
                     entry.path().extension().is_some_and(|extension| extension == "json")
                 })
             })
-    }
-}
-
-/// The private server plus the send-keys/capture glue.
-struct Tmux {
-    server: PrivateServer,
-}
-
-impl Tmux {
-    fn start(fixture: &Fixture) -> Self {
-        let env = fixture.server_env();
-        let pairs: Vec<(&str, &str)> =
-            env.iter().map(|(name, value)| (*name, value.as_str())).collect();
-
-        Self { server: PrivateServer::start(&["sleep", "3600"], WITHHELD, &pairs) }
-    }
-
-    fn screen(&self, pane: &str) -> String {
-        self.server.run(&["capture-pane", "-p", "-t", pane])
-    }
-
-    /// Types `text` into `pane` literally, then Enter.
-    fn type_line(&self, pane: &str, text: &str) {
-        self.server.run(&["send-keys", "-t", pane, "-l", "--", text]);
-        self.server.run(&["send-keys", "-t", pane, "Enter"]);
     }
 }
 
@@ -263,19 +188,15 @@ fn wait_for<T>(
 /// stops it after five.
 #[test]
 fn a_lead_auto_continues_for_its_team_and_the_breaker_halts_it_at_five() {
-    require_tmux();
     let fixture = Fixture::new();
-    let tmux = Tmux::start(&fixture);
-    let env = fixture.lead_env();
-    let pairs: Vec<(&str, &str)> =
-        env.iter().map(|(name, value)| (*name, value.as_str())).collect();
+    let tmux = Tmux::start(&fixture.server_env());
 
     // The lead, in a pane of its own in the project directory. Two words on
     // purpose (`env` and the binary): a one-word command would go through the
     // login shell.
-    let lead = tmux.server.split(
-        Some(fixture.homes.project()),
-        &pairs,
+    let lead = tmux.split(
+        fixture.homes.project(),
+        &fixture.lead_env(),
         &["/usr/bin/env", env!("CARGO_BIN_EXE_ganja")],
     );
     wait_for("the lead to draw its composer", &tmux, &fixture, &lead, || {

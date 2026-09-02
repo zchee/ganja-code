@@ -43,14 +43,16 @@
 #![cfg(unix)]
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use ganja_core::team::TeamFile;
 use ganja_core::team::task::{Store, TaskId, TaskStatus};
-use ganja_testkit::Homes;
-use ganja_testkit::tmux::{PrivateServer, require_tmux};
 use serde_json::json;
+
+mod pane_lead;
+
+use pane_lead::{Homes, Tmux};
 
 /// How long each stage is given: two debug `ganja` binaries starting cold in
 /// panes, each taking turns of its own.
@@ -89,23 +91,6 @@ const FILE_PROMPT: &str = "file the work";
 
 /// The lead's second, after the teammate has finished.
 const LIST_PROMPT: &str = "how did it go";
-
-/// What the private server is born **without**, so nothing a pane inherits
-/// can be this developer's rather than the fixture's.
-const WITHHELD: &[&str] = &[
-    "GANJA_CONFIG_HOME",
-    "GANJA_CONFIG",
-    "GANJA_MODEL",
-    "XDG_CONFIG_HOME",
-    "XDG_DATA_HOME",
-    "XDG_CACHE_HOME",
-    "XDG_RUNTIME_DIR",
-    "TMUX",
-    "TMUX_PANE",
-    "ANTHROPIC_API_KEY",
-    "OPENAI_API_KEY",
-    "OPENROUTER_API_KEY",
-];
 
 /// The two homes, the two scripts, and this suite's reads of the team the
 /// lead keeps under its config home.
@@ -199,22 +184,7 @@ impl Fixture {
     /// What the lead's own pane is additionally given (`-e`): where its things
     /// are, and its own script in place of the server's.
     fn lead_env(&self) -> Vec<(&'static str, String)> {
-        vec![
-            ("GANJA_CONFIG_HOME", self.config_home().display().to_string()),
-            ("XDG_DATA_HOME", self.homes.data().display().to_string()),
-            ("XDG_CONFIG_HOME", self.homes.data().join("config").display().to_string()),
-            ("XDG_CACHE_HOME", self.homes.data().join("cache").display().to_string()),
-            ("GANJA_FAKE_SCRIPT", self.homes.project().join(LEAD_SCRIPT).display().to_string()),
-            // What every other pty drill sets (**D517**): a private server born
-            // from `-f /dev/null` is a terminal whose answer to the kitty query
-            // depends on which tmux the host ships, and the probe blocks up to
-            // two seconds where there is none.
-            ("GANJA_DISABLE_TERM_PROBE", "1".to_owned()),
-        ]
-    }
-
-    fn log_dir(&self) -> PathBuf {
-        self.homes.data().join("ganja").join("log")
+        pane_lead::lead_env(&self.homes, &self.homes.project().join(LEAD_SCRIPT))
     }
 
     /// The team directory the lead made — the only one under the config home.
@@ -245,87 +215,16 @@ impl Fixture {
     }
 }
 
-/// The private server plus the send-keys/capture glue this suite drives the
-/// lead's pane through.
-struct Tmux {
-    server: PrivateServer,
-    logs: PathBuf,
-}
-
-impl Tmux {
-    fn start(fixture: &Fixture) -> Self {
-        let env = fixture.server_env();
-        let pairs: Vec<(&str, &str)> =
-            env.iter().map(|(name, value)| (*name, value.as_str())).collect();
-
-        Self {
-            server: PrivateServer::start(&["sleep", "3600"], WITHHELD, &pairs),
-            logs: fixture.log_dir(),
-        }
-    }
-
-    /// The tail of what the lead (and the member sharing its data home)
-    /// traced so far, for a wait that timed out.
-    fn log_tail(&self) -> String {
-        let mut files: Vec<PathBuf> = match fs::read_dir(&self.logs) {
-            Ok(entries) => entries.filter_map(Result::ok).map(|entry| entry.path()).collect(),
-            Err(error) => return format!("(no log under {}: {error})", self.logs.display()),
-        };
-        files.sort();
-        let text: String = files
-            .iter()
-            .filter_map(|path| fs::read_to_string(path).ok())
-            .collect::<Vec<_>>()
-            .join("");
-        let lines: Vec<&str> = text.lines().collect();
-        let kept = lines.len().saturating_sub(LOG_TAIL);
-
-        format!(
-            "{} of {} lines from {}:\n{}",
-            lines.len() - kept,
-            lines.len(),
-            self.logs.display(),
-            lines[kept..].join("\n")
-        )
-    }
-
-    fn split(&self, cwd: &Path, env: &[(&str, String)], argv: &[&str]) -> String {
-        let pairs: Vec<(&str, &str)> =
-            env.iter().map(|(name, value)| (*name, value.as_str())).collect();
-
-        self.server.split(Some(cwd), &pairs, argv)
-    }
-
-    fn panes(&self) -> Vec<String> {
-        self.server.panes()
-    }
-
-    /// The name of the process in the pane's foreground, as tmux sees it.
-    fn current_command(&self, pane: &str) -> String {
-        self.server
-            .run(&["display-message", "-p", "-t", pane, "#{pane_current_command}"])
-            .trim()
-            .to_owned()
-    }
-
-    fn screen(&self, pane: &str) -> String {
-        self.server.run(&["capture-pane", "-p", "-t", pane])
-    }
-
-    /// Types `text` into `pane` literally, then Enter.
-    fn type_line(&self, pane: &str, text: &str) {
-        self.server.run(&["send-keys", "-t", pane, "-l", "--", text]);
-        self.server.run(&["send-keys", "-t", pane, "Enter"]);
-    }
-
-    fn key(&self, pane: &str, name: &str) {
-        self.server.run(&["send-keys", "-t", pane, name]);
-    }
-}
-
 /// Polls `read` every 50ms until it answers, or panics with `what`, the
-/// lead's screen and the tail of its log after [`DEADLINE`].
-fn wait_for<T>(what: &str, tmux: &Tmux, lead: &str, mut read: impl FnMut() -> Option<T>) -> T {
+/// lead's screen and the tail of the log the lead — and the member sharing its
+/// data home — traced, after [`DEADLINE`].
+fn wait_for<T>(
+    what: &str,
+    tmux: &Tmux,
+    fixture: &Fixture,
+    lead: &str,
+    mut read: impl FnMut() -> Option<T>,
+) -> T {
     let started = Instant::now();
     loop {
         if let Some(found) = read() {
@@ -333,10 +232,9 @@ fn wait_for<T>(what: &str, tmux: &Tmux, lead: &str, mut read: impl FnMut() -> Op
         }
         assert!(
             started.elapsed() < DEADLINE,
-            "waited {DEADLINE:?} for {what} and it did not happen; the lead's screen:\n{}\n\
-             the lead's log, last {}",
+            "waited {DEADLINE:?} for {what} and it did not happen; the lead's screen:\n{}\n{}",
             tmux.screen(lead),
-            tmux.log_tail()
+            pane_lead::log_tail(&pane_lead::log_dir(&fixture.homes), LOG_TAIL)
         );
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -353,9 +251,8 @@ fn task(fixture: &Fixture, id: &TaskId) -> Option<ganja_core::team::task::Task> 
 /// another, read back by the first.
 #[test]
 fn a_lead_and_a_pane_teammate_drive_one_task_list_end_to_end() {
-    require_tmux();
     let fixture = Fixture::new();
-    let tmux = Tmux::start(&fixture);
+    let tmux = Tmux::start(&fixture.server_env());
     let one = TaskId::parse("1").expect("the first id a counter issues");
 
     // The lead, in a pane of its own in the project directory — so tmux gives
@@ -366,25 +263,26 @@ fn a_lead_and_a_pane_teammate_drive_one_task_list_end_to_end() {
         &fixture.lead_env(),
         &["/usr/bin/env", env!("CARGO_BIN_EXE_ganja")],
     );
-    wait_for("the lead to draw its composer", &tmux, &lead, || {
+    wait_for("the lead to draw its composer", &tmux, &fixture, &lead, || {
         tmux.screen(&lead).contains(COMPOSER).then_some(())
     });
 
     // 1. The lead's own turn files the work — before there is anybody to do
     // it, which is the order the pipeline actually runs in.
     tmux.type_line(&lead, FILE_PROMPT);
-    let filed = wait_for("the lead to file the task", &tmux, &lead, || task(&fixture, &one));
+    let filed =
+        wait_for("the lead to file the task", &tmux, &fixture, &lead, || task(&fixture, &one));
     assert_eq!(filed.subject, SUBJECT);
     assert_eq!(filed.status, TaskStatus::Pending, "a filed task is pending");
     assert!(filed.owner.is_empty(), "and belongs to nobody: {filed:?}");
 
     // 2. A second `ganja`, in a pane of its own: another process, another
     // engine, the same team directory.
-    wait_for("the composer to take the next line", &tmux, &lead, || {
+    wait_for("the composer to take the next line", &tmux, &fixture, &lead, || {
         tmux.screen(&lead).contains(COMPOSER).then_some(())
     });
     tmux.type_line(&lead, &format!("/teammate spawn {MEMBER} --backend ganja"));
-    let member = wait_for("the member record", &tmux, &lead, || {
+    let member = wait_for("the member record", &tmux, &fixture, &lead, || {
         fixture
             .team_file()?
             .member(MEMBER)
@@ -392,7 +290,7 @@ fn a_lead_and_a_pane_teammate_drive_one_task_list_end_to_end() {
             .filter(|member| member.tmux_pane_id.starts_with('%'))
     });
     let pane = member.tmux_pane_id.clone();
-    wait_for("the launch line to reach the pane", &tmux, &lead, || {
+    wait_for("the launch line to reach the pane", &tmux, &fixture, &lead, || {
         (tmux.current_command(&pane) == "ganja").then_some(())
     });
 
@@ -400,7 +298,7 @@ fn a_lead_and_a_pane_teammate_drive_one_task_list_end_to_end() {
     // say so — the owner it wrote, and a comment stamped with the name it
     // claimed under, which is the name its launch line carried and not
     // anything its arguments could have chosen.
-    let done = wait_for("the teammate to finish the task", &tmux, &lead, || {
+    let done = wait_for("the teammate to finish the task", &tmux, &fixture, &lead, || {
         task(&fixture, &one).filter(|task| task.status == TaskStatus::Completed)
     });
     assert_eq!(done.owner, MEMBER, "the claim wrote the teammate's own name: {done:?}");
@@ -410,35 +308,37 @@ fn a_lead_and_a_pane_teammate_drive_one_task_list_end_to_end() {
         "and so did the comment"
     );
     assert_eq!(done.comments[0].text, NOTE);
-    wait_for("the member's own turn to finish on its screen", &tmux, &lead, || {
+    wait_for("the member's own turn to finish on its screen", &tmux, &fixture, &lead, || {
         tmux.screen(&pane).contains(REPLY).then_some(())
     });
 
     // 4. And the lead reads it back through its own `task_list`: the status
     // and the owner another process wrote, on the lead's screen.
-    wait_for("the composer to take the next line", &tmux, &lead, || {
+    wait_for("the composer to take the next line", &tmux, &fixture, &lead, || {
         tmux.screen(&lead).contains(COMPOSER).then_some(())
     });
     tmux.type_line(&lead, LIST_PROMPT);
-    wait_for("the lead's listing to show the finished task", &tmux, &lead, || {
+    wait_for("the lead's listing to show the finished task", &tmux, &fixture, &lead, || {
         let screen = tmux.screen(&lead);
         (screen.contains("[completed]") && screen.contains(MEMBER)).then_some(())
     });
 
     // Both leave cleanly, with nothing left running: the lead asks, the
     // member approves and its pane goes, and then the lead's own does.
-    wait_for("the composer to come back", &tmux, &lead, || {
+    wait_for("the composer to come back", &tmux, &fixture, &lead, || {
         tmux.screen(&lead).contains(COMPOSER).then_some(())
     });
     tmux.type_line(&lead, &format!("/teammate shutdown {MEMBER}"));
-    wait_for("the pane to be killed on the approval", &tmux, &lead, || {
+    wait_for("the pane to be killed on the approval", &tmux, &fixture, &lead, || {
         (!tmux.panes().contains(&pane)).then_some(())
     });
-    wait_for("the composer to come back", &tmux, &lead, || {
+    wait_for("the composer to come back", &tmux, &fixture, &lead, || {
         tmux.screen(&lead).contains(COMPOSER).then_some(())
     });
     tmux.key(&lead, "C-c");
-    wait_for("the lead to leave", &tmux, &lead, || (!tmux.panes().contains(&lead)).then_some(()));
+    wait_for("the lead to leave", &tmux, &fixture, &lead, || {
+        (!tmux.panes().contains(&lead)).then_some(())
+    });
     assert_eq!(tmux.panes().len(), 1, "only the server's first pane is left");
     drop(tmux);
 }

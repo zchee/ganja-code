@@ -1,12 +1,23 @@
-//! A real `ganja` lead in a tmux window of its own, driven from outside.
+//! A real `ganja` lead in a tmux pane of its own, driven from outside.
 //!
-//! Shared by the two pane binaries in this directory (`teammate_permission.rs`,
-//! `teammate_env.rs`), which are the end-to-end half of what
+//! Shared by the pane binaries in this directory (`teammate_permission.rs`,
+//! `teammate_env.rs`, `team_tasks_pane.rs`, `team_continuation_pane.rs`), which
+//! are the end-to-end half of what
 //! `ganja-teammate-local/tests/pane_support` pins with a fake pane child: here **both**
 //! processes are the shipped binary — the lead is the terminal UI running
 //! inside a private tmux server, and the pane is whatever that lead's `/teammate
 //! spawn w1 --backend ganja` split off — and the test reaches them the way a
 //! person would, through `send-keys` and `capture-pane`.
+//!
+//! # Two ways in, and why both
+//!
+//! [`Lead`] is born **as** the server's first window, which is what a drill
+//! wants when the question is about the environment that window was born
+//! from. [`Tmux`] instead starts the server on an idle shell and splits the
+//! lead into a pane of its own, which is what a drill wants when the lead has
+//! to hold something the server does not — its own fake-provider script, so a
+//! pane it later spawns cannot play its conversation. The rest ([`WITHHELD`],
+//! [`lead_env`], [`log_dir`], [`log_text`]) is shared by both shapes.
 //!
 //! # Where the environment goes
 //!
@@ -29,7 +40,7 @@
 
 #![allow(dead_code)]
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -55,6 +66,83 @@ const POLL: Duration = Duration::from_millis(100);
 
 /// The pane teammate every test here spawns.
 pub const TEAMMATE: &str = "w1";
+
+/// What a private server is born **without**, so nothing a pane inherits can
+/// be this developer's rather than the fixture's.
+pub const WITHHELD: &[&str] = &[
+    "GANJA_CONFIG_HOME",
+    "GANJA_CONFIG",
+    "GANJA_MODEL",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_RUNTIME_DIR",
+    "TMUX",
+    "TMUX_PANE",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "OPENROUTER_API_KEY",
+];
+
+/// What a lead's own pane is additionally given (`-e`): where its things are,
+/// and the `script` it plays in place of whatever the server was born holding.
+///
+/// Given to the lead's process alone rather than to the server, which is what
+/// keeps a pane the lead later spawns from inheriting the lead's own
+/// conversation.
+pub fn lead_env(homes: &Homes, script: &Path) -> Vec<(&'static str, String)> {
+    vec![
+        ("GANJA_CONFIG_HOME", homes.config_home().display().to_string()),
+        ("XDG_DATA_HOME", homes.data().display().to_string()),
+        ("XDG_CONFIG_HOME", homes.data().join("config").display().to_string()),
+        ("XDG_CACHE_HOME", homes.data().join("cache").display().to_string()),
+        ("GANJA_FAKE_SCRIPT", script.display().to_string()),
+        // What every other pty drill sets (**D517**): a private server born
+        // from `-f /dev/null` is a terminal whose answer to the kitty query
+        // depends on which tmux the host ships, and the probe blocks up to
+        // two seconds where there is none.
+        ("GANJA_DISABLE_TERM_PROBE", "1".to_owned()),
+    ]
+}
+
+/// Where a session under `homes` traces.
+pub fn log_dir(homes: &Homes) -> PathBuf {
+    homes.data().join("ganja").join("log")
+}
+
+/// Everything traced under `dir` so far, oldest file first — nothing where
+/// there is no log yet, which is every moment before the first session opens
+/// one.
+pub fn log_text(dir: &Path) -> String {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return String::new();
+    };
+    let mut files: Vec<PathBuf> =
+        entries.filter_map(Result::ok).map(|entry| entry.path()).collect();
+    files.sort();
+
+    files.iter().filter_map(|path| std::fs::read_to_string(path).ok()).collect()
+}
+
+/// The last `lines` of what `dir` holds, named and counted, for a wait that
+/// timed out.
+///
+/// Names the directory because the most common way this reads empty is that
+/// nothing ever opened a log there — which is a different failure from a lead
+/// that ran and traced nothing.
+pub fn log_tail(dir: &Path, lines: usize) -> String {
+    let text = log_text(dir);
+    let held: Vec<&str> = text.lines().collect();
+    let kept = held.len().saturating_sub(lines);
+
+    format!(
+        "last {} of {} lines from {}:\n{}",
+        held.len() - kept,
+        held.len(),
+        dir.display(),
+        held[kept..].join("\n")
+    )
+}
 
 /// A private tmux server whose first window is a real `ganja` lead — the
 /// server itself is [`ganja_testkit::tmux`]'s, killed when dropped so a
@@ -211,6 +299,66 @@ impl Lead {
     pub fn global_has(&self, name: &str) -> bool {
         self.server.global_has(name)
     }
+}
+
+/// A private tmux server whose first window is an idle shell, for the drills
+/// that **split** their lead into a pane rather than being born as one.
+///
+/// [`Lead`]'s shape cannot serve them: a lead born as the server's first
+/// window holds exactly what the server holds, and these drills need the lead
+/// to hold a fake-provider script the server does not.
+pub struct Tmux {
+    server: PrivateServer,
+}
+
+impl Tmux {
+    /// Starts the server with `env` on its global environment — what every
+    /// pane it ever makes inherits — and [`WITHHELD`] taken out of it.
+    pub fn start(env: &[(&'static str, String)]) -> Self {
+        require_tmux();
+
+        Self { server: PrivateServer::start(&["sleep", "3600"], WITHHELD, &borrowed(env)) }
+    }
+
+    /// Splits `argv` into a pane of its own under `cwd`, with `env` on that
+    /// process alone, and answers the pane's id.
+    pub fn split(&self, cwd: &Path, env: &[(&'static str, String)], argv: &[&str]) -> String {
+        self.server.split(Some(cwd), &borrowed(env), argv)
+    }
+
+    /// The live pane ids.
+    pub fn panes(&self) -> Vec<String> {
+        self.server.panes()
+    }
+
+    /// The name of the process in `pane`'s foreground, as tmux sees it.
+    pub fn current_command(&self, pane: &str) -> String {
+        self.server
+            .run(&["display-message", "-p", "-t", pane, "#{pane_current_command}"])
+            .trim()
+            .to_owned()
+    }
+
+    /// What `pane` shows right now.
+    pub fn screen(&self, pane: &str) -> String {
+        self.server.run(&["capture-pane", "-p", "-t", pane])
+    }
+
+    /// Types `text` into `pane` literally, then Enter.
+    pub fn type_line(&self, pane: &str, text: &str) {
+        self.server.run(&["send-keys", "-t", pane, "-l", "--", text]);
+        self.server.run(&["send-keys", "-t", pane, "Enter"]);
+    }
+
+    /// Presses one key in `pane`.
+    pub fn key(&self, pane: &str, name: &str) {
+        self.server.run(&["send-keys", "-t", pane, name]);
+    }
+}
+
+/// `env`'s values borrowed, which is the shape [`PrivateServer`] takes.
+fn borrowed<'a>(env: &'a [(&'static str, String)]) -> Vec<(&'static str, &'a str)> {
+    env.iter().map(|(name, value)| (*name, value.as_str())).collect()
 }
 
 /// The command line of the process `pid`, as `ps(1)` shows it to everybody.
