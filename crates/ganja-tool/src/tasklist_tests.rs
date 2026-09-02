@@ -4,8 +4,9 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use super::{
-    Change, Comment, DELETE_WITH_CHANGES, Draft, EMPTY, NO_LIST, Owner, Record, Status, Summary,
-    TaskCreateTool, TaskFailure, TaskGetTool, TaskList, TaskListTool, TaskUpdateTool, UNOWNED,
+    Change, Comment, DELETE_WITH_CHANGES, Draft, EMPTY, MAX_COUNTERPARTS, NO_LIST, Owner, Record,
+    Status, Summary, TaskCreateTool, TaskFailure, TaskGetTool, TaskList, TaskListTool,
+    TaskUpdateTool, UNOWNED, UPDATE_DESCRIPTION,
 };
 use crate::{Tool as _, ToolCtx, ToolError, ToolOutput};
 
@@ -581,4 +582,17 @@ fn an_unowned_task_is_listed_in_words() {
     let line = super::summary_line("7", "port", Status::Pending, "", &[]);
 
     assert_eq!(line, format!("7 [pending] {UNOWNED} — port"));
+}
+
+/// The cap the model is told about is spelled in words, and a `&str` const
+/// cannot format a number — so the prose and the constant are pinned to each
+/// other here rather than one being derived from the other. A change to the
+/// cap reddens this until the sentence the model reads moves with it.
+#[test]
+fn the_description_spells_the_cap_this_module_declares() {
+    assert_eq!(MAX_COUNTERPARTS, 8, "the sentence below spells this number in words");
+    assert!(
+        UPDATE_DESCRIPTION.contains("at most eight other tasks"),
+        "and it is the number `task_update` names: {UPDATE_DESCRIPTION}",
+    );
 }

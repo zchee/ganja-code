@@ -109,6 +109,23 @@ A new task is pending and belongs to nobody, and its id is issued in order and \
 never reused. Give it an owner, wire what it waits on, or move it along with \
 task_update.";
 
+/// How many other tasks one `task_update` call may wire, which is the number
+/// `UPDATE_DESCRIPTION` spells in words.
+///
+/// A **mirror**, never the bound itself: the cap belongs to the store, where
+/// the documents and their locks are, and this crate's internal dependency
+/// list is asserted to be exactly `ganja-permission`, so it may not name that
+/// constant to read it. What keeps the two spellings one decision is
+/// `ganja-core`, the crate that sees both: its seam tests assert this equals
+/// `ganja_team::task::MAX_COUNTERPARTS` and that the seam accepts eight
+/// counterparts and refuses nine, so raising one number alone reddens.
+///
+/// The description spells it in words and cannot read this constant — a
+/// `&str` const cannot format one without a crate this workspace does not
+/// have — so the prose is pinned to this number by a test of this module's
+/// own rather than derived from it.
+pub const MAX_COUNTERPARTS: usize = 8;
+
 /// What the model is told `task_update` is for.
 const UPDATE_DESCRIPTION: &str = "\
 Change one task on the team's shared list. This is the only door that changes \

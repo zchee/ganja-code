@@ -1,7 +1,10 @@
-use ganja_team::task::{REFUSED_ALREADY_OWNED, REFUSED_ID_SHAPE, REFUSED_NO_SUCH_TASK, Store};
+use ganja_team::task::{
+    MAX_COUNTERPARTS, REFUSED_ALREADY_OWNED, REFUSED_ID_SHAPE, REFUSED_NO_SUCH_TASK,
+    REFUSED_NOT_A_DOCUMENT, REFUSED_TOO_MANY_COUNTERPARTS, Store, TaskId,
+};
 use ganja_tool::tasklist::{Change, Draft, Owner, Status, TaskList as _};
 
-use super::TeamTasks;
+use super::{TeamTasks, UNREACHABLE};
 
 /// A list in a directory that goes away with the test, acted on as `identity`.
 fn list(identity: &str) -> (tempfile::TempDir, TeamTasks) {
@@ -241,6 +244,51 @@ async fn blockers_are_added_and_listed_as_the_ids_they_are() {
     assert_eq!(listed[1].blocked_by, vec![first], "and what holds it up is named");
 }
 
+/// Every dependency is recorded on **both** tasks, so the end a call did not
+/// name carries the edge too. Reading only the named end is what would let a
+/// listing go on calling the other task free.
+#[tokio::test]
+async fn an_added_blocker_is_carried_by_the_task_it_blocks_as_well() {
+    let (_home, tasks) = list("team-lead");
+    let first = filed(&tasks, "port the parser").await;
+    let second = filed(&tasks, "wire the tests").await;
+
+    tasks
+        .update(&second, Change { add_blocked_by: vec![first.clone()], ..Change::default() })
+        .await
+        .expect("a blocker is added");
+
+    let far = tasks.get(&first).await.expect("the end the call did not name reads");
+    assert_eq!(far.blocks, vec![second.clone()], "and it holds the other task up");
+    assert!(far.blocked_by.is_empty(), "in the one direction that was asked for");
+
+    let named = tasks.get(&second).await.expect("the end the call named reads");
+    assert_eq!(named.blocked_by, vec![first]);
+    assert!(named.blocks.is_empty());
+}
+
+/// The mirror of it: the other list wires the same edge from the other end,
+/// and lands on both tasks the same way.
+#[tokio::test]
+async fn an_added_block_is_carried_by_the_task_it_holds_up_as_well() {
+    let (_home, tasks) = list("team-lead");
+    let first = filed(&tasks, "port the parser").await;
+    let second = filed(&tasks, "wire the tests").await;
+
+    tasks
+        .update(&first, Change { add_blocks: vec![second.clone()], ..Change::default() })
+        .await
+        .expect("a dependent is added");
+
+    let far = tasks.get(&second).await.expect("the end the call did not name reads");
+    assert_eq!(far.blocked_by, vec![first.clone()], "and it waits on the other task");
+    assert!(far.blocks.is_empty(), "in the one direction that was asked for");
+
+    let named = tasks.get(&first).await.expect("the end the call named reads");
+    assert_eq!(named.blocks, vec![second]);
+    assert!(named.blocked_by.is_empty());
+}
+
 #[tokio::test]
 async fn a_delete_removes_the_task_and_leaves_its_id_spent() {
     let (_home, tasks) = list("team-lead");
@@ -315,6 +363,76 @@ async fn a_blocker_that_is_not_an_id_refuses_before_a_claim_that_would_have_won(
     assert!(
         tasks.get(&id).await.expect("the task is still there").owner.is_empty(),
         "and the claim that travelled with it took nothing"
+    );
+}
+
+/// A name in the tasks directory is not yet a document — the directory is one
+/// another process of this user's may write into, which is what makes the
+/// list shared — and a name that is there and is not a task is something the
+/// model can go and look at. So the seam renders the store's own sentence
+/// rather than filing it under machinery nobody can act on.
+#[tokio::test]
+async fn a_name_that_is_no_document_is_refused_in_the_stores_own_words() {
+    let (_home, tasks) = list("team-lead");
+    filed(&tasks, "port the parser").await;
+
+    // A directory wearing the next id's name. What it is matters less than
+    // that it is not a task: every other plantable name refuses the same way.
+    let planted = TaskId::parse("2").expect("a valid id");
+    std::fs::create_dir(tasks.store.path_of(&planted)).expect("a directory is plantable");
+
+    let refused = tasks.get("2").await.expect_err("a directory is no task");
+    assert!(refused.reason.contains(REFUSED_NOT_A_DOCUMENT), "{}", refused.reason);
+    assert!(
+        !refused.reason.contains(UNREACHABLE),
+        "and it is the store's refusal rather than machinery: {}",
+        refused.reason,
+    );
+}
+
+/// The cap on one call's counterparts is the store's, and what the model is
+/// told about it is `ganja-tool`'s own spelling of the same number: that
+/// crate's internal dependency list is asserted to be exactly
+/// `ganja-permission`, so it cannot name the store's constant to read it.
+/// This crate sees both, so it is where the two are held to one decision —
+/// as an equality, and as the behavior the equality is about.
+#[tokio::test]
+async fn the_cap_the_model_is_told_about_is_the_one_the_store_refuses_past() {
+    assert_eq!(
+        ganja_tool::tasklist::MAX_COUNTERPARTS,
+        MAX_COUNTERPARTS,
+        "the number `task_update`'s description spells is the store's own",
+    );
+
+    let (_home, tasks) = list("team-lead");
+    let id = filed(&tasks, "port the parser").await;
+    let mut counterparts = Vec::with_capacity(MAX_COUNTERPARTS + 1);
+    for nth in 1..=MAX_COUNTERPARTS + 1 {
+        counterparts.push(filed(&tasks, &format!("wire the tests {nth}")).await);
+    }
+
+    let wired = tasks
+        .update(
+            &id,
+            Change { add_blocks: counterparts[..MAX_COUNTERPARTS].to_vec(), ..Change::default() },
+        )
+        .await
+        .expect("the cap is what a call may name, not what it must stay under");
+    assert_eq!(wired.blocks.len(), MAX_COUNTERPARTS);
+
+    let refused = tasks
+        .update(&id, Change { add_blocks: counterparts.clone(), ..Change::default() })
+        .await
+        .expect_err("one past the cap is past the cap");
+    assert!(refused.reason.contains(REFUSED_TOO_MANY_COUNTERPARTS), "{}", refused.reason);
+    // The store's own rendering, whole, rather than each digit on its own:
+    // a message that merely carried a `9` somewhere would pass the latter.
+    assert!(
+        refused
+            .reason
+            .contains(&format!("{} named, {MAX_COUNTERPARTS} at most", counterparts.len())),
+        "and it names how many were offered and how many a call may name: {}",
+        refused.reason,
     );
 }
 
