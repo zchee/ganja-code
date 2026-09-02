@@ -16,7 +16,7 @@ use std::env;
 
 use futures::StreamExt as _;
 use ganja_core::catalog;
-use ganja_core::protocol::{FinishReason, Message, Usage};
+use ganja_core::protocol::{FinishReason, Message, Part, Usage};
 use ganja_core::provider::retry::MAX_ATTEMPTS;
 use ganja_core::provider::{
     AnthropicProvider, ChatRequest, OpenAiProvider, OpencodeProvider, Provider, ProviderEvent,
@@ -111,6 +111,85 @@ async fn anthropic_answers_a_live_prompt() {
     });
 
     smoke(&AnthropicProvider::new(key).expect("a client builds"), &model).await;
+}
+
+/// The shape this build actually sends, against the vendor that receives it.
+///
+/// A turn whose tool results are followed by a steer drained at the step
+/// boundary — and, since the team guards landed, by a request-only block
+/// behind that — reaches the Messages API as **two or three `user` turns in a
+/// row**, because `provider::anthropic`'s merge deliberately stops at the edge
+/// of each canonical message. The wire's own suite pins that shape offline;
+/// what it cannot pin is that the vendor takes it, and a doc sentence saying
+/// consecutive same-role turns are "combined into a single turn" is a promise
+/// rather than a measurement.
+///
+/// Observed 2026-09-02 on `claude-opus-4-8` (the catalog's default): the
+/// request was accepted, the turn ended `Completed`, and the reply was exactly
+/// `"alpha bravo"` — **both** user turns, the fact stated in the second-to-last
+/// one and the instruction given in the last. That is combining doing what the
+/// documentation says rather than the last turn winning, which is the half a
+/// refusal-or-acceptance check alone would not have settled. A failure here
+/// means the vendor changed the rule, not that this build started sending a
+/// new shape.
+#[tokio::test]
+#[ignore = "talks to Anthropic; needs GANJA_LIVE_TEST=1 and ANTHROPIC_API_KEY"]
+async fn anthropic_accepts_the_adjacent_user_turns_a_steer_produces() {
+    let Some(key) = key("ANTHROPIC_API_KEY") else {
+        return;
+    };
+    let model = env::var("GANJA_MODEL").ok().unwrap_or_else(|| {
+        catalog::default_model("anthropic").expect("the catalog has a default").to_owned()
+    });
+    let provider = AnthropicProvider::new(key).expect("a client builds");
+
+    // [user, assistant, user, user] — the last two adjacent on purpose, each
+    // carrying one half of what a correct answer needs, so a reply holding
+    // both is evidence the earlier one was combined rather than dropped.
+    let mut assistant = Message::assistant(&model);
+    assistant.parts.push(Part::text("Noted."));
+    let events: Vec<ProviderEvent> = provider
+        .stream(
+            ChatRequest {
+                effort_options: Default::default(),
+                model: model.clone(),
+                system: Some("Answer with the two words and nothing else.".to_owned()),
+                messages: vec![
+                    Message::user("My first word is alpha."),
+                    assistant,
+                    Message::user("My second word is bravo."),
+                    Message::user("Reply with both of my words, lowercase, space-separated."),
+                ],
+                tools: Vec::new(),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("the vendor accepted a transcript whose user turns do not alternate")
+        .collect()
+        .await;
+
+    assert!(
+        !events.iter().any(|event| matches!(event, ProviderEvent::Failed(_))),
+        "adjacent user turns were refused mid-stream: {events:?}"
+    );
+    assert_eq!(
+        events.last(),
+        Some(&ProviderEvent::Finish(FinishReason::Completed)),
+        "a turn carrying adjacent user turns should still end completed: {events:?}"
+    );
+
+    // Printed rather than asserted, for this file's standing reason: what the
+    // wire did is the claim under test, and what the model chose to say is
+    // not. It is the evidence recorded in the doc above.
+    let text: String = events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderEvent::TextDelta(delta) => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    eprintln!("{model} answered {text:?} to two adjacent user turns");
 }
 
 #[tokio::test]

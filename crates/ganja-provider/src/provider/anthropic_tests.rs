@@ -872,10 +872,18 @@ fn a_turn_without_step_markers_is_one_step() {
     );
 }
 
-/// Splitting a turn must never produce two messages in a row with the same
-/// role: this API refuses a transcript whose roles do not alternate. Steps
-/// alternate on their own whenever each ends in calls, so what is left is
-/// the interrupted shape — a step that said something and called nothing,
+/// Splitting a turn must never produce two messages where the transcript
+/// held one — not because the API would refuse the result, but because the
+/// split is this port's own rendering of one message and may not invent a
+/// boundary the transcript never had. The API documents the opposite of a
+/// refusal: "Consecutive `user` or `assistant` turns in your request will be
+/// combined into a single turn", so an unmerged split would be *accepted*
+/// and silently undone by the vendor — which is exactly the outcome worth
+/// not depending on, since what this build sends should say what the
+/// transcript holds rather than lean on somebody else to repair it.
+///
+/// Steps alternate on their own whenever each ends in calls, so what is left
+/// is the interrupted shape — a step that said something and called nothing,
 /// with another step behind it — which was one message before the split and
 /// stays one after it.
 #[test]
@@ -908,6 +916,81 @@ fn two_steps_that_called_nothing_stay_one_message() {
             // And a message of its own is still a message of its own:
             // merging stops at the edge of the one it started in.
             {"role": "user", "content": "thanks"},
+        ]),
+        "got {body}"
+    );
+}
+
+/// The other half of that rule, and the shape this build actually sends: two
+/// canonical user messages in a row reach the wire as two `user` turns in a
+/// row, deliberately.
+///
+/// It is not a hypothetical. A step's tool results are already a synthetic
+/// user turn, a steer drained at the step boundary is a canonical user
+/// message behind it, and since the team guards landed there is a
+/// request-only block behind *that* — three `user` turns, sent as three.
+/// Merging them here would be this port editing the transcript's own message
+/// boundaries to look tidier on the wire, and the API asks for no such
+/// favour: it documents that "Consecutive `user` or `assistant` turns in your
+/// request will be combined into a single turn", and a live probe
+/// (`ganja-core/tests/live.rs`'s
+/// `anthropic_accepts_the_adjacent_user_turns_a_steer_produces`) measured it
+/// on 2026-09-02 — accepted, completed, and the reply carrying both adjacent
+/// user turns rather than only the last.
+#[test]
+fn adjacent_user_messages_are_sent_as_the_adjacent_turns_they_are() {
+    let mut assistant = Message::assistant("claude-test");
+    assistant.parts.push(tool_part(
+        "toolu_01Read",
+        "read",
+        ToolState::Completed {
+            input: json!({"filePath": "src/main.rs"}),
+            output: "fn main() {}".to_owned(),
+            title: "src/main.rs".to_owned(),
+            metadata: json!({}),
+            started: 1,
+            completed: 2,
+        },
+    ));
+
+    let request = ChatRequest {
+        effort_options: Default::default(),
+        model: "claude-test".to_owned(),
+        system: None,
+        messages: vec![
+            Message::user("read it"),
+            assistant,
+            // What `drain_steers` took on at the step boundary, and behind it
+            // the guards' block, which is a message of its own for the reason
+            // `session.rs` states: it answers what the assistant just did.
+            Message::user("actually, check the tests too"),
+            Message::user("<continue>The task list still holds open work.</continue>"),
+        ],
+        tools: Vec::new(),
+    };
+
+    let body =
+        serde_json::to_value(Body::new(&request, DEFAULT_MAX_TOKENS)).expect("the body serializes");
+
+    assert_eq!(
+        body["messages"],
+        json!([
+            {"role": "user", "content": "read it"},
+            {"role": "assistant", "content": [{
+                "type": "tool_use",
+                "id": "toolu_01Read",
+                "name": "read",
+                "input": {"filePath": "src/main.rs"},
+            }]},
+            // Three user turns, unmerged: the call's answer, then the steer,
+            // then the guards' block — each the message the transcript holds.
+            {"role": "user", "content": [{
+                "type": "tool_result",
+                "tool_use_id": "toolu_01Read",
+                "content": "fn main() {}",
+            }]},
+            {"role": "user", "content": "actually, check the tests too"},
+            {"role": "user", "content": "<continue>The task list still holds open work.</continue>"},
         ]),
         "got {body}"
     );
