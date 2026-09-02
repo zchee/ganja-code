@@ -111,11 +111,13 @@ const TEAM_DIR: &str = "team";
 /// What is written where when neither directory can be resolved — a machine
 /// with no home for [`crate::project::data_home`] to answer from.
 ///
-/// The template says the two paths are absolute and already correct, so the
-/// honest fallback is to say what the shape is rather than to fill in a
-/// relative path the model would then create in the worktree. A session in
-/// that state has no data home to write a session row into either, so this is
-/// unreachable short of a machine ganja cannot store anything on.
+/// The template asks for the two paths to be taken exactly as written rather
+/// than worked out — an instruction true of a resolved path and of this shape
+/// alike, which is why it calls them neither absolute nor already resolved:
+/// this value is neither. Naming the shape is the honest fallback; filling in a
+/// relative path is what the model would then create in the worktree. A
+/// session in that state has no data home to write a session row into either,
+/// so this is unreachable short of a machine ganja cannot store anything on.
 const UNRESOLVED_HOME: &str = "<data home>/ganja/project/<slug>/team";
 
 /// The placeholder that stands for everything the user typed, untokenized.
@@ -163,6 +165,13 @@ pub struct Misdirected {
 /// w1", "who is on the team" — is left to the template, which asks the model to
 /// notice the same thing in prose. What this door buys is the exact spellings:
 /// those cost no round trip and no turn.
+///
+/// **Case-sensitive**, and by the same argument: `/team List` is matched
+/// against the words `/teammate` really parses, which it spells in lower case,
+/// so respelling one here would be this door asserting a grammar the command
+/// it redirects to does not have. A capitalised roster line therefore lands in
+/// the template like any other phrasing and is answered there, in prose, for
+/// one round trip.
 fn misdirected(arguments: &str) -> Option<Misdirected> {
     let trimmed = arguments.trim();
     let first = trimmed.split_whitespace().next()?;

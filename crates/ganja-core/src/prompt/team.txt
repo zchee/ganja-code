@@ -34,12 +34,10 @@ $ARGUMENTS
 2. **Roster management wearing this command's old spelling** — the arguments
    read as a request to start, stop or enumerate a single teammate rather than
    to run a task: "start a teammate called w1", "who is on the team", "stop
-   w2". The bare spellings `spawn …`, `shutdown …` and `list` never reach you
-   at all — those are refused before this text is filled in, with the corrected
-   line — so what lands here is everything else that means the same thing. Tell
-   the user that roster management moved to `/teammate` and show them the line
-   they meant, with `/teammate` in place of `/team`. Stop there. Do not run a
-   pipeline for an argument list that was never a task description.
+   w2". Tell the user that roster management moved to `/teammate` and show
+   them the line they meant, with `/teammate` in place of `/team`. Stop there.
+   Do not run a pipeline for an argument list that was never a task
+   description.
 
 3. **A task** — anything else. Parse it as
    `[N[:agent]] [--backend <surface>] <task>` and run the pipeline below.
@@ -50,7 +48,8 @@ $ARGUMENTS
 
 ## Where this pipeline keeps its state
 
-Two directories, both absolute, both already correct for this checkout:
+Two directories — take them exactly as they are written here rather than
+working one out for yourself:
 
 - Pipeline state: `${state}`
   One file per lead session. This session's is `${session}.json`, already
@@ -187,8 +186,14 @@ When every real task is `completed` or has been terminally failed with its
 reason recorded:
 
 1. Send each member a `shutdown_request` frame through `send_message`.
-2. Wait for `shutdown_approved`, and for the `teammate_terminated` that
-   follows.
+2. Wait for each member's `shutdown_approved`. That is the whole settlement,
+   and the only frame a member sends you. What arrives beside it depends on
+   the surface: a `codex`, `grok` or `agy` member that exits mails you an
+   ordinary message saying so, while a `ganja` or `claude` pane that goes away
+   sends you nothing at all. So bound this wait rather than holding it open: a
+   member that has stopped answering is a member to stop waiting on. When one
+   does, reconcile with `task_list`, treat whatever it still holds
+   `in_progress` as reassignable, and go on to step 3.
 3. Delete the state file.
 4. Report to the user: what was built, what was verified and how, and anything
    left undone.
@@ -200,7 +205,7 @@ what makes the next run a resume rather than a restart.
 
     team-plan     the lead itself, with explore for read-only scouting
     team-prd      analyst    (critic to challenge the scope)
-    team-exec     general    (debugger for build and type errors)
+    team-exec     executor   (debugger for build and type errors)
     team-verify   verifier
     team-fix      executor, or debugger when the cause is unknown
 

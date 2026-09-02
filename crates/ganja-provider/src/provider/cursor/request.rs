@@ -305,10 +305,24 @@ fn blob_key(id: &[u8]) -> String {
 /// A run rather than one message, because the engine adds to a turn by
 /// appending user messages rather than by editing the last one — a steer
 /// drained at a step boundary, and the team guards' request-only block after
-/// a reply (D547) — and a wire that sent only the newest of them would send
-/// that block without the prompt it is about, which is what this did until
-/// 2026-09-02. The reply the run follows is the boundary: what came before it
-/// is history this wire does not carry yet.
+/// a reply (D547) — and a wire that sent only the newest of them would answer
+/// a guard block while dropping the steer beside it, which is what this did
+/// until 2026-09-02. The reply the run follows is the boundary: what came
+/// before it is history this wire does not carry yet.
+///
+/// **That boundary is the last reply and not the turn, and two shapes pay for
+/// it.** A continuation block is emitted on the arm where nothing was steered,
+/// so the request reads `[prompt, reply, block]` and the run is the block
+/// alone: it still reaches this wire without the prompt it is about. And a
+/// finished turn that took a steer leaves the steer in history *after* its
+/// reply, so the next turn's request reads `[prompt, reply, steer, prompt2]`
+/// and the run re-sends a consumed steer as part of the new prompt. Both want
+/// a turn boundary, and `ChatRequest` carries none: every user message here is
+/// a `Message::user`, ids and timestamps ascend across the boundary exactly as
+/// they do within it, and the two shapes are indistinguishable from
+/// `messages`. Closing them is a field on the request naming where this turn
+/// began — a change that reaches every wire, so it is named here rather than
+/// guessed at.
 ///
 /// Empty when the conversation holds no user message at all, which is not a
 /// request the engine builds — sending the empty message is more honest than

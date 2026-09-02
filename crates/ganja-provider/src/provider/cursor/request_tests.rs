@@ -284,6 +284,35 @@ fn the_newest_user_turn_is_every_user_message_since_the_last_reply() {
     );
 }
 
+/// And the price of that boundary, pinned as what it is rather than left to be
+/// discovered: the run is bounded by the last **reply**, not by the turn, so a
+/// steer a finished turn consumed is carried into the next turn's text.
+///
+/// The engine appends a consumed steer to history *after* the assistant it
+/// interrupted, so a turn that took one ends as `[prompt, reply, steer]`; the
+/// next turn pushes its own prompt and this wire sees `[prompt, reply, steer,
+/// prompt2]`. That is byte-identical to the within-turn shape above — every
+/// user message is a `Message::user`, and ids and timestamps ascend across a
+/// turn boundary exactly as they do within one — so nothing in `ChatRequest`
+/// distinguishes them, and this asserts what the wire really sends today. The
+/// fix is a turn marker on the request, which reaches every wire; the day it
+/// lands, this expectation is the thing that moves.
+#[test]
+fn a_finished_turns_steer_is_still_carried_into_the_next_turns_text() {
+    let across_turns = [
+        Message::user("write the config parser"),
+        Message::assistant("gpt-5.3-codex"),
+        Message::user("actually make it lenient about unknown keys"),
+        Message::user("now add tests"),
+    ];
+
+    assert_eq!(
+        newest_user_text(&across_turns),
+        "actually make it lenient about unknown keys\n\nnow add tests",
+        "the previous turn's steer rides along with the new prompt",
+    );
+}
+
 #[test]
 fn a_minted_id_is_a_v4_uuid_and_two_are_two() {
     let id = fresh_id().expect("entropy is available");

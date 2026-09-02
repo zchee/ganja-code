@@ -13,11 +13,27 @@ fn the_engine_refusals_map_to_their_statuses_and_nothing_else_moves() {
     });
     assert_eq!(not_found.status(), StatusCode::NOT_FOUND);
 
-    let refused = ApiError::from(EngineError::HookRefused {
-        event: "UserPromptSubmit",
-        reason: "not while the release is out".to_owned(),
-    });
-    assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+    // The client-fault group: a refusal the caller can act on, rather than a
+    // fault of the server carrying out its own config.
+    for refused in [
+        EngineError::HookRefused {
+            event: "UserPromptSubmit",
+            reason: "not while the release is out".to_owned(),
+        },
+        // `/team` given one of `/teammate`'s own subcommands (**D547**, bead
+        // 2m46): refused before a turn started, and the sentence carries the
+        // line that was meant, which is what makes a 400 body worth reading.
+        EngineError::MisdirectedCommand { meant: "/teammate list".to_owned() },
+    ] {
+        let mapped = ApiError::from(refused);
+        assert_eq!(mapped.status(), StatusCode::BAD_REQUEST, "{mapped:?}");
+    }
+    let misdirected =
+        ApiError::from(EngineError::MisdirectedCommand { meant: "/teammate list".to_owned() });
+    assert!(
+        misdirected.message().contains("/teammate list"),
+        "the corrected line reaches the caller: {misdirected:?}",
+    );
 
     let busy = ApiError::from(EngineError::Busy);
     assert_eq!(busy.status(), StatusCode::CONFLICT);

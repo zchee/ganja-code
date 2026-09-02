@@ -60,15 +60,27 @@ fn the_builtins_are_the_four_upstream_agents_this_build_can_run_and_ganjas_own_f
 /// belong to `/team`'s template, so a copy here would be a second place for
 /// them to drift — and an agent spawned outside a team would be reading
 /// instructions about a team it is not in.
+///
+/// Each opening is named, rather than checked for a shared prefix: `"You are
+/// a"` is a prefix of all five *and* of each other's, so a table that wired
+/// `executor.txt` into `critic` would pass it. What the roster promises is
+/// that a name reaches the prompt for that role, and only the sentence that
+/// role opens with can say so.
 #[test]
 fn the_five_team_roles_carry_their_own_prompts_and_no_protocol() {
     let registry = registry(&Config::default());
 
-    for name in [ANALYST, EXECUTOR, VERIFIER, CRITIC, DEBUGGER] {
+    for (name, opening) in [
+        (ANALYST, "You are a requirements analyst."),
+        (EXECUTOR, "You are an implementer."),
+        (VERIFIER, "You are a verifier."),
+        (CRITIC, "You are a critic."),
+        (DEBUGGER, "You are a debugger."),
+    ] {
         let agent = registry.get(name).unwrap_or_else(|| panic!("{name} is builtin"));
         let prompt = agent.prompt.as_deref().unwrap_or_else(|| panic!("{name} has a prompt"));
 
-        assert!(prompt.starts_with("You are a"), "{name}: {prompt}");
+        assert!(prompt.starts_with(opening), "{name} opens as {opening:?}: {prompt}");
         assert!(
             agent.description.as_deref().is_some_and(|line| !line.is_empty()),
             "{name} is offered to the task tool by a line the model reads",

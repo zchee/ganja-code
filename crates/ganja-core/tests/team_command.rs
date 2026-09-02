@@ -76,14 +76,13 @@ async fn expand(arguments: &str) -> String {
     expand_as(arguments, SESSION).await
 }
 
-/// The same, from a session named `session`.
+/// The context an expansion here runs under.
 ///
 /// The template names no `@file` and runs no ``!`command` ``, so expansion is
-/// pure text substitution and the context only has to be somewhere real.
-async fn expand_as(arguments: &str, session: &str) -> String {
-    let registry = roster();
-    let team = registry.get("team").expect("`/team` is a builtin");
-    let ctx = ToolCtx {
+/// pure text substitution: every field below is what "somewhere real, holding
+/// nothing" spells, and no test in this binary varies one of them.
+fn ctx() -> ToolCtx {
+    ToolCtx {
         cwd: std::env::temp_dir(),
         cancel: tokio_util::sync::CancellationToken::new(),
         call_id: String::new(),
@@ -95,30 +94,23 @@ async fn expand_as(arguments: &str, session: &str) -> String {
         ask: None,
         switch: None,
         jobs: None,
-    };
+    }
+}
 
-    team.expand(arguments, session, &ctx).await.expect("these arguments expand").prompt
+/// The same, from a session named `session`.
+async fn expand_as(arguments: &str, session: &str) -> String {
+    let registry = roster();
+    let team = registry.get("team").expect("`/team` is a builtin");
+
+    team.expand(arguments, session, &ctx()).await.expect("these arguments expand").prompt
 }
 
 /// What `/team` refuses `arguments` with, for the lines it never expands.
 async fn refusal(arguments: &str) -> command::Misdirected {
     let registry = roster();
     let team = registry.get("team").expect("`/team` is a builtin");
-    let ctx = ToolCtx {
-        cwd: std::env::temp_dir(),
-        cancel: tokio_util::sync::CancellationToken::new(),
-        call_id: String::new(),
-        files: Arc::new(FileTimes::default()),
-        credentials: Credentials::Unguarded,
-        spawn: None,
-        postbox: None,
-        tasks: None,
-        ask: None,
-        switch: None,
-        jobs: None,
-    };
 
-    team.expand(arguments, SESSION, &ctx)
+    team.expand(arguments, SESSION, &ctx())
         .await
         .expect_err("a roster line is refused rather than expanded")
 }
@@ -222,6 +214,48 @@ async fn legacy_roster_arguments_are_refused_before_a_turn_starts() {
     }
 }
 
+/// And a **file** cannot take the name away from it, which is the other half
+/// of that gate and the opposite outcome to the config tier's below.
+///
+/// `Registry::build` skips a command file whose name is a builtin's, with a
+/// warning naming the file — so a `team.md` in either commands home leaves the
+/// builtin, its `builtin` flag and therefore its refusal exactly where they
+/// were. Worth its own test because the two tiers resolve the same collision
+/// in opposite directions: a config entry *replaces* and the gate goes with
+/// the name, a file is *dropped* and the gate stays. Only `/init` was covered
+/// (`tests/command_files.rs`), and a change that let a file win would have
+/// disabled bead 2m46's door silently.
+///
+/// Planted into the config home this binary already pins, which its tests
+/// share: a skipped file changes no other roster here, and the day one stopped
+/// being skipped every test in this binary reddening is the honest report.
+#[tokio::test]
+async fn a_command_file_named_after_the_builtin_leaves_its_gate_alone() {
+    // Read back out of the variable `pin_homes` set, rather than rebuilt from
+    // the same arithmetic, so the plant cannot land in a directory the loader
+    // is not reading.
+    pin_homes();
+    let config_home =
+        PathBuf::from(std::env::var_os(CONFIG_HOME_ENV).expect("`pin_homes` set the config home"));
+    ganja_testkit::plant(&config_home, "commands/team.md", "run my own team playbook\n");
+
+    let registry = roster();
+    let team = registry.get("team").expect("the builtin survives a file wearing its name");
+
+    assert!(team.builtin, "the file was skipped rather than layered over the builtin");
+    assert!(team.source.is_none(), "and the surviving definition is not that file");
+    assert!(
+        !team.template.contains("run my own team playbook"),
+        "the builtin's own text is what expands: {}",
+        team.template,
+    );
+    assert_eq!(
+        refusal("list").await.meant,
+        "/teammate list",
+        "so the roster spellings are still refused before a turn starts",
+    );
+}
+
 /// And it is refused on behalf of **this build's** `/team`, never on behalf of
 /// the name.
 ///
@@ -248,23 +282,10 @@ async fn a_project_that_owns_the_team_name_keeps_the_roster_spellings() {
         command::Registry::build(&Config { command, ..Config::default() }, Path::new(WORKTREE));
     let team = registry.get("team").expect("the config entry took the name");
     assert!(!team.builtin, "the builtin was replaced rather than layered under");
-    let ctx = ToolCtx {
-        cwd: std::env::temp_dir(),
-        cancel: tokio_util::sync::CancellationToken::new(),
-        call_id: String::new(),
-        files: Arc::new(FileTimes::default()),
-        credentials: Credentials::Unguarded,
-        spawn: None,
-        postbox: None,
-        tasks: None,
-        ask: None,
-        switch: None,
-        jobs: None,
-    };
 
     for typed in ["spawn w1", "shutdown w2", "list"] {
         let expanded = team
-            .expand(typed, SESSION, &ctx)
+            .expand(typed, SESSION, &ctx())
             .await
             .unwrap_or_else(|refused| panic!("`/team {typed}` is the project's own: {refused:?}"))
             .prompt;
@@ -344,6 +365,27 @@ async fn the_text_carries_the_tools_the_pipeline_actually_drives() {
     assert!(
         expanded.contains("shutdown_request"),
         "and shut down through the frame that already exists: {expanded}",
+    );
+    // And through the only settlement that travels member→lead. The plan this
+    // template came from told the lead to wait for `teammate_terminated` too,
+    // which `teammate.rs` documents as the lead's word to a member and which
+    // no path in this workspace originates in either direction: a step waiting
+    // for it waits forever. Named as an absence rather than fixed once,
+    // because a harness-only frame is exactly what a later edit reaches for
+    // when it wants to say "and then it really went away".
+    assert!(
+        !expanded.contains("teammate_terminated"),
+        "the lead is never told to wait for a frame nothing sends it: {expanded}",
+    );
+    // And the positive half of the same correction. A `ganja` or `claude`
+    // pane's exit is mailed nowhere — `pane.rs` posts it on the registry
+    // channel, which reaches the person's status bar and never the model — so
+    // the only honest instruction is a bounded wait. Pinned on the words that
+    // carry it, because a text that says only what does *not* arrive leaves
+    // the lead holding the wait open.
+    assert!(
+        expanded.contains("stop waiting"),
+        "a member that stopped answering is one to stop waiting on: {expanded}",
     );
     assert!(
         expanded.contains("idle_notification"),
