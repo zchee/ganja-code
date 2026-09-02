@@ -1,14 +1,15 @@
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde_json::json;
 
 use super::{
-    Change, Comment, DELETE_WITH_CHANGES, Draft, EMPTY, MAX_COUNTERPARTS, NO_LIST, Owner, Record,
-    Status, Summary, TaskCreateTool, TaskFailure, TaskGetTool, TaskList, TaskListTool,
-    TaskUpdateTool, UNOWNED, UPDATE_DESCRIPTION,
+    CREATE_DESCRIPTION, Change, Comment, DELETE_WITH_CHANGES, Draft, EMPTY, GET_DESCRIPTION,
+    MAX_COUNTERPARTS, NO_LIST, Owner, Record, Status, Summary, TaskCreateTool, TaskFailure,
+    TaskGetTool, TaskList, TaskListTool, TaskUpdateTool, UNOWNED, UPDATE_DESCRIPTION,
 };
-use crate::{Tool as _, ToolCtx, ToolError, ToolOutput};
+use crate::{Tool as _, ToolCtx, ToolError, ToolOutput, truncate};
 
 /// What the fake was asked to do, in the vocabulary the seam crosses in — so
 /// a test asserts on the *call the tool made*, which is the whole of what this
@@ -394,8 +395,8 @@ fn the_schemas_offer_what_the_descriptions_promise() {
             ],
             &["task_id"],
         ),
-        (&TaskListTool, &[], &[]),
-        (&TaskGetTool, &["task_id"], &["task_id"]),
+        (&TaskListTool::default(), &[], &[]),
+        (&TaskGetTool::default(), &["task_id"], &["task_id"]),
     ];
 
     for (tool, offered, required) in cases {
@@ -463,7 +464,7 @@ async fn a_status_outside_the_four_reaches_no_list() {
 #[tokio::test]
 async fn a_listing_shows_one_line_per_task_lowest_id_first() {
     let list = Arc::new(Fake::new());
-    let output = run(&TaskListTool, &list, json!({})).await;
+    let output = run(&TaskListTool::default(), &list, json!({})).await;
 
     assert_eq!(
         output.output,
@@ -478,7 +479,7 @@ async fn a_listing_shows_one_line_per_task_lowest_id_first() {
 #[tokio::test]
 async fn an_empty_listing_says_so_rather_than_answering_with_nothing() {
     let list = Arc::new(Fake { summaries: Vec::new(), ..Fake::new() });
-    let output = TaskListTool
+    let output = TaskListTool::default()
         .run(json!({}), &ctx(Some(list as Arc<dyn TaskList>)))
         .await
         .expect("the call answers");
@@ -492,7 +493,7 @@ async fn an_empty_listing_says_so_rather_than_answering_with_nothing() {
 #[tokio::test]
 async fn a_get_answers_with_the_whole_record_comments_included() {
     let list = Arc::new(Fake::new());
-    let output = run(&TaskGetTool, &list, json!({"task_id": "1"})).await;
+    let output = run(&TaskGetTool::default(), &list, json!({"task_id": "1"})).await;
     let answered: serde_json::Value =
         serde_json::from_str(&output.output).expect("the answer is the record as JSON");
 
@@ -525,8 +526,8 @@ async fn a_call_with_no_list_behind_it_is_refused_in_one_sentence() {
     let cases: [(&dyn crate::Tool, serde_json::Value); 4] = [
         (&TaskCreateTool, json!({"subject": "port", "description": "from the spec"})),
         (&TaskUpdateTool, json!({"task_id": "1"})),
-        (&TaskListTool, json!({})),
-        (&TaskGetTool, json!({"task_id": "1"})),
+        (&TaskListTool::default(), json!({})),
+        (&TaskGetTool::default(), json!({"task_id": "1"})),
     ];
 
     for (tool, args) in cases {
@@ -559,10 +560,10 @@ fn a_call_describes_itself_by_the_task_it_names() {
         "task_create port the parser"
     );
     assert_eq!(TaskUpdateTool.describe(&json!({"task_id": "3"})), "task_update 3");
-    assert_eq!(TaskGetTool.describe(&json!({"task_id": "3"})), "task_get 3");
+    assert_eq!(TaskGetTool::default().describe(&json!({"task_id": "3"})), "task_get 3");
     // A listing names no task, so its title is the tool alone: the trait's
     // default, pinned because the other three override it.
-    assert_eq!(TaskListTool.describe(&json!({})), "task_list");
+    assert_eq!(TaskListTool::default().describe(&json!({})), "task_list");
     assert_eq!(
         TaskUpdateTool.describe(&json!({})),
         "task_update",
@@ -586,15 +587,20 @@ fn a_call_describes_itself_by_the_task_it_names() {
 fn the_four_tools_are_named_for_what_they_do() {
     assert_eq!(TaskCreateTool.id(), "task_create");
     assert_eq!(TaskUpdateTool.id(), "task_update");
-    assert_eq!(TaskListTool.id(), "task_list");
-    assert_eq!(TaskGetTool.id(), "task_get");
+    assert_eq!(TaskListTool::default().id(), "task_list");
+    assert_eq!(TaskGetTool::default().id(), "task_get");
 }
 
 /// None of the four asks by default, which is `todowrite`'s answer and for
 /// its reason: what changes is a list this user's own team keeps.
 #[test]
 fn none_of_the_four_asks_by_default() {
-    for id in [TaskCreateTool.id(), TaskUpdateTool.id(), TaskListTool.id(), TaskGetTool.id()] {
+    for id in [
+        TaskCreateTool.id(),
+        TaskUpdateTool.id(),
+        TaskListTool::default().id(),
+        TaskGetTool::default().id(),
+    ] {
         assert!(
             !ganja_permission::permission::ASK_BY_DEFAULT.contains(&id),
             "{id} runs unasked, like the rest of the team's own surface"
@@ -640,5 +646,183 @@ fn the_description_spells_the_cap_this_module_declares() {
     assert!(
         UPDATE_DESCRIPTION.contains("at most eight other tasks"),
         "and it is the number `task_update` names: {UPDATE_DESCRIPTION}",
+    );
+}
+
+/// What a clamped answer says the full text was written to, and what is in
+/// that file.
+///
+/// The notice is the only place either reading door names the path — a
+/// `task_get` carries no `outputPath` in its metadata the way `bash` does —
+/// so the test reads it back out of the sentence the model reads, which also
+/// pins that the sentence really carries one. A spill directory the test owns
+/// is what makes that assertable at all: left to resolve its own, the clamp
+/// would write into `~/.local/share`, and on a machine where it could write
+/// nowhere it would answer the pathless notice with every other assertion here
+/// still passing.
+fn spilled(output: &str, dir: &tempfile::TempDir) -> String {
+    let path = output
+        .split("Full output saved to: ")
+        .nth(1)
+        .and_then(|tail| tail.lines().next())
+        .unwrap_or_else(|| panic!("a clamped answer names where the rest of it went: {output}"));
+    assert!(
+        Path::new(path).starts_with(dir.path()),
+        "and it went to the directory this test named, not a real person's: {path}"
+    );
+
+    std::fs::read_to_string(path).expect("the spill is readable")
+}
+
+/// Nothing between these tools and the documents bounds a description or a
+/// comment thread, so a record can be far larger than a tool result may carry.
+/// It goes through the clamp every other tool here answers through, which is
+/// also what tells the model what it did not see — and writes the whole of it
+/// to a file the notice names, which is what makes the cut recoverable rather
+/// than a loss.
+#[tokio::test]
+async fn a_record_past_the_output_budget_reaches_the_model_clamped() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let huge = "x".repeat(truncate::MAX_CHARS + 1024);
+    let list =
+        Arc::new(Fake { record: Record { description: huge.clone(), ..record() }, ..Fake::new() });
+    let output = run(&TaskGetTool::spilling_into(dir.path()), &list, json!({"task_id": "1"})).await;
+
+    assert!(
+        output.output.len() < huge.len(),
+        "the answer is cut to the budget rather than carrying the whole document"
+    );
+    assert!(
+        output.output.contains("truncated"),
+        "and says so, so the model knows the record it read is partial: {}",
+        output.output
+    );
+    assert!(
+        spilled(&output.output, &dir).contains(&huge),
+        "and the whole record is in the file the notice names, cut description included"
+    );
+    assert_eq!(
+        output.metadata["task"]["description"],
+        json!(huge),
+        "while the carried record stays whole: the clamp is about what the model reads"
+    );
+}
+
+/// And a listing is the same class: every task the team ever filed, one row
+/// each, with no bound on how many there are.
+#[tokio::test]
+async fn a_listing_past_the_output_budget_reaches_the_model_clamped() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let many = truncate::MAX_LINES + 1_000;
+    let summaries: Vec<Summary> = (1..=many)
+        .map(|nth| Summary {
+            id: nth.to_string(),
+            subject: "port".to_owned(),
+            status: Status::Pending,
+            owner: String::new(),
+            blocked_by: Vec::new(),
+        })
+        .collect();
+    let list = Arc::new(Fake { summaries, ..Fake::new() });
+    let output = run(&TaskListTool::spilling_into(dir.path()), &list, json!({})).await;
+
+    assert!(
+        output.output.lines().count() < many,
+        "a listing of {many} tasks does not arrive whole: {} rows",
+        output.output.lines().count()
+    );
+    assert!(
+        output.output.contains("truncated"),
+        "and the model is told rows were cut: {}",
+        output.output
+    );
+    let full = spilled(&output.output, &dir);
+    assert_eq!(
+        full.lines().count(),
+        many,
+        "while every row the listing built is in the file the notice names"
+    );
+    assert_eq!(
+        output.metadata["tasks"].as_array().map(Vec::len),
+        Some(many),
+        "and the carried listing stays whole"
+    );
+}
+
+/// A subject is another member's words, and the controls that reorder a
+/// terminal's rendering are not control characters in Unicode's sense — so
+/// dropping `Cc` alone would let one member's task visually reshape the row it
+/// is on.
+#[test]
+fn a_subject_carrying_a_bidi_control_renders_as_one_row_without_it() {
+    let line = super::summary_line("7", "ship it\u{202E}liat desrever", Status::Pending, "", &[]);
+
+    assert_eq!(line, format!("7 [pending] {UNOWNED} — ship itliat desrever"));
+    assert_eq!(line.lines().count(), 1, "still one task to a line: {line}");
+}
+
+/// The title of a transcript row and of a permission dialog is a line a person
+/// reads, so a subject long enough to be a document is cut there the way a
+/// long shell command is.
+#[test]
+fn a_long_subject_is_shortened_where_a_person_reads_it() {
+    let subject = "x".repeat(4 * 1024);
+    let described = TaskCreateTool.describe(&json!({"subject": subject}));
+
+    assert_eq!(described, format!("task_create {}...", "x".repeat(crate::shell::DESCRIBE_LIMIT)));
+}
+
+/// The listing's one-task arm, beside the none and the many that were already
+/// pinned: an off-by-one in that guard is what this catches.
+#[tokio::test]
+async fn a_listing_of_one_task_is_titled_in_the_singular() {
+    let list = Arc::new(Fake { summaries: vec![Fake::new().summaries[0].clone()], ..Fake::new() });
+    let output = run(&TaskListTool::default(), &list, json!({})).await;
+
+    assert_eq!(output.title, "1 task");
+}
+
+/// A listing cuts a long subject where a row would otherwise run away with the
+/// screen; `task_get` is the door that answers one whole, so it does not.
+#[tokio::test]
+async fn a_long_subject_is_cut_in_the_listing_and_whole_in_the_record() {
+    let subject = "y".repeat(300);
+    let list = Arc::new(Fake {
+        summaries: vec![Summary {
+            id: "1".to_owned(),
+            subject: subject.clone(),
+            status: Status::Pending,
+            owner: String::new(),
+            blocked_by: Vec::new(),
+        }],
+        record: Record { subject: subject.clone(), ..record() },
+        ..Fake::new()
+    });
+
+    let listed = run(&TaskListTool::default(), &list, json!({})).await;
+    assert!(listed.output.ends_with('…'), "the cut is admitted rather than silent: {listed:?}");
+    assert!(
+        listed.output.contains(&"y".repeat(256)) && !listed.output.contains(&"y".repeat(257)),
+        "and it is the listing's own cap that decided where: {listed:?}"
+    );
+
+    let read = run(&TaskGetTool::default(), &list, json!({"task_id": "1"})).await;
+    let answered: serde_json::Value =
+        serde_json::from_str(&read.output).expect("the answer is the record as JSON");
+    assert_eq!(answered["subject"], json!(subject), "reading one whole answers it whole");
+}
+
+/// Two sentences a model acts on: the spelling it reads a record in is not the
+/// spelling it writes one back in, and an id is spent rather than
+/// unconditionally never seen again.
+#[test]
+fn the_descriptions_say_what_a_model_would_otherwise_have_to_guess() {
+    assert!(
+        GET_DESCRIPTION.contains("activeForm") && GET_DESCRIPTION.contains("active_form"),
+        "the read spelling and the written one are both named: {GET_DESCRIPTION}"
+    );
+    assert!(
+        CREATE_DESCRIPTION.contains("while this team's counter stands"),
+        "and an id's reuse is qualified by what actually guarantees it: {CREATE_DESCRIPTION}"
     );
 }

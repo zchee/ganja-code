@@ -214,10 +214,11 @@ fn address_of(directory: &Path, stem: &str) -> String {
     format!("{UDS_SCHEME}{}", directory.join(format!("{stem}.{}", socket::EXTENSION)).display())
 }
 
-/// A same-uid-written field, made safe to print: control characters and the
-/// two brackets that could pass for structure in a tool's own output are
-/// dropped, and the result is capped at [`MOST_SHOWN_POINTS`] with the cut
-/// admitted. The rule the mention reminder applies to this registry's bytes,
+/// A same-uid-written field, made safe to print: everything that could pass
+/// for structure in a tool's own output is dropped — the control characters,
+/// the two brackets, the two Unicode line separators and the bidi overrides,
+/// isolates and marks — and the result is capped at [`MOST_SHOWN_POINTS`] with
+/// the cut admitted. The rule the mention reminder applies to this registry's bytes,
 /// reapplied here because this is a second model-facing surface reading
 /// them.
 ///
@@ -230,7 +231,27 @@ fn address_of(directory: &Path, stem: &str) -> String {
 /// (`ganja-core`'s, which this crate may not name); a second inside one crate
 /// would be a spelling to keep in step for no boundary at all.
 pub(crate) fn neutralize(value: &str) -> String {
-    let admits = |point: &char| !point.is_control() && *point != '<' && *point != '>';
+    // [`char::is_control`] is `Cc` alone, which leaves three classes behind
+    // that this surface cannot afford: U+2028 and U+2029 end a line for
+    // anything that counts them, and the bidi overrides, isolates and marks
+    // reorder everything drawn after them — so one member's task subject could
+    // visually rewrite the row it is on and the ones after it. All of them
+    // are formatting rather than text, so dropping them loses nothing a
+    // reader was meant to see.
+    //
+    // The marks are here for the same reason as the overrides, and are easy to
+    // miss because they are *weaker*: U+200E/U+200F and U+061C set a direction
+    // rather than push one, so they reorder only a neutral run — which is
+    // exactly what the punctuation and digits around a name or a subject are.
+    // A `(3)` after an RLM draws as `(3)` mirrored, on a surface whose whole
+    // job is to be read literally.
+    let reorders = |point: char| {
+        matches!(point, '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{2028}' | '\u{2029}')
+            || ('\u{202A}'..='\u{202E}').contains(&point)
+            || ('\u{2066}'..='\u{2069}').contains(&point)
+    };
+    let admits =
+        |point: &char| !point.is_control() && *point != '<' && *point != '>' && !reorders(*point);
     let kept: String = value.chars().filter(admits).take(MOST_SHOWN_POINTS).collect();
 
     if value.chars().filter(admits).count() > MOST_SHOWN_POINTS {

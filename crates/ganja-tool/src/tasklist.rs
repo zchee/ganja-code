@@ -52,12 +52,14 @@
 //! member's own rules. The permission that matters was answered at the spawn
 //! that made the team.
 
+use std::path::{Path, PathBuf};
+
 use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::list_sessions::neutralize;
-use crate::{Tool, ToolCtx, ToolError, ToolOutput};
+use crate::{Tool, ToolCtx, ToolError, ToolOutput, truncate};
 
 /// The id of the tool that files a task, which is also its permission key.
 pub const CREATE_ID: &str = "task_create";
@@ -107,8 +109,9 @@ where there is one worth showing. `metadata` carries whatever else the team \
 needs kept beside the task.
 
 A new task is pending and belongs to nobody, and its id is issued in order and \
-never reused. Give it an owner, wire what it waits on, or move it along with \
-task_update.";
+not reissued while this team's counter stands: removing a task leaves a gap \
+where it was rather than freeing its id. Give it an owner, wire what it waits \
+on, or move it along with task_update.";
 
 /// How many other tasks one `task_update` call may wire, which is the number
 /// `UPDATE_DESCRIPTION` spells in words.
@@ -147,9 +150,13 @@ takes more than ten seconds to write: a hold that old is broken by the next \
 claimant taking it, age being the only thing anybody checks, and the two then \
 write the owner without ever seeing each other and both believe they won. A \
 claim is one small write, so it is a bound worth knowing rather than one to \
-work around. The empty string releases a task, which is how work is taken back \
-from a member that has stopped. Reassigning is therefore two calls — release \
-it, then claim it for whoever takes it next.
+work around. Whoever already holds a task counts as somebody, including you: \
+claiming a task that is already yours is refused like anybody else's claim on \
+it, and the refusal takes the whole call with it, so a status or a comment \
+sent beside your own name is not written either. Once a task is yours, leave \
+`owner` out of later calls about it. The empty string releases a task, which \
+is how work is taken back from a member that has stopped. Reassigning is \
+therefore two calls — release it, then claim it for whoever takes it next.
 
 `metadata` merges into what is already there, and a null value removes its \
 key. `add_blocks` and `add_blocked_by` add dependencies and remove none, and \
@@ -174,7 +181,12 @@ comments — with task_get.";
 const GET_DESCRIPTION: &str = "\
 One task from the team's shared list, whole: everything task_list summarizes, \
 plus the description somebody picking it up works from, the metadata the team \
-kept beside it, and every comment written on it.";
+kept beside it, and every comment written on it.
+
+The record reads back in the spelling it is kept in, which is not the spelling \
+task_update takes: what is answered as `activeForm` is written as \
+`active_form`, and what is answered as `blockedBy` is added to with \
+`add_blocked_by`.";
 
 /// What an empty list reads as. A sentence rather than nothing, so a model
 /// that asked can tell an empty list from a tool that answered nothing.
@@ -334,9 +346,12 @@ pub struct Change {
     pub owner: Option<Owner>,
     /// Keys to merge, a null value removing its key.
     ///
-    /// Sorted rather than as the call spelled it, exactly as [`Draft`]'s is:
-    /// a key this merge introduces lands alphabetically, and one the task
-    /// already carries keeps where it already is.
+    /// Sorted rather than as the call spelled it, exactly as [`Draft`]'s is —
+    /// but a merge lands in a document that already has an order of its own,
+    /// so what this sorting decides is narrower than [`Draft`]'s: a key this
+    /// merge introduces lands **after every key the task already carries**,
+    /// alphabetically among the keys of this call. A key the task already
+    /// carries keeps the position it already had.
     pub metadata: serde_json::Map<String, serde_json::Value>,
     /// Ids to add to what this task holds up.
     ///
@@ -539,11 +554,48 @@ pub struct TaskUpdateTool;
 
 /// Lists the team's shared task list.
 #[derive(Debug, Default)]
-pub struct TaskListTool;
+pub struct TaskListTool {
+    /// Where a clamped listing spills its whole text, when a caller named a
+    /// directory rather than leaving [`budgeted`] to resolve one per call.
+    ///
+    /// Only a test ever sets this, through `TaskListTool::spilling_into` —
+    /// gated `#[cfg(test)]`, so there is no item here to link. The seam is
+    /// `shell.rs`'s (`ShellTool::spill_dir`) and exists for its reason: a test
+    /// spilling into the resolved data directory would fill a real person's
+    /// `~/.local/share` with fixtures, which `tests/AGENTS.md` forbids in as
+    /// many words — and one that merely avoided naming a directory would pass
+    /// on the pathless notice a machine with no writable candidate answers
+    /// with, never proving a file was written at all. Every other build leaves
+    /// it empty and the location is resolved per call.
+    spill_dir: Option<PathBuf>,
+}
 
 /// Reads one whole task off the team's shared list.
 #[derive(Debug, Default)]
-pub struct TaskGetTool;
+pub struct TaskGetTool {
+    /// Where a clamped record spills its whole text. See
+    /// `TaskListTool::spill_dir`, which is the same seam on the other reading
+    /// door.
+    spill_dir: Option<PathBuf>,
+}
+
+impl TaskListTool {
+    /// Spills into `dir` rather than the resolved data directory. See
+    /// `TaskListTool::spill_dir`.
+    #[cfg(test)]
+    fn spilling_into(dir: &Path) -> Self {
+        Self { spill_dir: Some(dir.to_owned()) }
+    }
+}
+
+impl TaskGetTool {
+    /// Spills into `dir` rather than the resolved data directory. See
+    /// `TaskListTool::spill_dir`.
+    #[cfg(test)]
+    fn spilling_into(dir: &Path) -> Self {
+        Self { spill_dir: Some(dir.to_owned()) }
+    }
+}
 
 /// The four, as one registration.
 ///
@@ -556,8 +608,8 @@ pub fn tools() -> Vec<std::sync::Arc<dyn Tool>> {
     vec![
         std::sync::Arc::new(TaskCreateTool),
         std::sync::Arc::new(TaskUpdateTool),
-        std::sync::Arc::new(TaskListTool),
-        std::sync::Arc::new(TaskGetTool),
+        std::sync::Arc::new(TaskListTool::default()),
+        std::sync::Arc::new(TaskGetTool::default()),
     ]
 }
 
@@ -588,9 +640,17 @@ fn refused(failure: TaskFailure) -> ToolError {
 /// `names` because the two tools that title this way do not name a task with
 /// the same key: `task_create` has no id to give and titles on its subject,
 /// which is the one thing it does have.
+///
+/// Cut at [`crate::shell::DESCRIBE_LIMIT`], through the same
+/// [`crate::shell::shorten`] a long shell command is echoed by: a subject is
+/// free text another member wrote and is under no length bound anywhere, so a
+/// subject the size of a document would otherwise be a transcript row and a
+/// permission heading the size of a document.
 fn describing(tool: &str, args: &serde_json::Value, names: &str) -> String {
     match args.get(names).and_then(serde_json::Value::as_str).map(str::trim) {
-        Some(named) if !named.is_empty() => format!("{tool} {named}"),
+        Some(named) if !named.is_empty() => {
+            format!("{tool} {}", crate::shell::shorten(named, crate::shell::DESCRIBE_LIMIT))
+        }
         _ => tool.to_owned(),
     }
 }
@@ -637,9 +697,37 @@ fn line_of(record: &Record) -> String {
     summary_line(&record.id, &record.subject, record.status, &record.owner, &record.blocked_by)
 }
 
-/// A record as the structured extra a frontend may render richer than text.
+/// A record as the structured extra the answer carries beside its text: what
+/// the transcript part persists, and what a `PostToolUse` hook is handed.
+///
+/// It is deliberately **not** what [`budgeted`] clamps — a hook reading a task
+/// it was told about wants the task, and neither reader spends a context
+/// window on it.
 fn carried(record: &Record) -> serde_json::Value {
     serde_json::json!({ "task": record })
+}
+
+/// A reading answer, cut to what a tool result may carry.
+///
+/// Nothing between these tools and the documents bounds a description or a
+/// comment thread — the store's only bound is on a whole document, and it is
+/// a megabyte — so a single `task_get` could otherwise spend a whole context
+/// window, and a listing grows one row per task the team ever filed. This is
+/// the budget [`crate::read`], [`crate::websearch`] and [`crate::webfetch`]
+/// answer through and for their reason, spill file included: the model is told
+/// what it did not see and where the rest of it went.
+///
+/// Only the two *reading* doors need it. What a create or an update answers
+/// with is one summary line it built itself.
+///
+/// `spill` is where the overflow file goes when the caller named a directory,
+/// and is [`None`] in every shipped build — the shape `shell.rs`'s
+/// `open_spill` takes, for its reason (`TaskListTool::spill_dir`).
+fn budgeted(output: &str, spill: Option<&Path>) -> String {
+    match spill {
+        Some(dir) => truncate::clamp_with(output, dir).text,
+        None => truncate::clamp(output).text,
+    }
 }
 
 #[async_trait]
@@ -720,7 +808,8 @@ impl Tool for TaskUpdateTool {
             return Ok(ToolOutput {
                 title: format!("task {id} removed"),
                 output: format!(
-                    "Task {id} is off the list for good, and its id will not be issued again."
+                    "Task {id} is off the list for good, and its id will not be issued again \
+                     while this team's counter stands."
                 ),
                 metadata: serde_json::json!({ "task_id": id, "deleted": true }),
             });
@@ -805,7 +894,7 @@ impl Tool for TaskListTool {
 
         Ok(ToolOutput {
             title: title_of(summaries.len()),
-            output,
+            output: budgeted(&output, self.spill_dir.as_deref()),
             metadata: serde_json::json!({ "tasks": summaries }),
         })
     }
@@ -850,7 +939,11 @@ impl Tool for TaskGetTool {
         let output =
             serde_json::to_string_pretty(&record).expect("a task record is JSON by construction");
 
-        Ok(ToolOutput { title: format!("task {}", record.id), output, metadata: carried(&record) })
+        Ok(ToolOutput {
+            title: format!("task {}", record.id),
+            output: budgeted(&output, self.spill_dir.as_deref()),
+            metadata: carried(&record),
+        })
     }
 }
 
