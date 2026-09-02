@@ -154,6 +154,7 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
             .with_base_url(&url);
 
         let request = ChatRequest {
+            turn_start: 0,
             effort_options: Default::default(),
             model: "test-model".to_owned(),
             system: None,
@@ -205,6 +206,7 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
             .provider
             .stream(
                 ChatRequest {
+                    turn_start: 0,
                     effort_options: Default::default(),
                     model: configured.model.clone(),
                     system: None,

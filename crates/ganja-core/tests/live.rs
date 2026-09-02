@@ -52,6 +52,7 @@ async fn smoke(provider: &dyn Provider, model: &str) {
     let events: Vec<ProviderEvent> = provider
         .stream(
             ChatRequest {
+                turn_start: 0,
                 effort_options: Default::default(),
                 model: model.to_owned(),
                 system: Some("Answer with a single word.".to_owned()),
@@ -151,6 +152,7 @@ async fn anthropic_accepts_the_adjacent_user_turns_a_steer_produces() {
     let events: Vec<ProviderEvent> = provider
         .stream(
             ChatRequest {
+                turn_start: 0,
                 effort_options: Default::default(),
                 model: model.clone(),
                 system: Some("Answer with the two words and nothing else.".to_owned()),
@@ -274,6 +276,7 @@ async fn openrouter_accepts_the_effort_its_reference_publishes() {
     let events: Vec<ProviderEvent> = provider
         .stream(
             ChatRequest {
+                turn_start: 0,
                 // Exactly what `effort::roster` hands a session that picked
                 // `high` on one of this gateway's rows.
                 effort_options: serde_json::json!({"reasoning": {"effort": "high"}})

@@ -145,6 +145,7 @@ fn gateway_ask() -> ChatRequest {
 /// else is refused before a request is built at all.
 fn ask() -> ChatRequest {
     ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: SERVED.to_owned(),
         system: None,
@@ -924,6 +925,7 @@ fn a_sealed_thought_is_replayed_before_the_calls_it_produced() {
     ));
 
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: SERVED.to_owned(),
         system: None,
@@ -986,6 +988,7 @@ fn an_attachment_becomes_the_input_item_its_mime_names() {
     user.parts.push(Part::file("notes.md", "text/plain"));
 
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: SERVED.to_owned(),
         system: None,
@@ -1035,6 +1038,7 @@ fn reasoning_with_nothing_to_replay_never_reaches_the_wire() {
     assistant.parts.push(Part::reasoning(ID, "rs_1", Some("sealed-state".to_owned())));
 
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: SERVED.to_owned(),
         system: None,
@@ -1464,6 +1468,7 @@ fn the_system_prompt_travels_as_instructions_and_the_turn_as_items() {
     empty.parts.push(Part::text(""));
 
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "gpt-test".to_owned(),
         system: Some("be brief".to_owned()),
@@ -1510,6 +1515,7 @@ fn conforms(name: &str) -> bool {
 #[test]
 fn a_tool_name_this_api_refuses_is_advertised_under_a_conforming_alias() {
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "gpt-test".to_owned(),
         system: None,
@@ -1577,6 +1583,7 @@ fn a_completed_call_replays_under_the_same_alias_the_roster_advertises() {
     ));
 
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "gpt-test".to_owned(),
         system: None,
@@ -1604,6 +1611,7 @@ fn a_completed_call_replays_under_the_same_alias_the_roster_advertises() {
 #[test]
 fn a_request_advertises_the_tools_it_was_given() {
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "gpt-test".to_owned(),
         system: None,
@@ -1824,6 +1832,7 @@ fn a_gateway_turn_replays_a_call_and_its_output_in_the_documented_pair() {
     ));
 
     let request = ChatRequest {
+        turn_start: 0,
         messages: vec![Message::user("read src/main.rs"), assistant],
         tools: vec![a_tool()],
         ..gateway_ask()
@@ -2123,6 +2132,7 @@ fn a_finished_call_is_sent_back_as_a_call_item_and_an_output_item() {
     ));
 
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "gpt-test".to_owned(),
         system: None,
@@ -2200,6 +2210,7 @@ fn a_two_step_turn_is_sent_back_one_group_per_step() {
     }
 
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "gpt-test".to_owned(),
         system: None,
@@ -2229,6 +2240,7 @@ fn a_call_that_never_finished_is_answered_rather_than_left_dangling() {
     assistant.parts.push(tool_part("call_read", "read", ToolState::Pending { input: None }));
 
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "gpt-test".to_owned(),
         system: None,

@@ -277,6 +277,7 @@ async fn a_stored_reasoning_part_this_build_cannot_read_costs_only_its_continuit
     let streamed: Vec<_> = provider
         .stream(
             ChatRequest {
+                turn_start: 0,
                 effort_options: Default::default(),
                 model: MODEL.to_owned(),
                 system: None,

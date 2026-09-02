@@ -78,7 +78,7 @@ use buffa::Message as _;
 
 use super::{ID, decode, proto};
 use crate::auth::pkce;
-use crate::protocol::{Message, PartBody, Role};
+use crate::protocol::{PartBody, Role};
 use crate::provider::{ChatRequest, ProviderError};
 
 /// A fresh RFC 9562 v4 id in the spelling `crypto.randomUUID()` mints, which
@@ -122,7 +122,7 @@ pub(super) fn run_message(request: &ChatRequest) -> Result<Vec<u8>, ProviderErro
         user_message_action: buffa::MessageField::some(proto::UserMessageAction {
             user_message: buffa::MessageField::some(
                 proto::UserMessage::default()
-                    .with_text(newest_user_text(&request.messages))
+                    .with_text(newest_user_text(request))
                     .with_message_id(fresh_id()?),
             ),
             ..Default::default()
@@ -299,35 +299,43 @@ fn blob_key(id: &[u8]) -> String {
 }
 
 /// The text of the conversation's newest user **turn**: every user message
-/// from the last one back to the reply before it, their text parts in order,
-/// joined the way distinct parts read as distinct paragraphs.
+/// from the last one back to the reply before it — but never back past
+/// [`ChatRequest::turn_start`] — their text parts in order, joined the way
+/// distinct parts read as distinct paragraphs.
 ///
 /// A run rather than one message, because the engine adds to a turn by
 /// appending user messages rather than by editing the last one — a steer
 /// drained at a step boundary, and the team guards' request-only block after
 /// a reply (D547) — and a wire that sent only the newest of them would answer
 /// a guard block while dropping the steer beside it, which is what this did
-/// until 2026-09-02. The reply the run follows is the boundary: what came
-/// before it is history this wire does not carry yet.
+/// until 2026-09-02. What came before the run is history this wire does not
+/// carry yet.
 ///
-/// **That boundary is the last reply and not the turn, and two shapes pay for
-/// it.** A continuation block is emitted on the arm where nothing was steered,
-/// so the request reads `[prompt, reply, block]` and the run is the block
-/// alone: it still reaches this wire without the prompt it is about. And a
-/// finished turn that took a steer leaves the steer in history *after* its
-/// reply, so the next turn's request reads `[prompt, reply, steer, prompt2]`
-/// and the run re-sends a consumed steer as part of the new prompt. Both want
-/// a turn boundary, and `ChatRequest` carries none: every user message here is
-/// a `Message::user`, ids and timestamps ascend across the boundary exactly as
-/// they do within it, and the two shapes are indistinguishable from
-/// `messages`. Closing them is a field on the request naming where this turn
-/// began — a change that reaches every wire, so it is named here rather than
-/// guessed at.
+/// **The run's lower bound is two facts, not one, and the second cannot be
+/// read off `messages`.** The reply is the near bound; the turn's own opening
+/// is the far one. A finished turn that took a steer leaves the steer in
+/// history *after* its reply, so the next turn's request reads `[prompt,
+/// reply, steer, prompt2]` — the same four roles, in the same order, as the
+/// within-turn `[prompt, reply, steer, block]`, every one of them a
+/// `Message::user` whose id and timestamp ascend across the boundary exactly
+/// as they do within it. Nothing here distinguishes them, which is why the
+/// engine states where this turn began and this walk is clamped to it rather
+/// than guessing.
+///
+/// **One shape the clamp does not close**, named rather than left to be
+/// discovered: a continuation block emitted on the arm where nothing was
+/// steered makes the request `[prompt, reply, block]`, and the block still
+/// reaches this wire without the prompt it is about. The clamp raises the
+/// run's lower bound and never lowers it — lowering it here would mean
+/// reaching back past the assistant's reply, whose text this wire does not
+/// send — so closing that one means carrying more than the newest user turn,
+/// which is the history-over-blobs work this module's own header defers.
 ///
 /// Empty when the conversation holds no user message at all, which is not a
 /// request the engine builds — sending the empty message is more honest than
 /// refusing a request this module was still asked to encode.
-fn newest_user_text(messages: &[Message]) -> String {
+fn newest_user_text(request: &ChatRequest) -> String {
+    let messages = &request.messages;
     let Some(newest) = messages.iter().rposition(|message| matches!(message.role, Role::User))
     else {
         return String::new();
@@ -335,7 +343,19 @@ fn newest_user_text(messages: &[Message]) -> String {
     let first = messages[..newest]
         .iter()
         .rposition(|message| !matches!(message.role, Role::User))
-        .map_or(0, |reply| reply + 1);
+        .map_or(0, |reply| reply + 1)
+        // Never past this turn's own opening: a steer the *previous* turn
+        // consumed sits after that turn's reply, so the walk above would
+        // reach back through it and re-send it as part of this prompt.
+        .max(request.turn_start)
+        // And never past the newest user message itself. `turn_start` is a
+        // `pub` field on a `pub` struct, so its value is a caller's and not
+        // this module's: a request whose last message is an assistant's, with
+        // a marker pointing past the user message before it, would otherwise
+        // slice `first > newest` and panic the wire. A run of one is the
+        // honest answer to that — the newest user turn is still the newest
+        // user message — where a panic is no answer at all.
+        .min(newest);
 
     messages[first..=newest]
         .iter()

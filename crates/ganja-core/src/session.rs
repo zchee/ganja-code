@@ -2091,6 +2091,9 @@ async fn title_stream(
         model: model.to_owned(),
         system: Some(TITLE_PROMPT.to_owned()),
         messages: vec![Message::user(TITLE_INSTRUCTION), first_user],
+        // The whole list is this request's own: a title asks about a
+        // conversation rather than continuing one.
+        turn_start: 0,
         tools: Vec::new(),
         // No effort: this request may ask a cheaper stablemate the selected
         // name was never validated against.
@@ -2897,6 +2900,9 @@ async fn compact_if_needed(
         model: turn.model.clone(),
         system: turn.system.clone(),
         messages: vec![Message::user(prompt)],
+        // One message, and it is the request's own: the conversation being
+        // summarized rides inside that prompt as text.
+        turn_start: 0,
         tools: Vec::new(),
         // The same model as the steps, so the same effort: a session that
         // thinks harder should not summarize with a different mind.
@@ -3302,6 +3308,20 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
 
     let request = {
         let history = turn.history.lock().await;
+        // Where this turn's own messages begin, taken under the same lock as
+        // the clone and before anything is appended: `drive` and `drive_shell`
+        // both push the message that opens a turn onto history and nothing
+        // else is pushed until the turn ends, so the last element is it. A
+        // steer this turn consumed reaches history only at the turn's tail,
+        // which is why the wire that carries the newest user turn alone
+        // (cursor) cannot find this boundary in the messages themselves.
+        // `saturating_sub` guards exactly one shape, an empty history, and no
+        // shipped path produces one: both drivers push this turn's opening
+        // message before the first step, and the compaction that *does*
+        // replace a history with its summary runs ahead of that push, so the
+        // shortest list a step ever sees is `[summary, prompt]` and
+        // `turn_start` is 1. Nothing compacts mid-turn.
+        let turn_start = history.len().saturating_sub(1);
         let mut messages = history.clone();
         // Later steps carry the reply so far — its text, its tool calls and
         // their results — which is how the model reads what its calls
@@ -3414,6 +3434,7 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
             model: turn.model.clone(),
             system,
             messages,
+            turn_start,
             tools,
             effort_options: turn.effort_options.clone(),
         }

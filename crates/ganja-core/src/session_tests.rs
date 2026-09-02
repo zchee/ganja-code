@@ -634,6 +634,78 @@ async fn a_peer_part_is_carried_into_the_request() {
     );
 }
 
+/// The engine's half of `ChatRequest::turn_start`: a turn opening on a
+/// history that already holds a finished turn tells the wire its own prompt
+/// is where this turn begins, and says nothing about the steer that turn
+/// consumed.
+///
+/// The seeded history is what a turn that took a steer leaves behind —
+/// `[prompt, reply, steer]`, the steer appended *after* the assistant it
+/// interrupted — so the request this drive assembles is the four-message
+/// `[prompt, reply, steer, prompt2]` that `cursor`'s walk cannot read a
+/// boundary out of: every user message is a `Message::user`, and their ids
+/// ascend across the boundary exactly as they do within one.
+///
+/// Two mutations of `stream_step` redden this, and they are the two ways the
+/// index could be got wrong. Dropping the `-1` reports the length rather than
+/// the last index — `4` on the first request here, and one past the prompt
+/// for every request the engine builds. Moving the computation below
+/// `messages.push(assistant)` counts the reply so far as history and reports
+/// `4` on the **second** request, which is why this drives two steps: a
+/// marker past the prompt is, for `cursor`, a prompt the model never hears.
+///
+/// The second step is bought with a steer rather than a tool call, because a
+/// steer is also the thing being asserted about: the engine holds a consumed
+/// steer beside the history rather than in it, so `turn_start` is the same
+/// index on both requests even though the second carries two more messages.
+#[tokio::test]
+async fn a_turn_tells_the_wire_its_own_prompt_is_where_it_began() {
+    let provider = Arc::new(FakeProvider::new("ok", Duration::ZERO));
+    let (mut turn, _received) = turn_with(
+        CancellationToken::new(),
+        Arc::new(Effectful { marker: PathBuf::from("/nonexistent") }),
+    );
+    turn.provider = provider.clone();
+    turn.prompt = "now add tests".to_owned();
+    {
+        let mut history = turn.history.lock().await;
+        history.push(Message::user("write the config parser"));
+        history.push(Message::assistant(fake::MODEL));
+        history.push(Message::user("actually make it lenient about unknown keys"));
+    }
+    turn.steer.lock().expect("the steer mailbox is never poisoned").push(super::SteerInput {
+        id: "steer-1".to_owned(),
+        text: "and cover the empty file".to_owned(),
+        mentions: Vec::new(),
+        skills: Vec::new(),
+        peers: Vec::new(),
+        session_mentions: Vec::new(),
+    });
+
+    super::drive(&turn).await;
+
+    let recorded = provider.recorded();
+    assert_eq!(recorded.len(), 2, "the steer carried the turn into a second step");
+    assert_eq!(
+        recorded[0].messages.len(),
+        4,
+        "the drive pushed this turn's prompt onto the finished turn: {:?}",
+        recorded[0].messages
+    );
+    assert_eq!(
+        recorded[1].messages.len(),
+        6,
+        "and the second step carries the reply so far and the steer beside it: {:?}",
+        recorded[1].messages
+    );
+    for asked in &recorded {
+        assert_eq!(
+            asked.turn_start, 3,
+            "this turn began at its own prompt, not at the steer the last one took"
+        );
+    }
+}
+
 /// A teammate that answers mid-turn answers *this* turn, so the steer
 /// path builds the same part the prompt path does — and drops the empty
 /// text part for the same reason, which matters more here: a steer with no

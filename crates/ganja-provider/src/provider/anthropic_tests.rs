@@ -232,6 +232,7 @@ fn a_request_carries_the_transcript_and_the_system_prompt() {
     empty.parts.push(Part::text(""));
 
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "claude-test".to_owned(),
         system: Some("be brief".to_owned()),
@@ -282,6 +283,7 @@ fn a_transcript_held_thought_is_absent_from_the_body_this_wire_sends() {
     turn.parts.push(Part::reasoning("anthropic", "rs_1", Some("sealed-blob-0001".to_owned())));
 
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "claude-test".to_owned(),
         system: None,
@@ -310,6 +312,7 @@ fn a_transcript_held_thought_is_absent_from_the_body_this_wire_sends() {
 #[test]
 fn a_request_without_a_system_prompt_omits_the_field() {
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "claude-test".to_owned(),
         system: None,
@@ -329,6 +332,7 @@ fn a_request_without_a_system_prompt_omits_the_field() {
 #[test]
 fn an_effort_adds_thinking_but_cannot_claim_max_tokens() {
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: serde_json::json!({
             "thinking": {"type": "enabled", "budget_tokens": 16000},
             "max_tokens": 1,
@@ -390,6 +394,7 @@ fn an_attachment_becomes_the_source_block_its_mime_names() {
     user.parts.push(Part::file("notes.md", "text/plain"));
 
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "claude-test".to_owned(),
         system: None,
@@ -518,6 +523,7 @@ fn a_refused_tool() -> ToolDefinition {
 #[test]
 fn a_tool_name_this_api_refuses_is_advertised_under_a_conforming_alias() {
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "claude-test".to_owned(),
         system: None,
@@ -594,6 +600,7 @@ fn a_completed_call_replays_under_the_same_alias_the_roster_advertises() {
     ));
 
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "claude-test".to_owned(),
         system: None,
@@ -614,6 +621,7 @@ fn a_completed_call_replays_under_the_same_alias_the_roster_advertises() {
 #[test]
 fn a_request_advertises_the_tools_it_was_given() {
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "claude-test".to_owned(),
         system: None,
@@ -646,6 +654,7 @@ fn a_request_advertises_the_tools_it_was_given() {
 #[test]
 fn a_finished_call_is_sent_back_as_a_use_and_a_result() {
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "claude-test".to_owned(),
         system: Some("be brief".to_owned()),
@@ -755,6 +764,7 @@ fn a_turn_of_two_steps() -> Message {
 #[test]
 fn a_two_step_turn_is_sent_back_one_message_pair_per_step() {
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "claude-test".to_owned(),
         system: None,
@@ -839,6 +849,7 @@ fn a_turn_without_step_markers_is_one_step() {
     ));
 
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "claude-test".to_owned(),
         system: None,
@@ -895,6 +906,7 @@ fn two_steps_that_called_nothing_stay_one_message() {
     }
 
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "claude-test".to_owned(),
         system: None,
@@ -954,6 +966,7 @@ fn adjacent_user_messages_are_sent_as_the_adjacent_turns_they_are() {
     ));
 
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "claude-test".to_owned(),
         system: None,
@@ -1015,6 +1028,7 @@ fn a_call_that_never_finished_is_answered_rather_than_left_dangling() {
         assistant.parts.push(tool_part("toolu_01Read", "read", state));
 
         let request = ChatRequest {
+            turn_start: 0,
             effort_options: Default::default(),
             model: "claude-test".to_owned(),
             system: None,
@@ -1063,6 +1077,7 @@ fn step_markers_are_not_sent() {
     });
 
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "claude-test".to_owned(),
         system: None,
@@ -1181,6 +1196,7 @@ async fn a_request_that_cannot_be_built_reports_why_without_the_endpoint() {
     let opened = provider
         .stream(
             ChatRequest {
+                turn_start: 0,
                 effort_options: Default::default(),
                 model: "claude-sonnet-5".to_owned(),
                 system: None,

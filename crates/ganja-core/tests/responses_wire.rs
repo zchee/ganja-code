@@ -363,6 +363,7 @@ impl RefreshOauth for NeverRenews {
 /// One turn's worth of request, on the model the phase is about.
 fn ask(model: &str) -> ChatRequest {
     ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: model.to_owned(),
         system: Some("be brief".to_owned()),

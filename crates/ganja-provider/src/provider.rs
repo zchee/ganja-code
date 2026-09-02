@@ -204,6 +204,26 @@ pub struct ChatRequest {
     /// The conversation so far, oldest first, ending with the message the user
     /// just sent.
     pub messages: Vec<Message>,
+    /// Where this turn's own messages begin in [`Self::messages`]: the index
+    /// of the message that opened it — the user's prompt, or the notice a `!`
+    /// passthrough turn opens with.
+    ///
+    /// A wire that sends only the newest user turn ([`cursor`]) needs this
+    /// because role alone cannot say where a turn started. A finished turn
+    /// leaves the steers it consumed in history *after* its reply, so
+    /// `[prompt, reply, steer, prompt2]` — a consumed steer and the next
+    /// turn's prompt — and the within-turn `[prompt, reply, steer, block]`
+    /// are the same four roles in the same order, and every one of them is a
+    /// `Message::user` whose id and timestamp ascend across the boundary
+    /// exactly as they do within it.
+    ///
+    /// `0` is a request whose whole message list is this turn's: what a
+    /// one-shot request — a title, a summary — asks in, and what a fixture
+    /// carrying a single turn is. Wires that send the whole conversation read
+    /// nothing here, and one that does clamps rather than trusts — the field
+    /// is public, so a value past the end of [`Self::messages`] is a bound to
+    /// be brought back in range and never an index to slice on.
+    pub turn_start: usize,
     /// Tools the model may call, advertised on every request. Empty means the
     /// model is not offered any.
     pub tools: Vec<ToolDefinition>,
