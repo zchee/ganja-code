@@ -7,6 +7,7 @@ use ganja_tool::task::{Offered, Subagents, TaskTool, TeammateSpawn, Teammated};
 use ganja_tool::tasklist::{Status, Summary};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use unicode_width::UnicodeWidthStr as _;
 
 use super::{BUSY, Effect, Row, Spawned, Team, rows, spawn_request};
 use crate::command;
@@ -64,6 +65,36 @@ fn task(id: &str, status: Status, owner: &str, subject: &str, blocked_by: &[&str
 fn heading(line: &str) -> bool {
     line.trim_matches(|character: char| character.is_whitespace() || character == '\u{2502}')
         == super::TASKS
+}
+
+/// The one drawn line holding `needle`, with the dialog's border and the
+/// screen either side of it trimmed off — what the row really says.
+///
+/// The same trim [`heading`] uses, for the same reason: what a row *is* is
+/// decided by its content, and the box it is drawn in is not part of it.
+fn task_line(screen: &str, needle: &str) -> String {
+    screen
+        .lines()
+        .find(|line| line.contains(needle))
+        .unwrap_or_else(|| panic!("no drawn line holds {needle:?}:\n{screen}"))
+        .trim_matches(|character: char| character.is_whitespace() || character == '\u{2502}')
+        .to_owned()
+}
+
+/// Which screen **column** `needle` begins at on the one line that holds it.
+///
+/// A cell count rather than a display width, because [`rendered`] emits one
+/// entry per cell: a two-column glyph is its own symbol in one cell and the
+/// space ratatui reset the next one to, so counting characters counts columns
+/// where measuring the joined string would count the wide glyph twice.
+fn column_of(screen: &str, needle: &str) -> usize {
+    let line = screen
+        .lines()
+        .find(|line| line.contains(needle))
+        .unwrap_or_else(|| panic!("no drawn line holds {needle:?}:\n{screen}"));
+    let at = line.find(needle).expect("the line was found by that needle");
+
+    line[..at].chars().count()
 }
 
 /// The three-task list the section tests draw.
@@ -689,6 +720,168 @@ fn a_newline_in_a_subject_is_shown_rather_than_silently_swallowed() {
         dirty.matches(char::REPLACEMENT_CHARACTER).count(),
         2,
         "and both are shown rather than swallowed:\n{dirty}"
+    );
+}
+
+/// A line with room for everything says everything, in the order it is
+/// composed: the columns, the subject, then what the task waits on.
+///
+/// The baseline the two cases below are cuts of — a rule about what gives way
+/// first is only a rule if the untouched line is pinned too.
+#[test]
+fn a_task_line_with_room_for_all_of_it_keeps_its_subject_and_its_blockers() {
+    let screen = rendered(
+        &Team::new(members(), vec![task("1", Status::Pending, "", "Draw it", &["2"])]),
+        Rect::new(0, 0, 80, 30),
+    );
+
+    assert_eq!(
+        task_line(&screen, "Draw it"),
+        "1  pending  unowned  Draw it  (blocked by 2)",
+        "got:\n{screen}"
+    );
+}
+
+/// What a task waits on is never cut part-way: the subject gives way first,
+/// and the whole suffix survives beside whatever is left of it.
+///
+/// `(blocked by 1` is not a shorter way of saying `(blocked by 12, 13)` — it
+/// is a sentence about a different task, and a reader has no way to tell the
+/// two apart on the row. So the cut is taken where a cut is legible.
+#[test]
+fn a_blocked_line_too_long_for_the_row_gives_up_the_subject_before_the_suffix() {
+    let subject = "wire the parser and everything under it".repeat(3);
+    let screen = rendered(
+        &Team::new(members(), vec![task("1", Status::Pending, "", &subject, &["2"])]),
+        Rect::new(0, 0, 80, 30),
+    );
+    let line = task_line(&screen, "blocked by");
+
+    assert!(line.ends_with("(blocked by 2)"), "the suffix is whole:\n{screen}");
+    assert!(line.starts_with("1  pending  unowned  wire the parser"), "got:\n{screen}");
+    assert!(!screen.contains(&subject), "and the subject is what was cut:\n{screen}");
+}
+
+/// And where the suffix cannot fit beside even one column of subject it is
+/// dropped **whole** rather than shown as a fragment: a row saying what the
+/// task is beats a row saying half of what it waits on, and `task_get`
+/// answers the rest either way.
+#[test]
+fn a_blocked_suffix_with_no_room_beside_a_subject_is_dropped_rather_than_cut() {
+    let screen = rendered(
+        &Team::new(members(), vec![task("1", Status::Pending, "", "fix it", &["2"])]),
+        // 34 columns inside the border: the id, status and owner columns take
+        // 23 of them and the suffix wants 16, so there is no subject left to
+        // stand beside it.
+        Rect::new(0, 0, 40, 30),
+    );
+
+    // The whole line rather than a missing word, because what a cut leaves
+    // behind is `  (b` as readily as `  (blocked by` — an assertion naming one
+    // fragment would pass on every other one.
+    assert_eq!(task_line(&screen, "fix it"), "1  pending  unowned  fix it", "got:\n{screen}");
+}
+
+/// And "one column of room" is not "one column kept": a cut always yields a
+/// whole grapheme cluster, so one column of room buys a two-column glyph and
+/// the suffix composed beside it overruns the row — where the `Paragraph`
+/// cuts off exactly the fragment the rule forbids.
+///
+/// 40 columns inside the border, of which the id, status and owner columns
+/// take 23 and the suffix wants 16, leaves `room == 1` — and a subject opening
+/// on an East Asian glyph cannot be cut to it.
+#[test]
+fn a_blocked_suffix_beside_a_wide_glyph_too_big_for_its_room_is_dropped_too() {
+    let screen = rendered(
+        &Team::new(
+            members(),
+            vec![task("1", Status::Pending, "", "\u{4f5c}\u{696d}\u{3059}\u{308b}", &["2"])],
+        ),
+        Rect::new(0, 0, 46, 30),
+    );
+    // By a column the cut cannot reach: the subject itself is what is in
+    // question, so it cannot also be how the row is found.
+    let line = task_line(&screen, super::UNOWNED);
+
+    assert!(!line.contains("(blocked by"), "no fragment of the suffix survives:\n{screen}");
+    // Cells rather than [`unicode_width`], for [`column_of`]'s reason: a
+    // two-column glyph is one symbol plus the space beside it here, so
+    // counting characters counts columns.
+    assert!(line.chars().count() <= 40, "and the row still fits the box:\n{screen}");
+}
+
+/// A task line with no blockers at all is still cut inside the box it is
+/// drawn in.
+#[test]
+fn a_single_over_wide_task_line_is_cut_within_the_dialog() {
+    let subject = "wire the parser ".repeat(20);
+    let screen = rendered(
+        &Team::new(members(), vec![task("1", Status::Pending, "", &subject, &[])]),
+        Rect::new(0, 0, 40, 30),
+    );
+    // Found by a column the cut cannot reach, since what the cut does to the
+    // subject is exactly what a subject-shaped needle would be looking for.
+    let line = task_line(&screen, super::UNOWNED);
+
+    // The columns inside a 40-column area's border, which is what the row was
+    // laid out against; the two spaces the row opens with are trimmed off the
+    // measured content, so this is a ceiling rather than the exact width.
+    assert!(line.width() <= 34, "{} columns is too wide:\n{screen}", line.width());
+    assert!(line.starts_with("1  pending  unowned  wire the"), "got:\n{screen}");
+    assert!(!screen.contains(&subject), "and the tail of it is gone:\n{screen}");
+    assert!(
+        screen
+            .lines()
+            .filter(|line| line.contains('\u{2502}'))
+            .all(|line| line.trim_end().ends_with('\u{2502}')),
+        "and the box it overran is still closed:\n{screen}"
+    );
+}
+
+/// The columns are measured in display width, so they must be padded in it
+/// too: a name one East Asian glyph wide is two columns, and padding it by
+/// `char` count pushes everything after it out of line.
+#[test]
+fn a_wide_glyph_in_a_task_column_leaves_the_next_one_where_it_was() {
+    let screen = rendered(
+        &Team::new(
+            members(),
+            vec![
+                task("1", Status::Pending, "w1", "alpha", &[]),
+                // Three glyphs, six columns — the widest owner, so it is what
+                // the column is sized to.
+                task("2", Status::Pending, "\u{4f5c}\u{696d}\u{8005}", "beta", &[]),
+            ],
+        ),
+        Rect::new(0, 0, 80, 30),
+    );
+
+    assert_eq!(
+        column_of(&screen, "alpha"),
+        column_of(&screen, "beta"),
+        "both subjects start in the same column:\n{screen}"
+    );
+}
+
+/// The same rule on the roster above it, which had the same bug: a member
+/// name holding a wide glyph must not move the surface column beside it.
+#[test]
+fn a_wide_glyph_in_a_member_name_leaves_the_surface_column_where_it_was() {
+    let screen = rendered(
+        &Team::new(
+            vec![
+                row("w1", MemberBackend::Ganja, &[]),
+                row("\u{4f5c}\u{696d}\u{8005}", MemberBackend::Claude, &[]),
+            ],
+            Vec::new(),
+        ),
+        Rect::new(0, 0, 80, 30),
+    );
+
+    assert_eq!(
+        column_of(&screen, "ganja"),
+        column_of(&screen, "claude"),
+        "both surfaces start in the same column:\n{screen}"
     );
 }
 

@@ -10075,39 +10075,55 @@ async fn settle_task_read(app: &mut App) {
     panic!("the shared task list read never landed");
 }
 
-/// A shared list whose read does not come back: what a planted FIFO, a
-/// wedged lock or a filesystem that stopped answering leaves the store
-/// holding.
+/// A shared list that answers **at most once** and then stops — the two ways
+/// a store stops being a list: a read that does not come back (a planted
+/// FIFO, a wedged lock, a filesystem that stopped answering) and a read that
+/// comes back refused (the directory removed under a running session, a
+/// document that will not parse).
 ///
 /// [`ganja_testkit::StaticTasks`] is the double for suites that want an
-/// answer; this one exists for the suite that wants no answer, and it is
-/// here rather than beside that one because a list that never returns is
-/// only ever interesting to the loop that must keep drawing anyway.
+/// answer; this one exists for the suite that wants the answer to stop, and
+/// it is here rather than beside that one because a list that stops is only
+/// ever interesting to the loop that must keep drawing anyway.
 #[derive(Debug)]
-struct StallingTasks {
+struct StoppingTasks {
     listed: Vec<ganja_tool::tasklist::Summary>,
     /// Whether the one answer this double has has been given. A first read
-    /// that lands is what a later stall can then be measured against — the
-    /// section goes on drawing it.
+    /// that lands is what a later stop can then be measured against — the
+    /// section goes on drawing it, or stops drawing it, and neither is
+    /// legible without the read before it.
     answered: std::sync::atomic::AtomicBool,
+    /// Whether the reads after that one refuse rather than hang.
+    refuses: bool,
 }
 
-impl StallingTasks {
+impl StoppingTasks {
     /// Answers the first read with `listed`, and never answers again.
     fn answering_once(listed: Vec<ganja_tool::tasklist::Summary>) -> Self {
-        Self { listed, answered: std::sync::atomic::AtomicBool::new(false) }
+        Self { listed, answered: std::sync::atomic::AtomicBool::new(false), refuses: false }
+    }
+
+    /// The same, with the reads after the first one **refusing** instead of
+    /// hanging — which is what `Engine::task_list` turns into the [`None`]
+    /// the tick folds into an empty list.
+    fn refusing(self) -> Self {
+        Self { refuses: true, ..self }
     }
 
     /// Answers nothing at all, from the very first read.
     fn stalled() -> Self {
-        Self { listed: Vec::new(), answered: std::sync::atomic::AtomicBool::new(true) }
+        Self {
+            listed: Vec::new(),
+            answered: std::sync::atomic::AtomicBool::new(true),
+            refuses: false,
+        }
     }
 }
 
 /// Written in the shape `async_trait` desugars to, for the reason
 /// [`super::DialogAsker`]'s impl gives: this crate does not depend on that
 /// macro and should not start.
-impl ganja_tool::tasklist::TaskList for StallingTasks {
+impl ganja_tool::tasklist::TaskList for StoppingTasks {
     fn create<'a, 'b>(
         &'a self,
         _draft: ganja_tool::tasklist::Draft,
@@ -10189,10 +10205,16 @@ impl ganja_tool::tasklist::TaskList for StallingTasks {
     {
         let answer = (!self.answered.swap(true, std::sync::atomic::Ordering::SeqCst))
             .then(|| self.listed.clone());
+        let refuses = self.refuses;
 
         Box::pin(async move {
             match answer {
                 Some(listed) => Ok(listed),
+                // The read that came back refused, which the engine answers
+                // as `None` and the tick folds into an empty list.
+                None if refuses => Err(ganja_tool::tasklist::TaskFailure {
+                    reason: "the team directory is not readable".to_owned(),
+                }),
                 // The read that does not come back. `pending` rather than a
                 // long sleep, because a deadline a test can outwait is not
                 // the failure this stands for.
@@ -10239,7 +10261,7 @@ fn pending_task(id: &str, subject: &str) -> ganja_tool::tasklist::Summary {
 /// count so the poll has a reason to run — and the notice beside it, since a
 /// roster draws only what it names and one of these tests is about what the
 /// bar says.
-fn app_reading(tasks: StallingTasks) -> App {
+fn app_reading(tasks: StoppingTasks) -> App {
     let mut app = App::new(
         engine().with_tasks(Arc::new(tasks) as Arc<dyn ganja_tool::tasklist::TaskList>),
         None,
@@ -10263,7 +10285,7 @@ fn app_reading(tasks: StallingTasks) -> App {
 /// drawing the last list that landed.
 #[tokio::test]
 async fn a_task_list_read_that_never_answers_leaves_the_tick_answering() {
-    let mut app = app_reading(StallingTasks::answering_once(vec![pending_task("1", "Wire it")]));
+    let mut app = app_reading(StoppingTasks::answering_once(vec![pending_task("1", "Wire it")]));
 
     settle_task_read(&mut app).await;
     assert_eq!(app.tasks.len(), 1, "the first read answered");
@@ -10289,7 +10311,7 @@ async fn a_task_list_read_that_never_answers_leaves_the_tick_answering() {
 /// make room for it.
 #[tokio::test]
 async fn a_read_still_in_flight_is_never_joined_by_a_second() {
-    let mut app = app_reading(StallingTasks::stalled());
+    let mut app = app_reading(StoppingTasks::stalled());
 
     app.handle(AppEvent::Tick).await.expect("a tick is handled");
     assert!(app.task_read.is_some(), "the first tick started a read");
@@ -10311,7 +10333,7 @@ async fn a_read_still_in_flight_is_never_joined_by_a_second() {
 async fn a_read_past_its_deadline_is_said_once() {
     // What the screen is matched on below, so the two cannot drift apart.
     assert!(SLOW_TASK_READ.contains("not answering"));
-    let mut app = app_reading(StallingTasks::stalled());
+    let mut app = app_reading(StoppingTasks::stalled());
     app.handle(AppEvent::Tick).await.expect("a tick is handled");
 
     // Backdated rather than waited out: what the branch turns on is the age
@@ -10332,6 +10354,82 @@ async fn a_read_past_its_deadline_is_said_once() {
     app.handle(AppEvent::Tick).await.expect("a tick is handled");
     app.draw(&mut terminal).expect("a frame draws");
     assert!(!screen(&terminal).contains("not answering"), "got:\n{}", screen(&terminal));
+}
+
+/// The lead of [`leading`], reading its shared list through `tasks` rather
+/// than through the store under its own team directory, with a roster that
+/// draws the count.
+///
+/// Both surfaces the list reaches need a session shaped like this one. The
+/// segment needs a roster naming the element, which is [`app_reading`]'s
+/// half; the Tasks section needs a **team view** to repaint against, because
+/// [`App::poll_team_dialog`] reads `Engine::team_view` and returns where
+/// there is none — so a dialog on a session leading nobody goes on drawing
+/// whatever list it was opened over, and a test about the section would pin
+/// nothing at all.
+fn leading_reading(directory: &TempDir, tasks: StoppingTasks) -> App {
+    let registry = Arc::new(ganja_core::teammate::TeammateRegistry::for_session(
+        directory.path(),
+        "224cbeab-4e62-497c-aa8f-d05cc33ce7ba",
+        directory.path(),
+    ));
+    let engine = Engine::persistent(
+        Arc::new(FakeProvider::default()),
+        fake::MODEL,
+        Arc::new(ganja_tool::Registry::new(Vec::new())),
+        ganja_permission::Permissions::default(),
+        Storage::open(directory.path().join("storage")),
+    )
+    .with_teammates(registry, ganja_testkit::externals())
+    // After the team, which installs the real store under the registry's own
+    // directory: the last one installed is the one the reads go through.
+    .with_tasks(Arc::new(tasks) as Arc<dyn ganja_tool::tasklist::TaskList>);
+    let mut app = App::new(engine, None, Themes::builtin());
+    app.status.set_statusline(Some(&ganja_core::config::StatuslineConfig {
+        elements: Some(vec![ganja_core::config::StatuslineElement::TaskList]),
+        max_width: None,
+        detail: None,
+    }));
+
+    app
+}
+
+/// A read the store **refused** after one that answered: the list empties,
+/// and both surfaces drawing it empty with it.
+///
+/// `Engine::task_list` answers `None` for a read it could not make, and
+/// `reap_task_read` folds that into an empty list — deliberately, for the
+/// reason it states: the sentence about *why* goes to the debug log, and the
+/// section clears for the same reason a genuinely empty one does. What the
+/// fold costs is that a store that broke and a team that finished look alike
+/// on the frame, and pinning it is what makes that a choice rather than
+/// something the next reader discovers.
+#[tokio::test]
+async fn a_read_refused_after_a_good_one_empties_the_section_and_the_segment() {
+    let directory = temporary();
+    let mut app = leading_reading(
+        &directory,
+        StoppingTasks::answering_once(vec![pending_task("1", "Wire it")]).refusing(),
+    );
+    app.team_dialog = Some(team_dialog());
+
+    settle_task_read(&mut app).await;
+    let mut terminal = terminal(80, 30);
+    app.draw(&mut terminal).expect("a frame draws");
+    let before = screen(&terminal);
+    assert!(before.contains("1/1 team tasks"), "the good read reached the bar:\n{before}");
+    assert!(before.contains("Wire it"), "and the dialog's own section:\n{before}");
+
+    // What holds the second read back is the clock alone; a session a poll
+    // window older is the state this test is about.
+    app.tasks_polled = None;
+    settle_task_read(&mut app).await;
+    app.draw(&mut terminal).expect("a frame draws");
+    let after = screen(&terminal);
+
+    assert!(app.tasks.is_empty(), "the refusal emptied the list:\n{after}");
+    assert!(!after.contains("team tasks"), "so the segment is gone:\n{after}");
+    assert!(!after.contains("Wire it"), "and the section under the roster with it:\n{after}");
 }
 
 /// Opening the dialog is somebody asking for the list *now*: the poll's

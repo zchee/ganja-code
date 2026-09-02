@@ -454,21 +454,34 @@ fn a_submitted_buffer_names_a_command_only_when_the_name_stands_alone() {
     }
 }
 
-/// The rename is a clean cut: `/team` names nothing here any more.
+/// The rename is a clean cut: `/team` names nothing **in this crate** any
+/// more.
 ///
 /// Every door onto a command is asked, because they are separate readers of
 /// the same buffer and a compatibility alias left in any one of them would
-/// keep the old spelling working through that door alone. What a submitted
-/// `/team` line does instead is the composer's ordinary fallthrough — no
-/// entry, no grammar, no hint — which leaves it to be read as prose, exactly
-/// as `/nonesuch` already is.
+/// keep the old spelling working through that door alone.
+///
+/// What is on the other side of these refusals is not prose. A submitted
+/// buffer no UI command claims falls through to `App::engine_command`, which
+/// resolves it against the **engine's** roster and sends
+/// `Command::RunCommand` — and `/team` is a command there (**D547**), so
+/// these refusals are exactly what makes the pipeline builtin reachable
+/// rather than shadowed. `/nonesuch` is the one that ends up read as prose,
+/// because it names nothing on either roster.
 #[test]
 fn the_old_team_spelling_names_no_command_at_all() {
     assert!(lookup("team").is_none(), "the roster no longer holds `team`");
-    assert!(submitted("/team").is_none(), "a bare `/team` opens nothing");
-    assert!(inline_hint("/team", &[]).is_none(), "and shows nothing beside the cursor");
+    assert!(submitted("/team").is_none(), "so no UI command intercepts a bare `/team`");
+    assert!(inline_hint("/team", &[]).is_none(), "and nothing is hinted beside the cursor");
+    // Asked directly rather than left to the hint above it: the two are
+    // separate readers, and a completion offering `spawn` under the old
+    // spelling would be the alias this rename cut, back through one door.
+    assert!(
+        team_completion("/team sp", (0, 8), &kinds()).is_none(),
+        "and no subcommand is completed under it"
+    );
     for text in ["/team", "/team list", "/team spawn w1 --backend ganja", "/team shutdown w1"] {
-        assert_eq!(team(text), None, "{text:?} is prose now, not even a refusal");
+        assert_eq!(team(text), None, "{text:?} is the engine's line now, not this crate's");
     }
 }
 

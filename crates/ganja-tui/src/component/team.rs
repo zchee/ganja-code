@@ -38,7 +38,11 @@
 
 use ganja_protocol::{MemberBackend, MemberView, TeamView};
 use ganja_tool::task::TeammateSpawn;
-use ganja_tool::tasklist::Summary;
+// `UNOWNED` is the word `task_list` answers a model with for a task nobody
+// holds, imported rather than restated here: a second spelling is a second
+// place for the dialog and the tool to drift into naming one state two ways,
+// and the tool's own constant says it is the one.
+use ganja_tool::tasklist::{Summary, UNOWNED};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::text::{Line, Text};
@@ -87,11 +91,6 @@ const LEAD: &str = "lead";
 
 /// What the tasks section is headed with, when there is one.
 const TASKS: &str = "tasks";
-
-/// How a task nobody has claimed is listed, where an owner would be — the
-/// same word `task_list` answers the model with, so the dialog and the tool
-/// do not name one state two ways.
-const UNOWNED: &str = "unowned";
 
 /// What the dim line under the heading says about the members that cannot see
 /// this list, ahead of their names.
@@ -679,15 +678,15 @@ impl Team {
                 selected_line = lines.len();
             }
             let head = format!(
-                "{marker}{name:<name_width$}  {backend:<backend_width$}  {lead}",
+                "{marker}{name}  {backend}  {lead}",
                 marker = if index == self.selected { MARKER } else { "  " },
-                name = row.name,
-                backend = backend_label(row.backend),
+                name = pad(&row.name, name_width),
+                backend = pad(backend_label(row.backend), backend_width),
                 lead = if row.is_lead { LEAD } else { "" },
             );
             let line = clip(head.trim_end(), width);
             lines.push(Line::styled(
-                format!("{line:<width$}"),
+                pad(&line, width),
                 if index == self.selected { theme.selection } else { theme.fg },
             ));
             lines.extend(ring_rows(&row.recent, width, theme));
@@ -762,19 +761,44 @@ impl Team {
             lines.push(Line::styled(clip(&unshared, width), theme.dim));
         }
         for task in &self.tasks {
+            let head = format!(
+                "  {id}  {status}  {owner}  ",
+                id = pad(&printable(&task.id), id_width),
+                status = pad(task.status.as_str(), status_width),
+                owner = pad(&printable(owner_label(&task.owner)), owner_width),
+            );
             let blocked = if task.blocked_by.is_empty() {
                 String::new()
             } else {
                 format!("  (blocked by {})", printable(&task.blocked_by.join(", ")))
             };
-            let line = format!(
-                "  {id:<id_width$}  {status:<status_width$}  {owner:<owner_width$}  {subject}{blocked}",
-                id = printable(&task.id),
-                status = task.status.as_str(),
-                owner = printable(owner_label(&task.owner)),
-                subject = printable(&task.subject),
-            );
-            lines.push(Line::styled(clip(line.trim_end(), width), theme.fg));
+            let subject = printable(&task.subject);
+            // **The suffix is never cut part-way.** What a task waits on is
+            // the one thing on this line a reader acts on, and half of it —
+            // `(blocked by 1` — reads as a fact about a different task. So the
+            // subject is what gives way first, and the suffix survives whole
+            // for as long as one column of subject is left beside it; past
+            // that it is dropped whole rather than shown as a fragment, and
+            // the row says what the task is instead. The list is one
+            // `task_get` away either way.
+            //
+            // The rule is decided on what the cut actually **kept**, never on
+            // the room it was offered: [`clip`] consumes at least one grapheme
+            // cluster whatever the budget, so a subject opening on a
+            // two-column glyph comes back two columns wide out of one column
+            // of room, and composing the suffix beside it would overrun the
+            // row — and what a `Paragraph` then cuts off the end is the suffix
+            // this rule exists to keep whole. Measuring `kept` is what holds
+            // both halves: the composed line never exceeds `width`, and the
+            // suffix is whole or absent.
+            let room = width.saturating_sub(head.width() + blocked.width());
+            let kept = clip(&subject, room);
+            let line = if blocked.is_empty() || room == 0 || kept.width() > room {
+                clip(format!("{head}{subject}").trim_end(), width)
+            } else {
+                format!("{head}{kept}{blocked}")
+            };
+            lines.push(Line::styled(line, theme.fg));
         }
 
         lines
@@ -878,6 +902,21 @@ fn printable(text: &str) -> String {
             },
         )
         .collect()
+}
+
+/// `text` followed by the spaces that bring it to `width` **display
+/// columns**.
+///
+/// `{text:<width$}` counts `char`s, and every column this dialog lines its
+/// rows up against was measured with [`unicode_width`] — so a member name, a
+/// task id or an owner holding one East Asian glyph was padded two columns too
+/// wide and took the column after it with it. Those three are the padded
+/// columns that hold text somebody else wrote; the backend and the status
+/// beside them are fixed ASCII spellings of an enum. The two measurements have
+/// to be the same one, and this is where they are made so: it is what a member
+/// row and a task row both pad through, so a fix on one is a fix on both.
+fn pad(text: &str, width: usize) -> String {
+    format!("{text}{}", " ".repeat(width.saturating_sub(text.width())))
 }
 
 /// How a task's owner is listed: the member's name, or the word the

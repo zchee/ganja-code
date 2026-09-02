@@ -1968,14 +1968,15 @@ impl App {
 
     /// The lead's side of the mailbox, once a tick (**D503**).
     ///
-    /// Six things, and only the last is rate-limited *here*. Counting
-    /// teammates, carrying their dialogs and the spawn gate's asks, and
-    /// repainting the open `/teammate` dialog are reads of memory this process
-    /// already holds; reaping a finished spawn awaits a handle that already
-    /// reported finished. The §6.2 pass **is** a file read — one
-    /// `read_to_string` and, when it finds anything, a locked
-    /// read-modify-write — so it keeps the reference's own 1000 ms rather than
-    /// the loop's 16.
+    /// Seven things, and **two of them are on clocks**. Counting teammates,
+    /// carrying their dialogs and the spawn gate's asks, and repainting the
+    /// open `/teammate` dialog are reads of memory this process already holds;
+    /// reaping a finished spawn awaits a handle that already reported
+    /// finished. The other two are the ones that reach the disk, and both keep
+    /// the reference's own 1000 ms rather than the loop's 16: the shared task
+    /// list ([`App::poll_tasks`]), a directory read started off this loop and
+    /// collected by a later tick, and the §6.2 pass — one `read_to_string`
+    /// and, when it finds anything, a locked read-modify-write.
     ///
     /// What decides how often this runs at all is [`App::until_next_wakeup`],
     /// and the two gates answer different questions. A session with a teammate
