@@ -17,19 +17,18 @@
 #![cfg(unix)]
 
 use std::fs;
-use std::io::{BufRead as _, BufReader, Read as _};
 use std::path::Path;
-use std::process::{Child, Command as Spawn, Stdio};
-use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::process::{Command as Spawn, Stdio};
+use std::time::Instant;
 
 use assert_cmd::Command;
 use ganja_testkit::temp_dir as temporary;
 use serde_json::Value;
 use tempfile::TempDir;
 
-/// How long any single wait may take before the fixture is declared broken.
-const DEADLINE: Duration = Duration::from_secs(60);
+mod served_child;
+
+use served_child::{DEADLINE, Reaped};
 
 /// What the script's one turn says. One word, appearing nowhere else, so
 /// finding it means the whole turn ran.
@@ -159,7 +158,7 @@ impl Local {
 
 /// A real `ganja serve`, in its own project, playing `script`.
 struct Server {
-    child: Child,
+    child: Reaped,
     port: u16,
     _project: TempDir,
     _data: TempDir,
@@ -188,41 +187,36 @@ impl Server {
                 .expect("the config is writable");
         }
 
-        let mut child = Spawn::new(env!("CARGO_BIN_EXE_ganja"))
-            .args(["serve", "--port", "0"])
-            .current_dir(project.path())
-            .env("XDG_DATA_HOME", data.path())
-            .env("XDG_CONFIG_HOME", config.path())
-            // See the client builder above: all three doors move together.
-            .env("HOME", data.path())
-            .env_remove("GANJA_CONFIG_HOME")
-            .env("GANJA_FAKE_SCRIPT", project.path().join("script.json"))
-            .env_remove("GANJA_PROVIDER")
-            .env_remove("GANJA_MODEL")
-            .env_remove("GANJA_CONFIG")
-            .env_remove("GANJA_SERVER_PASSWORD")
-            .env_remove("GANJA_SERVER_USERNAME")
-            .env_remove("ANTHROPIC_API_KEY")
-            .env_remove("OPENAI_API_KEY")
-            .env_remove("OPENROUTER_API_KEY")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("the binary starts");
+        // Wrapped the moment it exists: every panic below this line — the
+        // announcement's deadline, a port that is not a number, and every
+        // assertion the test itself makes before it reaches `stop` — unwinds
+        // through the kill that `Child` itself would not do.
+        let mut child = Reaped::new(
+            Spawn::new(env!("CARGO_BIN_EXE_ganja"))
+                .args(["serve", "--port", "0"])
+                .current_dir(project.path())
+                .env("XDG_DATA_HOME", data.path())
+                .env("XDG_CONFIG_HOME", config.path())
+                // See the client builder above: all three doors move together.
+                .env("HOME", data.path())
+                .env_remove("GANJA_CONFIG_HOME")
+                .env("GANJA_FAKE_SCRIPT", project.path().join("script.json"))
+                .env_remove("GANJA_PROVIDER")
+                .env_remove("GANJA_MODEL")
+                .env_remove("GANJA_CONFIG")
+                .env_remove("GANJA_SERVER_PASSWORD")
+                .env_remove("GANJA_SERVER_USERNAME")
+                .env_remove("ANTHROPIC_API_KEY")
+                .env_remove("OPENAI_API_KEY")
+                .env_remove("OPENROUTER_API_KEY")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("the binary starts"),
+        );
 
-        // The address line, read on a thread so a server that never speaks
-        // fails the deadline instead of hanging the harness.
-        let stdout = child.stdout.take().expect("stdout is piped");
-        let (line_tx, line_rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let mut line = String::new();
-            let _ = BufReader::new(stdout).read_line(&mut line);
-            let _ = line_tx.send(line);
-        });
-        let line = line_rx
-            .recv_timeout(DEADLINE)
-            .expect("the server announces itself within the deadline");
+        let line = child.announcement("the server's address line");
         let port = line
             .trim()
             .rsplit(':')
@@ -241,29 +235,50 @@ impl Server {
     /// Runs one `ganja run --attach` against this server, from a directory
     /// that holds nothing: an attached run assembles no engine, so its own
     /// working directory decides nothing about the turn.
-    fn attached_run(&self, arguments: &[&str]) -> (String, String) {
+    fn attached_run(&mut self, arguments: &[&str]) -> (String, String) {
         let elsewhere = temporary();
         let data = temporary();
         let config = temporary();
 
         let mut command = Command::new(env!("CARGO_BIN_EXE_ganja"));
         sealed(&mut command, elsewhere.path(), data.path(), config.path());
-        let assert = command
+        let url = self.url();
+        let started = Instant::now();
+        let output = command
             // A run is a wait like every other in this file, and this is the
             // one that can be made to never end: a dialog the client opened on
             // the server and then declined to answer holds the turn open, and
             // there is nothing left to close it. Bounded here so that becomes
             // a named failure rather than a suite that stops progressing.
             .timeout(DEADLINE)
-            .args(["run", "--attach", &self.url()])
+            .args(["run", "--attach", &url])
             .args(arguments)
-            .assert()
-            .success();
-        let output = assert.get_output();
+            .output()
+            .expect("the attached run runs");
+
+        // A run that waited out the deadline arrives here as a failure like
+        // any other: `assert_cmd`'s timeout kills the client and hands back
+        // the signal it died of. So this is also the wait bead
+        // `ganja-code-ppm1` was filed for, and it has to say which of this
+        // file's three waits it was, how long it really took, both halves of
+        // what the client managed to say, and what the server had said by
+        // then — a bare "exit status 101" names none of that, and the run
+        // this fires on is one nobody watched.
+        assert!(
+            output.status.success(),
+            "the attached run exits zero: it exited {} after {:?}; {}\n\
+             its own standard output:\n{}\n\
+             its own standard error:\n{}",
+            output.status,
+            started.elapsed(),
+            self.child.state(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
 
         (
-            String::from_utf8(output.stdout.clone()).expect("the output is text"),
-            String::from_utf8(output.stderr.clone()).expect("the diagnostics are text"),
+            String::from_utf8(output.stdout).expect("the output is text"),
+            String::from_utf8(output.stderr).expect("the diagnostics are text"),
         )
     }
 
@@ -275,24 +290,10 @@ impl Server {
             .expect("kill runs");
         assert!(killed.success(), "the signal was delivered");
 
-        let deadline = Instant::now() + DEADLINE;
-        loop {
-            if self.child.try_wait().expect("the child is waitable").is_some() {
-                break;
-            }
-            assert!(Instant::now() < deadline, "the server should exit on SIGTERM");
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        let status = self.child.wait_for_exit("the server to exit on SIGTERM");
+        assert!(status.success(), "a clean shutdown exits 0: {status}; {}", self.child.state());
 
-        let mut stderr = String::new();
-        self.child
-            .stderr
-            .take()
-            .expect("stderr is piped")
-            .read_to_string(&mut stderr)
-            .expect("stderr reads");
-
-        stderr
+        self.child.diagnostics()
     }
 }
 
@@ -343,7 +344,7 @@ fn warnings(stream: &str) -> Vec<&str> {
 #[test]
 fn a_turn_over_a_socket_reads_exactly_the_way_the_same_turn_reads_in_process() {
     let script = one_word();
-    let server = Server::playing(&script);
+    let mut server = Server::playing(&script);
     let (attached, attached_err) = server.attached_run(&["--agent", "build", "hello"]);
     let served = server.stop();
 
@@ -375,7 +376,7 @@ fn a_turn_over_a_socket_reads_exactly_the_way_the_same_turn_reads_in_process() {
 #[test]
 fn the_nd_json_of_an_attached_turn_matches_the_local_one_object_for_object() {
     let script = one_word();
-    let server = Server::playing(&script);
+    let mut server = Server::playing(&script);
     let (attached, _) = server.attached_run(&["--format", "json", "--agent", "build", "hello"]);
     server.stop();
 
@@ -415,7 +416,7 @@ fn the_nd_json_of_an_attached_turn_matches_the_local_one_object_for_object() {
 #[test]
 fn an_attached_run_refuses_a_dialog_nobody_is_there_to_answer() {
     let script = asks_to_run_something();
-    let server = Server::playing(&script);
+    let mut server = Server::playing(&script);
     let (attached, attached_err) = server.attached_run(&["--agent", "build", "run something"]);
     server.stop();
 
@@ -449,7 +450,7 @@ fn an_attached_run_refuses_a_dialog_nobody_is_there_to_answer() {
 /// make on its own.
 #[test]
 fn an_attached_auto_run_answers_a_shell_dialog_and_still_refuses_a_question() {
-    let server = Server::playing_under(&asks_then_questions(), Some(asks_before_questioning()));
+    let mut server = Server::playing_under(&asks_then_questions(), Some(asks_before_questioning()));
     let (attached, attached_err) =
         server.attached_run(&["--auto", "--agent", "build", "have a look"]);
     server.stop();

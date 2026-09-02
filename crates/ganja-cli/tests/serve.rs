@@ -8,22 +8,21 @@
 
 #![cfg(unix)]
 
-use std::io::{BufRead as _, BufReader, Read as _, Write as _};
+use std::io::{Read as _, Write as _};
 use std::net::TcpStream;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::process::{Command, Stdio};
 
 use ganja_testkit::temp_dir as temporary;
 use tempfile::TempDir;
 
-/// How long any single wait may take before the fixture is declared broken.
-const DEADLINE: Duration = Duration::from_secs(60);
+mod served_child;
+
+use served_child::{DEADLINE, Reaped};
 
 /// A real `ganja serve` child, listening on a port the kernel picked.
 struct Served {
-    child: Child,
+    child: Reaped,
     port: u16,
     _data: TempDir,
     _config: TempDir,
@@ -41,42 +40,37 @@ impl Served {
         let data = temporary();
         let config = temporary();
 
-        let mut child = Command::new(env!("CARGO_BIN_EXE_ganja"))
-            .args(["serve", "--port", "0"])
-            .current_dir(project)
-            .env("XDG_DATA_HOME", data.path())
-            .env("XDG_CONFIG_HOME", config.path())
-            .env("HOME", config.path())
-            .env_remove("GANJA_CONFIG_HOME")
-            // Unset, so the fake provider answers and no password is
-            // configured — the unsecured warning below is the point.
-            .env_remove("GANJA_PROVIDER")
-            .env_remove("GANJA_MODEL")
-            .env_remove("GANJA_CONFIG")
-            .env_remove("GANJA_SERVER_PASSWORD")
-            .env_remove("GANJA_SERVER_USERNAME")
-            .env_remove("ANTHROPIC_API_KEY")
-            .env_remove("OPENAI_API_KEY")
-            .env_remove("OPENROUTER_API_KEY")
-            .env("GANJA_FAKE_SCRIPT", project.join("script.json"))
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("the binary starts");
+        // Wrapped the moment it exists: every panic below this line — the
+        // announcement's deadline, a line that is not an address, a port that
+        // is not a number — unwinds through the kill that `Child` itself
+        // would not do.
+        let mut child = Reaped::new(
+            Command::new(env!("CARGO_BIN_EXE_ganja"))
+                .args(["serve", "--port", "0"])
+                .current_dir(project)
+                .env("XDG_DATA_HOME", data.path())
+                .env("XDG_CONFIG_HOME", config.path())
+                .env("HOME", config.path())
+                .env_remove("GANJA_CONFIG_HOME")
+                // Unset, so the fake provider answers and no password is
+                // configured — the unsecured warning below is the point.
+                .env_remove("GANJA_PROVIDER")
+                .env_remove("GANJA_MODEL")
+                .env_remove("GANJA_CONFIG")
+                .env_remove("GANJA_SERVER_PASSWORD")
+                .env_remove("GANJA_SERVER_USERNAME")
+                .env_remove("ANTHROPIC_API_KEY")
+                .env_remove("OPENAI_API_KEY")
+                .env_remove("OPENROUTER_API_KEY")
+                .env("GANJA_FAKE_SCRIPT", project.join("script.json"))
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("the binary starts"),
+        );
 
-        // The address line, read on a thread so a server that never speaks
-        // fails the deadline instead of hanging the harness.
-        let stdout = child.stdout.take().expect("stdout is piped");
-        let (line_tx, line_rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let mut line = String::new();
-            let _ = BufReader::new(stdout).read_line(&mut line);
-            let _ = line_tx.send(line);
-        });
-        let line = line_rx
-            .recv_timeout(DEADLINE)
-            .expect("the server announces itself within the deadline");
+        let line = child.announcement("the server's address line");
         let line = line.trim();
         assert!(
             line.starts_with("ganja server listening on http://127.0.0.1:"),
@@ -98,7 +92,7 @@ impl Served {
     /// own: an attached run assembles no engine, no config and no tool
     /// registry, so anything the turn reflects came off the server's side of
     /// the socket rather than this process's.
-    fn attached_run(&self, arguments: &[&str]) -> String {
+    fn attached_run(&mut self, arguments: &[&str]) -> String {
         let elsewhere = temporary();
         let data = temporary();
         let config = temporary();
@@ -122,10 +116,14 @@ impl Served {
             .stdin(Stdio::null())
             .output()
             .expect("the attached run finishes");
+        // Both sides of the socket, because either can be the one that broke:
+        // the client's own diagnostics, and what the server had said by then.
         assert!(
             output.status.success(),
-            "the attached run exits zero: {:?}",
-            String::from_utf8_lossy(&output.stderr)
+            "the attached run exits zero: it exited {}; its standard error:\n{}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr),
+            self.child.state(),
         );
 
         String::from_utf8(output.stdout).expect("the output is text")
@@ -139,25 +137,10 @@ impl Served {
             .expect("kill runs");
         assert!(killed.success(), "the signal was delivered");
 
-        let deadline = Instant::now() + DEADLINE;
-        let status = loop {
-            if let Some(status) = self.child.try_wait().expect("the child is waitable") {
-                break status;
-            }
-            assert!(Instant::now() < deadline, "the server should exit on SIGTERM");
-            std::thread::sleep(Duration::from_millis(50));
-        };
-        assert!(status.success(), "a clean shutdown exits 0: {status:?}");
+        let status = self.child.wait_for_exit("the server to exit on SIGTERM");
+        assert!(status.success(), "a clean shutdown exits 0: {status}; {}", self.child.state());
 
-        let mut stderr = String::new();
-        self.child
-            .stderr
-            .take()
-            .expect("stderr is piped")
-            .read_to_string(&mut stderr)
-            .expect("stderr reads");
-
-        stderr
+        self.child.diagnostics()
     }
 }
 
@@ -230,7 +213,7 @@ fn a_skill_beside_the_served_project_loads_over_the_socket() {
     )
     .expect("the skill is writable");
 
-    let served = Served::in_project(project.path());
+    let mut served = Served::in_project(project.path());
     let stdout = served.attached_run(&["--format", "json", "load the porting skill"]);
 
     assert!(
