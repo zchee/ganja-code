@@ -49,11 +49,33 @@
 //!
 //! # What a delete leaves behind
 //!
-//! [`Store::delete`] removes one document and touches no other, so deleting A
-//! strands every edge that named it: B keeps a `blockedBy` pointing at an id
-//! nothing is filed under, and [`Store::update`]'s missing-counterpart refusal
-//! means `add_blocked_by: [A]` cannot repair it either, A being exactly the id
-//! that refusal is about. Recorded as a follow-up rather than closed here.
+//! An edge is written on both tasks, so removing one document would strand the
+//! other end of every edge it had: B would keep a `blockedBy` pointing at an
+//! id nothing is filed under, render as not-free in every listing for good,
+//! and [`Store::update`]'s missing-counterpart refusal would decline to repair
+//! it — A being exactly the id that refusal is about. So [`Store::delete`]
+//! **scrubs its own id from every counterpart it named**, one at a time under
+//! that counterpart's own hold.
+//!
+//! One at a time rather than under a hold set, and that is the whole
+//! difference between this and [`Store::update`]: the scrubs are independent
+//! of each other — nobody ever reads two of them as one edge — so nothing is
+//! bought by holding the second while the first is written, and a task can
+//! have accumulated far more edges than [`MAX_COUNTERPARTS`] one call at a
+//! time, which a single hold set could not take without holding the first
+//! document past [`lock::STALE`]. The price is that the scrub is not atomic:
+//! a crash or an IO failure part-way through leaves the rest of the edges
+//! dangling, exactly as every delete before this change did.
+//!
+//! Which is why the **read side tolerates what the write side now prevents**:
+//! [`Store::list`] and [`Store::get`] drop an edge naming an id the directory
+//! has no name filed under. A delete made dangling edges reachable by ordinary
+//! use, but it was never the only way to get one — a crash between two scrubs,
+//! a foreign writer, or a list written by a build older than this one all
+//! produce the same thing, and none of them can be fixed by writing more
+//! carefully. A blocker that is not there does not block, so a reader that
+//! renders it as one is simply wrong; saying so at the read costs a set the
+//! listing already builds.
 //!
 //! # What is somebody else's, and what is not
 //!
@@ -67,11 +89,16 @@
 //! met survives a rewrite in the position it arrived in.
 //!
 //! For the same reason a *name* in that directory is not yet a document: the
-//! writer that planted it need not have been a task list at all. So nothing
-//! here reads a path it has not first stamped — a regular file, within
-//! [`MAX_DOCUMENT_BYTES`] — because following a symlink would read somebody
-//! else's file into a team's list and opening a FIFO would park the reader for
-//! good, on a listing a lead's own render loop polls.
+//! writer that planted it need not have been a task list at all. Following a
+//! symlink would read somebody else's file into a team's list, and opening a
+//! FIFO would park the reader for good, on a listing a lead's own render loop
+//! polls. So nothing here reads a **name**: a document is opened with
+//! `O_NOFOLLOW | O_NONBLOCK` and then judged on the descriptor that comes
+//! back — a regular file, within [`MAX_DOCUMENT_BYTES`] — which leaves no
+//! window between the judgment and the read for a peer to swap anything into.
+//! The link's own stamp is still what asks whether a *name* is free or is
+//! somebody else's — a different question, with two callers, whose own doc
+//! says what window each of them keeps.
 //!
 //! The lock is [`crate::lock`]'s, unchanged: the same `mkdir` protocol, the
 //! same mtime staleness, the same ladder. A task document takes
@@ -87,6 +114,7 @@
 //! of the crate treats a message body: never in a log line, and rendered as a
 //! size or a key set by the [`Debug`] implementations below.
 
+use std::collections::BTreeSet;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::{fmt, fs, io};
@@ -736,6 +764,11 @@ impl Store {
     /// the counter's hold releases, so nobody else can be writing that
     /// document.
     ///
+    /// What comes back is the document as written, its edge lists included and
+    /// untidied: only the read doors, [`Store::get`] and [`Store::list`], drop
+    /// an edge naming an id nothing is filed under, so a stale edge a write
+    /// hands back is one the next read will not show.
+    ///
     /// # Errors
     ///
     /// [`TaskError::CounterExhausted`] at the end of the id space, and
@@ -772,12 +805,28 @@ impl Store {
     /// Takes no lock, and does not need one: every write here lands through a
     /// rename, so a reader sees one whole document or the one before it.
     ///
+    /// An edge naming an id the directory has **no name filed under** is left
+    /// out of what comes back — this module's note on what a delete leaves
+    /// behind says why the read side tolerates that rather than trusting the
+    /// write side to have prevented it. The document on disk is not touched:
+    /// nothing here repairs anything, and a scrub that failed stays visible to
+    /// whoever goes looking at the file.
+    ///
     /// # Errors
     ///
     /// [`TaskError::NoSuchTask`] when nothing is filed under the id, and
-    /// whatever reading or decoding the document returned.
+    /// whatever reading the directory or decoding the document returned.
     pub fn get(&self, id: &TaskId) -> Result<Task, TaskError> {
-        read(&self.path_of(id))?.ok_or(TaskError::NoSuchTask { id: *id })
+        let mut task = read(&self.path_of(id))?.ok_or(TaskError::NoSuchTask { id: *id })?;
+        // A task with no edges is the common one, and asking the directory
+        // about an empty list would be a `read_dir` per `get` for nothing.
+        if !task.blocks.is_empty() || !task.blocked_by.is_empty() {
+            let filed = self.filed()?;
+            task.blocks.retain(|edge| filed.contains(edge));
+            task.blocked_by.retain(|edge| filed.contains(edge));
+        }
+
+        Ok(task)
     }
 
     /// Every task in the list, lowest id first.
@@ -788,17 +837,31 @@ impl Store {
     /// it was — never the decoder's own sentence, which can quote the value it
     /// choked on.
     ///
+    /// A `blockedBy` naming an id the directory has **no name filed under** is
+    /// left out of the summary that carries it, for the reason [`Store::get`]
+    /// does the same: a blocker that is not there does not block, and this is
+    /// the listing that decides what a teammate is offered as free work. It
+    /// costs nothing — the set is the directory read this walks anyway. A
+    /// damaged document is *not* such an id: something is filed under it, and
+    /// dropping an edge to it would answer that a task nobody can read is not
+    /// blocking anything.
+    ///
     /// # Errors
     ///
     /// Whatever reading the directory returned. A directory that is not there
     /// yet is an empty list rather than an error: a team that has created no
     /// task is exactly that case.
     pub fn list(&self) -> Result<Vec<TaskSummary>, TaskError> {
-        let mut summaries: Vec<TaskSummary> = self
-            .ids()?
-            .into_iter()
-            .filter_map(|id| match read(&self.path_of(&id)) {
-                Ok(Some(task)) => Some(task.summary()),
+        let filed = self.filed()?;
+        let mut summaries: Vec<TaskSummary> = filed
+            .iter()
+            .filter_map(|id| match read(&self.path_of(id)) {
+                Ok(Some(task)) => {
+                    let mut summary = task.summary();
+                    summary.blocked_by.retain(|edge| filed.contains(edge));
+
+                    Some(summary)
+                }
                 // Deleted between the listing and the read, which is a race
                 // with a winner and no loser.
                 Ok(None) => None,
@@ -883,6 +946,11 @@ impl Store {
     /// an IO failure *between* two of them leaves the edge on one side. The
     /// next update naming that pair repairs it, since both sides are appended
     /// without duplication.
+    ///
+    /// What comes back is the document as written, its edge lists included and
+    /// untidied: only the read doors, [`Store::get`] and [`Store::list`], drop
+    /// an edge naming an id nothing is filed under, so a stale edge a write
+    /// hands back is one the next read will not show.
     ///
     /// # Errors
     ///
@@ -985,6 +1053,11 @@ impl Store {
     /// [`Store::update`] with an empty owner, which is the door a lead
     /// reassigning a dead member's work goes through.
     ///
+    /// What comes back is the document as written, its edge lists included and
+    /// untidied: only the read doors, [`Store::get`] and [`Store::list`], drop
+    /// an edge naming an id nothing is filed under, so a stale edge a write
+    /// hands back is one the next read will not show.
+    ///
     /// # Errors
     ///
     /// [`TaskError::NoSuchTask`] when nothing is filed under the id,
@@ -1005,22 +1078,72 @@ impl Store {
         Ok(task)
     }
 
-    /// Removes a task permanently.
+    /// Removes a task permanently, and takes both ends of its edges with it.
     ///
-    /// Under the task's own hold, so a delete cannot land in the middle of
-    /// somebody's read-modify-write; the hold's own directory is removed after
-    /// the document, by the guard's [`Drop`].
+    /// The document goes under the task's own hold, so a delete cannot land in
+    /// the middle of somebody's read-modify-write; the hold's own directory is
+    /// removed after the document, by the guard's [`Drop`].
     ///
     /// The id is **not** returned to the counter — see this module's own note
     /// on why a gap is the right outcome.
     ///
+    /// # The other end of every edge goes too
+    ///
+    /// An edge is written on both tasks, so a delete that touched one document
+    /// would leave every task this one named holding a `blockedBy` nothing is
+    /// filed under, and nothing could repair it: an update naming the deleted
+    /// id is refused by exactly the missing-counterpart door that keeps a
+    /// half-edge from being written in the first place. So this reads the
+    /// document before it removes it — its own `blocks` and `blockedBy` are
+    /// the only record of who names it back — and then scrubs its id from each
+    /// of those, **one at a time, under that counterpart's own hold**, with
+    /// its own hold released first.
+    ///
+    /// One hold at a time is what makes the order irrelevant and the count
+    /// unbounded: a scrub is independent of every other scrub, so there is
+    /// nothing to hold the first one for while the second is taken, and a task
+    /// wired one call at a time can carry far more counterparts than
+    /// [`MAX_COUNTERPARTS`] — a bound on one *update*'s hold set, which this
+    /// deliberately is not. Holding none of them while waiting for the next is
+    /// also what keeps a delete out of every deadlock [`Store::update`]'s
+    /// lowest-id-first ordering exists to prevent.
+    ///
+    /// The cost is stated rather than glossed: the scrubs are **not** one
+    /// transaction with the removal or with each other, this store having no
+    /// journal, so a crash or an IO failure part-way through leaves the rest of
+    /// the edges dangling. A scrub that cannot be done is reported and stepped
+    /// over for the same reason — the document is already gone, and answering
+    /// a caller that the delete failed would be false. What that leaves is what
+    /// [`Store::list`] and [`Store::get`] already tolerate: an edge naming an
+    /// id nothing is filed under is dropped from what they answer.
+    ///
     /// # Errors
     ///
     /// [`TaskError::NoSuchTask`] when nothing is filed under the id, and
-    /// whatever the lock or the filesystem returned.
+    /// whatever the lock or the filesystem returned **for the removal itself**.
+    /// A scrub never fails the call.
     pub fn delete(&self, id: &TaskId) -> Result<(), TaskError> {
         let path = self.path_of(id);
-        let _hold = self.hold(&path, id)?;
+        let hold = self.hold(&path, id)?;
+
+        // Before the removal, because afterwards there is nothing left to ask.
+        // A document that will not read still deletes — that is how a damaged
+        // one is got rid of — and takes its edges' whereabouts with it, which
+        // is a line in the log rather than a refusal.
+        let counterparts = match read(&path) {
+            Ok(Some(task)) => counterparts_of(&task),
+            Ok(None) => Vec::new(),
+            Err(error) => {
+                tracing::warn!(
+                    tasks = %self.dir.display(),
+                    %id,
+                    reason = dropped(&error),
+                    "a task was deleted without reading what it was wired to",
+                );
+
+                Vec::new()
+            }
+        };
 
         match fs::remove_file(&path) {
             Ok(()) => {}
@@ -1029,7 +1152,57 @@ impl Store {
             }
             Err(error) => return Err(error.into()),
         }
-        tracing::debug!(tasks = %self.dir.display(), %id, "a task was deleted");
+        // Released before the first scrub: the document it guarded is gone, and
+        // a hold kept across a run of contended ones would outlive
+        // `lock::STALE` and be broken by a peer while this process still stood
+        // in it.
+        drop(hold);
+        tracing::debug!(
+            tasks = %self.dir.display(),
+            %id,
+            counterparts = counterparts.len(),
+            "a task was deleted",
+        );
+
+        for counterpart in counterparts {
+            if let Err(error) = self.scrub(&counterpart, id) {
+                tracing::warn!(
+                    tasks = %self.dir.display(),
+                    %id,
+                    counterpart = %counterpart,
+                    reason = dropped(&error),
+                    "an edge to a deleted task was left on its counterpart",
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Removes `id` from both of `counterpart`'s edge lists, under that
+    /// document's own hold.
+    ///
+    /// Nothing is written when nothing named it: a counterpart that has
+    /// already been scrubbed, or that never held the edge, costs a read and no
+    /// rename. A document that is gone is the same answer — the pair was
+    /// deleted from both ends, which is a race with a winner and no loser.
+    ///
+    /// No stamp before the hold, unlike [`Store::update`]'s: the hazard there
+    /// is two ids collapsing onto one lock key while a *second* hold is held,
+    /// and this takes exactly one. A counterpart planted as a symlink is
+    /// refused by the read that follows.
+    fn scrub(&self, counterpart: &TaskId, id: &TaskId) -> Result<(), TaskError> {
+        let path = self.path_of(counterpart);
+        let _hold = self.hold(&path, counterpart)?;
+
+        let Some(mut task) = read(&path)? else { return Ok(()) };
+        let named = task.blocks.len() + task.blocked_by.len();
+        task.blocks.retain(|edge| edge != id);
+        task.blocked_by.retain(|edge| edge != id);
+        if task.blocks.len() + task.blocked_by.len() == named {
+            return Ok(());
+        }
+        write(&path, &task)?;
 
         Ok(())
     }
@@ -1146,6 +1319,22 @@ impl Store {
         Ok(highest)
     }
 
+    /// Every id the directory has a name filed under, in id order.
+    ///
+    /// A **set**, because the two readers that ask it ask once per edge and
+    /// the question is membership; in id order because [`Store::list`] walks
+    /// it as its own listing and a sorted walk is the order it has to answer
+    /// in anyway.
+    ///
+    /// The question is about a *name*, deliberately: a document too damaged to
+    /// decode is still an id somebody filed, and an edge to it is a real
+    /// blocker whose blocker nobody can currently read. What is not filed is
+    /// what a delete removed — or what a scrub, a crash or a foreign writer
+    /// left pointing at nothing.
+    fn filed(&self) -> Result<BTreeSet<TaskId>, TaskError> {
+        Ok(self.ids()?.into_iter().collect())
+    }
+
     /// Every id the directory holds a document for, in whatever order the
     /// filesystem answered in.
     ///
@@ -1200,33 +1389,40 @@ fn read(path: &Path) -> Result<Option<Task>, TaskError> {
 /// document, and the guard is what stands between a planted one and a reader.
 /// A symlink would redirect this read into somebody else's file; a FIFO would
 /// make it never return, and `/dev/zero` would make it never stop, on a
-/// listing that is polled for as long as anybody is watching the list. So
-/// [`stamped`] decides — a regular file, within [`MAX_DOCUMENT_BYTES`] — and
-/// anything else is [`TaskError::NotADocument`], which [`Store::list`] reports
-/// and skips exactly as it does a document that will not decode.
+/// listing that is polled for as long as anybody is watching the list.
 ///
-/// **The window is narrowed rather than closed**, and it is worth being exact
-/// about which half: a writer that swaps a regular file for a FIFO between
-/// this stamp and the open below can still park the reader. Closing that needs
-/// the open itself to carry `O_NOFOLLOW | O_NONBLOCK`, which nothing this
-/// crate ships can spell: `libc` is a dev-dependency here, taken on so a test
-/// can plant a real FIFO, and putting it in the shipped closure would be this
-/// crate's first system call outside `std`. What is here refuses every name a
-/// planted document can already be, and bounds the read on the open file,
-/// where no rename can reach it.
+/// **Nothing here judges the path.** The open itself carries `O_NOFOLLOW |
+/// O_NONBLOCK` and everything after it is decided on the **opened
+/// descriptor** — a regular file, within [`MAX_DOCUMENT_BYTES`], read with a
+/// bound one byte past it. That ordering is the whole point: a check on the
+/// name and an open of the name are two operations on a directory a peer can
+/// write into between them, so a stamp that passed could be a FIFO by the
+/// time it was opened, and the reader would park on a listing a lead's render
+/// loop is polling. There is no window on the final component to swap into —
+/// the descriptor answering `fstat` is the one the read comes from, and a
+/// rename cannot reach it. An ancestor swapped for a link is still followed:
+/// `O_NOFOLLOW` covers the last component only, and closing the rest is not
+/// portable (`O_NOFOLLOW_ANY` on macOS, `openat2`'s `RESOLVE_NO_SYMLINKS` on
+/// Linux). `O_NOFOLLOW` refuses a symlink at the open (`ELOOP`, or `EMLINK`
+/// on FreeBSD), so a planted link's target is never so much as stat'd;
+/// `O_NONBLOCK` is what keeps a FIFO with no writer from parking the open
+/// itself, which is the one refusal that has to happen before the descriptor
+/// exists to be judged. Anything refused is [`TaskError::NotADocument`], which
+/// [`Store::list`] reports and skips exactly as it does a document that will
+/// not decode.
 fn read_guarded(path: &Path) -> Result<Option<String>, TaskError> {
     let refuse = || TaskError::NotADocument { path: path.to_owned() };
-    if !stamped(path)? {
-        return Ok(None);
-    }
+    let Some(file) = open_guarded(path)? else { return Ok(None) };
 
-    let file = match fs::File::open(path) {
-        Ok(file) => file,
-        // Deleted between the stamp and the open: a race with a winner and no
-        // loser, which is how `Store::list` already reads a missing document.
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
-    };
+    // On the descriptor rather than on the name: a directory opens read-only
+    // on both unixes this ships for, and a FIFO or a device opens under
+    // `O_NONBLOCK`, so the open answering is not yet the file being a
+    // document. `File::metadata` is `fstat` — it describes what is actually
+    // about to be read.
+    let stamp = file.metadata()?;
+    if !stamp.is_file() || stamp.len() > MAX_DOCUMENT_BYTES {
+        return Err(refuse());
+    }
 
     // One byte past the bound, so a file that grew after its stamp is refused
     // on what was actually read rather than on what was promised.
@@ -1237,6 +1433,54 @@ fn read_guarded(path: &Path) -> Result<Option<String>, TaskError> {
     }
 
     Ok(Some(text))
+}
+
+/// The descriptor at `path`, opened so that what comes back can only be a
+/// thing this module is willing to judge — or [`None`] when there is nothing
+/// there.
+///
+/// `O_NOFOLLOW` makes the final component's being a symlink a failure rather
+/// than a redirection, and the errno for it is `ELOOP` on Linux, macOS and
+/// OpenBSD and `EMLINK` on FreeBSD; both are read as "not a document" rather than as an
+/// I/O failure, because a planted link is exactly the case this refuses.
+/// `O_NONBLOCK` is about the open, not about the read: a FIFO with no writer
+/// blocks in `open` itself, before any check could run, and the flag is what
+/// turns that into a descriptor [`read_guarded`] can then refuse on its type.
+/// It costs the read nothing — a regular file ignores it.
+#[cfg(unix)]
+fn open_guarded(path: &Path) -> Result<Option<fs::File>, TaskError> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+
+    match fs::File::options()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(file) => Ok(Some(file)),
+        // Deleted before the open, or never there: a race with a winner and no
+        // loser, which is how `Store::list` already reads a missing document.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) if matches!(error.raw_os_error(), Some(libc::ELOOP | libc::EMLINK)) => {
+            Err(TaskError::NotADocument { path: path.to_owned() })
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// The same open where those flags do not exist.
+///
+/// Windows is parked (no CI lane, no compile signal), so this arm is here to
+/// keep the module buildable rather than because it is equivalent: a plain
+/// open follows a reparse point, and the type and size checks
+/// [`read_guarded`] makes on the descriptor are all that stands behind it.
+/// Whoever unparks that platform closes this with `FILE_FLAG_OPEN_REPARSE_POINT`.
+#[cfg(not(unix))]
+fn open_guarded(path: &Path) -> Result<Option<fs::File>, TaskError> {
+    match fs::File::open(path) {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// Whether a document stands at `path` at all, on the link's own stamp.
@@ -1250,6 +1494,17 @@ fn read_guarded(path: &Path) -> Result<Option<String>, TaskError> {
 /// `false` is nothing there, which every caller reads as an absent task rather
 /// than as damage; [`TaskError::NotADocument`] is a name that is there and is
 /// not something this module will touch.
+///
+/// **This is a question about a name, and the two callers left ask it about a
+/// name on purpose.** [`Store::update`] stamps each path in its hold set
+/// before it takes the first hold, because the hazard there is a *lock key*
+/// rather than a read — `acquire_unseeded` canonicalizes its target, so a
+/// counterpart planted as a symlink collapses two ids onto one key and the
+/// second hold parks with no timeout. [`Store::issue_id`] asks whether a name
+/// is free to file a fresh document under. Neither can be answered on a
+/// descriptor, and both still leave the window a stamp always leaves: a swap
+/// between this call and the hold or the rename that follows it. What
+/// [`read_guarded`] leaves is nothing, which is why it no longer calls this.
 fn stamped(path: &Path) -> Result<bool, TaskError> {
     let stamp = match fs::symlink_metadata(path) {
         Ok(stamp) => stamp,
@@ -1338,6 +1593,30 @@ fn apply(task: &mut Task, update: Update) {
     if let Some(comment) = add_comment {
         task.comments.push(comment);
     }
+}
+
+/// Every other task `task` names, once each.
+///
+/// Both lists, because an edge is written on both tasks and a delete has to
+/// scrub whichever end it is: what this task blocks names it back in
+/// `blockedBy`, and what blocks it names it back in `blocks`.
+///
+/// **Its own id is not a counterpart of its own.** A task that blocks itself
+/// is one document, already removed by the time a scrub would run, and
+/// asking for its hold again would be a lock on a name whose document is
+/// gone — an answer nobody needs and a line in the log for it.
+fn counterparts_of(task: &Task) -> Vec<TaskId> {
+    let mut counterparts: Vec<TaskId> = task
+        .blocks
+        .iter()
+        .chain(&task.blocked_by)
+        .copied()
+        .filter(|edge| *edge != task.id)
+        .collect();
+    counterparts.sort_unstable();
+    counterparts.dedup();
+
+    counterparts
 }
 
 /// Where the document filed under `id` sits among the ones an update holds.

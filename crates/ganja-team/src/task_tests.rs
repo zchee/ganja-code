@@ -53,6 +53,18 @@ fn peer_hold(store: &Store, id: &TaskId) -> PathBuf {
     lock
 }
 
+/// The document as it is actually written, past every reader that tidies one
+/// up on the way out.
+///
+/// [`Store::get`] and [`Store::list`] drop an edge naming an id nothing is
+/// filed under, so a test that asked either of them whether a scrub ran would
+/// pass without one. Only the bytes can say.
+fn on_disk(store: &Store, id: &TaskId) -> Task {
+    let text = fs::read_to_string(store.path_of(id)).expect("the document reads");
+
+    serde_json::from_str(&text).expect("the document decodes")
+}
+
 /// Three tasks, so a test about edges has both ends of one to name.
 fn three(store: &Store) -> [TaskId; 3] {
     [1, 2, 3].map(|nth| {
@@ -433,6 +445,79 @@ fn a_name_that_is_not_a_regular_file_is_skipped_rather_than_read() {
     assert_eq!(next.id.to_string(), "6", "and the list can still be added to around them");
 }
 
+#[cfg(unix)]
+#[test]
+fn a_symlink_is_refused_at_the_open_rather_than_followed_to_whatever_it_names() {
+    use std::os::unix::fs::symlink;
+
+    let (home, store) = store();
+    let [first, planted, _third] = three(&store);
+
+    // Two links where documents belong: one onto a real task, one onto a name
+    // nothing was ever written to. Anything that consulted the *target* would
+    // tell them apart — the first would answer with task 1's document under
+    // task 2's name, the second with nothing filed there at all. `O_NOFOLLOW`
+    // cannot tell them apart, because it never asks: the open itself fails on
+    // the link.
+    fs::remove_file(store.path_of(&planted)).expect("the document is removable");
+    symlink(store.path_of(&first), store.path_of(&planted)).expect("a link is plantable");
+    let dangling = TaskId::parse("4").expect("a valid id");
+    symlink(home.path().join("nothing-was-ever-written-here"), store.path_of(&dangling))
+        .expect("a link is plantable");
+
+    for refused in [planted, dangling] {
+        assert!(
+            matches!(store.get(&refused), Err(TaskError::NotADocument { .. })),
+            "a link is refused whatever it names, and {refused} is no exception",
+        );
+    }
+    assert!(
+        store.path_of(&first).is_file(),
+        "and the document one of them named was never opened through it",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_where_a_document_belongs_answers_rather_than_parking_the_reader() {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (_home, store) = store();
+    let planted = TaskId::parse("1").expect("a valid id");
+    fs::create_dir_all(store.dir()).expect("the directory a create would have made");
+
+    let name =
+        CString::new(store.path_of(&planted).as_os_str().as_bytes()).expect("a path with no NUL");
+    // SAFETY: `mkfifo` reads the NUL-terminated name and answers with a
+    // status. The `CString` outlives the call, and nothing it returns is a
+    // pointer this test dereferences.
+    let made = unsafe { libc::mkfifo(name.as_ptr(), 0o600) };
+    assert_eq!(made, 0, "the fifo is created: {}", std::io::Error::last_os_error());
+
+    // Nothing has this open for writing, so an ordinary `open` for reading
+    // parks until something does — forever, here. `O_NONBLOCK` is the only
+    // thing standing between that and a listing a lead's render loop polls,
+    // now that nothing judges the name before the open. The bound is the
+    // assertion: a regression here does not fail, it hangs.
+    let (answered, answer) = mpsc::channel();
+    let elsewhere = store.clone();
+    std::thread::spawn(move || {
+        let _ = answered.send((elsewhere.get(&planted).err(), elsewhere.list()));
+    });
+
+    let (refused, listed) = answer
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the open answers rather than waiting for a writer that never comes");
+    assert!(matches!(refused, Some(TaskError::NotADocument { .. })), "{refused:?}");
+    assert!(
+        listed.expect("a planted name does not fail the list").is_empty(),
+        "and the listing that would have parked on it comes back without it",
+    );
+}
+
 #[test]
 fn a_document_larger_than_a_task_can_be_is_skipped_rather_than_read() {
     let (_home, store) = store();
@@ -686,6 +771,118 @@ fn a_deleted_task_takes_its_document_and_its_lock_with_it() {
     assert!(matches!(store.get(&task.id), Err(TaskError::NoSuchTask { .. })));
     assert!(matches!(store.delete(&task.id), Err(TaskError::NoSuchTask { .. })));
     assert!(store.list().expect("the list reads").is_empty());
+}
+
+#[test]
+fn a_delete_takes_the_other_end_of_every_edge_with_it() {
+    let (_home, store) = store();
+    let [first, second, third] = three(&store);
+
+    // Both directions at once: the task being deleted blocks one and is
+    // blocked by another, so a scrub that walked only one of its two lists
+    // would leave the other end standing.
+    store
+        .update(
+            &first,
+            Update { add_blocks: vec![second], add_blocked_by: vec![third], ..Update::default() },
+        )
+        .expect("the edges wire up");
+
+    store.delete(&first).expect("the task deletes");
+
+    assert_eq!(on_disk(&store, &second).blocked_by, [], "what it blocked is free work again");
+    assert_eq!(on_disk(&store, &third).blocks, [], "and what blocked it no longer claims to");
+}
+
+#[test]
+fn a_delete_scrubs_more_counterparts_than_one_update_may_name() {
+    let (_home, store) = store();
+    let task = store.create(NewTask::new("subject", "description")).expect("a task is created");
+    let counterparts: Vec<TaskId> = (0..=MAX_COUNTERPARTS)
+        .map(|nth| {
+            store
+                .create(NewTask::new(format!("counterpart {nth}"), "description"))
+                .expect("a task is created")
+                .id
+        })
+        .collect();
+
+    // Past the cap on purpose, one call at a time — which is what a task's
+    // edge list accumulates like, and why a delete takes one hold at a time
+    // rather than the whole set an update would have to.
+    for counterpart in &counterparts {
+        store
+            .update(&task.id, Update { add_blocks: vec![*counterpart], ..Update::default() })
+            .expect("an edge wires up");
+    }
+    assert!(counterparts.len() > MAX_COUNTERPARTS, "the point of the test is the cap");
+
+    store.delete(&task.id).expect("the task deletes");
+
+    for counterpart in &counterparts {
+        assert_eq!(
+            on_disk(&store, counterpart).blocked_by,
+            [],
+            "every counterpart is scrubbed, not the first {MAX_COUNTERPARTS} of them",
+        );
+    }
+}
+
+#[test]
+fn a_task_that_blocks_itself_is_deletable() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (_home, store) = store();
+    let task = store.create(NewTask::new("subject", "description")).expect("a task is created");
+    store
+        .update(&task.id, Update { add_blocks: vec![task.id], ..Update::default() })
+        .expect("a self-edge is one document");
+
+    // The only counterpart a self-edge names is the document being removed.
+    // Two things keep the scrub off it — the delete's own hold is released
+    // before the first one runs, and a task is not a counterpart of its own —
+    // and a call that lost both would park on a hold it already holds. The
+    // bound is the assertion: a regression here does not fail, it hangs.
+    let (answered, answer) = mpsc::channel();
+    let elsewhere = store.clone();
+    std::thread::spawn(move || {
+        let _ = answered.send(elsewhere.delete(&task.id));
+    });
+
+    answer
+        .recv_timeout(Duration::from_secs(10))
+        .expect("a delete answers rather than scrubbing the document it just removed")
+        .expect("the task deletes");
+    assert!(store.list().expect("the list reads").is_empty());
+}
+
+#[test]
+fn an_edge_naming_a_task_nobody_filed_is_read_as_absent_rather_than_as_a_blocker() {
+    let (_home, store) = store();
+    let [first, second, _third] = three(&store);
+    let absent = TaskId::parse("99").expect("a valid id");
+
+    // What a crash between two scrubs leaves, and what a foreign writer or a
+    // build older than the scrub can leave too: an edge naming an id the
+    // directory has nothing filed under.
+    let mut task = store.get(&first).expect("the task reads");
+    task.blocked_by = vec![absent, second];
+    task.blocks = vec![absent];
+    write(&store.path_of(&first), &task).expect("the document is writable");
+
+    let read_back = store.get(&first).expect("the task reads");
+    assert_eq!(read_back.blocked_by, [second], "a blocker nobody filed does not block");
+    assert_eq!(read_back.blocks, [], "and the other direction is dropped the same way");
+    let listed = store.list().expect("the list reads");
+    let row = listed.iter().find(|summary| summary.id == first).expect("the task is listed");
+    assert_eq!(row.blocked_by, [second], "the listing that offers free work answers the same");
+
+    assert_eq!(
+        on_disk(&store, &first).blocked_by,
+        [absent, second],
+        "and nothing was repaired: the read side tolerates what it will not answer",
+    );
 }
 
 #[test]

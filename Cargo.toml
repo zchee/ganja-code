@@ -209,7 +209,9 @@ jsonc-parser = "0.33.1"
 # dependency.
 jsonschema = { version = "0.52.1", default-features = false }
 # `killpg`, so cancelling a shell command takes its whole process group with
-# it without shelling out to `kill(1)`.
+# it without shelling out to `kill(1)`; and `O_NOFOLLOW | O_NONBLOCK`, so the
+# team task store opens a document it can judge on the descriptor rather
+# than on a name somebody may have swapped under it.
 libc = "0.2.189"
 # The LSP wire types the diagnostics client speaks to rust-analyzer and
 # gopls, so requests and notifications are typed instead of hand-built JSON.

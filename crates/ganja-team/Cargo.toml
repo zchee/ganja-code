@@ -53,14 +53,18 @@ thiserror.workspace = true
 # is user content, and `tests/no_bodies_in_logs.rs` is the canary that says so.
 tracing.workspace = true
 
+# The crate's first system call outside `std`, and the only one: `O_NOFOLLOW |
+# O_NONBLOCK` on the open a task document is read through, plus the `mkfifo`
+# its test plants a real FIFO with. Nothing `std` offers can spell those two
+# flags, and without them the read guard is a stamp on a *path* — a writer
+# that swaps a regular file for a FIFO or a symlink between that stamp and the
+# open still parks a listing a lead's render loop is polling. Target-scoped
+# because the code that needs it is `#[cfg(unix)]`: the parked Windows branch
+# opens plainly and says so, so it need not carry a dependency it cannot use.
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 # The canary reads its own log back, which needs a subscriber it can write
 # into — the same shape `ganja-core`'s `secrets_env.rs` uses for credentials.
 tracing-subscriber.workspace = true
-
-[target.'cfg(unix)'.dev-dependencies]
-# `mkfifo`, so the read guard's test plants a real FIFO where a task document
-# belongs rather than trusting review that the stamp comes before the open.
-# Dev-only and unix-only, which the table says as well as the comment:
-# nothing this crate ships reaches a system call it cannot make through `std`.
-libc.workspace = true
