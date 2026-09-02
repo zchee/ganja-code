@@ -108,6 +108,14 @@
 //!
 //! # Content and addressing
 //!
+//! **The file name is the address, and the document has to agree with it.**
+//! Every door here reaches a task through [`Store::path_of`], so a `2.json`
+//! holding `"id": "1"` is a document with two answers to which task it is, and
+//! the doors would take different ones. The `read` door compares the two and
+//! refuses a document that disagrees, naming both halves; [`Store::list`]
+//! drops such a row the way it drops any other damage, and [`Store::delete`]
+//! still removes it, which is how one is got rid of.
+//!
 //! An id, a status and an owner are addressing; a subject is the label every
 //! listing renders. A description, a comment's text and whatever a model put
 //! in `metadata` are **content**, and this module treats them the way the rest
@@ -165,7 +173,14 @@ pub const REFUSED_ALREADY_OWNED: &str = "this task is already claimed";
 /// Why a create could not be given an id.
 pub const REFUSED_COUNTER_EXHAUSTED: &str = "every id the grammar admits has been issued";
 
-/// Why a write was refused before it touched the directory.
+/// Why a write was refused before it touched the directory, or why a read
+/// refused what it found there.
+///
+/// Two producers rather than the one it was written for: the passthrough check
+/// every write runs over every document before the first rename, and the read
+/// door's cross-check of a document's own `id` against the name filing it —
+/// [`REFUSED_MISFILED`], which is the sentence that says which of the two a
+/// given refusal is.
 pub const REFUSED_SCHEMA: &str = "a task document does not match the task schema";
 
 /// Why an update naming a crowd of counterparts was refused.
@@ -185,6 +200,21 @@ pub const DROPPED_UNREADABLE: &str = "the document could not be read";
 /// Why a document was left out of a listing, when it is not a file this module
 /// will read at all.
 pub const DROPPED_NOT_A_DOCUMENT: &str = "the name is not a regular file of a size a task is";
+
+/// Why a document was left out of a listing, when the id it holds is not the
+/// one its name files it under.
+pub const DROPPED_MISFILED: &str = "the document holds another task's id";
+
+/// Why a document was refused: its own `id` is not the id its file name files
+/// it under.
+///
+/// A **schema** refusal rather than a kind of its own, and that is the smaller
+/// of two honest answers: [`TaskError::SchemaInvalid`] already means "this is
+/// not a task document this build will act on", it already carries one
+/// sentence per offending key, and `id` is exactly such a key. A variant of
+/// its own would be a new arm in every exhaustive match above this crate, for
+/// a case each of them would render the same way.
+pub const REFUSED_MISFILED: &str = "a task document is filed under an id that is not its own";
 
 /// Why a name in the tasks directory was not read.
 ///
@@ -259,7 +289,14 @@ pub enum TaskError {
     /// never issues an id twice, and wrapping to 1 would.
     #[error("{REFUSED_COUNTER_EXHAUSTED}")]
     CounterExhausted,
-    /// A passthrough map carries a key the shape itself declares.
+    /// A passthrough map carries a key the shape itself declares, or a
+    /// document is filed under an id that is not its own.
+    ///
+    /// Two producers and one variant, which is the whole argument for
+    /// [`REFUSED_MISFILED`] being a schema refusal: both mean "this is not a
+    /// task document this build will act on", and `issues` already says which
+    /// key is the offending one, so telling the two apart is reading a
+    /// sentence rather than matching a second variant.
     #[error("{REFUSED_SCHEMA}: {}", issues.join("; "))]
     SchemaInvalid {
         /// One sentence per offending key.
@@ -462,8 +499,14 @@ impl Comment {
     /// reason [`crate::MailboxMessage::new`]'s is: a value a test can pin is a
     /// value a test can assert on. [`crate::record::now_iso8601`] is the clock
     /// for callers that want it.
+    ///
+    /// The arguments are the **struct's own field order**, deliberately: `at`
+    /// and `text` are both strings, so a constructor that took them in the
+    /// other order than the shape declares them would let a swapped call
+    /// compile and file a timestamp as what somebody said. Matching the fields
+    /// is what makes the two orders one thing to remember rather than two.
     #[must_use]
-    pub fn new(from: impl Into<String>, text: impl Into<String>, at: impl Into<String>) -> Self {
+    pub fn new(from: impl Into<String>, at: impl Into<String>, text: impl Into<String>) -> Self {
         Self { from: from.into(), at: at.into(), text: text.into(), extra: IndexMap::new() }
     }
 }
@@ -814,8 +857,11 @@ impl Store {
     ///
     /// # Errors
     ///
-    /// [`TaskError::NoSuchTask`] when nothing is filed under the id, and
-    /// whatever reading the directory or decoding the document returned.
+    /// [`TaskError::NoSuchTask`] when nothing is filed under the id,
+    /// [`TaskError::SchemaInvalid`] when the document filed there holds
+    /// another task's id — naming the file and the id it holds, where the
+    /// listing only drops the row — and whatever reading the directory or
+    /// decoding the document returned.
     pub fn get(&self, id: &TaskId) -> Result<Task, TaskError> {
         let mut task = read(&self.path_of(id))?.ok_or(TaskError::NoSuchTask { id: *id })?;
         // A task with no edges is the common one, and asking the directory
@@ -836,6 +882,16 @@ impl Store {
     /// is a log line naming the directory, the id and which *kind* of failure
     /// it was — never the decoder's own sentence, which can quote the value it
     /// choked on.
+    ///
+    /// **A document filed under another task's id is one of those**, dropped
+    /// rather than refusing the whole listing, and for a second reason beside
+    /// the first: there is no honest row to draw for it. The name and the
+    /// field disagree about which task it is, so a row under the name would be
+    /// one [`Store::get`] then refuses, and a row under the field would be a
+    /// second task at an id the directory has nothing filed under. Dropping
+    /// says what is true — this list cannot place that file — and
+    /// [`Store::get`] is the door that says which file and which id to
+    /// whoever goes asking.
     ///
     /// A `blockedBy` naming an id the directory has **no name filed under** is
     /// left out of the summary that carries it, for the reason [`Store::get`]
@@ -957,11 +1013,14 @@ impl Store {
     /// [`TaskError::NoSuchTask`] when nothing is filed under the id or under
     /// one an edge names, [`TaskError::NotADocument`] when one of those names
     /// is not a document this module reads, [`TaskError::TooManyCounterparts`]
-    /// past [`MAX_COUNTERPARTS`], [`TaskError::SchemaInvalid`] when any
-    /// document this call would write carries a passthrough key its own shape
-    /// declares — the comment being appended is the reachable one; the
-    /// metadata merge is a nested map and cannot shadow a top-level key — and
-    /// whatever the locks or the filesystem returned.
+    /// past [`MAX_COUNTERPARTS`], [`TaskError::SchemaInvalid`] from either end
+    /// of the call — a document it would **write** carrying a passthrough key
+    /// its own shape declares (the comment being appended is the reachable
+    /// one; the metadata merge is a nested map and cannot shadow a top-level
+    /// key), or a document it **reads** being filed under an id that is not
+    /// its own ([`REFUSED_MISFILED`]), which the counterparts reach as readily
+    /// as the named task: a stray `cp 1.json 2.json`, then an update naming 2
+    /// as an edge — and whatever the locks or the filesystem returned.
     pub fn update(&self, id: &TaskId, update: Update) -> Result<Task, TaskError> {
         // Every document this call writes, sorted and deduplicated: the order
         // is the deadlock-free one and the dedupe is what keeps a self-edge
@@ -1005,7 +1064,12 @@ impl Store {
         // it is what it is blocked by.
         let blocks = update.add_blocks.clone();
         let blocked_by = update.add_blocked_by.clone();
-        apply(&mut documents[at(&held, id)?].1, update);
+        // Where this call's own task sits among the documents, taken once: it
+        // is what `apply` changes and what the answer is read back out of, and
+        // the two must be the same document by construction rather than by
+        // two searches that could disagree.
+        let answering = at(&held, id)?;
+        apply(&mut documents[answering].1, update);
         for counterpart in &blocks {
             extend_unique(&mut documents[at(&held, counterpart)?].1.blocked_by, [*id]);
         }
@@ -1023,10 +1087,13 @@ impl Store {
             write(path, task)?;
         }
 
-        let task = documents
-            .into_iter()
-            .find_map(|(_, task)| (task.id == *id).then_some(task))
-            .ok_or(TaskError::NoSuchTask { id: *id })?;
+        // By position in the hold set, never by searching the written
+        // documents for one whose `id` field matches: the set is what decided
+        // which files this call would hold and write, so the answer is the
+        // document at that position and no second question needs asking. A
+        // search would ask one — and would answer `NoSuchTask` for a task this
+        // call had just written, which reads as nothing having happened.
+        let task = documents.swap_remove(answering).1;
         tracing::debug!(
             tasks = %self.dir.display(),
             %id,
@@ -1046,6 +1113,19 @@ impl Store {
     /// second one takes the lock *after* the first one released it, reads the
     /// owner the first one wrote, and is refused.
     ///
+    /// # The exclusivity is the hold's, and the hold has a bound
+    ///
+    /// [`crate::lock`]'s staleness is the lock directory's mtime past
+    /// [`lock::STALE`] — ten seconds — with **no heartbeat and no liveness
+    /// probe**, so a hold that somehow outlives that is one a peer may break:
+    /// it removes the directory, takes the lock, and the two claimants then
+    /// read and write the owner without ever seeing each other. Two winners,
+    /// and neither of them refused. What keeps that theoretical is the very
+    /// thing the bound was chosen against — a claim is one read-modify-write
+    /// of a small document, a millisecond's work against a ten-second break —
+    /// and it is said here rather than glossed, because a promise worth making
+    /// is worth stating the condition of.
+    ///
     /// The refusal is unconditional on a non-empty owner, including when that
     /// owner is the claimant itself — a caller re-claiming its own task is
     /// answered by [`TaskError::AlreadyOwned`] naming itself, which is
@@ -1061,8 +1141,11 @@ impl Store {
     /// # Errors
     ///
     /// [`TaskError::NoSuchTask`] when nothing is filed under the id,
-    /// [`TaskError::AlreadyOwned`] when somebody holds it, and whatever the
-    /// lock or the filesystem returned.
+    /// [`TaskError::AlreadyOwned`] when somebody holds it,
+    /// [`TaskError::SchemaInvalid`] when the document filed there is filed
+    /// under an id that is not its own ([`REFUSED_MISFILED`]) — a claim reads
+    /// before it writes, so it is answered by the same cross-check
+    /// [`Store::get`] is — and whatever the lock or the filesystem returned.
     pub fn claim(&self, id: &TaskId, owner: &str) -> Result<Task, TaskError> {
         let path = self.path_of(id);
         let _hold = self.hold(&path, id)?;
@@ -1303,15 +1386,25 @@ impl Store {
     /// zero. A name alone moves nothing: a planted `<ID_MAX>.json` with no
     /// document behind it would otherwise push the issue point past the end
     /// of the id space and refuse every create from then on, with no repair
-    /// short of deleting it by hand. What the read guard would not read as a
-    /// document is not one here either — an absent, damaged or oversized name
-    /// is skipped — and only an I/O failure is an error.
+    /// short of deleting it by hand. What the read door would not read as a
+    /// document is not one here either — an absent, damaged, oversized or
+    /// misfiled name is skipped — and only an I/O failure is an error.
+    ///
+    /// Skipping is safe rather than merely convenient: the name is still a
+    /// name, and [`Store::issue_id`]'s own walk steps over every name that
+    /// exists, so a document nobody can place is never renamed over even
+    /// though it moves the issue point nowhere.
     fn highest_id(&self) -> Result<u64, TaskError> {
         let mut highest = 0;
         for id in self.ids()? {
             match read(&self.path_of(&id)) {
                 Ok(Some(_)) => highest = highest.max(id.number()),
-                Ok(None) | Err(TaskError::NotADocument { .. } | TaskError::Json(_)) => {}
+                Ok(None)
+                | Err(
+                    TaskError::NotADocument { .. }
+                    | TaskError::Json(_)
+                    | TaskError::SchemaInvalid { .. },
+                ) => {}
                 Err(error) => return Err(error),
             }
         }
@@ -1351,9 +1444,7 @@ impl Store {
         let mut ids = Vec::new();
         for entry in entries {
             let name = entry?.file_name();
-            let Some(name) = name.to_str() else { continue };
-            let Some(stem) = name.strip_suffix(DOCUMENT_SUFFIX) else { continue };
-            if let Ok(id) = TaskId::parse(stem) {
+            if let Some(id) = filed_as(Path::new(&name)) {
                 ids.push(id);
             }
         }
@@ -1364,22 +1455,71 @@ impl Store {
 
 /// Which sentence a dropped document is reported with.
 ///
-/// A fixed string per kind rather than the error's own rendering: a
+/// A fixed string per kind of damage rather than the error's own rendering: a
 /// `serde_json` message quotes the value it failed on, and a task's words are
 /// content by the same argument a message body is.
+///
+/// A kind of damage is not always a variant, which is what the guard below is
+/// about.
 fn dropped(error: &TaskError) -> &'static str {
     match error {
         TaskError::Json(_) => DROPPED_UNDECODABLE,
         TaskError::NotADocument { .. } => DROPPED_NOT_A_DOCUMENT,
+        // On the issue rather than on the variant, because the variant does
+        // not say which refusal it is: of the three call sites, two report a
+        // [`read`] and the third — [`Store::delete`]'s scrub loop — can also
+        // report a [`write`], whose own passthrough check raises this same
+        // variant, having read the counterpart first. A
+        // scrub refused for a shadowed comment key would otherwise be logged
+        // as holding another task's id, which is a false sentence about a
+        // document nobody is going to go and check.
+        TaskError::SchemaInvalid { issues }
+            if issues.iter().any(|issue| issue.contains(REFUSED_MISFILED)) =>
+        {
+            DROPPED_MISFILED
+        }
         _ => DROPPED_UNREADABLE,
     }
 }
 
 /// One task document, or [`None`] when there is no such file.
+///
+/// **The name is the address, and a document that disagrees with it is not
+/// read.** Every door in this module reaches a task through
+/// [`Store::path_of`], so a `2.json` holding `"id": "1"` is a document with two
+/// answers to which task it is, and the callers do not agree on which to take:
+/// [`Store::list`] would show it as 1 while [`Store::get`] and
+/// [`Store::update`] reach it as 2, and an update would take its hold, write
+/// the document, and only then fail to find the task it had just written —
+/// which its caller reads as nothing having happened. So the two are compared
+/// here, once, at the only place both are in hand, and a mismatch is refused
+/// naming each of them. Nothing is repaired: the file stays where whoever
+/// wants to look at it can.
+///
+/// A name that is not a document's name at all cannot be judged, and so is
+/// not — the check is on what a name says, where it says anything.
 fn read(path: &Path) -> Result<Option<Task>, TaskError> {
     let Some(text) = read_guarded(path)? else { return Ok(None) };
+    let task: Task = serde_json::from_str(&text)?;
+    if filed_as(path).is_some_and(|filed| filed != task.id) {
+        return Err(TaskError::SchemaInvalid {
+            issues: vec![format!("id: {REFUSED_MISFILED}; {} holds {}", path.display(), task.id)],
+        });
+    }
 
-    Ok(Some(serde_json::from_str(&text)?))
+    Ok(Some(task))
+}
+
+/// The id a **name** files a document under, or [`None`] when the name is not
+/// a document's at all.
+///
+/// The one place `<id>.json` is taken apart, so the listing walk that decides
+/// which names are tasks and [`read`]'s cross-check cannot come to different
+/// answers about the same name.
+fn filed_as(path: &Path) -> Option<TaskId> {
+    let name = path.file_name()?.to_str()?;
+
+    TaskId::parse(name.strip_suffix(DOCUMENT_SUFFIX)?).ok()
 }
 
 /// The bytes at `path`, when what is there is something this module will read.

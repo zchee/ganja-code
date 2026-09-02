@@ -215,12 +215,21 @@ fn address_of(directory: &Path, stem: &str) -> String {
 }
 
 /// A same-uid-written field, made safe to print: control characters and the
-/// two brackets that could pass for structure in this tool's own output are
+/// two brackets that could pass for structure in a tool's own output are
 /// dropped, and the result is capped at [`MOST_SHOWN_POINTS`] with the cut
 /// admitted. The rule the mention reminder applies to this registry's bytes,
 /// reapplied here because this is a second model-facing surface reading
 /// them.
-fn neutralize(value: &str) -> String {
+///
+/// `pub(crate)` because there is now a third, and it is not a registry:
+/// [`crate::tasklist`]'s listing renders a subject and an owner **another
+/// member of this team wrote**, one task to a line, where a newline would
+/// fabricate a row a reader takes for a task. Same bytes' provenance, same
+/// one-row-per-line surface, same answer — so it is this function rather than
+/// a copy of it. The crate boundary already costs one copy of this rule
+/// (`ganja-core`'s, which this crate may not name); a second inside one crate
+/// would be a spelling to keep in step for no boundary at all.
+pub(crate) fn neutralize(value: &str) -> String {
     let admits = |point: &char| !point.is_control() && *point != '<' && *point != '>';
     let kept: String = value.chars().filter(admits).take(MOST_SHOWN_POINTS).collect();
 

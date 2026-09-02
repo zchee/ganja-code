@@ -56,6 +56,7 @@ use async_trait::async_trait;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use crate::list_sessions::neutralize;
 use crate::{Tool, ToolCtx, ToolError, ToolOutput};
 
 /// The id of the tool that files a task, which is also its permission key.
@@ -136,13 +137,19 @@ as it is. `status` moves it along: pending, in_progress, completed, or \
 deleted, which removes the task permanently and cannot travel with any other \
 change.
 
-`owner` claims or releases it. A non-empty owner claims the task for that \
-member and is refused when somebody already holds it, which is what makes \
-claiming safe to race: two teammates reaching for one task produce one owner \
-and one refusal, never two members doing one piece of work. The empty string \
-releases a task, which is how work is taken back from a member that has \
-stopped. Reassigning is therefore two calls — release it, then claim it for \
-whoever takes it next.
+`owner` claims or releases it, and may name any member rather than only \
+yourself: handing work to whoever will do it is a lead's job, and a team is \
+one trust domain. A non-empty owner claims the task for that member and is \
+refused when somebody already holds it, which is what makes claiming safe to \
+race: two teammates reaching for one task produce one owner and one refusal, \
+never two members doing one piece of work. That holds unless a claim somehow \
+takes more than ten seconds to write: a hold that old is broken by the next \
+claimant taking it, age being the only thing anybody checks, and the two then \
+write the owner without ever seeing each other and both believe they won. A \
+claim is one small write, so it is a bound worth knowing rather than one to \
+work around. The empty string releases a task, which is how work is taken back \
+from a member that has stopped. Reassigning is therefore two calls — release \
+it, then claim it for whoever takes it next.
 
 `metadata` merges into what is already there, and a null value removes its \
 key. `add_blocks` and `add_blocked_by` add dependencies and remove none, and \
@@ -174,7 +181,13 @@ kept beside it, and every comment written on it.";
 const EMPTY: &str = "The team's task list is empty.";
 
 /// What a released task is listed as, where a name would be.
-const UNOWNED: &str = "unowned";
+///
+/// `pub` because the model's listing is not the only surface that renders an
+/// empty owner: `ganja-tui`'s Tasks section says the same word in the same
+/// column, and a second spelling of it would let the two drift into disagreeing
+/// about what an unclaimed task looks like. This is the one, and the frontend
+/// imports it.
+pub const UNOWNED: &str = "unowned";
 
 /// Where a task is in its life, as the list keeps it.
 ///
@@ -562,16 +575,23 @@ fn refused(failure: TaskFailure) -> ToolError {
     ToolError::Failed(failure.reason)
 }
 
-/// A call titled by the task it names, or by the tool alone where the
-/// arguments named none.
+/// A call titled by the argument that says which task it is about, or by the
+/// tool alone where the arguments carried none.
 ///
-/// The title is what a transcript row and a permission dialog are headed
-/// with, so a call that arrived without a `task_id` must not read as the tool's
-/// name and a trailing space.
-fn describing(tool: &str, args: &serde_json::Value) -> String {
-    match args.get("task_id").and_then(serde_json::Value::as_str) {
-        Some(id) => format!("{tool} {id}"),
-        None => tool.to_owned(),
+/// The title is what a transcript row and a permission dialog are headed with,
+/// so a call that arrived without that argument must not read as the tool's
+/// name and a trailing space. **Absent and empty are the same case** — a
+/// schema a model fills field by field produces `""` as readily as it omits
+/// the key, and both leave nothing to title the row with — which is why this
+/// asks what the argument amounts to rather than whether it is there.
+///
+/// `names` because the two tools that title this way do not name a task with
+/// the same key: `task_create` has no id to give and titles on its subject,
+/// which is the one thing it does have.
+fn describing(tool: &str, args: &serde_json::Value, names: &str) -> String {
+    match args.get(names).and_then(serde_json::Value::as_str).map(str::trim) {
+        Some(named) if !named.is_empty() => format!("{tool} {named}"),
+        _ => tool.to_owned(),
     }
 }
 
@@ -580,6 +600,19 @@ fn describing(tool: &str, args: &serde_json::Value) -> String {
 ///
 /// The fields rather than a [`Summary`], so a whole [`Record`] renders as one
 /// too without being copied into one first.
+///
+/// # The subject and the owner are somebody else's words
+///
+/// **One task to a line, and a line is what a reader counts tasks by** — so a
+/// subject carrying a newline would not be a subject with a newline in it, it
+/// would be two rows, the second of them a task nobody filed, written by
+/// whichever member typed it. That is the shared list's own shape used against
+/// the members reading it, and it is answered exactly where
+/// [`crate::list_sessions`] answers it on the registry's self-written names:
+/// [`neutralize`] drops the control characters and the two brackets that could
+/// pass for structure, and caps the result. The id, the status and the blocker
+/// ids are the store's own and are not run through it — they are digits and a
+/// closed vocabulary, not anything a member typed.
 fn summary_line(
     id: &str,
     subject: &str,
@@ -587,14 +620,15 @@ fn summary_line(
     owner: &str,
     blocked_by: &[String],
 ) -> String {
-    let owner = if owner.is_empty() { UNOWNED.to_owned() } else { format!("owner {owner}") };
+    let owner =
+        if owner.is_empty() { UNOWNED.to_owned() } else { format!("owner {}", neutralize(owner)) };
     let blocked = if blocked_by.is_empty() {
         String::new()
     } else {
         format!(", blocked by {}", blocked_by.join(", "))
     };
 
-    format!("{id} [{status}] {owner}{blocked} — {subject}")
+    format!("{id} [{status}] {owner}{blocked} — {}", neutralize(subject))
 }
 
 /// A whole record as its own summary, for the one-line answer an update reads
@@ -623,9 +657,7 @@ impl Tool for TaskCreateTool {
     }
 
     fn describe(&self, args: &serde_json::Value) -> String {
-        let subject = args.get("subject").and_then(serde_json::Value::as_str).unwrap_or_default();
-
-        format!("{CREATE_ID} {subject}")
+        describing(CREATE_ID, args, "subject")
     }
 
     async fn run(&self, args: serde_json::Value, ctx: &ToolCtx) -> Result<ToolOutput, ToolError> {
@@ -666,7 +698,7 @@ impl Tool for TaskUpdateTool {
     }
 
     fn describe(&self, args: &serde_json::Value) -> String {
-        describing(UPDATE_ID, args)
+        describing(UPDATE_ID, args, "task_id")
     }
 
     async fn run(&self, args: serde_json::Value, ctx: &ToolCtx) -> Result<ToolOutput, ToolError> {
@@ -721,8 +753,15 @@ fn change_of(args: UpdateArgs) -> Change {
         subject: args.subject,
         description: args.description,
         active_form: args.active_form,
+        // Trimmed at the claim, because the trim already decided the branch: an
+        // owner that is nothing but whitespace is a release, so an owner with
+        // whitespace around it is that member and not a second one that merely
+        // renders like them. A padded name stored as it arrived would be a
+        // holder no later claim or release could name back.
         owner: args.owner.map(|owner| {
-            if owner.trim().is_empty() { Owner::Release } else { Owner::Claim(owner) }
+            let owner = owner.trim();
+
+            if owner.is_empty() { Owner::Release } else { Owner::Claim(owner.to_owned()) }
         }),
         metadata: args.metadata.unwrap_or_default(),
         // An explicit `null` is the same as the argument being absent, the
@@ -796,7 +835,7 @@ impl Tool for TaskGetTool {
     }
 
     fn describe(&self, args: &serde_json::Value) -> String {
-        describing(GET_ID, args)
+        describing(GET_ID, args, "task_id")
     }
 
     async fn run(&self, args: serde_json::Value, ctx: &ToolCtx) -> Result<ToolOutput, ToolError> {

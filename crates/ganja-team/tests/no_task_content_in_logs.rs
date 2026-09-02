@@ -102,8 +102,8 @@ fn what_a_task_says_never_reaches_a_log_line() {
                 status: Some(TaskStatus::InProgress),
                 add_comment: Some(Comment::new(
                     "worker-1",
-                    COMMENT_CANARY,
                     "2026-09-02T10:00:00.000Z",
+                    COMMENT_CANARY,
                 )),
                 ..Update::default()
             },

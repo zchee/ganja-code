@@ -6,8 +6,9 @@ use indexmap::IndexMap;
 use serde_json::{Value, json};
 
 use super::{
-    COUNTER, Comment, ID_MAX, MAX_COUNTERPARTS, MAX_DOCUMENT_BYTES, NewTask, Store, TASK_KEYS,
-    Task, TaskError, TaskId, TaskStatus, Update, write,
+    COUNTER, Comment, DROPPED_MISFILED, DROPPED_UNREADABLE, ID_MAX, MAX_COUNTERPARTS,
+    MAX_DOCUMENT_BYTES, NewTask, Store, TASK_KEYS, Task, TaskError, TaskId, TaskStatus, Update,
+    dropped, write,
 };
 use crate::lock::LockError;
 use crate::record::document;
@@ -34,7 +35,7 @@ fn filled() -> Task {
         blocks: vec![TaskId::parse("2").expect("a valid id")],
         blocked_by: vec![TaskId::parse("3").expect("a valid id")],
         metadata: IndexMap::from([("lane".to_owned(), json!("w2"))]),
-        comments: vec![Comment::new("team-lead", "started", "2026-09-02T10:00:00.000Z")],
+        comments: vec![Comment::new("team-lead", "2026-09-02T10:00:00.000Z", "started")],
         extra: IndexMap::new(),
     }
 }
@@ -304,7 +305,7 @@ fn a_document_the_schema_refuses_leaves_every_other_one_as_it_was() {
     // task the call names, and the counterpart *below* it is written first —
     // which is the ordering that decides whether a refusal is a refusal or
     // half an edge.
-    let mut comment = Comment::new("team-lead", "started", "2026-09-02T10:00:00.000Z");
+    let mut comment = Comment::new("team-lead", "2026-09-02T10:00:00.000Z", "started");
     comment.extra.insert("text".to_owned(), json!("shadowed"));
 
     let refused = store
@@ -695,7 +696,7 @@ fn comments_only_ever_grow() {
             .update(
                 &task.id,
                 Update {
-                    add_comment: Some(Comment::new(from, text, "2026-09-02T10:00:00.000Z")),
+                    add_comment: Some(Comment::new(from, "2026-09-02T10:00:00.000Z", text)),
                     ..Update::default()
                 },
             )
@@ -942,6 +943,114 @@ fn a_damaged_document_is_left_out_of_the_list_rather_than_taking_it_down() {
     let ids: Vec<u64> = listed.iter().map(|summary| summary.id.number()).collect();
     assert_eq!(ids, [1, 3], "one broken file must not cost a team its whole list");
     assert!(store.get(&damaged).is_err(), "asking for it directly still says so");
+}
+
+#[test]
+fn a_document_holding_the_id_its_name_files_it_under_reads_back() {
+    let (_home, store) = store();
+    fs::create_dir_all(store.dir()).expect("the directory is creatable");
+    let one = TaskId::parse("1").expect("a valid id");
+
+    let mut task = filled();
+    // The edge lists name tasks nothing is filed under, and the read door
+    // drops those — this test is about the id, so it gives it nothing else to
+    // be about.
+    task.blocks.clear();
+    task.blocked_by.clear();
+    write(&store.path_of(&one), &task).expect("the document is writable");
+
+    assert_eq!(store.get(&one).expect("a document that agrees with its name reads"), task);
+}
+
+#[test]
+fn a_document_filed_under_another_tasks_id_is_dropped_and_refused_by_name() {
+    let (_home, store) = store();
+    let first = store.create(NewTask::new("subject", "description")).expect("a task is created");
+    let second = TaskId::parse("2").expect("a valid id");
+    // What a stray `cp 1.json 2.json` leaves: a document whose own id is not
+    // the id the directory files it under.
+    fs::copy(store.path_of(&first.id), store.path_of(&second)).expect("the document copies");
+
+    let listed = store.list().expect("a misfiled document does not fail the list");
+    let ids: Vec<u64> = listed.iter().map(|summary| summary.id.number()).collect();
+    assert_eq!(ids, [1], "a row under either id would be a row the other door then refuses");
+
+    let issues = match store.get(&second) {
+        Err(TaskError::SchemaInvalid { issues }) => issues,
+        other => panic!("asking for it directly names both halves: {other:?}"),
+    };
+    assert_eq!(issues.len(), 1);
+    assert!(issues[0].contains("2.json"), "the file it is: {}", issues[0]);
+    assert!(issues[0].ends_with("holds 1"), "and the id it holds: {}", issues[0]);
+
+    // The name is still a name, so a create steps over it rather than renaming
+    // a fresh task on top of it.
+    let next = store.create(NewTask::new("subject", "description")).expect("a task is created");
+    assert_eq!(next.id.to_string(), "3");
+}
+
+#[test]
+fn an_update_to_a_document_filed_under_another_tasks_id_moves_nothing() {
+    let (_home, store) = store();
+    let first = store.create(NewTask::new("subject", "description")).expect("a task is created");
+    let second = TaskId::parse("2").expect("a valid id");
+    fs::copy(store.path_of(&first.id), store.path_of(&second)).expect("the document copies");
+    let before = fs::read_to_string(store.path_of(&second)).expect("the copy reads");
+
+    let refused = store
+        .update(&second, Update { subject: Some("moved".to_owned()), ..Update::default() })
+        .expect_err("a document that disagrees with its name is not written through");
+    assert!(matches!(refused, TaskError::SchemaInvalid { .. }), "{refused:?}");
+    assert_eq!(
+        fs::read_to_string(store.path_of(&second)).expect("the copy reads"),
+        before,
+        "refused before the first rename, rather than written and then reported as missing",
+    );
+    assert_eq!(
+        store.get(&first.id).expect("the original reads").subject,
+        "subject",
+        "and the document it was a copy of is untouched",
+    );
+}
+
+#[test]
+fn a_write_refused_for_a_shadowed_key_is_not_reported_as_a_misfiled_document() {
+    let (_home, store) = store();
+    let first = store.create(NewTask::new("subject", "description")).expect("a task is created");
+    let second = TaskId::parse("2").expect("a valid id");
+    fs::copy(store.path_of(&first.id), store.path_of(&second)).expect("the document copies");
+
+    // Both refusals are `SchemaInvalid`, and each is taken from the door that
+    // raises it rather than hand-written, so the test cannot drift from the
+    // sentence the arm reads.
+    let misfiled = store.get(&second).expect_err("a misfiled document is refused");
+    let mut shadowing = filled();
+    shadowing.comments[0].extra.insert("text".to_owned(), json!("shadowed"));
+    let shadowed =
+        write(&store.path_of(&first.id), &shadowing).expect_err("a shadowed key is refused");
+
+    assert_eq!(dropped(&misfiled), DROPPED_MISFILED);
+    // `delete`'s scrub loop is the one call site that can also report a
+    // *write*, and its write raises this same variant, so the arm reads the issue rather
+    // than the variant: a scrub refused for a shadowed comment key, logged as
+    // the document holding another task's id, would be a false sentence about
+    // a document nobody is going to go and check. Asserted here rather than
+    // through a delete because that refusal cannot be reached off disk at all
+    // — serde declines a duplicated declared key, so a document read back
+    // never carries one — while the variant can still arrive at that site.
+    assert_eq!(dropped(&shadowed), DROPPED_UNREADABLE);
+}
+
+#[test]
+fn a_comment_takes_its_arguments_in_the_order_its_fields_are_declared() {
+    let comment = Comment::new("team-lead", "2026-09-02T10:00:00.000Z", "started");
+
+    assert_eq!(comment.from, "team-lead");
+    assert_eq!(comment.at, "2026-09-02T10:00:00.000Z");
+    assert_eq!(
+        comment.text, "started",
+        "`at` and `text` are both strings, so a swapped call compiles and only this can say",
+    );
 }
 
 #[test]

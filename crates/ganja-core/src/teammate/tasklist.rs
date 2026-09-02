@@ -271,7 +271,7 @@ impl TaskList for TeamTasks {
             add_blocks,
             add_blocked_by,
             add_comment: change.add_comment.map(|text| {
-                StoredComment::new(self.identity.to_string(), text, record::now_iso8601())
+                StoredComment::new(self.identity.to_string(), record::now_iso8601(), text)
             }),
         };
 
