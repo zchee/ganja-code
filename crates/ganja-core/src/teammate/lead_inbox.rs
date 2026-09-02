@@ -107,10 +107,10 @@ use ganja_protocol::team::{
     Frame, IdleNotification, MemberBackend, PermissionRequest, PermissionResponse, ShutdownApproved,
 };
 use ganja_team::{MailboxMessage, MemberName, Surface, TeamsRoot, mailbox, record};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 
 use super::inbound::{Inbound, MailboxAdmission, PassDisposition, ReceiverClass};
-use super::posture::Forwarded;
+use super::posture::{Forwarded, Undelivered};
 use super::runner::{drop_frame, prune_inbox, read_inbox};
 use super::{Delivery, Exited, REFUSED_NO_CONFIG_DIR, TeammateRegistry, member, teams_root};
 use crate::protocol::{PermissionReply, SessionId};
@@ -769,24 +769,29 @@ impl LeadInbox {
             return;
         };
         let (reply, waiting) = oneshot::channel();
-        if let Err(undelivered) =
-            surface.try_send(Forwarded { teammate: message.from.clone(), request: dialog, reply })
-        {
-            let reason = match undelivered {
-                mpsc::error::TrySendError::Full(_) => DIALOG_QUEUE_FULL,
-                mpsc::error::TrySendError::Closed(_) => LEAD_GONE,
-            };
-            tracing::warn!(
-                teammate = message.from,
-                request = asked.request_id,
-                reason,
-                "{REFUSED_ASK}"
-            );
-            answer.refuse(reason).await;
-            pass.asked.push(asked);
+        let raised = match surface.hand_over(Forwarded {
+            teammate: message.from.clone(),
+            request: dialog,
+            reply,
+        }) {
+            Ok(raised) => raised,
+            Err(undelivered) => {
+                let reason = match undelivered {
+                    Undelivered::Full => DIALOG_QUEUE_FULL,
+                    Undelivered::Closed => LEAD_GONE,
+                };
+                tracing::warn!(
+                    teammate = message.from,
+                    request = asked.request_id,
+                    reason,
+                    "{REFUSED_ASK}"
+                );
+                answer.refuse(reason).await;
+                pass.asked.push(asked);
 
-            return;
-        }
+                return;
+            }
+        };
         tracing::info!(
             teammate = message.from,
             request = asked.request_id,
@@ -796,10 +801,28 @@ impl LeadInbox {
         // The wait for the answer runs in a task of its own so the pass keeps
         // reading, exactly as the in-process handover does: a person takes as
         // long as they take, and the inbox has other frames in it.
+        let cancel = self.registry.cancellation();
         tokio::spawn(async move {
-            // A dropped sender is a lead that gave up on the dialog, which is
-            // the refusal it looks like.
-            let reply = waiting.await.unwrap_or(PermissionReply::Reject);
+            // Moved in with the wait, because that is exactly how long this
+            // question is in front of the person: the lead's own turn loop
+            // reads the count and refuses to talk over an open dialog.
+            let _raised = raised;
+            let reply = tokio::select! {
+                // The team going down ends the wait, the same arm the
+                // in-process carrier has had since D-5
+                // (`crate::teammate::posture::hand_over`). A dropped frontend
+                // already resolves the wait on its own — the receiver goes,
+                // the sender with it — so this is not the load-bearing path
+                // today; it is here because the count this guard holds is now
+                // read by the lead's continuation blocker, and a wait that
+                // never ended would disable that blocker for the rest of the
+                // session with nothing said (bead xysf). Symmetry is cheaper
+                // than a comment asking the next reader to re-derive that.
+                () = cancel.cancelled() => PermissionReply::Reject,
+                // A dropped sender is a lead that gave up on the dialog, which
+                // is the refusal it looks like.
+                reply = waiting => reply.unwrap_or(PermissionReply::Reject),
+            };
             answer.write(reply).await;
         });
         pass.asked.push(Asked { raised: true, ..asked });

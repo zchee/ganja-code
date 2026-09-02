@@ -32,11 +32,14 @@ $ARGUMENTS
        shutting one down — is `/teammate`, not this command.
 
 2. **Roster management wearing this command's old spelling** — the arguments
-   begin with `spawn`, `shutdown`, `list`, or otherwise read as a request to
-   start, stop or enumerate a single teammate rather than to run a task. Tell
-   the user that those moved to `/teammate` and show them the line they meant,
-   with `/teammate` in place of `/team`. Stop there. Do not run a pipeline for
-   an argument list that was never a task description.
+   read as a request to start, stop or enumerate a single teammate rather than
+   to run a task: "start a teammate called w1", "who is on the team", "stop
+   w2". The bare spellings `spawn …`, `shutdown …` and `list` never reach you
+   at all — those are refused before this text is filled in, with the corrected
+   line — so what lands here is everything else that means the same thing. Tell
+   the user that roster management moved to `/teammate` and show them the line
+   they meant, with `/teammate` in place of `/team`. Stop there. Do not run a
+   pipeline for an argument list that was never a task description.
 
 3. **A task** — anything else. Parse it as
    `[N[:agent]] [--backend <surface>] <task>` and run the pipeline below.

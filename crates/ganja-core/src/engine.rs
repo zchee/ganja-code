@@ -300,6 +300,16 @@ pub enum EngineError {
         /// Every command that would have worked, sorted.
         available: Vec<String>,
     },
+    /// [`Command::RunCommand`] ran `/team` on arguments that are one of
+    /// `/teammate`'s own subcommands (**bead 2m46**). Refused where the
+    /// expansion would have started rather than answered by the model, because
+    /// three fixed words are not worth a round trip; the message is the line
+    /// that was meant, so the fix is a copy away.
+    #[error("/team runs the pipeline; the roster commands are /teammate's — try: {meant}")]
+    MisdirectedCommand {
+        /// What the person typed, with the command that answers to it.
+        meant: String,
+    },
     /// [`Command::RunCommand`] named a command whose `agent` is a subagent.
     /// Those exist to be spawned by the task tool, and a command running as one
     /// would be a turn with no way back.
@@ -3942,7 +3952,13 @@ impl Engine {
         // expansion that a roster shared by every session in the process
         // cannot know.
         let session = self.session_id();
-        let expanded = definition.expand(args, session.as_str(), &ctx).await;
+        // A refusal here has cost nothing yet: no turn has started, no request
+        // has been assembled, and the model has not been asked to notice
+        // something three fixed words already said (**bead 2m46**).
+        let expanded = definition
+            .expand(args, session.as_str(), &ctx)
+            .await
+            .map_err(|misdirected| EngineError::MisdirectedCommand { meant: misdirected.meant })?;
 
         self.start_turn(
             expanded.prompt,

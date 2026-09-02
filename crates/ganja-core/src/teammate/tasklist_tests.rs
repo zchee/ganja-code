@@ -1,7 +1,10 @@
+use std::time::Duration;
+
 use ganja_team::task::{
     MAX_COUNTERPARTS, REFUSED_ALREADY_OWNED, REFUSED_ID_SHAPE, REFUSED_NO_SUCH_TASK,
     REFUSED_NOT_A_DOCUMENT, REFUSED_TOO_MANY_COUNTERPARTS, Store, TaskId,
 };
+use ganja_tool::Tool as _;
 use ganja_tool::tasklist::{Change, Draft, Owner, Status, TaskList as _};
 
 use super::{TeamTasks, UNREACHABLE};
@@ -489,4 +492,29 @@ async fn what_the_seam_writes_is_what_the_store_reads() {
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].id.to_string(), id);
     assert_eq!(listed[0].subject, "port the parser");
+}
+
+/// The bound a stale claim is broken past is `ganja-team`'s, and what the
+/// model is told about it is `ganja-tool`'s own spelling of the same number —
+/// in words, because a `&str` const cannot format one. Neither crate can see
+/// the other: `ganja-tool`'s internal dependency list is asserted to be exactly
+/// `ganja-permission`, and `ganja-team` knows nothing of tools. This crate sees
+/// both, so it is where the two are held to one decision, exactly as the
+/// counterpart cap above is (bead `kiob`).
+///
+/// The prose is read off the tool's own `description()` rather than off the
+/// constant behind it, for two reasons that agree: that constant is private to
+/// its module, and the words the model really reads are the thing worth
+/// pinning anyway.
+#[test]
+fn the_stale_break_the_model_is_told_about_is_the_locks_own() {
+    assert_eq!(
+        ganja_team::lock::STALE,
+        Duration::from_secs(10),
+        "the number `task_update`'s description spells in words is the lock's own",
+    );
+    assert!(
+        ganja_tool::tasklist::TaskUpdateTool.description().contains("ten seconds"),
+        "so raising one of the two alone reddens rather than going quiet",
+    );
 }

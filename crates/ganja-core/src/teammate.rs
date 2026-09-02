@@ -123,7 +123,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -931,7 +931,7 @@ pub struct Lent {
     /// Where a member's permission dialogs are handed to the lead (**D-5**).
     /// [`None`] until a frontend attaches a surface, which every reader takes
     /// as a refusal rather than leaving an ask hanging.
-    pub dialogs: Option<tokio::sync::mpsc::Sender<posture::Forwarded>>,
+    pub dialogs: Option<posture::DialogSurface>,
     /// Where a member whose pane stopped running puts the fact, for the lead's
     /// next pass to retire it on ([`TeammateRegistry::take_exited`]).
     pub exits: tokio::sync::mpsc::UnboundedSender<Exited>,
@@ -1613,6 +1613,16 @@ pub struct TeammateRegistry {
     /// constructed with, because the value a frontend has to build is a channel
     /// it also drains, and a registry is useful to a test that has neither.
     dialogs: Mutex<Option<tokio::sync::mpsc::Sender<posture::Forwarded>>>,
+    /// How many of this team's forwarded dialogs the person has not answered
+    /// yet ([`TeammateRegistry::dialogs_waiting`]).
+    ///
+    /// Beside the surface rather than inside it because it outlives any one
+    /// sender: [`TeammateRegistry::forward_dialogs_to`] may be called again,
+    /// and a dialog raised through the old surface is still on the same
+    /// person's screen. Every send hands out a
+    /// [`Raised`](posture::Raised) against this counter and nothing else can
+    /// touch it, so it cannot drift from what was really carried.
+    waiting_dialogs: Arc<AtomicUsize>,
 }
 
 impl fmt::Debug for TeammateRegistry {
@@ -1673,6 +1683,7 @@ impl TeammateRegistry {
             exits,
             exited: Mutex::new(exited),
             dialogs: Mutex::new(None),
+            waiting_dialogs: Arc::default(),
         }
     }
 
@@ -1774,8 +1785,36 @@ impl TeammateRegistry {
     /// [`crate::teammate::posture::Forwarding`] offers an in-process one —
     /// `try_send`, never a wait — and a registry nobody attached a surface to
     /// answers [`None`], which both callers read as a refusal.
-    pub(crate) fn dialog_surface(&self) -> Option<tokio::sync::mpsc::Sender<posture::Forwarded>> {
-        self.dialogs.lock().expect("the dialog surface is never poisoned").clone()
+    pub(crate) fn dialog_surface(&self) -> Option<posture::DialogSurface> {
+        let lead = self.dialogs.lock().expect("the dialog surface is never poisoned").clone()?;
+
+        Some(posture::DialogSurface::new(lead, Arc::clone(&self.waiting_dialogs)))
+    }
+
+    /// How many of this team's forwarded dialogs are still in front of the
+    /// person, whichever kind of teammate raised them.
+    ///
+    /// Read by the lead's own turn loop, which must not push a synthetic
+    /// instruction onto a screen that is already asking somebody a question
+    /// (`crate::teammate::discipline::Facts::dialog_open`). Both carriers count
+    /// here — [`crate::teammate::posture::Forwarding`] for an in-process
+    /// teammate and [`crate::teammate::lead_inbox`] for a pane's frame — because
+    /// the person answering cannot tell the two apart either.
+    #[must_use]
+    pub fn dialogs_waiting(&self) -> usize {
+        self.waiting_dialogs.load(Ordering::Relaxed)
+    }
+
+    /// A child of the token [`TeammateRegistry::shutdown`] cancels, for work
+    /// that outlives the pass that started it.
+    ///
+    /// A child rather than a clone for [`TeammateRegistry::lend`]'s reason: a
+    /// holder may cancel its own without ending anybody else's. The one caller
+    /// is [`crate::teammate::lead_inbox`]'s wait on a forwarded dialog, which
+    /// has to end when the team does — and it is a child there so the arm can
+    /// never be the thing that cancels the registry.
+    pub(crate) fn cancellation(&self) -> CancellationToken {
+        self.cancel.child_token()
     }
 
     /// Where the team's documents live.

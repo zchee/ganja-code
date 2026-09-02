@@ -42,6 +42,16 @@
 //! nothing — an anonymous subagent stays first-class (**D462**) — because the
 //! model is often right to want one.
 //!
+//! What makes a step *about a team* is two facts, either of which is enough
+//! (bead s8rw): the registry holds somebody live at the moment of the scan, or
+//! this very batch names somebody in a `task` call of its own
+//! ([`delegates_named`]). The second exists because the first cannot see the
+//! pipeline's own opening step, which spawns its named members and an
+//! anonymous helper in one batch: the registry is empty right up until those
+//! calls run, so a registry-only trigger answers about the instant before the
+//! delegation it is supposed to be about. A turn that leads nobody and names
+//! nobody is still silent, which is D462 intact.
+//!
 //! # Why the counter is a turn's and not a session's
 //!
 //! "Five *consecutive* auto-continuations" is exactly a turn's own count: the
@@ -101,14 +111,31 @@ pub(crate) struct Facts {
     /// began leading nobody is exactly the turn this is about.
     pub(crate) live_team: bool,
     /// Whether a permission dialog or a question is still waiting for an
-    /// answer.
+    /// answer — **this turn's own, or one a teammate forwarded** to the same
+    /// person (bead xysf).
     ///
-    /// A continuation queued behind one would put a synthetic instruction in
-    /// front of something the person has not answered yet.
+    /// A continuation queued behind either would put a synthetic instruction
+    /// in front of something the person has not answered yet, and both land on
+    /// one screen: a teammate's dialog is carried to whoever is sitting at the
+    /// lead, which is exactly who the block would be talking over.
     pub(crate) dialog_open: bool,
     /// Whether the shared list holds a pending or in-progress task
     /// ([`holds_unfinished_work`]).
     pub(crate) unfinished_work: bool,
+}
+
+impl Facts {
+    /// Whether everything but the breaker says to keep going.
+    ///
+    /// Named because the gathering site needs the same question the decision
+    /// asks, minus the one clause that is about this turn rather than about
+    /// the team: the breaker's log line claims the turn was *handed back*,
+    /// which is only true when these three would have continued it (bead
+    /// lymf). Said once here rather than spelled twice, so the claim and the
+    /// decision cannot come apart.
+    pub(crate) fn would_continue(self) -> bool {
+        self.live_team && !self.dialog_open && self.unfinished_work
+    }
 }
 
 /// One turn's own state for both guards.
@@ -158,7 +185,7 @@ impl Discipline {
     /// exhaustively, including the two that are hard to reach through a live
     /// engine. Every one of the four must hold.
     pub(crate) fn should_continue(&self, facts: Facts) -> bool {
-        facts.live_team && !facts.dialog_open && facts.unfinished_work && self.may_continue()
+        facts.would_continue() && self.may_continue()
     }
 
     /// Spends one auto-continuation, so the next request carries the block,
@@ -181,11 +208,16 @@ impl Discipline {
     /// teammate's message reaches the turn through the same mailbox and is
     /// deliberately not that: it is the team running, which is the state this
     /// breaker is counting rather than an interruption of it.
+    ///
+    /// It resets the counter and nothing else, because there is never a queued
+    /// continuation here to withdraw: the loop spends one the moment it takes
+    /// it — [`Discipline::continue_turn`] is followed by the request assembly
+    /// that calls [`Discipline::take_blocks`] before the steer drain can be
+    /// reached again — so a "queued but unrendered" continuation is a state
+    /// this loop cannot produce (bead lymf). An arm clearing it would be dead
+    /// code that reads as though the state were ordinary.
     pub(crate) fn user_took_over(&mut self) {
         self.continued = 0;
-        // A continuation queued and not yet rendered is withdrawn with it: the
-        // steer says the same thing better, and in the person's own words.
-        self.continuation = false;
     }
 
     /// The blocks the request being assembled should carry, each spent as it
@@ -229,22 +261,51 @@ pub(crate) fn holds_unfinished_work(tasks: &[Summary]) -> bool {
     tasks.iter().any(is_unfinished)
 }
 
-/// Renders one step's `task` calls into the question the nag asks: did any of
-/// them delegate without a name?
+/// Whether one `task` call names a teammate, or [`None`] for arguments that
+/// will not parse at all.
 ///
 /// Arguments arrive as the raw JSON the model produced, because that is what
 /// the loop holds before a call is parsed — and a `name` that is absent, not a
-/// string, or blank is all the same answer. A call whose arguments will not
-/// parse at all is not counted: it is about to fail with a message of its own,
-/// and telling the model to name a teammate on a call that never ran would be
-/// advice about the wrong thing.
-pub(crate) fn delegates_anonymously(arguments: &str) -> bool {
+/// string, or blank is all the same answer. The unparseable case is a third
+/// answer rather than either of the other two: such a call is about to fail
+/// with a message of its own, and it is evidence of nothing about how this
+/// model delegates. One function so the two questions below cannot disagree
+/// about which is which.
+fn names_a_teammate(arguments: &str) -> Option<bool> {
     let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(arguments)
     else {
-        return false;
+        return None;
     };
 
-    !map.get("name").and_then(serde_json::Value::as_str).is_some_and(|name| !name.trim().is_empty())
+    Some(
+        map.get("name")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|name| !name.trim().is_empty()),
+    )
+}
+
+/// Whether this `task` call delegates without naming anybody — the state the
+/// nag is about.
+///
+/// A call whose arguments will not parse is not counted: telling the model to
+/// name a teammate on a call that never ran would be advice about the wrong
+/// thing.
+pub(crate) fn delegates_anonymously(arguments: &str) -> bool {
+    names_a_teammate(arguments) == Some(false)
+}
+
+/// Whether this `task` call names somebody — the counterpart question, and the
+/// second of the nag's two triggers (bead s8rw).
+///
+/// A step that spawns named teammates *and* an anonymous helper in the same
+/// batch is delegating into a team whether or not the registry holds anybody
+/// yet, which is precisely what the pipeline's own first step looks like: it
+/// spawns its members in the batch the nag is scanning, so a trigger that only
+/// read the registry answered about the moment before that batch ran and said
+/// nothing. Reading it off the calls themselves makes the answer independent of
+/// *when* anything is read.
+pub(crate) fn delegates_named(arguments: &str) -> bool {
+    names_a_teammate(arguments) == Some(true)
 }
 
 /// The one-line note the log carries when a turn spends a continuation.

@@ -270,6 +270,9 @@ impl TaskList for TeamTasks {
             metadata: change.metadata.into_iter().collect(),
             add_blocks,
             add_blocked_by,
+            // The constructor's arguments are the record's own field order —
+            // `from`, `at`, `text` — because two of the three are strings and
+            // the other order would file a timestamp as what somebody said.
             add_comment: change.add_comment.map(|text| {
                 StoredComment::new(self.identity.to_string(), record::now_iso8601(), text)
             }),

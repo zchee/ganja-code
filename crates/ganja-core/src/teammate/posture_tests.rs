@@ -3,14 +3,24 @@ use std::path::PathBuf;
 use ganja_protocol::team::MemberBackend;
 
 use super::{
-    ANY, Arc, CancellationToken, Event, FOREIGN, Forwarded, Forwarding, Posture, SpawnGate,
-    Teammate, backend_name, mpsc, oneshot, permissions_for, spawn_gate,
+    ANY, Arc, AtomicUsize, CancellationToken, DialogSurface, Event, FOREIGN, Forwarded, Forwarding,
+    Ordering, Posture, SpawnGate, Teammate, backend_name, mpsc, oneshot, permissions_for,
+    spawn_gate,
 };
 use crate::Storage;
 use crate::permission::{Action, Decision, EXTERNAL_DIRECTORY, Permissions, Rule};
 use crate::protocol::{Command, PermissionId, PermissionReply, SessionId};
 use crate::provider::Provider;
 use crate::tool::Registry;
+
+/// A dialog surface over `lead`, counting into a tally nobody else holds.
+///
+/// What a registry hands a teammate is the same value counting into *its* own
+/// tally ([`crate::teammate::TeammateRegistry::dialogs_waiting`]); a test that
+/// only needs somewhere for a question to go supplies its own.
+fn surface(lead: mpsc::Sender<Forwarded>) -> DialogSurface {
+    DialogSurface::new(lead, Arc::default())
+}
 
 fn rule(permission: &str, pattern: &str, action: Action) -> Rule {
     Rule { permission: permission.to_owned(), pattern: pattern.to_owned(), action }
@@ -299,7 +309,7 @@ async fn a_teammates_question_reaches_the_lead_and_its_answer_comes_back() {
     );
 
     let (sender, mut inbox) = mpsc::channel(4);
-    let forwarding = Forwarding::new(Arc::clone(&teammate), Some(sender));
+    let forwarding = Forwarding::new(Arc::clone(&teammate), Some(surface(sender)));
     let cancel = CancellationToken::new();
     let carrying = tokio::spawn(forwarding.run(cancel.clone()));
     let mut events = teammate.engine().subscribe().await.expect("the first subscriber wins");
@@ -377,14 +387,53 @@ async fn a_teammate_with_nowhere_to_ask_is_refused_rather_than_left_hanging() {
     carrying.await.expect("the forwarding ends with its token");
 }
 
+/// **What the lead's turn loop reads.** A question carried to the lead is
+/// counted for exactly as long as somebody could still be answering it.
+#[test]
+fn a_carried_dialog_is_counted_until_whoever_waits_for_it_lets_go() {
+    let waiting: Arc<AtomicUsize> = Arc::default();
+    let (sender, _inbox) = mpsc::channel(4);
+    let surface = DialogSurface::new(sender, Arc::clone(&waiting));
+    assert_eq!(waiting.load(Ordering::Relaxed), 0, "nothing has been asked yet");
+
+    let raised = surface.hand_over(occupying()).expect("the slot was free");
+    assert_eq!(waiting.load(Ordering::Relaxed), 1, "the question is in front of the person");
+
+    drop(raised);
+    assert_eq!(waiting.load(Ordering::Relaxed), 0, "and it has been answered");
+}
+
+/// A question that was refused rather than carried was never in front of
+/// anybody, so it is not counted — the property that keeps the count from
+/// drifting upwards on a lead that stopped draining.
+#[test]
+fn a_dialog_the_lead_could_not_be_offered_is_never_counted() {
+    let waiting: Arc<AtomicUsize> = Arc::default();
+    let (sender, _held) = mpsc::channel(1);
+    let surface = DialogSurface::new(sender, Arc::clone(&waiting));
+    let occupying = surface.hand_over(occupying()).expect("the one slot was free");
+
+    surface.hand_over(occupying_from("late")).expect_err("the queue is full");
+    assert_eq!(waiting.load(Ordering::Relaxed), 1, "only the one that was really carried");
+
+    drop(occupying);
+    assert_eq!(waiting.load(Ordering::Relaxed), 0);
+}
+
 /// A dialog already sitting in the lead's one slot.
 ///
 /// Never read by anything: what it *is* does not matter, and that it is
 /// **there** is the whole of it — a queue with its only slot spent is what
 /// a lead that stopped draining looks like from this side.
 fn occupying() -> Forwarded {
+    occupying_from("somebody-else")
+}
+
+/// The same, from a named teammate, for the one test that needs to tell two
+/// of them apart in a sentence.
+fn occupying_from(teammate: &str) -> Forwarded {
     Forwarded {
-        teammate: "somebody-else".to_owned(),
+        teammate: teammate.to_owned(),
         request: Event::PermissionRequested {
             session_id: SessionId::ascending(),
             id: PermissionId::ascending(),
@@ -424,8 +473,9 @@ async fn a_teammate_whose_lead_never_reads_is_refused_rather_than_left_waiting()
     sender.try_send(occupying()).expect("the one slot was free");
 
     let cancel = CancellationToken::new();
-    let carrying =
-        tokio::spawn(Forwarding::new(Arc::clone(&teammate), Some(sender)).run(cancel.clone()));
+    let carrying = tokio::spawn(
+        Forwarding::new(Arc::clone(&teammate), Some(surface(sender))).run(cancel.clone()),
+    );
     let mut events = teammate.engine().subscribe().await.expect("the first subscriber wins");
     teammate
         .engine()

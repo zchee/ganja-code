@@ -21,7 +21,11 @@
 //! `write` and `read`. Nothing about the pipeline is machinery here; what *is*
 //! machinery is the two engine-native guards beside it (the continuation
 //! blocker and the name nag, both in [`crate::session`]), because neither can
-//! be a sentence in a prompt and still be true.
+//! be a sentence in a prompt and still be true — and one refusal, for the same
+//! reason in miniature: [`/teammate`'s three subcommands](Misdirected) typed at
+//! `/team` are answered here rather than by the model, because a template that
+//! asks the model to redirect them spends a round trip to say what three fixed
+//! words already say (**bead 2m46**).
 //!
 //! Expansion keeps upstream's order: fill the argument placeholders, run each
 //! ``!`command` `` the filled template names, trim the result, then resolve the
@@ -117,6 +121,58 @@ const UNRESOLVED_HOME: &str = "<data home>/ganja/project/<slug>/team";
 /// The placeholder that stands for everything the user typed, untokenized.
 const ARGUMENTS: &str = "$ARGUMENTS";
 
+/// The command that really answers to a roster line, since **D544**'s clean
+/// cut moved the dialog's name.
+const TEAMMATE: &str = "teammate";
+
+/// The two of `/teammate`'s three subcommands that take arguments, restated;
+/// `list`, which takes none, is matched whole where this is consulted.
+///
+/// The grammar is `list | spawn <name> [--backend] [--agent] [prompt] |
+/// shutdown [member]`, and it is **spelled in `crates/ganja-tui/src/command.rs`**
+/// — the terminal frontend sits above the engine, so this crate cannot name
+/// that file's types and the words are written out here instead. Three words
+/// that have not moved since D544; a fourth would be a `/teammate` this misses,
+/// which costs a model round trip rather than correctness.
+const ROSTER_SUBCOMMANDS: [&str; 2] = ["spawn", "shutdown"];
+
+/// What `/team` answers with instead of expanding, when what it was given is
+/// one of `/teammate`'s own subcommands (**bead 2m46**).
+///
+/// A value rather than a rendered sentence because the sentence a person reads
+/// is the engine's — every other refusal of a command lives in `EngineError`,
+/// and a second one worded here would be two places to change one wording.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Misdirected {
+    /// The line the person meant: what they typed **trimmed**, with
+    /// `/teammate` in place of `/team`.
+    ///
+    /// Internal spacing survives — `/team spawn  w1` is handed back as
+    /// `/teammate spawn  w1`, because respelling somebody's arguments is not
+    /// this door's business — but the ends are trimmed, since a suggested
+    /// command line with a trailing space helps nobody read it.
+    pub meant: String,
+}
+
+/// Whether `arguments` is a roster line that reached the wrong command.
+///
+/// **Conservative on purpose.** `spawn` and `shutdown` take arguments of their
+/// own, so a first word of either is that subcommand however it goes on; `list`
+/// takes none, so only a bare `list` is one, and `/team list the config keys`
+/// is a task somebody wants done. Everything else — "start a teammate called
+/// w1", "who is on the team" — is left to the template, which asks the model to
+/// notice the same thing in prose. What this door buys is the exact spellings:
+/// those cost no round trip and no turn.
+fn misdirected(arguments: &str) -> Option<Misdirected> {
+    let trimmed = arguments.trim();
+    let first = trimmed.split_whitespace().next()?;
+    if !ROSTER_SUBCOMMANDS.contains(&first) && trimmed != "list" {
+        return None;
+    }
+
+    Some(Misdirected { meant: format!("/{TEAMMATE} {trimmed}") })
+}
+
 /// A command template after every expansion step upstream applies.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Expanded {
@@ -157,6 +213,18 @@ pub struct Definition {
     /// command that quietly is not there
     /// ([`Registry::refusing_unknown_agents`]).
     pub source: Option<PathBuf>,
+    /// Whether this definition is one this build ships, rather than one a
+    /// config table or a Markdown file declared.
+    ///
+    /// Carried for exactly one reader, [`Definition::expand`]'s misdirection
+    /// gate: a `command` table entry that reuses `team` **replaces** the
+    /// builtin, deliberately and by documented precedence
+    /// ([`Registry::build`]), and a gate on the name alone would go on
+    /// refusing three argument shapes on behalf of a command that is no longer
+    /// there. [`Definition::source`] cannot answer this — it separates a file
+    /// from everything else, where the tier that can take `/team` over is the
+    /// one that is not a file either.
+    pub builtin: bool,
 }
 
 impl Definition {
@@ -172,12 +240,36 @@ impl Definition {
     /// *tool call* runs under and this expansion is not one; and it is filled
     /// here rather than at roster build because one roster serves every
     /// session a process opens.
+    ///
+    /// Refuses before a byte of the template is filled when the **builtin**
+    /// `/team` was typed with one of `/teammate`'s own subcommands (**bead
+    /// 2m46**): that template's own second arm asks the model to redirect
+    /// those, which is a whole round trip to be told what the three words
+    /// already say.
+    ///
+    /// The check is on the name *and* on [`Definition::builtin`], because the
+    /// name is only the difference between the two commands while this build
+    /// is the one that spelled it: a config `[command.team]` replaces the
+    /// builtin outright ([`Registry::build`]), and refusing three argument
+    /// shapes on its behalf would make somebody else's command unreachable in
+    /// favour of a sentence about a command they did not write.
+    ///
+    /// # Errors
+    ///
+    /// [`Misdirected`], carrying the line that was meant. No turn starts.
     pub async fn expand(
         &self,
         arguments: &str,
         session: &str,
         ctx: &crate::tool::ToolCtx,
-    ) -> Expanded {
+    ) -> Result<Expanded, Misdirected> {
+        if self.builtin
+            && self.name == TEAM
+            && let Some(misdirected) = misdirected(arguments)
+        {
+            return Err(misdirected);
+        }
+
         let filled = fill_template(&self.template, arguments);
         // The scan follows filling, so a command that arrived through
         // `$ARGUMENTS` runs too. The person who typed those arguments is the
@@ -250,7 +342,7 @@ impl Definition {
         // else, where the other order risks running their id as a command.
         let prompt = prompt.replace(SESSION_PLACEHOLDER, session);
 
-        Expanded { prompt, mentions }
+        Ok(Expanded { prompt, mentions })
     }
 }
 
@@ -650,6 +742,7 @@ fn parse_command(name: &str, text: &str) -> Option<Definition> {
         // The caller knows which file this text came from; a parser given a
         // string does not.
         source: None,
+        builtin: false,
     })
 }
 
@@ -759,6 +852,7 @@ fn builtins(worktree: &Path) -> Vec<Definition> {
             model: None,
             argument_hint: None,
             source: None,
+            builtin: true,
         },
         Definition {
             name: TEAM.to_owned(),
@@ -780,6 +874,10 @@ fn builtins(worktree: &Path) -> Vec<Definition> {
             model: None,
             argument_hint: Some(TEAM_ARGUMENT_HINT.to_owned()),
             source: None,
+            // What [`Definition::expand`]'s misdirection gate is really asking
+            // about: this is the `/team` whose template redirects a roster
+            // line, so it is the one that may answer three of them itself.
+            builtin: true,
         },
     ]
 }
@@ -801,6 +899,11 @@ fn configured(name: &str, definition: &CommandConfig) -> Definition {
         // so it answers to the config's loud dispatch-time refusal rather than
         // to the file tier's quiet one.
         source: None,
+        // The tier that is allowed to take a builtin's name over, which is why
+        // this flag exists at all: a `[command.team]` entry is the project's
+        // own `/team` from the moment it is loaded, and nothing here may keep
+        // answering roster lines on behalf of the template it replaced.
+        builtin: false,
     }
 }
 

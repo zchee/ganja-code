@@ -68,6 +68,25 @@ fn arguments_that_will_not_parse_are_not_nagged_about() {
     assert!(!delegates_anonymously("[1, 2]"), "valid JSON that is not an argument object");
 }
 
+/// The nag's second trigger (bead s8rw), and the property that makes the pair
+/// safe to ask about one call at a time: the two questions are opposites on
+/// every call either can answer, and a call neither can read is neither.
+#[test]
+fn naming_and_anonymity_are_the_two_answers_a_readable_call_can_give() {
+    for arguments in [r#"{"name": "backend"}"#, r#"{"name": " b "}"#] {
+        assert!(delegates_named(arguments), "{arguments} names somebody");
+        assert!(!delegates_anonymously(arguments));
+    }
+    for arguments in [r#"{"description": "read it"}"#, r#"{"name": ""}"#, r#"{"name": 7}"#] {
+        assert!(!delegates_named(arguments), "{arguments} names nobody");
+        assert!(delegates_anonymously(arguments));
+    }
+    for arguments in ["{\"name\":", "", "[1, 2]"] {
+        assert!(!delegates_named(arguments), "a call that never ran is evidence of nothing");
+        assert!(!delegates_anonymously(arguments));
+    }
+}
+
 #[test]
 fn a_fresh_turn_carries_no_blocks() {
     let mut discipline = Discipline::default();
@@ -151,25 +170,21 @@ fn the_breaker_allows_exactly_five_continuations() {
 }
 
 #[test]
-fn a_steer_resets_the_budget_and_withdraws_a_queued_continuation() {
+fn a_steer_resets_the_budget() {
     let mut discipline = Discipline::default();
     for _ in 0..MAX_CONTINUATIONS {
         discipline.continue_turn();
+        // Spent as the request that carries it is assembled, which is the only
+        // order the loop can produce: a continuation is taken and rendered
+        // before the steer drain can be reached again (bead lymf).
         let _ = discipline.take_blocks();
     }
     assert!(!discipline.may_continue(), "the budget is spent");
 
-    // The turn queued one more and then somebody typed before the request was
-    // built.
-    discipline.continue_turn();
     discipline.user_took_over();
 
     assert!(discipline.may_continue(), "a person driving resets consecutive auto-continuations");
     assert!(discipline.should_continue(CONTINUES), "so the guard is armed again");
-    assert!(
-        discipline.take_blocks().is_empty(),
-        "the steer says it better, and in the person's own words",
-    );
 }
 
 #[test]
@@ -197,6 +212,12 @@ fn every_arrangement_of_the_three_facts_decides_the_turn() {
                     Discipline::default().should_continue(facts),
                     expected,
                     "a turn continues only for a live team with open work and no dialog: {facts:?}",
+                );
+                assert_eq!(
+                    facts.would_continue(),
+                    expected,
+                    "and a fresh turn's budget decides nothing, which is what makes this the \
+                     question the breaker's own log line asks (bead lymf): {facts:?}",
                 );
             }
         }

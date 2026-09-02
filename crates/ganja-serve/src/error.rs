@@ -73,6 +73,10 @@ impl From<EngineError> for ApiError {
             // for looked at the prompt and refused it. `500` would report the
             // operator's policy as a fault of the server carrying it out.
             EngineError::HookRefused { .. } => Self::Invalid(error.to_string()),
+            // The same shape: `/team` given `/teammate`'s own subcommand is a
+            // request that named the wrong command, refused before any turn
+            // started, and the sentence carries the line that was meant.
+            EngineError::MisdirectedCommand { .. } => Self::Invalid(error.to_string()),
             _ => Self::Internal(error.to_string()),
         }
     }

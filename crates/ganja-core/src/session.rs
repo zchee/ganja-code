@@ -1587,27 +1587,34 @@ struct BufferedCall {
 }
 
 /// Records, at most once for the whole step, that `calls` delegated without
-/// naming anybody while this session's team was live (**the name nag**).
+/// naming anybody on a step that is about a team (**the name nag**).
 ///
-/// Silent for a session that leads nobody, and silent for a step whose `task`
-/// calls all carried a name. The registry is read *now* rather than off the
-/// turn's opening [`Turn::teamless`]: the `/team` pipeline's own first step
-/// spawns the members, so a turn that began leading nobody is exactly the turn
-/// this has to notice about.
+/// Two things make a step that: this session leads somebody live *now*, or the
+/// batch itself names somebody in another `task` call (bead s8rw). Either is
+/// enough, and the second is what the first cannot answer — the `/team`
+/// pipeline's own opening step spawns its named members in the very batch
+/// being scanned, so the registry is still empty however late it is read, and
+/// a registry-only trigger described the instant before the delegation rather
+/// than the delegation. Reading the naming off the calls themselves takes the
+/// answer off the clock entirely.
+///
+/// Silent for a step whose `task` calls all carried a name, and silent for a
+/// turn that leads nobody and names nobody: an anonymous subagent is a
+/// first-class thing to want (**D462**), and outside a team there is no
+/// teammate to prefer over one.
 fn note_anonymous_delegations(turn: &Turn, calls: &[BufferedCall]) {
-    if !leads_a_live_team(turn) {
+    use crate::teammate::discipline::{delegates_anonymously, delegates_named};
+
+    let (mut anonymous, mut named) = (false, false);
+    for call in calls.iter().filter(|call| delegates(call)) {
+        anonymous |= delegates_anonymously(&call.json);
+        named |= delegates_named(&call.json);
+    }
+    if !anonymous || !(named || leads_a_live_team(turn)) {
         return;
     }
 
-    let anonymous = calls.iter().any(|call| {
-        delegates(call) && crate::teammate::discipline::delegates_anonymously(&call.json)
-    });
-    if anonymous {
-        turn.discipline
-            .lock()
-            .expect("the turn guards are never poisoned")
-            .note_anonymous_delegation();
-    }
+    turn.discipline.lock().expect("the turn guards are never poisoned").note_anonymous_delegation();
 }
 
 /// Whether this turn's session is leading a team that still has somebody
@@ -1621,13 +1628,37 @@ fn leads_a_live_team(turn: &Turn) -> bool {
     turn.team.as_ref().is_some_and(|registry| registry.running() > 0)
 }
 
+/// Whether somebody is being asked something that a continuation would be
+/// pushed in front of.
+///
+/// Two halves, because a person sitting at a lead answers **both** on the one
+/// screen and cannot tell them apart (bead xysf). This turn's own pending
+/// replies is the half that is unreachable as the loop stands — a call that
+/// opened a dialog has been awaited by the time a step reports no calls at all
+/// — and is read anyway, because "never while the user is being asked
+/// something" is a promise about this behavior rather than about the shape of
+/// the loop that happens to keep it. A **teammate's** forwarded dialog
+/// ([`TeammateRegistry::dialogs_waiting`]) is the half that really happens: a
+/// teammate's turn runs beside the lead's, so its question can be raised at any
+/// moment of this one, including after the model has stopped talking.
+///
+/// [`TeammateRegistry::dialogs_waiting`]: crate::teammate::TeammateRegistry::dialogs_waiting
+fn dialog_open(turn: &Turn) -> bool {
+    if !turn.pending.lock().expect("the pending replies are never poisoned").is_empty() {
+        return true;
+    }
+
+    turn.team.as_ref().is_some_and(|registry| registry.dialogs_waiting() > 0)
+}
+
 /// Whether this turn should keep going because the team it leads still holds
 /// unfinished work (**the continuation blocker**).
 ///
 /// Every clause is a typed fact, and none of them is the state JSON the model
 /// writes for itself: a live member in the registry, no dialog waiting for an
-/// answer, a pending or in-progress document on the shared list, and a breaker
-/// that has not tripped. What to do with those four is
+/// answer ([`dialog_open`], either this turn's own or a teammate's), a pending
+/// or in-progress document on the shared list, and a breaker that has not
+/// tripped. What to do with those four is
 /// [`Discipline::should_continue`]'s, so the truth table is one expression a
 /// test can walk exhaustively; what is here is the gathering.
 ///
@@ -1640,28 +1671,20 @@ async fn continue_for_the_team(turn: &Turn) -> bool {
     use crate::teammate::discipline::Facts;
 
     let live_team = !turn.cancel.is_cancelled() && leads_a_live_team(turn);
-    // Unreachable as the loop stands — a call that opened a dialog has been
-    // awaited by the time a step reports no calls at all — and gathered
-    // anyway, because "never while the user is being asked something" is a
-    // promise about this behavior rather than about the shape of the loop that
-    // happens to keep it.
-    let dialog_open =
-        !turn.pending.lock().expect("the pending replies are never poisoned").is_empty();
+    // Named for the answer rather than for the question, so that the `Facts`
+    // literal below reads as the call it is instead of as field-init shorthand
+    // for the free function two lines up.
+    let somebody_is_asked = dialog_open(turn);
     let budget = turn.discipline.lock().expect("the turn guards are never poisoned").may_continue();
 
-    if live_team && !budget {
-        // The breaker: said at the moment it trips, and not again, because the
-        // turn ends here.
-        tracing::info!(
-            limit = crate::teammate::discipline::MAX_CONTINUATIONS,
-            "the turn stopped auto-continuing and handed the session back",
-        );
-    }
-
-    // The list is the one fact that costs a read off the disk, so it is the
-    // one gated on the three that do not: a turn already refused by those has
-    // no use for the answer.
-    let listed = if live_team && !dialog_open && budget {
+    // The list is the one fact that costs a read off the disk, so it is gated
+    // on the two that do not: a turn already refused by those has no use for
+    // the answer. The budget is deliberately **not** a third gate, though it
+    // would save this read on the turn the breaker trips — the log line below
+    // claims the session was handed back with work outstanding, and that claim
+    // is only true if the list really holds some (bead lymf). One extra read,
+    // once, on the last tail of a turn that is ending anyway.
+    let listed = if live_team && !somebody_is_asked {
         match turn.tasks.as_ref() {
             None => Vec::new(),
             Some(tasks) => match tasks.list().await {
@@ -1685,9 +1708,22 @@ async fn continue_for_the_team(turn: &Turn) -> bool {
 
     let facts = Facts {
         live_team,
-        dialog_open,
+        dialog_open: somebody_is_asked,
         unfinished_work: crate::teammate::discipline::holds_unfinished_work(&listed),
     };
+    if !budget && facts.would_continue() {
+        // The breaker, said at the moment it trips and not again, because the
+        // turn ends here — and said only when it is the fact that decided it.
+        // A drained list, a dialog or a team that has gone ends the turn for
+        // its own reason, and reporting those as the breaker would be this
+        // guard misdescribing itself in the one place a person looks to find
+        // out why a session stopped.
+        tracing::info!(
+            limit = crate::teammate::discipline::MAX_CONTINUATIONS,
+            "the turn stopped auto-continuing and handed the session back",
+        );
+    }
+
     let mut discipline = turn.discipline.lock().expect("the turn guards are never poisoned");
     if !discipline.should_continue(facts) {
         return false;

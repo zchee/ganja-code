@@ -2,8 +2,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::{
-    Definition, INIT, INIT_TEMPLATE, MAX_COMMAND_FILE_BYTES, PATH_PLACEHOLDER, Registry,
-    file_commands, fill_template, mentions, shell_substitutions, split_range, tokenize,
+    Definition, INIT, INIT_TEMPLATE, MAX_COMMAND_FILE_BYTES, Misdirected, PATH_PLACEHOLDER,
+    Registry, TEAM, file_commands, fill_template, mentions, shell_substitutions, split_range,
+    tokenize,
 };
 use crate::tool::{Credentials, FileTimes, ToolCtx};
 
@@ -191,18 +192,28 @@ async fn template_expansion_runs_shells_and_attaches_only_files_that_exist() {
         model: None,
         argument_hint: None,
         source: None,
+        builtin: false,
     };
 
-    let echoed = command(r#"!`echo hi`"#).expand("", SESSION, &ctx).await;
+    let echoed = command(r#"!`echo hi`"#)
+        .expand("", SESSION, &ctx)
+        .await
+        .expect("an ordinary command expands");
     assert_eq!(echoed.prompt, "hi");
 
-    let failed = command(r#"!`printf still-here; exit 7`"#).expand("", SESSION, &ctx).await;
+    let failed = command(r#"!`printf still-here; exit 7`"#)
+        .expand("", SESSION, &ctx)
+        .await
+        .expect("expands");
     assert_eq!(
         failed.prompt, "still-here",
         "a non-zero exit still substitutes what the command wrote"
     );
 
-    let attached = command("read @present.md and ask @alice").expand("", SESSION, &ctx).await;
+    let attached = command("read @present.md and ask @alice")
+        .expand("", SESSION, &ctx)
+        .await
+        .expect("expands");
     assert_eq!(attached.prompt, "read @present.md and ask @alice");
     assert_eq!(
         attached.mentions,
@@ -362,7 +373,8 @@ async fn a_file_command_expands_through_the_one_expansion_path() {
     };
 
     let commands = file_commands(dir.path());
-    let expanded = commands[0].expand("the port", SESSION, &ctx).await;
+    let expanded =
+        commands[0].expand("the port", SESSION, &ctx).await.expect("a file command expands");
 
     assert_eq!(expanded.prompt, "hi about the port beside @present.md");
     assert_eq!(
@@ -370,4 +382,75 @@ async fn a_file_command_expands_through_the_one_expansion_path() {
         vec![crate::protocol::Mention { path: "present.md".to_owned(), start: None, end: None }],
         "a file command attaches what a config command's template would"
     );
+}
+
+/// **Bead 2m46.** `/teammate`'s three subcommands are refused where `/team`
+/// would have expanded, so a line typed at the command D544 renamed costs no
+/// turn and no model round trip — and the refusal hands back the line that was
+/// meant rather than describing it.
+#[tokio::test]
+async fn the_roster_subcommands_are_refused_by_team_with_the_line_that_was_meant() {
+    let root = tempfile::TempDir::new().expect("a temporary project is creatable");
+    let ctx = expansion_ctx(root.path());
+    let team = Registry::builtin(root.path()).get(TEAM).expect("team is builtin").clone();
+
+    for (typed, meant) in [
+        ("spawn w1 --backend ganja", "/teammate spawn w1 --backend ganja"),
+        ("shutdown w2", "/teammate shutdown w2"),
+        ("shutdown", "/teammate shutdown"),
+        ("list", "/teammate list"),
+    ] {
+        assert_eq!(
+            team.expand(typed, SESSION, &ctx).await,
+            Err(Misdirected { meant: meant.to_owned() }),
+            "`/team {typed}` is a roster line, and nothing about it needs a model",
+        );
+    }
+}
+
+/// The refusal is conservative on purpose: `list` takes no arguments of its
+/// own, so a `list` with a tail is a task somebody wants done, and a first word
+/// that merely starts with one of the three is not one of them.
+#[tokio::test]
+async fn a_task_that_only_reads_like_a_roster_line_still_expands() {
+    let root = tempfile::TempDir::new().expect("a temporary project is creatable");
+    let ctx = expansion_ctx(root.path());
+    let team = Registry::builtin(root.path()).get(TEAM).expect("team is builtin").clone();
+
+    for typed in ["list the config keys", "3 spawn-free task text", "port the loader", ""] {
+        let expanded = team
+            .expand(typed, SESSION, &ctx)
+            .await
+            .unwrap_or_else(|refused| panic!("`/team {typed}` is a task: {refused:?}"));
+        assert!(
+            expanded.prompt.contains(typed),
+            "and what it expands to carries what was typed: {}",
+            expanded.prompt,
+        );
+        // `contains("")` holds of anything, so the empty row is proved an
+        // expansion by the template's own opening sentence instead.
+        assert!(
+            expanded.prompt.starts_with("You are running a team pipeline."),
+            "and it is the template that was expanded, not the line echoed: {}",
+            expanded.prompt,
+        );
+    }
+}
+
+/// The context an expansion runs in, at its dullest: a project directory and
+/// nothing lent.
+fn expansion_ctx(cwd: &Path) -> ToolCtx {
+    ToolCtx {
+        cwd: cwd.to_owned(),
+        cancel: tokio_util::sync::CancellationToken::new(),
+        call_id: String::new(),
+        files: Arc::new(FileTimes::default()),
+        credentials: Credentials::Unguarded,
+        spawn: None,
+        postbox: None,
+        tasks: None,
+        ask: None,
+        switch: None,
+        jobs: None,
+    }
 }

@@ -35,7 +35,7 @@ use std::time::Duration;
 use futures::StreamExt as _;
 use ganja_core::permission::Permissions;
 use ganja_core::protocol::team::PeerPayload;
-use ganja_core::protocol::{Command, Event, Message, Part, PartBody, Role};
+use ganja_core::protocol::{Command, Event, Message, Part, PartBody, PermissionReply, Role};
 use ganja_core::provider::{ChatRequest, ProviderEvent};
 use ganja_core::teammate::TeammateRegistry;
 use ganja_core::tool::Registry;
@@ -60,6 +60,11 @@ const PROMPT: &str = "look after the team, zarquon";
 /// What the teammate is spawned with. Answered with a bare finish, so it goes
 /// idle after one turn and simply stays in the registry.
 const WORK_PROMPT: &str = "stand by, zarquon";
+
+/// What the one teammate that really does something is spawned with. Its own
+/// prompt, so the provider double can answer that conversation alone: every
+/// other teammate here only talks.
+const ASKING_PROMPT: &str = "leave a note, zarquon";
 
 /// The teammate's name.
 const WORKER: &str = "worker-1";
@@ -88,6 +93,9 @@ enum Script {
     FansOutAnonymously,
     /// Delegate twice, both naming a teammate, then only talk.
     FansOutNamed,
+    /// Delegate twice in one step, naming somebody in one call and nobody in
+    /// the other, then only talk.
+    FansOutMixed,
 }
 
 /// Whether this conversation has already delegated.
@@ -97,6 +105,20 @@ fn already_delegated(request: &ChatRequest) -> bool {
         .iter()
         .flat_map(|message| &message.parts)
         .any(|part| matches!(&part.body, PartBody::Tool { tool, .. } if tool == "task"))
+}
+
+/// Whether this conversation has already made the call that raises a dialog.
+///
+/// Which is what keeps the asking teammate to exactly one question however its
+/// dialog is answered: a refusal is information the model reads, and a model
+/// that answered it by asking again would leave a second dialog open behind
+/// the assertions below.
+fn already_asked(request: &ChatRequest) -> bool {
+    request
+        .messages
+        .iter()
+        .flat_map(|message| &message.parts)
+        .any(|part| matches!(&part.body, PartBody::Tool { tool, .. } if tool == "write"))
 }
 
 /// Whether this request is one of the lead's own **step** requests.
@@ -112,13 +134,25 @@ fn is_lead_step(request: &ChatRequest) -> bool {
 /// Two `task` calls in **one** step, which is what makes this a fan-out rather
 /// than two steps that each delegated once.
 fn fan_out(named: bool) -> Vec<ProviderEvent> {
+    delegating(if named { [Some("alpha"), Some("beta")] } else { [None, None] })
+}
+
+/// One named `task` call and one anonymous one, in that same single step — the
+/// `/team` pipeline's own opening shape, and the one a registry read cannot
+/// answer about (bead s8rw): the members are spawned by the very batch being
+/// scanned, so the registry is still empty however late it is read.
+fn mixed_fan_out() -> Vec<ProviderEvent> {
+    delegating([Some("alpha"), None])
+}
+
+/// A step delegating once per entry, each naming a teammate or nobody.
+fn delegating(names: [Option<&str>; 2]) -> Vec<ProviderEvent> {
     let mut script = Vec::new();
-    for (index, who) in ["alpha", "beta"].iter().enumerate() {
+    for (index, who) in names.iter().enumerate() {
         let id = format!("call-{index}");
-        let args = if named {
-            json!({"name": who, "description": "take a piece of it"})
-        } else {
-            json!({"description": "take a piece of it"})
+        let args = match who {
+            Some(who) => json!({"name": who, "description": "take a piece of it"}),
+            None => json!({"description": "take a piece of it"}),
         };
         script.push(ProviderEvent::ToolCallStart { id: id.clone(), name: "task".to_owned() });
         script.push(ProviderEvent::ToolCallDelta { id: id.clone(), json: args.to_string() });
@@ -211,6 +245,10 @@ struct Lead {
     /// assertion does moves the engine it is asserting about.
     said: Arc<Mutex<Vec<String>>>,
     asker: RecordedSpawns,
+    /// The team this lead was wired with, kept for the one question no event
+    /// answers: how many of its teammates' dialogs are still in front of the
+    /// person (bead xysf).
+    registry: Arc<TeammateRegistry>,
     /// Declared last so it is dropped last: the engine's storage lives under
     /// it, and taking the directory away while the engine still holds it is
     /// the reverse of the safe order.
@@ -219,7 +257,20 @@ struct Lead {
 
 impl Lead {
     async fn new(script: Script) -> Self {
-        Self::build(script, None).await
+        Self::build(script, None, Registry::new(Vec::new())).await
+    }
+
+    /// A lead whose teammates hold one tool, and one that asks before it runs.
+    ///
+    /// The suite's other leads lend nothing at all, which is what keeps every
+    /// teammate here a conversation that only talks. This one exists for the
+    /// case that needs a teammate to really raise a permission dialog — `write`
+    /// asks by default (`ganja_permission::ASK_BY_DEFAULT`), so a recorder
+    /// wearing that name is a question on the lead's own screen.
+    async fn asking() -> Self {
+        let (tool, _calls) = ganja_testkit::RecorderTool::new("write", "wrote", "written");
+
+        Self::build(Script::OnlyTalks, None, Registry::new(vec![tool])).await
     }
 
     /// A lead whose `at`-th step request waits for the test before it is
@@ -230,10 +281,13 @@ impl Lead {
         let (permit, released) = std::sync::mpsc::channel();
         let gate = Gate { at, seen: AtomicUsize::new(0), arrived, release: Mutex::new(released) };
 
-        (Self::build(script, Some(gate)).await, Held { arrived: waiting, permit })
+        (
+            Self::build(script, Some(gate), Registry::new(Vec::new())).await,
+            Held { arrived: waiting, permit },
+        )
     }
 
-    async fn build(script: Script, gate: Option<Gate>) -> Self {
+    async fn build(script: Script, gate: Option<Gate>, tools: Registry) -> Self {
         let home = ganja_testkit::temp_dir();
         let storage = Storage::open(home.path().join("storage"));
         let root = TeamsRoot::new(home.path().join("teams"));
@@ -249,7 +303,15 @@ impl Lead {
                 gate.hold(request);
             }
 
-            if !transcript(request).contains(PROMPT) {
+            if transcript(request).contains(ASKING_PROMPT) && !already_asked(request) {
+                // The one teammate this suite gives something to do: it calls
+                // the tool once, which raises a dialog on the lead's screen,
+                // and says nothing more however that dialog is answered.
+                ganja_testkit::tool_call(
+                    "write",
+                    json!({ "filePath": "notes.md", "content": "a teammate's note" }),
+                )
+            } else if !transcript(request).contains(PROMPT) {
                 // Somebody else's conversation: the teammate's own turn, or a
                 // title request. Neither is what this suite is about.
                 vec![ProviderEvent::Finish(FinishReason::Completed)]
@@ -260,6 +322,7 @@ impl Lead {
                     Script::OnlyTalks => says("talked"),
                     Script::FansOutAnonymously => fan_out(false),
                     Script::FansOutNamed => fan_out(true),
+                    Script::FansOutMixed => mixed_fan_out(),
                 }
             }
         });
@@ -267,11 +330,11 @@ impl Lead {
         let engine = Engine::persistent(
             provider,
             "recorder-model",
-            Arc::new(Registry::new(Vec::new())),
+            Arc::new(tools),
             Permissions::default(),
             storage,
         )
-        .with_teammates(registry, ganja_testkit::externals());
+        .with_teammates(Arc::clone(&registry), ganja_testkit::externals());
         let mut events = engine.subscribe().await.expect("the first subscriber wins");
         let said: Arc<Mutex<Vec<String>>> = Arc::default();
         let recorder = Arc::clone(&said);
@@ -286,7 +349,16 @@ impl Lead {
             }
         });
 
-        Self { root, team, engine, requests, said, asker: RecordedSpawns::default(), home }
+        Self {
+            root,
+            team,
+            engine,
+            requests,
+            said,
+            asker: RecordedSpawns::default(),
+            registry,
+            home,
+        }
     }
 
     /// The team's task documents, read the way any other process would.
@@ -317,9 +389,15 @@ impl Lead {
     /// the one worker the gate has not parked: a wedge there should fail here
     /// with a sentence, not later at nextest's own deadline with none.
     async fn spawn_a_member(&self) {
+        self.spawn_working_on(WORK_PROMPT).await;
+    }
+
+    /// The same spawn, given work of its own — the door every case here takes,
+    /// differing only in what the teammate is asked to do.
+    async fn spawn_working_on(&self, prompt: &str) {
         let caller = caller(self.home.path());
         let started = self.engine.teammates().expect("this session leads a team").start(
-            spawn_with_prompt(WORKER, Some("in-process"), WORK_PROMPT),
+            spawn_with_prompt(WORKER, Some("in-process"), prompt),
             &caller,
             &self.asker,
         );
@@ -543,6 +621,60 @@ async fn open_work_with_no_live_member_does_not_continue_a_turn() {
     lead.finish().await;
 }
 
+/// **Bead xysf.** A teammate's question is on the lead's own screen, so a
+/// continuation queued while it is open would be talking over the person
+/// answering it. The very same facts continue the next turn once it is
+/// answered, which is what makes this about the dialog rather than about
+/// anything else in the arrangement.
+///
+/// The dialog is a real one, raised by a real teammate's own turn through the
+/// engine's own forwarding channel: nothing here reaches for the counter that
+/// carries it, and answering the question is the only thing that changes
+/// between the two halves.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_teammates_open_dialog_holds_the_continuation_back_until_it_is_answered() {
+    let lead = Lead::asking().await;
+    lead.seed_task(TaskStatus::InProgress);
+    // The surface a frontend would drain, claimed by the test instead, so the
+    // question really has somewhere to go and stays there until it is answered.
+    let mut dialogs = lead.engine.teammate_dialogs().expect("a team opens a dialog channel");
+    lead.spawn_working_on(ASKING_PROMPT).await;
+
+    let forwarded = tokio::time::timeout(EVENTUALLY, dialogs.recv())
+        .await
+        .expect("the teammate asks inside its budget")
+        .expect("the forwarding is still carrying");
+    assert_eq!(forwarded.teammate, WORKER, "the lead is being asked something on its behalf");
+
+    lead.prompt_and_settle(PROMPT).await;
+
+    assert_eq!(
+        lead.lead_requests().len(),
+        1,
+        "a live member and an open task, and the turn still ended: somebody is being asked \
+         something",
+    );
+    assert_eq!(lead.carrying(CONTINUATION_TAG), 0);
+
+    // Answered — a refusal is an answer — and the same three facts now say to
+    // carry on.
+    forwarded.reply.send(PermissionReply::Reject).expect("the teammate is still waiting");
+    ganja_testkit::eventually(EVENTUALLY, "the teammate's dialog to be answered", async || {
+        (lead.registry.dialogs_waiting() == 0).then_some(())
+    })
+    .await;
+
+    lead.prompt_and_settle(PROMPT).await;
+
+    assert_eq!(
+        lead.carrying(CONTINUATION_TAG),
+        5,
+        "nothing else moved: the second turn continued until the breaker stopped it",
+    );
+
+    lead.finish().await;
+}
+
 /// The registry is read at the turn's **tail**, not at its start: a member
 /// that appears while the model is still talking keeps *that* turn going.
 ///
@@ -730,6 +862,31 @@ async fn a_session_leading_nobody_is_never_nagged_about_a_name() {
     lead.prompt_and_settle(PROMPT).await;
 
     assert_eq!(lead.carrying(NAG_TAG), 0, "no team, no teammate to prefer");
+
+    lead.finish().await;
+}
+
+/// **Bead s8rw.** A step that names somebody in one `task` call and leaves
+/// another anonymous is delegating into a team, and is nagged for it even on a
+/// turn that leads nobody at the moment of the scan.
+///
+/// Which is the `/team` pipeline's own first step, and the case the registry
+/// alone cannot answer: the members are spawned by the very batch being
+/// scanned, so a trigger that only read the registry described the instant
+/// before the delegation and said nothing. The mirror is the test above it,
+/// which differs in one thing — no call in that batch names anybody — and stays
+/// silent.
+#[tokio::test]
+async fn a_step_naming_one_teammate_and_leaving_another_anonymous_is_nagged() {
+    let lead = Lead::new(Script::FansOutMixed).await;
+
+    lead.prompt_and_settle(PROMPT).await;
+
+    assert_eq!(
+        lead.carrying(NAG_TAG),
+        1,
+        "the batch named somebody, so the anonymous call beside it is worth a word — once",
+    );
 
     lead.finish().await;
 }

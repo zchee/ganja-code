@@ -97,7 +97,30 @@ async fn expand_as(arguments: &str, session: &str) -> String {
         jobs: None,
     };
 
-    team.expand(arguments, session, &ctx).await.prompt
+    team.expand(arguments, session, &ctx).await.expect("these arguments expand").prompt
+}
+
+/// What `/team` refuses `arguments` with, for the lines it never expands.
+async fn refusal(arguments: &str) -> command::Misdirected {
+    let registry = roster();
+    let team = registry.get("team").expect("`/team` is a builtin");
+    let ctx = ToolCtx {
+        cwd: std::env::temp_dir(),
+        cancel: tokio_util::sync::CancellationToken::new(),
+        call_id: String::new(),
+        files: Arc::new(FileTimes::default()),
+        credentials: Credentials::Unguarded,
+        spawn: None,
+        postbox: None,
+        tasks: None,
+        ask: None,
+        switch: None,
+        jobs: None,
+    };
+
+    team.expand(arguments, SESSION, &ctx)
+        .await
+        .expect_err("a roster line is refused rather than expanded")
 }
 
 /// Where this checkout's pipeline state belongs, computed the way anything
@@ -184,13 +207,90 @@ async fn bare_team_still_reaches_the_model_with_its_usage_and_teammate_pointer()
     assert!(expanded.contains("--backend"), "including what a backend is chosen from: {expanded}",);
 }
 
+/// **Bead 2m46.** The three exact spellings never reach the model at all: they
+/// are refused where the expansion would have begun, with the line that was
+/// meant. A round trip to be told what three fixed words already say is a round
+/// trip nobody should pay for a typo.
 #[tokio::test]
-async fn legacy_roster_arguments_reach_the_branch_that_redirects_them() {
-    for legacy in ["spawn worker-1", "shutdown worker-1", "list"] {
-        let expanded = expand(legacy).await;
+async fn legacy_roster_arguments_are_refused_before_a_turn_starts() {
+    for (legacy, meant) in [
+        ("spawn worker-1", "/teammate spawn worker-1"),
+        ("shutdown worker-1", "/teammate shutdown worker-1"),
+        ("list", "/teammate list"),
+    ] {
+        assert_eq!(refusal(legacy).await.meant, meant, "`/team {legacy}` names its own answer");
+    }
+}
+
+/// And it is refused on behalf of **this build's** `/team`, never on behalf of
+/// the name.
+///
+/// A `[command.team]` entry replaces the builtin outright — the config tier
+/// wins a name it reuses, which `command::Registry::build` documents as
+/// deliberate — so from that point the project's own template is what `/team`
+/// sends. A gate that kept refusing three argument shapes there would make
+/// somebody's own command unreachable for those spellings, and would answer
+/// with a sentence about a command they never wrote.
+#[tokio::test]
+async fn a_project_that_owns_the_team_name_keeps_the_roster_spellings() {
+    pin_homes();
+    let mut command = std::collections::BTreeMap::new();
+    command.insert(
+        "team".to_owned(),
+        ganja_core::config::CommandConfig {
+            template: "run the deploy playbook for $ARGUMENTS".to_owned(),
+            description: None,
+            agent: None,
+            model: None,
+        },
+    );
+    let registry =
+        command::Registry::build(&Config { command, ..Config::default() }, Path::new(WORKTREE));
+    let team = registry.get("team").expect("the config entry took the name");
+    assert!(!team.builtin, "the builtin was replaced rather than layered under");
+    let ctx = ToolCtx {
+        cwd: std::env::temp_dir(),
+        cancel: tokio_util::sync::CancellationToken::new(),
+        call_id: String::new(),
+        files: Arc::new(FileTimes::default()),
+        credentials: Credentials::Unguarded,
+        spawn: None,
+        postbox: None,
+        tasks: None,
+        ask: None,
+        switch: None,
+        jobs: None,
+    };
+
+    for typed in ["spawn w1", "shutdown w2", "list"] {
+        let expanded = team
+            .expand(typed, SESSION, &ctx)
+            .await
+            .unwrap_or_else(|refused| panic!("`/team {typed}` is the project's own: {refused:?}"))
+            .prompt;
+
+        assert_eq!(
+            expanded,
+            format!("run the deploy playbook for {typed}"),
+            "the project's template is what runs, whole",
+        );
+    }
+
+    // And the builtin, on the same machine and the same worktree, still is not.
+    assert_eq!(refusal("spawn w1").await.meant, "/teammate spawn w1");
+}
+
+/// And the template's redirect branch is still the fallback, because the
+/// refusal above only knows three spellings: anything else that means the same
+/// thing reaches the model with what was typed, whole, so it can answer with
+/// the corrected line itself.
+#[tokio::test]
+async fn roster_management_in_other_words_reaches_the_branch_that_redirects_it() {
+    for asked in ["start a teammate called worker-1", "who is on the team"] {
+        let expanded = expand(asked).await;
 
         assert!(
-            expanded.contains(legacy),
+            expanded.contains(asked),
             "what was typed reaches the model whole, so it can echo the corrected line: {expanded}",
         );
         assert!(
