@@ -345,7 +345,15 @@ const TASK: &str = "port the config loader";
 /// to standard output, so it adds no context of its own to the turn.
 fn submitted(run: &Run, args: &[&str]) -> String {
     let ledger = run.path().join("prompts");
-    let record = format!("{{ cat; echo; }} >> {}", ledger.display());
+    // One `sh` word, by the crate the production launch lines ride: `hook.rs`
+    // hands this to the POSIX shell, and a `TMPDIR` holding a space, a quote
+    // or a glob character would otherwise redirect somewhere else entirely —
+    // surfacing as a missing-file panic three lines down that names none of
+    // that.
+    let target = shlex::try_quote(&ledger.display().to_string())
+        .expect("no NUL rides a temporary path")
+        .into_owned();
+    let record = format!("{{ cat; echo; }} >> {target}");
     fs::write(
         run.path().join("ganja.toml"),
         format!(
@@ -354,7 +362,7 @@ fn submitted(run: &Run, args: &[&str]) -> String {
     )
     .expect("the project config is writable");
 
-    run.ganja_in_its_own_homes()
+    run.ganja()
         .args(["run"])
         .args(args)
         .assert()

@@ -18,7 +18,7 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::{Command as Spawn, Stdio};
+use std::process::Command as Spawn;
 use std::time::Instant;
 
 use assert_cmd::Command;
@@ -104,22 +104,20 @@ fn sealed(command: &mut Command, project: &Path, data: &Path, config: &Path) {
         .current_dir(project)
         .env("XDG_DATA_HOME", data)
         .env("XDG_CONFIG_HOME", config)
-        // The other two doors to a global home, closed with it: an exported
-        // `GANJA_CONFIG_HOME` outranks the pinned XDG dir, and an empty
-        // pinned XDG dir falls through to `~/.ganja` via `HOME`.
+        // The third door to a global home, closed with the other two: an
+        // exported `GANJA_CONFIG_HOME` (on `served_child::UNINHERITED`)
+        // outranks the pinned XDG dir, and an empty pinned XDG dir falls
+        // through to `~/.ganja` via `HOME`.
         .env("HOME", data)
-        .env_remove("GANJA_CONFIG_HOME")
-        .env_remove("GANJA_PROVIDER")
-        .env_remove("GANJA_MODEL")
-        .env_remove("GANJA_CONFIG")
-        .env_remove("GANJA_SERVER_PASSWORD")
-        .env_remove("GANJA_SERVER_USERNAME")
-        .env_remove("ANTHROPIC_API_KEY")
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("OPENROUTER_API_KEY")
         // A closed pipe rather than the harness's stdin: `run` reads it whole
         // when it is not a terminal.
         .write_stdin("");
+    // The same list the servers are spawned without: a client that inherited a
+    // provider or a credential the server did not would be the one asymmetry
+    // these identity tests cannot see.
+    for name in served_child::UNINHERITED {
+        command.env_remove(name);
+    }
 }
 
 /// One `ganja run` driving an engine in its own process, playing `script`.
@@ -187,33 +185,16 @@ impl Server {
                 .expect("the config is writable");
         }
 
-        // Wrapped the moment it exists: every panic below this line — the
-        // announcement's deadline, a port that is not a number, and every
-        // assertion the test itself makes before it reaches `stop` — unwinds
-        // through the kill that `Child` itself would not do.
-        let mut child = Reaped::new(
-            Spawn::new(env!("CARGO_BIN_EXE_ganja"))
-                .args(["serve", "--port", "0"])
-                .current_dir(project.path())
-                .env("XDG_DATA_HOME", data.path())
-                .env("XDG_CONFIG_HOME", config.path())
-                // See the client builder above: all three doors move together.
-                .env("HOME", data.path())
-                .env_remove("GANJA_CONFIG_HOME")
-                .env("GANJA_FAKE_SCRIPT", project.path().join("script.json"))
-                .env_remove("GANJA_PROVIDER")
-                .env_remove("GANJA_MODEL")
-                .env_remove("GANJA_CONFIG")
-                .env_remove("GANJA_SERVER_PASSWORD")
-                .env_remove("GANJA_SERVER_USERNAME")
-                .env_remove("ANTHROPIC_API_KEY")
-                .env_remove("OPENAI_API_KEY")
-                .env_remove("OPENROUTER_API_KEY")
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .expect("the binary starts"),
+        // `HOME` is the **data** directory here, where `serve.rs` names its
+        // config one: see the client builder above — all three doors move
+        // together, and which of a fixture's own two `HOME` lands on decides
+        // nothing as long as it is not the developer's.
+        let mut child = served_child::spawn(
+            project.path(),
+            data.path(),
+            config.path(),
+            data.path(),
+            &project.path().join("script.json"),
         );
 
         let line = child.announcement("the server's address line");

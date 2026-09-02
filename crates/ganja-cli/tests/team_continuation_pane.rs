@@ -57,8 +57,10 @@
 #![cfg(unix)]
 
 use std::fs;
+use std::path::PathBuf;
 use std::time::Duration;
 
+use ganja_core::team::task::TASKS_DIR;
 use serde_json::json;
 
 mod pane_lead;
@@ -106,6 +108,11 @@ const SCRIPT: &str = "turns.json";
 /// The homes, the script, and this drill's reads of what the lead wrote.
 struct Fixture {
     homes: Homes,
+    /// Where [`Homes::script`] put the script both conversations play, kept
+    /// rather than re-derived: which directory a script lands in is that
+    /// function's choice, and a drill that rebuilt the path would be
+    /// restating it.
+    script: PathBuf,
 }
 
 impl Fixture {
@@ -125,21 +132,9 @@ impl Fixture {
             }}],
         })];
         turns.extend(std::iter::repeat_n(json!({"text": "Nothing more from me."}), 24));
-        homes.script(SCRIPT, json!(turns));
+        let script = homes.script(SCRIPT, json!(turns));
 
-        Self { homes }
-    }
-
-    /// The environment the server is born from, and so what every pane
-    /// inherits. No script: both conversations here are the lead's own, and
-    /// the one it plays is on its own process.
-    fn server_env(&self) -> Vec<(&'static str, String)> {
-        pane_lead::server_env(&self.homes, None)
-    }
-
-    /// What the lead's own pane is additionally given (`-e`).
-    fn lead_env(&self) -> Vec<(&'static str, String)> {
-        pane_lead::lead_env(&self.homes, Some(&self.homes.project().join(SCRIPT)))
+        Self { homes, script }
     }
 
     /// How many times the lead's log says `needle`.
@@ -160,7 +155,7 @@ impl Fixture {
 
         teams
             .filter_map(Result::ok)
-            .filter_map(|team| fs::read_dir(team.path().join("tasks")).ok())
+            .filter_map(|team| fs::read_dir(team.path().join(TASKS_DIR)).ok())
             .any(|tasks| {
                 tasks.filter_map(Result::ok).any(|entry| {
                     entry.path().extension().is_some_and(|extension| extension == "json")
@@ -174,11 +169,14 @@ impl Fixture {
 #[test]
 fn a_lead_auto_continues_for_its_team_and_the_breaker_halts_it_at_five() {
     let fixture = Fixture::new();
-    let tmux = Tmux::start(&fixture.homes, &fixture.server_env(), DEADLINE);
+    // No script on the server: both conversations here are the lead's own, and
+    // the one it plays is handed to its own process.
+    let tmux = Tmux::start(&fixture.homes, &pane_lead::server_env(&fixture.homes, None), DEADLINE);
 
     // The lead, in a pane of its own in the project directory — so tmux gives
     // it `TMUX` and `TMUX_PANE` itself.
-    let lead = tmux.lead(&fixture.homes, &fixture.lead_env());
+    let lead =
+        tmux.lead(&fixture.homes, &pane_lead::lead_env(&fixture.homes, Some(&fixture.script)));
 
     // 1. The work is filed before there is anybody to do it, which is the
     // order the pipeline actually runs in — and that turn **ends**: open work

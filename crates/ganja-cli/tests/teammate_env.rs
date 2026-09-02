@@ -12,7 +12,7 @@
 //! for whether the pane joined the team.
 //!
 //! Every variable travels to a child — the server, the lead, the pane — and
-//! nothing here calls `set_var`, so the binary holds two tests.
+//! nothing here calls `set_var`, so the binary holds three tests.
 
 #![cfg(unix)]
 
@@ -21,7 +21,8 @@ mod pane_lead;
 use std::fs;
 
 use ganja_core::protocol::{PartBody, Role};
-use pane_lead::{Homes, Lead, TEAMMATE, argv_of, wait_for};
+use ganja_testkit::tmux::{PrivateServer, require_tmux};
+use pane_lead::{Homes, Lead, TEAMMATE, argv_of};
 use serde_json::json;
 
 /// A credential the lead holds, and the string the test greps a pane's
@@ -49,7 +50,7 @@ fn one_turn(homes: &Homes) -> std::path::PathBuf {
 fn pane_argv(lead: &Lead) -> String {
     let (_, pid) = lead.wait_for_teammate_pane();
 
-    wait_for("the pane's shell exec'd the binary", || {
+    lead.wait_for("the pane's shell exec'd the binary", || {
         let argv = argv_of(pid);
         argv.contains("--agent-id").then_some(argv)
     })
@@ -106,6 +107,39 @@ fn a_secret_the_lead_holds_never_reaches_a_panes_command_line() {
     );
 }
 
+/// **The developer's own verbosity, withheld.** `RUST_LOG` reaches a tmux
+/// client the way every other export does, and the server it starts hands its
+/// whole global table to every pane it will ever make (§10.10) — where
+/// `pane.rs`'s carried environment cannot take it back, because that list does
+/// not name it. So it is on `pane_lead`'s withheld list beside the
+/// credentials, and this is the removal *happening* rather than being spelled:
+/// the value is put on the client's own command, exactly where an export would
+/// have been read from, and the server is born without it anyway.
+///
+/// The cost of the leak is diagnostic, which is the only reason this test is
+/// cheaper than a lead: a member's pane resolves the lead's data home (D502)
+/// and writes the same rolling log, so a member at `trace` buries the eighty
+/// lines a timed-out wait quotes — the one account of where an Enter went that
+/// bead `mxqo` exists to read. No assertion anywhere would have failed.
+///
+/// A bare server rather than a [`Lead`]: what is under test is the list and
+/// the order `PrivateServer` applies it in — sets first, removals after — and
+/// starting a `ganja` to ask would only add a cold binary to the question.
+#[test]
+fn a_developers_rust_log_is_not_what_every_pane_inherits() {
+    require_tmux();
+    let server = PrivateServer::start(
+        &["sleep", "3600"],
+        &pane_lead::born_without(&[], &[]),
+        &[("RUST_LOG", "trace")],
+    );
+
+    assert!(
+        !server.global_has("RUST_LOG"),
+        "the table every pane inherits was born holding this developer's RUST_LOG"
+    );
+}
+
 /// **The failure D502's allowlist fixes.** The tmux server is born without
 /// the lead's config home; the lead alone holds it, and its team lives under
 /// it. A pane inheriting only the server's environment would resolve another
@@ -140,7 +174,7 @@ fn a_pane_joins_the_team_when_the_tmux_server_predates_the_config_home_export() 
     // lead's store — a root, carrying the seed as the lead's attributed words.
     lead.wait_for_screen(&pane, |screen| screen.contains(REPLY));
     let storage = homes.store();
-    let seeded = wait_for("the pane's session row reached the store", || {
+    let seeded = lead.wait_for("the pane's session row reached the store", || {
         storage
             .list_sessions()
             .expect("the store lists")

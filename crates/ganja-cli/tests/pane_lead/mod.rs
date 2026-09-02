@@ -39,9 +39,10 @@
 //! over this fixture may hold more than one test; `teammate_permission.rs`
 //! happens to hold one.
 
+// Each binary over this module uses a different half of it.
 #![allow(dead_code)]
 
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -135,6 +136,15 @@ pub const TEAMMATE: &str = "w1";
 /// How many lines of a lead's log a timed-out wait quotes.
 const LOG_TAIL: usize = 80;
 
+/// What every launch line here starts with, and why both shapes start with
+/// one at all: tmux hands a **one-word** command to the login shell, which
+/// sources rc files and gives the pane whatever they export (`pane.rs`'s own
+/// finding), so the binary has to be the second word. By absolute path
+/// because a `PATH` this fixture does not control could otherwise redirect
+/// it — and one spelling, so the rule is one fact rather than two that can
+/// disagree.
+const ENV: &str = "/usr/bin/env";
+
 /// What a private server is born **without**, so nothing a pane inherits can
 /// be this developer's rather than the fixture's (§10.10). One spelling,
 /// because a list that drifted between two drills would be two different
@@ -149,6 +159,15 @@ const LOG_TAIL: usize = 80;
 /// whose panes are meant to play no script (`server_env(_, None)`) must not
 /// inherit whichever one this developer had exported — and [`born_without`]
 /// is where that stops being a contradiction with the drills that do set one.
+///
+/// `RUST_LOG` is on it for a reason of the same shape but a different cost. A
+/// member's pane resolves the lead's data home (D502) and so writes the
+/// **same** rolling log file [`log_tail`] quotes; inheriting a developer's
+/// `trace` through the server's table would bury the lead's own account of
+/// where a keypress went — the eighty lines bead `mxqo` exists to read — under
+/// a second process's chatter. Withholding it is also what makes [`lead_env`]'s
+/// claim true: with nothing said, a member runs at the binary's own
+/// `DEFAULT_FILTER`, which is `info`.
 const WITHHELD: &[&str] = &[
     "GANJA_CONFIG_HOME",
     "GANJA_CONFIG",
@@ -168,6 +187,7 @@ const WITHHELD: &[&str] = &[
     "PARALLEL_API_KEY",
     "GANJA_SERVER_PASSWORD",
     "GANJA_SERVER_USERNAME",
+    "RUST_LOG",
 ];
 
 /// [`WITHHELD`] as a server is actually born without it: every name on that
@@ -184,7 +204,7 @@ const WITHHELD: &[&str] = &[
 /// predates this export", and a caller asking for that against a name the
 /// fixture happens to set means the withholding. Answering otherwise would
 /// quietly run a different experiment than the one the drill asks for.
-fn born_without<'a>(given: &[(&'static str, String)], also: &[&'a str]) -> Vec<&'a str> {
+pub fn born_without<'a>(given: &[(&'static str, String)], also: &[&'a str]) -> Vec<&'a str> {
     let mut names: Vec<&'a str> = Vec::new();
     for name in WITHHELD {
         if !given.iter().any(|(set, _)| set == name) {
@@ -252,8 +272,10 @@ pub fn lead_env(homes: &Homes, script: Option<&Path>) -> Vec<(&'static str, Stri
     // a wait that times out quotes [`LOG_TAIL`] lines of this file, and what
     // twice went missing on CI was an Enter nothing on the screen could
     // explain. The **lead's** process alone — a member's pane inherits the
-    // server's environment and stays at `info`, so the shared log file does
-    // not double. Measured on a deliberate timeout before it was left here:
+    // server's environment, which [`WITHHELD`] keeps this name out of, so the
+    // member runs at the binary's own default of `info` and the shared log
+    // file does not double. Measured on a deliberate timeout before it was
+    // left here:
     // `ganja_tui` at debug costs **two** lines per submitted line, and the
     // whole log of the two-spawn drill was sixteen — a fifth of the tail, so
     // it still reaches back past the spawn the drill is asking about.
@@ -377,6 +399,11 @@ pub struct Lead {
     server: PrivateServer,
     /// The pane the lead runs in.
     pane: String,
+    /// [`log_dir`] of the homes this lead was started over, for the reason
+    /// [`Tmux`] keeps the same field: a wait that gave up has a screen and
+    /// nothing else, and a screen has twice shown a lead that looked idle
+    /// with a line it never acted on.
+    logs: PathBuf,
 }
 
 impl Lead {
@@ -397,11 +424,8 @@ impl Lead {
     ) -> Self {
         require_tmux();
         // The window command: the lead's own environment first, then the
-        // binary. Always at least two words, which is what keeps tmux from
-        // handing a one-word command to the login shell (`pane.rs`'s own
-        // finding: that shell sources rc files and hands a pane whatever they
-        // export).
-        let mut window = String::from("env");
+        // binary — [`ENV`] carries the reason it is spelled that way round.
+        let mut window = String::from(ENV);
         for (name, value) in lead_only {
             window.push(' ');
             window.push_str(&shell_quote(&format!("{name}={value}")));
@@ -441,7 +465,7 @@ impl Lead {
         );
 
         let pane = server.first_pane().to_owned();
-        let lead = Self { server, pane };
+        let lead = Self { server, pane, logs: log_dir(homes) };
         // The lead's first frame, for [`COMPOSER`]'s reason.
         lead.wait_for_screen(&lead.pane, |screen| screen.contains(COMPOSER));
 
@@ -471,19 +495,39 @@ impl Lead {
 
     /// Waits until `pane`'s screen satisfies `wanted`, and answers the screen
     /// that did.
+    ///
+    /// The last screen read is kept for the failure, and the log quoted
+    /// beside it for [`Tmux::wait_for`]'s reason: what a lead *traced* in the
+    /// window that went wrong is the half no screen can give.
     pub fn wait_for_screen(&self, pane: &str, wanted: impl Fn(&str) -> bool) -> String {
-        let started = Instant::now();
-        loop {
-            let screen = self.screen(pane);
-            if wanted(&screen) {
-                return screen;
-            }
-            assert!(
-                started.elapsed() < DEADLINE,
-                "pane {pane} never showed what was waited for; it shows:\n{screen}"
-            );
-            std::thread::sleep(POLL);
-        }
+        let shown = RefCell::new(String::new());
+
+        waited(
+            DEADLINE,
+            || {
+                let screen = self.screen(pane);
+                if wanted(&screen) {
+                    return Some(screen);
+                }
+                *shown.borrow_mut() = screen;
+
+                None
+            },
+            || {
+                format!(
+                    "pane {pane} never showed what was waited for; it shows:\n{}\n{}",
+                    shown.borrow(),
+                    log_tail(&self.logs)
+                )
+            },
+        )
+    }
+
+    /// Waits until `look` answers, and says what the lead traced if it never
+    /// does — the shape a drill reaches for when what it watches is neither a
+    /// screen nor a pane, as `teammate_permission.rs`'s socket wait is.
+    pub fn wait_for<T>(&self, what: &str, look: impl FnMut() -> Option<T>) -> T {
+        waited(DEADLINE, look, || format!("{what} never happened;\n{}", log_tail(&self.logs)))
     }
 
     /// The live panes as `(id, pid)` pairs.
@@ -502,18 +546,17 @@ impl Lead {
 
     /// Waits for a second pane — the teammate's — and answers its `(id, pid)`.
     pub fn wait_for_teammate_pane(&self) -> (String, u32) {
-        let started = Instant::now();
-        loop {
-            if let Some(pane) = self.panes().into_iter().find(|(id, _)| *id != self.pane) {
-                return pane;
-            }
-            assert!(
-                started.elapsed() < DEADLINE,
-                "no teammate pane appeared; the lead shows:\n{}",
-                self.screen(&self.pane)
-            );
-            std::thread::sleep(POLL);
-        }
+        waited(
+            DEADLINE,
+            || self.panes().into_iter().find(|(id, _)| *id != self.pane),
+            || {
+                format!(
+                    "no teammate pane appeared; the lead shows:\n{}\n{}",
+                    self.screen(&self.pane),
+                    log_tail(&self.logs)
+                )
+            },
+        )
     }
 
     /// Whether the server's **global** environment — what every pane it makes
@@ -584,12 +627,11 @@ impl Tmux {
     ///
     /// One spelling for every drill that starts a lead this way, and the
     /// reason it is one rather than five: the launch has two clauses a drill
-    /// cannot be trusted to remember. The binary is the **second** word (`env`
-    /// first), because a one-word command goes through the login shell, which
-    /// sources rc files and hands the pane whatever they export; and
-    /// `--socket-dir` names [`sockets`], because a lead that is handed no such
-    /// directory binds in the developer's own (bead `niqq`). All five sites
-    /// this replaced remembered the first clause and none of them the second,
+    /// cannot be trusted to remember. The binary is the **second** word,
+    /// [`ENV`] first, for the reason that constant states; and `--socket-dir`
+    /// names [`sockets`], because a lead that is handed no such directory
+    /// binds in the developer's own (bead `niqq`). All five sites this
+    /// replaced remembered the first clause and none of them the second,
     /// which is the failure one shared spelling cannot have.
     ///
     /// Waiting for [`COMPOSER`] is part of the launch rather than the drill's
@@ -600,7 +642,7 @@ impl Tmux {
         let pane = self.split(
             homes.project(),
             env,
-            &["/usr/bin/env", env!("CARGO_BIN_EXE_ganja"), "--socket-dir", &sockets],
+            &[ENV, env!("CARGO_BIN_EXE_ganja"), "--socket-dir", &sockets],
         );
         // Remembered for [`Tmux::wait_for`]'s failure message, before the
         // first wait that could use it. A second lead would keep the first,
@@ -665,9 +707,10 @@ impl Tmux {
         self.server.run(&["send-keys", "-t", pane, name]);
     }
 
-    /// Polls `read` every 50ms until it answers, or panics with `what`, the
-    /// screens that can explain it and the tail of the log the lead — and any
-    /// member sharing its data home — traced, after this server's deadline.
+    /// Polls `read` every [`POLL`] until it answers, or panics with `what`,
+    /// the screens that can explain it and the tail of the log the lead — and
+    /// any member sharing its data home — traced, after this server's
+    /// deadline.
     ///
     /// `pane` is the pane the wait is **about**: the one a reader would look
     /// at first, which for a wait on a member's own turn is the member's and
@@ -686,21 +729,15 @@ impl Tmux {
     /// on CI (runs 33261878445 and 33368776921) and each time it showed a lead
     /// that looked idle with a line it never acted on; what the lead *traced*
     /// in that window is the half of the picture no screen can give.
-    pub fn wait_for<T>(&self, what: &str, pane: &str, mut read: impl FnMut() -> Option<T>) -> T {
-        let started = Instant::now();
-        loop {
-            if let Some(found) = read() {
-                return found;
-            }
-            assert!(
-                started.elapsed() < self.deadline,
+    pub fn wait_for<T>(&self, what: &str, pane: &str, read: impl FnMut() -> Option<T>) -> T {
+        waited(self.deadline, read, || {
+            format!(
                 "waited {:?} for {what} and it did not happen;{}\n{}",
                 self.deadline,
                 self.quoted(pane),
                 log_tail(&self.logs)
-            );
-            std::thread::sleep(Duration::from_millis(50));
-        }
+            )
+        })
     }
 
     /// `pane`'s screen, and the lead's beside it where this wait was about
@@ -757,14 +794,28 @@ pub fn argv_of(pid: u32) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
-/// Waits until `wanted` holds, and answers what it last saw.
-pub fn wait_for<T>(what: &str, mut look: impl FnMut() -> Option<T>) -> T {
+/// The one poll loop this module has: `look` every [`POLL`] until it answers,
+/// or `gave_up`'s own words once `within` is spent.
+///
+/// The message is built by the caller and only once the wait has actually
+/// given up, which is what lets each of the four waits over this keep the
+/// account it is worth failing with — a screen, the lead's beside it, the log
+/// both processes wrote — without any of them paying to assemble it on every
+/// poll. There is no wait here that says less than that: every drill over this
+/// module holds either a [`Lead`] or a [`Tmux`] by the time it waits on
+/// anything, so a failure that named only what it wanted would be withholding
+/// a log it had in hand.
+fn waited<T>(
+    within: Duration,
+    mut look: impl FnMut() -> Option<T>,
+    gave_up: impl Fn() -> String,
+) -> T {
     let started = Instant::now();
     loop {
         if let Some(found) = look() {
             return found;
         }
-        assert!(started.elapsed() < DEADLINE, "{what} never happened");
+        assert!(started.elapsed() < within, "{}", gave_up());
         std::thread::sleep(POLL);
     }
 }

@@ -42,14 +42,15 @@
 
 #![cfg(unix)]
 
+use std::path::PathBuf;
 use std::time::Duration;
 
-use ganja_core::team::task::{Store, TaskId, TaskStatus};
+use ganja_core::team::task::{Store, TASKS_DIR, TaskId, TaskStatus};
 use serde_json::json;
 
 mod pane_lead;
 
-use pane_lead::{COMPOSER, Homes, Tmux};
+use pane_lead::{Homes, Tmux};
 
 /// How long each stage is given: two debug `ganja` binaries starting cold in
 /// panes, each taking turns of its own.
@@ -82,102 +83,81 @@ const FILE_PROMPT: &str = "file the work";
 /// The lead's second, after the teammate has finished.
 const LIST_PROMPT: &str = "how did it go";
 
-/// The two homes, the two scripts, and this suite's reads of the team the
-/// lead keeps under its config home.
-struct Fixture {
-    homes: Homes,
-}
+/// The project, and the two scripts written into it — each at the path
+/// [`Homes::script`] answered with, so where a script landed is one fact
+/// rather than a join repeated at the call site.
+fn scripts() -> (Homes, PathBuf, PathBuf) {
+    let homes = Homes::new();
+    // The lead: file the task, then read the list back.
+    //
+    // A fake-provider script is played one entry per **request**, and a
+    // session makes requests this test does not ask for — a title, at a
+    // moment of its own choosing. So the listing is scripted **twice**, back
+    // to back, and the entries after it say nothing: whichever of the two the
+    // second prompt lands on, it lists, and whichever it does not becomes the
+    // step that ends the turn. Pinning one exact index would be pinning a
+    // race.
+    let lead = homes.script(
+        LEAD_SCRIPT,
+        json!([
+            {
+                "text": "Filing it.",
+                "tool_calls": [{"name": "task_create", "args": {
+                    "subject": SUBJECT,
+                    "description": "start from the spec",
+                }}],
+            },
+            {"text": "Filed."},
+            {
+                "text": "Reading the list.",
+                "tool_calls": [{"name": "task_list", "args": {}}],
+            },
+            {
+                "text": "Reading the list.",
+                "tool_calls": [{"name": "task_list", "args": {}}],
+            },
+            {"text": "The team finished it."},
+            {"text": "The team finished it."},
+            {"text": "The team finished it."},
+        ]),
+    );
+    // The member: claim the task and finish it in **one** turn, so that which
+    // of its own next two requests is the title and which is the step cannot
+    // matter.
+    let member = homes.script(
+        MEMBER_SCRIPT,
+        json!([
+            {
+                "text": "Taking it.",
+                "tool_calls": [
+                    {"name": "task_update", "args": {
+                        "task_id": "1",
+                        "owner": MEMBER,
+                        "status": "in_progress",
+                    }},
+                    {"name": "task_update", "args": {
+                        "task_id": "1",
+                        "status": "completed",
+                        "add_comment": NOTE,
+                    }},
+                ],
+            },
+            {"text": REPLY},
+            {"text": REPLY},
+        ]),
+    );
 
-impl Fixture {
-    fn new() -> Self {
-        let homes = Homes::new();
-        // The lead: file the task, then read the list back.
-        //
-        // A fake-provider script is played one entry per **request**, and a
-        // session makes requests this test does not ask for — a title, at a
-        // moment of its own choosing. So the listing is scripted **twice**,
-        // back to back, and the entries after it say nothing: whichever of
-        // the two the second prompt lands on, it lists, and whichever it does
-        // not becomes the step that ends the turn. Pinning one exact index
-        // would be pinning a race.
-        homes.script(
-            LEAD_SCRIPT,
-            json!([
-                {
-                    "text": "Filing it.",
-                    "tool_calls": [{"name": "task_create", "args": {
-                        "subject": SUBJECT,
-                        "description": "start from the spec",
-                    }}],
-                },
-                {"text": "Filed."},
-                {
-                    "text": "Reading the list.",
-                    "tool_calls": [{"name": "task_list", "args": {}}],
-                },
-                {
-                    "text": "Reading the list.",
-                    "tool_calls": [{"name": "task_list", "args": {}}],
-                },
-                {"text": "The team finished it."},
-                {"text": "The team finished it."},
-                {"text": "The team finished it."},
-            ]),
-        );
-        // The member: claim the task and finish it in **one** turn, so that
-        // which of its own next two requests is the title and which is the
-        // step cannot matter.
-        homes.script(
-            MEMBER_SCRIPT,
-            json!([
-                {
-                    "text": "Taking it.",
-                    "tool_calls": [
-                        {"name": "task_update", "args": {
-                            "task_id": "1",
-                            "owner": MEMBER,
-                            "status": "in_progress",
-                        }},
-                        {"name": "task_update", "args": {
-                            "task_id": "1",
-                            "status": "completed",
-                            "add_comment": NOTE,
-                        }},
-                    ],
-                },
-                {"text": REPLY},
-                {"text": REPLY},
-            ]),
-        );
-
-        Self { homes }
-    }
-
-    /// The environment the **server** is born from, and so what every pane
-    /// inherits: the member's script among it, since the member's pane is one
-    /// the lead makes rather than one this test does.
-    fn server_env(&self) -> Vec<(&'static str, String)> {
-        pane_lead::server_env(&self.homes, Some(&self.homes.project().join(MEMBER_SCRIPT)))
-    }
-
-    /// What the lead's own pane is additionally given (`-e`): where its things
-    /// are, and its own script in place of the server's.
-    fn lead_env(&self) -> Vec<(&'static str, String)> {
-        pane_lead::lead_env(&self.homes, Some(&self.homes.project().join(LEAD_SCRIPT)))
-    }
-
-    /// The shared task list, read the way any other process on this machine
-    /// would read it — which is the whole point: nothing here goes through
-    /// either running binary to see what it did.
-    fn tasks(&self) -> Option<Store> {
-        Some(Store::new(pane_lead::team_dir(&self.homes)?.join("tasks")))
-    }
+    (homes, lead, member)
 }
 
 /// The task, as the documents hold it right now — or nothing, where the list
 /// does not exist yet or has not got that far.
-fn task(fixture: &Fixture, id: &TaskId) -> Option<ganja_core::team::task::Task> {
-    fixture.tasks()?.get(id).ok()
+///
+/// The shared list is read the way any other process on this machine would
+/// read it, which is the whole point: nothing here goes through either running
+/// binary to see what it did.
+fn task(homes: &Homes, id: &TaskId) -> Option<ganja_core::team::task::Task> {
+    Store::new(pane_lead::team_dir(homes)?.join(TASKS_DIR)).get(id).ok()
 }
 
 /// **W3's acceptance drill.** A lead and a `ganja` pane teammate drive one
@@ -185,13 +165,17 @@ fn task(fixture: &Fixture, id: &TaskId) -> Option<ganja_core::team::task::Task> 
 /// another, read back by the first.
 #[test]
 fn a_lead_and_a_pane_teammate_drive_one_task_list_end_to_end() {
-    let fixture = Fixture::new();
-    let tmux = Tmux::start(&fixture.homes, &fixture.server_env(), DEADLINE);
+    let (homes, lead_script, member_script) = scripts();
+    // The **member's** script on the server, since the member's pane is one
+    // the lead makes rather than one this test does, and the **lead's** on the
+    // lead's own pane in place of it: the two conversations cannot then play
+    // each other's turns.
+    let tmux = Tmux::start(&homes, &pane_lead::server_env(&homes, Some(&member_script)), DEADLINE);
     let one = TaskId::parse("1").expect("the first id a counter issues");
 
     // The lead, in a pane of its own in the project directory — so tmux gives
     // it `TMUX` and `TMUX_PANE` itself.
-    let lead = tmux.lead(&fixture.homes, &fixture.lead_env());
+    let lead = tmux.lead(&homes, &pane_lead::lead_env(&homes, Some(&lead_script)));
 
     // Before anything else: this lead's socket is in the fixture's own
     // directory, not in the developer's `/tmp/ganja-<uid>/`. A lead binds
@@ -202,7 +186,7 @@ fn a_lead_and_a_pane_teammate_drive_one_task_list_end_to_end() {
     // the flag can actually be observed to have worked rather than where it
     // is spelled: an ignored `--socket-dir` reads as an empty directory here.
     let bound = tmux.wait_for("the lead to bind its socket", &lead, || {
-        let found = pane_lead::bound_sockets(&fixture.homes);
+        let found = pane_lead::bound_sockets(&homes);
         (!found.is_empty()).then_some(found)
     });
     assert_eq!(bound.len(), 1, "one session is one socket: {bound:?}");
@@ -214,7 +198,7 @@ fn a_lead_and_a_pane_teammate_drive_one_task_list_end_to_end() {
     // 1. The lead's own turn files the work — before there is anybody to do
     // it, which is the order the pipeline actually runs in.
     tmux.type_line(&lead, FILE_PROMPT);
-    let filed = tmux.wait_for("the lead to file the task", &lead, || task(&fixture, &one));
+    let filed = tmux.wait_for("the lead to file the task", &lead, || task(&homes, &one));
     assert_eq!(filed.subject, SUBJECT);
     assert_eq!(filed.status, TaskStatus::Pending, "a filed task is pending");
     assert!(filed.owner.is_empty(), "and belongs to nobody: {filed:?}");
@@ -234,7 +218,7 @@ fn a_lead_and_a_pane_teammate_drive_one_task_list_end_to_end() {
     });
     tmux.type_line(&lead, &format!("/teammate spawn {MEMBER} --backend ganja"));
     let member = tmux.wait_for("the member record", &lead, || {
-        pane_lead::team_file(&fixture.homes)?
+        pane_lead::team_file(&homes)?
             .member(MEMBER)
             .cloned()
             .filter(|member| member.tmux_pane_id.starts_with('%'))
@@ -253,7 +237,7 @@ fn a_lead_and_a_pane_teammate_drive_one_task_list_end_to_end() {
     // claimed under, which is the name its launch line carried and not
     // anything its arguments could have chosen.
     let done = tmux.wait_for("the teammate to finish the task", &pane, || {
-        task(&fixture, &one).filter(|task| task.status == TaskStatus::Completed)
+        task(&homes, &one).filter(|task| task.status == TaskStatus::Completed)
     });
     assert_eq!(done.owner, MEMBER, "the claim wrote the teammate's own name: {done:?}");
     assert_eq!(
@@ -268,17 +252,11 @@ fn a_lead_and_a_pane_teammate_drive_one_task_list_end_to_end() {
 
     // 4. And the lead reads it back through its own `task_list`: the status
     // and the owner another process wrote, on the lead's screen.
-    // The status bar's own word rather than the composer's placeholder (bead
-    // `d61w`): the placeholder is drawn whenever the buffer is empty, a
-    // streaming reply included, so it is no sign that the filing turn ended —
-    // and this line is a **prompt**, which typed into a running turn is a
-    // steer instead. What makes `ready` mean "ended" here is the wait at step
-    // 1 having already proved that turn ran a tool; the bar reads `ready`
-    // before a turn starts too. The `/teammate shutdown` lines below keep the
-    // placeholder: a UI command runs from `submit` ahead of the steer branch,
-    // so it is the same command whichever it lands in. The spawn line above
-    // waits on `idle` for a different reason — the team it creates is what
-    // would make the filing turn continue (bead `f4di`).
+    // The status bar's own word again rather than the composer's placeholder,
+    // for step 2's reason and one of its own: this line is a **prompt**, which
+    // typed into a running turn is a steer instead. The `/teammate shutdown`
+    // line below waits on neither sign — a UI command runs from `submit` ahead
+    // of the steer branch, so it is the same command whichever it lands in.
     tmux.wait_for("the filing turn to have ended", &lead, || {
         pane_lead::idle(&tmux.screen(&lead)).then_some(())
     });
@@ -297,15 +275,9 @@ fn a_lead_and_a_pane_teammate_drive_one_task_list_end_to_end() {
 
     // Both leave cleanly, with nothing left running: the lead asks, the
     // member approves and its pane goes, and then the lead's own does.
-    tmux.wait_for("the composer to come back", &lead, || {
-        tmux.screen(&lead).contains(COMPOSER).then_some(())
-    });
     tmux.type_line(&lead, &format!("/teammate shutdown {MEMBER}"));
     tmux.wait_for("the pane to be killed on the approval", &lead, || {
         (!tmux.panes().contains(&pane)).then_some(())
-    });
-    tmux.wait_for("the composer to come back", &lead, || {
-        tmux.screen(&lead).contains(COMPOSER).then_some(())
     });
     tmux.key(&lead, "C-c");
     tmux.wait_for("the lead to leave", &lead, || (!tmux.panes().contains(&lead)).then_some(()));

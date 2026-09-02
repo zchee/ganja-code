@@ -31,43 +31,22 @@ struct Served {
 impl Served {
     /// Spawns the server in `project` and waits for it to announce itself.
     ///
-    /// All three homes are pinned, not merely `XDG_DATA_HOME`: ganja's global
-    /// config home is resolved against `GANJA_CONFIG_HOME`, `XDG_CONFIG_HOME`
-    /// and `HOME` in that order, and a developer holding any of them would
-    /// otherwise hand this server a config — and a skills tier — that no
-    /// assertion here accounts for.
+    /// `HOME` is the config directory here — `served_child::spawn`'s own doc
+    /// says why the two callers may disagree about which of their own two it
+    /// is — and everything the server must not inherit, the provider and the
+    /// password among it, is `served_child::UNINHERITED`'s one list: the
+    /// unsecured warning read below is only worth reading if nothing on this
+    /// machine could have secured it.
     fn in_project(project: &Path) -> Self {
         let data = temporary();
         let config = temporary();
 
-        // Wrapped the moment it exists: every panic below this line — the
-        // announcement's deadline, a line that is not an address, a port that
-        // is not a number — unwinds through the kill that `Child` itself
-        // would not do.
-        let mut child = Reaped::new(
-            Command::new(env!("CARGO_BIN_EXE_ganja"))
-                .args(["serve", "--port", "0"])
-                .current_dir(project)
-                .env("XDG_DATA_HOME", data.path())
-                .env("XDG_CONFIG_HOME", config.path())
-                .env("HOME", config.path())
-                .env_remove("GANJA_CONFIG_HOME")
-                // Unset, so the fake provider answers and no password is
-                // configured — the unsecured warning below is the point.
-                .env_remove("GANJA_PROVIDER")
-                .env_remove("GANJA_MODEL")
-                .env_remove("GANJA_CONFIG")
-                .env_remove("GANJA_SERVER_PASSWORD")
-                .env_remove("GANJA_SERVER_USERNAME")
-                .env_remove("ANTHROPIC_API_KEY")
-                .env_remove("OPENAI_API_KEY")
-                .env_remove("OPENROUTER_API_KEY")
-                .env("GANJA_FAKE_SCRIPT", project.join("script.json"))
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .expect("the binary starts"),
+        let mut child = served_child::spawn(
+            project,
+            data.path(),
+            config.path(),
+            config.path(),
+            &project.join("script.json"),
         );
 
         let line = child.announcement("the server's address line");
@@ -97,25 +76,19 @@ impl Served {
         let data = temporary();
         let config = temporary();
 
-        let output = Command::new(env!("CARGO_BIN_EXE_ganja"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ganja"));
+        command
             .args(["run", "--attach", &format!("http://127.0.0.1:{}", self.port)])
             .args(arguments)
             .current_dir(elsewhere.path())
             .env("XDG_DATA_HOME", data.path())
             .env("XDG_CONFIG_HOME", config.path())
             .env("HOME", config.path())
-            .env_remove("GANJA_CONFIG_HOME")
-            .env_remove("GANJA_PROVIDER")
-            .env_remove("GANJA_MODEL")
-            .env_remove("GANJA_CONFIG")
-            .env_remove("GANJA_SERVER_PASSWORD")
-            .env_remove("GANJA_SERVER_USERNAME")
-            .env_remove("ANTHROPIC_API_KEY")
-            .env_remove("OPENAI_API_KEY")
-            .env_remove("OPENROUTER_API_KEY")
-            .stdin(Stdio::null())
-            .output()
-            .expect("the attached run finishes");
+            .stdin(Stdio::null());
+        for name in served_child::UNINHERITED {
+            command.env_remove(name);
+        }
+        let output = command.output().expect("the attached run finishes");
         // Both sides of the socket, because either can be the one that broke:
         // the client's own diagnostics, and what the server had said by then.
         assert!(

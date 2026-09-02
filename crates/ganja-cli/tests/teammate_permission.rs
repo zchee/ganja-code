@@ -25,7 +25,7 @@ mod pane_lead;
 use std::fs;
 use std::time::Instant;
 
-use pane_lead::{DEADLINE, DIALOG_OPTIONS, Homes, Lead, TEAMMATE, wait_for};
+use pane_lead::{DEADLINE, DIALOG_OPTIONS, Homes, Lead, TEAMMATE};
 use serde_json::json;
 
 /// What the pane's shell call writes, appearing nowhere else.
@@ -60,7 +60,10 @@ fn a_panes_ask_reaches_the_leads_dialog_and_the_leads_answer_lets_the_call_run()
     // different roads — an argv word for `Tmux::lead`, a shell-quoted word in
     // the window command here — and a road that lost it reads as an empty
     // directory rather than as a failure anywhere else.
-    let bound = wait_for("the lead to bind its socket", || {
+    // Through the lead rather than the free wait, so a lead that bound
+    // nowhere fails with what it traced on the way there instead of with six
+    // words: nothing on either screen says why a socket is missing.
+    let bound = lead.wait_for("the lead to bind its socket", || {
         let found = pane_lead::bound_sockets(&homes);
         (!found.is_empty()).then_some(found)
     });

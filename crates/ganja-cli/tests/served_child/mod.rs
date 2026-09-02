@@ -34,13 +34,69 @@
 #![allow(dead_code)]
 
 use std::io::{BufRead as _, BufReader};
-use std::process::{Child, ExitStatus};
+use std::path::Path;
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, mpsc};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// How long any single wait may take before the fixture is declared broken.
 pub const DEADLINE: Duration = Duration::from_secs(60);
+
+/// What no `ganja` this suite starts may inherit from the machine running it.
+///
+/// One list, because two copies of it are two different experiments wearing
+/// one name: a credential left on would make a wire reachable, a provider or a
+/// model would decide what answered, a config home would hand the process a
+/// tier no assertion accounts for, and a server password would secure a server
+/// whose unsecured warning is the thing being read. It is a `const` rather
+/// than nine lines at each spawn so that a name added here reaches every one
+/// of them — the servers `attach.rs` and `serve.rs` start, and the clients
+/// they run against those servers.
+pub const UNINHERITED: &[&str] = &[
+    "GANJA_CONFIG_HOME",
+    "GANJA_PROVIDER",
+    "GANJA_MODEL",
+    "GANJA_CONFIG",
+    "GANJA_SERVER_PASSWORD",
+    "GANJA_SERVER_USERNAME",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "OPENROUTER_API_KEY",
+];
+
+/// Spawns `ganja serve --port 0` in `project`, playing `script`, with all
+/// three homes pinned and [`UNINHERITED`] taken out — and hands it straight to
+/// [`Reaped`], which is what the caller must not get wrong.
+///
+/// `home` is separate from `data` and `config` because the two callers
+/// disagree about it and both are right: ganja's global config home resolves
+/// against `GANJA_CONFIG_HOME`, `XDG_CONFIG_HOME` and `HOME` in that order, so
+/// whichever of the two directories `HOME` names, it has to be one this
+/// fixture owns rather than the developer's.
+///
+/// Wrapped before it is returned: every panic in a caller's own startup
+/// checks — an announcement's deadline, a line that is not an address, a port
+/// that is not a number — then unwinds through the kill that `Child` itself
+/// would not do (bead `pjc`).
+pub fn spawn(project: &Path, data: &Path, config: &Path, home: &Path, script: &Path) -> Reaped {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_ganja"));
+    command
+        .args(["serve", "--port", "0"])
+        .current_dir(project)
+        .env("XDG_DATA_HOME", data)
+        .env("XDG_CONFIG_HOME", config)
+        .env("HOME", home)
+        .env("GANJA_FAKE_SCRIPT", script)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for name in UNINHERITED {
+        command.env_remove(name);
+    }
+
+    Reaped::new(command.spawn().expect("the binary starts"))
+}
 
 /// How often a wait for the child's exit looks again.
 const POLL: Duration = Duration::from_millis(50);
