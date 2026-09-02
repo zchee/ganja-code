@@ -80,7 +80,7 @@ use tempfile::TempDir;
 
 mod pane_lead;
 
-use pane_lead::{COMPOSER, Homes, Tmux};
+use pane_lead::{COMPOSER, Homes, SPAWN_NOTICE, Tmux};
 
 /// How long each stage is given: a debug `ganja` starting cold in a pane,
 /// then a second one starting cold in another, then both leaving.
@@ -95,19 +95,6 @@ const SCRIPT: &str = "script.json";
 
 /// The teammate's name, as the spec's own line spells it.
 const MEMBER: &str = "w1";
-
-/// The head of what the lead says right after a spawn — `<name> started`,
-/// with `\u{b7} prompt persisted in cleartext at <path>` following it.
-///
-/// Only the head, and that is a finding rather than a shortcut: since the
-/// teammates' column took 70% of the width, a lead at the remaining 30% has
-/// no room on one status line for the path, and this suite watches a **real**
-/// terminal. That the sentence itself is whole is pinned where a width can be
-/// chosen — `ganja-tui`'s own
-/// `a_team_spawn_is_reaped_by_the_tick_and_says_where_the_prompt_landed`.
-/// What is asserted here is the half only a real lead can show: that it says
-/// anything at all.
-const SPAWN_NOTICE: &str = "started";
 
 /// The shared project/data pair, plus this suite's own read of the inbox the
 /// lead keeps under its config home.

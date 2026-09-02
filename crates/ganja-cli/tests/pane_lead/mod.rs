@@ -55,7 +55,66 @@ use ganja_testkit::tmux::{PrivateServer, require_tmux};
 /// on, and a key sent to the pane is a key the app reads; later in a drill it
 /// is the sign that the next line typed reaches the composer rather than an
 /// overlay that owns the keyboard.
+///
+/// It is **not** the sign that no turn is running: the placeholder is drawn
+/// whenever the buffer is empty, a streaming reply included, so a drill that
+/// reads it as "idle" types its next line into a turn that has not ended —
+/// which the engine takes as a steer, not a prompt. [`idle`] is that sign.
 pub const COMPOSER: &str = "Ask ganja something";
+
+/// The status bar's word for a lead with no turn running — pinned to
+/// `ganja_tui::component::status::Activity::Ready`'s label, which the frontend
+/// sets in the same event handler that clears its own turn flag. A bar that
+/// reads it is a lead whose next typed line starts a turn rather than steering
+/// one.
+pub const READY: &str = "ready";
+
+/// What the status bar joins its segments with — pinned to
+/// `ganja_tui::component::status`.
+const SEPARATOR: &str = " \u{b7} ";
+
+/// The head of what the lead says right after a spawn — `<name> started`,
+/// with `\u{b7} prompt persisted in cleartext at <path>` following it
+/// (`ganja_tui::component::team::Spawned::notice`). The notice names the
+/// teammate, so waiting on `<name> started` cannot read an earlier teammate's
+/// line as this one's.
+///
+/// Only the head, and that is a finding rather than a shortcut: a pane
+/// teammate's column takes 65% of the width by default
+/// (`ganja_teammate_local::pane::DEFAULT_SHARE`), and a lead at the remaining
+/// 35% has no room on one status line for the path — these drills watch a
+/// **real** terminal. That the sentence itself is whole is pinned where a
+/// width can be chosen — `ganja-tui`'s own
+/// `a_team_spawn_is_reaped_by_the_tick_and_says_where_the_prompt_landed`.
+/// What is asserted here is the half only a real lead can show: that it says
+/// anything at all. An in-process teammate opens no column, and the head is
+/// still all a drill needs of the line.
+pub const SPAWN_NOTICE: &str = "started";
+
+/// Whether `screen` shows a lead with no turn running: its status bar — the
+/// bottom row, and the last row that says anything while no Ctrl+T inspector
+/// is open to hide it — carries [`READY`] as a segment of its own.
+///
+/// A segment rather than a substring, because the bar's tail is the notice
+/// lane and a notice is free prose: a finished spawn names a cleartext path
+/// there, and a path is the kind of text that can hold a five-letter word by
+/// accident. The activity segment reads the bare label only before any turn
+/// or after one that completed — `<spinner> streaming`, `tool: <name>` and
+/// `waiting on permission` while one runs, `stopped` or `failed` after one
+/// that did not complete — so nothing but an idle lead answers `true`, and a
+/// drill whose turn was cancelled or failed times out here, with the screen
+/// and the log printed, rather than failing at a count.
+///
+/// The default bar only: a configured `tui.statusline` roster joins its
+/// elements with ` | ` and draws only the ones it names, so a drill that sets
+/// one needs a sign of its own.
+pub fn idle(screen: &str) -> bool {
+    screen
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .is_some_and(|bar| bar.split(SEPARATOR).any(|segment| segment.trim() == READY))
+}
 
 /// The permission dialog's options line — pinned to
 /// `ganja_tui::component::permission`, as `pty_smoke.rs` pins it.
