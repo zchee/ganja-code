@@ -195,14 +195,7 @@ fn a_configured_pane_shell_still_execs_the_launch_line() {
         .expect("the config is writable");
     let tmux = Tmux::start(&fixture.homes, &fixture.server_env(), DEADLINE);
 
-    let lead = tmux.split(
-        fixture.homes.project(),
-        &fixture.lead_env(),
-        &["/usr/bin/env", env!("CARGO_BIN_EXE_ganja")],
-    );
-    tmux.wait_for("the lead to draw its composer", &lead, || {
-        tmux.screen(&lead).contains(COMPOSER).then_some(())
-    });
+    let lead = tmux.lead(&fixture.homes, &fixture.lead_env());
 
     tmux.type_line(&lead, &format!("/teammate spawn {MEMBER} --backend ganja"));
     let member = tmux.wait_for("the member record", &lead, || {
@@ -226,17 +219,9 @@ fn a_pane_teammate_spawned_with_backend_ganja_is_created_and_killed_on_shutdown_
     let fixture = Fixture::new();
     let tmux = Tmux::start(&fixture.homes, &fixture.server_env(), DEADLINE);
 
-    // The lead, in a pane of its own in the project directory — so tmux
-    // gives it `TMUX` and `TMUX_PANE` itself. Two words on purpose (`env` and
-    // the binary): a one-word command would go through the login shell.
-    let lead = tmux.split(
-        fixture.homes.project(),
-        &fixture.lead_env(),
-        &["/usr/bin/env", env!("CARGO_BIN_EXE_ganja")],
-    );
-    tmux.wait_for("the lead to draw its composer", &lead, || {
-        tmux.screen(&lead).contains(COMPOSER).then_some(())
-    });
+    // The lead, in a pane of its own in the project directory — so tmux gives
+    // it `TMUX` and `TMUX_PANE` itself.
+    let lead = tmux.lead(&fixture.homes, &fixture.lead_env());
 
     // 1. The spec's own line, typed. The bar says where the prompt went — no
     // dialog is raised for a line that already said what it wanted — and the
@@ -435,14 +420,7 @@ fn spawn_pane(tmux: &Tmux, lead: &str, fixture: &Fixture, name: &str) -> String 
 fn teammates_stack_in_one_column_beside_the_lead() {
     let fixture = Fixture::new();
     let tmux = Tmux::start(&fixture.homes, &fixture.server_env(), DEADLINE);
-    let lead = tmux.split(
-        fixture.homes.project(),
-        &fixture.lead_env(),
-        &["/usr/bin/env", env!("CARGO_BIN_EXE_ganja")],
-    );
-    tmux.wait_for("the lead to draw its composer", &lead, || {
-        tmux.screen(&lead).contains(COMPOSER).then_some(())
-    });
+    let lead = tmux.lead(&fixture.homes, &fixture.lead_env());
 
     let first = spawn_pane(&tmux, &lead, &fixture, "w1");
     let second = spawn_pane(&tmux, &lead, &fixture, "w2");

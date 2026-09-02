@@ -190,16 +190,26 @@ fn a_lead_and_a_pane_teammate_drive_one_task_list_end_to_end() {
     let one = TaskId::parse("1").expect("the first id a counter issues");
 
     // The lead, in a pane of its own in the project directory — so tmux gives
-    // it `TMUX` and `TMUX_PANE` itself. Two words on purpose (`env` and the
-    // binary): a one-word command would go through the login shell.
-    let lead = tmux.split(
-        fixture.homes.project(),
-        &fixture.lead_env(),
-        &["/usr/bin/env", env!("CARGO_BIN_EXE_ganja")],
-    );
-    tmux.wait_for("the lead to draw its composer", &lead, || {
-        tmux.screen(&lead).contains(COMPOSER).then_some(())
+    // it `TMUX` and `TMUX_PANE` itself.
+    let lead = tmux.lead(&fixture.homes, &fixture.lead_env());
+
+    // Before anything else: this lead's socket is in the fixture's own
+    // directory, not in the developer's `/tmp/ganja-<uid>/`. A lead binds
+    // whether or not it leads anybody (**D542**), so a drill that let it use
+    // the default would add a `.sock`, a `.json` record and a `.lock` to the
+    // socket directory this machine's own sessions are listed from — the
+    // `.lock` for good, since a lock file is never removed. Asserted where
+    // the flag can actually be observed to have worked rather than where it
+    // is spelled: an ignored `--socket-dir` reads as an empty directory here.
+    let bound = tmux.wait_for("the lead to bind its socket", &lead, || {
+        let found = pane_lead::bound_sockets(&fixture.homes);
+        (!found.is_empty()).then_some(found)
     });
+    assert_eq!(bound.len(), 1, "one session is one socket: {bound:?}");
+    assert!(
+        bound[0].with_extension("json").exists(),
+        "and its registration record is beside it: {bound:?}"
+    );
 
     // 1. The lead's own turn files the work — before there is anybody to do
     // it, which is the order the pipeline actually runs in.
@@ -211,8 +221,16 @@ fn a_lead_and_a_pane_teammate_drive_one_task_list_end_to_end() {
 
     // 2. A second `ganja`, in a pane of its own: another process, another
     // engine, the same team directory.
-    tmux.wait_for("the composer to take the next line", &lead, || {
-        tmux.screen(&lead).contains(COMPOSER).then_some(())
+    // Typed into an **idle** lead, the way `team_continuation_pane.rs` types
+    // its own spawn line (bead `d61w`): the composer's placeholder is drawn
+    // whenever the buffer is empty, a streaming reply included, so it is no
+    // sign the filing turn ended — and a spawn landing before that turn's
+    // tail leaves the guard a team to read, which continues the turn and
+    // spends script entries this drill's step 4 still needs (bead `f4di`).
+    // The wait at step 1 is what makes `ready` mean "ended" here: the bar
+    // reads it before a turn starts too.
+    tmux.wait_for("the filing turn to have ended", &lead, || {
+        pane_lead::idle(&tmux.screen(&lead)).then_some(())
     });
     tmux.type_line(&lead, &format!("/teammate spawn {MEMBER} --backend ganja"));
     let member = tmux.wait_for("the member record", &lead, || {
@@ -252,9 +270,11 @@ fn a_lead_and_a_pane_teammate_drive_one_task_list_end_to_end() {
     // and this line is a **prompt**, which typed into a running turn is a
     // steer instead. What makes `ready` mean "ended" here is the wait at step
     // 1 having already proved that turn ran a tool; the bar reads `ready`
-    // before a turn starts too. The `/teammate` lines around it keep the
+    // before a turn starts too. The `/teammate shutdown` lines below keep the
     // placeholder: a UI command runs from `submit` ahead of the steer branch,
-    // so it is the same command whichever it lands in.
+    // so it is the same command whichever it lands in. The spawn line above
+    // waits on `idle` for a different reason — the team it creates is what
+    // would make the filing turn continue (bead `f4di`).
     tmux.wait_for("the filing turn to have ended", &lead, || {
         pane_lead::idle(&tmux.screen(&lead)).then_some(())
     });

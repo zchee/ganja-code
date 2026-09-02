@@ -63,7 +63,7 @@ use serde_json::json;
 
 mod pane_lead;
 
-use pane_lead::{COMPOSER, Homes, SPAWN_NOTICE, Tmux};
+use pane_lead::{Homes, SPAWN_NOTICE, Tmux};
 
 /// How long each stage is given: a debug `ganja` starting cold in a pane, then
 /// seven provider round trips against a scripted provider.
@@ -176,17 +176,9 @@ fn a_lead_auto_continues_for_its_team_and_the_breaker_halts_it_at_five() {
     let fixture = Fixture::new();
     let tmux = Tmux::start(&fixture.homes, &fixture.server_env(), DEADLINE);
 
-    // The lead, in a pane of its own in the project directory. Two words on
-    // purpose (`env` and the binary): a one-word command would go through the
-    // login shell.
-    let lead = tmux.split(
-        fixture.homes.project(),
-        &fixture.lead_env(),
-        &["/usr/bin/env", env!("CARGO_BIN_EXE_ganja")],
-    );
-    tmux.wait_for("the lead to draw its composer", &lead, || {
-        tmux.screen(&lead).contains(COMPOSER).then_some(())
-    });
+    // The lead, in a pane of its own in the project directory — so tmux gives
+    // it `TMUX` and `TMUX_PANE` itself.
+    let lead = tmux.lead(&fixture.homes, &fixture.lead_env());
 
     // 1. The work is filed before there is anybody to do it, which is the
     // order the pipeline actually runs in — and that turn **ends**: open work

@@ -251,6 +251,47 @@ pub fn log_tail(dir: &Path) -> String {
     )
 }
 
+/// Where a lead started here binds its **own** session socket (**D505**):
+/// under this fixture's data home, never in this user's real
+/// `/tmp/ganja-<uid>/`.
+///
+/// Every lead in these drills is an ordinary interactive session, and since
+/// **D542** such a session binds whether or not it leads anybody. Without the
+/// hidden `--socket-dir` door each run would therefore leave a `<8hex>.sock`,
+/// its `.json` registration record and a `.lock` in the developer's own
+/// socket directory — listed by their `ganja sessions --live` and offered by
+/// their composer's `@` menu while the drill runs, and the `.lock` staying
+/// there afterwards, since a lock file is never removed by design
+/// (`ganja-serve`'s `socket.rs`). `ganja-tui`'s `binder.rs` states the
+/// opposite as the contract; this is the flag that makes it true, and it is
+/// on **every** lead here rather than on the drills that happen to ask about
+/// sockets, because binding is what a session does, not what a test opts into.
+///
+/// The binder makes the directory itself, at `0700`
+/// (`ganja_tool::socket::prepare_directory`), so nothing here creates it.
+pub fn sockets(homes: &Homes) -> PathBuf {
+    homes.data().join("sockets")
+}
+
+/// What a lead left in [`sockets`] — every `<stem>.sock` there, sorted.
+///
+/// The proof that the flag reached the binary rather than being merely
+/// spelled: a lead that ignored it binds in the real directory and this
+/// answers empty.
+pub fn bound_sockets(homes: &Homes) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(sockets(homes)) else {
+        return Vec::new();
+    };
+    let mut found: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "sock"))
+        .collect();
+    found.sort();
+
+    found
+}
+
 /// The team directory the lead made — the only one under the config home
 /// `homes` names, itself named `session-<8hex>` after a session id no drill
 /// here ever sees. The config home is the variable D502 exists to carry, so
@@ -314,6 +355,12 @@ impl Lead {
         }
         window.push(' ');
         window.push_str(&shell_quote(env!("CARGO_BIN_EXE_ganja")));
+        // Where this lead binds its own session socket, for [`sockets`]'
+        // reason. On the window command rather than in either environment
+        // table: it is this process's argument, and a pane the lead later
+        // spawns is a member, which binds nothing whatever it is told.
+        window.push_str(" --socket-dir ");
+        window.push_str(&shell_quote(&sockets(homes).display().to_string()));
 
         let script = pane_script.display().to_string();
         let data = homes.data().display().to_string();
@@ -332,10 +379,11 @@ impl Lead {
         let server = PrivateServer::start_in(
             homes.project(),
             // Wide enough that the lead is still comfortable **after** a
-            // teammate takes its column: since 2026-08-20 a spawn leaves the
-            // lead 30% of the window, and at 160 that is 48 columns — where
-            // the permission dialog's own option line wraps and a screen
-            // assertion reads half of it. 240 leaves the lead 72.
+            // teammate takes its column: a spawn gives the teammates 65% of
+            // the window (`ganja_teammate_local::pane::DEFAULT_SHARE`), so
+            // the lead keeps 35% — at 160 that is 56 columns, too tight to be
+            // sure of the permission dialog's own option line. 240 leaves the
+            // lead about 84, a column going to the divider.
             (240, 48),
             &[&window],
             &removed,
@@ -467,9 +515,42 @@ impl Tmux {
 
     /// Splits `argv` into a pane of its own under `cwd`, with `env` on that
     /// process alone, and answers the pane's id. `argv` is at least two words,
-    /// for the reason `pane.rs` gives.
-    pub fn split(&self, cwd: &Path, env: &[(&'static str, String)], argv: &[&str]) -> String {
+    /// for the reason `pane.rs` gives. Never a lead: [`Tmux::lead`] is the one
+    /// spelling of that launch, and this stays private so the flag it carries
+    /// cannot be forgotten by reaching for the primitive instead.
+    fn split(&self, cwd: &Path, env: &[(&'static str, String)], argv: &[&str]) -> String {
         self.server.split(Some(cwd), &borrowed(env), argv)
+    }
+
+    /// Splits a real lead into a pane of its own in `homes`' project
+    /// directory, with `env` on that process alone, waits for its first frame
+    /// and answers its pane id.
+    ///
+    /// One spelling for every drill that starts a lead this way, and the
+    /// reason it is one rather than five: the launch has two clauses a drill
+    /// cannot be trusted to remember. The binary is the **second** word (`env`
+    /// first), because a one-word command goes through the login shell, which
+    /// sources rc files and hands the pane whatever they export; and
+    /// `--socket-dir` names [`sockets`], because a lead that is handed no such
+    /// directory binds in the developer's own (bead `niqq`). All five sites
+    /// this replaced remembered the first clause and none of them the second,
+    /// which is the failure one shared spelling cannot have.
+    ///
+    /// Waiting for [`COMPOSER`] is part of the launch rather than the drill's
+    /// first step: until that frame is drawn the pane is not in raw mode, so
+    /// a key sent to it is a key nothing reads.
+    pub fn lead(&self, homes: &Homes, env: &[(&'static str, String)]) -> String {
+        let sockets = sockets(homes).display().to_string();
+        let pane = self.split(
+            homes.project(),
+            env,
+            &["/usr/bin/env", env!("CARGO_BIN_EXE_ganja"), "--socket-dir", &sockets],
+        );
+        self.wait_for("the lead to draw its composer", &pane, || {
+            self.screen(&pane).contains(COMPOSER).then_some(())
+        });
+
+        pane
     }
 
     /// The live pane ids.

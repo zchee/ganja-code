@@ -25,7 +25,7 @@ mod pane_lead;
 use std::fs;
 use std::time::Instant;
 
-use pane_lead::{DEADLINE, DIALOG_OPTIONS, Homes, Lead, TEAMMATE};
+use pane_lead::{DEADLINE, DIALOG_OPTIONS, Homes, Lead, TEAMMATE, wait_for};
 use serde_json::json;
 
 /// What the pane's shell call writes, appearing nowhere else.
@@ -52,6 +52,19 @@ fn a_panes_ask_reaches_the_leads_dialog_and_the_leads_answer_lets_the_call_run()
         ]),
     );
     let lead = Lead::start(&homes, &script, &[], &[]);
+
+    // This lead's socket is in the fixture's own directory rather than in the
+    // developer's `/tmp/ganja-<uid>/`, where it would show in their
+    // `sessions --live` and leave a `.lock` behind for good. Pinned on both
+    // shapes of lead this fixture starts, because the flag reaches them by
+    // different roads — an argv word for `Tmux::lead`, a shell-quoted word in
+    // the window command here — and a road that lost it reads as an empty
+    // directory rather than as a failure anywhere else.
+    let bound = wait_for("the lead to bind its socket", || {
+        let found = pane_lead::bound_sockets(&homes);
+        (!found.is_empty()).then_some(found)
+    });
+    assert_eq!(bound.len(), 1, "one session is one socket: {bound:?}");
 
     // The person's door, exactly as AC-11 spells it, plus the task. Nothing
     // is asked at spawn: the pane works inside the project, so the spawn gate
