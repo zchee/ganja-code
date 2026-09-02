@@ -1151,9 +1151,13 @@ pub struct Engine {
     /// is after this engine was built. That last one's own doc says why it is the
     /// exception and why it is not public.
     postbox: std::sync::Mutex<Option<Arc<dyn crate::tool::team::Postbox>>>,
-    /// The shared task list this session's four task tools drive, acted on
-    /// under **this engine's own** identity — the lead's name on a lead, the
-    /// member's own on either kind of member, exactly as `postbox` above.
+    /// The shared task list this session's four task tools drive.
+    ///
+    /// A **comment** written through it carries **this engine's own** identity
+    /// — the lead's name on a lead, the member's own on either kind of member,
+    /// exactly as `postbox` above. A **claim** does not, and the asymmetry is
+    /// deliberate: `owner` stays a free argument because a lead pre-assigning
+    /// work has to name somebody else, where a comment's author never is.
     ///
     /// Three installers for the same three kinds of session, and the parallel
     /// is deliberate: [`Engine::with_teammates`] for the lead, whose registry

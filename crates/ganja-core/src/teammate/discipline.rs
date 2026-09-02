@@ -71,8 +71,7 @@ use ganja_tool::tasklist::{Status, Summary};
 /// person tunes when this annoys them is whether the team is running at all,
 /// and a knob here would be a way to make the annoying case worse rather than
 /// to fix it. Five is enough to carry a stalled reconciliation over a few
-/// members reporting in, and short enough that a model looping on a task it
-/// cannot finish hands the session back inside a minute.
+/// members reporting in.
 pub(crate) const MAX_CONTINUATIONS: usize = 5;
 
 /// What the model reads when a turn was about to end with the team's list
@@ -118,6 +117,10 @@ pub(crate) struct Facts {
     /// in front of something the person has not answered yet, and both land on
     /// one screen: a teammate's dialog is carried to whoever is sitting at the
     /// lead, which is exactly who the block would be talking over.
+    ///
+    /// Gathered **last**, after the list read this decision also waits on: a
+    /// teammate's turn runs beside the lead's, so a question raised during that
+    /// read is a question already on the screen by the time this is decided.
     pub(crate) dialog_open: bool,
     /// Whether the shared list holds a pending or in-progress task
     /// ([`holds_unfinished_work`]).

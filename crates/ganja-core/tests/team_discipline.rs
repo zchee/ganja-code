@@ -33,20 +33,20 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::StreamExt as _;
+use ganja_core::Engine;
 use ganja_core::permission::Permissions;
 use ganja_core::protocol::team::PeerPayload;
 use ganja_core::protocol::{Command, Event, Message, Part, PartBody, PermissionReply, Role};
 use ganja_core::provider::{ChatRequest, ProviderEvent};
 use ganja_core::teammate::TeammateRegistry;
 use ganja_core::tool::Registry;
-use ganja_core::{Engine, Storage};
 use ganja_protocol::FinishReason;
 use ganja_team::task::{NewTask, Store, TaskStatus, Update};
 use ganja_team::{TeamName, TeamsRoot};
-use ganja_testkit::{
-    LEAD_SESSION_ID, RecordedSpawns, TEAM, caller, says, spawn_with_prompt, transcript,
-};
+use ganja_testkit::{RecordedSpawns, caller, says, spawn_with_prompt, transcript};
 use serde_json::json;
+
+mod lead;
 
 /// How long a lead is given to settle. Generous against a loaded machine: the
 /// breaker case is six provider round trips and a teammate's runner polls a
@@ -244,6 +244,15 @@ struct Lead {
     /// event stream rather than read back through `resume`, so nothing this
     /// assertion does moves the engine it is asserting about.
     said: Arc<Mutex<Vec<String>>>,
+    /// How many user messages this session announced, **whatever** they
+    /// carried — the count [`Lead::said`] cannot give, because a message whose
+    /// only part is a teammate's words adds nothing to it (**D495**).
+    ///
+    /// What a test waits on when its second message is one of those: the log
+    /// above stops growing, so its length can never say the peer's message has
+    /// landed and an assertion about the text would read a beat early and pass
+    /// on an empty answer.
+    announced: Arc<AtomicUsize>,
     asker: RecordedSpawns,
     /// The team this lead was wired with, kept for the one question no event
     /// answers: how many of its teammates' dialogs are still in front of the
@@ -288,16 +297,7 @@ impl Lead {
     }
 
     async fn build(script: Script, gate: Option<Gate>, tools: Registry) -> Self {
-        let home = ganja_testkit::temp_dir();
-        let storage = Storage::open(home.path().join("storage"));
-        let root = TeamsRoot::new(home.path().join("teams"));
-        let team = TeamName::parse(TEAM).expect("a team name");
-        let registry = Arc::new(TeammateRegistry::new(
-            root.clone(),
-            team.clone(),
-            LEAD_SESSION_ID,
-            home.path(),
-        ));
+        let (root, team, registry, storage, home) = lead::ground();
         let (provider, requests) = ganja_testkit::Director::answering(move |request| {
             if let Some(gate) = &gate {
                 gate.hold(request);
@@ -337,7 +337,9 @@ impl Lead {
         .with_teammates(Arc::clone(&registry), ganja_testkit::externals());
         let mut events = engine.subscribe().await.expect("the first subscriber wins");
         let said: Arc<Mutex<Vec<String>>> = Arc::default();
+        let announced: Arc<AtomicUsize> = Arc::default();
         let recorder = Arc::clone(&said);
+        let counter = Arc::clone(&announced);
         tokio::spawn(async move {
             while let Some(event) = events.next().await {
                 if let Event::MessageStarted { message, .. } = event
@@ -345,6 +347,10 @@ impl Lead {
                 {
                     let mut said = recorder.lock().expect("the said log is never poisoned");
                     said.extend(message.parts.iter().filter_map(Part::as_text).map(str::to_owned));
+                    // Counted with the text log still locked, so a waiter that
+                    // sees this count and then takes that lock sees everything
+                    // this message contributed to it — including nothing.
+                    counter.fetch_add(1, Ordering::Relaxed);
                 }
             }
         });
@@ -355,15 +361,16 @@ impl Lead {
             engine,
             requests,
             said,
+            announced,
             asker: RecordedSpawns::default(),
             registry,
             home,
         }
     }
 
-    /// The team's task documents, read the way any other process would.
+    /// The team's task documents.
     fn store(&self) -> Store {
-        Store::new(self.root.tasks_dir(&self.team))
+        lead::store(&self.root, &self.team)
     }
 
     /// Files one task in `status`, without the model touching anything.
@@ -424,16 +431,7 @@ impl Lead {
     }
 
     async fn prompt(&self, text: &str) {
-        self.engine
-            .send(Command::SendPrompt {
-                text: text.to_owned(),
-                mentions: Vec::new(),
-                skills: Vec::new(),
-                session_mentions: Vec::new(),
-                peers: Vec::new(),
-            })
-            .await
-            .expect("an idle engine accepts a prompt");
+        lead::prompt(&self.engine, text).await;
     }
 
     /// Prompts, then waits for the turn — however many continuations it takes
@@ -526,6 +524,22 @@ impl Lead {
         ganja_testkit::eventually(EVENTUALLY, "the typed messages to be announced", async || {
             let said = self.stored_user_text();
             (said.len() >= count).then_some(said)
+        })
+        .await
+    }
+
+    /// The same again, once `count` user messages have been announced —
+    /// **however much text each of them carried**.
+    ///
+    /// [`Lead::announced`] cannot serve the one case whose second message is a
+    /// teammate's: its words ride `PartBody::Peer`, which `Part::as_text`
+    /// deliberately excludes (**D495**), so the text log never reaches two and
+    /// the wait would be for something that is not coming. Waiting on the
+    /// announcement instead is what makes that assertion about the exclusion
+    /// rather than about which task reached the log first.
+    async fn once_announced(&self, count: usize) -> Vec<String> {
+        ganja_testkit::eventually(EVENTUALLY, "the user messages to be announced", async || {
+            (self.announced.load(Ordering::Relaxed) >= count).then(|| self.stored_user_text())
         })
         .await
     }
@@ -984,8 +998,11 @@ async fn a_teammates_message_does_not_put_the_continuation_budget_back() {
         transcript(&requests[2]).contains(PEER_REPORT),
         "the request after the hold is the one carrying what the teammate said",
     );
+    // Waited on the *announcement* rather than on the text, because the text
+    // is exactly what must not grow: both messages reached the session, and
+    // only one of them was something a person typed.
     assert_eq!(
-        lead.stored_user_text(),
+        lead.once_announced(2).await,
         vec![PROMPT.to_owned()],
         "and a teammate's words are not something a person typed",
     );

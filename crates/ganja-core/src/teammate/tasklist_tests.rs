@@ -7,7 +7,7 @@ use ganja_team::task::{
 use ganja_tool::Tool as _;
 use ganja_tool::tasklist::{Change, Draft, Owner, Status, TaskList as _};
 
-use super::{TeamTasks, UNREACHABLE};
+use super::{LIST_UNREACHABLE, OWNERSHIP_SETTLED, TeamTasks};
 
 /// A list in a directory that goes away with the test, acted on as `identity`.
 fn list(identity: &str) -> (tempfile::TempDir, TeamTasks) {
@@ -112,6 +112,95 @@ async fn a_refused_claim_applies_nothing_else_in_the_same_call() {
     assert_eq!(after.owner, "worker-1", "the winner still holds it");
     assert_eq!(after.status, Status::Pending, "and nothing else moved");
     assert_eq!(after.subject, "port the parser");
+}
+
+/// The other half of that contract, and it is asymmetric on purpose: a claim
+/// that **landed** is not rolled back when the rest of the call is refused, so
+/// the refusal has to say so. Nothing is filed under 99 — a well-shaped id the
+/// store refuses only once it has the document open, which is after the claim
+/// has been written — and the obvious retry, the same call with the id
+/// corrected, would be refused by the claim this call itself made.
+#[tokio::test]
+async fn a_claim_that_landed_is_named_in_the_refusal_the_rest_of_the_call_earned() {
+    let (_home, tasks) = list("worker-1");
+    let id = filed(&tasks, "port the parser").await;
+
+    let refused = tasks
+        .update(
+            &id,
+            Change {
+                owner: Some(Owner::Claim("worker-1".to_owned())),
+                add_blocked_by: vec!["99".to_owned()],
+                ..Change::default()
+            },
+        )
+        .await
+        .expect_err("nothing is filed under 99");
+
+    assert!(refused.reason.contains(REFUSED_NO_SUCH_TASK), "{}", refused.reason);
+    assert!(
+        refused.reason.starts_with(OWNERSHIP_SETTLED),
+        "and the claim that did land is named first, so the retry drops `owner`: {}",
+        refused.reason,
+    );
+
+    let after = tasks.get(&id).await.expect("the task is still there");
+    assert_eq!(after.owner, "worker-1", "which is the truth: ownership moved and stayed");
+    assert!(after.blocked_by.is_empty(), "and the edge it was refused for landed nowhere");
+}
+
+/// A call that moves nothing is answered by a read.
+///
+/// The write it replaces would have taken the document's lock and put back the
+/// bytes it found, which on a busy list is a hold contending against somebody's
+/// real claim.
+#[tokio::test]
+async fn a_change_that_moves_nothing_leaves_the_document_untouched() {
+    let (_home, tasks) = list("team-lead");
+    let id = filed(&tasks, "port the parser").await;
+    let document = tasks.store.path_of(&TaskId::parse(&id).expect("a valid id"));
+    let before = std::fs::metadata(&document).expect("the document is on the disk");
+
+    let answered = tasks.update(&id, Change::default()).await.expect("a no-op is no refusal");
+
+    assert_eq!(answered.subject, "port the parser", "it answers with the task as it stands");
+    let after = std::fs::metadata(&document).expect("the document is still on the disk");
+    assert_eq!(
+        after.modified().expect("a modification time"),
+        before.modified().expect("a modification time"),
+        "and the document was not written again",
+    );
+}
+
+/// The property that is worth more than the byte count: a call that moves
+/// nothing does not queue behind a peer's hold, because it takes none.
+///
+/// The planted directory is a peer's lock as `ganja-team`'s protocol defines
+/// it, freshly made so nothing may break it as stale. The second half is what
+/// keeps the first from passing vacuously: a call that really does move
+/// something still waits on that hold and is refused.
+#[tokio::test]
+async fn a_change_that_moves_nothing_does_not_wait_on_the_documents_lock() {
+    let (_home, tasks) = list("team-lead");
+    let id = filed(&tasks, "port the parser").await;
+    // Canonicalized first: the lock is named from the target the store's own
+    // `acquire_unseeded` resolves, and a temporary directory on this platform
+    // is reached through a symlink.
+    let document = std::fs::canonicalize(tasks.store.path_of(&TaskId::parse(&id).expect("an id")))
+        .expect("the document is on the disk");
+    let mut held = document.into_os_string();
+    held.push(ganja_team::lock::LOCK_SUFFIX);
+    std::fs::create_dir(&held).expect("a peer's hold is plantable");
+
+    let answered =
+        tasks.update(&id, Change::default()).await.expect("a no-op needs no lock to answer");
+    assert_eq!(answered.subject, "port the parser");
+
+    let refused = tasks
+        .update(&id, Change { subject: Some("reworded".to_owned()), ..Change::default() })
+        .await
+        .expect_err("a call that really moves something waits on the hold and gives up");
+    assert!(refused.reason.contains(LIST_UNREACHABLE), "{}", refused.reason);
 }
 
 /// Releasing is the door that never refuses: it is how a lead takes work back
@@ -387,7 +476,7 @@ async fn a_name_that_is_no_document_is_refused_in_the_stores_own_words() {
     let refused = tasks.get("2").await.expect_err("a directory is no task");
     assert!(refused.reason.contains(REFUSED_NOT_A_DOCUMENT), "{}", refused.reason);
     assert!(
-        !refused.reason.contains(UNREACHABLE),
+        !refused.reason.contains(LIST_UNREACHABLE),
         "and it is the store's refusal rather than machinery: {}",
         refused.reason,
     );

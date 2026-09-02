@@ -19,20 +19,21 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::StreamExt as _;
+use ganja_core::Engine;
 use ganja_core::permission::Permissions;
-use ganja_core::protocol::{Command, PartBody, ToolState};
+use ganja_core::protocol::{PartBody, ToolState};
 use ganja_core::provider::{ChatRequest, ProviderEvent};
 use ganja_core::teammate::TeammateRegistry;
 use ganja_core::tool::Registry;
-use ganja_core::{Engine, Storage};
 use ganja_protocol::FinishReason;
 use ganja_team::task::{Store, TaskId, TaskStatus};
 use ganja_team::{TeamName, TeamsRoot};
 use ganja_testkit::{
-    LEAD_SESSION_ID, RecordedSpawns, TEAM, caller, eventually, says, spawn_with_prompt, tool_call,
-    transcript,
+    RecordedSpawns, caller, eventually, says, spawn_with_prompt, tool_call, transcript,
 };
 use serde_json::json;
+
+mod lead;
 
 /// How long the two engines are given. Generous against a loaded machine: a
 /// teammate's runner polls its mailbox, so this waits on a poll rather than on
@@ -139,16 +140,7 @@ struct Lead {
 
 impl Lead {
     async fn new() -> Self {
-        let home = ganja_testkit::temp_dir();
-        let storage = Storage::open(home.path().join("storage"));
-        let root = TeamsRoot::new(home.path().join("teams"));
-        let team = TeamName::parse(TEAM).expect("a team name");
-        let registry = Arc::new(TeammateRegistry::new(
-            root.clone(),
-            team.clone(),
-            LEAD_SESSION_ID,
-            home.path(),
-        ));
+        let (root, team, registry, storage, home) = lead::ground();
         let (provider, requests) = ganja_testkit::Director::answering(script);
 
         let engine = Engine::persistent(
@@ -165,23 +157,13 @@ impl Lead {
         Self { root, team, registry, engine, requests, asker: RecordedSpawns::default(), home }
     }
 
-    /// The documents this team's list is kept in, read the way any other
-    /// process on the machine would read them.
+    /// The documents this team's list is kept in.
     fn store(&self) -> Store {
-        Store::new(self.root.tasks_dir(&self.team))
+        lead::store(&self.root, &self.team)
     }
 
     async fn prompt(&self, text: &str) {
-        self.engine
-            .send(Command::SendPrompt {
-                text: text.to_owned(),
-                mentions: Vec::new(),
-                skills: Vec::new(),
-                session_mentions: Vec::new(),
-                peers: Vec::new(),
-            })
-            .await
-            .expect("an idle engine accepts a prompt");
+        lead::prompt(&self.engine, text).await;
     }
 
     /// Every request either engine has made so far.

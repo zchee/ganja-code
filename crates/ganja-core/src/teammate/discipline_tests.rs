@@ -226,7 +226,13 @@ fn every_arrangement_of_the_three_facts_decides_the_turn() {
 
 #[test]
 fn the_continuation_note_names_the_budget_and_what_is_open() {
-    let note = continuation_note(2, 7);
-    assert!(note.contains('2') && note.contains('5'), "{note}");
-    assert!(note.contains('7'), "{note}");
+    // The whole rendering rather than the digits in it, for the reason
+    // `tasklist_tests.rs` gives about the counterpart cap: a note that merely
+    // carried a `2`, a `5` and a `7` somewhere would pass three `contains`
+    // calls — including one that had swapped what was spent for what is open,
+    // which is the regression this sentence exists to catch.
+    assert_eq!(
+        continuation_note(2, 7),
+        format!("auto-continuation 2 of {MAX_CONTINUATIONS}, 7 task(s) open"),
+    );
 }

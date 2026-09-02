@@ -7,12 +7,13 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     Answered, BufferedCall, ChildParts, PendingReplies, Turn, TurnKind, add_usage, attached,
-    context_carried, parse_args, peer_envelope, resolve, resolve_mentions, serialize_message,
-    session_mention_parts, sliced, title_model, user_message,
+    context_carried, continue_for_the_team, parse_args, peer_envelope, resolve, resolve_mentions,
+    serialize_message, session_mention_parts, sliced, title_model, user_message,
 };
 use crate::catalog;
 use crate::engine::Fanout;
 use crate::permission::Permissions;
+use crate::protocol::team::MemberBackend;
 use crate::protocol::{
     FinishReason, Message, Part, PartBody, PermissionId, PermissionReply, QuestionId, SessionId,
     ToolState, Usage,
@@ -20,6 +21,7 @@ use crate::protocol::{
 use crate::provider::{FakeProvider, fake};
 use crate::subagent::{Host, Spawn};
 use crate::teammate::identity::{Identity, TAG};
+use crate::tool::tasklist::{Status as TaskStatus, TaskFailure};
 use crate::tool::team::{Address, Body, Peer, Postbox, Reserved, Sent, Undelivered};
 use crate::tool::{Credentials, FileTimes, Registry, Tool, ToolCtx, ToolError, ToolOutput};
 
@@ -1298,5 +1300,135 @@ async fn a_peers_own_words_are_never_scanned_for_a_session_mention() {
         message.parts.iter().filter_map(Part::as_text).all(|text| !text.contains(TAG)),
         "no session-mention block is rendered from a peer's own words: {:?}",
         message.parts
+    );
+}
+
+/// A task list that opens a permission dialog while it is being read.
+///
+/// The window `continue_for_the_team` has to be honest about, with the race
+/// taken out of it: the tail gathers the dialog fact, then awaits the list —
+/// which in production is a directory walk taking a lock per document, off the
+/// runtime's own threads — and a teammate's turn running beside the lead's can
+/// raise its forwarded dialog inside that wait. Raising it from inside the read
+/// itself makes that ordering a fact rather than a scheduling accident.
+struct AsksMidRead {
+    /// The very map [`dialog_open`](super::dialog_open) reads, so a dialog this
+    /// opens is one the turn can really see.
+    pending: Arc<std::sync::Mutex<PendingReplies>>,
+    /// The waiting halves, kept because a dialog is something somebody is
+    /// still holding: dropping them would leave the map describing waits that
+    /// had already ended.
+    waiting: std::sync::Mutex<Vec<tokio::sync::oneshot::Receiver<PermissionReply>>>,
+}
+
+impl AsksMidRead {
+    fn over(pending: &Arc<std::sync::Mutex<PendingReplies>>) -> Self {
+        Self { pending: Arc::clone(pending), waiting: std::sync::Mutex::default() }
+    }
+}
+
+/// Hand-written because [`PendingReplies`] is not [`std::fmt::Debug`] — it
+/// holds reply channels, which are nobody's to render — and [`TaskList`]
+/// requires it of every list.
+///
+/// [`TaskList`]: crate::tool::tasklist::TaskList
+impl std::fmt::Debug for AsksMidRead {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("AsksMidRead").finish_non_exhaustive()
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::tool::tasklist::TaskList for AsksMidRead {
+    async fn list(&self) -> Result<Vec<crate::tool::tasklist::Summary>, TaskFailure> {
+        let (answer, waiting) = tokio::sync::oneshot::channel();
+        self.pending
+            .lock()
+            .expect("the pending replies are never poisoned")
+            .open_permission(PermissionId::ascending(), answer);
+        self.waiting.lock().expect("the waiting dialogs are never poisoned").push(waiting);
+
+        Ok(vec![ganja_testkit::task_summary("1", TaskStatus::InProgress, "w1")])
+    }
+
+    async fn create(
+        &self,
+        _draft: crate::tool::tasklist::Draft,
+    ) -> Result<crate::tool::tasklist::Record, TaskFailure> {
+        unreachable!("the continuation blocker reads the list and nothing else")
+    }
+
+    async fn update(
+        &self,
+        _id: &str,
+        _change: crate::tool::tasklist::Change,
+    ) -> Result<crate::tool::tasklist::Record, TaskFailure> {
+        unreachable!("the continuation blocker reads the list and nothing else")
+    }
+
+    async fn delete(&self, _id: &str) -> Result<(), TaskFailure> {
+        unreachable!("the continuation blocker reads the list and nothing else")
+    }
+
+    async fn get(&self, _id: &str) -> Result<crate::tool::tasklist::Record, TaskFailure> {
+        unreachable!("the continuation blocker reads the list and nothing else")
+    }
+}
+
+/// A turn leading `registry`, driving `tasks`, and otherwise of no
+/// consequence — the three facts the blocker decides on and nothing else.
+fn tail_of(
+    registry: Arc<crate::teammate::TeammateRegistry>,
+    tasks: impl Fn(&Arc<std::sync::Mutex<PendingReplies>>) -> Arc<dyn crate::tool::tasklist::TaskList>,
+) -> (Turn, mpsc::Receiver<crate::protocol::Event>) {
+    let (turn, received) = turn_with(
+        CancellationToken::new(),
+        Arc::new(Effectful { marker: std::env::temp_dir().join("never-written") }),
+    );
+    let tasks = tasks(&turn.pending);
+
+    (Turn { team: Some(registry), tasks: Some(tasks), ..turn }, received)
+}
+
+/// **The tail asks who is being asked twice, and decides on the second
+/// answer.**
+///
+/// The first read is a gate that saves the disk walk; the walk is what a
+/// teammate's dialog can be raised inside. A build that decided on the first
+/// answer would spend a continuation and put `<team_still_working>` in front of
+/// a question the person has not answered yet — which is precisely what the
+/// three doc sites around this promise never happens.
+///
+/// The control below is the same three facts with a list that opens nothing,
+/// so this cannot be passing because the turn was refused for another reason.
+#[tokio::test]
+async fn a_dialog_raised_inside_the_list_read_stops_the_continuation() {
+    let home = ganja_testkit::temp_dir();
+    let registry = crate::teammate::tests::registry(home.path());
+    registry
+        .spawn(
+            crate::teammate::tests::in_process(home.path()),
+            crate::teammate::tests::request("w1", MemberBackend::InProcess, home.path()),
+        )
+        .await
+        .expect("an in-process teammate starts");
+    assert_eq!(registry.running(), 1, "the team is live, which is the first of the three facts");
+
+    let (continuing, _received) = tail_of(Arc::clone(&registry), |_| {
+        Arc::new(ganja_testkit::StaticTasks::new(vec![ganja_testkit::task_summary(
+            "1",
+            TaskStatus::InProgress,
+            "w1",
+        )]))
+    });
+    assert!(
+        continue_for_the_team(&continuing).await,
+        "a live team, open work and nobody being asked anything: this turn carries on",
+    );
+
+    let (asked, _received) = tail_of(registry, |pending| Arc::new(AsksMidRead::over(pending)));
+    assert!(
+        !continue_for_the_team(&asked).await,
+        "and the same turn stops once the read it waited on left a question open",
     );
 }

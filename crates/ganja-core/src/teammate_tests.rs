@@ -1245,7 +1245,9 @@ fn a_forwarded_dialog_is_counted_by_the_registry_until_it_is_answered() {
     let (lead, mut inbox) = tokio::sync::mpsc::channel(4);
     registry.forward_dialogs_to(lead);
     let surface = registry.dialog_surface().expect("a surface is attached");
-    let raised = surface.hand_over(asking("w1")).expect("the queue has room");
+    let raised = surface
+        .hand_over(crate::teammate::posture::tests::forwarded("w1"))
+        .expect("the queue has room");
 
     assert_eq!(registry.dialogs_waiting(), 1, "somebody is being asked something");
     let forwarded = inbox.try_recv().expect("the question was really carried");
@@ -1253,21 +1255,4 @@ fn a_forwarded_dialog_is_counted_by_the_registry_until_it_is_answered() {
 
     drop(raised);
     assert_eq!(registry.dialogs_waiting(), 0, "the wait is over, whatever the answer was");
-}
-
-/// One teammate's permission dialog, as a carrier hands it over.
-fn asking(teammate: &str) -> crate::teammate::posture::Forwarded {
-    crate::teammate::posture::Forwarded {
-        teammate: teammate.to_owned(),
-        request: crate::protocol::Event::PermissionRequested {
-            session_id: crate::protocol::SessionId::ascending(),
-            id: crate::protocol::PermissionId::ascending(),
-            call_id: "a call".to_owned(),
-            tool: "write".to_owned(),
-            title: "may I write notes.md".to_owned(),
-            args: serde_json::Value::Null,
-            directories: Vec::new(),
-        },
-        reply: tokio::sync::oneshot::channel().0,
-    }
 }

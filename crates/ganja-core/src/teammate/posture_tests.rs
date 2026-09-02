@@ -413,7 +413,7 @@ fn a_dialog_the_lead_could_not_be_offered_is_never_counted() {
     let surface = DialogSurface::new(sender, Arc::clone(&waiting));
     let occupying = surface.hand_over(occupying()).expect("the one slot was free");
 
-    surface.hand_over(occupying_from("late")).expect_err("the queue is full");
+    surface.hand_over(forwarded("late")).expect_err("the queue is full");
     assert_eq!(waiting.load(Ordering::Relaxed), 1, "only the one that was really carried");
 
     drop(occupying);
@@ -426,12 +426,19 @@ fn a_dialog_the_lead_could_not_be_offered_is_never_counted() {
 /// **there** is the whole of it — a queue with its only slot spent is what
 /// a lead that stopped draining looks like from this side.
 fn occupying() -> Forwarded {
-    occupying_from("somebody-else")
+    forwarded("somebody-else")
 }
 
-/// The same, from a named teammate, for the one test that needs to tell two
-/// of them apart in a sentence.
-fn occupying_from(teammate: &str) -> Forwarded {
+/// One teammate's permission dialog, as a carrier hands it over.
+///
+/// Shared with [`crate::teammate::tests`], which needs the same value to prove
+/// the registry counts a dialog handed through its own surface: one fixture
+/// rather than two, so a `Forwarded` that grew a field cannot be constructed
+/// two different ways in two places that are asking the same question.
+///
+/// What the request *says* is read by nothing — that it is a dialog, and whose,
+/// is the whole of it.
+pub(crate) fn forwarded(teammate: &str) -> Forwarded {
     Forwarded {
         teammate: teammate.to_owned(),
         request: Event::PermissionRequested {

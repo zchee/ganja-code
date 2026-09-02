@@ -110,7 +110,7 @@ use ganja_team::{MailboxMessage, MemberName, Surface, TeamsRoot, mailbox, record
 use tokio::sync::oneshot;
 
 use super::inbound::{Inbound, MailboxAdmission, PassDisposition, ReceiverClass};
-use super::posture::{Forwarded, Undelivered};
+use super::posture::{Forwarded, NotOffered};
 use super::runner::{drop_frame, prune_inbox, read_inbox};
 use super::{Delivery, Exited, REFUSED_NO_CONFIG_DIR, TeammateRegistry, member, teams_root};
 use crate::protocol::{PermissionReply, SessionId};
@@ -777,8 +777,8 @@ impl LeadInbox {
             Ok(raised) => raised,
             Err(undelivered) => {
                 let reason = match undelivered {
-                    Undelivered::Full => DIALOG_QUEUE_FULL,
-                    Undelivered::Closed => LEAD_GONE,
+                    NotOffered::Full => DIALOG_QUEUE_FULL,
+                    NotOffered::Closed => LEAD_GONE,
                 };
                 tracing::warn!(
                     teammate = message.from,

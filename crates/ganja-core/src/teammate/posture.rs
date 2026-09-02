@@ -377,7 +377,7 @@ pub struct Forwarded {
 /// The channel and the count are **one value** rather than two that sit beside
 /// each other, because two can disagree: the only way to send is the crate's
 /// own `hand_over`, and what a carried dialog answers with *is*
-/// its place in the count — a [`Raised`] guard whoever waits for the answer
+/// its place in the count — a `Raised` guard whoever waits for the answer
 /// holds until it arrives. A dialog that was refused rather than carried is
 /// never counted, which is why the guard is minted on the success arm and
 /// nowhere else.
@@ -403,15 +403,15 @@ impl DialogSurface {
     ///
     /// [`mpsc::Sender::try_send`]'s own answer with the count attached: a
     /// carried dialog answers with the [`Raised`] guard that keeps it counted,
-    /// and a refused one answers with [why](Undelivered), which its caller
+    /// and a refused one answers with [why](NotOffered), which its caller
     /// turns into the refusal it owes its own teammate. Counted before the send
     /// and given back on the error arm by the guard's own drop, so the count
     /// can never be short of what is really on the lead's screen.
-    pub(crate) fn hand_over(&self, dialog: Forwarded) -> Result<Raised, Undelivered> {
+    pub(crate) fn hand_over(&self, dialog: Forwarded) -> Result<Raised, NotOffered> {
         let raised = Raised::counting(&self.waiting);
         self.lead.try_send(dialog).map_err(|undelivered| match undelivered {
-            mpsc::error::TrySendError::Full(_) => Undelivered::Full,
-            mpsc::error::TrySendError::Closed(_) => Undelivered::Closed,
+            mpsc::error::TrySendError::Full(_) => NotOffered::Full,
+            mpsc::error::TrySendError::Closed(_) => NotOffered::Closed,
         })?;
 
         Ok(raised)
@@ -425,8 +425,12 @@ impl DialogSurface {
 /// answered on the teammate's own side, by the request id the carrier already
 /// holds — and passing it along would make this a `Result` whose error is
 /// several times the size of its success.
+/// Named for what did not happen rather than `Undelivered`, which
+/// [`crate::tool::team::Undelivered`] already means in this crate about an
+/// entirely different failure — a message that did not reach a mailbox, where
+/// this is a question that was never put in front of anybody.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Undelivered {
+pub(crate) enum NotOffered {
     /// The lead's queue is full: it is behind, and this ask is dropped while
     /// it catches up.
     Full,
@@ -442,7 +446,7 @@ pub(crate) enum Undelivered {
 /// teammate. All four are answers, and none of them leaves the person still
 /// being asked; the count falls only once the teammate has been told.
 #[derive(Debug)]
-pub struct Raised(Arc<AtomicUsize>);
+pub(crate) struct Raised(Arc<AtomicUsize>);
 
 impl Raised {
     /// Counts one dialog from now until this value is dropped.
@@ -598,8 +602,8 @@ async fn hand_over(
             tracing::warn!(
                 teammate = teammate.name(),
                 reason = match undelivered {
-                    Undelivered::Full => "the lead's dialog queue is full",
-                    Undelivered::Closed => "the lead's side is gone",
+                    NotOffered::Full => "the lead's dialog queue is full",
+                    NotOffered::Closed => "the lead's side is gone",
                 },
                 "a teammate's permission dialog was refused rather than made to wait"
             );
@@ -644,4 +648,7 @@ async fn answer(teammate: &Teammate, id: PermissionId, reply: PermissionReply) {
 
 #[cfg(test)]
 #[path = "posture_tests.rs"]
-mod tests;
+// Visible to the crate's other test modules for [`tests::forwarded`], which is
+// the one dialog fixture both this module's tests and the registry's need —
+// `teammate.rs` above already carries the same declaration for the same reason.
+pub(crate) mod tests;

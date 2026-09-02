@@ -51,7 +51,12 @@ use ganja_tool::tasklist::{
 /// as they are. A lock that would not open or a directory that would not be
 /// written is not a refusal at all, and saying so is what keeps the model from
 /// reading "already claimed" and "the disk is full" in the same voice.
-const UNREACHABLE: &str = "The team's task list could not be read or written";
+///
+/// Named for the *list* rather than bare `UNREACHABLE`, because [`INTERRUPTED`]
+/// below documents itself as the case that is unreachable in the other sense —
+/// the code path nobody expects to take. This one is the ordinary machinery
+/// failure, and the two sitting together needed the difference in the names.
+const LIST_UNREACHABLE: &str = "The team's task list could not be read or written";
 
 /// What a blocking call whose answer never came back reads as. Unreachable
 /// short of the runtime tearing down under a call, and said in words rather
@@ -61,6 +66,23 @@ const UNREACHABLE: &str = "The team's task list could not be read or written";
 /// runtime shutting down loses the answer of a call that had already written
 /// its document, and only a read can settle which happened.
 const INTERRUPTED: &str = "The team's task list did not answer, so whether the change landed is unknown. Read the task back before deciding.";
+
+/// What a call whose ownership move landed and whose second write did not says
+/// first, ahead of the store's own account of the refusal.
+///
+/// The other half of [`TeamTasks::update`]'s ordering contract, and the half a
+/// silent failure would be worst in. Ownership is settled first *so that* a
+/// refused claim leaves the task exactly as it was — which makes the reverse,
+/// a claim that won followed by a second write that was refused, the one
+/// partial this seam can produce. Rolling the claim back is not on offer: a
+/// release is itself a fallible write, and it would race whoever claims next.
+///
+/// So the fix is to say what happened, because the model's obvious next move —
+/// the same call again with the mistake corrected — is otherwise refused by
+/// the claim its own failed attempt made, and the teammate loses a race to
+/// itself.
+const OWNERSHIP_SETTLED: &str = "The owner in this call was written and the rest of it was not, \
+                                 so send the rest again without `owner`:";
 
 /// One team's shared task list, and the name this session acts on it under.
 pub struct TeamTasks {
@@ -141,7 +163,7 @@ fn refusal(error: TaskError) -> TaskFailure {
         // which is why it is rendered whole rather than as machinery.
         | TaskError::NotADocument { .. } => error.to_string(),
         TaskError::Lock(_) | TaskError::Io(_) | TaskError::Json(_) => {
-            format!("{UNREACHABLE}: {error}")
+            format!("{LIST_UNREACHABLE}: {error}")
         }
     };
 
@@ -239,8 +261,32 @@ impl TaskList for TeamTasks {
     /// where they are used: they are the other way a call can be refused, and
     /// a claim taken and then refused for a malformed id would leave exactly
     /// the task this contract exists to prevent.
+    ///
+    /// # And the other half, which is not atomicity
+    ///
+    /// What the ordering buys is one direction only: a claim that was
+    /// **refused** applies nothing else. A claim that **won** is not taken
+    /// back when the second write is refused, because every refusal the store
+    /// can still raise there — an edge naming a task nobody filed, a
+    /// counterpart cap, a lock that would not open — is raised with the claim
+    /// already on the disk, and undoing it would mean a second fallible write
+    /// racing whoever claims next. So the partial is real and is **named**:
+    /// such a refusal is prefixed with `OWNERSHIP_SETTLED`, because the
+    /// model's obvious retry is otherwise refused by its own failed call's
+    /// claim.
     async fn update(&self, id: &str, mut change: Change) -> Result<Record, TaskFailure> {
         let id = id_of(id)?;
+        // A call that moves nothing is answered by a read. The write below
+        // would take the document's lock and put back the bytes it found,
+        // which on a busy list is a hold contending against a real claim, and
+        // the answer is the same one either way: what the task now is. It is
+        // `get`'s answer, with an edge naming an id nothing is filed under
+        // scrubbed the way every read scrubs one, where the write would have
+        // echoed the document as filed.
+        if change.moves_nothing() {
+            return self.blocking(move |store| store.get(&id)).await.map(record_of);
+        }
+
         let add_blocks = ids_of(&change.add_blocks)?;
         let add_blocked_by = ids_of(&change.add_blocked_by)?;
 
@@ -254,6 +300,9 @@ impl TaskList for TeamTasks {
                 }
             });
         }
+        // Read before the `filter` below consumes it: what a refusal from here
+        // on has to say depends on whether the owner is already written.
+        let settled = claimed.is_some();
         if let Some(task) = claimed.filter(|_| change.is_only_ownership()) {
             return Ok(record_of(task));
         }
@@ -278,7 +327,18 @@ impl TaskList for TeamTasks {
             }),
         };
 
-        self.blocking(move |store| store.update(&id, update)).await.map(record_of)
+        match self.blocking(move |store| store.update(&id, update)).await {
+            Ok(task) => Ok(record_of(task)),
+            // The one partial this seam can produce, said rather than hidden —
+            // except when the second write did not answer at all: `INTERRUPTED`
+            // already says the rest may have landed and to read the task back,
+            // and a prefix claiming it was not written would send a duplicate
+            // comment after a write that had.
+            Err(failure) if settled && failure.reason != INTERRUPTED => {
+                Err(TaskFailure { reason: format!("{OWNERSHIP_SETTLED} {}", failure.reason) })
+            }
+            Err(failure) => Err(failure),
+        }
     }
 
     async fn delete(&self, id: &str) -> Result<(), TaskFailure> {

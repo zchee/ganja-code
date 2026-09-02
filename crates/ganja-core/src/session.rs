@@ -1640,7 +1640,9 @@ fn leads_a_live_team(turn: &Turn) -> bool {
 /// the loop that happens to keep it. A **teammate's** forwarded dialog
 /// ([`TeammateRegistry::dialogs_waiting`]) is the half that really happens: a
 /// teammate's turn runs beside the lead's, so its question can be raised at any
-/// moment of this one, including after the model has stopped talking.
+/// moment of this one, including after the model has stopped talking — and
+/// including inside the list read [`continue_for_the_team`] waits on, which is
+/// why that function asks this twice and decides on the second answer.
 ///
 /// [`TeammateRegistry::dialogs_waiting`]: crate::teammate::TeammateRegistry::dialogs_waiting
 fn dialog_open(turn: &Turn) -> bool {
@@ -1671,10 +1673,9 @@ async fn continue_for_the_team(turn: &Turn) -> bool {
     use crate::teammate::discipline::Facts;
 
     let live_team = !turn.cancel.is_cancelled() && leads_a_live_team(turn);
-    // Named for the answer rather than for the question, so that the `Facts`
-    // literal below reads as the call it is instead of as field-init shorthand
-    // for the free function two lines up.
-    let somebody_is_asked = dialog_open(turn);
+    // The gate on the read below, and deliberately **not** the fact the
+    // decision is made on — that one is gathered again once the read is back.
+    let asked_before_the_read = dialog_open(turn);
     let budget = turn.discipline.lock().expect("the turn guards are never poisoned").may_continue();
 
     // The list is the one fact that costs a read off the disk, so it is gated
@@ -1684,7 +1685,7 @@ async fn continue_for_the_team(turn: &Turn) -> bool {
     // claims the session was handed back with work outstanding, and that claim
     // is only true if the list really holds some (bead lymf). One extra read,
     // once, on the last tail of a turn that is ending anyway.
-    let listed = if live_team && !somebody_is_asked {
+    let listed = if live_team && !asked_before_the_read {
         match turn.tasks.as_ref() {
             None => Vec::new(),
             Some(tasks) => match tasks.list().await {
@@ -1706,9 +1707,16 @@ async fn continue_for_the_team(turn: &Turn) -> bool {
         Vec::new()
     };
 
+    // Read **again**, immediately before the decision. Between the gate above
+    // and here lies the list read — a directory walk taking a lock per
+    // document, off the runtime's own threads — and a teammate's turn runs
+    // beside this one, so its forwarded dialog can be raised and land on the
+    // person's screen inside that window. The promise this guard makes is
+    // absolute: never a synthetic instruction in front of a question nobody
+    // has answered yet. A fact gathered before the wait cannot keep it.
     let facts = Facts {
         live_team,
-        dialog_open: somebody_is_asked,
+        dialog_open: dialog_open(turn),
         unfinished_work: crate::teammate::discipline::holds_unfinished_work(&listed),
     };
     if !budget && facts.would_continue() {
