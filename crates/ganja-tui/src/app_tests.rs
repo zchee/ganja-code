@@ -13,6 +13,8 @@ use ganja_protocol::{
     PartId, PermissionId, PermissionReply, QuestionId, QuestionInfo, QuestionOption, RedactedText,
     ToolState, Usage,
 };
+use ganja_testkit::{StaticTasks, task};
+use ganja_tool::tasklist::Status;
 use ratatui::Terminal;
 use ratatui::backend::{Backend, ClearType, TestBackend};
 use ratatui::crossterm::event::{
@@ -24,8 +26,9 @@ use tempfile::TempDir;
 
 use super::{
     App, BACKTRACK_HINT, Chooser, Cleared, Dropdown, ESC_CHORD, FRAME, Help, JoinHandle,
-    ListDialog, MAX_EVENT_LOG, MessageId, Mode, NO_EFFORTS, Palette, PendingDialog, Permission,
-    RevertScope, Rewind, SLOW_TASK_READ, TASK_READ_DEADLINE, WireListing, permission_reply,
+    ListDialog, MAX_EVENT_LOG, MessageId, Mode, NO_EFFORTS, NOBODY_TO_STOP, Palette, PendingDialog,
+    Permission, RevertScope, Rewind, SLOW_TASK_READ, TASK_READ_DEADLINE, WireListing,
+    permission_reply,
 };
 
 /// The session every hand-built fixture event happens in. One pinned id,
@@ -9900,27 +9903,9 @@ fn team_members() -> Vec<component::team::Row> {
 /// the roster, and the line naming the member that cannot see it.
 fn team_dialog_with_tasks() -> component::team::Team {
     let tasks = vec![
-        ganja_tool::tasklist::Summary {
-            id: "1".to_owned(),
-            subject: "Read the plan".to_owned(),
-            status: ganja_tool::tasklist::Status::Completed,
-            owner: "w1".to_owned(),
-            blocked_by: Vec::new(),
-        },
-        ganja_tool::tasklist::Summary {
-            id: "2".to_owned(),
-            subject: "Wire the parser".to_owned(),
-            status: ganja_tool::tasklist::Status::InProgress,
-            owner: "w1".to_owned(),
-            blocked_by: Vec::new(),
-        },
-        ganja_tool::tasklist::Summary {
-            id: "3".to_owned(),
-            subject: "Draw the section".to_owned(),
-            status: ganja_tool::tasklist::Status::Pending,
-            owner: String::new(),
-            blocked_by: vec!["2".to_owned()],
-        },
+        task("1", Status::Completed, "w1", "Read the plan", &[]),
+        task("2", Status::InProgress, "w1", "Wire the parser", &[]),
+        task("3", Status::Pending, "", "Draw the section", &["2"]),
     ];
 
     component::team::Team::new(team_members(), tasks)
@@ -10075,193 +10060,11 @@ async fn settle_task_read(app: &mut App) {
     panic!("the shared task list read never landed");
 }
 
-/// A shared list that answers **at most once** and then stops — the two ways
-/// a store stops being a list: a read that does not come back (a planted
-/// FIFO, a wedged lock, a filesystem that stopped answering) and a read that
-/// comes back refused (the directory removed under a running session, a
-/// document that will not parse).
-///
-/// [`ganja_testkit::StaticTasks`] is the double for suites that want an
-/// answer; this one exists for the suite that wants the answer to stop, and
-/// it is here rather than beside that one because a list that stops is only
-/// ever interesting to the loop that must keep drawing anyway.
-#[derive(Debug)]
-struct StoppingTasks {
-    listed: Vec<ganja_tool::tasklist::Summary>,
-    /// Whether the one answer this double has has been given. A first read
-    /// that lands is what a later stop can then be measured against — the
-    /// section goes on drawing it, or stops drawing it, and neither is
-    /// legible without the read before it.
-    answered: std::sync::atomic::AtomicBool,
-    /// Whether the reads after that one refuse rather than hang.
-    refuses: bool,
-}
-
-impl StoppingTasks {
-    /// Answers the first read with `listed`, and never answers again.
-    fn answering_once(listed: Vec<ganja_tool::tasklist::Summary>) -> Self {
-        Self { listed, answered: std::sync::atomic::AtomicBool::new(false), refuses: false }
-    }
-
-    /// The same, with the reads after the first one **refusing** instead of
-    /// hanging — which is what `Engine::task_list` turns into the [`None`]
-    /// the tick folds into an empty list.
-    fn refusing(self) -> Self {
-        Self { refuses: true, ..self }
-    }
-
-    /// Answers nothing at all, from the very first read.
-    fn stalled() -> Self {
-        Self {
-            listed: Vec::new(),
-            answered: std::sync::atomic::AtomicBool::new(true),
-            refuses: false,
-        }
-    }
-}
-
-/// Written in the shape `async_trait` desugars to, for the reason
-/// [`super::DialogAsker`]'s impl gives: this crate does not depend on that
-/// macro and should not start.
-impl ganja_tool::tasklist::TaskList for StoppingTasks {
-    fn create<'a, 'b>(
-        &'a self,
-        _draft: ganja_tool::tasklist::Draft,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<
-                        ganja_tool::tasklist::Record,
-                        ganja_tool::tasklist::TaskFailure,
-                    >,
-                > + Send
-                + 'b,
-        >,
-    >
-    where
-        'a: 'b,
-        Self: 'b,
-    {
-        unreachable!("this double only ever reads")
-    }
-
-    fn update<'a, 'b, 'c>(
-        &'a self,
-        _id: &'b str,
-        _change: ganja_tool::tasklist::Change,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<
-                        ganja_tool::tasklist::Record,
-                        ganja_tool::tasklist::TaskFailure,
-                    >,
-                > + Send
-                + 'c,
-        >,
-    >
-    where
-        'a: 'c,
-        'b: 'c,
-        Self: 'c,
-    {
-        unreachable!("this double only ever reads")
-    }
-
-    fn delete<'a, 'b, 'c>(
-        &'a self,
-        _id: &'b str,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Result<(), ganja_tool::tasklist::TaskFailure>>
-                + Send
-                + 'c,
-        >,
-    >
-    where
-        'a: 'c,
-        'b: 'c,
-        Self: 'c,
-    {
-        unreachable!("this double only ever reads")
-    }
-
-    fn list<'a, 'b>(
-        &'a self,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<
-                        Vec<ganja_tool::tasklist::Summary>,
-                        ganja_tool::tasklist::TaskFailure,
-                    >,
-                > + Send
-                + 'b,
-        >,
-    >
-    where
-        'a: 'b,
-        Self: 'b,
-    {
-        let answer = (!self.answered.swap(true, std::sync::atomic::Ordering::SeqCst))
-            .then(|| self.listed.clone());
-        let refuses = self.refuses;
-
-        Box::pin(async move {
-            match answer {
-                Some(listed) => Ok(listed),
-                // The read that came back refused, which the engine answers
-                // as `None` and the tick folds into an empty list.
-                None if refuses => Err(ganja_tool::tasklist::TaskFailure {
-                    reason: "the team directory is not readable".to_owned(),
-                }),
-                // The read that does not come back. `pending` rather than a
-                // long sleep, because a deadline a test can outwait is not
-                // the failure this stands for.
-                None => std::future::pending().await,
-            }
-        })
-    }
-
-    fn get<'a, 'b, 'c>(
-        &'a self,
-        _id: &'b str,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<
-                        ganja_tool::tasklist::Record,
-                        ganja_tool::tasklist::TaskFailure,
-                    >,
-                > + Send
-                + 'c,
-        >,
-    >
-    where
-        'a: 'c,
-        'b: 'c,
-        Self: 'c,
-    {
-        unreachable!("this double only ever reads")
-    }
-}
-
-/// One pending task, as the store would have summarized it.
-fn pending_task(id: &str, subject: &str) -> ganja_tool::tasklist::Summary {
-    ganja_tool::tasklist::Summary {
-        id: id.to_owned(),
-        subject: subject.to_owned(),
-        status: ganja_tool::tasklist::Status::Pending,
-        owner: String::new(),
-        blocked_by: Vec::new(),
-    }
-}
-
 /// An app whose engine reads through `tasks`, with a roster that draws the
 /// count so the poll has a reason to run — and the notice beside it, since a
 /// roster draws only what it names and one of these tests is about what the
 /// bar says.
-fn app_reading(tasks: StoppingTasks) -> App {
+fn app_reading(tasks: StaticTasks) -> App {
     let mut app = App::new(
         engine().with_tasks(Arc::new(tasks) as Arc<dyn ganja_tool::tasklist::TaskList>),
         None,
@@ -10285,7 +10088,13 @@ fn app_reading(tasks: StoppingTasks) -> App {
 /// drawing the last list that landed.
 #[tokio::test]
 async fn a_task_list_read_that_never_answers_leaves_the_tick_answering() {
-    let mut app = app_reading(StoppingTasks::answering_once(vec![pending_task("1", "Wire it")]));
+    let mut app = app_reading(StaticTasks::answering_once(vec![task(
+        "1",
+        Status::Pending,
+        "",
+        "Wire it",
+        &[],
+    )]));
 
     settle_task_read(&mut app).await;
     assert_eq!(app.tasks.len(), 1, "the first read answered");
@@ -10311,7 +10120,7 @@ async fn a_task_list_read_that_never_answers_leaves_the_tick_answering() {
 /// make room for it.
 #[tokio::test]
 async fn a_read_still_in_flight_is_never_joined_by_a_second() {
-    let mut app = app_reading(StoppingTasks::stalled());
+    let mut app = app_reading(StaticTasks::stalling());
 
     app.handle(AppEvent::Tick).await.expect("a tick is handled");
     assert!(app.task_read.is_some(), "the first tick started a read");
@@ -10333,7 +10142,7 @@ async fn a_read_still_in_flight_is_never_joined_by_a_second() {
 async fn a_read_past_its_deadline_is_said_once() {
     // What the screen is matched on below, so the two cannot drift apart.
     assert!(SLOW_TASK_READ.contains("not answering"));
-    let mut app = app_reading(StoppingTasks::stalled());
+    let mut app = app_reading(StaticTasks::stalling());
     app.handle(AppEvent::Tick).await.expect("a tick is handled");
 
     // Backdated rather than waited out: what the branch turns on is the age
@@ -10356,6 +10165,105 @@ async fn a_read_past_its_deadline_is_said_once() {
     assert!(!screen(&terminal).contains("not answering"), "got:\n{}", screen(&terminal));
 }
 
+/// A read that lands late clears the sentence about *itself*, and only that
+/// one.
+///
+/// The notice is a single unowned slot, so a read that overran and then
+/// answered can only clear it honestly by checking what is standing there
+/// first: between the two moments anything else may have written it — a
+/// refused shutdown, a failed command — and that sentence has no other way
+/// of reaching the person it is for.
+#[tokio::test]
+async fn a_late_read_landing_leaves_somebody_elses_notice_alone() {
+    let mut app = app_reading(StaticTasks::answering_once(vec![task(
+        "1",
+        Status::Pending,
+        "",
+        "Wire it",
+        &[],
+    )]));
+    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+    let read = app.task_read.as_mut().expect("a read is in flight");
+    read.started =
+        read.started.checked_sub(TASK_READ_DEADLINE).expect("the machine has run that long");
+    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+    let mut terminal = terminal(80, 24);
+    app.draw(&mut terminal).expect("a frame draws");
+    assert!(screen(&terminal).contains("not answering"), "got:\n{}", screen(&terminal));
+
+    // Written between the overrun and the landing, by something that is not
+    // this read: the bar is shared, and this one is the newer sentence.
+    app.status.set_notice(Some(NOBODY_TO_STOP.to_owned()));
+    settle_task_read(&mut app).await;
+    app.draw(&mut terminal).expect("a frame draws");
+    let screen = screen(&terminal);
+
+    assert!(!screen.contains("not answering"), "the read's own sentence went with it:\n{screen}");
+    assert!(screen.contains(NOBODY_TO_STOP), "and the one that was not its own stayed:\n{screen}");
+}
+
+/// The same session as [`app_reading`] with the count **off** the roster, so
+/// the only thing that can be watching the list is an open dialog — the
+/// ordinary session, where `task-list` is opt-in and nobody opted in.
+fn app_reading_unwatched(tasks: StaticTasks) -> App {
+    let mut app = App::new(
+        engine().with_tasks(Arc::new(tasks) as Arc<dyn ganja_tool::tasklist::TaskList>),
+        None,
+        Themes::builtin(),
+    );
+    app.status.set_statusline(Some(&ganja_core::config::StatuslineConfig {
+        elements: Some(vec![ganja_core::config::StatuslineElement::Notice]),
+        max_width: None,
+        detail: None,
+    }));
+
+    app
+}
+
+/// A deadline crossed while the dialog was shut is still said the moment
+/// somebody opens it again.
+///
+/// The overrun and the sentence about it are two facts, and only the second
+/// is the watcher's business: a read that passed its deadline unwatched has
+/// still overrun, and the person who opens the dialog onto a section that
+/// never fills is exactly who the sentence was written for. Latching on the
+/// crossing rather than on the saying would close that door for the life of
+/// the session — nothing else ever starts another read while this one hangs.
+#[tokio::test]
+async fn a_deadline_crossed_while_nobody_looked_is_still_said_when_somebody_does() {
+    let mut app = app_reading_unwatched(StaticTasks::stalling());
+    app.team_dialog = Some(team_dialog());
+    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+    assert!(app.task_read.is_some(), "the open dialog started a read");
+
+    // Backdated for the reason `a_read_past_its_deadline_is_said_once` gives:
+    // what the branch turns on is the age of the read, not the wall clock.
+    let read = app.task_read.as_mut().expect("a read is in flight");
+    read.started =
+        read.started.checked_sub(TASK_READ_DEADLINE).expect("the machine has run that long");
+
+    // The dialog is shut inside the deadline, and the tick that crosses it
+    // has nobody to tell.
+    app.team_dialog = None;
+    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+    let mut terminal = terminal(80, 24);
+    app.draw(&mut terminal).expect("a frame draws");
+    assert!(
+        !screen(&terminal).contains("not answering"),
+        "a list nobody draws is not worth a sentence:\n{}",
+        screen(&terminal)
+    );
+
+    app.team_dialog = Some(team_dialog());
+    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+    app.draw(&mut terminal).expect("a frame draws");
+    assert!(
+        screen(&terminal).contains("not answering"),
+        "the read is still the one hanging, and now somebody is looking:\n{}",
+        screen(&terminal)
+    );
+}
+
 /// The lead of [`leading`], reading its shared list through `tasks` rather
 /// than through the store under its own team directory, with a roster that
 /// draws the count.
@@ -10367,7 +10275,7 @@ async fn a_read_past_its_deadline_is_said_once() {
 /// there is none — so a dialog on a session leading nobody goes on drawing
 /// whatever list it was opened over, and a test about the section would pin
 /// nothing at all.
-fn leading_reading(directory: &TempDir, tasks: StoppingTasks) -> App {
+fn leading_reading(directory: &TempDir, tasks: StaticTasks) -> App {
     let registry = Arc::new(ganja_core::teammate::TeammateRegistry::for_session(
         directory.path(),
         "224cbeab-4e62-497c-aa8f-d05cc33ce7ba",
@@ -10409,7 +10317,8 @@ async fn a_read_refused_after_a_good_one_empties_the_section_and_the_segment() {
     let directory = temporary();
     let mut app = leading_reading(
         &directory,
-        StoppingTasks::answering_once(vec![pending_task("1", "Wire it")]).refusing(),
+        StaticTasks::answering_once(vec![task("1", Status::Pending, "", "Wire it", &[])])
+            .then_failing("the team directory is not readable"),
     );
     app.team_dialog = Some(team_dialog());
 

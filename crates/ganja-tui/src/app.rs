@@ -2382,12 +2382,16 @@ impl App {
     /// Starts the one read [`App::poll_tasks`] reaps, on the clock that gates
     /// it.
     fn spawn_task_read(&mut self) {
-        self.tasks_polled = Some(Instant::now());
+        // One reading of the clock for one moment: the poll's window opens
+        // when the read starts, and two `now`s a few nanoseconds apart would
+        // be two answers to a question with one.
+        let now = Instant::now();
+        self.tasks_polled = Some(now);
         let engine = Arc::clone(&self.engine);
         self.task_read = Some(TaskRead {
             task: tokio::spawn(async move { engine.task_list().await }),
-            started: Instant::now(),
-            overdue: false,
+            started: now,
+            said: false,
         });
     }
 
@@ -2405,12 +2409,17 @@ impl App {
     async fn reap_task_read(&mut self, watched: bool) -> Option<Vec<Summary>> {
         let read = self.task_read.as_mut()?;
         if !read.task.is_finished() {
-            let overran = !read.overdue && read.started.elapsed() >= TASK_READ_DEADLINE;
-            read.overdue |= overran;
+            let overran = !read.said && read.started.elapsed() >= TASK_READ_DEADLINE;
             // Said only to somebody looking at the list it is about: with the
             // dialog closed and no roster element drawing it, the sentence
-            // would name a list this frame does not show.
+            // would name a list this frame does not show. What is latched is
+            // therefore the *saying* and not the crossing — a deadline passed
+            // while nobody looked leaves the sentence owed, and the person who
+            // opens the dialog onto a section that never fills is the one it
+            // was written for. Nothing else would ever tell them: no second
+            // read is started while this one hangs.
             if overran && watched {
+                read.said = true;
                 self.status.set_notice(Some(SLOW_TASK_READ.to_owned()));
                 self.dirty = true;
             }
@@ -2424,9 +2433,11 @@ impl App {
             // section for the same reason a genuinely empty list does.
             Ok(tasks) => {
                 // A read that answered late has stopped being the thing the
-                // notice was about, so the notice goes with it.
-                if read.overdue {
-                    self.status.set_notice(None);
+                // notice was about, so the notice goes with it — its own
+                // notice, and only that one: the slot is shared, and anything
+                // written there since is a newer sentence somebody is owed.
+                if read.said {
+                    self.status.clear_notice_if(SLOW_TASK_READ);
                     self.dirty = true;
                 }
 
@@ -2434,8 +2445,14 @@ impl App {
             }
             Err(error) => {
                 // A panic inside the read; its message is all there is, and
-                // the last good list is better than an empty one.
+                // the last good list is better than an empty one. The sentence
+                // about it being slow outlived the read either way, so it goes
+                // here for the same reason it goes above.
                 tracing::debug!(%error, "the shared task list read failed");
+                if read.said {
+                    self.status.clear_notice_if(SLOW_TASK_READ);
+                    self.dirty = true;
+                }
 
                 None
             }
@@ -2449,10 +2466,16 @@ impl App {
             return;
         }
         self.tasks = tasks;
+        // Exhaustive rather than `matches!` for `shares_the_list`'s reason: a
+        // fourth status — blocked, cancelled — is a decision about what
+        // `open/total` counts, and a wildcard would make it silently closed.
         let open = self
             .tasks
             .iter()
-            .filter(|task| matches!(task.status, TaskStatus::Pending | TaskStatus::InProgress))
+            .filter(|task| match task.status {
+                TaskStatus::Pending | TaskStatus::InProgress => true,
+                TaskStatus::Completed => false,
+            })
             .count();
         self.status.set_task_list(open, self.tasks.len());
         self.dirty = true;
@@ -7770,10 +7793,14 @@ fn payload(message: &Delivered) -> ganja_protocol::team::PeerPayload {
 /// One in-flight read of the team's shared task list: the read itself, when
 /// it started, and whether its overrun has been said — [`SLOW_TASK_READ`] is
 /// one sentence about one read, not one per tick for as long as it hangs.
+///
+/// `said` records the sentence rather than the deadline it is about, which is
+/// what leaves a read that overran unwatched still able to say so once
+/// somebody looks; [`App::reap_task_read`] states why that matters.
 struct TaskRead {
     task: JoinHandle<Option<Vec<Summary>>>,
     started: Instant,
-    overdue: bool,
+    said: bool,
 }
 
 /// One in-flight `@`-menu walk: the fragment it answers, the token that

@@ -50,7 +50,7 @@ use ratatui::widgets::{Block, Clear, Paragraph, Widget as _};
 use unicode_width::UnicodeWidthStr as _;
 
 use crate::command::TeamSpawn;
-use crate::component::chat::{RESULT, clip};
+use crate::component::chat::{RESULT, clip, pad};
 use crate::component::{
     ACTION_HINTS, CHROME, INPUT_HINTS, LIST_HINTS, MARKER, MAX_HEIGHT, MAX_WIDTH, TwoStep,
     action_row, body_rows, clamped, first_visible,
@@ -904,21 +904,6 @@ fn printable(text: &str) -> String {
         .collect()
 }
 
-/// `text` followed by the spaces that bring it to `width` **display
-/// columns**.
-///
-/// `{text:<width$}` counts `char`s, and every column this dialog lines its
-/// rows up against was measured with [`unicode_width`] — so a member name, a
-/// task id or an owner holding one East Asian glyph was padded two columns too
-/// wide and took the column after it with it. Those three are the padded
-/// columns that hold text somebody else wrote; the backend and the status
-/// beside them are fixed ASCII spellings of an enum. The two measurements have
-/// to be the same one, and this is where they are made so: it is what a member
-/// row and a task row both pad through, so a fix on one is a fix on both.
-fn pad(text: &str, width: usize) -> String {
-    format!("{text}{}", " ".repeat(width.saturating_sub(text.width())))
-}
-
 /// How a task's owner is listed: the member's name, or the word the
 /// `task_list` tool answers with for a task nobody holds.
 fn owner_label(owner: &str) -> &str {
@@ -932,6 +917,12 @@ fn owner_label(owner: &str) -> &str {
 /// What was cut is admitted above what is shown rather than below it — the
 /// transcript's own posture for a clamped call log, and the one that keeps the
 /// newest line closest to the eye.
+///
+/// A call's text goes through [`printable`] for the reason a task's does: it
+/// is composed from arguments the model chose, so a control character in a
+/// path or a pattern arrives here and would be drawn as nothing at all. The
+/// line admitting what was cut is this file's own arithmetic and carries none
+/// of that text, which is why only the calls go through it.
 fn ring_rows(calls: &[String], width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let hidden = calls.len().saturating_sub(RING_LINES);
     let mut lines = Vec::new();
@@ -948,10 +939,9 @@ fn ring_rows(calls: &[String], width: usize, theme: &Theme) -> Vec<Line<'static>
         ));
     }
     lines.extend(
-        calls
-            .iter()
-            .skip(hidden)
-            .map(|call| Line::styled(clip(&format!("{RESULT}{call}"), width), theme.dim)),
+        calls.iter().skip(hidden).map(|call| {
+            Line::styled(clip(&printable(&format!("{RESULT}{call}")), width), theme.dim)
+        }),
     );
 
     lines

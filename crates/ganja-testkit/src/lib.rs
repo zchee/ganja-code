@@ -43,7 +43,7 @@ pub use session::{
     set_aside_of,
 };
 pub use subagent::{RecordingSpawner, ScriptedSubagents};
-pub use tasklist::{StaticTasks, task_summary};
+pub use tasklist::{StaticTasks, task, task_summary};
 pub use teammate::{
     AllowSpawn, LEAD_SESSION_ID, RecordedSpawns, RunnerHarness, TASK, TEAM, backends, caller,
     caller_with, eventually, externals, flooded_inbox, seed_team_file, spawn, spawn_with_prompt,

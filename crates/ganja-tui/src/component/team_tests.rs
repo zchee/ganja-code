@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use ganja_protocol::{MemberBackend, MemberView, TeamView};
-use ganja_testkit::RecordingSpawner;
+use ganja_testkit::{RecordingSpawner, task};
 use ganja_tool::Tool as _;
 use ganja_tool::task::{Offered, Subagents, TaskTool, TeammateSpawn, Teammated};
 use ganja_tool::tasklist::{Status, Summary};
@@ -47,17 +47,6 @@ fn members() -> Vec<Row> {
 
 fn dialog() -> Team {
     Team::new(members(), Vec::new())
-}
-
-/// One task on the shared list, as the engine's listing hands it over.
-fn task(id: &str, status: Status, owner: &str, subject: &str, blocked_by: &[&str]) -> Summary {
-    Summary {
-        id: id.to_owned(),
-        subject: subject.to_owned(),
-        status,
-        owner: owner.to_owned(),
-        blocked_by: blocked_by.iter().map(|id| (*id).to_owned()).collect(),
-    }
 }
 
 /// Whether a rendered line *is* the Tasks heading, once the dialog's border
@@ -292,6 +281,28 @@ fn a_ring_longer_than_the_row_shows_admits_the_cut() {
     assert!(screen.contains("+2 earlier calls"), "got:\n{screen}");
     assert!(screen.contains("\u{23bf} f"), "the newest is shown:\n{screen}");
     assert!(!screen.contains("\u{23bf} a"), "the oldest is cut:\n{screen}");
+}
+
+/// A call in the ring is model-written text too, and gets the same guard a
+/// task's fields get.
+///
+/// The `describe` a tool answers with is composed from the arguments the
+/// model chose — a path, a pattern, a subject — so a control character in one
+/// reaches this row exactly as it reaches a task's. Left alone it is drawn
+/// zero-width, which is a call log quietly saying something other than what
+/// was called.
+#[test]
+fn a_control_character_in_a_recent_call_is_shown_rather_than_silently_swallowed() {
+    let screen = rendered(
+        &Team::new(vec![row("w1", MemberBackend::InProcess, &["grep(a\u{7}\u{8}b)"])], Vec::new()),
+        AREA,
+    );
+
+    assert_eq!(
+        screen.matches(char::REPLACEMENT_CHARACTER).count(),
+        2,
+        "both are shown rather than swallowed:\n{screen}"
+    );
 }
 
 /// Enter on a teammate opens Message and Shutdown; the lead's row offers
@@ -827,7 +838,9 @@ fn a_single_over_wide_task_line_is_cut_within_the_dialog() {
     // laid out against; the two spaces the row opens with are trimmed off the
     // measured content, so this is a ceiling rather than the exact width.
     assert!(line.width() <= 34, "{} columns is too wide:\n{screen}", line.width());
-    assert!(line.starts_with("1  pending  unowned  wire the"), "got:\n{screen}");
+    // And the row itself, whole: the ceiling above would let an off-by-one
+    // through, and what the cut kept is the thing this test is about.
+    assert_eq!(line, "1  pending  unowned  wire the pa", "got:\n{screen}");
     assert!(!screen.contains(&subject), "and the tail of it is gone:\n{screen}");
     assert!(
         screen

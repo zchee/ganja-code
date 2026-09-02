@@ -514,6 +514,19 @@ impl Status {
         self.notice = notice;
     }
 
+    /// Takes the message down only if it is still `text`.
+    ///
+    /// The slot is one and unowned: whoever writes it last is what the bar
+    /// says, and a writer that later wants its own sentence gone has no way
+    /// of knowing whether it is still there. Clearing unconditionally would
+    /// wipe whatever was written in the meantime, and that sentence has no
+    /// second place to appear.
+    pub fn clear_notice_if(&mut self, text: &str) {
+        if self.notice.as_deref() == Some(text) {
+            self.notice = None;
+        }
+    }
+
     /// Shows what the session has spent so far.
     pub fn set_totals(&mut self, totals: Totals) {
         self.totals = Some(totals);

@@ -2328,6 +2328,20 @@ pub(crate) fn split_at_width(text: &str, width: usize) -> (&str, &str) {
     (text, "")
 }
 
+/// `text` followed by the spaces that bring it to `width` **display
+/// columns**.
+///
+/// [`clip`]'s twin, and here for that reason: `{text:<width$}` counts `char`s,
+/// and every column a dialog lines its rows up against is measured with
+/// [`unicode_width`] — so a name, a task id or an owner holding one East Asian
+/// glyph is padded two columns too wide and takes the column after it with it.
+/// The measuring and the padding have to be the one measurement, and a helper
+/// private to the dialog that first needed it is how the next dialog comes to
+/// write the mismatch again.
+pub(crate) fn pad(text: &str, width: usize) -> String {
+    format!("{text}{}", " ".repeat(width.saturating_sub(text.width())))
+}
+
 /// `text` cut to `width` display columns.
 pub(crate) fn clip(text: &str, width: usize) -> String {
     if text.width() <= width {

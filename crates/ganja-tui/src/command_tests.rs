@@ -1,7 +1,7 @@
 use super::{
     Action, BACKENDS, COMMANDS, Category, Choice, Completion, EngineCommand, SPAWN_GRAMMAR,
     Surface, Team, TeamSpawn, dropdown_matches, inline_hint, is_bare_exit, lookup, matches,
-    submitted, team, team_completion, value_matches,
+    subcommands, submitted, team, team_completion, value_matches,
 };
 
 /// The commands the engine offers a session that loaded no config: one,
@@ -483,6 +483,46 @@ fn the_old_team_spelling_names_no_command_at_all() {
     for text in ["/team", "/team list", "/team spawn w1 --backend ganja", "/team shutdown w1"] {
         assert_eq!(team(text), None, "{text:?} is the engine's line now, not this crate's");
     }
+}
+
+/// `/teammate` takes exactly three subcommands, and both of this crate's
+/// readers of them agree on which three.
+///
+/// The roster the completion menu offers and the grammar [`team`] parses are
+/// two separate spellings of one set, and a fourth word added to either alone
+/// would be a subcommand that completes but does not run, or runs but is
+/// never offered.
+///
+/// It is also the only place the drift can be seen at all. `ganja-core`'s
+/// `command::ROSTER_SUBCOMMANDS` restates two of these words by hand — the
+/// engine sits below this crate and cannot name its types, so `/team`'s
+/// misdirection door matches on literals — and nothing there can compare them
+/// against the grammar they are copied from. A fourth subcommand landing here
+/// is what that constant would then be missing, so the words are pinned where
+/// somebody adding one will read them.
+#[test]
+fn the_teammate_grammar_takes_exactly_three_subcommands() {
+    let mut offered: Vec<String> =
+        subcommands().into_iter().map(|candidate| candidate.text).collect();
+    offered.sort();
+
+    assert_eq!(offered, ["list", "shutdown", "spawn"], "the menu offers these three");
+
+    // Asked of the grammar separately, since the menu is not what runs: what
+    // a word outside the set earns is the `has no` refusal, and what a word
+    // inside it earns is anything but — `list` with an argument is still
+    // refused, for saying too much rather than for being unknown.
+    for word in ["list", "shutdown", "spawn"] {
+        let answer = team(&format!("/teammate {word} w1"));
+        assert!(
+            !matches!(&answer, Some(Team::Refused(refusal)) if refusal.contains("has no")),
+            "{word:?} is one the grammar takes: {answer:?}"
+        );
+    }
+    assert!(
+        matches!(team("/teammate restart w1"), Some(Team::Refused(refusal)) if refusal.contains("has no")),
+        "and a fourth word is not"
+    );
 }
 
 /// And the alias reaches every one of those doors, not just the roster row
