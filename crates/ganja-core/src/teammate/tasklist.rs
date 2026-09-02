@@ -132,7 +132,14 @@ fn refusal(error: TaskError) -> TaskFailure {
         | TaskError::NoSuchTask { .. }
         | TaskError::AlreadyOwned { .. }
         | TaskError::CounterExhausted
-        | TaskError::SchemaInvalid { .. } => error.to_string(),
+        | TaskError::SchemaInvalid { .. }
+        // The cap renders the number it refused and the number it allows, and
+        // the model's next move is to split the call — which is an act, so it
+        // is the store's own sentence rather than machinery.
+        | TaskError::TooManyCounterparts { .. }
+        // A name that is not a document is one the model can go and look at,
+        // which is why it is rendered whole rather than as machinery.
+        | TaskError::NotADocument { .. } => error.to_string(),
         TaskError::Lock(_) | TaskError::Io(_) | TaskError::Json(_) => {
             format!("{UNREACHABLE}: {error}")
         }

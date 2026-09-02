@@ -6,8 +6,8 @@ use indexmap::IndexMap;
 use serde_json::{Value, json};
 
 use super::{
-    COUNTER, Comment, ID_MAX, NewTask, Store, TASK_KEYS, Task, TaskError, TaskId, TaskStatus,
-    Update, write,
+    COUNTER, Comment, ID_MAX, MAX_COUNTERPARTS, MAX_DOCUMENT_BYTES, NewTask, Store, TASK_KEYS,
+    Task, TaskError, TaskId, TaskStatus, Update, write,
 };
 use crate::lock::LockError;
 use crate::record::document;
@@ -37,6 +37,30 @@ fn filled() -> Task {
         comments: vec![Comment::new("team-lead", "started", "2026-09-02T10:00:00.000Z")],
         extra: IndexMap::new(),
     }
+}
+
+/// Takes a task document's lock the way a *peer* takes it: a bare `mkdir` on
+/// the document's real path, through no code of ours, so the in-process half
+/// of the hold is not held and what a store spends is the on-disk ladder —
+/// `a_peers_hold_stops_every_write_and_none_of_the_reads` explains why that is
+/// the half worth simulating. Answers with the directory, for the caller to
+/// remove.
+fn peer_hold(store: &Store, id: &TaskId) -> PathBuf {
+    let real = fs::canonicalize(store.path_of(id)).expect("the document is real");
+    let lock = PathBuf::from(format!("{}.lock", real.display()));
+    fs::create_dir(&lock).expect("a peer takes the lock");
+
+    lock
+}
+
+/// Three tasks, so a test about edges has both ends of one to name.
+fn three(store: &Store) -> [TaskId; 3] {
+    [1, 2, 3].map(|nth| {
+        store
+            .create(NewTask::new(format!("task {nth}"), "description"))
+            .expect("a task is created")
+            .id
+    })
 }
 
 #[test]
@@ -144,6 +168,330 @@ fn a_rebuilt_counter_reissues_the_ids_deleted_above_the_highest_survivor() {
     // nobody checked.
     let next = store.create(NewTask::new("subject", "description")).expect("a task is created");
     assert_eq!(next.id, ids[2], "without the counter, the highest survivor decides");
+}
+
+#[test]
+fn a_counter_behind_the_documents_on_disk_never_reissues_a_live_id() {
+    let (_home, store) = store();
+    three(&store);
+
+    // What a power loss leaves: the rename that files a document is not
+    // fsynced, so the directory can hold 3 while the counter still says 1. A
+    // copy of a team directory taken mid-flight is the same shape.
+    fs::write(store.counter_path(), "1").expect("the counter is writable");
+
+    let next = store.create(NewTask::new("task 4", "description")).expect("a task is created");
+    assert_eq!(
+        next.id.to_string(),
+        "4",
+        "a create issues past the documents, not past the counter"
+    );
+
+    let listed = store.list().expect("the list reads");
+    let subjects: Vec<&str> = listed.iter().map(|summary| summary.subject.as_str()).collect();
+    assert_eq!(
+        subjects,
+        ["task 1", "task 2", "task 3", "task 4"],
+        "and renames over none of them on the way",
+    );
+}
+
+#[test]
+fn a_dependency_is_recorded_on_both_tasks() {
+    let (_home, store) = store();
+    let [first, second, third] = three(&store);
+
+    let blocking = store
+        .update(&first, Update { add_blocks: vec![second], ..Update::default() })
+        .expect("an edge wires up");
+    assert_eq!(blocking.blocks, [second]);
+    assert_eq!(
+        store.get(&second).expect("the counterpart reads").blocked_by,
+        [first],
+        "a listing renders blockedBy, so the end that was not named decides whether it reads free",
+    );
+
+    let blocked = store
+        .update(&first, Update { add_blocked_by: vec![third], ..Update::default() })
+        .expect("the other direction wires up too");
+    assert_eq!(blocked.blocked_by, [third]);
+    assert_eq!(store.get(&third).expect("the counterpart reads").blocks, [first]);
+}
+
+#[test]
+fn an_edge_naming_a_task_nobody_filed_refuses_the_whole_update() {
+    let (_home, store) = store();
+    let task = store.create(NewTask::new("subject", "description")).expect("a task is created");
+    let missing = TaskId::parse("9").expect("a valid id");
+
+    let refused = store
+        .update(
+            &task.id,
+            Update {
+                subject: Some("moved".to_owned()),
+                add_blocks: vec![missing],
+                ..Update::default()
+            },
+        )
+        .expect_err("an edge has two ends and one of them is not there");
+    assert!(matches!(refused, TaskError::NoSuchTask { id } if id == missing), "{refused}");
+    assert_eq!(
+        store.get(&task.id).expect("the task reads").subject,
+        "subject",
+        "and the half that could have been written was not",
+    );
+}
+
+#[test]
+fn an_edge_writes_neither_end_until_it_holds_both() {
+    let (_home, store) = store();
+    let [first, second, _third] = three(&store);
+
+    // Both orderings of one pair: the counterpart below the task being
+    // updated, then above it. Whichever end a peer holds, every hold is taken
+    // before any document is read, so the refusal leaves both ends as they
+    // were.
+    for (held, updated) in [(first, second), (second, first)] {
+        let lock = peer_hold(&store, &held);
+
+        let refused = store
+            .update(&updated, Update { add_blocks: vec![held], ..Update::default() })
+            .expect_err("a peer holds one end");
+        assert!(matches!(refused, TaskError::Lock(LockError::Held { .. })), "{refused:?}");
+        assert!(store.get(&updated).expect("the task reads").blocks.is_empty());
+        assert!(store.get(&held).expect("the counterpart reads").blocked_by.is_empty());
+
+        fs::remove_dir(&lock).expect("the peer releases");
+    }
+}
+
+#[test]
+fn a_task_that_blocks_itself_takes_one_hold_rather_than_two() {
+    let (_home, store) = store();
+    let task = store.create(NewTask::new("subject", "description")).expect("a task is created");
+
+    // Taking a hold this thread already holds never returns, so the hold set
+    // is deduplicated. A regression here hangs rather than fails, which is
+    // exactly why it is pinned.
+    let held = store
+        .update(&task.id, Update { add_blocks: vec![task.id], ..Update::default() })
+        .expect("a self-edge is one document, written once");
+
+    assert_eq!(held.blocks, [task.id]);
+    assert_eq!(held.blocked_by, [task.id], "both ends of a self-edge are the same document");
+}
+
+#[test]
+fn a_document_the_schema_refuses_leaves_every_other_one_as_it_was() {
+    let (_home, store) = store();
+    let [first, second, _third] = three(&store);
+
+    // A comment is the reachable way to hand an update a document a write
+    // would refuse: a passthrough key the shape declares cannot arrive off
+    // disk, serde refusing a duplicate declared key outright. It lands on the
+    // task the call names, and the counterpart *below* it is written first —
+    // which is the ordering that decides whether a refusal is a refusal or
+    // half an edge.
+    let mut comment = Comment::new("team-lead", "started", "2026-09-02T10:00:00.000Z");
+    comment.extra.insert("text".to_owned(), json!("shadowed"));
+
+    let refused = store
+        .update(
+            &second,
+            Update { add_blocked_by: vec![first], add_comment: Some(comment), ..Update::default() },
+        )
+        .expect_err("a document this call would write does not match the schema");
+    assert!(matches!(refused, TaskError::SchemaInvalid { .. }), "{refused:?}");
+
+    assert!(
+        store.get(&first).expect("the counterpart reads").blocks.is_empty(),
+        "the counterpart is the document written first, so it is where a half-applied call shows",
+    );
+    let named = store.get(&second).expect("the task reads");
+    assert!(named.blocked_by.is_empty(), "and the end the call named is untouched too");
+    assert!(named.comments.is_empty());
+}
+
+#[test]
+fn an_update_naming_more_counterparts_than_the_cap_is_refused_before_a_hold_is_taken() {
+    let (_home, store) = store();
+    let filed: Vec<TaskId> = (1..=MAX_COUNTERPARTS + 2)
+        .map(|nth| {
+            store
+                .create(NewTask::new(format!("task {nth}"), "description"))
+                .expect("a task is created")
+                .id
+        })
+        .collect();
+    let (task, counterparts) = filed.split_first().expect("a task and the ids it could name");
+
+    // A peer holds the first document, so a call that reached the holds at all
+    // would spend the ladder and report the hold. The cap has to answer ahead
+    // of that: what it bounds is exactly the time that ladder costs, once per
+    // counterpart, with the first document held throughout.
+    let lock = peer_hold(&store, task);
+
+    let refused = store
+        .update(task, Update { add_blocks: counterparts.to_vec(), ..Update::default() })
+        .expect_err("one past the cap is past the cap");
+    assert!(
+        matches!(refused, TaskError::TooManyCounterparts { named } if named == counterparts.len()),
+        "the refusal is the cap rather than the peer's hold: {refused:?}",
+    );
+    assert!(
+        refused.to_string().contains(&MAX_COUNTERPARTS.to_string()),
+        "and it says how many a call may name: {refused}",
+    );
+
+    fs::remove_dir(&lock).expect("the peer releases");
+    let wired = store
+        .update(
+            task,
+            Update { add_blocks: counterparts[..MAX_COUNTERPARTS].to_vec(), ..Update::default() },
+        )
+        .expect("the cap is what a call may name, not what it must stay under");
+    assert_eq!(wired.blocks.len(), MAX_COUNTERPARTS);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_counterpart_that_is_one_file_under_two_names_is_refused_rather_than_re_entered() {
+    use std::os::unix::fs::symlink;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let (_home, store) = store();
+    let [first, planted, _third] = three(&store);
+
+    // Two ids, one file. `lock::acquire_unseeded` locks the target's *real*
+    // path, so a hold on 2 and a hold on 1 are one key, and the second one
+    // parks on a condvar with no timeout — the dedupe is on the id and cannot
+    // see this, which is why the stamp runs before any hold is taken.
+    fs::remove_file(store.path_of(&planted)).expect("the document is removable");
+    symlink(store.path_of(&first), store.path_of(&planted)).expect("a link is plantable");
+
+    let (answered, answer) = mpsc::channel();
+    let elsewhere = store.clone();
+    std::thread::spawn(move || {
+        let refused =
+            elsewhere.update(&first, Update { add_blocks: vec![planted], ..Update::default() });
+        let _ = answered.send(refused.err());
+    });
+
+    // The bound is the assertion: a regression here does not fail, it hangs.
+    let refused = answer
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the call answers rather than waiting on a hold this thread already holds");
+    assert!(matches!(refused, Some(TaskError::NotADocument { .. })), "{refused:?}");
+    assert!(
+        store.get(&first).expect("the task reads").blocks.is_empty(),
+        "and neither name was wired",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_name_that_is_not_a_regular_file_is_skipped_rather_than_read() {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::symlink;
+
+    let (_home, store) = store();
+    let [first, planted, _third] = three(&store);
+
+    // A symlink onto a real document: followed, it would read task 1 back
+    // under task 2's name.
+    fs::remove_file(store.path_of(&planted)).expect("the document is removable");
+    symlink(store.path_of(&first), store.path_of(&planted)).expect("a link is plantable");
+
+    // A FIFO: opened, this read would never return — and it runs on every
+    // poll of a list somebody is watching.
+    let fifo = store.dir().join("4.json");
+    let name = CString::new(fifo.as_os_str().as_bytes()).expect("a path with no NUL");
+    // SAFETY: `mkfifo` reads the NUL-terminated name and answers with a
+    // status. The `CString` outlives the call, and nothing it returns is a
+    // pointer this test dereferences.
+    let made = unsafe { libc::mkfifo(name.as_ptr(), 0o600) };
+    assert_eq!(made, 0, "the fifo is created: {}", std::io::Error::last_os_error());
+
+    // And a directory wearing a document's name.
+    fs::create_dir(store.dir().join("5.json")).expect("a directory is plantable");
+
+    let listed = store.list().expect("a planted name does not fail the list");
+    let ids: Vec<u64> = listed.iter().map(|summary| summary.id.number()).collect();
+    assert_eq!(ids, [1, 3], "what a peer planted is skipped, and the rest of the list still reads");
+
+    for refused in [2, 4, 5] {
+        let id = TaskId::parse(&refused.to_string()).expect("a valid id");
+        assert!(
+            matches!(store.get(&id), Err(TaskError::NotADocument { .. })),
+            "asking for {refused} directly says so rather than reading it",
+        );
+    }
+
+    let next = store.create(NewTask::new("task 6", "description")).expect("a task is created");
+    assert_eq!(next.id.to_string(), "6", "and the list can still be added to around them");
+}
+
+#[test]
+fn a_document_larger_than_a_task_can_be_is_skipped_rather_than_read() {
+    let (_home, store) = store();
+    let [_first, planted, _third] = three(&store);
+
+    // Valid JSON either way: what is refused is the size, not the shape. The
+    // padding is plain ASCII, so a byte of description is a byte of document.
+    let mut task = filled();
+    task.id = planted;
+    task.description = String::new();
+    let bare = document(&task).expect("a task encodes").len() as u64;
+    task.description = "a".repeat((MAX_DOCUMENT_BYTES - bare) as usize);
+    let at_the_bound = document(&task).expect("a task encodes");
+    assert_eq!(at_the_bound.len() as u64, MAX_DOCUMENT_BYTES, "the padding lands on the bound");
+
+    fs::write(store.path_of(&planted), &at_the_bound).expect("the document is writable");
+    assert_eq!(
+        store.get(&planted).expect("a document on the bound reads").id,
+        planted,
+        "the bound is what a document may weigh, not what it must stay under",
+    );
+
+    task.description.push('a');
+    fs::write(store.path_of(&planted), document(&task).expect("a task encodes"))
+        .expect("the document is writable");
+
+    assert!(
+        matches!(store.get(&planted), Err(TaskError::NotADocument { .. })),
+        "one byte past it is not read at all",
+    );
+    let listed = store.list().expect("an oversized document does not fail the list");
+    let ids: Vec<u64> = listed.iter().map(|summary| summary.id.number()).collect();
+    assert_eq!(ids, [1, 3]);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_counter_planted_as_a_symlink_is_repaired_rather_than_followed() {
+    use std::os::unix::fs::symlink;
+
+    let (home, store) = store();
+    store.create(NewTask::new("subject", "description")).expect("a task is created");
+
+    let elsewhere = home.path().join("elsewhere");
+    fs::write(&elsewhere, "9999").expect("the target is writable");
+    fs::remove_file(store.counter_path()).expect("the counter is removable");
+    symlink(&elsewhere, store.counter_path()).expect("a link is plantable");
+
+    let next = store.create(NewTask::new("subject", "description")).expect("a create still lands");
+    assert_eq!(next.id.to_string(), "2", "a counter that is not a regular file is not followed");
+    assert_eq!(
+        fs::read_to_string(&elsewhere).expect("the target reads"),
+        "9999",
+        "and the repair renames over the name rather than writing through it",
+    );
+    assert!(
+        store.counter_path().symlink_metadata().expect("the counter is there").is_file(),
+        "what stands there afterwards is a counter",
+    );
 }
 
 #[test]
@@ -279,13 +627,12 @@ fn comments_only_ever_grow() {
 #[test]
 fn a_blocker_added_twice_is_held_once() {
     let (_home, store) = store();
-    let task = store.create(NewTask::new("subject", "description")).expect("a task is created");
-    let second = TaskId::parse("2").expect("a valid id");
-    let third = TaskId::parse("3").expect("a valid id");
+    // Both ends of an edge are written, so both ends have to be tasks.
+    let [first, second, third] = three(&store);
 
     store
         .update(
-            &task.id,
+            &first,
             Update {
                 add_blocked_by: vec![second, third],
                 add_blocks: vec![third],
@@ -294,11 +641,16 @@ fn a_blocker_added_twice_is_held_once() {
         )
         .expect("blockers wire up");
     let held = store
-        .update(&task.id, Update { add_blocked_by: vec![second], ..Update::default() })
+        .update(&first, Update { add_blocked_by: vec![second], ..Update::default() })
         .expect("a repeat wires up");
 
     assert_eq!(held.blocked_by, [second, third], "the order ids arrived in is the order kept");
     assert_eq!(held.blocks, [third]);
+    assert_eq!(
+        store.get(&second).expect("the counterpart reads").blocks,
+        [first],
+        "held once on the far end too: the repeat added nothing there either",
+    );
 }
 
 #[test]
@@ -565,4 +917,22 @@ fn a_peers_hold_stops_every_write_and_none_of_the_reads() {
         store.claim(&task.id, "worker-1").expect("the released task claims").owner,
         "worker-1"
     );
+}
+
+#[test]
+fn a_planted_name_at_the_top_of_the_id_space_does_not_wedge_every_create() {
+    let (_home, store) = store();
+    three(&store);
+    // The name alone and nothing behind it, twice over: an empty file and a
+    // directory, each spelt like the last id there is. A name that is no
+    // document must not move the issue point, or every create from here on
+    // would be refused as the end of the id space.
+    fs::write(store.dir().join(format!("{ID_MAX}.json")), "").expect("the name is plantable");
+    fs::create_dir(store.dir().join(format!("{}.json", ID_MAX - 1)))
+        .expect("the directory is plantable");
+
+    let next = store
+        .create(NewTask::new("task 4", "description"))
+        .expect("a name that is no document moves nothing");
+    assert_eq!(next.id.to_string(), "4", "issued past the documents, not past the names");
 }

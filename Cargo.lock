@@ -1489,6 +1489,7 @@ dependencies = [
  "ganja-protocol",
  "indexmap",
  "jiff",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",

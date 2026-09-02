@@ -128,9 +128,14 @@ stopped. Reassigning is therefore two calls — release it, then claim it for \
 whoever takes it next.
 
 `metadata` merges into what is already there, and a null value removes its \
-key. `add_blocks` and `add_blocked_by` add dependencies and remove none. \
-`add_comment` appends one comment; who wrote it is this session's own \
-identity rather than anything a call can choose.";
+key. `add_blocks` and `add_blocked_by` add dependencies and remove none, and \
+each dependency is recorded on both tasks — what this one blocks is blocked \
+by it — so an id naming no task refuses the whole call rather than leaving \
+half an edge behind. For that reason one call wires at most eight other tasks \
+between the two lists, and naming more refuses rather than truncates; wire a \
+longer list a few calls at a time. `add_comment` appends one comment; who \
+wrote it is this session's own identity rather than anything a call can \
+choose.";
 
 /// What the model is told `task_list` is for.
 const LIST_DESCRIPTION: &str = "\
@@ -304,8 +309,13 @@ pub struct Change {
     /// already carries keeps where it already is.
     pub metadata: serde_json::Map<String, serde_json::Value>,
     /// Ids to add to what this task holds up.
+    ///
+    /// Recorded on both tasks by whatever keeps the list, which is why an id
+    /// nothing is filed under refuses the call: half an edge would leave a
+    /// listing calling the other task free.
     pub add_blocks: Vec<String>,
-    /// Ids to add to what holds this task up.
+    /// Ids to add to what holds this task up, recorded on both tasks the same
+    /// way.
     pub add_blocked_by: Vec<String>,
     /// One comment to append, as its text alone: the author is the list's to
     /// stamp.
@@ -386,7 +396,8 @@ pub trait TaskList: std::fmt::Debug + Send + Sync {
     ///
     /// [`TaskFailure`], carrying the one sentence the model reads next —
     /// including the refusal a claim earns when somebody already holds the
-    /// task, which names the holder.
+    /// task, which names the holder, and the one an edge earns when it names
+    /// a task nothing is filed under.
     async fn update(&self, id: &str, change: Change) -> Result<Record, TaskFailure>;
 
     /// Removes the task `id` names, permanently.

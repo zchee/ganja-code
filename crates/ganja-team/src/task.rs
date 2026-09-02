@@ -30,13 +30,30 @@
 //! one of them silently loses its task. So the next id comes from
 //! [`COUNTER`], read-and-bumped under its own hold, and **a standing counter
 //! never issues an id twice**: deleting task 3 leaves a gap where 3 was, and
-//! the next create still gets 4. A counter that has gone missing is rebuilt
-//! from the highest id on disk rather than restarted at 1, so losing the file
-//! cannot hand a fresh task the id of one that still exists. What it *can* do
-//! is issue again the ids of tasks deleted above the highest survivor — the
+//! the next create still gets 4. **The documents on disk are read on every
+//! create all the same**, and the id issued is one past whichever of the two
+//! is higher — a counter can be *behind* the directory it counts as easily as
+//! it can be missing from it. The rename that files a document is not fsynced
+//! — `mailbox::write_atomically` says why, in a doc this module cannot link
+//! to, that function being crate-private — so a power loss can leave
+//! `4.json` on disk beside a counter that still says 3; a team directory
+//! restored from a copy carries whatever the counter held when the copy was
+//! taken. A counter trusted on its own there would issue 4 a second time and
+//! the create would rename straight over a live task, which is the one
+//! outcome this whole scheme exists to prevent — so a create pays one
+//! `read_dir`, the price the rebuild path already paid. What no repair can
+//! recover is the ids of tasks deleted above the highest survivor — the
 //! counter was the only record those were ever issued — and a `blockedBy`
 //! still naming one of them then points at new work. That is pinned by test
 //! rather than left to be rediscovered.
+//!
+//! # What a delete leaves behind
+//!
+//! [`Store::delete`] removes one document and touches no other, so deleting A
+//! strands every edge that named it: B keeps a `blockedBy` pointing at an id
+//! nothing is filed under, and [`Store::update`]'s missing-counterpart refusal
+//! means `add_blocked_by: [A]` cannot repair it either, A being exactly the id
+//! that refusal is about. Recorded as a follow-up rather than closed here.
 //!
 //! # What is somebody else's, and what is not
 //!
@@ -48,6 +65,13 @@
 //! crate uses is kept all the same — every shape here carries a
 //! `#[serde(flatten)] extra`, so a key written by a build this one has never
 //! met survives a rewrite in the position it arrived in.
+//!
+//! For the same reason a *name* in that directory is not yet a document: the
+//! writer that planted it need not have been a task list at all. So nothing
+//! here reads a path it has not first stamped — a regular file, within
+//! [`MAX_DOCUMENT_BYTES`] — because following a symlink would read somebody
+//! else's file into a team's list and opening a FIFO would park the reader for
+//! good, on a listing a lead's own render loop polls.
 //!
 //! The lock is [`crate::lock`]'s, unchanged: the same `mkdir` protocol, the
 //! same mtime staleness, the same ladder. A task document takes
@@ -63,6 +87,7 @@
 //! of the crate treats a message body: never in a log line, and rendered as a
 //! size or a key set by the [`Debug`] implementations below.
 
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::{fmt, fs, io};
 
@@ -115,6 +140,10 @@ pub const REFUSED_COUNTER_EXHAUSTED: &str = "every id the grammar admits has bee
 /// Why a write was refused before it touched the directory.
 pub const REFUSED_SCHEMA: &str = "a task document does not match the task schema";
 
+/// Why an update naming a crowd of counterparts was refused.
+pub const REFUSED_TOO_MANY_COUNTERPARTS: &str =
+    "an update may wire only so many other tasks at once";
+
 /// Why a document was left out of a listing, when it would not decode.
 ///
 /// Deliberately says nothing more, and the reason is
@@ -124,6 +153,46 @@ pub const DROPPED_UNDECODABLE: &str = "the document is not a task this build can
 
 /// Why a document was left out of a listing, when it could not be read at all.
 pub const DROPPED_UNREADABLE: &str = "the document could not be read";
+
+/// Why a document was left out of a listing, when it is not a file this module
+/// will read at all.
+pub const DROPPED_NOT_A_DOCUMENT: &str = "the name is not a regular file of a size a task is";
+
+/// Why a name in the tasks directory was not read.
+///
+/// Names the bound in words rather than in bytes, because this is a sentence a
+/// person reads in a log; [`MAX_DOCUMENT_BYTES`] is the number it is about,
+/// and the two are one decision that moves together.
+pub const REFUSED_NOT_A_DOCUMENT: &str =
+    "a task document is a regular file no larger than a megabyte";
+
+/// The most a task document may weigh before this module declines to read it.
+///
+/// The bound is about the **reader**, not about how large a document could
+/// conceivably grow: every listing reads every document, and a listing is
+/// polled for as long as somebody is watching the list. A subject, a
+/// description, a metadata map and a comment thread — all of them prose
+/// written one tool call at a time — come nowhere near it; a megabyte is on
+/// the order of ten thousand hundred-byte comments on a single task. What it
+/// stops is a same-uid writer planting a name this store would then read
+/// without end, `/dev/zero` being the shortest way to say it.
+pub const MAX_DOCUMENT_BYTES: u64 = 1024 * 1024;
+
+/// How many other tasks one [`Store::update`] may wire at once.
+///
+/// The bound is about **how long the first hold is held**, not about how many
+/// blockers a task may end up carrying. An update takes every document's hold
+/// before it reads any, and a hold a peer already has costs the whole ladder —
+/// ≈655 ms — before it is even reported, so sixteen contended counterparts
+/// would hold the first document for over ten seconds. Ten seconds is
+/// [`lock::STALE`]: a peer would break a hold this process is still standing
+/// in, on the protocol's premise that a hold is one sub-second
+/// read-modify-write. Eight keeps that worst case near five seconds and is
+/// already past what a dependency list a person reads ever holds — a task
+/// wired to nine others in one call is a plan, not a task. Nothing stops a
+/// caller from adding more one call at a time; what is refused is doing it
+/// under a single hold.
+pub const MAX_COUNTERPARTS: usize = 8;
 
 /// A refusal or a failure on the way to a task document.
 ///
@@ -167,6 +236,25 @@ pub enum TaskError {
     SchemaInvalid {
         /// One sentence per offending key.
         issues: Vec<String>,
+    },
+    /// An update named more counterparts than [`MAX_COUNTERPARTS`].
+    ///
+    /// Carries the count rather than the ids: what the caller has to change is
+    /// how many it named, and the ids are its own arguments read back.
+    #[error("{REFUSED_TOO_MANY_COUNTERPARTS}: {named} named, {MAX_COUNTERPARTS} at most")]
+    TooManyCounterparts {
+        /// How many distinct other tasks the update named.
+        named: usize,
+    },
+    /// The path is not a regular file, or is larger than any task document.
+    ///
+    /// A path rather than an id, because the whole point of it is that what is
+    /// there is not a task: naming the file is what tells whoever reads this
+    /// which name to go and look at.
+    #[error("{REFUSED_NOT_A_DOCUMENT}: {}", path.display())]
+    NotADocument {
+        /// The name that is not a document.
+        path: PathBuf,
     },
     /// The lock could not be taken.
     #[error(transparent)]
@@ -530,8 +618,15 @@ pub struct Update {
     /// already had. An empty map changes nothing.
     pub metadata: IndexMap<String, Value>,
     /// Ids to add to `blocks`, skipping any already there.
+    ///
+    /// Each id named here is also written from the other end — this task lands
+    /// in that one's `blockedBy` — so the pair cannot disagree about the edge.
+    /// An id nothing is filed under refuses the whole update; see
+    /// [`Store::update`].
     pub add_blocks: Vec<TaskId>,
     /// Ids to add to `blockedBy`, skipping any already there.
+    ///
+    /// Mirrored the same way: this task lands in each named task's `blocks`.
     pub add_blocked_by: Vec<TaskId>,
     /// One comment to append.
     pub add_comment: Option<Comment>,
@@ -736,24 +831,139 @@ impl Store {
     /// updates to one task cannot interleave into a document holding half of
     /// each.
     ///
+    /// # A dependency is written on both tasks
+    ///
+    /// `add_blocks` and `add_blocked_by` each name the *other* task, and both
+    /// documents move: A blocking B **is** B blocked by A, and a list that
+    /// recorded only the side the call named would keep calling B free — a
+    /// listing renders `blockedBy`, and free-to-pick-up is what that field
+    /// answers. So an update carrying either list takes every document's hold
+    /// — the task's and each counterpart's — **lowest id first**, and reads
+    /// them all before it writes any.
+    ///
+    /// The order is the whole of what makes it deadlock-free: two updates
+    /// wiring A and B in opposite directions would otherwise each hold what
+    /// the other waits for, and the in-process half of a hold parks on a
+    /// condvar with no timeout by design ([`lock::acquire`]'s own hazard).
+    /// A counterpart named twice, or a task named as its own counterpart, is
+    /// **one** hold rather than two, for the same reason: re-entering a hold
+    /// this thread already holds never returns. The dedupe is on the id, and
+    /// two *different* ids can name one file — a counterpart planted as a
+    /// symlink resolves onto its target, which is the very path
+    /// [`lock::acquire_unseeded`] keys on — so every path in the set is
+    /// stamped the way every read here stamps one **before any hold is taken**,
+    /// and a name that is not a regular document refuses the call
+    /// with [`TaskError::NotADocument`]. That narrows the window rather than
+    /// closing it, as every read's stamp does: a swap between the stamp and
+    /// the hold still collapses two ids onto one key, and that half parks with
+    /// no timeout — which is why the test that plants one bounds itself. A
+    /// hard link needs no answer here: it
+    /// canonicalizes to itself, so it is two keys rather than one, and a write
+    /// through either name renames a fresh file over that name rather than
+    /// through it.
+    ///
+    /// At most [`MAX_COUNTERPARTS`] of them, counted after the dedupe and
+    /// refused before the first hold, because the first document's hold is
+    /// held while every other one is taken — that constant's own doc has the
+    /// arithmetic.
+    ///
+    /// A counterpart that does not exist **refuses the whole call** with
+    /// [`TaskError::NoSuchTask`], before a byte is written. Recording the half
+    /// that can be recorded is the failure this door exists to close: an edge
+    /// naming a task nobody filed is the dangling `blockedBy` this module's
+    /// counter note calls out, and a model that mistyped an id is better
+    /// served reading that than by a list that quietly disagrees with itself.
+    ///
+    /// Every refusal a write could raise is raised **before the first
+    /// rename**: the schema check a write makes is made over every document up
+    /// front, so a counterpart carrying a shadowing passthrough key leaves
+    /// the whole list as it was rather than half-written. What is left is
+    /// narrower and is stated rather than glossed — the writes are **not** one
+    /// transaction and cannot be, this store having no journal, so a crash or
+    /// an IO failure *between* two of them leaves the edge on one side. The
+    /// next update naming that pair repairs it, since both sides are appended
+    /// without duplication.
+    ///
     /// # Errors
     ///
-    /// [`TaskError::NoSuchTask`] when nothing is filed under the id,
-    /// [`TaskError::SchemaInvalid`] when the comment being appended carries a
-    /// passthrough key the comment shape itself declares — the metadata merge
-    /// is a nested map and cannot shadow a top-level one — and whatever the
-    /// lock or the filesystem returned.
+    /// [`TaskError::NoSuchTask`] when nothing is filed under the id or under
+    /// one an edge names, [`TaskError::NotADocument`] when one of those names
+    /// is not a document this module reads, [`TaskError::TooManyCounterparts`]
+    /// past [`MAX_COUNTERPARTS`], [`TaskError::SchemaInvalid`] when any
+    /// document this call would write carries a passthrough key its own shape
+    /// declares — the comment being appended is the reachable one; the
+    /// metadata merge is a nested map and cannot shadow a top-level key — and
+    /// whatever the locks or the filesystem returned.
     pub fn update(&self, id: &TaskId, update: Update) -> Result<Task, TaskError> {
-        let path = self.path_of(id);
-        let _hold = self.hold(&path, id)?;
+        // Every document this call writes, sorted and deduplicated: the order
+        // is the deadlock-free one and the dedupe is what keeps a self-edge
+        // from re-entering a hold this thread already has.
+        let mut held = vec![*id];
+        held.extend(&update.add_blocks);
+        held.extend(&update.add_blocked_by);
+        held.sort_unstable();
+        held.dedup();
 
-        let mut task = read(&path)?.ok_or(TaskError::NoSuchTask { id: *id })?;
-        apply(&mut task, update);
-        write(&path, &task)?;
+        // The task itself is in the set and is not a counterpart of its own.
+        let named = held.len() - 1;
+        if named > MAX_COUNTERPARTS {
+            return Err(TaskError::TooManyCounterparts { named });
+        }
+
+        // Before the first hold, because the hold is what a planted symlink
+        // turns into a wait nothing ends: `acquire_unseeded` canonicalizes its
+        // target, so two ids that are one file are one lock key, and taking it
+        // twice on this thread parks on a condvar with no timeout.
+        for filed in &held {
+            stamped(&self.path_of(filed))?;
+        }
+
+        let _holds = held
+            .iter()
+            .map(|filed| self.hold(&self.path_of(filed), filed))
+            .collect::<Result<Vec<lock::Guard>, TaskError>>()?;
+
+        // Read every document before writing any, so an edge naming a task
+        // nobody filed refuses the call rather than half-applying it.
+        let mut documents = Vec::with_capacity(held.len());
+        for filed in &held {
+            let path = self.path_of(filed);
+            let task = read(&path)?.ok_or(TaskError::NoSuchTask { id: *filed })?;
+            documents.push((path, task));
+        }
+
+        // The same edges from the other end, taken before `apply` consumes
+        // them: what this task blocks is blocked by this task, and what blocks
+        // it is what it is blocked by.
+        let blocks = update.add_blocks.clone();
+        let blocked_by = update.add_blocked_by.clone();
+        apply(&mut documents[at(&held, id)?].1, update);
+        for counterpart in &blocks {
+            extend_unique(&mut documents[at(&held, counterpart)?].1.blocked_by, [*id]);
+        }
+        for counterpart in &blocked_by {
+            extend_unique(&mut documents[at(&held, counterpart)?].1.blocks, [*id]);
+        }
+
+        // Every check a write would make, made before the first one runs: a
+        // refusal raised halfway through would leave the documents ahead of it
+        // renamed into place with the rest of the edge missing.
+        for (_, task) in &documents {
+            unshadowed(task)?;
+        }
+        for (path, task) in &documents {
+            write(path, task)?;
+        }
+
+        let task = documents
+            .into_iter()
+            .find_map(|(_, task)| (task.id == *id).then_some(task))
+            .ok_or(TaskError::NoSuchTask { id: *id })?;
         tracing::debug!(
             tasks = %self.dir.display(),
             %id,
             status = task.status.as_str(),
+            edges = blocks.len() + blocked_by.len(),
             "a task changed",
         );
 
@@ -848,13 +1058,31 @@ impl Store {
     /// The hold covers the read as well as the write, which is the whole point:
     /// two creates that both read "3" would both write "4" and both file
     /// `4.json`, and one of those tasks would silently never have existed.
+    ///
+    /// **The directory is read on every create**, not only when the counter is
+    /// missing, and the id issued is one past whichever of the two is higher —
+    /// the module note above says why a counter that parses cleanly can still
+    /// be behind the documents it counts, and what a create that trusted it
+    /// would rename over. The cost is one `read_dir` per create, which is what
+    /// the rebuild path already spent and what [`Store::list`] spends on every
+    /// poll.
     fn issue_id(&self) -> Result<TaskId, TaskError> {
         let path = self.counter_path();
         let _hold = lock::acquire_unseeded(&path)?;
 
-        let issued = self.last_issued(&path)?;
+        let highest = self.highest_id()?;
+        let issued = self.last_issued(&path, highest)?.max(highest);
         // `last_issued` bounds `issued` at `ID_MAX`, well short of `u64::MAX`.
-        let next = issued + 1;
+        let mut next = issued + 1;
+        // Documents set the issue point; a name that is not one — planted, or a
+        // document too damaged to read — is stepped over, never renamed over:
+        // counting such names would let one spelt like the last id there is
+        // refuse every create from then on, and issuing under one would put a
+        // fresh task where something already stands. Only an absent name is
+        // free.
+        while next <= ID_MAX && !matches!(stamped(&self.path_of(&TaskId(next))), Ok(false)) {
+            next += 1;
+        }
         if next > ID_MAX {
             return Err(TaskError::CounterExhausted);
         }
@@ -863,7 +1091,8 @@ impl Store {
         Ok(TaskId(next))
     }
 
-    /// The highest id the counter says it has issued.
+    /// The highest id the counter says it has issued, or `highest` when it
+    /// cannot say.
     ///
     /// A counter that is **not there** is a list nobody has created a task in
     /// yet — or one whose counter somebody removed. Both are answered from the
@@ -871,31 +1100,50 @@ impl Store {
     /// would hand a fresh task the id of one that still exists and quietly
     /// merge two pieces of work. A counter that is there and unreadable is the
     /// same repair with a line about it: the alternative is a list that cannot
-    /// be added to until somebody deletes a file by hand.
-    fn last_issued(&self, path: &Path) -> Result<u64, TaskError> {
-        let text = match fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return self.highest_id(),
-            Err(error) => return Err(error.into()),
+    /// be added to until somebody deletes a file by hand. So is one that is
+    /// not a regular file at all — the write that repairs it renames a fresh
+    /// file **over the name**, and a rename follows nothing.
+    ///
+    /// `highest` is passed in rather than read here so that a create walks the
+    /// directory exactly once, whichever of these arms it takes.
+    fn last_issued(&self, path: &Path, highest: u64) -> Result<u64, TaskError> {
+        let issued = match read_guarded(path) {
+            Ok(Some(text)) => text.trim().parse::<u64>().ok().filter(|issued| *issued <= ID_MAX),
+            Ok(None) => return Ok(highest),
+            Err(TaskError::NotADocument { .. }) => None,
+            Err(error) => return Err(error),
         };
-        match text.trim().parse::<u64>() {
-            Ok(issued) if issued <= ID_MAX => Ok(issued),
-            _ => {
-                let highest = self.highest_id()?;
-                tracing::warn!(
-                    counter = %path.display(),
-                    highest,
-                    "the task counter would not read and was rebuilt from the documents on disk",
-                );
+        let Some(issued) = issued else {
+            tracing::warn!(
+                counter = %path.display(),
+                highest,
+                "the task counter would not read and was rebuilt from the documents on disk",
+            );
 
-                Ok(highest)
-            }
-        }
+            return Ok(highest);
+        };
+
+        Ok(issued)
     }
 
-    /// The highest id any document in the directory is filed under, or zero.
+    /// The highest id any **document** in the directory is filed under, or
+    /// zero. A name alone moves nothing: a planted `<ID_MAX>.json` with no
+    /// document behind it would otherwise push the issue point past the end
+    /// of the id space and refuse every create from then on, with no repair
+    /// short of deleting it by hand. What the read guard would not read as a
+    /// document is not one here either — an absent, damaged or oversized name
+    /// is skipped — and only an I/O failure is an error.
     fn highest_id(&self) -> Result<u64, TaskError> {
-        Ok(self.ids()?.into_iter().map(TaskId::number).max().unwrap_or(0))
+        let mut highest = 0;
+        for id in self.ids()? {
+            match read(&self.path_of(&id)) {
+                Ok(Some(_)) => highest = highest.max(id.number()),
+                Ok(None) | Err(TaskError::NotADocument { .. } | TaskError::Json(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+
+        Ok(highest)
     }
 
     /// Every id the directory holds a document for, in whatever order the
@@ -933,39 +1181,111 @@ impl Store {
 fn dropped(error: &TaskError) -> &'static str {
     match error {
         TaskError::Json(_) => DROPPED_UNDECODABLE,
+        TaskError::NotADocument { .. } => DROPPED_NOT_A_DOCUMENT,
         _ => DROPPED_UNREADABLE,
     }
 }
 
 /// One task document, or [`None`] when there is no such file.
 fn read(path: &Path) -> Result<Option<Task>, TaskError> {
-    let text = match fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.into()),
-    };
+    let Some(text) = read_guarded(path)? else { return Ok(None) };
 
     Ok(Some(serde_json::from_str(&text)?))
 }
 
-/// One task document, encoded the way every other document in this crate is
-/// and landed atomically.
+/// The bytes at `path`, when what is there is something this module will read.
 ///
-/// The shadow check is [`crate::mailbox::write_bounded`]'s, for the same
-/// reason: a passthrough map holding a key the shape also declares would emit
-/// that key twice, and a reader taking the last one would read something the
-/// writer never meant. Unreachable from a document read off disk — a declared
-/// key is captured by its field before the flatten map sees it — and checked
-/// anyway, because hand-building a record is the one way to get there and the
-/// cost of being wrong is a corrupt shared file.
-fn write(path: &Path, task: &Task) -> Result<(), TaskError> {
+/// The tasks directory is one another process of this user's can write into —
+/// that is what makes the list shared — so a **name** in it is not yet a
+/// document, and the guard is what stands between a planted one and a reader.
+/// A symlink would redirect this read into somebody else's file; a FIFO would
+/// make it never return, and `/dev/zero` would make it never stop, on a
+/// listing that is polled for as long as anybody is watching the list. So
+/// [`stamped`] decides — a regular file, within [`MAX_DOCUMENT_BYTES`] — and
+/// anything else is [`TaskError::NotADocument`], which [`Store::list`] reports
+/// and skips exactly as it does a document that will not decode.
+///
+/// **The window is narrowed rather than closed**, and it is worth being exact
+/// about which half: a writer that swaps a regular file for a FIFO between
+/// this stamp and the open below can still park the reader. Closing that needs
+/// the open itself to carry `O_NOFOLLOW | O_NONBLOCK`, which nothing this
+/// crate ships can spell: `libc` is a dev-dependency here, taken on so a test
+/// can plant a real FIFO, and putting it in the shipped closure would be this
+/// crate's first system call outside `std`. What is here refuses every name a
+/// planted document can already be, and bounds the read on the open file,
+/// where no rename can reach it.
+fn read_guarded(path: &Path) -> Result<Option<String>, TaskError> {
+    let refuse = || TaskError::NotADocument { path: path.to_owned() };
+    if !stamped(path)? {
+        return Ok(None);
+    }
+
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        // Deleted between the stamp and the open: a race with a winner and no
+        // loser, which is how `Store::list` already reads a missing document.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+
+    // One byte past the bound, so a file that grew after its stamp is refused
+    // on what was actually read rather than on what was promised.
+    let mut text = String::new();
+    file.take(MAX_DOCUMENT_BYTES + 1).read_to_string(&mut text)?;
+    if text.len() as u64 > MAX_DOCUMENT_BYTES {
+        return Err(refuse());
+    }
+
+    Ok(Some(text))
+}
+
+/// Whether a document stands at `path` at all, on the link's own stamp.
+///
+/// The tasks directory is one another process of this user's can write into —
+/// that is what makes the list shared — so a **name** in it is not yet a
+/// document. `symlink_metadata` reports on the link rather than on its target,
+/// which is the whole point: [`fs::metadata`] would describe whatever a
+/// planted symlink points at, and then whoever asked would read it.
+///
+/// `false` is nothing there, which every caller reads as an absent task rather
+/// than as damage; [`TaskError::NotADocument`] is a name that is there and is
+/// not something this module will touch.
+fn stamped(path: &Path) -> Result<bool, TaskError> {
+    let stamp = match fs::symlink_metadata(path) {
+        Ok(stamp) => stamp,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    if !stamp.is_file() || stamp.len() > MAX_DOCUMENT_BYTES {
+        return Err(TaskError::NotADocument { path: path.to_owned() });
+    }
+
+    Ok(true)
+}
+
+/// The schema check [`write`] makes, on its own so a caller writing several
+/// documents can make every one of them before the first rename.
+///
+/// It is [`crate::mailbox::write_bounded`]'s check, for the same reason: a
+/// passthrough map holding a key the shape also declares would emit that key
+/// twice, and a reader taking the last one would read something the writer
+/// never meant. Unreachable from a document read off disk — serde refuses a
+/// duplicate declared key outright, so the flatten map never receives one —
+/// and checked anyway, because hand-building a record (the comment an update
+/// appends is one) is the way to get there and the cost of being wrong is a
+/// corrupt shared file.
+fn unshadowed(task: &Task) -> Result<(), TaskError> {
     let mut issues = shadowed(&task.extra, &TASK_KEYS);
     for comment in &task.comments {
         issues.extend(shadowed(&comment.extra, &COMMENT_KEYS));
     }
-    if !issues.is_empty() {
-        return Err(TaskError::SchemaInvalid { issues });
-    }
+    if issues.is_empty() { Ok(()) } else { Err(TaskError::SchemaInvalid { issues }) }
+}
+
+/// One task document, encoded the way every other document in this crate is
+/// and landed atomically.
+fn write(path: &Path, task: &Task) -> Result<(), TaskError> {
+    unshadowed(task)?;
     write_atomically(path, document(task)?.as_bytes())?;
 
     Ok(())
@@ -1020,13 +1340,24 @@ fn apply(task: &mut Task, update: Update) {
     }
 }
 
+/// Where the document filed under `id` sits among the ones an update holds.
+///
+/// The hold set is sorted, so this is a search rather than a scan. Fallible
+/// rather than an `expect`: every id asked for here was put into that set by
+/// the same call, and if that ever stops being true a refused update is a
+/// better answer than a panicking store.
+fn at(held: &[TaskId], id: &TaskId) -> Result<usize, TaskError> {
+    held.binary_search(id).map_err(|_| TaskError::NoSuchTask { id: *id })
+}
+
 /// Appends the ids that are not already there, keeping the order they arrived
 /// in.
 ///
 /// Quadratic, and deliberately: a task's blocker list is a handful of ids, and
 /// a `HashSet` here would cost an allocation to save comparisons nobody can
-/// measure.
-fn extend_unique(held: &mut Vec<TaskId>, added: Vec<TaskId>) {
+/// measure. Takes anything that yields ids so that a mirrored edge — always
+/// exactly one — costs no `Vec` to append.
+fn extend_unique(held: &mut Vec<TaskId>, added: impl IntoIterator<Item = TaskId>) {
     for id in added {
         if !held.contains(&id) {
             held.push(id);
