@@ -28,6 +28,7 @@ use std::process::Command;
 use std::time::Duration;
 use std::{env, fs, thread};
 
+use ganja_team::lock::{self, LockError};
 use ganja_team::record::now_millis;
 use ganja_team::task::{NewTask, Store, TaskError, TaskId};
 
@@ -215,7 +216,7 @@ fn claim_as(role: &str) {
         // eight is genuinely contended rather than merely sequential.
         wait_until(start + id * SPACING);
         let id = TaskId::parse(&id.to_string()).expect("an id");
-        match store.claim(&id, role) {
+        match past_a_peers_hold(|| store.claim(&id, role)) {
             Ok(task) => {
                 assert_eq!(task.owner, role, "a claim answers with what it wrote");
                 outcome.push_str(&format!("{id} won\n"));
@@ -238,12 +239,42 @@ fn create_as(role: &str) {
     let mut outcome = String::new();
     for round in 0..EACH {
         wait_until(start + round * SPACING);
-        let task = store
-            .create(NewTask::new(format!("{role}-{round}"), "one of many at once"))
-            .unwrap_or_else(|error| panic!("{role} could not create round {round}: {error}"));
+        let task = past_a_peers_hold(|| {
+            store.create(NewTask::new(format!("{role}-{round}"), "one of many at once"))
+        })
+        .unwrap_or_else(|error| panic!("{role} could not create round {round}: {error}"));
         outcome.push_str(&format!("{}\n", task.id));
     }
     fs::write(told(OUTCOME), outcome).expect("a child writes its outcome");
+}
+
+/// One write, retried past a hold a peer is legitimately holding.
+///
+/// `Lock(Held)` is not a defect and must not be read as one here: it is what
+/// the ladder answers after ≈655 ms of contention, and
+/// `a_peers_hold_stops_every_write_and_none_of_the_reads` asserts that exact
+/// variant as *correct* behavior. What this file needs of each id is one
+/// winner and one loser, so a claimant descheduled inside its sub-millisecond
+/// rewrite — several lanes on one machine, or the four-core runner this
+/// repository already tracks a flake on — has to be waited out rather than
+/// turned into a red test whose panic names the wrong thing. Waiting is a
+/// smaller change than a third outcome, which the parent would then have to
+/// account for in every per-id assertion.
+///
+/// The bound is the lock's own [`lock::RETRIES`] spent again at the call
+/// level, never a number of this file's own — and, like npm's `retries: 10`,
+/// it counts the *retries*, so this is eleven attempts. Each of them already
+/// costs the whole ladder, which puts the ceiling past [`lock::STALE`]: a hold
+/// still standing then is one the next attempt breaks rather than waits for.
+fn past_a_peers_hold<T>(mut attempt: impl FnMut() -> Result<T, TaskError>) -> Result<T, TaskError> {
+    for _ in 0..lock::RETRIES {
+        match attempt() {
+            Err(TaskError::Lock(LockError::Held { .. })) => {}
+            settled => return settled,
+        }
+    }
+
+    attempt()
 }
 
 /// A path a child was handed.

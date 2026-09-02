@@ -6,9 +6,9 @@ use indexmap::IndexMap;
 use serde_json::{Value, json};
 
 use super::{
-    COUNTER, Comment, DROPPED_MISFILED, DROPPED_UNREADABLE, ID_MAX, MAX_COUNTERPARTS,
-    MAX_DOCUMENT_BYTES, NewTask, Store, TASK_KEYS, Task, TaskError, TaskId, TaskStatus, Update,
-    dropped, write,
+    COUNTER, Comment, DROPPED_MISFILED, DROPPED_NOT_A_DOCUMENT, DROPPED_UNREADABLE, ID_MAX,
+    MAX_COUNTERPARTS, MAX_DOCUMENT_BYTES, NewTask, Store, TASK_KEYS, Task, TaskError, TaskId,
+    TaskStatus, Update, dropped, write,
 };
 use crate::lock::LockError;
 use crate::record::document;
@@ -557,13 +557,17 @@ fn a_document_larger_than_a_task_can_be_is_skipped_rather_than_read() {
 #[cfg(unix)]
 #[test]
 fn a_counter_planted_as_a_symlink_is_repaired_rather_than_followed() {
-    use std::os::unix::fs::symlink;
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
 
     let (home, store) = store();
     store.create(NewTask::new("subject", "description")).expect("a task is created");
 
     let elsewhere = home.path().join("elsewhere");
     fs::write(&elsewhere, "9999").expect("the target is writable");
+    // A mode no umask produces, so what the repair is dressed in below says
+    // where it came from rather than what this machine happened to default to.
+    fs::set_permissions(&elsewhere, fs::Permissions::from_mode(0o604))
+        .expect("the target is chmod-able");
     fs::remove_file(store.counter_path()).expect("the counter is removable");
     symlink(&elsewhere, store.counter_path()).expect("a link is plantable");
 
@@ -574,9 +578,21 @@ fn a_counter_planted_as_a_symlink_is_repaired_rather_than_followed() {
         "9999",
         "and the repair renames over the name rather than writing through it",
     );
-    assert!(
-        store.counter_path().symlink_metadata().expect("the counter is there").is_file(),
-        "what stands there afterwards is a counter",
+    let stamp = store.counter_path().symlink_metadata().expect("the counter is there");
+    assert!(stamp.is_file(), "what stands there afterwards is a counter");
+    // What mode it was born with, which the bytes above do not say. The write
+    // keeps an existing document's permissions, and the stat it reads them
+    // with follows a link — so the replacement wears the *target's* mode
+    // rather than the temp file's own `0600`. Recorded rather than fixed: the
+    // planter is a same-uid writer who could have made a `0604` counter
+    // directly, and the two things that could have been destructive act on
+    // the link rather than through it, which the target's untouched bytes
+    // above are the proof of. Pinned so that changing which stat that copy
+    // reads is a decision somebody makes rather than one that happens.
+    assert_eq!(
+        stamp.permissions().mode() & 0o777,
+        0o604,
+        "the replacement's mode came from what the link named",
     );
 }
 
@@ -859,6 +875,39 @@ fn a_task_that_blocks_itself_is_deletable() {
 }
 
 #[test]
+fn a_document_that_will_not_read_is_still_deletable() {
+    let (_home, store) = store();
+    let [first, damaged, misfiled] = three(&store);
+
+    // The two shapes a damaged document actually arrives in: one that will not
+    // decode at all, and one a stray `cp 1.json 2.json` filed under an id that
+    // is not its own. Both are refused by every read door, which is what makes
+    // `delete` the only way to get rid of one — the claim this module, its
+    // `AGENTS.md` and the root `AGENTS.md` all make, and which nothing pinned
+    // until now.
+    fs::write(store.path_of(&damaged), "{not json at all").expect("the document is writable");
+    fs::copy(store.path_of(&first), store.path_of(&misfiled)).expect("the document copies");
+    assert!(store.get(&damaged).is_err(), "the damaged one is unreadable to begin with");
+    assert!(store.get(&misfiled).is_err(), "and so is the misfiled one");
+
+    store.delete(&damaged).expect("a document that will not decode still deletes");
+    store.delete(&misfiled).expect("a document filed under another id still deletes");
+
+    assert!(!store.path_of(&damaged).exists(), "a delete is permanent here too");
+    assert!(!store.path_of(&misfiled).exists());
+    assert_eq!(
+        store.list().expect("the list reads").len(),
+        1,
+        "and what is left is the healthy task, listed",
+    );
+    assert_eq!(
+        store.get(&first).expect("the original reads").subject,
+        "task 1",
+        "the document the misfiled one was a copy of is untouched",
+    );
+}
+
+#[test]
 fn an_edge_naming_a_task_nobody_filed_is_read_as_absent_rather_than_as_a_blocker() {
     let (_home, store) = store();
     let [first, second, _third] = three(&store);
@@ -1028,8 +1077,15 @@ fn a_write_refused_for_a_shadowed_key_is_not_reported_as_a_misfiled_document() {
     shadowing.comments[0].extra.insert("text".to_owned(), json!("shadowed"));
     let shadowed =
         write(&store.path_of(&first.id), &shadowing).expect_err("a shadowed key is refused");
+    // The reporter's fourth answer, from the same door: a directory wearing a
+    // document's name. Its sentence is a `pub const` nothing outside this
+    // module reads, so a wrong or swapped one would ship in silence.
+    let planted = TaskId::parse("3").expect("a valid id");
+    fs::create_dir(store.path_of(&planted)).expect("a directory is plantable");
+    let not_a_document = store.get(&planted).expect_err("a directory is not a document");
 
     assert_eq!(dropped(&misfiled), DROPPED_MISFILED);
+    assert_eq!(dropped(&not_a_document), DROPPED_NOT_A_DOCUMENT);
     // `delete`'s scrub loop is the one call site that can also report a
     // *write*, and its write raises this same variant, so the arm reads the issue rather
     // than the variant: a scrub refused for a shadowed comment key, logged as
@@ -1195,9 +1251,7 @@ fn a_peers_hold_stops_every_write_and_none_of_the_reads() {
     // `lock::acquire`, so the in-process half is not held and what the store
     // spends below is the on-disk ladder — which is the half that matters,
     // because the other process in a real race is not this one.
-    let real = fs::canonicalize(&path).expect("the document is real");
-    let lock = PathBuf::from(format!("{}.lock", real.display()));
-    fs::create_dir(&lock).expect("a peer takes the lock");
+    let lock = peer_hold(&store, &task.id);
 
     for refused in [
         store.claim(&task.id, "worker-1").err(),

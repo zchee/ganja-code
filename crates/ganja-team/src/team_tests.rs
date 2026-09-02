@@ -79,6 +79,11 @@ fn a_model_supplied_name_cannot_escape_the_teams_root() {
     let agent = MemberName::parse("demo-worker-1").expect("a valid member name");
     let inbox = root.inbox_path(&team, &agent);
     assert_eq!(inbox, Path::new("/tmp/teams/session-224cbeab/inboxes/demo-worker-1.json"));
+    // The sibling builder, pinned beside it: `tasks/` is a directory a real
+    // `claude` may be sharing the tree with, and its on-disk name is a fact
+    // callers outside this crate spell too — `ganja_team::task::TASKS_DIR` is
+    // what they spell it with, and this is what says what that is.
+    assert_eq!(root.tasks_dir(&team), Path::new("/tmp/teams/session-224cbeab/tasks"));
     assert!(inbox.starts_with("/tmp/teams"));
     assert!(
         !inbox

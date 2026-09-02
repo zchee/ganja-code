@@ -139,7 +139,12 @@ use crate::record::{Redacted, document, shadowed};
 ///
 /// Spelled here rather than only in [`crate::TeamsRoot::tasks_dir`] so a
 /// caller holding a bare path can name the same directory without restating
-/// the string.
+/// the string — and it is a name worth not restating: this directory is
+/// **the one liberty taken with a tree a real `claude` may be sharing**
+/// (D545), a ganja-only *subdirectory* beside Claude's own documents rather
+/// than a ganja-only key inside one of them. `TeamsRoot::tasks_dir` is what a
+/// caller holding a root spells; this is what one holding a bare team
+/// directory spells, and `team_tests.rs` pins the path both produce.
 pub const TASKS_DIR: &str = "tasks";
 
 /// The document that issues ids, beside the tasks it issues them for.
@@ -667,7 +672,24 @@ impl fmt::Debug for NewTask {
 /// Every field is "leave it alone" by default, which is what makes this one
 /// door rather than eight: a caller sets what it means to change and nothing
 /// else moves. The two list fields and the comment are **add-only** — there is
-/// no door here that removes a blocker or edits what somebody said.
+/// no door here that removes a blocker or edits what somebody said — which is
+/// Claude Code's own `TaskUpdate` vocabulary, the one a model arrives already
+/// trained on (D545).
+///
+/// **What that costs is stated rather than glossed: an edge outlives every
+/// call but a delete.** Nothing here unwrites one, and [`Store::delete`]'s
+/// scrub is the only code in this module that removes an edge — reached by
+/// deleting one of the two tasks the edge joins, never by naming the edge. So
+/// a mistyped id in `add_blocks` is undone by destroying filed work, and a
+/// pair wired in both directions — `add_blocks: [B]` on A and then on B, or
+/// one call naming B in both lists — leaves A and B each blocked by the other
+/// for as long as both are filed. A task named as **its own** counterpart is
+/// the one-call form of the same thing: accepted deliberately, since the hold
+/// set dedupes it into a single hold, and blocked by itself from then on.
+/// Every one of those renders as blocked in [`Store::list`], which is the
+/// listing free work is offered from, and no reader repairs it: an edge is
+/// dropped only when the directory has no name filed under the id it names,
+/// and these name tasks that are filed.
 #[derive(Clone, Default, PartialEq)]
 pub struct Update {
     /// Move it to another status.
@@ -767,7 +789,7 @@ impl fmt::Debug for Keys<'_> {
 /// assert_eq!(done.owner, "worker-1");
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct Store {
     /// The `tasks/` directory itself.
     dir: PathBuf,
@@ -793,8 +815,7 @@ impl Store {
     }
 
     /// Where the id counter is.
-    #[must_use]
-    pub fn counter_path(&self) -> PathBuf {
+    fn counter_path(&self) -> PathBuf {
         self.dir.join(COUNTER)
     }
 
@@ -909,7 +930,11 @@ impl Store {
     /// task is exactly that case.
     pub fn list(&self) -> Result<Vec<TaskSummary>, TaskError> {
         let filed = self.filed()?;
-        let mut summaries: Vec<TaskSummary> = filed
+        // Answered in the order the set is walked in, with no second sort
+        // behind it: `filed` is a `BTreeSet<TaskId>` whose `Ord` is the
+        // numeric one, so the walk is already lowest id first and re-sorting
+        // what it produced would be a comparison per row for nothing.
+        let summaries: Vec<TaskSummary> = filed
             .iter()
             .filter_map(|id| match read(&self.path_of(id)) {
                 Ok(Some(task)) => {
@@ -939,7 +964,6 @@ impl Store {
                 }
             })
             .collect();
-        summaries.sort_by_key(|summary| summary.id);
 
         Ok(summaries)
     }
@@ -1213,6 +1237,13 @@ impl Store {
         // A document that will not read still deletes — that is how a damaged
         // one is got rid of — and takes its edges' whereabouts with it, which
         // is a line in the log rather than a refusal.
+        //
+        // **The swallowed error is the whole feature**, and it is the one
+        // `read` in this module whose failure is not `?`-ed: `?` here would
+        // make a corrupt `2.json` undeletable, which is a team's shared list
+        // jammed with no recovery. `a_document_that_will_not_read_is_still_deletable`
+        // is what turns a hand tidying this asymmetry away into a red test
+        // rather than a silent one.
         let counterparts = match read(&path) {
             Ok(Some(task)) => counterparts_of(&task),
             Ok(None) => Vec::new(),
@@ -1274,6 +1305,14 @@ impl Store {
     /// is two ids collapsing onto one lock key while a *second* hold is held,
     /// and this takes exactly one. A counterpart planted as a symlink is
     /// refused by the read that follows.
+    ///
+    /// What such a link gets *before* that refusal is a lock directory beside
+    /// whatever it names, since [`lock::acquire_unseeded`] canonicalizes its
+    /// target — recorded here so the next reader does not have to re-derive
+    /// that it is harmless. The guard's own [`Drop`] removes it, and it grants
+    /// a same-uid planter nothing a bare `mkdir` would not have; nothing is
+    /// written *through* the link, the read refusing at `O_NOFOLLOW` before
+    /// there is anything to write.
     fn scrub(&self, counterpart: &TaskId, id: &TaskId) -> Result<(), TaskError> {
         let path = self.path_of(counterpart);
         let _hold = self.hold(&path, counterpart)?;
@@ -1336,6 +1375,20 @@ impl Store {
         // refuse every create from then on, and issuing under one would put a
         // fresh task where something already stands. Only an absent name is
         // free.
+        //
+        // **A name this store cannot ask about is stepped over too**, which is
+        // what the condition says by matching `Ok(false)` rather than by
+        // testing for a name that is there: a stat that failed for anything
+        // but `NotFound` has not answered "nothing is filed here", and reading
+        // it as though it had would rename a fresh task over whatever does
+        // stand there. The safe direction's own cost is that the walk's only
+        // floor is [`ID_MAX`], so a store every stat failed on would spend the
+        // id space before answering — an arm no reachable trigger was found
+        // for, the realistic cause (a peer stripping `+x` off the tasks
+        // directory) failing earlier at this function's own
+        // `acquire_unseeded`, whose `canonicalize` returns `PermissionDenied`
+        // rather than `NotFound` — and one that would waste a call rather than
+        // corrupt a list if it ever were reached.
         while next <= ID_MAX && !matches!(stamped(&self.path_of(&TaskId(next))), Ok(false)) {
             next += 1;
         }
@@ -1417,7 +1470,10 @@ impl Store {
     /// A **set**, because the two readers that ask it ask once per edge and
     /// the question is membership; in id order because [`Store::list`] walks
     /// it as its own listing and a sorted walk is the order it has to answer
-    /// in anyway.
+    /// in anyway. **That walk is the whole of the listing's order** — nothing
+    /// re-sorts what it produced — so the numeric [`Ord`] on [`TaskId`]
+    /// is what keeps 10 from arriving before 9 the way the *name* `10.json`
+    /// would.
     ///
     /// The question is about a *name*, deliberately: a document too damaged to
     /// decode is still an id somebody filed, and an edge to it is a real

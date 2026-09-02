@@ -18,12 +18,10 @@
 
 mod support;
 
-use std::sync::{Arc, Mutex};
-use std::{fs, io};
+use std::fs;
 
 use ganja_team::task::{Comment, NewTask, Store, TaskId, TaskStatus, Update};
 use serde_json::json;
-use tracing_subscriber::fmt::MakeWriter;
 
 /// A description, which is what somebody picking a task up reads — and a place
 /// a credential lands the way a spawn prompt is.
@@ -40,39 +38,9 @@ const METADATA_CANARY: &str = "incandescent-pangolin-5521";
 /// not know, verbatim, in the message it fails with.
 const DAMAGED_CANARY: &str = "vermillion-quokka-8807";
 
-/// A `tracing` writer a test can read back.
-#[derive(Clone, Default)]
-struct Capture(Arc<Mutex<Vec<u8>>>);
-
-impl Capture {
-    fn logged(&self) -> String {
-        String::from_utf8_lossy(&self.0.lock().expect("the log is never poisoned")).into_owned()
-    }
-}
-
-impl io::Write for Capture {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        self.0.lock().expect("the log is never poisoned").extend_from_slice(buffer);
-
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> MakeWriter<'a> for Capture {
-    type Writer = Self;
-
-    fn make_writer(&'a self) -> Self::Writer {
-        self.clone()
-    }
-}
-
 #[test]
 fn what_a_task_says_never_reaches_a_log_line() {
-    let capture = Capture::default();
+    let capture = support::Capture::default();
     let subscriber = tracing_subscriber::fmt()
         .with_writer(capture.clone())
         .with_ansi(false)
