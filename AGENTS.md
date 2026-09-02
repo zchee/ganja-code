@@ -204,6 +204,7 @@ The rule that keeps those two columns apart is a test rather than a comment — 
 - **Port behavior, not code.** Module docs cite the upstream file they port (`//! Spec: upstream packages/opencode/src/tool/edit.ts`). Deliberate divergences are documented at the point they occur, with the reason.
 - **Comments explain why, not what** — including in `Cargo.toml`. Match the surrounding density.
 - Never pick a dependency version in a member crate; add it to the workspace manifest with its rationale.
+- **Unsafe is not minimized here** (user directive, 2026-09-02, discarding the global "never `unsafe` unless absolutely necessary" rule for this codebase only): `unsafe` — first-party or inside a dependency — is judged the way any other tool is, by whether its invariants are stated, tested and audited, never by its count. What stays: a `// SAFETY:` comment on every unsafe block stating the invariant (the `ganja-testkit` `redirect_xdg_data_home` shape), and the `cargo audit`/`deny` gates on dependencies.
 
 ### Testing Requirements
 
