@@ -980,21 +980,56 @@ pub struct Exited {
     /// assumed: a corpse tmux would not take away, or an id that now names
     /// somebody else's pane, is said rather than called closed.
     pub pane: PaneFate,
-    /// The last non-empty line the pane showed, where the pane was still this
-    /// member's to read and the capture found one: the CLI's own parting
-    /// words. Never a recycled pane's screen.
+    /// The last non-empty lines the pane showed, where the pane was still this
+    /// member's to read and the capture found any: the CLI's own parting
+    /// words, as the trailing block its writer bounded them to — a vendor's
+    /// refusal routinely spans two lines and the last of them points at the
+    /// first (`ganja_teammate_local::shim_tui::last_words`). Never a recycled
+    /// pane's screen.
     pub last_words: Option<String>,
 }
 
+/// What stands in for the block's newlines where one cannot be drawn.
+///
+/// The middle dot rather than a space, because the lines it joins are whole
+/// sentences and a reader has to be able to tell where one ended — it is the
+/// separator a member's ring row already puts between its own fields, so the
+/// two one-line teammate surfaces read alike.
+const WORDS_SEPARATOR: &str = " · ";
+
+/// A pane's last words on a surface that can draw exactly **one** line.
+///
+/// [`last_words`](Exited::last_words) is a trailing *block* — a vendor's
+/// refusal is routinely two lines, the last of them pointing at the first
+/// (`ganja_teammate_local::shim_tui::last_words`) — and the one-line surfaces
+/// do not merely wrap it, they lose text: the `/teammate` dialog's notice
+/// takes `notice().lines().next()`, which would drop both the `error:` line
+/// *and* the fate clause after it, and the status bar's notice segment renders
+/// through a `ratatui` `Span`, which filters a control character out with
+/// nothing in its place and runs the two sentences together.
+///
+/// So the flattening happens **here, at the producer**, and covers every such
+/// surface at once rather than being repaired in each. What is deliberately
+/// *not* flattened is [`Exited::last_words`] itself and the inbox mail built
+/// from it: those are prose a model reads, where the newline is the structure
+/// and there is no row budget to lose it to.
+#[must_use]
+pub fn last_words_inline(words: &str) -> String {
+    words.replace('\n', WORDS_SEPARATOR)
+}
+
 impl Exited {
-    /// The one sentence a frontend shows for this.
+    /// The one sentence a frontend shows for this — one **line**, whatever the
+    /// pane said: the block is flattened through [`last_words_inline`], whose
+    /// doc says which surfaces would otherwise lose text and why the repair
+    /// belongs here.
     #[must_use]
     pub fn notice(&self) -> String {
         let cli = backend_name(self.backend);
         let said = self
             .last_words
             .as_deref()
-            .map(|words| format!(" — last line: {words}"))
+            .map(|words| format!(" — last words: {}", last_words_inline(words)))
             .unwrap_or_default();
         format!(
             "{name} ({cli}) exited in its pane{said}; {fate}",

@@ -66,6 +66,13 @@ const LATE: Duration = Duration::from_secs(2);
 const VENDOR_REFUSAL: &str = "error: could not apply the 'read-only' sandbox profile; see the \
      warning above for the cause. Refusing to start with its protections missing.";
 
+/// The line **above** it, and the reason the block exists (bead `ocz2`):
+/// [`VENDOR_REFUSAL`] ends on *"see the warning above for the cause"*, so this
+/// is the sentence a quote that stopped at the last line dropped. Named rather
+/// than left inline in the stub script so a test can assert the refusal
+/// carries it.
+const VENDOR_WARNING: &str = "warning: the sandbox profile could not be applied";
+
 /// What a hostile teammate would send to break out of the bracketed paste
 /// carrying its words: close the paste, submit what it closed with a `\r`, and
 /// type a command at whatever prompt is now listening — with a bell for good
@@ -116,7 +123,7 @@ case "$MODE" in
     exec cat >> "$LOG.received"
     ;;
   refuse)
-    printf 'warning: the sandbox profile could not be applied\n'
+    printf '%s\n' '{warning}'
     printf '%s\n' '{refusal}'
     exit 1
     ;;
@@ -149,6 +156,7 @@ esac
         // Baked into a single-quoted shell word, so the sentence's own
         // quotes are spelled the POSIX way rather than ending the word.
         refusal = VENDOR_REFUSAL.replace('\'', "'\\''"),
+        warning = VENDOR_WARNING.replace('\'', "'\\''"),
         // The envelope header plus every line of the seeded message. The
         // team's name never adds a line, so any well-formed one serves.
         late_secs = LATE.as_secs(),
@@ -514,6 +522,9 @@ async fn a_tui_that_shows_its_marker_and_then_dies_is_refused_and_never_a_live_m
         "the vendor's own sentence is what the lead reads: {}",
         refused.reason
     );
+    // The same `Ready::Died` road as the test below, and the same rule: one
+    // line, or a frontend that draws one cuts the vendor's words off.
+    assert!(!refused.reason.contains('\n'), "one line: {:?}", refused.reason);
     assert_eq!(server.panes(), before, "the dead pane was read and then closed");
     assert!(
         ganja_testkit::team_file(&root, &team)
@@ -699,11 +710,38 @@ async fn a_tui_that_exits_after_readiness_is_retired_and_its_pane_closed_unasked
         pass.exited.iter().find(|exited| exited.name == "w1").expect("the pass reports the exit");
     assert_eq!(exited.pane_id, pane_id);
     assert_eq!(exited.pane, PaneFate::Closed, "what `end` left is reported, not assumed");
-    assert_eq!(exited.last_words.as_deref(), Some("bye from the stub"));
+    // Bead `ocz2`: the trailing **block**, not the last line. The stub's
+    // parting line is still the last of it, and what the pane showed above
+    // that line rides with it — here the tail of the message the pane's `cat`
+    // echoed, where grok's refusal is the `warning:` line its `error:` line
+    // points at. The lines above are the pane's, so they are asserted as
+    // "there are some" rather than spelled out: pinning the echo would pin
+    // the preamble's wording into a test about last words.
+    let words = exited.last_words.clone().expect("the pane showed something");
+    assert_eq!(
+        words.lines().next_back(),
+        Some("bye from the stub"),
+        "the CLI's parting line closes the block: {words:?}"
+    );
+    assert!(words.lines().count() > 1, "and the pane's lines above it came too: {words:?}");
+    // Fix 2, HIGH: the field keeps the newline for the model, and `notice()`
+    // — the one sentence a frontend draws, on surfaces that render exactly one
+    // line — flattens it, so no line of the block and none of the fate clause
+    // after it can be cut off by a `lines().next()` or swallowed by a `Span`.
+    let notice = exited.notice();
     assert!(
-        exited.notice().starts_with("w1 (codex) exited in its pane — last line: bye from the stub"),
-        "{}",
-        exited.notice()
+        !notice.contains('\n'),
+        "the notice a frontend draws is one line, whatever the pane said: {notice:?}"
+    );
+    assert!(
+        notice.starts_with("w1 (codex) exited in its pane — last words: ")
+            && notice.contains(&ganja_core::teammate::last_words_inline(&words))
+            && notice.ends_with(exited.pane_sentence()),
+        "{notice}"
+    );
+    assert!(
+        !notice.chars().any(char::is_control),
+        "and it carries no control character off the pane's own screen: {notice:?}"
     );
     assert!(
         pass.retired.iter().any(|retired| retired.name == "w1"
@@ -800,7 +838,13 @@ async fn a_scripted_pane_exit_reaches_take_exited_carrying_every_field() {
     assert_eq!(exited.backend, MemberBackend::Codex);
     assert_eq!(exited.pane_id, pane_id);
     assert_eq!(exited.pane, PaneFate::Closed, "what `end` left is reported, not assumed");
-    assert_eq!(exited.last_words.as_deref(), Some("bye from the stub"));
+    // The trailing block closing on the stub's parting line (bead `ocz2`).
+    let words = exited.last_words.clone().expect("the pane showed something");
+    assert_eq!(
+        words.lines().next_back(),
+        Some("bye from the stub"),
+        "the CLI's parting line closes the block: {words:?}"
+    );
 
     registry.shutdown().await;
 }
@@ -835,6 +879,24 @@ async fn a_tui_that_exits_before_its_composer_refuses_the_spawn_with_its_last_wo
     assert!(
         refused.reason.contains(REFUSED_DIED) && refused.reason.contains("codex"),
         "and it says which CLI, and what happened: {}",
+        refused.reason
+    );
+    // Fix 3, the reviewer's re-verify. This refusal is exactly grok 1.0.18's
+    // road — that build dies *before* readiness — and it reaches the same
+    // one-line surfaces `Exited::notice` does, through `app.rs`'s `tell_team`.
+    // So both halves are asserted rather than one: the `warning:` line the
+    // `error:` line points at is carried (bead `ocz2`), **and** the whole
+    // reason is one line, or the `/teammate` dialog cuts it at the newline and
+    // drops the very sentence the block exists to carry. A `contains` alone is
+    // what let this path stay multi-line after `notice()` was fixed.
+    assert!(
+        refused.reason.contains(VENDOR_WARNING),
+        "the cause line the vendor's own refusal points at rides with it: {}",
+        refused.reason
+    );
+    assert!(
+        !refused.reason.contains('\n'),
+        "and the refusal a frontend draws is one line: {:?}",
         refused.reason
     );
     assert_eq!(server.panes(), before, "the dead pane was closed, not left to halve the column");

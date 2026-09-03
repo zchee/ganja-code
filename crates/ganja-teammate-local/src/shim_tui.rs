@@ -105,6 +105,22 @@
 //! column on every refusal (ruling 8(c)). The words travel in the refusal the
 //! lead reads.
 //!
+//! Those last words are the pane's trailing **block** rather than its last
+//! line ([`last_words`](crate::shim_tui::last_words), bead `ocz2`), because a
+//! vendor's refusal is routinely two lines and the last of them points at the
+//! first: grok's own says *"see the warning above for the cause"*, so a quote
+//! that stopped at the last line carried the pointer and dropped the cause,
+//! and the person had to reproduce the spawn by hand to read the line the
+//! refusal had told them to read. The block is bounded in lines and in bytes
+//! (`LAST_WORDS_LINES`, `LAST_WORDS_BYTES`), and it keeps its newlines only
+//! where something reads prose: the spawn refusal, the member's ring row and
+//! [`Exited::notice`](ganja_core::teammate::Exited::notice) each flatten it
+//! through [`ganja_core::teammate::last_words_inline`], because all three are
+//! drawn on surfaces that render exactly one line and would otherwise cut the
+//! block at its first newline. What keeps the real `\n` is what a **model**
+//! reads: [`Exited::last_words`](ganja_core::teammate::Exited) itself and the
+//! inbox message built from it.
+//!
 //! # What ends a pane, and in what order
 //!
 //! A pane's process is its own process-group leader (tmux `setsid`s it;
@@ -128,7 +144,7 @@
 //! A pane whose process ends **after** readiness — the CLI quit on its own,
 //! crashed, or a person closed the pane — is noticed by the member's own loop
 //! ([`LIVENESS_POLL`](crate::liveness::LIVENESS_POLL)), not only by the next paste that would have failed
-//! into it: the pane's last line is read while the corpse is still on screen,
+//! into it: the pane's last words are read while the corpse is still on screen,
 //! the messages still in that member's inbox are answered to their senders
 //! rather than left unread, the corpse is closed through the same dead-only
 //! door, the lead's model is told in prose, and the registry is handed an
@@ -157,7 +173,7 @@ use std::time::{Duration, SystemTime};
 use async_trait::async_trait;
 use ganja_core::teammate::{
     Delivery, Exited, PaneFate, RECENT_CALLS, SETTLE, SpawnSpec, Spawned, TeammateBackend,
-    Unsupported, backend_name, push_recent, runner,
+    Unsupported, backend_name, last_words_inline, push_recent, runner,
 };
 use ganja_protocol::team::{Frame, MemberBackend, ShutdownApproved, ShutdownRequest, Tagged};
 use ganja_team::{MailboxMessage, MemberName, ShimCli, Surface, mailbox, record};
@@ -245,7 +261,7 @@ pub const RING_PASTED_UNSUBMITTED: &str = "pasted into the pane, unsubmitted —
 
 /// What the ring says when the pane's process ended **after** readiness —
 /// the CLI quit on its own, crashed, or a person closed the pane — followed
-/// by the pane's own last line where it showed one.
+/// by the pane's own last words where it showed any.
 pub const RING_EXITED: &str = "exited in the pane";
 
 /// What a member's ring says once its CLI's own transcript has been found
@@ -526,20 +542,134 @@ pub fn environment_names<'a>(additions: &'a [&'a str]) -> Vec<&'a str> {
 /// the line a refusal wants. zsh, dash and fish leave without a word.
 const BASH_FAREWELL: &str = "exit";
 
-/// The last thing a pane showed that was the program's own — the line a
+/// How many of a pane's trailing lines a refusal quotes (bead `ocz2`).
+///
+/// Four rather than one, and a measurement is the reason: grok 1.0.18 on this
+/// machine refuses its sandbox profile in two lines, and the second — the one
+/// a last-line rule quoted — is *"error: could not apply the 'read-only'
+/// sandbox profile; **see the warning above for the cause**"*. Quoting the
+/// pointer and dropping the thing pointed at left the person to reproduce the
+/// spawn by hand to learn why it refused, which is the whole cost this
+/// constant exists to stop paying.
+///
+/// Four rather than the whole screen because a refusal is a sentence somebody
+/// reads and a `/teammate` ring row that gets clipped to a width, not a log:
+/// four leaves room for a cause that itself runs to two or three lines beside
+/// the error, and stops well before a CLI's startup banner.
+///
+/// A **line** bound, because a byte bound alone cuts inside a sentence and half
+/// a vendor's sentence is the failure being fixed wearing a smaller hat. It is
+/// not by itself a bound on size: [`crate::tmux::Server::capture`] passes `-J`,
+/// which joins wrapped rows, so a line here is a *logical* line of any length —
+/// the grok `warning:` line this was measured against is already wider than any
+/// pane. [`LAST_WORDS_BYTES`] is the bound that fact requires.
+const LAST_WORDS_LINES: usize = 4;
+
+/// How many bytes of the block survive, applied after [`LAST_WORDS_LINES`].
+///
+/// Four `-J`-joined lines are four logical lines, so a CLI that printed a stack
+/// trace or a JSON blob on its way out can hand this function kilobytes — and
+/// from here the block flows into the lead's model prose, into an inbox
+/// message, and into the status bar's notice, the one segment documented as
+/// having no length limit. A kilobyte is several screens of a vendor's
+/// refusal and a fraction of any of those accidents.
+///
+/// Cut **from the end**, keeping the newest bytes, for the same reason the line
+/// bound keeps the last lines: what a program says last is what it refused
+/// with. Not `ganja_tool::truncate::clamp_bytes`, which is the right posture
+/// for one-shot tool output and the wrong one here twice over — it keeps the
+/// *head* and it spills the remainder to a file, and a dying pane's screen is
+/// not something a refusal path should be writing to disk.
+const LAST_WORDS_BYTES: usize = 1024;
+
+/// What a block that lost its head opens with, so the cut is admitted rather
+/// than silent — the posture `ganja-tool`'s own listing neutralizer takes at
+/// the other end of its text.
+const CUT: &str = "…";
+
+/// The last thing a pane showed that was the program's own — the block a
 /// refusal quotes.
 ///
-/// The last non-empty line of a capture, leaving out what is not the program
-/// talking: tmux's own `remain-on-exit` notice under it, and a bare
-/// `exit` (`BASH_FAREWELL`). [`None`] when the pane showed nothing at all.
+/// The last `LAST_WORDS_LINES` non-empty lines of a capture, joined with
+/// `\n` in the order the pane showed them and clamped to `LAST_WORDS_BYTES`,
+/// leaving out what is not the program talking: tmux's own `remain-on-exit`
+/// notice under it, and a bare `exit` (`BASH_FAREWELL`). [`None`] when the
+/// pane showed nothing at all.
+///
+/// A block rather than a line because a vendor's refusal routinely spans two
+/// — the cause and the sentence that points back at it — and the one this was
+/// measured against says so in words (`LAST_WORDS_LINES`). The name and the
+/// [`Option`] shape are unchanged: every caller, and
+/// [`Exited::last_words`](ganja_core::teammate::Exited), still take what a
+/// pane last said and say it.
+///
+/// The block leaves here through `without_controls`, the rule [`paste_body`]
+/// applies to text going the *other* way, because this is the same boundary
+/// read backwards: a pane's tty **echoes** what was pasted into it, so a
+/// peer's own bracketed-paste terminator comes back off the screen as a real
+/// `ESC` — and from here the block is quoted into a spawn refusal, into the
+/// lead's inbox mail and into
+/// [`Exited::notice`](ganja_core::teammate::Exited::notice), none of which
+/// filter what they are handed. The `/teammate` ring is already safe on its
+/// own side and is left alone. Stripping runs **before** the empty and
+/// bounding rules, so a row that was nothing but control bytes is dropped as
+/// the non-words it is rather than spending one of the block's lines.
 #[must_use]
 pub fn last_words(captured: &str) -> Option<String> {
-    captured
+    let mut trailing: Vec<String> = captured
         .lines()
-        .map(str::trim_end)
+        .map(without_controls)
+        .map(|line| line.trim_end().to_owned())
         .filter(|line| !line.trim().is_empty())
-        .rfind(|line| !line.starts_with(PANE_IS_DEAD) && line.trim() != BASH_FAREWELL)
-        .map(str::to_owned)
+        .rev()
+        .filter(|line| !line.starts_with(PANE_IS_DEAD) && line.trim() != BASH_FAREWELL)
+        .take(LAST_WORDS_LINES)
+        .collect();
+    if trailing.is_empty() {
+        return None;
+    }
+    trailing.reverse();
+
+    Some(last_bytes(trailing.join("\n"), LAST_WORDS_BYTES))
+}
+
+/// `block` reduced to its last `most` bytes, opened with [`CUT`] when anything
+/// was dropped; a block already within the bound is handed back untouched.
+///
+/// The cut is walked **forward** to a character boundary, which is what keeps
+/// the result inside the bound rather than one code point over it — and keeps
+/// the slice from panicking mid-code-point, which is the whole hazard of
+/// bounding text in bytes. `str::len()` is a boundary, so the walk always ends.
+fn last_bytes(block: String, most: usize) -> String {
+    debug_assert!(most > CUT.len(), "the bound has to leave room for the mark that it was cut");
+    if block.len() <= most {
+        return block;
+    }
+    let mut start = block.len() - (most - CUT.len());
+    while !block.is_char_boundary(start) {
+        start += 1;
+    }
+
+    format!("{CUT}{}", &block[start..])
+}
+
+/// `text` with every control character but `\n` and `\t` removed.
+///
+/// One function for the module's two boundaries with a foreign pane —
+/// [`paste_body`] on the way in, [`last_words`] on the way out — because they
+/// are one rule and a second spelling of it is a place for the two to drift.
+/// The rule and its bargain are stated in full on [`paste_body`]: the `ESC`
+/// that arms a `[201~` is a control character and goes, leaving `[201~` as
+/// inert text; `\n` and `\t` stay because they are content a program or a
+/// person put there.
+///
+/// This crate cannot reach the tree's other two spellings and should not:
+/// `ganja-tui`'s `printable` belongs to a frontend a backend crate may not
+/// depend on, and `ganja-tool`'s `neutralize` is shaped for a **one-line**
+/// listing row — it drops `\n` with the rest of `Cc` and caps the length,
+/// which is right there and would flatten a block here.
+fn without_controls(text: &str) -> String {
+    text.chars().filter(|point| !point.is_control() || matches!(point, '\n' | '\t')).collect()
 }
 
 /// The bytes actually pasted for one peer message: the `runner::envelope`,
@@ -560,12 +690,12 @@ pub fn last_words(captured: &str) -> Option<String> {
 /// This is the invariant `ganja-tui`'s notifier already states for text
 /// carried inside an OSC/BEL escape (`notify::body`), narrowed here to keep the
 /// two whitespace characters a composer reads as content.
+///
+/// The filtering itself is `without_controls`, shared with [`last_words`] so
+/// that the two directions of this one boundary cannot drift apart.
 #[must_use]
 pub fn paste_body(from: &str, text: &str) -> String {
-    runner::envelope(from, text)
-        .chars()
-        .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
-        .collect()
+    without_controls(&runner::envelope(from, text))
 }
 
 /// Whether the readiness window ended with a composer, without one, or with
@@ -1146,8 +1276,15 @@ impl TeammateBackend for ShimTui {
                 if let Err(error) = server.close_dead(&pane.id).await {
                     tracing::warn!(pane = pane.id, %error, "a dead TUI pane could not be closed");
                 }
+                // Flattened for the reason `Exited::notice` is, and this is
+                // the road that matters most: grok dies *before* readiness, so
+                // its refusal is this string rather than that one — and it
+                // reaches the same one-line surfaces, the `/teammate` dialog's
+                // notice line and the status bar, through `tell_team`. Left
+                // whole it would be cut at the first newline, taking with it
+                // the `error:` sentence the block exists to carry.
                 let said = match words {
-                    Some(words) => format!("its pane said: {words}"),
+                    Some(words) => format!("its pane said: {}", last_words_inline(&words)),
                     None => "its pane showed nothing".to_owned(),
                 };
                 return Err(Unsupported {
@@ -1518,8 +1655,12 @@ impl TuiRunner {
             last = ?words,
             "a TUI teammate's pane stopped being its own after readiness; the member is retired"
         );
+        // A ring row is one line, drawn through `team.rs`'s `printable`, which
+        // turns a control character into U+FFFD — so the block goes in through
+        // the same flattening `Exited::notice` uses rather than leaving a
+        // replacement character where its newline was.
         self.remember(match &words {
-            Some(words) => format!("{RING_EXITED} · {words}"),
+            Some(words) => format!("{RING_EXITED} · {}", last_words_inline(words)),
             None => RING_EXITED.to_owned(),
         });
         self.answer_left_behind().await;
@@ -1535,7 +1676,7 @@ impl TuiRunner {
         let said = exited
             .last_words
             .as_deref()
-            .map(|words| format!(" — its pane's last line was: {words}"))
+            .map(|words| format!(" — its pane's last words were: {words}"))
             .unwrap_or_default();
         self.mail(
             self.lead_inbox.clone(),

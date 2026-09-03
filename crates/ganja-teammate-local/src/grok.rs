@@ -116,6 +116,36 @@
 //! same pinned profile, which is the shape a live `--sandbox read-only` turn
 //! was measured in before this landed.
 //!
+//! There is now a **second** measured startup refusal, and it is a different
+//! kind of thing (bead `ganja-code-4aaq`, grok 1.0.18, 2026-09-03). Launched
+//! exactly as the shim launches it, that build says
+//!
+//! ```text
+//! warning: sandbox could not be applied: runtime-socket deny resolution failed: could not resolve runtime-socket deny path /var/run/docker.sock: endpoint is a symlink
+//! error: could not apply the 'read-only' sandbox profile; see the warning above for the cause. Refusing to start with its protections missing.
+//! ```
+//!
+//! and exits 1. `/var/run/docker.sock` on this machine is a root-owned symlink
+//! to `~/.docker/run/docker.sock`, which is Docker Desktop's own default
+//! layout, and grok's `read-only` profile refuses to resolve a deny path
+//! through one. Unlike the first refusal, **this one is not ganja's to fix and
+//! was not fixed**: the first was a symlinked `~/.grok` the user un-symlinked,
+//! while this is the person's Docker configuration, and grok exposes no knob
+//! that would spare it — `--sandbox <PROFILE>` and `GROK_SANDBOX` are the whole
+//! surface, and the second is withheld on purpose ([`crate::shim`]'s posture
+//! rule). So a grok teammate on such a machine refuses every spawn, honestly
+//! and in the vendor's own words.
+//!
+//! What *did* change is what those words carry. That refusal's last line says
+//! **"see the warning above for the cause"**, so a quote that stopped at the
+//! last line handed the lead the pointer and dropped the line pointed at, and
+//! the person had to reproduce the spawn by hand to read it. Quoting the
+//! pane's trailing block instead
+//! ([`crate::shim_tui::last_words`], bead
+//! `ganja-code-ocz2`) is what this measurement bought: the `warning:` line
+//! travels with the `error:` line that names it, and the cause arrives with
+//! the refusal.
+//!
 //! # The parser, and the door it did not take (**D510**)
 //!
 //! `--output-format streaming-messages-json` is *"NDJSON in the Anthropic
