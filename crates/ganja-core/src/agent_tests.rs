@@ -5,7 +5,7 @@ use serde_json::json;
 
 use super::{
     ANALYST, ANY, AgentError, BUILD, CRITIC, DEBUGGER, EXECUTOR, EXPLORE, EXPLORE_PROMPT, GENERAL,
-    PLAN, Registry, VERIFIER, rule,
+    PLAN, REVIEWER, Registry, VERIFIER, rule,
 };
 use crate::config::{AgentConfig, AgentMode, Config, Overrides};
 use crate::permission::{Action, PermissionConfig, Permissions, Rule};
@@ -43,31 +43,33 @@ fn registry(config: &Config) -> Registry {
 }
 
 #[test]
-fn the_builtins_are_the_four_upstream_agents_this_build_can_run_and_ganjas_own_five() {
+fn the_builtins_are_the_four_upstream_agents_this_build_can_run_and_ganjas_own_six() {
     let registry = registry(&Config::default());
     let names: Vec<&str> = registry.agents().iter().map(|agent| agent.name.as_str()).collect();
 
     assert_eq!(
         names,
-        vec![BUILD, PLAN, GENERAL, EXPLORE, ANALYST, EXECUTOR, VERIFIER, CRITIC, DEBUGGER],
-        "upstream's four, then the five `/team`'s stage routing names",
+        vec![
+            BUILD, PLAN, GENERAL, EXPLORE, ANALYST, EXECUTOR, VERIFIER, CRITIC, DEBUGGER, REVIEWER
+        ],
+        "upstream's four, then the six `/team`'s stage routing names",
     );
-    assert_eq!(registry.default_agent(), BUILD, "and the five changed nothing about that");
+    assert_eq!(registry.default_agent(), BUILD, "and the six changed nothing about that");
 }
 
-/// The five carry prompts of their own, and none of them carries the team
+/// The six carry prompts of their own, and none of them carries the team
 /// work-protocol text: the pipeline's stages, claim discipline and shutdown
 /// belong to `/team`'s template, so a copy here would be a second place for
 /// them to drift — and an agent spawned outside a team would be reading
 /// instructions about a team it is not in.
 ///
 /// Each opening is named, rather than checked for a shared prefix: `"You are
-/// a"` is a prefix of all five *and* of each other's, so a table that wired
+/// a"` is a prefix of all six *and* of each other's, so a table that wired
 /// `executor.txt` into `critic` would pass it. What the roster promises is
 /// that a name reaches the prompt for that role, and only the sentence that
 /// role opens with can say so.
 #[test]
-fn the_five_team_roles_carry_their_own_prompts_and_no_protocol() {
+fn the_team_roles_carry_their_own_prompts_and_no_protocol() {
     let registry = registry(&Config::default());
 
     for (name, opening) in [
@@ -76,6 +78,7 @@ fn the_five_team_roles_carry_their_own_prompts_and_no_protocol() {
         (VERIFIER, "You are a verifier."),
         (CRITIC, "You are a critic."),
         (DEBUGGER, "You are a debugger."),
+        (REVIEWER, "You are a reviewer."),
     ] {
         let agent = registry.get(name).unwrap_or_else(|| panic!("{name} is builtin"));
         let prompt = agent.prompt.as_deref().unwrap_or_else(|| panic!("{name} has a prompt"));
@@ -94,14 +97,14 @@ fn the_five_team_roles_carry_their_own_prompts_and_no_protocol() {
     }
 }
 
-/// The five take the shared defaults and no rule delta at all, which
+/// The six take the shared defaults and no rule delta at all, which
 /// [`super::builtins`] argues is a decision rather than an omission: a role
 /// here is a prompt, not a permission posture. Stated against `general` — the
 /// agent they are otherwise shaped like — so what is pinned is the one
 /// difference rather than a second copy of the assembled list, which would
 /// redden on every unrelated change to the shared defaults.
 #[test]
-fn the_five_team_roles_run_under_generals_rules_minus_its_todowrite_deny() {
+fn the_team_roles_run_under_the_shared_defaults_with_no_delta() {
     let registry = registry(&Config::default());
     let general = &registry.get(GENERAL).expect("general is builtin").rules;
     let todowrite = rule("todowrite", ANY, Action::Deny);
@@ -113,7 +116,7 @@ fn the_five_team_roles_run_under_generals_rules_minus_its_todowrite_deny() {
         1,
         "general's whole delta is the one `todowrite` deny it takes from upstream",
     );
-    for name in [ANALYST, EXECUTOR, VERIFIER, CRITIC, DEBUGGER] {
+    for name in [ANALYST, EXECUTOR, VERIFIER, CRITIC, DEBUGGER, REVIEWER] {
         let agent = registry.get(name).unwrap_or_else(|| panic!("{name} is builtin"));
         assert_eq!(
             agent.rules, expected,
@@ -138,7 +141,7 @@ fn only_the_subagents_may_be_spawned_and_only_the_others_may_be_selected() {
             (PLAN, false, true),
             (GENERAL, true, false),
             (EXPLORE, true, false),
-            // The five are subagents for the same reason `general` is: a
+            // The six are subagents for the same reason `general` is: a
             // `/team` run delegates to them, and nobody switches a session to
             // one.
             (ANALYST, true, false),
@@ -146,6 +149,7 @@ fn only_the_subagents_may_be_spawned_and_only_the_others_may_be_selected() {
             (VERIFIER, true, false),
             (CRITIC, true, false),
             (DEBUGGER, true, false),
+            (REVIEWER, true, false),
         ]
     );
 }
@@ -459,18 +463,18 @@ fn a_disabled_agent_is_gone_and_an_unknown_name_becomes_a_new_one() {
     let mut agent = Definitions::new();
     agent.insert(PLAN.to_owned(), AgentConfig { disable: Some(true), ..AgentConfig::default() });
     agent.insert(
-        "reviewer".to_owned(),
+        "auditor".to_owned(),
         AgentConfig { prompt: Some("you review".to_owned()), ..AgentConfig::default() },
     );
     let config = Config { agent, ..Config::default() };
     let registry = registry(&config);
 
     assert!(registry.get(PLAN).is_none());
-    let reviewer = registry.get("reviewer").expect("a config agent exists");
-    assert_eq!(reviewer.mode, AgentMode::All, "upstream's default for one");
-    assert_eq!(reviewer.prompt.as_deref(), Some("you review"));
-    assert!(reviewer.spawnable(), "mode all is spawnable");
-    assert!(reviewer.selectable(), "and selectable");
+    let auditor = registry.get("auditor").expect("a config agent exists");
+    assert_eq!(auditor.mode, AgentMode::All, "upstream's default for one");
+    assert_eq!(auditor.prompt.as_deref(), Some("you review"));
+    assert!(auditor.spawnable(), "mode all is spawnable");
+    assert!(auditor.selectable(), "and selectable");
 }
 
 #[test]
@@ -597,23 +601,23 @@ fn a_definition_file_is_an_agent_named_after_it() {
     let (_directory, registry) = with_files(
         &Config::default(),
         &[(
-            "reviewer.md",
+            "auditor.md",
             "---\ndescription: Reviews a diff.\nmodel: anthropic/claude-haiku-4.5\n---\n\
                  You review changes and say what is wrong with them.\n",
         )],
     );
-    let reviewer = registry.get("reviewer").expect("the file defines an agent");
+    let auditor = registry.get("auditor").expect("the file defines an agent");
 
-    assert_eq!(reviewer.description.as_deref(), Some("Reviews a diff."));
-    assert_eq!(reviewer.model.as_deref(), Some("anthropic/claude-haiku-4.5"));
+    assert_eq!(auditor.description.as_deref(), Some("Reviews a diff."));
+    assert_eq!(auditor.model.as_deref(), Some("anthropic/claude-haiku-4.5"));
     assert_eq!(
-        reviewer.prompt.as_deref(),
+        auditor.prompt.as_deref(),
         Some("You review changes and say what is wrong with them."),
         "the body is the prompt, and a prompt replaces the base one"
     );
-    assert_eq!(reviewer.mode, AgentMode::All, "the same default a config-defined agent gets");
-    assert!(reviewer.selectable(), "so a person may switch to it");
-    assert!(reviewer.spawnable(), "and the task tool may spawn it");
+    assert_eq!(auditor.mode, AgentMode::All, "the same default a config-defined agent gets");
+    assert!(auditor.selectable(), "so a person may switch to it");
+    assert!(auditor.spawnable(), "and the task tool may spawn it");
 }
 
 /// A `description` written as a block scalar keeps every line of itself.
@@ -666,7 +670,7 @@ fn a_stated_name_outranks_the_file_name() {
 #[test]
 fn a_definition_nobody_could_act_on_is_skipped_with_a_reason() {
     let cases = [
-        ("---\nname: team/reviewer\n---\nbody", "path separator", "holds a path separator"),
+        ("---\nname: team/auditor\n---\nbody", "path separator", "holds a path separator"),
         ("---\nmode: occasionally\n---\nbody", "an unknown mode", "`primary`, `subagent`, `all`"),
         ("---\nhidden: sometimes\n---\nbody", "an unknown hidden", "`true` or `false`"),
     ];
@@ -685,7 +689,7 @@ fn a_definition_nobody_could_act_on_is_skipped_with_a_reason() {
 #[test]
 fn a_model_alias_is_refused_and_the_full_form_is_named() {
     let reason =
-        super::Definition::parse(Path::new("/agents/reviewer.md"), "---\nmodel: opus\n---\nbody")
+        super::Definition::parse(Path::new("/agents/auditor.md"), "---\nmodel: opus\n---\nbody")
             .expect_err("an alias is not a model id");
 
     assert!(reason.contains("opus"), "{reason}");
@@ -694,12 +698,12 @@ fn a_model_alias_is_refused_and_the_full_form_is_named() {
 
     // And the session still starts: the file is skipped, nothing else is.
     let (_directory, registry) =
-        with_files(&Config::default(), &[("reviewer.md", "---\nmodel: opus\n---\nbody")]);
-    assert!(registry.get("reviewer").is_none());
+        with_files(&Config::default(), &[("auditor.md", "---\nmodel: opus\n---\nbody")]);
+    assert!(registry.get("auditor").is_none());
     assert_eq!(registry.default_agent(), BUILD);
 }
 
-/// Two files in one directory cannot both be `reviewer`; the first by file
+/// Two files in one directory cannot both be `auditor`; the first by file
 /// name keeps it. (Across *directories* the later one wins, which is the
 /// precedence case below.)
 #[test]
@@ -707,12 +711,12 @@ fn a_second_file_claiming_a_name_in_one_directory_is_skipped() {
     let (_directory, registry) = with_files(
         &Config::default(),
         &[
-            ("a-reviewer.md", "---\nname: reviewer\n---\nfirst"),
-            ("b-reviewer.md", "---\nname: reviewer\n---\nsecond"),
+            ("a-auditor.md", "---\nname: auditor\n---\nfirst"),
+            ("b-auditor.md", "---\nname: auditor\n---\nsecond"),
         ],
     );
 
-    assert_eq!(registry.get("reviewer").expect("one of them won").prompt, Some("first".to_owned()));
+    assert_eq!(registry.get("auditor").expect("one of them won").prompt, Some("first".to_owned()));
 }
 
 /// **AC4, at the rules.** A listed tool is allowed, an unlisted one is
@@ -777,8 +781,8 @@ fn a_tools_list_leaves_the_conversation_tools_where_it_found_them() {
 #[test]
 fn a_file_that_states_no_tools_builds_no_wall() {
     let (_directory, registry) =
-        with_files(&Config::default(), &[("reviewer.md", "---\ndescription: r\n---\nReview.\n")]);
-    let rules = &registry.get("reviewer").expect("the file defines it").rules;
+        with_files(&Config::default(), &[("auditor.md", "---\ndescription: r\n---\nReview.\n")]);
+    let rules = &registry.get("auditor").expect("the file defines it").rules;
 
     for tool in ["edit", "write", "bash", "task", "read"] {
         assert_eq!(
@@ -820,12 +824,12 @@ fn a_project_file_outranks_a_global_one_and_the_config_outranks_both() {
     let global = tempfile::tempdir().expect("a temporary directory");
     let project = tempfile::tempdir().expect("a temporary directory");
     std::fs::write(
-        global.path().join("reviewer.md"),
+        global.path().join("auditor.md"),
         "---\ndescription: the global one\nmodel: anthropic/claude-haiku-4.5\n---\nglobal",
     )
     .expect("the fixture is written");
     std::fs::write(
-        project.path().join("reviewer.md"),
+        project.path().join("auditor.md"),
         "---\ndescription: the project one\n---\nproject",
     )
     .expect("the fixture is written");
@@ -833,32 +837,32 @@ fn a_project_file_outranks_a_global_one_and_the_config_outranks_both() {
 
     let registry =
         Registry::from_dirs(&Config::default(), &dirs).expect("the fixture resolves an agent");
-    let reviewer = registry.get("reviewer").expect("both files define it");
-    assert_eq!(reviewer.description.as_deref(), Some("the project one"));
-    assert_eq!(reviewer.prompt.as_deref(), Some("project"));
+    let auditor = registry.get("auditor").expect("both files define it");
+    assert_eq!(auditor.description.as_deref(), Some("the project one"));
+    assert_eq!(auditor.prompt.as_deref(), Some("project"));
     assert_eq!(
-        reviewer.model.as_deref(),
+        auditor.model.as_deref(),
         Some("anthropic/claude-haiku-4.5"),
         "a field the project file left out keeps what the global one said"
     );
 
     let mut agent = Definitions::new();
     agent.insert(
-        "reviewer".to_owned(),
+        "auditor".to_owned(),
         AgentConfig {
             description: Some("the configured one".to_owned()),
             ..AgentConfig::default()
         },
     );
     let config = Config { agent, ..Config::default() };
-    let reviewer = Registry::from_dirs(&config, &dirs)
+    let auditor = Registry::from_dirs(&config, &dirs)
         .expect("the fixture resolves an agent")
-        .get("reviewer")
+        .get("auditor")
         .cloned()
         .expect("the config kept it");
-    assert_eq!(reviewer.description.as_deref(), Some("the configured one"));
+    assert_eq!(auditor.description.as_deref(), Some("the configured one"));
     assert_eq!(
-        reviewer.prompt.as_deref(),
+        auditor.prompt.as_deref(),
         Some("project"),
         "and the config states nothing about the prompt, so the file's survives"
     );
@@ -870,14 +874,14 @@ fn a_project_file_outranks_a_global_one_and_the_config_outranks_both() {
 fn a_config_disable_removes_a_file_agent() {
     let mut agent = Definitions::new();
     agent.insert(
-        "reviewer".to_owned(),
+        "auditor".to_owned(),
         AgentConfig { disable: Some(true), ..AgentConfig::default() },
     );
     let config = Config { agent, ..Config::default() };
-    let (_directory, dirs) = homes(&[("reviewer.md", "---\ndescription: r\n---\nReview.")]);
+    let (_directory, dirs) = homes(&[("auditor.md", "---\ndescription: r\n---\nReview.")]);
 
     let registry = Registry::from_dirs(&config, &dirs).expect("the builtins are still there");
-    assert!(registry.get("reviewer").is_none());
+    assert!(registry.get("auditor").is_none());
 }
 
 /// What a directory of hostile files costs: nothing. Every one of them is

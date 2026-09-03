@@ -101,7 +101,7 @@ pub const GENERAL: &str = "general";
 /// Name of the search subagent.
 pub const EXPLORE: &str = "explore";
 
-/// Name of the requirements subagent, the first of the five roles the `/team`
+/// Name of the requirements subagent, the first of the six roles the `/team`
 /// pipeline routes its stages to.
 pub const ANALYST: &str = "analyst";
 
@@ -116,6 +116,9 @@ pub const CRITIC: &str = "critic";
 
 /// Name of the root-cause subagent.
 pub const DEBUGGER: &str = "debugger";
+
+/// Name of the read-only code-review subagent (**D549**).
+pub const REVIEWER: &str = "reviewer";
 
 /// The subdirectory of each home an agent definition file lives in (**D482**).
 const AGENTS_SUBDIR: &str = "agents";
@@ -165,7 +168,7 @@ const CONVERSATION_TOOLS: &[&str] = &["question", "plan_exit", "plan_enter"];
 /// `THIRD_PARTY_NOTICES.md`).
 const EXPLORE_PROMPT: &str = include_str!("prompt/explore.txt");
 
-/// The five team-role prompts. Ganja's own prose, written from this port's
+/// The six team-role prompts. Ganja's own prose, written from this port's
 /// team-orchestration behavior specification and modelled on no other
 /// project's text, which is why none of them earns a
 /// `THIRD_PARTY_NOTICES.md` entry the way [`EXPLORE_PROMPT`] does.
@@ -180,6 +183,7 @@ const EXECUTOR_PROMPT: &str = include_str!("prompt/executor.txt");
 const VERIFIER_PROMPT: &str = include_str!("prompt/verifier.txt");
 const CRITIC_PROMPT: &str = include_str!("prompt/critic.txt");
 const DEBUGGER_PROMPT: &str = include_str!("prompt/debugger.txt");
+const REVIEWER_PROMPT: &str = include_str!("prompt/reviewer.txt");
 
 /// Injected as a synthetic user part on every turn the [`PLAN`] agent runs,
 /// ported verbatim from upstream `session/prompt/plan.txt`.
@@ -365,7 +369,7 @@ impl Registry {
     }
 }
 
-/// The nine agents this build ships: upstream's roster, and ganja's own five.
+/// The ten agents this build ships: upstream's roster, and ganja's own six.
 ///
 /// Four of them are upstream's seven minus the three ganja does not have.
 /// `compaction`, `title` and `summary` are hidden agents upstream because its
@@ -373,10 +377,10 @@ impl Registry {
 /// compaction requests are direct — they carry their own prompt and no tools —
 /// so there is nothing for an agent to add (**D7**).
 ///
-/// The other five — [`ANALYST`], [`EXECUTOR`], [`VERIFIER`], [`CRITIC`],
-/// [`DEBUGGER`] — are the roles `/team`'s stage routing names, and have no
-/// upstream counterpart at all: opencode has no teams. Their prompts are
-/// ganja's own.
+/// The other six — [`ANALYST`], [`EXECUTOR`], [`VERIFIER`], [`CRITIC`],
+/// [`DEBUGGER`], [`REVIEWER`] — are the roles `/team`'s stage routing names,
+/// and have no upstream counterpart at all: opencode has no teams. Their
+/// prompts are ganja's own.
 fn builtins(config: &Config) -> Vec<Agent> {
     let user = config.permission.rules();
     // `attended` is what decides whether the memory door is opened for an
@@ -518,7 +522,7 @@ fn builtins(config: &Config) -> Vec<Agent> {
         },
     ];
 
-    // The five roles `/team` routes its stages to. Nothing upstream has a
+    // The six roles `/team` routes its stages to. Nothing upstream has a
     // counterpart to any of them.
     //
     // Each is `Subagent` mode and not hidden, which is exactly what
@@ -539,7 +543,7 @@ fn builtins(config: &Config) -> Vec<Agent> {
     // builtin.
     //
     // Differing in nothing but those three strings, they are a table rather
-    // than five literals: what a reader has to check about a new role is its
+    // than six literals: what a reader has to check about a new role is its
     // name, its offer line and its prompt, and a shape spelled once cannot
     // drift between them. The order is the roster's own and is asserted.
     agents.extend(
@@ -576,6 +580,13 @@ fn builtins(config: &Config) -> Vec<Agent> {
                 "Isolates the root cause of a failing build, test or behavior and reports the \
                  evidence for it. Use when something is broken and why is not yet known.",
                 DEBUGGER_PROMPT,
+            ),
+            (
+                REVIEWER,
+                "Reads a change and reports what is wrong with it: findings worst first, each \
+                 with the file and line it is at and the case that breaks. Use to review a diff \
+                 rather than to fix one — it edits nothing.",
+                REVIEWER_PROMPT,
             ),
         ]
         .map(|(name, description, prompt)| Agent {

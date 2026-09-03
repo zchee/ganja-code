@@ -457,7 +457,7 @@ async fn the_text_routes_every_stage_to_an_agent_this_build_ships() {
 
     // `plan` is deliberately not among them: it is a primary agent the `task`
     // tool refuses, so the table routes team-plan to the lead session itself.
-    for agent in ["analyst", "executor", "verifier", "critic", "debugger", "explore"] {
+    for agent in ["analyst", "executor", "verifier", "critic", "debugger", "reviewer", "explore"] {
         assert!(expanded.contains(agent), "the routing table names {agent}: {expanded}");
     }
     assert!(
@@ -471,6 +471,56 @@ async fn the_text_routes_every_stage_to_an_agent_this_build_ships() {
     assert!(
         expanded.contains(".ganja/agents"),
         "and says a project's own definition outranks the builtin: {expanded}",
+    );
+
+    // **AC-22.** The tenth agent has to be named in the table's own
+    // `team-verify` row, and the row is what is asserted: `reviewer` used to
+    // appear below the table, in the list of roles a *project* might have
+    // defined, so `expanded.contains("reviewer")` was green before this build
+    // shipped one and said nothing about where a stage routes. The row is the
+    // only line whose first token is `team-verify` — the prose above it opens
+    // `**team-verify**`, and the R10 sentence has the word mid-line.
+    let verify_row = expanded
+        .lines()
+        .find(|line| line.trim_start().starts_with("team-verify"))
+        .unwrap_or_else(|| panic!("the routing table has a team-verify row: {expanded}"));
+    assert!(
+        verify_row.contains("verifier") && verify_row.contains("reviewer"),
+        "team-verify routes to the verifier, with the reviewer beside it for code: {verify_row}",
+    );
+}
+
+/// **AC-23.** The three rules a run whose deliverable is findings turns on
+/// (**R11**'s reviewer is who produces them; these are **R10**).
+///
+/// Matched against the prompt with its line breaks collapsed, because each of
+/// these is a *sentence* and the template is hard-wrapped: a reflow that moved
+/// one word onto the next line would redden a raw `contains` without changing
+/// anything the model reads. What each assertion is for is the rule, not the
+/// vocabulary — a rewrite could keep saying "findings" everywhere and still
+/// drop the instruction that team-verify must not produce them a second time.
+#[tokio::test]
+async fn the_text_states_what_a_review_shaped_run_delivers() {
+    let expanded = expand("port the loader").await;
+    let flowed = expanded.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    assert!(
+        flowed.contains(
+            "the findings themselves are what the run produces, and this stage does not \
+             produce them a second time"
+        ),
+        "the findings are the deliverable rather than a step towards one: {expanded}",
+    );
+    assert!(
+        flowed.contains(
+            "team-verify reconciles the findings the members reported and checks the evidence \
+             each one carries; it never re-reviews the same code"
+        ),
+        "team-verify reconciles and checks evidence instead of reviewing again: {expanded}",
+    );
+    assert!(
+        flowed.contains("Do not also hand it to an anonymous subagent while they work on it"),
+        "work already given to a member is not delegated a second time: {expanded}",
     );
 }
 

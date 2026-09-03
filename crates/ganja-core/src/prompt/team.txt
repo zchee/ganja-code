@@ -231,15 +231,18 @@ what makes the next run a resume rather than a restart.
     team-plan     the lead itself, with explore for read-only scouting
     team-prd      analyst    (critic to challenge the scope)
     team-exec     executor   (debugger for build and type errors)
-    team-verify   verifier
+    team-verify   verifier   (reviewer to read the diff, when there is one)
     team-fix      executor, or debugger when the cause is unknown
 
-An `N:agent` override on the command line replaces this table for the members
-it spawns. A definition in `.ganja/agents/` with one of these names outranks
-the built-in of the same name — if this project defines its own `verifier`,
-that is the one to use. Roles this project may have defined and this table
-does not name — a designer, a writer, a test engineer, a security or code
-reviewer, an architect — are worth using when the work calls for them, and
+A spec on the command line, already resolved for you into the
+`<team-members>` block above, replaces this table's choice for team-exec's
+initial roster and for nothing else: team-verify's own checkers, a
+replacement for a member that died, and anyone added because work backed up
+are all still this table's. A definition in `.ganja/agents/` with one of
+these names outranks the built-in of the same name — if this project defines
+its own `verifier`, that is the one to use. Roles this project may have
+defined and this table does not name — a designer, a writer, a test
+engineer, an architect — are worth using when the work calls for them, and
 only if the user has actually defined them. Do not ask for an agent that does
 not exist.
 

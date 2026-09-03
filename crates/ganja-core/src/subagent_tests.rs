@@ -221,7 +221,10 @@ fn the_description_is_upstreams_text_followed_by_the_callers_roster() {
         .collect();
     assert_eq!(
         names,
-        vec!["analyst", "critic", "debugger", "executor", "explore", "general", "verifier"],
+        vec![
+            "analyst", "critic", "debugger", "executor", "explore", "general", "reviewer",
+            "verifier"
+        ],
         "every spawnable agent, sorted by name as upstream sorts: {roster:?}",
     );
 }
