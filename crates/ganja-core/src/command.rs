@@ -46,6 +46,8 @@ use std::{fs, io};
 use ganja_tool::frontmatter::{fields, split};
 
 use crate::config::{CommandConfig, Config};
+use crate::protocol::team::MemberBackend;
+use crate::teammate::{DEFAULT_BACKEND, UnknownBackend, backend_name, parse_backend};
 
 /// Name of the builtin that writes a repository's `AGENTS.md`.
 pub const INIT: &str = "init";
@@ -172,7 +174,7 @@ pub struct Misdirected {
 /// it redirects to does not have. A capitalised roster line therefore lands in
 /// the template like any other phrasing and is answered there, in prose, for
 /// one round trip.
-fn misdirected(arguments: &str) -> Option<Misdirected> {
+pub fn misdirected(arguments: &str) -> Option<Misdirected> {
     let trimmed = arguments.trim();
     let first = trimmed.split_whitespace().next()?;
     if !ROSTER_SUBCOMMANDS.contains(&first) && trimmed != "list" {
@@ -180,6 +182,656 @@ fn misdirected(arguments: &str) -> Option<Misdirected> {
     }
 
     Some(Misdirected { meant: format!("/{TEAMMATE} {trimmed}") })
+}
+
+/// What a session's agent roster says about one name a spec used.
+///
+/// Three-valued rather than a `bool` because the two ways a name can fail are
+/// different sentences: a name nobody holds is a typo, where a **primary**
+/// agent is a real agent no `task` call may spawn — the distinction
+/// [`crate::agent::Agent::spawnable`] draws, carried across this module's
+/// boundary as an answer rather than as a registry. Injected as a closure
+/// because the roster varies per session (config agents, `.ganja/agents/`),
+/// where the backend vocabulary does not and is read here directly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RosterAnswer {
+    /// A `task` call may spawn this agent.
+    Spawnable,
+    /// A real agent, and a primary: a session becomes it, no teammate is it.
+    Primary,
+    /// No agent of this name.
+    Unknown,
+}
+
+/// One member a `/team` spec asks for, resolved.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Member {
+    /// What this member is spawned under, assigned here rather than asked for
+    /// (**R6**), so it is unique by construction.
+    pub name: String,
+    /// The agent it runs as, when its segment named one.
+    pub agent: Option<String>,
+    /// The surface it runs on: its own `@`, else the flag's round-robin, else
+    /// the default a spawn naming no backend already gets.
+    pub backend: MemberBackend,
+}
+
+/// A `/team` line as the code reads it (**D549**): who to spawn, on what, and
+/// the task text that is still the model's to read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TeamInvocation {
+    /// The members the spec asked for, in spec order; empty when the head
+    /// token was not a spec.
+    pub members: Vec<Member>,
+    /// The surface a `--backend` naming exactly one names (**R4**): it pins no
+    /// count, and it stands over the members this spec named — each of which
+    /// already carries it in [`Member::backend`].
+    ///
+    /// R7 draws it for the model **only when the spec named nobody**, which is
+    /// rendering (c): a resolved roster says each member's surface on its own
+    /// row and never mentions this field, so a later spawn the model decides on
+    /// for itself is told nothing by it. Widening that is a fourth rendering
+    /// and needs a ruling, not a doc sentence.
+    pub standing: Option<MemberBackend>,
+    /// What is left once the head token and the flag are cut out — the task,
+    /// untokenized and unrespelled, which is what reaches `$ARGUMENTS`.
+    pub task: String,
+}
+
+/// The prefix a member whose segment named no agent is named under (**R6**,
+/// option D1 as the user ruled it on 2026-09-03).
+///
+/// `worker` rather than `member`: `member` is already this codebase's word for
+/// a row in a team's directory (`MemberName`, `MemberView`), and a name the
+/// model types into a `task` call should not read as one of those.
+const WORKER: &str = "worker";
+
+/// The largest team a **typed spec** may ask for.
+///
+/// **Chosen, not derived.** Neither the agent concurrency default (four) nor
+/// anything about how many panes fit on a screen yields sixteen: it is a typo
+/// bound, so that a slipped digit refuses instead of asking for a hundred
+/// members. It bounds the typed spec and nothing else — `/team`'s own template
+/// tells the model there is no cap on the spawns it decides on for itself, and
+/// a spec of sixteen under a concurrency of four is fanned in by that cap
+/// exactly as sixteen `task` calls already are. A later reader tempted to
+/// "align" this number with the concurrency default would refuse a legitimate
+/// eight-member run.
+pub const MAX_SPEC_MEMBERS: usize = 16;
+
+/// The flag this grammar reads out of the line wherever it appears (**R4**).
+const BACKEND_FLAG: &str = "--backend";
+
+/// The joined spelling of the same flag.
+const BACKEND_FLAG_EQUALS: &str = "--backend=";
+
+/// Whether one raw token **is** the flag, in either of its two spellings.
+///
+/// One predicate for both passes that ask the question — the extraction in
+/// [`backend_flag`] and R2's bare-name arm in [`looks_like_a_spec`] — so the
+/// two can never come to disagree about what the flag looks like. R2 words that
+/// arm as "begins `--backend`", and this is what that was written to admit: the
+/// joined `--backend=<surface>`, never a longer word that merely opens the same
+/// way. `--backends` is a word, and a line carrying one is prose.
+fn is_backend_flag(token: &str) -> bool {
+    token == BACKEND_FLAG || token.starts_with(BACKEND_FLAG_EQUALS)
+}
+
+/// Whether one run of text could be a count: non-empty, and ASCII digits
+/// throughout.
+///
+/// One predicate for both places that ask — an all-digits head token, and a
+/// segment's `N:` prefix — on [`is_backend_flag`]'s argument: two spellings of
+/// one question are two spellings that can come to disagree.
+fn digits(run: &str) -> bool {
+    !run.is_empty() && run.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// The one sentence every [`TeamSpecError`] ends with (**PM-1**).
+///
+/// A head token holding a `:`, an `@` or a comma list naming an agent, and a
+/// `--backend` anywhere in the line, are read as a team spec. That is the
+/// ambiguity these refusals are bought with, so a person who meant the words
+/// literally is told the way out rather than left to find it: the refusal is
+/// cheap, and a task text silently eaten is not.
+const ESCAPE_TAIL: &str = "if this was the task rather than a team spec, rephrase it so it \
+    opens with a word carrying no `:`, `@` or `,` and names no `--backend`";
+
+/// Why a `/team` line that looked like a team spec is not one (**R3**).
+///
+/// Every sentence names the text that was refused and ends with the one
+/// shared escape tail. The wording lives here and nowhere else: the engine
+/// translates these into its own error, the server maps a status onto that,
+/// and neither restates a sentence.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum TeamSpecError {
+    /// A segment named an agent this session's roster does not hold.
+    #[error("no agent named {name:?}; {ESCAPE_TAIL}")]
+    UnknownAgent {
+        /// The name that was typed.
+        name: String,
+    },
+    /// A segment named a **primary** agent, which is one a session becomes
+    /// rather than one it spawns.
+    #[error("{name:?} is an agent a session runs as, not one a teammate can be; {ESCAPE_TAIL}")]
+    NotSpawnable {
+        /// The name that was typed.
+        name: String,
+    },
+    /// A surface — a segment's `@`, or the flag's value — nothing answers to.
+    #[error("{0}; {ESCAPE_TAIL}")]
+    UnknownBackend(#[from] UnknownBackend),
+    /// A segment pinned its own surface with `@` while the line also carried a
+    /// `--backend`.
+    #[error(
+        "{segment:?} already names the surface it runs on, so this line cannot \
+         also carry `--backend`; {ESCAPE_TAIL}"
+    )]
+    BackendWithAt {
+        /// The segment carrying the `@`.
+        segment: String,
+    },
+    /// More surfaces than members to round-robin them over, so at least one
+    /// surface would go to nobody.
+    #[error(
+        "{surfaces} surfaces were given for a team of {members}, so one of them \
+         would run nobody; {ESCAPE_TAIL}"
+    )]
+    FewerMembersThanSurfaces {
+        /// How many members the spec asked for.
+        members: usize,
+        /// How many surfaces the flag listed.
+        surfaces: usize,
+    },
+    /// A segment asked for no members at all.
+    #[error("{segment:?} asks for no members at all; {ESCAPE_TAIL}")]
+    ZeroCount {
+        /// The segment carrying the zero.
+        segment: String,
+    },
+    /// More members than [`MAX_SPEC_MEMBERS`] — or a digit run too long to be
+    /// a count of anything, which takes this same door because the sentence a
+    /// person needs is the same one.
+    #[error("a team of {asked} is more than the {cap} a typed spec may ask for; {ESCAPE_TAIL}")]
+    TooMany {
+        /// What was asked for: the summed total, or the digit run itself when
+        /// it does not fit a `usize`.
+        asked: String,
+        /// [`MAX_SPEC_MEMBERS`], restated so the sentence is self-contained.
+        cap: usize,
+    },
+    /// A segment that is not `[N:]agent[@surface]` at all.
+    #[error("{token:?} is not `[N:]agent[@surface]`; {ESCAPE_TAIL}")]
+    Malformed {
+        /// The segment that could not be read.
+        token: String,
+    },
+    /// `--backend` with nothing after it to run on.
+    #[error("`--backend` was given no surface to run on; {ESCAPE_TAIL}")]
+    MissingBackendValue,
+    /// `--backend` twice, which would be two answers to one question.
+    #[error("`--backend` was given twice; one line names one list of surfaces; {ESCAPE_TAIL}")]
+    RepeatedBackend,
+}
+
+/// The `--backend` flag as it was found in the raw token stream.
+struct BackendFlag {
+    /// The surfaces it named, in the order they were written.
+    surfaces: Vec<MemberBackend>,
+    /// The raw token indices it occupies, so the head token is the first token
+    /// that is not one of them and the task text can cut them out.
+    indices: Vec<usize>,
+}
+
+/// One segment of a spec, validated.
+struct Segment<'a> {
+    /// How many members it asks for; an omitted count is one.
+    count: usize,
+    /// The agent it named, when it named one.
+    agent: Option<&'a str>,
+    /// The surface its own `@` pinned, when it had one.
+    surface: Option<MemberBackend>,
+}
+
+/// Every whitespace-delimited token of `arguments`, with the byte range it
+/// occupies.
+///
+/// Deliberately **not** [`tokenize`]: that one is upstream's argument splitter,
+/// which strips the quotes that held a span together. What this grammar needs
+/// is the opposite — spans, so the task left over after the head token and the
+/// flag are cut out is the person's own bytes, quoting and internal spacing
+/// included, which is what `$ARGUMENTS` then carries.
+fn raw_tokens(arguments: &str) -> Vec<(Range<usize>, &str)> {
+    let mut tokens = Vec::new();
+    let mut opened: Option<usize> = None;
+
+    for (index, character) in arguments.char_indices() {
+        if character.is_whitespace() {
+            if let Some(start) = opened.take() {
+                tokens.push((start..index, &arguments[start..index]));
+            }
+        } else if opened.is_none() {
+            opened = Some(index);
+        }
+    }
+    if let Some(start) = opened {
+        tokens.push((start..arguments.len(), &arguments[start..]));
+    }
+
+    tokens
+}
+
+/// `arguments` with `consumed` cut out of it, trimmed.
+///
+/// Each cut reaches back over the whitespace in front of it, so a flag taken
+/// out of the middle of a sentence closes the gap rather than leaving a double
+/// space where it stood. `consumed` is in ascending order and holds whole
+/// tokens, which is what makes that reach unambiguous.
+fn remaining(arguments: &str, consumed: &[Range<usize>]) -> String {
+    let mut kept = String::with_capacity(arguments.len());
+    let mut cursor = 0;
+
+    for span in consumed {
+        let from = arguments[..span.start].trim_end().len().max(cursor);
+        kept.push_str(&arguments[cursor..from]);
+        cursor = span.end;
+    }
+    kept.push_str(&arguments[cursor..]);
+
+    kept.trim().to_owned()
+}
+
+/// The `--backend` this line carries, or nothing, or why it is not one.
+///
+/// A value is read exactly as it was typed: [`raw_tokens`] strips no quoting,
+/// for the reason stated there, so `--backend "claude"` is refused **showing
+/// the quotes**. That is the honest sentence — the surface really is not
+/// named `claude` here — and stripping them to be helpful would be this pass
+/// respelling bytes that the task text needs kept.
+///
+/// # Errors
+///
+/// [`TeamSpecError::RepeatedBackend`] and
+/// [`TeamSpecError::MissingBackendValue`] before any surface is read, and
+/// [`TeamSpecError::UnknownBackend`] for a surface nothing answers to —
+/// naming the whole value when the offending entry is an empty one.
+fn backend_flag(raw: &[(Range<usize>, &str)]) -> Result<Option<BackendFlag>, TeamSpecError> {
+    // **The ruled divergence, written where it happens (R4, Risk 2).** The flag
+    // is read *anywhere* in the line rather than only ahead of the task, and the
+    // cost is one whole shape: `/team fix the --backend flag docs` takes `flag`
+    // as a surface and lands on `TeamSpecError::UnknownBackend`, so a sentence
+    // about this build's own flag cannot be typed as a task at all. The ruling
+    // chose that anyway, because both `/team --backend codex <task>` and the
+    // trailing `/team <task> --backend claude` are shapes people really type
+    // and a position rule has to lose one of them — and because the refusal
+    // says `--backend` is this command's flag wherever it appears, which
+    // teaches the rephrase once, where a word quietly eaten out of a sentence
+    // teaches nothing at all. No members block is rendered on that path, so
+    // nothing else would have shown it back either.
+    let mut found: Vec<(Option<&str>, Vec<usize>)> = Vec::new();
+    let mut index = 0;
+
+    while index < raw.len() {
+        let text = raw[index].1;
+        if !is_backend_flag(text) {
+            index += 1;
+            continue;
+        }
+        if let Some(value) = text.strip_prefix(BACKEND_FLAG_EQUALS) {
+            found.push((Some(value), vec![index]));
+            index += 1;
+            continue;
+        }
+
+        // The separate-word spelling: the value is the next token whatever it
+        // says — **unless** that token is the flag again, which is an
+        // occurrence of its own rather than a surface named `--backend`. That
+        // lands `--backend --backend x` on the repeat arm below, whose sentence
+        // is the one the person needs.
+        match raw.get(index + 1) {
+            Some((_, value)) if !is_backend_flag(value) => {
+                found.push((Some(*value), vec![index, index + 1]));
+                index += 2;
+            }
+            _ => {
+                found.push((None, vec![index]));
+                index += 1;
+            }
+        }
+    }
+
+    // R2: extraction wins over recognition, so both of these land before a head
+    // token is judged and before either value is read as a surface.
+    if found.len() > 1 {
+        return Err(TeamSpecError::RepeatedBackend);
+    }
+    let Some((value, indices)) = found.pop() else {
+        return Ok(None);
+    };
+    let Some(value) = value.filter(|value| !value.is_empty()) else {
+        return Err(TeamSpecError::MissingBackendValue);
+    };
+    let surfaces = value
+        .split(',')
+        .map(|entry| {
+            // An empty entry cannot name itself, so the refusal names the whole
+            // value: `--backend claude, x` reads `no backend named "claude,"`,
+            // where `no backend named ""` would tell the person nothing. Same
+            // argument as the empty `--backend=`, carried inside the split.
+            if entry.is_empty() {
+                return Err(UnknownBackend { value: value.to_owned() });
+            }
+
+            parse_backend(entry)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(Some(BackendFlag { surfaces, indices }))
+}
+
+/// Whether the head token is a spec rather than the first word of the task
+/// (**R2**, narrowed by **R3**).
+fn looks_like_a_spec(
+    head: &str,
+    next: Option<&str>,
+    roster: &dyn Fn(&str) -> RosterAnswer,
+) -> bool {
+    if digits(head) {
+        return true;
+    }
+    if head.contains([':', '@']) {
+        return true;
+    }
+    if head.contains(',') {
+        // R3: a comma list is spec-shaped only when it names somebody. `/team
+        // fix,the,bug` is a sentence, and claiming it would be this parser
+        // eating a task nobody spelled as a spec. The narrowing costs R1's
+        // `segment := … | count` its comma form on purpose — `2,3 fix it` is
+        // prose here — because a list of bare counts names nobody either.
+        return head.split(',').any(|piece| roster(piece) != RosterAnswer::Unknown);
+    }
+
+    // R2's bare-name arm, and option F1's literal reading of *where* it looks:
+    // the **raw** token after the head has to be the flag. `--backend claude
+    // critic review this` therefore stays prose, where a looser rule would make
+    // it a one-critic run on the strength of a flag written somewhere else.
+    //
+    // Both arms ask `!= Unknown` deliberately (execution deviation **Dv-1**,
+    // lead ruling): one intent must not be answered two ways. R2 words this arm
+    // "a bare **spawnable** roster name", but a primary immediately followed by
+    // this command's own flag is a spec the person meant, and swallowing it
+    // into the task is the misread Principle 1 refuses — where `build,build x`
+    // already refuses `NotSpawnable{build}` for the same intent. So the arm
+    // decides only *whether this is a spec*, and `segment` decides whether the
+    // agent may be spawned.
+    roster(head) != RosterAnswer::Unknown && next.is_some_and(is_backend_flag)
+}
+
+/// One segment of a spec, validated against `roster` and against whether the
+/// line carried a flag.
+fn segment<'a>(
+    text: &'a str,
+    flagged: bool,
+    roster: &dyn Fn(&str) -> RosterAnswer,
+) -> Result<Segment<'a>, TeamSpecError> {
+    let counted = |run: &str| -> Result<usize, TeamSpecError> {
+        let count = run
+            .parse::<usize>()
+            .map_err(|_| TeamSpecError::TooMany { asked: run.to_owned(), cap: MAX_SPEC_MEMBERS })?;
+        if count == 0 {
+            return Err(TeamSpecError::ZeroCount { segment: text.to_owned() });
+        }
+
+        Ok(count)
+    };
+
+    if digits(text) {
+        return Ok(Segment { count: counted(text)?, agent: None, surface: None });
+    }
+
+    let (count, rest) = match text.split_once(':') {
+        Some((run, rest)) => {
+            if !digits(run) {
+                return Err(TeamSpecError::Malformed { token: text.to_owned() });
+            }
+            (counted(run)?, rest)
+        }
+        None => (1, text),
+    };
+
+    let (agent, surface) = match rest.split_once('@') {
+        Some((agent, surface)) => {
+            // R4: one line answers the surface question one way.
+            if flagged {
+                return Err(TeamSpecError::BackendWithAt { segment: text.to_owned() });
+            }
+            (agent, Some(surface))
+        }
+        None => (rest, None),
+    };
+    let malformed = agent.is_empty()
+        || rest.contains(':')
+        || surface.is_some_and(|surface| surface.is_empty() || surface.contains('@'));
+    if malformed {
+        return Err(TeamSpecError::Malformed { token: text.to_owned() });
+    }
+
+    match roster(agent) {
+        RosterAnswer::Spawnable => {}
+        RosterAnswer::Primary => {
+            return Err(TeamSpecError::NotSpawnable { name: agent.to_owned() });
+        }
+        RosterAnswer::Unknown => {
+            return Err(TeamSpecError::UnknownAgent { name: agent.to_owned() });
+        }
+    }
+
+    Ok(Segment { count, agent: Some(agent), surface: surface.map(parse_backend).transpose()? })
+}
+
+/// The members a spec-shaped head token asks for, named and given surfaces.
+fn spec_members(
+    head: &str,
+    flagged: bool,
+    surfaces: &[MemberBackend],
+    roster: &dyn Fn(&str) -> RosterAnswer,
+) -> Result<Vec<Member>, TeamSpecError> {
+    // An empty piece cannot name itself, and a refusal naming nothing is what
+    // PM-1's escape tail exists to make survivable — so the head token is the
+    // payload. `/team critic, then fix it` is exactly PM-1's class of input:
+    // prose opening with a roster name and a comma.
+    if head.split(',').any(str::is_empty) {
+        return Err(TeamSpecError::Malformed { token: head.to_owned() });
+    }
+    let segments = head
+        .split(',')
+        .map(|text| segment(text, flagged, roster))
+        .collect::<Result<Vec<_>, _>>()?;
+    // Saturating, because the sum of counts that each fit a `usize` need not:
+    // both ways past the cap are the same refusal.
+    let total = segments.iter().fold(0usize, |total, segment| total.saturating_add(segment.count));
+    if total > MAX_SPEC_MEMBERS {
+        return Err(TeamSpecError::TooMany { asked: total.to_string(), cap: MAX_SPEC_MEMBERS });
+    }
+    if total < surfaces.len() {
+        return Err(TeamSpecError::FewerMembersThanSurfaces {
+            members: total,
+            surfaces: surfaces.len(),
+        });
+    }
+
+    let mut counters: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut members = Vec::with_capacity(total);
+    for segment in &segments {
+        for _ in 0..segment.count {
+            // R6: one counter per agent name, `worker` standing in for the rows
+            // that named none, so every name is unique across the whole spec.
+            let key = segment.agent.unwrap_or(WORKER);
+            let nth = {
+                let counter = counters.entry(key).or_insert(0);
+                *counter += 1;
+                *counter
+            };
+            // R4: `i` counts **members**, not segments, so two segments over
+            // two surfaces alternate rather than taking one surface each.
+            let backend = segment.surface.unwrap_or_else(|| {
+                if surfaces.is_empty() {
+                    DEFAULT_BACKEND
+                } else {
+                    surfaces[members.len() % surfaces.len()]
+                }
+            });
+            members.push(Member {
+                name: format!("{key}-{nth}"),
+                agent: segment.agent.map(str::to_owned),
+                backend,
+            });
+        }
+    }
+
+    Ok(members)
+}
+
+/// The members a line with no spec at all asks for: none for a standing
+/// surface, and one per surface for a list of them (**R4**).
+fn spec_less_members(surfaces: &[MemberBackend]) -> Result<Vec<Member>, TeamSpecError> {
+    if surfaces.len() < 2 {
+        return Ok(Vec::new());
+    }
+    if surfaces.len() > MAX_SPEC_MEMBERS {
+        return Err(TeamSpecError::TooMany {
+            asked: surfaces.len().to_string(),
+            cap: MAX_SPEC_MEMBERS,
+        });
+    }
+
+    Ok(surfaces
+        .iter()
+        .enumerate()
+        .map(|(index, backend)| Member {
+            name: format!("{WORKER}-{}", index + 1),
+            agent: None,
+            backend: *backend,
+        })
+        .collect())
+}
+
+/// Reads a `/team` line's head token and its `--backend` flag (**D549**),
+/// leaving everything else as the task the model reads.
+///
+/// A pure function over the typed text and one roster predicate, in **R2's
+/// order**: tokenize, extract the flag from wherever it was written, take the
+/// head of what survives, and only then decide whether that head is a spec. The
+/// order is what makes `--backend claude 3:critic fix it` a three-critic run
+/// and two `--backend`s a refusal before any head token is judged at all.
+///
+/// `roster` answers for one agent name. It is a closure rather than a registry
+/// because the roster varies per session and this crate's lowest useful
+/// statement about a name is what the session's own registry says about it —
+/// which also makes the whole grammar a table test with no engine, no runtime
+/// and no fixture home.
+///
+/// # Errors
+///
+/// [`TeamSpecError`], whenever the head token *looks* like a spec and is not a
+/// valid one, or the flag is wrong however it can be (**R3**). A head token
+/// that looks like nothing in particular is never an error: it is the first
+/// word of the task.
+pub fn parse_team(
+    arguments: &str,
+    roster: &dyn Fn(&str) -> RosterAnswer,
+) -> Result<TeamInvocation, TeamSpecError> {
+    let raw = raw_tokens(arguments);
+    let flag = backend_flag(&raw)?;
+    let surfaces = flag.as_ref().map_or(&[][..], |flag| flag.surfaces.as_slice());
+    // R4: exactly one surface pins no count, which is what makes it standing.
+    let standing = (surfaces.len() == 1).then(|| surfaces[0]);
+
+    let mut consumed = flag.as_ref().map(|flag| flag.indices.clone()).unwrap_or_default();
+    let head = (0..raw.len()).find(|index| !consumed.contains(index));
+    let spec = head.filter(|index| {
+        let next = raw.get(index + 1).map(|(_, text)| *text);
+        looks_like_a_spec(raw[*index].1, next, roster)
+    });
+
+    let members = match spec {
+        Some(index) => {
+            consumed.push(index);
+            spec_members(raw[index].1, flag.is_some(), surfaces, roster)?
+        }
+        None => spec_less_members(surfaces)?,
+    };
+
+    consumed.sort_unstable();
+    let spans: Vec<Range<usize>> = consumed.iter().map(|index| raw[*index].0.clone()).collect();
+
+    Ok(TeamInvocation { members, standing, task: remaining(arguments, &spans) })
+}
+
+/// (a) The imperative header a resolved roster is drawn under (**R7**).
+const MEMBERS_HEADER: &str = "Spawn exactly these members and no others. Each row's name and \
+     surface are already decided — pass them verbatim to the `task` call that starts that \
+     member:";
+
+/// (b) What the block says when the line named nobody and no surface (**R7**).
+const NOTHING_NAMED: &str =
+    "Nobody was named for this run: size the team yourself and name each member.";
+
+/// (c)'s second sentence, appended to [`NOTHING_NAMED`] when the line carried a
+/// standing surface; [`SURFACE_MARKER`] is where that surface's spelling goes.
+const STANDING_CLAUSE: &str = "Run every member on `{surface}`.";
+
+/// The one token [`STANDING_CLAUSE`] fills.
+const SURFACE_MARKER: &str = "{surface}";
+
+/// What `${members}` says, in whichever of **R7**'s three renderings the parse
+/// earned.
+///
+/// The empty-task override is computed **here**, from `invocation.task`, so the
+/// one argument really is the whole input: a line with no task prints usage and
+/// spawns nobody, so a roster drawn beside that usage would describe a team
+/// nothing is about to create. The parse is unchanged; only the drawing is.
+///
+/// # Filling this last is safe, and for its own reason
+///
+/// `${session}` is filled last because an id is opaque bytes nothing reads
+/// again. This block is filled last on a different argument: it holds only
+/// closed-vocabulary tokens — roster names the predicate admitted, backend
+/// spellings from this build's own list, and digits this function assigned —
+/// every one of them validated before it is rendered, so there is nothing in it
+/// a later pass could have run or attached. A change that admits a free-form
+/// token here voids that argument and has to say so.
+#[must_use]
+pub fn render_members(invocation: &TeamInvocation) -> String {
+    if invocation.task.is_empty() {
+        return NOTHING_NAMED.to_owned();
+    }
+    if invocation.members.is_empty() {
+        let Some(surface) = invocation.standing else {
+            return NOTHING_NAMED.to_owned();
+        };
+        let clause = STANDING_CLAUSE.replace(SURFACE_MARKER, backend_name(surface));
+
+        return format!("{NOTHING_NAMED} {clause}");
+    }
+
+    let rows: Vec<String> = invocation
+        .members
+        .iter()
+        .enumerate()
+        .map(|(index, member)| {
+            let surface = backend_name(member.backend);
+            let position = index + 1;
+            match &member.agent {
+                Some(agent) => format!("{position}. {} — {agent} on {surface}", member.name),
+                None => {
+                    format!("{position}. {} — on {surface}, agent yours to choose", member.name)
+                }
+            }
+        })
+        .collect();
+
+    format!("{MEMBERS_HEADER}\n\n{}", rows.join("\n"))
 }
 
 /// A command template after every expansion step upstream applies.
