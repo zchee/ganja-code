@@ -392,13 +392,6 @@ toml = { version = "1.1.5", features = ["preserve_order"] }
 # writers spell an entry out of the same serde type the loader reads back,
 # through `toml_edit::ser`, rather than composing table syntax by hand.
 toml_edit = { version = "0.25.13", features = ["serde"] }
-# The service trait axum is built on. Admitted alongside it so the serve layer
-# can write one middleware (auth, header posture) without a second admission
-# round.
-tower = "0.5.3"
-# Tower's HTTP-specific middleware, admitted with the pair above; a member
-# opts in only where a hand-written layer would otherwise duplicate it.
-tower-http = "0.7.1"
 tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
@@ -447,7 +440,6 @@ assert_cmd = "2.2.2"
 expectrl = "0.9.0"
 insta = "1.48.0"
 predicates = "3.1.4"
-similar-asserts = "2.0.0"
 # Left this group in P25 without moving: `ganja-team`, `ganja-core`,
 # `ganja-cli`, `ganja-tui`, and the dev-only `ganja-testkit` name it under
 # `[dependencies]`; `ganja-permission`, `ganja-provider`, `ganja-serve`, and
