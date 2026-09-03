@@ -102,17 +102,41 @@ async fn expand_as(arguments: &str, session: &str) -> String {
     let registry = roster();
     let team = registry.get("team").expect("`/team` is a builtin");
 
-    team.expand(arguments, session, &ctx()).await.expect("these arguments expand").prompt
+    team.expand(arguments, command::Fills { session, members: None }, &ctx()).await.prompt
 }
 
-/// What `/team` refuses `arguments` with, for the lines it never expands.
-async fn refusal(arguments: &str) -> command::Misdirected {
+/// What `/team` sends for `arguments` **with its spec resolved**, the way
+/// `Engine::run_command` resolves it (**D549**).
+///
+/// The three steps that engine takes, in its order and against this build's
+/// real agent roster: read the head token and the flag, render the roster the
+/// grammar found, and expand what is left of the line with that roster filled
+/// in. Spelled here rather than driven through an engine because what these
+/// tests are about is the *template* — that the block lands where the spawn
+/// step reads it, and that nothing is left unfilled — and an engine would cost
+/// this binary a provider and a store to prove a substitution. That the engine
+/// really wires it this way is `tests/team_spec.rs`'s.
+///
+/// The roster predicate is `AgentRegistry::roster_answer`, which is the one the
+/// engine hands `parse_team` rather than a copy of it: a copy would go on
+/// passing the day that mapping changed, and it has changed once already
+/// (**Dv-1** widened the bare-name arm).
+async fn expand_spec(arguments: &str) -> String {
+    let agents = ganja_testkit::agent_registry(&Config::default());
+    let invocation = command::parse_team(arguments, &|name: &str| agents.roster_answer(name))
+        .expect("these arguments are a valid spec");
+    let members = command::render_members(&invocation);
+
     let registry = roster();
     let team = registry.get("team").expect("`/team` is a builtin");
 
-    team.expand(arguments, SESSION, &ctx())
-        .await
-        .expect_err("a roster line is refused rather than expanded")
+    team.expand(
+        &invocation.task,
+        command::Fills { session: SESSION, members: Some(&members) },
+        &ctx(),
+    )
+    .await
+    .prompt
 }
 
 /// Where this checkout's pipeline state belongs, computed the way anything
@@ -138,8 +162,8 @@ async fn team_is_a_builtin_with_its_grammar_as_the_hint() {
     assert!(team.model.is_none());
     assert_eq!(
         team.argument_hint.as_deref(),
-        Some("[N[:agent]] [--backend <surface>] <task>"),
-        "the composer draws the grammar, because nothing in this crate parses it",
+        Some("[[N:]agent[@surface],\u{2026}] [--backend <surface>,\u{2026}] <task>"),
+        "the composer draws the grammar the code really reads (**D549**)",
     );
     assert!(
         registry.get("init").is_some(),
@@ -193,24 +217,51 @@ async fn bare_team_still_reaches_the_model_with_its_usage_and_teammate_pointer()
         "the usage points the old spelling somewhere: {expanded}",
     );
     assert!(
-        expanded.contains("[N[:agent]] [--backend <surface>] <task>"),
+        expanded.contains("[[N:]agent[@surface],\u{2026}] [--backend <surface>,\u{2026}] <task>"),
         "and shows the grammar: {expanded}",
     );
     assert!(expanded.contains("--backend"), "including what a backend is chosen from: {expanded}",);
+}
+
+/// **AC-26.** The grammar is spelled once in this build: the hint the composer
+/// draws and the usage the template prints are one string.
+///
+/// A drift pin rather than a measurement — both halves already agree today —
+/// and the drift it is pinned against is the expensive one: D549 made the hint
+/// a description of what `parse_team` really accepts, so a template that went
+/// on advertising an older spelling would be teaching a grammar the code
+/// refuses, and nothing would redden.
+#[tokio::test]
+async fn the_hint_and_the_template_spell_the_grammar_the_same_way() {
+    let registry = roster();
+    let team = registry.get("team").expect("`/team` is a builtin");
+    let hint = team.argument_hint.clone().expect("`/team` carries a hint");
+
+    assert!(
+        expand("").await.contains(&hint),
+        "the usage quotes the hint verbatim, so the two cannot come apart: {hint}",
+    );
 }
 
 /// **Bead 2m46.** The three exact spellings never reach the model at all: they
 /// are refused where the expansion would have begun, with the line that was
 /// meant. A round trip to be told what three fixed words already say is a round
 /// trip nobody should pay for a typo.
-#[tokio::test]
-async fn legacy_roster_arguments_are_refused_before_a_turn_starts() {
+///
+/// Asked of [`command::misdirected`] since **D549** moved the door out of the
+/// expansion and into `Engine::run_command`, ahead of the grammar reading the
+/// same line. That it is still consulted, and still first, is
+/// `tests/team_spec.rs`'s to prove; what these rows are about is what it
+/// decides.
+#[test]
+fn legacy_roster_arguments_are_refused_before_a_turn_starts() {
     for (legacy, meant) in [
         ("spawn worker-1", "/teammate spawn worker-1"),
         ("shutdown worker-1", "/teammate shutdown worker-1"),
         ("list", "/teammate list"),
     ] {
-        assert_eq!(refusal(legacy).await.meant, meant, "`/team {legacy}` names its own answer");
+        let refused = command::misdirected(legacy).expect("a roster line is refused");
+        assert_eq!(refused.meant, meant, "`/team {legacy}` names its own answer");
     }
 }
 
@@ -229,6 +280,12 @@ async fn legacy_roster_arguments_are_refused_before_a_turn_starts() {
 /// Planted into the config home this binary already pins, which its tests
 /// share: a skipped file changes no other roster here, and the day one stopped
 /// being skipped every test in this binary reddening is the honest report.
+///
+/// What it can say about the gate itself ends at
+/// [`command::Definition::builtin`] since **D549**: the flag is what
+/// `Engine::run_command` reads, and an engine is what proves it is read —
+/// `tests/team_spec.rs::a_project_that_owns_the_team_name_keeps_the_roster_spellings`
+/// is where that half now lives.
 #[tokio::test]
 async fn a_command_file_named_after_the_builtin_leaves_its_gate_alone() {
     // Read back out of the variable `pin_homes` set, rather than rebuilt from
@@ -249,62 +306,23 @@ async fn a_command_file_named_after_the_builtin_leaves_its_gate_alone() {
         "the builtin's own text is what expands: {}",
         team.template,
     );
-    assert_eq!(
-        refusal("list").await.meant,
-        "/teammate list",
-        "so the roster spellings are still refused before a turn starts",
+    assert!(
+        command::misdirected("list").is_some(),
+        "so the roster spellings the surviving builtin is gated on are still roster lines",
     );
-}
-
-/// And it is refused on behalf of **this build's** `/team`, never on behalf of
-/// the name.
-///
-/// A `[command.team]` entry replaces the builtin outright — the config tier
-/// wins a name it reuses, which `command::Registry::build` documents as
-/// deliberate — so from that point the project's own template is what `/team`
-/// sends. A gate that kept refusing three argument shapes there would make
-/// somebody's own command unreachable for those spellings, and would answer
-/// with a sentence about a command they never wrote.
-#[tokio::test]
-async fn a_project_that_owns_the_team_name_keeps_the_roster_spellings() {
-    pin_homes();
-    let mut command = std::collections::BTreeMap::new();
-    command.insert(
-        "team".to_owned(),
-        ganja_core::config::CommandConfig {
-            template: "run the deploy playbook for $ARGUMENTS".to_owned(),
-            description: None,
-            agent: None,
-            model: None,
-        },
-    );
-    let registry =
-        command::Registry::build(&Config { command, ..Config::default() }, Path::new(WORKTREE));
-    let team = registry.get("team").expect("the config entry took the name");
-    assert!(!team.builtin, "the builtin was replaced rather than layered under");
-
-    for typed in ["spawn w1", "shutdown w2", "list"] {
-        let expanded = team
-            .expand(typed, SESSION, &ctx())
-            .await
-            .unwrap_or_else(|refused| panic!("`/team {typed}` is the project's own: {refused:?}"))
-            .prompt;
-
-        assert_eq!(
-            expanded,
-            format!("run the deploy playbook for {typed}"),
-            "the project's template is what runs, whole",
-        );
-    }
-
-    // And the builtin, on the same machine and the same worktree, still is not.
-    assert_eq!(refusal("spawn w1").await.meant, "/teammate spawn w1");
 }
 
 /// And the template's redirect branch is still the fallback, because the
 /// refusal above only knows three spellings: anything else that means the same
 /// thing reaches the model with what was typed, whole, so it can answer with
 /// the corrected line itself.
+///
+/// It survives **D549** on a vocabulary accident worth naming: `start` and
+/// `who` happen to be in no agent roster, so neither line's head token is a
+/// spec and both still reach `$ARGUMENTS` untouched. An agent named either
+/// would turn these two rows into specs — the head token would be consumed,
+/// and `expanded.contains(asked)` would redden — which is a true report about
+/// this grammar rather than a fault in this test.
 #[tokio::test]
 async fn roster_management_in_other_words_reaches_the_branch_that_redirects_it() {
     for asked in ["start a teammate called worker-1", "who is on the team"] {
@@ -321,23 +339,46 @@ async fn roster_management_in_other_words_reaches_the_branch_that_redirects_it()
     }
 }
 
+/// What reaches `$ARGUMENTS` is the **task**, whole and untokenized — and,
+/// since **D549**, exactly the task and nothing else.
+///
+/// Asserted as the arguments block's whole content rather than as a
+/// `contains`, which is the only way to pin the half that is new: the head
+/// token and the flag were read by the code, so they are *gone* from what the
+/// model is handed. A `contains` cannot see that — the raw typed line contains
+/// the task too — so a `fill_template` that started handing the whole line
+/// through again would go unnoticed by every other assertion in this binary.
+/// The other half is unchanged and still load-bearing: whatever is left is the
+/// person's own bytes, spacing and all, because the model reads it as prose.
 #[tokio::test]
 async fn the_whole_grammar_reaches_the_text_however_it_was_spelled() {
-    for typed in [
-        "3 port the config loader",
-        "3:executor port the config loader",
-        "2:debugger --backend claude find the leak",
-        "--backend codex read the wire and report",
-        "just do the thing",
+    for (typed, task) in [
+        ("3 port the config loader", "port the config loader"),
+        ("3:executor port the config loader", "port the config loader"),
+        ("2:critic --backend claude find the leak", "find the leak"),
+        ("--backend codex read the wire and report", "read the wire and report"),
+        ("just do the thing", "just do the thing"),
     ] {
-        let expanded = expand(typed).await;
-
-        assert!(
-            expanded.contains(typed),
-            "`$ARGUMENTS` carries the whole line untokenized, because the model parses it: \
-             {typed:?} is missing from {expanded}",
+        assert_eq!(
+            arguments_block(&expand_spec(typed).await),
+            task,
+            "`/team {typed}` hands the model its task and neither the head token nor the flag",
         );
     }
+}
+
+/// What the template put between its own argument markers.
+///
+/// The template names `$ARGUMENTS` exactly once, between a line holding
+/// `<team-arguments>` and one holding `</team-arguments>`, so reading back what
+/// landed there is reading back what the model is told the user typed. Named
+/// because two tests ask it and because a `contains` over the whole prompt
+/// cannot answer the question either of them is asking.
+fn arguments_block(expanded: &str) -> &str {
+    let (_, rest) = expanded.split_once("<team-arguments>\n").expect("the template opens a block");
+    let (block, _) = rest.split_once("\n</team-arguments>").expect("and closes it");
+
+    block
 }
 
 #[tokio::test]
@@ -430,6 +471,77 @@ async fn the_text_routes_every_stage_to_an_agent_this_build_ships() {
     assert!(
         expanded.contains(".ganja/agents"),
         "and says a project's own definition outranks the builtin: {expanded}",
+    );
+}
+
+/// **AC-11.** `${members}` is filled at expansion like the session id, and
+/// nothing is left standing.
+///
+/// The four placeholders reach the model by two different routes — two at
+/// roster build, two at expansion — so the honest assertion is over the whole
+/// prompt: no `${` of any kind survives a run that resolved a roster. A fifth
+/// placeholder added to the template and filled nowhere would redden here,
+/// which is what this is for.
+#[tokio::test]
+async fn no_placeholder_survives_a_spec_run() {
+    let expanded = expand_spec("2:critic@claude,critic@codex port the loader").await;
+
+    assert!(
+        !expanded.contains("${"),
+        "every placeholder is filled by the time the model reads this: {expanded}",
+    );
+    assert!(
+        expanded.contains("critic-1 — critic on claude"),
+        "and the roster the grammar resolved is what the block says: {expanded}",
+    );
+}
+
+/// **AC-14.** The block sits inside team-exec's own spawn step, not in a
+/// reference section further down.
+///
+/// Which is the whole of PM-2's mitigation: nothing enforces that the model
+/// spawns these rows, so where the roster sits relative to the instruction that
+/// spawns is the persuasion. A later edit that moved it under "Which agent runs
+/// which stage" would be moving it out of the step that reads it.
+#[tokio::test]
+async fn the_members_block_is_named_where_the_spawn_step_reads_it() {
+    let expanded = expand_spec("2:critic port the loader").await;
+
+    let (before, _) = expanded
+        .split_once("critic-1 — critic on ganja")
+        .expect("the resolved roster is in the prompt");
+    let (_, step) = before
+        .rsplit_once("3. Spawn the teammates with the `task` tool")
+        .expect("the block sits after the spawn step opens");
+
+    assert!(
+        !step.contains("\n## "),
+        "and before the next section begins, so the roster is inside that step: {step:?}",
+    );
+}
+
+/// **AC-13.** A spec-less `/team --backend codex <task>` still puts `codex` in
+/// front of the model.
+///
+/// Driver 2's fifth shipped shape, and the reason `render_members` has a third
+/// rendering at all: the line names nobody, so there is no roster to draw, but
+/// the surface it named must not be lost between the flag and the spawn.
+#[tokio::test]
+async fn a_spec_less_surface_reaches_the_model_as_a_standing_surface() {
+    let expanded = expand_spec("--backend codex read the wire and report").await;
+
+    assert!(
+        expanded.contains("Run every member on `codex`"),
+        "the surface survives a line that named nobody: {expanded}",
+    );
+    assert!(
+        expanded.contains("size the team yourself"),
+        "and the model is still the one that sizes the team: {expanded}",
+    );
+    assert_eq!(
+        arguments_block(&expanded),
+        "read the wire and report",
+        "with the flag taken out of the task",
     );
 }
 

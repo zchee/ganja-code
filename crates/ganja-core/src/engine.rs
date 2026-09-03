@@ -245,7 +245,18 @@ pub enum EngineError {
     /// registry, which is every engine a test or a golden run builds.
     #[error("this engine has no agents; it was built without a registry")]
     NoAgents,
-    /// [`Command::SwitchAgent`] named an agent the registry does not hold.
+    /// [`Command::SwitchAgent`] named an agent the registry does not hold —
+    /// and, since **D549**, a `/team` spec segment that named one, which is
+    /// this variant's second caller and the reason its message says nothing
+    /// about switching.
+    ///
+    /// The two share a variant because they are one sentence: a name nobody
+    /// holds is a typo whichever door it arrived at. What they do **not** share
+    /// is a status over `ganja serve` — this one is a `500` where every other
+    /// `/team` spec refusal is a `400`, which is recorded as **F2** in
+    /// `.omc/plans/2026-09-03-team-segment-grammar.md` and commented beside the
+    /// row that maps it, because moving it would move `SwitchAgent`'s shipped
+    /// status too.
     #[error("no agent named {name}")]
     UnknownAgent {
         /// The name nothing answers to.
@@ -310,6 +321,15 @@ pub enum EngineError {
         /// What the person typed, with the command that answers to it.
         meant: String,
     },
+    /// [`Command::RunCommand`] ran the builtin `/team` on a line whose head
+    /// token *looks* like a team spec and is not a valid one (**D549**).
+    ///
+    /// Transparent on purpose: [`command::TeamSpecError`] words every one of
+    /// these, including the shared tail naming the way back to plain task text,
+    /// and a sentence restated here would be a second place to change one
+    /// wording. Refused before the template is filled, so no turn starts.
+    #[error(transparent)]
+    TeamSpec(#[from] command::TeamSpecError),
     /// [`Command::RunCommand`] named a command whose `agent` is a subagent.
     /// Those exist to be spawned by the task tool, and a command running as one
     /// would be a turn with no way back.
@@ -3798,6 +3818,10 @@ impl Engine {
                     text,
                     TurnKind::Prompt { mentions, skills, peers, session_mentions },
                     None,
+                    // A typed prompt carries no `/team` spec: only the builtin
+                    // template's own expansion resolves one, and a person who
+                    // types the grammar into an ordinary message typed prose.
+                    None,
                 )
                 .await
             }
@@ -3877,10 +3901,10 @@ impl Engine {
                 Ok(())
             }
             Command::RunShell { command } => {
-                self.start_turn(command.clone(), TurnKind::Shell { command }, None).await
+                self.start_turn(command.clone(), TurnKind::Shell { command }, None, None).await
             }
             Command::RunCommand { name, args } => self.run_command(&name, &args).await,
-            Command::Compact => self.start_turn(String::new(), TurnKind::Compact, None).await,
+            Command::Compact => self.start_turn(String::new(), TurnKind::Compact, None, None).await,
             Command::NewSession => self.new_session().await,
             Command::Undo => self.undo().await,
             Command::Redo => self.redo().await,
@@ -3956,13 +3980,30 @@ impl Engine {
         // expansion that a roster shared by every session in the process
         // cannot know.
         let session = self.session_id();
-        // A refusal here has cost nothing yet: no turn has started, no request
-        // has been assembled, and the model has not been asked to notice
-        // something three fixed words already said (**bead 2m46**).
+        // Both `/team` gates run here, before a byte of the template is
+        // filled. A refusal at this point has cost nothing: no turn has
+        // started, no request has been assembled, and the model has not been
+        // asked to notice something three fixed words already said (**bead
+        // 2m46**) or to parse a spec the code just found invalid (**D549**).
+        let invocation = self.team_spec(definition, args)?;
+        // Drawn from the same invocation the turn goes on to carry, so the
+        // block the model reads and the rows the spec arm judges its spawns
+        // against are one parse — a roster read twice could come apart, and a
+        // correction naming a row the prompt never showed is worse than no
+        // correction at all.
+        let members = invocation.as_ref().map(command::render_members);
         let expanded = definition
-            .expand(args, session.as_str(), &ctx)
-            .await
-            .map_err(|misdirected| EngineError::MisdirectedCommand { meant: misdirected.meant })?;
+            .expand(
+                // What is left of the line once the head token and the flag are
+                // cut out. Identical to `args` for every command but a parsed
+                // `/team`, and for a `/team` whose head token was the first word
+                // of the task — which is what keeps `/team port the loader`
+                // reaching the model exactly as it always did.
+                invocation.as_ref().map_or(args, |invocation| invocation.task.as_str()),
+                command::Fills { session: session.as_str(), members: members.as_deref() },
+                &ctx,
+            )
+            .await;
 
         self.start_turn(
             expanded.prompt,
@@ -3979,8 +4020,100 @@ impl Engine {
                 session_mentions: Vec::new(),
             },
             overrides,
+            // **F5, Dv-2.** The roster rides the turn only when the model was
+            // shown it: `render_members`'s empty-task override draws "nobody
+            // was named" for a spec with no task, whatever the parse returned,
+            // and a nag against a roster nobody read would be a correction for
+            // an instruction that was never given. Asked of the rendering's own
+            // input rather than of the rendering, because a block is text and
+            // `members` is the roster the nag has to compare names against.
+            invocation
+                .filter(|invocation| !invocation.task.is_empty() && !invocation.members.is_empty())
+                .map(|invocation| invocation.members),
         )
         .await
+    }
+
+    /// What **D549**'s grammar reads out of a `/team` line, or [`None`] for
+    /// every other command.
+    ///
+    /// Both gates in front of the builtin `/team` live here, in the order the
+    /// ruling puts them: bead 2m46's roster-line redirect first, so
+    /// `/team list` is still answered by three fixed words and `/team 2:critic
+    /// list` is a pipeline over the task `list`; then the grammar, which reads
+    /// the head token and the `--backend` flag and leaves everything after
+    /// them as the task.
+    ///
+    /// Gated on [`command::Definition::builtin`] as well as the name, because
+    /// a config `[command.team]` **replaces** the builtin outright
+    /// ([`command::Registry::build`]): parsing somebody else's arguments as a
+    /// team spec, or refusing three roster spellings on their behalf, would
+    /// make a command they wrote unreachable in favour of sentences about one
+    /// they did not.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::MisdirectedCommand`] for a roster line, and one of three
+    /// for a head token that looks like a spec and is not a valid one — an
+    /// unknown agent reaches [`EngineError::UnknownAgent`], or
+    /// [`EngineError::NoAgents`] on a session that was handed no registry at
+    /// all, and everything else [`EngineError::TeamSpec`] transparently.
+    fn team_spec(
+        &self,
+        definition: &command::Definition,
+        args: &str,
+    ) -> Result<Option<command::TeamInvocation>, EngineError> {
+        if !(definition.builtin && definition.name == command::TEAM) {
+            return Ok(None);
+        }
+        if let Some(misdirected) = command::misdirected(args) {
+            return Err(EngineError::MisdirectedCommand { meant: misdirected.meant });
+        }
+
+        let agents = self.agents.as_deref();
+        // **R8.** A session with no agent registry answers `Unknown` for every
+        // name, which is the honest answer rather than a special case: nothing
+        // is spawnable when nothing is known. The bare-name arm therefore never
+        // fires there, so `critic --backend claude x` stays task text, and only
+        // a `:`/`@`/`,`-shaped head reaches a refusal at all. That asymmetry —
+        // one intent spelled two ways, answered two ways — is an accepted
+        // consequence: no shipped binary is registry-less, so it is reachable
+        // only from a fixture.
+        let roster = |name: &str| {
+            agents.map_or(command::RosterAnswer::Unknown, |registry| registry.roster_answer(name))
+        };
+
+        match command::parse_team(args, &roster) {
+            Ok(invocation) => Ok(Some(invocation)),
+            Err(refused) => {
+                tracing::debug!(
+                    // The first token **as typed**, which is the head token
+                    // unless the flag was written in front of it. Naming the
+                    // post-extraction head would mean spelling the flag rule a
+                    // second time out here, and two spellings of one rule are
+                    // two that can come to disagree.
+                    typed = args.split_whitespace().next().unwrap_or_default(),
+                    // Debug rather than Display: the variant and its payload
+                    // are what a log wants, where the sentence with its escape
+                    // tail is what the person gets.
+                    refusal = ?refused,
+                    "a /team line looked like a team spec and is not one",
+                );
+
+                Err(match refused {
+                    // A registry-less session holds no agents to be wrong
+                    // about, so "no agent named x" would name the wrong
+                    // problem: what is missing is the roster, not the name.
+                    command::TeamSpecError::UnknownAgent { .. } if agents.is_none() => {
+                        EngineError::NoAgents
+                    }
+                    command::TeamSpecError::UnknownAgent { name } => {
+                        EngineError::UnknownAgent { name }
+                    }
+                    other => EngineError::TeamSpec(other),
+                })
+            }
+        }
     }
 
     /// The model a config spelling names, when this provider serves it.
@@ -5245,6 +5378,7 @@ impl Engine {
         prompt: String,
         kind: TurnKind,
         overrides: Option<Overrides>,
+        spec: Option<Vec<command::Member>>,
     ) -> Result<(), EngineError> {
         // An announced approval is applied inside `lock_entry` — before the
         // `refresh_mcp` below, so the task-roster rebuild sees build, and
@@ -5468,6 +5602,7 @@ impl Engine {
             receipts: Arc::clone(&self.settled_receipts),
             teamless: self.teamless(),
             teamless_send: self.teamless_send,
+            spec,
             deferral: self.deferral(),
             permissions,
             cwd: self.cwd.clone(),

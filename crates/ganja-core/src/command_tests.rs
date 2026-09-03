@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::{
-    Definition, ESCAPE_TAIL, INIT, INIT_TEMPLATE, MAX_COMMAND_FILE_BYTES, MAX_SPEC_MEMBERS,
+    Definition, ESCAPE_TAIL, Fills, INIT, INIT_TEMPLATE, MAX_COMMAND_FILE_BYTES, MAX_SPEC_MEMBERS,
     Misdirected, NOTHING_NAMED, PATH_PLACEHOLDER, Registry, RosterAnswer, TEAM, TeamInvocation,
     TeamSpecError, file_commands, fill_template, mentions, misdirected, parse_team, render_members,
     shell_substitutions, split_range, tokenize,
@@ -14,6 +14,18 @@ use crate::tool::{Credentials, FileTimes, ToolCtx};
 /// that a substitution which ever became pattern-matching rather than a plain
 /// replace would show up as a mangled prompt rather than as nothing.
 const SESSION: &str = "session-${odd}-01";
+
+/// What every expansion here fills from: this binary's session and **no**
+/// roster.
+///
+/// [`Fills::members`] is [`None`] because no test in this file expands the
+/// `/team` builtin with a spec — the grammar is a pure function tested
+/// directly below, and the one place a resolved roster has to reach the
+/// template is `tests/team_command.rs`, which pins the homes that expansion
+/// reads.
+fn fills() -> Fills<'static> {
+    Fills { session: SESSION, members: None }
+}
 
 #[test]
 fn the_init_template_is_upstreams_with_ganjas_identity_and_the_worktree_filled_in() {
@@ -197,25 +209,16 @@ async fn template_expansion_runs_shells_and_attaches_only_files_that_exist() {
         builtin: false,
     };
 
-    let echoed = command(r#"!`echo hi`"#)
-        .expand("", SESSION, &ctx)
-        .await
-        .expect("an ordinary command expands");
+    let echoed = command(r#"!`echo hi`"#).expand("", fills(), &ctx).await;
     assert_eq!(echoed.prompt, "hi");
 
-    let failed = command(r#"!`printf still-here; exit 7`"#)
-        .expand("", SESSION, &ctx)
-        .await
-        .expect("expands");
+    let failed = command(r#"!`printf still-here; exit 7`"#).expand("", fills(), &ctx).await;
     assert_eq!(
         failed.prompt, "still-here",
         "a non-zero exit still substitutes what the command wrote"
     );
 
-    let attached = command("read @present.md and ask @alice")
-        .expand("", SESSION, &ctx)
-        .await
-        .expect("expands");
+    let attached = command("read @present.md and ask @alice").expand("", fills(), &ctx).await;
     assert_eq!(attached.prompt, "read @present.md and ask @alice");
     assert_eq!(
         attached.mentions,
@@ -375,8 +378,7 @@ async fn a_file_command_expands_through_the_one_expansion_path() {
     };
 
     let commands = file_commands(dir.path());
-    let expanded =
-        commands[0].expand("the port", SESSION, &ctx).await.expect("a file command expands");
+    let expanded = commands[0].expand("the port", fills(), &ctx).await;
 
     assert_eq!(expanded.prompt, "hi about the port beside @present.md");
     assert_eq!(
@@ -390,12 +392,14 @@ async fn a_file_command_expands_through_the_one_expansion_path() {
 /// would have expanded, so a line typed at the command D544 renamed costs no
 /// turn and no model round trip — and the refusal hands back the line that was
 /// meant rather than describing it.
-#[tokio::test]
-async fn the_roster_subcommands_are_refused_by_team_with_the_line_that_was_meant() {
-    let root = tempfile::TempDir::new().expect("a temporary project is creatable");
-    let ctx = expansion_ctx(root.path());
-    let team = Registry::builtin(root.path()).get(TEAM).expect("team is builtin").clone();
-
+///
+/// Asked of [`misdirected`] itself since **D549**: the door moved out of
+/// [`Definition::expand`] to `Engine::run_command`, where it now runs ahead of
+/// the grammar that reads the same line. What it decides did not move, which is
+/// what these four rows are about; that it runs at all, and before the parse,
+/// is `tests/team_spec.rs`'s.
+#[test]
+fn the_roster_subcommands_are_refused_by_team_with_the_line_that_was_meant() {
     for (typed, meant) in [
         ("spawn w1 --backend ganja", "/teammate spawn w1 --backend ganja"),
         ("shutdown w2", "/teammate shutdown w2"),
@@ -403,8 +407,8 @@ async fn the_roster_subcommands_are_refused_by_team_with_the_line_that_was_meant
         ("list", "/teammate list"),
     ] {
         assert_eq!(
-            team.expand(typed, SESSION, &ctx).await,
-            Err(Misdirected { meant: meant.to_owned() }),
+            misdirected(typed),
+            Some(Misdirected { meant: meant.to_owned() }),
             "`/team {typed}` is a roster line, and nothing about it needs a model",
         );
     }
@@ -419,11 +423,14 @@ async fn a_task_that_only_reads_like_a_roster_line_still_expands() {
     let ctx = expansion_ctx(root.path());
     let team = Registry::builtin(root.path()).get(TEAM).expect("team is builtin").clone();
 
-    for typed in ["list the config keys", "3 spawn-free task text", "port the loader", ""] {
-        let expanded = team
-            .expand(typed, SESSION, &ctx)
-            .await
-            .unwrap_or_else(|refused| panic!("`/team {typed}` is a task: {refused:?}"));
+    // `3 spawn-free task text` used to sit here and has moved to the grammar
+    // table above, which already holds its shape as `3 port the loader`: since
+    // **D549** the head token is read by code, so a bare count is a two-worker
+    // spec and no longer reaches `$ARGUMENTS` whole. What is left here is the
+    // three rows that are still exactly what this test is about — lines that
+    // only *read* like a roster line.
+    for typed in ["list the config keys", "port the loader", ""] {
+        let expanded = team.expand(typed, fills(), &ctx).await;
         assert!(
             expanded.prompt.contains(typed),
             "and what it expands to carries what was typed: {}",
@@ -867,6 +874,16 @@ fn render_members_says_which_of_the_three_cases_it_is() {
         "a resolved roster is one line per member: {resolved}"
     );
     assert!(resolved.contains("3. critic-3 — critic on codex"), "{resolved}");
+    // **R5**, pinned on the header (**Dv-3**): this roster is the run's opening
+    // members, and the template tells the model three sections further down to
+    // start a verifier, to replace a member that stopped answering and to add
+    // one more when work backs up. A header that read "and no others" would
+    // contradict that, and the guard enforcing this roster is scoped to agree
+    // with it.
+    assert!(
+        resolved.contains("start this run with") && resolved.contains("verifier"),
+        "the header says which spawns these rows are, and which are not: {resolved}",
+    );
 
     let nothing =
         render_members(&parse_team("port the loader", &fixture_roster).expect("task text parses"));

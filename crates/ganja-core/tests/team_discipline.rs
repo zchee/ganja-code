@@ -83,6 +83,29 @@ const CONTINUATION_TAG: &str = "team_still_working";
 /// The tag the name nag carries.
 const NAG_TAG: &str = "teammate_naming";
 
+/// The tag the nag's **spec arm** carries (**D549**, F5).
+const SPEC_TAG: &str = "teammate_roster";
+
+/// The task text a `/team` run carries, appearing nowhere else, so a spec'd
+/// run's conversation can be told from a bare prompt's.
+const SPEC_TASK: &str = "port the config loader, zarquon";
+
+/// The `/team` template's opening sentence.
+///
+/// What identifies a spec'd run's conversation, where an ordinary prompt is
+/// identified by [`PROMPT`]: the arguments of such a run are cut down to the
+/// task, and one of the cases below deliberately has no task at all — so the
+/// only text every `/team` request certainly carries is the template's own.
+const TEAM_TEMPLATE_OPENING: &str = "You are running a team pipeline.";
+
+/// Whether this request is the lead's own conversation, however that
+/// conversation was started.
+fn is_lead(request: &ChatRequest) -> bool {
+    let said = transcript(request);
+
+    said.contains(PROMPT) || said.contains(TEAM_TEMPLATE_OPENING)
+}
+
 /// What the model does with the step it is asked for.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Script {
@@ -96,6 +119,30 @@ enum Script {
     /// Delegate twice in one step, naming somebody in one call and nobody in
     /// the other, then only talk.
     FansOutMixed,
+    /// Spawn one member the spec never asked for — the right name on the wrong
+    /// surface — then only talk (**D549**, F5).
+    SpawnsOffTheSpec,
+    /// Spawn exactly the two rows the spec named, on the surfaces it assigned
+    /// them, then only talk.
+    SpawnsToTheSpec,
+    /// Spawn the two rows correctly, then — on a **second** step — spawn
+    /// team-verify's own verifier, the way the template tells it to.
+    SpawnsThenVerifies,
+}
+
+/// How many `task` calls this conversation has already made.
+///
+/// The two-step drill needs to answer *which* step it is being asked for, where
+/// every other script here only needs "has it delegated at all" — and a failed
+/// call leaves a part behind just as a successful one does, which is what makes
+/// this a reliable step counter under a roster the permissions deny.
+fn delegations(request: &ChatRequest) -> usize {
+    request
+        .messages
+        .iter()
+        .flat_map(|message| &message.parts)
+        .filter(|part| matches!(&part.body, PartBody::Tool { tool, .. } if tool == "task"))
+        .count()
 }
 
 /// Whether this conversation has already delegated.
@@ -128,7 +175,7 @@ fn already_asked(request: &ChatRequest) -> bool {
 /// filter that looked at the words alone. A title request is offered no tools,
 /// which is what tells the two apart.
 fn is_lead_step(request: &ChatRequest) -> bool {
-    !request.tools.is_empty() && transcript(request).contains(PROMPT)
+    !request.tools.is_empty() && is_lead(request)
 }
 
 /// Two `task` calls in **one** step, which is what makes this a fan-out rather
@@ -143,6 +190,51 @@ fn fan_out(named: bool) -> Vec<ProviderEvent> {
 /// scanned, so the registry is still empty however late it is read.
 fn mixed_fan_out() -> Vec<ProviderEvent> {
     delegating([Some("alpha"), None])
+}
+
+/// A step spawning each `(name, backend)` in one batch, which is the shape
+/// `/team`'s own team-exec step produces.
+///
+/// Every one of these calls is denied before it runs — see [`Lead::spec`] —
+/// which is deliberate: the scan this suite is about reads a step's arguments
+/// *before* any of them runs, so what a call would have done is beside the
+/// point and letting one really spawn would cost a pane.
+fn spawning(members: &[(&str, &str)]) -> Vec<ProviderEvent> {
+    let mut script = Vec::new();
+    for (index, (name, backend)) in members.iter().enumerate() {
+        let id = format!("spawn-{index}");
+        let args = json!({
+            "name": name,
+            "backend": backend,
+            "subagent_type": "critic",
+            "description": "take a piece of it",
+        });
+        script.push(ProviderEvent::ToolCallStart { id: id.clone(), name: "task".to_owned() });
+        script.push(ProviderEvent::ToolCallDelta { id: id.clone(), json: args.to_string() });
+        script.push(ProviderEvent::ToolCallEnd { id });
+    }
+    script.push(ProviderEvent::Finish(FinishReason::Completed));
+
+    script
+}
+
+/// The spawn team-verify's own step makes: a `verifier` under a name no roster
+/// row holds, on a surface no row named, which is what `prompt/team.txt` tells
+/// the model to do once the work is built.
+fn verifying() -> Vec<ProviderEvent> {
+    let args = json!({
+        "name": "verifier-1",
+        "backend": "in-process",
+        "subagent_type": "verifier",
+        "description": "check it against the criteria",
+    });
+
+    vec![
+        ProviderEvent::ToolCallStart { id: "verify".to_owned(), name: "task".to_owned() },
+        ProviderEvent::ToolCallDelta { id: "verify".to_owned(), json: args.to_string() },
+        ProviderEvent::ToolCallEnd { id: "verify".to_owned() },
+        ProviderEvent::Finish(FinishReason::Completed),
+    ]
 }
 
 /// A step delegating once per entry, each naming a teammate or nobody.
@@ -296,7 +388,35 @@ impl Lead {
         )
     }
 
+    /// A lead holding this build's agent roster, so `/team` can resolve a spec
+    /// out of the line it is given (**D549**, F5).
+    ///
+    /// Its config **denies `task`**, and that is the whole trick: the spec arm
+    /// is decided over a step's `task` calls *before* any of them runs, so what
+    /// this suite needs is calls that arrive and then go away again. A denial
+    /// is refused with no dialog and becomes error text the model reads, which
+    /// is the ordinary shape (**D462**: a tool result is information, never
+    /// control flow) — where letting them run would put a permission dialog
+    /// nobody answers in front of a real pane spawn.
+    async fn spec(script: Script) -> Self {
+        let config: ganja_core::Config = serde_json::from_value(json!({
+            "permission": { "task": "deny" }
+        }))
+        .expect("the fixture config parses");
+
+        Self::assembled(script, None, Registry::new(Vec::new()), Some(&config)).await
+    }
+
     async fn build(script: Script, gate: Option<Gate>, tools: Registry) -> Self {
+        Self::assembled(script, gate, tools, None).await
+    }
+
+    async fn assembled(
+        script: Script,
+        gate: Option<Gate>,
+        tools: Registry,
+        agents: Option<&ganja_core::Config>,
+    ) -> Self {
         let (root, team, registry, storage, home) = lead::ground();
         let (provider, requests) = ganja_testkit::Director::answering(move |request| {
             if let Some(gate) = &gate {
@@ -311,11 +431,15 @@ impl Lead {
                     "write",
                     json!({ "filePath": "notes.md", "content": "a teammate's note" }),
                 )
-            } else if !transcript(request).contains(PROMPT) {
+            } else if !is_lead(request) {
                 // Somebody else's conversation: the teammate's own turn, or a
                 // title request. Neither is what this suite is about.
                 vec![ProviderEvent::Finish(FinishReason::Completed)]
-            } else if already_delegated(request) {
+            } else if already_delegated(request) && script != Script::SpawnsThenVerifies {
+                says("talked")
+            } else if script == Script::SpawnsThenVerifies && delegations(request) >= 3 {
+                // Its own tail: two rows and a verifier are all three steps it
+                // has, and the fourth request ends the turn.
                 says("talked")
             } else {
                 match script {
@@ -323,6 +447,22 @@ impl Lead {
                     Script::FansOutAnonymously => fan_out(false),
                     Script::FansOutNamed => fan_out(true),
                     Script::FansOutMixed => mixed_fan_out(),
+                    Script::SpawnsOffTheSpec => spawning(&[("critic-1", "codex")]),
+                    Script::SpawnsToTheSpec => {
+                        spawning(&[("critic-1", "claude"), ("critic-2", "codex")])
+                    }
+                    Script::SpawnsThenVerifies => {
+                        // Two rows on step one, the verifier on step two. Read
+                        // off the transcript rather than off a counter of its
+                        // own, so the script says what the model would be
+                        // looking at rather than how many times it has been
+                        // called.
+                        if delegations(request) < 2 {
+                            spawning(&[("critic-1", "claude"), ("critic-2", "codex")])
+                        } else {
+                            verifying()
+                        }
+                    }
                 }
             }
         });
@@ -335,6 +475,10 @@ impl Lead {
             storage,
         )
         .with_teammates(Arc::clone(&registry), ganja_testkit::externals());
+        let engine = match agents {
+            Some(config) => engine.with_agents(ganja_testkit::agent_registry(config)),
+            None => engine,
+        };
         let mut events = engine.subscribe().await.expect("the first subscriber wins");
         let said: Arc<Mutex<Vec<String>>> = Arc::default();
         let announced: Arc<AtomicUsize> = Arc::default();
@@ -432,6 +576,20 @@ impl Lead {
 
     async fn prompt(&self, text: &str) {
         lead::prompt(&self.engine, text).await;
+    }
+
+    /// Runs `/team` with `arguments`, then waits for the turn to be over.
+    ///
+    /// The door a spec really arrives through: `Engine::run_command` is what
+    /// reads the head token, renders the roster into the template and carries
+    /// the resolved rows onto the turn, so nothing short of it can put a spec
+    /// where the scan reads one.
+    async fn team_and_settle(&self, arguments: &str) {
+        self.engine
+            .send(Command::RunCommand { name: "team".to_owned(), args: arguments.to_owned() })
+            .await
+            .expect("an idle engine accepts a /team line whose spec is valid");
+        assert!(self.engine.settle(EVENTUALLY).await, "the turn ended inside its budget");
     }
 
     /// Prompts, then waits for the turn — however many continuations it takes
@@ -901,6 +1059,136 @@ async fn a_step_naming_one_teammate_and_leaving_another_anonymous_is_nagged() {
         1,
         "the batch named somebody, so the anonymous call beside it is worth a word — once",
     );
+
+    lead.finish().await;
+}
+
+/// **AC-28 (F5).** A `task` call that spawns somebody the `/team` spec did not
+/// name — or names one of its rows on a surface it did not assign — earns one
+/// block saying which row it should have used.
+///
+/// Four cases in one test because they are one decision seen from four sides,
+/// and three of them are the silences that make the fourth mean something:
+///
+/// - **off the spec** — the roster said `critic-1` runs on `claude` and the
+///   step spawned it on `codex`, so the block names the row;
+/// - **to the spec** — both rows spawned as assigned, so nothing is said;
+/// - **no spec** — an ordinary prompt is not a `/team` run at all, which is
+///   every session that has never typed the command;
+/// - **a spec with no task** (execution deviation **Dv-2**) — the line parsed
+///   three members, but `render_members`'s empty-task override drew "nobody was
+///   named" instead, so no roster reached the model and nagging against one
+///   would be a correction for an instruction that was never given.
+///
+/// One block for the whole batch, like the nag beside it: this is the same
+/// per-step scan, and a fan-out that got every row wrong is still one thing the
+/// model did once.
+#[tokio::test]
+async fn a_member_spawned_off_the_spec_is_told_the_row_it_should_have_used() {
+    let lead = Lead::spec(Script::SpawnsOffTheSpec).await;
+
+    lead.team_and_settle(&format!("critic@claude,critic@codex {SPEC_TASK}")).await;
+
+    assert_eq!(lead.carrying(SPEC_TAG), 1, "one block for the step, not one per call");
+    let blocked = lead.requests_carrying(SPEC_TAG);
+    let [blocked] = blocked.as_slice() else { panic!("exactly one request carried the block") };
+    let block = tagged(blocked, SPEC_TAG);
+    assert!(
+        block.contains("critic-1 — critic on claude"),
+        "the block names the row the call should have used, in the roster's own spelling: {block}",
+    );
+    assert!(
+        !block.contains("critic-2 — critic on codex"),
+        "and not the row the step never touched: {block}",
+    );
+
+    lead.finish().await;
+}
+
+/// **Dv-3.** Once the roster has been started, the stages the template governs
+/// by itself are none of this arm's business — the run's opening members are
+/// all **R5** gives it.
+///
+/// The pipeline's own happy path, in two steps: team-exec starts both rows
+/// exactly as the roster says, and team-verify then starts a `verifier` under a
+/// name on no row, on a surface no row named, because `prompt/team.txt` tells it
+/// to. A block there would be this build correcting the model for reading its
+/// own instructions, and the plausible outcome is a model that stops spawning
+/// the verifier rather than one that ignores the block.
+#[tokio::test]
+async fn a_verifier_started_after_the_roster_is_told_nothing() {
+    let lead = Lead::spec(Script::SpawnsThenVerifies).await;
+
+    lead.team_and_settle(&format!("critic@claude,critic@codex {SPEC_TASK}")).await;
+
+    // The drill is worthless if the second step never happened, so it is
+    // asserted rather than assumed: three `task` calls means the roster and the
+    // verifier both reached the loop.
+    let steps = lead.lead_requests();
+    let last = steps.last().expect("the lead took at least one step");
+    assert_eq!(delegations(last), 3, "two roster rows on step one, the verifier on step two");
+    assert_eq!(lead.carrying(SPEC_TAG), 0, "and neither step departed from the roster");
+
+    lead.finish().await;
+}
+
+/// The content of the one `<tag>…</tag>` block a request carries.
+///
+/// Read out of the request rather than matched against the whole transcript,
+/// because for this block the two are different questions: the `/team` prompt
+/// the turn opened with **also** holds the roster, row for row, so a
+/// `contains` over the transcript would be green for a correction naming any
+/// row at all — including one it never made.
+fn tagged(request: &ChatRequest, tag: &str) -> String {
+    let said = transcript(request);
+    let (_, rest) = said.split_once(&format!("<{tag}>")).expect("the request carries the block");
+    let (block, _) = rest.split_once(&format!("</{tag}>")).expect("and closes it");
+
+    block.to_owned()
+}
+
+/// The mirror: a step that spawned exactly what the roster said is what the
+/// block is asking for, so it says nothing.
+#[tokio::test]
+async fn a_batch_matching_the_spec_is_told_nothing() {
+    let lead = Lead::spec(Script::SpawnsToTheSpec).await;
+
+    lead.team_and_settle(&format!("critic@claude,critic@codex {SPEC_TASK}")).await;
+
+    assert_eq!(lead.carrying(SPEC_TAG), 0, "every call used the row it was given");
+
+    lead.finish().await;
+}
+
+/// And a turn that is not a `/team` run has no roster to be off, which is every
+/// turn this build ran before **D549** and every one that never types the
+/// command.
+#[tokio::test]
+async fn a_turn_with_no_spec_is_told_nothing() {
+    let lead = Lead::spec(Script::SpawnsOffTheSpec).await;
+
+    lead.prompt_and_settle(PROMPT).await;
+
+    assert_eq!(lead.carrying(SPEC_TAG), 0, "no spec, no roster to spawn off");
+
+    lead.finish().await;
+}
+
+/// **Dv-2.** A spec whose line carried no task parses members and shows the
+/// model none of them, so nothing here is about to be compared against a
+/// roster.
+///
+/// The hazard the deviation was written for: `render_members` overrides its own
+/// rendering when the task is empty — that line prints usage and spawns nobody
+/// — while the *parse* still returned three members. Carrying those onto the
+/// turn would nag a model for ignoring a roster it was never shown.
+#[tokio::test]
+async fn a_spec_with_no_task_shows_no_roster_and_nags_about_none() {
+    let lead = Lead::spec(Script::SpawnsOffTheSpec).await;
+
+    lead.team_and_settle("3:critic --backend=claude").await;
+
+    assert_eq!(lead.carrying(SPEC_TAG), 0, "the model was shown no roster, so it broke none");
 
     lead.finish().await;
 }

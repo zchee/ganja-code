@@ -19,13 +19,16 @@
 //! file and rule it describes is carried out by the model through tools this
 //! build already lends it — the four task tools, `task`, `send_message`,
 //! `write` and `read`. Nothing about the pipeline is machinery here; what *is*
-//! machinery is the two engine-native guards beside it (the continuation
-//! blocker and the name nag, both in [`crate::session`]), because neither can
-//! be a sentence in a prompt and still be true — and one refusal, for the same
-//! reason in miniature: [`/teammate`'s three subcommands](Misdirected) typed at
-//! `/team` are answered here rather than by the model, because a template that
-//! asks the model to redirect them spends a round trip to say what three fixed
-//! words already say (**bead 2m46**).
+//! machinery is the three engine-native guards beside it (the continuation
+//! blocker, the name nag and the spec nag, all in [`crate::session`]), because
+//! none of them can be a sentence in a prompt and still be true — and two
+//! refusals, for the same reason in miniature: [`/teammate`'s three
+//! subcommands](Misdirected) typed at `/team`, and a head token that
+//! [looks like a team spec](parse_team) and is not a valid one, are both
+//! answered before a turn starts. This module *decides* both — [`misdirected`]
+//! and [`parse_team`] are pure functions over `&str` — and
+//! `Engine::run_command` is what calls them, holds the agent roster the second
+//! one needs, and words the refusal a person reads.
 //!
 //! Expansion keeps upstream's order: fill the argument placeholders, run each
 //! ``!`command` `` the filled template names, trim the result, then resolve the
@@ -75,8 +78,12 @@ const TEAM_TEMPLATE: &str = include_str!("prompt/team.txt");
 const TEAM_DESCRIPTION: &str = "run a staged team pipeline over a shared task list";
 
 /// What the composer draws dim after a typed `/team` (**D518**). The grammar
-/// itself, because the model — not this crate — is what parses it.
-const TEAM_ARGUMENT_HINT: &str = "[N[:agent]] [--backend <surface>] <task>";
+/// itself, spelled **once** in this build: [`TEAM_TEMPLATE`]'s own usage block
+/// quotes this same line, and `the_hint_and_the_template_spell_the_grammar_the_same_way`
+/// reddens if the two ever come apart. Since **D549** it is also the grammar
+/// [`parse_team`] really reads, so a hint that drifted would be advertising a
+/// spelling the code refuses.
+const TEAM_ARGUMENT_HINT: &str = "[[N:]agent[@surface],…] [--backend <surface>,…] <task>";
 
 /// The placeholder `/init`'s template carries for the worktree it is being run
 /// in. Upstream substitutes it with a plain string replace, which in JavaScript
@@ -104,6 +111,18 @@ const HANDOFFS_PLACEHOLDER: &str = "${handoffs}";
 /// the caller's own row — so "use this session's id" is an instruction no
 /// model can follow.
 const SESSION_PLACEHOLDER: &str = "${session}";
+
+/// The placeholder `/team`'s template carries for the roster its head token
+/// asked for (**D549**, **R7**).
+///
+/// Filled at expansion in the same last-of-all step as
+/// [`SESSION_PLACEHOLDER`], and safe there on an argument of its own that
+/// [`render_members`] states. Filled only for the one command that carries it:
+/// [`Fills::members`] is [`None`] for every other template, and a template that
+/// grew this placeholder without the engine resolving a roster for it would
+/// reach the model as literal text — the same way any other unknown `${…}`
+/// already does.
+const MEMBERS_PLACEHOLDER: &str = "${members}";
 
 /// Where a project's team pipeline artefacts hang off its data directory
 /// (decisions 7, 8 and 19 of the team-orchestration plan): operational state
@@ -769,9 +788,21 @@ pub fn parse_team(
 }
 
 /// (a) The imperative header a resolved roster is drawn under (**R7**).
-const MEMBERS_HEADER: &str = "Spawn exactly these members and no others. Each row's name and \
-     surface are already decided — pass them verbatim to the `task` call that starts that \
-     member:";
+///
+/// It says *which* spawns these rows are, and not merely that they are the
+/// rows: **R5** gives this roster the run's opening members and nothing after
+/// them, so a header reading "spawn these and no others" would contradict the
+/// same template three sections further down, where the model is told to start
+/// a verifier, to replace a member that stopped answering, and to add one more
+/// when work backs up. The engine-native guard that enforces this roster is
+/// scoped the same way (`teammate::discipline`, **Dv-3**), and the two have to
+/// say the same thing or the model is being corrected for following its own
+/// instructions.
+const MEMBERS_HEADER: &str = "These are the members to start this run with, and their names and \
+     surfaces are already decided — pass each row verbatim to the `task` call that starts it. \
+     Later spawns this pipeline decides on for itself — a verifier, a replacement for a member \
+     that stopped answering, one more when work backs up — are on no row of this roster and \
+     follow your instructions as written:";
 
 /// (b) What the block says when the line named nobody and no surface (**R7**).
 const NOTHING_NAMED: &str =
@@ -819,19 +850,31 @@ pub fn render_members(invocation: &TeamInvocation) -> String {
         .members
         .iter()
         .enumerate()
-        .map(|(index, member)| {
-            let surface = backend_name(member.backend);
-            let position = index + 1;
-            match &member.agent {
-                Some(agent) => format!("{position}. {} — {agent} on {surface}", member.name),
-                None => {
-                    format!("{position}. {} — on {surface}, agent yours to choose", member.name)
-                }
-            }
-        })
+        .map(|(index, member)| format!("{}. {}", index + 1, member_row(member)))
         .collect();
 
     format!("{MEMBERS_HEADER}\n\n{}", rows.join("\n"))
+}
+
+/// One member as the block spells it: `critic-1 — critic on claude`.
+///
+/// Named and shared because two readers spell it, and the whole point of the
+/// second is that it quotes the first: [`render_members`] draws the roster the
+/// model is given, and the spec arm of the name nag
+/// (`teammate::discipline`, **F5**) tells a `task` call which of those
+/// rows it should have used. A row worded twice would be a correction naming a
+/// line the model cannot find in what it was shown.
+///
+/// The position is **not** part of it. The roster numbers its rows so a person
+/// reading the prompt can count them; a correction names one row, where a
+/// number would be an index into a list the model would then have to re-derive.
+#[must_use]
+pub(crate) fn member_row(member: &Member) -> String {
+    let surface = backend_name(member.backend);
+    match &member.agent {
+        Some(agent) => format!("{} — {agent} on {surface}", member.name),
+        None => format!("{} — on {surface}, agent yours to choose", member.name),
+    }
 }
 
 /// A command template after every expansion step upstream applies.
@@ -841,6 +884,28 @@ pub struct Expanded {
     pub prompt: String,
     /// Existing files the final text mentions, in mention order.
     pub mentions: Vec<crate::protocol::Mention>,
+}
+
+/// What an expansion fills the two session-scoped placeholders from.
+///
+/// A struct rather than two `&str` parameters because they are filled in one
+/// step and two string arguments at a call site are two a caller can pass the
+/// wrong way round — a mistake that would put a session id where a roster goes
+/// and compile.
+///
+/// Both are the caller's to resolve, and for the same reason: one roster serves
+/// every session a process opens, so neither the id running an expansion nor
+/// the members a `/team` line asked for is a fact a [`Definition`] holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Fills<'a> {
+    /// The id of the session about to send this prompt.
+    pub session: &'a str,
+    /// What `${members}` says, for the one command that carries it.
+    ///
+    /// [`None`] for every other template, and for a `/team` whose line the
+    /// engine did not parse a roster out of — see `MEMBERS_PLACEHOLDER`,
+    /// which is filled only when this is [`Some`].
+    pub members: Option<&'a str>,
 }
 
 /// One command a session can run.
@@ -877,14 +942,18 @@ pub struct Definition {
     /// Whether this definition is one this build ships, rather than one a
     /// config table or a Markdown file declared.
     ///
-    /// Carried for exactly one reader, [`Definition::expand`]'s misdirection
-    /// gate: a `command` table entry that reuses `team` **replaces** the
-    /// builtin, deliberately and by documented precedence
+    /// Carried for the two gates `Engine::run_command` runs
+    /// in front of the `/team` builtin — the [misdirection](misdirected) door
+    /// and D549's [grammar](parse_team) — which are one reader in every sense
+    /// that matters here: both are about *this build's* `/team`, and both ask
+    /// this question the same way. A `command` table entry that reuses `team`
+    /// **replaces** the builtin, deliberately and by documented precedence
     /// ([`Registry::build`]), and a gate on the name alone would go on
-    /// refusing three argument shapes on behalf of a command that is no longer
-    /// there. [`Definition::source`] cannot answer this — it separates a file
-    /// from everything else, where the tier that can take `/team` over is the
-    /// one that is not a file either.
+    /// refusing argument shapes on behalf of a command that is no longer
+    /// there — and would parse somebody else's arguments as a team spec.
+    /// [`Definition::source`] cannot answer this — it separates a file from
+    /// everything else, where the tier that can take `/team` over is the one
+    /// that is not a file either.
     pub builtin: bool,
 }
 
@@ -895,42 +964,25 @@ impl Definition {
     /// and where mentions resolve. One context keeps a template from running a
     /// command in one place while naming files in another.
     ///
-    /// `session` is the id of the session about to send this, filled into the
-    /// template's `${session}` **after every other step below**. It is a
-    /// parameter rather than another `ctx` field because a `ToolCtx` is what a
-    /// *tool call* runs under and this expansion is not one; and it is filled
-    /// here rather than at roster build because one roster serves every
-    /// session a process opens.
+    /// `fills` carries the two placeholders that are about *this* run rather
+    /// than about the template: the id of the session about to send it, and
+    /// the roster a `/team` line asked for. Both go in **after every other
+    /// step below**, and both are parameters rather than `ctx` fields because a
+    /// `ToolCtx` is what a *tool call* runs under and this expansion is not
+    /// one.
     ///
-    /// Refuses before a byte of the template is filled when the **builtin**
-    /// `/team` was typed with one of `/teammate`'s own subcommands (**bead
-    /// 2m46**): that template's own second arm asks the model to redirect
-    /// those, which is a whole round trip to be told what the three words
-    /// already say.
-    ///
-    /// The check is on the name *and* on [`Definition::builtin`], because the
-    /// name is only the difference between the two commands while this build
-    /// is the one that spelled it: a config `[command.team]` replaces the
-    /// builtin outright ([`Registry::build`]), and refusing three argument
-    /// shapes on its behalf would make somebody else's command unreachable in
-    /// favour of a sentence about a command they did not write.
-    ///
-    /// # Errors
-    ///
-    /// [`Misdirected`], carrying the line that was meant. No turn starts.
+    /// **Infallible.** It was not, until **D549**: the builtin `/team`'s
+    /// [misdirection gate](misdirected) used to answer here, and it now runs in
+    /// `Engine::run_command` beside the grammar that reads the
+    /// same line — which is where the agent roster is, and which is what
+    /// removes the ordering hazard of gating a line this function would then be
+    /// handed only the *task* half of.
     pub async fn expand(
         &self,
         arguments: &str,
-        session: &str,
+        fills: Fills<'_>,
         ctx: &crate::tool::ToolCtx,
-    ) -> Result<Expanded, Misdirected> {
-        if self.builtin
-            && self.name == TEAM
-            && let Some(misdirected) = misdirected(arguments)
-        {
-            return Err(misdirected);
-        }
-
+    ) -> Expanded {
         let filled = fill_template(&self.template, arguments);
         // The scan follows filling, so a command that arrived through
         // `$ARGUMENTS` runs too. The person who typed those arguments is the
@@ -1001,9 +1053,23 @@ impl Definition {
         // person who types the placeholder after the command name gets it
         // filled too — which tells them their own session's id and nothing
         // else, where the other order risks running their id as a command.
-        let prompt = prompt.replace(SESSION_PLACEHOLDER, session);
+        // `${members}` below is filled on the same terms and knowingly: a
+        // person who types it into a `/team` task gets this run's roster where
+        // they wrote it, which is text they can read rather than anything that
+        // runs, and the alternative — filling it into the template ahead of the
+        // arguments — is the order R7 forbids.
+        let prompt = prompt.replace(SESSION_PLACEHOLDER, fills.session);
+        // The roster goes in beside it, in the same step and for a safety
+        // argument of its own ([`render_members`]) rather than by inheriting
+        // this one: what makes it safe here is that every token in it came out
+        // of a closed vocabulary this crate validated, not that nothing reads
+        // it again.
+        let prompt = match fills.members {
+            Some(members) => prompt.replace(MEMBERS_PLACEHOLDER, members),
+            None => prompt,
+        };
 
-        Ok(Expanded { prompt, mentions })
+        Expanded { prompt, mentions }
     }
 }
 
@@ -1535,9 +1601,10 @@ fn builtins(worktree: &Path) -> Vec<Definition> {
             model: None,
             argument_hint: Some(TEAM_ARGUMENT_HINT.to_owned()),
             source: None,
-            // What [`Definition::expand`]'s misdirection gate is really asking
-            // about: this is the `/team` whose template redirects a roster
-            // line, so it is the one that may answer three of them itself.
+            // What `run_command`'s two gates are really asking about: this is
+            // the `/team` whose template redirects a roster line and whose
+            // grammar D549 reads, so it is the one that may answer three
+            // roster spellings itself and the one whose head token is parsed.
             builtin: true,
         },
     ]

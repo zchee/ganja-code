@@ -1,5 +1,6 @@
 use axum::http::StatusCode;
 use ganja_core::EngineError;
+use ganja_core::command::TeamSpecError;
 use ganja_protocol::SessionId;
 
 use super::ApiError;
@@ -24,6 +25,11 @@ fn the_engine_refusals_map_to_their_statuses_and_nothing_else_moves() {
         // 2m46): refused before a turn started, and the sentence carries the
         // line that was meant, which is what makes a 400 body worth reading.
         EngineError::MisdirectedCommand { meant: "/teammate list".to_owned() },
+        // The other gate in front of `/team` (**D549**): a head token that
+        // looked like a team spec and was not a valid one. The caller's own
+        // line is what is wrong, and the body says so and names the way back
+        // to plain task text.
+        EngineError::TeamSpec(TeamSpecError::ZeroCount { segment: "0:critic".to_owned() }),
     ] {
         let mapped = ApiError::from(refused);
         assert_eq!(mapped.status(), StatusCode::BAD_REQUEST, "{mapped:?}");
@@ -44,6 +50,13 @@ fn the_engine_refusals_map_to_their_statuses_and_nothing_else_moves() {
         EngineError::NothingToUndo,
         EngineError::NothingToRedo,
         EngineError::NoSnapshots,
+        // **F2** (`.omc/plans/2026-09-03-team-segment-grammar.md`). This one is
+        // the odd row and is meant to be: since **D549** a `/team` segment
+        // naming an agent nobody holds lands here too, so one `/team` spec
+        // refusal is a 500 while every other is a 400. Not fixed with the
+        // grammar, deliberately — moving it moves `SwitchAgent`'s shipped
+        // status, which is an HTTP contract no ruling covers and a grammar
+        // change has no business altering as a side effect.
         EngineError::UnknownAgent { name: "nobody".to_owned() },
     ] {
         let mapped = ApiError::from(other);

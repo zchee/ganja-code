@@ -77,6 +77,11 @@ impl From<EngineError> for ApiError {
             // request that named the wrong command, refused before any turn
             // started, and the sentence carries the line that was meant.
             EngineError::MisdirectedCommand { .. } => Self::Invalid(error.to_string()),
+            // And the other gate in front of the same command (**D549**): a
+            // `/team` head token that looks like a team spec and is not a
+            // valid one is the caller's line to fix, and the sentence carries
+            // both what was wrong with it and the way back to plain task text.
+            EngineError::TeamSpec(..) => Self::Invalid(error.to_string()),
             _ => Self::Internal(error.to_string()),
         }
     }

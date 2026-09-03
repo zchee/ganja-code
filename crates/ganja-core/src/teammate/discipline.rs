@@ -1,9 +1,9 @@
-//! The two guards a lead's own turn loop runs under while it holds a team.
+//! The three guards a lead's own turn loop runs under while it holds a team.
 //!
-//! Both exist because neither can be a sentence in a prompt and still be true.
-//! `/team`'s instruction template can *ask* the model to keep going until the
-//! list is drained and to give continuing work a named teammate; what it
-//! cannot do is notice when the model stopped anyway. So the noticing is
+//! All three exist because none can be a sentence in a prompt and still be
+//! true. `/team`'s instruction template can *ask* the model to keep going
+//! until the list is drained and to give continuing work a named teammate;
+//! what it cannot do is notice when the model stopped anyway. So the noticing is
 //! engine-native, made of facts this build can type — a registry that holds a
 //! live member, a task document that is still pending, a `task` call whose
 //! arguments carry no `name` — and never of the state JSON the model writes
@@ -52,6 +52,28 @@
 //! delegation it is supposed to be about. A turn that leads nobody and names
 //! nobody is still silent, which is D462 intact.
 //!
+//! The **spec arm** ([`Discipline::note_roster_departures`], **D549** F5)
+//! rides that same scan, over the same batch, and asks the other half of the
+//! naming question: not whether a `task` call named anybody, but whether it
+//! named the member the user's own `/team` line decided. `${members}` is prose
+//! the model may ignore — a prompt cannot notice that it was ignored, which is
+//! why this is here and not there — so a step that departs from that roster
+//! earns one block quoting the row it should have used. It blocks nothing
+//! either: the roster is what the person asked for, and a model that has a
+//! reason to depart from it is answering to them rather than to this file.
+//!
+//! Its trigger is narrower than the nag's twice over, and deliberately. A turn
+//! carries a spec only when a `/team` line resolved one **and the model was
+//! shown it** ([`crate::session::Turn::spec`]), so a turn with no roster is
+//! silent without consulting a registry at all. And **R5** gives that roster
+//! the run's *opening* members only, so the arm narrows again as the rows are
+//! claimed (execution deviation **Dv-3**): once every row has been asked for,
+//! the pipeline has moved on to the stages the template governs by itself —
+//! a verifier, a replacement for a member that stopped answering, one more when
+//! work backs up — and only the wrong-surface arm still has anything to say.
+//! Correcting those would be this file contradicting the prompt the model is
+//! reading in the same request.
+//!
 //! # Why the counter is a turn's and not a session's
 //!
 //! "Five *consecutive* auto-continuations" is exactly a turn's own count: the
@@ -94,6 +116,33 @@ const NAG: &str = "<teammate_naming>\nA `task` call in your last step carried no
                    belongs to this team — a subagent cannot claim a task, cannot be messaged, \
                    cannot be reassigned and does not appear on the roster. Give continuing work to \
                    a named teammate instead.\n</teammate_naming>";
+
+/// What the model reads after a step departed from the `/team` roster it was
+/// given (**D549**, F5, scoped by **Dv-3**).
+///
+/// [`ROSTER_MARKER`] is where the offending calls and the rows they should have
+/// used go. The same shape as [`NAG`] and for the same reason: it corrects what
+/// just happened, blocks nothing, and is spent by the request that carries it.
+///
+/// Its closing sentence is load-bearing rather than polite. **R5** gives this
+/// roster the team-exec *initial* spawns and nothing else, so a block that read
+/// as "spawn nobody but these" would contradict the very template the model is
+/// reading in the same prompt — which tells it to spawn a verifier, to replace
+/// a member that stopped answering, and to add one more when work backs up.
+const OFF_SPEC: &str = "<teammate_roster>\nThe user's own `/team` line decided which members this \
+                        run starts with — their names, and the surface each one runs on — and the \
+                        members block in your instructions is that roster, row for row. A `task` \
+                        call in your last step departed from it:\n\n{rows}\n\nStart each of those \
+                        rows once, under the name and on the surface it names: a member spawned \
+                        under another name is not the one the roster promised, and one on another \
+                        surface can see different things. This is about that opening roster only. \
+                        The spawns the pipeline decides on for itself — a verifier, a replacement \
+                        for a member that stopped answering, one more when work backs up — are on \
+                        no row of it, and follow your instructions as \
+                        written.\n</teammate_roster>";
+
+/// The one token [`OFF_SPEC`] fills.
+const ROSTER_MARKER: &str = "{rows}";
 
 /// The typed facts the continuation blocker decides on, gathered by the turn
 /// loop and never inferred from anything the model wrote.
@@ -154,6 +203,32 @@ pub(crate) struct Discipline {
     /// Set by [`Discipline::note_anonymous_delegation`] over a whole step's
     /// calls, cleared by the render that spends it.
     nag: bool,
+    /// The lines the next request's roster block carries, one per `task` call
+    /// this step made off the spec (**D549**, F5).
+    ///
+    /// Text rather than a flag, unlike its two neighbours, because this block
+    /// names *which* calls and *which* rows — a correction that said only
+    /// "some call was wrong" would leave the model to guess which of a fan-out
+    /// it meant. Empty is the silence.
+    off_spec: Vec<String>,
+    /// Which roster rows this turn has already been asked to start, by name
+    /// (**Dv-3**).
+    ///
+    /// The turn's, not the step's, and that is the whole of what makes the
+    /// scope right: **R5** gives the roster the *opening* spawns, so once every
+    /// row has been asked for, the run has moved on to the stages the template
+    /// governs by itself and only the wrong-surface arm still has anything to
+    /// say. A step-scoped set would re-open the roster on every
+    /// auto-continuation, which is how the whole pipeline runs.
+    ///
+    /// Recorded by **name alone, whatever surface the call named**, and from
+    /// the **call** rather than from what became of it. The scan runs before
+    /// any call in the batch does, which is what makes the block one per step;
+    /// a row whose spawn a person then refuses therefore counts as asked for,
+    /// and a retry of it reads as a second claim — a known cost of deciding
+    /// this where the batch is still a batch, and the same trade the name nag
+    /// beside it already makes.
+    claimed: std::collections::BTreeSet<String>,
     /// Whether the next request carries the continuation block.
     continuation: bool,
     /// How many auto-continuations this turn has already spent.
@@ -169,6 +244,152 @@ impl Discipline {
     /// already-set flag anyway.
     pub(crate) fn note_anonymous_delegation(&mut self) {
         self.nag = true;
+    }
+
+    /// Judges this step's whole batch against the roster the `/team` line
+    /// decided, recording one block naming every row it departed from.
+    ///
+    /// Over the batch rather than per call, which is what makes the block one
+    /// per step exactly as the nag beside it is — a fan-out that got three rows
+    /// wrong is one thing the model did once. The calls are judged **in the
+    /// order the model wrote them**, because the claims move as they are read:
+    /// "while rows are still waiting" is a state, and a call is answered
+    /// against the state that held when it was made.
+    pub(crate) fn note_roster_departures<'a>(
+        &mut self,
+        spec: &[crate::command::Member],
+        calls: impl Iterator<Item = &'a str>,
+    ) {
+        let rows: Vec<String> =
+            calls.filter_map(|arguments| self.off_the_spec(spec, arguments)).collect();
+        if rows.is_empty() {
+            return;
+        }
+
+        self.off_spec = rows;
+    }
+
+    /// The roster row one `task` call should have used, or [`None`] when it
+    /// departed from none — claiming the row it names as it goes (**Dv-3**).
+    ///
+    /// Three ways to answer nothing before the roster is consulted at all, and
+    /// each is somebody else's question:
+    ///
+    /// - a call whose arguments will not parse is about to fail with a message
+    ///   of its own, and is evidence of nothing about how this model spawns;
+    /// - a call that named nobody is the *name nag*'s
+    ///   ([`delegates_anonymously`]), so answering it here as well would put two
+    ///   corrections about one call in front of the model;
+    /// - and a call that named a row and ran it where the row says is what the
+    ///   roster asked for.
+    ///
+    /// What is left is three departures, scoped by **R5** — the roster governs
+    /// the run's *opening* members and nothing after them:
+    ///
+    /// 1. **A row on the wrong surface**, whenever it happens. This one never
+    ///    goes quiet, because the surface decides what that member can see, and
+    ///    a member that cannot see the task list is a different member than the
+    ///    person asked for. It still **claims** the row — a row started in the
+    ///    wrong place is started — so the two scoped arms below stop offering
+    ///    it as one nobody has taken.
+    /// 2. **A row asked for twice while others are still waiting** — the person
+    ///    asked for one of each, and a second `critic-1` is a `critic-2` that
+    ///    never started. Silent once every row has been asked for, which is
+    ///    where a repeat becomes the template's own replacement rule.
+    /// 3. **A name on no row, matching a waiting row's agent** — a spawn of the
+    ///    same role while a row for that role is unfilled is the roster being
+    ///    worked around. Matched by agent because a name is exactly what
+    ///    departed; a row that named no agent (a `worker`) is matched by its own
+    ///    name and never by one, so nothing stands in for it. A call whose role
+    ///    no waiting row carries is silent, which is what leaves team-prd's
+    ///    analyst and critic, explore's scouting and team-verify's verifier
+    ///    alone.
+    ///
+    /// An **under-spawn** is silent throughout: a batch that starts two of three
+    /// rows is a batch, not a decision, and the third may come in the next step.
+    fn off_the_spec(&mut self, spec: &[crate::command::Member], arguments: &str) -> Option<String> {
+        let Ok(serde_json::Value::Object(map)) =
+            serde_json::from_str::<serde_json::Value>(arguments)
+        else {
+            return None;
+        };
+        let name = map.get("name").and_then(serde_json::Value::as_str).map(str::trim)?;
+        if name.is_empty() {
+            return None;
+        }
+
+        match spec.iter().find(|member| member.name == name) {
+            Some(member) => {
+                // The claim is by **name, on any surface**, and is taken before
+                // the surface is judged. A row started in the wrong place is
+                // still a row that was started: leaving it unclaimed would make
+                // the two arms below go on offering it as one nobody has taken,
+                // so the model would be told to use a row it just used and told
+                // off for its surface in the same breath.
+                let first = self.claimed.insert(name.to_owned());
+                // Absent is the same answer the spawn door gives it: a call
+                // naming no surface runs on the default one, so that is the
+                // surface to compare. A spelling nothing answers to is left as
+                // it was typed, because the honest correction quotes what was
+                // asked for rather than what it might have meant — and the call
+                // is about to be refused for it anyway.
+                let asked = map.get("backend").and_then(serde_json::Value::as_str).map(str::trim);
+                let surface = asked
+                    .map_or(Ok(crate::teammate::DEFAULT_BACKEND), crate::teammate::parse_backend);
+                if !surface.is_ok_and(|surface| surface == member.backend) {
+                    return Some(format!(
+                        "`{name}` was started on `{}`, and its row says: {}",
+                        asked.unwrap_or_else(|| crate::teammate::backend_name(
+                            crate::teammate::DEFAULT_BACKEND
+                        )),
+                        crate::command::member_row(member),
+                    ));
+                }
+                if first {
+                    return None;
+                }
+                let waiting = self.waiting(spec, |_| true);
+                if waiting.is_empty() {
+                    return None;
+                }
+
+                Some(format!("`{name}` was already started, and these rows were not: {waiting}"))
+            }
+            None => {
+                let agent = map
+                    .get("subagent_type")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|agent| !agent.is_empty())?;
+                let waiting = self.waiting(spec, |member| member.agent.as_deref() == Some(agent));
+                if waiting.is_empty() {
+                    return None;
+                }
+
+                Some(format!(
+                    "`{name}` runs as `{agent}` under a name on no row, while these rows were \
+                     waiting for one: {waiting}"
+                ))
+            }
+        }
+    }
+
+    /// The rows this turn has not been asked for yet that `wanted` admits,
+    /// spelled the way the roster spells them.
+    ///
+    /// Empty is the answer that turns each of the two scoped arms off, so the
+    /// one place that decides what "still waiting" means is here.
+    fn waiting(
+        &self,
+        spec: &[crate::command::Member],
+        wanted: impl Fn(&crate::command::Member) -> bool,
+    ) -> String {
+        spec.iter()
+            .filter(|member| !self.claimed.contains(&member.name))
+            .filter(|member| wanted(member))
+            .map(crate::command::member_row)
+            .collect::<Vec<_>>()
+            .join("; ")
     }
 
     /// Whether the breaker still allows an auto-continuation.
@@ -235,6 +456,10 @@ impl Discipline {
         let mut blocks = Vec::new();
         if std::mem::take(&mut self.nag) {
             blocks.push(NAG.to_owned());
+        }
+        let off_spec = std::mem::take(&mut self.off_spec);
+        if !off_spec.is_empty() {
+            blocks.push(OFF_SPEC.replace(ROSTER_MARKER, &off_spec.join("\n")));
         }
         if std::mem::take(&mut self.continuation) {
             blocks.push(CONTINUATION.to_owned());

@@ -13,17 +13,22 @@ $ARGUMENTS
    below, verbatim in substance, and stop. Do not start a pipeline, do not
    file tasks, do not spawn anybody.
 
-       /team [N[:agent]] [--backend <surface>] <task>
+       /team [[N:]agent[@surface],…] [--backend <surface>,…] <task>
 
        Runs a staged pipeline over a shared task list: plan, decompose, spawn
        teammates, verify, fix, shut down.
 
-         N          how many teammates to start; omitted, size it from the
-                    decomposition (two to four is usually right)
-         :agent     the agent every spawned teammate runs as, overriding the
-                    per-stage routing
-         --backend  the surface they run on: ganja, claude, codex, grok, agy,
-                    in-process. Omitted, the registry's default is used.
+         N          how many of that segment's members to start; omitted, one.
+                    Omit the whole roster and the pipeline sizes the team from
+                    the decomposition (two to four is usually right).
+         agent      the agent those members run as, overriding the per-stage
+                    routing below
+         @surface   the surface that segment runs on: ganja, claude, codex,
+                    grok, agy, in-process
+         --backend  the same choice for the whole line, one surface or a list
+                    dealt round-robin over the members. Omitted, the
+                    registry's default is used; it cannot be combined with an
+                    `@`.
 
        Example:
          /team 3 port the config loader to TOML and keep the old files loading
@@ -39,12 +44,18 @@ $ARGUMENTS
    Do not run a pipeline for an argument list that was never a task
    description.
 
-3. **A task** — anything else. Parse it as
-   `[N[:agent]] [--backend <surface>] <task>` and run the pipeline below.
-   Parse leniently: a leading integer is N, a `:name` glued to it is the agent
-   override, `--backend <surface>` may appear before or after the task text,
-   and everything left over is the task. If the leftover is empty, treat it as
-   case 1.
+3. **A task** — anything else. Run the pipeline below over it, as written.
+
+   The roster is already resolved before you read this. Anything the user
+   typed as a member count, an agent name or a backend has been taken out of
+   the arguments above and turned into the member list in team-exec step 3, so
+   do not look for a leading integer, a `:agent`, an `@surface` or a
+   `--backend` here and do not re-parse one: what is between the markers is the
+   task and nothing else. A line whose roster could not be read never reached
+   you at all — it was refused before this pipeline started.
+
+   Case 2 above is still yours to judge, because that one is about what the
+   prose means rather than about a grammar.
 
 ## Where this pipeline keeps its state
 
@@ -128,8 +139,12 @@ skipped it. Exit when the acceptance criteria are written down.
    free, and name what a task waits on with `add_blocked_by` so nobody claims
    work that cannot start.
 3. Spawn the teammates with the `task` tool, giving each one a `name`, a
-   `subagent_type` from the routing table below, and the `backend` the user
-   asked for if they asked for one.
+   `subagent_type` from the routing table below, and a `backend`. Who to
+   spawn is between the markers below, resolved from the line the user typed:
+
+<team-members>
+${members}
+</team-members>
 
 Filing the tasks before spawning is deliberate: a member that starts with an
 empty list has nothing to claim.
@@ -151,6 +166,12 @@ acceptance criteria, with evidence: commands run, output seen. Anything that
 fails becomes a new task, filed with `task_create` and described well enough
 to fix without re-reading the failure.
 
+For a task whose deliverable is a **review** — findings about code rather than
+a change to it — the findings themselves are what the run produces, and this
+stage does not produce them a second time. team-verify reconciles the findings
+the members reported and checks the evidence each one carries; it never
+re-reviews the same code to see whether it agrees.
+
 **team-fix** — the fix tasks go back through team-exec. Increment
 `fix_loop_count` each time round. When it reaches `max_fix_loops`, stop
 looping: set `current_phase` to `failed`, and report what is still broken with
@@ -166,6 +187,10 @@ view — what is really claimed, done and blocked.
 
 Do not sleep, do not busy-wait, and do not re-run `task_list` in a loop hoping
 something changed. Nothing changes while you are looping.
+
+Work you have already given a member is that member's. Do not also hand it to
+an anonymous subagent while they work on it: two agents doing one task file
+two answers to it, and only one of them is on the list.
 
 **When a member looks dead** — a task has been `in_progress` for a long time
 and that member has sent nothing — ask it directly with `send_message` for a

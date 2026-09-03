@@ -339,6 +339,30 @@ impl Registry {
     pub fn default_agent(&self) -> &str {
         &self.default
     }
+
+    /// What a `/team` spec's roster predicate answers for `name` (**D549**,
+    /// **R8**).
+    ///
+    /// Here rather than as a closure at its one production call site because
+    /// two spellings of it can come to disagree, and one of them already did
+    /// once: **Dv-1** widened which answers the grammar's bare-name arm accepts,
+    /// and a test carrying its own copy of the mapping would have gone on
+    /// passing. `crate::command::parse_team` still takes a closure — the roster
+    /// varies per session, which is the whole reason it is injected — and this
+    /// is the closure every caller holding a registry should hand it.
+    ///
+    /// A registry that does not hold `name` answers
+    /// [`RosterAnswer::Unknown`](crate::command::RosterAnswer::Unknown); a
+    /// session holding no registry at all answers that for *every* name, which
+    /// is the caller's arm rather than this one's.
+    #[must_use]
+    pub fn roster_answer(&self, name: &str) -> crate::command::RosterAnswer {
+        match self.get(name) {
+            None => crate::command::RosterAnswer::Unknown,
+            Some(agent) if agent.spawnable() => crate::command::RosterAnswer::Spawnable,
+            Some(_) => crate::command::RosterAnswer::Primary,
+        }
+    }
 }
 
 /// The nine agents this build ships: upstream's roster, and ganja's own five.

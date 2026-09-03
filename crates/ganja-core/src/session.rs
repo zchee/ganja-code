@@ -976,8 +976,25 @@ pub(crate) struct Turn {
     /// nothing about whether it leads a team. [`None`] is a session with no
     /// team machinery — and every turn a subagent runs, which leads nothing.
     pub(crate) team: Option<Arc<crate::teammate::TeammateRegistry>>,
-    /// The two team guards this turn runs under (the continuation blocker and
-    /// the name nag), and the counters they keep.
+    /// The roster a `/team` line's spec resolved to, when this turn is a
+    /// `/team` run **whose model was shown that roster** (**D549**, F5).
+    ///
+    /// Read by the spec arm of the name-nag batch scan
+    /// ([`note_anonymous_delegations`]), which is the whole reason it is here:
+    /// a `task` call spawning somebody off the roster the prompt named earns a
+    /// block saying which row it should have used.
+    ///
+    /// [`None`] whenever no roster reached the model, which is three cases and
+    /// not one: a turn that is not a `/team` run at all, a `/team` line whose
+    /// head token was the first word of the task, and — execution deviation
+    /// **Dv-2** — a `/team` line that *did* parse members but carried no task,
+    /// where [`crate::command::render_members`]'s empty-task override draws
+    /// "nobody was named" instead. Nagging against a roster the model was
+    /// never shown would be telling it off for not following instructions it
+    /// did not receive.
+    pub(crate) spec: Option<Vec<crate::command::Member>>,
+    /// The three team guards this turn runs under (the continuation blocker,
+    /// the name nag and its spec arm), and the counters they keep.
     ///
     /// A turn's own, never the engine's — [`discipline`] argues why — so a
     /// child turn simply gets a fresh one it never consults: a subagent is
@@ -1151,6 +1168,11 @@ impl Turn {
             // work under the lead's name would be a claim nobody made.
             tasks: None,
             team: None,
+            // None, for the reason `team` is: a child is offered no `task`
+            // tool, so there is no spawn here for a spec to be about — and a
+            // spec is a fact about the *lead's* prompt, which a subagent
+            // never read.
+            spec: None,
             discipline: std::sync::Mutex::default(),
             delegated: true,
             persist: parts.persist,
@@ -1587,7 +1609,15 @@ struct BufferedCall {
 }
 
 /// Records, at most once for the whole step, that `calls` delegated without
-/// naming anybody on a step that is about a team (**the name nag**).
+/// naming anybody on a step that is about a team (**the name nag**) — and,
+/// since **D549**, that one of them spawned off the roster the `/team` line
+/// resolved (**the spec arm**, F5).
+///
+/// One scan for both because both are questions about a whole step's `task`
+/// calls asked before any of them runs, and scanning twice would be two
+/// answers about one batch. They are not one *trigger*: the nag fires on a
+/// team being live or named, the spec arm on this turn carrying a roster the
+/// model was shown, and a step can honestly earn either alone or both.
 ///
 /// Two things make a step that: this session leads somebody live *now*, or the
 /// batch itself names somebody in another `task` call (bead s8rw). Either is
@@ -1610,6 +1640,20 @@ fn note_anonymous_delegations(turn: &Turn, calls: &[BufferedCall]) {
         anonymous |= delegates_anonymously(&call.json);
         named |= delegates_named(&call.json);
     }
+    // The spec arm rides the same scan and asks the other half of the naming
+    // question (**D549**, F5): a turn whose model was shown a `/team` roster is
+    // told which row a spawn should have used. Its own trigger, not the nag's —
+    // a roster the person decided is a roster whether or not this step also
+    // delegated anonymously, and a turn carrying none is silent without asking
+    // a registry anything. It judges and claims in one pass, so the calls go in
+    // as an ordered iterator rather than as a set.
+    if let Some(spec) = &turn.spec {
+        turn.discipline.lock().expect("the turn guards are never poisoned").note_roster_departures(
+            spec,
+            calls.iter().filter(|call| delegates(call)).map(|call| call.json.as_str()),
+        );
+    }
+
     if !anonymous || !(named || leads_a_live_team(turn)) {
         return;
     }
