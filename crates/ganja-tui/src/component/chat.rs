@@ -739,6 +739,11 @@ impl Chat {
     /// already say it, and a number maintained in parallel would have to be
     /// corrected on every path that rewrites the chat — a resume, a revert, a
     /// redo — instead of simply following it.
+    ///
+    /// A teammate spawn rides the same tool id and is **not** one of them
+    /// (2026-09-03, bead `gaqe`): it starts an agent and returns, so the
+    /// session is not waiting on a turn the way it waits on a child, and
+    /// counting it would report work nobody is doing.
     #[must_use]
     pub fn running_tasks(&self) -> usize {
         self.shown()
@@ -747,8 +752,8 @@ impl Chat {
             .filter(|part| {
                 matches!(
                     &part.body,
-                    PartBody::Tool { tool, state: ToolState::Running { .. }, .. }
-                        if tool == ganja_tool::task::ID
+                    PartBody::Tool { tool, state: state @ ToolState::Running { .. }, .. }
+                        if tool == ganja_tool::task::ID && !is_spawn(state)
                 )
             })
             .count()
@@ -2116,7 +2121,17 @@ fn tool_lines(tool: &str, state: &ToolState, theme: &Theme, blink: u8) -> Vec<Ro
 /// the row** — it is inside the tool result the model reads, and a transcript
 /// that printed it would be showing the same work twice, once as prose and
 /// once as a result.
+///
+/// A **teammate spawn** rides the same tool id and is none of that
+/// (2026-09-03, bead `gaqe`): it starts an agent that outlives the call and
+/// answers at once, so it has no child to name, no tools to count — the zero
+/// this row used to print was the absence of a key, not a fact — and its
+/// clock measures the launch. It is drawn by [`spawn_lines`] instead.
 fn task_lines(state: &ToolState, theme: &Theme, blink: u8) -> Vec<Row> {
+    if is_spawn(state) {
+        return spawn_lines(state, theme, blink);
+    }
+
     match state {
         ToolState::Pending { input } => {
             let heading = input.as_ref().map_or_else(
@@ -2185,6 +2200,103 @@ fn task_lines(state: &ToolState, theme: &Theme, blink: u8) -> Vec<Row> {
     }
 }
 
+/// Whether a `task` part is a teammate spawn rather than a delegated child.
+///
+/// Two doors stand behind one tool id (`ganja_tool::task`), told apart by the
+/// argument the tool itself decides on: a call carrying `name` starts a
+/// teammate, and one without it delegates a turn. The settled metadata says
+/// the same thing under `teammate`, which is what a resumed part carries once
+/// the arguments are behind it.
+fn is_spawn(state: &ToolState) -> bool {
+    match state {
+        ToolState::Pending { input } => {
+            input.as_ref().is_some_and(|input| field(input, "name").is_some())
+        }
+        ToolState::Running { input, metadata, .. }
+        | ToolState::Completed { input, metadata, .. } => {
+            field(metadata, "teammate").or_else(|| field(input, "name")).is_some()
+        }
+        // Never reached from [`task_lines`], which a failed call bypasses; the
+        // answer is still the honest one for any other caller.
+        ToolState::Error { input, .. } => field(input, "name").is_some(),
+    }
+}
+
+/// The row a teammate spawn gets, in whatever state the launch is in.
+///
+/// Says what the call *is* rather than what a delegation would have been: the
+/// name, because that is what the roster and the next `send_message` address
+/// the teammate by, and the backend, because two members of one team may be
+/// different agents entirely. Never a tool count — that is a child's fact, and
+/// a spawn has no child — and never the `subagent_type` under an `agent:`
+/// label, which would name a role hint as an agent that ran.
+fn spawn_lines(state: &ToolState, theme: &Theme, blink: u8) -> Vec<Row> {
+    // A pending call's arguments may still be streaming, and a pending call
+    // carries no metadata at all. Null answers `field` the way an absent key
+    // does, so one heading builder serves all three.
+    let absent = serde_json::Value::Null;
+
+    match state {
+        ToolState::Pending { input } => {
+            let input = input.as_ref().unwrap_or(&absent);
+
+            vec![Row::led(
+                point_glyph(blink),
+                point_style(theme, blink),
+                spawn_heading(input, &absent, None),
+                theme.dim,
+            )]
+        }
+        ToolState::Running { input, metadata, .. } => vec![
+            Row::led(
+                point_glyph(blink),
+                point_style(theme, blink),
+                spawn_heading(input, metadata, None),
+                theme.dim,
+            ),
+            Row::new(RESULT, "teammate starting".to_owned(), theme.dim),
+        ],
+        ToolState::Completed { input, title, metadata, started, completed, .. } => vec![
+            Row::led(
+                BULLET,
+                theme.success,
+                spawn_heading(input, metadata, Some(title.as_str())),
+                theme.fg,
+            ),
+            Row::new(
+                RESULT,
+                // The launch is the whole of what settled, and how long it
+                // took is a real number: a pane split is milliseconds, a
+                // foreign CLI waiting for its composer is seconds.
+                format!("teammate started \u{b7} {}", elapsed(*started, *completed)),
+                theme.dim,
+            ),
+        ],
+        // Never reached: a failed call keeps the shape every other failed call
+        // has, whose header already names the teammate off the raw arguments.
+        ToolState::Error { .. } => Vec::new(),
+    }
+}
+
+/// A spawn row's header, read from wherever the part carries each fact.
+///
+/// The settled metadata leads because it is the far side's own answer — a
+/// teammate may be seated under a name or a backend other than the one asked
+/// for — and the call's arguments stand behind it for the flight, when no
+/// metadata exists yet. A backend nobody named is left off rather than
+/// invented.
+fn spawn_heading(
+    input: &serde_json::Value,
+    metadata: &serde_json::Value,
+    title: Option<&str>,
+) -> String {
+    heading(&[
+        ("teammate", field(metadata, "teammate").or_else(|| field(input, "name"))),
+        ("backend", field(metadata, "backend").or_else(|| field(input, "backend"))),
+        ("description", field(input, "description").or(title)),
+    ])
+}
+
 /// One string field of a JSON object, when it is there and is not empty.
 fn field<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(serde_json::Value::as_str).filter(|found| !found.is_empty())
@@ -2216,9 +2328,16 @@ fn call_log(metadata: &serde_json::Value) -> Vec<String> {
 /// call's metadata, and a header that printed both spellings would be naming
 /// the wire rather than the work.
 fn task_heading(agent: Option<&str>, description: Option<&str>) -> String {
+    heading(&[("agent", agent), ("description", description)])
+}
+
+/// `Task(key: "value", …)` over whichever pairs the row has, dropping the
+/// ones nothing filled in — the one grammar both a delegation and a spawn are
+/// written in, so the two rows differ in what they say and not in how.
+fn heading(args: &[(&str, Option<&str>)]) -> String {
     let name = titlecase(TASK_TOOL);
-    let args: Vec<String> = [("agent", agent), ("description", description)]
-        .into_iter()
+    let args: Vec<String> = args
+        .iter()
         .filter_map(|(key, value)| value.map(|value| format!("{key}: {}", quoted(value))))
         .collect();
 

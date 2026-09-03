@@ -1,0 +1,28 @@
+---
+source: crates/ganja-tui/src/app_tests.rs
+expression: screen(&terminal)
+---
+● Task(teammate: "reviewer", backend: "claude", description: "strict review")   
+  ⎿ teammate started · 15.2s                                                    
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+· Thinking… (0s)                                                                
+┌ message ─────────────────────────────────────────────────────────────────────┐
+│ Ask ganja something...                                                       │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+⠋ streaming

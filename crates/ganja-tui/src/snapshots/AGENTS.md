@@ -33,6 +33,7 @@
 | `ganja_tui__app__tests__snapshot_shell_output_streaming.snap` | A `!` passthrough mid-command, its newest output redrawn under the running row. |
 | `ganja_tui__app__tests__snapshot_task_running.snap` | A delegated turn as one inline row: the agent, the ask, and the tool the child is in. |
 | `ganja_tui__app__tests__snapshot_task_completed.snap` | The same row finished — count and duration, and never the child's own answer. |
+| `ganja_tui__app__tests__snapshot_teammate_spawn_completed.snap` | The other door behind the same tool id: a teammate spawn names the member it started and how long the launch took, and counts nothing. |
 | `ganja_tui__app__tests__snapshot_permission_dialog_with_directories.snap` | The permission modal for a call that reaches outside the project, listing where. |
 
 ## For AI Agents

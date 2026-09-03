@@ -15,6 +15,12 @@ use crate::theme::{Theme, Themes};
 /// A reply carrying one tool part in `state`, rendered wide enough that
 /// nothing wraps.
 fn tool_call(tool: &str, state: ToolState) -> Vec<String> {
+    tool_call_at(tool, state, 80)
+}
+
+/// The same, laid out at `width`: a teammate spawn's header names three
+/// arguments and does not fit the width every other row is measured at.
+fn tool_call_at(tool: &str, state: ToolState, width: u16) -> Vec<String> {
     let mut chat = Chat::default();
     let mut reply = Message::assistant("canned");
     reply.parts.push(Part {
@@ -23,7 +29,7 @@ fn tool_call(tool: &str, state: ToolState) -> Vec<String> {
     });
     chat.start_message(reply);
 
-    rendered(&mut chat, Rect::new(0, 0, 80, 20))
+    rendered(&mut chat, Rect::new(0, 0, width, 20))
 }
 
 /// A tool the gateway ran on its own side, drawn in the same grammar a
@@ -1791,6 +1797,203 @@ fn a_failed_task_keeps_the_shape_every_other_failure_has() {
     assert!(
         lines.iter().any(|line| line == "  \u{23bf} [error] no agent named parser-hunter"),
         "got {lines:?}"
+    );
+}
+
+/// A teammate spawn is not a delegated child, and the row may not read as
+/// one (2026-09-03, bead `gaqe`): it names the teammate the roster and the
+/// next `send_message` address, the backend it was seated on, and how long
+/// the launch took. The `0 toolcalls` this row used to print was the absence
+/// of a key rather than a count, and the `agent:` beside it named a role hint
+/// as an agent that had run.
+#[test]
+fn a_finished_teammate_spawn_names_the_teammate_and_counts_nothing() {
+    let lines = tool_call_at(
+        "task",
+        ToolState::Completed {
+            input: serde_json::json!({
+                "backend": "claude",
+                "description": "Strict specification review",
+                "name": "claude-review",
+                "prompt": "review this branch strictly",
+                "subagent_type": "critic",
+            }),
+            output: "Teammate started: claude-review on the claude backend. \
+                     Send it work with send_message."
+                .to_owned(),
+            title: "Strict specification review".to_owned(),
+            metadata: serde_json::json!({
+                "teammate": "claude-review",
+                "agent_id": "claude-review@session-01a06361",
+                "backend": "claude",
+            }),
+            started: 1_788_373_839_733,
+            completed: 1_788_373_839_913,
+        },
+        120,
+    );
+
+    assert!(
+        lines.iter().any(|line| line
+            == "\u{25cf} Task(teammate: \"claude-review\", backend: \"claude\", \
+                description: \"Strict specification review\")"),
+        "got {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line == "  \u{23bf} teammate started \u{b7} 180ms"),
+        "got {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("toolcalls")),
+        "a count is a child's fact and a spawn has no child, got {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("agent:")),
+        "and the role hint is not an agent that ran, got {lines:?}"
+    );
+}
+
+/// While the launch is in flight nothing has answered yet, so the row says
+/// exactly that — never the `0 toolcalls` a delegation would show between
+/// tools, which for a spawn is a count of nothing that was ever coming.
+#[test]
+fn a_teammate_spawn_in_flight_says_it_is_starting() {
+    let lines = tool_call_at(
+        "task",
+        ToolState::Running {
+            input: serde_json::json!({
+                "backend": "codex",
+                "description": "Strict correctness review",
+                "name": "codex-review",
+                "subagent_type": "critic",
+            }),
+            metadata: serde_json::Value::Null,
+            started: 0,
+        },
+        120,
+    );
+
+    assert!(
+        lines.iter().any(|line| line
+            == "\u{25cf} Task(teammate: \"codex-review\", backend: \"codex\", \
+                description: \"Strict correctness review\")"),
+        "got {lines:?}"
+    );
+    assert!(lines.iter().any(|line| line == "  \u{23bf} teammate starting"), "got {lines:?}");
+    assert!(
+        !lines.iter().any(|line| line.contains("toolcalls")),
+        "nothing has run to be counted, got {lines:?}"
+    );
+}
+
+/// Where the teammate was actually seated is the team's answer, not the
+/// call's ask: a spawn that named no backend still says which one it got.
+#[test]
+fn a_finished_spawn_reads_its_backend_from_what_the_team_answered() {
+    let lines = tool_call_at(
+        "task",
+        ToolState::Completed {
+            input: serde_json::json!({
+                "description": "Strict architecture review",
+                "name": "grok-review",
+                "subagent_type": "critic",
+            }),
+            output: "Teammate started: grok-review on the grok backend.".to_owned(),
+            title: "Strict architecture review".to_owned(),
+            metadata: serde_json::json!({
+                "teammate": "grok-review",
+                "agent_id": "grok-review@session-01a06361",
+                "backend": "grok",
+            }),
+            started: 0,
+            completed: 1_635,
+        },
+        120,
+    );
+
+    assert!(
+        lines.iter().any(|line| line
+            == "\u{25cf} Task(teammate: \"grok-review\", backend: \"grok\", \
+                description: \"Strict architecture review\")"),
+        "got {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line == "  \u{23bf} teammate started \u{b7} 1.6s"),
+        "got {lines:?}"
+    );
+}
+
+/// A spawn that never started is a failed call and keeps every other failed
+/// call's shape — which already names the teammate, off the raw arguments,
+/// because that is the one thing the reader needs to know which member of the
+/// roster is missing.
+#[test]
+fn a_refused_spawn_still_names_the_teammate_it_could_not_start() {
+    let lines = tool_call_at(
+        "task",
+        ToolState::Error {
+            input: serde_json::json!({
+                "backend": "grok",
+                "description": "Strict architecture review",
+                "name": "reviewer-3",
+                "prompt": "review this branch strictly",
+                "subagent_type": "critic",
+            }),
+            error: "the grok backend is unavailable: grok exited before its composer was ready"
+                .to_owned(),
+            started: 0,
+            completed: 12,
+        },
+        120,
+    );
+
+    assert!(
+        lines.iter().any(|line| line.contains("name: \"reviewer-3\"")),
+        "which member could not be started is the fact, got {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|line| line
+            == "  \u{23bf} [error] the grok backend is unavailable: \
+                grok exited before its composer was ready"),
+        "got {lines:?}"
+    );
+}
+
+/// The status bar's `N tasks running` means delegated children in flight
+/// (**D462**). A spawn rides the same tool id and is not one of them, so
+/// three teammates starting at once must not read as three turns the session
+/// is waiting on (2026-09-03, bead `gaqe`).
+#[test]
+fn running_tasks_counts_delegated_children_and_not_teammate_spawns() {
+    let delegated = ToolState::Running {
+        input: serde_json::json!({"description": "find the parser", "subagent_type": "explore"}),
+        metadata: serde_json::json!({"toolcalls": 3}),
+        started: 0,
+    };
+    let spawn = ToolState::Running {
+        input: serde_json::json!({
+            "backend": "claude",
+            "description": "Strict specification review",
+            "name": "claude-review",
+        }),
+        metadata: serde_json::Value::Null,
+        started: 0,
+    };
+
+    let mut chat = Chat::default();
+    let mut reply = Message::assistant("canned");
+    for (id, state) in [("prt_1", delegated), ("prt_2", spawn)] {
+        reply.parts.push(Part {
+            id: PartId::from(id.to_owned()),
+            body: PartBody::Tool { call_id: id.to_owned(), tool: "task".to_owned(), state },
+        });
+    }
+    chat.start_message(reply);
+
+    assert_eq!(
+        chat.running_tasks(),
+        1,
+        "the delegated child counts and the spawn beside it does not"
     );
 }
 

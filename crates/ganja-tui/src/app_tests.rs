@@ -6184,6 +6184,43 @@ async fn snapshot_task_completed() {
     insta::assert_snapshot!(screen(&terminal));
 }
 
+/// The other door behind the same tool id (2026-09-03, bead `gaqe`): a
+/// teammate spawn names the member it started and how long the launch took,
+/// where a delegation names an agent and counts the tools it ran.
+#[tokio::test]
+async fn snapshot_teammate_spawn_completed() {
+    let mut app = app();
+    task_part(
+        &mut app,
+        ToolState::Completed {
+            input: serde_json::json!({
+                "backend": "claude",
+                "description": "strict review",
+                "name": "reviewer",
+                "prompt": "review this branch strictly",
+                "subagent_type": "critic",
+            }),
+            output: "Teammate started: reviewer on the claude backend. \
+                     Send it work with send_message."
+                .to_owned(),
+            title: "strict review".to_owned(),
+            metadata: serde_json::json!({
+                "teammate": "reviewer",
+                "agent_id": "reviewer@session-01a06361",
+                "backend": "claude",
+            }),
+            started: 1_000,
+            completed: 16_244,
+        },
+    )
+    .await;
+
+    let mut terminal = terminal(80, 24);
+    app.draw(&mut terminal).expect("a frame draws");
+
+    insta::assert_snapshot!(screen(&terminal));
+}
+
 #[tokio::test]
 async fn snapshot_permission_dialog_with_directories() {
     let mut app = app();
