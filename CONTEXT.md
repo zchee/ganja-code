@@ -39,9 +39,9 @@ _Avoid_: provider (that is a model vendor), worker type, execution mode
 
 **Agent** (persona):
 A named prompt-and-rules identity a session or teammate runs as — `build`,
-`plan`, `general`, `explore`, the five roles a team run routes its stages to
-(`analyst`, `executor`, `verifier`, `critic`, `debugger`), or one the config
-adds.
+`plan`, `general`, `explore`, the six roles a team run routes its stages to
+(`analyst`, `executor`, `verifier`, `critic`, `debugger`, `reviewer`), or one
+the config adds.
 _Avoid_: role, agent-type (OMC's word, which mixes personas and providers)
 
 **task tool**:
