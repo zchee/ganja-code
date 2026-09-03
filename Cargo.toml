@@ -207,7 +207,7 @@ jsonc-parser = "0.33.1"
 # `$ref`s that live over HTTP or on disk; the schema has neither, only local
 # `#/$defs/...` refs, so they are off and nothing here gains a network
 # dependency.
-jsonschema = { version = "0.52.1", default-features = false }
+jsonschema = { version = "0.53.0", default-features = false }
 # `killpg`, so cancelling a shell command takes its whole process group with
 # it without shelling out to `kill(1)`; and `O_NOFOLLOW | O_NONBLOCK`, so the
 # team task store opens a document it can judge on the descriptor rather
@@ -384,7 +384,7 @@ tokio-util = "0.7.19"
 # The feature is on for the other route — `toml::Table`/`Value` is a `BTreeMap`
 # without it, and anything reaching for one would re-sort exactly the order
 # that pin exists to protect.
-toml = { version = "1.1.4", features = ["preserve_order"] }
+toml = { version = "1.1.5", features = ["preserve_order"] }
 # The same project's format-preserving half, and the reason `ganja mcp add`
 # keeps its contract (D483): editing one `[mcp.<name>]` entry of a file
 # somebody hand-commented has to put the entry back without printing the
