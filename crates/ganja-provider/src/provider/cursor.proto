@@ -17,6 +17,27 @@
 // names, so only the service paths (constants in cursor.rs) must match the
 // server's spelling.
 //
+// A third source is the shipped cursor-agent itself, whose webpack bundle
+// `index.js` carries the @bufbuild/protobuf descriptors with every field
+// name, number and oneof membership intact. That bundle is minified onto a
+// handful of enormous lines, so a line number would say nothing: citations
+// to it are **byte offsets**, reproducible with
+// `grep -b -o -F '<anchor>' index.js`. Two bundles are cited below and every
+// offset belongs to exactly one of them:
+//
+//   * `2026.07.23-e383d2b` — the refusal control channel (ExecControl,
+//     ExecThrow, ExecStreamClose), read when D486 landed and left anchored
+//     there because its own prose cites those offsets.
+//   * `2026.09.02-c22c1a3` — everything D550 added: the exec kinds, the
+//     typed refusal arms that answer them, and the RequestContext
+//     switchboard. The read is recorded in
+//     `.omc/research/cursor/2026-09-04-cursor-agent-bundle-read.md`.
+//
+// The two anchor sets describe one protocol rather than two: the newer
+// bundle's ExecClientControlMessage (index.js@6299362) is the older one's
+// @6033532 field for field, and six weeks of releases added two fields and
+// renumbered nothing.
+//
 // Generated with `buf generate` against the buf.build/anthropics/buffa remote
 // plugin; the generated Rust is checked in beside this file under cursor/, and
 // a drift test regenerates and diffs it.
@@ -69,7 +90,7 @@ message ModelEntry {
 // build does not speak yet, so only these four are modelled.
 // The exec channel's *control* half — the one an exec is refused on rather
 // than answered — rides the same stream as exec_client_control_message = 5
-// (index.js@5927250; ExecControl below carries the citation convention).
+// (index.js@5927250; byte offsets, per the citation note above).
 message ClientMessage {
   RunRequest run_request = 1;
   ExecResponse exec_response = 2;
@@ -192,15 +213,91 @@ message TurnEnded {}
 // minimal subset of the plugin's ExecServerMessage (agent_pb.ts:6859) an
 // answered turn needs. id = 1 (:6861) and exec_id = 15 (:6868) are the echo
 // every answer must carry (proxy.ts:1307-1310); request_context_args = 10
-// (:6934) is the one kind this build answers with a *result*. The other arms
-// of the args oneof (:6885-:6997) are tools this build does not run for the
-// server; they survive decoding as unknown fields, whose numbers decode.rs
-// names in the refusal it sends back on the ExecControl channel below (D486)
-// — an unanswered exec is a hang, never an outcome.
+// (:6934) is the one kind this build answers with a *result*.
+//
+// The ten kinds beside it are the tools the server asks a client to run, and
+// this build refuses each **in the kind's own vocabulary** (D550, amending
+// D486). Each is modelled only as far as its refusal echoes back — a path, a
+// command, a url, a tool name — because nothing here runs them, and a member
+// this build would neither read nor send would claim an understanding of the
+// kind it does not have. The numbers are the shipped client's own
+// ExecServerMessage oneof (index.js@6302201). Both shell kinds carry the
+// same ShellArgs and redacted_read_args = 29 carries the same ReadArgs as
+// read_args = 7, exactly as that descriptor declares them — which is why the
+// second number costs no second message.
+//
+// Kinds outside this list survive decoding as unknown fields, whose numbers
+// decode.rs names in the ExecControl throw it falls back to — D486's channel,
+// now the catch-all rather than the whole answer. An unanswered exec is a
+// hang, never an outcome, and that is what the catch-all keeps true for a
+// kind newer than this file.
 message ExecRequest {
   uint32 id = 1;
+  ShellArgs shell_args = 2;
+  WriteArgs write_args = 3;
+  DeleteArgs delete_args = 4;
+  GrepArgs grep_args = 5;
+  ReadArgs read_args = 7;
+  LsArgs ls_args = 8;
   ContextArgs request_context_args = 10;
+  McpArgs mcp_args = 11;
+  ShellArgs shell_stream_args = 14;
   string exec_id = 15;
+  FetchArgs fetch_args = 20;
+  ReadArgs redacted_read_args = 29;
+}
+
+// What a shell exec asks for, narrowed to the two members its refusal echoes:
+// command = 1 and working_directory = 2 (index.js@6535128). The twenty-one
+// beside them describe how to *run* the command, which is the one thing this
+// build does not do with it.
+message ShellArgs {
+  string command = 1;
+  string working_directory = 2;
+}
+
+// index.js@6604943: path = 1, beside the file text and the flags a write this
+// build never performs would need.
+message WriteArgs {
+  string path = 1;
+}
+
+// index.js@6284920: path = 1, beside a tool_call_id = 2.
+message DeleteArgs {
+  string path = 1;
+}
+
+// Fieldless on purpose: grep's own answer arm is a bare GrepError (below),
+// which echoes nothing of the query — so all sixteen members of the shipped
+// GrepArgs (index.js@6326295) would be decoded and none of them sent.
+// Presence is the whole question.
+message GrepArgs {}
+
+// index.js@6431203: path = 1. One message for both read kinds, because the
+// shipped descriptor gives read_args = 7 and redacted_read_args = 29 the
+// same type.
+message ReadArgs {
+  string path = 1;
+}
+
+// index.js@6357464: path = 1.
+message LsArgs {
+  string path = 1;
+}
+
+// index.js@6371504: name = 1, the tool the model called, and tool_call_id = 3.
+// The name is what this client's refusal is *about* — a client serving no
+// tools should say so about the one that was asked for — and the call id is
+// what correlates that refusal with the call in a log.
+message McpArgs {
+  string name = 1;
+  string tool_call_id = 3;
+}
+
+// index.js@6313150: url = 1, which the FetchError arm echoes back beside the
+// reason.
+message FetchArgs {
+  string url = 1;
 }
 
 // Fieldless on purpose: the plugin's RequestContextArgs (agent_pb.ts:9874)
@@ -210,12 +307,29 @@ message ContextArgs {}
 
 // The client's half of the exec exchange: the plugin's ExecClientMessage
 // (agent_pb.ts:7014) — id = 1 (:7016), exec_id = 15 (:7023),
-// request_context_result = 10 (:7082) — narrowed to the one result this
-// build sends.
+// request_context_result = 10 (:7082) — beside the ten typed refusals D550
+// answers the tool kinds with.
+//
+// **A result's number equals its args' number.** That is the shipped
+// client's own ExecClientMessage (index.js@6305844), confirmed kind by kind
+// for every row here; the two rows where it does not hold there
+// (pi_read_result = 46, mini_swe_agent_bash_result = 55) belong to families
+// this build models none of. So this table reads as ExecRequest's mirror,
+// and a reader who has checked one number has checked both.
 message ExecResponse {
   uint32 id = 1;
+  ShellResult shell_result = 2;
+  WriteResult write_result = 3;
+  DeleteResult delete_result = 4;
+  GrepResult grep_result = 5;
+  ReadResult read_result = 7;
+  LsResult ls_result = 8;
   ContextResult request_context_result = 10;
+  McpResult mcp_result = 11;
+  ShellStream shell_stream = 14;
   string exec_id = 15;
+  FetchResult fetch_result = 20;
+  ReadResult redacted_read_result = 29;
 }
 
 // The plugin's RequestContextResult oneof (agent_pb.ts:9895) narrowed to
@@ -231,29 +345,174 @@ message ContextSuccess {
   RequestContext request_context = 1;
 }
 
+// The shipped ShellResult (index.js@6536782) narrowed to rejected = 4 — the
+// arm its own handler returns when the person at the prompt declines
+// (index.js@5329600). Its success, failure, timeout, spawn_error and
+// permission_denied arms all describe a command that ran or tried to, which
+// is not what happened here.
+message ShellResult {
+  ShellRejected rejected = 4;
+}
+
+// The one streamed kind's event, narrowed to rejected = 5
+// (index.js@6541690). A running shell writes many of these and then a stream
+// close; a refused one writes exactly this event and then that close.
+message ShellStream {
+  ShellRejected rejected = 5;
+}
+
+// index.js@6545830. The first two members are echoed back from the args so
+// the server's loop reads *which* command was refused; reason = 3 is ganja's
+// sentence. is_readonly = 4 states a permission verdict — the shipped client
+// sets it from the rule that blocked the call — and this refusal makes no
+// such verdict, so it is left absent, which the wire reads as false.
+message ShellRejected {
+  string command = 1;
+  string working_directory = 2;
+  string reason = 3;
+  bool is_readonly = 4;
+}
+
+// The shipped WriteResult (index.js@6605625) narrowed to rejected = 6.
+message WriteResult {
+  WriteRejected rejected = 6;
+}
+
+// index.js@6608494: the path echoed back, and ganja's reason.
+message WriteRejected {
+  string path = 1;
+  string reason = 2;
+}
+
+// The shipped DeleteResult (index.js@6285400) narrowed to rejected = 6 —
+// the arm index.js@5487600 builds on a decline, and the site this whole
+// answer shape was read from.
+message DeleteResult {
+  DeleteRejected rejected = 6;
+}
+
+// index.js@6288754.
+message DeleteRejected {
+  string path = 1;
+  string reason = 2;
+}
+
+// The shipped GrepResult (index.js@6327477) is success = 1 and error = 2 and
+// nothing else: this kind has no rejected arm, so its refusal travels as the
+// error, which is the only arm the server's loop can be told anything on.
+message GrepResult {
+  GrepError error = 2;
+}
+
+// index.js@6327973: one string, no echo of the query.
+message GrepError {
+  string error = 1;
+}
+
+// The shipped ReadResult (index.js@6431826) narrowed to rejected = 3. One
+// message for both read kinds, matching ReadArgs above.
+message ReadResult {
+  ReadRejected rejected = 3;
+}
+
+// index.js@6433922.
+message ReadRejected {
+  string path = 1;
+  string reason = 2;
+}
+
+// The shipped LsResult (index.js@6358100) narrowed to rejected = 3.
+message LsResult {
+  LsRejected rejected = 3;
+}
+
+// index.js@6360970.
+message LsRejected {
+  string path = 1;
+  string reason = 2;
+}
+
+// The shipped McpResult (index.js@6372351) narrowed to rejected = 3.
+//
+// Its tool_not_found = 5 arm carries a name and an available_tools list and
+// reads like the better fit — but that list is a roster, and answering with
+// an empty one would state that this client publishes a roster and that the
+// name is missing from it. This build publishes none, so the honest arm is
+// the one that carries only a reason, and the reason says which name was
+// asked for.
+message McpResult {
+  McpRejected rejected = 3;
+}
+
+// index.js@6377058: reason = 1, and an is_readonly = 2 left absent for
+// ShellRejected's reason.
+message McpRejected {
+  string reason = 1;
+  bool is_readonly = 2;
+}
+
+// The shipped FetchResult (index.js@6313628) is success = 1 and error = 2,
+// so like grep this kind is refused on its error arm.
+message FetchResult {
+  FetchError error = 2;
+}
+
+// index.js@6314742: the url echoed back beside ganja's reason.
+message FetchError {
+  string url = 1;
+  string error = 2;
+}
+
 // The plugin's RequestContext (agent_pb.ts:10232) narrowed to cloud_rule =
 // 16 (:10286) — the prompt channel cursor's agent actually honors: the
 // plugin's own answer records that plain system messages are ignored
-// server-side (proxy.ts:1133). Its other members are all empty on that
-// answer, and an absent member encodes identically to an empty one, so this
-// one field is the whole message a bare turn needs.
+// server-side (proxy.ts:1133).
+//
+// The three members beside it are the **switchboard** (D550): per-turn
+// booleans on the shipped RequestContext (index.js@6467399) by which a
+// client narrows what the server's loop will ask it for. Only what
+// demonstrably generates an exec this build cannot serve is set, because
+// each one off is a capability the seat is paying for and not getting:
+//
+//   * mcp_file_system_options = 23 — the MCP filesystem meta-tool, whose
+//     descriptor and filesystem execs this build serves none of.
+//   * web_fetch_enabled = 24 — whether to generate fetch_args = 20. Not a
+//     literal: the wire sends it true exactly when the request declared a
+//     tool roster, which is when a fetch has somewhere to be redirected to.
+//   * read_lints_enabled = 35 — drives diagnostics_args = 9, a kind with no
+//     ganja equivalent at all: this build's diagnostics ride edit and write
+//     results, not a request from a provider.
+//
+// **web_search_enabled = 17 is deliberately absent**, and a test in
+// request_tests.rs asserts it stays absent so a later tidy-up reddens rather
+// than lands: server-side search may need no client exec at all, and turning
+// it off on suspicion would cost a capability for nothing.
+// search_conversations_enabled = 50, send_message_enabled = 51 and
+// mcp_meta_tool_options = 34 are absent for the plainer reason that absent
+// already means off and their execs are outside everything this build
+// models. Every other member of that message is empty on the plugin's own
+// answer, and an absent member encodes identically to an empty one.
 message RequestContext {
   string cloud_rule = 16;
+  McpFileSystemOptions mcp_file_system_options = 23;
+  bool web_fetch_enabled = 24;
+  bool read_lints_enabled = 35;
+}
+
+// The shipped McpFileSystemOptions (index.js@6392361) narrowed to
+// enabled = 1; its workspace_project_dir and mcp_descriptors describe the
+// filesystem this build is declining to lend.
+message McpFileSystemOptions {
+  bool enabled = 1;
 }
 
 // The client's control half of the exec exchange: the channel an exec is
 // *refused* on rather than answered, and the one this build refuses every
 // tool exec through (D486, declared in cursor/request.rs).
 //
-// Derived from the shipped cursor client itself — the bundled agent at
-// ~/.local/share/cursor-agent/versions/2026.07.23-e383d2b, whose webpack
-// bundle `index.js` carries the @bufbuild/protobuf descriptors with every
-// field name, number and oneof membership intact. That bundle is minified
-// onto a handful of enormous lines, so a line number would say nothing:
-// citations here are **byte offsets** into `index.js`, reproducible with
-// `grep -b -o -F '<anchor>' index.js`. This is the same role
-// `agent_pb.ts:<line>` plays above, against a source that ships no
-// unminified descriptor.
+// Derived from the shipped cursor client itself; the byte offsets in this
+// message and the two below it are the `2026.07.23-e383d2b` bundle's, per
+// the header's citation note.
 //
 // The wrapper is the client's ExecClientControlMessage (index.js@6033532),
 // whose whole oneof is stream_close = 1, throw = 2 and heartbeat = 3.

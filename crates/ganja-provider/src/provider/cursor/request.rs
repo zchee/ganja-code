@@ -33,7 +33,7 @@
 //! on the one channel the server honors, and never through the member it
 //! demonstrably refuses.
 //!
-//! # Tool execs are refused, not run (**D486**, `cursor-exec-refusal`)
+//! # Tool execs are refused with the kind's typed arm (**D550**, amending **D486**)
 //!
 //! Cursor's server does not only *ask for* context mid-turn; it asks the
 //! client to **run tools** for it — a shell command, a file read, an MCP
@@ -56,20 +56,50 @@
 //! dialog, rule and transcript this build has, driven by a party the user
 //! is talking to rather than one they are running.
 //!
-//! **Why a refusal rather than a failure.** The same client shows what to
-//! send when it *won't* run an exec. Its dispatcher, on finding no handler
-//! for a server exec, writes two control messages and nothing else: a
-//! `throw` carrying the exec id and a reason string, then a `stream_close`
-//! carrying the id (`index.js@4272747` in the bundled
-//! `2026.07.23-e383d2b` agent — byte offsets, per `cursor.proto`'s
-//! citation note). That channel is keyed on the numeric id alone, naming
-//! neither kind nor `exec_id`, which is precisely what makes it a *general*
-//! refusal: `shell_stream_args`, a kind no table here knows, and an exec
-//! carrying nothing recognizable at all are all refusable through it, so no
-//! exec kind is left to fail a turn. The reason string names ganja and the
-//! kind, because it is read by the server's own agent loop — a refusal is
-//! information that loop can act on, the way a denied tool call is
-//! information ganja's own loop acts on, and the turn survives it.
+//! **Why a refusal rather than a failure.** An unanswered exec is a hang:
+//! the server holds generation until the client says something, so the
+//! choice is never between refusing and staying quiet. And the reason
+//! string names ganja and the kind, because it is read by the server's own
+//! agent loop — a refusal is information that loop can act on, the way a
+//! denied tool call is information ganja's own loop acts on, and the turn
+//! survives it.
+//!
+//! **Why the kind's own arm rather than a throw.** D486 refused every exec
+//! on the control channel, copying the one branch of the shipped
+//! dispatcher that had been read: a `throw` carrying the exec id and a
+//! reason, then a `stream_close` carrying the id (`index.js@4272747`). That
+//! branch is the client's **no-handler** path — what it writes when nothing
+//! claims a server message at all. A *decline* is answered elsewhere and
+//! differently: the handler returns the kind's typed `rejected` arm with the
+//! reason in it (`index.js@5487600` for a delete, `@5329600` for a shell,
+//! twelve such sites across the handlers). The distinction is what the
+//! model on the other end reads — a rejection is a tool outcome it adapts
+//! to, a throw is a client that broke — and this build was sending the
+//! broken-client shape for a decision it had made deliberately.
+//!
+//! So [`refusal_answer`] now answers ten kinds in their own vocabulary:
+//! `ExecResponse` carrying the kind's rejected arm at the kind's own field
+//! number, echoing back what the args named — the command, the path, the
+//! url — then the `stream_close` that ends every exec, refused or served.
+//! Two of the ten have no rejected arm in the shipped descriptor at all
+//! (`grep_result`, `fetch_result`), so their refusal travels as the error
+//! arm, which is the only place their result can say anything.
+//!
+//! **The throw survives as the catch-all**, and that is the half of D486
+//! that was load-bearing: its channel is keyed on the numeric id alone,
+//! naming neither kind nor `exec_id`, so an exec of a kind no table here
+//! knows — one newer than this file — is still refusable, and no exec kind
+//! is left to fail a turn.
+//!
+//! # The switchboard: asking the server for less
+//!
+//! [`context_answer`] also fills three members of `RequestContext` that
+//! narrow what the server's loop will ask this client for at all
+//! (`cursor.proto`'s own comment on that message says which and why). The
+//! one that is not a literal is `web_fetch_enabled`, which the caller
+//! computes with [`super::serves_fetch`] from the request's own tool
+//! roster: a fetch exec has somewhere to go exactly when this turn declared
+//! tools. A refusal answered well is still worse than an ask never made.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -152,9 +182,26 @@ pub(super) fn run_message(request: &ChatRequest) -> Result<Vec<u8>, ProviderErro
 /// An absent or empty prompt mirrors the plugin's no-prompt answer — its
 /// `cloudRule` is `undefined` then, so the member is absent while the
 /// context message itself is still present and still a success.
-pub(super) fn context_answer(ask: decode::ContextAsk, system: Option<&str>) -> Vec<u8> {
+///
+/// `web_fetch` is [`super::serves_fetch`]'s verdict on the request this
+/// turn opened with, computed once at stream start and carried here as a
+/// plain `bool` — the wire cannot name an engine type and does not need to.
+/// The other two switchboard members are literals, and
+/// `web_search_enabled = 17` is deliberately not among them; `cursor.proto`
+/// states the reasoning on `RequestContext` itself, and a test in this
+/// module's tests asserts its absence so a later tidy-up reddens.
+pub(super) fn context_answer(
+    ask: decode::ContextAsk,
+    system: Option<&str>,
+    web_fetch: bool,
+) -> Vec<u8> {
     let context = proto::RequestContext {
         cloud_rule: system.map(str::to_owned).filter(|text| !text.is_empty()),
+        mcp_file_system_options: buffa::MessageField::some(
+            proto::McpFileSystemOptions::default().with_enabled(false),
+        ),
+        web_fetch_enabled: Some(web_fetch),
+        read_lints_enabled: Some(false),
         ..Default::default()
     };
     let answer = proto::ExecResponse {
@@ -174,65 +221,208 @@ pub(super) fn context_answer(ask: decode::ContextAsk, system: Option<&str>) -> V
         .encode_to_vec()
 }
 
-/// The two messages refusing one tool exec (**D486**): the throw carrying
-/// the reason, then the stream close that ends the exchange — the pair the
-/// shipped client writes when no handler of its own claims a server exec
-/// (`index.js@4272747`), in that order, because the close is what tells the
-/// server the exec is over rather than still running.
+/// The messages refusing one tool exec: the kind's own rejection followed by
+/// the stream close that ends every exec (**D550**), or — for a kind this
+/// build models no arm for — D486's control-channel throw followed by that
+/// same close.
 ///
-/// Both echo the id the server minted and neither names the kind: the
-/// channel has no member for one, so the kind travels inside the reason
-/// string, which is where the server's agent loop reads it.
+/// Always the close, and always last: the shipped client writes it after a
+/// handler's final frame and after a no-handler throw alike
+/// (`index.js@4272747`), because the close is what tells the server the exec
+/// is over rather than still running. A refused `shell_stream_args` is
+/// therefore exactly one `ShellStream{rejected}` event and then the close,
+/// with nothing between — the streamed kind's shape for "it did not run",
+/// where a served one would have written stdout events first.
 pub(super) fn refusal_answer(ask: &decode::ExecRefusal) -> Vec<Vec<u8>> {
     tracing::debug!(
         provider = ID,
         exec = ask.id,
         kind = ask.kind,
+        typed = !matches!(ask.arm, decode::RefusalArm::Throw),
+        call = tool_call_id(&ask.arm),
         "refusing an exec cursor asked this client to run"
     );
 
-    let thrown = proto::ExecControl {
-        throw: buffa::MessageField::some(proto::ExecThrow {
-            id: ask.id,
-            error: Some(refusal_reason(&ask.kind)),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let closed = proto::ExecControl {
-        stream_close: buffa::MessageField::some(proto::ExecStreamClose {
-            id: ask.id,
+    let closed = proto::ClientMessage {
+        exec_control: buffa::MessageField::some(proto::ExecControl {
+            stream_close: buffa::MessageField::some(proto::ExecStreamClose {
+                id: ask.id,
+                ..Default::default()
+            }),
             ..Default::default()
         }),
         ..Default::default()
     };
 
-    [thrown, closed]
-        .into_iter()
-        .map(|control| {
-            proto::ClientMessage {
-                exec_control: buffa::MessageField::some(control),
+    let reason = refusal_reason(&ask.kind);
+    let refused = match rejection(ask, &reason) {
+        Some(response) => proto::ClientMessage {
+            exec_response: buffa::MessageField::some(response),
+            ..Default::default()
+        },
+        None => proto::ClientMessage {
+            exec_control: buffa::MessageField::some(proto::ExecControl {
+                throw: buffa::MessageField::some(proto::ExecThrow {
+                    id: ask.id,
+                    error: Some(reason),
+                    ..Default::default()
+                }),
                 ..Default::default()
-            }
-            .encode_to_vec()
-        })
-        .collect()
+            }),
+            ..Default::default()
+        },
+    };
+
+    vec![refused.encode_to_vec(), closed.encode_to_vec()]
 }
 
-/// What the server's agent loop is told about a refused exec.
+/// The kind's own rejection, at the kind's own result field — or `None` for
+/// a kind with no modelled arm, whose refusal rides the throw instead.
+///
+/// Both ids are echoed, the way the context answer echoes them: an
+/// `ExecClientMessage` has an `exec_id = 15` to put one in, which is the
+/// difference from the throw.
+fn rejection(ask: &decode::ExecRefusal, reason: &str) -> Option<proto::ExecResponse> {
+    let mut response =
+        proto::ExecResponse { id: ask.id, exec_id: ask.exec_id.clone(), ..Default::default() };
+
+    match &ask.arm {
+        decode::RefusalArm::Throw => return None,
+        decode::RefusalArm::Shell { command, working_directory } => {
+            response.shell_result = buffa::MessageField::some(proto::ShellResult {
+                rejected: buffa::MessageField::some(shell_rejected(
+                    command,
+                    working_directory,
+                    reason,
+                )),
+                ..Default::default()
+            });
+        }
+        decode::RefusalArm::ShellStream { command, working_directory } => {
+            response.shell_stream = buffa::MessageField::some(proto::ShellStream {
+                rejected: buffa::MessageField::some(shell_rejected(
+                    command,
+                    working_directory,
+                    reason,
+                )),
+                ..Default::default()
+            });
+        }
+        decode::RefusalArm::Write { path } => {
+            response.write_result = buffa::MessageField::some(proto::WriteResult {
+                rejected: buffa::MessageField::some(
+                    proto::WriteRejected::default().with_path(path).with_reason(reason),
+                ),
+                ..Default::default()
+            });
+        }
+        decode::RefusalArm::Delete { path } => {
+            response.delete_result = buffa::MessageField::some(proto::DeleteResult {
+                rejected: buffa::MessageField::some(
+                    proto::DeleteRejected::default().with_path(path).with_reason(reason),
+                ),
+                ..Default::default()
+            });
+        }
+        decode::RefusalArm::Grep => {
+            response.grep_result = buffa::MessageField::some(proto::GrepResult {
+                error: buffa::MessageField::some(proto::GrepError::default().with_error(reason)),
+                ..Default::default()
+            });
+        }
+        decode::RefusalArm::Read { path } => {
+            response.read_result = buffa::MessageField::some(read_rejected(path, reason));
+        }
+        decode::RefusalArm::RedactedRead { path } => {
+            response.redacted_read_result = buffa::MessageField::some(read_rejected(path, reason));
+        }
+        decode::RefusalArm::Ls { path } => {
+            response.ls_result = buffa::MessageField::some(proto::LsResult {
+                rejected: buffa::MessageField::some(
+                    proto::LsRejected::default().with_path(path).with_reason(reason),
+                ),
+                ..Default::default()
+            });
+        }
+        decode::RefusalArm::Mcp { name, .. } => {
+            response.mcp_result = buffa::MessageField::some(proto::McpResult {
+                rejected: buffa::MessageField::some(
+                    proto::McpRejected::default().with_reason(mcp_refusal_reason(name)),
+                ),
+                ..Default::default()
+            });
+        }
+        decode::RefusalArm::Fetch { url } => {
+            response.fetch_result = buffa::MessageField::some(proto::FetchResult {
+                error: buffa::MessageField::some(
+                    proto::FetchError::default().with_url(url).with_error(reason),
+                ),
+                ..Default::default()
+            });
+        }
+    }
+
+    Some(response)
+}
+
+/// The rejection both shell kinds carry; only the field it is set on differs.
+fn shell_rejected(command: &str, working_directory: &str, reason: &str) -> proto::ShellRejected {
+    proto::ShellRejected::default()
+        .with_command(command)
+        .with_working_directory(working_directory)
+        .with_reason(reason)
+}
+
+/// The rejection both read kinds carry, likewise.
+fn read_rejected(path: &str, reason: &str) -> proto::ReadResult {
+    proto::ReadResult {
+        rejected: buffa::MessageField::some(
+            proto::ReadRejected::default().with_path(path).with_reason(reason),
+        ),
+        ..Default::default()
+    }
+}
+
+/// What the server's agent loop is told about a refused exec, `{kind}`
+/// substituted.
 ///
 /// It names ganja, so the sentence reads as a client's policy rather than a
-/// malfunction, and it names the kind, so the loop can tell a refused shell
-/// from a refused file read and choose differently. The shipped client's own
-/// no-handler reason (`No handler found for server message of type <kind>`,
-/// `index.js@4272747`) is the shape being matched — a plain sentence, the
-/// kind in it, nothing machine-readable, because the channel offers no
-/// structured field for either.
+/// malfunction; it names the kind, so the loop can tell a refused shell from
+/// a refused file read and choose differently; and it says *why*, because a
+/// loop that reads "this client cannot" retries and a loop that reads "this
+/// client will not, and its tools run elsewhere" stops asking. Ganja's own
+/// words — the shipped client's decline reasons are the user's free text,
+/// so there is nothing here to port.
+const REFUSAL: &str = "ganja does not run {kind} for a provider: its tools run for its own \
+                       session, under its own permission engine.";
+
+/// What an MCP call is refused with instead, `{name}` substituted.
+///
+/// The name is the honest subject: this client publishes no tool roster at
+/// all, so the answer is about the name that was called rather than about a
+/// policy on running it. The arm carrying it (`McpRejected`) has no member
+/// for a roster, which is the second reason the sentence is the whole answer.
+const MCP_REFUSAL: &str = "no tool named {name} is served by this client";
+
+/// [`REFUSAL`] with the kind in it.
 fn refusal_reason(kind: &str) -> String {
-    format!(
-        "ganja runs its tools itself and does not execute them for the server \
-         (no handler for {kind})"
-    )
+    REFUSAL.replace("{kind}", kind)
+}
+
+/// [`MCP_REFUSAL`] with the called tool's name in it.
+fn mcp_refusal_reason(name: &str) -> String {
+    MCP_REFUSAL.replace("{name}", name)
+}
+
+/// The call id an MCP exec carried, for the refusal's log line — the one
+/// value that correlates a refusal with the tool call the model made. Every
+/// other kind identifies itself by its path or command, which the rejection
+/// already echoes.
+fn tool_call_id(arm: &decode::RefusalArm) -> Option<&str> {
+    match arm {
+        decode::RefusalArm::Mcp { tool_call_id, .. } => Some(tool_call_id.as_str()),
+        _ => None,
+    }
 }
 
 /// The bytes answering one kv exchange, serviced against `blobs` — the

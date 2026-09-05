@@ -36,11 +36,14 @@
 //! replies (the 2026-08-10 live turn hung in silence on exactly that,
 //! skipped). The reply (`request::context_answer`) echoes the exec ids
 //! and carries `ChatRequest.system` on `RequestContext.cloud_rule`, the one
-//! prompt channel cursor's agent honors. The server's *other* execs are the
-//! tools it asks a client to run for it; ganja runs its tools for its own
-//! session, so those are answered with a structured refusal naming the kind
-//! (`request::refusal_answer`, **D486**) — never run, and never left to
-//! hang the turn. What is still deliberately not here is the
+//! prompt channel cursor's agent honors, beside the switchboard that tells
+//! the server which asks are worth making at all. The server's *other*
+//! execs are the tools it asks a client to run for it; ganja runs its tools
+//! for its own session, so those are refused in each kind's own vocabulary
+//! — the rejected arm of the kind's own result, echoing the command or path
+//! it named (`request::refusal_answer`, **D550**), falling back to D486's
+//! control-channel throw for a kind with no such arm. Never run, and never
+//! left to hang the turn. What is still deliberately not here is the
 //! conversation-state machinery that carries history and tool calls on
 //! cursor's content-addressed blob channel; `request`'s module docs say
 //! why.
@@ -116,6 +119,29 @@ const STREAMING_CONTENT_TYPE: &str = "application/connect+proto";
 /// One constant so the day the server starts gating on it there is one
 /// place to move.
 const CLIENT_VERSION: &str = "cli-2026.01.09-231024f";
+
+/// Whether this turn can serve a `fetch_args` exec, which is the value the
+/// context answer sends as `RequestContext.web_fetch_enabled = 24`.
+///
+/// **The roster is the honest local signal.** That switchboard member asks
+/// whether the server should generate fetch execs at all, and this client
+/// can serve one exactly when it has a `webfetch` to redirect it to — which
+/// is exactly when the engine advertised a tool roster on *this* request. A
+/// request carrying no tools is one the engine is not offering tools for,
+/// and a one-shot title or summary turn (`turn_start == 0`, empty
+/// [`ChatRequest::tools`]) correctly draws no fetch execs.
+///
+/// It is deliberately a predicate over the request rather than a fact about
+/// the provider: this crate declares no dependency on the engine and is
+/// forbidden one by `depgate.toml`, so a fact the engine owns cannot be
+/// named here. The engine cross-checks the two agree; see its own tests.
+///
+/// `pub` for that cross-check, which lives in the one crate that can see
+/// both sides.
+#[must_use]
+pub fn serves_fetch(request: &ChatRequest) -> bool {
+    !request.tools.is_empty()
+}
 
 /// The identity `GANJA_PROVIDER=cursor` selects.
 ///
@@ -324,7 +350,12 @@ impl CursorWire {
             events(
                 response.bytes_stream().boxed(),
                 cancel,
-                Duplex { answers, system: request.system.clone(), blobs: HashMap::new() },
+                Duplex {
+                    answers,
+                    system: request.system.clone(),
+                    web_fetch: serves_fetch(&request),
+                    blobs: HashMap::new(),
+                },
             ),
             presented,
             endpoint,
@@ -391,6 +422,12 @@ impl CursorWire {
 struct Duplex {
     answers: mpsc::UnboundedSender<Result<Vec<u8>, Infallible>>,
     system: Option<String>,
+    /// What the context answer sends as `web_fetch_enabled`: this turn's
+    /// [`serves_fetch`] verdict, read once at stream start rather than per
+    /// ask, because the request cannot change while its own stream is open.
+    /// A `bool` and not the request, so that the answer-building layer names
+    /// nothing an engine owns.
+    web_fetch: bool,
     /// The turn's blob store: what the server asked this client to hold
     /// mid-turn, read back by the server's own gets. Per-turn on purpose —
     /// this build carries no conversation state across turns, so every turn
@@ -511,6 +548,7 @@ where
                                             vec![request::context_answer(
                                                 ask,
                                                 state.duplex.system.as_deref(),
+                                                state.duplex.web_fetch,
                                             )],
                                             "context ask",
                                         ),
@@ -583,7 +621,7 @@ fn replay(body: Vec<u8>, cancel: CancellationToken) -> BoxStream<'static, Provid
     events(
         stream::iter([Ok::<Vec<u8>, std::convert::Infallible>(body)]),
         cancel,
-        Duplex { answers, system: None, blobs: std::collections::HashMap::new() },
+        Duplex { answers, system: None, web_fetch: false, blobs: std::collections::HashMap::new() },
     )
 }
 

@@ -3,7 +3,7 @@ use buffa::Message as _;
 use super::super::{connect, proto};
 use super::{
     Ask, ContextAsk, ExecRefusal, FinishReason, KvAsk, KvOp, Mapping, ProviderError, ProviderEvent,
-    model_list, verdict,
+    RefusalArm, model_list, verdict,
 };
 
 /// An exec request carrying one args arm by number, the way a kind this
@@ -416,15 +416,33 @@ fn a_skipped_arm_is_named_the_way_the_plugins_descriptor_names_it() {
 /// The kind a live turn really died on: `shell_stream_args`, field 14 of
 /// the args oneof — the server asking this client to run a shell for it.
 /// It is a question to hand up with the kind named, never an event, and
-/// no longer the failure that used to end the turn (**D486**).
+/// no longer the failure that used to end the turn (**D486**). Since
+/// **D550** the kind is recognised by the field it arrived on rather than
+/// by an unknown number, and what it named comes back up with it.
 #[test]
 fn the_live_observed_shell_stream_exec_is_handed_up_as_a_refusal() {
-    let (events, asks) = mapped_asks(&exec_framed(exec_of_kind(5, 14)), false);
+    let asked = proto::ExecRequest {
+        id: Some(5),
+        exec_id: Some("exec-abc".to_owned()),
+        shell_stream_args: buffa::MessageField::some(
+            proto::ShellArgs::default().with_command("cargo test").with_working_directory("/repo"),
+        ),
+        ..Default::default()
+    };
+    let (events, asks) = mapped_asks(&exec_framed(asked), false);
 
     assert!(events.is_empty(), "a refusal is an answer to send, not an event: {events:?}");
     assert_eq!(
         asks,
-        vec![Ask::Refuse(ExecRefusal { id: Some(5), kind: "shell_stream_args".to_owned() })]
+        vec![Ask::Refuse(ExecRefusal {
+            id: Some(5),
+            exec_id: Some("exec-abc".to_owned()),
+            kind: "shell_stream_args".to_owned(),
+            arm: RefusalArm::ShellStream {
+                command: "cargo test".to_owned(),
+                working_directory: "/repo".to_owned(),
+            },
+        })]
     );
 }
 
@@ -433,14 +451,32 @@ fn the_live_observed_shell_stream_exec_is_handed_up_as_a_refusal() {
 /// mapped, and the stream still reaches its finish.
 #[test]
 fn a_named_tool_exec_is_refused_and_the_turn_carries_on_past_it() {
-    // shell_args is field 2 of the plugin's oneof (agent_pb.ts:6885).
-    let mut body = exec_framed(exec_of_kind(3, 2));
+    // shell_args is field 2 of the shipped oneof (index.js@6302201).
+    let asked = proto::ExecRequest {
+        id: Some(3),
+        shell_args: buffa::MessageField::some(proto::ShellArgs::default().with_command("ls")),
+        ..Default::default()
+    };
+    let mut body = exec_framed(asked);
     body.extend(framed(text("still generating")));
     body.extend(framed(turn_ended()));
     body.extend(end_stream("{}"));
 
     let (events, asks) = mapped_asks(&body, false);
-    assert_eq!(asks, vec![Ask::Refuse(ExecRefusal { id: Some(3), kind: "shell_args".to_owned() })]);
+    assert_eq!(
+        asks,
+        vec![Ask::Refuse(ExecRefusal {
+            id: Some(3),
+            exec_id: None,
+            kind: "shell_args".to_owned(),
+            arm: RefusalArm::Shell {
+                command: "ls".to_owned(),
+                // Absent and empty are one answer: the arm has no way to
+                // say the server did not send a working directory.
+                working_directory: String::new(),
+            },
+        })]
+    );
     assert_eq!(
         events,
         vec![
@@ -459,8 +495,8 @@ fn a_named_tool_exec_is_refused_and_the_turn_carries_on_past_it() {
 /// *it* unanswered would hang the turn just as surely.
 #[test]
 fn an_exec_kind_beyond_the_table_is_refused_by_its_field_number() {
-    let mut asked = exec_of_kind(4, 42);
-    // span_context = 19 rides beside the args oneof (agent_pb.ts:6875).
+    let mut asked = exec_of_kind(4, 39);
+    // span_context = 19 rides beside the args oneof (index.js@6302201).
     asked.__buffa_unknown_fields.push(buffa::UnknownField {
         number: 19,
         data: buffa::UnknownFieldData::LengthDelimited(Vec::new()),
@@ -470,7 +506,12 @@ fn an_exec_kind_beyond_the_table_is_refused_by_its_field_number() {
     assert!(events.is_empty(), "{events:?}");
     assert_eq!(
         asks,
-        vec![Ask::Refuse(ExecRefusal { id: Some(4), kind: "field 42".to_owned() })],
+        vec![Ask::Refuse(ExecRefusal {
+            id: Some(4),
+            exec_id: None,
+            kind: "field 39".to_owned(),
+            arm: RefusalArm::Throw,
+        })],
         "the span context is passed over rather than blamed"
     );
 
@@ -478,8 +519,39 @@ fn an_exec_kind_beyond_the_table_is_refused_by_its_field_number() {
     assert!(events.is_empty(), "{events:?}");
     assert_eq!(
         asks,
-        vec![Ask::Refuse(ExecRefusal { id: None, kind: "no recognizable kind".to_owned() })],
+        vec![Ask::Refuse(ExecRefusal {
+            id: None,
+            exec_id: None,
+            kind: "no recognizable kind".to_owned(),
+            arm: RefusalArm::Throw,
+        })],
         "an id the server never sent is not invented"
+    );
+}
+
+/// The name table behind the throw covers the kinds D550 models no arm
+/// for, and only those: a number that now decodes into a field of its own
+/// can never reach it, and one the table has never heard of is still
+/// reported as itself, which is enough to go derive.
+#[test]
+fn a_kind_with_no_modelled_arm_is_named_from_the_throws_own_table() {
+    for (number, named) in [(9u32, "diagnostics_args"), (28, "subagent_args"), (56, "adopt_args")] {
+        let (_, asks) = mapped_asks(&exec_framed(exec_of_kind(1, number)), false);
+        assert_eq!(
+            asks,
+            vec![Ask::Refuse(ExecRefusal {
+                id: Some(1),
+                exec_id: None,
+                kind: named.to_owned(),
+                arm: RefusalArm::Throw,
+            })],
+        );
+    }
+
+    let (_, asks) = mapped_asks(&exec_framed(exec_of_kind(1, 99)), false);
+    assert!(
+        matches!(asks.as_slice(), [Ask::Refuse(refusal)] if refusal.kind == "field 99"),
+        "a kind newer than this file is refusable by number: {asks:?}"
     );
 }
 

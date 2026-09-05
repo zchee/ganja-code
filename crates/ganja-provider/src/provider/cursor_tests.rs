@@ -76,11 +76,14 @@ fn exec_framed(id: u32, exec_id: &str) -> Vec<u8> {
 /// args oneof's field 14, which this build models by number rather than
 /// by shape, because it never runs one.
 fn shell_stream_framed(id: u32) -> Vec<u8> {
-    let mut exec = proto::ExecRequest::default().with_id(id);
-    exec.__buffa_unknown_fields.push(buffa::UnknownField {
-        number: 14,
-        data: buffa::UnknownFieldData::LengthDelimited(Vec::new()),
-    });
+    let exec = proto::ExecRequest {
+        id: Some(id),
+        exec_id: Some("exec-shell".to_owned()),
+        shell_stream_args: buffa::MessageField::some(
+            proto::ShellArgs::default().with_command("ls").with_working_directory("/repo"),
+        ),
+        ..Default::default()
+    };
 
     let message = proto::ServerMessage {
         exec_request: buffa::MessageField::some(exec),
@@ -93,7 +96,12 @@ fn shell_stream_framed(id: u32) -> Vec<u8> {
 /// A duplex whose answers nobody reads, for fixtures without an ask.
 fn promptless_duplex() -> super::Duplex {
     let (answers, _) = futures::channel::mpsc::unbounded();
-    super::Duplex { answers, system: None, blobs: std::collections::HashMap::new() }
+    super::Duplex {
+        answers,
+        system: None,
+        web_fetch: false,
+        blobs: std::collections::HashMap::new(),
+    }
 }
 
 /// A data frame holding one kv exchange, built with the real message
@@ -235,6 +243,7 @@ async fn the_context_ask_is_answered_on_the_open_body_before_the_turn_flows() {
         super::Duplex {
             answers,
             system: Some("You are terse.".to_owned()),
+            web_fetch: false,
             blobs: std::collections::HashMap::new(),
         },
     );
@@ -309,6 +318,7 @@ async fn the_kv_channel_is_answered_in_frame_order_behind_the_context_answer() {
         super::Duplex {
             answers,
             system: Some("You are terse.".to_owned()),
+            web_fetch: false,
             blobs: std::collections::HashMap::new(),
         },
     );
@@ -398,7 +408,12 @@ async fn a_tool_exec_is_refused_on_the_open_body_and_the_turn_survives() {
     let stream = super::events(
         receiver,
         CancellationToken::new(),
-        super::Duplex { answers, system: None, blobs: std::collections::HashMap::new() },
+        super::Duplex {
+            answers,
+            system: None,
+            web_fetch: false,
+            blobs: std::collections::HashMap::new(),
+        },
     );
 
     let mut body = shell_stream_framed(5);
@@ -429,7 +444,7 @@ async fn a_tool_exec_is_refused_on_the_open_body_and_the_turn_survives() {
         .map(|answer| answer.expect("the channel's error type is infallible"))
         .collect()
         .await;
-    assert_eq!(sent.len(), 2, "the throw, and the close that ends it");
+    assert_eq!(sent.len(), 2, "the rejection, and the close that ends it");
 
     let decoded: Vec<proto::ClientMessage> = sent
         .iter()
@@ -440,15 +455,21 @@ async fn a_tool_exec_is_refused_on_the_open_body_and_the_turn_survives() {
         })
         .collect();
 
-    let thrown = decoded[0]
-        .exec_control
+    let rejected = decoded[0]
+        .exec_response
         .as_option()
-        .and_then(|control| control.throw.as_option())
-        .expect("the throw went out first");
-    assert_eq!(thrown.id, Some(5), "the id the server minted comes back");
+        .expect("the rejection went out first, on the exec channel");
+    assert_eq!(rejected.id, Some(5), "the id the server minted comes back");
+    assert_eq!(rejected.exec_id.as_deref(), Some("exec-shell"), "and so does the exec id");
+    let event = rejected
+        .shell_stream
+        .as_option()
+        .and_then(|stream| stream.rejected.as_option())
+        .expect("the streamed kind's own rejected event");
+    assert_eq!(event.command.as_deref(), Some("ls"), "echoing what the server asked to run");
     assert!(
-        thrown.error.as_deref().is_some_and(|reason| reason.contains("shell_stream_args")),
-        "the server's agent loop is told what was refused: {thrown:?}"
+        event.reason.as_deref().is_some_and(|reason| reason.contains("shell_stream_args")),
+        "the server's agent loop is told what was refused and why: {event:?}"
     );
     assert_eq!(
         decoded[1]
