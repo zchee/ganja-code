@@ -17,7 +17,9 @@ use crate::protocol::{
     Command, Event, FinishReason, Message, Part, PermissionReply, RevertScope, Role, Usage,
 };
 use crate::provider::fake::MODEL;
-use crate::provider::{ChatRequest, FakeProvider, Provider, ProviderError, ProviderEvent};
+use crate::provider::{
+    ChatRequest, FakeProvider, PROVIDERS, Provider, ProviderError, ProviderEvent, ToolReach, cursor,
+};
 use crate::storage::{self, SessionId, SessionInfo, Storage};
 use crate::tool::{FileTimes, Registry, tasklist};
 
@@ -41,22 +43,33 @@ struct ScriptedProvider {
     events: Vec<ProviderEvent>,
     failure: Option<ProviderError>,
     seen: Arc<Mutex<Vec<ChatRequest>>>,
+    /// What it calls itself. A field rather than a constant because
+    /// **D551**'s door reads [`ToolReach::of`] over [`Provider::id`], so what
+    /// those tests need is a seat that *reports* a real provider's id — never
+    /// that provider's wire, which would want that vendor's credentials to
+    /// answer a question about a string.
+    id: &'static str,
 }
 
 impl ScriptedProvider {
     fn new(events: Vec<ProviderEvent>) -> Self {
-        Self { events, failure: None, seen: Arc::default() }
+        Self { events, failure: None, seen: Arc::default(), id: "scripted" }
     }
 
     fn failing(failure: ProviderError) -> Self {
-        Self { events: Vec::new(), failure: Some(failure), seen: Arc::default() }
+        Self { events: Vec::new(), failure: Some(failure), seen: Arc::default(), id: "scripted" }
+    }
+
+    /// The same, answering nothing, under the id a shipped provider has.
+    fn named(id: &'static str) -> Self {
+        Self { id, ..Self::new(Vec::new()) }
     }
 }
 
 #[async_trait]
 impl Provider for ScriptedProvider {
     fn id(&self) -> &str {
-        "scripted"
+        self.id
     }
 
     async fn stream(
@@ -1998,4 +2011,180 @@ async fn a_task_list_that_cannot_be_read_answers_as_no_list_at_all() {
     let engine = engine().with_tasks(tasks as Arc<dyn tasklist::TaskList>);
 
     assert!(engine.task_list().await.is_none());
+}
+
+/// An engine on `provider` holding this build's real agent roster.
+///
+/// The roster matters even though every test below refuses before a turn: two
+/// of the three prove that **D549**'s grammar and bead 2m46's redirect still
+/// answer first, and a grammar judged against a roster a fixture invented
+/// would prove nothing about the order a session really runs these doors in.
+fn seated(provider: Arc<ScriptedProvider>) -> Engine {
+    let agents = crate::agent::Registry::from_config(&crate::config::Config::default())
+        .expect("the default config resolves this build's own roster");
+
+    Engine::new(provider, MODEL, Arc::new(Registry::new(Vec::new())), Permissions::default())
+        .with_agents(Arc::new(agents))
+}
+
+/// **AC-5**, first of three (**D551**): the two builtins whose whole body is
+/// tool calls are refused on a provider that serves none, before the template
+/// is filled and before the provider is asked anything at all.
+#[tokio::test]
+async fn the_tool_driven_builtins_are_refused_on_a_provider_that_serves_no_tools() {
+    for (command, names) in [("team", "run the steps yourself"), ("init", "AGENTS.md")] {
+        let provider = Arc::new(ScriptedProvider::named(cursor::ID));
+        let seen = Arc::clone(&provider.seen);
+        let engine = seated(provider);
+
+        let refused = engine
+            .send(Command::RunCommand {
+                name: command.to_owned(),
+                args: "port the config loader".to_owned(),
+            })
+            .await
+            .expect_err("a tool pipeline on a tool-less provider is refused");
+
+        let EngineError::ProviderToolReach { provider, command: refused_command, missing } =
+            &refused
+        else {
+            panic!("the reach door should answer for /{command}, got {refused:?}");
+        };
+        assert_eq!(provider, cursor::ID, "the sentence names the provider that cannot serve it");
+        assert_eq!(refused_command, command);
+        assert_eq!(*missing, ToolReach::None);
+
+        let sentence = refused.to_string();
+        assert!(
+            sentence.contains(cursor::ID) && sentence.contains("serves this build no tools"),
+            "the sentence is derived from the reach value, got {sentence:?}"
+        );
+        assert!(sentence.contains(names), "it says what this command wanted, got {sentence:?}");
+        assert!(
+            seen.lock().expect("the request log is never poisoned").is_empty(),
+            "a refusal in front of the expansion starts no turn, so nothing was asked"
+        );
+    }
+}
+
+/// **AC-5**, second of three: the grammar is ahead of the reach door, so a
+/// head token that is not a valid spec is answered by **D549**'s own sentence
+/// on cursor exactly as it is anywhere else. A line that is broken on every
+/// provider must not be answered by naming one.
+#[tokio::test]
+async fn a_malformed_team_spec_on_a_tool_less_provider_still_gets_the_grammars_sentence() {
+    let engine = seated(Arc::new(ScriptedProvider::named(cursor::ID)));
+
+    let refused = engine
+        .send(Command::RunCommand {
+            name: "team".to_owned(),
+            args: "0:critic fix the wire".to_owned(),
+        })
+        .await
+        .expect_err("a count of nobody is refused whatever the provider serves");
+
+    assert!(
+        matches!(refused, EngineError::TeamSpec(_)),
+        "the spec gate answers first, got {refused:?}"
+    );
+}
+
+/// **AC-5**, third of three: bead 2m46's redirect is ahead of both, so
+/// `/team list` is still three fixed words about the command that was meant
+/// rather than a sentence about what cursor serves.
+#[tokio::test]
+async fn a_misdirected_roster_line_on_a_tool_less_provider_still_gets_the_redirect() {
+    let engine = seated(Arc::new(ScriptedProvider::named(cursor::ID)));
+
+    let refused = engine
+        .send(Command::RunCommand { name: "team".to_owned(), args: "list".to_owned() })
+        .await
+        .expect_err("a roster line is refused whatever the provider serves");
+
+    let EngineError::MisdirectedCommand { meant } = &refused else {
+        panic!("the redirect answers first, got {refused:?}");
+    };
+    assert_eq!(meant, "/teammate list");
+}
+
+/// **AC-3**'s cross-check, and the reason it lives here: `depgate.toml`
+/// forbids `ganja-provider` a dependency on this crate, so the wire cannot
+/// name [`ToolReach`] and computes a local signal — its own roster predicate —
+/// instead. Whether the two agree is a question only the crate that sees both
+/// can ask.
+///
+/// The direction asserted is the one W4 will invert: every id that reaches
+/// every tool sends a real turn with a roster on it, so cursor's predicate
+/// says `true` for exactly the requests a tool-serving session produces.
+#[tokio::test]
+async fn every_tool_reaching_provider_sends_a_roster_the_cursor_predicate_answers_for() {
+    // A loop that skipped every id would pass while asserting nothing, which
+    // is the one way this test could go quietly wrong.
+    let mut checked = 0_usize;
+
+    for id in PROVIDERS {
+        if ToolReach::of(id) != ToolReach::Full {
+            continue;
+        }
+
+        let provider = Arc::new(ScriptedProvider::named(id));
+        let seen = Arc::clone(&provider.seen);
+        let engine = Engine::new(
+            provider,
+            MODEL,
+            Arc::new(Registry::with_builtins()),
+            Permissions::default(),
+        );
+        let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+        engine
+            .send(Command::SendPrompt {
+                text: "what does this crate do".to_owned(),
+                mentions: Vec::new(),
+                skills: Vec::new(),
+                session_mentions: Vec::new(),
+                peers: Vec::new(),
+            })
+            .await
+            .expect("an idle engine accepts a prompt");
+        drain(&mut events).await;
+
+        let requests = seen.lock().expect("the request log is never poisoned");
+        let [request] = requests.as_slice() else {
+            panic!("one prompt on a storeless engine is one request, got {requests:?}");
+        };
+        assert!(
+            !request.tools.is_empty(),
+            "{id} reaches every tool, so a turn advertises the registry it was built with"
+        );
+        assert!(
+            cursor::serves_fetch(request),
+            "the wire's own predicate must say yes to exactly what a tool-serving turn sends"
+        );
+        checked += 1;
+    }
+
+    assert!(checked > 0, "some shipped id reaches every tool, so this asserted something");
+}
+
+/// The other half of the same agreement, on the shape no roster rides: a
+/// one-shot title or summary request — this turn's messages only, no tools —
+/// is what a session asks in when it is not offering tools at all, and the
+/// wire must not invite fetch execs it could not serve.
+#[test]
+fn the_one_shot_request_shape_draws_no_fetch_from_the_cursor_wire() {
+    let one_shot = ChatRequest {
+        model: MODEL.to_owned(),
+        system: None,
+        messages: Vec::new(),
+        turn_start: 0,
+        tools: Vec::new(),
+        effort_options: serde_json::Map::new(),
+    };
+
+    assert_eq!(ToolReach::of(cursor::ID), ToolReach::None);
+    assert!(
+        !cursor::serves_fetch(&one_shot),
+        "a request carrying no roster is one this client has nothing to redirect a fetch to"
+    );
 }

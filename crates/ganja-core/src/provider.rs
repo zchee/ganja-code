@@ -580,6 +580,51 @@ pub fn select(config: &Config) -> Result<Selection, SelectionError> {
     Ok(Selection { provider: wire.provider, model, notice: None })
 }
 
+/// How much of ganja's tool set a wire can actually serve (**D551**).
+///
+/// A fact about **this build's** support for a provider, not about the vendor:
+/// [`cursor`] is the one wire whose server runs the tool loop itself, so a
+/// roster ganja advertises to it reaches nothing it will call back into. The
+/// answer therefore lives here, next to [`select`], rather than as a defaulted
+/// [`Provider`] method: a scaffold two waves wide would otherwise become a
+/// question every wire is asked forever, and the day cursor serves tools the
+/// only edit is one arm of [`ToolReach::of`].
+///
+/// Three-valued because the middle value is a real destination and not a
+/// hedge: a seat that serves the wire's own native kinds — files, shell — and
+/// no `task`, team tools or `skill` is what a refusal must be able to *name*.
+/// A two-valued flag could only claim nothing works, which would be false the
+/// moment the first tool ships.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ToolReach {
+    /// Every tool the registry advertises is callable. Every wire but cursor.
+    Full,
+    /// Only the kinds the wire's own vocabulary already has — no `task`, no
+    /// team task tools, no `skill`. Reached by no id yet; the value the
+    /// native-kind seat will be.
+    NativeOnly,
+    /// The wire calls nothing ganja registered.
+    None,
+}
+
+impl ToolReach {
+    /// What `provider_id` — a [`Provider::id`], builtin or config-declared —
+    /// serves.
+    ///
+    /// Keyed on the id because that is what an [`Engine`](crate::Engine) holds:
+    /// it carries an `Arc<dyn Provider>` and no [`Selection`]. A
+    /// config-declared `compat` provider answers [`ToolReach::Full`] with every
+    /// other id, and correctly — the three dialects it speaks are
+    /// function-calling wires, whatever endpoint they were pointed at.
+    #[must_use]
+    pub fn of(provider_id: &str) -> Self {
+        match provider_id {
+            cursor::ID => Self::None,
+            _ => Self::Full,
+        }
+    }
+}
+
 /// The provider a session defaults to when nothing named one: the oldest
 /// stored login this build can run as, or [`None`] on a machine with none.
 ///

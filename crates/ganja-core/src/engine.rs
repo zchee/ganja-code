@@ -47,7 +47,7 @@ use crate::protocol::{
     Command, Event, Message, MessageId, PartBody, PermissionId, PermissionMode, PermissionReply,
     RevertInfo, RevertScope, Role, ToolState, Usage, now,
 };
-use crate::provider::Provider;
+use crate::provider::{Provider, ToolReach};
 use crate::session::{
     Answered, LiveSession, PendingReplies, Persist, SessionState, SteerInput, Steering, Turn,
     TurnHandle, TurnKind, run_turn,
@@ -330,6 +330,25 @@ pub enum EngineError {
     /// wording. Refused before the template is filled, so no turn starts.
     #[error(transparent)]
     TeamSpec(#[from] command::TeamSpecError),
+    /// [`Command::RunCommand`] ran a builtin whose whole body is tool calls on
+    /// a provider that serves this build none of them (**D551**).
+    ///
+    /// Third of the three doors in front of an expansion and last of them on
+    /// purpose: a roster line and a malformed spec are wrong on every
+    /// provider, so a sentence naming this one would name the wrong problem.
+    /// Only a well-formed, correctly-spelled builtin invocation reaches here,
+    /// and it is refused before the template is filled, so no turn starts.
+    #[error("{}", tool_reach_refusal(command, provider, *missing))]
+    ProviderToolReach {
+        /// The provider that serves the tools the command needs — none of
+        /// them, or only the wire's own native kinds.
+        provider: String,
+        /// The builtin that was asked for, without its slash.
+        command: String,
+        /// What that provider reaches, which is what the sentence is derived
+        /// from: never [`ToolReach::Full`], which refuses nothing.
+        missing: ToolReach,
+    },
     /// [`Command::RunCommand`] named a command whose `agent` is a subagent.
     /// Those exist to be spawned by the task tool, and a command running as one
     /// would be a turn with no way back.
@@ -379,6 +398,43 @@ pub enum EngineError {
         /// What the hook said — its stderr, or the reason it denied with.
         reason: String,
     },
+}
+
+/// [`EngineError::ProviderToolReach`]'s whole sentence, derived from the reach
+/// value rather than stored beside it, so that it cannot go stale the day a
+/// wire starts serving tools (**D551**).
+///
+/// Two commands and two reach values, and each pair says what is actually
+/// missing: the `NativeOnly` half names the tools a native-kind seat has no
+/// vocabulary for — `task` and the team task tools for `/team`, `question` for
+/// `/init`, which its own template asks for by name — rather than claiming
+/// nothing works, and closes by saying what does.
+fn tool_reach_refusal(command: &str, provider: &str, missing: ToolReach) -> String {
+    match (missing, command) {
+        (ToolReach::None, command::INIT) => format!(
+            "`/{command}` writes `AGENTS.md` through tool calls and the {provider} provider \
+             serves this build no tools; run it under another provider, or write the file \
+             yourself."
+        ),
+        (ToolReach::None, _) => format!(
+            "`/{command}` is a pipeline of tool calls and the {provider} provider serves this \
+             build no tools; run it under another provider, or run the steps yourself."
+        ),
+        (ToolReach::NativeOnly, command::INIT) => format!(
+            "`/{command}` needs the `question` tool, which the {provider} provider does not \
+             serve; file reads and shell commands do work here."
+        ),
+        (ToolReach::NativeOnly, _) => format!(
+            "`/{command}` needs `task` and the team task tools, which the {provider} provider \
+             does not serve; file reads and shell commands do work here."
+        ),
+        // The gate never builds this error for a provider that serves
+        // everything, so this arm exists only so the sentence is total rather
+        // than a panic in a `Display`.
+        (ToolReach::Full, _) => {
+            format!("`/{command}` needs tools the {provider} provider does not serve.")
+        }
+    }
 }
 
 /// The half of [`EngineError::UnknownEffort`]'s sentence that names what
@@ -3986,6 +4042,11 @@ impl Engine {
         // asked to notice something three fixed words already said (**bead
         // 2m46**) or to parse a spec the code just found invalid (**D549**).
         let invocation = self.team_spec(definition, args)?;
+        // And the third door (**D551**), last of them for the reason the ruling
+        // gives: a roster line and a malformed spec are wrong on every
+        // provider, so only a well-formed, correctly-spelled builtin
+        // invocation earns a sentence about what this one serves.
+        self.tool_reach(definition)?;
         // Drawn from the same invocation the turn goes on to carry, so the
         // block the model reads and the rows the spec arm judges its spawns
         // against are one parse — a roster read twice could come apart, and a
@@ -4032,6 +4093,43 @@ impl Engine {
                 .map(|invocation| invocation.members),
         )
         .await
+    }
+
+    /// Refuses a builtin whose whole body is tool calls on a provider that
+    /// serves this build none of them (**D551**).
+    ///
+    /// Read as [`ToolReach::of`] over [`Provider::id`] because that is what an
+    /// engine holds — an `Arc<dyn Provider>`, never a
+    /// [`Selection`](crate::provider::Selection) — the same read
+    /// [`Self::model_named`] already makes.
+    ///
+    /// Gated on [`command::Definition::builtin`] for D549's own reason: a
+    /// config `[command.team]` **replaces** the builtin, and refusing somebody
+    /// else's command because of what *this build's* `/team` would have called
+    /// would make theirs unreachable. Named off the definition rather than the
+    /// typed word so an alias reaches the same answer as the name it resolves
+    /// to.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::ProviderToolReach`], naming the provider and what it
+    /// leaves unserved.
+    fn tool_reach(&self, definition: &command::Definition) -> Result<(), EngineError> {
+        let missing = ToolReach::of(self.provider.id());
+        if missing == ToolReach::Full {
+            return Ok(());
+        }
+        if !(definition.builtin
+            && matches!(definition.name.as_str(), command::TEAM | command::INIT))
+        {
+            return Ok(());
+        }
+
+        Err(EngineError::ProviderToolReach {
+            provider: self.provider.id().to_owned(),
+            command: definition.name.clone(),
+            missing,
+        })
     }
 
     /// What **D549**'s grammar reads out of a `/team` line, or [`None`] for

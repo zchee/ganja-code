@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
 use super::{
-    Config, Dialect, PROVIDER_ENV, PROVIDERS, ProviderConfig, SelectionError, adoptable_login,
-    cursor, defaulted_model, fake, grok, openai, opencode, openrouter, select, selectable,
-    wire_model_listing,
+    Config, Dialect, PROVIDER_ENV, PROVIDERS, ProviderConfig, SelectionError, ToolReach,
+    adoptable_login, cursor, defaulted_model, fake, grok, openai, opencode, openrouter, select,
+    selectable, wire_model_listing,
 };
 use crate::catalog;
 
@@ -286,4 +286,33 @@ fn a_backends_own_default_outranks_its_vendors_catalog_row() {
         defaulted_model(cursor::ID, None).expect("cursor has the wire-published pin"),
         "default"
     );
+}
+
+/// **AC-4.** Asked of the id list rather than of nine constructed wires: the
+/// fact is a function of the id, and instantiating a provider to ask it would
+/// need credentials for eight vendors to answer a question about a string.
+#[test]
+fn cursor_is_the_one_shipped_id_that_reaches_none_of_this_builds_tools() {
+    assert_eq!(ToolReach::of(cursor::ID), ToolReach::None);
+
+    for builtin in PROVIDERS {
+        if builtin == cursor::ID {
+            continue;
+        }
+
+        assert_eq!(
+            ToolReach::of(builtin),
+            ToolReach::Full,
+            "{builtin} speaks a function-calling wire, so every registered tool is callable"
+        );
+    }
+}
+
+/// A provider somebody declared in their own config is one of the three
+/// function-calling dialects wearing an endpoint of their choosing, so it
+/// answers with every other id rather than falling into the cursor arm by
+/// being unrecognised.
+#[test]
+fn a_config_declared_endpoint_reaches_every_tool_like_the_builtin_it_speaks_as() {
+    assert_eq!(ToolReach::of("local-llama"), ToolReach::Full);
 }
