@@ -5,7 +5,7 @@
 
 ## Purpose
 
-Captured `text/event-stream` bodies, one per shape a wire has to survive. They live beside the wires that parse them rather than beside the suites that serve them, because what each file records is a fact about a vendor's protocol.
+Captured `text/event-stream` bodies, one per shape a wire has to survive, plus the recordings of live probes against a vendor. They live beside the wires that parse them rather than beside the suites that serve them, because what each file records is a fact about a vendor's protocol.
 
 ## Key Files
 
@@ -19,12 +19,14 @@ Captured `text/event-stream` bodies, one per shape a wire has to survive. They l
 | `anthropic_tool_use_interleaved.sse` / `openai_tool_calls_interleaved.sse` | Tool-call fragments interleaved with text, proving argument assembly across chunk boundaries. |
 | `openai_tool_calls.sse` | Multiple tool calls in one reply. |
 | `anthropic_tool_call_cut_short.sse` / `openai_tool_call_cut_short.sse` | A call whose arguments never complete. |
+| `cursor-mcp-tools-probe.txt` | The recording of five live turns against `api2.cursor.sh` (2026-09-06) settling whether that server will call a tool a third-party client declares on `AgentRunRequest.mcp_tools = 4`, whether a 25-second client-side pause inside one exec survives on run heartbeats alone and with exec heartbeats, how a typed `rejected` on a native kind is treated, whether `system_prompt_spec = 29` is gated, and which of the two schema fields is honored. Not a decoder fixture — nothing `include_str!`s it: it is evidence, the way `ganja-core`'s `codex-identity-probe.txt` is, and it is what the cursor tool bridge's decision gate reads (`.omc/plans/2026-09-04-cursor-tool-bridge.md`, W2/W3). |
 
 ## For AI Agents
 
 ### Working In This Directory
 
-- Two crates `include_str!` these: this crate's own unit tests in `src/provider/`, and `ganja-core`'s socket suites, which reach across for them. A rename is a compile error in both, not a silent skip — which is the intent.
+- Two crates `include_str!` the `.sse` files: this crate's own unit tests in `src/provider/`, and `ganja-core`'s socket suites, which reach across for them. A rename is a compile error in both, not a silent skip — which is the intent. `cursor-mcp-tools-probe.txt` is the exception and is read by nobody: a probe recording is evidence for a decision, so it is judged by a person and must never be edited to make a test pass.
+- **A probe recording is written from the log, never from memory or from a reply.** No token, no tool-argument value and no reply text may appear in one — the same rule `secrets_env.rs` pins for everything else this crate writes down. What it may carry is field names, enum arm names, field numbers, timings, sizes, and any error `code`/`message` verbatim; where there was no error, it says so rather than leaving the section blank.
 - Fixtures are *recorded shapes*, not invented ones. When adding a case, capture what the vendor actually sends (or reproduce it precisely from their documented format); a hand-waved fixture proves the decoder handles a stream nobody will ever send.
 - Every new frame shape a provider learns to handle needs a fixture here. The socket suites are where mapping regressions get caught; unit tests alone do not exercise the split-across-chunks path.
 
