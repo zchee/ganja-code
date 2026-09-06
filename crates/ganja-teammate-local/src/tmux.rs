@@ -715,6 +715,43 @@ impl Server {
         run("capture-pane", command).await
     }
 
+    /// [`Server::capture`] with the scrollback in front of the screen
+    /// (`-S - -E -`): everything the pane has shown since its history was
+    /// last cleared, joined the same way.
+    ///
+    /// The reader of a **dead** pane's last words asks this one, and the
+    /// reason is a tmux fact measured 2026-09-07 on next-3.8 while landing
+    /// **D554**: when a kept pane's process exits, tmux moves the cursor to
+    /// the last row and *linefeeds* before it writes `Pane is dead (…)`, and
+    /// that linefeed scrolls the pane's **top row into the history**. Before
+    /// D554 the top row was the shell's echo of the launch line, and losing
+    /// it cost nothing; with [`LAUNCH_HEAD`] wiping the pane before the
+    /// `exec`, the top row is the CLI's own first line — grok's `warning:`,
+    /// the cause its `error:` line points at (bead `ocz2`) — and a reader of
+    /// the visible screen alone would quote the pointer and drop the cause
+    /// again. The history holds that row, and this reads it back. Not folded
+    /// into [`Server::capture`]: the readiness poll asks what a person
+    /// looking at the pane would see, and this is a question about what the
+    /// pane said.
+    ///
+    /// # Errors
+    ///
+    /// As [`Server::capture`].
+    pub async fn capture_with_history(&self, pane_id: &str) -> Result<String, TmuxError> {
+        let mut command = self.command();
+        command
+            .arg("capture-pane")
+            .arg("-p")
+            .arg("-J")
+            .arg("-S")
+            .arg("-")
+            .arg("-E")
+            .arg("-")
+            .arg("-t")
+            .arg(pane_id);
+        run("capture-pane", command).await
+    }
+
     /// What `pane_id`'s foreground process is called — tmux's own
     /// `#{pane_current_command}`, the name of the process its tty has in the
     /// foreground, read fresh on every call.
@@ -1029,8 +1066,43 @@ impl Server {
     }
 }
 
-/// The line typed into a pane's idle shell: `exec` the binary with `argv`,
-/// every word quoted for the shell reading it.
+/// What a launch line opens with (**D554**): one `printf` of three CSI
+/// sequences, so the pane is wiped by the shell itself before the `exec`
+/// after it replaces that shell.
+///
+/// `ESC[2J` is `ED 2`, erase the whole screen; `ESC[3J` is `ED 3`, erase the
+/// scrollback too (tmux ≥ 2.4 clears the pane's history on it, measured
+/// 2026-09-07 on next-3.8: an overflowed `history_size` of 28 read 0 after
+/// it); `ESC[H` is `CUP`, the cursor home, so the CLI's first row is the
+/// pane's first row. What they take with them is everything the idle shell
+/// put on the screen between the split and the Enter — its rc files' output
+/// (a `direnv: loading …` row, `direnv: export …`), its prompt, and the
+/// **echo of this very line** — which is what an inline TUI would otherwise
+/// keep above its composer for the whole session, and what scrolling up in
+/// the pane would otherwise find. The scrollback goes because an inline
+/// TUI's scrollback *is* the pane's: nothing separates the shell's rows from
+/// the CLI's once both are above the viewport.
+///
+/// `printf` rather than `clear` because the line is read by the person's own
+/// shell (D520) inside an environment that is an enumeration (D502): `clear`
+/// is an external command that needs a `PATH` to be found on and a terminfo
+/// entry to look the sequences up in, where `printf` is a builtin of `sh`,
+/// `bash`, `zsh` and `fish` alike — the four shells [`shell_quote`] already
+/// serves — and decodes `\033` in every one of them (POSIX `printf` by
+/// specification; fish's by its own). One constant rather than a per-shell
+/// head, so a shell that proves unable to run it is one edit from the
+/// fallback: `clear; ` in its place, at the cost of that `PATH` and that
+/// terminfo.
+///
+/// The shell reading it still echoes the whole line first — that is the
+/// tty's doing, not the shell's — so the row is on screen exactly between
+/// the echo and the Enter, which is the one interval a readiness poll can
+/// still find it in ([`crate::shim_tui::composer_shown`]).
+pub const LAUNCH_HEAD: &str = "printf '\\033[2J\\033[3J\\033[H'; ";
+
+/// The line typed into a pane's idle shell: wipe the pane
+/// ([`LAUNCH_HEAD`]), then `exec` the binary with `argv`, every word quoted
+/// for the shell reading it.
 ///
 /// `exec`, so the shell is replaced rather than parented — the pane's process
 /// keeps the pid tmux forked, which is the `birth` half of its recorded
@@ -1039,11 +1111,37 @@ impl Server {
 /// to the shell. Here beside the quoting rule because both pane backends
 /// compose their line this way; only which `arguments` fills `argv` differs.
 ///
+/// The head comes first because the order is the point (**D554**): the wipe
+/// is run by the shell that will be replaced, so it lands after everything
+/// the shell printed and before anything the CLI does — no tmux-side reset
+/// can be ordered against a CLI's first frame that way, which is why the
+/// alternative (`send-keys -R` after Enter) was refused. The line without
+/// its head is [`exec_line`], which is what a reader looking for the row the
+/// shell echoed matches on.
+///
 /// # Errors
 ///
 /// [`TmuxError::Unquotable`] for a word no quoting can carry; both backends
 /// take that refusal before a pane exists.
 pub fn launch_line(binary: &Path, argv: &[OsString]) -> Result<OsString, TmuxError> {
+    let mut line = OsString::from(LAUNCH_HEAD);
+    line.push(exec_line(binary, argv)?);
+
+    Ok(line)
+}
+
+/// [`launch_line`] without its head: `exec <binary> <argv…>`, quoted the
+/// same way.
+///
+/// Split out so the shape a reader matches on — the readiness poll's needle
+/// is `exec <quoted binary>` ([`crate::shim_tui::launch_needle`]) — is
+/// composed by the very function the typed line is, rather than restated
+/// beside it where the two could drift.
+///
+/// # Errors
+///
+/// [`TmuxError::Unquotable`], as [`launch_line`].
+pub fn exec_line(binary: &Path, argv: &[OsString]) -> Result<OsString, TmuxError> {
     let mut line = OsString::from("exec ");
     line.push(shell_quote(binary.as_os_str())?);
     for argument in argv {

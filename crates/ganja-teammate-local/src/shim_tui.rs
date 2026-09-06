@@ -83,7 +83,15 @@
 //! a marker counts only on a row **below** the launch line's own, or, on a
 //! screen that row is gone from, only once `#{pane_current_command}` no
 //! longer answers what it did before the line was typed
-//! ([`composer_shown`](crate::shim_tui::composer_shown)); and the
+//! ([`composer_shown`](crate::shim_tui::composer_shown)). Since **D554** the
+//! launch row is on screen only between the shell's echo of it and the
+//! shell running the line's head — [`tmux::LAUNCH_HEAD`], which wipes the
+//! pane a moment after Enter, before the `exec` — so the
+//! screen a poll sees is the wiped one and the second door is the door,
+//! as it already was for a CLI that clears its own screen; a CLI that is a
+//! script under a same-named shell, which never changes that name, now
+//! waits the whole ceiling and is pasted unsubmitted (the recorded cost;
+//! no shipped CLI is that shape). The
 //! one way a launch line hands the pane back to a shell that would prompt
 //! again, a failed `exec`, is closed by the line's own `|| exit`
 //! ([`LAUNCH_TAIL`](crate::shim_tui::LAUNCH_TAIL)), which turns it
@@ -594,7 +602,11 @@ const CUT: &str = "…";
 /// `\n` in the order the pane showed them and clamped to `LAST_WORDS_BYTES`,
 /// leaving out what is not the program talking: tmux's own `remain-on-exit`
 /// notice under it, and a bare `exit` (`BASH_FAREWELL`). [`None`] when the
-/// pane showed nothing at all.
+/// pane showed nothing at all. Since **D554** the launch line's own echo is
+/// not among them either — the line's head wiped it before the `exec` that
+/// failed — so a refusal quotes the shell's report of the failure and
+/// nothing of the line that caused it; the line itself is on the launch log
+/// line at `debug`, which is where a person diagnosing the refusal reads it.
 ///
 /// A block rather than a line because a vendor's refusal routinely spans two
 /// — the cause and the sentence that points back at it — and the one this was
@@ -716,7 +728,9 @@ enum Ready {
 /// What the readiness poll holds a capture against, fixed before the launch
 /// line is typed — the two facts [`composer_shown`] asks its caller for.
 struct Watch {
-    /// `exec <binary>` as the shell echoes it: the launch line's own row.
+    /// `exec <binary>` as the shell echoes it: the launch line's own row —
+    /// on screen only until the line's head wipes it (**D554**), which is
+    /// why the second witness below is the one most polls are judged by.
     needle: String,
     /// What the pane's foreground was called while the shell was the only
     /// thing in it — the name that has to change before a marker on a screen
@@ -1083,7 +1097,11 @@ impl ShimTui {
                     None => {
                         // Dead and kept, or gone: the words first, while they
                         // are still there to read.
-                        let words = match server.capture(&pane.id).await {
+                        // With the history: tmux's own dead-pane notice
+                        // scrolls the top row off the screen, and since D554
+                        // that row is the CLI's first line rather than the
+                        // launch line's echo (`capture_with_history`).
+                        let words = match server.capture_with_history(&pane.id).await {
                             Ok(shown) => last_words(&shown),
                             Err(_) => None,
                         };
@@ -1135,7 +1153,7 @@ impl ShimTui {
                             return Ready::Seen;
                         }
                         Ok(_) => {
-                            let words = match server.capture(&pane.id).await {
+                            let words = match server.capture_with_history(&pane.id).await {
                                 Ok(fresh) => last_words(&fresh),
                                 Err(_) => last_words(&shown),
                             };
@@ -1257,6 +1275,16 @@ impl TeammateBackend for ShimTui {
             shell = watch.shell.as_str(),
             cli,
             "a TUI pane was launched"
+        );
+        // The line itself, at `debug`: its head wipes the screen it was
+        // echoed on (D554), so the log is where a launch stays diagnosable.
+        // No secret rides it — the flags are the driver's pinned floors and
+        // the binary a path; credentials travel in the environment (D502).
+        tracing::debug!(
+            teammate = spec.name.as_str(),
+            pane = pane.id,
+            line = %line.to_string_lossy(),
+            "the launch line typed into the TUI pane"
         );
 
         let readiness = match self.wait_ready(&server, &pane, &watch).await {
@@ -1641,7 +1669,7 @@ impl TuiRunner {
         let cli = backend_name(self.handle.backend);
         let pane = self.handle.pane().id.clone();
         let words = match how {
-            Gone::Dead => match self.handle.server().capture(&pane).await {
+            Gone::Dead => match self.handle.server().capture_with_history(&pane).await {
                 Ok(captured) => last_words(&captured),
                 Err(_) => None,
             },
@@ -2134,10 +2162,12 @@ impl TuiRunner {
 /// (`Ready::Died`). Spelled the same in `sh`, `bash`, `zsh` and `fish`.
 pub const LAUNCH_TAIL: &str = " || exit";
 
-/// The line typed into the pane's idle shell: `exec` the binary with the
-/// driver's TUI words, each shell-quoted — [`tmux::launch_line`] over
-/// [`TuiDriver::tui_argv`], spelled once so the spawn and the tests that pin
-/// the quoting read the same composition — closing on [`LAUNCH_TAIL`].
+/// The line typed into the pane's idle shell: wipe the pane, then `exec` the
+/// binary with the driver's TUI words, each shell-quoted —
+/// [`tmux::launch_line`] over [`TuiDriver::tui_argv`], spelled once so the
+/// spawn and the tests that pin the quoting read the same composition —
+/// opening on [`tmux::LAUNCH_HEAD`] (**D554**) and closing on
+/// [`LAUNCH_TAIL`].
 ///
 /// # Errors
 ///
@@ -2149,10 +2179,17 @@ pub fn launch_line(binary: &OsStr, driver: &dyn TuiDriver) -> Result<OsString, T
     Ok(line)
 }
 
-/// The launch line's own opening — `exec <binary>`, quoted as the line is —
-/// which is how the readiness poll finds the row the line was typed on: the
-/// shell echoes it there, and a prompt's glyph sits on that row or above it
-/// while the composer's is drawn below ([`composer_shown`]).
+/// The launch line's opening **after its head** — `exec <binary>`, quoted as
+/// the line is — which is how the readiness poll finds the row the line was
+/// typed on: the shell echoes it there, and a prompt's glyph sits on that row
+/// or above it while the composer's is drawn below ([`composer_shown`]).
+///
+/// After the head rather than from the line's first byte, because the head
+/// is what a matched row would never be *followed* by: [`tmux::LAUNCH_HEAD`]
+/// wipes the screen the echo is on the moment the shell runs it (**D554**),
+/// so the row this names is on screen only between the echo and that wipe.
+/// Composed by [`tmux::exec_line`], the same function the typed line's own
+/// tail is, so the two cannot spell the `exec` differently.
 ///
 /// The opening rather than the whole line, so a pane narrower than the line
 /// still shows it on one row (`capture-pane -J` joins what tmux wrapped;
@@ -2163,7 +2200,7 @@ pub fn launch_line(binary: &OsStr, driver: &dyn TuiDriver) -> Result<OsString, T
 /// [`TmuxError::Unquotable`], as [`launch_line`] — never in practice, since
 /// the line itself is composed first.
 pub fn launch_needle(binary: &OsStr) -> Result<String, TmuxError> {
-    tmux::launch_line(std::path::Path::new(binary), &[])
+    tmux::exec_line(std::path::Path::new(binary), &[])
         .map(|opening| opening.to_string_lossy().into_owned())
 }
 
@@ -2183,16 +2220,30 @@ pub fn launch_needle(binary: &OsStr) -> Result<String, TmuxError> {
 ///   `needle` (`exec <binary>`, [`launch_needle`]), only the rows **under**
 ///   it count.
 /// - **Whether the shell is still there.** A screen with no launch row on
-///   it is one the CLI cleared or scrolled — nothing of the shell's remains,
-///   and the marker may be anywhere — *or* one the shell has not echoed the
-///   line onto yet, where the prompt still stands alone. `launched` — the
-///   pane's foreground name no longer the one it gave before the line was
-///   typed ([`Server::current_command`]) — is what separates them, and
-///   without it nothing on such a screen counts.
+///   it is one the line's own head wiped ([`tmux::LAUNCH_HEAD`], **D554**)
+///   or the CLI cleared or scrolled — nothing of the shell's remains, and
+///   the marker may be anywhere — *or* one the shell has not echoed the line
+///   onto yet, where the prompt still stands alone. `launched` — the pane's
+///   foreground name no longer the one it gave before the line was typed
+///   ([`Server::current_command`]) — is what separates them, and without it
+///   nothing on such a screen counts.
 ///
-/// A CLI that is a shell script under a same-named pane shell never reads as
-/// `launched`, and loses only the second door: it draws under the launch row
-/// like any inline TUI, and the first door is the one it takes.
+/// Since **D554** the launch row is on screen only between the shell's echo
+/// of the line and the shell running its head, a moment after Enter — the
+/// head wipes the very screen the echo is on. So the first door stands open
+/// for that moment alone, and on every screen a poll sees after it the
+/// second door is the door: the situation a CLI that clears its own screen
+/// (grok) already put every poll in, now the ordinary one for all three. The
+/// doors themselves are unchanged — the function reads the screen it is
+/// handed, and a screen that still shows the row is still judged by it.
+///
+/// The cost, stated: a CLI that is a shell script under a same-named pane
+/// shell never reads as `launched`, and before D554 lost only the second
+/// door — it drew under the launch row like any inline TUI, and the first
+/// door was the one it took. With the row wiped it has neither, waits the
+/// whole [`READY_WAIT`], and is pasted unsubmitted with [`RING_NOT_READY`]
+/// on the ring — a proceed, never a failure, and a shape none of the three
+/// shipped CLIs has (each is a binary; an `npm` shim reads as `node`).
 #[must_use]
 pub fn composer_shown(shown: &str, needle: &str, marker: &str, launched: bool) -> bool {
     let rows: Vec<&str> = shown.lines().collect();

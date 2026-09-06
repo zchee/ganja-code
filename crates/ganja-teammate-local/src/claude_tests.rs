@@ -14,7 +14,7 @@ use super::{
 // the reason the hoist changed no behaviour.
 use crate::pane::CARRIED_ENV;
 use crate::shim::resolve;
-use crate::tmux::{REFUSED_NO_TMUX, TmuxError};
+use crate::tmux::{LAUNCH_HEAD, REFUSED_NO_TMUX, TmuxError};
 
 /// A spawn with every field a launch could be tempted to put on the line,
 /// and a prompt wearing a canary.
@@ -70,19 +70,20 @@ fn the_launch_line_is_the_spawn_flags_and_plan_mode_when_it_was_asked_for() {
     assert!(!line.contains("--permission-mode"), "no permission mode is composed (D513): {line}");
 }
 
-/// The composed line, as tmux is handed it: `exec`, the binary — bare,
-/// because no byte of that path needs quoting — and never the prompt.
-/// (The one-word login-shell hazard is a property of the *idle* argv,
-/// pinned at `pane::SHELL`; this line is typed with `send-keys -l`,
-/// which no shell re-reads.)
+/// The composed line, as tmux is handed it: the wipe that every pane's line
+/// opens on (**D554**), then `exec`, the binary — bare, because no byte of
+/// that path needs quoting — and never the prompt. (The one-word
+/// login-shell hazard is a property of the *idle* argv, pinned at
+/// `pane::SHELL`; this line is typed with `send-keys -l`, which no shell
+/// re-reads.)
 #[test]
-fn the_composed_line_execs_the_binary_and_the_prompt_stays_off_it() {
+fn the_composed_line_wipes_then_execs_the_binary_and_the_prompt_stays_off_it() {
     let line =
         crate::tmux::launch_line(&PathBuf::from("/usr/local/bin/claude"), &arguments(&spec()))
             .expect("no NUL rides the spawn flags")
             .into_string()
             .expect("ascii");
-    assert!(line.starts_with("exec /usr/local/bin/claude "), "{line}");
+    assert!(line.starts_with(&format!("{LAUNCH_HEAD}exec /usr/local/bin/claude ")), "{line}");
     // The canary again, on the *composed* line rather than on `arguments`
     // alone: the line is what tmux is handed and what `ps`
     // would print, so it is the value the §4.1-step-5 rule is really about.

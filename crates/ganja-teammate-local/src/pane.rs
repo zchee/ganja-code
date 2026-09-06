@@ -23,7 +23,11 @@
 //! cosmetic title; and **the launch line typed into that shell only once the
 //! member record is on disk** — the record is the first thing the pane's own
 //! process reads (its posture, its model), so a launch that ran before it
-//! would be a race the pane had to wait out. `exec` on the line keeps the
+//! would be a race the pane had to wait out. The line wipes the pane first
+//! ([`crate::tmux::LAUNCH_HEAD`], **D554**): everything the idle shell put on
+//! the screen — its rc files' output, its prompt, the echo of the line
+//! itself — and the scrollback behind it are gone before `ganja` draws, so
+//! the pane shows nothing of the shell's. `exec` on the line keeps the
 //! shell's pid, so the pair recorded at the split is still the pane's when
 //! `ganja` is what runs in it.
 //!
@@ -490,11 +494,24 @@ impl GanjaPane {
     /// `ganja-code-ipg`).
     async fn type_launch_line(spec: &SpawnSpec, pane: &Pane, line: &OsStr, server: &Server) {
         match server.type_line(&pane.id, line).await {
-            Ok(()) => tracing::info!(
-                teammate = spec.name.as_str(),
-                pane = pane.id,
-                "a teammate's pane was launched"
-            ),
+            Ok(()) => {
+                tracing::info!(
+                    teammate = spec.name.as_str(),
+                    pane = pane.id,
+                    "a teammate's pane was launched"
+                );
+                // The line itself, at `debug`: its head wipes the screen it
+                // was echoed on (D554), so the log is where a launch stays
+                // diagnosable. No secret rides it — the flags are this
+                // module's own constants and the binary is `current_exe()`;
+                // credentials travel in the environment, never argv (D502).
+                tracing::debug!(
+                    teammate = spec.name.as_str(),
+                    pane = pane.id,
+                    line = %line.to_string_lossy(),
+                    "the launch line typed into the teammate's pane"
+                );
+            }
             Err(error) => {
                 tracing::warn!(
                     teammate = spec.name.as_str(),

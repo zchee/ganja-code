@@ -696,6 +696,25 @@ impl Tmux {
         self.server.run(&["capture-pane", "-p", "-t", pane])
     }
 
+    /// Whether `pane`'s program is on the alternate screen — a full-screen
+    /// TUI's, which `ganja` enters as it starts.
+    pub fn on_alternate_screen(&self, pane: &str) -> bool {
+        self.server.run(&["display-message", "-p", "-t", pane, "#{alternate_on}"]).trim() == "1"
+    }
+
+    /// The screen **under** a full-screen program, and its history: the
+    /// primary grid a program on the alternate screen saved when it switched
+    /// (`capture-pane -a`), with `-S - -E -` asking for everything scrolled
+    /// above it too. What a person finds by scrolling up in the pane or when
+    /// the program leaves, and where a shell's residue from before the
+    /// program would be — measured 2026-09-07 on tmux next-3.8: without the
+    /// launch line's wipe the banner and the echoed `exec` are read back
+    /// exactly here. Refused by tmux while the pane has no alternate screen,
+    /// so ask [`Tmux::on_alternate_screen`] first.
+    pub fn primary_screen_and_history(&self, pane: &str) -> String {
+        self.server.run(&["capture-pane", "-p", "-J", "-a", "-S", "-", "-E", "-", "-t", pane])
+    }
+
     /// Types `text` into `pane` literally and submits it, in one `send-keys` —
     /// see [`submitted`].
     pub fn type_line(&self, pane: &str, text: &str) {

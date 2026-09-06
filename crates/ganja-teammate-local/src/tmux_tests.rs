@@ -5,9 +5,9 @@ use std::time::Duration;
 use ganja_testkit::tmux::PrivateServer;
 
 use super::{
-    Closed, Killed, LIVENESS_FORMAT, Launch, Listed, PANE_FORMAT, Placement, REFUSED_NO_TMUX,
-    Server, TmuxError, after_kill, buffer_name, environment, parse_listing, parse_pane,
-    shell_quote, socket_of,
+    Closed, Killed, LAUNCH_HEAD, LIVENESS_FORMAT, Launch, Listed, PANE_FORMAT, Placement,
+    REFUSED_NO_TMUX, Server, TmuxError, after_kill, buffer_name, environment, parse_listing,
+    parse_pane, shell_quote, socket_of,
 };
 use crate::reaper::Pane;
 
@@ -84,9 +84,6 @@ fn a_shell_word_survives_quoting() {
     }
 }
 
-/// The composed line quotes only the words that need it, and a word no
-/// quoting can carry refuses the whole line before tmux is handed
-/// anything.
 /// Exactly one pane of the window is where typing goes, and it is the one
 /// tmux itself calls active — a fresh split's answer is read off tmux
 /// rather than assumed, since whether a split takes the focus is tmux's
@@ -104,16 +101,32 @@ async fn focused_answers_for_the_active_pane_of_the_current_window_and_no_other(
     assert_eq!(second, active.trim() == "1");
 }
 
+/// The composed line opens on the wipe, then quotes only the words that
+/// need it; the head is exactly the three sequences (**D554**), ends on the
+/// `; ` that makes the `exec` a second command, and is absent from the
+/// head-less composition a reader matches on; and a word no quoting can
+/// carry refuses the whole line before tmux is handed anything.
 #[test]
-fn a_launch_line_quotes_what_needs_it_and_refuses_a_nul() {
-    let line = super::launch_line(
-        std::path::Path::new("/opt/ganja builds/ganja"),
-        &[OsString::from("--agent-name"), OsString::from("it's")],
-    )
-    .expect("no NUL rides these words")
-    .into_string()
-    .expect("ascii");
-    assert_eq!(line, "exec '/opt/ganja builds/ganja' --agent-name \"it's\"");
+fn a_launch_line_wipes_then_quotes_what_needs_it_and_refuses_a_nul() {
+    let binary = std::path::Path::new("/opt/ganja builds/ganja");
+    let argv = [OsString::from("--agent-name"), OsString::from("it's")];
+    let line = super::launch_line(binary, &argv)
+        .expect("no NUL rides these words")
+        .into_string()
+        .expect("ascii");
+    assert_eq!(line, format!("{LAUNCH_HEAD}exec '/opt/ganja builds/ganja' --agent-name \"it's\""));
+
+    // `ED 2`, `ED 3`, `CUP`, as the bytes a shell's `printf` decodes them
+    // from — and nothing else, so a fallback is one edit of one constant.
+    assert_eq!(LAUNCH_HEAD, "printf '\\033[2J\\033[3J\\033[H'; ");
+    assert!(LAUNCH_HEAD.ends_with("; "), "the head is a command of its own before the exec");
+
+    let exec = super::exec_line(binary, &argv)
+        .expect("no NUL rides these words")
+        .into_string()
+        .expect("ascii");
+    assert_eq!(exec, "exec '/opt/ganja builds/ganja' --agent-name \"it's\"");
+    assert_eq!(line, format!("{LAUNCH_HEAD}{exec}"), "the line is the head, then the exec");
 
     #[cfg(unix)]
     {
@@ -316,6 +329,92 @@ async fn a_capture_reads_what_the_pane_shows_with_wrapped_lines_rejoined() {
     .await;
 }
 
+/// What `pane_id` shows **and** everything scrolled above it: the visible
+/// rows and the whole history, joined the way [`Server::capture`] joins —
+/// the reader a person scrolling up in the pane is.
+fn screen_and_history(server: &PrivateServer, pane_id: &str) -> String {
+    server.run(&["capture-pane", "-p", "-J", "-S", "-", "-E", "-", "-t", pane_id])
+}
+
+/// **D554.** The launch line wipes the pane before it execs: what the idle
+/// shell put on the screen before the line — a rc file's banner, its
+/// prompt, the echo of the line itself — and the scrollback behind it are
+/// gone by the time the CLI's first row shows, under the default `sh` and
+/// under `bash` alike, each run with no startup files so the pane shell is
+/// exactly what the test typed into.
+///
+/// The banner is made to **overflow** the pane so part of it is in the
+/// history before the line is typed — a banner that never scrolled would
+/// prove the screen wiped and say nothing about the scrollback, which is
+/// the sequence `ED 3` is in the head for (an inline TUI's scrollback is the
+/// pane's). The stand-in for the CLI is a `sh -c` that prints its first row
+/// and sleeps, which is enough: the wipe is the shell's own act, ordered
+/// before the `exec`, and the CLI never sees the screen it inherits.
+#[tokio::test]
+async fn a_launch_line_leaves_nothing_of_the_shells_on_the_screen_or_in_the_history() {
+    let shells: [&[&str]; 2] = [&["/bin/sh", "-s"], &["/bin/bash", "--norc", "--noprofile", "-s"]];
+    for (index, shell) in shells.into_iter().enumerate() {
+        let banner = format!("BANNER-{}-{index}", std::process::id());
+        let cwd = ganja_testkit::temp_dir();
+        // A short window, so thirty banner rows overflow the pane.
+        let server = PrivateServer::start_in(cwd.path(), (80, 12), &["sleep", "3600"], &[], &[]);
+        let at = Server::at(server.socket(), Some(server.first_pane().to_owned()));
+        let pane = split(&at, cwd.path(), shell).await;
+
+        // What a rc file would have printed, standing in for `direnv`'s rows.
+        let rows = format!("i=0; while [ $i -lt 30 ]; do i=$((i+1)); echo {banner}-$i; done");
+        at.type_line(&pane.id, OsStr::new(&rows)).await.expect("the shell hears its banner");
+        eventually("the banner to overflow into the history", async || {
+            let size = server.run(&["display-message", "-p", "-t", &pane.id, "#{history_size}"]);
+            let all = screen_and_history(&server, &pane.id);
+            if all.contains(&banner) && size.trim() != "0" {
+                Ok(())
+            } else {
+                Err(format!("history_size={} shown={all:?}", size.trim()))
+            }
+        })
+        .await;
+
+        let line = super::launch_line(
+            Path::new("/bin/sh"),
+            &[OsString::from("-c"), OsString::from("printf 'MARK\\n'; exec sleep 3600")],
+        )
+        .expect("no NUL rides these words");
+        at.type_line(&pane.id, &line).await.expect("the shell hears its launch line");
+        eventually("the CLI's first row to show", async || {
+            let shown = at.capture(&pane.id).await.map_err(|error| error.to_string())?;
+            if shown.lines().any(|row| row == "MARK") { Ok(()) } else { Err(format!("{shown:?}")) }
+        })
+        .await;
+
+        let shown = at.capture(&pane.id).await.expect("the pane captures");
+        let all = screen_and_history(&server, &pane.id);
+        for (what, text) in [("screen", &shown), ("screen and history", &all)] {
+            assert!(
+                !text.contains(&banner),
+                "{shell:?}: the {what} still holds the banner: {text:?}"
+            );
+            assert!(
+                !text.contains("exec /bin/sh"),
+                "{shell:?}: the {what} still holds the exec: {text:?}"
+            );
+            assert!(
+                !text.contains(LAUNCH_HEAD.trim_end()),
+                "{shell:?}: the {what} still holds the head's echo: {text:?}"
+            );
+            assert!(
+                text.lines().any(|row| row == "MARK"),
+                "{shell:?}: the {what} lost the CLI's row"
+            );
+        }
+        assert_eq!(
+            server.run(&["display-message", "-p", "-t", &pane.id, "#{history_size}"]).trim(),
+            "0",
+            "{shell:?}: the scrollback was emptied, not merely scrolled"
+        );
+    }
+}
+
 /// Multi-line text reaches the pane's program whole — its newlines, its
 /// quotes and its non-ASCII as given — followed by the one Enter that
 /// submits it; an empty text delivers nothing, not even that Enter; and
@@ -506,6 +605,23 @@ async fn a_pane_kept_on_exit_stays_readable_after_its_process_dies() {
     assert!(
         shown.lines().any(|line| line == "last words: refused by the vendor"),
         "its last words are readable: {shown:?}"
+    );
+    // The tmux fact `capture_with_history` exists for (D554): the dead-pane
+    // notice's own linefeed scrolled the pane's top row — here the tty's
+    // echo of the typed line — into the history, off the visible screen and
+    // out of a plain capture, and the history read still has it.
+    assert!(
+        !shown.lines().any(|line| line == "refused by the vendor"),
+        "the top row was scrolled off by the dead notice: {shown:?}"
+    );
+    let whole = at.capture_with_history(&pane.id).await.expect("the history reads too");
+    assert!(
+        whole.lines().any(|line| line == "refused by the vendor"),
+        "and the history still holds it: {whole:?}"
+    );
+    assert!(
+        whole.lines().any(|line| line == "last words: refused by the vendor"),
+        "beside the words themselves: {whole:?}"
     );
 
     let live = at.panes().await.expect("a dead pane does not make the listing unreadable");

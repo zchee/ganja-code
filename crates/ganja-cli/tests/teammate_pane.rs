@@ -168,6 +168,12 @@ impl Drop for Held {
 /// launch line arrives. With bash named in the lead's own config, the typed
 /// line is still read and exec'd — the pane's process becomes this binary
 /// exactly as it does under the default `/bin/sh -s`.
+///
+/// **D554**, on the same pane: the line wiped the pane before it exec'd, so
+/// the screen under the member's TUI — the primary grid `ganja` saved when
+/// it took the alternate screen, and its history — holds nothing of the
+/// shell's: no echoed `exec`, no `bash-` prompt. That grid is the shell's
+/// residue, and there must be none.
 #[test]
 fn a_configured_pane_shell_still_execs_the_launch_line() {
     let (homes, script) = project();
@@ -193,6 +199,20 @@ fn a_configured_pane_shell_still_execs_the_launch_line() {
     tmux.wait_for("the launch line to reach the pane through bash", &pane, || {
         (tmux.current_command(&pane) == "ganja").then_some(())
     });
+
+    // The member's TUI takes the alternate screen a moment after it starts;
+    // only then does the primary grid — where the shell's rows would be —
+    // exist as something tmux will read back.
+    tmux.wait_for("the member's TUI to take the alternate screen", &pane, || {
+        tmux.on_alternate_screen(&pane).then_some(())
+    });
+    let residue = tmux.primary_screen_and_history(&pane);
+    for forbidden in ["exec ", "bash-"] {
+        assert!(
+            !residue.contains(forbidden),
+            "the screen under the member's TUI still holds the shell's {forbidden:?}: {residue:?}"
+        );
+    }
 }
 
 /// **AC-11.** `/teammate spawn w1 --backend ganja` in a real lead makes a real pane

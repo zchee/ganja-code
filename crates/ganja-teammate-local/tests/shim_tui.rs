@@ -308,6 +308,52 @@ fn ring(registry: &TeammateRegistry, name: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Plays the person that **D554**'s recorded cost leaves a paste waiting
+/// for: waits for `w1`'s ring to say the text was pasted **unsubmitted** —
+/// the composer marker never seen inside `READY_WAIT` — and presses the
+/// Enter the runner deliberately did not.
+///
+/// The stubs this serves are the shape the plan's pre-mortem 3 names and
+/// none of the three shipped CLIs has: a `#!/bin/sh` script under a
+/// `/bin/sh` pane that reads its input through a **child** (`quits` through
+/// `head`, `hup-immune` through a `cat` its `trap` has to outlive) rather
+/// than an `exec`, so the pane's foreground name — tmux reads the process
+/// group leader's, measured — is the shell's for the stub's whole life.
+/// Before D554 their marker counted under the launch line's row; since the
+/// line's head wipes that row a moment after Enter, and the name never
+/// changes, neither door opens, the poll waits the whole ceiling, and the
+/// text is pasted for a person to submit — which is what this does. The
+/// three tests that call it are where that cost is proved live rather than
+/// described; the modes that `exec cat` never need it.
+///
+/// No renaming opens a door for them, so do not reach for one to save the
+/// wait: macOS's `/bin/sh` reports as `bash`, so a `#!/bin/bash` shebang
+/// reads as the same name it started with, and a symlink-named copy of the
+/// idle shell reads as its target's (`bash`) too — both measured 2026-09-07.
+/// Only an `exec` of a non-shell changes the name, and these two stubs
+/// cannot `exec` without losing what they are for (`quits` its parting line
+/// after `head`, `hup-immune` the `trap` that writes the F3 witness).
+async fn submit_as_the_person(server: &PrivateServer, registry: &TeammateRegistry, pane_id: &str) {
+    assert!(
+        until(LANDS, || {
+            ring(registry, "w1").iter().any(|line| line.starts_with(RING_PASTED_UNSUBMITTED))
+        })
+        .await,
+        "the ring says the text is pasted and waiting for a person: {:?}",
+        ring(registry, "w1")
+    );
+    let lines = ring(registry, "w1");
+    assert!(
+        lines.iter().any(|line| line == RING_NOT_READY),
+        "a stub that keeps the shell's name never reads as ready (D554's recorded cost): {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line == RING_READY),
+        "and the ring does not claim it did: {lines:?}"
+    );
+    server.run(&["send-keys", "-t", pane_id, "Enter"]);
+}
+
 /// **AC-1, AC-2, AC-3.** A codex spawn opens a pane in the private server
 /// running the stub with both `-c` floors on its argv, records the **real**
 /// pane id beside codex's own `backendType`, and the spawn prompt reaches the
@@ -660,8 +706,11 @@ async fn a_tui_that_exits_after_readiness_is_retired_and_its_pane_closed_unasked
         .expect("w1 joined the team")
         .tmux_pane_id;
 
-    // The prompt lands; the stub reads it and quits. `remain-on-exit` keeps
-    // the corpse on screen, which is what the loop's liveness poll sees.
+    // The prompt lands — submitted by the person the `quits` stub's shape
+    // leaves it waiting for (`submit_as_the_person`); the stub reads it and
+    // quits. `remain-on-exit` keeps the corpse on screen, which is what the
+    // loop's liveness poll sees.
+    submit_as_the_person(&server, &registry, &pane_id).await;
     assert!(
         until(LANDS, || received(&stub) == framed("team-lead", &seeded(&team))).await,
         "the prompt reached the composer before it quit; got {:?}",
@@ -795,8 +844,10 @@ async fn a_scripted_pane_exit_reaches_take_exited_carrying_every_field() {
         .expect("w1 joined the team")
         .tmux_pane_id;
 
-    // The prompt lands; the stub reads it and quits, so the member's own loop
-    // notices the exit on its own cadence.
+    // The prompt lands — submitted by the person the `quits` stub's shape
+    // leaves it waiting for (`submit_as_the_person`); the stub reads it and
+    // quits, so the member's own loop notices the exit on its own cadence.
+    submit_as_the_person(&server, &registry, &pane_id).await;
     assert!(
         until(LANDS, || received(&stub) == framed("team-lead", &seeded(&team))).await,
         "the prompt reached the composer before it quit; got {:?}",
@@ -942,8 +993,10 @@ async fn shutdown_ends_a_tui_that_ignores_sighup_by_terming_its_group_while_the_
     let pane_id = member.tmux_pane_id.clone();
     let pane = live_pane(&server, &pane_id).expect("the pane is live");
     let pid: i32 = pane.birth.parse().expect("a pid");
-    // The prompt landed, so the stub is past its setup and its traps are
-    // armed before anything is signalled.
+    // The prompt landed — submitted by the person the `hup-immune` stub's
+    // shape leaves it waiting for (`submit_as_the_person`) — so the stub is
+    // past its setup and its traps are armed before anything is signalled.
+    submit_as_the_person(&server, &registry, &pane_id).await;
     assert!(
         until(LANDS, || received(&stub) == framed("team-lead", &seeded(&team))).await,
         "the prompt reached the composer first"
@@ -1100,6 +1153,15 @@ async fn ending_a_tui_pane_is_identity_checked_against_the_recorded_pair() {
 /// stub's — proven by the clock, and by the bytes: the stub turns bracketed
 /// paste on only with its marker, so a paste that came on the prompt's would
 /// have reached it unframed.
+///
+/// Since **D554** the prompt's marker is on screen only between the echo of
+/// the launch line and the wipe its head runs a moment after Enter, and the
+/// stub's own marker counts through the poll's second door — its `exec cat`
+/// changes the pane's foreground name — so the two witnesses keep the same
+/// verdict on a screen that now holds nothing of the shell's. That door is
+/// this stub's alone: the `quits` and `hup-immune` stubs never `exec`, keep
+/// the shell's name, and open neither door — [`submit_as_the_person`] says
+/// why, and why no renaming would change it.
 #[tokio::test]
 async fn a_prompt_that_draws_the_composers_marker_is_the_shells_and_never_the_composer() {
     let home = ganja_testkit::temp_dir();
@@ -1122,14 +1184,23 @@ async fn a_prompt_that_draws_the_composers_marker_is_the_shells_and_never_the_co
         started.elapsed()
     );
 
-    // The premise, read off the screen rather than assumed: the shell drew
-    // the marker on the launch line's own row, and it is still there.
+    // The premise, read off the screen rather than assumed — and since D554
+    // a premise about the wipe: the shell drew its marker-prompt on the
+    // launch line's own row, and that row was on screen only between the
+    // echo and the Enter, the line's head having wiped it along with the
+    // prompt a moment later. What the pane shows now is what the stub drew
+    // on the wiped screen — its own marker, on a row carrying no `exec ` —
+    // with no row of the shell's left for a poll to mistake.
     let file = ganja_testkit::team_file(&root, &team).expect("the team file is written");
     let pane_id = file.member("w1").expect("w1 joined the team").tmux_pane_id.clone();
     let screen = server.run(&["capture-pane", "-p", "-J", "-t", &pane_id]);
     assert!(
-        screen.lines().any(|row| row.contains(READY_MARKER) && row.contains("exec ")),
-        "the pane's shell drew the marker on the launch row: {screen:?}"
+        !screen.lines().any(|row| row.contains("exec ")),
+        "the launch row, and the prompt with it, was wiped: {screen:?}"
+    );
+    assert!(
+        screen.lines().any(|row| row.contains(READY_MARKER)),
+        "the stub's own marker is what the wiped screen shows: {screen:?}"
     );
 
     // The prompt reached the composer framed and submitted — after the stub's

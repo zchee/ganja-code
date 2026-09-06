@@ -16,6 +16,7 @@ use crate::grok::{self, Grok};
 use crate::pane::CARRIED_ENV;
 use crate::readback;
 use crate::shim::{self, Driver as _};
+use crate::tmux::LAUNCH_HEAD;
 
 /// **D515.** The cursor a poll advances is the cursor the next poll
 /// starts from: what was carried once is never carried again, and what a
@@ -117,8 +118,9 @@ fn the_tui_driver_delegates_to_each_drivers_own_inherent_items() {
 
 /// Ruling 6, pinned: shlex single-quotes codex's `-c` values, the pane
 /// shell strips the quotes, and codex reads the TOML bytes exactly — so
-/// the composed line splits back into the very words the argv table
-/// holds, quotes inside the values included.
+/// the composed line, between the head that wipes the pane (**D554**) and
+/// the tail that ends a shell whose exec came back, splits back into the
+/// very words the argv table holds, quotes inside the values included.
 #[test]
 fn the_codex_launch_line_round_trips_its_toml_values_through_the_shell() {
     let line = launch_line(OsStr::new("codex"), &Codex::new())
@@ -127,10 +129,17 @@ fn the_codex_launch_line_round_trips_its_toml_values_through_the_shell() {
         .expect("ascii");
     assert_eq!(
         line,
-        "exec codex -c 'sandbox_mode=\"read-only\"' -c 'approval_policy=\"never\"' || exit"
+        format!(
+            "{LAUNCH_HEAD}exec codex -c 'sandbox_mode=\"read-only\"' -c \
+             'approval_policy=\"never\"'{LAUNCH_TAIL}"
+        )
     );
 
-    let exec = line.strip_suffix(LAUNCH_TAIL).expect("the line closes on the tail");
+    let exec = line
+        .strip_prefix(LAUNCH_HEAD)
+        .expect("the line opens on the head")
+        .strip_suffix(LAUNCH_TAIL)
+        .expect("the line closes on the tail");
     let words = shlex::split(exec).expect("the line is a shell line");
     let mut expected = vec!["exec".to_owned(), "codex".to_owned()];
     expected
@@ -138,17 +147,17 @@ fn the_codex_launch_line_round_trips_its_toml_values_through_the_shell() {
     assert_eq!(words, expected);
 }
 
-/// Every driver's line opens with `exec` and the binary, closes on the
-/// tail that ends a shell whose exec came back, and carries only that
-/// driver's own words between — no prompt, no identity flag.
+/// Every driver's line opens with the wipe and then `exec` and the binary,
+/// closes on the tail that ends a shell whose exec came back, and carries
+/// only that driver's own words between — no prompt, no identity flag.
 #[test]
-fn every_drivers_launch_line_is_exec_the_binary_and_its_floors() {
+fn every_drivers_launch_line_is_the_wipe_then_exec_the_binary_and_its_floors() {
     let drivers: [(&dyn TuiDriver, &str); 3] =
         [(&Codex::new(), codex::BINARY), (&Grok::new(), grok::BINARY), (&Agy::new(), agy::BINARY)];
     for (driver, binary) in drivers {
         let line =
             launch_line(OsStr::new(binary), driver).expect("no NUL").into_string().expect("ascii");
-        assert!(line.starts_with(&format!("exec {binary} ")), "{line}");
+        assert!(line.starts_with(&format!("{LAUNCH_HEAD}exec {binary} ")), "{line}");
         assert!(line.ends_with(LAUNCH_TAIL), "{line}");
         for forbidden in ["--agent-id", "--parent-session-id", "--prompt", "exec resume"] {
             assert!(!line.contains(forbidden), "{line} carries {forbidden}");
@@ -201,18 +210,41 @@ fn a_screen_without_the_launch_row_counts_a_marker_only_once_the_shell_is_gone()
     assert!(!composer_shown("  starting\n", needle, "❯", true));
 }
 
-/// The needle is the line's own opening, so the row the shell echoes it
-/// on is the row it finds — quoting included, since the shell echoes
-/// what was typed and not what it made of it.
+/// **D554.** The screen the launch line's head leaves — blank, the echo
+/// gone with the prompt — is no composer while the shell is still the
+/// foreground, and the CLI's first frame on that same screen is one once
+/// the name has changed: the wipe moves every poll to the second door and
+/// widens neither.
 #[test]
-fn the_needle_is_the_launch_lines_own_opening() {
+fn a_wiped_screen_is_no_composer_until_the_cli_has_drawn_and_the_shell_is_gone() {
+    let needle = "exec /opt/homebrew/bin/grok";
+    for wiped in ["", "\n", "\n\n\n"] {
+        assert!(!composer_shown(wiped, needle, "❯", false), "{wiped:?} with the shell still there");
+        assert!(!composer_shown(wiped, needle, "❯", true), "{wiped:?} has no marker to count");
+    }
+    // The CLI drew on the wiped screen: its marker counts once, and only
+    // once, the foreground stopped being the shell.
+    let drawn = "  main sandbox:read-only ~/rust\n\n❯ \n";
+    assert!(!composer_shown(drawn, needle, "❯", false));
+    assert!(composer_shown(drawn, needle, "❯", true));
+}
+
+/// The needle is the line's opening after its head, so the row the shell
+/// echoes it on is the row it finds — quoting included, since the shell
+/// echoes what was typed and not what it made of it — and the head's own
+/// `printf` is no part of it, since a matched row is one the head has not
+/// yet wiped.
+#[test]
+fn the_needle_is_the_launch_lines_own_opening_after_the_head() {
     let line = launch_line(OsStr::new("/opt/my tools/codex"), &Codex::new())
         .expect("no NUL")
         .into_string()
         .expect("ascii");
     let needle = launch_needle(OsStr::new("/opt/my tools/codex")).expect("no NUL");
     assert_eq!(needle, "exec '/opt/my tools/codex'");
-    assert!(line.starts_with(&needle), "{line}");
+    assert!(!needle.contains("printf"), "{needle}");
+    assert!(line.starts_with(LAUNCH_HEAD), "{line}");
+    assert!(line[LAUNCH_HEAD.len()..].starts_with(&needle), "{line}");
 }
 
 /// The pane's names are the `ganja` pane's closed list, then the driver's
@@ -281,9 +313,11 @@ Pane is dead (status 1, Thu Sep  3 11:02:14 2026)
         "a pane with one line to show still shows it"
     );
     // An interactive bash says `exit` on its way out — under the report
-    // a refusal wants, when the launch line's tail ended it.
+    // a refusal wants, when the launch line's tail ended it. The report is
+    // the pane's first row: the line's own head wiped the prompt and the
+    // echo before the exec failed (D554), so the shell's report is the
+    // whole of what the pane shows.
     let bash = "\
-$ exec /x/codex -c 'sandbox_mode=\"read-only\"' || exit
 sh: /x/codex: /nope/interpreter: bad interpreter: No such file or directory
 exit
 
@@ -291,11 +325,8 @@ Pane is dead (status 126, Tue Aug 25 00:40:00 2026)
 ";
     assert_eq!(
         last_words(bash).as_deref(),
-        Some(
-            "$ exec /x/codex -c 'sandbox_mode=\"read-only\"' || exit\nsh: /x/codex: \
-             /nope/interpreter: bad interpreter: No such file or directory"
-        ),
-        "the shell's own two lines; its `exit` and tmux's notice are neither of them"
+        Some("sh: /x/codex: /nope/interpreter: bad interpreter: No such file or directory"),
+        "the shell's own report; its `exit` and tmux's notice are neither of them"
     );
     assert_eq!(last_words("exit\n"), None);
 }
