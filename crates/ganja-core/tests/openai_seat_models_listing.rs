@@ -22,15 +22,21 @@ use std::{env, fs};
 
 use ganja_core::provider;
 
-/// The five, in the order the seam must offer them. Spelled out rather than
+/// The six, in the order the seam must offer them. Spelled out rather than
 /// imported from the constant: a test that read the same array it is checking
 /// would pass however that array was reordered, and the order is half of what
 /// was pinned.
-const OFFERED: [&str; 5] =
-    ["gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.3-codex-spark"];
+const OFFERED: [&str; 6] = [
+    "gpt-6-astra",
+    "gpt-5.5",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.3-codex-spark",
+];
 
 #[tokio::test]
-async fn a_chatgpt_login_is_offered_the_pinned_five_and_no_other_credential_is_offered_anything() {
+async fn a_chatgpt_login_is_offered_the_pinned_six_and_no_other_credential_is_offered_anything() {
     let store = tempfile::tempdir().expect("a temp directory");
     let cache = tempfile::tempdir().expect("a temp directory");
     // SAFETY: this binary holds exactly one test, so nothing else in the

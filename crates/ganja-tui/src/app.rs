@@ -5285,7 +5285,7 @@ impl App {
     /// The wire wins where it answers, and that is now a decision rather than
     /// an accident of an empty table: cursor has no catalog rows to lose, but a
     /// ChatGPT seat's provider has plenty and its offering is still the pinned
-    /// five (**D476**) — offering a session the vendor's whole catalog would
+    /// six (**D476**) — offering a session the vendor's whole catalog would
     /// list models its own backend refuses. `wire_lists_models` is the seam's
     /// own decision asked synchronously, because this opens a dialog or spawns
     /// a fetch and cannot await to find out which.

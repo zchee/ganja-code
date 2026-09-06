@@ -1,10 +1,10 @@
-//! `/models` on a ChatGPT seat session offers the pinned five (**D476**).
+//! `/models` on a ChatGPT seat session offers the pinned six (**D476**).
 //!
 //! The chooser's wire lane used to be reachable only where the catalog had
 //! nothing to show — cursor's tier. A seat's provider has plenty of catalog
 //! rows and is still not offered them, so the lane is now chosen by the seam's
 //! own `wire_lists_models` rather than by an empty table, and this is what
-//! pins that: the five appear, and `gpt-5.4` — an openai row this build's
+//! pins that: the six appear, and `gpt-5.4` — an openai row this build's
 //! catalog carries, servable on the seat and deliberately unoffered — does not.
 //!
 //! It lives out here rather than beside the module because the decision reads
@@ -103,8 +103,14 @@ async fn the_model_chooser_on_a_chatgpt_seat_offers_the_pinned_roster_rather_tha
         tokio::time::sleep(std::time::Duration::from_millis(1)).await;
     }
 
-    for model in ["gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.3-codex-spark"]
-    {
+    for model in [
+        "gpt-6-astra",
+        "gpt-5.5",
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.3-codex-spark",
+    ] {
         assert!(offered.contains(model), "the seat is offered `{model}`:\n{offered}");
     }
     assert!(

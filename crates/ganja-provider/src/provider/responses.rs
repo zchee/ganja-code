@@ -261,8 +261,8 @@ const BETA: &str = "responses=experimental";
 /// (`codex.ts:15`).
 ///
 /// A positive list, and the reason it is spelled out rather than derived: three
-/// of these four are *older* than the floor [`NEWER_THAN`] sets, so the rule
-/// below would refuse them.
+/// of upstream's four are *older* than the floor [`NEWER_THAN`] sets, so the
+/// rule below would refuse them.
 ///
 /// **Scope: [`Backend::Codex`] only.** This is a subscription's offering, not
 /// the API's — upstream filters the model list on the same `auth.type ===
@@ -270,17 +270,27 @@ const BETA: &str = "responses=experimental";
 /// session holding a key sees whatever the platform sells. The list is a
 /// snapshot of somebody else's product decision as of v1.18.22 and **will
 /// drift**; [`NEWER_THAN`] is what keeps it from aging badly, and when the
-/// seat's offering changes these four lines are what to re-read against
+/// seat's offering changes these lines are what to re-read against
 /// `codex.ts:15-16`.
-const ALLOWED_MODELS: [&str; 4] = ["gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini"];
+///
+/// **`gpt-6-astra` is the owner's own addition (2026-09-07), not `codex.ts:15`'s**,
+/// and it is here rather than left to the generation rule because that rule
+/// cannot read it: the id carries no `N.M` after `gpt-`, so [`generation`]
+/// answers [`None`] and `serves` would refuse the one gpt-6 the seat offers.
+/// A drift that made the id readable (`gpt-6.0-astra`) would not need this
+/// line; a drift that removed the model from the seat would need it gone.
+const ALLOWED_MODELS: [&str; 5] =
+    ["gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini", "gpt-6-astra"];
 
 /// The models a ChatGPT seat is **offered**, in the order to offer them
 /// (**D476**, `seat-roster-pinned`).
 ///
 /// No upstream counterpart: `codex.ts` filters the vendor's catalog through
 /// `serves` and offers whatever survives, so the roster a seat browses drifts
-/// with `models.dev`. This is the owner's own pin instead — five ids, this
-/// order, decided once and answered from the binary.
+/// with `models.dev`. This is the owner's own pin instead — six ids, this
+/// order, decided once and answered from the binary (`gpt-6-astra` joined
+/// the five on 2026-09-07, first because it is the newest generation the
+/// seat offers).
 ///
 /// **Offered is not servable, and the split is the whole point.** `serves`
 /// stays the `codex.ts:281-292` port it always was, so a session that names
@@ -291,16 +301,23 @@ const ALLOWED_MODELS: [&str; 4] = ["gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.4", 
 /// because what a seat defaults to and what it offers to browse are two
 /// decisions.
 ///
-/// **The catalog cannot move this list.** Membership is these five lines;
+/// **The catalog cannot move this list.** Membership is these six lines;
 /// `ganja models --refresh` re-reads sizing and pricing and never this. A
 /// catalog row is consulted for one thing only, a human-readable name, and its
 /// absence costs nothing — the id stands in.
 ///
 /// Every id here has to satisfy `serves`: an offer this backend would then
 /// refuse is a lie the listing tells, and the test in `responses_tests.rs`
-/// is what keeps it honest.
-pub const SEAT_ROSTER: [&str; 5] =
-    ["gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.3-codex-spark"];
+/// is what keeps it honest — which is why `gpt-6-astra` is also in
+/// `ALLOWED_MODELS`, the only route `serves` has to an id with no `N.M`.
+pub const SEAT_ROSTER: [&str; 6] = [
+    "gpt-6-astra",
+    "gpt-5.5",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.3-codex-spark",
+];
 
 /// What a subscription session asks for when nothing named a model.
 ///

@@ -197,7 +197,7 @@ pub fn wire_lists_models(provider_id: &str) -> bool {
 ///   a second staleness to reason about (deviation:
 ///   `cursor-model-listing-uncached-at-the-seam`).
 /// - **openai on a ChatGPT seat**, whose offering is
-///   [`responses::SEAT_ROSTER`]'s pinned five (**D476**). No network and no
+///   [`responses::SEAT_ROSTER`]'s pinned six (**D476**). No network and no
 ///   catalog read decides membership: the list is compile-time, and the catalog
 ///   is consulted only for a human name it may or may not know. A session on
 ///   an API key is not a seat, so it answers [`None`] and the catalog stays its
@@ -222,7 +222,7 @@ pub async fn wire_model_listing(provider_id: &str) -> Option<Result<WireModels, 
     Some(Ok(seat_models()))
 }
 
-/// The ChatGPT-seat half of [`wire_model_listing`]: the pinned five, named by
+/// The ChatGPT-seat half of [`wire_model_listing`]: the pinned six, named by
 /// the catalog where it happens to know them.
 ///
 /// The lookup is provider-scoped so a same-named row of another vendor cannot

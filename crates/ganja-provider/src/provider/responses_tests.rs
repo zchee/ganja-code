@@ -793,7 +793,7 @@ fn a_subscription_session_that_names_no_model_gets_one_the_seat_can_run() {
 
 /// The obligation [`SEAT_ROSTER`] carries: an offer this backend would
 /// then refuse is a listing that lies, and the two halves of the roster
-/// reach [`serves`] by different routes — two are named by
+/// reach [`serves`] by different routes — three are named by
 /// [`ALLOWED_MODELS`], three are admitted by the generation rule — so the
 /// pin has to be asserted over the whole list rather than over either.
 #[test]
@@ -1366,13 +1366,19 @@ fn the_backend_serves_a_pinned_list_and_the_order_of_the_rules_is_the_rule() {
     for served in ALLOWED_MODELS {
         assert!(serves(served), "codex.ts:15 names {served}");
     }
-    // Three of those four are older than the floor, so a check that read
+    // Three of those five are older than the floor, so a check that read
     // the generation rule first would refuse the models the list exists to
     // allow — including the one this build now defaults to.
     assert!(
         serves("gpt-5.4") && generation("gpt-5.4") == Some(5.4),
         "gpt-5.4 is not newer than 5.4 and is served anyway, which is what \
              makes the list order load-bearing"
+    );
+    // And one of them the generation rule cannot read at all: no `N.M`
+    // follows its `gpt-`, so the list is the only route it has.
+    assert!(
+        serves("gpt-6-astra") && generation("gpt-6-astra").is_none(),
+        "gpt-6-astra has no generation to compare and is served by the list alone"
     );
 
     for refused in ["gpt-5.6", "gpt-5.5-pro", "gpt-5.4-nano", "gpt-5.3-codex"] {
