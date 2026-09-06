@@ -362,6 +362,436 @@ Only the size is seen; the arm is not decoded.
   this log will see it beside every tool call.
 
 == probe 2 ==
-# Recorded at W3, after the recovery (D553, second half) lands: a bridged
-# Run paused on a tool call, its held Run gone, resumed from the composed
-# state with `Action::Resume`. Not yet run.
+# Whether a bridged Run whose hold outlived the idle bound is recovered — the
+# next request reopening a Run over the composed conversation under
+# `resume_action` — and whether the tool that paused it runs exactly once.
+#
+# The recording W4's gate reads (.omc/plans/2026-09-07-cursor-history-blobs.md,
+# W3 "Probe 2"; AC-20). One live turn in the TUI against api2.cursor.sh, run
+# by the user through `!` — no lane and no lead ran one, and nothing here was
+# read out of auth.json. The same three credential markers were grepped for
+# before a line of this was written: zero hits over the 53-line window the
+# charter named, and zero over the whole 7,264-line file.
+#
+# Recorded by: the shipped wire's own lines, no scaffolding — bridge.rs's two
+#              (:349 holding, :378 dropping), cursor.rs's INFO at :447
+#              (recovering) and its bridging line at :1040, history.rs's two
+#              (:511, :522), request.rs's kv pair (:599 get, :617 set) and
+#              decode.rs's three (:341 unmodelled fields, :357 thinking, :385
+#              skipped arms). Line numbers are d8fc38e's.
+# Build:  ganja-code 0.1.0; ./target/release/ganja rebuilt from d8fc38e (W3,
+#         "provider,testkit,core: recover a cursor turn whose held Run is
+#         gone, once").
+# Date:   2026-09-06, 18:59:08 - 19:11:11 UTC (2026-09-07 03:59 - 04:11 JST).
+# Log:    the same file, 7,264 lines at writing; the session is :7016-:7264,
+#         the last 249. The charter's window, :7039-:7091, is not a session
+#         boundary: :7016-:7038 are the session's startup, :7039-:7085 the
+#         turn's wire lines, and :7086-:7264 the title one-shot's own Run.
+# Server: api2.cursor.sh; the client version string probe 1 names, unchanged.
+# Model:  GANJA_MODEL unset, so `default` (Auto) again; the config's effort
+#         dropped at adoption (:7025). Which model Auto resolved to on each of
+#         the three Runs is server-side and not observable here.
+# Frontend: the TUI, where probe 1 was `ganja run`. Two differences follow
+#         from that and are named where they show: the newest user message
+#         carries the engine's request-only text (the session's five MCP
+#         tools were deferred at threshold=0, :7034-:7037, where probe 1's
+#         headless runs built their requests before any MCP server had
+#         connected), and the title one-shot is sent rather than composed at
+#         teardown.
+#
+# What the wire carried that no request before d8fc38e did: a run request
+# under `resume_action` (request.rs:240-241) — the first this build has ever
+# sent to the server. Every earlier live request, probe 1's included, was
+# `action="user"`; the Resume arm had only ever gone to the testkit's mock.
+# Its state carried an assistant root entry that is one `[Tool Call]`
+# paragraph and nothing else, and a `[Tool Result]` entry for a call the
+# *server* had asked for as an exec and never got an answer to on the body
+# it asked on.
+#
+# NO CONNECT ERROR OF ANY KIND WAS PRODUCED. No `code`, no `message`, no
+# EndStream error frame, no `Blob not found`, no `invalid_argument`, no
+# ProviderEvent::Failed, no cap sentence ("already reopened once": zero
+# lines), and a case-insensitive grep of the session for "failed" and
+# "error" returns nothing at all — not even probe 1's tool-outcome line,
+# since the one tool here ran.
+#
+# This directory's rule holds: no token, no tool-argument value (the plan's
+# 82-byte command is referred to by its length), no thinking text. The reply
+# was the single character `1` — P3's measurement, which the plan's own text
+# names — and it is stated as that rather than quoted as prose.
+
+== the run ==
+# One session, one prompt — the plan's two lines, 167 bytes as the composer
+# took them (:7033) — three Runs on the wire, one turn. `A` is the Run the
+# tool call paused, `B` the Run the recovery opened, `C` the title one-shot.
+
+  session      :7016-:7264  18:59:08.59Z - 19:11:11.30Z              (722.72 s)
+  T1 the turn  :7032-:7085  Enter 18:59:26.90Z - step_completed
+                            19:11:07.97Z                             (701.08 s)
+    A paused   :7039-:7059  composition 18:59:27.14Z, held 18:59:35.67Z,
+                            dropped 19:09:35.68Z
+    B recovery :7060-:7085  recovery 19:10:59.20Z - step_completed
+                            19:11:07.97Z                               (8.77 s)
+  C one-shot   :7086-:7264  composition 19:11:08.01Z - step_completed
+                            19:11:11.30Z                               (3.29 s)
+
+# A, line by line. entries=0 is the first-turn shape probe 1's R1 had (the
+# head appears only beside history); the prompt rode the action inline.
+
+  :7039  composed the conversation state entries=0 turns=0 blobs=0 bytes=0
+         clamped_calls=0 action="user"                    18:59:27.141315Z
+  :7041  kv set 2260                                      +1.916 s
+  :7042  kv set 191609   :7043 90   :7044 1402            +2.548 s
+  :7045  first thinking delta (24; :7047 24, :7049 20 — 68 bytes, the
+         first thinking line the TUI showed)              +8.472 s
+  :7051  skipped partial_tool_call (7) + field 25
+  :7053  skipped tool_call_started (2) + field 25
+  :7054  bridging an exec to a ganja tool exec=1 kind="mcp_args" tool="bash"
+         (call id: one `call-<v4 uuid>-0` over one `fc_<hex>_0`, the shape
+         probe 1 records)                                 +8.476 s
+  :7055  kv set 1445   :7056 88   :7057 293
+  :7058  holding a run open for the engine execs=1        18:59:35.669828Z
+         (52.6 ms after :7054)
+  :7059  dropping a held run reason=Idle                  19:09:35.675792Z
+         = hold + 600.006 s
+
+# The `bash` permission dialog opened at the hold and was answered *allow
+# once* 683.5 s later. Between :7058 and :7059 the keeper beat the body
+# every 5 s (bridge.rs:567; no line per beat) — P3 says what the reason
+# proves about those beats.
+
+# B, line by line.
+
+  :7060  INFO recovering a cursor turn on a fresh run     19:10:59.203014Z
+         = drop + 83.527 s
+  :7061  composed the conversation state entries=4 turns=1 blobs=8
+         bytes=173176 clamped_calls=0 action="resume"     +0.17 ms
+  :7062  the composed blob ids (eight; decomposed under P3)
+  :7063-:7067  five kv gets, one batch of 38 µs, all found  +1.215 s
+  :7068  kv get found=1311                                +2.779 s
+  :7069  first thinking delta (20; :7072 25, :7074 23, :7076 26 — 94
+         bytes, the second thinking line)                 +8.180 s
+  :7071  kv get found=20                                  +8.180 s (16 µs
+                                                          after :7069)
+  :7078  kv set 115   :7079 12   :7080 173                +8.384 s
+  :7081  unmodelled server-message fields [(3, 1353)]     +8.577 s
+  :7082  kv set 1078
+  :7083  unmodelled server-message fields [(3, 521)]
+  :7084  skipped step_completed (17)                      +8.772 s
+  :7085  unmodelled server-message fields [(3, 521)]
+
+# No partial_tool_call, no tool_call_started, no bridging line and no hold
+# on B: the model read the call and its result and answered.
+
+# C: composition entries=0 at :7086; sets :7088-:7091 (12749, 15612, 90,
+# 341) at +1.049 s; 86 thinking deltas (457 bytes) :7092-:7255 from
+# +2.163 s; sets :7256-:7259 (378, 480, 44, 375) and :7261 (3008); (3, 3249)
+# at :7260; (3, 483) at :7262 and :7264 bracketing step_completed at :7263,
+# +3.289 s. Sent, where `ganja run`'s one-shot was composed and never sent
+# (probe 1's third incidental): the process here stayed up.
+
+== P3 — the recovery, over the composed history, and the tool ran once ==
+VERDICT: YES
+
+The two lines, verbatim (neither carries a secret):
+
+  :7059  2026-09-06T19:09:35.675792Z DEBUG ganja_provider::provider::cursor::bridge: dropping a held run provider="cursor" reason=Idle
+  :7060  2026-09-06T19:10:59.203014Z  INFO ganja_provider::provider::cursor: recovering a cursor turn on a fresh run provider="cursor" why=this turn is answering a cursor tool call, but the run that asked for it is gone: it was not resumed within the idle bound; reopening a run over the composed conversation
+
+What each proves.
+
+  * The drop is the shipped path at the shipped bound. `reason=Idle` is
+    `keep()`'s third arm (bridge.rs:566), 600.006 s after the hold against
+    IDLE_BOUND = 600 s (bridge.rs:130); the 6 ms is the select's own
+    scheduling. It is `Idle` and not `Closed`, and that is a measurement:
+    `Closed` is returned on the first heartbeat whose send fails
+    (bridge.rs:567-570), so every one of the ~120 beats sent on that body
+    over ten minutes succeeded — the server, or at least the connection
+    under it, tolerated a beating held body for the whole 600 s. The D552
+    recording bounded that from below at 25 s (bridge.rs:25-27); this one
+    bounds it at 600 s. Nothing here says where the ceiling is, nor
+    whether a resume written to that body at 599 s would have been read.
+
+  * The recovery keyed to the dropped Run. The sentence's clause — "it was
+    not resumed within the idle bound" — is `Reason::Idle`'s spelling
+    (bridge.rs:211), and `because(key)` reads it from the ring's entry for
+    the request's own key; a request that keyed elsewhere would have
+    recovered with no clause. So `(model, messages[turn_start].id)` came
+    out the same on the request that answered the dialog as on the one
+    the hold was taken under.
+
+  * The request went out under `resume_action`. :7061 says
+    `action="resume"`, which is `entries()`'s second arm (history.rs:225 —
+    the request's last message is the assistant's) and reaches the wire as
+    `ConversationAction.resume_action` (request.rs:240-241). This build
+    logs no run request, so the field itself is inferred from the
+    composition's action, one match arm away.
+
+  * The composed history carried the call and its result, and the server
+    read both. :7061-:7062 decomposed against history.rs's shapes — a
+    system entry is `{"role":"system","content":"…"}`, 30 bytes of frame;
+    user 53 and assistant 58 as probe 1 found; a step under 128 bytes is
+    1+1+(1+1+len); a UserMessage is (1+len+text)+(1+1+36):
+
+    root[0]  ce20faa643dd5597  170040  system head: 30 + 170,010 escaped —
+                                       736 more than probe 1's; what
+                                       differed between the two sessions'
+                                       `request.system` is not in the log FETCHED :7065
+    root[1]  b46f50b0bc02f7c8    1334  user: 53 + 1,281 escaped, of which
+                                       the prompt is 167 (:7033) and the
+                                       rest is the request-only text the
+                                       engine joins onto the newest user
+                                       message — see incidental           FETCHED :7066
+    root[2]  7ab301a1e710b296     178  assistant: no text, one paragraph —
+                                       `[Tool Call] bash ` (17) + a 97-byte
+                                       compact `{"command":…}` = 114, +6
+                                       for the six characters JSON escapes
+                                       in it, +58                         FETCHED :7067
+    root[3]  79e4836f6086f40e      71  `[Tool Result]`, newline, the 2-byte
+                                       output: 53 + 18 (16 raw, its two
+                                       newlines escaped)                  FETCHED :7064
+    turns[0] 753f02de266bda9c     104  ConversationTurn: 1+1+(3 × (1+1+32))
+                                       — the user_message id and two steps FETCHED :7063
+    turn.user_message
+             00e3b29d736b904e    1311  UserMessage: (1+2+1,270 text) +
+                                       (1+1+36 derived message_id), the
+                                       same joined text as root[1],
+                                       unescaped                          FETCHED :7068
+    step[0]  2098a677ac8c8cd6     118  the assistant paragraph in proto
+                                       framing: 1+1+(1+1+114)             not fetched
+    step[1]  0d68653ddbe2ec51      20  the result: 1+1+(1+1+16)           FETCHED :7071
+
+    The sizes sum to 173,176 (:7061 bytes=); 173,058 was fetched in seven
+    gets, 173,038 of it before the first thinking delta. Both root/step
+    pairs close on each other and on nothing else: 178/118 only for an
+    input that is exactly the plan's command under a lone `command` key
+    (no description, no timeout — the six escapes are its four quotes and
+    the doubled backslash), and 71/20 only for an output that is exactly
+    the line count and its newline, which is what shell.rs:313 returns for
+    a clean exit (stdout verbatim, no wrapper). So what the model sent and
+    what the tool printed are both pinned by the arithmetic without a byte
+    of either in the log. root[1]/user_message close the same way: 1,281
+    escaped over 1,270 raw is 11 escapes — the prompt's newline and
+    backslash, the join's two newlines, and the seven the `<deferred_tools>`
+    listing carries (deferral.rs:232-240) — which says the listing was the
+    only text joined on and the reminders were empty.
+
+  * The tool ran exactly once, from three sides. The file: one line, by the
+    user's own `! wc -l` after the turn (the re-execution check — a second
+    call would have appended a second `run`). The transcript: one Tool
+    part, Completed, then the reply (the TUI). The wire: one `bridging an
+    exec` in the session (:7054); zero `partial_tool_call` and zero
+    `tool_call_started` on B (:7060-:7085); zero holds on B. And zero
+    `answering a bridged exec` lines in the whole session — the result
+    never went back as an exec answer, because the body it would have gone
+    out on was gone; it went out as root[3], the D553 shape, and a model
+    shown the call it made beside the result it produced did not make the
+    call again. That is the divergence history.rs:37-42 argues for,
+    holding on one sample.
+
+  * The reply was `1`, and the turn ended cleanly: step_completed at :7084,
+    no error of any kind (the header), and the session's next line is the
+    one-shot's composition.
+
+  * This is the first recovered request the server has accepted — the
+    first `resume_action` this build has sent it, over a history whose
+    `[Tool Call]` and `[Tool Result]` entries it fetched (:7067, :7064) and
+    answered from without a call.
+
+Timings, composition to first thinking delta (the same two ends probe 1
+measured, for the same reason — no text-delta, send or clean-end line):
+
+  A   composition :7039 18:59:27.141315Z
+      sets        :7041 at +1.916 s (2260), :7042-:7044 at +2.548 s
+                  (191609, 90, 1402)
+      first thinking delta :7045 18:59:35.613217Z    = +8.472 s
+      gets before that delta: 0   sets before it: 4
+      bridging :7054 at +8.476 s; hold :7058 at +8.529 s
+
+      hold → drop         600.006 s   (:7058 → :7059; the bound)
+      drop → recovery      83.527 s   (:7059 → :7060; the person answering)
+      hold → recovery     683.533 s   (the dialog's whole life)
+
+  B   composition :7061 19:10:59.203183Z (0.17 ms after the INFO line)
+      gets        :7063-:7067 at +1.215 s (5, one batch of 38 µs, 171,727
+                  bytes: turns[0], root[3], root[0], root[1], root[2])
+                  :7068 at +2.779 s (the user_message, 1311)
+                  :7071 at +8.180 s (step[1], 20) — 16 µs after :7069
+      first thinking delta :7069 19:11:07.383388Z    = +8.180 s
+      gets before that delta: 6 (173,038 bytes)   sets before it: 0
+      first set :7078 at +8.384 s; step_completed :7084 at +8.772 s
+
+  C   composition :7086 19:11:08.014893Z
+      sets :7088-:7091 at +1.049 s; first thinking delta :7092 at
+      +2.163 s; step_completed :7263 at +3.289 s
+
+Read carefully: B, which fetched 173 KB of state — every root entry, the
+turn wrapper, its user message and its last step — reached its first
+thinking 0.29 s *sooner* than A, which fetched nothing. One sample per arm
+on Auto; as probe 1 said of its pair, not a measurement of the fetch's
+cost. What it bounds: the batch of five gets was answered 1.2 s after the
+request went out, the sixth 1.6 s after that, and the model was thinking
+5.4 s after the last of those — B's 8.2 s went to the model, not to the
+fetch.
+
+Fetch order, against probe 1's: turns[0], the LAST root entry, then
+root[0] onward in order — probe 1 saw turns[0], root[5], root[0..4]; this
+saw turns[0], root[3], root[0..2]. Two recordings, one order. Then, new
+here: the turn's user_message 1.56 s later on its own, and the turn's last
+step at the instant the model started — two blobs inside the turn wrapper
+that probe 1's `action="user"` request never saw dereferenced. Probe 1's
+item 5 ("does not prove the server has no path that would") now has the
+path: a resume reads into the wrapper, for the user message and the last
+step, and — on this sample — not for the assistant step between them.
+
+Reading checklist (C-M5, C-M1'):
+
+  * A get for an id this build never minted: NO. All seven gets name ids
+    in the :7062 listing; one composed id (step[0], 118) was never asked
+    for; no asked-for id was uncomposed, and none went unanswered-found.
+
+  * Either `message_id` echoed anywhere visible: NOT DETERMINABLE, as
+    probe 1 — a case-sensitive grep of the session for `message_id` and
+    `conversation_id` returns nothing. The one server-minted id shown is
+    :7054's call id, index 0 on a first exec, the shape probe 1 records.
+
+  * Anything attributable to `conversation_id`: NOTHING SEPARABLE. A and B
+    carried the same derived value (history.rs:501, from messages[0]); C
+    carried its own. The one difference between the three Runs with two
+    candidate causes is under incidental.
+
+== P4 — the checkpoint arm on a bridged turn ==
+VERDICT: YES — it arrives on the recovered Run and on the one-shot: 6
+arrivals, n from 483 to 3249; none on the Run that was dropped
+
+`unmodelled server-message fields provider="cursor" fields=[(3, n)]`:
+
+  A   none                                                    0 arrivals
+  B   :7081 (3, 1353)  :7083 (3, 521)   :7085 (3, 521)        3 arrivals
+  C   :7260 (3, 3249)  :7262 (3, 483)   :7264 (3, 483)        3 arrivals
+
+Placement is probe 1's exactly: on each Run that finished, one arrives
+after the kv-set burst (:7081 after :7078-:7080; :7260 after :7256-:7259)
+and the run's last two are a pair of identical size bracketing
+`step_completed (17)` (:7084 between the two 521s; :7263 between the two
+483s). A had no tool_call_completed and no set burst after its hold — its
+server never reached the point probe 1's first arrival came at — so "on a
+bridged turn" here means the *recovered* request of one: the arm is not
+tied to the Run that made the call, and a turn whose held Run is dropped
+still gets its checkpoints on the Run that finishes it. Only the size is
+seen; the arm is not decoded.
+
+The `token_details` bead's first step is: model the arm.
+
+== P5 — `conversation_id` (5): sent, reference parity ==
+Sent on all three Runs, the value derived from `messages[0]`'s id
+(history.rs:501): the same on A and B, C's own on C. Nothing came back
+naming it (checklist above), so whether it matters is not observable from
+this client, as the plan states. Nothing new measured.
+
+== P6 — `pre_fetched_blobs` (17): not sent ==
+Not sent; the shipped client never fills it, so it is unmeasured at both
+ends. What would justify it is B's own numbers above — six gets, 173 KB,
+all answered by +2.8 s against a first thinking delta at +8.2 s — and on
+this sample the gets were not what the model waited on.
+
+== what this cannot measure ==
+
+1. One drop reason live: `Idle`. `Closed` is the e2e suite's (AC-16, over
+   the testkit's `Hangup`); `Cancelled` and `Evicted` have their sentences
+   pinned by unit test (AC-14) and have never been recovered from against
+   the real server.
+
+2. The cap's `Failed` arm was not reached — by design: a second drop of
+   this key did not occur, and nothing here says what the server does
+   with a second `resume_action` over the same conversation. AC-14b and
+   AC-16b own it, against the mock.
+
+3. One seat, one account, Auto on all three Runs, one client version, one
+   afternoon; one turn of history, one call, one result of two bytes. A
+   named model, a multi-call step, a result at the tool's clamp, or a
+   `[Tool Call]` at CALL_INPUT_LIMIT (clamped_calls=0 again) is
+   unmeasured.
+
+4. Nothing about a Run that dies *during* generation. A was idle-held with
+   its answer outstanding when it was dropped; a body that closes under a
+   delta or under a partial_tool_call leaves a different transcript
+   (`Pending`/`Running` rendered as NO_RESULT, history.rs:342-345) and was
+   not exercised.
+
+5. Whether the server *used* what it newly fetched. That the turn's
+   user_message (:7068) and last step (:7071) were dereferenced on a
+   resume — where probe 1's user-action request left them alone — is
+   observed; whether they reached the model, fed a checkpoint, or were
+   read and dropped is not. The same for the one it did not fetch: one
+   sample says the assistant step is not read on a resume, and does not
+   say it never is.
+
+6. Where the server's hold ceiling is. `Idle` bounds it from below at
+   600 s under 5 s heartbeats; a resume on the body at 599 s, or a hold
+   past 600 s, is unmeasured, and IDLE_BOUND's own doc (bridge.rs:120-129)
+   says it is a backstop, not a guess at the ceiling.
+
+7. First-*text*-delta timing, the run request's send instant, the
+   heartbeats, and the clean EndStream: none has a log line, as probe 1's
+   item 7.
+
+8. What (3, n) carries, and whether A's server would ever have produced
+   one — A was dropped before the point probe 1's first arrival came at.
+
+9. Whether the request-only text in root[1] (incidental) changes anything
+   the model does on a resumed history: not separable from anything else
+   here.
+
+== incidental, and worth knowing before W4 ==
+
+* The newest user message's root entry carries text the transcript does
+  not hold. root[1] is 1,334 bytes for a 167-byte prompt: the engine
+  appends its reminders and the per-step `<deferred_tools>` listing to the
+  request's newest user message as text parts (session.rs:3379-3403, "the
+  REQUEST and not the transcript"), and `entries()` joins every text part
+  of a message (history.rs:242). Two consequences the arithmetic makes
+  visible. The turn's user_message blob (1311) carries the same joined
+  text, so both blobs of that message hash over the deferral state at the
+  step they were composed at — an activation between two steps re-mints
+  both ids, where history.rs:20-22 expects a rebuild to yield the same
+  ones; not exercised here (nothing activated), an inference from the
+  source the sizes agree with. And a resumed session's history carries the
+  listing as it stood when that message was newest — a fact about the
+  request, not the transcript, and one probe 1 could not see: its headless
+  runs built their requests before an MCP server had connected (zero
+  deferral lines in either window), so their user entries were the prompt
+  alone.
+
+* The no-history request's large server set scales with the request. A's
+  server set 191,609 bytes at :7042 (probe 1's R1: 190,884), 2.5 s in; C —
+  also entries=0 — got 15,612 and 12,749 (:7089, :7088); B, with a root
+  supplied, nothing above 1,078 (:7082). Probe 1's two candidate causes
+  for the absence on a rooted request both still fit (C's derived id was
+  as new to the server as A's); what is new is that the size on the two
+  unrooted requests differs by 12×, and the one thing known to differ
+  between them from this side is the request's own system text and
+  prompt. Which of those it follows is not measured.
+
+* The one-shot is sent from the TUI: nine kv sets (:7088-:7091,
+  :7256-:7259, :7261), 86 thinking deltas, its own three (3, n) arrivals
+  and its own step_completed at :7263 — 3.29 s. Probe 1's `ganja run`
+  composed it at teardown and never sent it. Same wire, different
+  frontend lifetime.
+
+* Server-minted per-step call ids, again: :7054's `call-<v4>-0` over
+  `fc_<hex>_0`, index 0 on a first exec — probe 1 saw -0/-1 and -2 across
+  two steps. B minted none: no exec.
+
+* kv sets in the session: 7 on A, 4 on B, 9 on C, 20 in all; 168 is the
+  whole day's log (148 at probe 1's writing, +20). `a server set replaced
+  bytes this run already held`: zero in the session, still zero in the
+  file.
+
+* The hold's own lines are two, 52.6 ms apart (:7054 bridging, :7058
+  holding), and the heartbeat between them and the drop is silent: a
+  reader of this log will see ten minutes of nothing between :7058 and
+  :7059, and that silence is the shipped keeper doing what its doc says.
+
+* `field 25` beside partial_tool_call and tool_call_started (:7051,
+  :7053): unchanged from probe 1, on the one exec.

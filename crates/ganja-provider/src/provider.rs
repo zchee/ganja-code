@@ -208,8 +208,9 @@ pub struct ChatRequest {
     /// of the message that opened it — the user's prompt, or the notice a `!`
     /// passthrough turn opens with.
     ///
-    /// A wire that sends only the newest user turn ([`cursor`]) needs this
-    /// because role alone cannot say where a turn started. A finished turn
+    /// A wire that sends the newest user turn as its action and composes
+    /// everything before it as history ([`cursor`]) needs this because role
+    /// alone cannot say where a turn started. A finished turn
     /// leaves the steers it consumed in history *after* its reply, so
     /// `[prompt, reply, steer, prompt2]` — a consumed steer and the next
     /// turn's prompt — and the within-turn `[prompt, reply, steer, block]`

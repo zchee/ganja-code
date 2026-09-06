@@ -3353,8 +3353,9 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
         // both push the message that opens a turn onto history and nothing
         // else is pushed until the turn ends, so the last element is it. A
         // steer this turn consumed reaches history only at the turn's tail,
-        // which is why the wire that carries the newest user turn alone
-        // (cursor) cannot find this boundary in the messages themselves.
+        // which is why the wire that splits the newest user turn from the
+        // history it composes (cursor) cannot find this boundary in the
+        // messages themselves.
         // `saturating_sub` guards exactly one shape, an empty history, and no
         // shipped path produces one: both drivers push this turn's opening
         // message before the first step, and the compaction that *does*
