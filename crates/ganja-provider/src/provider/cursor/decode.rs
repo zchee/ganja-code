@@ -220,6 +220,20 @@ pub(super) struct McpCall {
     pub(super) arguments: Option<serde_json::Value>,
 }
 
+impl McpCall {
+    /// The tool this call names: the declaration's own
+    /// [`tool_name`](Self::tool_name), falling back to
+    /// [`name`](Self::name) when the server sent none.
+    ///
+    /// One function because two of them disagreed: the roster match read
+    /// `tool_name` while the refusal sentence read `name`, so a call the
+    /// bridge looked up under one spelling was refused under the other
+    /// (**D552**). Every reader of "which tool is this" goes through here.
+    pub(super) fn called(&self) -> &str {
+        if self.tool_name.is_empty() { &self.name } else { &self.tool_name }
+    }
+}
+
 /// One kv exchange the server opened: the id the answer must echo
 /// (proxy.ts:1075-1077), and which of the two operations the oneof carried.
 #[derive(Debug, PartialEq)]

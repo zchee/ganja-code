@@ -52,10 +52,16 @@ const MODEL: &str = "gpt-5.3-codex";
 const SECOND: &[u8] = b"second";
 
 /// The token every wire here presents. A canary rather than a plausible
-/// credential: nothing in this build may render one, and
-/// `crates/ganja-core/tests/secrets_env.rs` is what checks. The mock server
-/// never reads the `authorization` header at all — the point of handing the
+/// credential, though nothing in this file looks for it: the mock server never
+/// reads the `authorization` header at all, because the point of handing the
 /// wire a token explicitly is that no store is consulted.
+///
+/// That the cursor wire keeps a credential out of its renderings and its log is
+/// checked in `crates/ganja-core/tests/secrets_env.rs`, whose own cursor arm
+/// plants `CURSOR_CANARY` on a `CursorProvider::at` and drives both of this
+/// wire's failure paths against an endpoint that quotes it back. It is a
+/// separate binary because that drill mutates process-wide environment
+/// variables and this one must not.
 const TOKEN: &str = "at-cursor-bridge-canary-AAAA";
 
 /// How long a byte that should already be in flight may take. Generous
@@ -158,6 +164,71 @@ async fn a_request_body_written_after_the_response_began_still_reaches_the_serve
     );
 }
 
+/// A Run whose request body is **not** chunked is refused readably, rather
+/// than read forever as protobuf that never parses.
+///
+/// The mock de-chunks the request body by hand, because a body held open for a
+/// whole turn has no length to declare. Nothing downstream of that checks it:
+/// against a `content-length` body the first "size line" is protobuf,
+/// `from_str_radix` fails, and the de-chunker returns nothing for the rest of
+/// the connection — so every asking step in the script times out twenty seconds
+/// apart and no message anywhere names the cause. That is a failure this suite
+/// has already hit once, and one line at the head turns it into a sentence.
+#[tokio::test]
+async fn a_run_whose_body_is_not_chunked_is_refused_with_a_reason() {
+    let server = CursorServer::start(Script::finished()).await;
+
+    // `body` over a sized value rather than a stream, which is what makes
+    // reqwest declare a `content-length` instead of chunking.
+    let refusal = reqwest::Client::builder()
+        .build()
+        .expect("a default client builds")
+        .post(format!("{}/Run", server.base_url()))
+        .body(vec![0_u8; 8])
+        .send()
+        .await
+        .expect("the fixture answers rather than hanging");
+
+    assert_eq!(refusal.status().as_u16(), 400, "an un-chunked Run body is a fixture misuse");
+    let complaint = refusal.text().await.expect("the refusal carries its reason");
+    assert!(
+        complaint.contains("transfer-encoding: chunked"),
+        "and the reason names what was missing, got {complaint:?}",
+    );
+}
+
+/// A dropped [`CursorServer`] stops accepting.
+///
+/// The accept loop owns the listener, so nothing else can close it: without a
+/// `Drop` the task runs until it errors, which is never. Under nextest that is
+/// bounded by the process-per-test — but a plain `cargo test` of this binary
+/// runs every test in one process, and each server would stay bound and
+/// accepting for the life of it.
+#[tokio::test]
+async fn a_dropped_server_stops_accepting_connections() {
+    let address = {
+        let server = CursorServer::start(Script::finished()).await;
+        let address = server
+            .base_url()
+            .trim_start_matches("http://")
+            .parse::<std::net::SocketAddr>()
+            .expect("the base URL is host:port");
+        // Still live while the server is: this is what the assertion below is
+        // a change *from*, rather than an address that never worked.
+        tokio::net::TcpStream::connect(address).await.expect("a live server accepts");
+
+        address
+    };
+
+    // `abort` is a request, not a join, so the listener closes a moment later.
+    ganja_testkit::eventually(
+        PATIENCE,
+        "the dropped server's port to stop accepting",
+        async || tokio::net::TcpStream::connect(address).await.err().map(|_| ()),
+    )
+    .await;
+}
+
 /// An engine on `server`, holding `tools`, gated by `permissions`.
 fn seated(server: &CursorServer, tools: Registry, permissions: Permissions) -> Engine {
     Engine::new(Arc::new(provider_at(server)), MODEL, Arc::new(tools), permissions)
@@ -250,7 +321,7 @@ async fn a_declared_tool_the_server_calls_runs_once_and_answers_with_its_output(
             .then(Step::mcp(1, "lookup", &args))
             .then(Step::Text("found it".to_owned()))
             .then(Step::TurnEnded)
-            .then(Step::EndStream(None)),
+            .then(Step::EndStream),
     )
     .await;
 
@@ -334,7 +405,7 @@ async fn a_call_refused_at_the_dialog_never_runs_and_goes_back_as_rejected() {
             .then(Step::mcp(1, "lookup", &args))
             .then(Step::Text("understood".to_owned()))
             .then(Step::TurnEnded)
-            .then(Step::EndStream(None)),
+            .then(Step::EndStream),
     )
     .await;
 
@@ -388,6 +459,193 @@ async fn a_call_refused_at_the_dialog_never_runs_and_goes_back_as_rejected() {
     assert_eq!(error.1, args, "the arguments travel with it, as they do for every other refusal");
 }
 
+/// **AC-23** at engine level (**Dv-3**): an `mcp_args` exec carrying
+/// `smart_mode_approval_only = 7` is a *preflight*, not a call. It is answered
+/// `approved` and nothing runs — no tool, no dialog, no `Tool` part.
+///
+/// The wire proves the same thing over an in-memory duplex; this proves it
+/// where a call would really have executed, which is the only place "nothing
+/// executed" is a measurement rather than a property of the harness. The real
+/// call the server sends *after* an approval is an ordinary exec and is gated
+/// by the ordinary dialog — that is AC-13's, not this test's.
+#[tokio::test]
+async fn an_approval_preflight_is_approved_at_the_engine_without_running_anything() {
+    let args = json!({"key": "alpha"});
+    let server = CursorServer::start(
+        Script::new()
+            .then(Step::Context)
+            .then(Step::mcp(1, "lookup", &args).approval_only())
+            .then(Step::TurnEnded)
+            .then(Step::EndStream),
+    )
+    .await;
+
+    let (tool, calls) = RecorderTool::new("lookup", "lookup ran", "the answer");
+    // Allowed, deliberately: under an `ask` rule an absent dialog could mean
+    // the preflight was skipped *or* that the engine never got that far. With
+    // the tool allowed, the only thing standing between this exec and a real
+    // invocation is the flag.
+    let engine = seated(&server, Registry::new(vec![tool]), allow("lookup"));
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine.send(prompt()).await.expect("an idle engine accepts a prompt");
+    let seen = drain(&mut events).await;
+
+    let results = server.mcp_results();
+    let [result] = results.as_slice() else {
+        panic!("one exec is one answer, got {results:?}");
+    };
+    assert!(result.approved.is_set(), "a preflight is answered `approved`, got {result:?}");
+    assert!(result.success.is_unset(), "and never as a tool that ran");
+
+    assert!(
+        calls.lock().expect("the call log is never poisoned").is_empty(),
+        "an approval preflight must not run the tool it names",
+    );
+    assert!(
+        !seen.iter().any(|event| matches!(event, Event::PermissionRequested { .. })),
+        "nor raise a dialog for a call that has not been made",
+    );
+    assert!(
+        tool_parts(&seen).is_empty(),
+        "nor leave a Tool part, which is what the transcript would show a call as",
+    );
+    assert!(
+        matches!(seen.last(), Some(Event::MessageFinished { .. })),
+        "and the turn finishes normally",
+    );
+}
+
+/// The run-level `client_heartbeat = 7` really crosses a socket while a turn is
+/// held, which is what the recording's (b) measured a 25-second hold surviving
+/// on.
+///
+/// Held at a **permission dialog**, because that is the hold a person actually
+/// causes and the one with no upper bound: everything else a turn waits on is
+/// bounded by something. The wire's own equivalent runs under
+/// `tokio::time::pause`, which proves the cadence and not the socket; this is
+/// the only place both are true at once, so it is worth the wall clock — and
+/// the only test in this suite that costs any.
+#[tokio::test]
+async fn a_turn_held_at_a_dialog_keeps_beating_on_the_body_it_left_open() {
+    /// Longer than one `client_heartbeat` interval (5 s) with room for a slow
+    /// machine to schedule the first one.
+    const HELD: Duration = Duration::from_millis(5_500);
+
+    let server = CursorServer::start(
+        Script::new()
+            .then(Step::Context)
+            .then(Step::mcp(1, "lookup", &json!({"key": "alpha"})))
+            .then(Step::TurnEnded)
+            .then(Step::EndStream),
+    )
+    .await;
+
+    let (tool, _calls) = RecorderTool::new("lookup", "lookup ran", "the answer");
+    let engine = seated(&server, Registry::new(vec![tool]), ask_for("lookup"));
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine.send(prompt()).await.expect("an idle engine accepts a prompt");
+
+    // Answered by hand rather than through `drain_answering`, because the whole
+    // measurement is what happens *between* the dialog and the reply.
+    let mut seen = Vec::new();
+    let held = loop {
+        let event = events.next().await.expect("the dialog arrives before the stream ends");
+        let waiting = match &event {
+            Event::PermissionRequested { id, .. } => Some(id.clone()),
+            _ => None,
+        };
+        seen.push(event);
+        if let Some(id) = waiting {
+            break id;
+        }
+    };
+
+    let before = server.heartbeats();
+    tokio::time::sleep(HELD).await;
+    let during = server.heartbeats();
+
+    engine
+        .send(Command::ReplyPermission { id: held, reply: PermissionReply::Once })
+        .await
+        .expect("a reply is never refused");
+    seen.extend(drain(&mut events).await);
+
+    assert!(
+        during > before,
+        "a run held {HELD:?} at a dialog should have beaten at least once on its \
+         open request body, and went from {before} to {during}",
+    );
+    assert!(
+        matches!(seen.last(), Some(Event::MessageFinished { .. })),
+        "and the held turn still finishes once the dialog is answered",
+    );
+}
+
+/// **Two execs in one batch**, which is what the recording actually saw the
+/// server do (two `grep_args` within 5 ms) and what every sequential step in
+/// this file cannot replay.
+///
+/// Both are written before either is answered, so both are genuinely in flight
+/// and the client's answers are matched by `id` rather than by arrival order.
+/// End to end this exercises the wire's gather window, the engine's `resolve`
+/// fan-out and the transcript, over the real socket — the one measured server
+/// behaviour this suite was built to be able to replay.
+#[tokio::test]
+async fn two_execs_the_server_sent_together_are_both_run_and_both_answered() {
+    let first = json!({"key": "alpha"});
+    let second = json!({"key": "beta"});
+    let server = CursorServer::start(
+        Script::new()
+            .then(Step::Context)
+            .then(Step::batch(vec![
+                Step::mcp(1, "lookup", &first),
+                Step::mcp(2, "lookup", &second),
+            ]))
+            .then(Step::TurnEnded)
+            .then(Step::EndStream),
+    )
+    .await;
+
+    let (tool, calls) = RecorderTool::new("lookup", "lookup ran", "the answer");
+    let engine = seated(&server, Registry::new(vec![tool]), allow("lookup"));
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine.send(prompt()).await.expect("an idle engine accepts a prompt");
+    let seen = drain(&mut events).await;
+
+    // Both ran, with their own arguments. Sorted rather than compared in order:
+    // two concurrent execs have no order to assert, and demanding one would be
+    // asserting a scheduling detail rather than the behaviour.
+    let mut recorded = calls.lock().expect("the call log is never poisoned").clone();
+    recorded.sort_by_key(std::string::ToString::to_string);
+    let mut wanted = vec![first, second];
+    wanted.sort_by_key(std::string::ToString::to_string);
+    assert_eq!(recorded, wanted, "each exec ran once, with the arguments it carried");
+
+    let results = server.mcp_results();
+    assert_eq!(results.len(), 2, "two execs are two answers, got {results:?}");
+    for result in &results {
+        let success = result.success.as_option().expect("a tool that ran answers `success`");
+        assert_ne!(success.is_error, Some(true), "and neither failed");
+    }
+
+    // Two calls, two closed parts, one finish: a batch is one step of the
+    // agent loop, not two turns.
+    let completed = tool_parts(&seen)
+        .into_iter()
+        .filter(|(_, state)| matches!(state, ToolState::Completed { .. }))
+        .map(|(call_id, _)| call_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(completed.len(), 2, "both calls close as completed Tool parts, got {completed:?}");
+    assert_eq!(
+        seen.iter().filter(|event| matches!(event, Event::MessageFinished { .. })).count(),
+        1,
+        "and the batch is one step of one turn",
+    );
+}
+
 /// **AC-17**, the execution-site invariant, on both paths.
 ///
 /// A native `read_args` exec and an `mcp_exec` naming `read` are the *same*
@@ -408,11 +666,7 @@ async fn both_paths_to_the_read_tool_pass_the_same_dialog_and_leave_the_same_rec
             Step::mcp(1, "read", &json!({"filePath": readable}))
         };
         let server = CursorServer::start(
-            Script::new()
-                .then(Step::Context)
-                .then(ask)
-                .then(Step::TurnEnded)
-                .then(Step::EndStream(None)),
+            Script::new().then(Step::Context).then(ask).then(Step::TurnEnded).then(Step::EndStream),
         )
         .await;
 
@@ -480,7 +734,7 @@ async fn an_undeclared_tool_and_a_foreign_server_are_each_refused_in_their_own_a
             .then(Step::mcp(1, "nonesuch", &json!({})))
             .then(Step::mcp_from(2, "lookup", &json!({}), "somebody-else"))
             .then(Step::TurnEnded)
-            .then(Step::EndStream(None)),
+            .then(Step::EndStream),
     )
     .await;
 
@@ -547,8 +801,8 @@ async fn the_title_one_shot_opens_its_own_run_and_leaves_the_bridged_turn_alone(
             .then(Step::mcp(1, "lookup", &json!({"key": "alpha"})))
             .then(Step::Text("found it".to_owned()))
             .then(Step::TurnEnded)
-            .then(Step::EndStream(None)),
-        Script::new().then(Step::Text("A title".to_owned())).then(Step::EndStream(None)),
+            .then(Step::EndStream),
+        Script::new().then(Step::Text("A title".to_owned())).then(Step::EndStream),
     ])
     .await;
 

@@ -670,17 +670,19 @@ fn keyed_request() -> ChatRequest {
     }
 }
 
-/// Drives one `mcp_args` through a **bridging** fold with `declared` on the
-/// roster, and returns the `McpResult` it was answered with — or `None` when
-/// the exec was handed to the engine instead.
+/// Drives one exec frame through a **bridging** fold with `declared` on the
+/// roster, and returns the events it produced beside what it wrote back.
 ///
-/// A bridged call pauses the Run, so it produces tool-call events and *no*
-/// answer on the wire; every refusal is decided before a pause could happen
-/// and produces an answer and no events. That difference is the assertion.
-async fn answered_mcp(
-    args: proto::McpArgs,
+/// The bridge is what makes the two observations below mean anything. Under
+/// [`super::events`] the fold has no key to park under, so *every* exec is
+/// answered at the `!bridgeable` guard and a `ToolCallStart` is structurally
+/// impossible — an absent one would be a tautology rather than a measurement.
+/// Here a bridgeable exec really would pause the Run and emit one, so "nothing
+/// executed" is something the harness could have contradicted.
+async fn bridged_exec(
+    exec: Vec<u8>,
     declared: Vec<crate::tool::ToolDefinition>,
-) -> Option<proto::McpResult> {
+) -> (Vec<ProviderEvent>, Vec<proto::ClientMessage>) {
     let held = std::sync::Arc::new(super::bridge::HeldRuns::default());
     let request = keyed_request();
     let key = super::bridge::Key::of(&request).expect("a request with a message keys");
@@ -696,10 +698,23 @@ async fn answered_mcp(
         key,
     );
 
-    let mut body = mcp_framed(3, args);
-    body.extend(framed(turn_ended()));
-    body.extend(end_stream("{}"));
-    sender.unbounded_send(Ok(body)).expect("the body is open");
+    sender.unbounded_send(Ok(exec)).expect("the body is open");
+
+    // The turn's end arrives in a **second** chunk, a gather window later, and
+    // that gap is load-bearing: a terminal event reaching the fold before the
+    // window closes clears the pending batch and the Run never pauses at all.
+    // Delivered in one chunk — which is what this harness used to do — no exec
+    // could ever be bridged, and every "nothing executed" assertion below
+    // would hold for the harness's reasons rather than the code's.
+    tokio::spawn(async move {
+        tokio::time::sleep(super::GATHER_WINDOW * 3).await;
+        let mut tail = framed(turn_ended());
+        tail.extend(end_stream("{}"));
+        // A bridged exec has already moved the fold into the held table by
+        // now, so this reaches a body nobody is reading. That is the shape a
+        // live turn has too.
+        let _ = sender.unbounded_send(Ok(tail));
+    });
 
     let events: Vec<ProviderEvent> =
         tokio::time::timeout(Duration::from_secs(10), stream.collect())
@@ -710,10 +725,28 @@ async fn answered_mcp(
         "an answered exec is not a failed turn: {events:?}"
     );
 
+    // `try_recv` rather than collecting the stream: a *bridged* exec moves the
+    // duplex — and with it the sender — into the held run, so the channel is
+    // never closed and a collect would wait for a turn that has paused.
     let sent: Vec<proto::ClientMessage> = std::iter::from_fn(|| answered.try_recv().ok())
         .flatten()
         .map(|bytes| proto::ClientMessage::decode_from_slice(&bytes[5..]).expect("client messages"))
         .collect();
+
+    (events, sent)
+}
+
+/// The same, for one `mcp_args`: the `McpResult` it was answered with — or
+/// `None` when the exec was handed to the engine instead.
+///
+/// A bridged call pauses the Run, so it produces tool-call events and *no*
+/// answer on the wire; every refusal is decided before a pause could happen
+/// and produces an answer and no events. That difference is the assertion.
+async fn answered_mcp(
+    args: proto::McpArgs,
+    declared: Vec<crate::tool::ToolDefinition>,
+) -> Option<proto::McpResult> {
+    let (_, sent) = bridged_exec(mcp_framed(3, args), declared).await;
 
     sent.iter()
         .find_map(|message| message.exec_response.as_option())
@@ -794,47 +827,32 @@ async fn a_present_server_identifier_on_our_own_call_refuses_nothing() {
 /// possibly twice, since the real call follows. So it is approved and
 /// **nothing executes**: no tool call reaches the engine, which is what the
 /// absent `ToolCallStart` below asserts.
+///
+/// Driven through the bridging harness on purpose: `bash` is on this roster,
+/// so without the preflight arm this exec *would* pause the Run and emit a
+/// `ToolCallStart`. Under a fold with no bridge the absence would prove
+/// nothing at all.
 #[tokio::test]
 async fn an_approval_preflight_is_approved_without_executing_anything() {
-    let (sender, receiver) =
-        futures::channel::mpsc::unbounded::<Result<Vec<u8>, std::convert::Infallible>>();
-    let (answers, answered) = futures::channel::mpsc::unbounded();
-    let stream = super::events(
-        receiver,
-        CancellationToken::new(),
-        super::Duplex::for_tests(answers, roster()),
-    );
+    let (events, sent) = bridged_exec(
+        mcp_framed(
+            3,
+            proto::McpArgs::default()
+                .with_name("bash")
+                .with_tool_name("bash")
+                .with_tool_call_id("call-1")
+                .with_provider_identifier("ganja")
+                .with_smart_mode_approval_only(true),
+        ),
+        roster(),
+    )
+    .await;
 
-    let mut body = mcp_framed(
-        3,
-        proto::McpArgs::default()
-            .with_name("bash")
-            .with_tool_name("bash")
-            .with_tool_call_id("call-1")
-            .with_provider_identifier("ganja")
-            .with_smart_mode_approval_only(true),
-    );
-    body.extend(framed(turn_ended()));
-    body.extend(end_stream("{}"));
-    sender.unbounded_send(Ok(body)).expect("the body is open");
-    drop(sender);
-
-    let events: Vec<ProviderEvent> =
-        tokio::time::timeout(Duration::from_secs(10), stream.collect())
-            .await
-            .expect("a preflight is answered rather than held");
     assert!(
         !events.iter().any(|event| matches!(event, ProviderEvent::ToolCallStart { .. })),
         "a preflight must not reach the engine as a call: {events:?}"
     );
 
-    let sent: Vec<proto::ClientMessage> = answered
-        .map(|answer| {
-            let bytes = answer.expect("the channel's error type is infallible");
-            proto::ClientMessage::decode_from_slice(&bytes[5..]).expect("client messages")
-        })
-        .collect()
-        .await;
     assert!(
         sent.iter()
             .filter_map(|message| message.exec_response.as_option())
@@ -935,26 +953,34 @@ async fn a_turn_declaring_no_tools_still_refuses_a_call_by_name() {
     );
 }
 
-/// A native exec whose ganja tool is **not** on this request's roster keeps
-/// D550's typed refusal — a turn not offering `bash` does not run a shell
-/// because the server asked for one.
+/// A wire that cannot pause refuses a call it **does** serve for the reason
+/// that actually holds.
+///
+/// `read` is on this roster, so "no tool named read is served by this client"
+/// would be false: what is missing is the hold, not the tool. Reachable by no
+/// shipped session — every one of them has a message to key on — which is
+/// exactly why it is worth a test: nothing else would ever read the sentence.
 #[tokio::test]
-async fn a_native_exec_whose_tool_is_not_offered_keeps_the_typed_refusal() {
+async fn a_call_a_pauseless_wire_cannot_hold_is_refused_for_the_hold_and_not_the_roster() {
     let (sender, receiver) =
         futures::channel::mpsc::unbounded::<Result<Vec<u8>, std::convert::Infallible>>();
     let (answers, answered) = futures::channel::mpsc::unbounded();
-    let readonly = vec![crate::tool::ToolDefinition {
-        name: "read".to_owned(),
-        description: "Reads a file.".to_owned(),
-        schema: serde_json::json!({ "type": "object" }),
-    }];
+    // `events` and not `bridged_events`: a fold with no key to park under is
+    // the state this refusal is about.
     let stream = super::events(
         receiver,
         CancellationToken::new(),
-        super::Duplex::for_tests(answers, readonly),
+        super::Duplex::for_tests(answers, roster()),
     );
 
-    let mut body = shell_stream_framed(5);
+    let mut body = mcp_framed(
+        3,
+        proto::McpArgs::default()
+            .with_name("read")
+            .with_tool_name("read")
+            .with_tool_call_id("call-1")
+            .with_provider_identifier("ganja"),
+    );
     body.extend(framed(turn_ended()));
     body.extend(end_stream("{}"));
     sender.unbounded_send(Ok(body)).expect("the body is open");
@@ -966,7 +992,7 @@ async fn a_native_exec_whose_tool_is_not_offered_keeps_the_typed_refusal() {
             .expect("a refused exec ends the exchange");
     assert!(
         !events.iter().any(|event| matches!(event, ProviderEvent::ToolCallStart { .. })),
-        "a tool this turn does not offer is not run because the server asked: {events:?}"
+        "a wire that cannot hold the run does not hand the call over: {events:?}"
     );
 
     let sent: Vec<proto::ClientMessage> = answered
@@ -976,12 +1002,65 @@ async fn a_native_exec_whose_tool_is_not_offered_keeps_the_typed_refusal() {
         })
         .collect()
         .await;
+    let reason = sent
+        .iter()
+        .filter_map(|message| message.exec_response.as_option())
+        .filter_map(|response| response.mcp_result.as_option())
+        .filter_map(|result| result.rejected.as_option())
+        .find_map(|rejected| rejected.reason.clone())
+        .unwrap_or_else(|| panic!("the call is refused on the rejected arm: {sent:?}"));
+
+    assert!(reason.contains("could not be paused"), "the reason is the hold: {reason}");
+    assert!(
+        !reason.contains("no tool named"),
+        "and never the roster's sentence, which is false here: {reason}"
+    );
+}
+
+/// A native exec whose ganja tool is **not** on this request's roster keeps
+/// D550's typed refusal — a turn not offering `bash` does not run a shell
+/// because the server asked for one.
+///
+/// The roster is the only thing standing between this exec and a bridged
+/// shell, and the harness is what makes that observable: the same frame
+/// against a roster holding `bash` pauses the Run and emits a
+/// `ToolCallStart`, which the second half asserts, so the absence in the
+/// first half is a measurement of the gate rather than of the harness.
+#[tokio::test]
+async fn a_native_exec_whose_tool_is_not_offered_keeps_the_typed_refusal() {
+    let readonly = vec![crate::tool::ToolDefinition {
+        name: "read".to_owned(),
+        description: "Reads a file.".to_owned(),
+        schema: serde_json::json!({ "type": "object" }),
+    }];
+
+    let (events, sent) = bridged_exec(shell_stream_framed(5), readonly).await;
+    assert!(
+        !events.iter().any(|event| matches!(event, ProviderEvent::ToolCallStart { .. })),
+        "a tool this turn does not offer is not run because the server asked: {events:?}"
+    );
     assert!(
         sent.iter()
             .filter_map(|message| message.exec_response.as_option())
             .filter_map(|response| response.shell_stream.as_option())
             .any(|event| event.rejected.is_set()),
         "the streamed kind's own rejected event, exactly as before the bridge"
+    );
+
+    let (offered, answered) = bridged_exec(shell_stream_framed(5), roster()).await;
+    assert!(
+        offered.iter().any(|event| matches!(
+            event,
+            ProviderEvent::ToolCallStart { name, .. } if name == "bash"
+        )),
+        "and the same exec against a roster that does offer bash is bridged: {offered:?}"
+    );
+    assert!(
+        !answered
+            .iter()
+            .filter_map(|message| message.exec_response.as_option())
+            .any(|response| response.shell_stream.is_set()),
+        "which answers nothing on the wire until the engine has run it: {answered:?}"
     );
 }
 

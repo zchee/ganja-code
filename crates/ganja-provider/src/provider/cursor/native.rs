@@ -149,10 +149,16 @@ pub(super) fn redirect(args: &decode::ExecArgs, roster: &[String]) -> Option<Bri
     };
 
     match args {
-        // Cursor's `offset` is a 1-indexed line and so is ganja's, so both
-        // members pass straight through rather than being re-based.
+        // Both members pass through unchanged; cursor's own indexing is not
+        // measured by the recording, so nothing here re-bases them. A
+        // *negative* offset is dropped rather than passed on: `read`'s own
+        // `offset` is an unsigned line number, so `-3` reaches its
+        // deserializer as "invalid type: integer `-3`" and the model reads a
+        // broken tool where it asked for a window that does not exist. Absent
+        // is what this build has to say about that window.
         decode::ExecArgs::Read { path, offset, limit }
         | decode::ExecArgs::RedactedRead { path, offset, limit } => {
+            let offset = offset.filter(|line| *line >= 0);
             let mut input = serde_json::json!({ "filePath": path });
             if let Some(offset) = offset {
                 input["offset"] = serde_json::json!(offset);
@@ -196,11 +202,20 @@ pub(super) fn redirect(args: &decode::ExecArgs, roster: &[String]) -> Option<Bri
 
             bridged("grep", input, Answer::Grep { pattern: pattern.clone(), path: path.clone() })
         }
-        decode::ExecArgs::Ls { path } => bridged(
+        // Only an absolute path, and [`listable`] says why: `glob` answers
+        // with absolute paths and [`tree`] builds the listing by stripping
+        // the directory off each of them, so a relative or absent path
+        // matches nothing and would answer an empty directory the model
+        // could not tell from a real one. Such an exec keeps D550's typed
+        // rejection, under [`ABSOLUTE_LISTING`] rather than the kind-level
+        // sentence — ganja does list directories, and saying it does not
+        // would be the falsehood this table exists to avoid.
+        decode::ExecArgs::Ls { path } if listable(path) => bridged(
             "glob",
             serde_json::json!({ "pattern": LISTING, "path": path }),
             Answer::Ls { path: path.clone() },
         ),
+        decode::ExecArgs::Ls { .. } => None,
         decode::ExecArgs::Write { path, file_text } => bridged(
             "write",
             serde_json::json!({ "filePath": path, "content": file_text }),
@@ -239,6 +254,46 @@ pub(super) fn redirect(args: &decode::ExecArgs, roster: &[String]) -> Option<Bri
 /// is why the tree it fills says `children_were_processed = false` rather than
 /// claiming a walk it did not do.
 const LISTING: &str = "{*,*/*}";
+
+/// Whether an `ls_args` path is one this build can turn into a listing.
+///
+/// Absolute or nothing: [`tree`] matches `glob`'s absolute output against this
+/// path, so anything else describes no directory the two ends can agree on.
+fn listable(path: &str) -> bool {
+    path.starts_with('/')
+}
+
+/// What a listing this build will not redirect is refused with.
+///
+/// Names the requirement rather than the kind, because the kind-level sentence
+/// ("ganja does not run ls_args for a provider") would be false here: ganja
+/// lists directories, and this one only under a path both ends can name the
+/// same way.
+pub(super) const ABSOLUTE_LISTING: &str = "ganja lists an absolute path: its listing answers with absolute paths, and a relative one \
+     names no directory those entries could be matched against.";
+
+/// What a listing whose entries lie somewhere else is answered with.
+///
+/// Not an empty directory: a `glob` that found files and put none of them
+/// under the path that was asked about has answered about a *different*
+/// directory, and reporting that as "nothing here" is a fact this build did
+/// not measure. The model can act on the distinction; it cannot act on a
+/// silence.
+const LISTING_ELSEWHERE: &str = "ganja's listing answered with entries under a different directory than the one asked \
+     about, so nothing it found describes this path.";
+
+/// Whether a refused redirect has a sentence of its own — the arguments being
+/// the reason rather than the kind.
+///
+/// Consulted only where [`redirect`] returned [`None`], and spelled beside the
+/// arm that refuses so the two cannot drift: the predicate is [`listable`] on
+/// both sides.
+pub(super) fn argument_refusal(args: &decode::ExecArgs) -> Option<&'static str> {
+    match args {
+        decode::ExecArgs::Ls { path } if !listable(path) => Some(ABSOLUTE_LISTING),
+        _ => None,
+    }
+}
 
 /// A count as the wire's `int32`, saturating rather than wrapping.
 fn clamped(count: usize) -> i32 {
@@ -513,12 +568,20 @@ fn parse_matches(output: &str) -> Vec<proto::GrepFileMatch> {
 /// `ls_result = 8`, built from the `glob` listing [`LISTING`] asked for.
 fn ls_result(path: &str, outcome: &Outcome) -> proto::LsResult {
     match outcome {
-        Outcome::Ran { output, .. } => proto::LsResult {
-            success: buffa::MessageField::some(proto::LsSuccess {
-                directory_tree_root: buffa::MessageField::some(tree(path, output)),
+        Outcome::Ran { output, .. } => match tree(path, output) {
+            Some(root) => proto::LsResult {
+                success: buffa::MessageField::some(proto::LsSuccess {
+                    directory_tree_root: buffa::MessageField::some(root),
+                    ..Default::default()
+                }),
                 ..Default::default()
-            }),
-            ..Default::default()
+            },
+            None => proto::LsResult {
+                error: buffa::MessageField::some(
+                    proto::LsError::default().with_path(path).with_error(LISTING_ELSEWHERE),
+                ),
+                ..Default::default()
+            },
         },
         Outcome::Failed(error) => proto::LsResult {
             error: buffa::MessageField::some(
@@ -535,18 +598,29 @@ fn ls_result(path: &str, outcome: &Outcome) -> proto::LsResult {
     }
 }
 
-/// One directory level, from the absolute paths `glob` listed.
+/// One directory level, from the absolute paths `glob` listed — or [`None`]
+/// when the listing describes somewhere else.
 ///
 /// A path with one component left under `path` is a file in it; one with two
 /// names a child directory. Everything deeper, and the tool's own "No files
 /// found" and truncation notes, are passed over — a line that is not a path
 /// under the directory asked about has nothing to contribute to a tree of it.
-fn tree(path: &str, output: &str) -> proto::LsDirectoryTreeNode {
+///
+/// **An empty directory and a listing of somewhere else are different
+/// answers.** `glob` says "No files found" for the first, which is no path at
+/// all and leaves the tree honestly empty; the second is absolute paths that
+/// simply do not lie under `root`, and answering *that* with an empty
+/// directory would report a fact nobody established. So a listing holding
+/// absolute paths of which none matched is [`None`], which
+/// [`ls_result`] renders as the kind's own error arm.
+fn tree(path: &str, output: &str) -> Option<proto::LsDirectoryTreeNode> {
     let root = path.trim_end_matches('/');
     let mut files: Vec<String> = Vec::new();
     let mut directories: Vec<String> = Vec::new();
+    let mut listed = false;
 
     for line in output.lines() {
+        listed |= line.starts_with('/');
         let Some(relative) = line.strip_prefix(root).and_then(|rest| rest.strip_prefix('/')) else {
             continue;
         };
@@ -562,7 +636,11 @@ fn tree(path: &str, output: &str) -> proto::LsDirectoryTreeNode {
         }
     }
 
-    proto::LsDirectoryTreeNode {
+    if listed && files.is_empty() && directories.is_empty() {
+        return None;
+    }
+
+    Some(proto::LsDirectoryTreeNode {
         abs_path: Some(root.to_owned()),
         children_dirs: directories
             .into_iter()
@@ -582,7 +660,7 @@ fn tree(path: &str, output: &str) -> proto::LsDirectoryTreeNode {
         // between an answer and a claim.
         children_were_processed: Some(false),
         ..Default::default()
-    }
+    })
 }
 
 /// `write_result = 3`.

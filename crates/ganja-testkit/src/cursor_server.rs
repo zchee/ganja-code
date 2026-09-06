@@ -27,14 +27,16 @@
 //!   `crates/ganja-core/tests/cursor_bridge.rs`'s first test, over the same
 //!   reqwest/hyper stack the wire uses.
 //!
-//! A [`Step`] that asks — a context exec, an `mcp_args` exec, any other exec,
-//! a kv get or set — **waits** for the client's answer on the still-open
-//! request body before the script moves on, and records it decoded. Answers
-//! are matched by `id` rather than by arrival order, because the live server
-//! issues concurrent execs (two `grep_args` within 5 ms in the recording at
+//! A [`Step`] that asks — a context exec, an `mcp_args` exec, any other exec —
+//! **waits** for the client's answer on the still-open request body before the
+//! script moves on, and records it decoded. Answers are matched by `id` rather
+//! than by arrival order, because the live server issues concurrent execs (two
+//! `grep_args` within 5 ms in the recording at
 //! `crates/ganja-provider/tests/fixtures/cursor-mcp-tools-probe.txt`) and a
-//! bridge that assumed one outstanding exec at a time would be wrong about
-//! the thing this fixture exists to prove.
+//! bridge that assumed one outstanding exec at a time would be wrong about the
+//! thing this fixture exists to prove. [`Step::Batch`] is what actually puts
+//! two in flight at once; a lone [`Step::Exec`] settles before the next frame
+//! is written, so the id-matching has nothing to disambiguate.
 //!
 //! `client_heartbeat = 7` frames are counted rather than recorded, so a test
 //! can assert the run-level cadence without every other assertion having to
@@ -92,29 +94,31 @@ pub enum Step {
         /// every kind but `shell_stream`, which is several.
         responses: usize,
     },
-    /// One kv ask, on its own channel: no `stream_close`, and the answer is a
-    /// `KvResponse` matched by `id`.
-    Kv(proto::KvRequest),
+    /// Several execs written **back-to-back**, then answered in whatever order
+    /// the client answers them.
+    ///
+    /// The live server issues concurrent execs — two `grep_args` within 5 ms in
+    /// the recording — so a bridge that assumed one outstanding exec at a time
+    /// would be wrong about the thing this fixture exists to prove. A
+    /// sequential [`Step::Exec`] cannot replay that: it blocks on its own
+    /// answer before the next frame is written, so nothing is ever in flight
+    /// twice and [`Inbox`]'s id-matching never has two candidates to choose
+    /// between. This is the step that does.
+    ///
+    /// Built by [`Step::batch`], which is what fixes each member's response
+    /// count.
+    Batch(Vec<(Box<proto::ExecRequest>, usize)>),
     /// A `text_delta`.
     Text(String),
-    /// A `thinking_delta`.
-    Thinking(String),
-    /// The run-level `heartbeat = 13`, which is the server's, not the
-    /// client's.
-    Heartbeat,
     /// `turn_ended = 14`.
     TurnEnded,
-    /// The Connect EndStream frame that closes the response: [`None`] for a
-    /// clean end, [`Some`] for an in-body failure.
-    EndStream(Option<Failure>),
-}
-
-/// An in-body Connect failure, the shape cursor's server really sends one in.
-pub struct Failure {
-    /// The Connect error code, e.g. `unavailable`.
-    pub code: String,
-    /// Its human half.
-    pub message: String,
+    /// The Connect EndStream frame that closes the response, cleanly.
+    ///
+    /// No failure payload: an in-body Connect verdict is a *wire* fact rather
+    /// than a bridge one, and it is measured where it can be measured against
+    /// the redaction that has to survive it — `crates/ganja-core/tests/secrets_env.rs`'s
+    /// cursor arm, over a real socket, on both of that wire's failure paths.
+    EndStream,
 }
 
 impl Step {
@@ -192,6 +196,31 @@ impl Step {
 
         self
     }
+
+    /// Several execs as one [`Step::Batch`], written together.
+    ///
+    /// Takes whole [`Step::Exec`]s rather than bare requests so a batch is
+    /// spelled with the same builders a lone exec is — `Step::batch(vec![
+    /// Step::mcp(1, ..), Step::read(2, ..)])` — and so each member keeps its
+    /// own response count.
+    ///
+    /// # Panics
+    ///
+    /// A member that is not an exec, which is a fixture bug rather than a
+    /// server behaviour: nothing else has an `id` to match an answer by, and
+    /// writing a `text_delta` inside a batch is just writing it before one.
+    #[must_use]
+    pub fn batch(steps: Vec<Self>) -> Self {
+        Self::Batch(
+            steps
+                .into_iter()
+                .map(|step| match step {
+                    Self::Exec { request, responses } => (request, responses),
+                    _ => panic!("a batch holds execs; every other step is written on its own"),
+                })
+                .collect(),
+        )
+    }
 }
 
 /// What one Run stream does, in order.
@@ -222,30 +251,41 @@ impl Script {
     /// finished turn earns, most often.
     #[must_use]
     pub fn finished() -> Self {
-        Self::new().then(Step::TurnEnded).then(Step::EndStream(None))
+        Self::new().then(Step::TurnEnded).then(Step::EndStream)
     }
 }
 
 /// One thing the client sent, decoded.
 ///
 /// `client_heartbeat` frames are counted in [`CursorServer::heartbeats`]
-/// rather than landing here.
+/// rather than landing here, and everything else a client writes — kv answers,
+/// the `stream_close` that ends each exec — reaches [`Inbox`], where the steps
+/// waiting on it can claim it. Only what a test *asserts about* is recorded,
+/// so a variant here is a variant some accessor reads.
 #[derive(Clone, Debug)]
 pub enum Recorded {
     /// The opening frame of a Run, with the declared tool roster on it.
     RunRequest(Box<proto::RunRequest>),
     /// An exec answer of any kind.
     ExecResponse(Box<proto::ExecResponse>),
-    /// A kv answer.
-    KvResponse(Box<proto::KvResponse>),
-    /// The control channel: a `stream_close`, or a `throw`.
-    ExecControl(Box<proto::ExecControl>),
 }
 
 /// The endpoint, and everything it saw.
 pub struct CursorServer {
     base_url: String,
     state: Arc<State>,
+    /// The accept loop, ended when this server is dropped. Held rather than
+    /// detached because a test binary that runs several of these — a plain
+    /// `cargo test`, where nextest's process-per-test does not apply — would
+    /// otherwise leave every one of them bound and accepting for the life of
+    /// the process.
+    accepting: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for CursorServer {
+    fn drop(&mut self) {
+        self.accepting.abort();
+    }
 }
 
 /// Shared between the accept loop and every reader task.
@@ -276,19 +316,19 @@ impl CursorServer {
         let state = Arc::new(State::default());
         let served = Arc::new(Mutex::new(std::collections::VecDeque::from(scripts)));
 
-        let accepting = Arc::clone(&state);
-        tokio::spawn(async move {
+        let recording = Arc::clone(&state);
+        let accepting = tokio::spawn(async move {
             loop {
                 let Ok((socket, _)) = listener.accept().await else {
                     return;
                 };
-                let state = Arc::clone(&accepting);
+                let state = Arc::clone(&recording);
                 let served = Arc::clone(&served);
                 tokio::spawn(async move { serve_one(socket, &state, &served).await });
             }
         });
 
-        Self { base_url: format!("http://{address}"), state }
+        Self { base_url: format!("http://{address}"), state, accepting }
     }
 
     /// Where a wire is pointed at this server.
@@ -391,6 +431,33 @@ async fn serve_one(
         return;
     }
     if head.contains("/Run") {
+        // The whole fixture reads the request body as HTTP chunked transfer
+        // encoding, because that is what a body of unknown length is framed as
+        // and a held-open Run body has no length. Nothing checks that
+        // downstream: `next_chunk` would read a protobuf byte as the front of a
+        // hex size line, fail to parse it, and return `None` for the rest of
+        // the connection — so a client that switched framing would present as
+        // every asking step timing out at once, twenty seconds apart, with
+        // nothing in any message naming the cause. This is one line, and it
+        // turns that into a sentence.
+        if !chunked(&head) {
+            let complaint = "this fixture de-chunks the request body, and this Run's head \
+                             declared no `transfer-encoding: chunked`";
+            let _ = socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 400 Bad Request\r\nconnection: close\r\n\
+                         content-type: text/plain\r\ncontent-length: {}\r\n\r\n{complaint}",
+                        complaint.len(),
+                    )
+                    .as_bytes(),
+                )
+                .await;
+            let _ = socket.flush().await;
+
+            return;
+        }
+
         let script = {
             let mut queue = served.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             queue.pop_front().unwrap_or_else(Script::finished)
@@ -452,7 +519,7 @@ async fn serve_run(socket: tokio::net::TcpStream, script: Script, state: &Arc<St
 
     let draining = Arc::clone(&inbox);
     let recording = Arc::clone(state);
-    tokio::spawn(async move { drain_body(reader, &draining, &recording).await });
+    let reading = tokio::spawn(async move { drain_body(reader, &draining, &recording).await });
 
     if writer
         .write_all(
@@ -466,6 +533,17 @@ async fn serve_run(socket: tokio::net::TcpStream, script: Script, state: &Arc<St
         return;
     }
     let _ = writer.flush().await;
+
+    // A Run begins with the client's opening frame, and the tool roster a test
+    // reads through `declared_rosters` rides on it. Waiting for it here is what
+    // makes ending the reader below safe: a script with no asking step at all —
+    // `Script::finished`, which is what the title one-shot gets — would
+    // otherwise write its whole response and close the reader before that frame
+    // had been decoded, and the roster would go missing on a race rather than
+    // on a behaviour.
+    if inbox.claim("run request", |message| message.run_request.is_set()).await.is_err() {
+        return;
+    }
 
     for step in script.0 {
         if run_step(step, &mut writer, &inbox).await.is_err() {
@@ -481,6 +559,13 @@ async fn serve_run(socket: tokio::net::TcpStream, script: Script, state: &Arc<St
     // to can actually finish.
     let _ = writer.write_all(b"0\r\n\r\n").await;
     let _ = writer.flush().await;
+
+    // And now end the reader, so both halves drop and the client's connection
+    // gets a FIN rather than being held half-open until the process exits.
+    // Safe here and only here: every asking step claimed its answers before the
+    // script advanced, so nothing a test asserts about arrives after this
+    // point.
+    reading.abort();
 }
 
 /// One step, written and — where it asks — waited on.
@@ -513,48 +598,20 @@ async fn run_step(
                 .await?;
         }
         Step::Exec { request, responses } => {
-            let id = request.id;
-
-            write_server_message(
-                writer,
-                proto::ServerMessage {
-                    exec_request: MessageField::some(*request),
-                    ..Default::default()
-                },
-            )
-            .await?;
-
-            for _ in 0..responses {
-                inbox
-                    .claim("exec answer", |message| {
-                        message.exec_response.as_option().is_some_and(|answer| answer.id == id)
-                    })
-                    .await?;
-            }
-            inbox
-                .claim("exec stream_close", |message| {
-                    message.exec_control.as_option().is_some_and(|control| {
-                        control.stream_close.as_option().is_some_and(|close| close.id == id)
-                            || control.throw.as_option().is_some_and(|thrown| thrown.id == id)
-                    })
-                })
-                .await?;
+            let id = write_exec(writer, *request).await?;
+            settle_exec(inbox, id, responses).await?;
         }
-        Step::Kv(request) => {
-            let id = request.id;
-            write_server_message(
-                writer,
-                proto::ServerMessage {
-                    kv_request: MessageField::some(request),
-                    ..Default::default()
-                },
-            )
-            .await?;
-            inbox
-                .claim("kv answer", |message| {
-                    message.kv_response.as_option().is_some_and(|answer| answer.id == id)
-                })
-                .await?;
+        Step::Batch(execs) => {
+            // Every request first, so they really are in flight together...
+            let mut outstanding = Vec::with_capacity(execs.len());
+            for (request, responses) in execs {
+                outstanding.push((write_exec(writer, *request).await?, responses));
+            }
+            // ...and only then the answers, which `Inbox` matches by id, so the
+            // client may answer them in either order.
+            for (id, responses) in outstanding {
+                settle_exec(inbox, id, responses).await?;
+            }
         }
         Step::Text(text) => {
             write_update(
@@ -564,29 +621,6 @@ async fn run_step(
                         text: Some(text),
                         ..Default::default()
                     }),
-                    ..Default::default()
-                },
-            )
-            .await?;
-        }
-        Step::Thinking(text) => {
-            write_update(
-                writer,
-                proto::Update {
-                    thinking_delta: MessageField::some(proto::ThinkingDelta {
-                        text: Some(text),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-            )
-            .await?;
-        }
-        Step::Heartbeat => {
-            write_update(
-                writer,
-                proto::Update {
-                    heartbeat: MessageField::some(proto::Heartbeat::default()),
                     ..Default::default()
                 },
             )
@@ -602,17 +636,49 @@ async fn run_step(
             )
             .await?;
         }
-        Step::EndStream(failure) => {
-            let payload = match failure {
-                None => serde_json::json!({}),
-                Some(Failure { code, message }) => {
-                    serde_json::json!({"error": {"code": code, "message": message}})
-                }
-            };
-            let body = serde_json::to_vec(&payload).expect("a JSON object serializes");
+        Step::EndStream => {
+            let body =
+                serde_json::to_vec(&serde_json::json!({})).expect("a JSON object serializes");
             write_chunk(writer, &envelope(END_STREAM, &body)).await?;
         }
     }
+
+    Ok(())
+}
+
+/// Writes one exec and hands back the `id` its answers will carry.
+async fn write_exec(
+    writer: &mut tokio::io::WriteHalf<tokio::net::TcpStream>,
+    request: proto::ExecRequest,
+) -> std::io::Result<Option<u32>> {
+    let id = request.id;
+    write_server_message(
+        writer,
+        proto::ServerMessage { exec_request: MessageField::some(request), ..Default::default() },
+    )
+    .await?;
+
+    Ok(id)
+}
+
+/// Waits for one exec's answers and the `stream_close` that ends it, refused
+/// or served.
+async fn settle_exec(inbox: &Inbox, id: Option<u32>, responses: usize) -> std::io::Result<()> {
+    for _ in 0..responses {
+        inbox
+            .claim("exec answer", |message| {
+                message.exec_response.as_option().is_some_and(|answer| answer.id == id)
+            })
+            .await?;
+    }
+    inbox
+        .claim("exec stream_close", |message| {
+            message.exec_control.as_option().is_some_and(|control| {
+                control.stream_close.as_option().is_some_and(|close| close.id == id)
+                    || control.throw.as_option().is_some_and(|thrown| thrown.id == id)
+            })
+        })
+        .await?;
 
     Ok(())
 }
@@ -810,14 +876,14 @@ fn file(message: &proto::ClientMessage, recording: &State) {
         return;
     }
 
+    // Only what an accessor reads. A kv answer and the `stream_close` that
+    // ends an exec both still reach [`Inbox`] — that is what the steps waiting
+    // on them claim — but nothing asserts *about* them, and a recorded variant
+    // no test can name is a fixture path that has never run.
     let entry = if let Some(run) = message.run_request.as_option() {
         Recorded::RunRequest(Box::new(run.clone()))
     } else if let Some(answer) = message.exec_response.as_option() {
         Recorded::ExecResponse(Box::new(answer.clone()))
-    } else if let Some(answer) = message.kv_response.as_option() {
-        Recorded::KvResponse(Box::new(answer.clone()))
-    } else if let Some(control) = message.exec_control.as_option() {
-        Recorded::ExecControl(Box::new(control.clone()))
     } else {
         return;
     };
@@ -860,6 +926,17 @@ async fn read_head(socket: &mut tokio::net::TcpStream) -> Option<String> {
     Some(String::from_utf8_lossy(&head).into_owned())
 }
 
+/// Whether the head declares the chunked transfer encoding this fixture's
+/// body reader assumes.
+fn chunked(head: &str) -> bool {
+    head.lines().any(|line| {
+        line.split_once(':').is_some_and(|(name, value)| {
+            name.trim().eq_ignore_ascii_case("transfer-encoding")
+                && value.to_ascii_lowercase().contains("chunked")
+        })
+    })
+}
+
 /// `content-length`, when the head declares one.
 fn content_length(head: &str) -> Option<usize> {
     head.lines().find_map(|line| {
@@ -870,10 +947,24 @@ fn content_length(head: &str) -> Option<usize> {
 
 /// A JSON object as the `McpArgs.args` entry list the server really sends.
 ///
-/// The values go through [`value::encode`] — the wire lane's own outbound
-/// encoder — rather than a second copy of it here. A fixture that encoded
-/// arguments its own way could pass while the shipped encoder was wrong about
-/// the same shape, which is the one thing a mock server must not be able to do.
+/// The values go through [`value::encode`] rather than a second copy of it
+/// here — but that buys **less** than symmetry usually does, and the difference
+/// is worth stating. `value::encode` has no shipped caller: the roster declares
+/// on `input_schema_json = 6` alone, so nothing outside tests encodes a
+/// `JsonValue` at all, and these bytes are therefore the exact mirror image of
+/// the decoder they are fed to. Transposing `JsonStruct`'s and `JsonList`'s
+/// field numbers would leave this fixture, its round-trip test and every
+/// bridged-call assertion green, and break only on the first live call carrying
+/// a nested argument object.
+///
+/// Nor is there a recording to diff against: the live probe declared an
+/// argument-less tool, so `args = 2` was **absent** on all five runs
+/// (`crates/ganja-provider/tests/fixtures/cursor-mcp-tools-probe.txt`). The
+/// argument encoding this fixture exercises is unmeasured against cursor's
+/// server. What pins it to the wire instead of to itself is
+/// `cursor/value_tests.rs`'s `a_nested_value_encodes_the_bytes_the_descriptor_numbers_spell`,
+/// which asserts one nested shape's bytes against the descriptor's own field
+/// numbers.
 ///
 /// Anything but an object becomes one entry keyed `value`, which is what the
 /// server would have to do with a bare scalar too.

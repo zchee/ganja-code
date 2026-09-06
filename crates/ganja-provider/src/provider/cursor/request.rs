@@ -304,6 +304,18 @@ pub(super) fn context_answer(
 /// with nothing between — the streamed kind's shape for "it did not run",
 /// where a served one would have written stdout events first.
 pub(super) fn refusal_answer(ask: &decode::ExecAsk) -> Vec<Vec<u8>> {
+    let reason = refusal_reason(&ask.kind);
+
+    refusal_answer_because(ask, &reason)
+}
+
+/// The same, under a reason of the caller's own.
+///
+/// For a refusal that is about *this exec's arguments* rather than about its
+/// kind: [`REFUSAL`] says ganja does not run the kind at all, which is a
+/// falsehood when the kind is one this build serves and only these arguments
+/// are unusable ([`super::native::argument_refusal`]).
+pub(super) fn refusal_answer_because(ask: &decode::ExecAsk, reason: &str) -> Vec<Vec<u8>> {
     tracing::debug!(
         provider = ID,
         exec = ask.id,
@@ -314,8 +326,7 @@ pub(super) fn refusal_answer(ask: &decode::ExecAsk) -> Vec<Vec<u8>> {
     );
 
     let closed = stream_close(ask.id);
-    let reason = refusal_reason(&ask.kind);
-    let refused = match rejection(ask, &reason) {
+    let refused = match rejection(ask, reason) {
         Some(response) => proto::ClientMessage {
             exec_response: buffa::MessageField::some(response),
             ..Default::default()
@@ -324,7 +335,7 @@ pub(super) fn refusal_answer(ask: &decode::ExecAsk) -> Vec<Vec<u8>> {
             exec_control: buffa::MessageField::some(proto::ExecControl {
                 throw: buffa::MessageField::some(proto::ExecThrow {
                     id: ask.id,
-                    error: Some(reason),
+                    error: Some(reason.to_owned()),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -407,7 +418,10 @@ fn rejection(ask: &decode::ExecAsk, reason: &str) -> Option<proto::ExecResponse>
         decode::ExecArgs::Mcp(call) => {
             response.mcp_result = buffa::MessageField::some(proto::McpResult {
                 rejected: buffa::MessageField::some(
-                    proto::McpRejected::default().with_reason(mcp_refusal_reason(&call.name)),
+                    // `called()` and not `name`: the roster is matched under
+                    // the declaration's own `tool_name`, so naming the other
+                    // field here would refuse one tool by another's name.
+                    proto::McpRejected::default().with_reason(mcp_refusal_reason(call.called())),
                 ),
                 ..Default::default()
             });
@@ -467,6 +481,18 @@ const REFUSAL: &str = "ganja does not run {kind} for a provider: its tools run f
 /// (**D552**, [`super::bridge`]).
 const MCP_REFUSAL: &str = "no tool named {name} is served by this client";
 
+/// What a call this client **does** serve is refused with when the wire cannot
+/// hold its Run open, `{name}` substituted.
+///
+/// [`MCP_REFUSAL`]'s sentence would be false here: the tool is on the roster,
+/// and what is missing is the pause. A wire with no key to park under is a
+/// fixture replay or a request carrying no message to key on, so this arm is
+/// reachable by no shipped session — but a false sentence is not made harmless
+/// by being rare, and the reason a loop reads has to be the reason that holds
+/// (**D552**).
+const UNBRIDGEABLE: &str = "ganja serves {name}, but this request could not be paused to run it: \
+                            the tool's answer would have had nowhere to go";
+
 /// [`REFUSAL`] with the kind in it.
 fn refusal_reason(kind: &str) -> String {
     REFUSAL.replace("{kind}", kind)
@@ -475,6 +501,11 @@ fn refusal_reason(kind: &str) -> String {
 /// [`MCP_REFUSAL`] with the called tool's name in it.
 pub(super) fn mcp_refusal_reason(name: &str) -> String {
     MCP_REFUSAL.replace("{name}", name)
+}
+
+/// [`UNBRIDGEABLE`] with the called tool's name in it.
+pub(super) fn unbridgeable_reason(name: &str) -> String {
+    UNBRIDGEABLE.replace("{name}", name)
 }
 
 /// The call id an MCP exec carried, for the refusal's log line — the one

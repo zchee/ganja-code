@@ -15,6 +15,12 @@
 //! than the environment, because that is where OAuth credentials live — with
 //! the renewal refused by a socket that echoes the token at it.
 //!
+//! The cursor wire earns a third pass, because it is the one wire whose
+//! credential is a value handed to it rather than a store lookup, and the one
+//! with two failure paths instead of one: an HTTP refusal like everyone else's,
+//! and a Connect EndStream verdict carried *inside a `200`*, which no HTTP
+//! status describes and which the shared refusal masking therefore never sees.
+//!
 //! One test, one binary, on purpose: it mutates process-wide environment
 //! variables, and `cargo test` runs the tests inside a binary on parallel
 //! threads.
@@ -31,7 +37,8 @@ use std::env;
 use futures::StreamExt as _;
 use ganja_core::auth::{self, AuthErrorKind, OauthCredential, RefreshOauth as _, grok};
 use ganja_core::provider::{
-    self, AnthropicProvider, ChatRequest, OpenAiProvider, Provider as _, ProviderEvent,
+    self, AnthropicProvider, ChatRequest, CredentialSource, CursorProvider, OpenAiProvider,
+    Provider as _, ProviderEvent,
 };
 use ganja_testkit::LogCapture as Capture;
 use secrecy::SecretString;
@@ -53,6 +60,17 @@ const REFRESH_CANARY: &str = "rt-test-canary-RST";
 /// where text the model wrote itself is read back into every prompt (D478).
 /// The prompt is where it belongs; a log line is not.
 const MEMORY_CANARY: &str = "mk-test-canary-OPQ";
+
+/// The token handed to the cursor wire, which is the one wire whose credential
+/// is a **value** rather than a store lookup ([`CursorProvider::at`], D552's
+/// Dv-11) — so this canary is planted by being passed, not by being exported.
+///
+/// That wire also has two failure paths where the others have one: an HTTP
+/// refusal, masked by the shared `retry::refusal`, and an in-body Connect
+/// EndStream verdict inside a `200`, which is mapped by a decoder holding no
+/// `Presented` and is masked only because the wire joins `provider::shielded`
+/// by hand. Both are driven below.
+const CURSOR_CANARY: &str = "ct-test-canary-LMN";
 
 /// Serves `responses`, one per connection, then closes.
 async fn serve(responses: Vec<String>) -> (String, tokio::task::JoinHandle<()>) {
@@ -78,6 +96,30 @@ async fn serve(responses: Vec<String>) -> (String, tokio::task::JoinHandle<()>) 
 /// A close-delimited response.
 fn response(status: &str, content_type: &str, body: &str) -> String {
     format!("HTTP/1.1 {status}\r\nconnection: close\r\ncontent-type: {content_type}\r\n\r\n{body}")
+}
+
+/// One Connect EndStream frame as a response body: the flag byte, a big-endian
+/// length, then the JSON verdict.
+///
+/// This is the shape cursor's server reports a mid-stream failure in — inside a
+/// `200`, so no HTTP status ever says the turn failed and the shared refusal
+/// masking never runs on it.
+fn end_stream(verdict: &str) -> String {
+    /// The Connect EndStream flag, as the live probe recorded it.
+    const END_STREAM: u8 = 0b0000_0010;
+
+    let length = u32::try_from(verdict.len()).expect("a fixture verdict is tiny");
+    let mut frame = String::from(char::from(END_STREAM));
+    for byte in length.to_be_bytes() {
+        // A `String` is what `serve` takes, so every byte of the length prefix
+        // has to be its own UTF-8 encoding — true below 0x80 and nowhere else.
+        // A longer verdict would need a byte-bodied server, not a wider escape.
+        assert!(byte < 0x80, "an EndStream fixture verdict stays under 128 bytes");
+        frame.push(char::from(byte));
+    }
+    frame.push_str(verdict);
+
+    frame
 }
 
 #[tokio::test]
@@ -280,6 +322,86 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
         )
     };
 
+    // The same drill for the cursor wire, which needs its own arm for two
+    // reasons the other providers do not have. Its credential is handed in as a
+    // *value* rather than read from the store or the environment, so no planted
+    // variable reaches it; and its turn can fail two ways — an HTTP refusal like
+    // everyone else's, and a Connect EndStream verdict inside a `200`, which is
+    // mapped by a decoder that holds no `Presented` and is masked only because
+    // the wire joins `provider::shielded` by hand. A server that quotes the
+    // token it rejected is a real shape on both, so both are driven here.
+    let cursor_rendered = {
+        let (cursor_url, _cursor_server) = serve(vec![
+            // First turn: the HTTP refusal. `unauthenticated` is not in
+            // `RETRYABLE_STATUS` and this wording matches none of the transient
+            // message patterns, so it consumes exactly one connection.
+            response(
+                "401 Unauthorized",
+                "application/json",
+                &format!(
+                    r#"{{"error":{{"code":"unauthenticated","message":"presented token {CURSOR_CANARY} is not valid"}}}}"#
+                ),
+            ),
+            // Second turn: the same refusal where cursor really puts one — in
+            // the body of a success, as the frame that ends the stream.
+            response(
+                "200 OK",
+                "application/connect+proto",
+                &end_stream(&format!(
+                    r#"{{"error":{{"code":"unauthenticated","message":"token {CURSOR_CANARY} rejected"}}}}"#
+                )),
+            ),
+        ])
+        .await;
+
+        // `at` rather than the store: this arm has no code path to `auth.json`
+        // at all, which is the same structural property `cursor_bridge.rs`
+        // rests on.
+        let cursor = CursorProvider::at(
+            &cursor_url,
+            CredentialSource::key(CURSOR_CANARY).expect("a non-blank token"),
+        )
+        .expect("loopback may carry a token");
+        let request = ChatRequest {
+            turn_start: 0,
+            effort_options: Default::default(),
+            model: "gpt-5.3-codex".to_owned(),
+            system: None,
+            messages: vec![ganja_core::protocol::Message::user("hello")],
+            tools: Vec::new(),
+        };
+
+        let Err(refusal) = cursor.stream(request.clone(), CancellationToken::new()).await else {
+            panic!("a 401 is not answerable");
+        };
+        assert!(
+            refusal.to_string().contains("[redacted]"),
+            "cursor's HTTP refusal should mask the token it echoed: {refusal}"
+        );
+
+        // The in-body verdict arrives as an event on an otherwise successful
+        // stream, which is the path with no HTTP status to mask it.
+        let events: Vec<ProviderEvent> = cursor
+            .stream(request, CancellationToken::new())
+            .await
+            .expect("a 200 opens a stream whatever its body ends up saying")
+            .collect()
+            .await;
+        let failure = events
+            .iter()
+            .find_map(|event| match event {
+                ProviderEvent::Failed(error) => Some(error),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the EndStream verdict fails the turn, got {events:?}"));
+        assert!(
+            failure.to_string().contains("[redacted]"),
+            "and the in-body verdict is masked by the same rule: {failure}"
+        );
+
+        format!("{cursor:?} {refusal} {refusal:?} {failure} {failure:?}")
+    };
+
     // The same drill for the newest text that reaches a prompt: a project's
     // own memory. It is composed from a file the model wrote, so it may hold
     // anything the model was ever shown — and the injection path traces the
@@ -327,6 +449,10 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
         // And the memory injection's own, so the sweep below is searching a
         // log that really did have the chance to leak what memory holds.
         "the project's memory joined the prompt",
+        // `provider::shielded`'s own line, which is the only thing that traces
+        // an in-body Connect verdict: without it the cursor half would be
+        // searching an empty space too.
+        "the turn died mid-stream",
     ] {
         assert!(
             logged.contains(line),
@@ -334,7 +460,7 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
              in it would prove nothing:\n{logged}"
         );
     }
-    for secret in [CANARY, ACCESS_CANARY, REFRESH_CANARY, MEMORY_CANARY] {
+    for secret in [CANARY, ACCESS_CANARY, REFRESH_CANARY, MEMORY_CANARY, CURSOR_CANARY] {
         assert!(!logged.contains(secret), "a credential reached the log:\n{logged}");
     }
     assert!(!rendered.contains(CANARY), "a credential reached a rendering: {rendered}");
@@ -357,6 +483,15 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
         !oauth_rendered.contains("already used") && !oauth_rendered.contains("revoked"),
         "the refused body must not travel into a message that will be logged: \
          {oauth_rendered}"
+    );
+    assert!(
+        !cursor_rendered.contains(CURSOR_CANARY),
+        "a token handed to the cursor wire reached a rendering: {cursor_rendered}"
+    );
+    assert!(
+        cursor_rendered.contains("[redacted]"),
+        "the echoed token should be masked rather than dropped, on both of \
+         cursor's failure paths: {cursor_rendered}"
     );
 
     // The store itself is the one place these do belong, and a test that

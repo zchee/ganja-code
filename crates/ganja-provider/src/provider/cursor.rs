@@ -1015,19 +1015,19 @@ fn exec(state: &mut Streaming, ask: decode::ExecAsk) -> Exec {
                     // Unreachable: `mcp` already refused an unreadable map.
                     return Exec::Answered(refused_mcp(&ask, unreadable()));
                 };
-                let name = if call.tool_name.is_empty() {
-                    call.name.clone()
-                } else {
-                    call.tool_name.clone()
-                };
-
-                (call_id, name, arguments, native::Answer::Mcp)
+                (call_id, call.called().to_owned(), arguments, native::Answer::Mcp)
             }
             Err(result) => return Exec::Answered(refused_mcp(&ask, *result)),
         },
         args => {
             let Some(bridged) = native::redirect(args, &roster) else {
-                return Exec::Answered(request::refusal_answer(&ask));
+                // A kind outside the table, or one whose tool this request is
+                // not offering, is refused for its *kind*; an exec whose own
+                // arguments are the reason says so instead.
+                return Exec::Answered(match native::argument_refusal(args) {
+                    Some(reason) => request::refusal_answer_because(&ask, reason),
+                    None => request::refusal_answer(&ask),
+                });
             };
             let Ok(call_id) = request::fresh_id() else {
                 // No id, no call the engine could answer. The typed refusal is
@@ -1040,7 +1040,22 @@ fn exec(state: &mut Streaming, ask: decode::ExecAsk) -> Exec {
     };
 
     if !bridgeable {
-        return Exec::Answered(request::refusal_answer(&ask));
+        // A call this client serves is refused for the reason that actually
+        // holds — the pause, not the roster — where every other kind keeps
+        // D550's kind-level sentence.
+        return Exec::Answered(match answer {
+            native::Answer::Mcp => refused_mcp(
+                &ask,
+                proto::McpResult {
+                    rejected: buffa::MessageField::some(
+                        proto::McpRejected::default()
+                            .with_reason(request::unbridgeable_reason(&tool)),
+                    ),
+                    ..Default::default()
+                },
+            ),
+            _ => request::refusal_answer(&ask),
+        });
     }
 
     tracing::debug!(
@@ -1059,8 +1074,9 @@ fn exec(state: &mut Streaming, ask: decode::ExecAsk) -> Exec {
         input,
         answer,
     });
-    // Restarted on every frame while a batch is in hand, so a burst the server
-    // sent together rides one step.
+    // Restarted on every bridged exec, so a burst the server sent together
+    // rides one step. Text, thinking and kv frames do not extend it: a chatty
+    // server cannot postpone the step it is waiting on.
     state.gather = Some(Instant::now() + GATHER_WINDOW);
 
     Exec::Bridged
@@ -1112,7 +1128,7 @@ fn mcp(call: &decode::McpCall, roster: &[String]) -> Result<String, Box<proto::M
     };
     debug_assert!(arguments.is_object(), "an argument map decodes to an object or to nothing");
 
-    let name = if call.tool_name.is_empty() { &call.name } else { &call.tool_name };
+    let name = call.called();
     if roster.is_empty() {
         // With nothing declared there is no roster to be missing from, and
         // `tool_not_found` carrying an empty list would state that this client
@@ -1130,7 +1146,7 @@ fn mcp(call: &decode::McpCall, roster: &[String]) -> Result<String, Box<proto::M
     if !roster.iter().any(|tool| tool == name) {
         return Err(Box::new(proto::McpResult {
             tool_not_found: buffa::MessageField::some(proto::McpToolNotFound {
-                name: Some(name.clone()),
+                name: Some(name.to_owned()),
                 available_tools: roster.to_vec(),
                 ..Default::default()
             }),

@@ -72,7 +72,7 @@ fn a_read_exec_runs_ganjas_read_and_answers_on_the_read_result() {
     assert_eq!(
         bridged.input,
         json!({ "filePath": "/repo/src/lib.rs", "offset": 12, "limit": 40 }),
-        "cursor's offset is a 1-indexed line and so is ganja's, so it passes straight through"
+        "the window passes through unchanged; nothing here re-bases it"
     );
 
     let outcome = ran_with(
@@ -120,6 +120,35 @@ fn a_read_without_a_window_reports_no_range_applied() {
             .and_then(|result| result.success.as_option())
             .and_then(|success| success.range_applied),
         Some(false)
+    );
+}
+
+/// `ReadArgs.offset` is an `int32` and `read`'s is unsigned, so a negative one
+/// is dropped rather than handed over: passed on, it fails the tool's own
+/// deserializer with "invalid type: integer `-3`", which the model reads as a
+/// broken client instead of a window that does not exist.
+#[test]
+fn a_negative_offset_is_dropped_rather_than_handed_to_a_tool_that_cannot_read_it() {
+    let bridged = redirect(
+        &decode::ExecArgs::Read { path: "/f".to_owned(), offset: Some(-3), limit: Some(10) },
+        &everything(),
+    )
+    .expect("read is on the roster");
+
+    assert_eq!(
+        bridged.input,
+        json!({ "filePath": "/f", "limit": 10 }),
+        "no offset key at all, which is what `read` reads as 'from the top'"
+    );
+    let [response] = sent(&bridged.answer, &ran("body")).try_into().expect("one result");
+    assert_eq!(
+        response
+            .read_result
+            .as_option()
+            .and_then(|result| result.success.as_option())
+            .and_then(|success| success.range_applied),
+        Some(true),
+        "the limit is still a window, and the answer says so"
     );
 }
 
@@ -382,6 +411,77 @@ fn an_ls_exec_becomes_one_glob_level_and_says_what_it_did_not_walk() {
         Some(false),
         "one glob is not a walk, and claiming otherwise would be a lie about the listing"
     );
+}
+
+/// A listing this build cannot match is **refused**, not answered empty.
+///
+/// `glob` answers with absolute paths and the tree is built by stripping the
+/// directory off each of them, so a relative path matches nothing and an
+/// absent one — which decodes to `""` — matches *everything* with the root
+/// left in front, fabricating a child directory called `/Users` and reporting
+/// zero files. Both are refused before the redirect, under a reason naming
+/// what is required rather than the kind-level "ganja does not run ls_args".
+#[test]
+fn a_listing_whose_path_is_not_absolute_is_refused_and_says_what_it_needed() {
+    for path in ["", "src", "./src", "~/repo"] {
+        let args = decode::ExecArgs::Ls { path: path.to_owned() };
+
+        assert!(
+            redirect(&args, &everything()).is_none(),
+            "a listing of {path:?} names no directory glob's own output could be matched against"
+        );
+        assert_eq!(
+            super::argument_refusal(&args),
+            Some(super::ABSOLUTE_LISTING),
+            "and the refusal names the requirement rather than the kind: {path:?}"
+        );
+    }
+
+    let absolute = decode::ExecArgs::Ls { path: "/repo".to_owned() };
+    assert!(redirect(&absolute, &everything()).is_some(), "an absolute path is still redirected");
+    assert_eq!(
+        super::argument_refusal(&absolute),
+        None,
+        "and has no argument refusal to answer with"
+    );
+}
+
+/// A listing whose entries lie somewhere else answers on the **error** arm.
+///
+/// The distinction is the whole point: `glob` says "No files found" for a
+/// directory that really is empty, which leaves the tree honestly empty, while
+/// a listing of absolute paths none of which lie under the directory asked
+/// about is a search that resolved somewhere else — and reporting *that* as an
+/// empty directory would state a fact nobody established.
+#[test]
+fn a_listing_of_a_different_directory_is_an_error_rather_than_an_empty_one() {
+    let bridged = redirect(&decode::ExecArgs::Ls { path: "/repo".to_owned() }, &everything())
+        .expect("glob is on the roster");
+
+    let elsewhere = "/somewhere/else/a.rs\n/somewhere/else/b.rs";
+    let [response] = sent(&bridged.answer, &ran(elsewhere)).try_into().expect("one result");
+    let result = response.ls_result.as_option().expect("a listing answers on ls_result");
+    assert!(
+        result.success.is_unset(),
+        "an empty directory and a listing of somewhere else are different answers: {result:?}"
+    );
+    let error = result.error.as_option().expect("the kind's own error arm");
+    assert_eq!(error.path.as_deref(), Some("/repo"), "named for the path that was asked about");
+    assert!(
+        error.error.as_deref().is_some_and(|error| error.contains("different directory")),
+        "{error:?}"
+    );
+
+    // And the case it must not swallow: a directory that really is empty.
+    let [empty] = sent(&bridged.answer, &ran("No files found")).try_into().expect("one result");
+    let tree = empty
+        .ls_result
+        .as_option()
+        .and_then(|result| result.success.as_option())
+        .and_then(|success| success.directory_tree_root.as_option())
+        .expect("an empty directory is still a directory");
+    assert_eq!(tree.num_files, Some(0));
+    assert!(tree.children_dirs.is_empty());
 }
 
 /// **AC-15, the write row.** The path and the text reach `write` under its own

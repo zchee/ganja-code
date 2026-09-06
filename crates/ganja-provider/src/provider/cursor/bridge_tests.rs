@@ -264,6 +264,73 @@ async fn a_run_nobody_resumes_is_dropped_at_the_idle_bound() {
     );
 }
 
+/// **Drop 4.** The request body closed under a held Run, so the heartbeat the
+/// keeper writes has nowhere to go and no answer ever could either.
+///
+/// The keeper is the only thing watching that channel while a Run is held —
+/// nothing else writes to it between the pause and the resume — so the *beat*
+/// failing is how this build learns the body is gone.
+#[tokio::test(start_paused = true)]
+async fn a_body_that_closes_under_a_held_run_drops_it_and_the_resume_is_told() {
+    let held = Arc::new(HeldRuns::default());
+    let paused = pause("auto", &held, "call-1").await;
+
+    // The far end of the request body goes away, which is what a server
+    // hanging up on the Run looks like from here.
+    drop(paused.answered);
+    tokio::time::sleep(super::HEARTBEAT + Duration::from_secs(1)).await;
+    settled(&held, &paused.request).await;
+
+    let resumed = answered(&paused.request, "call-1", completed("nowhere to go"));
+    assert!(
+        matches!(held.resolve(&resumed), Resolution::Dead(reason)
+            if reason.contains("closed the request body")),
+        "a resume against a closed body is told which of the four reasons it was"
+    );
+}
+
+/// The same closure a beat ahead of the keeper: the entry is still in the
+/// table, so the resume finds it, [`Entry::settle`] cannot deliver, and the
+/// turn fails **naming it** rather than reading on into a Run nobody is
+/// generating into.
+///
+/// Driven through `CursorProvider::stream` because that is where the sentence
+/// lives; the resume path returns before any credential is resolved or any
+/// socket is opened, so this reaches no network at all.
+#[tokio::test]
+async fn a_resume_whose_body_closed_under_it_fails_the_turn_rather_than_reading_on() {
+    let provider = crate::provider::cursor::CursorProvider::at(
+        "http://127.0.0.1:9",
+        crate::provider::CredentialSource::key("at-bridge-canary").expect("a non-blank token"),
+    )
+    .expect("loopback may carry a token");
+    let paused = pause("auto", &provider.held, "call-1").await;
+
+    // Closed, and resolved before the keeper's next beat notices — which is
+    // the window in which a resume can find an entry it cannot settle.
+    drop(paused.answered);
+    let resumed = answered(&paused.request, "call-1", completed("the file's contents"));
+
+    let events: Vec<ProviderEvent> = tokio::time::timeout(Duration::from_secs(10), async {
+        crate::provider::Provider::stream(&provider, resumed, CancellationToken::new())
+            .await
+            .expect("a resume answers from the table rather than from a socket")
+            .collect()
+            .await
+    })
+    .await
+    .expect("a resume that cannot be delivered fails rather than hanging");
+
+    assert!(
+        matches!(
+            events.as_slice(),
+            [ProviderEvent::Failed(error)]
+                if error.to_string().contains("closed its request body")
+        ),
+        "the turn says the answers reached nobody: {events:?}"
+    );
+}
+
 /// The heartbeat that makes a hold survivable at all: while a Run is held,
 /// something has to keep the exchange alive, and a live 25-second hold on this
 /// ping alone was measured before this was built.
