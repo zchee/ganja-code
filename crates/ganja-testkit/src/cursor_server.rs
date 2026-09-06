@@ -102,7 +102,7 @@ pub enum Step {
     /// would be wrong about the thing this fixture exists to prove. A
     /// sequential [`Step::Exec`] cannot replay that: it blocks on its own
     /// answer before the next frame is written, so nothing is ever in flight
-    /// twice and [`Inbox`]'s id-matching never has two candidates to choose
+    /// twice and `Inbox`'s id-matching never has two candidates to choose
     /// between. This is the step that does.
     ///
     /// Built by [`Step::batch`], which is what fixes each member's response
@@ -259,7 +259,7 @@ impl Script {
 ///
 /// `client_heartbeat` frames are counted in [`CursorServer::heartbeats`]
 /// rather than landing here, and everything else a client writes — kv answers,
-/// the `stream_close` that ends each exec — reaches [`Inbox`], where the steps
+/// the `stream_close` that ends each exec — reaches `Inbox`, where the steps
 /// waiting on it can claim it. Only what a test *asserts about* is recorded,
 /// so a variant here is a variant some accessor reads.
 #[derive(Clone, Debug)]

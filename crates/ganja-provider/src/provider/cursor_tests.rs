@@ -822,6 +822,46 @@ async fn a_present_server_identifier_on_our_own_call_refuses_nothing() {
     );
 }
 
+/// **AC-22**, the matching half: when a call's two spellings disagree, the
+/// bridge runs the one the *declaration* named.
+///
+/// `McpArgs` carries both `name = 1` and `tool_name = 5`, and the shipped
+/// client fills them from one declaration (`index.js@5699717`), so every
+/// recorded call has them identical and no recording can settle which of the
+/// two this build reads. [`super::cursor::decode::McpCall::called`] prefers
+/// `tool_name`. Both spellings here name a tool the roster really holds, so a
+/// reversed precedence would refuse nothing and *quietly run the other tool* —
+/// which is the failure this pins, and the one no roster-membership test can
+/// see.
+#[tokio::test]
+async fn a_call_whose_two_spellings_disagree_runs_the_one_the_declaration_named() {
+    let (events, _) = bridged_exec(
+        mcp_framed(
+            3,
+            proto::McpArgs::default()
+                .with_name("bash")
+                .with_tool_name("read")
+                .with_tool_call_id("call-1")
+                .with_provider_identifier("ganja"),
+        ),
+        roster(),
+    )
+    .await;
+
+    let called: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderEvent::ToolCallStart { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        called,
+        vec!["read"],
+        "`tool_name = 5` names the tool; `name = 1` is the fallback for a server that sent none",
+    );
+}
+
 /// **AC-23.** A `smart_mode_approval_only` preflight is a policy question, and
 /// answering it by running the tool would run a side-effecting call for one —
 /// possibly twice, since the real call follows. So it is approved and

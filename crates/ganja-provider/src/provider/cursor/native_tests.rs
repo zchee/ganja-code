@@ -367,11 +367,16 @@ fn a_refused_grep_travels_on_the_only_arm_it_has() {
     );
 }
 
-/// **AC-15, the ls row**, on a directory holding a subdirectory with a file in
-/// it and a dotfile: the files directly in it are named, the child directory
-/// is named because a file inside it showed up, and the dotfile is absent
-/// because `glob` never listed it — which is why the node says its children
-/// were **not** processed.
+/// **AC-15, the ls row**, over a listing written here: what the frame says,
+/// given lines of the shape `glob` produces — the files directly in the
+/// directory are named, and a child directory is named because a file inside
+/// it showed up, which is why the node says its children were **not**
+/// processed.
+///
+/// The listing is *chosen* rather than measured, so this pins the answer
+/// builder's field numbers and nothing about the tool. What `glob` really
+/// lists — dotfiles included — is measured against a real directory by the
+/// test below.
 #[test]
 fn an_ls_exec_becomes_one_glob_level_and_says_what_it_did_not_walk() {
     let bridged = redirect(&decode::ExecArgs::Ls { path: "/repo".to_owned() }, &everything())
@@ -384,8 +389,8 @@ fn an_ls_exec_becomes_one_glob_level_and_says_what_it_did_not_walk() {
         "one level of files, plus the files that reveal a child directory"
     );
 
-    // What `glob` answers with: absolute paths, one per line. The dotfile the
-    // walker's own defaults hid is simply not here.
+    // The shape a `glob` answer has: absolute paths, one per line. Which
+    // paths is this test's own choice.
     let output = "/repo/Cargo.toml\n/repo/README.md\n/repo/src/lib.rs\n/repo/src/main.rs";
     let [response] = sent(&bridged.answer, &ran(output)).try_into().expect("one result");
     let root = response
@@ -408,6 +413,98 @@ fn an_ls_exec_becomes_one_glob_level_and_says_what_it_did_not_walk() {
     );
     assert_eq!(
         root.children_were_processed,
+        Some(false),
+        "one glob is not a walk, and claiming otherwise would be a lie about the listing"
+    );
+}
+
+/// **AC-15, the ls row, over a real directory** — the AC's own condition, and
+/// the only form of it a change in `glob`'s behaviour can redden.
+///
+/// The test above hands the answer builder a hand-written listing, which pins
+/// the frame's field numbers and nothing about the tool: if `glob` stopped
+/// listing dotfiles, or started walking deeper than one level, that string
+/// would keep saying otherwise. So this one builds a real directory holding a
+/// file, a **dotfile**, a subdirectory with a file in it and a grandchild
+/// directory deeper still, runs the redirect's own arguments through the
+/// **real** [`ganja_tool::glob::GlobTool`], and asserts the frame that came
+/// out of what the tool actually found.
+///
+/// The dotfile **is** listed, which is measured here rather than assumed: the
+/// walker's `hidden(true)` default only applies to an entry the glob override
+/// did not match, and `{*,*/*}` is gitignore-glob syntax, where a leading `*`
+/// matches a leading dot. The one level the row promises is real too — the
+/// grandchild's file matches neither arm of the pattern, so neither it nor its
+/// directory appears anywhere in the tree.
+#[tokio::test]
+async fn an_ls_exec_over_a_real_directory_lists_what_glob_really_finds() {
+    let directory = tempfile::tempdir().expect("a temp directory");
+    let root = directory.path().to_string_lossy().into_owned();
+    std::fs::write(directory.path().join("Cargo.toml"), "[package]\n").expect("the fixture writes");
+    std::fs::write(directory.path().join(".hidden"), "a dotfile\n").expect("the fixture writes");
+    std::fs::create_dir(directory.path().join("src")).expect("the fixture makes a child");
+    std::fs::write(directory.path().join("src/lib.rs"), "// lib\n").expect("the fixture writes");
+    std::fs::create_dir(directory.path().join("src/deep")).expect("and a grandchild");
+    std::fs::write(directory.path().join("src/deep/buried.rs"), "// deep\n")
+        .expect("the fixture writes");
+
+    let bridged = redirect(&decode::ExecArgs::Ls { path: root.clone() }, &everything())
+        .expect("glob is on the roster");
+    assert_eq!(bridged.tool, "glob");
+
+    // The real tool, with the redirect's own arguments and nothing rewritten:
+    // what this asserts about is exactly what a bridged listing would run.
+    let context = ganja_tool::ToolCtx {
+        cwd: directory.path().to_path_buf(),
+        cancel: tokio_util::sync::CancellationToken::new(),
+        call_id: "call".to_owned(),
+        files: std::sync::Arc::new(ganja_tool::FileTimes::default()),
+        credentials: ganja_tool::Credentials::Unguarded,
+        spawn: None,
+        postbox: None,
+        tasks: None,
+        ask: None,
+        switch: None,
+        jobs: None,
+    };
+    let listed =
+        ganja_tool::Tool::run(&ganja_tool::glob::GlobTool, bridged.input.clone(), &context)
+            .await
+            .expect("a real directory lists");
+
+    let [response] = sent(&bridged.answer, &ran(&listed.output)).try_into().expect("one result");
+    let node = response
+        .ls_result
+        .as_option()
+        .and_then(|result| result.success.as_option())
+        .and_then(|success| success.directory_tree_root.as_option())
+        .expect("the tree");
+
+    assert_eq!(node.abs_path.as_deref(), Some(root.as_str()));
+    let files: Vec<&str> =
+        node.children_files.iter().filter_map(|file| file.name.as_deref()).collect();
+    assert_eq!(
+        files,
+        vec![".hidden", "Cargo.toml"],
+        "the files directly in it, the dotfile among them, sorted as `glob` sorts them"
+    );
+    assert_eq!(node.num_files, Some(2), "counted, not guessed");
+    assert_eq!(
+        node.children_dirs.iter().filter_map(|dir| dir.abs_path.as_deref()).collect::<Vec<_>>(),
+        vec![format!("{root}/src").as_str()],
+        "the child directory, named once because a file inside it showed up"
+    );
+    assert!(
+        !files.iter().any(|name| name.contains("lib.rs")),
+        "a file one level down is what named the directory, never a file of this one: {files:?}"
+    );
+    assert!(
+        !listed.output.contains("buried.rs"),
+        "and `{{*,*/*}}` never reached the grandchild at all: {}",
+        listed.output
+    );
+    assert_eq!(
+        node.children_were_processed,
         Some(false),
         "one glob is not a walk, and claiming otherwise would be a lie about the listing"
     );

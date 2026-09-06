@@ -29,13 +29,16 @@
 //! is what the AC-17 tests below assert, and nothing in `depgate.toml`
 //! asserts it.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::{SinkExt as _, StreamExt as _};
 use ganja_core::Engine;
 use ganja_core::permission::{Action, Permissions, Rule};
-use ganja_core::protocol::{Command, Event, PartBody, PermissionReply, ToolState};
+use ganja_core::protocol::{
+    Command, Event, FinishReason, PartBody, PartId, PermissionReply, ToolState,
+};
 use ganja_core::provider::{CredentialSource, CursorProvider};
 use ganja_core::tool::Registry;
 use ganja_testkit::cursor_server::{CursorServer, Script, Step};
@@ -239,7 +242,7 @@ fn seated(server: &CursorServer, tools: Registry, permissions: Permissions) -> E
 /// **No credential store is involved** (lead ruling, **Dv-11**): `at` takes its
 /// credential explicitly, so this suite has no code path to `auth.json` at all
 /// — structural, rather than an `XDG_DATA_HOME` redirect pointing away from it.
-/// That is also what lets this be one binary holding six tests:
+/// That is also what lets this be one binary holding eleven tests:
 /// `ganja_testkit::redirect_xdg_data_home` is `unsafe` with a documented
 /// one-test-per-binary invariant, and every other XDG-mutating binary in this
 /// tree holds exactly one test.
@@ -297,6 +300,35 @@ fn tool_parts(events: &[Event]) -> Vec<(String, ToolState)> {
             _ => None,
         })
         .collect()
+}
+
+/// The assistant's text in a drained turn, as a frontend applying the stream
+/// would hold it: one entry per `Text` part, in part order.
+///
+/// Streamed text opens as an **empty** [`Event::PartStarted`] and grows by
+/// [`Event::PartDelta`] fragments addressed by part id, so reading the parts
+/// alone finds every streamed part empty and would assert nothing. Applying
+/// the deltas is what makes this a claim about what the turn actually said.
+fn said(events: &[Event]) -> Vec<String> {
+    let mut texts: BTreeMap<PartId, String> = BTreeMap::new();
+
+    for event in events {
+        match event {
+            Event::PartStarted { part, .. } | Event::PartUpdated { part, .. } => {
+                if let PartBody::Text { text } = &part.body {
+                    texts.insert(part.id.clone(), text.clone());
+                }
+            }
+            Event::PartDelta { part_id, delta, .. } => {
+                if let Some(text) = texts.get_mut(part_id) {
+                    text.push_str(delta);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    texts.into_values().collect()
 }
 
 /// **AC-12.** The whole round trip, with nothing refusing anything: the roster
@@ -383,13 +415,21 @@ async fn a_declared_tool_the_server_calls_runs_once_and_answers_with_its_output(
     assert_eq!(text, vec!["the answer"], "the tool's own output is what went back");
 
     assert!(
-        matches!(seen.last(), Some(Event::MessageFinished { .. })),
+        matches!(seen.last(), Some(Event::MessageFinished { reason: FinishReason::Completed, .. })),
         "the turn ends in a finish, not a failure",
     );
     let parts = tool_parts(&seen);
     assert!(
         parts.iter().any(|(_, state)| matches!(state, ToolState::Completed { .. })),
         "a bridged call closes as a completed Tool part like any other, got {parts:?}",
+    );
+    // The AC's "and the text continues": what the server said *after* the tool
+    // result is the proof the turn read on past the bridged exec rather than
+    // ending on it.
+    let continued = said(&seen);
+    assert!(
+        continued.iter().any(|line| line == "found it"),
+        "the text the server sent after the tool result reached the transcript, got {continued:?}",
     );
 }
 
@@ -439,7 +479,7 @@ async fn a_call_refused_at_the_dialog_never_runs_and_goes_back_as_rejected() {
     assert!(result.success.is_unset(), "and never the failed-tool shape");
 
     assert!(
-        matches!(seen.last(), Some(Event::MessageFinished { .. })),
+        matches!(seen.last(), Some(Event::MessageFinished { reason: FinishReason::Completed, .. })),
         "the turn survives its refusal",
     );
 
@@ -511,7 +551,7 @@ async fn an_approval_preflight_is_approved_at_the_engine_without_running_anythin
         "nor leave a Tool part, which is what the transcript would show a call as",
     );
     assert!(
-        matches!(seen.last(), Some(Event::MessageFinished { .. })),
+        matches!(seen.last(), Some(Event::MessageFinished { reason: FinishReason::Completed, .. })),
         "and the turn finishes normally",
     );
 }
@@ -578,7 +618,7 @@ async fn a_turn_held_at_a_dialog_keeps_beating_on_the_body_it_left_open() {
          open request body, and went from {before} to {during}",
     );
     assert!(
-        matches!(seen.last(), Some(Event::MessageFinished { .. })),
+        matches!(seen.last(), Some(Event::MessageFinished { reason: FinishReason::Completed, .. })),
         "and the held turn still finishes once the dialog is answered",
     );
 }
@@ -781,7 +821,7 @@ async fn an_undeclared_tool_and_a_foreign_server_are_each_refused_in_their_own_a
         "neither refusal ran anything",
     );
     assert!(
-        matches!(seen.last(), Some(Event::MessageFinished { .. })),
+        matches!(seen.last(), Some(Event::MessageFinished { reason: FinishReason::Completed, .. })),
         "and the turn survives both",
     );
 }
@@ -844,7 +884,10 @@ async fn the_title_one_shot_opens_its_own_run_and_leaves_the_bridged_turn_alone(
         1,
         "the bridged call ran once, whatever else opened a socket",
     );
-    assert!(matches!(seen.last(), Some(Event::MessageFinished { .. })), "and its turn completed",);
+    assert!(
+        matches!(seen.last(), Some(Event::MessageFinished { reason: FinishReason::Completed, .. })),
+        "and its turn completed",
+    );
     let rosters = server.declared_rosters();
     assert_eq!(rosters.len(), 2, "one opening frame per Run");
     assert!(!rosters[0].is_empty(), "the bridged turn declared its registry");
