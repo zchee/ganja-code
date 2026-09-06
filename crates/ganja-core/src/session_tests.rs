@@ -1505,3 +1505,31 @@ async fn a_dialog_raised_inside_the_list_read_stops_the_continuation() {
         "and the same turn stops once the read it waited on left a question open",
     );
 }
+
+/// The rule-refusal sentence still renders the bytes it rendered before
+/// **D552** moved its prefix into `ganja-tool`: the prefix, then the rules as
+/// JSON, with nothing between them.
+///
+/// The wire matches on that prefix to route an `Error` part to cursor's
+/// `rejected` arm rather than its failed-tool arm, so a stray separator or a
+/// reworded clause is an interop change wearing a cosmetic hat.
+#[test]
+fn a_rule_refusal_reads_as_the_hoisted_prefix_followed_by_its_rules() {
+    let rules = vec![crate::permission::Rule {
+        permission: "bash".to_owned(),
+        pattern: "rm *".to_owned(),
+        action: crate::permission::Action::Deny,
+    }];
+    let rendered = super::denied(&rules);
+
+    assert_eq!(
+        rendered,
+        format!(
+            "The user has specified a rule which prevents you from using this specific tool \
+             call. Here are some of the relevant rules {}",
+            serde_json::to_string(&rules).expect("rules serialize"),
+        ),
+    );
+    assert!(rendered.starts_with(ganja_tool::permission_text::DENIED_PREFIX));
+    assert_eq!(super::REJECTED, ganja_tool::permission_text::REJECTED);
+}

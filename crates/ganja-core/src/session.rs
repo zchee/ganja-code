@@ -40,6 +40,17 @@ use std::time::Duration;
 
 use futures::StreamExt as _;
 use futures::stream::BoxStream;
+/// The two refusal sentences a model reads, whose bytes live in
+/// [`ganja_tool::permission_text`] rather than here (**D552**, W4).
+///
+/// They moved because a **wire** has to tell a permission refusal from a failed
+/// tool without seeing the engine — cursor's server wants one of two shapes back
+/// and the only thing that reaches the wire is a tool part's text — and
+/// `ganja-tool` is the one crate the engine and every wire may both name. The
+/// upstream citation (`packages/core/src/v1/permission.ts`, `RejectedError` and
+/// `DeniedError`) moved with them. Nothing about what a refusal *decides*
+/// changed; only where two `&str`s live.
+use ganja_tool::permission_text::REJECTED;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -59,23 +70,17 @@ use crate::tool::{
     shell, skill,
 };
 
-/// What the model reads when the user refuses a call, ported verbatim from
-/// upstream `packages/core/src/v1/permission.ts` (`RejectedError`).
-const REJECTED: &str = "The user rejected permission to use this specific tool call.";
-
-/// What the model reads when a rule refuses a call before anyone is asked,
-/// ported from upstream `packages/core/src/v1/permission.ts` (`DeniedError`).
+/// What the model reads when a rule refuses a call before anyone is asked.
 ///
-/// The rules travel with the message, as upstream's do: a model told only that
-/// it may not do something tries the same thing spelled differently, where one
-/// told *which rule* stopped it can work out what else the rule covers.
+/// The sentence's own bytes are [`ganja_tool::permission_text::DENIED_PREFIX`];
+/// what is composed here is the rendered rules after it. They travel with the
+/// message, as upstream's do: a model told only that it may not do something
+/// tries the same thing spelled differently, where one told *which rule*
+/// stopped it can work out what else the rule covers.
 fn denied(rules: &[crate::permission::Rule]) -> String {
     let rendered = serde_json::to_string(rules).unwrap_or_else(|_| "[]".to_owned());
 
-    format!(
-        "The user has specified a rule which prevents you from using this specific tool call. \
-         Here are some of the relevant rules {rendered}"
-    )
+    format!("{}{rendered}", ganja_tool::permission_text::DENIED_PREFIX)
 }
 
 /// What a buffered call reads when the provider died before it could run.
