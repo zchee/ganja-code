@@ -711,17 +711,17 @@ pub(super) fn newest_user_run(request: &ChatRequest) -> Option<RangeInclusive<us
     Some(first..=newest)
 }
 
-/// The text of [`newest_user_run`]: its messages' text parts in order,
-/// joined the way distinct parts read as distinct paragraphs.
+/// The text of `run`, [`newest_user_run`]'s slice: its messages' text parts
+/// in order, joined the way distinct parts read as distinct paragraphs.
 ///
-/// Empty when the conversation holds no user message at all, which is not a
-/// request the engine builds — sending the empty message is more honest than
-/// refusing a request this module was still asked to encode.
-pub(super) fn newest_user_text(request: &ChatRequest) -> String {
-    let Some(run) = newest_user_run(request) else {
-        return String::new();
-    };
-
+/// Takes the run rather than finding it, because its one caller —
+/// `history::entries` — has already scanned for the run to decide where
+/// history ends, and the boundary is one scan rather than two. A
+/// conversation with no user message at all, which the engine never builds,
+/// has no run to pass; that caller composes the empty message for it, which
+/// is more honest than refusing a request this module was still asked to
+/// encode.
+pub(super) fn newest_user_text(request: &ChatRequest, run: RangeInclusive<usize>) -> String {
     request.messages[run].iter().flat_map(history::texts).collect::<Vec<_>>().join("\n\n")
 }
 

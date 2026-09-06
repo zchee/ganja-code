@@ -311,8 +311,16 @@ impl HeldRuns {
             entry.done.cancel();
             return match settle(entry, &outcomes) {
                 // The body had closed under the entry this request took: a
-                // recovery, capped exactly where the ring's is.
-                Resolution::Recover(why) => self.reopen(&key, why),
+                // recovery, capped exactly where the ring's is. The entry left
+                // the table for a resume rather than through `drop_run`, so
+                // the ring learns of this drop here — a capped second attempt
+                // reads the ring for its reason, and without this entry it
+                // would name whatever drop the ring last held for the key,
+                // which is the *previous* one.
+                Resolution::Recover(why) => {
+                    self.remember(&key, Reason::Closed);
+                    self.reopen(&key, why)
+                }
                 resumed => resumed,
             };
         }
@@ -376,6 +384,13 @@ impl HeldRuns {
         entry.done.cancel();
 
         tracing::debug!(provider = ID, reason = ?reason, "dropping a held run");
+        self.remember(key, reason);
+    }
+
+    /// Files one drop on the ring, evicting the oldest past [`DROPPED`] —
+    /// the ring's only writer, so the bound is kept in one place whether the
+    /// drop was the keeper's or one a resume found for itself.
+    fn remember(&self, key: &Key, reason: Reason) {
         let mut dropped = self.dropped.lock().expect("the dropped ring is never poisoned");
         if dropped.len() == DROPPED {
             dropped.pop_front();

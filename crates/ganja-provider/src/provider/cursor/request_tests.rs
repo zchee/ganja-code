@@ -5,8 +5,8 @@ use buffa::Message as _;
 use super::super::tests::roster;
 use super::super::{connect, history, proto, serves_fetch};
 use super::{
-    ChatRequest, context_answer, decode, fresh_id, kv_answer, newest_user_text, refusal_answer,
-    run_message,
+    ChatRequest, context_answer, decode, fresh_id, kv_answer, newest_user_run, newest_user_text,
+    refusal_answer, run_message,
 };
 use crate::protocol::{Message, Part};
 use crate::tool::ToolDefinition;
@@ -502,12 +502,20 @@ fn turn(messages: Vec<Message>, turn_start: usize) -> ChatRequest {
     ChatRequest { messages, turn_start, ..request() }
 }
 
+/// The newest user turn's text: the boundary, then the text of the run it
+/// found — the two halves composed the way `history::entries` composes them,
+/// so the four boundary tests below read as one question. Empty for a
+/// conversation with no user message, which has no run.
+fn newest_text(request: &ChatRequest) -> String {
+    newest_user_run(request).map_or_else(String::new, |run| newest_user_text(request, run))
+}
+
 #[test]
 fn the_newest_user_turn_is_every_user_message_since_the_last_reply() {
     let conversation =
         vec![Message::user("first"), Message::assistant("gpt-5.3-codex"), Message::user("second")];
-    assert_eq!(newest_user_text(&turn(conversation, 2)), "second");
-    assert_eq!(newest_user_text(&turn(Vec::new(), 0)), "");
+    assert_eq!(newest_text(&turn(conversation, 2)), "second");
+    assert_eq!(newest_text(&turn(Vec::new(), 0)), "");
 
     // The engine appends to a turn — a steer, the team guards' request-only
     // block after a reply — and each of those is a message of its own, so
@@ -521,7 +529,7 @@ fn the_newest_user_turn_is_every_user_message_since_the_last_reply() {
         Message::user("<team_still_working>keep going</team_still_working>"),
     ];
     assert_eq!(
-        newest_user_text(&turn(appended, 2)),
+        newest_text(&turn(appended, 2)),
         "second\n\n<team_still_working>keep going</team_still_working>"
     );
 }
@@ -548,7 +556,7 @@ fn a_finished_turns_steer_stays_in_that_turn() {
     ];
 
     assert_eq!(
-        newest_user_text(&turn(across_turns, 3)),
+        newest_text(&turn(across_turns, 3)),
         "now add tests",
         "the previous turn consumed that steer; this turn is its prompt alone",
     );
@@ -573,7 +581,7 @@ fn a_continuation_block_still_arrives_without_the_prompt_it_is_about() {
     ];
 
     assert_eq!(
-        newest_user_text(&turn(continued, 0)),
+        newest_text(&turn(continued, 0)),
         "<team_still_working>keep going</team_still_working>",
     );
 }
@@ -596,7 +604,7 @@ fn a_turn_marker_past_the_newest_user_message_does_not_panic_the_walk() {
     ];
 
     assert_eq!(
-        newest_user_text(&turn(overshot, 2)),
+        newest_text(&turn(overshot, 2)),
         "and make it lenient",
         "the newest user message alone, and no panic",
     );

@@ -40,6 +40,13 @@
 //! (`:657-661`, `:793-800`): on a recovered turn a model shown a result it
 //! never asked for is the model most likely to issue the call again and run
 //! its side effect twice, and the call beside the result is the mitigation.
+//! A result entry follows every call, an empty `Completed` output included,
+//! where the reference drops an empty result (`:654`): a call that answered
+//! nothing still answered, and a call with no result after it reads as one
+//! still running. A failed call's result is marked `[Tool Result (error)]`,
+//! where the reference writes `[Tool Result]` whatever the outcome (`:758`,
+//! `:793`): text is the only channel a root entry has for `is_error`, which
+//! every other wire sends as a field of its own.
 //! History user-blob ids are [`derived`] from each message's own
 //! `MessageId`, where the reference seeds them from turn index and text
 //! (`:786`): the same v4 shape on the wire, from a seed that survives
@@ -219,7 +226,8 @@ pub(super) fn entries(request: &ChatRequest) -> History<'_> {
     let (history, action) = match request::newest_user_run(request) {
         // The newest user message is the last message: the run is the action.
         Some(run) if *run.end() + 1 == messages.len() => {
-            (&messages[..*run.start()], Action::User { text: request::newest_user_text(request) })
+            let start = *run.start();
+            (&messages[..start], Action::User { text: request::newest_user_text(request, run) })
         }
         // A user message exists but the assistant's follows it: a resume.
         Some(_) => (messages, Action::Resume),
@@ -558,17 +566,17 @@ fn assistant_text(text: &str, calls: &[Call<'_>], clamped_calls: &mut usize) -> 
 
 /// `input` cut at [`CALL_INPUT_LIMIT`] on a char boundary, with an elision
 /// naming exactly how many bytes were omitted; and whether it was cut.
-fn clamp(input: String) -> (String, bool) {
+fn clamp(mut input: String) -> (String, bool) {
     if input.len() <= CALL_INPUT_LIMIT {
         return (input, false);
     }
 
     let cut = input.floor_char_boundary(CALL_INPUT_LIMIT);
     let omitted = input.len() - cut;
-    let mut clamped = input[..cut].to_owned();
-    write!(clamped, "… [+{omitted} bytes]").expect("writing into a String cannot fail");
+    input.truncate(cut);
+    write!(input, "… [+{omitted} bytes]").expect("writing into a String cannot fail");
 
-    (clamped, true)
+    (input, true)
 }
 
 /// A result entry's text, the reference's `[Tool Result]` prefix with the

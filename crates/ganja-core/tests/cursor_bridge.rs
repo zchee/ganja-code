@@ -407,26 +407,33 @@ fn capturing() -> (LogCapture, tracing::subscriber::DefaultGuard) {
 ///
 /// A turn that finishes before any dialog is a failure named here, not a
 /// wait on a stream that never ends: the engine outlives its turns, so
-/// `events` has no end to reach.
+/// `events` has no end to reach. Bounded at [`SETTLE`] for the third shape,
+/// an engine that neither finishes nor asks: under nextest that would be
+/// cut by the per-test timeout without a word, and under a plain
+/// `cargo test` it would hang.
 async fn held_at_dialog(events: &mut BoxStream<'static, Event>) -> (PermissionId, Vec<Event>) {
-    let mut seen = Vec::new();
-    loop {
-        let event = events.next().await.expect("the dialog arrives before the stream ends");
-        let waiting = match &event {
-            Event::PermissionRequested { id, .. } => Some(id.clone()),
-            _ => None,
-        };
-        let finished = matches!(event, Event::MessageFinished { .. });
-        seen.push(event);
-        if let Some(id) = waiting {
-            return (id, seen);
+    timeout(SETTLE, async {
+        let mut seen = Vec::new();
+        loop {
+            let event = events.next().await.expect("the dialog arrives before the stream ends");
+            let waiting = match &event {
+                Event::PermissionRequested { id, .. } => Some(id.clone()),
+                _ => None,
+            };
+            let finished = matches!(event, Event::MessageFinished { .. });
+            seen.push(event);
+            if let Some(id) = waiting {
+                return (id, seen);
+            }
+            assert!(
+                !finished,
+                "the turn finished before a bridged call raised its dialog: {:?}",
+                seen.last()
+            );
         }
-        assert!(
-            !finished,
-            "the turn finished before a bridged call raised its dialog: {:?}",
-            seen.last()
-        );
-    }
+    })
+    .await
+    .expect("the bridged call's dialog is raised within the settle window")
 }
 
 /// Hangs up on `server` and waits for the keeper to drop the held Run — the
@@ -770,20 +777,10 @@ async fn a_turn_held_at_a_dialog_keeps_beating_on_the_body_it_left_open() {
 
     engine.send(prompt()).await.expect("an idle engine accepts a prompt");
 
-    // Answered by hand rather than through `drain_answering`, because the whole
-    // measurement is what happens *between* the dialog and the reply.
-    let mut seen = Vec::new();
-    let held = loop {
-        let event = events.next().await.expect("the dialog arrives before the stream ends");
-        let waiting = match &event {
-            Event::PermissionRequested { id, .. } => Some(id.clone()),
-            _ => None,
-        };
-        seen.push(event);
-        if let Some(id) = waiting {
-            break id;
-        }
-    };
+    // Read up to the dialog and answered by hand rather than through
+    // `drain_answering`, because the whole measurement is what happens
+    // *between* the dialog and the reply.
+    let (held, mut seen) = held_at_dialog(&mut events).await;
 
     let before = server.heartbeats();
     tokio::time::sleep(HELD).await;
@@ -1428,4 +1425,104 @@ async fn a_second_hangup_of_one_turn_is_not_reopened_and_the_turn_fails_by_name(
     assert_eq!(first_calls.lock().expect("never poisoned").len(), 1, "the first tool ran once");
     assert_eq!(second_calls.lock().expect("never poisoned").len(), 1, "and so did the second");
     assert!(server.mcp_results().is_empty(), "neither answered on a body the server had closed");
+}
+
+/// The recovered Run is a Run like any other, end to end: its own exec is
+/// answered on its **live** body and the turn reads on to a finish. AC-16
+/// is recover-then-finish and AC-16b recover-then-drop-again; this is
+/// recover-then-continue — the shape a second tool call after a hangup
+/// produces, which the wire pins over its loopback and nothing drove
+/// through the engine.
+#[tokio::test]
+async fn a_recovered_runs_own_exec_is_answered_on_its_live_body_and_the_turn_reads_on() {
+    let (log, _guard) = capturing();
+    let server = CursorServer::with_scripts(vec![
+        vec![Step::Context, Step::mcp(1, "first", &json!({"n": 1})).no_wait(), Step::Hangup],
+        vec![
+            Step::Context,
+            Step::mcp(2, "second", &json!({"n": 2})),
+            Step::Text("went on".to_owned()),
+            Step::TurnEnded,
+            Step::EndStream,
+        ],
+    ])
+    .await;
+
+    let (first, first_calls) = RecorderTool::new("first", "first ran", "one");
+    let (second, second_calls) = RecorderTool::new("second", "second ran", "two");
+    // The first call asks, so the drop provably precedes its result; the
+    // second is allowed, so the reopened Run's exec is answered at once, on
+    // the body that asked.
+    let engine = seated(
+        &server,
+        Registry::new(vec![first, second]),
+        rules(&[("first", Action::Ask), ("second", Action::Allow)]),
+    );
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine.send(prompt()).await.expect("an idle engine accepts a prompt");
+    let (dialog, mut seen) = held_at_dialog(&mut events).await;
+    hang_up_and_wait_for_drop(&server, &log, 1).await;
+    engine
+        .send(Command::ReplyPermission { id: dialog, reply: PermissionReply::Once })
+        .await
+        .expect("a reply is never refused");
+    seen.extend(drain(&mut events).await);
+
+    assert!(
+        matches!(seen.last(), Some(Event::MessageFinished { reason: FinishReason::Completed, .. })),
+        "the turn finishes on the reopened Run, got {:?}",
+        seen.last(),
+    );
+    assert_eq!(first_calls.lock().expect("never poisoned").len(), 1, "the first tool ran once");
+    assert_eq!(second_calls.lock().expect("never poisoned").len(), 1, "and the second once");
+    let results = server.mcp_results();
+    let [answered] = results.as_slice() else {
+        panic!("one answer on the live body and none on the dead one, got {results:?}");
+    };
+    assert!(answered.success.is_set(), "the second tool's own output, on the Run that asked");
+    assert_eq!(server.run_requests().len(), 2, "the drop and the one recovery, no third");
+    assert!(
+        said(&seen).iter().any(|line| line == "went on"),
+        "and the text after the answered exec is what the turn ends on, got {:?}",
+        said(&seen),
+    );
+}
+
+/// A kv get for an id nobody composed is answered not-found — a present
+/// result with no data — and the turn goes on: the miss is the wire's honest
+/// answer about a blob it never held, never a failure. The one consumer of
+/// [`Step::KvGet`], and of the testkit's own not-found arm with it; the
+/// wire's half is unit-pinned in `ganja-provider`.
+#[tokio::test]
+async fn a_kv_get_for_an_id_nobody_composed_is_answered_not_found_and_the_turn_goes_on() {
+    let nobody = vec![0_u8; 32];
+    let server = CursorServer::start(vec![
+        Step::Context,
+        Step::KvGet(nobody.clone()),
+        Step::Text("nothing under that id".to_owned()),
+        Step::TurnEnded,
+        Step::EndStream,
+    ])
+    .await;
+
+    let (tool, _calls) = RecorderTool::new("lookup", "lookup ran", "the answer");
+    let engine = seated(&server, Registry::new(vec![tool]), rule("lookup", Action::Allow));
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine.send(prompt()).await.expect("an idle engine accepts a prompt");
+    let seen = drain(&mut events).await;
+
+    let answers = server.kv_answers();
+    let [answer] = answers.as_slice() else {
+        panic!("one get is one answer, got {answers:?}");
+    };
+    assert_eq!(answer.blob_id, nobody, "answered under the id that was asked for");
+    assert_eq!(answer.data, None, "not found is a result with no data, never invented bytes");
+    assert!(
+        matches!(seen.last(), Some(Event::MessageFinished { reason: FinishReason::Completed, .. })),
+        "and the turn finishes on the text after the miss, got {:?}",
+        seen.last(),
+    );
+    assert!(said(&seen).iter().any(|line| line == "nothing under that id"), "{:?}", said(&seen));
 }

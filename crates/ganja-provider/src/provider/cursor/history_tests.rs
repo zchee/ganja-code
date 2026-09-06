@@ -179,17 +179,35 @@ fn an_assistant_reply_with_tool_calls_composes_the_calls_beside_its_text_and_the
     assert_eq!(composed.clamped_calls, 0, "both inputs are under the limit");
     assert_content_addressed(&composed);
 
-    // A call the model never finished: no input to show, and no result to
-    // show either — rendered as the hole every wire renders a dead turn's
-    // call by.
-    let pending = reply("", vec![call("c1", "read", ToolState::Pending { input: None })]);
-    let composed =
-        compose(&request(vec![Message::user("Read."), pending, Message::user("Well?")], 2));
-    assert_eq!(root(&composed, 2), text_entry("assistant", "[Tool Call] read {}"));
-    assert_eq!(
-        root(&composed, 3),
-        text_entry("user", "[Tool Result (error)]\n[no result recorded]")
+    // A call the model never finished, and one still running when the turn
+    // died: no result to show for either — rendered as the hole every wire
+    // renders a dead turn's call by — and no input to show for the first.
+    let dead = reply(
+        "",
+        vec![
+            call("c1", "read", ToolState::Pending { input: None }),
+            call(
+                "c2",
+                "bash",
+                ToolState::Running {
+                    input: serde_json::json!({ "command": "sleep 9" }),
+                    metadata: serde_json::Value::Null,
+                    started: 0,
+                },
+            ),
+        ],
     );
+    let composed = compose(&request(vec![Message::user("Read."), dead, Message::user("Well?")], 2));
+    assert_eq!(
+        root(&composed, 2),
+        text_entry(
+            "assistant",
+            "[Tool Call] read {}\n\n[Tool Call] bash {\"command\":\"sleep 9\"}"
+        )
+    );
+    let hole = text_entry("user", "[Tool Result (error)]\n[no result recorded]");
+    assert_eq!(root(&composed, 3), hole, "the call that never finished streaming");
+    assert_eq!(root(&composed, 4), hole, "and the one that was still running");
 }
 
 /// **AC-2b.** A call input past [`CALL_INPUT_LIMIT`] is cut on a char

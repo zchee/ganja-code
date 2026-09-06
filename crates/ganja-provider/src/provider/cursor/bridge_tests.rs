@@ -1002,6 +1002,46 @@ async fn a_second_resume_straight_after_a_recovery_is_refused_by_name() {
     );
 }
 
+/// **AC-14b**, the settle variant: the second drop is found by the *resume*
+/// rather than by the keeper — the recovered Run is held again, the body
+/// closes under it, and the results land before the keeper's next beat, so
+/// the entry is still in the table and `drop_run` never runs for it. The
+/// cap's sentence names the closed body all the same, and not the first
+/// drop, because the settle path files its drop on the ring the keeper's go
+/// on; before it did, the sentence read the ring's newest entry for the key,
+/// which was the cancel.
+#[tokio::test(start_paused = true)]
+async fn a_capped_resume_that_found_the_body_closed_names_that_drop_and_not_the_first() {
+    let held = Arc::new(HeldRuns::default());
+    let first = pause("auto", &held, "call-1").await;
+    first.cancel.cancel();
+    settled(&held, &first.request).await;
+
+    let resumed = answered(&first.request, "call-1", completed("once"));
+    assert!(
+        matches!(held.resolve(&resumed), Resolution::Recover(why) if why.contains("cancelled")),
+        "the first recovery, naming the cancel"
+    );
+
+    // Held again under the same key; the body closes; and the results are
+    // resolved with no await between, so the keeper cannot have noticed.
+    let again = pause_with(resumed, &held, "call-2").await;
+    drop(again.answered);
+    let twice = answered(&again.request, "call-2", completed("twice"));
+    let Resolution::Failed(sentence) = held.resolve(&twice) else {
+        panic!("a second recovery of one turn is refused");
+    };
+    assert!(sentence.contains("already reopened once"), "the cap is named: {sentence}");
+    assert!(
+        sentence.contains("cursor closed the request body under it"),
+        "with the drop this resume found for itself: {sentence}"
+    );
+    assert!(
+        !sentence.contains("cancelled"),
+        "and not the first drop's clause, which is what the ring held before: {sentence}"
+    );
+}
+
 /// **AC-14b**, through the provider: a capped resume is a failed stream
 /// naming the cap, and opens no Run — the endpoint here is one nothing can
 /// connect to, so an attempted fresh Run would have been a transport error
