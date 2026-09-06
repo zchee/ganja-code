@@ -2,8 +2,8 @@ use buffa::Message as _;
 
 use super::super::{connect, proto};
 use super::{
-    Ask, ContextAsk, ExecRefusal, FinishReason, KvAsk, KvOp, Mapping, ProviderError, ProviderEvent,
-    RefusalArm, model_list, verdict,
+    Ask, ContextAsk, ExecArgs, ExecAsk, FinishReason, KvAsk, KvOp, Mapping, ProviderError,
+    ProviderEvent, model_list, verdict,
 };
 
 /// An exec request carrying one args arm by number, the way a kind this
@@ -434,11 +434,11 @@ fn the_live_observed_shell_stream_exec_is_handed_up_as_a_refusal() {
     assert!(events.is_empty(), "a refusal is an answer to send, not an event: {events:?}");
     assert_eq!(
         asks,
-        vec![Ask::Refuse(ExecRefusal {
+        vec![Ask::Exec(ExecAsk {
             id: Some(5),
             exec_id: Some("exec-abc".to_owned()),
             kind: "shell_stream_args".to_owned(),
-            arm: RefusalArm::ShellStream {
+            args: ExecArgs::ShellStream {
                 command: "cargo test".to_owned(),
                 working_directory: "/repo".to_owned(),
             },
@@ -465,11 +465,11 @@ fn a_named_tool_exec_is_refused_and_the_turn_carries_on_past_it() {
     let (events, asks) = mapped_asks(&body, false);
     assert_eq!(
         asks,
-        vec![Ask::Refuse(ExecRefusal {
+        vec![Ask::Exec(ExecAsk {
             id: Some(3),
             exec_id: None,
             kind: "shell_args".to_owned(),
-            arm: RefusalArm::Shell {
+            args: ExecArgs::Shell {
                 command: "ls".to_owned(),
                 // Absent and empty are one answer: the arm has no way to
                 // say the server did not send a working directory.
@@ -506,11 +506,11 @@ fn an_exec_kind_beyond_the_table_is_refused_by_its_field_number() {
     assert!(events.is_empty(), "{events:?}");
     assert_eq!(
         asks,
-        vec![Ask::Refuse(ExecRefusal {
+        vec![Ask::Exec(ExecAsk {
             id: Some(4),
             exec_id: None,
             kind: "field 39".to_owned(),
-            arm: RefusalArm::Throw,
+            args: ExecArgs::Unmodelled,
         })],
         "the span context is passed over rather than blamed"
     );
@@ -519,11 +519,11 @@ fn an_exec_kind_beyond_the_table_is_refused_by_its_field_number() {
     assert!(events.is_empty(), "{events:?}");
     assert_eq!(
         asks,
-        vec![Ask::Refuse(ExecRefusal {
+        vec![Ask::Exec(ExecAsk {
             id: None,
             exec_id: None,
             kind: "no recognizable kind".to_owned(),
-            arm: RefusalArm::Throw,
+            args: ExecArgs::Unmodelled,
         })],
         "an id the server never sent is not invented"
     );
@@ -539,18 +539,18 @@ fn a_kind_with_no_modelled_arm_is_named_from_the_throws_own_table() {
         let (_, asks) = mapped_asks(&exec_framed(exec_of_kind(1, number)), false);
         assert_eq!(
             asks,
-            vec![Ask::Refuse(ExecRefusal {
+            vec![Ask::Exec(ExecAsk {
                 id: Some(1),
                 exec_id: None,
                 kind: named.to_owned(),
-                arm: RefusalArm::Throw,
+                args: ExecArgs::Unmodelled,
             })],
         );
     }
 
     let (_, asks) = mapped_asks(&exec_framed(exec_of_kind(1, 99)), false);
     assert!(
-        matches!(asks.as_slice(), [Ask::Refuse(refusal)] if refusal.kind == "field 99"),
+        matches!(asks.as_slice(), [Ask::Exec(refusal)] if refusal.kind == "field 99"),
         "a kind newer than this file is refusable by number: {asks:?}"
     );
 }

@@ -288,30 +288,37 @@ fn a_backends_own_default_outranks_its_vendors_catalog_row() {
     );
 }
 
-/// **AC-4.** Asked of the id list rather than of nine constructed wires: the
-/// fact is a function of the id, and instantiating a provider to ask it would
-/// need credentials for eight vendors to answer a question about a string.
+/// **AC-4**, inverted by **D552**: with cursor's bridge landed there is no
+/// shipped id left that reaches less than every tool.
+///
+/// Asked of the id list rather than of nine constructed wires: the fact is a
+/// function of the id, and instantiating a provider to ask it would need
+/// credentials for eight vendors to answer a question about a string. Cursor is
+/// named on its own line as well as covered by the loop, because it is the id
+/// this assertion is about — a loop that silently stopped including it would
+/// still pass.
 #[test]
-fn cursor_is_the_one_shipped_id_that_reaches_none_of_this_builds_tools() {
-    assert_eq!(ToolReach::of(cursor::ID), ToolReach::None);
+fn every_shipped_id_reaches_every_tool_this_build_registers() {
+    assert_eq!(
+        ToolReach::of(cursor::ID),
+        ToolReach::Full,
+        "cursor's server calls back into the same registry since D552",
+    );
 
     for builtin in PROVIDERS {
-        if builtin == cursor::ID {
-            continue;
-        }
-
         assert_eq!(
             ToolReach::of(builtin),
             ToolReach::Full,
-            "{builtin} speaks a function-calling wire, so every registered tool is callable"
+            "{builtin} calls tools ganja registered, so every one of them is callable"
         );
     }
+    assert!(PROVIDERS.contains(&cursor::ID), "and the loop above really did cover cursor");
 }
 
 /// A provider somebody declared in their own config is one of the three
 /// function-calling dialects wearing an endpoint of their choosing, so it
-/// answers with every other id rather than falling into the cursor arm by
-/// being unrecognised.
+/// answers with every other id rather than an unrecognised name reaching some
+/// narrower default.
 #[test]
 fn a_config_declared_endpoint_reaches_every_tool_like_the_builtin_it_speaks_as() {
     assert_eq!(ToolReach::of("local-llama"), ToolReach::Full);

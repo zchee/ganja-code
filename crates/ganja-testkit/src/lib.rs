@@ -22,6 +22,16 @@
 //! [`Tool`]: ganja_tool::Tool
 
 mod agent;
+// A loopback cursor agent backend that hosts the Run RPC as a real duplex — the
+// one fixture that can drive both ends of D552's tool bridge at once. A module
+// rather than a re-export because its script vocabulary is a dozen names that
+// only make sense together.
+//
+// The description is a `//` comment rather than a `///` doc on purpose: an
+// outer doc here is concatenated with the module's own `//!` header, and the
+// merged block resolves its intra-doc links in *this* file's scope, where
+// `Script` and `Step` are not names. The module documents itself.
+pub mod cursor_server;
 mod drain;
 mod fs;
 mod log;

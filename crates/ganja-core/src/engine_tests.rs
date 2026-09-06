@@ -9,7 +9,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     Engine, EngineError, STALE_FILES, STORELESS, message_chars, send_message, stale_notice,
-    subagent, teammate,
+    subagent, teammate, tool_reach_refusal,
 };
 use crate::config::TeamlessSend;
 use crate::permission::Permissions;
@@ -2027,42 +2027,69 @@ fn seated(provider: Arc<ScriptedProvider>) -> Engine {
         .with_agents(Arc::new(agents))
 }
 
-/// **AC-5**, first of three (**D551**): the two builtins whose whole body is
-/// tool calls are refused on a provider that serves none, before the template
-/// is filled and before the provider is asked anything at all.
+/// **AC-5**, first of three, inverted by **D552**: the two builtins whose whole
+/// body is tool calls now *run* on cursor. Both templates expand and both start
+/// a turn — the reach door no longer stands in front of either.
+///
+/// The scripted seat reports cursor's id and nothing else about cursor: the
+/// door reads [`ToolReach::of`] over [`Provider::id`], so an id is the whole
+/// input, and asking a real wire would want that vendor's credentials to answer
+/// a question about a string.
 #[tokio::test]
-async fn the_tool_driven_builtins_are_refused_on_a_provider_that_serves_no_tools() {
-    for (command, names) in [("team", "run the steps yourself"), ("init", "AGENTS.md")] {
+async fn the_tool_driven_builtins_now_start_a_turn_on_cursor() {
+    for command in ["team", "init"] {
         let provider = Arc::new(ScriptedProvider::named(cursor::ID));
         let seen = Arc::clone(&provider.seen);
         let engine = seated(provider);
+        let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
-        let refused = engine
+        engine
             .send(Command::RunCommand {
                 name: command.to_owned(),
                 args: "port the config loader".to_owned(),
             })
             .await
-            .expect_err("a tool pipeline on a tool-less provider is refused");
+            .unwrap_or_else(|error| panic!("/{command} is served on cursor now, got {error:?}"));
+        drain(&mut events).await;
 
-        let EngineError::ProviderToolReach { provider, command: refused_command, missing } =
-            &refused
-        else {
-            panic!("the reach door should answer for /{command}, got {refused:?}");
+        let requests = seen.lock().expect("the request log is never poisoned");
+        let [request] = requests.as_slice() else {
+            panic!("/{command} on an idle engine is one request, got {requests:?}");
         };
-        assert_eq!(provider, cursor::ID, "the sentence names the provider that cannot serve it");
-        assert_eq!(refused_command, command);
-        assert_eq!(*missing, ToolReach::None);
-
-        let sentence = refused.to_string();
         assert!(
-            sentence.contains(cursor::ID) && sentence.contains("serves this build no tools"),
-            "the sentence is derived from the reach value, got {sentence:?}"
+            !request.messages.is_empty(),
+            "/{command}'s filled-in template is what the turn was started with"
         );
-        assert!(sentence.contains(names), "it says what this command wanted, got {sentence:?}");
+    }
+}
+
+/// The refusal itself did not leave with cursor: a provider that reaches less
+/// than everything is still refused in front of the expansion, with the
+/// sentence derived from *which* less.
+///
+/// No shipped id answers either narrow value since **D552**, so this asks
+/// [`tool_reach_refusal`] directly rather than through an engine. That is the
+/// point — the door's wording is the thing kept alive for the wire that
+/// arrives serving less, and a test that could only be written by shipping such
+/// a wire would have been deleted with cursor's arm.
+#[test]
+fn the_reach_refusal_still_words_both_narrow_values_for_a_wire_that_serves_less() {
+    for (command, names) in [("team", "run the steps yourself"), ("init", "AGENTS.md")] {
+        let nothing = tool_reach_refusal(command, "some-wire", ToolReach::None);
         assert!(
-            seen.lock().expect("the request log is never poisoned").is_empty(),
-            "a refusal in front of the expansion starts no turn, so nothing was asked"
+            nothing.contains("some-wire") && nothing.contains("serves this build no tools"),
+            "the sentence is derived from the reach value, got {nothing:?}"
+        );
+        assert!(nothing.contains(names), "it says what this command wanted, got {nothing:?}");
+
+        let native = tool_reach_refusal(command, "some-wire", ToolReach::NativeOnly);
+        assert!(
+            native.contains("file reads and shell commands do work here"),
+            "a native-kind seat is named as the real destination it is, got {native:?}"
+        );
+        assert!(
+            !native.contains("serves this build no tools"),
+            "and is never worded as the seat that serves nothing, got {native:?}"
         );
     }
 }
@@ -2070,9 +2097,10 @@ async fn the_tool_driven_builtins_are_refused_on_a_provider_that_serves_no_tools
 /// **AC-5**, second of three: the grammar is ahead of the reach door, so a
 /// head token that is not a valid spec is answered by **D549**'s own sentence
 /// on cursor exactly as it is anywhere else. A line that is broken on every
-/// provider must not be answered by naming one.
+/// provider must not be answered by naming one — and after **D552** reopened
+/// the door, must still not reach a turn.
 #[tokio::test]
-async fn a_malformed_team_spec_on_a_tool_less_provider_still_gets_the_grammars_sentence() {
+async fn a_malformed_team_spec_on_cursor_still_gets_the_grammars_sentence() {
     let engine = seated(Arc::new(ScriptedProvider::named(cursor::ID)));
 
     let refused = engine
@@ -2090,10 +2118,10 @@ async fn a_malformed_team_spec_on_a_tool_less_provider_still_gets_the_grammars_s
 }
 
 /// **AC-5**, third of three: bead 2m46's redirect is ahead of both, so
-/// `/team list` is still three fixed words about the command that was meant
-/// rather than a sentence about what cursor serves.
+/// `/team list` is still three fixed words about the command that was meant —
+/// on cursor as anywhere else, before **D552** and after it.
 #[tokio::test]
-async fn a_misdirected_roster_line_on_a_tool_less_provider_still_gets_the_redirect() {
+async fn a_misdirected_roster_line_on_cursor_still_gets_the_redirect() {
     let engine = seated(Arc::new(ScriptedProvider::named(cursor::ID)));
 
     let refused = engine
@@ -2113,9 +2141,11 @@ async fn a_misdirected_roster_line_on_a_tool_less_provider_still_gets_the_redire
 /// instead. Whether the two agree is a question only the crate that sees both
 /// can ask.
 ///
-/// The direction asserted is the one W4 will invert: every id that reaches
-/// every tool sends a real turn with a roster on it, so cursor's predicate
-/// says `true` for exactly the requests a tool-serving session produces.
+/// Every id that reaches every tool sends a real turn with a roster on it, so
+/// cursor's predicate says `true` for exactly the requests a tool-serving
+/// session produces. **D552** inverted the coverage rather than the assertion:
+/// the skip below now skips nothing, and cursor — the id the predicate is
+/// *about* — is inside the loop instead of stepped over by it.
 #[tokio::test]
 async fn every_tool_reaching_provider_sends_a_roster_the_cursor_predicate_answers_for() {
     // A loop that skipped every id would pass while asserting nothing, which
@@ -2164,7 +2194,12 @@ async fn every_tool_reaching_provider_sends_a_roster_the_cursor_predicate_answer
         checked += 1;
     }
 
-    assert!(checked > 0, "some shipped id reaches every tool, so this asserted something");
+    assert_eq!(
+        checked,
+        PROVIDERS.len(),
+        "no shipped id reaches less than every tool since D552, so none was skipped",
+    );
+    assert!(PROVIDERS.contains(&cursor::ID), "cursor among them, which is whose predicate this is");
 }
 
 /// The other half of the same agreement, on the shape no roster rides: a
@@ -2182,7 +2217,11 @@ fn the_one_shot_request_shape_draws_no_fetch_from_the_cursor_wire() {
         effort_options: serde_json::Map::new(),
     };
 
-    assert_eq!(ToolReach::of(cursor::ID), ToolReach::None);
+    assert_eq!(
+        ToolReach::of(cursor::ID),
+        ToolReach::Full,
+        "the seat serves every tool since D552, which is what makes the roster's absence the signal",
+    );
     assert!(
         !cursor::serves_fetch(&one_shot),
         "a request carrying no roster is one this client has nothing to redirect a fetch to"

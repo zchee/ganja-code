@@ -37,16 +37,25 @@
 //! skipped). The reply (`request::context_answer`) echoes the exec ids
 //! and carries `ChatRequest.system` on `RequestContext.cloud_rule`, the one
 //! prompt channel cursor's agent honors, beside the switchboard that tells
-//! the server which asks are worth making at all. The server's *other*
-//! execs are the tools it asks a client to run for it; ganja runs its tools
-//! for its own session, so those are refused in each kind's own vocabulary
-//! — the rejected arm of the kind's own result, echoing the command or path
-//! it named (`request::refusal_answer`, **D550**), falling back to D486's
-//! control-channel throw for a kind with no such arm. Never run, and never
-//! left to hang the turn. What is still deliberately not here is the
-//! conversation-state machinery that carries history and tool calls on
-//! cursor's content-addressed blob channel; `request`'s module docs say
-//! why.
+//! the server which asks are worth making at all.
+//!
+//! **Ganja's tools run on this wire** (**D552**). The server's *other* execs
+//! are the tools it asks a client to run for it, and this client answers
+//! them with its own: the roster on `ChatRequest.tools` is declared on the
+//! run request and on every context answer (`request::declaration`), an
+//! `mcp_args` naming one of those tools and the six native kinds of the
+//! redirect table (`native`) are surfaced to ganja's engine as ordinary tool
+//! calls, and the Run is **held open** while the engine runs them (`bridge`)
+//! — under the session's own permission dialogs, rules and transcript, which
+//! is the whole reason nothing is executed inside this crate. Every kind the
+//! roster has no tool for keeps D550's typed refusal — the rejected arm of
+//! that kind's own result — falling back to D486's control-channel throw for
+//! a kind with no such arm. Never run here, and never left to hang the turn.
+//!
+//! What is still deliberately not here is the conversation-state machinery
+//! that carries history on cursor's content-addressed blob channel;
+//! `request`'s module docs say why, and `bridge`'s say what it costs a resume
+//! whose held Run is gone.
 //!
 //! The provider rides the uncataloged tier, so a session must be told which
 //! model to ask for; [`CursorWire::usable_models`] is the listing that says
@@ -60,21 +69,27 @@ use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use buffa::Message as _;
 use futures::channel::mpsc;
 use futures::stream::BoxStream;
 use futures::{Stream, StreamExt as _, stream};
+use tokio::time::{Instant, Interval, MissedTickBehavior, interval_at, sleep_until};
 use tokio_util::sync::CancellationToken;
 
 use crate::auth::{self, RefreshOauth};
+use crate::protocol::FinishReason;
 use crate::provider::{
     ChatRequest, CredentialSource, Presented, Provider, ProviderError, ProviderEvent,
     check_base_url, client, endpoint, is_terminal, retry, shielded, shown_base_url,
 };
+use crate::tool::ToolDefinition;
 
+mod bridge;
 mod connect;
 mod decode;
+mod native;
 mod request;
-mod spike;
+pub mod value;
 
 /// The cursor wire's protobuf messages, generated from `cursor.proto` by
 /// `buffa`'s codegen and checked in.
@@ -121,6 +136,20 @@ const STREAMING_CONTENT_TYPE: &str = "application/connect+proto";
 /// place to move.
 const CLIENT_VERSION: &str = "cli-2026.01.09-231024f";
 
+/// How long the fold keeps reading after a bridgeable exec is in hand, before
+/// it pauses.
+///
+/// The server issues **concurrent** execs — two `grep_args` arrived within 5 ms
+/// of each other on a recorded run — so pausing on the first one would hand
+/// the engine one call, run it, resume, and immediately pause again on the
+/// second. Waiting for a short quiet lets a batch the server sent together
+/// ride one step, which is also how the engine runs them: concurrently, up to
+/// `agents.concurrency`.
+///
+/// Deliberately short. It is a gap between frames the server already sent, not
+/// a poll interval, and every millisecond of it is latency added to a turn.
+const GATHER_WINDOW: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// Whether this turn can serve a `fetch_args` exec, which is the value the
 /// context answer sends as `RequestContext.web_fetch_enabled = 24`.
 ///
@@ -146,13 +175,93 @@ pub fn serves_fetch(request: &ChatRequest) -> bool {
 
 /// The identity `GANJA_PROVIDER=cursor` selects.
 ///
-/// Fieldless because the selection layer builds it as a bare name:
-/// construction reads nothing, and every request builds a [`CursorWire`]
-/// from the stored login at the moment it is needed. Fieldless is also what
-/// keeps its `Debug` trivially clean; the wire's own `Debug` is where the
-/// no-secrets posture is held.
-#[derive(Debug, Default)]
-pub struct CursorProvider;
+/// It owns two things a [`CursorWire`] cannot own for itself. The first is
+/// **where the wire points**: [`default`](Self::default) is the stored login
+/// at cursor's own endpoint, and [`at`](Self::at) is a loopback a test drives.
+/// The second is the **held-run table** (`bridge`), which has to outlive any
+/// one `stream()` call — a Run paused for a tool call is resumed by the *next*
+/// call, and the two are different `CursorWire`s built from this one provider.
+///
+/// The engine clones one `Arc<dyn Provider>` for every turn a session runs,
+/// subagents included (`Turn::child`), so every wire built here shares that
+/// one table. That is what makes "a `stream()` never drops a held run it does
+/// not key to" a rule about a single table rather than a hope about several.
+#[derive(Default)]
+pub struct CursorProvider {
+    /// Where the wire points, or [`None`] for the stored login at
+    /// [`DEFAULT_BASE_URL`] — which is what a shipped session uses.
+    endpoint: Option<Endpoint>,
+    held: Arc<bridge::HeldRuns>,
+}
+
+/// An endpoint a caller pointed a provider at, with the credential its
+/// requests present.
+#[derive(Clone)]
+struct Endpoint {
+    base_url: String,
+    credential: CredentialSource,
+}
+
+impl fmt::Debug for CursorProvider {
+    /// Renders where it points and nothing else — no credential ever reaches
+    /// this type, and the held table's contents are somebody's conversation.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let endpoint = self
+            .endpoint
+            .as_ref()
+            .map_or_else(|| shown_base_url(DEFAULT_BASE_URL), |at| shown_base_url(&at.base_url));
+
+        formatter.debug_struct("CursorProvider").field("base_url", &endpoint).finish()
+    }
+}
+
+impl CursorProvider {
+    /// A provider pointed at an endpoint of the caller's choosing, presenting
+    /// a credential the caller supplies — which is how a test drives a whole
+    /// bridged turn against a loopback socket.
+    ///
+    /// **Store-free on purpose** (**D552**, Dv-11). The credential is a value
+    /// rather than a lookup, so a suite built on this has no code path to
+    /// `auth.json` at all: an engine-level bridge test needs a token but has no
+    /// business owning a credential store, and the alternative —
+    /// [`CredentialSource::Oauth`], which resolves per request — would make
+    /// every such test redirect `XDG_DATA_HOME`, whose documented invariant is
+    /// one test per binary. [`CredentialSource::key`] is the door.
+    /// [`from_stored`](CursorWire::from_stored) reaches the same construction
+    /// with an `Oauth` source, so the shipped path is this path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::Transport`] when `base_url` is somewhere an
+    /// access token may not travel — the rule every other provider's endpoint
+    /// is held to, checked here so a bad endpoint is refused at construction
+    /// rather than at the first turn.
+    pub fn at(
+        base_url: impl Into<String>,
+        credential: CredentialSource,
+    ) -> Result<Self, ProviderError> {
+        let base_url = base_url.into();
+        check_base_url(&base_url)?;
+
+        Ok(Self { endpoint: Some(Endpoint { base_url, credential }), held: Arc::default() })
+    }
+
+    /// The wire one request runs on, sharing this provider's held-run table.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError`] as [`CursorWire::from_stored`] does on the
+    /// shipped path; the endpoint-pointed path only builds a client.
+    fn wire(&self) -> Result<CursorWire, ProviderError> {
+        let mut wire = match &self.endpoint {
+            Some(at) => CursorWire::presenting(&at.base_url, at.credential.clone())?,
+            None => CursorWire::from_stored()?,
+        };
+        wire.held = Arc::clone(&self.held);
+
+        Ok(wire)
+    }
+}
 
 #[async_trait]
 impl Provider for CursorProvider {
@@ -165,25 +274,23 @@ impl Provider for CursorProvider {
         request: ChatRequest,
         cancel: CancellationToken,
     ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
-        CursorWire::from_stored()?.stream(request, cancel).await
+        self.wire()?.stream(request, cancel).await
     }
 }
 
-/// The wire itself: an endpoint, a client, and the credential source every
-/// request resolves afresh.
+/// The wire itself: an endpoint, a client, the credential source every
+/// request resolves afresh, and the Runs this session is holding open.
 ///
 /// Split from [`CursorProvider`] so a test can point it at a loopback
-/// socket; the unit struct above is the one the selection layer names.
+/// socket; the provider above is the one the selection layer names.
 pub struct CursorWire {
     client: reqwest::Client,
     base_url: String,
     credential: CredentialSource,
-    /// W2 measurement scaffolding, `None` unless `GANJA_CURSOR_SPIKE` was set
-    /// for this process — and `None` unconditionally on the
-    /// [`at`](Self::at) path, which is what makes every test in this crate a
-    /// spike-free one without touching the process environment.
-    /// [`spike`] says what it is and when it goes.
-    spike: Option<spike::Spike>,
+    /// The held-run table. Its own by default — a wire built straight through
+    /// [`at`](Self::at) is one nobody shares — and replaced by the provider's
+    /// when [`CursorProvider::wire`] builds one, which is every shipped turn.
+    held: Arc<bridge::HeldRuns>,
 }
 
 impl fmt::Debug for CursorWire {
@@ -194,7 +301,6 @@ impl fmt::Debug for CursorWire {
             .debug_struct("CursorWire")
             .field("credential", &self.credential)
             .field("base_url", &shown_base_url(&self.base_url))
-            .field("spike", &self.spike)
             .finish()
     }
 }
@@ -222,14 +328,31 @@ impl CursorWire {
         let refresh = auth::cursor::Refresh::new()
             .map_err(|error| ProviderError::Transport(error.to_string()))?;
 
-        // The one read of the spike's environment in the whole workspace, at
-        // the one construction a shipped session runs through. A malformed
-        // flag refuses here rather than measuring something else; see
-        // [`spike::Spike::from_env`].
-        let mut wire = Self::at(DEFAULT_BASE_URL, Arc::new(refresh))?;
-        wire.spike = spike::Spike::from_env()?;
+        Self::at(DEFAULT_BASE_URL, Arc::new(refresh))
+    }
 
-        Ok(wire)
+    /// The wire against `base_url`, presenting whatever credential the caller
+    /// resolved.
+    ///
+    /// The one constructor the two above delegate to: [`at`](Self::at) builds
+    /// an OAuth source over a refresher, [`from_stored`](Self::from_stored)
+    /// builds the same thing against cursor's own endpoint, and
+    /// [`CursorProvider::at`] hands over a source it was given. Keeping them
+    /// one function is what makes "the shipped path is the tested path" true
+    /// rather than asserted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProviderError::Transport`] when no HTTP client can be built,
+    /// or when `base_url` is somewhere an access token may not travel.
+    fn presenting(
+        base_url: impl Into<String>,
+        credential: CredentialSource,
+    ) -> Result<Self, ProviderError> {
+        let base_url = base_url.into();
+        check_base_url(&base_url)?;
+
+        Ok(Self { client: client()?, base_url, credential, held: Arc::default() })
     }
 
     /// The same wire against an endpoint of the caller's choosing, which is
@@ -244,15 +367,7 @@ impl CursorWire {
         base_url: impl Into<String>,
         refresh: Arc<dyn RefreshOauth>,
     ) -> Result<Self, ProviderError> {
-        let base_url = base_url.into();
-        check_base_url(&base_url)?;
-
-        Ok(Self {
-            client: client()?,
-            base_url,
-            credential: CredentialSource::Oauth { provider_id: ID, refresh },
-            spike: None,
-        })
+        Self::presenting(base_url, CredentialSource::Oauth { provider_id: ID, refresh })
     }
 
     /// The models the stored login may name, from the live listing.
@@ -281,9 +396,17 @@ impl CursorWire {
         decode::model_list(&body)
     }
 
-    /// One turn: the run request out on a body held open for the exec
-    /// answers the server asks for mid-stream, events in as it produces
-    /// them.
+    /// One turn: either a Run held open by an earlier step, read on from
+    /// where it paused, or a fresh Run request out on a body held open for
+    /// the exec answers the server asks for mid-stream.
+    ///
+    /// **The resume comes first**, and it is a lookup rather than a guess:
+    /// `bridge::HeldRuns::resolve` answers from the request alone, and only a
+    /// request whose key matches a held Run *and* whose messages carry a
+    /// finished result for every exec that Run is waiting on continues it. A
+    /// request that keys nowhere opens a fresh Run and disturbs nothing —
+    /// which is what a title one-shot, a compaction summary and every
+    /// subagent turn do while a root turn is paused.
     ///
     /// # Errors
     ///
@@ -299,7 +422,27 @@ impl CursorWire {
         request: ChatRequest,
         cancel: CancellationToken,
     ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
-        let opening = connect::envelope(&request::run_message(&request, self.spike.as_ref())?);
+        let resuming =
+            bridge::Key::of(&request).map(|key| Bridge { held: Arc::clone(&self.held), key });
+
+        match self.held.resolve(&request) {
+            bridge::Resolution::Resume(entry) => {
+                return Ok(match entry.settle(&request) {
+                    Ok(fold) => run(fold, cancel, resuming),
+                    // The body is gone, so the answers this resume was for
+                    // reached nobody. Reading on would wait for generation
+                    // that will never come.
+                    Err(()) => failed(
+                        "the cursor run this turn was resuming closed its request body before \
+                         the tool results could be answered",
+                    ),
+                });
+            }
+            bridge::Resolution::Dead(reason) => return Ok(failed(&reason)),
+            bridge::Resolution::Fresh => {}
+        }
+
+        let opening = connect::envelope(&request::run_message(&request)?);
         let presented = self.credential.presented().await?;
         // Minted once for the whole turn: every attempt below is the same
         // request under the same stamp, the shape the shared driver's
@@ -363,21 +506,19 @@ impl CursorWire {
         // `Presented`, and a server that echoes the token it rejected
         // would otherwise put it on the screen and in the log.
         Ok(shielded(
-            events(
-                response.bytes_stream().boxed(),
+            run(
+                Fold::new(
+                    normalize(response.bytes_stream().boxed()),
+                    Duplex {
+                        answers,
+                        system: request.system.clone(),
+                        web_fetch: serves_fetch(&request),
+                        roster: request.tools.clone(),
+                        blobs: HashMap::new(),
+                    },
+                ),
                 cancel,
-                Duplex {
-                    answers,
-                    system: request.system.clone(),
-                    web_fetch: serves_fetch(&request),
-                    blobs: HashMap::new(),
-                    // Built here rather than in the fold because an interval
-                    // needs a runtime, and this is the async context that has
-                    // one. `None` off the spike leaves the fold's heartbeat
-                    // branch a future that never completes.
-                    beat: self.spike.as_ref().map(|_| spike::run_beats()),
-                    spike: self.spike.clone(),
-                },
+                resuming,
             ),
             presented,
             endpoint,
@@ -433,15 +574,24 @@ impl CursorWire {
     }
 }
 
+/// A stream that reports one failure and ends, for the two states a resume
+/// can find instead of a Run to read on.
+fn failed(reason: &str) -> BoxStream<'static, ProviderEvent> {
+    let failure = ProviderEvent::Failed(ProviderError::Transport(reason.to_owned()));
+
+    stream::once(async move { failure }).boxed()
+}
+
 /// The client half of the Run duplex: the sender feeding the held-open
-/// request body, and the system prompt the context answer carries on it.
+/// request body, and what every answer on it is built from.
 ///
-/// The fold owns it, so its lifetime is the event stream's: when the stream
-/// is dropped — after a clean finish, a failure, or a cancel alike — the
-/// sender goes with it, the channel closes, and the request body ends.
-/// That is the body's only close, which is what "a cancel mid-duplex ends
-/// the stream without a verdict and closes the request body" cashes out to.
-struct Duplex {
+/// The fold owns it, so its lifetime is the event stream's — except across a
+/// pause, where the whole fold moves into the held-run table and the sender
+/// travels with it, which is exactly what keeps the request body open for the
+/// answer a bridged tool will produce. When the stream is finally dropped —
+/// after a clean finish, a failure, a cancel, or a held Run being dropped —
+/// the sender goes with it, the channel closes, and the request body ends.
+pub(super) struct Duplex {
     answers: mpsc::UnboundedSender<Result<Vec<u8>, Infallible>>,
     system: Option<String>,
     /// What the context answer sends as `web_fetch_enabled`: this turn's
@@ -450,6 +600,11 @@ struct Duplex {
     /// A `bool` and not the request, so that the answer-building layer names
     /// nothing an engine owns.
     web_fetch: bool,
+    /// The tools this request declared, which three answers read: the
+    /// declaration on every context answer, the roster a `tool_not_found`
+    /// carries, and the membership test that decides whether a native exec is
+    /// redirected or refused.
+    roster: Vec<ToolDefinition>,
     /// The turn's blob store: what the server asked this client to hold
     /// mid-turn, read back by the server's own gets. Per-turn on purpose —
     /// this build carries no conversation state across turns, so every turn
@@ -458,64 +613,180 @@ struct Duplex {
     /// rather than failed, because an empty store is a state the server
     /// itself put there.
     blobs: HashMap<Vec<u8>, Vec<u8>>,
-    /// W2 measurement scaffolding and its run-level heartbeat, `None` on
-    /// every turn this build ships; see [`spike`].
-    spike: Option<spike::Spike>,
-    beat: Option<tokio::time::Interval>,
 }
 
-/// Drives the body's chunks through the Connect splitter and the mapping,
+impl Duplex {
+    /// The registry names this request declared.
+    fn names(&self) -> Vec<String> {
+        self.roster.iter().map(|tool| tool.name.clone()).collect()
+    }
+
+    /// A duplex answering on `answers` and declaring `roster`, for a test that
+    /// drives the fold without a socket.
+    #[cfg(test)]
+    pub(super) fn for_tests(
+        answers: mpsc::UnboundedSender<Result<Vec<u8>, Infallible>>,
+        roster: Vec<ToolDefinition>,
+    ) -> Self {
+        Self { answers, system: None, web_fetch: false, roster, blobs: HashMap::new() }
+    }
+
+    /// The same, carrying a system prompt for the context answer to put on
+    /// `cloud_rule`.
+    #[cfg(test)]
+    pub(super) fn speaking(
+        answers: mpsc::UnboundedSender<Result<Vec<u8>, Infallible>>,
+        system: Option<&str>,
+    ) -> Self {
+        Self { system: system.map(str::to_owned), ..Self::for_tests(answers, Vec::new()) }
+    }
+}
+
+/// Chunks of a response body, normalized to one concrete type.
+///
+/// The transport hands over `Bytes` and a test hands over `Vec<u8>`; the fold
+/// takes neither, because a fold that is generic over its chunk stream cannot
+/// be **stored**, and storing it is what a pause is. One boxed stream of owned
+/// bytes costs a copy per chunk — the splitter copies into its own buffer
+/// anyway — and buys a `Fold` that fits in a table.
+type Chunks = BoxStream<'static, Result<Vec<u8>, String>>;
+
+/// Whatever a caller has, as [`Chunks`].
+fn normalize<S, C, E>(chunks: S) -> Chunks
+where
+    S: Stream<Item = Result<C, E>> + Send + 'static,
+    C: AsRef<[u8]> + Send + 'static,
+    E: fmt::Display + Send + 'static,
+{
+    chunks
+        .map(|chunk| chunk.map(|bytes| bytes.as_ref().to_vec()).map_err(|error| error.to_string()))
+        .boxed()
+}
+
+/// Everything one Run needs to keep reading — and everything a pause has to
+/// carry across it.
+///
+/// It is one struct rather than a closure's captured state precisely so that
+/// it can be moved: a bridged exec pauses the stream by lifting this whole
+/// value into `bridge::HeldRuns` and dropping the stream around it, and the
+/// next request lifts it back out and reads on. The response body, the
+/// splitter's half-frame, the mapping's `turn_ended`, the request body's
+/// sender and the blob store all have to survive that, and every one of them
+/// is here.
+pub(super) struct Fold {
+    chunks: Chunks,
+    splitter: connect::Splitter,
+    mapping: decode::Mapping,
+    pub(super) duplex: Duplex,
+    /// Events already decoded, not yet handed out.
+    ready: VecDeque<ProviderEvent>,
+    /// Reused so that mapping a frame does not allocate.
+    scratch: Vec<ProviderEvent>,
+    /// The run-level heartbeat, on the fold's own clock while it is reading.
+    /// While the Run is *held* the keeper task beats instead — a fold nobody
+    /// is polling cannot tick.
+    beat: Interval,
+    done: bool,
+}
+
+impl Fold {
+    /// A fold over `chunks`, answering on `duplex`.
+    fn new(chunks: Chunks, duplex: Duplex) -> Self {
+        Self {
+            chunks,
+            splitter: connect::Splitter::default(),
+            mapping: decode::Mapping::default(),
+            duplex,
+            ready: VecDeque::new(),
+            scratch: Vec::new(),
+            beat: beats(bridge::HEARTBEAT),
+            done: false,
+        }
+    }
+}
+
+/// An interval whose first tick is one period out rather than immediate — an
+/// interval that fired at zero would put a heartbeat ahead of the run
+/// request's own first answer for no reason.
+fn beats(period: std::time::Duration) -> Interval {
+    let mut interval = interval_at(Instant::now() + period, period);
+    // A tick missed because the fold was busy decoding is a tick to skip, not
+    // one to fire immediately afterwards: liveness is a cadence, and a burst
+    // reports nothing extra.
+    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    interval
+}
+
+/// Where a paused Run is parked, and under which key.
+#[derive(Clone)]
+struct Bridge {
+    held: Arc<bridge::HeldRuns>,
+    key: bridge::Key,
+}
+
+/// Everything the event stream carries between polls.
+struct Streaming {
+    /// The fold, until a pause lifts it out — after which the stream hands out
+    /// what it already decided and ends.
+    fold: Option<Fold>,
+    cancel: CancellationToken,
+    /// Events a pause committed to: whatever was decoded, then the tool calls,
+    /// then the finish.
+    tail: VecDeque<ProviderEvent>,
+    /// Execs waiting to be handed to the engine when the gather window closes.
+    pending: Vec<bridge::Pending>,
+    /// Where to park on a pause, and `None` for a stream that cannot pause at
+    /// all — a fixture replay, or a request with no messages to key on. Such a
+    /// stream refuses every exec instead, which is what this wire did before
+    /// the bridge.
+    bridge: Option<Bridge>,
+    /// When the gather window closes, once a bridgeable exec is in hand.
+    gather: Option<Instant>,
+}
+
+/// What one turn of the read loop found.
+enum Next {
+    Cancelled,
+    /// The gather window closed: the batch is complete and the Run pauses.
+    Gathered,
+    /// The run-level heartbeat came due.
+    Beat,
+    Chunk(Option<Result<Vec<u8>, String>>),
+}
+
+/// Drives a fold's chunks through the Connect splitter and the mapping,
 /// handing out each frame's events the moment the frame completes.
 ///
 /// The duplex's answer path rides here too: a frame that decodes to one of
-/// the server's asks — the exec channel's context ask, the kv channel's
-/// blob exchanges — is answered on the held-open request body before the
-/// next frame is read, because the server holds generation until the
-/// answer lands. An ask the body can no longer carry an answer to fails the
-/// turn readably — an unanswered ask is the silent hang the 2026-08-10
+/// the server's asks — the exec channel's context ask and its tool execs, the
+/// kv channel's blob exchanges — is answered on the held-open request body
+/// before the next frame is read, because the server holds generation until
+/// the answer lands. An ask the body can no longer carry an answer to fails
+/// the turn readably — an unanswered ask is the silent hang the 2026-08-10
 /// live turns died of, once on the exec channel and once on the kv channel,
 /// and never again an outcome.
+///
+/// **A bridged exec is answered later, and elsewhere.** It is surfaced as a
+/// tool call, the step is finished, and the Run is held — see `bridge`. The
+/// answer goes out when the engine's result arrives on the next request.
 ///
 /// The cancellation posture is the SSE fold's, verbatim: the token is
 /// checked before handing out a buffered event as well as before pulling a
 /// new chunk, so a cancel cannot be outrun by frames that were already
-/// parsed, and a terminal event drops whatever decoded behind it. Split
-/// from [`CursorWire::stream`] so a fixture drives exactly the pipeline a
-/// live turn runs — both directions of it — minus the socket.
-fn events<S, C, E>(
-    chunks: S,
+/// parsed, and a terminal event drops whatever decoded behind it.
+fn run(
+    fold: Fold,
     cancel: CancellationToken,
-    duplex: Duplex,
-) -> BoxStream<'static, ProviderEvent>
-where
-    S: Stream<Item = Result<C, E>> + Send + Unpin + 'static,
-    C: AsRef<[u8]> + Send + 'static,
-    E: fmt::Display + Send + 'static,
-{
-    /// Everything the fold carries between polls.
-    struct State<S> {
-        chunks: S,
-        splitter: connect::Splitter,
-        mapping: decode::Mapping,
-        cancel: CancellationToken,
-        duplex: Duplex,
-        /// Events already decoded, not yet handed out.
-        ready: VecDeque<ProviderEvent>,
-        /// Reused so that mapping a frame does not allocate.
-        scratch: Vec<ProviderEvent>,
-        done: bool,
-    }
-
+    bridge: Option<Bridge>,
+) -> BoxStream<'static, ProviderEvent> {
     stream::unfold(
-        State {
-            chunks,
-            splitter: connect::Splitter::default(),
-            mapping: decode::Mapping::watching(duplex.spike.is_some()),
+        Streaming {
+            fold: Some(fold),
             cancel,
-            duplex,
-            ready: VecDeque::new(),
-            scratch: Vec::new(),
-            done: false,
+            tail: VecDeque::new(),
+            pending: Vec::new(),
+            bridge,
+            gather: None,
         },
         |mut state| async move {
             loop {
@@ -526,160 +797,422 @@ where
                     return None;
                 }
 
-                if let Some(event) = state.ready.pop_front() {
-                    if is_terminal(&event) {
-                        state.done = true;
-                        state.ready.clear();
-                    }
-
+                // A pause has already decided what this step says; nothing is
+                // read again.
+                if let Some(event) = state.tail.pop_front() {
                     return Some((event, state));
                 }
 
-                if state.done {
-                    return None;
-                }
-
-                // The run-level heartbeat rides the same wait the body does,
-                // so a spike turn beats on the fold's own clock rather than on
-                // a task that could outlive the stream it is keeping alive.
-                // Off the spike the branch is a future that never completes,
-                // which is the same `select!` with one arm that never fires.
-                let chunk = loop {
-                    tokio::select! {
-                        biased;
-                        () = state.cancel.cancelled() => return None,
-                        () = spike::beat(state.duplex.beat.as_mut()) => {
-                            let framed = connect::envelope(&spike::run_heartbeat());
-                            if state.duplex.answers.unbounded_send(Ok(framed)).is_err() {
-                                // The body is gone; the turn's own failure
-                                // arrives on the next ask, and beating into a
-                                // closed channel would only repeat the news.
-                                state.duplex.beat = None;
-                            } else {
-                                tracing::debug!(provider = ID, "cursor spike: run heartbeat");
+                {
+                    let fold = state.fold.as_mut()?;
+                    if let Some(event) = fold.ready.pop_front() {
+                        if is_terminal(&event) {
+                            fold.done = true;
+                            fold.ready.clear();
+                            if !state.pending.is_empty() {
+                                // The server ended the Run while execs it had
+                                // asked for were still gathering. It decided
+                                // not to wait, so there is nothing left to
+                                // hold open and nothing to resume — but a
+                                // model that asked for a tool and got a turn
+                                // instead is worth a line rather than silence.
+                                tracing::debug!(
+                                    provider = ID,
+                                    execs = state.pending.len(),
+                                    "the run ended before its own tool asks could be bridged"
+                                );
+                                state.pending.clear();
                             }
                         }
-                        chunk = state.chunks.next() => break chunk,
+
+                        return Some((event, state));
+                    }
+                    if fold.done {
+                        return None;
+                    }
+                }
+
+                let next = {
+                    let gather = state.gather;
+                    let cancel = state.cancel.clone();
+                    let fold = state.fold.as_mut()?;
+                    tokio::select! {
+                        biased;
+                        () = cancel.cancelled() => Next::Cancelled,
+                        () = gathered(gather) => Next::Gathered,
+                        _ = fold.beat.tick() => Next::Beat,
+                        chunk = fold.chunks.next() => Next::Chunk(chunk),
                     }
                 };
 
-                state.scratch.clear();
-                match chunk {
-                    Some(Ok(chunk)) => {
-                        state.splitter.push(chunk.as_ref());
-                        loop {
-                            match state.splitter.frame() {
-                                Ok(Some(frame)) => {
-                                    let Some(ask) = state.mapping.frame(&frame, &mut state.scratch)
-                                    else {
-                                        continue;
-                                    };
-                                    // Answered the moment it decodes: the
-                                    // server holds generation until the
-                                    // reply lands on the body the run
-                                    // request opened. Both kinds go out on
-                                    // that one channel in frame order, so a
-                                    // kv answer can never overtake the
-                                    // context answer ahead of it.
-                                    // A refusal is two messages where the
-                                    // other two asks are one, so every arm
-                                    // hands over a list: the throw and the
-                                    // stream close must reach the body in
-                                    // that order and with nothing between
-                                    // them.
-                                    let (answers, asked) = match ask {
-                                        decode::Ask::Context(ask) => (
-                                            vec![request::context_answer(
-                                                ask,
-                                                state.duplex.system.as_deref(),
-                                                state.duplex.web_fetch,
-                                                state.duplex.spike.as_ref(),
-                                            )],
-                                            "context ask",
-                                        ),
-                                        decode::Ask::Kv(ask) => (
-                                            vec![request::kv_answer(ask, &mut state.duplex.blobs)],
-                                            "kv ask",
-                                        ),
-                                        // The W2 spike's own arm, and the only
-                                        // exec this build ever serves: the
-                                        // declared probe, held open for the
-                                        // measured delay and then answered.
-                                        // Unreachable off the spike, which
-                                        // declares no tool for the server to
-                                        // call. Removed with the spike.
-                                        decode::Ask::Refuse(ask)
-                                            if state.duplex.spike.is_some()
-                                                && spike::is_ping(&ask) =>
-                                        {
-                                            let duplex = &mut state.duplex;
-                                            match spike::held(duplex, ask.id, &state.cancel).await {
-                                                spike::Held::Cancelled => return None,
-                                                spike::Held::Closed => (Vec::new(), "the probe"),
-                                                spike::Held::Elapsed => {
-                                                    (spike::pong(&ask), "the probe")
-                                                }
-                                            }
-                                        }
-                                        decode::Ask::Refuse(ask) => {
-                                            (request::refusal_answer(&ask), "tool exec")
-                                        }
-                                    };
-                                    // A hold that ended with the body closed
-                                    // has nothing to send and everything to
-                                    // report, which is the same failure the
-                                    // send below reports for every other ask.
-                                    let closed = answers.is_empty();
-                                    let closed = closed
-                                        || answers.into_iter().any(|answer| {
-                                            let enveloped = connect::envelope(&answer);
-                                            state
-                                                .duplex
-                                                .answers
-                                                .unbounded_send(Ok(enveloped))
-                                                .is_err()
-                                        });
-                                    if closed {
-                                        // A body nothing holds open cannot
-                                        // carry the answer, and an
-                                        // unanswered ask is a hang — so
-                                        // the turn fails, readably.
-                                        state.done = true;
-                                        state.scratch.push(ProviderEvent::Failed(
-                                            ProviderError::Transport(format!(
-                                                "the request body closed before the server's \
-                                                 {asked} could be answered"
-                                            )),
-                                        ));
-                                        break;
-                                    }
-                                }
-                                Ok(None) => break,
-                                Err(error) => {
-                                    state.done = true;
-                                    state.scratch.push(ProviderEvent::Failed(error));
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    Some(Err(error)) => {
-                        state.done = true;
-                        state.scratch.push(ProviderEvent::Failed(ProviderError::Transport(
-                            error.to_string(),
-                        )));
-                    }
-                    None => {
-                        state.done = true;
-                        state.mapping.truncated(&mut state.scratch);
-                    }
+                match next {
+                    Next::Cancelled => return None,
+                    Next::Gathered => pause(&mut state),
+                    Next::Beat => beat(&mut state),
+                    Next::Chunk(chunk) => absorb(&mut state, chunk),
                 }
-
-                state.ready.extend(state.scratch.drain(..));
             }
         },
     )
     .boxed()
+}
+
+/// Waits for the gather window to close, or forever when nothing is gathering.
+///
+/// The `None` arm is what lets one `select!` serve a step with a bridgeable
+/// exec in hand and one without: a branch that never completes is a branch
+/// that is not there.
+async fn gathered(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Sends one run-level heartbeat on the open request body.
+///
+/// A body that has closed is not reported here: the turn's own failure arrives
+/// the next time an ask cannot be answered, which says the same thing about a
+/// state the session can act on.
+fn beat(state: &mut Streaming) {
+    let Some(fold) = state.fold.as_mut() else { return };
+    let framed = connect::envelope(&request::run_heartbeat().encode_to_vec());
+    if fold.duplex.answers.unbounded_send(Ok(framed)).is_err() {
+        tracing::debug!(provider = ID, "the request body closed under the run heartbeat");
+    }
+}
+
+/// Takes one chunk of the body: cuts frames, maps them, answers what must be
+/// answered now, and collects what must be answered by the engine.
+///
+/// Three passes rather than one loop, because answering an ask needs the whole
+/// stream state — the pending batch, the bridge — while cutting a frame needs
+/// only the fold. Splitting them is what keeps each borrow short enough to be
+/// obviously correct.
+fn absorb(state: &mut Streaming, chunk: Option<Result<Vec<u8>, String>>) {
+    {
+        let Some(fold) = state.fold.as_mut() else { return };
+        fold.scratch.clear();
+
+        match chunk {
+            Some(Ok(chunk)) => fold.splitter.push(&chunk),
+            Some(Err(error)) => {
+                fold.done = true;
+                fold.scratch.push(ProviderEvent::Failed(ProviderError::Transport(error)));
+            }
+            None => {
+                fold.done = true;
+                fold.mapping.truncated(&mut fold.scratch);
+            }
+        }
+    }
+
+    loop {
+        let ask = {
+            let Some(fold) = state.fold.as_mut() else { return };
+            if fold.done {
+                break;
+            }
+
+            match fold.splitter.frame() {
+                Ok(Some(frame)) => fold.mapping.frame(&frame, &mut fold.scratch),
+                Ok(None) => break,
+                Err(error) => {
+                    fold.done = true;
+                    fold.scratch.push(ProviderEvent::Failed(error));
+                    break;
+                }
+            }
+        };
+
+        let Some(ask) = ask else { continue };
+        if !answer(state, ask) {
+            break;
+        }
+    }
+
+    let Some(fold) = state.fold.as_mut() else { return };
+    let decoded = std::mem::take(&mut fold.scratch);
+    fold.ready.extend(decoded);
+}
+
+/// Answers one ask, or records it as one the engine will answer.
+///
+/// Returns `false` when the exchange is over — the request body closed, which
+/// is a hang if it is not reported — so the caller stops cutting frames.
+fn answer(state: &mut Streaming, ask: decode::Ask) -> bool {
+    // Answered the moment it decodes: the server holds generation until the
+    // reply lands on the body the run request opened. Every kind goes out on
+    // that one channel in frame order, so a kv answer can never overtake the
+    // context answer ahead of it, and a refusal's two messages — the rejection
+    // and the close — reach the body in that order with nothing between them.
+    let (answers, asked) = match ask {
+        decode::Ask::Context(ask) => {
+            let Some(fold) = state.fold.as_mut() else { return false };
+            (
+                vec![request::context_answer(
+                    ask,
+                    fold.duplex.system.as_deref(),
+                    fold.duplex.web_fetch,
+                    &fold.duplex.roster,
+                )],
+                "context ask",
+            )
+        }
+        decode::Ask::Kv(ask) => {
+            let Some(fold) = state.fold.as_mut() else { return false };
+            (vec![request::kv_answer(ask, &mut fold.duplex.blobs)], "kv ask")
+        }
+        decode::Ask::Exec(ask) => match exec(state, ask) {
+            // Bridged: nothing goes out now, and the gather window is what
+            // decides when the step ends.
+            Exec::Bridged => return true,
+            Exec::Answered(messages) => (messages, "tool exec"),
+        },
+    };
+
+    let Some(fold) = state.fold.as_mut() else { return false };
+    let closed = answers.into_iter().any(|answer| {
+        let enveloped = connect::envelope(&answer);
+        fold.duplex.answers.unbounded_send(Ok(enveloped)).is_err()
+    });
+    if closed {
+        // A body nothing holds open cannot carry the answer, and an
+        // unanswered ask is a hang — so the turn fails, readably.
+        fold.done = true;
+        fold.scratch.push(ProviderEvent::Failed(ProviderError::Transport(format!(
+            "the request body closed before the server's {asked} could be answered"
+        ))));
+
+        return false;
+    }
+
+    true
+}
+
+/// What one tool exec became.
+enum Exec {
+    /// Handed to the engine; the answer goes out on a later request.
+    Bridged,
+    /// Answered here and now, in the kind's own vocabulary.
+    Answered(Vec<Vec<u8>>),
+}
+
+/// Decides what one tool exec gets: ganja's own tool, or a refusal.
+fn exec(state: &mut Streaming, ask: decode::ExecAsk) -> Exec {
+    let Some(fold) = state.fold.as_ref() else { return Exec::Answered(Vec::new()) };
+    let roster = fold.duplex.names();
+
+    // A wire that cannot pause cannot bridge: a fixture replay and a request
+    // with no message to key on both fall through to the refusal this wire
+    // sent before the bridge existed.
+    let bridgeable = state.bridge.is_some();
+
+    let (call_id, tool, input, answer) = match &ask.args {
+        decode::ExecArgs::Mcp(call) => match mcp(call, &roster) {
+            Ok(call_id) => {
+                let Some(arguments) = call.arguments.clone() else {
+                    // Unreachable: `mcp` already refused an unreadable map.
+                    return Exec::Answered(refused_mcp(&ask, unreadable()));
+                };
+                let name = if call.tool_name.is_empty() {
+                    call.name.clone()
+                } else {
+                    call.tool_name.clone()
+                };
+
+                (call_id, name, arguments, native::Answer::Mcp)
+            }
+            Err(result) => return Exec::Answered(refused_mcp(&ask, *result)),
+        },
+        args => {
+            let Some(bridged) = native::redirect(args, &roster) else {
+                return Exec::Answered(request::refusal_answer(&ask));
+            };
+            let Ok(call_id) = request::fresh_id() else {
+                // No id, no call the engine could answer. The typed refusal is
+                // still an outcome the server's loop reads.
+                return Exec::Answered(request::refusal_answer(&ask));
+            };
+
+            (call_id, bridged.tool, bridged.input, bridged.answer)
+        }
+    };
+
+    if !bridgeable {
+        return Exec::Answered(request::refusal_answer(&ask));
+    }
+
+    tracing::debug!(
+        provider = ID,
+        exec = ask.id,
+        kind = ask.kind,
+        tool,
+        call = call_id,
+        "bridging an exec to a ganja tool"
+    );
+    state.pending.push(bridge::Pending {
+        id: ask.id,
+        exec_id: ask.exec_id,
+        call_id,
+        tool,
+        input,
+        answer,
+    });
+    // Restarted on every frame while a batch is in hand, so a burst the server
+    // sent together rides one step.
+    state.gather = Some(Instant::now() + GATHER_WINDOW);
+
+    Exec::Bridged
+}
+
+/// Whether an `mcp_args` is a call this client serves, and under which id — or
+/// the `McpResult` that refuses it.
+///
+/// The order is the one the checks have to happen in: a preflight is answered
+/// before anything is resolved, a call for another server is not this client's
+/// to look up, an argument map that cannot be read cannot become a tool call,
+/// and only then is the name matched against the roster.
+fn mcp(call: &decode::McpCall, roster: &[String]) -> Result<String, Box<proto::McpResult>> {
+    if call.approval_only {
+        // A preflight asks whether the call *would* be allowed, and answering
+        // it by running the tool would run a side-effecting `bash` or `write`
+        // for a policy question — possibly twice, since the real call follows.
+        // So it is approved without executing anything: the real call is what
+        // meets ganja's permission dialog, and a deny there becomes `rejected`
+        // on that call.
+        tracing::debug!(
+            provider = ID,
+            call = call.tool_call_id,
+            "answering a smart-mode approval preflight without executing anything"
+        );
+        return Err(Box::new(proto::McpResult {
+            approved: buffa::MessageField::some(proto::McpApproved::default()),
+            ..Default::default()
+        }));
+    }
+
+    // Absent is not foreign: a server that sent no identifier has not named
+    // somebody else's, and the name is what decides the rest.
+    if !call.provider_identifier.is_empty()
+        && call.provider_identifier != request::PROVIDER_IDENTIFIER
+    {
+        return Err(Box::new(proto::McpResult {
+            server_not_found: buffa::MessageField::some(proto::McpServerNotFound {
+                name: Some(call.provider_identifier.clone()),
+                available_servers: vec![request::PROVIDER_IDENTIFIER.to_owned()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        }));
+    }
+
+    let Some(arguments) = call.arguments.as_ref() else {
+        return Err(Box::new(unreadable()));
+    };
+    debug_assert!(arguments.is_object(), "an argument map decodes to an object or to nothing");
+
+    let name = if call.tool_name.is_empty() { &call.name } else { &call.tool_name };
+    if roster.is_empty() {
+        // With nothing declared there is no roster to be missing from, and
+        // `tool_not_found` carrying an empty list would state that this client
+        // publishes one and that the name is not on it. The honest answer is
+        // the one that carries only a reason, and the reason names what was
+        // called — which is what this wire answered before it published a
+        // roster at all.
+        return Err(Box::new(proto::McpResult {
+            rejected: buffa::MessageField::some(
+                proto::McpRejected::default().with_reason(request::mcp_refusal_reason(name)),
+            ),
+            ..Default::default()
+        }));
+    }
+    if !roster.iter().any(|tool| tool == name) {
+        return Err(Box::new(proto::McpResult {
+            tool_not_found: buffa::MessageField::some(proto::McpToolNotFound {
+                name: Some(name.clone()),
+                available_tools: roster.to_vec(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }));
+    }
+
+    // A server that called without minting an id still gets an answer, keyed
+    // on one of ours: the engine needs a call id, and an empty one would
+    // collide with the next empty one.
+    Ok(if call.tool_call_id.is_empty() {
+        request::fresh_id().unwrap_or_else(|_| call.name.clone())
+    } else {
+        call.tool_call_id.clone()
+    })
+}
+
+/// The failure an argument map this build cannot read earns — that one call,
+/// never the turn.
+fn unreadable() -> proto::McpResult {
+    proto::McpResult {
+        error: buffa::MessageField::some(proto::McpError::default().with_error(
+            "ganja could not read the argument values of this call: one of them is a \
+             google.protobuf.Value shape this client does not model",
+        )),
+        ..Default::default()
+    }
+}
+
+/// One refused `mcp_args`: the result, then the close every exec ends with.
+fn refused_mcp(ask: &decode::ExecAsk, result: proto::McpResult) -> Vec<Vec<u8>> {
+    let refused = proto::ClientMessage {
+        exec_response: buffa::MessageField::some(proto::ExecResponse {
+            id: ask.id,
+            exec_id: ask.exec_id.clone(),
+            mcp_result: buffa::MessageField::some(result),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    vec![refused.encode_to_vec(), request::stream_close(ask.id).encode_to_vec()]
+}
+
+/// Ends the step and holds the Run open for the engine.
+///
+/// The events are committed here, in this order: whatever the gather window
+/// decoded, then each pending exec's `ToolCallStart`/`Delta`/`End`, then the
+/// finish. `session.rs` branches on whether the step produced calls rather
+/// than on the finish reason, so `Completed` here drives another step — which
+/// is the step whose request resumes this Run.
+///
+/// One `ToolCallDelta` per call, carrying the whole argument object: the exec
+/// arrived whole, so there is nothing to stream and nothing gained by
+/// pretending otherwise.
+fn pause(state: &mut Streaming) {
+    let Some(mut fold) = state.fold.take() else { return };
+    let pending = std::mem::take(&mut state.pending);
+    state.gather = None;
+
+    let mut tail = std::mem::take(&mut fold.ready);
+    for exec in &pending {
+        tail.push_back(ProviderEvent::ToolCallStart {
+            id: exec.call_id.clone(),
+            name: exec.tool.clone(),
+        });
+        tail.push_back(ProviderEvent::ToolCallDelta {
+            id: exec.call_id.clone(),
+            json: exec.input.to_string(),
+        });
+        tail.push_back(ProviderEvent::ToolCallEnd { id: exec.call_id.clone() });
+    }
+    tail.push_back(ProviderEvent::Finish(FinishReason::Completed));
+    state.tail = tail;
+
+    let Some(bridge) = state.bridge.clone() else {
+        // Unreachable: nothing is ever pending without somewhere to park it.
+        // Dropping the fold here closes the body, which the server reads as
+        // the client giving up — honest, if this ever happens.
+        return;
+    };
+    bridge.held.hold(bridge.key, fold, pending, &state.cancel);
 }
 
 /// Feeds a recorded body through the pipeline a live turn runs.
@@ -700,11 +1233,51 @@ fn replay(body: Vec<u8>, cancel: CancellationToken) -> BoxStream<'static, Provid
             answers,
             system: None,
             web_fetch: false,
+            roster: Vec::new(),
             blobs: std::collections::HashMap::new(),
-            spike: None,
-            beat: None,
         },
     )
+}
+
+/// The fold over a caller's own chunks, without a bridge: every exec is
+/// refused, which is what a fixture replay and the pre-bridge tests want.
+///
+/// Test-only since the bridge landed: a shipped turn always has a key to park
+/// under, so [`CursorWire::stream`] builds its fold directly.
+#[cfg(test)]
+fn events<S, C, E>(
+    chunks: S,
+    cancel: CancellationToken,
+    duplex: Duplex,
+) -> BoxStream<'static, ProviderEvent>
+where
+    S: Stream<Item = Result<C, E>> + Send + 'static,
+    C: AsRef<[u8]> + Send + 'static,
+    E: fmt::Display + Send + 'static,
+{
+    run(Fold::new(normalize(chunks), duplex), cancel, None)
+}
+
+/// The same fold **with** a bridge, so a test can drive the real pause and the
+/// real resume over in-memory channels rather than a socket.
+///
+/// The seam is `run`'s own arguments and nothing else: what a test builds this
+/// way is byte for byte what [`CursorWire::stream`] builds, which is the whole
+/// point of having it.
+#[cfg(test)]
+fn bridged_events<S, C, E>(
+    chunks: S,
+    cancel: CancellationToken,
+    duplex: Duplex,
+    held: &Arc<bridge::HeldRuns>,
+    key: bridge::Key,
+) -> BoxStream<'static, ProviderEvent>
+where
+    S: Stream<Item = Result<C, E>> + Send + 'static,
+    C: AsRef<[u8]> + Send + 'static,
+    E: fmt::Display + Send + 'static,
+{
+    run(Fold::new(normalize(chunks), duplex), cancel, Some(Bridge { held: Arc::clone(held), key }))
 }
 
 #[cfg(test)]

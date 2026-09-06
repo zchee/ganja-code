@@ -1,31 +1,14 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use buffa::Message as _;
 
-use super::super::{CursorWire, DEFAULT_BASE_URL, connect, proto, serves_fetch};
+use super::super::{connect, proto, serves_fetch};
 use super::{
     ChatRequest, context_answer, decode, fresh_id, kv_answer, newest_user_text, refusal_answer,
     run_message,
 };
-use crate::auth::{AuthError, OauthCredential, RefreshOauth};
 use crate::protocol::{Message, Part};
 use crate::tool::ToolDefinition;
-
-/// A renewal that must never run: the send-side test below builds a wire and
-/// encodes with it, and never reaches a token endpoint.
-struct NeverRenews;
-
-#[async_trait::async_trait]
-impl RefreshOauth for NeverRenews {
-    async fn refresh(
-        &self,
-        provider_id: &str,
-        _credential: &OauthCredential,
-    ) -> Result<OauthCredential, AuthError> {
-        panic!("{provider_id} was renewed by a test that only encodes a request");
-    }
-}
 
 /// The sentence every typed refusal but the MCP one carries, spelled out
 /// once here rather than rebuilt from the constant under test: a test that
@@ -102,7 +85,7 @@ fn refused(exec: proto::ExecRequest) -> Vec<proto::ClientMessage> {
     let mut events = Vec::new();
     let ask = decode::Mapping::default().frame(&frame, &mut events).expect("the server waits");
     assert!(events.is_empty(), "a refusal is an answer to send, not an event: {events:?}");
-    let decode::Ask::Refuse(ask) = ask else { panic!("a tool exec is refused: {ask:?}") };
+    let decode::Ask::Exec(ask) = ask else { panic!("a tool exec is refused: {ask:?}") };
 
     refusal_answer(&ask)
         .iter()
@@ -150,7 +133,7 @@ fn request() -> ChatRequest {
 
 #[test]
 fn the_assembled_bytes_decode_back_to_what_the_assembly_promised() {
-    let bytes = run_message(&request(), None).expect("the assembly encodes");
+    let bytes = run_message(&request()).expect("the assembly encodes");
     let decoded = proto::ClientMessage::decode_from_slice(&bytes).expect("what was sent decodes");
 
     let run = decoded.run_request.as_option().expect("a run request first");
@@ -183,22 +166,22 @@ fn the_assembled_bytes_decode_back_to_what_the_assembly_promised() {
     );
 }
 
-/// **AC-10.** A wire built with the W2 spike's environment unset sends the
-/// four fields it sent before the spike existed, and neither of the two the
-/// spike adds.
+/// **AC-10, half one.** A request offering no tools declares no roster, and
+/// the run request it sends is byte for byte the one this wire sent before the
+/// bridge existed.
 ///
-/// The wire is *constructed* rather than described, and constructed through
-/// [`CursorWire::at`] — the path that sets the spike to `None` explicitly —
-/// so nothing here mutates the process environment and nothing depends on the
-/// order the tests in this binary ran in. What is asserted is the bytes: a
-/// struct field can read back correctly while the encoder has started writing
-/// something extra beside it, and "extra" is exactly this test's subject.
+/// That is what a title or summary one-shot is, and `ganja run` builds this
+/// wire twice per invocation — the second one is exactly such a turn — so
+/// "declares nothing" is the common case rather than an edge.
+///
+/// What is asserted is the **bytes**: a struct field can read back correctly
+/// while the encoder has started writing something extra beside it, and
+/// "extra" is exactly this test's subject.
 #[test]
-fn a_spikeless_wire_sends_a_run_request_with_no_spike_fields() {
-    let wire = CursorWire::at(DEFAULT_BASE_URL, Arc::new(NeverRenews)).expect("the wire builds");
-    assert!(wire.spike.is_none(), "no environment was set, so there is no spike");
+fn a_request_offering_no_tools_declares_no_roster() {
+    let toolless = ChatRequest { tools: Vec::new(), ..request() };
 
-    let bytes = run_message(&request(), wire.spike.as_ref()).expect("the assembly encodes");
+    let bytes = run_message(&toolless).expect("the assembly encodes");
     let run = proto::ClientMessage::decode_from_slice(&bytes)
         .expect("what was sent decodes")
         .run_request
@@ -209,16 +192,107 @@ fn a_spikeless_wire_sends_a_run_request_with_no_spike_fields() {
     assert_eq!(
         field_numbers(&run.encode_to_vec()),
         vec![1, 2, 3, 9],
-        "conversation_state, action, model_details, requested_model — no mcp_tools = 4 and no \
-         system_prompt_spec = 29"
+        "conversation_state, action, model_details, requested_model — and no mcp_tools = 4"
     );
-    assert!(!run.mcp_tools.is_set(), "no roster is declared off the spike");
-    assert!(!run.system_prompt_spec.is_set(), "and no second system-prompt channel");
+    assert!(!run.mcp_tools.is_set(), "nothing to declare, so nothing is declared");
+}
+
+/// **AC-10, half two.** A request that *does* offer tools declares them on the
+/// run request's own channel, and on no other field.
+#[test]
+fn a_request_offering_tools_declares_them_on_the_run_request() {
+    let offering = ChatRequest { tools: declared(), ..request() };
+
+    let bytes = run_message(&offering).expect("the assembly encodes");
+    let run = proto::ClientMessage::decode_from_slice(&bytes)
+        .expect("what was sent decodes")
+        .run_request
+        .as_option()
+        .cloned()
+        .expect("the run request");
+
+    assert_eq!(
+        field_numbers(&run.encode_to_vec()),
+        vec![1, 2, 3, 4, 9],
+        "conversation_state, action, model_details, mcp_tools, requested_model"
+    );
+
+    let declaration = run.mcp_tools.as_option().expect("the roster");
+    assert_eq!(declaration.mcp_tools.len(), 2, "one definition per tool, in the engine's order");
+    let read = &declaration.mcp_tools[0];
+    assert_eq!(read.name.as_deref(), Some("read"));
+    assert_eq!(read.tool_name.as_deref(), Some("read"), "both names, from one declaration");
+    assert_eq!(read.description.as_deref(), Some("Reads a file."));
+    assert_eq!(
+        read.provider_identifier.as_deref(),
+        Some("ganja"),
+        "provider_identifier says who serves the tool, and ganja does"
+    );
+    assert_eq!(
+        read.input_schema_json.as_deref(),
+        Some(r#"{"type":"object"}"#),
+        "the schema is already a JSON string on this side"
+    );
+    assert!(
+        !read.input_schema.is_set(),
+        "field 3 stays modelled and unsent: the server was measured accepting either, and two \
+         encodings of one schema are two things that can disagree"
+    );
+}
+
+/// The roster the two declaration tests offer.
+fn declared() -> Vec<ToolDefinition> {
+    vec![
+        ToolDefinition {
+            name: "read".to_owned(),
+            description: "Reads a file.".to_owned(),
+            schema: serde_json::json!({ "type": "object" }),
+        },
+        ToolDefinition {
+            name: "bash".to_owned(),
+            description: "Runs a command.".to_owned(),
+            schema: serde_json::json!({ "type": "object" }),
+        },
+    ]
+}
+
+/// The declaration's *second* channel: the shipped client refreshes the roster
+/// on every context answer, and so does this one — with the same definitions.
+#[test]
+fn the_context_answer_carries_the_same_roster_the_run_request_declared() {
+    let bytes =
+        context_answer(decode::ContextAsk { id: Some(7), exec_id: None }, None, true, &declared());
+    let context = proto::ClientMessage::decode_from_slice(&bytes)
+        .expect("what was sent decodes")
+        .exec_response
+        .as_option()
+        .and_then(|answer| answer.request_context_result.as_option())
+        .and_then(|result| result.success.as_option())
+        .and_then(|success| success.request_context.as_option())
+        .cloned()
+        .expect("the context");
+
+    assert_eq!(
+        context.tools.iter().filter_map(|tool| tool.name.as_deref()).collect::<Vec<_>>(),
+        vec!["read", "bash"]
+    );
+
+    let empty = context_answer(decode::ContextAsk { id: Some(7), exec_id: None }, None, false, &[]);
+    let context = proto::ClientMessage::decode_from_slice(&empty)
+        .expect("what was sent decodes")
+        .exec_response
+        .as_option()
+        .and_then(|answer| answer.request_context_result.as_option())
+        .and_then(|result| result.success.as_option())
+        .and_then(|success| success.request_context.as_option())
+        .cloned()
+        .expect("the context");
+    assert!(context.tools.is_empty(), "a request declaring nothing declares nothing here either");
 }
 
 #[test]
 fn the_system_prompt_never_rides_the_run_request() {
-    let bytes = run_message(&request(), None).expect("the assembly encodes");
+    let bytes = run_message(&request()).expect("the assembly encodes");
 
     let prompt = b"You are terse.";
     assert!(
@@ -234,7 +308,7 @@ fn the_context_answer_echoes_the_ids_and_carries_the_prompt_on_cloud_rule() {
         decode::ContextAsk { id: Some(7), exec_id: Some("exec-abc".to_owned()) },
         Some("You are terse."),
         true,
-        None,
+        &[],
     );
     let decoded = proto::ClientMessage::decode_from_slice(&bytes).expect("what was sent decodes");
 
@@ -259,7 +333,7 @@ fn the_context_answer_echoes_the_ids_and_carries_the_prompt_on_cloud_rule() {
 fn a_promptless_turn_answers_with_a_present_but_empty_context() {
     for system in [None, Some("")] {
         let bytes =
-            context_answer(decode::ContextAsk { id: None, exec_id: None }, system, false, None);
+            context_answer(decode::ContextAsk { id: None, exec_id: None }, system, false, &[]);
         let decoded = proto::ClientMessage::decode_from_slice(&bytes).expect("decodes");
         let answer = decoded.exec_response.as_option().expect("the exec answer");
         assert_eq!(answer.id, None, "an id the server never sent is not invented");
@@ -281,11 +355,11 @@ fn a_promptless_turn_answers_with_a_present_but_empty_context() {
 /// what keeps a kind newer than `cursor.proto` refusable at all.
 #[test]
 fn an_exec_with_no_modelled_arm_is_a_throw_naming_the_kind_and_then_a_stream_close() {
-    let refused = refusal_answer(&decode::ExecRefusal {
+    let refused = refusal_answer(&decode::ExecAsk {
         id: Some(5),
         exec_id: Some("exec-abc".to_owned()),
         kind: "subagent_args".to_owned(),
-        arm: decode::RefusalArm::Throw,
+        args: decode::ExecArgs::Unmodelled,
     });
     assert_eq!(refused.len(), 2, "a throw, and the close that ends it");
 
@@ -340,11 +414,11 @@ fn an_exec_with_no_modelled_arm_is_a_throw_naming_the_kind_and_then_a_stream_clo
 /// either — the same discipline the context and kv answers hold.
 #[test]
 fn a_refusal_for_an_exec_without_an_id_invents_none() {
-    let refused = refusal_answer(&decode::ExecRefusal {
+    let refused = refusal_answer(&decode::ExecAsk {
         id: None,
         exec_id: None,
         kind: "no recognizable kind".to_owned(),
-        arm: decode::RefusalArm::Throw,
+        args: decode::ExecArgs::Unmodelled,
     });
 
     let decoded = proto::ClientMessage::decode_from_slice(&refused[0]).expect("decodes");
@@ -841,7 +915,7 @@ fn an_exec_kind_outside_the_table_still_reaches_the_throw() {
 /// nothing, and a later tidy-up that "completes" the set reddens here.
 #[test]
 fn the_context_answer_carries_exactly_the_three_switchboard_members() {
-    let bytes = context_answer(decode::ContextAsk { id: None, exec_id: None }, None, true, None);
+    let bytes = context_answer(decode::ContextAsk { id: None, exec_id: None }, None, true, &[]);
     let decoded = proto::ClientMessage::decode_from_slice(&bytes).expect("decodes");
     let context = decoded
         .exec_response
@@ -873,7 +947,7 @@ fn a_prompt_joins_the_switchboard_rather_than_replacing_it() {
         decode::ContextAsk { id: None, exec_id: None },
         Some("Be terse."),
         false,
-        None,
+        &[],
     );
     let decoded = proto::ClientMessage::decode_from_slice(&bytes).expect("decodes");
     let context = decoded

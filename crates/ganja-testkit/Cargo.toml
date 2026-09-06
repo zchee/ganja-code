@@ -22,6 +22,11 @@ ganja-core.workspace = true
 # their home crate, not through `ganja-core`'s root, which names only the
 # engine's own types.
 ganja-protocol.workspace = true
+# The cursor mock server encodes and decodes the wire's own protobuf: the
+# messages come through `ganja_core::provider::cursor::proto`, but `encode_to_vec`
+# and `decode_from_slice` are `buffa::Message`'s, so the trait has to be nameable
+# here. Codegen-only, exactly as `ganja-provider` names it.
+buffa.workspace = true
 # The five external backends `externals()` assembles are that crate's, so a
 # fixture lead is production on a machine where none of the foreign CLIs is
 # installed rather than a stub of one. A normal dependency, not a dev one: the

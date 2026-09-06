@@ -11,7 +11,7 @@ use super::{
 };
 use crate::auth::{self, AuthError, OauthCredential, RefreshOauth};
 use crate::protocol::FinishReason;
-use crate::provider::ProviderEvent;
+use crate::provider::{ChatRequest, ProviderEvent};
 
 /// A renewal that must never run, for the cases that are about
 /// construction rather than about a token endpoint.
@@ -96,15 +96,8 @@ fn shell_stream_framed(id: u32) -> Vec<u8> {
 /// A duplex whose answers nobody reads, for fixtures without an ask.
 fn promptless_duplex() -> super::Duplex {
     let (answers, _) = futures::channel::mpsc::unbounded();
-    super::Duplex {
-        answers,
-        system: None,
-        web_fetch: false,
-        blobs: std::collections::HashMap::new(),
-        // W2 spike: off, as it is on every turn this build ships.
-        spike: None,
-        beat: None,
-    }
+
+    super::Duplex::for_tests(answers, Vec::new())
 }
 
 /// A data frame holding one kv exchange, built with the real message
@@ -151,7 +144,7 @@ fn end_stream(payload: &str) -> Vec<u8> {
 
 #[test]
 fn ganja_calls_it_cursor_everywhere_the_wire_can_see() {
-    assert_eq!(CursorProvider.id(), ID);
+    assert_eq!(CursorProvider::default().id(), ID);
     assert_eq!(ID, "cursor");
     assert_eq!(
         ID,
@@ -176,9 +169,14 @@ fn the_endpoint_is_cursors_own_and_the_debug_holds_no_secret() {
         "the endpoint is what tells one wire from another: {rendered}"
     );
 
-    // The selectable identity stays a bare name: nothing to leak, and
-    // nothing read at construction.
-    assert_eq!(format!("{CursorProvider:?}"), "CursorProvider");
+    // The selectable identity renders where it points and nothing else: it
+    // holds no credential, and the runs it is holding open are somebody's
+    // conversation.
+    let selectable = format!("{:?}", CursorProvider::default());
+    assert!(
+        selectable.contains("api2.cursor.sh"),
+        "the default provider is the stored login at cursor's own endpoint: {selectable}"
+    );
 }
 
 /// The endpoint is not exempt from the rule every other base URL is held
@@ -243,15 +241,7 @@ async fn the_context_ask_is_answered_on_the_open_body_before_the_turn_flows() {
     let mut stream = super::events(
         receiver,
         CancellationToken::new(),
-        super::Duplex {
-            answers,
-            system: Some("You are terse.".to_owned()),
-            web_fetch: false,
-            blobs: std::collections::HashMap::new(),
-            // W2 spike: off, as it is on every turn this build ships.
-            spike: None,
-            beat: None,
-        },
+        super::Duplex::speaking(answers, Some("You are terse.")),
     );
 
     sender.unbounded_send(Ok(exec_framed(7, "exec-abc"))).expect("the body is open");
@@ -321,15 +311,7 @@ async fn the_kv_channel_is_answered_in_frame_order_behind_the_context_answer() {
     let stream = super::events(
         receiver,
         CancellationToken::new(),
-        super::Duplex {
-            answers,
-            system: Some("You are terse.".to_owned()),
-            web_fetch: false,
-            blobs: std::collections::HashMap::new(),
-            // W2 spike: off, as it is on every turn this build ships.
-            spike: None,
-            beat: None,
-        },
+        super::Duplex::speaking(answers, Some("You are terse.")),
     );
 
     let mut body = exec_framed(7, "exec-abc");
@@ -417,15 +399,7 @@ async fn a_tool_exec_is_refused_on_the_open_body_and_the_turn_survives() {
     let stream = super::events(
         receiver,
         CancellationToken::new(),
-        super::Duplex {
-            answers,
-            system: None,
-            web_fetch: false,
-            blobs: std::collections::HashMap::new(),
-            // W2 spike: off, as it is on every turn this build ships.
-            spike: None,
-            beat: None,
-        },
+        super::Duplex::for_tests(answers, Vec::new()),
     );
 
     let mut body = shell_stream_framed(5);
@@ -650,113 +624,394 @@ fn the_checked_in_generated_code_matches_the_proto() {
     );
 }
 
-/// W2 spike, at the fold: the declared probe is held for its delay and then
-/// answered with `mcp_result.success`, on the same body every other answer
-/// rides — while every *other* exec keeps W1's typed refusal.
+/// The roster a bridged turn declares, and the tool an `mcp_args` names.
+fn roster() -> Vec<crate::tool::ToolDefinition> {
+    vec![
+        crate::tool::ToolDefinition {
+            name: "read".to_owned(),
+            description: "Reads a file.".to_owned(),
+            schema: serde_json::json!({ "type": "object" }),
+        },
+        crate::tool::ToolDefinition {
+            name: "bash".to_owned(),
+            description: "Runs a command.".to_owned(),
+            schema: serde_json::json!({ "type": "object" }),
+        },
+    ]
+}
+
+/// A frame carrying one `mcp_args`, built from whatever the case is about.
+fn mcp_framed(id: u32, args: proto::McpArgs) -> Vec<u8> {
+    let message = proto::ServerMessage {
+        exec_request: buffa::MessageField::some(proto::ExecRequest {
+            id: Some(id),
+            exec_id: Some("exec-mcp".to_owned()),
+            mcp_args: buffa::MessageField::some(args),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    connect::envelope(&message.encode_to_vec())
+}
+
+/// A request that can key a held run, so the harness below is a wire that
+/// really could pause — which is what makes "this call was bridged rather than
+/// answered" observable instead of indistinguishable from "this wire cannot
+/// bridge".
+fn keyed_request() -> ChatRequest {
+    ChatRequest {
+        model: "auto".to_owned(),
+        system: None,
+        messages: vec![crate::protocol::Message::user("do the thing")],
+        turn_start: 0,
+        tools: roster(),
+        effort_options: serde_json::Map::new(),
+    }
+}
+
+/// Drives one `mcp_args` through a **bridging** fold with `declared` on the
+/// roster, and returns the `McpResult` it was answered with — or `None` when
+/// the exec was handed to the engine instead.
 ///
-/// Driven with the delay at zero: what this proves is the wiring — that the
-/// classifier, the hold and the answer are joined end to end — where the
-/// delay's own effect is a server-side fact only a live turn can measure.
-/// Deleted with the spike in W3a.
-#[tokio::test]
-async fn the_spikes_probe_is_served_where_every_other_exec_is_refused() {
-    let spike = super::spike::Spike::read(&|variable| {
-        (variable == super::spike::ENABLE_ENV).then(|| "1".to_owned())
-    })
-    .expect("a bare enable is readable")
-    .expect("enabled");
+/// A bridged call pauses the Run, so it produces tool-call events and *no*
+/// answer on the wire; every refusal is decided before a pause could happen
+/// and produces an answer and no events. That difference is the assertion.
+async fn answered_mcp(
+    args: proto::McpArgs,
+    declared: Vec<crate::tool::ToolDefinition>,
+) -> Option<proto::McpResult> {
+    let held = std::sync::Arc::new(super::bridge::HeldRuns::default());
+    let request = keyed_request();
+    let key = super::bridge::Key::of(&request).expect("a request with a message keys");
 
     let (sender, receiver) =
         futures::channel::mpsc::unbounded::<Result<Vec<u8>, std::convert::Infallible>>();
     let (answers, mut answered) = futures::channel::mpsc::unbounded();
-    let mut stream = super::events(
+    let stream = super::bridged_events(
         receiver,
         CancellationToken::new(),
-        super::Duplex {
-            answers,
-            system: None,
-            web_fetch: false,
-            blobs: std::collections::HashMap::new(),
-            beat: Some(super::spike::run_beats()),
-            spike: Some(spike),
-        },
+        super::Duplex::for_tests(answers, declared),
+        &held,
+        key,
     );
 
-    let called = |name: &str| {
-        let message = proto::ServerMessage {
-            exec_request: buffa::MessageField::some(proto::ExecRequest {
-                id: Some(4),
-                exec_id: Some("exec-ping".to_owned()),
-                mcp_args: buffa::MessageField::some(
-                    proto::McpArgs::default().with_name(name).with_tool_call_id("call-1"),
-                ),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
+    let mut body = mcp_framed(3, args);
+    body.extend(framed(turn_ended()));
+    body.extend(end_stream("{}"));
+    sender.unbounded_send(Ok(body)).expect("the body is open");
 
-        connect::envelope(&message.encode_to_vec())
-    };
-    sender.unbounded_send(Ok(called(super::spike::TOOL_NAME))).expect("the body is open");
-
-    let served = tokio::time::timeout(Duration::from_secs(10), async {
-        let drive = stream.next();
-        match futures::future::select(drive, answered.next()).await {
-            futures::future::Either::Right((answer, _)) => answer
-                .expect("the fold holds the sender")
-                .expect("the channel's error type is infallible"),
-            futures::future::Either::Left((event, _)) => {
-                panic!("a served exec is an answer, not an event: {event:?}")
-            }
-        }
-    })
-    .await
-    .expect("the answer goes out while the body is open");
-
-    let sent = proto::ClientMessage::decode_from_slice(&served[5..])
-        .expect("the answered bytes are the client message");
-    let success = sent
-        .exec_response
-        .as_option()
-        .expect("the result rides the exec channel")
-        .mcp_result
-        .as_option()
-        .expect("the mcp result")
-        .success
-        .as_option()
-        .expect("served, not refused");
-    assert_eq!(
-        success.content[0].text.as_option().and_then(|text| text.text.as_deref()),
-        Some("pong")
-    );
-
-    // A tool nobody declared is still refused, spike or no spike: the probe is
-    // recognised by its name, not by the flag being on.
-    sender.unbounded_send(Ok(called("rm_minus_rf"))).expect("the body is open");
-    let refused = tokio::time::timeout(Duration::from_secs(10), async {
-        // The close that ends the served exec comes first, then the refusal.
-        let _close = answered.next().await;
-        let drive = stream.next();
-        match futures::future::select(drive, answered.next()).await {
-            futures::future::Either::Right((answer, _)) => answer
-                .expect("the fold holds the sender")
-                .expect("the channel's error type is infallible"),
-            futures::future::Either::Left((event, _)) => {
-                panic!("a refusal is an answer, not an event: {event:?}")
-            }
-        }
-    })
-    .await
-    .expect("the refusal goes out while the body is open");
-
-    let sent = proto::ClientMessage::decode_from_slice(&refused[5..])
-        .expect("the answered bytes are the client message");
+    let events: Vec<ProviderEvent> =
+        tokio::time::timeout(Duration::from_secs(10), stream.collect())
+            .await
+            .expect("an answered exec ends the exchange rather than hanging it");
     assert!(
-        sent.exec_response
+        !events.iter().any(|event| matches!(event, ProviderEvent::Failed(_))),
+        "an answered exec is not a failed turn: {events:?}"
+    );
+
+    let sent: Vec<proto::ClientMessage> = std::iter::from_fn(|| answered.try_recv().ok())
+        .flatten()
+        .map(|bytes| proto::ClientMessage::decode_from_slice(&bytes[5..]).expect("client messages"))
+        .collect();
+
+    sent.iter()
+        .find_map(|message| message.exec_response.as_option())
+        .and_then(|response| response.mcp_result.as_option())
+        .cloned()
+}
+
+/// **AC-14.** A name outside the roster this request declared is answered with
+/// `tool_not_found` **carrying that roster** — which is the arm this build
+/// could not honestly use before it published one — and the turn survives.
+#[tokio::test]
+async fn a_call_naming_an_undeclared_tool_is_answered_with_the_roster_it_is_missing_from() {
+    let result = answered_mcp(
+        proto::McpArgs::default()
+            .with_name("rm_minus_rf")
+            .with_tool_name("rm_minus_rf")
+            .with_tool_call_id("call-1")
+            .with_provider_identifier("ganja"),
+        roster(),
+    )
+    .await
+    .expect("an undeclared name is answered here, never bridged");
+
+    let missing = result.tool_not_found.as_option().expect("the arm that carries a roster");
+    assert_eq!(missing.name.as_deref(), Some("rm_minus_rf"));
+    assert_eq!(
+        missing.available_tools,
+        vec!["read".to_owned(), "bash".to_owned()],
+        "the roster is this request's own, in the order the engine advertised it"
+    );
+    assert!(!result.rejected.is_set(), "the roster exists now, so the honest arm is the typed one");
+}
+
+/// **AC-22.** A call naming somebody else's server is not this client's to
+/// look up, and is answered `server_not_found` rather than executed.
+#[tokio::test]
+async fn a_call_for_another_server_is_answered_server_not_found_and_never_run() {
+    let result = answered_mcp(
+        proto::McpArgs::default()
+            .with_name("read")
+            .with_tool_name("read")
+            .with_tool_call_id("call-1")
+            .with_provider_identifier("somebody-elses-mcp"),
+        roster(),
+    )
+    .await
+    .expect("a foreign identifier is answered here, never bridged");
+
+    let missing = result.server_not_found.as_option().expect("the server arm");
+    assert_eq!(missing.name.as_deref(), Some("somebody-elses-mcp"));
+    assert_eq!(missing.available_servers, vec!["ganja".to_owned()]);
+}
+
+/// The other half of AC-22, and the one the fixture settles: a **present**
+/// `server_identifier` on a `"ganja"` call is the measured norm — it arrived on
+/// every recorded call — so it refuses nothing, and the call is bridged.
+#[tokio::test]
+async fn a_present_server_identifier_on_our_own_call_refuses_nothing() {
+    let bridged = answered_mcp(
+        proto::McpArgs::default()
+            .with_name("read")
+            .with_tool_name("read")
+            .with_tool_call_id("call-1")
+            .with_provider_identifier("ganja")
+            .with_server_identifier("whatever-the-server-calls-us"),
+        roster(),
+    )
+    .await;
+
+    assert!(
+        bridged.is_none(),
+        "a call this client serves is handed to the engine, not answered on the wire"
+    );
+}
+
+/// **AC-23.** A `smart_mode_approval_only` preflight is a policy question, and
+/// answering it by running the tool would run a side-effecting call for one —
+/// possibly twice, since the real call follows. So it is approved and
+/// **nothing executes**: no tool call reaches the engine, which is what the
+/// absent `ToolCallStart` below asserts.
+#[tokio::test]
+async fn an_approval_preflight_is_approved_without_executing_anything() {
+    let (sender, receiver) =
+        futures::channel::mpsc::unbounded::<Result<Vec<u8>, std::convert::Infallible>>();
+    let (answers, answered) = futures::channel::mpsc::unbounded();
+    let stream = super::events(
+        receiver,
+        CancellationToken::new(),
+        super::Duplex::for_tests(answers, roster()),
+    );
+
+    let mut body = mcp_framed(
+        3,
+        proto::McpArgs::default()
+            .with_name("bash")
+            .with_tool_name("bash")
+            .with_tool_call_id("call-1")
+            .with_provider_identifier("ganja")
+            .with_smart_mode_approval_only(true),
+    );
+    body.extend(framed(turn_ended()));
+    body.extend(end_stream("{}"));
+    sender.unbounded_send(Ok(body)).expect("the body is open");
+    drop(sender);
+
+    let events: Vec<ProviderEvent> =
+        tokio::time::timeout(Duration::from_secs(10), stream.collect())
+            .await
+            .expect("a preflight is answered rather than held");
+    assert!(
+        !events.iter().any(|event| matches!(event, ProviderEvent::ToolCallStart { .. })),
+        "a preflight must not reach the engine as a call: {events:?}"
+    );
+
+    let sent: Vec<proto::ClientMessage> = answered
+        .map(|answer| {
+            let bytes = answer.expect("the channel's error type is infallible");
+            proto::ClientMessage::decode_from_slice(&bytes[5..]).expect("client messages")
+        })
+        .collect()
+        .await;
+    assert!(
+        sent.iter()
+            .filter_map(|message| message.exec_response.as_option())
+            .filter_map(|response| response.mcp_result.as_option())
+            .any(|result| result.approved.is_set()),
+        "the preflight is answered `approved`"
+    );
+    assert!(
+        sent.iter().any(|message| message
+            .exec_control
             .as_option()
-            .and_then(|answer| answer.mcp_result.as_option())
-            .and_then(|result| result.rejected.as_option())
-            .is_some(),
-        "an undeclared tool keeps D550's typed rejection"
+            .is_some_and(|control| control.stream_close.is_set())),
+        "and then the close that ends the exec"
+    );
+}
+
+/// An argument map this build cannot read fails **that one call** with the
+/// error arm and never the turn — the model reads it, tries something else,
+/// and the reply still arrives.
+#[tokio::test]
+async fn an_unreadable_argument_map_fails_one_call_and_not_the_turn() {
+    let unreadable = proto::McpArgs::default()
+        .with_name("read")
+        .with_tool_name("read")
+        .with_tool_call_id("call-1")
+        .with_provider_identifier("ganja");
+    let unreadable = proto::McpArgs {
+        args: vec![proto::McpArgEntry {
+            key: Some("filePath".to_owned()),
+            // A value with no arm set: on the wire a oneof always writes its
+            // case, so this is a shape this build refuses rather than guesses.
+            value: buffa::MessageField::some(proto::JsonValue::default()),
+            ..Default::default()
+        }],
+        ..unreadable
+    };
+
+    let result =
+        answered_mcp(unreadable, roster()).await.expect("an unreadable map is answered here");
+    assert!(
+        result
+            .error
+            .as_option()
+            .and_then(|error| error.error.as_deref())
+            .is_some_and(|error| error.contains("could not read the argument values")),
+        "{result:?}"
+    );
+}
+
+/// A turn that declared **no** tools keeps the answer it gave before the
+/// bridge: with nothing declared there is no roster to be missing from, so the
+/// sentence is about the name that was called.
+#[tokio::test]
+async fn a_turn_declaring_no_tools_still_refuses_a_call_by_name() {
+    let (sender, receiver) =
+        futures::channel::mpsc::unbounded::<Result<Vec<u8>, std::convert::Infallible>>();
+    let (answers, answered) = futures::channel::mpsc::unbounded();
+    let stream = super::events(
+        receiver,
+        CancellationToken::new(),
+        super::Duplex::for_tests(answers, Vec::new()),
+    );
+
+    let mut body =
+        mcp_framed(3, proto::McpArgs::default().with_name("read").with_tool_call_id("call-1"));
+    body.extend(framed(turn_ended()));
+    body.extend(end_stream("{}"));
+    sender.unbounded_send(Ok(body)).expect("the body is open");
+    drop(sender);
+
+    let events: Vec<ProviderEvent> =
+        tokio::time::timeout(Duration::from_secs(10), stream.collect())
+            .await
+            .expect("a refused exec ends the exchange");
+    assert_eq!(
+        events,
+        vec![ProviderEvent::Finish(FinishReason::Completed)],
+        "a refusal is an answer, never an event"
+    );
+
+    let sent: Vec<proto::ClientMessage> = answered
+        .map(|answer| {
+            let bytes = answer.expect("the channel's error type is infallible");
+            proto::ClientMessage::decode_from_slice(&bytes[5..]).expect("client messages")
+        })
+        .collect()
+        .await;
+    assert!(
+        sent.iter()
+            .filter_map(|message| message.exec_response.as_option())
+            .filter_map(|response| response.mcp_result.as_option())
+            .filter_map(|result| result.rejected.as_option())
+            .any(|rejected| rejected
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("no tool named read"))),
+        "with no roster declared, the answer is about the name: {sent:?}"
+    );
+}
+
+/// A native exec whose ganja tool is **not** on this request's roster keeps
+/// D550's typed refusal — a turn not offering `bash` does not run a shell
+/// because the server asked for one.
+#[tokio::test]
+async fn a_native_exec_whose_tool_is_not_offered_keeps_the_typed_refusal() {
+    let (sender, receiver) =
+        futures::channel::mpsc::unbounded::<Result<Vec<u8>, std::convert::Infallible>>();
+    let (answers, answered) = futures::channel::mpsc::unbounded();
+    let readonly = vec![crate::tool::ToolDefinition {
+        name: "read".to_owned(),
+        description: "Reads a file.".to_owned(),
+        schema: serde_json::json!({ "type": "object" }),
+    }];
+    let stream = super::events(
+        receiver,
+        CancellationToken::new(),
+        super::Duplex::for_tests(answers, readonly),
+    );
+
+    let mut body = shell_stream_framed(5);
+    body.extend(framed(turn_ended()));
+    body.extend(end_stream("{}"));
+    sender.unbounded_send(Ok(body)).expect("the body is open");
+    drop(sender);
+
+    let events: Vec<ProviderEvent> =
+        tokio::time::timeout(Duration::from_secs(10), stream.collect())
+            .await
+            .expect("a refused exec ends the exchange");
+    assert!(
+        !events.iter().any(|event| matches!(event, ProviderEvent::ToolCallStart { .. })),
+        "a tool this turn does not offer is not run because the server asked: {events:?}"
+    );
+
+    let sent: Vec<proto::ClientMessage> = answered
+        .map(|answer| {
+            let bytes = answer.expect("the channel's error type is infallible");
+            proto::ClientMessage::decode_from_slice(&bytes[5..]).expect("client messages")
+        })
+        .collect()
+        .await;
+    assert!(
+        sent.iter()
+            .filter_map(|message| message.exec_response.as_option())
+            .filter_map(|response| response.shell_stream.as_option())
+            .any(|event| event.rejected.is_set()),
+        "the streamed kind's own rejected event, exactly as before the bridge"
+    );
+}
+
+/// **Dv-11.** The provider takes its credential as a value, so a caller that
+/// must never read `auth.json` has no code path to it — which is a stronger
+/// statement than a redirected `XDG_DATA_HOME` pointing away from it, and is
+/// what lets an engine-level bridge suite be one binary rather than six.
+///
+/// The endpoint rule is not relaxed by the credential being handed over: a
+/// token still may not travel anywhere a key could not.
+#[test]
+fn a_provider_may_be_given_its_credential_instead_of_a_store_to_read() {
+    let credential = crate::provider::CredentialSource::key("at-cursor-canary")
+        .expect("a non-blank token is a credential");
+    let provider = CursorProvider::at("http://127.0.0.1:4096", credential.clone())
+        .expect("loopback never reaches a network");
+
+    let rendered = format!("{provider:?}");
+    assert!(rendered.contains("127.0.0.1:4096"), "{rendered}");
+    assert!(
+        !rendered.contains("at-cursor-canary"),
+        "a provider renders where it points, never what it presents: {rendered}"
+    );
+
+    let refused = CursorProvider::at("http://api2.cursor.sh", credential)
+        .expect_err("plain http to a public host puts the token on the wire in the clear");
+    assert!(matches!(refused, ProviderError::Transport(_)), "{refused:?}");
+
+    assert!(
+        crate::provider::CredentialSource::key("   ").is_none(),
+        "a blank credential is refused at construction, not as a 401 mid-turn"
     );
 }

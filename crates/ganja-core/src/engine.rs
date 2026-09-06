@@ -331,13 +331,23 @@ pub enum EngineError {
     #[error(transparent)]
     TeamSpec(#[from] command::TeamSpecError),
     /// [`Command::RunCommand`] ran a builtin whose whole body is tool calls on
-    /// a provider that serves this build none of them (**D551**).
+    /// a provider that serves this build none of them, or only its own native
+    /// kinds (**D551**, amended by **D552**).
     ///
     /// Third of the three doors in front of an expansion and last of them on
     /// purpose: a roster line and a malformed spec are wrong on every
     /// provider, so a sentence naming this one would name the wrong problem.
     /// Only a well-formed, correctly-spelled builtin invocation reaches here,
     /// and it is refused before the template is filled, so no turn starts.
+    ///
+    /// **No shipped id raises this today.** D551 minted it while cursor's
+    /// server ran the tool loop itself; D552's bridge answers that server out
+    /// of the same registry, so every builtin id answers
+    /// [`ToolReach::Full`] and this door opens for nobody. It is kept whole —
+    /// the variant, the gate that reads it and the two sentences that word it
+    /// — because a wire that serves less is a real destination this has to be
+    /// able to *name*, and re-deriving the wording later would re-derive it
+    /// worse.
     #[error("{}", tool_reach_refusal(command, provider, *missing))]
     ProviderToolReach {
         /// The provider that serves the tools the command needs — none of
@@ -402,7 +412,12 @@ pub enum EngineError {
 
 /// [`EngineError::ProviderToolReach`]'s whole sentence, derived from the reach
 /// value rather than stored beside it, so that it cannot go stale the day a
-/// wire starts serving tools (**D551**).
+/// wire starts serving tools (**D551**) — which is exactly what **D552** then
+/// did to cursor, at the cost of one arm of
+/// [`ToolReach::of`](crate::provider::ToolReach::of) and no word of this.
+///
+/// Unreached by any shipped id since that ruling, and tested directly rather
+/// than through an engine for that reason.
 ///
 /// Two commands and two reach values, and each pair says what is actually
 /// missing: the `NativeOnly` half names the tools a native-kind seat has no
@@ -4097,6 +4112,12 @@ impl Engine {
 
     /// Refuses a builtin whose whole body is tool calls on a provider that
     /// serves this build none of them (**D551**).
+    ///
+    /// Refuses nothing today: every builtin id answers [`ToolReach::Full`]
+    /// since **D552** put cursor's tool calls back through the registry, so the
+    /// early return below is the only arm a shipped session takes. The read
+    /// stays because it costs one comparison and is where a narrower wire is
+    /// admitted.
     ///
     /// Read as [`ToolReach::of`] over [`Provider::id`] because that is what an
     /// engine holds — an `Arc<dyn Provider>`, never a

@@ -37,6 +37,7 @@ use ganja_provider::provider::cursor::{CursorWire, proto};
 use ganja_provider::provider::{
     ChatRequest, CursorProvider, Provider as _, ProviderError, ProviderEvent,
 };
+use ganja_provider::tool::ToolDefinition;
 use secrecy::SecretString;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpListener;
@@ -424,6 +425,22 @@ fn request() -> ChatRequest {
     }
 }
 
+/// The roster the declaration phase offers.
+fn declared() -> Vec<ToolDefinition> {
+    vec![
+        ToolDefinition {
+            name: "read".to_owned(),
+            description: "Reads a file.".to_owned(),
+            schema: serde_json::json!({ "type": "object" }),
+        },
+        ToolDefinition {
+            name: "bash".to_owned(),
+            description: "Runs a command.".to_owned(),
+            schema: serde_json::json!({ "type": "object" }),
+        },
+    ]
+}
+
 /// The recorded headers every cursor request carries, asserted once per RPC
 /// kind because the two differ only where the live probe measured them
 /// differing.
@@ -470,7 +487,7 @@ async fn the_wire_speaks_the_recorded_connect_protocol() {
         std::env::set_var("XDG_DATA_HOME", empty.path());
     }
 
-    let refused = CursorProvider
+    let refused = CursorProvider::default()
         .stream(request(), CancellationToken::new())
         .await
         .err()
@@ -553,9 +570,9 @@ async fn the_wire_speaks_the_recorded_connect_protocol() {
     // wire intact — and the system prompt never does, because its one inline
     // member is the allowlist-gated override the live server refused.
     assert_eq!(recorded.body[0], 0, "an ordinary data frame");
-    let declared =
+    let envelope =
         u32::from_be_bytes(recorded.body[1..5].try_into().expect("a whole prefix")) as usize;
-    assert_eq!(declared, recorded.body.len() - 5, "the envelope covers the body");
+    assert_eq!(envelope, recorded.body.len() - 5, "the envelope covers the body");
     let sent = proto::ClientMessage::decode_from_slice(&recorded.body[5..])
         .expect("the sent bytes are the client message");
     let run = sent.run_request.as_option().expect("a run request first");
@@ -577,6 +594,48 @@ async fn the_wire_speaks_the_recorded_connect_protocol() {
             .and_then(|message| message.text.as_deref()),
         Some("say hi")
     );
+
+    // ── The declared roster, on the wire ─────────────────────────────────
+    // The same turn, offering tools: the run request that opens it carries
+    // `mcp_tools = 4` with one definition per tool, and this is asserted
+    // against the bytes a real socket received rather than against an
+    // assembled message — the one place that proves the roster survives the
+    // envelope, the chunked body and the transport.
+    endpoint.forget();
+    endpoint.answers_with(Reply::ok("application/connect+proto", exchange_body()));
+
+    let offering = ChatRequest { tools: declared(), ..request() };
+    let events: Vec<ProviderEvent> = wire
+        .stream(offering, CancellationToken::new())
+        .await
+        .expect("the exchange opens")
+        .collect()
+        .await;
+    assert_eq!(events, exchange_events(), "declaring a roster changes nothing about the reply");
+
+    let recorded = endpoint.only();
+    assert_eq!(recorded.body[0], 0, "an ordinary data frame");
+    let sent = proto::ClientMessage::decode_from_slice(&recorded.body[5..])
+        .expect("the sent bytes are the client message");
+    let declaration = sent
+        .run_request
+        .as_option()
+        .and_then(|run| run.mcp_tools.as_option())
+        .expect("the roster rides the run request");
+    assert_eq!(
+        declaration.mcp_tools.iter().filter_map(|tool| tool.name.as_deref()).collect::<Vec<_>>(),
+        vec!["read", "bash"],
+        "one definition per tool, in the order the engine advertised them"
+    );
+    let read = &declaration.mcp_tools[0];
+    assert_eq!(read.provider_identifier.as_deref(), Some("ganja"));
+    assert_eq!(read.tool_name.as_deref(), Some("read"));
+    assert_eq!(
+        read.input_schema_json.as_deref(),
+        Some(r#"{"type":"object"}"#),
+        "the schema rides field 6"
+    );
+    assert!(!read.input_schema.is_set(), "and never field 3");
 
     // ── Delivery is incremental ──────────────────────────────────────────
     // The body pauses after the first frame, so the first delta can only

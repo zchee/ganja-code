@@ -1525,6 +1525,7 @@ name = "ganja-testkit"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "buffa",
  "futures",
  "ganja-core",
  "ganja-protocol",

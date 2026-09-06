@@ -1,0 +1,548 @@
+//! The drops and the no-drops (**AC-18**), driven through the real pause and
+//! the real resume.
+//!
+//! Nothing here fakes the machinery it is testing: every case builds a fold
+//! over in-memory channels — the `replay` precedent — hands it a real
+//! [`HeldRuns`] table, and drives it with the same `run` a live turn uses. Two
+//! `stream()` calls share one table, which is what makes "a `stream()` never
+//! drops a held run it does not key to" a thing a test can watch happen.
+
+use std::convert::Infallible;
+use std::sync::Arc;
+use std::time::Duration;
+
+use buffa::Message as _;
+use futures::StreamExt as _;
+use futures::channel::mpsc;
+use tokio_util::sync::CancellationToken;
+
+use super::{HeldRuns, Key, Reason, Resolution};
+use crate::protocol::{FinishReason, Message, MessageId, Part, PartBody, ToolState};
+use crate::provider::cursor::{Duplex, connect, proto};
+use crate::provider::{ChatRequest, ProviderEvent};
+use crate::tool::ToolDefinition;
+
+/// The tool every request here declares, so an `mcp_args` naming it is a call
+/// this client serves.
+fn roster() -> Vec<ToolDefinition> {
+    vec![ToolDefinition {
+        name: "read".to_owned(),
+        description: "Reads a file.".to_owned(),
+        schema: serde_json::json!({ "type": "object" }),
+    }]
+}
+
+/// A request that opens a turn: one user message, the roster declared.
+fn opening(model: &str) -> ChatRequest {
+    ChatRequest {
+        model: model.to_owned(),
+        system: None,
+        messages: vec![Message::user("read the file")],
+        turn_start: 0,
+        tools: roster(),
+        effort_options: serde_json::Map::new(),
+    }
+}
+
+/// The same request one step later, with the assistant's tool part on it —
+/// what the engine hands back after running the call.
+fn answered(request: &ChatRequest, call_id: &str, state: ToolState) -> ChatRequest {
+    let mut resumed = request.clone();
+    let mut reply = Message::assistant(&request.model);
+    reply.parts.push(Part {
+        id: crate::protocol::PartId::ascending(),
+        body: PartBody::Tool { call_id: call_id.to_owned(), tool: "read".to_owned(), state },
+    });
+    resumed.messages.push(reply);
+
+    resumed
+}
+
+/// A frame carrying the server calling the declared tool.
+fn called(id: u32, tool_call_id: &str) -> Vec<u8> {
+    let message = proto::ServerMessage {
+        exec_request: buffa::MessageField::some(proto::ExecRequest {
+            id: Some(id),
+            exec_id: Some(format!("exec-{id}")),
+            mcp_args: buffa::MessageField::some(
+                proto::McpArgs::default()
+                    .with_name("read")
+                    .with_tool_name("read")
+                    .with_tool_call_id(tool_call_id)
+                    .with_provider_identifier("ganja"),
+            ),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    connect::envelope(&message.encode_to_vec())
+}
+
+/// A turn paused on one bridged call, with its channels left open so the test
+/// can watch what happens to the held Run.
+struct Paused {
+    request: ChatRequest,
+    cancel: CancellationToken,
+    /// Kept alive so the response body does not end under the held fold.
+    _body: mpsc::UnboundedSender<Result<Vec<u8>, Infallible>>,
+    /// What the wire answered on the request body, so a test can watch the
+    /// heartbeats.
+    answered: mpsc::UnboundedReceiver<Result<Vec<u8>, Infallible>>,
+    events: Vec<ProviderEvent>,
+}
+
+/// Runs one turn up to its pause and returns everything it left behind.
+async fn pause(model: &str, held: &Arc<HeldRuns>, call_id: &str) -> Paused {
+    let request = opening(model);
+    let key = Key::of(&request).expect("a request with a message keys");
+    let cancel = CancellationToken::new();
+
+    let (body, chunks) = mpsc::unbounded::<Result<Vec<u8>, Infallible>>();
+    let (answers, answered) = mpsc::unbounded();
+    let stream = crate::provider::cursor::bridged_events(
+        chunks,
+        cancel.clone(),
+        Duplex::for_tests(answers, roster()),
+        held,
+        key,
+    );
+
+    body.unbounded_send(Ok(called(1, call_id))).expect("the body is open");
+    let events: Vec<ProviderEvent> =
+        tokio::time::timeout(Duration::from_secs(10), stream.collect())
+            .await
+            .expect("a bridged exec pauses the stream rather than hanging it");
+
+    Paused { request, cancel, _body: body, answered, events }
+}
+
+/// The events a pause commits to: the call, then the finish that ends the step.
+fn calls(events: &[ProviderEvent], call_id: &str) {
+    assert_eq!(
+        events,
+        [
+            ProviderEvent::ToolCallStart { id: call_id.to_owned(), name: "read".to_owned() },
+            ProviderEvent::ToolCallDelta { id: call_id.to_owned(), json: "{}".to_owned() },
+            ProviderEvent::ToolCallEnd { id: call_id.to_owned() },
+            ProviderEvent::Finish(FinishReason::Completed),
+        ],
+        "the exec arrives whole, so one delta carries the whole argument object"
+    );
+}
+
+fn completed(output: &str) -> ToolState {
+    ToolState::Completed {
+        input: serde_json::json!({}),
+        output: output.to_owned(),
+        title: "read".to_owned(),
+        metadata: serde_json::json!({}),
+        started: 0,
+        completed: 0,
+    }
+}
+
+/// The shape the whole feature rests on: a declared tool called mid-stream
+/// becomes a tool call, the step ends, and the **same** Run is read on when
+/// the result arrives — with the answer going out on the body that was never
+/// closed.
+#[tokio::test]
+async fn a_bridged_call_pauses_the_run_and_the_result_resumes_it() {
+    let held = Arc::new(HeldRuns::default());
+    let mut paused = pause("auto", &held, "call-1").await;
+    calls(&paused.events, "call-1");
+
+    let resumed = answered(&paused.request, "call-1", completed("the file's contents"));
+    let Resolution::Resume(entry) = held.resolve(&resumed) else {
+        panic!("the result keys the held run");
+    };
+    entry.settle(&resumed).expect("the body is open");
+
+    // The answer the server was waiting for, on the body the pause left open.
+    let sent: Vec<proto::ClientMessage> = std::iter::from_fn(|| paused.answered.try_recv().ok())
+        .flatten()
+        .map(|bytes| proto::ClientMessage::decode_from_slice(&bytes[5..]).expect("client messages"))
+        .collect();
+    let result = sent
+        .iter()
+        .find_map(|message| message.exec_response.as_option())
+        .expect("the tool's result went out on the exec channel");
+    assert_eq!(result.id, Some(1), "the id the server minted comes back");
+    assert_eq!(
+        result.mcp_result.as_option().and_then(|result| result.success.as_option()).map(
+            |success| success.content[0]
+                .text
+                .as_option()
+                .and_then(|text| text.text.as_deref())
+                .unwrap_or_default()
+                .to_owned()
+        ),
+        Some("the file's contents".to_owned())
+    );
+    assert!(
+        sent.iter().any(|message| message
+            .exec_control
+            .as_option()
+            .is_some_and(|control| control.stream_close.is_set())),
+        "and then the close that ends the exec"
+    );
+    drop(paused.cancel);
+}
+
+/// **Drop 1.** The turn that paused was cancelled, so nobody is left to answer
+/// the Run it was holding.
+#[tokio::test]
+async fn a_cancelled_turn_drops_the_run_it_was_holding() {
+    let held = Arc::new(HeldRuns::default());
+    let paused = pause("auto", &held, "call-1").await;
+
+    paused.cancel.cancel();
+    settled(&held, &paused.request).await;
+
+    let resumed = answered(&paused.request, "call-1", completed("late"));
+    assert!(
+        matches!(held.resolve(&resumed), Resolution::Dead(reason) if reason.contains("cancelled")),
+        "a resume against a cancelled bridge is told so, never answered with a fresh run"
+    );
+}
+
+/// **Drop 2**, the guard: a differently-keyed request carrying *another* held
+/// Run's results. Root turns are serial and each subagent keys to its own
+/// opening message, so the engine does not produce this state today — the test
+/// constructs it, and the rule is kept for a future that does.
+#[tokio::test]
+async fn a_request_carrying_another_held_runs_results_evicts_it() {
+    let held = Arc::new(HeldRuns::default());
+    let first = pause("auto", &held, "call-1").await;
+    let second = pause("gpt-5.3-codex", &held, "call-2").await;
+
+    // Keyed to the second turn, carrying the first turn's result.
+    let confused = answered(&second.request, "call-1", completed("somebody else's answer"));
+    assert!(
+        matches!(held.resolve(&confused), Resolution::Fresh),
+        "a request whose own run is still waiting opens a fresh one and keeps it held"
+    );
+
+    let resumed = answered(&first.request, "call-1", completed("its own answer"));
+    assert!(
+        matches!(held.resolve(&resumed), Resolution::Dead(reason)
+            if reason.contains("differently-keyed")),
+        "the run whose results turned up elsewhere is gone, and the reason says why"
+    );
+
+    let still_held = answered(&second.request, "call-2", completed("its own answer"));
+    assert!(
+        matches!(held.resolve(&still_held), Resolution::Resume(_)),
+        "and the run this request did key to was never touched"
+    );
+}
+
+/// **Drop 3**, and the case nothing else covers: a turn that pauses and then
+/// simply never comes back. Without the bound the Run would hold a task and a
+/// socket for the life of the process.
+#[tokio::test(start_paused = true)]
+async fn a_run_nobody_resumes_is_dropped_at_the_idle_bound() {
+    let held = Arc::new(HeldRuns::default());
+    let paused = pause("auto", &held, "call-1").await;
+
+    // Just inside the bound: still there, still beating.
+    tokio::time::sleep(super::IDLE_BOUND - Duration::from_secs(1)).await;
+    let early = answered(&paused.request, "call-1", completed("in time"));
+    assert!(
+        matches!(held.resolve(&early), Resolution::Resume(_)),
+        "a resume inside the bound is still a resume"
+    );
+
+    // And past it, on a second run held the same way.
+    let paused = pause("auto", &held, "call-2").await;
+    tokio::time::sleep(super::IDLE_BOUND + Duration::from_secs(1)).await;
+
+    let late = answered(&paused.request, "call-2", completed("too late"));
+    assert!(
+        matches!(held.resolve(&late), Resolution::Dead(reason) if reason.contains("idle bound")),
+        "past the bound the run is gone, and the resume is told rather than silently restarted"
+    );
+}
+
+/// The heartbeat that makes a hold survivable at all: while a Run is held,
+/// something has to keep the exchange alive, and a live 25-second hold on this
+/// ping alone was measured before this was built.
+#[tokio::test(start_paused = true)]
+async fn a_held_run_beats_on_the_body_it_left_open() {
+    let held = Arc::new(HeldRuns::default());
+    let mut paused = pause("auto", &held, "call-1").await;
+
+    tokio::time::sleep(super::HEARTBEAT * 5 + Duration::from_secs(1)).await;
+
+    let beats = std::iter::from_fn(|| paused.answered.try_recv().ok())
+        .flatten()
+        .filter(|bytes: &Vec<u8>| {
+            proto::ClientMessage::decode_from_slice(&bytes[5..])
+                .expect("client messages")
+                .client_heartbeat
+                .is_set()
+        })
+        .count();
+
+    assert!(beats >= 4, "a held run beats on the body it left open, and beat {beats} times");
+}
+
+/// **No-drop 1.** A title or summary one-shot — `turn_start == 0`, no tools,
+/// no results — keys to nothing and must leave a held Run exactly where it is.
+/// The engine runs one of these on the same wire at the end of every turn.
+#[tokio::test]
+async fn a_one_shot_turn_leaves_a_held_run_alone() {
+    let held = Arc::new(HeldRuns::default());
+    let paused = pause("auto", &held, "call-1").await;
+
+    let one_shot = ChatRequest {
+        model: "auto".to_owned(),
+        system: None,
+        messages: vec![Message::user("summarize this conversation")],
+        turn_start: 0,
+        tools: Vec::new(),
+        effort_options: serde_json::Map::new(),
+    };
+    assert!(matches!(held.resolve(&one_shot), Resolution::Fresh));
+
+    let resumed = answered(&paused.request, "call-1", completed("still here"));
+    assert!(matches!(held.resolve(&resumed), Resolution::Resume(_)), "the held run survived");
+}
+
+/// **No-drop 2.** A `task` child turn — its own opening message, its own key,
+/// up to `agents.concurrency` of them at once on the same `Arc<dyn Provider>`.
+#[tokio::test]
+async fn a_subagent_turn_leaves_its_parents_held_run_alone() {
+    let held = Arc::new(HeldRuns::default());
+    let paused = pause("auto", &held, "call-1").await;
+
+    let child = opening("auto");
+    assert_ne!(
+        Key::of(&child),
+        Key::of(&paused.request),
+        "a child turn opens with a message of its own, which is what keys it elsewhere"
+    );
+    assert!(matches!(held.resolve(&child), Resolution::Fresh));
+
+    let resumed = answered(&paused.request, "call-1", completed("still here"));
+    assert!(matches!(held.resolve(&resumed), Resolution::Resume(_)));
+}
+
+/// **No-drop 3.** The compaction summary: a turn of its own, a fresh
+/// `[summary, prompt]` with newly minted ids, so it keys to nothing.
+#[tokio::test]
+async fn the_compaction_summary_leaves_a_held_run_alone() {
+    let held = Arc::new(HeldRuns::default());
+    let paused = pause("auto", &held, "call-1").await;
+
+    let compaction = ChatRequest {
+        model: "auto".to_owned(),
+        system: None,
+        messages: vec![Message::user("<summary>…</summary>"), Message::user("carry on")],
+        turn_start: 0,
+        tools: roster(),
+        effort_options: serde_json::Map::new(),
+    };
+    assert!(matches!(held.resolve(&compaction), Resolution::Fresh));
+
+    let resumed = answered(&paused.request, "call-1", completed("still here"));
+    assert!(matches!(held.resolve(&resumed), Resolution::Resume(_)));
+}
+
+/// **No-drop 4.** An ordinary new turn keys to no held run and opens a fresh
+/// one, which is the common case and must cost the held run nothing.
+#[tokio::test]
+async fn a_request_keying_to_nothing_opens_a_fresh_run() {
+    let held = Arc::new(HeldRuns::default());
+    let paused = pause("auto", &held, "call-1").await;
+
+    let next = opening("auto");
+    assert!(matches!(held.resolve(&next), Resolution::Fresh));
+
+    let resumed = answered(&paused.request, "call-1", completed("still here"));
+    assert!(matches!(held.resolve(&resumed), Resolution::Resume(_)));
+}
+
+/// **No-drop 5.** A keyed hit whose confirmation *fails* — the request keys to
+/// the held Run but carries no finished result for the exec it is waiting on.
+/// A fresh Run, and the held one is left exactly as it was: dropping it would
+/// throw away a bridge that is still perfectly good.
+#[tokio::test]
+async fn a_keyed_hit_whose_results_have_not_arrived_leaves_the_run_held() {
+    let held = Arc::new(HeldRuns::default());
+    let paused = pause("auto", &held, "call-1").await;
+
+    // Same key, but the call is still pending.
+    let pending = answered(&paused.request, "call-1", ToolState::Pending { input: None });
+    assert!(matches!(held.resolve(&pending), Resolution::Fresh));
+
+    // And the same key with a result for a call this run never asked for.
+    let elsewhere = answered(&paused.request, "call-9", completed("not ours"));
+    assert!(matches!(held.resolve(&elsewhere), Resolution::Fresh));
+
+    let resumed = answered(&paused.request, "call-1", completed("at last"));
+    assert!(
+        matches!(held.resolve(&resumed), Resolution::Resume(_)),
+        "the held run was still there for the resume that did carry its result"
+    );
+}
+
+/// A resume against a bridge that was never held at all is still a dead
+/// bridge, not a silent fresh Run: this wire carries only the newest user
+/// turn, so restarting would drop what the tool answered and let the model
+/// carry on as though it had never asked.
+#[tokio::test]
+async fn a_resume_against_a_bridge_that_never_existed_fails_rather_than_restarting() {
+    let held = Arc::new(HeldRuns::default());
+    let request = opening("auto");
+    let resumed = answered(&request, "call-1", completed("an answer to nothing"));
+
+    let Resolution::Dead(reason) = held.resolve(&resumed) else {
+        panic!("a request carrying tool results resumes something or fails");
+    };
+    assert!(
+        reason.contains("only the newest message"),
+        "the failure says why restarting is not an option: {reason}"
+    );
+}
+
+/// A request with no messages at all keys to nothing and cannot be resumed —
+/// which is the honest answer rather than a panic on an empty list.
+#[test]
+fn a_request_with_no_messages_keys_to_nothing() {
+    let empty = ChatRequest {
+        model: "auto".to_owned(),
+        system: None,
+        messages: Vec::new(),
+        turn_start: 7,
+        tools: Vec::new(),
+        effort_options: serde_json::Map::new(),
+    };
+
+    assert_eq!(Key::of(&empty), None);
+}
+
+/// `turn_start` is a `pub` field on a `pub` struct, so its value is a caller's:
+/// one past the end names no message, and the key clamps rather than slices.
+#[test]
+fn a_turn_start_past_the_end_is_clamped_rather_than_sliced() {
+    let mut request = opening("auto");
+    request.turn_start = 99;
+
+    assert_eq!(
+        Key::of(&request),
+        Key::of(&opening_with(request.messages[0].id.clone())),
+        "the last message is the far end of the clamp"
+    );
+}
+
+/// A request whose opening message is `id`.
+fn opening_with(id: MessageId) -> ChatRequest {
+    let mut request = opening("auto");
+    request.messages[0].id = id;
+    request
+}
+
+/// The reason a resume is told is the reason its bridge actually went, which
+/// is what makes the failure worth reading.
+#[test]
+fn every_drop_reason_has_a_sentence_of_its_own() {
+    let spelled: Vec<&str> = [Reason::Cancelled, Reason::Idle, Reason::Closed, Reason::Evicted]
+        .into_iter()
+        .map(Reason::spelled)
+        .collect();
+
+    let mut unique = spelled.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(unique.len(), spelled.len(), "four reasons, four sentences: {spelled:?}");
+}
+
+/// Waits for the keeper task to notice what the test just did.
+///
+/// The drop happens in a task of its own — a child of nothing a turn owns —
+/// so a test that asserted immediately would be racing it.
+async fn settled(held: &Arc<HeldRuns>, request: &ChatRequest) {
+    for _ in 0..100 {
+        if matches!(held.resolve(request), Resolution::Fresh | Resolution::Dead(_)) {
+            let key = Key::of(request).expect("a request with a message keys");
+            if !held.holds(&key) {
+                return;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    panic!("the keeper never dropped the held run");
+}
+
+/// One frame at a time is the worst case for a batch, and one chunk carrying
+/// two execs is the other: the server issues concurrent execs — two
+/// `grep_args` within 5 ms on a recorded run — and both must ride one step
+/// rather than pausing twice.
+#[tokio::test]
+async fn a_batch_the_server_sent_together_rides_one_step() {
+    let held = Arc::new(HeldRuns::default());
+    let request = opening("auto");
+    let key = Key::of(&request).expect("a request with a message keys");
+    let cancel = CancellationToken::new();
+
+    let mut batch = called(1, "call-1");
+    batch.extend(called(2, "call-2"));
+
+    // The body stays open, the way a real one does while the server waits for
+    // the answers: a response stream that *ended* here would be a bridge that
+    // died mid-batch, which is a different case and a failed turn.
+    let (body, chunks) = mpsc::unbounded::<Result<Vec<u8>, Infallible>>();
+    let (answers, _answered) = mpsc::unbounded();
+    let stream = crate::provider::cursor::bridged_events(
+        chunks,
+        cancel,
+        Duplex::for_tests(answers, roster()),
+        &held,
+        key,
+    );
+    body.unbounded_send(Ok(batch)).expect("the body is open");
+
+    let events: Vec<ProviderEvent> =
+        tokio::time::timeout(Duration::from_secs(10), stream.collect())
+            .await
+            .expect("the batch pauses once");
+    let started: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderEvent::ToolCallStart { id, .. } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(started, vec!["call-1", "call-2"], "both calls, one step");
+    assert_eq!(
+        events.last(),
+        Some(&ProviderEvent::Finish(FinishReason::Completed)),
+        "and one finish"
+    );
+}
+
+/// A turn whose messages carry no user message at all still keys, because the
+/// opening message is an index rather than a role.
+#[test]
+fn the_key_is_the_opening_messages_id_and_the_model() {
+    let request = opening("auto");
+    let mut elsewhere = request.clone();
+    elsewhere.model = "gpt-5.3-codex".to_owned();
+
+    assert_ne!(
+        Key::of(&request),
+        Key::of(&elsewhere),
+        "two models are two runs, whatever the conversation"
+    );
+
+    let mut later = request.clone();
+    later.messages.push(Message::user("and another thing"));
+    assert_eq!(
+        Key::of(&request),
+        Key::of(&later),
+        "a turn that grew is the same turn, which is what makes a resume find its own run"
+    );
+}

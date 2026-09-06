@@ -543,7 +543,11 @@ pub fn select(config: &Config) -> Result<Selection, SelectionError> {
         // refusing by naming `ganja auth login` when there is none.
         // Uncataloged on purpose, so a session must name its model like any
         // config-declared endpoint.
-        cursor::ID => Wire::catalog(CursorProvider),
+        // `::default()` rather than the bare name since **D552**: the provider
+        // owns a held-run table now, so it is no longer a unit struct. The
+        // default is still the stored-login endpoint, which is what this arm
+        // always meant.
+        cursor::ID => Wire::catalog(CursorProvider::default()),
         // Grok's construction shape, and grok's posture with it: neither reads
         // a token here, so a session with no stored login is built and fails at
         // its first request, with the message that names the login. What
@@ -580,30 +584,38 @@ pub fn select(config: &Config) -> Result<Selection, SelectionError> {
     Ok(Selection { provider: wire.provider, model, notice: None })
 }
 
-/// How much of ganja's tool set a wire can actually serve (**D551**).
+/// How much of ganja's tool set a wire can actually serve (**D551**, amended by
+/// **D552**).
 ///
-/// A fact about **this build's** support for a provider, not about the vendor:
-/// [`cursor`] is the one wire whose server runs the tool loop itself, so a
-/// roster ganja advertises to it reaches nothing it will call back into. The
-/// answer therefore lives here, next to [`select`], rather than as a defaulted
-/// [`Provider`] method: a scaffold two waves wide would otherwise become a
-/// question every wire is asked forever, and the day cursor serves tools the
-/// only edit is one arm of [`ToolReach::of`].
+/// A fact about **this build's** support for a provider, not about the vendor.
+/// D551 minted it when [`cursor`] was the one wire whose server ran the tool
+/// loop itself and a roster ganja advertised to it reached nothing; D552 built
+/// the bridge that answers that server's `mcp_exec` asks out of the same
+/// registry every other wire calls, so **no builtin id reaches anything but
+/// [`ToolReach::Full`] today**. The answer still lives here, next to [`select`],
+/// rather than as a defaulted [`Provider`] method: a scaffold two waves wide
+/// would otherwise become a question every wire is asked forever, and a wire
+/// that serves less is still one arm of [`ToolReach::of`].
 ///
-/// Three-valued because the middle value is a real destination and not a
-/// hedge: a seat that serves the wire's own native kinds — files, shell — and
-/// no `task`, team tools or `skill` is what a refusal must be able to *name*.
-/// A two-valued flag could only claim nothing works, which would be false the
-/// moment the first tool ships.
+/// Three-valued because the middle value is a real destination and not a hedge:
+/// a seat that serves the wire's own native kinds — files, shell — and no
+/// `task`, team tools or `skill` is what a refusal must be able to *name*. A
+/// two-valued flag could only claim nothing works, which was already false the
+/// day the first tool shipped. Both narrow values are unreached by any builtin
+/// id and are kept for the wire that arrives serving less, with
+/// [`Engine::tool_reach`](crate::Engine) and `tool_reach_refusal` still able to
+/// say which of the two it is.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ToolReach {
-    /// Every tool the registry advertises is callable. Every wire but cursor.
+    /// Every tool the registry advertises is callable. Every builtin wire,
+    /// cursor included since **D552**.
     Full,
     /// Only the kinds the wire's own vocabulary already has — no `task`, no
-    /// team task tools, no `skill`. Reached by no id yet; the value the
-    /// native-kind seat will be.
+    /// team task tools, no `skill`. Reached by no id; the value a native-kind
+    /// seat would be.
     NativeOnly,
-    /// The wire calls nothing ganja registered.
+    /// The wire calls nothing ganja registered. Reached by no id; cursor
+    /// answered this until **D552**.
     None,
 }
 
@@ -616,12 +628,18 @@ impl ToolReach {
     /// config-declared `compat` provider answers [`ToolReach::Full`] with every
     /// other id, and correctly — the three dialects it speaks are
     /// function-calling wires, whatever endpoint they were pointed at.
+    ///
+    /// Every id answers [`ToolReach::Full`] since **D552** — cursor's bridge
+    /// was the last exception — so the body is the constant rather than a
+    /// `match` with one wildcard arm. The parameter stays: this is the one
+    /// place a wire that serves less is named, and the caller that reads the
+    /// answer, the error that carries it and the two sentences that word it
+    /// are all still here, so admitting one is an arm rather than a wave.
     #[must_use]
-    pub fn of(provider_id: &str) -> Self {
-        match provider_id {
-            cursor::ID => Self::None,
-            _ => Self::Full,
-        }
+    pub const fn of(provider_id: &str) -> Self {
+        let _ = provider_id;
+
+        Self::Full
     }
 }
 

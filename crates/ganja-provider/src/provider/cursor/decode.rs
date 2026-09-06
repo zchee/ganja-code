@@ -41,16 +41,22 @@ pub(super) fn model_list(body: &[u8]) -> Result<Vec<proto::ModelEntry>, Provider
 /// skipped it hung a real turn in silence (LIVE-OBSERVED 2026-08-10, one
 /// debug line then nothing until the process was killed). So [`frame`](Self::frame)
 /// hands the ask up as a [`ContextAsk`] for the stream layer to answer on
-/// the open request body. Every *other* exec kind — the tools cursor's
-/// server asks its own client to run — is handed up as an [`ExecRefusal`]
-/// instead, answered on the same body with a structured refusal rather than
-/// killing the turn (**D486**, declared in [`super::request`]): the server's
-/// agent loop reads a refusal the way it reads any other tool outcome and
-/// keeps generating, which is one more turn surviving than the failure this
-/// replaced. Since **D550** that refusal is spoken in the *kind's own*
-/// vocabulary wherever the kind has one — [`refusal_arm`] classifies the
-/// exec and carries back what the arm must echo — and falls back to D486's
-/// control-channel throw for a kind with no modelled arm.
+/// the open request body. Every *other* exec kind — the tools cursor's server
+/// asks its own client to run — is handed up as an [`ExecAsk`] instead, for
+/// the stream layer to answer on that same body.
+///
+/// **This layer classifies; it does not decide.** [`exec_args`] reads each
+/// kind's arguments into an [`ExecArgs`] and stops there, because what happens
+/// next depends on a fact only the stream layer holds: the tool roster *this
+/// request* declared. With one, an `mcp_args` naming a declared tool and the
+/// six native kinds of the redirect table are **bridged** — surfaced to
+/// ganja's engine as ordinary tool calls, run there under its permission
+/// engine, and answered here from the result (**D552**). Without one, or for a
+/// kind outside the table, the same value is answered with **D550**'s typed
+/// refusal in the kind's own vocabulary, falling back to **D486**'s
+/// control-channel throw for a kind with no modelled arm. Either way the
+/// server's agent loop reads an outcome it can act on and keeps generating,
+/// which is one more turn surviving than the failure both of those replaced.
 ///
 /// **The kv arm is never skipped either.** The server stores and reads
 /// conversation state mid-turn over the kv channel and waits on every
@@ -84,18 +90,6 @@ pub(super) struct Mapping {
     /// The server marked the turn ended, so the reply is complete with or
     /// without the terminator.
     ended: bool,
-    /// W2 spike: whether each arriving exec is written down before it is
-    /// classified. `false` on every turn this build ships — including every
-    /// [`Mapping::default`] a test builds — so the shipped path gains a
-    /// branch and no log line. Removed with the spike.
-    spike: bool,
-}
-
-impl Mapping {
-    /// A mapping that writes down each exec as it arrives, for the W2 spike.
-    pub(super) fn watching(spike: bool) -> Self {
-        Self { spike, ..Self::default() }
-    }
 }
 
 /// A mid-stream question the server waits on, carried up to the stream
@@ -108,8 +102,9 @@ impl Mapping {
 pub(super) enum Ask {
     Context(ContextAsk),
     Kv(KvAsk),
-    /// A tool exec this build refuses to run for the server (**D486**).
-    Refuse(ExecRefusal),
+    /// A tool exec: bridged to a ganja tool (**D552**) or refused (**D550**,
+    /// **D486**), which the roster decides and this layer does not.
+    Exec(ExecAsk),
 }
 
 /// The server's context ask, ids and nothing else — presence is the whole
@@ -122,38 +117,37 @@ pub(super) struct ContextAsk {
     pub(super) exec_id: Option<String>,
 }
 
-/// One tool exec the server asked this client to run, and this client will
-/// not (**D486**, answered in the kind's own vocabulary since **D550**): the
-/// ids the refusal echoes, the kind's name, and whatever that kind's arm
-/// carries back.
+/// One tool exec the server asked this client to run: the ids the answer
+/// echoes, the kind's name, and that kind's arguments as far as this build
+/// reads them.
 ///
-/// **The exec id is present but not always sent.** A typed refusal rides
-/// `ExecResponse`, which has an `exec_id = 15` to echo the way the context
-/// answer does; the control-channel throw has no such member — it is keyed
-/// on the numeric id alone (`ExecClientThrow`, `index.js@6032526`) — so on
-/// that path the id is decoded and dropped rather than invented a home for.
+/// **The exec id is present but not always sent.** An answer — a result or a
+/// typed refusal — rides `ExecResponse`, which has an `exec_id = 15` to echo
+/// the way the context answer does; the control-channel throw has no such
+/// member — it is keyed on the numeric id alone (`ExecClientThrow`,
+/// `index.js@6032526`) — so on that path the id is decoded and dropped rather
+/// than invented a home for.
 #[derive(Debug, PartialEq)]
-pub(super) struct ExecRefusal {
+pub(super) struct ExecAsk {
     pub(super) id: Option<u32>,
     pub(super) exec_id: Option<String>,
     pub(super) kind: String,
-    pub(super) arm: RefusalArm,
+    pub(super) args: ExecArgs,
 }
 
-/// How one refused exec is answered: the kind's own rejection arm, or the
-/// control-channel throw for a kind this build models no arm for.
+/// One exec's arguments, as far as two answers need them: the refusal's echo,
+/// and the redirect's mapping onto a ganja tool.
 ///
-/// The variants carry only what their arm echoes back, which is why several
-/// look alike and one is empty: `GrepResult` has no rejected arm at all and
-/// its error carries no echo of the query, so there is nothing for
-/// [`RefusalArm::Grep`] to hold but the fact of it. The two shell kinds and
-/// the two read kinds are separate variants rather than one with a number
-/// in it, because the arm they encode to differs — a stream's rejection is
-/// an *event*, and a redacted read answers at a second field.
+/// The variants carry only that much, which is why several look alike and one
+/// is empty: `delete_args` is refused and never bridged, so its variant holds
+/// only the path its rejection echoes. The two shell kinds and the two read
+/// kinds are separate variants rather than one with a number in it, because
+/// the arm they answer on differs — a stream's rejection is an *event*, and a
+/// redacted read answers at a second field.
 #[derive(Debug, PartialEq)]
-pub(super) enum RefusalArm {
+pub(super) enum ExecArgs {
     /// No modelled arm for this kind: D486's throw, still the catch-all.
-    Throw,
+    Unmodelled,
     Shell {
         command: String,
         working_directory: String,
@@ -164,27 +158,66 @@ pub(super) enum RefusalArm {
     },
     Write {
         path: String,
+        file_text: String,
     },
     Delete {
         path: String,
     },
-    Grep,
+    Grep {
+        pattern: String,
+        path: String,
+        glob: String,
+        case_insensitive: bool,
+    },
     Read {
         path: String,
+        offset: Option<i32>,
+        limit: Option<u32>,
     },
     RedactedRead {
         path: String,
+        offset: Option<i32>,
+        limit: Option<u32>,
     },
     Ls {
         path: String,
     },
-    Mcp {
-        name: String,
-        tool_call_id: String,
-    },
+    Mcp(McpCall),
     Fetch {
         url: String,
     },
+}
+
+/// A model calling a tool this client declared (**D552**).
+///
+/// The arguments are decoded here rather than carried as protobuf, so the
+/// stream layer answers one question — is this call ours, and what is it —
+/// without reaching back into the wire's own types. [`arguments`](Self::arguments)
+/// is [`None`] for a value shape [`super::value::decode`] cannot read, which
+/// fails that one call with `McpResult.error` and never the turn.
+#[derive(Debug, PartialEq)]
+pub(super) struct McpCall {
+    /// What the model called, `McpArgs.name = 1`.
+    pub(super) name: String,
+    /// What the declaration named the tool, `tool_name = 5`. The bridge
+    /// matches on this and falls back to [`name`](Self::name); the shipped
+    /// client sets both from one declaration (`index.js@5699717`).
+    pub(super) tool_name: String,
+    /// The id the answer is keyed on and the engine's transcript part carries.
+    pub(super) tool_call_id: String,
+    /// Who is said to serve the tool. Empty means the server sent none, which
+    /// is not the same as sending somebody else's name.
+    pub(super) provider_identifier: String,
+    /// Read for the log line. A present one on a `"ganja"` call is the
+    /// measured norm and refuses nothing.
+    pub(super) server_identifier: String,
+    /// `smart_mode_approval_only = 7`: a preflight that must execute nothing.
+    pub(super) approval_only: bool,
+    /// `skip_approval = 8`, read for the log line alone — what a call may skip
+    /// is ganja's permission engine's to decide, never the caller's.
+    pub(super) skip_approval: bool,
+    /// The argument object, or [`None`] when the map could not be read.
+    pub(super) arguments: Option<serde_json::Value>,
 }
 
 /// One kv exchange the server opened: the id the answer must echo
@@ -239,10 +272,6 @@ impl Mapping {
         };
 
         if let Some(exec) = message.exec_request.as_option() {
-            if self.spike {
-                super::spike::log_exec(exec);
-            }
-
             if exec.request_context_args.is_set() {
                 return Some(Ask::Context(ContextAsk {
                     id: exec.id,
@@ -250,19 +279,18 @@ impl Mapping {
                 }));
             }
 
-            // Every other kind is a tool the server is asking this client
-            // to run for it, and this client runs its tools for its own
-            // session instead (**D486**). The server stops generating until
-            // an exec is answered either way, so the kind's name goes back
-            // as a refusal rather than as a turn-killing error: refused is
-            // an outcome the server's agent loop can act on, and unanswered
-            // is the silent hang this arm's modelling exists to end.
-            let (kind, arm) = refusal_arm(exec);
-            return Some(Ask::Refuse(ExecRefusal {
+            // Every other kind is a tool the server is asking this client to
+            // run. The server stops generating until an exec is answered
+            // either way, so it is handed up to be answered — bridged to
+            // ganja's own tool where the roster has one, refused in the
+            // kind's own vocabulary where it does not — and never left
+            // silent, which is the hang this arm's modelling exists to end.
+            let (kind, args) = exec_args(exec);
+            return Some(Ask::Exec(ExecAsk {
                 id: exec.id,
                 exec_id: exec.exec_id.clone(),
                 kind,
-                arm,
+                args,
             }));
         }
 
@@ -393,18 +421,21 @@ fn verdict(code: &str, message: &str) -> ProviderError {
     }
 }
 
-/// Classifies a refused exec: the kind's name, and how it is answered.
+/// Reads an exec's kind and its arguments, as far as an answer needs them.
 ///
 /// The ten kinds `cursor.proto` models decode into fields of their own, so
-/// they are recognised by presence and their echo is read straight off the
-/// args. Everything else still arrives as unknown fields — [`exec_kind`]
-/// names those — and is answered on D486's control channel.
+/// they are recognised by presence and read straight off the args. Everything
+/// else still arrives as unknown fields — [`exec_kind`] names those — and is
+/// answered on D486's control channel.
 ///
 /// A modelled kind's args may be *present and empty*: an exec whose payload
 /// this build decodes none of still identifies its kind by the field it
 /// arrived on, and an empty echo is the honest answer about a path nobody
-/// sent. That is why every read here defaults rather than refuses.
-fn refusal_arm(exec: &proto::ExecRequest) -> (String, RefusalArm) {
+/// sent. That is why every string read here defaults rather than refuses. The
+/// numbers do not: an absent `offset` is a window the server did not ask to
+/// narrow, which is a different thing from asking for line zero, so those stay
+/// [`Option`] all the way to the tool call they become.
+fn exec_args(exec: &proto::ExecRequest) -> (String, ExecArgs) {
     /// An optional string field as the echo carries it: absent and empty are
     /// one answer, because the arm has no way to say "the server did not
     /// send this".
@@ -412,12 +443,12 @@ fn refusal_arm(exec: &proto::ExecRequest) -> (String, RefusalArm) {
         value.clone().unwrap_or_default()
     }
 
-    let named = |kind: &str, arm| (kind.to_owned(), arm);
+    let named = |kind: &str, args| (kind.to_owned(), args);
 
     if let Some(args) = exec.shell_args.as_option() {
         return named(
             "shell_args",
-            RefusalArm::Shell {
+            ExecArgs::Shell {
                 command: echoed(&args.command),
                 working_directory: echoed(&args.working_directory),
             },
@@ -426,41 +457,71 @@ fn refusal_arm(exec: &proto::ExecRequest) -> (String, RefusalArm) {
     if let Some(args) = exec.shell_stream_args.as_option() {
         return named(
             "shell_stream_args",
-            RefusalArm::ShellStream {
+            ExecArgs::ShellStream {
                 command: echoed(&args.command),
                 working_directory: echoed(&args.working_directory),
             },
         );
     }
     if let Some(args) = exec.write_args.as_option() {
-        return named("write_args", RefusalArm::Write { path: echoed(&args.path) });
+        return named(
+            "write_args",
+            ExecArgs::Write { path: echoed(&args.path), file_text: echoed(&args.file_text) },
+        );
     }
     if let Some(args) = exec.delete_args.as_option() {
-        return named("delete_args", RefusalArm::Delete { path: echoed(&args.path) });
+        return named("delete_args", ExecArgs::Delete { path: echoed(&args.path) });
     }
-    if exec.grep_args.is_set() {
-        return named("grep_args", RefusalArm::Grep);
+    if let Some(args) = exec.grep_args.as_option() {
+        return named(
+            "grep_args",
+            ExecArgs::Grep {
+                pattern: echoed(&args.pattern),
+                path: echoed(&args.path),
+                glob: echoed(&args.glob),
+                case_insensitive: args.case_insensitive.unwrap_or(false),
+            },
+        );
     }
     if let Some(args) = exec.read_args.as_option() {
-        return named("read_args", RefusalArm::Read { path: echoed(&args.path) });
+        return named(
+            "read_args",
+            ExecArgs::Read { path: echoed(&args.path), offset: args.offset, limit: args.limit },
+        );
     }
     if let Some(args) = exec.redacted_read_args.as_option() {
-        return named("redacted_read_args", RefusalArm::RedactedRead { path: echoed(&args.path) });
+        return named(
+            "redacted_read_args",
+            ExecArgs::RedactedRead {
+                path: echoed(&args.path),
+                offset: args.offset,
+                limit: args.limit,
+            },
+        );
     }
     if let Some(args) = exec.ls_args.as_option() {
-        return named("ls_args", RefusalArm::Ls { path: echoed(&args.path) });
+        return named("ls_args", ExecArgs::Ls { path: echoed(&args.path) });
     }
     if let Some(args) = exec.mcp_args.as_option() {
         return named(
             "mcp_args",
-            RefusalArm::Mcp { name: echoed(&args.name), tool_call_id: echoed(&args.tool_call_id) },
+            ExecArgs::Mcp(McpCall {
+                name: echoed(&args.name),
+                tool_name: echoed(&args.tool_name),
+                tool_call_id: echoed(&args.tool_call_id),
+                provider_identifier: echoed(&args.provider_identifier),
+                server_identifier: echoed(&args.server_identifier),
+                approval_only: args.smart_mode_approval_only.unwrap_or(false),
+                skip_approval: args.skip_approval.unwrap_or(false),
+                arguments: super::value::arguments(&args.args),
+            }),
         );
     }
     if let Some(args) = exec.fetch_args.as_option() {
-        return named("fetch_args", RefusalArm::Fetch { url: echoed(&args.url) });
+        return named("fetch_args", ExecArgs::Fetch { url: echoed(&args.url) });
     }
 
-    (exec_kind(exec), RefusalArm::Throw)
+    (exec_kind(exec), ExecArgs::Unmodelled)
 }
 
 /// Names the kind of an exec with no modelled answer arm.
