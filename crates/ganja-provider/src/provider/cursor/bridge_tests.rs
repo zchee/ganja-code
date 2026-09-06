@@ -18,31 +18,11 @@ use tokio_util::sync::CancellationToken;
 
 use super::{HeldRuns, Key, Reason, Resolution};
 use crate::protocol::{FinishReason, Message, MessageId, Part, PartBody, ToolState};
-use crate::provider::cursor::{Duplex, connect, proto};
+use crate::provider::cursor::tests::{
+    Answered, end_stream, framed, opening, roster, sent_so_far, text, turn_ended,
+};
+use crate::provider::cursor::{Bridge, Duplex, connect, proto};
 use crate::provider::{ChatRequest, ProviderEvent};
-use crate::tool::ToolDefinition;
-
-/// The tool every request here declares, so an `mcp_args` naming it is a call
-/// this client serves.
-fn roster() -> Vec<ToolDefinition> {
-    vec![ToolDefinition {
-        name: "read".to_owned(),
-        description: "Reads a file.".to_owned(),
-        schema: serde_json::json!({ "type": "object" }),
-    }]
-}
-
-/// A request that opens a turn: one user message, the roster declared.
-fn opening(model: &str) -> ChatRequest {
-    ChatRequest {
-        model: model.to_owned(),
-        system: None,
-        messages: vec![Message::user("read the file")],
-        turn_start: 0,
-        tools: roster(),
-        effort_options: serde_json::Map::new(),
-    }
-}
 
 /// The same request one step later, with the assistant's tool part on it —
 /// what the engine hands back after running the call.
@@ -60,19 +40,27 @@ fn answered(request: &ChatRequest, call_id: &str, state: ToolState) -> ChatReque
 
 /// A frame carrying the server calling the declared tool.
 fn called(id: u32, tool_call_id: &str) -> Vec<u8> {
+    exec(id, |exec| {
+        exec.mcp_args = buffa::MessageField::some(
+            proto::McpArgs::default()
+                .with_name("read")
+                .with_tool_name("read")
+                .with_tool_call_id(tool_call_id)
+                .with_provider_identifier("ganja"),
+        );
+    })
+}
+
+/// A frame carrying one exec, `fill` having chosen its kind and arguments.
+fn exec(id: u32, fill: impl FnOnce(&mut proto::ExecRequest)) -> Vec<u8> {
+    let mut asked = proto::ExecRequest {
+        id: Some(id),
+        exec_id: Some(format!("exec-{id}")),
+        ..Default::default()
+    };
+    fill(&mut asked);
     let message = proto::ServerMessage {
-        exec_request: buffa::MessageField::some(proto::ExecRequest {
-            id: Some(id),
-            exec_id: Some(format!("exec-{id}")),
-            mcp_args: buffa::MessageField::some(
-                proto::McpArgs::default()
-                    .with_name("read")
-                    .with_tool_name("read")
-                    .with_tool_call_id(tool_call_id)
-                    .with_provider_identifier("ganja"),
-            ),
-            ..Default::default()
-        }),
+        exec_request: buffa::MessageField::some(asked),
         ..Default::default()
     };
 
@@ -88,7 +76,7 @@ struct Paused {
     _body: mpsc::UnboundedSender<Result<Vec<u8>, Infallible>>,
     /// What the wire answered on the request body, so a test can watch the
     /// heartbeats.
-    answered: mpsc::UnboundedReceiver<Result<Vec<u8>, Infallible>>,
+    answered: Answered,
     events: Vec<ProviderEvent>,
 }
 
@@ -100,12 +88,11 @@ async fn pause(model: &str, held: &Arc<HeldRuns>, call_id: &str) -> Paused {
 
     let (body, chunks) = mpsc::unbounded::<Result<Vec<u8>, Infallible>>();
     let (answers, answered) = mpsc::unbounded();
-    let stream = crate::provider::cursor::bridged_events(
+    let stream = crate::provider::cursor::events(
         chunks,
         cancel.clone(),
         Duplex::for_tests(answers, roster()),
-        held,
-        key,
+        Some(Bridge::new(Arc::clone(held), key)),
     );
 
     body.unbounded_send(Ok(called(1, call_id))).expect("the body is open");
@@ -153,16 +140,13 @@ async fn a_bridged_call_pauses_the_run_and_the_result_resumes_it() {
     calls(&paused.events, "call-1");
 
     let resumed = answered(&paused.request, "call-1", completed("the file's contents"));
-    let Resolution::Resume(entry) = held.resolve(&resumed) else {
-        panic!("the result keys the held run");
-    };
-    entry.settle(&resumed).expect("the body is open");
+    assert!(
+        matches!(held.resolve(&resumed), Resolution::Resume(_)),
+        "the result keys the held run, and the answers go out as it is resolved"
+    );
 
     // The answer the server was waiting for, on the body the pause left open.
-    let sent: Vec<proto::ClientMessage> = std::iter::from_fn(|| paused.answered.try_recv().ok())
-        .flatten()
-        .map(|bytes| proto::ClientMessage::decode_from_slice(&bytes[5..]).expect("client messages"))
-        .collect();
+    let sent = sent_so_far(&mut paused.answered);
     let result = sent
         .iter()
         .find_map(|message| message.exec_response.as_option())
@@ -290,9 +274,9 @@ async fn a_body_that_closes_under_a_held_run_drops_it_and_the_resume_is_told() {
 }
 
 /// The same closure a beat ahead of the keeper: the entry is still in the
-/// table, so the resume finds it, [`Entry::settle`] cannot deliver, and the
-/// turn fails **naming it** rather than reading on into a Run nobody is
-/// generating into.
+/// table, so the resume finds it, its answers cannot be delivered
+/// ([`Resolution::Closed`]), and the turn fails **naming it** rather than
+/// reading on into a Run nobody is generating into.
 ///
 /// Driven through `CursorProvider::stream` because that is where the sentence
 /// lives; the resume path returns before any credential is resolved or any
@@ -341,14 +325,9 @@ async fn a_held_run_beats_on_the_body_it_left_open() {
 
     tokio::time::sleep(super::HEARTBEAT * 5 + Duration::from_secs(1)).await;
 
-    let beats = std::iter::from_fn(|| paused.answered.try_recv().ok())
-        .flatten()
-        .filter(|bytes: &Vec<u8>| {
-            proto::ClientMessage::decode_from_slice(&bytes[5..])
-                .expect("client messages")
-                .client_heartbeat
-                .is_set()
-        })
+    let beats = sent_so_far(&mut paused.answered)
+        .into_iter()
+        .filter(|message| message.client_heartbeat.is_set())
         .count();
 
     assert!(beats >= 4, "a held run beats on the body it left open, and beat {beats} times");
@@ -363,12 +342,9 @@ async fn a_one_shot_turn_leaves_a_held_run_alone() {
     let paused = pause("auto", &held, "call-1").await;
 
     let one_shot = ChatRequest {
-        model: "auto".to_owned(),
-        system: None,
         messages: vec![Message::user("summarize this conversation")],
-        turn_start: 0,
         tools: Vec::new(),
-        effort_options: serde_json::Map::new(),
+        ..opening("auto")
     };
     assert!(matches!(held.resolve(&one_shot), Resolution::Fresh));
 
@@ -403,12 +379,8 @@ async fn the_compaction_summary_leaves_a_held_run_alone() {
     let paused = pause("auto", &held, "call-1").await;
 
     let compaction = ChatRequest {
-        model: "auto".to_owned(),
-        system: None,
         messages: vec![Message::user("<summary>…</summary>"), Message::user("carry on")],
-        turn_start: 0,
-        tools: roster(),
-        effort_options: serde_json::Map::new(),
+        ..opening("auto")
     };
     assert!(matches!(held.resolve(&compaction), Resolution::Fresh));
 
@@ -477,14 +449,8 @@ async fn a_resume_against_a_bridge_that_never_existed_fails_rather_than_restarti
 /// which is the honest answer rather than a panic on an empty list.
 #[test]
 fn a_request_with_no_messages_keys_to_nothing() {
-    let empty = ChatRequest {
-        model: "auto".to_owned(),
-        system: None,
-        messages: Vec::new(),
-        turn_start: 7,
-        tools: Vec::new(),
-        effort_options: serde_json::Map::new(),
-    };
+    let empty =
+        ChatRequest { messages: Vec::new(), turn_start: 7, tools: Vec::new(), ..opening("auto") };
 
     assert_eq!(Key::of(&empty), None);
 }
@@ -515,7 +481,7 @@ fn opening_with(id: MessageId) -> ChatRequest {
 #[test]
 fn every_drop_reason_has_a_sentence_of_its_own() {
     let spelled: Vec<&str> = [Reason::Cancelled, Reason::Idle, Reason::Closed, Reason::Evicted]
-        .into_iter()
+        .iter()
         .map(Reason::spelled)
         .collect();
 
@@ -562,12 +528,11 @@ async fn a_batch_the_server_sent_together_rides_one_step() {
     // died mid-batch, which is a different case and a failed turn.
     let (body, chunks) = mpsc::unbounded::<Result<Vec<u8>, Infallible>>();
     let (answers, _answered) = mpsc::unbounded();
-    let stream = crate::provider::cursor::bridged_events(
+    let stream = crate::provider::cursor::events(
         chunks,
         cancel,
         Duplex::for_tests(answers, roster()),
-        &held,
-        key,
+        Some(Bridge::new(Arc::clone(&held), key)),
     );
     body.unbounded_send(Ok(batch)).expect("the body is open");
 
@@ -588,6 +553,277 @@ async fn a_batch_the_server_sent_together_rides_one_step() {
         events.last(),
         Some(&ProviderEvent::Finish(FinishReason::Completed)),
         "and one finish"
+    );
+}
+
+/// **M2.** A terminal event arriving while execs are still gathering ends the
+/// step without a hold: the server decided not to wait, so there is nothing
+/// left to hold open and nothing a later request could resume. The bridged
+/// call reaches the engine as nothing — no `ToolCallStart` — while a refusal
+/// that was due in the same chunk still goes out, because a refusal is
+/// answered the moment it decodes and a bridge is answered on a resume that
+/// will never come.
+#[tokio::test]
+async fn a_run_that_ends_while_execs_are_gathering_never_holds() {
+    let held = Arc::new(HeldRuns::default());
+    let request = opening("auto");
+    let key = Key::of(&request).expect("a request with a message keys");
+
+    let (body, chunks) = mpsc::unbounded::<Result<Vec<u8>, Infallible>>();
+    let (answers, mut answered) = mpsc::unbounded();
+    let stream = crate::provider::cursor::events(
+        chunks,
+        CancellationToken::new(),
+        Duplex::for_tests(answers, roster()),
+        Some(Bridge::new(Arc::clone(&held), key.clone())),
+    );
+
+    // One chunk: the bridgeable call, a refusable delete, then the turn's end
+    // and the verdict — all cut and mapped before the gather window can close.
+    let mut chunk = called(1, "call-1");
+    chunk.extend(exec(2, |exec| {
+        exec.delete_args = buffa::MessageField::some(proto::DeleteArgs::default().with_path("/f"));
+    }));
+    chunk.extend(framed(turn_ended()));
+    chunk.extend(end_stream("{}"));
+    body.unbounded_send(Ok(chunk)).expect("the body is open");
+    drop(body);
+
+    let events: Vec<ProviderEvent> =
+        tokio::time::timeout(Duration::from_secs(10), stream.collect())
+            .await
+            .expect("a turn the server ended ends here too");
+    assert!(
+        !events.iter().any(|event| matches!(event, ProviderEvent::ToolCallStart { .. })),
+        "a call the server did not wait for never reaches the engine: {events:?}"
+    );
+    assert_eq!(events.last(), Some(&ProviderEvent::Finish(FinishReason::Completed)));
+    assert!(!held.holds(&key), "nothing was held: there is no run left to resume");
+
+    let sent = sent_so_far(&mut answered);
+    assert_eq!(sent.len(), 2, "the delete's refusal and its close, and nothing for the call");
+    assert!(
+        sent[0]
+            .exec_response
+            .as_option()
+            .is_some_and(|response| response.id == Some(2) && response.delete_result.is_set()),
+        "the refusal that was due still went out: {sent:?}"
+    );
+}
+
+/// **M3, the restart.** A second exec inside the gather window restarts it,
+/// and both ride one step. The restart is what is pinned, and it is pinned by
+/// the clock rather than by the batch alone: under paused time the pause lands
+/// exactly on the deadline that fired, so a window that had *not* restarted
+/// would end this step one half-window earlier.
+#[tokio::test(start_paused = true)]
+async fn a_second_exec_inside_the_window_restarts_it_and_rides_the_same_step() {
+    let Reading { body, _answered, driver } = reading();
+    let opened = tokio::time::Instant::now();
+
+    body.unbounded_send(Ok(called(1, "call-1"))).expect("the body is open");
+    tokio::time::sleep(super::super::GATHER_WINDOW / 2).await;
+    body.unbounded_send(Ok(called(2, "call-2"))).expect("the body is open");
+
+    let events = paused_step(driver).await;
+    assert_eq!(
+        opened.elapsed(),
+        super::super::GATHER_WINDOW + super::super::GATHER_WINDOW / 2,
+        "the window restarted on the second exec"
+    );
+    assert_eq!(started(&events), vec!["call-1", "call-2"], "both calls, one step");
+}
+
+/// **M3, the clause.** Text does not extend the window: a chatty server cannot
+/// postpone the step it is waiting on. Same clock, opposite reading — the
+/// pause lands on the *first* exec's deadline, a half-window after the text.
+#[tokio::test(start_paused = true)]
+async fn a_text_frame_inside_the_window_does_not_extend_it() {
+    let Reading { body, _answered, driver } = reading();
+    let opened = tokio::time::Instant::now();
+
+    body.unbounded_send(Ok(called(1, "call-1"))).expect("the body is open");
+    tokio::time::sleep(super::super::GATHER_WINDOW / 2).await;
+    body.unbounded_send(Ok(framed(text("meanwhile…")))).expect("the body is open");
+
+    let events = paused_step(driver).await;
+    assert_eq!(opened.elapsed(), super::super::GATHER_WINDOW, "text moved nothing");
+    assert_eq!(started(&events), vec!["call-1"]);
+    assert!(
+        events.contains(&ProviderEvent::TextDelta("meanwhile…".to_owned())),
+        "and the text still rode the step it arrived in: {events:?}"
+    );
+}
+
+/// **M3, the boundary.** An exec arriving after the window closed rides the
+/// next step: the first pause committed to one call, and the second call is
+/// read only once the first has been answered and the same Run resumed.
+#[tokio::test(start_paused = true)]
+async fn an_exec_after_the_window_closed_rides_the_next_step() {
+    let held = Arc::new(HeldRuns::default());
+    let request = opening("auto");
+    let key = Key::of(&request).expect("a request with a message keys");
+    let cancel = CancellationToken::new();
+
+    let (body, chunks) = mpsc::unbounded::<Result<Vec<u8>, Infallible>>();
+    let (answers, _answered) = mpsc::unbounded();
+    let stream = crate::provider::cursor::events(
+        chunks,
+        cancel.clone(),
+        Duplex::for_tests(answers, roster()),
+        Some(Bridge::new(Arc::clone(&held), key.clone())),
+    );
+    let driver = tokio::spawn(stream.collect::<Vec<ProviderEvent>>());
+
+    body.unbounded_send(Ok(called(1, "call-1"))).expect("the body is open");
+    tokio::time::sleep(super::super::GATHER_WINDOW * 2).await;
+    body.unbounded_send(Ok(called(2, "call-2"))).expect("the body is open");
+
+    let first = paused_step(driver).await;
+    assert_eq!(started(&first), vec!["call-1"], "the window had closed before the second call");
+
+    let resumed = answered(&request, "call-1", completed("done"));
+    let Resolution::Resume(fold) = held.resolve(&resumed) else {
+        panic!("the result keys the held run");
+    };
+    let second: Vec<ProviderEvent> =
+        crate::provider::cursor::run(*fold, cancel, Some(Bridge::new(Arc::clone(&held), key)))
+            .collect()
+            .await;
+    assert_eq!(started(&second), vec!["call-2"], "the second call is the next step's");
+}
+
+/// A bridging fold over an open body, driven in a task of its own so the
+/// gather clock ticks while the test is sleeping.
+struct Reading {
+    body: mpsc::UnboundedSender<Result<Vec<u8>, Infallible>>,
+    /// Kept alive so the answer channel stays open under the fold.
+    _answered: Answered,
+    driver: tokio::task::JoinHandle<Vec<ProviderEvent>>,
+}
+
+fn reading() -> Reading {
+    let held = Arc::new(HeldRuns::default());
+    let request = opening("auto");
+    let key = Key::of(&request).expect("a request with a message keys");
+
+    let (body, chunks) = mpsc::unbounded::<Result<Vec<u8>, Infallible>>();
+    let (answers, answered) = mpsc::unbounded();
+    let stream = crate::provider::cursor::events(
+        chunks,
+        CancellationToken::new(),
+        Duplex::for_tests(answers, roster()),
+        Some(Bridge::new(Arc::clone(&held), key)),
+    );
+
+    Reading { body, _answered: answered, driver: tokio::spawn(stream.collect()) }
+}
+
+/// The events a driven fold committed to when it paused — bounded, so a
+/// window that never closes is a failure rather than a hang under a clock
+/// nothing else advances.
+async fn paused_step(driver: tokio::task::JoinHandle<Vec<ProviderEvent>>) -> Vec<ProviderEvent> {
+    tokio::time::timeout(Duration::from_secs(10), driver)
+        .await
+        .expect("the gather window closes")
+        .expect("the fold pauses")
+}
+
+/// The call ids a step started, in order.
+fn started(events: &[ProviderEvent]) -> Vec<&str> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderEvent::ToolCallStart { id, .. } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// **M4.** A server that called without minting a `tool_call_id` still gets
+/// an answer, under an id this wire minted: the engine needs one, and an empty
+/// one would collide with the next empty one. The minted id is what the tool
+/// part carries and what the resume is matched by — and the answer still goes
+/// out under the *exec's* own numeric id, which is the only key the server
+/// reads.
+#[tokio::test]
+async fn a_call_without_a_tool_call_id_is_bridged_under_a_minted_one() {
+    let held = Arc::new(HeldRuns::default());
+    let request = opening("auto");
+    let key = Key::of(&request).expect("a request with a message keys");
+
+    let (body, chunks) = mpsc::unbounded::<Result<Vec<u8>, Infallible>>();
+    let (answers, mut replies) = mpsc::unbounded();
+    let stream = crate::provider::cursor::events(
+        chunks,
+        CancellationToken::new(),
+        Duplex::for_tests(answers, roster()),
+        Some(Bridge::new(Arc::clone(&held), key)),
+    );
+    body.unbounded_send(Ok(exec(1, |exec| {
+        exec.mcp_args = buffa::MessageField::some(
+            proto::McpArgs::default()
+                .with_name("read")
+                .with_tool_name("read")
+                .with_provider_identifier("ganja"),
+        );
+    })))
+    .expect("the body is open");
+
+    let events: Vec<ProviderEvent> =
+        tokio::time::timeout(Duration::from_secs(10), stream.collect())
+            .await
+            .expect("a bridged exec pauses the stream");
+    let [minted] = started(&events).try_into().expect("one call");
+    assert_eq!(minted.len(), 36, "a v4 uuid in the recorded client's spelling: {minted}");
+
+    let resumed = answered(&request, minted, completed("under the minted id"));
+    assert!(
+        matches!(held.resolve(&resumed), Resolution::Resume(_)),
+        "the minted id is what the resume is matched by"
+    );
+
+    let sent = sent_so_far(&mut replies);
+    let result = sent
+        .iter()
+        .find_map(|message| message.exec_response.as_option())
+        .expect("the result went out on the exec channel");
+    assert_eq!(result.id, Some(1), "answered under the exec's own id, the one the server keyed");
+    assert!(result.mcp_result.as_option().is_some_and(|result| result.success.is_set()));
+}
+
+/// **M6.** The dead-bridge sentence reaches the engine through
+/// `Provider::stream` and not only through `resolve`: a turn resuming a
+/// cancelled bridge fails naming the cancel.
+#[tokio::test]
+async fn a_resume_against_a_dropped_bridge_fails_the_turn_through_the_provider() {
+    let provider = crate::provider::cursor::CursorProvider::at(
+        "http://127.0.0.1:9",
+        crate::provider::CredentialSource::key("at-bridge-canary").expect("a non-blank token"),
+    )
+    .expect("loopback may carry a token");
+    let paused = pause("auto", &provider.held, "call-1").await;
+
+    paused.cancel.cancel();
+    settled(&provider.held, &paused.request).await;
+
+    let resumed = answered(&paused.request, "call-1", completed("late"));
+    let events: Vec<ProviderEvent> = tokio::time::timeout(Duration::from_secs(10), async {
+        crate::provider::Provider::stream(&provider, resumed, CancellationToken::new())
+            .await
+            .expect("a dead bridge answers from the ring rather than from a socket")
+            .collect()
+            .await
+    })
+    .await
+    .expect("a dead-bridge resume fails rather than hanging");
+
+    assert!(
+        matches!(
+            events.as_slice(),
+            [ProviderEvent::Failed(error)] if error.to_string().contains("cancelled")
+        ),
+        "the turn is told why its bridge is gone: {events:?}"
     );
 }
 

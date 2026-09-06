@@ -482,7 +482,8 @@ impl ::buffa::ExtensionSet for ModelEntry {
 /// the client's exec answers — exec_client_message = 2 (agent_pb.ts:3603).
 /// The kv channel's answers ride the same stream — kv_client_message = 3
 /// (agent_pb.ts:3617). The other arms of that oneof belong to flows this
-/// build does not speak yet, so only these four are modelled.
+/// build does not speak yet, so only five are modelled: those three, the
+/// control half below, and the run-level heartbeat.
 /// The exec channel's *control* half — the one an exec is refused on rather
 /// than answered — rides the same stream as exec_client_control_message = 5
 /// (index.js@5927250; byte offsets, per the citation note above).
@@ -2501,8 +2502,8 @@ impl ::buffa::ExtensionSet for TurnEnded {
 /// (:6934) is the one kind this build answers with a *result*.
 ///
 /// The ten kinds beside it are the tools the server asks a client to run.
-/// Seven of them are now **bridged to ganja's own tools** (**D552**): an
-/// `mcp_args = 11` naming a tool this request declared, and the six native
+/// Eight of them are now **bridged to ganja's own tools** (**D552**): an
+/// `mcp_args = 11` naming a tool this request declared, and the seven native
 /// kinds of the redirect table (read, redacted read, streamed shell, grep, ls,
 /// write, fetch), are surfaced to ganja's engine as ordinary tool calls, run
 /// there under its permission engine and written into its transcript, and
@@ -3950,10 +3951,12 @@ impl ::buffa::ExtensionSet for LsArgs {
 /// *would* be allowed. Answered `approved` with nothing executed; the real
 /// call that follows is what meets the permission dialog.
 /// ```
-///   * server_identifier = 9 and skip_approval = 8 — read for the log line.
+///   * server_identifier = 9 and skip_approval = 8 — decoded by the generated
 /// ```text
-/// A present server_identifier is the measured norm on a `"ganja"` call
-/// (the recording's (a)) and refuses nothing.
+/// type and read by nothing. A present server_identifier is the measured
+/// norm on a `"ganja"` call (the recording's (a)) and refuses nothing; what
+/// a call may skip is ganja's permission engine's to decide, never the
+/// caller's, so skip_approval is not consulted either.
 /// ```
 ///
 /// Beside them the descriptor carries smart_mode_approval = 6, which arrived
@@ -5476,7 +5479,7 @@ impl ::buffa::ExtensionSet for ShellResult {
 /// forward; a redirect that emitted output line by line would be inventing a
 /// cadence it never observed. stderr = 2 is where a failed call's message goes,
 /// because the model on the other end reads that arm as the command's own
-/// complaint. The six arms beside them — start = 4, permission_denied = 6,
+/// complaint. The five arms beside them — start = 4, permission_denied = 6,
 /// backgrounded = 7, hook_context = 8, sandbox_unsupported = 9 — describe a
 /// shell this client is not running.
 #[derive(Clone, PartialEq, Default)]
@@ -6029,9 +6032,10 @@ impl ::buffa::ExtensionSet for ShellStreamExit {
 }
 /// index.js@6545830. The first two members are echoed back from the args so
 /// the server's loop reads *which* command was refused; reason = 3 is ganja's
-/// sentence. is_readonly = 4 states a permission verdict — the shipped client
-/// sets it from the rule that blocked the call — and this refusal makes no
-/// such verdict, so it is left absent, which the wire reads as false.
+/// sentence. is_readonly = 4 is not modelled: it states a permission verdict —
+/// the shipped client sets it from the rule that blocked the call — and this
+/// refusal makes no such verdict, so it is left absent, which the wire reads
+/// as false.
 #[derive(Clone, PartialEq, Default)]
 pub struct ShellRejected {
     /// Field 1: `command`
@@ -6040,8 +6044,6 @@ pub struct ShellRejected {
     pub working_directory: ::core::option::Option<::buffa::alloc::string::String>,
     /// Field 3: `reason`
     pub reason: ::core::option::Option<::buffa::alloc::string::String>,
-    /// Field 4: `is_readonly`
-    pub is_readonly: ::core::option::Option<bool>,
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -6051,7 +6053,6 @@ impl ::core::fmt::Debug for ShellRejected {
             .field("command", &self.command)
             .field("working_directory", &self.working_directory)
             .field("reason", &self.reason)
-            .field("is_readonly", &self.is_readonly)
             .finish()
     }
 }
@@ -6093,13 +6094,6 @@ impl ShellRejected {
         self.reason = Some(value.into());
         self
     }
-    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
-    #[inline]
-    ///Sets [`Self::is_readonly`] to `Some(value)`, consuming and returning `self`.
-    pub fn with_is_readonly(mut self, value: bool) -> Self {
-        self.is_readonly = Some(value);
-        self
-    }
 }
 ::buffa::impl_default_instance!(ShellRejected);
 impl ::buffa::MessageName for ShellRejected {
@@ -6130,9 +6124,6 @@ impl ::buffa::Message for ShellRejected {
         if let Some(ref v) = self.reason {
             size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
         }
-        if self.is_readonly.is_some() {
-            size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
-        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -6151,9 +6142,6 @@ impl ::buffa::Message for ShellRejected {
         }
         if let Some(ref v) = self.reason {
             ::buffa::types::put_string_field(3u32, v, buf);
-        }
-        if let Some(v) = self.is_readonly {
-            ::buffa::types::put_bool_field(4u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -6200,15 +6188,6 @@ impl ::buffa::Message for ShellRejected {
                     buf,
                 )?;
             }
-            4u32 => {
-                ::buffa::encoding::check_wire_type(
-                    tag,
-                    ::buffa::encoding::WireType::Varint,
-                )?;
-                self.is_readonly = ::core::option::Option::Some(
-                    ::buffa::types::decode_bool(buf)?,
-                );
-            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -6220,7 +6199,6 @@ impl ::buffa::Message for ShellRejected {
         self.command = ::core::option::Option::None;
         self.working_directory = ::core::option::Option::None;
         self.reason = ::core::option::Option::None;
-        self.is_readonly = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -10701,23 +10679,18 @@ impl ::buffa::ExtensionSet for McpApproved {
         &mut self.__buffa_unknown_fields
     }
 }
-/// index.js@6377058: reason = 1, and an is_readonly = 2 left absent for
+/// index.js@6377058: reason = 1, and an is_readonly = 2 not modelled for
 /// ShellRejected's reason.
 #[derive(Clone, PartialEq, Default)]
 pub struct McpRejected {
     /// Field 1: `reason`
     pub reason: ::core::option::Option<::buffa::alloc::string::String>,
-    /// Field 2: `is_readonly`
-    pub is_readonly: ::core::option::Option<bool>,
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
 impl ::core::fmt::Debug for McpRejected {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("McpRejected")
-            .field("reason", &self.reason)
-            .field("is_readonly", &self.is_readonly)
-            .finish()
+        f.debug_struct("McpRejected").field("reason", &self.reason).finish()
     }
 }
 impl McpRejected {
@@ -10736,13 +10709,6 @@ impl McpRejected {
         value: impl Into<::buffa::alloc::string::String>,
     ) -> Self {
         self.reason = Some(value.into());
-        self
-    }
-    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
-    #[inline]
-    ///Sets [`Self::is_readonly`] to `Some(value)`, consuming and returning `self`.
-    pub fn with_is_readonly(mut self, value: bool) -> Self {
-        self.is_readonly = Some(value);
         self
     }
 }
@@ -10769,9 +10735,6 @@ impl ::buffa::Message for McpRejected {
         if let Some(ref v) = self.reason {
             size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
         }
-        if self.is_readonly.is_some() {
-            size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
-        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -10784,9 +10747,6 @@ impl ::buffa::Message for McpRejected {
         use ::buffa::Enumeration as _;
         if let Some(ref v) = self.reason {
             ::buffa::types::put_string_field(1u32, v, buf);
-        }
-        if let Some(v) = self.is_readonly {
-            ::buffa::types::put_bool_field(2u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -10811,15 +10771,6 @@ impl ::buffa::Message for McpRejected {
                     buf,
                 )?;
             }
-            2u32 => {
-                ::buffa::encoding::check_wire_type(
-                    tag,
-                    ::buffa::encoding::WireType::Varint,
-                )?;
-                self.is_readonly = ::core::option::Option::Some(
-                    ::buffa::types::decode_bool(buf)?,
-                );
-            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -10829,7 +10780,6 @@ impl ::buffa::Message for McpRejected {
     }
     fn clear(&mut self) {
         self.reason = ::core::option::Option::None;
-        self.is_readonly = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -11279,7 +11229,8 @@ impl ::buffa::ExtensionSet for FetchError {
 /// plugin's own answer records that plain system messages are ignored
 /// server-side (proxy.ts:1133).
 ///
-/// The three members beside it are the **switchboard** (D550): per-turn
+/// Four members sit beside it: tools = 7, the roster's second channel (D552,
+/// on the member itself), and the three of the **switchboard** (D550) — per-turn
 /// booleans on the shipped RequestContext (index.js@6467399) by which a
 /// client narrows what the server's loop will ask it for. Only what
 /// demonstrably generates an exec this build cannot serve is set, because
@@ -15322,7 +15273,8 @@ pub mod __buffa {
         /// the client's exec answers — exec_client_message = 2 (agent_pb.ts:3603).
         /// The kv channel's answers ride the same stream — kv_client_message = 3
         /// (agent_pb.ts:3617). The other arms of that oneof belong to flows this
-        /// build does not speak yet, so only these four are modelled.
+        /// build does not speak yet, so only five are modelled: those three, the
+        /// control half below, and the run-level heartbeat.
         /// The exec channel's *control* half — the one an exec is refused on rather
         /// than answered — rides the same stream as exec_client_control_message = 5
         /// (index.js@5927250; byte offsets, per the citation note above).
@@ -19719,8 +19671,8 @@ pub mod __buffa {
         /// (:6934) is the one kind this build answers with a *result*.
         ///
         /// The ten kinds beside it are the tools the server asks a client to run.
-        /// Seven of them are now **bridged to ganja's own tools** (**D552**): an
-        /// `mcp_args = 11` naming a tool this request declared, and the six native
+        /// Eight of them are now **bridged to ganja's own tools** (**D552**): an
+        /// `mcp_args = 11` naming a tool this request declared, and the seven native
         /// kinds of the redirect table (read, redacted read, streamed shell, grep, ls,
         /// write, fetch), are surfaced to ganja's engine as ordinary tool calls, run
         /// there under its permission engine and written into its transcript, and
@@ -22255,10 +22207,12 @@ pub mod __buffa {
         /// *would* be allowed. Answered `approved` with nothing executed; the real
         /// call that follows is what meets the permission dialog.
         /// ```
-        ///   * server_identifier = 9 and skip_approval = 8 — read for the log line.
+        ///   * server_identifier = 9 and skip_approval = 8 — decoded by the generated
         /// ```text
-        /// A present server_identifier is the measured norm on a `"ganja"` call
-        /// (the recording's (a)) and refuses nothing.
+        /// type and read by nothing. A present server_identifier is the measured
+        /// norm on a `"ganja"` call (the recording's (a)) and refuses nothing; what
+        /// a call may skip is ganja's permission engine's to decide, never the
+        /// caller's, so skip_approval is not consulted either.
         /// ```
         ///
         /// Beside them the descriptor carries smart_mode_approval = 6, which arrived
@@ -25216,7 +25170,7 @@ pub mod __buffa {
         /// forward; a redirect that emitted output line by line would be inventing a
         /// cadence it never observed. stderr = 2 is where a failed call's message goes,
         /// because the model on the other end reads that arm as the command's own
-        /// complaint. The six arms beside them — start = 4, permission_denied = 6,
+        /// complaint. The five arms beside them — start = 4, permission_denied = 6,
         /// backgrounded = 7, hook_context = 8, sandbox_unsupported = 9 — describe a
         /// shell this client is not running.
         #[derive(Clone, Debug, Default)]
@@ -26390,9 +26344,10 @@ pub mod __buffa {
         }
         /// index.js@6545830. The first two members are echoed back from the args so
         /// the server's loop reads *which* command was refused; reason = 3 is ganja's
-        /// sentence. is_readonly = 4 states a permission verdict — the shipped client
-        /// sets it from the rule that blocked the call — and this refusal makes no
-        /// such verdict, so it is left absent, which the wire reads as false.
+        /// sentence. is_readonly = 4 is not modelled: it states a permission verdict —
+        /// the shipped client sets it from the rule that blocked the call — and this
+        /// refusal makes no such verdict, so it is left absent, which the wire reads
+        /// as false.
         #[derive(Clone, Debug, Default)]
         pub struct ShellRejectedView<'a> {
             /// Field 1: `command`
@@ -26401,8 +26356,6 @@ pub mod __buffa {
             pub working_directory: ::core::option::Option<&'a str>,
             /// Field 3: `reason`
             pub reason: ::core::option::Option<&'a str>,
-            /// Field 4: `is_readonly`
-            pub is_readonly: ::core::option::Option<bool>,
             pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
         }
         impl<'a> ::buffa::MessageView<'a> for ShellRejectedView<'a> {
@@ -26464,13 +26417,6 @@ pub mod __buffa {
                         )?;
                         view.reason = Some(::buffa::types::borrow_str(&mut cur)?);
                     }
-                    4u32 => {
-                        ::buffa::encoding::check_wire_type(
-                            tag,
-                            ::buffa::encoding::WireType::Varint,
-                        )?;
-                        view.is_readonly = Some(::buffa::types::decode_bool(&mut cur)?);
-                    }
                     _ => {
                         ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
                         let span_len = before_tag.len() - cur.len();
@@ -26503,7 +26449,6 @@ pub mod __buffa {
                     command: self.command.map(|s| s.to_string()),
                     working_directory: self.working_directory.map(|s| s.to_string()),
                     reason: self.reason.map(|s| s.to_string()),
-                    is_readonly: self.is_readonly,
                     __buffa_unknown_fields: self
                         .__buffa_unknown_fields
                         .to_owned()?
@@ -26527,9 +26472,6 @@ pub mod __buffa {
                 if let Some(ref v) = self.reason {
                     size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
                 }
-                if self.is_readonly.is_some() {
-                    size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
-                }
                 size += self.__buffa_unknown_fields.encoded_len() as u64;
                 ::buffa::saturate_size(size)
             }
@@ -26549,9 +26491,6 @@ pub mod __buffa {
                 }
                 if let Some(ref v) = self.reason {
                     ::buffa::types::put_string_field(3u32, v, buf);
-                }
-                if let Some(v) = self.is_readonly {
-                    ::buffa::types::put_bool_field(4u32, v, buf);
                 }
                 self.__buffa_unknown_fields.write_to(buf);
             }
@@ -26662,11 +26601,6 @@ pub mod __buffa {
             #[must_use]
             pub fn reason(&self) -> ::core::option::Option<&'_ str> {
                 self.0.reborrow().reason
-            }
-            /// Field 4: `is_readonly`
-            #[must_use]
-            pub fn is_readonly(&self) -> ::core::option::Option<bool> {
-                self.0.reborrow().is_readonly
             }
         }
         impl ::core::convert::From<::buffa::OwnedView<ShellRejectedView<'static>>>
@@ -35315,14 +35249,12 @@ pub mod __buffa {
             type View<'a> = McpApprovedView<'a>;
             type ViewHandle = McpApprovedOwnedView;
         }
-        /// index.js@6377058: reason = 1, and an is_readonly = 2 left absent for
+        /// index.js@6377058: reason = 1, and an is_readonly = 2 not modelled for
         /// ShellRejected's reason.
         #[derive(Clone, Debug, Default)]
         pub struct McpRejectedView<'a> {
             /// Field 1: `reason`
             pub reason: ::core::option::Option<&'a str>,
-            /// Field 2: `is_readonly`
-            pub is_readonly: ::core::option::Option<bool>,
             pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
         }
         impl<'a> ::buffa::MessageView<'a> for McpRejectedView<'a> {
@@ -35368,13 +35300,6 @@ pub mod __buffa {
                         )?;
                         view.reason = Some(::buffa::types::borrow_str(&mut cur)?);
                     }
-                    2u32 => {
-                        ::buffa::encoding::check_wire_type(
-                            tag,
-                            ::buffa::encoding::WireType::Varint,
-                        )?;
-                        view.is_readonly = Some(::buffa::types::decode_bool(&mut cur)?);
-                    }
                     _ => {
                         ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
                         let span_len = before_tag.len() - cur.len();
@@ -35405,7 +35330,6 @@ pub mod __buffa {
                 let _ = __buffa_src;
                 ::core::result::Result::Ok(super::super::McpRejected {
                     reason: self.reason.map(|s| s.to_string()),
-                    is_readonly: self.is_readonly,
                     __buffa_unknown_fields: self
                         .__buffa_unknown_fields
                         .to_owned()?
@@ -35423,9 +35347,6 @@ pub mod __buffa {
                 if let Some(ref v) = self.reason {
                     size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
                 }
-                if self.is_readonly.is_some() {
-                    size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
-                }
                 size += self.__buffa_unknown_fields.encoded_len() as u64;
                 ::buffa::saturate_size(size)
             }
@@ -35439,9 +35360,6 @@ pub mod __buffa {
                 use ::buffa::Enumeration as _;
                 if let Some(ref v) = self.reason {
                     ::buffa::types::put_string_field(1u32, v, buf);
-                }
-                if let Some(v) = self.is_readonly {
-                    ::buffa::types::put_bool_field(2u32, v, buf);
                 }
                 self.__buffa_unknown_fields.write_to(buf);
             }
@@ -35540,11 +35458,6 @@ pub mod __buffa {
             #[must_use]
             pub fn reason(&self) -> ::core::option::Option<&'_ str> {
                 self.0.reborrow().reason
-            }
-            /// Field 2: `is_readonly`
-            #[must_use]
-            pub fn is_readonly(&self) -> ::core::option::Option<bool> {
-                self.0.reborrow().is_readonly
             }
         }
         impl ::core::convert::From<::buffa::OwnedView<McpRejectedView<'static>>>
@@ -36417,7 +36330,8 @@ pub mod __buffa {
         /// plugin's own answer records that plain system messages are ignored
         /// server-side (proxy.ts:1133).
         ///
-        /// The three members beside it are the **switchboard** (D550): per-turn
+        /// Four members sit beside it: tools = 7, the roster's second channel (D552,
+        /// on the member itself), and the three of the **switchboard** (D550) — per-turn
         /// booleans on the shipped RequestContext (index.js@6467399) by which a
         /// client narrows what the server's loop will ask it for. Only what
         /// demonstrably generates an exec this build cannot serve is set, because

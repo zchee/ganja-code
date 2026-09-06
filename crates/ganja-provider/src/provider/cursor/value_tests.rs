@@ -265,3 +265,32 @@ fn an_integral_number_comes_back_as_an_integer_a_tool_can_deserialize() {
 
     assert!(decode(&encode(&json!(1.5))).expect("a number reads").is_f64(), "a real stays real");
 }
+
+/// The bound the wire's `double` puts on that restoration, pinned as a known
+/// limit rather than left to surprise: an integer above 2^53 was rounded
+/// before this decoder saw it, and what comes back is the neighbour the
+/// double could spell.
+#[test]
+fn an_integer_above_two_to_the_fifty_three_arrives_already_rounded() {
+    assert_eq!(
+        decode(&encode(&json!(9_007_199_254_740_993_u64))),
+        Some(json!(9_007_199_254_740_992_u64)),
+        "the double's own rounding, not this decoder's"
+    );
+}
+
+/// Exactly 2^63 is not `i64::MAX`. `i64::MAX as f64` rounds *up* to 2^63, so
+/// an inclusive guard would admit it and `as i64` would saturate — handing a
+/// tool `9223372036854775807` for a value the model spelled
+/// `9223372036854775808`. The float spelling is the honest one, and JSON can
+/// carry it.
+#[test]
+fn exactly_two_to_the_sixty_three_is_not_i64_max() {
+    let edge =
+        proto::JsonValue { number_value: Some(9_223_372_036_854_775_808.0), ..Default::default() };
+    let decoded = decode(&edge).expect("a finite number reads");
+
+    assert_ne!(decoded, json!(i64::MAX));
+    assert!(decoded.is_f64(), "past i64 the only spelling is the float's: {decoded}");
+    assert_eq!(decoded.as_f64(), Some(9_223_372_036_854_775_808.0));
+}

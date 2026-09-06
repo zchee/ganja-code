@@ -60,6 +60,7 @@ fn sent(shape: &Answer, outcome: &Outcome) -> Vec<proto::ExecResponse> {
 fn a_read_exec_runs_ganjas_read_and_answers_on_the_read_result() {
     let bridged = redirect(
         &decode::ExecArgs::Read {
+            redacted: false,
             path: "/repo/src/lib.rs".to_owned(),
             offset: Some(12),
             limit: Some(40),
@@ -106,7 +107,12 @@ fn a_read_exec_runs_ganjas_read_and_answers_on_the_read_result() {
 #[test]
 fn a_read_without_a_window_reports_no_range_applied() {
     let bridged = redirect(
-        &decode::ExecArgs::Read { path: "/f".to_owned(), offset: None, limit: None },
+        &decode::ExecArgs::Read {
+            redacted: false,
+            path: "/f".to_owned(),
+            offset: None,
+            limit: None,
+        },
         &everything(),
     )
     .expect("read is on the roster");
@@ -130,7 +136,12 @@ fn a_read_without_a_window_reports_no_range_applied() {
 #[test]
 fn a_negative_offset_is_dropped_rather_than_handed_to_a_tool_that_cannot_read_it() {
     let bridged = redirect(
-        &decode::ExecArgs::Read { path: "/f".to_owned(), offset: Some(-3), limit: Some(10) },
+        &decode::ExecArgs::Read {
+            redacted: false,
+            path: "/f".to_owned(),
+            offset: Some(-3),
+            limit: Some(10),
+        },
         &everything(),
     )
     .expect("read is on the roster");
@@ -157,7 +168,12 @@ fn a_negative_offset_is_dropped_rather_than_handed_to_a_tool_that_cannot_read_it
 #[test]
 fn a_redacted_read_answers_at_field_29() {
     let bridged = redirect(
-        &decode::ExecArgs::RedactedRead { path: "/f".to_owned(), offset: None, limit: None },
+        &decode::ExecArgs::Read {
+            redacted: true,
+            path: "/f".to_owned(),
+            offset: None,
+            limit: None,
+        },
         &everything(),
     )
     .expect("read is on the roster");
@@ -454,23 +470,13 @@ async fn an_ls_exec_over_a_real_directory_lists_what_glob_really_finds() {
 
     // The real tool, with the redirect's own arguments and nothing rewritten:
     // what this asserts about is exactly what a bridged listing would run.
-    let context = ganja_tool::ToolCtx {
-        cwd: directory.path().to_path_buf(),
-        cancel: tokio_util::sync::CancellationToken::new(),
-        call_id: "call".to_owned(),
-        files: std::sync::Arc::new(ganja_tool::FileTimes::default()),
-        credentials: ganja_tool::Credentials::Unguarded,
-        spawn: None,
-        postbox: None,
-        tasks: None,
-        ask: None,
-        switch: None,
-        jobs: None,
-    };
-    let listed =
-        ganja_tool::Tool::run(&ganja_tool::glob::GlobTool, bridged.input.clone(), &context)
-            .await
-            .expect("a real directory lists");
+    let listed = ganja_tool::Tool::run(
+        &ganja_tool::glob::GlobTool,
+        bridged.input.clone(),
+        &context_at(directory.path()),
+    )
+    .await
+    .expect("a real directory lists");
 
     let [response] = sent(&bridged.answer, &ran(&listed.output)).try_into().expect("one result");
     let node = response
@@ -508,6 +514,182 @@ async fn an_ls_exec_over_a_real_directory_lists_what_glob_really_finds() {
         Some(false),
         "one glob is not a walk, and claiming otherwise would be a lie about the listing"
     );
+}
+
+/// A [`ganja_tool::ToolCtx`] rooted at `cwd`, for a row that runs a real tool
+/// with the redirect's own arguments: what the answer builder reads off the
+/// tool's output is a shape that tool owns, and only running it can redden a
+/// rename on the other side of the crate boundary.
+fn context_at(cwd: &std::path::Path) -> ganja_tool::ToolCtx {
+    ganja_tool::ToolCtx {
+        cwd: cwd.to_path_buf(),
+        cancel: tokio_util::sync::CancellationToken::new(),
+        call_id: "call".to_owned(),
+        files: std::sync::Arc::new(ganja_tool::FileTimes::default()),
+        credentials: ganja_tool::Credentials::Unguarded,
+        spawn: None,
+        postbox: None,
+        tasks: None,
+        ask: None,
+        switch: None,
+        jobs: None,
+    }
+}
+
+/// **AC-15, the read row, over a real file.** The window the exec asked for
+/// is the window `read` applies, and the counts the answer reports are the
+/// ones the tool wrote into its metadata (`ganja-tool/src/read.rs`,
+/// `display.totalLines` and `truncated`) — read off a real run, so a rename
+/// there reddens here rather than reporting `total_lines: None` forever.
+#[tokio::test]
+async fn a_read_exec_over_a_real_file_reports_the_tools_own_window_and_counts() {
+    let directory = tempfile::tempdir().expect("a temp directory");
+    let file = directory.path().join("five.txt");
+    std::fs::write(&file, "one\ntwo\nthree\nfour\nfive\n").expect("the fixture writes");
+    let path = file.to_string_lossy().into_owned();
+
+    let bridged = redirect(
+        &decode::ExecArgs::Read {
+            redacted: false,
+            path: path.clone(),
+            offset: Some(2),
+            limit: Some(2),
+        },
+        &everything(),
+    )
+    .expect("read is on the roster");
+    let read = ganja_tool::Tool::run(
+        &ganja_tool::read::ReadTool,
+        bridged.input.clone(),
+        &context_at(directory.path()),
+    )
+    .await
+    .expect("a real file reads");
+
+    let [response] = sent(&bridged.answer, &ran_with(&read.output, read.metadata))
+        .try_into()
+        .expect("one result");
+    let success = response
+        .read_result
+        .as_option()
+        .and_then(|result| result.success.as_option())
+        .expect("the read succeeded");
+
+    assert_eq!(success.path.as_deref(), Some(path.as_str()));
+    let content = success.content.as_deref().expect("the tool's own output");
+    assert!(
+        content.contains("two") && content.contains("three") && !content.contains("four"),
+        "the window the exec asked for: {content}"
+    );
+    assert_eq!(success.total_lines, Some(5), "counted by the tool, read off its metadata");
+    assert_eq!(success.truncated, Some(true), "two of five is a window with more past it");
+    assert_eq!(success.range_applied, Some(true));
+}
+
+/// **AC-15, the shell row, over a real shell.** The exit code the answer
+/// reports is the one `bash` wrote into its metadata
+/// (`ganja-tool/src/shell.rs`, `exit`), for a command that succeeded and one
+/// that did not; the output rides the stdout event verbatim.
+#[tokio::test]
+async fn a_shell_exec_over_a_real_shell_reports_the_tools_own_exit_code() {
+    let directory = tempfile::tempdir().expect("a temp directory");
+    let shell = ganja_tool::shell::ShellTool::new();
+
+    for (command, code) in [("printf bridged-stdout", 0), ("false", 1)] {
+        let bridged = redirect(
+            &decode::ExecArgs::ShellStream {
+                command: command.to_owned(),
+                working_directory: String::new(),
+            },
+            &everything(),
+        )
+        .expect("bash is on the roster");
+        let run =
+            ganja_tool::Tool::run(&shell, bridged.input.clone(), &context_at(directory.path()))
+                .await
+                .expect("a shell command runs, whatever it exits with");
+
+        let responses = sent(&bridged.answer, &ran_with(&run.output, run.metadata));
+        assert_eq!(responses.len(), 2, "{command}: the output, then the exit");
+        assert_eq!(
+            responses[1]
+                .shell_stream
+                .as_option()
+                .and_then(|event| event.exit.as_option())
+                .and_then(|exit| exit.code),
+            Some(code),
+            "{command}: the code the tool reported"
+        );
+        if code == 0 {
+            assert!(
+                responses[0]
+                    .shell_stream
+                    .as_option()
+                    .and_then(|event| event.stdout.as_option())
+                    .and_then(|out| out.data.as_deref())
+                    .is_some_and(|data| data.contains("bridged-stdout")),
+                "the command's own output rides the stdout event: {:?}",
+                responses[0]
+            );
+        }
+    }
+}
+
+/// **AC-15, the grep row, over a real search.** The match tree is parsed out
+/// of `grep`'s own output (`ganja-tool/src/grep.rs`: the count line, a
+/// `<path>:` header per file, `  Line <n>: <text>` under it), so the parser
+/// is driven by what the tool really writes rather than by a sample typed to
+/// look like it.
+#[tokio::test]
+async fn a_grep_exec_over_a_real_directory_reads_the_tools_own_output_back() {
+    let directory = tempfile::tempdir().expect("a temp directory");
+    std::fs::write(directory.path().join("a.rs"), "fn main() {}\nfn main2() {}\n")
+        .expect("the fixture writes");
+    std::fs::write(directory.path().join("b.rs"), "fn main() {}\n").expect("the fixture writes");
+    std::fs::write(directory.path().join("c.txt"), "fn main() {}\n").expect("the fixture writes");
+    let root = directory.path().to_string_lossy().into_owned();
+
+    let bridged = redirect(
+        &decode::ExecArgs::Grep {
+            pattern: "fn main".to_owned(),
+            path: root.clone(),
+            glob: "*.rs".to_owned(),
+            case_insensitive: false,
+        },
+        &everything(),
+    )
+    .expect("grep is on the roster");
+    let searched = ganja_tool::Tool::run(
+        &ganja_tool::grep::GrepTool,
+        bridged.input.clone(),
+        &context_at(directory.path()),
+    )
+    .await
+    .expect("a real directory searches");
+
+    let [response] = sent(&bridged.answer, &ran(&searched.output)).try_into().expect("one result");
+    let content = response
+        .grep_result
+        .as_option()
+        .and_then(|result| result.success.as_option())
+        .and_then(|success| success.workspace_results.first())
+        .and_then(|entry| entry.value.as_option())
+        .and_then(|union| union.content.as_option())
+        .expect("matching lines");
+
+    assert_eq!(content.total_matched_lines, Some(3), "three lines in the two .rs files");
+    let files: Vec<&str> = content.matches.iter().filter_map(|file| file.file.as_deref()).collect();
+    assert_eq!(
+        files,
+        vec![format!("{root}/a.rs").as_str(), format!("{root}/b.rs").as_str()],
+        "the glob kept the .txt out, and the tool sorts by path"
+    );
+    assert_eq!(
+        content.matches[0].matches.iter().filter_map(|line| line.line_number).collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    assert_eq!(content.matches[0].matches[1].content.as_deref(), Some("fn main2() {}"));
+    assert_eq!(content.matches[1].matches.len(), 1);
 }
 
 /// A listing this build cannot match is **refused**, not answered empty.
@@ -579,6 +761,34 @@ fn a_listing_of_a_different_directory_is_an_error_rather_than_an_empty_one() {
         .expect("an empty directory is still a directory");
     assert_eq!(tree.num_files, Some(0));
     assert!(tree.children_dirs.is_empty());
+}
+
+/// The filesystem root is a listable directory whose name is the one
+/// separator: trimming that separator for the prefix match must not leave the
+/// node itself nameless, and a child under it is `/etc`, never `//etc`.
+#[test]
+fn a_listing_of_the_root_names_the_root_and_its_children_correctly() {
+    let bridged = redirect(&decode::ExecArgs::Ls { path: "/".to_owned() }, &everything())
+        .expect("the root is absolute, so it is listed");
+
+    let [response] =
+        sent(&bridged.answer, &ran("/bin\n/etc/hosts\n/vmlinuz")).try_into().expect("one result");
+    let root = response
+        .ls_result
+        .as_option()
+        .and_then(|result| result.success.as_option())
+        .and_then(|success| success.directory_tree_root.as_option())
+        .expect("the tree");
+
+    assert_eq!(root.abs_path.as_deref(), Some("/"), "the root is `/`, not the empty string");
+    assert_eq!(
+        root.children_files.iter().filter_map(|file| file.name.as_deref()).collect::<Vec<_>>(),
+        vec!["bin", "vmlinuz"]
+    );
+    assert_eq!(
+        root.children_dirs.iter().filter_map(|dir| dir.abs_path.as_deref()).collect::<Vec<_>>(),
+        vec!["/etc"]
+    );
 }
 
 /// **AC-15, the write row.** The path and the text reach `write` under its own
@@ -678,6 +888,74 @@ fn a_fetch_exec_runs_webfetch_and_reports_only_what_that_tool_knows() {
     assert_eq!(success.content.as_deref(), Some("# Example"));
 }
 
+/// Fetch has no rejected arm, so a failure and a refusal both travel as the
+/// error — each still echoing the url, which is the one thing `FetchError`
+/// has room for beside the sentence.
+#[test]
+fn a_failed_fetch_and_a_refused_fetch_both_travel_on_the_error_arm() {
+    let shape = Answer::Fetch { url: "https://example.com".to_owned() };
+
+    for outcome in [Outcome::Failed("unreachable".to_owned()), Outcome::Refused("no".to_owned())] {
+        let text = outcome.text().to_owned();
+        let [response] = sent(&shape, &outcome).try_into().expect("one result");
+        let error = response
+            .fetch_result
+            .as_option()
+            .and_then(|result| result.error.as_option())
+            .expect("the only arm a fetch can say anything on");
+        assert_eq!(error.url.as_deref(), Some("https://example.com"));
+        assert_eq!(error.error.as_deref(), Some(text.as_str()));
+    }
+}
+
+/// A listing that failed answers on the error arm and one that was refused on
+/// the rejected arm, both naming the path — the same split the read row pins,
+/// on the kind that has both arms to split over.
+#[test]
+fn a_failed_listing_is_an_error_and_a_refused_listing_is_a_rejection() {
+    let shape = Answer::Ls { path: "/repo".to_owned() };
+
+    let [failed] = sent(&shape, &Outcome::Failed("not a directory".to_owned()))
+        .try_into()
+        .expect("one result");
+    let error = failed
+        .ls_result
+        .as_option()
+        .and_then(|result| result.error.as_option())
+        .expect("the error arm");
+    assert_eq!(error.path.as_deref(), Some("/repo"));
+    assert_eq!(error.error.as_deref(), Some("not a directory"));
+
+    let [refused] =
+        sent(&shape, &Outcome::Refused("no".to_owned())).try_into().expect("one result");
+    let rejected = refused
+        .ls_result
+        .as_option()
+        .and_then(|result| result.rejected.as_option())
+        .expect("the rejected arm");
+    assert_eq!(rejected.path.as_deref(), Some("/repo"));
+    assert_eq!(rejected.reason.as_deref(), Some("no"));
+}
+
+/// A write the permission engine refused rides the rejected arm with the
+/// engine's own sentence — the arm the read-first refusal shares, and the one
+/// the model reads as "stop asking" rather than "try again".
+#[test]
+fn a_refused_write_is_a_rejection_carrying_the_engines_sentence() {
+    let shape = Answer::Write { path: "/repo/x".to_owned(), lines: 1, size: 2 };
+    let [response] =
+        sent(&shape, &Outcome::Refused("denied".to_owned())).try_into().expect("one result");
+
+    let rejected = response
+        .write_result
+        .as_option()
+        .and_then(|result| result.rejected.as_option())
+        .expect("the rejected arm");
+    assert_eq!(rejected.path.as_deref(), Some("/repo/x"));
+    assert_eq!(rejected.reason.as_deref(), Some("denied"));
+    assert!(response.write_result.as_option().is_some_and(|result| result.error.is_unset()));
+}
+
 /// **The roster is the gate.** A seat that is not offering `bash` on this
 /// request does not run a shell because the server asked for one, and the
 /// exec falls back to the typed refusal it got before this table existed.
@@ -696,19 +974,14 @@ fn an_exec_whose_tool_is_not_on_this_requests_roster_is_not_redirected() {
         .is_none(),
         "a turn not offering bash does not run a shell"
     );
-    assert!(
-        redirect(
-            &decode::ExecArgs::Read { path: "/f".to_owned(), offset: None, limit: None },
-            &readonly
-        )
-        .is_some(),
-        "and the tool it does offer still works"
-    );
-    assert!(
-        redirect(&decode::ExecArgs::Read { path: "/f".to_owned(), offset: None, limit: None }, &[])
-            .is_none(),
-        "an empty roster redirects nothing at all"
-    );
+    let read = || decode::ExecArgs::Read {
+        redacted: false,
+        path: "/f".to_owned(),
+        offset: None,
+        limit: None,
+    };
+    assert!(redirect(&read(), &readonly).is_some(), "and the tool it does offer still works");
+    assert!(redirect(&read(), &[]).is_none(), "an empty roster redirects nothing at all");
 }
 
 /// The kinds with no ganja equivalent are not in the table at any roster: a
@@ -719,6 +992,14 @@ fn the_kinds_outside_the_table_are_never_redirected() {
     for args in [
         decode::ExecArgs::Delete { path: "/f".to_owned() },
         decode::ExecArgs::Shell { command: "ls".to_owned(), working_directory: String::new() },
+        decode::ExecArgs::Mcp(decode::McpCall {
+            name: "read".to_owned(),
+            tool_name: "read".to_owned(),
+            tool_call_id: "call-1".to_owned(),
+            provider_identifier: "ganja".to_owned(),
+            approval_only: false,
+            arguments: Some(json!({})),
+        }),
         decode::ExecArgs::Unmodelled,
     ] {
         assert!(redirect(&args, &everything()).is_none(), "{args:?}");

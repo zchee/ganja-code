@@ -1531,5 +1531,4 @@ fn a_rule_refusal_reads_as_the_hoisted_prefix_followed_by_its_rules() {
         ),
     );
     assert!(rendered.starts_with(ganja_tool::permission_text::DENIED_PREFIX));
-    assert_eq!(super::REJECTED, ganja_tool::permission_text::REJECTED);
 }

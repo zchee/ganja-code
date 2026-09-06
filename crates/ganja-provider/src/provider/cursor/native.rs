@@ -103,7 +103,7 @@ fn refused(error: &str) -> bool {
 }
 
 /// One exec turned into a ganja tool call, and the shape its answer takes.
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub(super) struct Bridged {
     /// The registry name the engine will run.
     pub(super) tool: String,
@@ -115,7 +115,7 @@ pub(super) struct Bridged {
 
 /// Which result frame a bridged exec is answered with, and what that frame
 /// echoes back from the args.
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub(super) enum Answer {
     /// `mcp_result = 11`: a tool the model called by name.
     Mcp,
@@ -156,8 +156,7 @@ pub(super) fn redirect(args: &decode::ExecArgs, roster: &[String]) -> Option<Bri
         // deserializer as "invalid type: integer `-3`" and the model reads a
         // broken tool where it asked for a window that does not exist. Absent
         // is what this build has to say about that window.
-        decode::ExecArgs::Read { path, offset, limit }
-        | decode::ExecArgs::RedactedRead { path, offset, limit } => {
+        decode::ExecArgs::Read { redacted, path, offset, limit } => {
             let offset = offset.filter(|line| *line >= 0);
             let mut input = serde_json::json!({ "filePath": path });
             if let Some(offset) = offset {
@@ -171,7 +170,7 @@ pub(super) fn redirect(args: &decode::ExecArgs, roster: &[String]) -> Option<Bri
                 "read",
                 input,
                 Answer::Read {
-                    redacted: matches!(args, decode::ExecArgs::RedactedRead { .. }),
+                    redacted: *redacted,
                     path: path.clone(),
                     ranged: offset.is_some() || limit.is_some(),
                 },
@@ -318,23 +317,25 @@ pub(super) fn answer(
         exec_response: buffa::MessageField::some(response),
         ..Default::default()
     };
+    // One result message, its arm set by `fill`.
+    let one = |fill: &dyn Fn(&mut proto::ExecResponse)| {
+        let mut response = empty();
+        fill(&mut response);
+        vec![sent(response)]
+    };
 
     let mut messages = match shape {
-        Answer::Mcp => {
-            let mut response = empty();
+        Answer::Mcp => one(&|response| {
             response.mcp_result = buffa::MessageField::some(mcp_result(outcome));
-            vec![sent(response)]
-        }
-        Answer::Read { redacted, path, ranged } => {
-            let mut response = empty();
+        }),
+        Answer::Read { redacted, path, ranged } => one(&|response| {
             let result = buffa::MessageField::some(read_result(path, *ranged, outcome));
             if *redacted {
                 response.redacted_read_result = result;
             } else {
                 response.read_result = result;
             }
-            vec![sent(response)]
-        }
+        }),
         // The one kind whose answer is several messages: a streamed shell
         // writes its output and then its exit, each its own ExecResponse.
         Answer::Shell => shell_events(outcome)
@@ -345,27 +346,19 @@ pub(super) fn answer(
                 sent(response)
             })
             .collect(),
-        Answer::Grep { pattern, path } => {
-            let mut response = empty();
+        Answer::Grep { pattern, path } => one(&|response| {
             response.grep_result = buffa::MessageField::some(grep_result(pattern, path, outcome));
-            vec![sent(response)]
-        }
-        Answer::Ls { path } => {
-            let mut response = empty();
+        }),
+        Answer::Ls { path } => one(&|response| {
             response.ls_result = buffa::MessageField::some(ls_result(path, outcome));
-            vec![sent(response)]
-        }
-        Answer::Write { path, lines, size } => {
-            let mut response = empty();
+        }),
+        Answer::Write { path, lines, size } => one(&|response| {
             response.write_result =
                 buffa::MessageField::some(write_result(path, *lines, *size, outcome));
-            vec![sent(response)]
-        }
-        Answer::Fetch { url } => {
-            let mut response = empty();
+        }),
+        Answer::Fetch { url } => one(&|response| {
             response.fetch_result = buffa::MessageField::some(fetch_result(url, outcome));
-            vec![sent(response)]
-        }
+        }),
     };
     messages.push(request::stream_close(id));
 
@@ -544,7 +537,7 @@ fn grep_result(pattern: &str, path: &str, outcome: &Outcome) -> proto::GrepResul
 /// Its shape is fixed by that tool (`ganja-tool/src/grep.rs`): a count line, a
 /// `<path>:` header per file, and `  Line <n>: <text>` under it. Parsing what
 /// this build itself wrote is a seam worth naming — the two must agree, and
-/// this module's tests drive real `grep` output through it rather than a
+/// this module's tests drive real `grep` output through it, not only a
 /// hand-typed sample.
 fn parse_matches(output: &str) -> Vec<proto::GrepFileMatch> {
     let mut files: Vec<proto::GrepFileMatch> = Vec::new();
@@ -618,6 +611,9 @@ fn ls_result(path: &str, outcome: &Outcome) -> proto::LsResult {
 /// absolute paths of which none matched is [`None`], which
 /// [`ls_result`] renders as the kind's own error arm.
 fn tree(path: &str, output: &str) -> Option<proto::LsDirectoryTreeNode> {
+    // Trimmed for the prefix match — `/repo/` and `/repo` name one directory
+    // and `glob` writes the second — which leaves the root itself as `""`; it
+    // is still `/`, and a child under it is still `/etc` rather than `//etc`.
     let root = path.trim_end_matches('/');
     let mut files: Vec<String> = Vec::new();
     let mut directories: Vec<String> = Vec::new();
@@ -645,7 +641,7 @@ fn tree(path: &str, output: &str) -> Option<proto::LsDirectoryTreeNode> {
     }
 
     Some(proto::LsDirectoryTreeNode {
-        abs_path: Some(root.to_owned()),
+        abs_path: Some(if root.is_empty() { "/".to_owned() } else { root.to_owned() }),
         children_dirs: directories
             .into_iter()
             .map(|child| proto::LsDirectoryTreeNode {

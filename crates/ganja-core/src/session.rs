@@ -40,17 +40,8 @@ use std::time::Duration;
 
 use futures::StreamExt as _;
 use futures::stream::BoxStream;
-/// The two refusal sentences a model reads, whose bytes live in
-/// [`ganja_tool::permission_text`] rather than here (**D552**, W4).
-///
-/// They moved because a **wire** has to tell a permission refusal from a failed
-/// tool without seeing the engine — cursor's server wants one of two shapes back
-/// and the only thing that reaches the wire is a tool part's text — and
-/// `ganja-tool` is the one crate the engine and every wire may both name. The
-/// upstream citation (`packages/core/src/v1/permission.ts`, `RejectedError` and
-/// `DeniedError`) moved with them. Nothing about what a refusal *decides*
-/// changed; only where two `&str`s live.
-use ganja_tool::permission_text::REJECTED;
+// D552: the two sentences live in ganja-tool; see permission_text.
+use ganja_tool::permission_text::{DENIED_PREFIX, REJECTED};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -80,7 +71,7 @@ use crate::tool::{
 fn denied(rules: &[crate::permission::Rule]) -> String {
     let rendered = serde_json::to_string(rules).unwrap_or_else(|_| "[]".to_owned());
 
-    format!("{}{rendered}", ganja_tool::permission_text::DENIED_PREFIX)
+    format!("{DENIED_PREFIX}{rendered}")
 }
 
 /// What a buffered call reads when the provider died before it could run.

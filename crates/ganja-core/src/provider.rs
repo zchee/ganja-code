@@ -629,12 +629,9 @@ impl ToolReach {
     /// other id, and correctly — the three dialects it speaks are
     /// function-calling wires, whatever endpoint they were pointed at.
     ///
-    /// Every id answers [`ToolReach::Full`] since **D552** — cursor's bridge
-    /// was the last exception — so the body is the constant rather than a
-    /// `match` with one wildcard arm. The parameter stays: this is the one
-    /// place a wire that serves less is named, and the caller that reads the
-    /// answer, the error that carries it and the two sentences that word it
-    /// are all still here, so admitting one is an arm rather than a wave.
+    /// Every id answers [`ToolReach::Full`] since **D552** (see [`ToolReach`]),
+    /// so the body is the constant; the parameter stays because this is where
+    /// a wire that serves less is admitted, as an arm rather than a wave.
     #[must_use]
     pub const fn of(provider_id: &str) -> Self {
         let _ = provider_id;

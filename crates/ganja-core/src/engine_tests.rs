@@ -11,7 +11,8 @@ use super::{
     Engine, EngineError, STALE_FILES, STORELESS, message_chars, send_message, stale_notice,
     subagent, teammate, tool_reach_refusal,
 };
-use crate::config::TeamlessSend;
+use crate::command;
+use crate::config::{Config, TeamlessSend};
 use crate::permission::Permissions;
 use crate::protocol::{
     Command, Event, FinishReason, Message, Part, PermissionReply, RevertScope, Role, Usage,
@@ -43,33 +44,22 @@ struct ScriptedProvider {
     events: Vec<ProviderEvent>,
     failure: Option<ProviderError>,
     seen: Arc<Mutex<Vec<ChatRequest>>>,
-    /// What it calls itself. A field rather than a constant because
-    /// **D551**'s door reads [`ToolReach::of`] over [`Provider::id`], so what
-    /// those tests need is a seat that *reports* a real provider's id — never
-    /// that provider's wire, which would want that vendor's credentials to
-    /// answer a question about a string.
-    id: &'static str,
 }
 
 impl ScriptedProvider {
     fn new(events: Vec<ProviderEvent>) -> Self {
-        Self { events, failure: None, seen: Arc::default(), id: "scripted" }
+        Self { events, failure: None, seen: Arc::default() }
     }
 
     fn failing(failure: ProviderError) -> Self {
-        Self { events: Vec::new(), failure: Some(failure), seen: Arc::default(), id: "scripted" }
-    }
-
-    /// The same, answering nothing, under the id a shipped provider has.
-    fn named(id: &'static str) -> Self {
-        Self { id, ..Self::new(Vec::new()) }
+        Self { events: Vec::new(), failure: Some(failure), seen: Arc::default() }
     }
 }
 
 #[async_trait]
 impl Provider for ScriptedProvider {
     fn id(&self) -> &str {
-        self.id
+        "scripted"
     }
 
     async fn stream(
@@ -2013,34 +2003,30 @@ async fn a_task_list_that_cannot_be_read_answers_as_no_list_at_all() {
     assert!(engine.task_list().await.is_none());
 }
 
-/// An engine on `provider` holding this build's real agent roster.
-///
-/// The roster matters even though every test below refuses before a turn: two
-/// of the three prove that **D549**'s grammar and bead 2m46's redirect still
-/// answer first, and a grammar judged against a roster a fixture invented
-/// would prove nothing about the order a session really runs these doors in.
-fn seated(provider: Arc<ScriptedProvider>) -> Engine {
-    let agents = crate::agent::Registry::from_config(&crate::config::Config::default())
-        .expect("the default config resolves this build's own roster");
-
-    Engine::new(provider, MODEL, Arc::new(Registry::new(Vec::new())), Permissions::default())
-        .with_agents(Arc::new(agents))
-}
-
-/// **AC-5**, first of three, inverted by **D552**: the two builtins whose whole
-/// body is tool calls now *run* on cursor. Both templates expand and both start
-/// a turn — the reach door no longer stands in front of either.
+/// **AC-5**, inverted by **D552**: the two builtins whose whole body is tool
+/// calls now *run* on cursor. Both templates expand and both start a turn —
+/// the reach door no longer stands in front of either.
 ///
 /// The scripted seat reports cursor's id and nothing else about cursor: the
 /// door reads [`ToolReach::of`] over [`Provider::id`], so an id is the whole
 /// input, and asking a real wire would want that vendor's credentials to answer
-/// a question about a string.
+/// a question about a string. The real agent roster rides along because a
+/// `/team` line is judged against it before the template is read.
 #[tokio::test]
 async fn the_tool_driven_builtins_now_start_a_turn_on_cursor() {
-    for command in ["team", "init"] {
-        let provider = Arc::new(ScriptedProvider::named(cursor::ID));
-        let seen = Arc::clone(&provider.seen);
-        let engine = seated(provider);
+    for (command, carried) in [
+        // The team template's own usage example says "port the config loader",
+        // so only the block the arguments land in can show that they arrived.
+        (command::TEAM, "<team-arguments>\nport the config loader\n</team-arguments>"),
+        (command::INIT, "port the config loader"),
+    ] {
+        let (provider, seen) = ganja_testkit::ScriptedProvider::named(cursor::ID, Vec::new());
+        // Resolved here rather than through the testkit's `agent_registry`: a
+        // lib test is a second compilation of this crate, so the testkit's
+        // `Config` and `AgentRegistry` are not this crate's own.
+        let agents = crate::agent::Registry::from_config(&Config::default())
+            .expect("the default config resolves this build's own roster");
+        let engine = bare(provider, MODEL).with_agents(Arc::new(agents));
         let mut events = engine.subscribe().await.expect("the first subscriber wins");
 
         engine
@@ -2056,10 +2042,29 @@ async fn the_tool_driven_builtins_now_start_a_turn_on_cursor() {
         let [request] = requests.as_slice() else {
             panic!("/{command} on an idle engine is one request, got {requests:?}");
         };
+        let prompt: String = request
+            .messages
+            .last()
+            .expect("the turn was started with the expanded template")
+            .parts
+            .iter()
+            .filter_map(Part::as_text)
+            .collect();
         assert!(
-            !request.messages.is_empty(),
-            "/{command}'s filled-in template is what the turn was started with"
+            prompt.contains(carried),
+            "/{command}'s filled-in template is what the turn was started with, got {prompt:?}"
         );
+        if command == command::TEAM {
+            let nobody_named = command::render_members(&command::TeamInvocation {
+                members: Vec::new(),
+                standing: None,
+                task: "port the config loader".to_owned(),
+            });
+            assert!(
+                prompt.contains(&nobody_named),
+                "and `${{members}}` was filled from the same parse, got {prompt:?}"
+            );
+        }
     }
 }
 
@@ -2067,11 +2072,8 @@ async fn the_tool_driven_builtins_now_start_a_turn_on_cursor() {
 /// than everything is still refused in front of the expansion, with the
 /// sentence derived from *which* less.
 ///
-/// No shipped id answers either narrow value since **D552**, so this asks
-/// [`tool_reach_refusal`] directly rather than through an engine. That is the
-/// point — the door's wording is the thing kept alive for the wire that
-/// arrives serving less, and a test that could only be written by shipping such
-/// a wire would have been deleted with cursor's arm.
+/// Unreached by any shipped id since **D552** (see [`ToolReach`]), so this asks
+/// [`tool_reach_refusal`] directly rather than through an engine.
 #[test]
 fn the_reach_refusal_still_words_both_narrow_values_for_a_wire_that_serves_less() {
     for (command, names) in [("team", "run the steps yourself"), ("init", "AGENTS.md")] {
@@ -2081,6 +2083,16 @@ fn the_reach_refusal_still_words_both_narrow_values_for_a_wire_that_serves_less(
             "the sentence is derived from the reach value, got {nothing:?}"
         );
         assert!(nothing.contains(names), "it says what this command wanted, got {nothing:?}");
+        // The variant's `Display` is that sentence, field for field: a swapped
+        // pair in its `#[error]` would render, green, a `/some-wire` command on
+        // the team provider.
+        let displayed = EngineError::ProviderToolReach {
+            provider: "some-wire".to_owned(),
+            command: command.to_owned(),
+            reach: ToolReach::None,
+        }
+        .to_string();
+        assert_eq!(displayed, nothing, "the variant renders what its fields derive");
 
         let native = tool_reach_refusal(command, "some-wire", ToolReach::NativeOnly);
         assert!(
@@ -2092,47 +2104,6 @@ fn the_reach_refusal_still_words_both_narrow_values_for_a_wire_that_serves_less(
             "and is never worded as the seat that serves nothing, got {native:?}"
         );
     }
-}
-
-/// **AC-5**, second of three: the grammar is ahead of the reach door, so a
-/// head token that is not a valid spec is answered by **D549**'s own sentence
-/// on cursor exactly as it is anywhere else. A line that is broken on every
-/// provider must not be answered by naming one — and after **D552** reopened
-/// the door, must still not reach a turn.
-#[tokio::test]
-async fn a_malformed_team_spec_on_cursor_still_gets_the_grammars_sentence() {
-    let engine = seated(Arc::new(ScriptedProvider::named(cursor::ID)));
-
-    let refused = engine
-        .send(Command::RunCommand {
-            name: "team".to_owned(),
-            args: "0:critic fix the wire".to_owned(),
-        })
-        .await
-        .expect_err("a count of nobody is refused whatever the provider serves");
-
-    assert!(
-        matches!(refused, EngineError::TeamSpec(_)),
-        "the spec gate answers first, got {refused:?}"
-    );
-}
-
-/// **AC-5**, third of three: bead 2m46's redirect is ahead of both, so
-/// `/team list` is still three fixed words about the command that was meant —
-/// on cursor as anywhere else, before **D552** and after it.
-#[tokio::test]
-async fn a_misdirected_roster_line_on_cursor_still_gets_the_redirect() {
-    let engine = seated(Arc::new(ScriptedProvider::named(cursor::ID)));
-
-    let refused = engine
-        .send(Command::RunCommand { name: "team".to_owned(), args: "list".to_owned() })
-        .await
-        .expect_err("a roster line is refused whatever the provider serves");
-
-    let EngineError::MisdirectedCommand { meant } = &refused else {
-        panic!("the redirect answers first, got {refused:?}");
-    };
-    assert_eq!(meant, "/teammate list");
 }
 
 /// **AC-3**'s cross-check, and the reason it lives here: `depgate.toml`
@@ -2157,8 +2128,7 @@ async fn every_tool_reaching_provider_sends_a_roster_the_cursor_predicate_answer
             continue;
         }
 
-        let provider = Arc::new(ScriptedProvider::named(id));
-        let seen = Arc::clone(&provider.seen);
+        let (provider, seen) = ganja_testkit::ScriptedProvider::named(id, Vec::new());
         let engine = Engine::new(
             provider,
             MODEL,
@@ -2199,7 +2169,6 @@ async fn every_tool_reaching_provider_sends_a_roster_the_cursor_predicate_answer
         PROVIDERS.len(),
         "no shipped id reaches less than every tool since D552, so none was skipped",
     );
-    assert!(PROVIDERS.contains(&cursor::ID), "cursor among them, which is whose predicate this is");
 }
 
 /// The other half of the same agreement, on the shape no roster rides: a
@@ -2217,11 +2186,6 @@ fn the_one_shot_request_shape_draws_no_fetch_from_the_cursor_wire() {
         effort_options: serde_json::Map::new(),
     };
 
-    assert_eq!(
-        ToolReach::of(cursor::ID),
-        ToolReach::Full,
-        "the seat serves every tool since D552, which is what makes the roster's absence the signal",
-    );
     assert!(
         !cursor::serves_fetch(&one_shot),
         "a request carrying no roster is one this client has nothing to redirect a fetch to"

@@ -403,7 +403,7 @@ fn exchange_body() -> Vec<u8> {
 }
 
 /// What [`exchange_body`] decodes to, spelled once: the thinking surfaces
-/// as reasoning, the kv exchange surfaces as nothing at all.
+/// as reasoning.
 fn exchange_events() -> Vec<ProviderEvent> {
     vec![
         ProviderEvent::ReasoningDelta("Weighing a greeting.".to_owned()),

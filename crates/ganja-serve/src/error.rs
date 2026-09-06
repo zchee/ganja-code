@@ -82,16 +82,10 @@ impl From<EngineError> for ApiError {
             // valid one is the caller's line to fix, and the sentence carries
             // both what was wrong with it and the way back to plain task text.
             EngineError::TeamSpec(..) => Self::Invalid(error.to_string()),
-            // The third door in front of that same command (**D551**,
-            // amended by **D552**): a builtin whose whole body is tool calls,
-            // asked for on a provider that serves this build none of them.
-            // What is wrong is which provider the caller's session runs as,
-            // and the engine refuses before any turn starts — so `500` would
-            // again report a caller's request as a fault of this server.
-            // Unreached today: every builtin id answers `ToolReach::Full`
-            // since cursor's tool bridge landed, and this arm is kept for the
-            // wire that arrives serving less, exactly as the engine keeps the
-            // variant and its two sentences.
+            // The third door in front of that same command (**D551**, amended
+            // by **D552**): a tool-driven builtin asked for on a provider that
+            // serves this build none of its tools, refused before any turn
+            // starts — so `400` for the reason the two above it are.
             EngineError::ProviderToolReach { .. } => Self::Invalid(error.to_string()),
             _ => Self::Internal(error.to_string()),
         }

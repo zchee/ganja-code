@@ -41,6 +41,7 @@ use ganja_core::provider::{
     Provider as _, ProviderEvent,
 };
 use ganja_testkit::LogCapture as Capture;
+use ganja_testkit::cursor_server::{END_STREAM, envelope};
 use secrecy::SecretString;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpListener;
@@ -61,15 +62,8 @@ const REFRESH_CANARY: &str = "rt-test-canary-RST";
 /// The prompt is where it belongs; a log line is not.
 const MEMORY_CANARY: &str = "mk-test-canary-OPQ";
 
-/// The token handed to the cursor wire, which is the one wire whose credential
-/// is a **value** rather than a store lookup ([`CursorProvider::at`], D552's
-/// Dv-11) — so this canary is planted by being passed, not by being exported.
-///
-/// That wire also has two failure paths where the others have one: an HTTP
-/// refusal, masked by the shared `retry::refusal`, and an in-body Connect
-/// EndStream verdict inside a `200`, which is mapped by a decoder holding no
-/// `Presented` and is masked only because the wire joins `provider::shielded`
-/// by hand. Both are driven below.
+/// The token handed to the cursor wire, planted by being passed
+/// ([`CursorProvider::at`]), not exported.
 const CURSOR_CANARY: &str = "ct-test-canary-LMN";
 
 /// Serves `responses`, one per connection, then closes.
@@ -98,28 +92,16 @@ fn response(status: &str, content_type: &str, body: &str) -> String {
     format!("HTTP/1.1 {status}\r\nconnection: close\r\ncontent-type: {content_type}\r\n\r\n{body}")
 }
 
-/// One Connect EndStream frame as a response body: the flag byte, a big-endian
-/// length, then the JSON verdict.
-///
-/// This is the shape cursor's server reports a mid-stream failure in — inside a
-/// `200`, so no HTTP status ever says the turn failed and the shared refusal
-/// masking never runs on it.
-fn end_stream(verdict: &str) -> String {
-    /// The Connect EndStream flag, as the live probe recorded it.
-    const END_STREAM: u8 = 0b0000_0010;
-
-    let length = u32::try_from(verdict.len()).expect("a fixture verdict is tiny");
-    let mut frame = String::from(char::from(END_STREAM));
-    for byte in length.to_be_bytes() {
-        // A `String` is what `serve` takes, so every byte of the length prefix
-        // has to be its own UTF-8 encoding — true below 0x80 and nowhere else.
-        // A longer verdict would need a byte-bodied server, not a wider escape.
-        assert!(byte < 0x80, "an EndStream fixture verdict stays under 128 bytes");
-        frame.push(char::from(byte));
+/// One `hello` turn, asking `model`.
+fn hello(model: &str) -> ChatRequest {
+    ChatRequest {
+        turn_start: 0,
+        effort_options: Default::default(),
+        model: model.to_owned(),
+        system: None,
+        messages: vec![ganja_core::protocol::Message::user("hello")],
+        tools: Vec::new(),
     }
-    frame.push_str(verdict);
-
-    frame
 }
 
 #[tokio::test]
@@ -195,14 +177,7 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
             .expect("the planted key builds a provider")
             .with_base_url(&url);
 
-        let request = ChatRequest {
-            turn_start: 0,
-            effort_options: Default::default(),
-            model: "test-model".to_owned(),
-            system: None,
-            messages: vec![ganja_core::protocol::Message::user("hello")],
-            tools: Vec::new(),
-        };
+        let request = hello("test-model");
 
         // First turn: refused, with the key quoted back at us. Matched rather
         // than `expect_err`, because the success type is a stream and streams
@@ -244,20 +219,8 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
         let configured = provider::select(&config).expect("the entry's own variable holds the key");
         assert_eq!(configured.provider.id(), "local-llama");
 
-        let Err(compat_refusal) = configured
-            .provider
-            .stream(
-                ChatRequest {
-                    turn_start: 0,
-                    effort_options: Default::default(),
-                    model: configured.model.clone(),
-                    system: None,
-                    messages: vec![ganja_core::protocol::Message::user("hello")],
-                    tools: Vec::new(),
-                },
-                CancellationToken::new(),
-            )
-            .await
+        let Err(compat_refusal) =
+            configured.provider.stream(hello(&configured.model), CancellationToken::new()).await
         else {
             panic!("a 401 is not answerable");
         };
@@ -322,14 +285,7 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
         )
     };
 
-    // The same drill for the cursor wire, which needs its own arm for two
-    // reasons the other providers do not have. Its credential is handed in as a
-    // *value* rather than read from the store or the environment, so no planted
-    // variable reaches it; and its turn can fail two ways — an HTTP refusal like
-    // everyone else's, and a Connect EndStream verdict inside a `200`, which is
-    // mapped by a decoder that holds no `Presented` and is masked only because
-    // the wire joins `provider::shielded` by hand. A server that quotes the
-    // token it rejected is a real shape on both, so both are driven here.
+    // The cursor drill — see the header for why it is a third pass.
     let cursor_rendered = {
         let (cursor_url, _cursor_server) = serve(vec![
             // First turn: the HTTP refusal. `unauthenticated` is not in
@@ -347,9 +303,14 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
             response(
                 "200 OK",
                 "application/connect+proto",
-                &end_stream(&format!(
-                    r#"{{"error":{{"code":"unauthenticated","message":"token {CURSOR_CANARY} rejected"}}}}"#
-                )),
+                &String::from_utf8(envelope(
+                    END_STREAM,
+                    format!(
+                        r#"{{"error":{{"code":"unauthenticated","message":"token {CURSOR_CANARY} rejected"}}}}"#
+                    )
+                    .as_bytes(),
+                ))
+                .expect("a short verdict's frame is ASCII, which is all `serve` carries"),
             ),
         ])
         .await;
@@ -362,14 +323,7 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
             CredentialSource::key(CURSOR_CANARY).expect("a non-blank token"),
         )
         .expect("loopback may carry a token");
-        let request = ChatRequest {
-            turn_start: 0,
-            effort_options: Default::default(),
-            model: "gpt-5.3-codex".to_owned(),
-            system: None,
-            messages: vec![ganja_core::protocol::Message::user("hello")],
-            tools: Vec::new(),
-        };
+        let request = hello("gpt-5.3-codex");
 
         let Err(refusal) = cursor.stream(request.clone(), CancellationToken::new()).await else {
             panic!("a 401 is not answerable");

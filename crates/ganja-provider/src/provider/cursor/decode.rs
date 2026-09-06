@@ -49,7 +49,7 @@ pub(super) fn model_list(body: &[u8]) -> Result<Vec<proto::ModelEntry>, Provider
 /// kind's arguments into an [`ExecArgs`] and stops there, because what happens
 /// next depends on a fact only the stream layer holds: the tool roster *this
 /// request* declared. With one, an `mcp_args` naming a declared tool and the
-/// six native kinds of the redirect table are **bridged** — surfaced to
+/// seven native kinds of the redirect table are **bridged** — surfaced to
 /// ganja's engine as ordinary tool calls, run there under its permission
 /// engine, and answered here from the result (**D552**). Without one, or for a
 /// kind outside the table, the same value is answered with **D550**'s typed
@@ -140,10 +140,10 @@ pub(super) struct ExecAsk {
 ///
 /// The variants carry only that much, which is why several look alike and one
 /// is empty: `delete_args` is refused and never bridged, so its variant holds
-/// only the path its rejection echoes. The two shell kinds and the two read
-/// kinds are separate variants rather than one with a number in it, because
-/// the arm they answer on differs — a stream's rejection is an *event*, and a
-/// redacted read answers at a second field.
+/// only the path its rejection echoes. The two shell kinds are separate
+/// variants because the arm they answer on differs — a stream's rejection is
+/// an *event* — where the two read kinds share one variant and a flag, since
+/// a redacted read is the same `ReadResult` at a second field number.
 #[derive(Debug, PartialEq)]
 pub(super) enum ExecArgs {
     /// No modelled arm for this kind: D486's throw, still the catch-all.
@@ -170,11 +170,9 @@ pub(super) enum ExecArgs {
         case_insensitive: bool,
     },
     Read {
-        path: String,
-        offset: Option<i32>,
-        limit: Option<u32>,
-    },
-    RedactedRead {
+        /// `redacted_read_args = 29` rather than `read_args = 7`: the answer
+        /// goes back at the matching number.
+        redacted: bool,
         path: String,
         offset: Option<i32>,
         limit: Option<u32>,
@@ -208,14 +206,8 @@ pub(super) struct McpCall {
     /// Who is said to serve the tool. Empty means the server sent none, which
     /// is not the same as sending somebody else's name.
     pub(super) provider_identifier: String,
-    /// Read for the log line. A present one on a `"ganja"` call is the
-    /// measured norm and refuses nothing.
-    pub(super) server_identifier: String,
     /// `smart_mode_approval_only = 7`: a preflight that must execute nothing.
     pub(super) approval_only: bool,
-    /// `skip_approval = 8`, read for the log line alone — what a call may skip
-    /// is ganja's permission engine's to decide, never the caller's.
-    pub(super) skip_approval: bool,
     /// The argument object, or [`None`] when the map could not be read.
     pub(super) arguments: Option<serde_json::Value>,
 }
@@ -500,13 +492,19 @@ fn exec_args(exec: &proto::ExecRequest) -> (String, ExecArgs) {
     if let Some(args) = exec.read_args.as_option() {
         return named(
             "read_args",
-            ExecArgs::Read { path: echoed(&args.path), offset: args.offset, limit: args.limit },
+            ExecArgs::Read {
+                redacted: false,
+                path: echoed(&args.path),
+                offset: args.offset,
+                limit: args.limit,
+            },
         );
     }
     if let Some(args) = exec.redacted_read_args.as_option() {
         return named(
             "redacted_read_args",
-            ExecArgs::RedactedRead {
+            ExecArgs::Read {
+                redacted: true,
                 path: echoed(&args.path),
                 offset: args.offset,
                 limit: args.limit,
@@ -524,9 +522,7 @@ fn exec_args(exec: &proto::ExecRequest) -> (String, ExecArgs) {
                 tool_name: echoed(&args.tool_name),
                 tool_call_id: echoed(&args.tool_call_id),
                 provider_identifier: echoed(&args.provider_identifier),
-                server_identifier: echoed(&args.server_identifier),
                 approval_only: args.smart_mode_approval_only.unwrap_or(false),
-                skip_approval: args.skip_approval.unwrap_or(false),
                 arguments: super::value::arguments(&args.args),
             }),
         );
@@ -542,8 +538,8 @@ fn exec_args(exec: &proto::ExecRequest) -> (String, ExecArgs) {
 ///
 /// Those kinds arrive as unknown fields, and the field number *is* the kind:
 /// the table is the shipped client's own `ExecServerMessage` oneof
-/// (`index.js@6302201`) minus the ten [`refusal_arm`] answers in their own
-/// vocabulary, so it names exactly what still rides the throw. A number the
+/// (`index.js@6302201`) minus the ten kinds [`super::request::refusal_answer`]
+/// answers in their own vocabulary, so it names exactly what still rides the throw. A number the
 /// table does not know is reported as itself — still enough to go derive,
 /// and still refusable, because the throw is keyed on the exec id rather
 /// than on the kind — and span_context (= 19) rides beside the oneof

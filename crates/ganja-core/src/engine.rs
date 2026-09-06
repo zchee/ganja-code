@@ -332,23 +332,12 @@ pub enum EngineError {
     TeamSpec(#[from] command::TeamSpecError),
     /// [`Command::RunCommand`] ran a builtin whose whole body is tool calls on
     /// a provider that serves this build none of them, or only its own native
-    /// kinds (**D551**, amended by **D552**).
+    /// kinds (**D551**, amended by **D552**). Third of the three doors in front
+    /// of an expansion, refused before the template is filled, so no turn
+    /// starts.
     ///
-    /// Third of the three doors in front of an expansion and last of them on
-    /// purpose: a roster line and a malformed spec are wrong on every
-    /// provider, so a sentence naming this one would name the wrong problem.
-    /// Only a well-formed, correctly-spelled builtin invocation reaches here,
-    /// and it is refused before the template is filled, so no turn starts.
-    ///
-    /// **No shipped id raises this today.** D551 minted it while cursor's
-    /// server ran the tool loop itself; D552's bridge answers that server out
-    /// of the same registry, so every builtin id answers
-    /// [`ToolReach::Full`] and this door opens for nobody. It is kept whole —
-    /// the variant, the gate that reads it and the two sentences that word it
-    /// — because a wire that serves less is a real destination this has to be
-    /// able to *name*, and re-deriving the wording later would re-derive it
-    /// worse.
-    #[error("{}", tool_reach_refusal(command, provider, *missing))]
+    /// Unreached by any shipped id since **D552**; see [`ToolReach`].
+    #[error("{}", tool_reach_refusal(command, provider, *reach))]
     ProviderToolReach {
         /// The provider that serves the tools the command needs — none of
         /// them, or only the wire's own native kinds.
@@ -357,7 +346,7 @@ pub enum EngineError {
         command: String,
         /// What that provider reaches, which is what the sentence is derived
         /// from: never [`ToolReach::Full`], which refuses nothing.
-        missing: ToolReach,
+        reach: ToolReach,
     },
     /// [`Command::RunCommand`] named a command whose `agent` is a subagent.
     /// Those exist to be spawned by the task tool, and a command running as one
@@ -412,20 +401,16 @@ pub enum EngineError {
 
 /// [`EngineError::ProviderToolReach`]'s whole sentence, derived from the reach
 /// value rather than stored beside it, so that it cannot go stale the day a
-/// wire starts serving tools (**D551**) — which is exactly what **D552** then
-/// did to cursor, at the cost of one arm of
-/// [`ToolReach::of`](crate::provider::ToolReach::of) and no word of this.
-///
-/// Unreached by any shipped id since that ruling, and tested directly rather
-/// than through an engine for that reason.
+/// wire starts serving tools (**D551**). Unreached by any shipped id since
+/// **D552**; see [`ToolReach`].
 ///
 /// Two commands and two reach values, and each pair says what is actually
 /// missing: the `NativeOnly` half names the tools a native-kind seat has no
 /// vocabulary for — `task` and the team task tools for `/team`, `question` for
 /// `/init`, which its own template asks for by name — rather than claiming
 /// nothing works, and closes by saying what does.
-fn tool_reach_refusal(command: &str, provider: &str, missing: ToolReach) -> String {
-    match (missing, command) {
+fn tool_reach_refusal(command: &str, provider: &str, reach: ToolReach) -> String {
+    match (reach, command) {
         (ToolReach::None, command::INIT) => format!(
             "`/{command}` writes `AGENTS.md` through tool calls and the {provider} provider \
              serves this build no tools; run it under another provider, or write the file \
@@ -4111,13 +4096,9 @@ impl Engine {
     }
 
     /// Refuses a builtin whose whole body is tool calls on a provider that
-    /// serves this build none of them (**D551**).
-    ///
-    /// Refuses nothing today: every builtin id answers [`ToolReach::Full`]
-    /// since **D552** put cursor's tool calls back through the registry, so the
-    /// early return below is the only arm a shipped session takes. The read
-    /// stays because it costs one comparison and is where a narrower wire is
-    /// admitted.
+    /// serves this build none of them (**D551**). Unreached by any shipped id
+    /// since **D552** — the early return is the only arm a shipped session
+    /// takes; see [`ToolReach`].
     ///
     /// Read as [`ToolReach::of`] over [`Provider::id`] because that is what an
     /// engine holds — an `Arc<dyn Provider>`, never a
@@ -4136,8 +4117,8 @@ impl Engine {
     /// [`EngineError::ProviderToolReach`], naming the provider and what it
     /// leaves unserved.
     fn tool_reach(&self, definition: &command::Definition) -> Result<(), EngineError> {
-        let missing = ToolReach::of(self.provider.id());
-        if missing == ToolReach::Full {
+        let reach = ToolReach::of(self.provider.id());
+        if reach == ToolReach::Full {
             return Ok(());
         }
         if !(definition.builtin
@@ -4149,7 +4130,7 @@ impl Engine {
         Err(EngineError::ProviderToolReach {
             provider: self.provider.id().to_owned(),
             command: definition.name.clone(),
-            missing,
+            reach,
         })
     }
 

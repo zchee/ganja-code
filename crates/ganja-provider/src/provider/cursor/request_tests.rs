@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use buffa::Message as _;
 
+use super::super::tests::roster;
 use super::super::{connect, proto, serves_fetch};
 use super::{
     ChatRequest, context_answer, decode, fresh_id, kv_answer, newest_user_text, refusal_answer,
@@ -201,7 +202,7 @@ fn a_request_offering_no_tools_declares_no_roster() {
 /// run request's own channel, and on no other field.
 #[test]
 fn a_request_offering_tools_declares_them_on_the_run_request() {
-    let offering = ChatRequest { tools: declared(), ..request() };
+    let offering = ChatRequest { tools: roster(), ..request() };
 
     let bytes = run_message(&offering).expect("the assembly encodes");
     let run = proto::ClientMessage::decode_from_slice(&bytes)
@@ -240,28 +241,11 @@ fn a_request_offering_tools_declares_them_on_the_run_request() {
     );
 }
 
-/// The roster the two declaration tests offer.
-fn declared() -> Vec<ToolDefinition> {
-    vec![
-        ToolDefinition {
-            name: "read".to_owned(),
-            description: "Reads a file.".to_owned(),
-            schema: serde_json::json!({ "type": "object" }),
-        },
-        ToolDefinition {
-            name: "bash".to_owned(),
-            description: "Runs a command.".to_owned(),
-            schema: serde_json::json!({ "type": "object" }),
-        },
-    ]
-}
-
 /// The declaration's *second* channel: the shipped client refreshes the roster
 /// on every context answer, and so does this one — with the same definitions.
 #[test]
 fn the_context_answer_carries_the_same_roster_the_run_request_declared() {
-    let bytes =
-        context_answer(decode::ContextAsk { id: Some(7), exec_id: None }, None, true, &declared());
+    let bytes = context_answer(decode::ContextAsk { id: Some(7), exec_id: None }, None, &roster());
     let context = proto::ClientMessage::decode_from_slice(&bytes)
         .expect("what was sent decodes")
         .exec_response
@@ -276,8 +260,13 @@ fn the_context_answer_carries_the_same_roster_the_run_request_declared() {
         context.tools.iter().filter_map(|tool| tool.name.as_deref()).collect::<Vec<_>>(),
         vec!["read", "bash"]
     );
+    assert_eq!(
+        context.web_fetch_enabled,
+        Some(true),
+        "a roster is what makes a fetch exec answerable, so the roster is what switches it on"
+    );
 
-    let empty = context_answer(decode::ContextAsk { id: Some(7), exec_id: None }, None, false, &[]);
+    let empty = context_answer(decode::ContextAsk { id: Some(7), exec_id: None }, None, &[]);
     let context = proto::ClientMessage::decode_from_slice(&empty)
         .expect("what was sent decodes")
         .exec_response
@@ -288,6 +277,7 @@ fn the_context_answer_carries_the_same_roster_the_run_request_declared() {
         .cloned()
         .expect("the context");
     assert!(context.tools.is_empty(), "a request declaring nothing declares nothing here either");
+    assert_eq!(context.web_fetch_enabled, Some(false), "and asks for no fetch execs");
 }
 
 #[test]
@@ -307,7 +297,6 @@ fn the_context_answer_echoes_the_ids_and_carries_the_prompt_on_cloud_rule() {
     let bytes = context_answer(
         decode::ContextAsk { id: Some(7), exec_id: Some("exec-abc".to_owned()) },
         Some("You are terse."),
-        true,
         &[],
     );
     let decoded = proto::ClientMessage::decode_from_slice(&bytes).expect("what was sent decodes");
@@ -332,8 +321,7 @@ fn the_context_answer_echoes_the_ids_and_carries_the_prompt_on_cloud_rule() {
 #[test]
 fn a_promptless_turn_answers_with_a_present_but_empty_context() {
     for system in [None, Some("")] {
-        let bytes =
-            context_answer(decode::ContextAsk { id: None, exec_id: None }, system, false, &[]);
+        let bytes = context_answer(decode::ContextAsk { id: None, exec_id: None }, system, &[]);
         let decoded = proto::ClientMessage::decode_from_slice(&bytes).expect("decodes");
         let answer = decoded.exec_response.as_option().expect("the exec answer");
         assert_eq!(answer.id, None, "an id the server never sent is not invented");
@@ -643,11 +631,6 @@ fn a_shell_exec_is_rejected_at_field_2_echoing_the_command_it_named() {
     assert_eq!(rejected.command.as_deref(), Some("rm -rf /"));
     assert_eq!(rejected.working_directory.as_deref(), Some("/tmp"));
     assert_eq!(rejected.reason.as_deref(), Some(refusal("shell_args").as_str()));
-    assert_eq!(
-        field_numbers(&rejected.encode_to_vec()),
-        vec![1, 2, 3],
-        "is_readonly = 4 states a permission verdict this refusal does not make"
-    );
 }
 
 /// The one streamed kind, and the shape **AC-2** pins: exactly one
@@ -817,12 +800,14 @@ fn an_ls_exec_is_rejected_at_field_8_echoing_the_path_it_named() {
     assert_eq!(rejected.reason.as_deref(), Some(refusal("ls_args").as_str()));
 }
 
-/// The MCP call is refused about the *name* rather than about a policy:
-/// this client publishes no roster, so the honest answer is that nothing
-/// answers to what was called. `McpRejected` has no member for a roster,
-/// which is why the sentence is the whole answer.
+/// The MCP row: the kind's rejected arm at `mcp_result = 11`, carrying the
+/// reason it was handed like every other arm. The sentence a *shipped* refusal
+/// carries is decided one layer up, by what the roster holds — the name-only
+/// sentence for a roster-less turn, `tool_not_found` for a declared one, the
+/// pause for a wire that cannot hold — and each is pinned in `cursor`'s own
+/// tests; this row pins the field number.
 #[test]
-fn an_mcp_exec_is_rejected_at_field_11_naming_the_tool_that_was_called() {
+fn an_mcp_exec_is_rejected_at_field_11_carrying_the_reason_it_was_handed() {
     let refused = refused(proto::ExecRequest {
         id: Some(11),
         exec_id: Some("exec-11".to_owned()),
@@ -840,16 +825,7 @@ fn an_mcp_exec_is_rejected_at_field_11_naming_the_tool_that_was_called() {
         .as_option()
         .and_then(|result| result.rejected.as_option())
         .expect("the rejected arm");
-    assert_eq!(
-        rejected.reason.as_deref(),
-        Some("no tool named read_file is served by this client"),
-        "the name that was called is the subject, not the kind"
-    );
-    assert_eq!(
-        field_numbers(&rejected.encode_to_vec()),
-        vec![1],
-        "is_readonly = 2 is absent for ShellRejected's reason"
-    );
+    assert_eq!(rejected.reason.as_deref(), Some(refusal("mcp_args").as_str()));
 }
 
 /// Fetch, like grep, has only an error arm — but that one does echo, so
@@ -915,7 +891,7 @@ fn an_exec_kind_outside_the_table_still_reaches_the_throw() {
 /// nothing, and a later tidy-up that "completes" the set reddens here.
 #[test]
 fn the_context_answer_carries_exactly_the_three_switchboard_members() {
-    let bytes = context_answer(decode::ContextAsk { id: None, exec_id: None }, None, true, &[]);
+    let bytes = context_answer(decode::ContextAsk { id: None, exec_id: None }, None, &[]);
     let decoded = proto::ClientMessage::decode_from_slice(&bytes).expect("decodes");
     let context = decoded
         .exec_response
@@ -935,7 +911,11 @@ fn the_context_answer_carries_exactly_the_three_switchboard_members() {
         Some(false),
         "the filesystem meta-tool is declined, not merely unmentioned"
     );
-    assert_eq!(context.web_fetch_enabled, Some(true));
+    assert_eq!(
+        context.web_fetch_enabled,
+        Some(false),
+        "a roster-less turn asks for no fetch execs; the member is sent, not omitted"
+    );
     assert_eq!(context.read_lints_enabled, Some(false));
 }
 
@@ -943,12 +923,8 @@ fn the_context_answer_carries_exactly_the_three_switchboard_members() {
 /// something the presence of a `cloud_rule` moves.
 #[test]
 fn a_prompt_joins_the_switchboard_rather_than_replacing_it() {
-    let bytes = context_answer(
-        decode::ContextAsk { id: None, exec_id: None },
-        Some("Be terse."),
-        false,
-        &[],
-    );
+    let bytes =
+        context_answer(decode::ContextAsk { id: None, exec_id: None }, Some("Be terse."), &[]);
     let decoded = proto::ClientMessage::decode_from_slice(&bytes).expect("decodes");
     let context = decoded
         .exec_response

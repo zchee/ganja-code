@@ -76,7 +76,7 @@ use std::time::Duration;
 use buffa::Message as _;
 use tokio_util::sync::CancellationToken;
 
-use super::{ID, connect, native, request};
+use super::{Answers, ID, connect, native, request};
 use crate::protocol::{MessageId, PartBody, ToolState};
 use crate::provider::ChatRequest;
 
@@ -133,7 +133,6 @@ fn turn_start(request: &ChatRequest) -> usize {
 }
 
 /// One exec waiting on ganja's engine.
-#[derive(Debug)]
 pub(super) struct Pending {
     /// The exec's numeric id, which every answer and the close echo.
     pub(super) id: Option<u32>,
@@ -154,7 +153,7 @@ pub(super) struct Pending {
 }
 
 /// Why a held Run is no longer there.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub(super) enum Reason {
     /// The turn that paused it was cancelled.
     Cancelled,
@@ -169,7 +168,7 @@ pub(super) enum Reason {
 
 impl Reason {
     /// The clause a dead-bridge failure ends with.
-    fn spelled(self) -> &'static str {
+    fn spelled(&self) -> &'static str {
         match self {
             Self::Cancelled => "the turn that opened it was cancelled",
             Self::Idle => "it was not resumed within the idle bound",
@@ -181,9 +180,9 @@ impl Reason {
 
 /// One held Run: everything the fold needs to read on, and the execs it is
 /// waiting for.
-pub(super) struct Entry {
-    pub(super) fold: super::Fold,
-    pub(super) pending: Vec<Pending>,
+struct Entry {
+    fold: super::Fold,
+    pending: Vec<Pending>,
     /// Fired the moment the entry leaves the table — taken for a resume, or
     /// dropped. It is what stops the keeper, and stopping the keeper is what
     /// closes the request body: the keeper holds a clone of the body's sender,
@@ -192,56 +191,18 @@ pub(super) struct Entry {
     done: CancellationToken,
 }
 
-impl Entry {
-    /// Sends every pending exec's answer on the body the pause left open, then
-    /// hands the fold back to be read on.
-    ///
-    /// # Errors
-    ///
-    /// Returns the fold anyway when the body has closed — an answer that
-    /// cannot be delivered is a turn that will hang, and the caller reports it
-    /// rather than reading a stream nobody is generating into.
-    pub(super) fn settle(mut self, request: &ChatRequest) -> Result<super::Fold, ()> {
-        let results = results(request);
-        let mut delivered = true;
-        for exec in &self.pending {
-            let Some(outcome) = results.get(&exec.call_id).and_then(native::Outcome::of) else {
-                // `resolve` confirmed every call id before handing the entry
-                // over, so this is unreachable; answering nothing at all would
-                // hang the turn, where the refusal is something the loop reads.
-                continue;
-            };
-
-            tracing::debug!(
-                provider = ID,
-                exec = exec.id,
-                tool = exec.tool,
-                outcome = match &outcome {
-                    native::Outcome::Ran { .. } => "ran",
-                    native::Outcome::Failed(_) => "failed",
-                    native::Outcome::Refused(_) => "refused",
-                },
-                "answering a bridged exec from the engine's result"
-            );
-
-            for message in native::answer(&exec.answer, exec.id, exec.exec_id.as_deref(), &outcome)
-            {
-                let framed = connect::envelope(&message.encode_to_vec());
-                delivered &= self.fold.duplex.answers.unbounded_send(Ok(framed)).is_ok();
-            }
-        }
-
-        self.pending.clear();
-        if delivered { Ok(self.fold) } else { Err(()) }
-    }
-}
-
 /// What a `stream()` should do about the held runs.
 pub(super) enum Resolution {
     /// Open a fresh Run. Every held run is untouched.
     Fresh,
-    /// Continue this one, after settling the execs it was waiting for.
-    Resume(Box<Entry>),
+    /// Read on from this fold: the execs it was waiting for have been answered
+    /// on the body the pause left open. Boxed because the fold is the large
+    /// variant.
+    Resume(Box<super::Fold>),
+    /// This request resumed a held Run whose request body has closed, so the
+    /// answers it carried reached nobody: reading on would wait for generation
+    /// that will never come.
+    Closed,
     /// This request is resuming a bridge that is gone; the sentence says which
     /// and, when the ring still knows, why.
     Dead(String),
@@ -277,13 +238,13 @@ impl HeldRuns {
         let mut keyed = false;
         let taken = {
             let mut runs = self.runs.lock().expect("the held-run table is never poisoned");
-            match runs.get(&key) {
+            match runs.get(&key).map(|entry| outcomes(entry, &results)) {
                 // Every pending exec has an answer waiting: this is the resume
                 // the pause was for.
-                Some(entry) if confirmed(entry, &results) => runs.remove(&key),
+                Some(Some(outcomes)) => runs.remove(&key).map(|entry| (entry, outcomes)),
                 // Keyed, but the results are not here. A fresh Run, and the
                 // held one is left exactly as it was.
-                Some(_) => {
+                Some(None) => {
                     tracing::debug!(
                         provider = ID,
                         "a request keyed a held run whose results have not arrived; opening a \
@@ -296,9 +257,9 @@ impl HeldRuns {
             }
         };
 
-        if let Some(entry) = taken {
+        if let Some((entry, outcomes)) = taken {
             entry.done.cancel();
-            return Resolution::Resume(Box::new(entry));
+            return settle(entry, &outcomes);
         }
 
         // Somebody *else's* results turned up on this request: whatever those
@@ -394,41 +355,69 @@ impl HeldRuns {
     /// Whether a Run is still held under `key`, so a test can watch a drop
     /// actually happen rather than infer it from a resolution.
     #[cfg(test)]
-    pub(super) fn holds(&self, key: &Key) -> bool {
+    fn holds(&self, key: &Key) -> bool {
         self.runs.lock().expect("the held-run table is never poisoned").contains_key(key)
     }
 
     /// The sentence a resume against a gone bridge fails with.
     fn dead(&self, key: &Key) -> String {
         let dropped = self.dropped.lock().expect("the dropped ring is never poisoned");
-        let reason = dropped
+        let because = dropped
             .iter()
             .rev()
             .find(|(dropped, _)| dropped == key)
-            .map(|(_, reason)| reason.spelled());
+            .map(|(_, reason)| format!(": {}", reason.spelled()))
+            .unwrap_or_default();
 
-        match reason {
-            Some(reason) => format!(
-                "this turn is answering a cursor tool call, but the run that asked for it is \
-                 gone: {reason}. Cursor's wire carries only the newest message, so continuing \
-                 would drop what the tool answered"
-            ),
-            None => "this turn is answering a cursor tool call, but the run that asked for it is \
-                     gone. Cursor's wire carries only the newest message, so continuing would \
-                     drop what the tool answered"
-                .to_owned(),
-        }
+        format!(
+            "this turn is answering a cursor tool call, but the run that asked for it is \
+             gone{because}. Cursor's wire carries only the newest message, so continuing would \
+             drop what the tool answered"
+        )
     }
 }
 
-/// Whether every exec the entry is waiting for has a finished result in
-/// `results`.
-fn confirmed(entry: &Entry, results: &HashMap<String, ToolState>) -> bool {
-    entry.pending.iter().all(|exec| {
-        results.get(&exec.call_id).is_some_and(|state| {
-            matches!(state, ToolState::Completed { .. } | ToolState::Error { .. })
-        })
-    })
+/// The finished outcome of every exec the entry is waiting for, in the
+/// entry's own order — or [`None`] while any one of them is missing from
+/// `results` or still running, which is what makes a keyed hit a fresh Run
+/// rather than a resume.
+fn outcomes(entry: &Entry, results: &HashMap<String, ToolState>) -> Option<Vec<native::Outcome>> {
+    entry
+        .pending
+        .iter()
+        .map(|exec| results.get(&exec.call_id).and_then(native::Outcome::of))
+        .collect()
+}
+
+/// Sends every pending exec's answer on the body the pause left open, then
+/// hands the fold back to be read on — or reports the body closed, because an
+/// answer that cannot be delivered is a turn that will hang, and the caller
+/// says so rather than reading a stream nobody is generating into.
+///
+/// `outcomes` is what [`outcomes`] confirmed for this entry, pairing with
+/// `pending` by position; no lock is held here, and nothing awaits.
+fn settle(entry: Entry, outcomes: &[native::Outcome]) -> Resolution {
+    let mut delivered = true;
+    for (exec, outcome) in entry.pending.iter().zip(outcomes) {
+        tracing::debug!(
+            provider = ID,
+            exec = exec.id,
+            tool = exec.tool,
+            outcome = match outcome {
+                native::Outcome::Ran { .. } => "ran",
+                native::Outcome::Failed(_) => "failed",
+                native::Outcome::Refused(_) => "refused",
+            },
+            "answering a bridged exec from the engine's result"
+        );
+
+        for message in native::answer(&exec.answer, exec.id, exec.exec_id.as_deref(), outcome) {
+            let framed = connect::envelope(&message.encode_to_vec());
+            delivered &= entry.fold.duplex.answers.unbounded_send(Ok(framed)).is_ok();
+        }
+    }
+
+    if delivered { Resolution::Resume(Box::new(entry.fold)) } else { Resolution::Closed }
 }
 
 /// The finished tool results this request carries **at or after** its turn's
@@ -440,7 +429,7 @@ fn confirmed(entry: &Entry, results: &HashMap<String, ToolState>) -> bool {
 fn results(request: &ChatRequest) -> HashMap<String, ToolState> {
     let start = turn_start(request);
 
-    request.messages[start.min(request.messages.len())..]
+    request.messages[start..]
         .iter()
         .flat_map(|message| message.parts.iter())
         .filter_map(|part| match &part.body {
@@ -453,7 +442,7 @@ fn results(request: &ChatRequest) -> HashMap<String, ToolState> {
 /// Beats on the request body until the hold ends, reporting how — or [`None`]
 /// when the entry was taken for a resume, which is not a drop.
 async fn keep(
-    answers: &futures::channel::mpsc::UnboundedSender<Result<Vec<u8>, std::convert::Infallible>>,
+    answers: &Answers,
     done: &CancellationToken,
     turn: &CancellationToken,
 ) -> Option<Reason> {

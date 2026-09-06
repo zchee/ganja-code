@@ -420,7 +420,7 @@ fn a_skipped_arm_is_named_the_way_the_plugins_descriptor_names_it() {
 /// **D550** the kind is recognised by the field it arrived on rather than
 /// by an unknown number, and what it named comes back up with it.
 #[test]
-fn the_live_observed_shell_stream_exec_is_handed_up_as_a_refusal() {
+fn the_live_observed_shell_stream_exec_is_handed_up_with_its_arguments() {
     let asked = proto::ExecRequest {
         id: Some(5),
         exec_id: Some("exec-abc".to_owned()),
@@ -431,7 +431,7 @@ fn the_live_observed_shell_stream_exec_is_handed_up_as_a_refusal() {
     };
     let (events, asks) = mapped_asks(&exec_framed(asked), false);
 
-    assert!(events.is_empty(), "a refusal is an answer to send, not an event: {events:?}");
+    assert!(events.is_empty(), "an exec is a question to answer, not an event: {events:?}");
     assert_eq!(
         asks,
         vec![Ask::Exec(ExecAsk {
@@ -447,10 +447,10 @@ fn the_live_observed_shell_stream_exec_is_handed_up_as_a_refusal() {
 }
 
 /// Every other named tool exec takes the same door, and the turn it
-/// arrives on keeps going: the frames behind the refusal are still
-/// mapped, and the stream still reaches its finish.
+/// arrives on keeps going: the frames behind the ask are still mapped,
+/// and the stream still reaches its finish.
 #[test]
-fn a_named_tool_exec_is_refused_and_the_turn_carries_on_past_it() {
+fn a_named_tool_exec_is_handed_up_and_the_turn_carries_on_past_it() {
     // shell_args is field 2 of the shipped oneof (index.js@6302201).
     let asked = proto::ExecRequest {
         id: Some(3),
@@ -483,7 +483,7 @@ fn a_named_tool_exec_is_refused_and_the_turn_carries_on_past_it() {
             ProviderEvent::TextDelta("still generating".to_owned()),
             ProviderEvent::Finish(FinishReason::Completed),
         ],
-        "a refused exec is not a dead turn"
+        "an exec handed up is not a dead turn"
     );
 }
 
@@ -527,6 +527,194 @@ fn an_exec_kind_beyond_the_table_is_refused_by_its_field_number() {
         })],
         "an id the server never sent is not invented"
     );
+}
+
+/// Every modelled kind, read off a frame with every member this build
+/// reads set — so each argument is pinned to the field number `cursor.proto`
+/// gives it, from the bytes and not from the generated struct alone. The two
+/// numbers keep their absence: an `offset` of zero is a window at line zero
+/// where an absent one is no window at all, and `case_insensitive` is read
+/// both ways rather than only when set.
+#[test]
+fn each_modelled_exec_kind_decodes_into_its_arguments() {
+    let shell =
+        || proto::ShellArgs::default().with_command("ls -a").with_working_directory("/repo");
+    let rows: Vec<(proto::ExecRequest, &str, ExecArgs)> = vec![
+        (
+            proto::ExecRequest {
+                shell_args: buffa::MessageField::some(shell()),
+                ..Default::default()
+            },
+            "shell_args",
+            ExecArgs::Shell { command: "ls -a".to_owned(), working_directory: "/repo".to_owned() },
+        ),
+        (
+            proto::ExecRequest {
+                shell_stream_args: buffa::MessageField::some(shell()),
+                ..Default::default()
+            },
+            "shell_stream_args",
+            ExecArgs::ShellStream {
+                command: "ls -a".to_owned(),
+                working_directory: "/repo".to_owned(),
+            },
+        ),
+        (
+            proto::ExecRequest {
+                write_args: buffa::MessageField::some(
+                    proto::WriteArgs::default().with_path("/repo/new.txt").with_file_text("one\n"),
+                ),
+                ..Default::default()
+            },
+            "write_args",
+            ExecArgs::Write { path: "/repo/new.txt".to_owned(), file_text: "one\n".to_owned() },
+        ),
+        (
+            proto::ExecRequest {
+                delete_args: buffa::MessageField::some(
+                    proto::DeleteArgs::default().with_path("/repo/old.txt"),
+                ),
+                ..Default::default()
+            },
+            "delete_args",
+            ExecArgs::Delete { path: "/repo/old.txt".to_owned() },
+        ),
+        (
+            proto::ExecRequest {
+                grep_args: buffa::MessageField::some(
+                    proto::GrepArgs::default()
+                        .with_pattern("todo")
+                        .with_path("/repo")
+                        .with_glob("*.rs")
+                        .with_case_insensitive(true),
+                ),
+                ..Default::default()
+            },
+            "grep_args",
+            ExecArgs::Grep {
+                pattern: "todo".to_owned(),
+                path: "/repo".to_owned(),
+                glob: "*.rs".to_owned(),
+                case_insensitive: true,
+            },
+        ),
+        (
+            proto::ExecRequest {
+                grep_args: buffa::MessageField::some(
+                    proto::GrepArgs::default().with_pattern("todo").with_case_insensitive(false),
+                ),
+                ..Default::default()
+            },
+            "grep_args",
+            ExecArgs::Grep {
+                pattern: "todo".to_owned(),
+                path: String::new(),
+                glob: String::new(),
+                case_insensitive: false,
+            },
+        ),
+        (
+            proto::ExecRequest {
+                read_args: buffa::MessageField::some(
+                    proto::ReadArgs::default().with_path("/f").with_offset(0).with_limit(40),
+                ),
+                ..Default::default()
+            },
+            "read_args",
+            ExecArgs::Read {
+                redacted: false,
+                path: "/f".to_owned(),
+                offset: Some(0),
+                limit: Some(40),
+            },
+        ),
+        (
+            proto::ExecRequest {
+                read_args: buffa::MessageField::some(proto::ReadArgs::default().with_path("/f")),
+                ..Default::default()
+            },
+            "read_args",
+            ExecArgs::Read { redacted: false, path: "/f".to_owned(), offset: None, limit: None },
+        ),
+        (
+            proto::ExecRequest {
+                redacted_read_args: buffa::MessageField::some(
+                    proto::ReadArgs::default().with_path("/.env").with_offset(3).with_limit(5),
+                ),
+                ..Default::default()
+            },
+            "redacted_read_args",
+            ExecArgs::Read {
+                redacted: true,
+                path: "/.env".to_owned(),
+                offset: Some(3),
+                limit: Some(5),
+            },
+        ),
+        (
+            proto::ExecRequest {
+                ls_args: buffa::MessageField::some(proto::LsArgs::default().with_path("/repo")),
+                ..Default::default()
+            },
+            "ls_args",
+            ExecArgs::Ls { path: "/repo".to_owned() },
+        ),
+        (
+            proto::ExecRequest {
+                fetch_args: buffa::MessageField::some(
+                    proto::FetchArgs::default().with_url("https://example.com/"),
+                ),
+                ..Default::default()
+            },
+            "fetch_args",
+            ExecArgs::Fetch { url: "https://example.com/".to_owned() },
+        ),
+        (
+            proto::ExecRequest {
+                mcp_args: buffa::MessageField::some(proto::McpArgs {
+                    args: vec![proto::McpArgEntry {
+                        key: Some("limit".to_owned()),
+                        value: buffa::MessageField::some(crate::provider::cursor::value::encode(
+                            &serde_json::json!(40),
+                        )),
+                        ..Default::default()
+                    }],
+                    ..proto::McpArgs::default()
+                        .with_name("read")
+                        .with_tool_name("read")
+                        .with_tool_call_id("call-1")
+                        .with_provider_identifier("ganja")
+                        .with_smart_mode_approval_only(true)
+                }),
+                ..Default::default()
+            },
+            "mcp_args",
+            ExecArgs::Mcp(super::McpCall {
+                name: "read".to_owned(),
+                tool_name: "read".to_owned(),
+                tool_call_id: "call-1".to_owned(),
+                provider_identifier: "ganja".to_owned(),
+                approval_only: true,
+                arguments: Some(serde_json::json!({ "limit": 40 })),
+            }),
+        ),
+    ];
+
+    for (exec, kind, args) in rows {
+        let (events, asks) =
+            mapped_asks(&exec_framed(exec.with_id(9).with_exec_id("exec-9")), false);
+        assert!(events.is_empty(), "{kind}: an exec is a question, not an event: {events:?}");
+        assert_eq!(
+            asks,
+            vec![Ask::Exec(ExecAsk {
+                id: Some(9),
+                exec_id: Some("exec-9".to_owned()),
+                kind: kind.to_owned(),
+                args,
+            })],
+            "{kind}"
+        );
+    }
 }
 
 /// The name table behind the throw covers the kinds D550 models no arm

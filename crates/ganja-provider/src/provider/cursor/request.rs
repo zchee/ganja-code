@@ -23,9 +23,8 @@
 //! `mcp_tools = 4` and on every `RequestContext.tools = 7` answer, which is
 //! where the shipped client puts them — so the server's agent loop calls
 //! ganja's tools by name and this client answers from what its own engine ran.
-//! A request that declares no tools declares no roster, which is what a title
-//! or summary one-shot does and is byte-identical to what this module sent
-//! before the bridge existed.
+//! A request that declares no tools — a title or summary one-shot — declares
+//! no roster, and [`declaration`] says why that costs no byte.
 //!
 //! **The system prompt rides the answer, not the request.** The
 //! descriptor's one inline member for it, `custom_system_prompt = 8`, is an
@@ -80,55 +79,33 @@
 //! everything the engine has no tool for, which is where D550's typed arms and
 //! D486's throw stayed.
 //!
-//! **Why a refusal rather than a failure.** An unanswered exec is a hang:
-//! the server holds generation until the client says something, so the
-//! choice is never between refusing and staying quiet. And the reason
-//! string names ganja and the kind, because it is read by the server's own
-//! agent loop — a refusal is information that loop can act on, the way a
-//! denied tool call is information ganja's own loop acts on, and the turn
-//! survives it.
-//!
-//! **Why the kind's own arm rather than a throw.** D486 refused every exec
-//! on the control channel, copying the one branch of the shipped
-//! dispatcher that had been read: a `throw` carrying the exec id and a
-//! reason, then a `stream_close` carrying the id (`index.js@4272747`). That
-//! branch is the client's **no-handler** path — what it writes when nothing
-//! claims a server message at all. A *decline* is answered elsewhere and
-//! differently: the handler returns the kind's typed `rejected` arm with the
-//! reason in it (`index.js@5487600` for a delete, `@5329600` for a shell,
-//! twelve such sites across the handlers). The distinction is what the
-//! model on the other end reads — a rejection is a tool outcome it adapts
-//! to, a throw is a client that broke — and this build was sending the
-//! broken-client shape for a decision it had made deliberately.
-//!
-//! So [`refusal_answer`] answers ten kinds in their own vocabulary:
+//! [`refusal_answer`] answers ten kinds in their own vocabulary:
 //! `ExecResponse` carrying the kind's rejected arm at the kind's own field
 //! number, echoing back what the args named — the command, the path, the
 //! url — then the `stream_close` that ends every exec, refused or served.
 //! Two of the ten have no rejected arm in the shipped descriptor at all
 //! (`grep_result`, `fetch_result`), so their refusal travels as the error
-//! arm, which is the only place their result can say anything.
-//!
-//! Seven of those ten now reach this function only when the bridge declined
-//! them — the tool they map to is not on this request's roster — which is what
-//! makes "refused" still mean something after **D552**: it is a statement
-//! about what this turn is offering, not about what this client can do.
-//!
-//! **The throw survives as the catch-all**, and that is the half of D486
-//! that was load-bearing: its channel is keyed on the numeric id alone,
-//! naming neither kind nor `exec_id`, so an exec of a kind no table here
-//! knows — one newer than this file — is still refusable, and no exec kind
-//! is left to fail a turn.
+//! arm, which is the only place their result can say anything; a kind with
+//! no modelled arm at all takes D486's control-channel throw, keyed on the
+//! numeric id alone, which is what keeps a kind newer than this file
+//! refusable. Seven of the ten reach this function only when the bridge
+//! declined them — the tool they map to is not on this request's roster —
+//! which is what makes "refused" still mean something after **D552**: it is
+//! a statement about what this turn is offering, not about what this client
+//! can do. Why a decline is the kind's own arm rather than the throw, and a
+//! refusal rather than a failed turn, are **D550**'s rulings, stated in full
+//! in `crates/ganja-provider/AGENTS.md`.
 //!
 //! # The switchboard: asking the server for less
 //!
 //! [`context_answer`] also fills three members of `RequestContext` that
 //! narrow what the server's loop will ask this client for at all
 //! (`cursor.proto`'s own comment on that message says which and why). The
-//! one that is not a literal is `web_fetch_enabled`, which the caller
-//! computes with [`super::serves_fetch`] from the request's own tool
-//! roster: a fetch exec has somewhere to go exactly when this turn declared
-//! tools. A refusal answered well is still worse than an ask never made.
+//! one that is not a literal is `web_fetch_enabled`, which it computes from
+//! the roster it is handed through the predicate [`super::serves_fetch`]
+//! answers off the request: a fetch exec has somewhere to go exactly when
+//! this turn declared tools. A refusal answered well is still worse than an
+//! ask never made.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -239,8 +216,8 @@ pub(super) fn run_message(request: &ChatRequest) -> Result<Vec<u8>, ProviderErro
 
     // The roster, on the run request's own channel — declared before the first
     // token, so it does not depend on winning the request_context_args race.
-    // Absent entirely on a request offering no tools, which is what keeps a
-    // title or summary one-shot byte-identical to what it always was.
+    // Absent entirely on a request offering no tools; `declaration` says why
+    // that is byte-identical to the request this wire sent before the bridge.
     let declared = declaration(&request.tools);
     if !declared.is_empty() {
         run.mcp_tools = buffa::MessageField::some(proto::McpTools {
@@ -262,22 +239,18 @@ pub(super) fn run_message(request: &ChatRequest) -> Result<Vec<u8>, ProviderErro
 /// `cloudRule` is `undefined` then, so the member is absent while the
 /// context message itself is still present and still a success.
 ///
-/// `web_fetch` is [`super::serves_fetch`]'s verdict on the request this
-/// turn opened with, computed once at stream start and carried here as a
-/// plain `bool` — the wire cannot name an engine type and does not need to.
-/// The other two switchboard members are literals, and
-/// `web_search_enabled = 17` is deliberately not among them; `cursor.proto`
-/// states the reasoning on `RequestContext` itself, and a test in this
-/// module's tests asserts its absence so a later tidy-up reddens.
-///
 /// `roster` is this request's tools on the declaration's *second* channel,
-/// which the shipped client refreshes on every context answer. Empty for a
-/// request that declared none, and an empty repeated field encodes to nothing
-/// at all.
+/// which the shipped client refreshes on every context answer — empty for a
+/// request that declared none, at no cost in bytes ([`declaration`]) — and it
+/// is also what decides `web_fetch_enabled`, through the same
+/// predicate [`super::serves_fetch`] answers off the request. The other two
+/// switchboard members are literals, and `web_search_enabled = 17` is
+/// deliberately not among them; `cursor.proto` states the reasoning on
+/// `RequestContext` itself, and a test in this module's tests asserts its
+/// absence so a later tidy-up reddens.
 pub(super) fn context_answer(
     ask: decode::ContextAsk,
     system: Option<&str>,
-    web_fetch: bool,
     roster: &[ToolDefinition],
 ) -> Vec<u8> {
     let context = proto::RequestContext {
@@ -286,7 +259,7 @@ pub(super) fn context_answer(
         mcp_file_system_options: buffa::MessageField::some(
             proto::McpFileSystemOptions::default().with_enabled(false),
         ),
-        web_fetch_enabled: Some(web_fetch),
+        web_fetch_enabled: Some(super::serves_fetch_for(roster)),
         read_lints_enabled: Some(false),
         ..Default::default()
     };
@@ -312,13 +285,11 @@ pub(super) fn context_answer(
 /// build models no arm for — D486's control-channel throw followed by that
 /// same close.
 ///
-/// Always the close, and always last: the shipped client writes it after a
-/// handler's final frame and after a no-handler throw alike
-/// (`index.js@4272747`), because the close is what tells the server the exec
-/// is over rather than still running. A refused `shell_stream_args` is
-/// therefore exactly one `ShellStream{rejected}` event and then the close,
-/// with nothing between — the streamed kind's shape for "it did not run",
-/// where a served one would have written stdout events first.
+/// Always the close, and always last ([`stream_close`] says why), so a
+/// refused `shell_stream_args` is exactly one `ShellStream{rejected}` event
+/// and then the close, with nothing between — the streamed kind's shape for
+/// "it did not run", where a served one would have written stdout events
+/// first.
 pub(super) fn refusal_answer(ask: &decode::ExecAsk) -> Vec<Vec<u8>> {
     let reason = refusal_reason(&ask.kind);
 
@@ -328,9 +299,10 @@ pub(super) fn refusal_answer(ask: &decode::ExecAsk) -> Vec<Vec<u8>> {
 /// The same, under a reason of the caller's own.
 ///
 /// For a refusal that is about *this exec's arguments* rather than about its
-/// kind: [`REFUSAL`] says ganja does not run the kind at all, which is a
-/// falsehood when the kind is one this build serves and only these arguments
-/// are unusable ([`super::native::argument_refusal`]).
+/// kind: [`refusal_reason`] says ganja does not run the kind at all, which is
+/// a falsehood when the kind is one this build serves and only these arguments
+/// are unusable ([`super::native::argument_refusal`]) — or when the tool is
+/// served and what is missing is the pause ([`unbridgeable_reason`]).
 pub(super) fn refusal_answer_because(ask: &decode::ExecAsk, reason: &str) -> Vec<Vec<u8>> {
     tracing::debug!(
         provider = ID,
@@ -417,11 +389,13 @@ fn rejection(ask: &decode::ExecAsk, reason: &str) -> Option<proto::ExecResponse>
                 ..Default::default()
             });
         }
-        decode::ExecArgs::Read { path, .. } => {
-            response.read_result = buffa::MessageField::some(read_rejected(path, reason));
-        }
-        decode::ExecArgs::RedactedRead { path, .. } => {
-            response.redacted_read_result = buffa::MessageField::some(read_rejected(path, reason));
+        decode::ExecArgs::Read { redacted, path, .. } => {
+            let rejected = buffa::MessageField::some(read_rejected(path, reason));
+            if *redacted {
+                response.redacted_read_result = rejected;
+            } else {
+                response.read_result = rejected;
+            }
         }
         decode::ExecArgs::Ls { path } => {
             response.ls_result = buffa::MessageField::some(proto::LsResult {
@@ -431,13 +405,10 @@ fn rejection(ask: &decode::ExecAsk, reason: &str) -> Option<proto::ExecResponse>
                 ..Default::default()
             });
         }
-        decode::ExecArgs::Mcp(call) => {
+        decode::ExecArgs::Mcp(_) => {
             response.mcp_result = buffa::MessageField::some(proto::McpResult {
                 rejected: buffa::MessageField::some(
-                    // `called()` and not `name`: the roster is matched under
-                    // the declaration's own `tool_name`, so naming the other
-                    // field here would refuse one tool by another's name.
-                    proto::McpRejected::default().with_reason(mcp_refusal_reason(call.called())),
+                    proto::McpRejected::default().with_reason(reason),
                 ),
                 ..Default::default()
             });
@@ -473,8 +444,7 @@ fn read_rejected(path: &str, reason: &str) -> proto::ReadResult {
     }
 }
 
-/// What the server's agent loop is told about a refused exec, `{kind}`
-/// substituted.
+/// What the server's agent loop is told about a refused exec of `kind`.
 ///
 /// It names ganja, so the sentence reads as a client's policy rather than a
 /// malfunction; it names the kind, so the loop can tell a refused shell from
@@ -483,11 +453,15 @@ fn read_rejected(path: &str, reason: &str) -> proto::ReadResult {
 /// client will not, and its tools run elsewhere" stops asking. Ganja's own
 /// words — the shipped client's decline reasons are the user's free text,
 /// so there is nothing here to port.
-const REFUSAL: &str = "ganja does not run {kind} for a provider: its tools run for its own \
-                       session, under its own permission engine.";
+fn refusal_reason(kind: &str) -> String {
+    format!(
+        "ganja does not run {kind} for a provider: its tools run for its own session, under its \
+         own permission engine."
+    )
+}
 
-/// What an MCP call is refused with when **this request declared no roster at
-/// all**, `{name}` substituted.
+/// What an MCP call naming `name` is refused with when **this request declared
+/// no roster at all**.
 ///
 /// The name is the honest subject: with nothing declared there is no roster to
 /// be missing from, so the answer is about the name that was called rather
@@ -495,33 +469,24 @@ const REFUSAL: &str = "ganja does not run {kind} for a provider: its tools run f
 /// answers an unknown name on the `tool_not_found` arm instead, carrying that
 /// roster — which is the arm this sentence used to be a stand-in for
 /// (**D552**, [`super::bridge`]).
-const MCP_REFUSAL: &str = "no tool named {name} is served by this client";
-
-/// What a call this client **does** serve is refused with when the wire cannot
-/// hold its Run open, `{name}` substituted.
-///
-/// [`MCP_REFUSAL`]'s sentence would be false here: the tool is on the roster,
-/// and what is missing is the pause. A wire with no key to park under is a
-/// fixture replay or a request carrying no message to key on, so this arm is
-/// reachable by no shipped session — but a false sentence is not made harmless
-/// by being rare, and the reason a loop reads has to be the reason that holds
-/// (**D552**).
-const UNBRIDGEABLE: &str = "ganja serves {name}, but this request could not be paused to run it: \
-                            the tool's answer would have had nowhere to go";
-
-/// [`REFUSAL`] with the kind in it.
-fn refusal_reason(kind: &str) -> String {
-    REFUSAL.replace("{kind}", kind)
-}
-
-/// [`MCP_REFUSAL`] with the called tool's name in it.
 pub(super) fn mcp_refusal_reason(name: &str) -> String {
-    MCP_REFUSAL.replace("{name}", name)
+    format!("no tool named {name} is served by this client")
 }
 
-/// [`UNBRIDGEABLE`] with the called tool's name in it.
+/// What a call this client **does** serve, `name`, is refused with when the
+/// wire cannot hold its Run open.
+///
+/// [`mcp_refusal_reason`]'s sentence would be false here: the tool is on the
+/// roster, and what is missing is the pause. A wire with no key to park under
+/// is a fixture replay or a request carrying no message to key on, so this arm
+/// is reachable by no shipped session — but a false sentence is not made
+/// harmless by being rare, and the reason a loop reads has to be the reason
+/// that holds (**D552**).
 pub(super) fn unbridgeable_reason(name: &str) -> String {
-    UNBRIDGEABLE.replace("{name}", name)
+    format!(
+        "ganja serves {name}, but this request could not be paused to run it: the tool's answer \
+         would have had nowhere to go"
+    )
 }
 
 /// The call id an MCP exec carried, for the refusal's log line — the one

@@ -639,7 +639,7 @@ impl fmt::Debug for Presented {
 /// `Clone` because a provider that outlives its wires has to hand each one a
 /// copy: [`cursor::CursorProvider`] is built once and builds a fresh
 /// [`cursor::CursorWire`] per request, and the credential goes with it. Both
-/// arms are cheap to clone — a `SecretString` handle, or an `Arc`.
+/// arms are cheap to clone — a copied secret, or an `Arc`.
 #[derive(Clone)]
 pub enum CredentialSource {
     /// A key, held for the life of the provider.
@@ -677,21 +677,13 @@ struct Resolved {
 impl CredentialSource {
     /// A key source over `secret`, or [`None`] when it is blank.
     ///
-    /// The one door into [`Key`](Self::Key) from outside this crate, and the
-    /// reason it exists is a test rather than a wire: an engine-level test of
-    /// the cursor bridge points a provider at a loopback socket and has to give
-    /// it a token, and the alternative — an OAuth source resolving out of the
-    /// credential store — would make every such test redirect `XDG_DATA_HOME`,
-    /// whose documented invariant is one test per binary. With this, a suite
-    /// that must never read `auth.json` has no code path to it at all, which is
-    /// a stronger statement than a redirect pointing away from it (**D552**,
+    /// The one door into [`Key`](Self::Key) from outside this crate: a caller
+    /// may build the source, and only this crate may read what is inside it.
+    /// The blank refusal is `Presented::new`'s, for its own reason — an
+    /// exported-but-empty variable should fail at startup rather than as a 401
+    /// mid-turn. Why the door exists — a store-free provider for the engine's
+    /// bridge suite — is [`cursor::CursorProvider::at`]'s to say (**D552**,
     /// Dv-11).
-    ///
-    /// `Presented::new` stays private — unlinked here because it is, which is
-    /// the point: a caller may build the source and only this crate may read
-    /// what is inside it. The blank refusal is that constructor's, for its own
-    /// reason — an exported-but-empty variable should fail at startup rather
-    /// than as a 401 mid-turn.
     #[must_use]
     pub fn key(secret: impl Into<SecretString>) -> Option<Self> {
         Presented::new(secret).map(Self::Key)

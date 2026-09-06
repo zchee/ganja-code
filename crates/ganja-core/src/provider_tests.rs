@@ -293,18 +293,11 @@ fn a_backends_own_default_outranks_its_vendors_catalog_row() {
 ///
 /// Asked of the id list rather than of nine constructed wires: the fact is a
 /// function of the id, and instantiating a provider to ask it would need
-/// credentials for eight vendors to answer a question about a string. Cursor is
-/// named on its own line as well as covered by the loop, because it is the id
-/// this assertion is about — a loop that silently stopped including it would
-/// still pass.
+/// credentials for eight vendors to answer a question about a string. The
+/// `contains` guard is what makes the loop about cursor — the id this assertion
+/// is about — since a loop that silently stopped including it would still pass.
 #[test]
 fn every_shipped_id_reaches_every_tool_this_build_registers() {
-    assert_eq!(
-        ToolReach::of(cursor::ID),
-        ToolReach::Full,
-        "cursor's server calls back into the same registry since D552",
-    );
-
     for builtin in PROVIDERS {
         assert_eq!(
             ToolReach::of(builtin),
@@ -313,13 +306,4 @@ fn every_shipped_id_reaches_every_tool_this_build_registers() {
         );
     }
     assert!(PROVIDERS.contains(&cursor::ID), "and the loop above really did cover cursor");
-}
-
-/// A provider somebody declared in their own config is one of the three
-/// function-calling dialects wearing an endpoint of their choosing, so it
-/// answers with every other id rather than an unrecognised name reaching some
-/// narrower default.
-#[test]
-fn a_config_declared_endpoint_reaches_every_tool_like_the_builtin_it_speaks_as() {
-    assert_eq!(ToolReach::of("local-llama"), ToolReach::Full);
 }

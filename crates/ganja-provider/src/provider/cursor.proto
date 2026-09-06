@@ -9,9 +9,10 @@
 // plugin's generated descriptor, src/proto/agent_pb.ts at
 // a37a6ba9a6d6d8d176bb68248f59240271f46767 (MIT; see THIRD_PARTY_NOTICES.md),
 // each such field marked at its site. Nothing is copied wholesale: this is
-// the minimal set one one-shot turn and one model listing need, and the
-// server's oneofs are flattened to plain fields with the same numbers and
-// types, which encode identically on the wire.
+// the set one turn, the tool bridge under it (D552, the block at the end of
+// this file) and one model listing need, and the server's oneofs are
+// flattened to plain fields with the same numbers and types, which encode
+// identically on the wire.
 //
 // Message names are ganja's own — protobuf carries field numbers, never type
 // names, so only the service paths (constants in cursor.rs) must match the
@@ -87,7 +88,8 @@ message ModelEntry {
 // the client's exec answers — exec_client_message = 2 (agent_pb.ts:3603).
 // The kv channel's answers ride the same stream — kv_client_message = 3
 // (agent_pb.ts:3617). The other arms of that oneof belong to flows this
-// build does not speak yet, so only these four are modelled.
+// build does not speak yet, so only five are modelled: those three, the
+// control half below, and the run-level heartbeat.
 // The exec channel's *control* half — the one an exec is refused on rather
 // than answered — rides the same stream as exec_client_control_message = 5
 // (index.js@5927250; byte offsets, per the citation note above).
@@ -235,8 +237,8 @@ message TurnEnded {}
 // (:6934) is the one kind this build answers with a *result*.
 //
 // The ten kinds beside it are the tools the server asks a client to run.
-// Seven of them are now **bridged to ganja's own tools** (**D552**): an
-// `mcp_args = 11` naming a tool this request declared, and the six native
+// Eight of them are now **bridged to ganja's own tools** (**D552**): an
+// `mcp_args = 11` naming a tool this request declared, and the seven native
 // kinds of the redirect table (read, redacted read, streamed shell, grep, ls,
 // write, fetch), are surfaced to ganja's engine as ordinary tool calls, run
 // there under its permission engine and written into its transcript, and
@@ -362,9 +364,11 @@ message LsArgs {
 //   * smart_mode_approval_only = 7 — a preflight asking whether the call
 //     *would* be allowed. Answered `approved` with nothing executed; the real
 //     call that follows is what meets the permission dialog.
-//   * server_identifier = 9 and skip_approval = 8 — read for the log line.
-//     A present server_identifier is the measured norm on a `"ganja"` call
-//     (the recording's (a)) and refuses nothing.
+//   * server_identifier = 9 and skip_approval = 8 — decoded by the generated
+//     type and read by nothing. A present server_identifier is the measured
+//     norm on a `"ganja"` call (the recording's (a)) and refuses nothing; what
+//     a call may skip is ganja's permission engine's to decide, never the
+//     caller's, so skip_approval is not consulted either.
 //
 // Beside them the descriptor carries smart_mode_approval = 6, which arrived
 // on none of the recorded runs and which this build neither reads nor sends.
@@ -458,7 +462,7 @@ message ShellResult {
 // forward; a redirect that emitted output line by line would be inventing a
 // cadence it never observed. stderr = 2 is where a failed call's message goes,
 // because the model on the other end reads that arm as the command's own
-// complaint. The six arms beside them — start = 4, permission_denied = 6,
+// complaint. The five arms beside them — start = 4, permission_denied = 6,
 // backgrounded = 7, hook_context = 8, sandbox_unsupported = 9 — describe a
 // shell this client is not running.
 message ShellStream {
@@ -490,14 +494,14 @@ message ShellStreamExit {
 
 // index.js@6545830. The first two members are echoed back from the args so
 // the server's loop reads *which* command was refused; reason = 3 is ganja's
-// sentence. is_readonly = 4 states a permission verdict — the shipped client
-// sets it from the rule that blocked the call — and this refusal makes no
-// such verdict, so it is left absent, which the wire reads as false.
+// sentence. is_readonly = 4 is not modelled: it states a permission verdict —
+// the shipped client sets it from the rule that blocked the call — and this
+// refusal makes no such verdict, so it is left absent, which the wire reads
+// as false.
 message ShellRejected {
   string command = 1;
   string working_directory = 2;
   string reason = 3;
-  bool is_readonly = 4;
 }
 
 // The shipped WriteResult (index.js@6605625): success = 1 for a bridged
@@ -762,11 +766,10 @@ message McpServerNotFound {
 // index.js@6373140: fieldless. The arrival is the whole answer.
 message McpApproved {}
 
-// index.js@6377058: reason = 1, and an is_readonly = 2 left absent for
+// index.js@6377058: reason = 1, and an is_readonly = 2 not modelled for
 // ShellRejected's reason.
 message McpRejected {
   string reason = 1;
-  bool is_readonly = 2;
 }
 
 // The shipped FetchResult (index.js@6313628) is success = 1 and error = 2, so
@@ -798,7 +801,8 @@ message FetchError {
 // plugin's own answer records that plain system messages are ignored
 // server-side (proxy.ts:1133).
 //
-// The three members beside it are the **switchboard** (D550): per-turn
+// Four members sit beside it: tools = 7, the roster's second channel (D552,
+// on the member itself), and the three of the **switchboard** (D550) — per-turn
 // booleans on the shipped RequestContext (index.js@6467399) by which a
 // client narrows what the server's loop will ask it for. Only what
 // demonstrably generates an exec this build cannot serve is set, because

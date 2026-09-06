@@ -9,8 +9,9 @@
 //! shared task list that answers with something fixed, the drain loop that
 //! collects a turn's events (optionally answering permission dialogs along
 //! the way), the storage builders that seed a session directly on disk, the
-//! teammate fixtures P25's suites share, and the private tmux server every
-//! pane suite runs against.
+//! teammate fixtures P25's suites share, the duplex cursor backend the tool
+//! bridge is proven against, and the private tmux server every pane suite
+//! runs against.
 //!
 //! This crate exists to hold exactly that — nothing that is genuinely
 //! specific to one suite (a bun fixture's own spawn helper, a
@@ -22,15 +23,8 @@
 //! [`Tool`]: ganja_tool::Tool
 
 mod agent;
-// A loopback cursor agent backend that hosts the Run RPC as a real duplex — the
-// one fixture that can drive both ends of D552's tool bridge at once. A module
-// rather than a re-export because its script vocabulary is a dozen names that
+// A module rather than a re-export: its script vocabulary is a dozen names that
 // only make sense together.
-//
-// The description is a `//` comment rather than a `///` doc on purpose: an
-// outer doc here is concatenated with the module's own `//!` header, and the
-// merged block resolves its intra-doc links in *this* file's scope, where
-// `Script` and `Step` are not names. The module documents itself.
 pub mod cursor_server;
 mod drain;
 mod fs;
