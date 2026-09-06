@@ -454,6 +454,18 @@ impl Spawned for ClaudeMember {
             pane = self.pane.pane().id,
             "a claude teammate's pane was launched"
         );
+        // The line itself, at `debug`, as `pane.rs` logs its own: the head
+        // wipes the screen it was echoed on (D554), so the log is the one
+        // place a launch stays diagnosable — a `claude` that refuses its
+        // flags dies under a blank pane. No secret rides it: the flags are
+        // `arguments`' identifiers, the binary is `on_path`'s, and
+        // credentials travel in the environment, never argv (D502).
+        tracing::debug!(
+            teammate = spec.name.as_str(),
+            pane = self.pane.pane().id,
+            line = %line.to_string_lossy(),
+            "the launch line typed into the claude teammate's pane"
+        );
 
         Ok(())
     }

@@ -702,17 +702,34 @@ impl Tmux {
         self.server.run(&["display-message", "-p", "-t", pane, "#{alternate_on}"]).trim() == "1"
     }
 
-    /// The screen **under** a full-screen program, and its history: the
-    /// primary grid a program on the alternate screen saved when it switched
-    /// (`capture-pane -a`), with `-S - -E -` asking for everything scrolled
-    /// above it too. What a person finds by scrolling up in the pane or when
-    /// the program leaves, and where a shell's residue from before the
-    /// program would be — measured 2026-09-07 on tmux next-3.8: without the
-    /// launch line's wipe the banner and the echoed `exec` are read back
-    /// exactly here. Refused by tmux while the pane has no alternate screen,
-    /// so ask [`Tmux::on_alternate_screen`] first.
-    pub fn primary_screen_and_history(&self, pane: &str) -> String {
-        self.server.run(&["capture-pane", "-p", "-J", "-a", "-S", "-", "-E", "-", "-t", pane])
+    /// The **visible** rows under a full-screen program: the primary grid a
+    /// program on the alternate screen saved when it switched (`capture-pane
+    /// -a`) — the rows that were on screen at that moment, and only those.
+    /// tmux's `-a` cannot reach the primary grid's history, and a `-S -`
+    /// beside it changes nothing (measured 2026-09-07 on next-3.8: 6 saved
+    /// rows of a 20-row banner, where the same read without `-a` gave all
+    /// 20), so residue that had already scrolled above the viewport is not
+    /// here — [`Tmux::history_size`] is where it counts. What a person sees
+    /// when the program leaves, and where a shell's residue from before the
+    /// program shows otherwise: without the launch line's wipe the prompt and
+    /// the echoed `exec` are read back exactly here. Refused by tmux while
+    /// the pane has no alternate screen, so ask [`Tmux::on_alternate_screen`]
+    /// first.
+    pub fn saved_primary_screen(&self, pane: &str) -> String {
+        self.server.run(&["capture-pane", "-p", "-J", "-a", "-t", pane])
+    }
+
+    /// How many rows `pane` holds above its screen — tmux's `#{history_size}`.
+    ///
+    /// Read while a program holds the alternate screen it is the **primary**
+    /// grid's scrollback: the alternate screen accumulates no history of its
+    /// own (measured 2026-09-07 on next-3.8: a 15-row overflow read 16 from
+    /// under an alternate screen, and 0 once `ED 3` had run), so on a pane
+    /// whose TUI is up this number is exactly what a person finds by
+    /// scrolling up — the half of a shell's residue
+    /// [`Tmux::saved_primary_screen`] cannot see.
+    pub fn history_size(&self, pane: &str) -> String {
+        self.server.run(&["display-message", "-p", "-t", pane, "#{history_size}"]).trim().to_owned()
     }
 
     /// Types `text` into `pane` literally and submits it, in one `send-keys` —

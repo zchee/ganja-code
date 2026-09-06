@@ -715,9 +715,9 @@ impl Server {
         run("capture-pane", command).await
     }
 
-    /// [`Server::capture`] with the scrollback in front of the screen
-    /// (`-S - -E -`): everything the pane has shown since its history was
-    /// last cleared, joined the same way.
+    /// [`Server::capture`] with the tail of the scrollback in front of the
+    /// screen: the last `shim_tui::LAST_WORDS_HISTORY` rows above the
+    /// viewport (`-S -<rows> -E -`), then the screen, joined the same way.
     ///
     /// The reader of a **dead** pane's last words asks this one, and the
     /// reason is a tmux fact measured 2026-09-07 on next-3.8 while landing
@@ -734,6 +734,14 @@ impl Server {
     /// looking at the pane would see, and this is a question about what the
     /// pane said.
     ///
+    /// Bounded rather than `-S -`, because the question is that small: only
+    /// the rows a dead pane can have scrolled off are wanted, and the notice
+    /// scrolls exactly one per death, where `-S -` reads the whole history
+    /// — bounded by `history-limit`, which is the person's setting and can be
+    /// fifty thousand rows — into one string for a four-line answer. tmux
+    /// clamps a start above the history's top to the top, so a pane with
+    /// fewer rows behind it than the bound is read whole.
+    ///
     /// # Errors
     ///
     /// As [`Server::capture`].
@@ -744,7 +752,7 @@ impl Server {
             .arg("-p")
             .arg("-J")
             .arg("-S")
-            .arg("-")
+            .arg(format!("-{}", crate::shim_tui::LAST_WORDS_HISTORY))
             .arg("-E")
             .arg("-")
             .arg("-t")
@@ -1084,9 +1092,10 @@ impl Server {
 /// the CLI's once both are above the viewport.
 ///
 /// `printf` rather than `clear` because the line is read by the person's own
-/// shell (D520) inside an environment that is an enumeration (D502): `clear`
-/// is an external command that needs a `PATH` to be found on and a terminfo
-/// entry to look the sequences up in, where `printf` is a builtin of `sh`,
+/// shell (D520) with only what the tmux server's environment happens to hold
+/// (`-e` adds, D502 never enumerates a pane's): `clear` is an external
+/// command that needs a `PATH` to be found on and a terminfo entry to look
+/// the sequences up in, where `printf` is a builtin of `sh`,
 /// `bash`, `zsh` and `fish` alike — the four shells [`shell_quote`] already
 /// serves — and decodes `\033` in every one of them (POSIX `printf` by
 /// specification; fish's by its own). One constant rather than a per-shell
@@ -1096,8 +1105,8 @@ impl Server {
 ///
 /// The shell reading it still echoes the whole line first — that is the
 /// tty's doing, not the shell's — so the row is on screen exactly between
-/// the echo and the Enter, which is the one interval a readiness poll can
-/// still find it in ([`crate::shim_tui::composer_shown`]).
+/// the echo and the shell running the head, which is the one interval a
+/// readiness poll can still find it in ([`crate::shim_tui::composer_shown`]).
 pub const LAUNCH_HEAD: &str = "printf '\\033[2J\\033[3J\\033[H'; ";
 
 /// The line typed into a pane's idle shell: wipe the pane

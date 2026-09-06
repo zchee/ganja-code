@@ -590,6 +590,19 @@ const LAST_WORDS_LINES: usize = 4;
 /// not something a refusal path should be writing to disk.
 const LAST_WORDS_BYTES: usize = 1024;
 
+/// How many rows of scrollback the last-words read asks for above the
+/// screen ([`Server::capture_with_history`]'s `-S -<rows>`).
+///
+/// Only the rows a dead pane can have scrolled off are wanted: tmux's own
+/// dead notice scrolls exactly one row per death (measured 2026-09-07 on
+/// next-3.8), and [`LAST_WORDS_LINES`] is the most the block will keep of
+/// whatever is read. Sixty-four is generous by an order of magnitude, and
+/// bounded because the alternative — the whole history — is bounded only by
+/// `history-limit`, the person's setting: a read of tens of thousands of
+/// rows into one string on the retirement path of an inline TUI that ran
+/// for hours, for a four-line answer.
+pub(crate) const LAST_WORDS_HISTORY: usize = 64;
+
 /// What a block that lost its head opens with, so the cut is admitted rather
 /// than silent — the posture `ganja-tool`'s own listing neutralizer takes at
 /// the other end of its text.
@@ -1669,6 +1682,11 @@ impl TuiRunner {
         let cli = backend_name(self.handle.backend);
         let pane = self.handle.pane().id.clone();
         let words = match how {
+            // With the history for consistency with the two readiness-side
+            // reads; unpinned, because a pane that ran long enough to reach
+            // this watch has more rows than `LAST_WORDS_LINES` and its top
+            // row — the one the dead notice scrolls off — never enters the
+            // block.
             Gone::Dead => match self.handle.server().capture_with_history(&pane).await {
                 Ok(captured) => last_words(&captured),
                 Err(_) => None,
@@ -2243,7 +2261,10 @@ pub fn launch_needle(binary: &OsStr) -> Result<String, TmuxError> {
 /// door was the one it took. With the row wiped it has neither, waits the
 /// whole [`READY_WAIT`], and is pasted unsubmitted with [`RING_NOT_READY`]
 /// on the ring — a proceed, never a failure, and a shape none of the three
-/// shipped CLIs has (each is a binary; an `npm` shim reads as `node`).
+/// shipped CLIs has as its vendor ships it: each is a binary or an `npm`
+/// trampoline that reads as `node`. A wrapper script of the person's own
+/// that runs the CLI as a child is the one shape that pays the ceiling, and
+/// bead `hcty` (a pane-pid argv witness) is the door for it.
 #[must_use]
 pub fn composer_shown(shown: &str, needle: &str, marker: &str, launched: bool) -> bool {
     let rows: Vec<&str> = shown.lines().collect();

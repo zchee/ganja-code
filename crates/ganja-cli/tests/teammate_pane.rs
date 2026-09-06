@@ -170,10 +170,21 @@ impl Drop for Held {
 /// exactly as it does under the default `/bin/sh -s`.
 ///
 /// **D554**, on the same pane: the line wiped the pane before it exec'd, so
-/// the screen under the member's TUI — the primary grid `ganja` saved when
-/// it took the alternate screen, and its history — holds nothing of the
-/// shell's: no echoed `exec`, no `bash-` prompt. That grid is the shell's
-/// residue, and there must be none.
+/// nothing of the shell's is under the member's TUI. Two reads, one per
+/// half. The screen half is the `capture-pane -a` read — the visible primary
+/// rows `ganja` saved when it took the alternate screen, and only those,
+/// since tmux's `-a` cannot reach the history — holding no echoed `exec`
+/// and no `bash-` prompt. The history half is `#{history_size}`, which must
+/// be `0`: the alternate screen accumulates no history of its own, so that
+/// number is exactly the primary scrollback, and `ED 3` is what emptied it —
+/// drop `ED 3` from the head and `ED 2` alone pushes the prompt and the
+/// echoed line *into* that history, leaving the saved rows blank, so the
+/// `-a` read passes and only this half reddens (measured 2026-09-07 on
+/// next-3.8). Of the two screen matchers `exec ` is the assertion, present
+/// in every echo; `bash-` is a belt that holds only under bash's compiled-in
+/// default prompt (`\s-\v\$ `), which a distribution's `/etc/bash.bashrc`
+/// replaces (Debian's does), so on such a runner it is vacuous and never
+/// wrong.
 #[test]
 fn a_configured_pane_shell_still_execs_the_launch_line() {
     let (homes, script) = project();
@@ -206,13 +217,22 @@ fn a_configured_pane_shell_still_execs_the_launch_line() {
     tmux.wait_for("the member's TUI to take the alternate screen", &pane, || {
         tmux.on_alternate_screen(&pane).then_some(())
     });
-    let residue = tmux.primary_screen_and_history(&pane);
+    let residue = tmux.saved_primary_screen(&pane);
     for forbidden in ["exec ", "bash-"] {
         assert!(
             !residue.contains(forbidden),
             "the screen under the member's TUI still holds the shell's {forbidden:?}: {residue:?}"
         );
     }
+    // The history half, which the `-a` read cannot see: the primary
+    // scrollback under the TUI is empty, or scrolling up in the pane would
+    // find what the screen no longer shows.
+    let history = tmux.history_size(&pane);
+    assert_eq!(
+        history, "0",
+        "the primary scrollback under the member's TUI holds {history} rows of the shell's; the \
+         saved screen reads {residue:?}"
+    );
 }
 
 /// **AC-11.** `/teammate spawn w1 --backend ganja` in a real lead makes a real pane
