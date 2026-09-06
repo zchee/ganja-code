@@ -74,6 +74,7 @@ use crate::provider::{
 mod connect;
 mod decode;
 mod request;
+mod spike;
 
 /// The cursor wire's protobuf messages, generated from `cursor.proto` by
 /// `buffa`'s codegen and checked in.
@@ -177,6 +178,12 @@ pub struct CursorWire {
     client: reqwest::Client,
     base_url: String,
     credential: CredentialSource,
+    /// W2 measurement scaffolding, `None` unless `GANJA_CURSOR_SPIKE` was set
+    /// for this process — and `None` unconditionally on the
+    /// [`at`](Self::at) path, which is what makes every test in this crate a
+    /// spike-free one without touching the process environment.
+    /// [`spike`] says what it is and when it goes.
+    spike: Option<spike::Spike>,
 }
 
 impl fmt::Debug for CursorWire {
@@ -187,6 +194,7 @@ impl fmt::Debug for CursorWire {
             .debug_struct("CursorWire")
             .field("credential", &self.credential)
             .field("base_url", &shown_base_url(&self.base_url))
+            .field("spike", &self.spike)
             .finish()
     }
 }
@@ -214,7 +222,14 @@ impl CursorWire {
         let refresh = auth::cursor::Refresh::new()
             .map_err(|error| ProviderError::Transport(error.to_string()))?;
 
-        Self::at(DEFAULT_BASE_URL, Arc::new(refresh))
+        // The one read of the spike's environment in the whole workspace, at
+        // the one construction a shipped session runs through. A malformed
+        // flag refuses here rather than measuring something else; see
+        // [`spike::Spike::from_env`].
+        let mut wire = Self::at(DEFAULT_BASE_URL, Arc::new(refresh))?;
+        wire.spike = spike::Spike::from_env()?;
+
+        Ok(wire)
     }
 
     /// The same wire against an endpoint of the caller's choosing, which is
@@ -236,6 +251,7 @@ impl CursorWire {
             client: client()?,
             base_url,
             credential: CredentialSource::Oauth { provider_id: ID, refresh },
+            spike: None,
         })
     }
 
@@ -283,7 +299,7 @@ impl CursorWire {
         request: ChatRequest,
         cancel: CancellationToken,
     ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
-        let opening = connect::envelope(&request::run_message(&request)?);
+        let opening = connect::envelope(&request::run_message(&request, self.spike.as_ref())?);
         let presented = self.credential.presented().await?;
         // Minted once for the whole turn: every attempt below is the same
         // request under the same stamp, the shape the shared driver's
@@ -355,6 +371,12 @@ impl CursorWire {
                     system: request.system.clone(),
                     web_fetch: serves_fetch(&request),
                     blobs: HashMap::new(),
+                    // Built here rather than in the fold because an interval
+                    // needs a runtime, and this is the async context that has
+                    // one. `None` off the spike leaves the fold's heartbeat
+                    // branch a future that never completes.
+                    beat: self.spike.as_ref().map(|_| spike::run_beats()),
+                    spike: self.spike.clone(),
                 },
             ),
             presented,
@@ -436,6 +458,10 @@ struct Duplex {
     /// rather than failed, because an empty store is a state the server
     /// itself put there.
     blobs: HashMap<Vec<u8>, Vec<u8>>,
+    /// W2 measurement scaffolding and its run-level heartbeat, `None` on
+    /// every turn this build ships; see [`spike`].
+    spike: Option<spike::Spike>,
+    beat: Option<tokio::time::Interval>,
 }
 
 /// Drives the body's chunks through the Connect splitter and the mapping,
@@ -484,7 +510,7 @@ where
         State {
             chunks,
             splitter: connect::Splitter::default(),
-            mapping: decode::Mapping::default(),
+            mapping: decode::Mapping::watching(duplex.spike.is_some()),
             cancel,
             duplex,
             ready: VecDeque::new(),
@@ -513,10 +539,28 @@ where
                     return None;
                 }
 
-                let chunk = tokio::select! {
-                    biased;
-                    () = state.cancel.cancelled() => return None,
-                    chunk = state.chunks.next() => chunk,
+                // The run-level heartbeat rides the same wait the body does,
+                // so a spike turn beats on the fold's own clock rather than on
+                // a task that could outlive the stream it is keeping alive.
+                // Off the spike the branch is a future that never completes,
+                // which is the same `select!` with one arm that never fires.
+                let chunk = loop {
+                    tokio::select! {
+                        biased;
+                        () = state.cancel.cancelled() => return None,
+                        () = spike::beat(state.duplex.beat.as_mut()) => {
+                            let framed = connect::envelope(&spike::run_heartbeat());
+                            if state.duplex.answers.unbounded_send(Ok(framed)).is_err() {
+                                // The body is gone; the turn's own failure
+                                // arrives on the next ask, and beating into a
+                                // closed channel would only repeat the news.
+                                state.duplex.beat = None;
+                            } else {
+                                tracing::debug!(provider = ID, "cursor spike: run heartbeat");
+                            }
+                        }
+                        chunk = state.chunks.next() => break chunk,
+                    }
                 };
 
                 state.scratch.clear();
@@ -549,6 +593,7 @@ where
                                                 ask,
                                                 state.duplex.system.as_deref(),
                                                 state.duplex.web_fetch,
+                                                state.duplex.spike.as_ref(),
                                             )],
                                             "context ask",
                                         ),
@@ -556,14 +601,44 @@ where
                                             vec![request::kv_answer(ask, &mut state.duplex.blobs)],
                                             "kv ask",
                                         ),
+                                        // The W2 spike's own arm, and the only
+                                        // exec this build ever serves: the
+                                        // declared probe, held open for the
+                                        // measured delay and then answered.
+                                        // Unreachable off the spike, which
+                                        // declares no tool for the server to
+                                        // call. Removed with the spike.
+                                        decode::Ask::Refuse(ask)
+                                            if state.duplex.spike.is_some()
+                                                && spike::is_ping(&ask) =>
+                                        {
+                                            let duplex = &mut state.duplex;
+                                            match spike::held(duplex, ask.id, &state.cancel).await {
+                                                spike::Held::Cancelled => return None,
+                                                spike::Held::Closed => (Vec::new(), "the probe"),
+                                                spike::Held::Elapsed => {
+                                                    (spike::pong(&ask), "the probe")
+                                                }
+                                            }
+                                        }
                                         decode::Ask::Refuse(ask) => {
                                             (request::refusal_answer(&ask), "tool exec")
                                         }
                                     };
-                                    let closed = answers.into_iter().any(|answer| {
-                                        let enveloped = connect::envelope(&answer);
-                                        state.duplex.answers.unbounded_send(Ok(enveloped)).is_err()
-                                    });
+                                    // A hold that ended with the body closed
+                                    // has nothing to send and everything to
+                                    // report, which is the same failure the
+                                    // send below reports for every other ask.
+                                    let closed = answers.is_empty();
+                                    let closed = closed
+                                        || answers.into_iter().any(|answer| {
+                                            let enveloped = connect::envelope(&answer);
+                                            state
+                                                .duplex
+                                                .answers
+                                                .unbounded_send(Ok(enveloped))
+                                                .is_err()
+                                        });
                                     if closed {
                                         // A body nothing holds open cannot
                                         // carry the answer, and an
@@ -621,7 +696,14 @@ fn replay(body: Vec<u8>, cancel: CancellationToken) -> BoxStream<'static, Provid
     events(
         stream::iter([Ok::<Vec<u8>, std::convert::Infallible>(body)]),
         cancel,
-        Duplex { answers, system: None, web_fetch: false, blobs: std::collections::HashMap::new() },
+        Duplex {
+            answers,
+            system: None,
+            web_fetch: false,
+            blobs: std::collections::HashMap::new(),
+            spike: None,
+            beat: None,
+        },
     )
 }
 

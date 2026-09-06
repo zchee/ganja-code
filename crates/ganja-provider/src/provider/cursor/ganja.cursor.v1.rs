@@ -499,6 +499,14 @@ pub struct ClientMessage {
     pub kv_response: ::buffa::MessageField<KvResponse, ::buffa::Inline<KvResponse>>,
     /// Field 5: `exec_control`
     pub exec_control: ::buffa::MessageField<ExecControl, ::buffa::Inline<ExecControl>>,
+    /// W2 SPIKE: the run-level liveness ping, sent every five seconds while the
+    /// body is open (index.js@6200066). Removed with the spike.
+    ///
+    /// Field 7: `client_heartbeat`
+    pub client_heartbeat: ::buffa::MessageField<
+        ClientHeartbeat,
+        ::buffa::Inline<ClientHeartbeat>,
+    >,
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -509,6 +517,7 @@ impl ::core::fmt::Debug for ClientMessage {
             .field("exec_response", &self.exec_response)
             .field("kv_response", &self.kv_response)
             .field("exec_control", &self.exec_control)
+            .field("client_heartbeat", &self.client_heartbeat)
             .finish()
     }
 }
@@ -571,6 +580,14 @@ impl ::buffa::Message for ClientMessage {
                 += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
                     + inner_size as u64;
         }
+        if self.client_heartbeat.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.client_heartbeat.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -612,6 +629,14 @@ impl ::buffa::Message for ClientMessage {
                 buf,
             );
             self.exec_control.write_to(__cache, buf);
+        }
+        if self.client_heartbeat.is_set() {
+            ::buffa::types::put_len_delimited_header(
+                7u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            self.client_heartbeat.write_to(__cache, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -670,6 +695,17 @@ impl ::buffa::Message for ClientMessage {
                     ctx,
                 )?;
             }
+            7u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::Message::merge_length_delimited(
+                    self.client_heartbeat.get_or_insert_default(),
+                    buf,
+                    ctx,
+                )?;
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -682,6 +718,7 @@ impl ::buffa::Message for ClientMessage {
         self.exec_response = ::buffa::MessageField::none();
         self.kv_response = ::buffa::MessageField::none();
         self.exec_control = ::buffa::MessageField::none();
+        self.client_heartbeat = ::buffa::MessageField::none();
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -728,6 +765,17 @@ pub struct RunRequest {
         RequestedModel,
         ::buffa::Inline<RequestedModel>,
     >,
+    /// W2 SPIKE: the client-declared tool roster (index.js@6165910's field 4) and
+    /// the ungated-or-not system-prompt channel (its field 29). Both are absent
+    /// unless `GANJA_CURSOR_SPIKE` is set, and both are removed with the spike.
+    ///
+    /// Field 4: `mcp_tools`
+    pub mcp_tools: ::buffa::MessageField<McpTools, ::buffa::Inline<McpTools>>,
+    /// Field 29: `system_prompt_spec`
+    pub system_prompt_spec: ::buffa::MessageField<
+        SystemPromptSpec,
+        ::buffa::Inline<SystemPromptSpec>,
+    >,
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -738,6 +786,8 @@ impl ::core::fmt::Debug for RunRequest {
             .field("action", &self.action)
             .field("model_details", &self.model_details)
             .field("requested_model", &self.requested_model)
+            .field("mcp_tools", &self.mcp_tools)
+            .field("system_prompt_spec", &self.system_prompt_spec)
             .finish()
     }
 }
@@ -792,12 +842,28 @@ impl ::buffa::Message for RunRequest {
                 += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
                     + inner_size as u64;
         }
+        if self.mcp_tools.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.mcp_tools.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
         if self.requested_model.is_set() {
             let __slot = __cache.reserve();
             let inner_size = self.requested_model.compute_size(__cache);
             __cache.set(__slot, inner_size);
             size
                 += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
+        if self.system_prompt_spec.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.system_prompt_spec.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 2u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
                     + inner_size as u64;
         }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
@@ -834,6 +900,14 @@ impl ::buffa::Message for RunRequest {
             );
             self.model_details.write_to(__cache, buf);
         }
+        if self.mcp_tools.is_set() {
+            ::buffa::types::put_len_delimited_header(
+                4u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            self.mcp_tools.write_to(__cache, buf);
+        }
         if self.requested_model.is_set() {
             ::buffa::types::put_len_delimited_header(
                 9u32,
@@ -841,6 +915,14 @@ impl ::buffa::Message for RunRequest {
                 buf,
             );
             self.requested_model.write_to(__cache, buf);
+        }
+        if self.system_prompt_spec.is_set() {
+            ::buffa::types::put_len_delimited_header(
+                29u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            self.system_prompt_spec.write_to(__cache, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -888,6 +970,17 @@ impl ::buffa::Message for RunRequest {
                     ctx,
                 )?;
             }
+            4u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::Message::merge_length_delimited(
+                    self.mcp_tools.get_or_insert_default(),
+                    buf,
+                    ctx,
+                )?;
+            }
             9u32 => {
                 ::buffa::encoding::check_wire_type(
                     tag,
@@ -895,6 +988,17 @@ impl ::buffa::Message for RunRequest {
                 )?;
                 ::buffa::Message::merge_length_delimited(
                     self.requested_model.get_or_insert_default(),
+                    buf,
+                    ctx,
+                )?;
+            }
+            29u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::Message::merge_length_delimited(
+                    self.system_prompt_spec.get_or_insert_default(),
                     buf,
                     ctx,
                 )?;
@@ -910,7 +1014,9 @@ impl ::buffa::Message for RunRequest {
         self.conversation_state = ::buffa::MessageField::none();
         self.action = ::buffa::MessageField::none();
         self.model_details = ::buffa::MessageField::none();
+        self.mcp_tools = ::buffa::MessageField::none();
         self.requested_model = ::buffa::MessageField::none();
+        self.system_prompt_spec = ::buffa::MessageField::none();
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -3609,6 +3715,23 @@ pub struct McpArgs {
     pub name: ::core::option::Option<::buffa::alloc::string::String>,
     /// Field 3: `tool_call_id`
     pub tool_call_id: ::core::option::Option<::buffa::alloc::string::String>,
+    /// W2 SPIKE, read-only: what the server tells a client about the call it is
+    /// asking for (index.js@6371504). Nothing sends these; the spike logs which
+    /// of them arrived, which is how measurement (a) is read off a log rather
+    /// than guessed at. `args = 2` is deliberately still unmodelled — it is the
+    /// model's argument values, which no log line here may carry. Removed with
+    /// the spike.
+    ///
+    /// Field 4: `provider_identifier`
+    pub provider_identifier: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Field 5: `tool_name`
+    pub tool_name: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Field 7: `smart_mode_approval_only`
+    pub smart_mode_approval_only: ::core::option::Option<bool>,
+    /// Field 8: `skip_approval`
+    pub skip_approval: ::core::option::Option<bool>,
+    /// Field 9: `server_identifier`
+    pub server_identifier: ::core::option::Option<::buffa::alloc::string::String>,
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -3617,6 +3740,11 @@ impl ::core::fmt::Debug for McpArgs {
         f.debug_struct("McpArgs")
             .field("name", &self.name)
             .field("tool_call_id", &self.tool_call_id)
+            .field("provider_identifier", &self.provider_identifier)
+            .field("tool_name", &self.tool_name)
+            .field("smart_mode_approval_only", &self.smart_mode_approval_only)
+            .field("skip_approval", &self.skip_approval)
+            .field("server_identifier", &self.server_identifier)
             .finish()
     }
 }
@@ -3648,6 +3776,50 @@ impl McpArgs {
         self.tool_call_id = Some(value.into());
         self
     }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::provider_identifier`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_provider_identifier(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.provider_identifier = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::tool_name`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_tool_name(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.tool_name = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::smart_mode_approval_only`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_smart_mode_approval_only(mut self, value: bool) -> Self {
+        self.smart_mode_approval_only = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::skip_approval`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_skip_approval(mut self, value: bool) -> Self {
+        self.skip_approval = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::server_identifier`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_server_identifier(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.server_identifier = Some(value.into());
+        self
+    }
 }
 ::buffa::impl_default_instance!(McpArgs);
 impl ::buffa::MessageName for McpArgs {
@@ -3675,6 +3847,21 @@ impl ::buffa::Message for McpArgs {
         if let Some(ref v) = self.tool_call_id {
             size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
         }
+        if let Some(ref v) = self.provider_identifier {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        if let Some(ref v) = self.tool_name {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        if self.smart_mode_approval_only.is_some() {
+            size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
+        }
+        if self.skip_approval.is_some() {
+            size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
+        }
+        if let Some(ref v) = self.server_identifier {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -3690,6 +3877,21 @@ impl ::buffa::Message for McpArgs {
         }
         if let Some(ref v) = self.tool_call_id {
             ::buffa::types::put_string_field(3u32, v, buf);
+        }
+        if let Some(ref v) = self.provider_identifier {
+            ::buffa::types::put_string_field(4u32, v, buf);
+        }
+        if let Some(ref v) = self.tool_name {
+            ::buffa::types::put_string_field(5u32, v, buf);
+        }
+        if let Some(v) = self.smart_mode_approval_only {
+            ::buffa::types::put_bool_field(7u32, v, buf);
+        }
+        if let Some(v) = self.skip_approval {
+            ::buffa::types::put_bool_field(8u32, v, buf);
+        }
+        if let Some(ref v) = self.server_identifier {
+            ::buffa::types::put_string_field(9u32, v, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -3726,6 +3928,60 @@ impl ::buffa::Message for McpArgs {
                     buf,
                 )?;
             }
+            4u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self
+                        .provider_identifier
+                        .get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            5u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self
+                        .tool_name
+                        .get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            7u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.smart_mode_approval_only = ::core::option::Option::Some(
+                    ::buffa::types::decode_bool(buf)?,
+                );
+            }
+            8u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.skip_approval = ::core::option::Option::Some(
+                    ::buffa::types::decode_bool(buf)?,
+                );
+            }
+            9u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self
+                        .server_identifier
+                        .get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -3736,6 +3992,11 @@ impl ::buffa::Message for McpArgs {
     fn clear(&mut self) {
         self.name = ::core::option::Option::None;
         self.tool_call_id = ::core::option::Option::None;
+        self.provider_identifier = ::core::option::Option::None;
+        self.tool_name = ::core::option::Option::None;
+        self.smart_mode_approval_only = ::core::option::Option::None;
+        self.skip_approval = ::core::option::Option::None;
+        self.server_identifier = ::core::option::Option::None;
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -6365,12 +6626,20 @@ impl ::buffa::ExtensionSet for LsRejected {
 pub struct McpResult {
     /// Field 3: `rejected`
     pub rejected: ::buffa::MessageField<McpRejected, ::buffa::Inline<McpRejected>>,
+    /// W2 SPIKE: the arm a served tool answers on, which is the whole of what
+    /// the spike adds to this channel. Removed with the spike.
+    ///
+    /// Field 1: `success`
+    pub success: ::buffa::MessageField<McpSuccess, ::buffa::Inline<McpSuccess>>,
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
 impl ::core::fmt::Debug for McpResult {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
-        f.debug_struct("McpResult").field("rejected", &self.rejected).finish()
+        f.debug_struct("McpResult")
+            .field("rejected", &self.rejected)
+            .field("success", &self.success)
+            .finish()
     }
 }
 impl McpResult {
@@ -6400,6 +6669,14 @@ impl ::buffa::Message for McpResult {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u64;
+        if self.success.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.success.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
         if self.rejected.is_set() {
             let __slot = __cache.reserve();
             let inner_size = self.rejected.compute_size(__cache);
@@ -6418,6 +6695,14 @@ impl ::buffa::Message for McpResult {
     ) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
+        if self.success.is_set() {
+            ::buffa::types::put_len_delimited_header(
+                1u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            self.success.write_to(__cache, buf);
+        }
         if self.rejected.is_set() {
             ::buffa::types::put_len_delimited_header(
                 3u32,
@@ -6439,6 +6724,17 @@ impl ::buffa::Message for McpResult {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::Message::merge_length_delimited(
+                    self.success.get_or_insert_default(),
+                    buf,
+                    ctx,
+                )?;
+            }
             3u32 => {
                 ::buffa::encoding::check_wire_type(
                     tag,
@@ -6458,6 +6754,7 @@ impl ::buffa::Message for McpResult {
         ::core::result::Result::Ok(())
     }
     fn clear(&mut self) {
+        self.success = ::buffa::MessageField::none();
         self.rejected = ::buffa::MessageField::none();
         self.__buffa_unknown_fields.clear();
     }
@@ -6904,6 +7201,12 @@ impl ::buffa::ExtensionSet for FetchError {
 pub struct RequestContext {
     /// Field 16: `cloud_rule`
     pub cloud_rule: ::core::option::Option<::buffa::alloc::string::String>,
+    /// W2 SPIKE: the roster's *second* channel, refreshed on every context answer
+    /// (index.js@6467399's field 7). Empty and therefore absent unless
+    /// `GANJA_CURSOR_SPIKE` is set; removed with the spike.
+    ///
+    /// Field 7: `tools`
+    pub tools: ::buffa::alloc::vec::Vec<McpToolDefinition>,
     /// Field 23: `mcp_file_system_options`
     pub mcp_file_system_options: ::buffa::MessageField<
         McpFileSystemOptions,
@@ -6920,6 +7223,7 @@ impl ::core::fmt::Debug for RequestContext {
     fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
         f.debug_struct("RequestContext")
             .field("cloud_rule", &self.cloud_rule)
+            .field("tools", &self.tools)
             .field("mcp_file_system_options", &self.mcp_file_system_options)
             .field("web_fetch_enabled", &self.web_fetch_enabled)
             .field("read_lints_enabled", &self.read_lints_enabled)
@@ -6979,6 +7283,14 @@ impl ::buffa::Message for RequestContext {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         let mut size = 0u64;
+        for v in &self.tools {
+            let __slot = __cache.reserve();
+            let inner_size = v.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
         if let Some(ref v) = self.cloud_rule {
             size += 2u64 + ::buffa::types::string_encoded_len(v) as u64;
         }
@@ -7006,6 +7318,14 @@ impl ::buffa::Message for RequestContext {
     ) {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
+        for v in &self.tools {
+            ::buffa::types::put_len_delimited_header(
+                7u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            v.write_to(__cache, buf);
+        }
         if let Some(ref v) = self.cloud_rule {
             ::buffa::types::put_string_field(16u32, v, buf);
         }
@@ -7036,6 +7356,18 @@ impl ::buffa::Message for RequestContext {
         #[allow(unused_imports)]
         use ::buffa::Enumeration as _;
         match tag.field_number() {
+            7u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let mut elem = ::core::default::Default::default();
+                ctx.register_element_memory(
+                    ::buffa::__private::element_footprint(&elem),
+                )?;
+                ::buffa::Message::merge_length_delimited(&mut elem, buf, ctx)?;
+                self.tools.push(elem);
+            }
             16u32 => {
                 ::buffa::encoding::check_wire_type(
                     tag,
@@ -7085,6 +7417,7 @@ impl ::buffa::Message for RequestContext {
         ::core::result::Result::Ok(())
     }
     fn clear(&mut self) {
+        self.tools.clear();
         self.cloud_rule = ::core::option::Option::None;
         self.mcp_file_system_options = ::buffa::MessageField::none();
         self.web_fetch_enabled = ::core::option::Option::None;
@@ -7233,6 +7566,12 @@ pub struct ExecControl {
     >,
     /// Field 2: `throw`
     pub throw: ::buffa::MessageField<ExecThrow, ::buffa::Inline<ExecThrow>>,
+    /// W2 SPIKE: the third arm, which the comment above records this build never
+    /// needing — because it never held an exec open. Measurement (b') is exactly
+    /// that state. Removed with the spike.
+    ///
+    /// Field 3: `heartbeat`
+    pub heartbeat: ::buffa::MessageField<ExecHeartbeat, ::buffa::Inline<ExecHeartbeat>>,
     #[doc(hidden)]
     pub __buffa_unknown_fields: ::buffa::UnknownFields,
 }
@@ -7241,6 +7580,7 @@ impl ::core::fmt::Debug for ExecControl {
         f.debug_struct("ExecControl")
             .field("stream_close", &self.stream_close)
             .field("throw", &self.throw)
+            .field("heartbeat", &self.heartbeat)
             .finish()
     }
 }
@@ -7287,6 +7627,14 @@ impl ::buffa::Message for ExecControl {
                 += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
                     + inner_size as u64;
         }
+        if self.heartbeat.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.heartbeat.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
         size += self.__buffa_unknown_fields.encoded_len() as u64;
         ::buffa::saturate_size(size)
     }
@@ -7312,6 +7660,14 @@ impl ::buffa::Message for ExecControl {
                 buf,
             );
             self.throw.write_to(__cache, buf);
+        }
+        if self.heartbeat.is_set() {
+            ::buffa::types::put_len_delimited_header(
+                3u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            self.heartbeat.write_to(__cache, buf);
         }
         self.__buffa_unknown_fields.write_to(buf);
     }
@@ -7348,6 +7704,17 @@ impl ::buffa::Message for ExecControl {
                     ctx,
                 )?;
             }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::Message::merge_length_delimited(
+                    self.heartbeat.get_or_insert_default(),
+                    buf,
+                    ctx,
+                )?;
+            }
             _ => {
                 self.__buffa_unknown_fields
                     .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
@@ -7358,6 +7725,7 @@ impl ::buffa::Message for ExecControl {
     fn clear(&mut self) {
         self.stream_close = ::buffa::MessageField::none();
         self.throw = ::buffa::MessageField::none();
+        self.heartbeat = ::buffa::MessageField::none();
         self.__buffa_unknown_fields.clear();
     }
 }
@@ -8443,6 +8811,1770 @@ impl ::buffa::ExtensionSet for SetBlobResult {
         &mut self.__buffa_unknown_fields
     }
 }
+/// ---------------------------------------------------------------------------
+/// W2 SPIKE SCAFFOLDING — measurement only, removed in W3a or W4.
+///
+/// Everything below this line exists to settle five facts about cursor's MCP
+/// tool channel that no bundle read can answer, and is deleted with the spike
+/// (`.omc/plans/2026-09-04-cursor-tool-bridge.md`, W2 step 6). It is reachable
+/// only when `GANJA_CURSOR_SPIKE` is set: with the flag unset nothing here is
+/// encoded, which the send-side test in `request_tests.rs` pins by field number.
+///
+/// Every number below was re-derived from the `2026.09.02-c22c1a3` bundle's own
+/// descriptors before it was written — the byte offsets are that bundle's, per
+/// the header's citation note — rather than copied from the research note, so a
+/// wrong number is a wrong reading of the bundle rather than a stale quote.
+/// ---------------------------------------------------------------------------
+///
+/// The client-declared tool roster, which the shipped client fills on the run
+/// request itself (index.js@4574466): AgentRunRequest.mcp_tools = 4, of type
+/// McpTools (index.js@6389679), whose whole content is the repeated definition
+/// at field 1. Declared before the first token, so it does not depend on
+/// winning the request_context_args race.
+#[derive(Clone, PartialEq, Default)]
+pub struct McpTools {
+    /// Field 1: `mcp_tools`
+    pub mcp_tools: ::buffa::alloc::vec::Vec<McpToolDefinition>,
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for McpTools {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("McpTools").field("mcp_tools", &self.mcp_tools).finish()
+    }
+}
+impl McpTools {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.McpTools";
+}
+::buffa::impl_default_instance!(McpTools);
+impl ::buffa::MessageName for McpTools {
+    const PACKAGE: &'static str = "ganja.cursor.v1";
+    const NAME: &'static str = "McpTools";
+    const FULL_NAME: &'static str = "ganja.cursor.v1.McpTools";
+    const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.McpTools";
+}
+impl ::buffa::Message for McpTools {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        for v in &self.mcp_tools {
+            let __slot = __cache.reserve();
+            let inner_size = v.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        __cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        for v in &self.mcp_tools {
+            ::buffa::types::put_len_delimited_header(
+                1u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            v.write_to(__cache, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let mut elem = ::core::default::Default::default();
+                ctx.register_element_memory(
+                    ::buffa::__private::element_footprint(&elem),
+                )?;
+                ::buffa::Message::merge_length_delimited(&mut elem, buf, ctx)?;
+                self.mcp_tools.push(elem);
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.mcp_tools.clear();
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for McpTools {
+    const PROTO_FQN: &'static str = "ganja.cursor.v1.McpTools";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+/// One declared tool (index.js@6389002). The schema travels on **either**
+/// input_schema = 3, a google.protobuf.Value, **or** input_schema_json = 6, the
+/// same schema as a JSON string — the shipped client's own builder picks one
+/// (index.js@5699717), which is exactly why measurement (e) fills them one at a
+/// time. Both are modelled because the spike must be able to send either.
+#[derive(Clone, PartialEq, Default)]
+pub struct McpToolDefinition {
+    /// Field 1: `name`
+    pub name: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Field 2: `description`
+    pub description: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Field 3: `input_schema`
+    pub input_schema: ::buffa::MessageField<JsonValue, ::buffa::Inline<JsonValue>>,
+    /// Field 4: `provider_identifier`
+    pub provider_identifier: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Field 5: `tool_name`
+    pub tool_name: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Field 6: `input_schema_json`
+    pub input_schema_json: ::core::option::Option<::buffa::alloc::string::String>,
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for McpToolDefinition {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("McpToolDefinition")
+            .field("name", &self.name)
+            .field("description", &self.description)
+            .field("input_schema", &self.input_schema)
+            .field("provider_identifier", &self.provider_identifier)
+            .field("tool_name", &self.tool_name)
+            .field("input_schema_json", &self.input_schema_json)
+            .finish()
+    }
+}
+impl McpToolDefinition {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.McpToolDefinition";
+}
+impl McpToolDefinition {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::name`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_name(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.name = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::description`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_description(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.description = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::provider_identifier`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_provider_identifier(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.provider_identifier = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::tool_name`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_tool_name(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.tool_name = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::input_schema_json`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_input_schema_json(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.input_schema_json = Some(value.into());
+        self
+    }
+}
+::buffa::impl_default_instance!(McpToolDefinition);
+impl ::buffa::MessageName for McpToolDefinition {
+    const PACKAGE: &'static str = "ganja.cursor.v1";
+    const NAME: &'static str = "McpToolDefinition";
+    const FULL_NAME: &'static str = "ganja.cursor.v1.McpToolDefinition";
+    const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.McpToolDefinition";
+}
+impl ::buffa::Message for McpToolDefinition {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(ref v) = self.name {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        if let Some(ref v) = self.description {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        if self.input_schema.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.input_schema.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
+        if let Some(ref v) = self.provider_identifier {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        if let Some(ref v) = self.tool_name {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        if let Some(ref v) = self.input_schema_json {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        __cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.name {
+            ::buffa::types::put_string_field(1u32, v, buf);
+        }
+        if let Some(ref v) = self.description {
+            ::buffa::types::put_string_field(2u32, v, buf);
+        }
+        if self.input_schema.is_set() {
+            ::buffa::types::put_len_delimited_header(
+                3u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            self.input_schema.write_to(__cache, buf);
+        }
+        if let Some(ref v) = self.provider_identifier {
+            ::buffa::types::put_string_field(4u32, v, buf);
+        }
+        if let Some(ref v) = self.tool_name {
+            ::buffa::types::put_string_field(5u32, v, buf);
+        }
+        if let Some(ref v) = self.input_schema_json {
+            ::buffa::types::put_string_field(6u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self.name.get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self
+                        .description
+                        .get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::Message::merge_length_delimited(
+                    self.input_schema.get_or_insert_default(),
+                    buf,
+                    ctx,
+                )?;
+            }
+            4u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self
+                        .provider_identifier
+                        .get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            5u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self
+                        .tool_name
+                        .get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            6u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self
+                        .input_schema_json
+                        .get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.name = ::core::option::Option::None;
+        self.description = ::core::option::Option::None;
+        self.input_schema = ::buffa::MessageField::none();
+        self.provider_identifier = ::core::option::Option::None;
+        self.tool_name = ::core::option::Option::None;
+        self.input_schema_json = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for McpToolDefinition {
+    const PROTO_FQN: &'static str = "ganja.cursor.v1.McpToolDefinition";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+/// `google.protobuf.Value` (index.js@3928104), flattened the way every oneof in
+/// this file is: same numbers, same types, identical on the wire. Modelled here
+/// rather than imported because `buffa` ships no pre-generated well-known types
+/// — it is codegen-only — so an import would add a second generated file and a
+/// second drift surface for a message this build needs six fields of.
+///
+/// null_value = 1 is declared an enum in the descriptor; an enum and an int32
+/// are the same varint on the wire, and `google.protobuf.NullValue` has exactly
+/// one member (0), so nothing is lost by spelling it as the number it is.
+///
+/// Total over `serde_json::Value` on purpose: an encoder that silently dropped
+/// arrays would make a malformed schema look like a server-side refusal, which
+/// is the one confusion measurement (e) cannot afford.
+#[derive(Clone, PartialEq, Default)]
+pub struct JsonValue {
+    /// Field 1: `null_value`
+    pub null_value: ::core::option::Option<i32>,
+    /// Field 2: `number_value`
+    pub number_value: ::core::option::Option<f64>,
+    /// Field 3: `string_value`
+    pub string_value: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Field 4: `bool_value`
+    pub bool_value: ::core::option::Option<bool>,
+    /// Field 5: `struct_value`
+    pub struct_value: ::buffa::MessageField<JsonStruct, ::buffa::Inline<JsonStruct>>,
+    /// Field 6: `list_value`
+    pub list_value: ::buffa::MessageField<JsonList, ::buffa::Inline<JsonList>>,
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for JsonValue {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("JsonValue")
+            .field("null_value", &self.null_value)
+            .field("number_value", &self.number_value)
+            .field("string_value", &self.string_value)
+            .field("bool_value", &self.bool_value)
+            .field("struct_value", &self.struct_value)
+            .field("list_value", &self.list_value)
+            .finish()
+    }
+}
+impl JsonValue {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.JsonValue";
+}
+impl JsonValue {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::null_value`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_null_value(mut self, value: i32) -> Self {
+        self.null_value = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::number_value`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_number_value(mut self, value: f64) -> Self {
+        self.number_value = Some(value);
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::string_value`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_string_value(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.string_value = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::bool_value`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_bool_value(mut self, value: bool) -> Self {
+        self.bool_value = Some(value);
+        self
+    }
+}
+::buffa::impl_default_instance!(JsonValue);
+impl ::buffa::MessageName for JsonValue {
+    const PACKAGE: &'static str = "ganja.cursor.v1";
+    const NAME: &'static str = "JsonValue";
+    const FULL_NAME: &'static str = "ganja.cursor.v1.JsonValue";
+    const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.JsonValue";
+}
+impl ::buffa::Message for JsonValue {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(v) = self.null_value {
+            size += 1u64 + ::buffa::types::int32_encoded_len(v) as u64;
+        }
+        if self.number_value.is_some() {
+            size += 1u64 + ::buffa::types::FIXED64_ENCODED_LEN as u64;
+        }
+        if let Some(ref v) = self.string_value {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        if self.bool_value.is_some() {
+            size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
+        }
+        if self.struct_value.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.struct_value.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
+        if self.list_value.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.list_value.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        __cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(v) = self.null_value {
+            ::buffa::types::put_int32_field(1u32, v, buf);
+        }
+        if let Some(v) = self.number_value {
+            ::buffa::types::put_double_field(2u32, v, buf);
+        }
+        if let Some(ref v) = self.string_value {
+            ::buffa::types::put_string_field(3u32, v, buf);
+        }
+        if let Some(v) = self.bool_value {
+            ::buffa::types::put_bool_field(4u32, v, buf);
+        }
+        if self.struct_value.is_set() {
+            ::buffa::types::put_len_delimited_header(
+                5u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            self.struct_value.write_to(__cache, buf);
+        }
+        if self.list_value.is_set() {
+            ::buffa::types::put_len_delimited_header(
+                6u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            self.list_value.write_to(__cache, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.null_value = ::core::option::Option::Some(
+                    ::buffa::types::decode_int32(buf)?,
+                );
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Fixed64,
+                )?;
+                self.number_value = ::core::option::Option::Some(
+                    ::buffa::types::decode_double(buf)?,
+                );
+            }
+            3u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self
+                        .string_value
+                        .get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            4u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.bool_value = ::core::option::Option::Some(
+                    ::buffa::types::decode_bool(buf)?,
+                );
+            }
+            5u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::Message::merge_length_delimited(
+                    self.struct_value.get_or_insert_default(),
+                    buf,
+                    ctx,
+                )?;
+            }
+            6u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::Message::merge_length_delimited(
+                    self.list_value.get_or_insert_default(),
+                    buf,
+                    ctx,
+                )?;
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.null_value = ::core::option::Option::None;
+        self.number_value = ::core::option::Option::None;
+        self.string_value = ::core::option::Option::None;
+        self.bool_value = ::core::option::Option::None;
+        self.struct_value = ::buffa::MessageField::none();
+        self.list_value = ::buffa::MessageField::none();
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for JsonValue {
+    const PROTO_FQN: &'static str = "ganja.cursor.v1.JsonValue";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+/// `google.protobuf.Struct` (index.js@3926700) is `map\<string, Value\> fields =
+/// 1`, and a protobuf map *is* a repeated entry message with key = 1 and
+/// value = 2 — so this spelling is byte-identical to the map and, unlike a map,
+/// preserves the order it was built in. That determinism is what lets a test
+/// assert the declaration's bytes rather than assert around a HashMap.
+#[derive(Clone, PartialEq, Default)]
+pub struct JsonStruct {
+    /// Field 1: `fields`
+    pub fields: ::buffa::alloc::vec::Vec<JsonField>,
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for JsonStruct {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("JsonStruct").field("fields", &self.fields).finish()
+    }
+}
+impl JsonStruct {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.JsonStruct";
+}
+::buffa::impl_default_instance!(JsonStruct);
+impl ::buffa::MessageName for JsonStruct {
+    const PACKAGE: &'static str = "ganja.cursor.v1";
+    const NAME: &'static str = "JsonStruct";
+    const FULL_NAME: &'static str = "ganja.cursor.v1.JsonStruct";
+    const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.JsonStruct";
+}
+impl ::buffa::Message for JsonStruct {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        for v in &self.fields {
+            let __slot = __cache.reserve();
+            let inner_size = v.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        __cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        for v in &self.fields {
+            ::buffa::types::put_len_delimited_header(
+                1u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            v.write_to(__cache, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let mut elem = ::core::default::Default::default();
+                ctx.register_element_memory(
+                    ::buffa::__private::element_footprint(&elem),
+                )?;
+                ::buffa::Message::merge_length_delimited(&mut elem, buf, ctx)?;
+                self.fields.push(elem);
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.fields.clear();
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for JsonStruct {
+    const PROTO_FQN: &'static str = "ganja.cursor.v1.JsonStruct";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+/// One entry of that map: the synthesized MapEntry protobuf generates for it.
+#[derive(Clone, PartialEq, Default)]
+pub struct JsonField {
+    /// Field 1: `key`
+    pub key: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Field 2: `value`
+    pub value: ::buffa::MessageField<JsonValue, ::buffa::Inline<JsonValue>>,
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for JsonField {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("JsonField")
+            .field("key", &self.key)
+            .field("value", &self.value)
+            .finish()
+    }
+}
+impl JsonField {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.JsonField";
+}
+impl JsonField {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::key`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_key(mut self, value: impl Into<::buffa::alloc::string::String>) -> Self {
+        self.key = Some(value.into());
+        self
+    }
+}
+::buffa::impl_default_instance!(JsonField);
+impl ::buffa::MessageName for JsonField {
+    const PACKAGE: &'static str = "ganja.cursor.v1";
+    const NAME: &'static str = "JsonField";
+    const FULL_NAME: &'static str = "ganja.cursor.v1.JsonField";
+    const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.JsonField";
+}
+impl ::buffa::Message for JsonField {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(ref v) = self.key {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        if self.value.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.value.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        __cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.key {
+            ::buffa::types::put_string_field(1u32, v, buf);
+        }
+        if self.value.is_set() {
+            ::buffa::types::put_len_delimited_header(
+                2u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            self.value.write_to(__cache, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self.key.get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::Message::merge_length_delimited(
+                    self.value.get_or_insert_default(),
+                    buf,
+                    ctx,
+                )?;
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.key = ::core::option::Option::None;
+        self.value = ::buffa::MessageField::none();
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for JsonField {
+    const PROTO_FQN: &'static str = "ganja.cursor.v1.JsonField";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+/// `google.protobuf.ListValue` (index.js@3929084).
+#[derive(Clone, PartialEq, Default)]
+pub struct JsonList {
+    /// Field 1: `values`
+    pub values: ::buffa::alloc::vec::Vec<JsonValue>,
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for JsonList {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("JsonList").field("values", &self.values).finish()
+    }
+}
+impl JsonList {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.JsonList";
+}
+::buffa::impl_default_instance!(JsonList);
+impl ::buffa::MessageName for JsonList {
+    const PACKAGE: &'static str = "ganja.cursor.v1";
+    const NAME: &'static str = "JsonList";
+    const FULL_NAME: &'static str = "ganja.cursor.v1.JsonList";
+    const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.JsonList";
+}
+impl ::buffa::Message for JsonList {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        for v in &self.values {
+            let __slot = __cache.reserve();
+            let inner_size = v.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        __cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        for v in &self.values {
+            ::buffa::types::put_len_delimited_header(
+                1u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            v.write_to(__cache, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let mut elem = ::core::default::Default::default();
+                ctx.register_element_memory(
+                    ::buffa::__private::element_footprint(&elem),
+                )?;
+                ::buffa::Message::merge_length_delimited(&mut elem, buf, ctx)?;
+                self.values.push(elem);
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.values.clear();
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for JsonList {
+    const PROTO_FQN: &'static str = "ganja.cursor.v1.JsonList";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+/// The run-level liveness ping the client sends while its request body is open:
+/// AgentClientMessage.client_heartbeat = 7 (index.js@6200066), of type
+/// ClientHeartbeat (index.js@6197181), which carries nothing — the arrival is
+/// the whole message, exactly like the server's own Heartbeat above.
+#[derive(Clone, PartialEq, Default)]
+pub struct ClientHeartbeat {
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for ClientHeartbeat {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("ClientHeartbeat").finish()
+    }
+}
+impl ClientHeartbeat {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.ClientHeartbeat";
+}
+::buffa::impl_default_instance!(ClientHeartbeat);
+impl ::buffa::MessageName for ClientHeartbeat {
+    const PACKAGE: &'static str = "ganja.cursor.v1";
+    const NAME: &'static str = "ClientHeartbeat";
+    const FULL_NAME: &'static str = "ganja.cursor.v1.ClientHeartbeat";
+    const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.ClientHeartbeat";
+}
+impl ::buffa::Message for ClientHeartbeat {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for ClientHeartbeat {
+    const PROTO_FQN: &'static str = "ganja.cursor.v1.ClientHeartbeat";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+/// The *exec*-level liveness ping, the third arm of the control channel this
+/// file already models two arms of: ExecClientControlMessage.heartbeat = 3
+/// (index.js@6299362), of type ExecClientHeartbeat (index.js@6298918), whose
+/// id = 1 is the exec's, not the stream's. The shipped client sends one every
+/// three seconds while a handler is actually running (index.js@4272747) — the
+/// state D486 said this build never enters, and the state a deliberate pause
+/// puts it in for the first time.
+#[derive(Clone, PartialEq, Default)]
+pub struct ExecHeartbeat {
+    /// Field 1: `id`
+    pub id: ::core::option::Option<u32>,
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for ExecHeartbeat {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("ExecHeartbeat").field("id", &self.id).finish()
+    }
+}
+impl ExecHeartbeat {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.ExecHeartbeat";
+}
+impl ExecHeartbeat {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::id`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_id(mut self, value: u32) -> Self {
+        self.id = Some(value);
+        self
+    }
+}
+::buffa::impl_default_instance!(ExecHeartbeat);
+impl ::buffa::MessageName for ExecHeartbeat {
+    const PACKAGE: &'static str = "ganja.cursor.v1";
+    const NAME: &'static str = "ExecHeartbeat";
+    const FULL_NAME: &'static str = "ganja.cursor.v1.ExecHeartbeat";
+    const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.ExecHeartbeat";
+}
+impl ::buffa::Message for ExecHeartbeat {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(v) = self.id {
+            size += 1u64 + ::buffa::types::uint32_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(v) = self.id {
+            ::buffa::types::put_uint32_field(1u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.id = ::core::option::Option::Some(
+                    ::buffa::types::decode_uint32(buf)?,
+                );
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.id = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for ExecHeartbeat {
+    const PROTO_FQN: &'static str = "ganja.cursor.v1.ExecHeartbeat";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+/// The system-prompt channel that is *not* the allowlist-gated
+/// custom_system_prompt = 8: AgentRunRequest.system_prompt_spec = 29, of type
+/// SystemPromptSpec (index.js@6580696), whose whole oneof is two **string**
+/// arms — replace = 1 and append = 2. Whether these are gated the way
+/// custom_system_prompt was is measurement (d); only append is ever sent,
+/// because a replace would discard the prompt cloud_rule already carries.
+#[derive(Clone, PartialEq, Default)]
+pub struct SystemPromptSpec {
+    /// Field 1: `replace`
+    pub replace: ::core::option::Option<::buffa::alloc::string::String>,
+    /// Field 2: `append`
+    pub append: ::core::option::Option<::buffa::alloc::string::String>,
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for SystemPromptSpec {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("SystemPromptSpec")
+            .field("replace", &self.replace)
+            .field("append", &self.append)
+            .finish()
+    }
+}
+impl SystemPromptSpec {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.SystemPromptSpec";
+}
+impl SystemPromptSpec {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::replace`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_replace(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.replace = Some(value.into());
+        self
+    }
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::append`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_append(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.append = Some(value.into());
+        self
+    }
+}
+::buffa::impl_default_instance!(SystemPromptSpec);
+impl ::buffa::MessageName for SystemPromptSpec {
+    const PACKAGE: &'static str = "ganja.cursor.v1";
+    const NAME: &'static str = "SystemPromptSpec";
+    const FULL_NAME: &'static str = "ganja.cursor.v1.SystemPromptSpec";
+    const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.SystemPromptSpec";
+}
+impl ::buffa::Message for SystemPromptSpec {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(ref v) = self.replace {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        if let Some(ref v) = self.append {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.replace {
+            ::buffa::types::put_string_field(1u32, v, buf);
+        }
+        if let Some(ref v) = self.append {
+            ::buffa::types::put_string_field(2u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self.replace.get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self.append.get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.replace = ::core::option::Option::None;
+        self.append = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for SystemPromptSpec {
+    const PROTO_FQN: &'static str = "ganja.cursor.v1.SystemPromptSpec";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+/// The success arm of the MCP answer this file already models the rejection of:
+/// McpResult.success = 1 (index.js@6372351), of type McpSuccess
+/// (index.js@6376081) — content = 1 repeated, is_error = 2. Its
+/// structured_content = 3 is not modelled: the spike answers one word.
+#[derive(Clone, PartialEq, Default)]
+pub struct McpSuccess {
+    /// Field 1: `content`
+    pub content: ::buffa::alloc::vec::Vec<McpContentItem>,
+    /// Field 2: `is_error`
+    pub is_error: ::core::option::Option<bool>,
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for McpSuccess {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("McpSuccess")
+            .field("content", &self.content)
+            .field("is_error", &self.is_error)
+            .finish()
+    }
+}
+impl McpSuccess {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.McpSuccess";
+}
+impl McpSuccess {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::is_error`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_is_error(mut self, value: bool) -> Self {
+        self.is_error = Some(value);
+        self
+    }
+}
+::buffa::impl_default_instance!(McpSuccess);
+impl ::buffa::MessageName for McpSuccess {
+    const PACKAGE: &'static str = "ganja.cursor.v1";
+    const NAME: &'static str = "McpSuccess";
+    const FULL_NAME: &'static str = "ganja.cursor.v1.McpSuccess";
+    const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.McpSuccess";
+}
+impl ::buffa::Message for McpSuccess {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        for v in &self.content {
+            let __slot = __cache.reserve();
+            let inner_size = v.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
+        if self.is_error.is_some() {
+            size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        __cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        for v in &self.content {
+            ::buffa::types::put_len_delimited_header(
+                1u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            v.write_to(__cache, buf);
+        }
+        if let Some(v) = self.is_error {
+            ::buffa::types::put_bool_field(2u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                let mut elem = ::core::default::Default::default();
+                ctx.register_element_memory(
+                    ::buffa::__private::element_footprint(&elem),
+                )?;
+                ::buffa::Message::merge_length_delimited(&mut elem, buf, ctx)?;
+                self.content.push(elem);
+            }
+            2u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::Varint,
+                )?;
+                self.is_error = ::core::option::Option::Some(
+                    ::buffa::types::decode_bool(buf)?,
+                );
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.content.clear();
+        self.is_error = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for McpSuccess {
+    const PROTO_FQN: &'static str = "ganja.cursor.v1.McpSuccess";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+/// One item of that content (McpToolResultContentItem, index.js@6375554),
+/// narrowed to text = 1; the image arm beside it is a payload this spike has no
+/// reason to produce.
+#[derive(Clone, PartialEq, Default)]
+pub struct McpContentItem {
+    /// Field 1: `text`
+    pub text: ::buffa::MessageField<McpTextContent, ::buffa::Inline<McpTextContent>>,
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for McpContentItem {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("McpContentItem").field("text", &self.text).finish()
+    }
+}
+impl McpContentItem {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.McpContentItem";
+}
+::buffa::impl_default_instance!(McpContentItem);
+impl ::buffa::MessageName for McpContentItem {
+    const PACKAGE: &'static str = "ganja.cursor.v1";
+    const NAME: &'static str = "McpContentItem";
+    const FULL_NAME: &'static str = "ganja.cursor.v1.McpContentItem";
+    const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.McpContentItem";
+}
+impl ::buffa::Message for McpContentItem {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if self.text.is_set() {
+            let __slot = __cache.reserve();
+            let inner_size = self.text.compute_size(__cache);
+            __cache.set(__slot, inner_size);
+            size
+                += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                    + inner_size as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        __cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if self.text.is_set() {
+            ::buffa::types::put_len_delimited_header(
+                1u32,
+                u64::from(__cache.consume_next()),
+                buf,
+            );
+            self.text.write_to(__cache, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::Message::merge_length_delimited(
+                    self.text.get_or_insert_default(),
+                    buf,
+                    ctx,
+                )?;
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.text = ::buffa::MessageField::none();
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for McpContentItem {
+    const PROTO_FQN: &'static str = "ganja.cursor.v1.McpContentItem";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
+/// index.js@6374553: text = 1, beside an output_location = 2 that names where a
+/// large result was spilled — which a one-word answer never needs.
+#[derive(Clone, PartialEq, Default)]
+pub struct McpTextContent {
+    /// Field 1: `text`
+    pub text: ::core::option::Option<::buffa::alloc::string::String>,
+    #[doc(hidden)]
+    pub __buffa_unknown_fields: ::buffa::UnknownFields,
+}
+impl ::core::fmt::Debug for McpTextContent {
+    fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+        f.debug_struct("McpTextContent").field("text", &self.text).finish()
+    }
+}
+impl McpTextContent {
+    /// Protobuf type URL for this message, for use with `Any::pack` and
+    /// `Any::unpack_if`.
+    ///
+    /// Format: `type.googleapis.com/<fully.qualified.TypeName>`
+    pub const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.McpTextContent";
+}
+impl McpTextContent {
+    #[must_use = "with_* setters return `self` by value; assign or chain the result"]
+    #[inline]
+    ///Sets [`Self::text`] to `Some(value)`, consuming and returning `self`.
+    pub fn with_text(
+        mut self,
+        value: impl Into<::buffa::alloc::string::String>,
+    ) -> Self {
+        self.text = Some(value.into());
+        self
+    }
+}
+::buffa::impl_default_instance!(McpTextContent);
+impl ::buffa::MessageName for McpTextContent {
+    const PACKAGE: &'static str = "ganja.cursor.v1";
+    const NAME: &'static str = "McpTextContent";
+    const FULL_NAME: &'static str = "ganja.cursor.v1.McpTextContent";
+    const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.McpTextContent";
+}
+impl ::buffa::Message for McpTextContent {
+    /// Returns the total encoded size in bytes.
+    ///
+    /// Accumulates in `u64` (which cannot overflow for in-memory
+    /// data) and saturates to `u32` at return, so a message whose
+    /// encoded size exceeds the 2 GiB protobuf limit yields a value
+    /// above [`::buffa::MAX_MESSAGE_BYTES`] that the encode entry
+    /// points reject, never a silently wrapped size.
+    #[allow(clippy::let_and_return)]
+    fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        let mut size = 0u64;
+        if let Some(ref v) = self.text {
+            size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+        }
+        size += self.__buffa_unknown_fields.encoded_len() as u64;
+        ::buffa::saturate_size(size)
+    }
+    fn write_to(
+        &self,
+        _cache: &mut ::buffa::SizeCache,
+        buf: &mut impl ::buffa::EncodeSink,
+    ) {
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        if let Some(ref v) = self.text {
+            ::buffa::types::put_string_field(1u32, v, buf);
+        }
+        self.__buffa_unknown_fields.write_to(buf);
+    }
+    fn merge_field(
+        &mut self,
+        tag: ::buffa::encoding::Tag,
+        buf: &mut impl ::buffa::bytes::Buf,
+        ctx: ::buffa::DecodeContext<'_>,
+    ) -> ::core::result::Result<(), ::buffa::DecodeError> {
+        #[allow(unused_imports)]
+        use ::buffa::bytes::Buf as _;
+        #[allow(unused_imports)]
+        use ::buffa::Enumeration as _;
+        match tag.field_number() {
+            1u32 => {
+                ::buffa::encoding::check_wire_type(
+                    tag,
+                    ::buffa::encoding::WireType::LengthDelimited,
+                )?;
+                ::buffa::types::merge_string(
+                    self.text.get_or_insert_with(::buffa::alloc::string::String::new),
+                    buf,
+                )?;
+            }
+            _ => {
+                self.__buffa_unknown_fields
+                    .push(::buffa::encoding::decode_unknown_field(tag, buf, ctx)?);
+            }
+        }
+        ::core::result::Result::Ok(())
+    }
+    fn clear(&mut self) {
+        self.text = ::core::option::Option::None;
+        self.__buffa_unknown_fields.clear();
+    }
+}
+impl ::buffa::ExtensionSet for McpTextContent {
+    const PROTO_FQN: &'static str = "ganja.cursor.v1.McpTextContent";
+    fn unknown_fields(&self) -> &::buffa::UnknownFields {
+        &self.__buffa_unknown_fields
+    }
+    fn unknown_fields_mut(&mut self) -> &mut ::buffa::UnknownFields {
+        &mut self.__buffa_unknown_fields
+    }
+}
 #[allow(
     non_camel_case_types,
     dead_code,
@@ -9363,6 +11495,13 @@ pub mod __buffa {
             pub exec_control: ::buffa::MessageFieldView<
                 super::super::__buffa::view::ExecControlView<'a>,
             >,
+            /// W2 SPIKE: the run-level liveness ping, sent every five seconds while the
+            /// body is open (index.js@6200066). Removed with the spike.
+            ///
+            /// Field 7: `client_heartbeat`
+            pub client_heartbeat: ::buffa::MessageFieldView<
+                super::super::__buffa::view::ClientHeartbeatView<'a>,
+            >,
             pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
         }
         impl<'a> ::buffa::MessageView<'a> for ClientMessageView<'a> {
@@ -9501,6 +11640,31 @@ pub mod __buffa {
                             }
                         }
                     }
+                    7u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        match view.client_heartbeat.as_mut() {
+                            Some(existing) => {
+                                ::buffa::MessageView::merge_into_view(
+                                    existing,
+                                    sub,
+                                    __sub_ctx,
+                                )?
+                            }
+                            None => {
+                                view.client_heartbeat = ::buffa::MessageFieldView::set(
+                                    <super::super::__buffa::view::ClientHeartbeatView as ::buffa::MessageView>::decode_view_ctx(
+                                        sub,
+                                        __sub_ctx,
+                                    )?,
+                                );
+                            }
+                        }
+                    }
                     _ => {
                         ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
                         let span_len = before_tag.len() - cur.len();
@@ -9566,6 +11730,15 @@ pub mod __buffa {
                         }
                         None => ::buffa::MessageField::none(),
                     },
+                    client_heartbeat: match self.client_heartbeat.as_option() {
+                        Some(v) => {
+                            ::buffa::MessageField::<
+                                super::super::ClientHeartbeat,
+                                ::buffa::Inline<super::super::ClientHeartbeat>,
+                            >::some(v.to_owned_from_source(__buffa_src)?)
+                        }
+                        None => ::buffa::MessageField::none(),
+                    },
                     __buffa_unknown_fields: self
                         .__buffa_unknown_fields
                         .to_owned()?
@@ -9607,6 +11780,14 @@ pub mod __buffa {
                 if self.exec_control.is_set() {
                     let __slot = __cache.reserve();
                     let inner_size = self.exec_control.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                            + inner_size as u64;
+                }
+                if self.client_heartbeat.is_set() {
+                    let __slot = __cache.reserve();
+                    let inner_size = self.client_heartbeat.compute_size(__cache);
                     __cache.set(__slot, inner_size);
                     size
                         += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
@@ -9654,6 +11835,14 @@ pub mod __buffa {
                         buf,
                     );
                     self.exec_control.write_to(__cache, buf);
+                }
+                if self.client_heartbeat.is_set() {
+                    ::buffa::types::put_len_delimited_header(
+                        7u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    self.client_heartbeat.write_to(__cache, buf);
                 }
                 self.__buffa_unknown_fields.write_to(buf);
             }
@@ -9786,6 +11975,18 @@ pub mod __buffa {
             > {
                 &self.0.reborrow().exec_control
             }
+            /// W2 SPIKE: the run-level liveness ping, sent every five seconds while the
+            /// body is open (index.js@6200066). Removed with the spike.
+            ///
+            /// Field 7: `client_heartbeat`
+            #[must_use]
+            pub fn client_heartbeat(
+                &self,
+            ) -> &::buffa::MessageFieldView<
+                super::super::__buffa::view::ClientHeartbeatView<'_>,
+            > {
+                &self.0.reborrow().client_heartbeat
+            }
         }
         impl ::core::convert::From<::buffa::OwnedView<ClientMessageView<'static>>>
         for ClientMessageOwnedView {
@@ -9841,6 +12042,18 @@ pub mod __buffa {
             /// Field 9: `requested_model`
             pub requested_model: ::buffa::MessageFieldView<
                 super::super::__buffa::view::RequestedModelView<'a>,
+            >,
+            /// W2 SPIKE: the client-declared tool roster (index.js@6165910's field 4) and
+            /// the ungated-or-not system-prompt channel (its field 29). Both are absent
+            /// unless `GANJA_CURSOR_SPIKE` is set, and both are removed with the spike.
+            ///
+            /// Field 4: `mcp_tools`
+            pub mcp_tools: ::buffa::MessageFieldView<
+                super::super::__buffa::view::McpToolsView<'a>,
+            >,
+            /// Field 29: `system_prompt_spec`
+            pub system_prompt_spec: ::buffa::MessageFieldView<
+                super::super::__buffa::view::SystemPromptSpecView<'a>,
             >,
             pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
         }
@@ -9980,6 +12193,56 @@ pub mod __buffa {
                             }
                         }
                     }
+                    4u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        match view.mcp_tools.as_mut() {
+                            Some(existing) => {
+                                ::buffa::MessageView::merge_into_view(
+                                    existing,
+                                    sub,
+                                    __sub_ctx,
+                                )?
+                            }
+                            None => {
+                                view.mcp_tools = ::buffa::MessageFieldView::set(
+                                    <super::super::__buffa::view::McpToolsView as ::buffa::MessageView>::decode_view_ctx(
+                                        sub,
+                                        __sub_ctx,
+                                    )?,
+                                );
+                            }
+                        }
+                    }
+                    29u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        match view.system_prompt_spec.as_mut() {
+                            Some(existing) => {
+                                ::buffa::MessageView::merge_into_view(
+                                    existing,
+                                    sub,
+                                    __sub_ctx,
+                                )?
+                            }
+                            None => {
+                                view.system_prompt_spec = ::buffa::MessageFieldView::set(
+                                    <super::super::__buffa::view::SystemPromptSpecView as ::buffa::MessageView>::decode_view_ctx(
+                                        sub,
+                                        __sub_ctx,
+                                    )?,
+                                );
+                            }
+                        }
+                    }
                     _ => {
                         ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
                         let span_len = before_tag.len() - cur.len();
@@ -10039,6 +12302,24 @@ pub mod __buffa {
                         }
                         None => ::buffa::MessageField::none(),
                     },
+                    mcp_tools: match self.mcp_tools.as_option() {
+                        Some(v) => {
+                            ::buffa::MessageField::<
+                                super::super::McpTools,
+                                ::buffa::Inline<super::super::McpTools>,
+                            >::some(v.to_owned_from_source(__buffa_src)?)
+                        }
+                        None => ::buffa::MessageField::none(),
+                    },
+                    system_prompt_spec: match self.system_prompt_spec.as_option() {
+                        Some(v) => {
+                            ::buffa::MessageField::<
+                                super::super::SystemPromptSpec,
+                                ::buffa::Inline<super::super::SystemPromptSpec>,
+                            >::some(v.to_owned_from_source(__buffa_src)?)
+                        }
+                        None => ::buffa::MessageField::none(),
+                    },
                     __buffa_unknown_fields: self
                         .__buffa_unknown_fields
                         .to_owned()?
@@ -10077,12 +12358,28 @@ pub mod __buffa {
                         += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
                             + inner_size as u64;
                 }
+                if self.mcp_tools.is_set() {
+                    let __slot = __cache.reserve();
+                    let inner_size = self.mcp_tools.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                            + inner_size as u64;
+                }
                 if self.requested_model.is_set() {
                     let __slot = __cache.reserve();
                     let inner_size = self.requested_model.compute_size(__cache);
                     __cache.set(__slot, inner_size);
                     size
                         += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                            + inner_size as u64;
+                }
+                if self.system_prompt_spec.is_set() {
+                    let __slot = __cache.reserve();
+                    let inner_size = self.system_prompt_spec.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 2u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
                             + inner_size as u64;
                 }
                 size += self.__buffa_unknown_fields.encoded_len() as u64;
@@ -10120,6 +12417,14 @@ pub mod __buffa {
                     );
                     self.model_details.write_to(__cache, buf);
                 }
+                if self.mcp_tools.is_set() {
+                    ::buffa::types::put_len_delimited_header(
+                        4u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    self.mcp_tools.write_to(__cache, buf);
+                }
                 if self.requested_model.is_set() {
                     ::buffa::types::put_len_delimited_header(
                         9u32,
@@ -10127,6 +12432,14 @@ pub mod __buffa {
                         buf,
                     );
                     self.requested_model.write_to(__cache, buf);
+                }
+                if self.system_prompt_spec.is_set() {
+                    ::buffa::types::put_len_delimited_header(
+                        29u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    self.system_prompt_spec.write_to(__cache, buf);
                 }
                 self.__buffa_unknown_fields.write_to(buf);
             }
@@ -10261,6 +12574,28 @@ pub mod __buffa {
                 super::super::__buffa::view::RequestedModelView<'_>,
             > {
                 &self.0.reborrow().requested_model
+            }
+            /// W2 SPIKE: the client-declared tool roster (index.js@6165910's field 4) and
+            /// the ungated-or-not system-prompt channel (its field 29). Both are absent
+            /// unless `GANJA_CURSOR_SPIKE` is set, and both are removed with the spike.
+            ///
+            /// Field 4: `mcp_tools`
+            #[must_use]
+            pub fn mcp_tools(
+                &self,
+            ) -> &::buffa::MessageFieldView<
+                super::super::__buffa::view::McpToolsView<'_>,
+            > {
+                &self.0.reborrow().mcp_tools
+            }
+            /// Field 29: `system_prompt_spec`
+            #[must_use]
+            pub fn system_prompt_spec(
+                &self,
+            ) -> &::buffa::MessageFieldView<
+                super::super::__buffa::view::SystemPromptSpecView<'_>,
+            > {
+                &self.0.reborrow().system_prompt_spec
             }
         }
         impl ::core::convert::From<::buffa::OwnedView<RunRequestView<'static>>>
@@ -15918,6 +18253,23 @@ pub mod __buffa {
             pub name: ::core::option::Option<&'a str>,
             /// Field 3: `tool_call_id`
             pub tool_call_id: ::core::option::Option<&'a str>,
+            /// W2 SPIKE, read-only: what the server tells a client about the call it is
+            /// asking for (index.js@6371504). Nothing sends these; the spike logs which
+            /// of them arrived, which is how measurement (a) is read off a log rather
+            /// than guessed at. `args = 2` is deliberately still unmodelled — it is the
+            /// model's argument values, which no log line here may carry. Removed with
+            /// the spike.
+            ///
+            /// Field 4: `provider_identifier`
+            pub provider_identifier: ::core::option::Option<&'a str>,
+            /// Field 5: `tool_name`
+            pub tool_name: ::core::option::Option<&'a str>,
+            /// Field 7: `smart_mode_approval_only`
+            pub smart_mode_approval_only: ::core::option::Option<bool>,
+            /// Field 8: `skip_approval`
+            pub skip_approval: ::core::option::Option<bool>,
+            /// Field 9: `server_identifier`
+            pub server_identifier: ::core::option::Option<&'a str>,
             pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
         }
         impl<'a> ::buffa::MessageView<'a> for McpArgsView<'a> {
@@ -15970,6 +18322,49 @@ pub mod __buffa {
                         )?;
                         view.tool_call_id = Some(::buffa::types::borrow_str(&mut cur)?);
                     }
+                    4u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        view.provider_identifier = Some(
+                            ::buffa::types::borrow_str(&mut cur)?,
+                        );
+                    }
+                    5u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        view.tool_name = Some(::buffa::types::borrow_str(&mut cur)?);
+                    }
+                    7u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::Varint,
+                        )?;
+                        view.smart_mode_approval_only = Some(
+                            ::buffa::types::decode_bool(&mut cur)?,
+                        );
+                    }
+                    8u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::Varint,
+                        )?;
+                        view.skip_approval = Some(
+                            ::buffa::types::decode_bool(&mut cur)?,
+                        );
+                    }
+                    9u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        view.server_identifier = Some(
+                            ::buffa::types::borrow_str(&mut cur)?,
+                        );
+                    }
                     _ => {
                         ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
                         let span_len = before_tag.len() - cur.len();
@@ -15995,6 +18390,11 @@ pub mod __buffa {
                 ::core::result::Result::Ok(super::super::McpArgs {
                     name: self.name.map(|s| s.to_string()),
                     tool_call_id: self.tool_call_id.map(|s| s.to_string()),
+                    provider_identifier: self.provider_identifier.map(|s| s.to_string()),
+                    tool_name: self.tool_name.map(|s| s.to_string()),
+                    smart_mode_approval_only: self.smart_mode_approval_only,
+                    skip_approval: self.skip_approval,
+                    server_identifier: self.server_identifier.map(|s| s.to_string()),
                     __buffa_unknown_fields: self
                         .__buffa_unknown_fields
                         .to_owned()?
@@ -16015,6 +18415,21 @@ pub mod __buffa {
                 if let Some(ref v) = self.tool_call_id {
                     size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
                 }
+                if let Some(ref v) = self.provider_identifier {
+                    size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+                }
+                if let Some(ref v) = self.tool_name {
+                    size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+                }
+                if self.smart_mode_approval_only.is_some() {
+                    size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
+                }
+                if self.skip_approval.is_some() {
+                    size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
+                }
+                if let Some(ref v) = self.server_identifier {
+                    size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+                }
                 size += self.__buffa_unknown_fields.encoded_len() as u64;
                 ::buffa::saturate_size(size)
             }
@@ -16031,6 +18446,21 @@ pub mod __buffa {
                 }
                 if let Some(ref v) = self.tool_call_id {
                     ::buffa::types::put_string_field(3u32, v, buf);
+                }
+                if let Some(ref v) = self.provider_identifier {
+                    ::buffa::types::put_string_field(4u32, v, buf);
+                }
+                if let Some(ref v) = self.tool_name {
+                    ::buffa::types::put_string_field(5u32, v, buf);
+                }
+                if let Some(v) = self.smart_mode_approval_only {
+                    ::buffa::types::put_bool_field(7u32, v, buf);
+                }
+                if let Some(v) = self.skip_approval {
+                    ::buffa::types::put_bool_field(8u32, v, buf);
+                }
+                if let Some(ref v) = self.server_identifier {
+                    ::buffa::types::put_string_field(9u32, v, buf);
                 }
                 self.__buffa_unknown_fields.write_to(buf);
             }
@@ -16134,6 +18564,38 @@ pub mod __buffa {
             #[must_use]
             pub fn tool_call_id(&self) -> ::core::option::Option<&'_ str> {
                 self.0.reborrow().tool_call_id
+            }
+            /// W2 SPIKE, read-only: what the server tells a client about the call it is
+            /// asking for (index.js@6371504). Nothing sends these; the spike logs which
+            /// of them arrived, which is how measurement (a) is read off a log rather
+            /// than guessed at. `args = 2` is deliberately still unmodelled — it is the
+            /// model's argument values, which no log line here may carry. Removed with
+            /// the spike.
+            ///
+            /// Field 4: `provider_identifier`
+            #[must_use]
+            pub fn provider_identifier(&self) -> ::core::option::Option<&'_ str> {
+                self.0.reborrow().provider_identifier
+            }
+            /// Field 5: `tool_name`
+            #[must_use]
+            pub fn tool_name(&self) -> ::core::option::Option<&'_ str> {
+                self.0.reborrow().tool_name
+            }
+            /// Field 7: `smart_mode_approval_only`
+            #[must_use]
+            pub fn smart_mode_approval_only(&self) -> ::core::option::Option<bool> {
+                self.0.reborrow().smart_mode_approval_only
+            }
+            /// Field 8: `skip_approval`
+            #[must_use]
+            pub fn skip_approval(&self) -> ::core::option::Option<bool> {
+                self.0.reborrow().skip_approval
+            }
+            /// Field 9: `server_identifier`
+            #[must_use]
+            pub fn server_identifier(&self) -> ::core::option::Option<&'_ str> {
+                self.0.reborrow().server_identifier
             }
         }
         impl ::core::convert::From<::buffa::OwnedView<McpArgsView<'static>>>
@@ -21574,6 +24036,13 @@ pub mod __buffa {
             pub rejected: ::buffa::MessageFieldView<
                 super::super::__buffa::view::McpRejectedView<'a>,
             >,
+            /// W2 SPIKE: the arm a served tool answers on, which is the whole of what
+            /// the spike adds to this channel. Removed with the spike.
+            ///
+            /// Field 1: `success`
+            pub success: ::buffa::MessageFieldView<
+                super::super::__buffa::view::McpSuccessView<'a>,
+            >,
             pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
         }
         impl<'a> ::buffa::MessageView<'a> for McpResultView<'a> {
@@ -21637,6 +24106,31 @@ pub mod __buffa {
                             }
                         }
                     }
+                    1u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        match view.success.as_mut() {
+                            Some(existing) => {
+                                ::buffa::MessageView::merge_into_view(
+                                    existing,
+                                    sub,
+                                    __sub_ctx,
+                                )?
+                            }
+                            None => {
+                                view.success = ::buffa::MessageFieldView::set(
+                                    <super::super::__buffa::view::McpSuccessView as ::buffa::MessageView>::decode_view_ctx(
+                                        sub,
+                                        __sub_ctx,
+                                    )?,
+                                );
+                            }
+                        }
+                    }
                     _ => {
                         ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
                         let span_len = before_tag.len() - cur.len();
@@ -21669,6 +24163,15 @@ pub mod __buffa {
                         }
                         None => ::buffa::MessageField::none(),
                     },
+                    success: match self.success.as_option() {
+                        Some(v) => {
+                            ::buffa::MessageField::<
+                                super::super::McpSuccess,
+                                ::buffa::Inline<super::super::McpSuccess>,
+                            >::some(v.to_owned_from_source(__buffa_src)?)
+                        }
+                        None => ::buffa::MessageField::none(),
+                    },
                     __buffa_unknown_fields: self
                         .__buffa_unknown_fields
                         .to_owned()?
@@ -21683,6 +24186,14 @@ pub mod __buffa {
                 #[allow(unused_imports)]
                 use ::buffa::Enumeration as _;
                 let mut size = 0u64;
+                if self.success.is_set() {
+                    let __slot = __cache.reserve();
+                    let inner_size = self.success.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                            + inner_size as u64;
+                }
                 if self.rejected.is_set() {
                     let __slot = __cache.reserve();
                     let inner_size = self.rejected.compute_size(__cache);
@@ -21702,6 +24213,14 @@ pub mod __buffa {
             ) {
                 #[allow(unused_imports)]
                 use ::buffa::Enumeration as _;
+                if self.success.is_set() {
+                    ::buffa::types::put_len_delimited_header(
+                        1u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    self.success.write_to(__cache, buf);
+                }
                 if self.rejected.is_set() {
                     ::buffa::types::put_len_delimited_header(
                         3u32,
@@ -21811,6 +24330,18 @@ pub mod __buffa {
                 super::super::__buffa::view::McpRejectedView<'_>,
             > {
                 &self.0.reborrow().rejected
+            }
+            /// W2 SPIKE: the arm a served tool answers on, which is the whole of what
+            /// the spike adds to this channel. Removed with the spike.
+            ///
+            /// Field 1: `success`
+            #[must_use]
+            pub fn success(
+                &self,
+            ) -> &::buffa::MessageFieldView<
+                super::super::__buffa::view::McpSuccessView<'_>,
+            > {
+                &self.0.reborrow().success
             }
         }
         impl ::core::convert::From<::buffa::OwnedView<McpResultView<'static>>>
@@ -22650,6 +25181,15 @@ pub mod __buffa {
         pub struct RequestContextView<'a> {
             /// Field 16: `cloud_rule`
             pub cloud_rule: ::core::option::Option<&'a str>,
+            /// W2 SPIKE: the roster's *second* channel, refreshed on every context answer
+            /// (index.js@6467399's field 7). Empty and therefore absent unless
+            /// `GANJA_CURSOR_SPIKE` is set; removed with the spike.
+            ///
+            /// Field 7: `tools`
+            pub tools: ::buffa::RepeatedView<
+                'a,
+                super::super::__buffa::view::McpToolDefinitionView<'a>,
+            >,
             /// Field 23: `mcp_file_system_options`
             pub mcp_file_system_options: ::buffa::MessageFieldView<
                 super::super::__buffa::view::McpFileSystemOptionsView<'a>,
@@ -22746,6 +25286,26 @@ pub mod __buffa {
                             ::buffa::types::decode_bool(&mut cur)?,
                         );
                     }
+                    7u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        ctx.register_element_memory(
+                            ::core::mem::size_of::<
+                                super::super::__buffa::view::McpToolDefinitionView,
+                            >(),
+                        )?;
+                        view.tools
+                            .push(
+                                <super::super::__buffa::view::McpToolDefinitionView as ::buffa::MessageView>::decode_view_ctx(
+                                    sub,
+                                    __sub_ctx,
+                                )?,
+                            );
+                    }
                     _ => {
                         ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
                         let span_len = before_tag.len() - cur.len();
@@ -22776,6 +25336,11 @@ pub mod __buffa {
                 let _ = __buffa_src;
                 ::core::result::Result::Ok(super::super::RequestContext {
                     cloud_rule: self.cloud_rule.map(|s| s.to_string()),
+                    tools: self
+                        .tools
+                        .iter()
+                        .map(|v| v.to_owned_from_source(__buffa_src))
+                        .collect::<::core::result::Result<_, ::buffa::DecodeError>>()?,
                     mcp_file_system_options: match self
                         .mcp_file_system_options
                         .as_option()
@@ -22804,6 +25369,14 @@ pub mod __buffa {
                 #[allow(unused_imports)]
                 use ::buffa::Enumeration as _;
                 let mut size = 0u64;
+                for v in &self.tools {
+                    let __slot = __cache.reserve();
+                    let inner_size = v.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                            + inner_size as u64;
+                }
                 if let Some(ref v) = self.cloud_rule {
                     size += 2u64 + ::buffa::types::string_encoded_len(v) as u64;
                 }
@@ -22832,6 +25405,14 @@ pub mod __buffa {
             ) {
                 #[allow(unused_imports)]
                 use ::buffa::Enumeration as _;
+                for v in &self.tools {
+                    ::buffa::types::put_len_delimited_header(
+                        7u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    v.write_to(__cache, buf);
+                }
                 if let Some(ref v) = self.cloud_rule {
                     ::buffa::types::put_string_field(16u32, v, buf);
                 }
@@ -22948,6 +25529,20 @@ pub mod __buffa {
             #[must_use]
             pub fn cloud_rule(&self) -> ::core::option::Option<&'_ str> {
                 self.0.reborrow().cloud_rule
+            }
+            /// W2 SPIKE: the roster's *second* channel, refreshed on every context answer
+            /// (index.js@6467399's field 7). Empty and therefore absent unless
+            /// `GANJA_CURSOR_SPIKE` is set; removed with the spike.
+            ///
+            /// Field 7: `tools`
+            #[must_use]
+            pub fn tools(
+                &self,
+            ) -> &::buffa::RepeatedView<
+                '_,
+                super::super::__buffa::view::McpToolDefinitionView<'_>,
+            > {
+                &self.0.reborrow().tools
             }
             /// Field 23: `mcp_file_system_options`
             #[must_use]
@@ -23253,6 +25848,14 @@ pub mod __buffa {
             pub throw: ::buffa::MessageFieldView<
                 super::super::__buffa::view::ExecThrowView<'a>,
             >,
+            /// W2 SPIKE: the third arm, which the comment above records this build never
+            /// needing — because it never held an exec open. Measurement (b') is exactly
+            /// that state. Removed with the spike.
+            ///
+            /// Field 3: `heartbeat`
+            pub heartbeat: ::buffa::MessageFieldView<
+                super::super::__buffa::view::ExecHeartbeatView<'a>,
+            >,
             pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
         }
         impl<'a> ::buffa::MessageView<'a> for ExecControlView<'a> {
@@ -23341,6 +25944,31 @@ pub mod __buffa {
                             }
                         }
                     }
+                    3u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        match view.heartbeat.as_mut() {
+                            Some(existing) => {
+                                ::buffa::MessageView::merge_into_view(
+                                    existing,
+                                    sub,
+                                    __sub_ctx,
+                                )?
+                            }
+                            None => {
+                                view.heartbeat = ::buffa::MessageFieldView::set(
+                                    <super::super::__buffa::view::ExecHeartbeatView as ::buffa::MessageView>::decode_view_ctx(
+                                        sub,
+                                        __sub_ctx,
+                                    )?,
+                                );
+                            }
+                        }
+                    }
                     _ => {
                         ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
                         let span_len = before_tag.len() - cur.len();
@@ -23388,6 +26016,15 @@ pub mod __buffa {
                         }
                         None => ::buffa::MessageField::none(),
                     },
+                    heartbeat: match self.heartbeat.as_option() {
+                        Some(v) => {
+                            ::buffa::MessageField::<
+                                super::super::ExecHeartbeat,
+                                ::buffa::Inline<super::super::ExecHeartbeat>,
+                            >::some(v.to_owned_from_source(__buffa_src)?)
+                        }
+                        None => ::buffa::MessageField::none(),
+                    },
                     __buffa_unknown_fields: self
                         .__buffa_unknown_fields
                         .to_owned()?
@@ -23413,6 +26050,14 @@ pub mod __buffa {
                 if self.throw.is_set() {
                     let __slot = __cache.reserve();
                     let inner_size = self.throw.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                            + inner_size as u64;
+                }
+                if self.heartbeat.is_set() {
+                    let __slot = __cache.reserve();
+                    let inner_size = self.heartbeat.compute_size(__cache);
                     __cache.set(__slot, inner_size);
                     size
                         += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
@@ -23444,6 +26089,14 @@ pub mod __buffa {
                         buf,
                     );
                     self.throw.write_to(__cache, buf);
+                }
+                if self.heartbeat.is_set() {
+                    ::buffa::types::put_len_delimited_header(
+                        3u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    self.heartbeat.write_to(__cache, buf);
                 }
                 self.__buffa_unknown_fields.write_to(buf);
             }
@@ -23555,6 +26208,19 @@ pub mod __buffa {
                 super::super::__buffa::view::ExecThrowView<'_>,
             > {
                 &self.0.reborrow().throw
+            }
+            /// W2 SPIKE: the third arm, which the comment above records this build never
+            /// needing — because it never held an exec open. Measurement (b') is exactly
+            /// that state. Removed with the spike.
+            ///
+            /// Field 3: `heartbeat`
+            #[must_use]
+            pub fn heartbeat(
+                &self,
+            ) -> &::buffa::MessageFieldView<
+                super::super::__buffa::view::ExecHeartbeatView<'_>,
+            > {
+                &self.0.reborrow().heartbeat
             }
         }
         impl ::core::convert::From<::buffa::OwnedView<ExecControlView<'static>>>
@@ -25722,6 +28388,3433 @@ pub mod __buffa {
             type View<'a> = SetBlobResultView<'a>;
             type ViewHandle = SetBlobResultOwnedView;
         }
+        /// ---------------------------------------------------------------------------
+        /// W2 SPIKE SCAFFOLDING — measurement only, removed in W3a or W4.
+        ///
+        /// Everything below this line exists to settle five facts about cursor's MCP
+        /// tool channel that no bundle read can answer, and is deleted with the spike
+        /// (`.omc/plans/2026-09-04-cursor-tool-bridge.md`, W2 step 6). It is reachable
+        /// only when `GANJA_CURSOR_SPIKE` is set: with the flag unset nothing here is
+        /// encoded, which the send-side test in `request_tests.rs` pins by field number.
+        ///
+        /// Every number below was re-derived from the `2026.09.02-c22c1a3` bundle's own
+        /// descriptors before it was written — the byte offsets are that bundle's, per
+        /// the header's citation note — rather than copied from the research note, so a
+        /// wrong number is a wrong reading of the bundle rather than a stale quote.
+        /// ---------------------------------------------------------------------------
+        ///
+        /// The client-declared tool roster, which the shipped client fills on the run
+        /// request itself (index.js@4574466): AgentRunRequest.mcp_tools = 4, of type
+        /// McpTools (index.js@6389679), whose whole content is the repeated definition
+        /// at field 1. Declared before the first token, so it does not depend on
+        /// winning the request_context_args race.
+        #[derive(Clone, Debug, Default)]
+        pub struct McpToolsView<'a> {
+            /// Field 1: `mcp_tools`
+            pub mcp_tools: ::buffa::RepeatedView<
+                'a,
+                super::super::__buffa::view::McpToolDefinitionView<'a>,
+            >,
+            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+        }
+        impl<'a> ::buffa::MessageView<'a> for McpToolsView<'a> {
+            type Owned = super::super::McpTools;
+            fn decode_view(
+                buf: &'a [u8],
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                let __limit = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT,
+                );
+                let __elem = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_ELEMENT_MEMORY_LIMIT,
+                );
+                <Self as ::buffa::MessageView>::decode_view_ctx(
+                    buf,
+                    ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit)
+                        .with_element_memory(&__elem),
+                )
+            }
+            fn decode_view_with_ctx(
+                buf: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+            }
+            #[inline]
+            fn merge_view_field(
+                &mut self,
+                tag: ::buffa::encoding::Tag,
+                cur: &'a [u8],
+                before_tag: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+                let _ = ctx;
+                #[allow(unused_variables)]
+                let view = self;
+                let mut cur = cur;
+                match tag.field_number() {
+                    1u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        ctx.register_element_memory(
+                            ::core::mem::size_of::<
+                                super::super::__buffa::view::McpToolDefinitionView,
+                            >(),
+                        )?;
+                        view.mcp_tools
+                            .push(
+                                <super::super::__buffa::view::McpToolDefinitionView as ::buffa::MessageView>::decode_view_ctx(
+                                    sub,
+                                    __sub_ctx,
+                                )?,
+                            );
+                    }
+                    _ => {
+                        ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                        let span_len = before_tag.len() - cur.len();
+                        view.__buffa_unknown_fields
+                            .push_record(before_tag, span_len, ctx)?;
+                    }
+                }
+                ::core::result::Result::Ok(cur)
+            }
+            fn to_owned_message(
+                &self,
+            ) -> ::core::result::Result<super::super::McpTools, ::buffa::DecodeError> {
+                self.to_owned_from_source(None)
+            }
+            #[allow(clippy::useless_conversion, clippy::needless_update)]
+            fn to_owned_from_source(
+                &self,
+                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+            ) -> ::core::result::Result<super::super::McpTools, ::buffa::DecodeError> {
+                #[allow(unused_imports)]
+                use ::buffa::alloc::string::ToString as _;
+                let _ = __buffa_src;
+                ::core::result::Result::Ok(super::super::McpTools {
+                    mcp_tools: self
+                        .mcp_tools
+                        .iter()
+                        .map(|v| v.to_owned_from_source(__buffa_src))
+                        .collect::<::core::result::Result<_, ::buffa::DecodeError>>()?,
+                    __buffa_unknown_fields: self
+                        .__buffa_unknown_fields
+                        .to_owned()?
+                        .into(),
+                    ..::core::default::Default::default()
+                })
+            }
+        }
+        impl<'a> ::buffa::ViewEncode<'a> for McpToolsView<'a> {
+            #[allow(clippy::needless_borrow, clippy::let_and_return)]
+            fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                let mut size = 0u64;
+                for v in &self.mcp_tools {
+                    let __slot = __cache.reserve();
+                    let inner_size = v.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                            + inner_size as u64;
+                }
+                size += self.__buffa_unknown_fields.encoded_len() as u64;
+                ::buffa::saturate_size(size)
+            }
+            #[allow(clippy::needless_borrow)]
+            fn write_to(
+                &self,
+                __cache: &mut ::buffa::SizeCache,
+                buf: &mut impl ::buffa::EncodeSink,
+            ) {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                for v in &self.mcp_tools {
+                    ::buffa::types::put_len_delimited_header(
+                        1u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    v.write_to(__cache, buf);
+                }
+                self.__buffa_unknown_fields.write_to(buf);
+            }
+        }
+        impl<'a> ::buffa::MessageName for McpToolsView<'a> {
+            const PACKAGE: &'static str = "ganja.cursor.v1";
+            const NAME: &'static str = "McpTools";
+            const FULL_NAME: &'static str = "ganja.cursor.v1.McpTools";
+            const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.McpTools";
+        }
+        ::buffa::impl_default_view_instance!(McpToolsView);
+        ::buffa::impl_view_reborrow!(McpToolsView);
+        /** Self-contained, `'static` owned view of a `McpTools` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`McpToolsView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`McpToolsView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+        #[derive(Clone, Debug)]
+        pub struct McpToolsOwnedView(::buffa::OwnedView<McpToolsView<'static>>);
+        impl McpToolsOwnedView {
+            /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+            ///
+            /// The view borrows directly from the buffer's data; the buffer is
+            /// retained inside the returned handle.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+            /// protobuf data.
+            pub fn decode(
+                bytes: ::buffa::bytes::Bytes,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    McpToolsOwnedView(::buffa::OwnedView::decode(bytes)?),
+                )
+            }
+            /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+            /// max message size).
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+            /// exceeds the configured limits.
+            pub fn decode_with_options(
+                bytes: ::buffa::bytes::Bytes,
+                opts: &::buffa::DecodeOptions,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    McpToolsOwnedView(
+                        ::buffa::OwnedView::decode_with_options(bytes, opts)?,
+                    ),
+                )
+            }
+            /// Build from an owned message via an encode → decode round-trip.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError::MessageTooLarge`] if the
+            /// message's encoded size exceeds the 2 GiB protobuf limit, or
+            /// another [`::buffa::DecodeError`] if the re-encoded bytes are
+            /// somehow invalid (should not happen for well-formed messages).
+            pub fn from_owned(
+                msg: &super::super::McpTools,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    McpToolsOwnedView(::buffa::OwnedView::from_owned(msg)?),
+                )
+            }
+            /// Borrow the full [`McpToolsView`] with its lifetime tied to `&self`.
+            #[must_use]
+            pub fn view(&self) -> &McpToolsView<'_> {
+                self.0.reborrow()
+            }
+            /// Convert to the owned message type.
+            ///
+            /// Infallible: this type's constructors wire-decode their
+            /// buffer, and a view produced by wire decoding always
+            /// converts. Delegates to [`::buffa::OwnedView::to_owned_message`],
+            /// whose contract also governs handles converted from a raw
+            /// [`::buffa::OwnedView`].
+            #[must_use]
+            pub fn to_owned_message(&self) -> super::super::McpTools {
+                self.0.to_owned_message()
+            }
+            /// The underlying bytes buffer.
+            #[must_use]
+            pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+                self.0.bytes()
+            }
+            /// Consume the handle, returning the underlying bytes buffer.
+            #[must_use]
+            pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+                self.0.into_bytes()
+            }
+            /// Field 1: `mcp_tools`
+            #[must_use]
+            pub fn mcp_tools(
+                &self,
+            ) -> &::buffa::RepeatedView<
+                '_,
+                super::super::__buffa::view::McpToolDefinitionView<'_>,
+            > {
+                &self.0.reborrow().mcp_tools
+            }
+        }
+        impl ::core::convert::From<::buffa::OwnedView<McpToolsView<'static>>>
+        for McpToolsOwnedView {
+            fn from(inner: ::buffa::OwnedView<McpToolsView<'static>>) -> Self {
+                McpToolsOwnedView(inner)
+            }
+        }
+        impl ::core::convert::From<McpToolsOwnedView>
+        for ::buffa::OwnedView<McpToolsView<'static>> {
+            fn from(wrapper: McpToolsOwnedView) -> Self {
+                wrapper.0
+            }
+        }
+        impl ::core::convert::AsRef<::buffa::OwnedView<McpToolsView<'static>>>
+        for McpToolsOwnedView {
+            fn as_ref(&self) -> &::buffa::OwnedView<McpToolsView<'static>> {
+                &self.0
+            }
+        }
+        impl ::buffa::HasMessageView for super::super::McpTools {
+            type View<'a> = McpToolsView<'a>;
+            type ViewHandle = McpToolsOwnedView;
+        }
+        /// One declared tool (index.js@6389002). The schema travels on **either**
+        /// input_schema = 3, a google.protobuf.Value, **or** input_schema_json = 6, the
+        /// same schema as a JSON string — the shipped client's own builder picks one
+        /// (index.js@5699717), which is exactly why measurement (e) fills them one at a
+        /// time. Both are modelled because the spike must be able to send either.
+        #[derive(Clone, Debug, Default)]
+        pub struct McpToolDefinitionView<'a> {
+            /// Field 1: `name`
+            pub name: ::core::option::Option<&'a str>,
+            /// Field 2: `description`
+            pub description: ::core::option::Option<&'a str>,
+            /// Field 3: `input_schema`
+            pub input_schema: ::buffa::MessageFieldView<
+                super::super::__buffa::view::JsonValueView<'a>,
+            >,
+            /// Field 4: `provider_identifier`
+            pub provider_identifier: ::core::option::Option<&'a str>,
+            /// Field 5: `tool_name`
+            pub tool_name: ::core::option::Option<&'a str>,
+            /// Field 6: `input_schema_json`
+            pub input_schema_json: ::core::option::Option<&'a str>,
+            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+        }
+        impl<'a> ::buffa::MessageView<'a> for McpToolDefinitionView<'a> {
+            type Owned = super::super::McpToolDefinition;
+            fn decode_view(
+                buf: &'a [u8],
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                let __limit = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT,
+                );
+                let __elem = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_ELEMENT_MEMORY_LIMIT,
+                );
+                <Self as ::buffa::MessageView>::decode_view_ctx(
+                    buf,
+                    ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit)
+                        .with_element_memory(&__elem),
+                )
+            }
+            fn decode_view_with_ctx(
+                buf: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+            }
+            #[inline]
+            fn merge_view_field(
+                &mut self,
+                tag: ::buffa::encoding::Tag,
+                cur: &'a [u8],
+                before_tag: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+                let _ = ctx;
+                #[allow(unused_variables)]
+                let view = self;
+                let mut cur = cur;
+                match tag.field_number() {
+                    1u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        view.name = Some(::buffa::types::borrow_str(&mut cur)?);
+                    }
+                    2u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        view.description = Some(::buffa::types::borrow_str(&mut cur)?);
+                    }
+                    3u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        match view.input_schema.as_mut() {
+                            Some(existing) => {
+                                ::buffa::MessageView::merge_into_view(
+                                    existing,
+                                    sub,
+                                    __sub_ctx,
+                                )?
+                            }
+                            None => {
+                                view.input_schema = ::buffa::MessageFieldView::set(
+                                    <super::super::__buffa::view::JsonValueView as ::buffa::MessageView>::decode_view_ctx(
+                                        sub,
+                                        __sub_ctx,
+                                    )?,
+                                );
+                            }
+                        }
+                    }
+                    4u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        view.provider_identifier = Some(
+                            ::buffa::types::borrow_str(&mut cur)?,
+                        );
+                    }
+                    5u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        view.tool_name = Some(::buffa::types::borrow_str(&mut cur)?);
+                    }
+                    6u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        view.input_schema_json = Some(
+                            ::buffa::types::borrow_str(&mut cur)?,
+                        );
+                    }
+                    _ => {
+                        ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                        let span_len = before_tag.len() - cur.len();
+                        view.__buffa_unknown_fields
+                            .push_record(before_tag, span_len, ctx)?;
+                    }
+                }
+                ::core::result::Result::Ok(cur)
+            }
+            fn to_owned_message(
+                &self,
+            ) -> ::core::result::Result<
+                super::super::McpToolDefinition,
+                ::buffa::DecodeError,
+            > {
+                self.to_owned_from_source(None)
+            }
+            #[allow(clippy::useless_conversion, clippy::needless_update)]
+            fn to_owned_from_source(
+                &self,
+                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+            ) -> ::core::result::Result<
+                super::super::McpToolDefinition,
+                ::buffa::DecodeError,
+            > {
+                #[allow(unused_imports)]
+                use ::buffa::alloc::string::ToString as _;
+                let _ = __buffa_src;
+                ::core::result::Result::Ok(super::super::McpToolDefinition {
+                    name: self.name.map(|s| s.to_string()),
+                    description: self.description.map(|s| s.to_string()),
+                    input_schema: match self.input_schema.as_option() {
+                        Some(v) => {
+                            ::buffa::MessageField::<
+                                super::super::JsonValue,
+                                ::buffa::Inline<super::super::JsonValue>,
+                            >::some(v.to_owned_from_source(__buffa_src)?)
+                        }
+                        None => ::buffa::MessageField::none(),
+                    },
+                    provider_identifier: self.provider_identifier.map(|s| s.to_string()),
+                    tool_name: self.tool_name.map(|s| s.to_string()),
+                    input_schema_json: self.input_schema_json.map(|s| s.to_string()),
+                    __buffa_unknown_fields: self
+                        .__buffa_unknown_fields
+                        .to_owned()?
+                        .into(),
+                    ..::core::default::Default::default()
+                })
+            }
+        }
+        impl<'a> ::buffa::ViewEncode<'a> for McpToolDefinitionView<'a> {
+            #[allow(clippy::needless_borrow, clippy::let_and_return)]
+            fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                let mut size = 0u64;
+                if let Some(ref v) = self.name {
+                    size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+                }
+                if let Some(ref v) = self.description {
+                    size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+                }
+                if self.input_schema.is_set() {
+                    let __slot = __cache.reserve();
+                    let inner_size = self.input_schema.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                            + inner_size as u64;
+                }
+                if let Some(ref v) = self.provider_identifier {
+                    size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+                }
+                if let Some(ref v) = self.tool_name {
+                    size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+                }
+                if let Some(ref v) = self.input_schema_json {
+                    size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+                }
+                size += self.__buffa_unknown_fields.encoded_len() as u64;
+                ::buffa::saturate_size(size)
+            }
+            #[allow(clippy::needless_borrow)]
+            fn write_to(
+                &self,
+                __cache: &mut ::buffa::SizeCache,
+                buf: &mut impl ::buffa::EncodeSink,
+            ) {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                if let Some(ref v) = self.name {
+                    ::buffa::types::put_string_field(1u32, v, buf);
+                }
+                if let Some(ref v) = self.description {
+                    ::buffa::types::put_string_field(2u32, v, buf);
+                }
+                if self.input_schema.is_set() {
+                    ::buffa::types::put_len_delimited_header(
+                        3u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    self.input_schema.write_to(__cache, buf);
+                }
+                if let Some(ref v) = self.provider_identifier {
+                    ::buffa::types::put_string_field(4u32, v, buf);
+                }
+                if let Some(ref v) = self.tool_name {
+                    ::buffa::types::put_string_field(5u32, v, buf);
+                }
+                if let Some(ref v) = self.input_schema_json {
+                    ::buffa::types::put_string_field(6u32, v, buf);
+                }
+                self.__buffa_unknown_fields.write_to(buf);
+            }
+        }
+        impl<'a> ::buffa::MessageName for McpToolDefinitionView<'a> {
+            const PACKAGE: &'static str = "ganja.cursor.v1";
+            const NAME: &'static str = "McpToolDefinition";
+            const FULL_NAME: &'static str = "ganja.cursor.v1.McpToolDefinition";
+            const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.McpToolDefinition";
+        }
+        ::buffa::impl_default_view_instance!(McpToolDefinitionView);
+        ::buffa::impl_view_reborrow!(McpToolDefinitionView);
+        /** Self-contained, `'static` owned view of a `McpToolDefinition` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`McpToolDefinitionView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`McpToolDefinitionView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+        #[derive(Clone, Debug)]
+        pub struct McpToolDefinitionOwnedView(
+            ::buffa::OwnedView<McpToolDefinitionView<'static>>,
+        );
+        impl McpToolDefinitionOwnedView {
+            /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+            ///
+            /// The view borrows directly from the buffer's data; the buffer is
+            /// retained inside the returned handle.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+            /// protobuf data.
+            pub fn decode(
+                bytes: ::buffa::bytes::Bytes,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    McpToolDefinitionOwnedView(::buffa::OwnedView::decode(bytes)?),
+                )
+            }
+            /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+            /// max message size).
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+            /// exceeds the configured limits.
+            pub fn decode_with_options(
+                bytes: ::buffa::bytes::Bytes,
+                opts: &::buffa::DecodeOptions,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    McpToolDefinitionOwnedView(
+                        ::buffa::OwnedView::decode_with_options(bytes, opts)?,
+                    ),
+                )
+            }
+            /// Build from an owned message via an encode → decode round-trip.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError::MessageTooLarge`] if the
+            /// message's encoded size exceeds the 2 GiB protobuf limit, or
+            /// another [`::buffa::DecodeError`] if the re-encoded bytes are
+            /// somehow invalid (should not happen for well-formed messages).
+            pub fn from_owned(
+                msg: &super::super::McpToolDefinition,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    McpToolDefinitionOwnedView(::buffa::OwnedView::from_owned(msg)?),
+                )
+            }
+            /// Borrow the full [`McpToolDefinitionView`] with its lifetime tied to `&self`.
+            #[must_use]
+            pub fn view(&self) -> &McpToolDefinitionView<'_> {
+                self.0.reborrow()
+            }
+            /// Convert to the owned message type.
+            ///
+            /// Infallible: this type's constructors wire-decode their
+            /// buffer, and a view produced by wire decoding always
+            /// converts. Delegates to [`::buffa::OwnedView::to_owned_message`],
+            /// whose contract also governs handles converted from a raw
+            /// [`::buffa::OwnedView`].
+            #[must_use]
+            pub fn to_owned_message(&self) -> super::super::McpToolDefinition {
+                self.0.to_owned_message()
+            }
+            /// The underlying bytes buffer.
+            #[must_use]
+            pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+                self.0.bytes()
+            }
+            /// Consume the handle, returning the underlying bytes buffer.
+            #[must_use]
+            pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+                self.0.into_bytes()
+            }
+            /// Field 1: `name`
+            #[must_use]
+            pub fn name(&self) -> ::core::option::Option<&'_ str> {
+                self.0.reborrow().name
+            }
+            /// Field 2: `description`
+            #[must_use]
+            pub fn description(&self) -> ::core::option::Option<&'_ str> {
+                self.0.reborrow().description
+            }
+            /// Field 3: `input_schema`
+            #[must_use]
+            pub fn input_schema(
+                &self,
+            ) -> &::buffa::MessageFieldView<
+                super::super::__buffa::view::JsonValueView<'_>,
+            > {
+                &self.0.reborrow().input_schema
+            }
+            /// Field 4: `provider_identifier`
+            #[must_use]
+            pub fn provider_identifier(&self) -> ::core::option::Option<&'_ str> {
+                self.0.reborrow().provider_identifier
+            }
+            /// Field 5: `tool_name`
+            #[must_use]
+            pub fn tool_name(&self) -> ::core::option::Option<&'_ str> {
+                self.0.reborrow().tool_name
+            }
+            /// Field 6: `input_schema_json`
+            #[must_use]
+            pub fn input_schema_json(&self) -> ::core::option::Option<&'_ str> {
+                self.0.reborrow().input_schema_json
+            }
+        }
+        impl ::core::convert::From<::buffa::OwnedView<McpToolDefinitionView<'static>>>
+        for McpToolDefinitionOwnedView {
+            fn from(inner: ::buffa::OwnedView<McpToolDefinitionView<'static>>) -> Self {
+                McpToolDefinitionOwnedView(inner)
+            }
+        }
+        impl ::core::convert::From<McpToolDefinitionOwnedView>
+        for ::buffa::OwnedView<McpToolDefinitionView<'static>> {
+            fn from(wrapper: McpToolDefinitionOwnedView) -> Self {
+                wrapper.0
+            }
+        }
+        impl ::core::convert::AsRef<::buffa::OwnedView<McpToolDefinitionView<'static>>>
+        for McpToolDefinitionOwnedView {
+            fn as_ref(&self) -> &::buffa::OwnedView<McpToolDefinitionView<'static>> {
+                &self.0
+            }
+        }
+        impl ::buffa::HasMessageView for super::super::McpToolDefinition {
+            type View<'a> = McpToolDefinitionView<'a>;
+            type ViewHandle = McpToolDefinitionOwnedView;
+        }
+        /// `google.protobuf.Value` (index.js@3928104), flattened the way every oneof in
+        /// this file is: same numbers, same types, identical on the wire. Modelled here
+        /// rather than imported because `buffa` ships no pre-generated well-known types
+        /// — it is codegen-only — so an import would add a second generated file and a
+        /// second drift surface for a message this build needs six fields of.
+        ///
+        /// null_value = 1 is declared an enum in the descriptor; an enum and an int32
+        /// are the same varint on the wire, and `google.protobuf.NullValue` has exactly
+        /// one member (0), so nothing is lost by spelling it as the number it is.
+        ///
+        /// Total over `serde_json::Value` on purpose: an encoder that silently dropped
+        /// arrays would make a malformed schema look like a server-side refusal, which
+        /// is the one confusion measurement (e) cannot afford.
+        #[derive(Clone, Debug, Default)]
+        pub struct JsonValueView<'a> {
+            /// Field 1: `null_value`
+            pub null_value: ::core::option::Option<i32>,
+            /// Field 2: `number_value`
+            pub number_value: ::core::option::Option<f64>,
+            /// Field 3: `string_value`
+            pub string_value: ::core::option::Option<&'a str>,
+            /// Field 4: `bool_value`
+            pub bool_value: ::core::option::Option<bool>,
+            /// Field 5: `struct_value`
+            pub struct_value: ::buffa::MessageFieldView<
+                super::super::__buffa::view::JsonStructView<'a>,
+            >,
+            /// Field 6: `list_value`
+            pub list_value: ::buffa::MessageFieldView<
+                super::super::__buffa::view::JsonListView<'a>,
+            >,
+            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+        }
+        impl<'a> ::buffa::MessageView<'a> for JsonValueView<'a> {
+            type Owned = super::super::JsonValue;
+            fn decode_view(
+                buf: &'a [u8],
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                let __limit = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT,
+                );
+                let __elem = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_ELEMENT_MEMORY_LIMIT,
+                );
+                <Self as ::buffa::MessageView>::decode_view_ctx(
+                    buf,
+                    ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit)
+                        .with_element_memory(&__elem),
+                )
+            }
+            fn decode_view_with_ctx(
+                buf: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+            }
+            #[inline]
+            fn merge_view_field(
+                &mut self,
+                tag: ::buffa::encoding::Tag,
+                cur: &'a [u8],
+                before_tag: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+                let _ = ctx;
+                #[allow(unused_variables)]
+                let view = self;
+                let mut cur = cur;
+                match tag.field_number() {
+                    1u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::Varint,
+                        )?;
+                        view.null_value = Some(::buffa::types::decode_int32(&mut cur)?);
+                    }
+                    2u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::Fixed64,
+                        )?;
+                        view.number_value = Some(
+                            ::buffa::types::decode_double(&mut cur)?,
+                        );
+                    }
+                    3u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        view.string_value = Some(::buffa::types::borrow_str(&mut cur)?);
+                    }
+                    4u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::Varint,
+                        )?;
+                        view.bool_value = Some(::buffa::types::decode_bool(&mut cur)?);
+                    }
+                    5u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        match view.struct_value.as_mut() {
+                            Some(existing) => {
+                                ::buffa::MessageView::merge_into_view(
+                                    existing,
+                                    sub,
+                                    __sub_ctx,
+                                )?
+                            }
+                            None => {
+                                view.struct_value = ::buffa::MessageFieldView::set(
+                                    <super::super::__buffa::view::JsonStructView as ::buffa::MessageView>::decode_view_ctx(
+                                        sub,
+                                        __sub_ctx,
+                                    )?,
+                                );
+                            }
+                        }
+                    }
+                    6u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        match view.list_value.as_mut() {
+                            Some(existing) => {
+                                ::buffa::MessageView::merge_into_view(
+                                    existing,
+                                    sub,
+                                    __sub_ctx,
+                                )?
+                            }
+                            None => {
+                                view.list_value = ::buffa::MessageFieldView::set(
+                                    <super::super::__buffa::view::JsonListView as ::buffa::MessageView>::decode_view_ctx(
+                                        sub,
+                                        __sub_ctx,
+                                    )?,
+                                );
+                            }
+                        }
+                    }
+                    _ => {
+                        ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                        let span_len = before_tag.len() - cur.len();
+                        view.__buffa_unknown_fields
+                            .push_record(before_tag, span_len, ctx)?;
+                    }
+                }
+                ::core::result::Result::Ok(cur)
+            }
+            fn to_owned_message(
+                &self,
+            ) -> ::core::result::Result<super::super::JsonValue, ::buffa::DecodeError> {
+                self.to_owned_from_source(None)
+            }
+            #[allow(clippy::useless_conversion, clippy::needless_update)]
+            fn to_owned_from_source(
+                &self,
+                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+            ) -> ::core::result::Result<super::super::JsonValue, ::buffa::DecodeError> {
+                #[allow(unused_imports)]
+                use ::buffa::alloc::string::ToString as _;
+                let _ = __buffa_src;
+                ::core::result::Result::Ok(super::super::JsonValue {
+                    null_value: self.null_value,
+                    number_value: self.number_value,
+                    string_value: self.string_value.map(|s| s.to_string()),
+                    bool_value: self.bool_value,
+                    struct_value: match self.struct_value.as_option() {
+                        Some(v) => {
+                            ::buffa::MessageField::<
+                                super::super::JsonStruct,
+                                ::buffa::Inline<super::super::JsonStruct>,
+                            >::some(v.to_owned_from_source(__buffa_src)?)
+                        }
+                        None => ::buffa::MessageField::none(),
+                    },
+                    list_value: match self.list_value.as_option() {
+                        Some(v) => {
+                            ::buffa::MessageField::<
+                                super::super::JsonList,
+                                ::buffa::Inline<super::super::JsonList>,
+                            >::some(v.to_owned_from_source(__buffa_src)?)
+                        }
+                        None => ::buffa::MessageField::none(),
+                    },
+                    __buffa_unknown_fields: self
+                        .__buffa_unknown_fields
+                        .to_owned()?
+                        .into(),
+                    ..::core::default::Default::default()
+                })
+            }
+        }
+        impl<'a> ::buffa::ViewEncode<'a> for JsonValueView<'a> {
+            #[allow(clippy::needless_borrow, clippy::let_and_return)]
+            fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                let mut size = 0u64;
+                if let Some(v) = self.null_value {
+                    size += 1u64 + ::buffa::types::int32_encoded_len(v) as u64;
+                }
+                if self.number_value.is_some() {
+                    size += 1u64 + ::buffa::types::FIXED64_ENCODED_LEN as u64;
+                }
+                if let Some(ref v) = self.string_value {
+                    size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+                }
+                if self.bool_value.is_some() {
+                    size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
+                }
+                if self.struct_value.is_set() {
+                    let __slot = __cache.reserve();
+                    let inner_size = self.struct_value.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                            + inner_size as u64;
+                }
+                if self.list_value.is_set() {
+                    let __slot = __cache.reserve();
+                    let inner_size = self.list_value.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                            + inner_size as u64;
+                }
+                size += self.__buffa_unknown_fields.encoded_len() as u64;
+                ::buffa::saturate_size(size)
+            }
+            #[allow(clippy::needless_borrow)]
+            fn write_to(
+                &self,
+                __cache: &mut ::buffa::SizeCache,
+                buf: &mut impl ::buffa::EncodeSink,
+            ) {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                if let Some(v) = self.null_value {
+                    ::buffa::types::put_int32_field(1u32, v, buf);
+                }
+                if let Some(v) = self.number_value {
+                    ::buffa::types::put_double_field(2u32, v, buf);
+                }
+                if let Some(ref v) = self.string_value {
+                    ::buffa::types::put_string_field(3u32, v, buf);
+                }
+                if let Some(v) = self.bool_value {
+                    ::buffa::types::put_bool_field(4u32, v, buf);
+                }
+                if self.struct_value.is_set() {
+                    ::buffa::types::put_len_delimited_header(
+                        5u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    self.struct_value.write_to(__cache, buf);
+                }
+                if self.list_value.is_set() {
+                    ::buffa::types::put_len_delimited_header(
+                        6u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    self.list_value.write_to(__cache, buf);
+                }
+                self.__buffa_unknown_fields.write_to(buf);
+            }
+        }
+        impl<'a> ::buffa::MessageName for JsonValueView<'a> {
+            const PACKAGE: &'static str = "ganja.cursor.v1";
+            const NAME: &'static str = "JsonValue";
+            const FULL_NAME: &'static str = "ganja.cursor.v1.JsonValue";
+            const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.JsonValue";
+        }
+        ::buffa::impl_default_view_instance!(JsonValueView);
+        ::buffa::impl_view_reborrow!(JsonValueView);
+        /** Self-contained, `'static` owned view of a `JsonValue` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`JsonValueView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`JsonValueView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+        #[derive(Clone, Debug)]
+        pub struct JsonValueOwnedView(::buffa::OwnedView<JsonValueView<'static>>);
+        impl JsonValueOwnedView {
+            /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+            ///
+            /// The view borrows directly from the buffer's data; the buffer is
+            /// retained inside the returned handle.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+            /// protobuf data.
+            pub fn decode(
+                bytes: ::buffa::bytes::Bytes,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    JsonValueOwnedView(::buffa::OwnedView::decode(bytes)?),
+                )
+            }
+            /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+            /// max message size).
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+            /// exceeds the configured limits.
+            pub fn decode_with_options(
+                bytes: ::buffa::bytes::Bytes,
+                opts: &::buffa::DecodeOptions,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    JsonValueOwnedView(
+                        ::buffa::OwnedView::decode_with_options(bytes, opts)?,
+                    ),
+                )
+            }
+            /// Build from an owned message via an encode → decode round-trip.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError::MessageTooLarge`] if the
+            /// message's encoded size exceeds the 2 GiB protobuf limit, or
+            /// another [`::buffa::DecodeError`] if the re-encoded bytes are
+            /// somehow invalid (should not happen for well-formed messages).
+            pub fn from_owned(
+                msg: &super::super::JsonValue,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    JsonValueOwnedView(::buffa::OwnedView::from_owned(msg)?),
+                )
+            }
+            /// Borrow the full [`JsonValueView`] with its lifetime tied to `&self`.
+            #[must_use]
+            pub fn view(&self) -> &JsonValueView<'_> {
+                self.0.reborrow()
+            }
+            /// Convert to the owned message type.
+            ///
+            /// Infallible: this type's constructors wire-decode their
+            /// buffer, and a view produced by wire decoding always
+            /// converts. Delegates to [`::buffa::OwnedView::to_owned_message`],
+            /// whose contract also governs handles converted from a raw
+            /// [`::buffa::OwnedView`].
+            #[must_use]
+            pub fn to_owned_message(&self) -> super::super::JsonValue {
+                self.0.to_owned_message()
+            }
+            /// The underlying bytes buffer.
+            #[must_use]
+            pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+                self.0.bytes()
+            }
+            /// Consume the handle, returning the underlying bytes buffer.
+            #[must_use]
+            pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+                self.0.into_bytes()
+            }
+            /// Field 1: `null_value`
+            #[must_use]
+            pub fn null_value(&self) -> ::core::option::Option<i32> {
+                self.0.reborrow().null_value
+            }
+            /// Field 2: `number_value`
+            #[must_use]
+            pub fn number_value(&self) -> ::core::option::Option<f64> {
+                self.0.reborrow().number_value
+            }
+            /// Field 3: `string_value`
+            #[must_use]
+            pub fn string_value(&self) -> ::core::option::Option<&'_ str> {
+                self.0.reborrow().string_value
+            }
+            /// Field 4: `bool_value`
+            #[must_use]
+            pub fn bool_value(&self) -> ::core::option::Option<bool> {
+                self.0.reborrow().bool_value
+            }
+            /// Field 5: `struct_value`
+            #[must_use]
+            pub fn struct_value(
+                &self,
+            ) -> &::buffa::MessageFieldView<
+                super::super::__buffa::view::JsonStructView<'_>,
+            > {
+                &self.0.reborrow().struct_value
+            }
+            /// Field 6: `list_value`
+            #[must_use]
+            pub fn list_value(
+                &self,
+            ) -> &::buffa::MessageFieldView<
+                super::super::__buffa::view::JsonListView<'_>,
+            > {
+                &self.0.reborrow().list_value
+            }
+        }
+        impl ::core::convert::From<::buffa::OwnedView<JsonValueView<'static>>>
+        for JsonValueOwnedView {
+            fn from(inner: ::buffa::OwnedView<JsonValueView<'static>>) -> Self {
+                JsonValueOwnedView(inner)
+            }
+        }
+        impl ::core::convert::From<JsonValueOwnedView>
+        for ::buffa::OwnedView<JsonValueView<'static>> {
+            fn from(wrapper: JsonValueOwnedView) -> Self {
+                wrapper.0
+            }
+        }
+        impl ::core::convert::AsRef<::buffa::OwnedView<JsonValueView<'static>>>
+        for JsonValueOwnedView {
+            fn as_ref(&self) -> &::buffa::OwnedView<JsonValueView<'static>> {
+                &self.0
+            }
+        }
+        impl ::buffa::HasMessageView for super::super::JsonValue {
+            type View<'a> = JsonValueView<'a>;
+            type ViewHandle = JsonValueOwnedView;
+        }
+        /// `google.protobuf.Struct` (index.js@3926700) is `map\<string, Value\> fields =
+        /// 1`, and a protobuf map *is* a repeated entry message with key = 1 and
+        /// value = 2 — so this spelling is byte-identical to the map and, unlike a map,
+        /// preserves the order it was built in. That determinism is what lets a test
+        /// assert the declaration's bytes rather than assert around a HashMap.
+        #[derive(Clone, Debug, Default)]
+        pub struct JsonStructView<'a> {
+            /// Field 1: `fields`
+            pub fields: ::buffa::RepeatedView<
+                'a,
+                super::super::__buffa::view::JsonFieldView<'a>,
+            >,
+            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+        }
+        impl<'a> ::buffa::MessageView<'a> for JsonStructView<'a> {
+            type Owned = super::super::JsonStruct;
+            fn decode_view(
+                buf: &'a [u8],
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                let __limit = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT,
+                );
+                let __elem = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_ELEMENT_MEMORY_LIMIT,
+                );
+                <Self as ::buffa::MessageView>::decode_view_ctx(
+                    buf,
+                    ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit)
+                        .with_element_memory(&__elem),
+                )
+            }
+            fn decode_view_with_ctx(
+                buf: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+            }
+            #[inline]
+            fn merge_view_field(
+                &mut self,
+                tag: ::buffa::encoding::Tag,
+                cur: &'a [u8],
+                before_tag: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+                let _ = ctx;
+                #[allow(unused_variables)]
+                let view = self;
+                let mut cur = cur;
+                match tag.field_number() {
+                    1u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        ctx.register_element_memory(
+                            ::core::mem::size_of::<
+                                super::super::__buffa::view::JsonFieldView,
+                            >(),
+                        )?;
+                        view.fields
+                            .push(
+                                <super::super::__buffa::view::JsonFieldView as ::buffa::MessageView>::decode_view_ctx(
+                                    sub,
+                                    __sub_ctx,
+                                )?,
+                            );
+                    }
+                    _ => {
+                        ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                        let span_len = before_tag.len() - cur.len();
+                        view.__buffa_unknown_fields
+                            .push_record(before_tag, span_len, ctx)?;
+                    }
+                }
+                ::core::result::Result::Ok(cur)
+            }
+            fn to_owned_message(
+                &self,
+            ) -> ::core::result::Result<super::super::JsonStruct, ::buffa::DecodeError> {
+                self.to_owned_from_source(None)
+            }
+            #[allow(clippy::useless_conversion, clippy::needless_update)]
+            fn to_owned_from_source(
+                &self,
+                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+            ) -> ::core::result::Result<super::super::JsonStruct, ::buffa::DecodeError> {
+                #[allow(unused_imports)]
+                use ::buffa::alloc::string::ToString as _;
+                let _ = __buffa_src;
+                ::core::result::Result::Ok(super::super::JsonStruct {
+                    fields: self
+                        .fields
+                        .iter()
+                        .map(|v| v.to_owned_from_source(__buffa_src))
+                        .collect::<::core::result::Result<_, ::buffa::DecodeError>>()?,
+                    __buffa_unknown_fields: self
+                        .__buffa_unknown_fields
+                        .to_owned()?
+                        .into(),
+                    ..::core::default::Default::default()
+                })
+            }
+        }
+        impl<'a> ::buffa::ViewEncode<'a> for JsonStructView<'a> {
+            #[allow(clippy::needless_borrow, clippy::let_and_return)]
+            fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                let mut size = 0u64;
+                for v in &self.fields {
+                    let __slot = __cache.reserve();
+                    let inner_size = v.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                            + inner_size as u64;
+                }
+                size += self.__buffa_unknown_fields.encoded_len() as u64;
+                ::buffa::saturate_size(size)
+            }
+            #[allow(clippy::needless_borrow)]
+            fn write_to(
+                &self,
+                __cache: &mut ::buffa::SizeCache,
+                buf: &mut impl ::buffa::EncodeSink,
+            ) {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                for v in &self.fields {
+                    ::buffa::types::put_len_delimited_header(
+                        1u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    v.write_to(__cache, buf);
+                }
+                self.__buffa_unknown_fields.write_to(buf);
+            }
+        }
+        impl<'a> ::buffa::MessageName for JsonStructView<'a> {
+            const PACKAGE: &'static str = "ganja.cursor.v1";
+            const NAME: &'static str = "JsonStruct";
+            const FULL_NAME: &'static str = "ganja.cursor.v1.JsonStruct";
+            const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.JsonStruct";
+        }
+        ::buffa::impl_default_view_instance!(JsonStructView);
+        ::buffa::impl_view_reborrow!(JsonStructView);
+        /** Self-contained, `'static` owned view of a `JsonStruct` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`JsonStructView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`JsonStructView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+        #[derive(Clone, Debug)]
+        pub struct JsonStructOwnedView(::buffa::OwnedView<JsonStructView<'static>>);
+        impl JsonStructOwnedView {
+            /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+            ///
+            /// The view borrows directly from the buffer's data; the buffer is
+            /// retained inside the returned handle.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+            /// protobuf data.
+            pub fn decode(
+                bytes: ::buffa::bytes::Bytes,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    JsonStructOwnedView(::buffa::OwnedView::decode(bytes)?),
+                )
+            }
+            /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+            /// max message size).
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+            /// exceeds the configured limits.
+            pub fn decode_with_options(
+                bytes: ::buffa::bytes::Bytes,
+                opts: &::buffa::DecodeOptions,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    JsonStructOwnedView(
+                        ::buffa::OwnedView::decode_with_options(bytes, opts)?,
+                    ),
+                )
+            }
+            /// Build from an owned message via an encode → decode round-trip.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError::MessageTooLarge`] if the
+            /// message's encoded size exceeds the 2 GiB protobuf limit, or
+            /// another [`::buffa::DecodeError`] if the re-encoded bytes are
+            /// somehow invalid (should not happen for well-formed messages).
+            pub fn from_owned(
+                msg: &super::super::JsonStruct,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    JsonStructOwnedView(::buffa::OwnedView::from_owned(msg)?),
+                )
+            }
+            /// Borrow the full [`JsonStructView`] with its lifetime tied to `&self`.
+            #[must_use]
+            pub fn view(&self) -> &JsonStructView<'_> {
+                self.0.reborrow()
+            }
+            /// Convert to the owned message type.
+            ///
+            /// Infallible: this type's constructors wire-decode their
+            /// buffer, and a view produced by wire decoding always
+            /// converts. Delegates to [`::buffa::OwnedView::to_owned_message`],
+            /// whose contract also governs handles converted from a raw
+            /// [`::buffa::OwnedView`].
+            #[must_use]
+            pub fn to_owned_message(&self) -> super::super::JsonStruct {
+                self.0.to_owned_message()
+            }
+            /// The underlying bytes buffer.
+            #[must_use]
+            pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+                self.0.bytes()
+            }
+            /// Consume the handle, returning the underlying bytes buffer.
+            #[must_use]
+            pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+                self.0.into_bytes()
+            }
+            /// Field 1: `fields`
+            #[must_use]
+            pub fn fields(
+                &self,
+            ) -> &::buffa::RepeatedView<
+                '_,
+                super::super::__buffa::view::JsonFieldView<'_>,
+            > {
+                &self.0.reborrow().fields
+            }
+        }
+        impl ::core::convert::From<::buffa::OwnedView<JsonStructView<'static>>>
+        for JsonStructOwnedView {
+            fn from(inner: ::buffa::OwnedView<JsonStructView<'static>>) -> Self {
+                JsonStructOwnedView(inner)
+            }
+        }
+        impl ::core::convert::From<JsonStructOwnedView>
+        for ::buffa::OwnedView<JsonStructView<'static>> {
+            fn from(wrapper: JsonStructOwnedView) -> Self {
+                wrapper.0
+            }
+        }
+        impl ::core::convert::AsRef<::buffa::OwnedView<JsonStructView<'static>>>
+        for JsonStructOwnedView {
+            fn as_ref(&self) -> &::buffa::OwnedView<JsonStructView<'static>> {
+                &self.0
+            }
+        }
+        impl ::buffa::HasMessageView for super::super::JsonStruct {
+            type View<'a> = JsonStructView<'a>;
+            type ViewHandle = JsonStructOwnedView;
+        }
+        /// One entry of that map: the synthesized MapEntry protobuf generates for it.
+        #[derive(Clone, Debug, Default)]
+        pub struct JsonFieldView<'a> {
+            /// Field 1: `key`
+            pub key: ::core::option::Option<&'a str>,
+            /// Field 2: `value`
+            pub value: ::buffa::MessageFieldView<
+                super::super::__buffa::view::JsonValueView<'a>,
+            >,
+            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+        }
+        impl<'a> ::buffa::MessageView<'a> for JsonFieldView<'a> {
+            type Owned = super::super::JsonField;
+            fn decode_view(
+                buf: &'a [u8],
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                let __limit = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT,
+                );
+                let __elem = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_ELEMENT_MEMORY_LIMIT,
+                );
+                <Self as ::buffa::MessageView>::decode_view_ctx(
+                    buf,
+                    ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit)
+                        .with_element_memory(&__elem),
+                )
+            }
+            fn decode_view_with_ctx(
+                buf: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+            }
+            #[inline]
+            fn merge_view_field(
+                &mut self,
+                tag: ::buffa::encoding::Tag,
+                cur: &'a [u8],
+                before_tag: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+                let _ = ctx;
+                #[allow(unused_variables)]
+                let view = self;
+                let mut cur = cur;
+                match tag.field_number() {
+                    1u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        view.key = Some(::buffa::types::borrow_str(&mut cur)?);
+                    }
+                    2u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        match view.value.as_mut() {
+                            Some(existing) => {
+                                ::buffa::MessageView::merge_into_view(
+                                    existing,
+                                    sub,
+                                    __sub_ctx,
+                                )?
+                            }
+                            None => {
+                                view.value = ::buffa::MessageFieldView::set(
+                                    <super::super::__buffa::view::JsonValueView as ::buffa::MessageView>::decode_view_ctx(
+                                        sub,
+                                        __sub_ctx,
+                                    )?,
+                                );
+                            }
+                        }
+                    }
+                    _ => {
+                        ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                        let span_len = before_tag.len() - cur.len();
+                        view.__buffa_unknown_fields
+                            .push_record(before_tag, span_len, ctx)?;
+                    }
+                }
+                ::core::result::Result::Ok(cur)
+            }
+            fn to_owned_message(
+                &self,
+            ) -> ::core::result::Result<super::super::JsonField, ::buffa::DecodeError> {
+                self.to_owned_from_source(None)
+            }
+            #[allow(clippy::useless_conversion, clippy::needless_update)]
+            fn to_owned_from_source(
+                &self,
+                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+            ) -> ::core::result::Result<super::super::JsonField, ::buffa::DecodeError> {
+                #[allow(unused_imports)]
+                use ::buffa::alloc::string::ToString as _;
+                let _ = __buffa_src;
+                ::core::result::Result::Ok(super::super::JsonField {
+                    key: self.key.map(|s| s.to_string()),
+                    value: match self.value.as_option() {
+                        Some(v) => {
+                            ::buffa::MessageField::<
+                                super::super::JsonValue,
+                                ::buffa::Inline<super::super::JsonValue>,
+                            >::some(v.to_owned_from_source(__buffa_src)?)
+                        }
+                        None => ::buffa::MessageField::none(),
+                    },
+                    __buffa_unknown_fields: self
+                        .__buffa_unknown_fields
+                        .to_owned()?
+                        .into(),
+                    ..::core::default::Default::default()
+                })
+            }
+        }
+        impl<'a> ::buffa::ViewEncode<'a> for JsonFieldView<'a> {
+            #[allow(clippy::needless_borrow, clippy::let_and_return)]
+            fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                let mut size = 0u64;
+                if let Some(ref v) = self.key {
+                    size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+                }
+                if self.value.is_set() {
+                    let __slot = __cache.reserve();
+                    let inner_size = self.value.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                            + inner_size as u64;
+                }
+                size += self.__buffa_unknown_fields.encoded_len() as u64;
+                ::buffa::saturate_size(size)
+            }
+            #[allow(clippy::needless_borrow)]
+            fn write_to(
+                &self,
+                __cache: &mut ::buffa::SizeCache,
+                buf: &mut impl ::buffa::EncodeSink,
+            ) {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                if let Some(ref v) = self.key {
+                    ::buffa::types::put_string_field(1u32, v, buf);
+                }
+                if self.value.is_set() {
+                    ::buffa::types::put_len_delimited_header(
+                        2u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    self.value.write_to(__cache, buf);
+                }
+                self.__buffa_unknown_fields.write_to(buf);
+            }
+        }
+        impl<'a> ::buffa::MessageName for JsonFieldView<'a> {
+            const PACKAGE: &'static str = "ganja.cursor.v1";
+            const NAME: &'static str = "JsonField";
+            const FULL_NAME: &'static str = "ganja.cursor.v1.JsonField";
+            const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.JsonField";
+        }
+        ::buffa::impl_default_view_instance!(JsonFieldView);
+        ::buffa::impl_view_reborrow!(JsonFieldView);
+        /** Self-contained, `'static` owned view of a `JsonField` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`JsonFieldView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`JsonFieldView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+        #[derive(Clone, Debug)]
+        pub struct JsonFieldOwnedView(::buffa::OwnedView<JsonFieldView<'static>>);
+        impl JsonFieldOwnedView {
+            /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+            ///
+            /// The view borrows directly from the buffer's data; the buffer is
+            /// retained inside the returned handle.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+            /// protobuf data.
+            pub fn decode(
+                bytes: ::buffa::bytes::Bytes,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    JsonFieldOwnedView(::buffa::OwnedView::decode(bytes)?),
+                )
+            }
+            /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+            /// max message size).
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+            /// exceeds the configured limits.
+            pub fn decode_with_options(
+                bytes: ::buffa::bytes::Bytes,
+                opts: &::buffa::DecodeOptions,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    JsonFieldOwnedView(
+                        ::buffa::OwnedView::decode_with_options(bytes, opts)?,
+                    ),
+                )
+            }
+            /// Build from an owned message via an encode → decode round-trip.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError::MessageTooLarge`] if the
+            /// message's encoded size exceeds the 2 GiB protobuf limit, or
+            /// another [`::buffa::DecodeError`] if the re-encoded bytes are
+            /// somehow invalid (should not happen for well-formed messages).
+            pub fn from_owned(
+                msg: &super::super::JsonField,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    JsonFieldOwnedView(::buffa::OwnedView::from_owned(msg)?),
+                )
+            }
+            /// Borrow the full [`JsonFieldView`] with its lifetime tied to `&self`.
+            #[must_use]
+            pub fn view(&self) -> &JsonFieldView<'_> {
+                self.0.reborrow()
+            }
+            /// Convert to the owned message type.
+            ///
+            /// Infallible: this type's constructors wire-decode their
+            /// buffer, and a view produced by wire decoding always
+            /// converts. Delegates to [`::buffa::OwnedView::to_owned_message`],
+            /// whose contract also governs handles converted from a raw
+            /// [`::buffa::OwnedView`].
+            #[must_use]
+            pub fn to_owned_message(&self) -> super::super::JsonField {
+                self.0.to_owned_message()
+            }
+            /// The underlying bytes buffer.
+            #[must_use]
+            pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+                self.0.bytes()
+            }
+            /// Consume the handle, returning the underlying bytes buffer.
+            #[must_use]
+            pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+                self.0.into_bytes()
+            }
+            /// Field 1: `key`
+            #[must_use]
+            pub fn key(&self) -> ::core::option::Option<&'_ str> {
+                self.0.reborrow().key
+            }
+            /// Field 2: `value`
+            #[must_use]
+            pub fn value(
+                &self,
+            ) -> &::buffa::MessageFieldView<
+                super::super::__buffa::view::JsonValueView<'_>,
+            > {
+                &self.0.reborrow().value
+            }
+        }
+        impl ::core::convert::From<::buffa::OwnedView<JsonFieldView<'static>>>
+        for JsonFieldOwnedView {
+            fn from(inner: ::buffa::OwnedView<JsonFieldView<'static>>) -> Self {
+                JsonFieldOwnedView(inner)
+            }
+        }
+        impl ::core::convert::From<JsonFieldOwnedView>
+        for ::buffa::OwnedView<JsonFieldView<'static>> {
+            fn from(wrapper: JsonFieldOwnedView) -> Self {
+                wrapper.0
+            }
+        }
+        impl ::core::convert::AsRef<::buffa::OwnedView<JsonFieldView<'static>>>
+        for JsonFieldOwnedView {
+            fn as_ref(&self) -> &::buffa::OwnedView<JsonFieldView<'static>> {
+                &self.0
+            }
+        }
+        impl ::buffa::HasMessageView for super::super::JsonField {
+            type View<'a> = JsonFieldView<'a>;
+            type ViewHandle = JsonFieldOwnedView;
+        }
+        /// `google.protobuf.ListValue` (index.js@3929084).
+        #[derive(Clone, Debug, Default)]
+        pub struct JsonListView<'a> {
+            /// Field 1: `values`
+            pub values: ::buffa::RepeatedView<
+                'a,
+                super::super::__buffa::view::JsonValueView<'a>,
+            >,
+            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+        }
+        impl<'a> ::buffa::MessageView<'a> for JsonListView<'a> {
+            type Owned = super::super::JsonList;
+            fn decode_view(
+                buf: &'a [u8],
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                let __limit = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT,
+                );
+                let __elem = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_ELEMENT_MEMORY_LIMIT,
+                );
+                <Self as ::buffa::MessageView>::decode_view_ctx(
+                    buf,
+                    ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit)
+                        .with_element_memory(&__elem),
+                )
+            }
+            fn decode_view_with_ctx(
+                buf: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+            }
+            #[inline]
+            fn merge_view_field(
+                &mut self,
+                tag: ::buffa::encoding::Tag,
+                cur: &'a [u8],
+                before_tag: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+                let _ = ctx;
+                #[allow(unused_variables)]
+                let view = self;
+                let mut cur = cur;
+                match tag.field_number() {
+                    1u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        ctx.register_element_memory(
+                            ::core::mem::size_of::<
+                                super::super::__buffa::view::JsonValueView,
+                            >(),
+                        )?;
+                        view.values
+                            .push(
+                                <super::super::__buffa::view::JsonValueView as ::buffa::MessageView>::decode_view_ctx(
+                                    sub,
+                                    __sub_ctx,
+                                )?,
+                            );
+                    }
+                    _ => {
+                        ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                        let span_len = before_tag.len() - cur.len();
+                        view.__buffa_unknown_fields
+                            .push_record(before_tag, span_len, ctx)?;
+                    }
+                }
+                ::core::result::Result::Ok(cur)
+            }
+            fn to_owned_message(
+                &self,
+            ) -> ::core::result::Result<super::super::JsonList, ::buffa::DecodeError> {
+                self.to_owned_from_source(None)
+            }
+            #[allow(clippy::useless_conversion, clippy::needless_update)]
+            fn to_owned_from_source(
+                &self,
+                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+            ) -> ::core::result::Result<super::super::JsonList, ::buffa::DecodeError> {
+                #[allow(unused_imports)]
+                use ::buffa::alloc::string::ToString as _;
+                let _ = __buffa_src;
+                ::core::result::Result::Ok(super::super::JsonList {
+                    values: self
+                        .values
+                        .iter()
+                        .map(|v| v.to_owned_from_source(__buffa_src))
+                        .collect::<::core::result::Result<_, ::buffa::DecodeError>>()?,
+                    __buffa_unknown_fields: self
+                        .__buffa_unknown_fields
+                        .to_owned()?
+                        .into(),
+                    ..::core::default::Default::default()
+                })
+            }
+        }
+        impl<'a> ::buffa::ViewEncode<'a> for JsonListView<'a> {
+            #[allow(clippy::needless_borrow, clippy::let_and_return)]
+            fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                let mut size = 0u64;
+                for v in &self.values {
+                    let __slot = __cache.reserve();
+                    let inner_size = v.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                            + inner_size as u64;
+                }
+                size += self.__buffa_unknown_fields.encoded_len() as u64;
+                ::buffa::saturate_size(size)
+            }
+            #[allow(clippy::needless_borrow)]
+            fn write_to(
+                &self,
+                __cache: &mut ::buffa::SizeCache,
+                buf: &mut impl ::buffa::EncodeSink,
+            ) {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                for v in &self.values {
+                    ::buffa::types::put_len_delimited_header(
+                        1u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    v.write_to(__cache, buf);
+                }
+                self.__buffa_unknown_fields.write_to(buf);
+            }
+        }
+        impl<'a> ::buffa::MessageName for JsonListView<'a> {
+            const PACKAGE: &'static str = "ganja.cursor.v1";
+            const NAME: &'static str = "JsonList";
+            const FULL_NAME: &'static str = "ganja.cursor.v1.JsonList";
+            const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.JsonList";
+        }
+        ::buffa::impl_default_view_instance!(JsonListView);
+        ::buffa::impl_view_reborrow!(JsonListView);
+        /** Self-contained, `'static` owned view of a `JsonList` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`JsonListView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`JsonListView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+        #[derive(Clone, Debug)]
+        pub struct JsonListOwnedView(::buffa::OwnedView<JsonListView<'static>>);
+        impl JsonListOwnedView {
+            /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+            ///
+            /// The view borrows directly from the buffer's data; the buffer is
+            /// retained inside the returned handle.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+            /// protobuf data.
+            pub fn decode(
+                bytes: ::buffa::bytes::Bytes,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    JsonListOwnedView(::buffa::OwnedView::decode(bytes)?),
+                )
+            }
+            /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+            /// max message size).
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+            /// exceeds the configured limits.
+            pub fn decode_with_options(
+                bytes: ::buffa::bytes::Bytes,
+                opts: &::buffa::DecodeOptions,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    JsonListOwnedView(
+                        ::buffa::OwnedView::decode_with_options(bytes, opts)?,
+                    ),
+                )
+            }
+            /// Build from an owned message via an encode → decode round-trip.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError::MessageTooLarge`] if the
+            /// message's encoded size exceeds the 2 GiB protobuf limit, or
+            /// another [`::buffa::DecodeError`] if the re-encoded bytes are
+            /// somehow invalid (should not happen for well-formed messages).
+            pub fn from_owned(
+                msg: &super::super::JsonList,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    JsonListOwnedView(::buffa::OwnedView::from_owned(msg)?),
+                )
+            }
+            /// Borrow the full [`JsonListView`] with its lifetime tied to `&self`.
+            #[must_use]
+            pub fn view(&self) -> &JsonListView<'_> {
+                self.0.reborrow()
+            }
+            /// Convert to the owned message type.
+            ///
+            /// Infallible: this type's constructors wire-decode their
+            /// buffer, and a view produced by wire decoding always
+            /// converts. Delegates to [`::buffa::OwnedView::to_owned_message`],
+            /// whose contract also governs handles converted from a raw
+            /// [`::buffa::OwnedView`].
+            #[must_use]
+            pub fn to_owned_message(&self) -> super::super::JsonList {
+                self.0.to_owned_message()
+            }
+            /// The underlying bytes buffer.
+            #[must_use]
+            pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+                self.0.bytes()
+            }
+            /// Consume the handle, returning the underlying bytes buffer.
+            #[must_use]
+            pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+                self.0.into_bytes()
+            }
+            /// Field 1: `values`
+            #[must_use]
+            pub fn values(
+                &self,
+            ) -> &::buffa::RepeatedView<
+                '_,
+                super::super::__buffa::view::JsonValueView<'_>,
+            > {
+                &self.0.reborrow().values
+            }
+        }
+        impl ::core::convert::From<::buffa::OwnedView<JsonListView<'static>>>
+        for JsonListOwnedView {
+            fn from(inner: ::buffa::OwnedView<JsonListView<'static>>) -> Self {
+                JsonListOwnedView(inner)
+            }
+        }
+        impl ::core::convert::From<JsonListOwnedView>
+        for ::buffa::OwnedView<JsonListView<'static>> {
+            fn from(wrapper: JsonListOwnedView) -> Self {
+                wrapper.0
+            }
+        }
+        impl ::core::convert::AsRef<::buffa::OwnedView<JsonListView<'static>>>
+        for JsonListOwnedView {
+            fn as_ref(&self) -> &::buffa::OwnedView<JsonListView<'static>> {
+                &self.0
+            }
+        }
+        impl ::buffa::HasMessageView for super::super::JsonList {
+            type View<'a> = JsonListView<'a>;
+            type ViewHandle = JsonListOwnedView;
+        }
+        /// The run-level liveness ping the client sends while its request body is open:
+        /// AgentClientMessage.client_heartbeat = 7 (index.js@6200066), of type
+        /// ClientHeartbeat (index.js@6197181), which carries nothing — the arrival is
+        /// the whole message, exactly like the server's own Heartbeat above.
+        #[derive(Clone, Debug, Default)]
+        pub struct ClientHeartbeatView<'a> {
+            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+        }
+        impl<'a> ::buffa::MessageView<'a> for ClientHeartbeatView<'a> {
+            type Owned = super::super::ClientHeartbeat;
+            fn decode_view(
+                buf: &'a [u8],
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                let __limit = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT,
+                );
+                let __elem = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_ELEMENT_MEMORY_LIMIT,
+                );
+                <Self as ::buffa::MessageView>::decode_view_ctx(
+                    buf,
+                    ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit)
+                        .with_element_memory(&__elem),
+                )
+            }
+            fn decode_view_with_ctx(
+                buf: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+            }
+            #[inline]
+            fn merge_view_field(
+                &mut self,
+                tag: ::buffa::encoding::Tag,
+                cur: &'a [u8],
+                before_tag: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+                let _ = ctx;
+                #[allow(unused_variables)]
+                let view = self;
+                let mut cur = cur;
+                match tag.field_number() {
+                    _ => {
+                        ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                        let span_len = before_tag.len() - cur.len();
+                        view.__buffa_unknown_fields
+                            .push_record(before_tag, span_len, ctx)?;
+                    }
+                }
+                ::core::result::Result::Ok(cur)
+            }
+            fn to_owned_message(
+                &self,
+            ) -> ::core::result::Result<
+                super::super::ClientHeartbeat,
+                ::buffa::DecodeError,
+            > {
+                self.to_owned_from_source(None)
+            }
+            #[allow(clippy::useless_conversion, clippy::needless_update)]
+            fn to_owned_from_source(
+                &self,
+                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+            ) -> ::core::result::Result<
+                super::super::ClientHeartbeat,
+                ::buffa::DecodeError,
+            > {
+                #[allow(unused_imports)]
+                use ::buffa::alloc::string::ToString as _;
+                let _ = __buffa_src;
+                ::core::result::Result::Ok(super::super::ClientHeartbeat {
+                    __buffa_unknown_fields: self
+                        .__buffa_unknown_fields
+                        .to_owned()?
+                        .into(),
+                    ..::core::default::Default::default()
+                })
+            }
+        }
+        impl<'a> ::buffa::ViewEncode<'a> for ClientHeartbeatView<'a> {
+            #[allow(clippy::needless_borrow, clippy::let_and_return)]
+            fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                let mut size = 0u64;
+                size += self.__buffa_unknown_fields.encoded_len() as u64;
+                ::buffa::saturate_size(size)
+            }
+            #[allow(clippy::needless_borrow)]
+            fn write_to(
+                &self,
+                _cache: &mut ::buffa::SizeCache,
+                buf: &mut impl ::buffa::EncodeSink,
+            ) {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                self.__buffa_unknown_fields.write_to(buf);
+            }
+        }
+        impl<'a> ::buffa::MessageName for ClientHeartbeatView<'a> {
+            const PACKAGE: &'static str = "ganja.cursor.v1";
+            const NAME: &'static str = "ClientHeartbeat";
+            const FULL_NAME: &'static str = "ganja.cursor.v1.ClientHeartbeat";
+            const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.ClientHeartbeat";
+        }
+        ::buffa::impl_default_view_instance!(ClientHeartbeatView);
+        ::buffa::impl_view_reborrow!(ClientHeartbeatView);
+        /** Self-contained, `'static` owned view of a `ClientHeartbeat` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`ClientHeartbeatView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`ClientHeartbeatView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+        #[derive(Clone, Debug)]
+        pub struct ClientHeartbeatOwnedView(
+            ::buffa::OwnedView<ClientHeartbeatView<'static>>,
+        );
+        impl ClientHeartbeatOwnedView {
+            /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+            ///
+            /// The view borrows directly from the buffer's data; the buffer is
+            /// retained inside the returned handle.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+            /// protobuf data.
+            pub fn decode(
+                bytes: ::buffa::bytes::Bytes,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    ClientHeartbeatOwnedView(::buffa::OwnedView::decode(bytes)?),
+                )
+            }
+            /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+            /// max message size).
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+            /// exceeds the configured limits.
+            pub fn decode_with_options(
+                bytes: ::buffa::bytes::Bytes,
+                opts: &::buffa::DecodeOptions,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    ClientHeartbeatOwnedView(
+                        ::buffa::OwnedView::decode_with_options(bytes, opts)?,
+                    ),
+                )
+            }
+            /// Build from an owned message via an encode → decode round-trip.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError::MessageTooLarge`] if the
+            /// message's encoded size exceeds the 2 GiB protobuf limit, or
+            /// another [`::buffa::DecodeError`] if the re-encoded bytes are
+            /// somehow invalid (should not happen for well-formed messages).
+            pub fn from_owned(
+                msg: &super::super::ClientHeartbeat,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    ClientHeartbeatOwnedView(::buffa::OwnedView::from_owned(msg)?),
+                )
+            }
+            /// Borrow the full [`ClientHeartbeatView`] with its lifetime tied to `&self`.
+            #[must_use]
+            pub fn view(&self) -> &ClientHeartbeatView<'_> {
+                self.0.reborrow()
+            }
+            /// Convert to the owned message type.
+            ///
+            /// Infallible: this type's constructors wire-decode their
+            /// buffer, and a view produced by wire decoding always
+            /// converts. Delegates to [`::buffa::OwnedView::to_owned_message`],
+            /// whose contract also governs handles converted from a raw
+            /// [`::buffa::OwnedView`].
+            #[must_use]
+            pub fn to_owned_message(&self) -> super::super::ClientHeartbeat {
+                self.0.to_owned_message()
+            }
+            /// The underlying bytes buffer.
+            #[must_use]
+            pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+                self.0.bytes()
+            }
+            /// Consume the handle, returning the underlying bytes buffer.
+            #[must_use]
+            pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+                self.0.into_bytes()
+            }
+        }
+        impl ::core::convert::From<::buffa::OwnedView<ClientHeartbeatView<'static>>>
+        for ClientHeartbeatOwnedView {
+            fn from(inner: ::buffa::OwnedView<ClientHeartbeatView<'static>>) -> Self {
+                ClientHeartbeatOwnedView(inner)
+            }
+        }
+        impl ::core::convert::From<ClientHeartbeatOwnedView>
+        for ::buffa::OwnedView<ClientHeartbeatView<'static>> {
+            fn from(wrapper: ClientHeartbeatOwnedView) -> Self {
+                wrapper.0
+            }
+        }
+        impl ::core::convert::AsRef<::buffa::OwnedView<ClientHeartbeatView<'static>>>
+        for ClientHeartbeatOwnedView {
+            fn as_ref(&self) -> &::buffa::OwnedView<ClientHeartbeatView<'static>> {
+                &self.0
+            }
+        }
+        impl ::buffa::HasMessageView for super::super::ClientHeartbeat {
+            type View<'a> = ClientHeartbeatView<'a>;
+            type ViewHandle = ClientHeartbeatOwnedView;
+        }
+        /// The *exec*-level liveness ping, the third arm of the control channel this
+        /// file already models two arms of: ExecClientControlMessage.heartbeat = 3
+        /// (index.js@6299362), of type ExecClientHeartbeat (index.js@6298918), whose
+        /// id = 1 is the exec's, not the stream's. The shipped client sends one every
+        /// three seconds while a handler is actually running (index.js@4272747) — the
+        /// state D486 said this build never enters, and the state a deliberate pause
+        /// puts it in for the first time.
+        #[derive(Clone, Debug, Default)]
+        pub struct ExecHeartbeatView<'a> {
+            /// Field 1: `id`
+            pub id: ::core::option::Option<u32>,
+            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+        }
+        impl<'a> ::buffa::MessageView<'a> for ExecHeartbeatView<'a> {
+            type Owned = super::super::ExecHeartbeat;
+            fn decode_view(
+                buf: &'a [u8],
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                let __limit = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT,
+                );
+                let __elem = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_ELEMENT_MEMORY_LIMIT,
+                );
+                <Self as ::buffa::MessageView>::decode_view_ctx(
+                    buf,
+                    ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit)
+                        .with_element_memory(&__elem),
+                )
+            }
+            fn decode_view_with_ctx(
+                buf: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+            }
+            #[inline]
+            fn merge_view_field(
+                &mut self,
+                tag: ::buffa::encoding::Tag,
+                cur: &'a [u8],
+                before_tag: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+                let _ = ctx;
+                #[allow(unused_variables)]
+                let view = self;
+                let mut cur = cur;
+                match tag.field_number() {
+                    1u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::Varint,
+                        )?;
+                        view.id = Some(::buffa::types::decode_uint32(&mut cur)?);
+                    }
+                    _ => {
+                        ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                        let span_len = before_tag.len() - cur.len();
+                        view.__buffa_unknown_fields
+                            .push_record(before_tag, span_len, ctx)?;
+                    }
+                }
+                ::core::result::Result::Ok(cur)
+            }
+            fn to_owned_message(
+                &self,
+            ) -> ::core::result::Result<
+                super::super::ExecHeartbeat,
+                ::buffa::DecodeError,
+            > {
+                self.to_owned_from_source(None)
+            }
+            #[allow(clippy::useless_conversion, clippy::needless_update)]
+            fn to_owned_from_source(
+                &self,
+                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+            ) -> ::core::result::Result<
+                super::super::ExecHeartbeat,
+                ::buffa::DecodeError,
+            > {
+                #[allow(unused_imports)]
+                use ::buffa::alloc::string::ToString as _;
+                let _ = __buffa_src;
+                ::core::result::Result::Ok(super::super::ExecHeartbeat {
+                    id: self.id,
+                    __buffa_unknown_fields: self
+                        .__buffa_unknown_fields
+                        .to_owned()?
+                        .into(),
+                    ..::core::default::Default::default()
+                })
+            }
+        }
+        impl<'a> ::buffa::ViewEncode<'a> for ExecHeartbeatView<'a> {
+            #[allow(clippy::needless_borrow, clippy::let_and_return)]
+            fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                let mut size = 0u64;
+                if let Some(v) = self.id {
+                    size += 1u64 + ::buffa::types::uint32_encoded_len(v) as u64;
+                }
+                size += self.__buffa_unknown_fields.encoded_len() as u64;
+                ::buffa::saturate_size(size)
+            }
+            #[allow(clippy::needless_borrow)]
+            fn write_to(
+                &self,
+                _cache: &mut ::buffa::SizeCache,
+                buf: &mut impl ::buffa::EncodeSink,
+            ) {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                if let Some(v) = self.id {
+                    ::buffa::types::put_uint32_field(1u32, v, buf);
+                }
+                self.__buffa_unknown_fields.write_to(buf);
+            }
+        }
+        impl<'a> ::buffa::MessageName for ExecHeartbeatView<'a> {
+            const PACKAGE: &'static str = "ganja.cursor.v1";
+            const NAME: &'static str = "ExecHeartbeat";
+            const FULL_NAME: &'static str = "ganja.cursor.v1.ExecHeartbeat";
+            const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.ExecHeartbeat";
+        }
+        ::buffa::impl_default_view_instance!(ExecHeartbeatView);
+        ::buffa::impl_view_reborrow!(ExecHeartbeatView);
+        /** Self-contained, `'static` owned view of a `ExecHeartbeat` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`ExecHeartbeatView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`ExecHeartbeatView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+        #[derive(Clone, Debug)]
+        pub struct ExecHeartbeatOwnedView(
+            ::buffa::OwnedView<ExecHeartbeatView<'static>>,
+        );
+        impl ExecHeartbeatOwnedView {
+            /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+            ///
+            /// The view borrows directly from the buffer's data; the buffer is
+            /// retained inside the returned handle.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+            /// protobuf data.
+            pub fn decode(
+                bytes: ::buffa::bytes::Bytes,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    ExecHeartbeatOwnedView(::buffa::OwnedView::decode(bytes)?),
+                )
+            }
+            /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+            /// max message size).
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+            /// exceeds the configured limits.
+            pub fn decode_with_options(
+                bytes: ::buffa::bytes::Bytes,
+                opts: &::buffa::DecodeOptions,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    ExecHeartbeatOwnedView(
+                        ::buffa::OwnedView::decode_with_options(bytes, opts)?,
+                    ),
+                )
+            }
+            /// Build from an owned message via an encode → decode round-trip.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError::MessageTooLarge`] if the
+            /// message's encoded size exceeds the 2 GiB protobuf limit, or
+            /// another [`::buffa::DecodeError`] if the re-encoded bytes are
+            /// somehow invalid (should not happen for well-formed messages).
+            pub fn from_owned(
+                msg: &super::super::ExecHeartbeat,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    ExecHeartbeatOwnedView(::buffa::OwnedView::from_owned(msg)?),
+                )
+            }
+            /// Borrow the full [`ExecHeartbeatView`] with its lifetime tied to `&self`.
+            #[must_use]
+            pub fn view(&self) -> &ExecHeartbeatView<'_> {
+                self.0.reborrow()
+            }
+            /// Convert to the owned message type.
+            ///
+            /// Infallible: this type's constructors wire-decode their
+            /// buffer, and a view produced by wire decoding always
+            /// converts. Delegates to [`::buffa::OwnedView::to_owned_message`],
+            /// whose contract also governs handles converted from a raw
+            /// [`::buffa::OwnedView`].
+            #[must_use]
+            pub fn to_owned_message(&self) -> super::super::ExecHeartbeat {
+                self.0.to_owned_message()
+            }
+            /// The underlying bytes buffer.
+            #[must_use]
+            pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+                self.0.bytes()
+            }
+            /// Consume the handle, returning the underlying bytes buffer.
+            #[must_use]
+            pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+                self.0.into_bytes()
+            }
+            /// Field 1: `id`
+            #[must_use]
+            pub fn id(&self) -> ::core::option::Option<u32> {
+                self.0.reborrow().id
+            }
+        }
+        impl ::core::convert::From<::buffa::OwnedView<ExecHeartbeatView<'static>>>
+        for ExecHeartbeatOwnedView {
+            fn from(inner: ::buffa::OwnedView<ExecHeartbeatView<'static>>) -> Self {
+                ExecHeartbeatOwnedView(inner)
+            }
+        }
+        impl ::core::convert::From<ExecHeartbeatOwnedView>
+        for ::buffa::OwnedView<ExecHeartbeatView<'static>> {
+            fn from(wrapper: ExecHeartbeatOwnedView) -> Self {
+                wrapper.0
+            }
+        }
+        impl ::core::convert::AsRef<::buffa::OwnedView<ExecHeartbeatView<'static>>>
+        for ExecHeartbeatOwnedView {
+            fn as_ref(&self) -> &::buffa::OwnedView<ExecHeartbeatView<'static>> {
+                &self.0
+            }
+        }
+        impl ::buffa::HasMessageView for super::super::ExecHeartbeat {
+            type View<'a> = ExecHeartbeatView<'a>;
+            type ViewHandle = ExecHeartbeatOwnedView;
+        }
+        /// The system-prompt channel that is *not* the allowlist-gated
+        /// custom_system_prompt = 8: AgentRunRequest.system_prompt_spec = 29, of type
+        /// SystemPromptSpec (index.js@6580696), whose whole oneof is two **string**
+        /// arms — replace = 1 and append = 2. Whether these are gated the way
+        /// custom_system_prompt was is measurement (d); only append is ever sent,
+        /// because a replace would discard the prompt cloud_rule already carries.
+        #[derive(Clone, Debug, Default)]
+        pub struct SystemPromptSpecView<'a> {
+            /// Field 1: `replace`
+            pub replace: ::core::option::Option<&'a str>,
+            /// Field 2: `append`
+            pub append: ::core::option::Option<&'a str>,
+            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+        }
+        impl<'a> ::buffa::MessageView<'a> for SystemPromptSpecView<'a> {
+            type Owned = super::super::SystemPromptSpec;
+            fn decode_view(
+                buf: &'a [u8],
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                let __limit = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT,
+                );
+                let __elem = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_ELEMENT_MEMORY_LIMIT,
+                );
+                <Self as ::buffa::MessageView>::decode_view_ctx(
+                    buf,
+                    ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit)
+                        .with_element_memory(&__elem),
+                )
+            }
+            fn decode_view_with_ctx(
+                buf: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+            }
+            #[inline]
+            fn merge_view_field(
+                &mut self,
+                tag: ::buffa::encoding::Tag,
+                cur: &'a [u8],
+                before_tag: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+                let _ = ctx;
+                #[allow(unused_variables)]
+                let view = self;
+                let mut cur = cur;
+                match tag.field_number() {
+                    1u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        view.replace = Some(::buffa::types::borrow_str(&mut cur)?);
+                    }
+                    2u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        view.append = Some(::buffa::types::borrow_str(&mut cur)?);
+                    }
+                    _ => {
+                        ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                        let span_len = before_tag.len() - cur.len();
+                        view.__buffa_unknown_fields
+                            .push_record(before_tag, span_len, ctx)?;
+                    }
+                }
+                ::core::result::Result::Ok(cur)
+            }
+            fn to_owned_message(
+                &self,
+            ) -> ::core::result::Result<
+                super::super::SystemPromptSpec,
+                ::buffa::DecodeError,
+            > {
+                self.to_owned_from_source(None)
+            }
+            #[allow(clippy::useless_conversion, clippy::needless_update)]
+            fn to_owned_from_source(
+                &self,
+                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+            ) -> ::core::result::Result<
+                super::super::SystemPromptSpec,
+                ::buffa::DecodeError,
+            > {
+                #[allow(unused_imports)]
+                use ::buffa::alloc::string::ToString as _;
+                let _ = __buffa_src;
+                ::core::result::Result::Ok(super::super::SystemPromptSpec {
+                    replace: self.replace.map(|s| s.to_string()),
+                    append: self.append.map(|s| s.to_string()),
+                    __buffa_unknown_fields: self
+                        .__buffa_unknown_fields
+                        .to_owned()?
+                        .into(),
+                    ..::core::default::Default::default()
+                })
+            }
+        }
+        impl<'a> ::buffa::ViewEncode<'a> for SystemPromptSpecView<'a> {
+            #[allow(clippy::needless_borrow, clippy::let_and_return)]
+            fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                let mut size = 0u64;
+                if let Some(ref v) = self.replace {
+                    size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+                }
+                if let Some(ref v) = self.append {
+                    size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+                }
+                size += self.__buffa_unknown_fields.encoded_len() as u64;
+                ::buffa::saturate_size(size)
+            }
+            #[allow(clippy::needless_borrow)]
+            fn write_to(
+                &self,
+                _cache: &mut ::buffa::SizeCache,
+                buf: &mut impl ::buffa::EncodeSink,
+            ) {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                if let Some(ref v) = self.replace {
+                    ::buffa::types::put_string_field(1u32, v, buf);
+                }
+                if let Some(ref v) = self.append {
+                    ::buffa::types::put_string_field(2u32, v, buf);
+                }
+                self.__buffa_unknown_fields.write_to(buf);
+            }
+        }
+        impl<'a> ::buffa::MessageName for SystemPromptSpecView<'a> {
+            const PACKAGE: &'static str = "ganja.cursor.v1";
+            const NAME: &'static str = "SystemPromptSpec";
+            const FULL_NAME: &'static str = "ganja.cursor.v1.SystemPromptSpec";
+            const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.SystemPromptSpec";
+        }
+        ::buffa::impl_default_view_instance!(SystemPromptSpecView);
+        ::buffa::impl_view_reborrow!(SystemPromptSpecView);
+        /** Self-contained, `'static` owned view of a `SystemPromptSpec` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`SystemPromptSpecView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`SystemPromptSpecView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+        #[derive(Clone, Debug)]
+        pub struct SystemPromptSpecOwnedView(
+            ::buffa::OwnedView<SystemPromptSpecView<'static>>,
+        );
+        impl SystemPromptSpecOwnedView {
+            /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+            ///
+            /// The view borrows directly from the buffer's data; the buffer is
+            /// retained inside the returned handle.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+            /// protobuf data.
+            pub fn decode(
+                bytes: ::buffa::bytes::Bytes,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    SystemPromptSpecOwnedView(::buffa::OwnedView::decode(bytes)?),
+                )
+            }
+            /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+            /// max message size).
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+            /// exceeds the configured limits.
+            pub fn decode_with_options(
+                bytes: ::buffa::bytes::Bytes,
+                opts: &::buffa::DecodeOptions,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    SystemPromptSpecOwnedView(
+                        ::buffa::OwnedView::decode_with_options(bytes, opts)?,
+                    ),
+                )
+            }
+            /// Build from an owned message via an encode → decode round-trip.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError::MessageTooLarge`] if the
+            /// message's encoded size exceeds the 2 GiB protobuf limit, or
+            /// another [`::buffa::DecodeError`] if the re-encoded bytes are
+            /// somehow invalid (should not happen for well-formed messages).
+            pub fn from_owned(
+                msg: &super::super::SystemPromptSpec,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    SystemPromptSpecOwnedView(::buffa::OwnedView::from_owned(msg)?),
+                )
+            }
+            /// Borrow the full [`SystemPromptSpecView`] with its lifetime tied to `&self`.
+            #[must_use]
+            pub fn view(&self) -> &SystemPromptSpecView<'_> {
+                self.0.reborrow()
+            }
+            /// Convert to the owned message type.
+            ///
+            /// Infallible: this type's constructors wire-decode their
+            /// buffer, and a view produced by wire decoding always
+            /// converts. Delegates to [`::buffa::OwnedView::to_owned_message`],
+            /// whose contract also governs handles converted from a raw
+            /// [`::buffa::OwnedView`].
+            #[must_use]
+            pub fn to_owned_message(&self) -> super::super::SystemPromptSpec {
+                self.0.to_owned_message()
+            }
+            /// The underlying bytes buffer.
+            #[must_use]
+            pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+                self.0.bytes()
+            }
+            /// Consume the handle, returning the underlying bytes buffer.
+            #[must_use]
+            pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+                self.0.into_bytes()
+            }
+            /// Field 1: `replace`
+            #[must_use]
+            pub fn replace(&self) -> ::core::option::Option<&'_ str> {
+                self.0.reborrow().replace
+            }
+            /// Field 2: `append`
+            #[must_use]
+            pub fn append(&self) -> ::core::option::Option<&'_ str> {
+                self.0.reborrow().append
+            }
+        }
+        impl ::core::convert::From<::buffa::OwnedView<SystemPromptSpecView<'static>>>
+        for SystemPromptSpecOwnedView {
+            fn from(inner: ::buffa::OwnedView<SystemPromptSpecView<'static>>) -> Self {
+                SystemPromptSpecOwnedView(inner)
+            }
+        }
+        impl ::core::convert::From<SystemPromptSpecOwnedView>
+        for ::buffa::OwnedView<SystemPromptSpecView<'static>> {
+            fn from(wrapper: SystemPromptSpecOwnedView) -> Self {
+                wrapper.0
+            }
+        }
+        impl ::core::convert::AsRef<::buffa::OwnedView<SystemPromptSpecView<'static>>>
+        for SystemPromptSpecOwnedView {
+            fn as_ref(&self) -> &::buffa::OwnedView<SystemPromptSpecView<'static>> {
+                &self.0
+            }
+        }
+        impl ::buffa::HasMessageView for super::super::SystemPromptSpec {
+            type View<'a> = SystemPromptSpecView<'a>;
+            type ViewHandle = SystemPromptSpecOwnedView;
+        }
+        /// The success arm of the MCP answer this file already models the rejection of:
+        /// McpResult.success = 1 (index.js@6372351), of type McpSuccess
+        /// (index.js@6376081) — content = 1 repeated, is_error = 2. Its
+        /// structured_content = 3 is not modelled: the spike answers one word.
+        #[derive(Clone, Debug, Default)]
+        pub struct McpSuccessView<'a> {
+            /// Field 1: `content`
+            pub content: ::buffa::RepeatedView<
+                'a,
+                super::super::__buffa::view::McpContentItemView<'a>,
+            >,
+            /// Field 2: `is_error`
+            pub is_error: ::core::option::Option<bool>,
+            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+        }
+        impl<'a> ::buffa::MessageView<'a> for McpSuccessView<'a> {
+            type Owned = super::super::McpSuccess;
+            fn decode_view(
+                buf: &'a [u8],
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                let __limit = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT,
+                );
+                let __elem = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_ELEMENT_MEMORY_LIMIT,
+                );
+                <Self as ::buffa::MessageView>::decode_view_ctx(
+                    buf,
+                    ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit)
+                        .with_element_memory(&__elem),
+                )
+            }
+            fn decode_view_with_ctx(
+                buf: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+            }
+            #[inline]
+            fn merge_view_field(
+                &mut self,
+                tag: ::buffa::encoding::Tag,
+                cur: &'a [u8],
+                before_tag: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+                let _ = ctx;
+                #[allow(unused_variables)]
+                let view = self;
+                let mut cur = cur;
+                match tag.field_number() {
+                    2u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::Varint,
+                        )?;
+                        view.is_error = Some(::buffa::types::decode_bool(&mut cur)?);
+                    }
+                    1u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        ctx.register_element_memory(
+                            ::core::mem::size_of::<
+                                super::super::__buffa::view::McpContentItemView,
+                            >(),
+                        )?;
+                        view.content
+                            .push(
+                                <super::super::__buffa::view::McpContentItemView as ::buffa::MessageView>::decode_view_ctx(
+                                    sub,
+                                    __sub_ctx,
+                                )?,
+                            );
+                    }
+                    _ => {
+                        ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                        let span_len = before_tag.len() - cur.len();
+                        view.__buffa_unknown_fields
+                            .push_record(before_tag, span_len, ctx)?;
+                    }
+                }
+                ::core::result::Result::Ok(cur)
+            }
+            fn to_owned_message(
+                &self,
+            ) -> ::core::result::Result<super::super::McpSuccess, ::buffa::DecodeError> {
+                self.to_owned_from_source(None)
+            }
+            #[allow(clippy::useless_conversion, clippy::needless_update)]
+            fn to_owned_from_source(
+                &self,
+                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+            ) -> ::core::result::Result<super::super::McpSuccess, ::buffa::DecodeError> {
+                #[allow(unused_imports)]
+                use ::buffa::alloc::string::ToString as _;
+                let _ = __buffa_src;
+                ::core::result::Result::Ok(super::super::McpSuccess {
+                    content: self
+                        .content
+                        .iter()
+                        .map(|v| v.to_owned_from_source(__buffa_src))
+                        .collect::<::core::result::Result<_, ::buffa::DecodeError>>()?,
+                    is_error: self.is_error,
+                    __buffa_unknown_fields: self
+                        .__buffa_unknown_fields
+                        .to_owned()?
+                        .into(),
+                    ..::core::default::Default::default()
+                })
+            }
+        }
+        impl<'a> ::buffa::ViewEncode<'a> for McpSuccessView<'a> {
+            #[allow(clippy::needless_borrow, clippy::let_and_return)]
+            fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                let mut size = 0u64;
+                for v in &self.content {
+                    let __slot = __cache.reserve();
+                    let inner_size = v.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                            + inner_size as u64;
+                }
+                if self.is_error.is_some() {
+                    size += 1u64 + ::buffa::types::BOOL_ENCODED_LEN as u64;
+                }
+                size += self.__buffa_unknown_fields.encoded_len() as u64;
+                ::buffa::saturate_size(size)
+            }
+            #[allow(clippy::needless_borrow)]
+            fn write_to(
+                &self,
+                __cache: &mut ::buffa::SizeCache,
+                buf: &mut impl ::buffa::EncodeSink,
+            ) {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                for v in &self.content {
+                    ::buffa::types::put_len_delimited_header(
+                        1u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    v.write_to(__cache, buf);
+                }
+                if let Some(v) = self.is_error {
+                    ::buffa::types::put_bool_field(2u32, v, buf);
+                }
+                self.__buffa_unknown_fields.write_to(buf);
+            }
+        }
+        impl<'a> ::buffa::MessageName for McpSuccessView<'a> {
+            const PACKAGE: &'static str = "ganja.cursor.v1";
+            const NAME: &'static str = "McpSuccess";
+            const FULL_NAME: &'static str = "ganja.cursor.v1.McpSuccess";
+            const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.McpSuccess";
+        }
+        ::buffa::impl_default_view_instance!(McpSuccessView);
+        ::buffa::impl_view_reborrow!(McpSuccessView);
+        /** Self-contained, `'static` owned view of a `McpSuccess` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`McpSuccessView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`McpSuccessView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+        #[derive(Clone, Debug)]
+        pub struct McpSuccessOwnedView(::buffa::OwnedView<McpSuccessView<'static>>);
+        impl McpSuccessOwnedView {
+            /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+            ///
+            /// The view borrows directly from the buffer's data; the buffer is
+            /// retained inside the returned handle.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+            /// protobuf data.
+            pub fn decode(
+                bytes: ::buffa::bytes::Bytes,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    McpSuccessOwnedView(::buffa::OwnedView::decode(bytes)?),
+                )
+            }
+            /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+            /// max message size).
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+            /// exceeds the configured limits.
+            pub fn decode_with_options(
+                bytes: ::buffa::bytes::Bytes,
+                opts: &::buffa::DecodeOptions,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    McpSuccessOwnedView(
+                        ::buffa::OwnedView::decode_with_options(bytes, opts)?,
+                    ),
+                )
+            }
+            /// Build from an owned message via an encode → decode round-trip.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError::MessageTooLarge`] if the
+            /// message's encoded size exceeds the 2 GiB protobuf limit, or
+            /// another [`::buffa::DecodeError`] if the re-encoded bytes are
+            /// somehow invalid (should not happen for well-formed messages).
+            pub fn from_owned(
+                msg: &super::super::McpSuccess,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    McpSuccessOwnedView(::buffa::OwnedView::from_owned(msg)?),
+                )
+            }
+            /// Borrow the full [`McpSuccessView`] with its lifetime tied to `&self`.
+            #[must_use]
+            pub fn view(&self) -> &McpSuccessView<'_> {
+                self.0.reborrow()
+            }
+            /// Convert to the owned message type.
+            ///
+            /// Infallible: this type's constructors wire-decode their
+            /// buffer, and a view produced by wire decoding always
+            /// converts. Delegates to [`::buffa::OwnedView::to_owned_message`],
+            /// whose contract also governs handles converted from a raw
+            /// [`::buffa::OwnedView`].
+            #[must_use]
+            pub fn to_owned_message(&self) -> super::super::McpSuccess {
+                self.0.to_owned_message()
+            }
+            /// The underlying bytes buffer.
+            #[must_use]
+            pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+                self.0.bytes()
+            }
+            /// Consume the handle, returning the underlying bytes buffer.
+            #[must_use]
+            pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+                self.0.into_bytes()
+            }
+            /// Field 1: `content`
+            #[must_use]
+            pub fn content(
+                &self,
+            ) -> &::buffa::RepeatedView<
+                '_,
+                super::super::__buffa::view::McpContentItemView<'_>,
+            > {
+                &self.0.reborrow().content
+            }
+            /// Field 2: `is_error`
+            #[must_use]
+            pub fn is_error(&self) -> ::core::option::Option<bool> {
+                self.0.reborrow().is_error
+            }
+        }
+        impl ::core::convert::From<::buffa::OwnedView<McpSuccessView<'static>>>
+        for McpSuccessOwnedView {
+            fn from(inner: ::buffa::OwnedView<McpSuccessView<'static>>) -> Self {
+                McpSuccessOwnedView(inner)
+            }
+        }
+        impl ::core::convert::From<McpSuccessOwnedView>
+        for ::buffa::OwnedView<McpSuccessView<'static>> {
+            fn from(wrapper: McpSuccessOwnedView) -> Self {
+                wrapper.0
+            }
+        }
+        impl ::core::convert::AsRef<::buffa::OwnedView<McpSuccessView<'static>>>
+        for McpSuccessOwnedView {
+            fn as_ref(&self) -> &::buffa::OwnedView<McpSuccessView<'static>> {
+                &self.0
+            }
+        }
+        impl ::buffa::HasMessageView for super::super::McpSuccess {
+            type View<'a> = McpSuccessView<'a>;
+            type ViewHandle = McpSuccessOwnedView;
+        }
+        /// One item of that content (McpToolResultContentItem, index.js@6375554),
+        /// narrowed to text = 1; the image arm beside it is a payload this spike has no
+        /// reason to produce.
+        #[derive(Clone, Debug, Default)]
+        pub struct McpContentItemView<'a> {
+            /// Field 1: `text`
+            pub text: ::buffa::MessageFieldView<
+                super::super::__buffa::view::McpTextContentView<'a>,
+            >,
+            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+        }
+        impl<'a> ::buffa::MessageView<'a> for McpContentItemView<'a> {
+            type Owned = super::super::McpContentItem;
+            fn decode_view(
+                buf: &'a [u8],
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                let __limit = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT,
+                );
+                let __elem = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_ELEMENT_MEMORY_LIMIT,
+                );
+                <Self as ::buffa::MessageView>::decode_view_ctx(
+                    buf,
+                    ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit)
+                        .with_element_memory(&__elem),
+                )
+            }
+            fn decode_view_with_ctx(
+                buf: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+            }
+            #[inline]
+            fn merge_view_field(
+                &mut self,
+                tag: ::buffa::encoding::Tag,
+                cur: &'a [u8],
+                before_tag: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+                let _ = ctx;
+                #[allow(unused_variables)]
+                let view = self;
+                let mut cur = cur;
+                match tag.field_number() {
+                    1u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        let __sub_ctx = ctx.descend()?;
+                        let sub = ::buffa::types::borrow_bytes(&mut cur)?;
+                        match view.text.as_mut() {
+                            Some(existing) => {
+                                ::buffa::MessageView::merge_into_view(
+                                    existing,
+                                    sub,
+                                    __sub_ctx,
+                                )?
+                            }
+                            None => {
+                                view.text = ::buffa::MessageFieldView::set(
+                                    <super::super::__buffa::view::McpTextContentView as ::buffa::MessageView>::decode_view_ctx(
+                                        sub,
+                                        __sub_ctx,
+                                    )?,
+                                );
+                            }
+                        }
+                    }
+                    _ => {
+                        ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                        let span_len = before_tag.len() - cur.len();
+                        view.__buffa_unknown_fields
+                            .push_record(before_tag, span_len, ctx)?;
+                    }
+                }
+                ::core::result::Result::Ok(cur)
+            }
+            fn to_owned_message(
+                &self,
+            ) -> ::core::result::Result<
+                super::super::McpContentItem,
+                ::buffa::DecodeError,
+            > {
+                self.to_owned_from_source(None)
+            }
+            #[allow(clippy::useless_conversion, clippy::needless_update)]
+            fn to_owned_from_source(
+                &self,
+                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+            ) -> ::core::result::Result<
+                super::super::McpContentItem,
+                ::buffa::DecodeError,
+            > {
+                #[allow(unused_imports)]
+                use ::buffa::alloc::string::ToString as _;
+                let _ = __buffa_src;
+                ::core::result::Result::Ok(super::super::McpContentItem {
+                    text: match self.text.as_option() {
+                        Some(v) => {
+                            ::buffa::MessageField::<
+                                super::super::McpTextContent,
+                                ::buffa::Inline<super::super::McpTextContent>,
+                            >::some(v.to_owned_from_source(__buffa_src)?)
+                        }
+                        None => ::buffa::MessageField::none(),
+                    },
+                    __buffa_unknown_fields: self
+                        .__buffa_unknown_fields
+                        .to_owned()?
+                        .into(),
+                    ..::core::default::Default::default()
+                })
+            }
+        }
+        impl<'a> ::buffa::ViewEncode<'a> for McpContentItemView<'a> {
+            #[allow(clippy::needless_borrow, clippy::let_and_return)]
+            fn compute_size(&self, __cache: &mut ::buffa::SizeCache) -> u32 {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                let mut size = 0u64;
+                if self.text.is_set() {
+                    let __slot = __cache.reserve();
+                    let inner_size = self.text.compute_size(__cache);
+                    __cache.set(__slot, inner_size);
+                    size
+                        += 1u64 + ::buffa::encoding::varint_len(inner_size as u64) as u64
+                            + inner_size as u64;
+                }
+                size += self.__buffa_unknown_fields.encoded_len() as u64;
+                ::buffa::saturate_size(size)
+            }
+            #[allow(clippy::needless_borrow)]
+            fn write_to(
+                &self,
+                __cache: &mut ::buffa::SizeCache,
+                buf: &mut impl ::buffa::EncodeSink,
+            ) {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                if self.text.is_set() {
+                    ::buffa::types::put_len_delimited_header(
+                        1u32,
+                        u64::from(__cache.consume_next()),
+                        buf,
+                    );
+                    self.text.write_to(__cache, buf);
+                }
+                self.__buffa_unknown_fields.write_to(buf);
+            }
+        }
+        impl<'a> ::buffa::MessageName for McpContentItemView<'a> {
+            const PACKAGE: &'static str = "ganja.cursor.v1";
+            const NAME: &'static str = "McpContentItem";
+            const FULL_NAME: &'static str = "ganja.cursor.v1.McpContentItem";
+            const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.McpContentItem";
+        }
+        ::buffa::impl_default_view_instance!(McpContentItemView);
+        ::buffa::impl_view_reborrow!(McpContentItemView);
+        /** Self-contained, `'static` owned view of a `McpContentItem` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`McpContentItemView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`McpContentItemView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+        #[derive(Clone, Debug)]
+        pub struct McpContentItemOwnedView(
+            ::buffa::OwnedView<McpContentItemView<'static>>,
+        );
+        impl McpContentItemOwnedView {
+            /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+            ///
+            /// The view borrows directly from the buffer's data; the buffer is
+            /// retained inside the returned handle.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+            /// protobuf data.
+            pub fn decode(
+                bytes: ::buffa::bytes::Bytes,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    McpContentItemOwnedView(::buffa::OwnedView::decode(bytes)?),
+                )
+            }
+            /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+            /// max message size).
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+            /// exceeds the configured limits.
+            pub fn decode_with_options(
+                bytes: ::buffa::bytes::Bytes,
+                opts: &::buffa::DecodeOptions,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    McpContentItemOwnedView(
+                        ::buffa::OwnedView::decode_with_options(bytes, opts)?,
+                    ),
+                )
+            }
+            /// Build from an owned message via an encode → decode round-trip.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError::MessageTooLarge`] if the
+            /// message's encoded size exceeds the 2 GiB protobuf limit, or
+            /// another [`::buffa::DecodeError`] if the re-encoded bytes are
+            /// somehow invalid (should not happen for well-formed messages).
+            pub fn from_owned(
+                msg: &super::super::McpContentItem,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    McpContentItemOwnedView(::buffa::OwnedView::from_owned(msg)?),
+                )
+            }
+            /// Borrow the full [`McpContentItemView`] with its lifetime tied to `&self`.
+            #[must_use]
+            pub fn view(&self) -> &McpContentItemView<'_> {
+                self.0.reborrow()
+            }
+            /// Convert to the owned message type.
+            ///
+            /// Infallible: this type's constructors wire-decode their
+            /// buffer, and a view produced by wire decoding always
+            /// converts. Delegates to [`::buffa::OwnedView::to_owned_message`],
+            /// whose contract also governs handles converted from a raw
+            /// [`::buffa::OwnedView`].
+            #[must_use]
+            pub fn to_owned_message(&self) -> super::super::McpContentItem {
+                self.0.to_owned_message()
+            }
+            /// The underlying bytes buffer.
+            #[must_use]
+            pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+                self.0.bytes()
+            }
+            /// Consume the handle, returning the underlying bytes buffer.
+            #[must_use]
+            pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+                self.0.into_bytes()
+            }
+            /// Field 1: `text`
+            #[must_use]
+            pub fn text(
+                &self,
+            ) -> &::buffa::MessageFieldView<
+                super::super::__buffa::view::McpTextContentView<'_>,
+            > {
+                &self.0.reborrow().text
+            }
+        }
+        impl ::core::convert::From<::buffa::OwnedView<McpContentItemView<'static>>>
+        for McpContentItemOwnedView {
+            fn from(inner: ::buffa::OwnedView<McpContentItemView<'static>>) -> Self {
+                McpContentItemOwnedView(inner)
+            }
+        }
+        impl ::core::convert::From<McpContentItemOwnedView>
+        for ::buffa::OwnedView<McpContentItemView<'static>> {
+            fn from(wrapper: McpContentItemOwnedView) -> Self {
+                wrapper.0
+            }
+        }
+        impl ::core::convert::AsRef<::buffa::OwnedView<McpContentItemView<'static>>>
+        for McpContentItemOwnedView {
+            fn as_ref(&self) -> &::buffa::OwnedView<McpContentItemView<'static>> {
+                &self.0
+            }
+        }
+        impl ::buffa::HasMessageView for super::super::McpContentItem {
+            type View<'a> = McpContentItemView<'a>;
+            type ViewHandle = McpContentItemOwnedView;
+        }
+        /// index.js@6374553: text = 1, beside an output_location = 2 that names where a
+        /// large result was spilled — which a one-word answer never needs.
+        #[derive(Clone, Debug, Default)]
+        pub struct McpTextContentView<'a> {
+            /// Field 1: `text`
+            pub text: ::core::option::Option<&'a str>,
+            pub __buffa_unknown_fields: ::buffa::UnknownFieldsView<'a>,
+        }
+        impl<'a> ::buffa::MessageView<'a> for McpTextContentView<'a> {
+            type Owned = super::super::McpTextContent;
+            fn decode_view(
+                buf: &'a [u8],
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                let __limit = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_UNKNOWN_FIELD_LIMIT,
+                );
+                let __elem = ::core::cell::Cell::new(
+                    ::buffa::DEFAULT_ELEMENT_MEMORY_LIMIT,
+                );
+                <Self as ::buffa::MessageView>::decode_view_ctx(
+                    buf,
+                    ::buffa::DecodeContext::new(::buffa::RECURSION_LIMIT, &__limit)
+                        .with_element_memory(&__elem),
+                )
+            }
+            fn decode_view_with_ctx(
+                buf: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                <Self as ::buffa::MessageView>::decode_view_ctx(buf, ctx)
+            }
+            #[inline]
+            fn merge_view_field(
+                &mut self,
+                tag: ::buffa::encoding::Tag,
+                cur: &'a [u8],
+                before_tag: &'a [u8],
+                ctx: ::buffa::DecodeContext<'_>,
+            ) -> ::core::result::Result<&'a [u8], ::buffa::DecodeError> {
+                let _ = ctx;
+                #[allow(unused_variables)]
+                let view = self;
+                let mut cur = cur;
+                match tag.field_number() {
+                    1u32 => {
+                        ::buffa::encoding::check_wire_type(
+                            tag,
+                            ::buffa::encoding::WireType::LengthDelimited,
+                        )?;
+                        view.text = Some(::buffa::types::borrow_str(&mut cur)?);
+                    }
+                    _ => {
+                        ::buffa::encoding::skip_field_depth(tag, &mut cur, ctx.depth())?;
+                        let span_len = before_tag.len() - cur.len();
+                        view.__buffa_unknown_fields
+                            .push_record(before_tag, span_len, ctx)?;
+                    }
+                }
+                ::core::result::Result::Ok(cur)
+            }
+            fn to_owned_message(
+                &self,
+            ) -> ::core::result::Result<
+                super::super::McpTextContent,
+                ::buffa::DecodeError,
+            > {
+                self.to_owned_from_source(None)
+            }
+            #[allow(clippy::useless_conversion, clippy::needless_update)]
+            fn to_owned_from_source(
+                &self,
+                __buffa_src: ::core::option::Option<&::buffa::bytes::Bytes>,
+            ) -> ::core::result::Result<
+                super::super::McpTextContent,
+                ::buffa::DecodeError,
+            > {
+                #[allow(unused_imports)]
+                use ::buffa::alloc::string::ToString as _;
+                let _ = __buffa_src;
+                ::core::result::Result::Ok(super::super::McpTextContent {
+                    text: self.text.map(|s| s.to_string()),
+                    __buffa_unknown_fields: self
+                        .__buffa_unknown_fields
+                        .to_owned()?
+                        .into(),
+                    ..::core::default::Default::default()
+                })
+            }
+        }
+        impl<'a> ::buffa::ViewEncode<'a> for McpTextContentView<'a> {
+            #[allow(clippy::needless_borrow, clippy::let_and_return)]
+            fn compute_size(&self, _cache: &mut ::buffa::SizeCache) -> u32 {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                let mut size = 0u64;
+                if let Some(ref v) = self.text {
+                    size += 1u64 + ::buffa::types::string_encoded_len(v) as u64;
+                }
+                size += self.__buffa_unknown_fields.encoded_len() as u64;
+                ::buffa::saturate_size(size)
+            }
+            #[allow(clippy::needless_borrow)]
+            fn write_to(
+                &self,
+                _cache: &mut ::buffa::SizeCache,
+                buf: &mut impl ::buffa::EncodeSink,
+            ) {
+                #[allow(unused_imports)]
+                use ::buffa::Enumeration as _;
+                if let Some(ref v) = self.text {
+                    ::buffa::types::put_string_field(1u32, v, buf);
+                }
+                self.__buffa_unknown_fields.write_to(buf);
+            }
+        }
+        impl<'a> ::buffa::MessageName for McpTextContentView<'a> {
+            const PACKAGE: &'static str = "ganja.cursor.v1";
+            const NAME: &'static str = "McpTextContent";
+            const FULL_NAME: &'static str = "ganja.cursor.v1.McpTextContent";
+            const TYPE_URL: &'static str = "type.googleapis.com/ganja.cursor.v1.McpTextContent";
+        }
+        ::buffa::impl_default_view_instance!(McpTextContentView);
+        ::buffa::impl_view_reborrow!(McpTextContentView);
+        /** Self-contained, `'static` owned view of a `McpTextContent` message.
+
+ Wraps [`::buffa::OwnedView`]`<`[`McpTextContentView`]`<'static>>`: the decoded view and the [`::buffa::bytes::Bytes`] buffer it borrows from travel together, so the handle is `'static` and `Send + Sync` — suitable for async handlers, spawned tasks, and anywhere a `'static` bound is required.
+
+ Field accessors return borrows tied to `&self`. Use [`Self::view`] to get the full [`McpTextContentView`] when you need struct patterns, iteration helpers, or to pass the view to lifetime-parameterised code.*/
+        #[derive(Clone, Debug)]
+        pub struct McpTextContentOwnedView(
+            ::buffa::OwnedView<McpTextContentView<'static>>,
+        );
+        impl McpTextContentOwnedView {
+            /// Decode an owned view from a [`::buffa::bytes::Bytes`] buffer.
+            ///
+            /// The view borrows directly from the buffer's data; the buffer is
+            /// retained inside the returned handle.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer contains invalid
+            /// protobuf data.
+            pub fn decode(
+                bytes: ::buffa::bytes::Bytes,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    McpTextContentOwnedView(::buffa::OwnedView::decode(bytes)?),
+                )
+            }
+            /// Decode with custom [`::buffa::DecodeOptions`] (recursion limit,
+            /// max message size).
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError`] if the buffer is invalid or
+            /// exceeds the configured limits.
+            pub fn decode_with_options(
+                bytes: ::buffa::bytes::Bytes,
+                opts: &::buffa::DecodeOptions,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    McpTextContentOwnedView(
+                        ::buffa::OwnedView::decode_with_options(bytes, opts)?,
+                    ),
+                )
+            }
+            /// Build from an owned message via an encode → decode round-trip.
+            ///
+            /// # Errors
+            ///
+            /// Returns [`::buffa::DecodeError::MessageTooLarge`] if the
+            /// message's encoded size exceeds the 2 GiB protobuf limit, or
+            /// another [`::buffa::DecodeError`] if the re-encoded bytes are
+            /// somehow invalid (should not happen for well-formed messages).
+            pub fn from_owned(
+                msg: &super::super::McpTextContent,
+            ) -> ::core::result::Result<Self, ::buffa::DecodeError> {
+                ::core::result::Result::Ok(
+                    McpTextContentOwnedView(::buffa::OwnedView::from_owned(msg)?),
+                )
+            }
+            /// Borrow the full [`McpTextContentView`] with its lifetime tied to `&self`.
+            #[must_use]
+            pub fn view(&self) -> &McpTextContentView<'_> {
+                self.0.reborrow()
+            }
+            /// Convert to the owned message type.
+            ///
+            /// Infallible: this type's constructors wire-decode their
+            /// buffer, and a view produced by wire decoding always
+            /// converts. Delegates to [`::buffa::OwnedView::to_owned_message`],
+            /// whose contract also governs handles converted from a raw
+            /// [`::buffa::OwnedView`].
+            #[must_use]
+            pub fn to_owned_message(&self) -> super::super::McpTextContent {
+                self.0.to_owned_message()
+            }
+            /// The underlying bytes buffer.
+            #[must_use]
+            pub fn bytes(&self) -> &::buffa::bytes::Bytes {
+                self.0.bytes()
+            }
+            /// Consume the handle, returning the underlying bytes buffer.
+            #[must_use]
+            pub fn into_bytes(self) -> ::buffa::bytes::Bytes {
+                self.0.into_bytes()
+            }
+            /// Field 1: `text`
+            #[must_use]
+            pub fn text(&self) -> ::core::option::Option<&'_ str> {
+                self.0.reborrow().text
+            }
+        }
+        impl ::core::convert::From<::buffa::OwnedView<McpTextContentView<'static>>>
+        for McpTextContentOwnedView {
+            fn from(inner: ::buffa::OwnedView<McpTextContentView<'static>>) -> Self {
+                McpTextContentOwnedView(inner)
+            }
+        }
+        impl ::core::convert::From<McpTextContentOwnedView>
+        for ::buffa::OwnedView<McpTextContentView<'static>> {
+            fn from(wrapper: McpTextContentOwnedView) -> Self {
+                wrapper.0
+            }
+        }
+        impl ::core::convert::AsRef<::buffa::OwnedView<McpTextContentView<'static>>>
+        for McpTextContentOwnedView {
+            fn as_ref(&self) -> &::buffa::OwnedView<McpTextContentView<'static>> {
+                &self.0
+            }
+        }
+        impl ::buffa::HasMessageView for super::super::McpTextContent {
+            type View<'a> = McpTextContentView<'a>;
+            type ViewHandle = McpTextContentOwnedView;
+        }
     }
 }
 #[doc(inline)]
@@ -25956,3 +32049,51 @@ pub use self::__buffa::view::GetBlobResultOwnedView;
 pub use self::__buffa::view::SetBlobResultView;
 #[doc(inline)]
 pub use self::__buffa::view::SetBlobResultOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::McpToolsView;
+#[doc(inline)]
+pub use self::__buffa::view::McpToolsOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::McpToolDefinitionView;
+#[doc(inline)]
+pub use self::__buffa::view::McpToolDefinitionOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::JsonValueView;
+#[doc(inline)]
+pub use self::__buffa::view::JsonValueOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::JsonStructView;
+#[doc(inline)]
+pub use self::__buffa::view::JsonStructOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::JsonFieldView;
+#[doc(inline)]
+pub use self::__buffa::view::JsonFieldOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::JsonListView;
+#[doc(inline)]
+pub use self::__buffa::view::JsonListOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::ClientHeartbeatView;
+#[doc(inline)]
+pub use self::__buffa::view::ClientHeartbeatOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::ExecHeartbeatView;
+#[doc(inline)]
+pub use self::__buffa::view::ExecHeartbeatOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::SystemPromptSpecView;
+#[doc(inline)]
+pub use self::__buffa::view::SystemPromptSpecOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::McpSuccessView;
+#[doc(inline)]
+pub use self::__buffa::view::McpSuccessOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::McpContentItemView;
+#[doc(inline)]
+pub use self::__buffa::view::McpContentItemOwnedView;
+#[doc(inline)]
+pub use self::__buffa::view::McpTextContentView;
+#[doc(inline)]
+pub use self::__buffa::view::McpTextContentOwnedView;

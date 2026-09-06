@@ -106,7 +106,7 @@ use std::fmt::Write as _;
 
 use buffa::Message as _;
 
-use super::{ID, decode, proto};
+use super::{ID, decode, proto, spike};
 use crate::auth::pkce;
 use crate::protocol::{PartBody, Role};
 use crate::provider::{ChatRequest, ProviderError};
@@ -137,11 +137,18 @@ pub(super) fn fresh_id() -> Result<String, ProviderError> {
 
 /// The bytes of the stream's opening message, assembled from `request`.
 ///
+/// `spike` is the W2 measurement scaffolding and is `None` on every turn this
+/// build ships: with it absent the message carries exactly the four fields it
+/// carried before the spike existed, which `request_tests.rs` pins by number.
+///
 /// # Errors
 ///
 /// Returns [`ProviderError::Transport`] when no message id can be minted;
 /// see [`fresh_id`].
-pub(super) fn run_message(request: &ChatRequest) -> Result<Vec<u8>, ProviderError> {
+pub(super) fn run_message(
+    request: &ChatRequest,
+    spike: Option<&spike::Spike>,
+) -> Result<Vec<u8>, ProviderError> {
     let model = proto::ModelEntry::default()
         .with_model_id(&request.model)
         .with_display_model_id(&request.model)
@@ -160,7 +167,7 @@ pub(super) fn run_message(request: &ChatRequest) -> Result<Vec<u8>, ProviderErro
         ..Default::default()
     };
 
-    let run = proto::RunRequest {
+    let mut run = proto::RunRequest {
         conversation_state: buffa::MessageField::some(proto::ConversationState::default()),
         action: buffa::MessageField::some(action),
         model_details: buffa::MessageField::some(model),
@@ -169,6 +176,15 @@ pub(super) fn run_message(request: &ChatRequest) -> Result<Vec<u8>, ProviderErro
         ),
         ..Default::default()
     };
+
+    // W2 spike, removed with it: the declared roster on field 4, and the
+    // system-prompt channel measurement (d) asks about on field 29.
+    if let Some(spike) = spike {
+        run.mcp_tools = buffa::MessageField::some(spike.declaration());
+        if let Some(spec) = spike.prompt_spec() {
+            run.system_prompt_spec = buffa::MessageField::some(spec);
+        }
+    }
 
     Ok(proto::ClientMessage { run_request: buffa::MessageField::some(run), ..Default::default() }
         .encode_to_vec())
@@ -190,13 +206,20 @@ pub(super) fn run_message(request: &ChatRequest) -> Result<Vec<u8>, ProviderErro
 /// `web_search_enabled = 17` is deliberately not among them; `cursor.proto`
 /// states the reasoning on `RequestContext` itself, and a test in this
 /// module's tests asserts its absence so a later tidy-up reddens.
+///
+/// `spike` is the W2 measurement scaffolding, `None` on every shipped turn.
 pub(super) fn context_answer(
     ask: decode::ContextAsk,
     system: Option<&str>,
     web_fetch: bool,
+    spike: Option<&spike::Spike>,
 ) -> Vec<u8> {
     let context = proto::RequestContext {
         cloud_rule: system.map(str::to_owned).filter(|text| !text.is_empty()),
+        // W2 spike, removed with it: the roster's second channel, refreshed
+        // on every answer. Empty off the spike, and an empty repeated field
+        // encodes to nothing at all.
+        tools: spike.map(spike::Spike::tools).unwrap_or_default(),
         mcp_file_system_options: buffa::MessageField::some(
             proto::McpFileSystemOptions::default().with_enabled(false),
         ),

@@ -84,6 +84,18 @@ pub(super) struct Mapping {
     /// The server marked the turn ended, so the reply is complete with or
     /// without the terminator.
     ended: bool,
+    /// W2 spike: whether each arriving exec is written down before it is
+    /// classified. `false` on every turn this build ships — including every
+    /// [`Mapping::default`] a test builds — so the shipped path gains a
+    /// branch and no log line. Removed with the spike.
+    spike: bool,
+}
+
+impl Mapping {
+    /// A mapping that writes down each exec as it arrives, for the W2 spike.
+    pub(super) fn watching(spike: bool) -> Self {
+        Self { spike, ..Self::default() }
+    }
 }
 
 /// A mid-stream question the server waits on, carried up to the stream
@@ -227,6 +239,10 @@ impl Mapping {
         };
 
         if let Some(exec) = message.exec_request.as_option() {
+            if self.spike {
+                super::spike::log_exec(exec);
+            }
+
             if exec.request_context_args.is_set() {
                 return Some(Ask::Context(ContextAsk {
                     id: exec.id,

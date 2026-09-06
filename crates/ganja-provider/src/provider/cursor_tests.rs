@@ -101,6 +101,9 @@ fn promptless_duplex() -> super::Duplex {
         system: None,
         web_fetch: false,
         blobs: std::collections::HashMap::new(),
+        // W2 spike: off, as it is on every turn this build ships.
+        spike: None,
+        beat: None,
     }
 }
 
@@ -245,6 +248,9 @@ async fn the_context_ask_is_answered_on_the_open_body_before_the_turn_flows() {
             system: Some("You are terse.".to_owned()),
             web_fetch: false,
             blobs: std::collections::HashMap::new(),
+            // W2 spike: off, as it is on every turn this build ships.
+            spike: None,
+            beat: None,
         },
     );
 
@@ -320,6 +326,9 @@ async fn the_kv_channel_is_answered_in_frame_order_behind_the_context_answer() {
             system: Some("You are terse.".to_owned()),
             web_fetch: false,
             blobs: std::collections::HashMap::new(),
+            // W2 spike: off, as it is on every turn this build ships.
+            spike: None,
+            beat: None,
         },
     );
 
@@ -413,6 +422,9 @@ async fn a_tool_exec_is_refused_on_the_open_body_and_the_turn_survives() {
             system: None,
             web_fetch: false,
             blobs: std::collections::HashMap::new(),
+            // W2 spike: off, as it is on every turn this build ships.
+            spike: None,
+            beat: None,
         },
     );
 
@@ -635,5 +647,116 @@ fn the_checked_in_generated_code_matches_the_proto() {
         before, after,
         "the checked-in cursor protobuf code has drifted from cursor.proto; \
              run `buf generate` in crates/ganja-provider and commit the result"
+    );
+}
+
+/// W2 spike, at the fold: the declared probe is held for its delay and then
+/// answered with `mcp_result.success`, on the same body every other answer
+/// rides — while every *other* exec keeps W1's typed refusal.
+///
+/// Driven with the delay at zero: what this proves is the wiring — that the
+/// classifier, the hold and the answer are joined end to end — where the
+/// delay's own effect is a server-side fact only a live turn can measure.
+/// Deleted with the spike in W3a.
+#[tokio::test]
+async fn the_spikes_probe_is_served_where_every_other_exec_is_refused() {
+    let spike = super::spike::Spike::read(&|variable| {
+        (variable == super::spike::ENABLE_ENV).then(|| "1".to_owned())
+    })
+    .expect("a bare enable is readable")
+    .expect("enabled");
+
+    let (sender, receiver) =
+        futures::channel::mpsc::unbounded::<Result<Vec<u8>, std::convert::Infallible>>();
+    let (answers, mut answered) = futures::channel::mpsc::unbounded();
+    let mut stream = super::events(
+        receiver,
+        CancellationToken::new(),
+        super::Duplex {
+            answers,
+            system: None,
+            web_fetch: false,
+            blobs: std::collections::HashMap::new(),
+            beat: Some(super::spike::run_beats()),
+            spike: Some(spike),
+        },
+    );
+
+    let called = |name: &str| {
+        let message = proto::ServerMessage {
+            exec_request: buffa::MessageField::some(proto::ExecRequest {
+                id: Some(4),
+                exec_id: Some("exec-ping".to_owned()),
+                mcp_args: buffa::MessageField::some(
+                    proto::McpArgs::default().with_name(name).with_tool_call_id("call-1"),
+                ),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        connect::envelope(&message.encode_to_vec())
+    };
+    sender.unbounded_send(Ok(called(super::spike::TOOL_NAME))).expect("the body is open");
+
+    let served = tokio::time::timeout(Duration::from_secs(10), async {
+        let drive = stream.next();
+        match futures::future::select(drive, answered.next()).await {
+            futures::future::Either::Right((answer, _)) => answer
+                .expect("the fold holds the sender")
+                .expect("the channel's error type is infallible"),
+            futures::future::Either::Left((event, _)) => {
+                panic!("a served exec is an answer, not an event: {event:?}")
+            }
+        }
+    })
+    .await
+    .expect("the answer goes out while the body is open");
+
+    let sent = proto::ClientMessage::decode_from_slice(&served[5..])
+        .expect("the answered bytes are the client message");
+    let success = sent
+        .exec_response
+        .as_option()
+        .expect("the result rides the exec channel")
+        .mcp_result
+        .as_option()
+        .expect("the mcp result")
+        .success
+        .as_option()
+        .expect("served, not refused");
+    assert_eq!(
+        success.content[0].text.as_option().and_then(|text| text.text.as_deref()),
+        Some("pong")
+    );
+
+    // A tool nobody declared is still refused, spike or no spike: the probe is
+    // recognised by its name, not by the flag being on.
+    sender.unbounded_send(Ok(called("rm_minus_rf"))).expect("the body is open");
+    let refused = tokio::time::timeout(Duration::from_secs(10), async {
+        // The close that ends the served exec comes first, then the refusal.
+        let _close = answered.next().await;
+        let drive = stream.next();
+        match futures::future::select(drive, answered.next()).await {
+            futures::future::Either::Right((answer, _)) => answer
+                .expect("the fold holds the sender")
+                .expect("the channel's error type is infallible"),
+            futures::future::Either::Left((event, _)) => {
+                panic!("a refusal is an answer, not an event: {event:?}")
+            }
+        }
+    })
+    .await
+    .expect("the refusal goes out while the body is open");
+
+    let sent = proto::ClientMessage::decode_from_slice(&refused[5..])
+        .expect("the answered bytes are the client message");
+    assert!(
+        sent.exec_response
+            .as_option()
+            .and_then(|answer| answer.mcp_result.as_option())
+            .and_then(|result| result.rejected.as_option())
+            .is_some(),
+        "an undeclared tool keeps D550's typed rejection"
     );
 }

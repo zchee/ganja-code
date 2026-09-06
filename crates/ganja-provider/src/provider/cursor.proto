@@ -96,6 +96,9 @@ message ClientMessage {
   ExecResponse exec_response = 2;
   KvResponse kv_response = 3;
   ExecControl exec_control = 5;
+  // W2 SPIKE: the run-level liveness ping, sent every five seconds while the
+  // body is open (index.js@6200066). Removed with the spike.
+  ClientHeartbeat client_heartbeat = 7;
 }
 
 // One turn's opening request, the minimal subset of the plugin's
@@ -116,6 +119,11 @@ message RunRequest {
   // this and requested_model, so this build does too.
   ModelEntry model_details = 3;
   RequestedModel requested_model = 9;
+  // W2 SPIKE: the client-declared tool roster (index.js@6165910's field 4) and
+  // the ungated-or-not system-prompt channel (its field 29). Both are absent
+  // unless `GANJA_CURSOR_SPIKE` is set, and both are removed with the spike.
+  McpTools mcp_tools = 4;
+  SystemPromptSpec system_prompt_spec = 29;
 }
 
 // Prior-conversation state. Fieldless here on purpose: the plugin's
@@ -292,6 +300,17 @@ message LsArgs {
 message McpArgs {
   string name = 1;
   string tool_call_id = 3;
+  // W2 SPIKE, read-only: what the server tells a client about the call it is
+  // asking for (index.js@6371504). Nothing sends these; the spike logs which
+  // of them arrived, which is how measurement (a) is read off a log rather
+  // than guessed at. `args = 2` is deliberately still unmodelled — it is the
+  // model's argument values, which no log line here may carry. Removed with
+  // the spike.
+  string provider_identifier = 4;
+  string tool_name = 5;
+  bool smart_mode_approval_only = 7;
+  bool skip_approval = 8;
+  string server_identifier = 9;
 }
 
 // index.js@6313150: url = 1, which the FetchError arm echoes back beside the
@@ -442,6 +461,9 @@ message LsRejected {
 // asked for.
 message McpResult {
   McpRejected rejected = 3;
+  // W2 SPIKE: the arm a served tool answers on, which is the whole of what
+  // the spike adds to this channel. Removed with the spike.
+  McpSuccess success = 1;
 }
 
 // index.js@6377058: reason = 1, and an is_readonly = 2 left absent for
@@ -494,6 +516,10 @@ message FetchError {
 // answer, and an absent member encodes identically to an empty one.
 message RequestContext {
   string cloud_rule = 16;
+  // W2 SPIKE: the roster's *second* channel, refreshed on every context answer
+  // (index.js@6467399's field 7). Empty and therefore absent unless
+  // `GANJA_CURSOR_SPIKE` is set; removed with the spike.
+  repeated McpToolDefinition tools = 7;
   McpFileSystemOptions mcp_file_system_options = 23;
   bool web_fetch_enabled = 24;
   bool read_lints_enabled = 35;
@@ -522,6 +548,10 @@ message McpFileSystemOptions {
 message ExecControl {
   ExecStreamClose stream_close = 1;
   ExecThrow throw = 2;
+  // W2 SPIKE: the third arm, which the comment above records this build never
+  // needing — because it never held an exec open. Measurement (b') is exactly
+  // that state. Removed with the spike.
+  ExecHeartbeat heartbeat = 3;
 }
 
 // The client's ExecClientThrow (index.js@6032526): id = 1 and error = 2,
@@ -593,3 +623,133 @@ message GetBlobResult {
 // holds only an optional error (= 1, :7908) its own ack never sets
 // (proxy.ts:1113-1117) — the empty message is the ack.
 message SetBlobResult {}
+
+// ---------------------------------------------------------------------------
+// W2 SPIKE SCAFFOLDING — measurement only, removed in W3a or W4.
+//
+// Everything below this line exists to settle five facts about cursor's MCP
+// tool channel that no bundle read can answer, and is deleted with the spike
+// (`.omc/plans/2026-09-04-cursor-tool-bridge.md`, W2 step 6). It is reachable
+// only when `GANJA_CURSOR_SPIKE` is set: with the flag unset nothing here is
+// encoded, which the send-side test in `request_tests.rs` pins by field number.
+//
+// Every number below was re-derived from the `2026.09.02-c22c1a3` bundle's own
+// descriptors before it was written — the byte offsets are that bundle's, per
+// the header's citation note — rather than copied from the research note, so a
+// wrong number is a wrong reading of the bundle rather than a stale quote.
+// ---------------------------------------------------------------------------
+
+// The client-declared tool roster, which the shipped client fills on the run
+// request itself (index.js@4574466): AgentRunRequest.mcp_tools = 4, of type
+// McpTools (index.js@6389679), whose whole content is the repeated definition
+// at field 1. Declared before the first token, so it does not depend on
+// winning the request_context_args race.
+message McpTools {
+  repeated McpToolDefinition mcp_tools = 1;
+}
+
+// One declared tool (index.js@6389002). The schema travels on **either**
+// input_schema = 3, a google.protobuf.Value, **or** input_schema_json = 6, the
+// same schema as a JSON string — the shipped client's own builder picks one
+// (index.js@5699717), which is exactly why measurement (e) fills them one at a
+// time. Both are modelled because the spike must be able to send either.
+message McpToolDefinition {
+  string name = 1;
+  string description = 2;
+  JsonValue input_schema = 3;
+  string provider_identifier = 4;
+  string tool_name = 5;
+  string input_schema_json = 6;
+}
+
+// `google.protobuf.Value` (index.js@3928104), flattened the way every oneof in
+// this file is: same numbers, same types, identical on the wire. Modelled here
+// rather than imported because `buffa` ships no pre-generated well-known types
+// — it is codegen-only — so an import would add a second generated file and a
+// second drift surface for a message this build needs six fields of.
+//
+// null_value = 1 is declared an enum in the descriptor; an enum and an int32
+// are the same varint on the wire, and `google.protobuf.NullValue` has exactly
+// one member (0), so nothing is lost by spelling it as the number it is.
+//
+// Total over `serde_json::Value` on purpose: an encoder that silently dropped
+// arrays would make a malformed schema look like a server-side refusal, which
+// is the one confusion measurement (e) cannot afford.
+message JsonValue {
+  int32 null_value = 1;
+  double number_value = 2;
+  string string_value = 3;
+  bool bool_value = 4;
+  JsonStruct struct_value = 5;
+  JsonList list_value = 6;
+}
+
+// `google.protobuf.Struct` (index.js@3926700) is `map<string, Value> fields =
+// 1`, and a protobuf map *is* a repeated entry message with key = 1 and
+// value = 2 — so this spelling is byte-identical to the map and, unlike a map,
+// preserves the order it was built in. That determinism is what lets a test
+// assert the declaration's bytes rather than assert around a HashMap.
+message JsonStruct {
+  repeated JsonField fields = 1;
+}
+
+// One entry of that map: the synthesized MapEntry protobuf generates for it.
+message JsonField {
+  string key = 1;
+  JsonValue value = 2;
+}
+
+// `google.protobuf.ListValue` (index.js@3929084).
+message JsonList {
+  repeated JsonValue values = 1;
+}
+
+// The run-level liveness ping the client sends while its request body is open:
+// AgentClientMessage.client_heartbeat = 7 (index.js@6200066), of type
+// ClientHeartbeat (index.js@6197181), which carries nothing — the arrival is
+// the whole message, exactly like the server's own Heartbeat above.
+message ClientHeartbeat {}
+
+// The *exec*-level liveness ping, the third arm of the control channel this
+// file already models two arms of: ExecClientControlMessage.heartbeat = 3
+// (index.js@6299362), of type ExecClientHeartbeat (index.js@6298918), whose
+// id = 1 is the exec's, not the stream's. The shipped client sends one every
+// three seconds while a handler is actually running (index.js@4272747) — the
+// state D486 said this build never enters, and the state a deliberate pause
+// puts it in for the first time.
+message ExecHeartbeat {
+  uint32 id = 1;
+}
+
+// The system-prompt channel that is *not* the allowlist-gated
+// custom_system_prompt = 8: AgentRunRequest.system_prompt_spec = 29, of type
+// SystemPromptSpec (index.js@6580696), whose whole oneof is two **string**
+// arms — replace = 1 and append = 2. Whether these are gated the way
+// custom_system_prompt was is measurement (d); only append is ever sent,
+// because a replace would discard the prompt cloud_rule already carries.
+message SystemPromptSpec {
+  string replace = 1;
+  string append = 2;
+}
+
+// The success arm of the MCP answer this file already models the rejection of:
+// McpResult.success = 1 (index.js@6372351), of type McpSuccess
+// (index.js@6376081) — content = 1 repeated, is_error = 2. Its
+// structured_content = 3 is not modelled: the spike answers one word.
+message McpSuccess {
+  repeated McpContentItem content = 1;
+  bool is_error = 2;
+}
+
+// One item of that content (McpToolResultContentItem, index.js@6375554),
+// narrowed to text = 1; the image arm beside it is a payload this spike has no
+// reason to produce.
+message McpContentItem {
+  McpTextContent text = 1;
+}
+
+// index.js@6374553: text = 1, beside an output_location = 2 that names where a
+// large result was spilled — which a one-word answer never needs.
+message McpTextContent {
+  string text = 1;
+}

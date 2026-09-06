@@ -1,14 +1,31 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use buffa::Message as _;
 
-use super::super::{connect, proto, serves_fetch};
+use super::super::{CursorWire, DEFAULT_BASE_URL, connect, proto, serves_fetch};
 use super::{
     ChatRequest, context_answer, decode, fresh_id, kv_answer, newest_user_text, refusal_answer,
     run_message,
 };
+use crate::auth::{AuthError, OauthCredential, RefreshOauth};
 use crate::protocol::{Message, Part};
 use crate::tool::ToolDefinition;
+
+/// A renewal that must never run: the send-side test below builds a wire and
+/// encodes with it, and never reaches a token endpoint.
+struct NeverRenews;
+
+#[async_trait::async_trait]
+impl RefreshOauth for NeverRenews {
+    async fn refresh(
+        &self,
+        provider_id: &str,
+        _credential: &OauthCredential,
+    ) -> Result<OauthCredential, AuthError> {
+        panic!("{provider_id} was renewed by a test that only encodes a request");
+    }
+}
 
 /// The sentence every typed refusal but the MCP one carries, spelled out
 /// once here rather than rebuilt from the constant under test: a test that
@@ -133,7 +150,7 @@ fn request() -> ChatRequest {
 
 #[test]
 fn the_assembled_bytes_decode_back_to_what_the_assembly_promised() {
-    let bytes = run_message(&request()).expect("the assembly encodes");
+    let bytes = run_message(&request(), None).expect("the assembly encodes");
     let decoded = proto::ClientMessage::decode_from_slice(&bytes).expect("what was sent decodes");
 
     let run = decoded.run_request.as_option().expect("a run request first");
@@ -166,9 +183,42 @@ fn the_assembled_bytes_decode_back_to_what_the_assembly_promised() {
     );
 }
 
+/// **AC-10.** A wire built with the W2 spike's environment unset sends the
+/// four fields it sent before the spike existed, and neither of the two the
+/// spike adds.
+///
+/// The wire is *constructed* rather than described, and constructed through
+/// [`CursorWire::at`] — the path that sets the spike to `None` explicitly —
+/// so nothing here mutates the process environment and nothing depends on the
+/// order the tests in this binary ran in. What is asserted is the bytes: a
+/// struct field can read back correctly while the encoder has started writing
+/// something extra beside it, and "extra" is exactly this test's subject.
+#[test]
+fn a_spikeless_wire_sends_a_run_request_with_no_spike_fields() {
+    let wire = CursorWire::at(DEFAULT_BASE_URL, Arc::new(NeverRenews)).expect("the wire builds");
+    assert!(wire.spike.is_none(), "no environment was set, so there is no spike");
+
+    let bytes = run_message(&request(), wire.spike.as_ref()).expect("the assembly encodes");
+    let run = proto::ClientMessage::decode_from_slice(&bytes)
+        .expect("what was sent decodes")
+        .run_request
+        .as_option()
+        .cloned()
+        .expect("the run request");
+
+    assert_eq!(
+        field_numbers(&run.encode_to_vec()),
+        vec![1, 2, 3, 9],
+        "conversation_state, action, model_details, requested_model — no mcp_tools = 4 and no \
+         system_prompt_spec = 29"
+    );
+    assert!(!run.mcp_tools.is_set(), "no roster is declared off the spike");
+    assert!(!run.system_prompt_spec.is_set(), "and no second system-prompt channel");
+}
+
 #[test]
 fn the_system_prompt_never_rides_the_run_request() {
-    let bytes = run_message(&request()).expect("the assembly encodes");
+    let bytes = run_message(&request(), None).expect("the assembly encodes");
 
     let prompt = b"You are terse.";
     assert!(
@@ -184,6 +234,7 @@ fn the_context_answer_echoes_the_ids_and_carries_the_prompt_on_cloud_rule() {
         decode::ContextAsk { id: Some(7), exec_id: Some("exec-abc".to_owned()) },
         Some("You are terse."),
         true,
+        None,
     );
     let decoded = proto::ClientMessage::decode_from_slice(&bytes).expect("what was sent decodes");
 
@@ -207,7 +258,8 @@ fn the_context_answer_echoes_the_ids_and_carries_the_prompt_on_cloud_rule() {
 #[test]
 fn a_promptless_turn_answers_with_a_present_but_empty_context() {
     for system in [None, Some("")] {
-        let bytes = context_answer(decode::ContextAsk { id: None, exec_id: None }, system, false);
+        let bytes =
+            context_answer(decode::ContextAsk { id: None, exec_id: None }, system, false, None);
         let decoded = proto::ClientMessage::decode_from_slice(&bytes).expect("decodes");
         let answer = decoded.exec_response.as_option().expect("the exec answer");
         assert_eq!(answer.id, None, "an id the server never sent is not invented");
@@ -789,7 +841,7 @@ fn an_exec_kind_outside_the_table_still_reaches_the_throw() {
 /// nothing, and a later tidy-up that "completes" the set reddens here.
 #[test]
 fn the_context_answer_carries_exactly_the_three_switchboard_members() {
-    let bytes = context_answer(decode::ContextAsk { id: None, exec_id: None }, None, true);
+    let bytes = context_answer(decode::ContextAsk { id: None, exec_id: None }, None, true, None);
     let decoded = proto::ClientMessage::decode_from_slice(&bytes).expect("decodes");
     let context = decoded
         .exec_response
@@ -817,8 +869,12 @@ fn the_context_answer_carries_exactly_the_three_switchboard_members() {
 /// something the presence of a `cloud_rule` moves.
 #[test]
 fn a_prompt_joins_the_switchboard_rather_than_replacing_it() {
-    let bytes =
-        context_answer(decode::ContextAsk { id: None, exec_id: None }, Some("Be terse."), false);
+    let bytes = context_answer(
+        decode::ContextAsk { id: None, exec_id: None },
+        Some("Be terse."),
+        false,
+        None,
+    );
     let decoded = proto::ClientMessage::decode_from_slice(&bytes).expect("decodes");
     let context = decoded
         .exec_response
