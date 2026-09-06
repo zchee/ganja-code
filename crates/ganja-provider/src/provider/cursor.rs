@@ -52,10 +52,16 @@
 //! here and never left to hang the turn. The rulings behind both — D550's and
 //! D552's — are stated in full in `crates/ganja-provider/AGENTS.md`.
 //!
-//! What is still deliberately not here is the conversation-state machinery
-//! that carries history on cursor's content-addressed blob channel;
-//! `request`'s module docs say why, and `bridge`'s say what it costs a resume
-//! whose held Run is gone.
+//! **The conversation rides cursor's blob channel** (**D553**). Every message
+//! before the newest user run is composed into the run request's
+//! content-addressed state (`history`) and served from the Run's own store
+//! to the server's kv gets, so a fresh Run carries the whole transcript —
+//! which is what lets a resume whose held Run is **gone** be recovered on a
+//! fresh Run under `resume_action`, **once per turn opening**, rather than
+//! failed by name (`bridge`, the recovery and its cap). What is still
+//! deliberately not modelled — the state's other 34 fields, the checkpoint
+//! arm `decode` reports by number and size — is named in `cursor.proto`'s
+//! comments, each with the measurement that says why.
 //!
 //! The provider rides the uncataloged tier, so a session must be told which
 //! model to ask for; [`CursorWire::usable_models`] is the listing that says
@@ -407,7 +413,11 @@ impl CursorWire {
     /// finished result for every exec that Run is waiting on continues it. A
     /// request that keys nowhere opens a fresh Run and disturbs nothing —
     /// which is what a title one-shot, a compaction summary and every
-    /// subagent turn do while a root turn is paused.
+    /// subagent turn do while a root turn is paused. A request resuming a
+    /// bridge that is **gone** opens a fresh Run too — the recovery, logged
+    /// and never an event — whose composed history carries what the tool
+    /// answered under `resume_action`; only its second recovery of one turn
+    /// is a failed stream (`bridge`'s cap).
     ///
     /// # Errors
     ///
@@ -428,13 +438,15 @@ impl CursorWire {
 
         match self.held.resolve(&request) {
             bridge::Resolution::Resume(fold) => return Ok(run(*fold, cancel, resuming)),
-            bridge::Resolution::Closed => {
-                return Ok(failed(
-                    "the cursor run this turn was resuming closed its request body before the \
-                     tool results could be answered",
-                ));
+            // The bridge is gone; the fresh Run below carries the composed
+            // conversation, and its composition answers `resume_action` by
+            // this request's own shape. A log line rather than an event,
+            // because the protocol has no notice event and the turn is not
+            // failing.
+            bridge::Resolution::Recover(why) => {
+                tracing::info!(provider = ID, %why, "recovering a cursor turn on a fresh run");
             }
-            bridge::Resolution::Dead(reason) => return Ok(failed(&reason)),
+            bridge::Resolution::Failed(why) => return Ok(failed(&why)),
             bridge::Resolution::Fresh => {}
         }
 
@@ -576,8 +588,9 @@ impl CursorWire {
     }
 }
 
-/// A stream that reports one failure and ends, for the two states a resume
-/// can find instead of a Run to read on.
+/// A stream that reports one failure and ends, for the one state a resume
+/// can find instead of a Run to read on: a bridge that is gone whose turn was
+/// already reopened once (`bridge::Resolution::Failed`).
 fn failed(reason: &str) -> BoxStream<'static, ProviderEvent> {
     let failure = ProviderEvent::Failed(ProviderError::Transport(reason.to_owned()));
 

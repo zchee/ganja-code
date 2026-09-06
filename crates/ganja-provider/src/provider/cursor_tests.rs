@@ -12,7 +12,7 @@ use super::{
 };
 use crate::auth::{self, AuthError, OauthCredential, RefreshOauth};
 use crate::protocol::FinishReason;
-use crate::provider::{ChatRequest, ProviderEvent};
+use crate::provider::{ChatRequest, CredentialSource, NO_RESULT, ProviderEvent};
 use crate::tool::ToolDefinition;
 
 /// A renewal that must never run, for the cases that are about
@@ -629,6 +629,120 @@ async fn a_held_run_resumed_after_a_pause_still_answers_a_composed_id() {
     );
 }
 
+/// **AC-14c, the wire half.** A keyed hit still lacking one of its results
+/// opens a fresh Run — the held one stays held, which `bridge::tests`
+/// watches — and the run request that Run goes out with is a
+/// `resume_action` over a state that names the result that did finish and
+/// renders the one that did not as [`NO_RESULT`]. Driven through
+/// `Provider::stream` against a loopback, so the request read back is the
+/// one the wire built, sent and streamed.
+#[tokio::test]
+async fn a_keyed_hit_still_lacking_a_result_opens_a_run_naming_what_it_has_and_what_it_lacks() {
+    let served = serve_run(finished("Carrying on."), false).await;
+    let provider = CursorProvider::at(
+        &served.base_url,
+        CredentialSource::key("at-bridge-canary").expect("a non-blank token"),
+    )
+    .expect("loopback may carry a token");
+    let request = opening("auto");
+    let key = super::bridge::Key::of(&request).expect("a request with a message keys");
+
+    // Two execs in one chunk, both bridged: the Run is held for both.
+    let (body, chunks) = futures::channel::mpsc::unbounded::<Result<Vec<u8>, Infallible>>();
+    let (answers, _answered) = futures::channel::mpsc::unbounded();
+    let stream = super::events(
+        chunks,
+        CancellationToken::new(),
+        super::Duplex::for_tests(answers, roster()),
+        Some(super::Bridge::new(Arc::clone(&provider.held), key)),
+    );
+    let mut batch = mcp_framed(1, read_args("call-1"));
+    batch.extend(mcp_framed(2, read_args("call-2")));
+    body.unbounded_send(Ok(batch)).expect("the body is open");
+    let paused: Vec<ProviderEvent> =
+        tokio::time::timeout(Duration::from_secs(10), stream.collect())
+            .await
+            .expect("a bridged batch pauses the stream rather than hanging it");
+    assert_eq!(
+        paused.iter().filter(|event| matches!(event, ProviderEvent::ToolCallStart { .. })).count(),
+        2,
+        "both calls reached the engine on one step: {paused:?}"
+    );
+
+    // The engine's next step, one call finished and one still pending.
+    let mut partial = request.clone();
+    let mut reply = crate::protocol::Message::assistant(&request.model);
+    for (call_id, state) in [
+        (
+            "call-1",
+            crate::protocol::ToolState::Completed {
+                input: serde_json::json!({}),
+                output: "the finished one".to_owned(),
+                title: "read".to_owned(),
+                metadata: serde_json::json!({}),
+                started: 0,
+                completed: 0,
+            },
+        ),
+        ("call-2", crate::protocol::ToolState::Pending { input: None }),
+    ] {
+        reply.parts.push(crate::protocol::Part {
+            id: crate::protocol::PartId::ascending(),
+            body: crate::protocol::PartBody::Tool {
+                call_id: call_id.to_owned(),
+                tool: "read".to_owned(),
+                state,
+            },
+        });
+    }
+    partial.messages.push(reply);
+
+    let events: Vec<ProviderEvent> = tokio::time::timeout(Duration::from_secs(10), async {
+        provider
+            .stream(partial.clone(), CancellationToken::new())
+            .await
+            .expect("a keyed hit without its results opens a fresh run")
+            .collect()
+            .await
+    })
+    .await
+    .expect("the fresh run reads to its end");
+    assert_eq!(
+        events,
+        vec![
+            ProviderEvent::TextDelta("Carrying on.".to_owned()),
+            ProviderEvent::Finish(FinishReason::Completed),
+        ],
+        "a fresh run over the loopback, not a failure"
+    );
+
+    let opened = served.opened.await.expect("the fresh run went out");
+    assert!(
+        opened.action.as_option().is_some_and(|action| action.resume_action.is_set()),
+        "the newest message is the assistant's, so the run resumes rather than sending a user \
+         message: {opened:?}"
+    );
+    let composed = super::history::compose(&partial);
+    let state = opened.conversation_state.as_option().expect("a composed state");
+    assert_eq!(
+        state.root_prompt_messages_json, composed.root,
+        "the ids on the wire are the composition's, whose blobs the run answers gets from"
+    );
+    let entries: Vec<String> = composed
+        .root
+        .iter()
+        .map(|id| String::from_utf8_lossy(&composed.blobs[id]).into_owned())
+        .collect();
+    assert!(
+        entries.iter().any(|entry| entry.contains("the finished one")),
+        "the result that finished is in the state: {entries:?}"
+    );
+    assert!(
+        entries.iter().any(|entry| entry.contains(NO_RESULT)),
+        "and the one still pending is rendered as missing rather than invented: {entries:?}"
+    );
+}
+
 /// The turn the live `shell_stream_args` exec used to kill (**D486**):
 /// the server asks this client to run a shell mid-stream, the refusal
 /// rides out on the held-open body as the pair the shipped client
@@ -909,6 +1023,129 @@ pub(super) fn sent_so_far(answered: &mut Answered) -> Vec<proto::ClientMessage> 
 
 /// The receiving end of a duplex's answer channel.
 pub(super) type Answered = futures::channel::mpsc::UnboundedReceiver<Result<Vec<u8>, Infallible>>;
+
+/// A loopback Run endpoint for exactly one connection: the run request the
+/// connection opened with, and a canned response body served as Connect
+/// frames.
+///
+/// `tests/cursor_wire.rs` serves the whole recorded protocol and asserts on
+/// its headers; this one exists so a **recovery** — a `Recover` resolution
+/// falling through to [`CursorWire::stream`]'s fresh-Run arm — can be driven
+/// through the provider in the module its held-run table lives in, and read
+/// back as the run request the reopened Run actually went out with. Nothing
+/// in `stream()` is bypassed: the request is built, sent and streamed by the
+/// same client a live turn uses.
+pub(super) struct Served {
+    pub(super) base_url: String,
+    /// The run request the one connection opened with, decoded off the
+    /// chunked request body's first Connect envelope.
+    pub(super) opened: tokio::sync::oneshot::Receiver<proto::RunRequest>,
+}
+
+/// Serves `reply` on the next connection to a fresh loopback port. With
+/// `keep_open` the response body is left unterminated and the socket held,
+/// the way a server waiting on an exec answer holds a Run — which is what
+/// lets a recovered Run pause on a bridged exec of its own.
+pub(super) async fn serve_run(reply: Vec<u8>, keep_open: bool) -> Served {
+    use tokio::io::AsyncWriteExt as _;
+
+    let listener =
+        tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("loopback is bindable");
+    let port = listener.local_addr().expect("a bound socket has an address").port();
+    let (tell, opened) = tokio::sync::oneshot::channel();
+
+    tokio::spawn(async move {
+        let Ok((mut socket, _)) = listener.accept().await else { return };
+        let Some(envelope) = opening_envelope(&mut socket).await else { return };
+        let run = client_message(&envelope)
+            .run_request
+            .into_option()
+            .expect("the envelope that opens a run carries the run request");
+        let _ = tell.send(run);
+
+        // Chunked, because a body with a declared length ends the moment its
+        // last byte is read, and a held Run's must not.
+        let mut response = b"HTTP/1.1 200 OK\r\ncontent-type: application/connect+proto\r\n\
+                             transfer-encoding: chunked\r\n\r\n"
+            .to_vec();
+        if !reply.is_empty() {
+            response.extend_from_slice(format!("{:x}\r\n", reply.len()).as_bytes());
+            response.extend_from_slice(&reply);
+            response.extend_from_slice(b"\r\n");
+        }
+        if !keep_open {
+            response.extend_from_slice(b"0\r\n\r\n");
+        }
+        let _ = socket.write_all(&response).await;
+        let _ = socket.flush().await;
+        if keep_open {
+            std::future::pending::<()>().await;
+        }
+    });
+
+    Served { base_url: format!("http://127.0.0.1:{port}"), opened }
+}
+
+/// Reads the request head and de-chunks the streamed body until one whole
+/// Connect envelope is buffered, then stops: the duplex body is held open for
+/// exec answers and never ends while the turn is open, so a reader that went
+/// to EOF would hang on the wire's defining feature.
+async fn opening_envelope(socket: &mut tokio::net::TcpStream) -> Option<Vec<u8>> {
+    use tokio::io::AsyncReadExt as _;
+
+    let mut byte = [0_u8; 1];
+    let mut head = Vec::new();
+    while !head.ends_with(b"\r\n\r\n") {
+        match socket.read(&mut byte).await {
+            Ok(0) | Err(_) => return None,
+            Ok(_) => head.push(byte[0]),
+        }
+    }
+
+    let mut body = Vec::new();
+    loop {
+        if body.len() >= 5 {
+            let declared = u32::from_be_bytes(body[1..5].try_into().ok()?) as usize;
+            if body.len() >= 5 + declared {
+                body.truncate(5 + declared);
+                return Some(body);
+            }
+        }
+
+        let mut line = Vec::new();
+        while !line.ends_with(b"\r\n") {
+            match socket.read(&mut byte).await {
+                Ok(0) | Err(_) => return None,
+                Ok(_) => line.push(byte[0]),
+            }
+        }
+        let size = usize::from_str_radix(String::from_utf8_lossy(&line).trim(), 16).ok()?;
+        if size == 0 {
+            return None;
+        }
+        let mut chunk = vec![0_u8; size + 2];
+        socket.read_exact(&mut chunk).await.ok()?;
+        chunk.truncate(size);
+        body.extend_from_slice(&chunk);
+    }
+}
+
+/// A served turn that says `reply` and ends cleanly.
+pub(super) fn finished(reply: &str) -> Vec<u8> {
+    let mut body = framed(text(reply));
+    body.extend(framed(turn_ended()));
+    body.extend(end_stream("{}"));
+    body
+}
+
+/// A read of `call_id`, the way the server calls the declared tool.
+pub(super) fn read_args(call_id: &str) -> proto::McpArgs {
+    proto::McpArgs::default()
+        .with_name("read")
+        .with_tool_name("read")
+        .with_tool_call_id(call_id)
+        .with_provider_identifier("ganja")
+}
 
 /// A frame carrying one `mcp_args`, built from whatever the case is about.
 fn mcp_framed(id: u32, args: proto::McpArgs) -> Vec<u8> {

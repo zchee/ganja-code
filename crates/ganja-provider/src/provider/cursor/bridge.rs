@@ -62,12 +62,40 @@
 //! and without a bound it would hold a task and a socket for the life of the
 //! process.
 //!
-//! A resume against a bridge that is **gone** is answered with
-//! [`ProviderEvent::Failed`](crate::provider::ProviderEvent::Failed) naming it,
-//! and never with a silent fresh Run: this wire carries only the newest user
-//! turn, so a fresh Run there would quietly drop everything the tool answered
-//! and let the model continue as though it had never asked (bead
-//! `ganja-code-lnlq` is the history-composition work that closes that hole).
+//! # The recovery, and its cap
+//!
+//! A resume against a bridge that is **gone** — dropped for one of the three
+//! reasons above, or taken for a resume and found with its request body
+//! closed — is **recovered** rather than failed (**D553**, amending D552's
+//! "fails by name"): [`HeldRuns::resolve`] answers [`Resolution::Recover`]
+//! with a sentence naming the drop for the log line, and `stream()` falls
+//! through to a fresh Run over the composed conversation (`history`). That
+//! Run goes out under `resume_action` by the request's own shape — its newest
+//! message is the assistant's, carrying the tool's result — so what the tool
+//! answered rides the blob channel into the reopened Run instead of being
+//! quietly forgotten, which is the one thing that made failing the honest
+//! answer before history was composed.
+//!
+//! The recovery is **capped at one per key**. Every key recovered is pushed
+//! onto a bounded list of its own ([`REOPENED`]) that `drop_run` never
+//! touches — deliberately, because the shipped shape is recover → the reopened
+//! Run is held again under the *same* key → it is dropped again, and a count
+//! kept in the drop ring would be shadowed by that second drop's fresh entry.
+//! A key already on the list is answered [`Resolution::Failed`] naming the
+//! cap. The check replaces a `Recover` exactly where one would be produced
+//! and **never precedes `Resume` or `Fresh`**: a recovered Run held again by
+//! a later exec and resumed with its results present resolves `Resume` as
+//! any held Run does, so a capped turn loses its second *reopening*, not its
+//! ability to continue. Why one: the shipped shapes produce one drop per turn
+//! (a dialog past the bound, a body the server closed), a second drop of the
+//! same turn is a condition a person should see, and the shipped client stops
+//! its own automatic resumes after two attempts without progress. The list is
+//! scoped to the provider and reset by nothing — not a clean finish, not a
+//! new turn — which is safe because a [`Key`] is the opening message's id and
+//! message ids ascend, so no later turn can collide with a recovered one; the
+//! FIFO bound is on recoveries, which are rare, so its escape hatch —
+//! sixty-four other recoveries between two resumes of one turn — is not a
+//! shape a session produces.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -104,6 +132,14 @@ pub(super) const IDLE_BOUND: Duration = Duration::from_secs(600);
 /// How many dropped keys the ring remembers, so a resume can be told *why* its
 /// bridge is gone rather than only that it is.
 const DROPPED: usize = 16;
+
+/// How many recovered keys the cap remembers.
+///
+/// A bound on *recoveries*, which are rare, rather than on drops, which are
+/// not: a turn's key leaves this list only when sixty-four other turns have
+/// been recovered after it, which is not a shape a session produces between
+/// two resumes of one turn.
+const REOPENED: usize = 64;
 
 /// What a held Run is filed under: the model, and the id of the message that
 /// opened the turn.
@@ -167,7 +203,8 @@ pub(super) enum Reason {
 }
 
 impl Reason {
-    /// The clause a dead-bridge failure ends with.
+    /// The clause a recovery's sentence — and a capped one's — names the
+    /// drop by.
     fn spelled(&self) -> &'static str {
         match self {
             Self::Cancelled => "the turn that opened it was cancelled",
@@ -199,13 +236,14 @@ pub(super) enum Resolution {
     /// on the body the pause left open. Boxed because the fold is the large
     /// variant.
     Resume(Box<super::Fold>),
-    /// This request resumed a held Run whose request body has closed, so the
-    /// answers it carried reached nobody: reading on would wait for generation
-    /// that will never come.
-    Closed,
-    /// This request is resuming a bridge that is gone; the sentence says which
-    /// and, when the ring still knows, why.
-    Dead(String),
+    /// This request is resuming a bridge that is gone — dropped, or taken and
+    /// found with its body closed — and the turn is recovered on a fresh Run
+    /// over the composed conversation. The sentence says why, for the log
+    /// line; nothing fails.
+    Recover(String),
+    /// This request is resuming a bridge that is gone and its turn was already
+    /// reopened once: the cap, and the sentence the turn fails with.
+    Failed(String),
 }
 
 /// The Runs one provider is holding open, shared by every wire it builds.
@@ -220,11 +258,16 @@ pub(super) struct HeldRuns {
     /// The last few keys to go, and why. Bounded, because its only reader is a
     /// resume that wants one sentence.
     dropped: Mutex<VecDeque<(Key, Reason)>>,
+    /// Every key recovered so far, oldest first, bounded at [`REOPENED`] —
+    /// the cap's memory, kept apart from `dropped` because a second drop of a
+    /// recovered key must not erase the fact that it was recovered.
+    reopened: Mutex<VecDeque<Key>>,
 }
 
 impl HeldRuns {
-    /// What `request` should do: resume a held Run, open a fresh one, or fail
-    /// because the bridge it is resuming is gone.
+    /// What `request` should do: resume a held Run, open a fresh one, recover
+    /// on a fresh one because the bridge it is resuming is gone, or fail
+    /// because that recovery already happened once.
     ///
     /// **No guard is held across an await here, and none can be**: this
     /// function does not await at all. It takes the lock, decides, and gives
@@ -243,7 +286,14 @@ impl HeldRuns {
                 // the pause was for.
                 Some(Some(outcomes)) => runs.remove(&key).map(|entry| (entry, outcomes)),
                 // Keyed, but the results are not here. A fresh Run, and the
-                // held one is left exactly as it was.
+                // held one is left exactly as it was. Defensive: the engine
+                // resumes a step only once every call it started has
+                // finished, so this arm is not a shape a turn produces. The
+                // fresh Run it opens carries the composed history — the
+                // finished results as `[Tool Result]` entries, the call it
+                // still lacks as `NO_RESULT` — and, the request's newest
+                // message being the assistant's, goes out under
+                // `resume_action`.
                 Some(None) => {
                     tracing::debug!(
                         provider = ID,
@@ -259,7 +309,12 @@ impl HeldRuns {
 
         if let Some((entry, outcomes)) = taken {
             entry.done.cancel();
-            return settle(entry, &outcomes);
+            return match settle(entry, &outcomes) {
+                // The body had closed under the entry this request took: a
+                // recovery, capped exactly where the ring's is.
+                Resolution::Recover(why) => self.reopen(&key, why),
+                resumed => resumed,
+            };
         }
 
         // Somebody *else's* results turned up on this request: whatever those
@@ -273,7 +328,7 @@ impl HeldRuns {
             return Resolution::Fresh;
         }
 
-        Resolution::Dead(self.dead(&key))
+        self.reopen(&key, self.recovery(&key))
     }
 
     /// Holds `fold` open under `key`, beating on the request body until the
@@ -359,21 +414,62 @@ impl HeldRuns {
         self.runs.lock().expect("the held-run table is never poisoned").contains_key(key)
     }
 
-    /// The sentence a resume against a gone bridge fails with.
-    fn dead(&self, key: &Key) -> String {
+    /// Answers a recovery for `key` — or, for a key already recovered once,
+    /// the refusal that caps it.
+    ///
+    /// Called exactly where a [`Resolution::Recover`] would otherwise be
+    /// returned, and nowhere earlier: the cap must never stand in front of a
+    /// `Resume` or a `Fresh`, or a recovered Run held again by its next exec
+    /// would fail at the very resume it was reopened for.
+    fn reopen(&self, key: &Key, recovery: String) -> Resolution {
+        let first = {
+            let mut reopened = self.reopened.lock().expect("the reopened list is never poisoned");
+            if reopened.contains(key) {
+                false
+            } else {
+                if reopened.len() == REOPENED {
+                    reopened.pop_front();
+                }
+                reopened.push_back(key.clone());
+                true
+            }
+        };
+
+        if first { Resolution::Recover(recovery) } else { Resolution::Failed(self.capped(key)) }
+    }
+
+    /// The sentence a resume against a gone bridge is recovered under — the
+    /// log line's, since nothing fails.
+    fn recovery(&self, key: &Key) -> String {
+        let because = self.because(key);
+
+        format!(
+            "this turn is answering a cursor tool call, but the run that asked for it is \
+             gone{because}; reopening a run over the composed conversation"
+        )
+    }
+
+    /// The sentence a second recovery of one key fails with.
+    fn capped(&self, key: &Key) -> String {
+        let because = self.because(key);
+
+        format!(
+            "this turn is answering a cursor tool call, but the run that asked for it is \
+             gone{because}; it was already reopened once for this turn and is not reopened again"
+        )
+    }
+
+    /// The reason clause the ring still holds for `key`, newest drop first —
+    /// or nothing, for a key the ring has turned over or never held.
+    fn because(&self, key: &Key) -> String {
         let dropped = self.dropped.lock().expect("the dropped ring is never poisoned");
-        let because = dropped
+
+        dropped
             .iter()
             .rev()
             .find(|(dropped, _)| dropped == key)
             .map(|(_, reason)| format!(": {}", reason.spelled()))
-            .unwrap_or_default();
-
-        format!(
-            "this turn is answering a cursor tool call, but the run that asked for it is \
-             gone{because}. Cursor's wire carries only the newest message, so continuing would \
-             drop what the tool answered"
-        )
+            .unwrap_or_default()
     }
 }
 
@@ -390,9 +486,12 @@ fn outcomes(entry: &Entry, results: &HashMap<String, ToolState>) -> Option<Vec<n
 }
 
 /// Sends every pending exec's answer on the body the pause left open, then
-/// hands the fold back to be read on — or reports the body closed, because an
-/// answer that cannot be delivered is a turn that will hang, and the caller
-/// says so rather than reading a stream nobody is generating into.
+/// hands the fold back to be read on — or, when the body had closed under it,
+/// answers a recovery: an answer that cannot be delivered is a Run that will
+/// never generate again, so the caller reopens one over the composed
+/// conversation rather than reading a stream nobody is generating into. The
+/// cap on that recovery is the caller's, applied at this function's one call
+/// site in [`HeldRuns::resolve`].
 ///
 /// `outcomes` is what [`outcomes`] confirmed for this entry, pairing with
 /// `pending` by position; no lock is held here, and nothing awaits.
@@ -417,7 +516,16 @@ fn settle(entry: Entry, outcomes: &[native::Outcome]) -> Resolution {
         }
     }
 
-    if delivered { Resolution::Resume(Box::new(entry.fold)) } else { Resolution::Closed }
+    if delivered {
+        Resolution::Resume(Box::new(entry.fold))
+    } else {
+        Resolution::Recover(
+            "this turn is answering a cursor tool call, but the run that asked for it closed \
+             its request body before the answers could reach it; reopening a run over the \
+             composed conversation"
+                .to_owned(),
+        )
+    }
 }
 
 /// The finished tool results this request carries **at or after** its turn's

@@ -28,21 +28,34 @@
 //! executes — behind the same permission dialog, into the same transcript —
 //! is what the AC-17 tests below assert, and nothing in `depgate.toml`
 //! asserts it.
+//!
+//! **D553** (`.omc/plans/2026-09-07-cursor-history-blobs.md`, W3) added the
+//! turn a server *drops*: a Run held for the engine whose request body the
+//! server closes. The transport claim under it — that hyper fails the held
+//! body's sender once the connection has FINed, so the keeper's next beat
+//! drops the Run as `Reason::Closed` rather than the idle bound doing so ten
+//! minutes later — is the pin
+//! [`a_hangup_under_a_held_body_fails_the_keepers_next_beat`], measured
+//! before the recovery tests build on it. The drop is always a
+//! [`Step::Hangup`] the test releases, never a timeout.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::stream::BoxStream;
 use futures::{SinkExt as _, StreamExt as _};
 use ganja_core::Engine;
 use ganja_core::permission::{Action, Permissions, Rule};
 use ganja_core::protocol::{
-    Command, Event, FinishReason, PartBody, PartId, PermissionReply, ToolState,
+    Command, Event, FinishReason, Message, Part, PartBody, PartId, PermissionId, PermissionReply,
+    ToolState,
 };
+use ganja_core::provider::cursor::proto;
 use ganja_core::provider::{CredentialSource, CursorProvider};
 use ganja_core::tool::Registry;
-use ganja_testkit::cursor_server::{CursorServer, Step, finished};
-use ganja_testkit::{RecorderTool, drain, drain_answering};
+use ganja_testkit::cursor_server::{CursorServer, KvAnswer, Step, decoded, finished};
+use ganja_testkit::{LogCapture, RecorderTool, drain, drain_answering};
 use serde_json::json;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpListener;
@@ -50,6 +63,21 @@ use tokio::time::timeout;
 
 /// The model every seat here asks for.
 const MODEL: &str = "gpt-5.3-codex";
+
+/// The run-level heartbeat's cadence, restated: the wire's own constant is
+/// crate-private, and the heartbeat test below already says the number in
+/// its own voice.
+const HEARTBEAT: Duration = Duration::from_secs(5);
+
+/// Room for a slow machine to schedule the beat that lands on the bound.
+const SCHEDULING: Duration = Duration::from_secs(2);
+
+/// The keeper's own line for a held Run leaving the table — the line probe
+/// 2 reads for the same fact.
+const DROPPED: &str = "dropping a held run";
+
+/// The clause `Reason::Closed` renders as, wherever the drop is named.
+const CLOSED: &str = "cursor closed the request body under it";
 
 /// What the client writes only after the response has started.
 const SECOND: &[u8] = b"second";
@@ -222,6 +250,77 @@ async fn a_dropped_server_stops_accepting_connections() {
     .await;
 }
 
+/// **The transport pin under D553's recovery** (W3, step 9). A Run held open
+/// for the engine is a request body the *keeper* beats on every
+/// [`HEARTBEAT`]; when the server hangs up under it, the held Run must leave
+/// the table as `Reason::Closed` on the keeper's next beat — not on the idle
+/// bound, ten minutes on. That is a claim about hyper: that a `wrap_stream`
+/// request body's receiver is dropped once the connection has FINed with the
+/// exchange unfinished, so the sender's next write fails. Measured here,
+/// over the stack the wire uses, before AC-16 builds on it.
+///
+/// The hangup is released once the dialog is up, because that is the proof
+/// the Run is held ([`Step::Hangup`] says why nothing earlier is); the drop
+/// is read off the keeper's own line, `dropping a held run … reason=Closed`,
+/// the line probe 2 reads for the same fact. Two heartbeats is the bound the
+/// plan states; the first is where the drop is expected, because the FIN
+/// reaches hyper's read side while the response is mid-body and it closes
+/// the connection there, well before any beat has to be written.
+///
+/// Refused afterwards, so the pin runs nothing and claims nothing about what
+/// the resume finds — that is AC-16's.
+#[tokio::test]
+async fn a_hangup_under_a_held_body_fails_the_keepers_next_beat() {
+    let (log, _guard) = capturing();
+    let server = CursorServer::start(vec![
+        Step::Context,
+        Step::mcp(1, "lookup", &json!({"key": "alpha"})).no_wait(),
+        Step::Hangup,
+    ])
+    .await;
+
+    let (tool, calls) = RecorderTool::new("lookup", "lookup ran", "the answer");
+    let engine = seated(&server, Registry::new(vec![tool]), rule("lookup", Action::Ask));
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine.send(prompt()).await.expect("an idle engine accepts a prompt");
+    let (dialog, mut seen) = held_at_dialog(&mut events).await;
+    assert!(
+        log.logged().contains("holding a run open for the engine"),
+        "the dialog is raised by a held Run, got:\n{}",
+        log.logged(),
+    );
+    assert!(!log.logged().contains(DROPPED), "and nothing is dropped while the socket is up");
+
+    let hung_up = tokio::time::Instant::now();
+    let logged = hang_up_and_wait_for_drop(&server, &log, 1).await;
+    let elapsed = hung_up.elapsed();
+
+    let line = logged
+        .lines()
+        .find(|line| line.contains(DROPPED))
+        .expect("the wait returned on the drop line");
+    assert!(
+        line.contains("reason=Closed"),
+        "the drop names the closed body, not the idle bound or a cancel: {line}",
+    );
+    assert!(
+        elapsed <= 2 * HEARTBEAT + SCHEDULING,
+        "the keeper noticed within two beats, took {elapsed:?}",
+    );
+
+    engine
+        .send(Command::ReplyPermission { id: dialog, reply: PermissionReply::Reject })
+        .await
+        .expect("a reply is never refused");
+    seen.extend(drain(&mut events).await);
+    assert!(calls.lock().expect("the call log is never poisoned").is_empty(), "refused, so unrun");
+    assert!(
+        matches!(seen.last(), Some(Event::MessageFinished { .. })),
+        "and the turn ends rather than hanging on a body nobody holds",
+    );
+}
+
 /// An engine on `server`, holding `tools`, gated by `permissions`.
 fn seated(server: &CursorServer, tools: Registry, permissions: Permissions) -> Engine {
     Engine::new(Arc::new(provider_at(server)), MODEL, Arc::new(tools), permissions)
@@ -243,8 +342,13 @@ fn provider_at(server: &CursorServer) -> CursorProvider {
 
 /// One prompt, with nothing attached.
 fn prompt() -> Command {
+    saying("what does this crate do")
+}
+
+/// A prompt saying `text`, with nothing attached.
+fn saying(text: &str) -> Command {
     Command::SendPrompt {
-        text: "what does this crate do".to_owned(),
+        text: text.to_owned(),
         mentions: Vec::new(),
         skills: Vec::new(),
         session_mentions: Vec::new(),
@@ -256,14 +360,124 @@ fn prompt() -> Command {
 /// dialog, an allow where a test about the bridge should not be one about
 /// dialogs.
 fn rule(tool: &str, action: Action) -> Permissions {
+    rules(&[(tool, action)])
+}
+
+/// The same, one rule per named tool.
+fn rules(rules: &[(&str, Action)]) -> Permissions {
     let mut permissions = Permissions::default();
-    permissions.set_baseline(vec![Rule {
-        permission: tool.to_owned(),
-        pattern: "*".to_owned(),
-        action,
-    }]);
+    permissions.set_baseline(
+        rules
+            .iter()
+            .map(|(tool, action)| Rule {
+                permission: (*tool).to_owned(),
+                pattern: "*".to_owned(),
+                action: action.clone(),
+            })
+            .collect(),
+    );
 
     permissions
+}
+
+/// A `tracing` capture at DEBUG for the calling thread — which, under the
+/// current-thread runtime every test here runs on, is every task the engine
+/// and the wire spawn: the keeper that drops a held Run logs from one, and
+/// the recovery that reopens it logs from the turn.
+///
+/// Thread-local rather than global, because this binary holds many tests and
+/// a plain `cargo test` runs them on parallel threads; the guard must live
+/// as long as the test does.
+fn capturing() -> (LogCapture, tracing::subscriber::DefaultGuard) {
+    let capture = LogCapture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(capture.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::DEBUG)
+        .finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+
+    (capture, guard)
+}
+
+/// Reads events up to the dialog a bridged call raises, handing back its id
+/// and everything seen. Once the dialog is up the Run is **held**: the wire
+/// files the fold in the held-run table before it hands the engine the call
+/// events that raise it, so this is the moment a test may hang up under it.
+///
+/// A turn that finishes before any dialog is a failure named here, not a
+/// wait on a stream that never ends: the engine outlives its turns, so
+/// `events` has no end to reach.
+async fn held_at_dialog(events: &mut BoxStream<'static, Event>) -> (PermissionId, Vec<Event>) {
+    let mut seen = Vec::new();
+    loop {
+        let event = events.next().await.expect("the dialog arrives before the stream ends");
+        let waiting = match &event {
+            Event::PermissionRequested { id, .. } => Some(id.clone()),
+            _ => None,
+        };
+        let finished = matches!(event, Event::MessageFinished { .. });
+        seen.push(event);
+        if let Some(id) = waiting {
+            return (id, seen);
+        }
+        assert!(
+            !finished,
+            "the turn finished before a bridged call raised its dialog: {:?}",
+            seen.last()
+        );
+    }
+}
+
+/// Hangs up on `server` and waits for the keeper to drop the held Run — the
+/// `nth` drop this log has seen — within the two heartbeats the transport
+/// pin bounds it at, handing back the log so the caller can read the reason.
+///
+/// A wait on a line the keeper writes rather than a sleep: the drop lands on
+/// the first beat after the FIN in practice, and a sleep sized for the bound
+/// would spend the bound every time.
+async fn hang_up_and_wait_for_drop(server: &CursorServer, log: &LogCapture, nth: usize) -> String {
+    server.hang_up();
+
+    ganja_testkit::eventually(
+        2 * HEARTBEAT + SCHEDULING,
+        "the keeper's beat to fail on the hung-up body",
+        async || {
+            let logged = log.logged();
+            (logged.matches(DROPPED).count() >= nth).then_some(logged)
+        },
+    )
+    .await
+}
+
+/// The text of one root entry as the composition renders it: a bare string
+/// for the system head, the joined `text` items for everything else.
+fn root_text(answer: &KvAnswer) -> String {
+    let bytes = answer.data.as_deref().expect("a composed root id is found");
+    let entry: serde_json::Value =
+        serde_json::from_slice(bytes).expect("a root entry is the JSON the reference reads");
+    match &entry["content"] {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Array(items) => {
+            items.iter().filter_map(|item| item["text"].as_str()).collect::<Vec<_>>().join("")
+        }
+        other => panic!("a root entry's content is a string or a list, got {other}"),
+    }
+}
+
+/// The answer recorded for `id`, which every composed id has exactly one of.
+fn answer_for<'a>(answers: &'a [KvAnswer], id: &[u8]) -> &'a KvAnswer {
+    let matching: Vec<&KvAnswer> = answers.iter().filter(|answer| answer.blob_id == id).collect();
+    let [answer] = matching.as_slice() else {
+        panic!("one get per composed id, got {} for {}", matching.len(), hex(id));
+    };
+
+    answer
+}
+
+/// A blob id's leading hex, the spelling the wire logs one under.
+fn hex(id: &[u8]) -> String {
+    id.iter().take(8).map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// The `Tool` parts a drained turn left in the transcript, as
@@ -850,4 +1064,368 @@ async fn the_title_one_shot_opens_its_own_run_and_leaves_the_bridged_turn_alone(
     );
     assert!(!rosters[0].is_empty(), "the bridged turn declared its registry");
     assert!(rosters[1].is_empty(), "and the one-shot, carrying no tools, declared nothing");
+
+    // **AC-17 (D553).** The one-shot's request composes nothing before its
+    // one message — an empty state, set rather than absent — and carries a
+    // conversation id of its own, minted from that message rather than
+    // borrowed from the turn it titles.
+    let runs = server.run_requests();
+    let [turn, one_shot] = runs.as_slice() else {
+        panic!("two Runs opened, so two opening frames were recorded, got {}", runs.len());
+    };
+    let state = one_shot
+        .conversation_state
+        .as_option()
+        .expect("the composed state rides every run request, empty or not");
+    assert!(
+        state.root_prompt_messages_json.is_empty() && state.turns.is_empty(),
+        "a one-shot has no history to compose, got {} root entries and {} turns",
+        state.root_prompt_messages_json.len(),
+        state.turns.len(),
+    );
+    let conversation = one_shot
+        .conversation_id
+        .as_deref()
+        .expect("a conversation id rides every run request that has a message");
+    assert_eq!(conversation.len(), 36, "v4-shaped, as the reference's is: {conversation:?}");
+    assert!(turn.conversation_id.is_some(), "the bridged turn's request carries one too");
+    assert_ne!(
+        one_shot.conversation_id, turn.conversation_id,
+        "derived from each request's own first message, so the two Runs never share one",
+    );
+}
+
+/// **AC-18 (D553).** A resumed session's first request carries the history
+/// it stored, and the Run it opens serves that history to the server's gets:
+/// `[u1, a1, u2]` seeded through the engine's own storage composes a system
+/// head, `u1` and `a1` as root entries and `u1`'s turn with `a1` as its step,
+/// every blob answered found — and the `a1` root entry answers with `a1`'s
+/// text.
+///
+/// Seeded rather than played, because the composition is a property of the
+/// *request* and a stored session is where a request with history comes
+/// from; the newest message is the prompt, so the action is a user message
+/// and not a resume.
+#[tokio::test]
+async fn a_resumed_session_opens_its_run_over_the_history_it_stored() {
+    let server = CursorServer::start(vec![
+        Step::Context,
+        Step::KvGetComposed,
+        Step::Text("By hand.".to_owned()),
+        Step::TurnEnded,
+        Step::EndStream,
+    ])
+    .await;
+
+    let data = ganja_testkit::temp_dir();
+    let storage = ganja_core::Storage::open(data.path().join("storage"));
+    let session = ganja_testkit::seed_session(&storage, 0);
+    let asked = "What does this crate do?";
+    let answered = "It parses TOML.";
+    let u1 = Message::user(asked);
+    let mut a1 = Message::assistant(MODEL);
+    a1.parts.push(Part::text(answered));
+    a1.complete();
+    ganja_testkit::seed_message(&storage, &session, &u1);
+    ganja_testkit::seed_message(&storage, &session, &a1);
+
+    let (tool, _calls) = RecorderTool::new("lookup", "lookup ran", "the answer");
+    let engine = Engine::persistent(
+        Arc::new(provider_at(&server)),
+        MODEL,
+        Arc::new(Registry::new(vec![tool])),
+        rule("lookup", Action::Allow),
+        storage,
+    );
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+    engine.resume(&session).await.expect("the seeded session loads");
+
+    engine.send(saying("How?")).await.expect("an idle engine accepts a prompt");
+    let seen = drain(&mut events).await;
+    assert!(
+        matches!(seen.last(), Some(Event::MessageFinished { reason: FinishReason::Completed, .. })),
+        "the turn over history finishes clean, got {:?}",
+        seen.last(),
+    );
+
+    let runs = server.run_requests();
+    let run = runs.first().expect("the turn opened a Run");
+    let state = run.conversation_state.as_option().expect("the composed state rides the request");
+    // The system head rides the root only when there is a system prompt, and
+    // the same prompt travels to the server on the context answer's
+    // `cloud_rule`, filtered empty the same way — so the two spellings are
+    // held to each other rather than to a guess about what this engine
+    // assembly says: a bare engine says nothing, and composes no head.
+    let contexts = server.context_answers();
+    let [context] = contexts.as_slice() else {
+        panic!("one turn asks for its context once, got {} of them", contexts.len());
+    };
+    let head = usize::from(context.cloud_rule.is_some());
+    assert_eq!(
+        state.root_prompt_messages_json.len(),
+        head + 2,
+        "u1 and a1 as root entries, behind a head exactly when a system prompt travelled \
+         (cloud_rule = {:?})",
+        context.cloud_rule,
+    );
+    assert_eq!(state.turns.len(), 1, "u1's turn, with a1 as its step");
+    assert!(run.conversation_id.is_some(), "and a conversation id, derived from u1");
+    let action = run.action.as_option().expect("a request whose newest message is a prompt acts");
+    assert!(action.user_message_action.is_set(), "as a user message, not a resume");
+    assert!(action.resume_action.is_unset());
+
+    let answers = server.kv_answers();
+    assert!(
+        answers.iter().all(|answer| answer.data.is_some()),
+        "every composed id the server asked for is found, got {answers:?}",
+    );
+    let roots: Vec<(String, String)> = state
+        .root_prompt_messages_json
+        .iter()
+        .map(|id| {
+            let answer = answer_for(&answers, id);
+            let entry: serde_json::Value =
+                serde_json::from_slice(answer.data.as_deref().expect("found"))
+                    .expect("a root entry is JSON");
+            (entry["role"].as_str().unwrap_or_default().to_owned(), root_text(answer))
+        })
+        .collect();
+    if head == 1 {
+        assert_eq!(roots[0].0, "system", "the head first");
+        assert_eq!(Some(roots[0].1.as_str()), context.cloud_rule.as_deref(), "carrying the prompt");
+    }
+    assert_eq!(roots[head], ("user".to_owned(), asked.to_owned()), "then u1");
+    assert_eq!(
+        roots[head + 1],
+        ("assistant".to_owned(), answered.to_owned()),
+        "and the a1 root entry answers with a1's text",
+    );
+
+    // The turn blob names u1's message and a1's step, and both were asked for
+    // and found — the walk the live server makes.
+    let turn = decoded::<proto::ConversationTurn>(
+        answer_for(&answers, &state.turns[0]).data.as_deref().expect("found"),
+    )
+    .expect("a turn blob decodes")
+    .agent_conversation_turn
+    .into_option()
+    .expect("holding the agent turn");
+    let user = decoded::<proto::UserMessage>(
+        answer_for(&answers, turn.user_message.as_deref().expect("a turn names its user message"))
+            .data
+            .as_deref()
+            .expect("found"),
+    )
+    .expect("a user-message blob decodes");
+    assert_eq!(user.text.as_deref(), Some(asked));
+    assert_eq!(user.message_id.as_deref().map(str::len), Some(36), "under a derived v4-shaped id");
+    let [step] = turn.steps.as_slice() else {
+        panic!("one reply is one step, got {}", turn.steps.len());
+    };
+    let step = decoded::<proto::ConversationStep>(
+        answer_for(&answers, step).data.as_deref().expect("found"),
+    )
+    .expect("a step blob decodes");
+    assert_eq!(
+        step.assistant_message.as_option().and_then(|message| message.text.as_deref()),
+        Some(answered),
+        "the step is a1's text",
+    );
+    assert_eq!(answers.len(), head + 2 + 1 + 2, "the roots, one turn, its message and its step");
+}
+
+/// **AC-16 (D553).** A bridged call whose Run the server hung up under is
+/// recovered, not failed: the held Run leaves the table as `Reason::Closed`
+/// on the keeper's next beat (the pin above), and when the tool's result
+/// comes back the engine's next step opens a **second** Run under
+/// `resume_action` whose state carries the whole conversation — the call and
+/// its result included — served to the server's gets from the fresh Run's
+/// own store. The tool ran exactly once; nothing was answered on the dead
+/// body; the turn finishes on the second Run's text.
+///
+/// The call is held at a dialog so the drop provably precedes the result:
+/// an allowed tool answers within a millisecond of the exec, which would
+/// race the hangup rather than follow it. Probe 2 holds the very same dialog
+/// for the very same reason.
+#[tokio::test]
+async fn a_bridged_call_whose_run_hung_up_is_recovered_on_a_fresh_run_carrying_its_result() {
+    let (log, _guard) = capturing();
+    let args = json!({"key": "alpha"});
+    let server = CursorServer::with_scripts(vec![
+        vec![Step::Context, Step::mcp(1, "lookup", &args).no_wait(), Step::Hangup],
+        vec![
+            Step::Context,
+            Step::KvGetComposed,
+            Step::Text("recovered".to_owned()),
+            Step::TurnEnded,
+            Step::EndStream,
+        ],
+    ])
+    .await;
+
+    let (tool, calls) = RecorderTool::new("lookup", "lookup ran", "the answer");
+    let engine = seated(&server, Registry::new(vec![tool]), rule("lookup", Action::Ask));
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine.send(prompt()).await.expect("an idle engine accepts a prompt");
+    let (dialog, mut seen) = held_at_dialog(&mut events).await;
+    let logged = hang_up_and_wait_for_drop(&server, &log, 1).await;
+    assert!(logged.contains("reason=Closed"), "the pin's drop, again: {logged}");
+
+    engine
+        .send(Command::ReplyPermission { id: dialog, reply: PermissionReply::Once })
+        .await
+        .expect("a reply is never refused");
+    seen.extend(drain(&mut events).await);
+
+    // The verdict first, so that a build without the recovery arm fails
+    // here, naming the sentence it failed by.
+    let finish = seen.last();
+    assert!(
+        matches!(finish, Some(Event::MessageFinished { reason: FinishReason::Completed, .. })),
+        "a resume against a hung-up Run reopens one rather than failing by name, got {finish:?}",
+    );
+    assert!(
+        !seen.iter().any(|event| matches!(
+            event,
+            Event::MessageFinished { reason: FinishReason::Failed, .. }
+        )),
+        "and no Failed was published along the way",
+    );
+    assert_eq!(
+        calls.lock().expect("the call log is never poisoned").as_slice(),
+        &[args],
+        "the tool ran exactly once — a recovery replays nothing",
+    );
+
+    let runs = server.run_requests();
+    let [first, second] = runs.as_slice() else {
+        panic!("the drop and the recovery are two Runs, got {}", runs.len());
+    };
+    let action = second.action.as_option().expect("the second Run acts");
+    assert!(
+        action.resume_action.is_set() && action.user_message_action.is_unset(),
+        "the request whose newest message is the assistant's goes out as a resume",
+    );
+    let state = second.conversation_state.as_option().expect("over the composed state");
+    assert!(!state.root_prompt_messages_json.is_empty(), "which is not empty");
+    assert_eq!(
+        second.conversation_id, first.conversation_id,
+        "one turn, one conversation: both Runs derive it from the same opening message",
+    );
+    assert!(
+        first
+            .conversation_state
+            .as_option()
+            .is_some_and(|state| state.root_prompt_messages_json.is_empty()),
+        "where the first Run, a first turn, composed nothing",
+    );
+
+    // What the second Run served: every root id found and JSON, the call and
+    // its result among them; the turn blob found and decoding.
+    let answers = server.kv_answers();
+    let texts: Vec<String> = state
+        .root_prompt_messages_json
+        .iter()
+        .map(|id| root_text(answer_for(&answers, id)))
+        .collect();
+    assert!(
+        texts.iter().any(|text| text.contains("[Tool Call] lookup")),
+        "the assistant entry carries the call, got {texts:?}",
+    );
+    assert!(
+        texts.iter().any(|text| text.starts_with("[Tool Result]") && text.contains("the answer")),
+        "and the result entry carries the tool's own output, got {texts:?}",
+    );
+    for id in &state.turns {
+        let bytes = answer_for(&answers, id).data.as_deref().expect("a turn id is found");
+        assert!(decoded::<proto::ConversationTurn>(bytes).is_some(), "and decodes");
+    }
+    assert!(
+        server.mcp_results().is_empty(),
+        "the result reached the server as history, never as an answer on the dead body",
+    );
+
+    // The transcript: one call, closed completed, then the second Run's text.
+    let parts = tool_parts(&seen);
+    let ids: std::collections::BTreeSet<&String> = parts.iter().map(|(id, _)| id).collect();
+    assert_eq!(ids.len(), 1, "exactly one Tool part, got {parts:?}");
+    assert!(
+        parts.iter().any(|(_, state)| matches!(state, ToolState::Completed { .. })),
+        "closed as completed, got {parts:?}",
+    );
+    assert!(
+        said(&seen).iter().any(|line| line == "recovered"),
+        "and the second Run's text is what the turn ends on, got {:?}",
+        said(&seen),
+    );
+
+    let logged = log.logged();
+    assert!(
+        logged.contains("recovering a cursor turn on a fresh run") && logged.contains(CLOSED),
+        "the recovery is a log line naming the drop's reason, got:\n{logged}",
+    );
+}
+
+/// **AC-16b (D553), the cap end to end.** The recovered Run is hung up under
+/// too: the engine runs the second tool, and its next request finds a key
+/// that was already reopened once — so the turn ends in a `Failed` naming
+/// the cap, **exactly two** Runs were opened, and each tool ran exactly once.
+/// This is the paid loop bounded where it would otherwise run.
+#[tokio::test]
+async fn a_second_hangup_of_one_turn_is_not_reopened_and_the_turn_fails_by_name() {
+    let (log, _guard) = capturing();
+    let server = CursorServer::with_scripts(vec![
+        vec![Step::Context, Step::mcp(1, "first", &json!({"n": 1})).no_wait(), Step::Hangup],
+        vec![Step::Context, Step::mcp(2, "second", &json!({"n": 2})).no_wait(), Step::Hangup],
+    ])
+    .await;
+
+    let (first, first_calls) = RecorderTool::new("first", "first ran", "one");
+    let (second, second_calls) = RecorderTool::new("second", "second ran", "two");
+    let engine = seated(
+        &server,
+        Registry::new(vec![first, second]),
+        rules(&[("first", Action::Ask), ("second", Action::Ask)]),
+    );
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine.send(prompt()).await.expect("an idle engine accepts a prompt");
+    let (dialog, mut seen) = held_at_dialog(&mut events).await;
+    hang_up_and_wait_for_drop(&server, &log, 1).await;
+    engine
+        .send(Command::ReplyPermission { id: dialog, reply: PermissionReply::Once })
+        .await
+        .expect("a reply is never refused");
+
+    // The recovery opened the second Run, whose exec raises the second dialog
+    // — a held Run again, under the same key.
+    let (dialog, more) = held_at_dialog(&mut events).await;
+    seen.extend(more);
+    hang_up_and_wait_for_drop(&server, &log, 2).await;
+    engine
+        .send(Command::ReplyPermission { id: dialog, reply: PermissionReply::Once })
+        .await
+        .expect("a reply is never refused");
+    seen.extend(drain(&mut events).await);
+
+    let Some(Event::MessageFinished { reason, error, .. }) = seen.last() else {
+        panic!("a drained turn ends in a finish");
+    };
+    assert_eq!(*reason, FinishReason::Failed, "the second reopening is refused, got {error:?}");
+    let error = error.as_deref().expect("a failed finish names why");
+    assert!(
+        error.contains("already reopened once") && error.contains(CLOSED),
+        "the cap's own sentence, with the second drop's reason: {error}",
+    );
+
+    let runs = server.run_requests();
+    assert_eq!(runs.len(), 2, "exactly two Runs: the drop and the one recovery");
+    assert!(
+        runs[1].action.as_option().is_some_and(|action| action.resume_action.is_set()),
+        "the second under resume_action",
+    );
+    assert_eq!(first_calls.lock().expect("never poisoned").len(), 1, "the first tool ran once");
+    assert_eq!(second_calls.lock().expect("never poisoned").len(), 1, "and so did the second");
+    assert!(server.mcp_results().is_empty(), "neither answered on a body the server had closed");
 }
