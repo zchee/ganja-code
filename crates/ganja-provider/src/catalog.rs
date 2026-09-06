@@ -6,9 +6,9 @@
 //! `https://models.opencode.ai/api.json` is written to the XDG cache directory
 //! and adopted at startup; where there is no cache to adopt, the compiled-in
 //! snapshot answers. That snapshot is pruned from <https://models.dev/api.json>
-//! as taken on **2026-08-03** (one row, `gpt-6-astra`, from the same file on
-//! **2026-09-07**), covering the current generation of the two providers this
-//! build ships, and it is unconditional — sizing and pricing
+//! as taken on **2026-08-03** (the `gpt-6-astra` row and `gpt-5.6`'s prices
+//! from the same file on **2026-09-07**), covering the current generation of
+//! the two providers this build ships, and it is unconditional — sizing and pricing
 //! work with no network, no cache and no home directory, so a session started
 //! offline is never left without a context window. Upstream's third tier, an
 //! empty table when fetching is disabled and nothing else answered, is
@@ -388,13 +388,15 @@ const SNAPSHOT: &[Row] = &[
         max_output: 128_000,
         pricing: Pricing { input: 10.0, output: 50.0, cache_read: 1.0, cache_write: Some(12.5) },
     },
+    // Prices re-read from models.dev on 2026-09-07: the vendor cut them
+    // (5 / 30 / 0.5 / 6.25 on 2026-08-03) and the same over-272k tier applies.
     Row {
         id: "gpt-5.6",
         provider_id: "openai",
         name: "GPT-5.6",
         context_window: 1_050_000,
         max_output: 128_000,
-        pricing: Pricing { input: 5.0, output: 30.0, cache_read: 0.5, cache_write: Some(6.25) },
+        pricing: Pricing { input: 4.0, output: 20.0, cache_read: 0.4, cache_write: Some(5.0) },
     },
     Row {
         id: "gpt-5.4",
