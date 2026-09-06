@@ -117,7 +117,7 @@ fn the_agy_name_parses_and_is_offered() {
 /// of itself, because two literals agreeing proves only that somebody typed
 /// carefully.
 ///
-/// **AC-17** rides along: the same sentence opens the ring, so `/team` and the
+/// **AC-17** rides along: the same sentence opens the ring, so `/teammate` and the
 /// spawn dialog cannot come to describe one grant differently.
 #[test]
 fn the_agy_posture_is_the_one_its_probe_recorded() {

@@ -28,12 +28,12 @@ fn typing(editor: &mut Editor, text: &str) {
 #[test]
 fn the_hint_draws_after_the_text_and_never_enters_the_buffer() {
     let mut editor = Editor::new(&Theme::default());
-    typing(&mut editor, "/team");
+    typing(&mut editor, "/teammate");
     editor.set_hint(Some("list | spawn <name>".to_owned()));
 
     let screen = drawn(&editor);
-    assert!(screen.contains("/team list | spawn <name>"), "got:\n{screen}");
-    assert_eq!(editor.text(), "/team");
+    assert!(screen.contains("/teammate list | spawn <name>"), "got:\n{screen}");
+    assert_eq!(editor.text(), "/teammate");
 }
 
 /// **D518.** A hint wider than the box clips at the border instead of
@@ -41,7 +41,7 @@ fn the_hint_draws_after_the_text_and_never_enters_the_buffer() {
 #[test]
 fn a_hint_wider_than_the_box_is_clipped_not_wrapped() {
     let mut editor = Editor::new(&Theme::default());
-    typing(&mut editor, "/team");
+    typing(&mut editor, "/teammate");
     editor.set_hint(Some("x".repeat(80)));
 
     let screen = drawn(&editor);
@@ -56,7 +56,7 @@ fn a_hint_wider_than_the_box_is_clipped_not_wrapped() {
 #[test]
 fn a_cleared_hint_paints_nothing() {
     let mut editor = Editor::new(&Theme::default());
-    typing(&mut editor, "/team");
+    typing(&mut editor, "/teammate");
     editor.set_hint(Some("list".to_owned()));
     editor.set_hint(None);
 

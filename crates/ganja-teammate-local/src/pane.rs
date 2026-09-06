@@ -79,8 +79,8 @@
 //! teammate on the lead's roster and in the team file until the *next* lead
 //! started, since [`crate::reaper`] is a cold-start sweep of a **previous**
 //! lead's orphans (**D506**) and never a liveness poll of this one's own
-//! panes. `/team` kept listing the member for as long as the session ran, and
-//! a `/team shutdown` aimed at it only queued a request nobody was left to
+//! panes. `/teammate` kept listing the member for as long as the session ran, and
+//! a `/teammate shutdown` aimed at it only queued a request nobody was left to
 //! read.
 //!
 //! So [`PaneMember`](crate::pane::PaneMember) now runs the poll the shim TUI
@@ -105,7 +105,7 @@
 //! the same reason: "the pane was closed" is a claim, and a claim has to be
 //! read off tmux, a recycled id off the listing and everything else through
 //! that door. And `alive()` is a
-//! **flag**, not a listing: it is asked on every `/team` render and in every
+//! **flag**, not a listing: it is asked on every `/teammate` render and in every
 //! roster count, so the subprocess belongs on the two-second timer and the
 //! answer belongs in an [`AtomicBool`](std::sync::atomic::AtomicBool) the
 //! timer flips.
@@ -330,6 +330,29 @@ pub fn arguments(spec: &SpawnSpec) -> Vec<OsString> {
     .collect()
 }
 
+/// The one placement decision this process makes at a time (bead `lr79`).
+///
+/// A `static` rather than a field, because there is nothing narrower for it to
+/// be a field **of**: every backend builds its own [`Server`] per spawn
+/// ([`Server::current`]), and `GanjaPane`, `ClaudePane` and
+/// [`crate::shim_tui::ShimTui`] are three unrelated types — while what is
+/// being serialized is a thing this process has exactly one of, the window it
+/// places panes into. A gate on any of those would let the next spawn through
+/// a different door and place against a screen it had not read.
+///
+/// It serializes the **placement decision**, never the launch: the guard is
+/// held across exactly [`Server::column_bottom`] and [`Server::split`] and is
+/// gone before the title, the launch line, the readiness poll and everything
+/// else a slow CLI spends its seconds on. So a sibling spawn waits for one
+/// `list-panes` and one `split-window` — milliseconds — and the concurrency
+/// D462 fans a step's `task` calls out with is kept everywhere it is worth
+/// having.
+///
+/// [`tokio::sync::Mutex`] rather than [`std::sync::Mutex`] because both calls
+/// inside it are `.await`s; `clippy::await_holding_lock` is about the other
+/// one for exactly this reason.
+static PLACEMENT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// §4.1 step 1 as both pane backends run it: one `split-window` at `spec`'s
 /// working directory carrying `environment` (D502's closed lists, each
 /// caller's own) and holding [`SHELL`] idle, answered with the identifying
@@ -337,7 +360,8 @@ pub fn arguments(spec: &SpawnSpec) -> Vec<OsString> {
 ///
 /// Where the pane lands is [`Placement`]'s, chosen here off
 /// [`Server::column_bottom`] so both backends stack into one column rather
-/// than each opening a column of its own.
+/// than each opening a column of its own — under [`PLACEMENT`], so two spawns
+/// that overlap do not both read the screen before either has changed it.
 ///
 /// `refused_as` is the surface a failing split is refused as, and `whose` the
 /// word the log knows the teammate by.
@@ -353,27 +377,33 @@ pub(super) async fn split_idle_shell(
     let shell = shell.argv();
     // Where it goes is read off the screen, not remembered: the first
     // teammate opens a column beside the lead and every later one stacks
-    // under that column's bottom. A listing that fails is not a spawn that
-    // fails — where a pane sits is cosmetic — so it falls back to the
-    // placement a lead with no column would have given it anyway.
+    // under that column's bottom. Reading and acting are one step here — a
+    // second spawn that read the screen before this one had changed it would
+    // read "no column yet" too, and split the lead a second time.
+    //
+    // A listing that fails is not a spawn that fails — where a pane sits is
+    // cosmetic — so it falls back to the placement a lead with no column would
+    // have given it anyway.
     let beside = Placement::Beside { share: share.percent() };
-    let placement = match server.column_bottom().await {
-        Ok(Some(bottom)) => Placement::Under(bottom),
-        Ok(None) => beside,
-        Err(error) => {
-            tracing::warn!(
-                teammate = spec.name.as_str(),
-                %error,
-                "the teammates' column could not be read; opening beside the lead"
-            );
+    let pane = {
+        let _placing = PLACEMENT.lock().await;
+        let placement = match server.column_bottom().await {
+            Ok(Some(bottom)) => Placement::Under(bottom),
+            Ok(None) => beside,
+            Err(error) => {
+                tracing::warn!(
+                    teammate = spec.name.as_str(),
+                    %error,
+                    "the teammates' column could not be read; opening beside the lead"
+                );
 
-            beside
-        }
-    };
-    let pane = server
-        .split(Launch { cwd: &spec.cwd, environment, argv: &shell, placement })
-        .await
-        .map_err(|error| Unsupported { backend: refused_as, reason: error.to_string() })?;
+                beside
+            }
+        };
+
+        server.split(Launch { cwd: &spec.cwd, environment, argv: &shell, placement }).await
+    }
+    .map_err(|error| Unsupported { backend: refused_as, reason: error.to_string() })?;
     tracing::info!(
         teammate = spec.name.as_str(),
         pane = pane.id,
@@ -627,7 +657,7 @@ pub struct PaneMember {
     cancel: CancellationToken,
     /// What [`Spawned::alive`] answers: cleared when the watch ends, on every
     /// road out of it. A flag rather than a listing because that method is
-    /// asked on every `/team` render.
+    /// asked on every `/teammate` render.
     ///
     /// [`Ordering::Relaxed`] at both ends of it, deliberately: the flag
     /// publishes no other data — the [`Exited`] that carries the facts travels

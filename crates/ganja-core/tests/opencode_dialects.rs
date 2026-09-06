@@ -158,6 +158,7 @@ async fn sent(
     body: &'static str,
 ) -> String {
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: model.to_owned(),
         system: None,
@@ -287,6 +288,7 @@ async fn the_catalogs_transport_hint_picks_the_wire_and_the_wire_picks_the_heade
     let refused = zen
         .stream(
             ChatRequest {
+                turn_start: 0,
                 effort_options: Default::default(),
                 model: "gemini-3-pro".to_owned(),
                 system: None,

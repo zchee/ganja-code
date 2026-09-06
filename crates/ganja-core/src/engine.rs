@@ -47,7 +47,7 @@ use crate::protocol::{
     Command, Event, Message, MessageId, PartBody, PermissionId, PermissionMode, PermissionReply,
     RevertInfo, RevertScope, Role, ToolState, Usage, now,
 };
-use crate::provider::Provider;
+use crate::provider::{Provider, ToolReach};
 use crate::session::{
     Answered, LiveSession, PendingReplies, Persist, SessionState, SteerInput, Steering, Turn,
     TurnHandle, TurnKind, run_turn,
@@ -245,7 +245,18 @@ pub enum EngineError {
     /// registry, which is every engine a test or a golden run builds.
     #[error("this engine has no agents; it was built without a registry")]
     NoAgents,
-    /// [`Command::SwitchAgent`] named an agent the registry does not hold.
+    /// [`Command::SwitchAgent`] named an agent the registry does not hold —
+    /// and, since **D549**, a `/team` spec segment that named one, which is
+    /// this variant's second caller and the reason its message says nothing
+    /// about switching.
+    ///
+    /// The two share a variant because they are one sentence: a name nobody
+    /// holds is a typo whichever door it arrived at. What they do **not** share
+    /// is a status over `ganja serve` — this one is a `500` where every other
+    /// `/team` spec refusal is a `400`, which is recorded as **F2** in
+    /// `.omc/plans/2026-09-03-team-segment-grammar.md` and commented beside the
+    /// row that maps it, because moving it would move `SwitchAgent`'s shipped
+    /// status too.
     #[error("no agent named {name}")]
     UnknownAgent {
         /// The name nothing answers to.
@@ -300,6 +311,43 @@ pub enum EngineError {
         /// Every command that would have worked, sorted.
         available: Vec<String>,
     },
+    /// [`Command::RunCommand`] ran `/team` on arguments that are one of
+    /// `/teammate`'s own subcommands (**bead 2m46**). Refused where the
+    /// expansion would have started rather than answered by the model, because
+    /// three fixed words are not worth a round trip; the message is the line
+    /// that was meant, so the fix is a copy away.
+    #[error("/team runs the pipeline; the roster commands are /teammate's — try: {meant}")]
+    MisdirectedCommand {
+        /// What the person typed, with the command that answers to it.
+        meant: String,
+    },
+    /// [`Command::RunCommand`] ran the builtin `/team` on a line whose head
+    /// token *looks* like a team spec and is not a valid one (**D549**).
+    ///
+    /// Transparent on purpose: [`command::TeamSpecError`] words every one of
+    /// these, including the shared tail naming the way back to plain task text,
+    /// and a sentence restated here would be a second place to change one
+    /// wording. Refused before the template is filled, so no turn starts.
+    #[error(transparent)]
+    TeamSpec(#[from] command::TeamSpecError),
+    /// [`Command::RunCommand`] ran a builtin whose whole body is tool calls on
+    /// a provider that serves this build none of them, or only its own native
+    /// kinds (**D551**, amended by **D552**). Third of the three doors in front
+    /// of an expansion, refused before the template is filled, so no turn
+    /// starts.
+    ///
+    /// Unreached by any shipped id since **D552**; see [`ToolReach`].
+    #[error("{}", tool_reach_refusal(command, provider, *reach))]
+    ProviderToolReach {
+        /// The provider that serves the tools the command needs — none of
+        /// them, or only the wire's own native kinds.
+        provider: String,
+        /// The builtin that was asked for, without its slash.
+        command: String,
+        /// What that provider reaches, which is what the sentence is derived
+        /// from: never [`ToolReach::Full`], which refuses nothing.
+        reach: ToolReach,
+    },
     /// [`Command::RunCommand`] named a command whose `agent` is a subagent.
     /// Those exist to be spawned by the task tool, and a command running as one
     /// would be a turn with no way back.
@@ -349,6 +397,44 @@ pub enum EngineError {
         /// What the hook said — its stderr, or the reason it denied with.
         reason: String,
     },
+}
+
+/// [`EngineError::ProviderToolReach`]'s whole sentence, derived from the reach
+/// value rather than stored beside it, so that it cannot go stale the day a
+/// wire starts serving tools (**D551**). Unreached by any shipped id since
+/// **D552**; see [`ToolReach`].
+///
+/// Two commands and two reach values, and each pair says what is actually
+/// missing: the `NativeOnly` half names the tools a native-kind seat has no
+/// vocabulary for — `task` and the team task tools for `/team`, `question` for
+/// `/init`, which its own template asks for by name — rather than claiming
+/// nothing works, and closes by saying what does.
+fn tool_reach_refusal(command: &str, provider: &str, reach: ToolReach) -> String {
+    match (reach, command) {
+        (ToolReach::None, command::INIT) => format!(
+            "`/{command}` writes `AGENTS.md` through tool calls and the {provider} provider \
+             serves this build no tools; run it under another provider, or write the file \
+             yourself."
+        ),
+        (ToolReach::None, _) => format!(
+            "`/{command}` is a pipeline of tool calls and the {provider} provider serves this \
+             build no tools; run it under another provider, or run the steps yourself."
+        ),
+        (ToolReach::NativeOnly, command::INIT) => format!(
+            "`/{command}` needs the `question` tool, which the {provider} provider does not \
+             serve; file reads and shell commands do work here."
+        ),
+        (ToolReach::NativeOnly, _) => format!(
+            "`/{command}` needs `task` and the team task tools, which the {provider} provider \
+             does not serve; file reads and shell commands do work here."
+        ),
+        // The gate never builds this error for a provider that serves
+        // everything, so this arm exists only so the sentence is total rather
+        // than a panic in a `Display`.
+        (ToolReach::Full, _) => {
+            format!("`/{command}` needs tools the {provider} provider does not serve.")
+        }
+    }
 }
 
 /// The half of [`EngineError::UnknownEffort`]'s sentence that names what
@@ -1141,6 +1227,24 @@ pub struct Engine {
     /// is after this engine was built. That last one's own doc says why it is the
     /// exception and why it is not public.
     postbox: std::sync::Mutex<Option<Arc<dyn crate::tool::team::Postbox>>>,
+    /// The shared task list this session's four task tools drive.
+    ///
+    /// A **comment** written through it carries **this engine's own** identity
+    /// — the lead's name on a lead, the member's own on either kind of member,
+    /// exactly as `postbox` above. A **claim** does not, and the asymmetry is
+    /// deliberate: `owner` stays a free argument because a lead pre-assigning
+    /// work has to name somebody else, where a comment's author never is.
+    ///
+    /// Three installers for the same three kinds of session, and the parallel
+    /// is deliberate: [`Engine::with_teammates`] for the lead, whose registry
+    /// names the team the list belongs to; [`Engine::with_tasks`] for a pane
+    /// teammate, whose frontend holds the teams root its lead wrote; and
+    /// [`Engine::install_tasks`] for an in-process teammate, whose name and
+    /// team only exist together after this engine was built.
+    ///
+    /// [`None`] on a session with no team machinery at all, where the four
+    /// tools are not registered either.
+    tasks: std::sync::Mutex<Option<Arc<dyn crate::tool::tasklist::TaskList>>>,
     /// Every teammate's permission dialogs, waiting for the lead side to claim
     /// the receiver (**D-5**). See [`Engine::teammate_dialogs`].
     teammate_dialogs: std::sync::Mutex<Option<mpsc::Receiver<teammate::posture::Forwarded>>>,
@@ -1481,6 +1585,7 @@ impl Engine {
             jobs: Arc::new(job::JobRegistry::new()),
             teammates: None,
             postbox: std::sync::Mutex::new(None),
+            tasks: std::sync::Mutex::new(None),
             teammate_dialogs: std::sync::Mutex::new(None),
             team_shape: std::sync::Mutex::new(None),
             permission_mode: Arc::new(std::sync::Mutex::new(PermissionMode::Ask)),
@@ -2045,6 +2150,15 @@ impl Engine {
             None => Arc::new(Storeless),
         };
 
+        // Built before the registry moves into the door below, and installed
+        // after: the documents live in the team directory this registry names,
+        // so this is the first moment the list exists to be built at all.
+        let tasks = Arc::new(teammate::tasklist::TeamTasks::of(
+            registry.root(),
+            registry.team(),
+            registry.lead().as_str(),
+        ));
+
         let (dialogs, waiting) = mpsc::channel(TEAMMATE_DIALOGS);
         registry.forward_dialogs_to(dialogs);
         *self.teammate_dialogs.lock().expect("the dialog queue is never poisoned") = Some(waiting);
@@ -2060,6 +2174,11 @@ impl Engine {
             backends.with_in_process(in_process),
         )));
         self.install_postbox(lead);
+        // And the team's own shared list, under the lead's name. Unconditional
+        // on the team holding anybody: a lead files the work before it spawns
+        // whoever will do it, so a list withheld until the first member would
+        // be withheld at exactly the moment it is used first.
+        self.install_tasks(tasks);
         // A lead's postbox reaches `deliver_over_socket` and the resolver, so
         // this session may be handed the model-facing listing (**D535**).
         self.cross_session_postbox.store(true, Ordering::Relaxed);
@@ -2188,7 +2307,7 @@ impl Engine {
         });
     }
 
-    /// The team this session leads, for a status display, the `/team` dialog
+    /// The team this session leads, for a status display, the `/teammate` dialog
     /// or a turn's `task` call — polled exactly as [`Engine::jobs`] is.
     ///
     /// [`None`] is a session that leads no team, which is a different answer
@@ -2226,7 +2345,7 @@ impl Engine {
 
     /// The team this session leads, as anything that only *renders* it reads
     /// it — `GET /team` on either of `ganja-serve`'s transports (D-13,
-    /// **D505**), and the same value the `/team` dialog draws.
+    /// **D505**), and the same value the `/teammate` dialog draws.
     ///
     /// Polled, exactly as [`Engine::teammates`] is, and derived from it: one
     /// [`view`](teammate::TeammateRegistry::view) over the registry, so a
@@ -2450,6 +2569,47 @@ impl Engine {
         self.inbound.held_messages()
     }
 
+    /// The team's shared task list as it stands right now, lowest id first —
+    /// what the `/teammate` dialog's Tasks section and the `task-list` status
+    /// segment read, in the [`Engine::team_view`]/[`Engine::held_messages`]
+    /// family.
+    ///
+    /// **Read-through and `async`, where its neighbours are neither**, and
+    /// both halves are the store rather than a preference: the list is
+    /// documents in the team's own directory, which another process writes
+    /// too, so a cached count would be a count of what this session last did
+    /// rather than of what the team has. `ganja_team::task::Store` is
+    /// synchronous and every method of [`teammate::tasklist::TeamTasks`]
+    /// wraps it in `spawn_blocking`, so awaiting this never parks the
+    /// runtime's own thread — but it **is** a directory read, and a caller on
+    /// a render loop is expected to poll it on a coarse clock the way the
+    /// lead's §6.2 pass is polled, never once a frame.
+    ///
+    /// [`None`] on a session with no list installed — which is every session
+    /// with no team machinery — **and** where the list could not be read at
+    /// all. The two are one answer on purpose: what a status surface can
+    /// honestly draw for either is nothing, and a failure is traced rather
+    /// than rendered because a bar is not where somebody would look for the
+    /// reason a directory would not open.
+    pub async fn task_list(&self) -> Option<Vec<crate::tool::tasklist::Summary>> {
+        // Cloned out of the lock before anything is awaited: no guard may
+        // cross an await here, which clippy's `await_holding_lock` asserts at
+        // `-D warnings`.
+        let tasks = {
+            let installed = self.tasks.lock().expect("the task list is never poisoned");
+            installed.as_ref().map(Arc::clone)
+        }?;
+
+        match tasks.list().await {
+            Ok(summaries) => Some(summaries),
+            Err(failure) => {
+                tracing::debug!(reason = %failure.reason, "the team task list could not be read");
+
+                None
+            }
+        }
+    }
+
     /// The queue this session's teammates raise their permission dialogs on
     /// (**D-5**), claimed once by whoever is going to answer them.
     ///
@@ -2525,6 +2685,41 @@ impl Engine {
         // own `Postbox::of` — cannot cross-session send at all, and a
         // listing they could not act on is noise.
         self.cross_session_postbox.store(false, Ordering::Relaxed);
+    }
+
+    /// Gives this session the shared task list its four task tools drive —
+    /// the door for a process that **is** a teammate, beside
+    /// [`Engine::with_postbox`], which the same assembly calls.
+    ///
+    /// Consuming, like every other installer here: which team's list a session
+    /// works on is decided once, before anything can be streaming. A pane
+    /// launched by some other session's lead installs one over the teams root
+    /// its launch line carried, and is offered the four tools from its first
+    /// turn — presence is ability, the same rule the lead's own list is
+    /// registered under.
+    ///
+    /// The identity a comment is written under is the list's own, bound when
+    /// it was built and never a parameter here, exactly as a postbox's sender
+    /// is.
+    #[must_use]
+    pub fn with_tasks(self, tasks: Arc<dyn crate::tool::tasklist::TaskList>) -> Self {
+        self.install_tasks(tasks);
+        self.recompose_tools();
+
+        self
+    }
+
+    /// Installs the shared task list one engine's task tools drive.
+    ///
+    /// `&self` and `pub(crate)` for [`Engine::install_postbox`]'s reasons, in
+    /// both halves: an in-process teammate's list can only be built once
+    /// [`teammate::TeammateRegistry`] holds both the team and the teammate,
+    /// which is after that engine was built and while it is reachable by
+    /// shared reference alone; and a public setter on `&self` would hand back
+    /// the choice of whose name a comment carries, which is exactly what
+    /// binding the identity at construction exists to prevent.
+    pub(crate) fn install_tasks(&self, tasks: Arc<dyn crate::tool::tasklist::TaskList>) {
+        *self.tasks.lock().expect("the task list is never poisoned") = Some(tasks);
     }
 
     /// Sets this session's self-name (**D530**, **ADJ-2**): the name a
@@ -2767,6 +2962,16 @@ impl Engine {
     /// the lead is the one peer that exists before any teammate does and
     /// cannot go away, and who *else* a teammate may address is answered per
     /// call by its own postbox.
+    ///
+    /// The four task tools join the set **here** rather than through
+    /// [`Engine::compose`], and the asymmetry with the lead's own registration
+    /// is the timing again: a teammate engine composes once, when
+    /// [`teammate::Teammate::deferring`] builds it, and its list is installed
+    /// a moment later by [`teammate::Spawned::start`] — the same moment its
+    /// postbox is, which is why `send_message` is added here too. Their
+    /// descriptions carry no roster, so nothing about them varies per
+    /// teammate; what varies is the identity behind them, and that arrives in
+    /// the [`crate::tool::ToolCtx`] rather than in the tool.
     fn teammate_tools(
         &self,
         registry: &Arc<teammate::TeammateRegistry>,
@@ -2777,11 +2982,11 @@ impl Engine {
 
         move || {
             let base = Arc::clone(&lent.lock().expect("the tool registry is never poisoned"));
+            let messaging: Arc<dyn Tool> =
+                Arc::new(send_message::SendMessageTool::new(std::slice::from_ref(&lead)));
 
             Arc::new(
-                base.with(Arc::new(send_message::SendMessageTool::new(std::slice::from_ref(
-                    &lead,
-                )))),
+                base.with_all(std::iter::once(messaging).chain(crate::tool::tasklist::tools())),
             )
         }
     }
@@ -3669,6 +3874,10 @@ impl Engine {
                     text,
                     TurnKind::Prompt { mentions, skills, peers, session_mentions },
                     None,
+                    // A typed prompt carries no `/team` spec: only the builtin
+                    // template's own expansion resolves one, and a person who
+                    // types the grammar into an ordinary message typed prose.
+                    None,
                 )
                 .await
             }
@@ -3748,10 +3957,10 @@ impl Engine {
                 Ok(())
             }
             Command::RunShell { command } => {
-                self.start_turn(command.clone(), TurnKind::Shell { command }, None).await
+                self.start_turn(command.clone(), TurnKind::Shell { command }, None, None).await
             }
             Command::RunCommand { name, args } => self.run_command(&name, &args).await,
-            Command::Compact => self.start_turn(String::new(), TurnKind::Compact, None).await,
+            Command::Compact => self.start_turn(String::new(), TurnKind::Compact, None, None).await,
             Command::NewSession => self.new_session().await,
             Command::Undo => self.undo().await,
             Command::Redo => self.redo().await,
@@ -3816,11 +4025,46 @@ impl Engine {
             credentials: self.credentials.clone(),
             spawn: None,
             postbox: None,
+            // A command template expands outside any turn, so there is no
+            // team identity to act on a list under.
+            tasks: None,
             ask: None,
             switch: None,
             jobs: None,
         };
-        let expanded = definition.expand(args, &ctx).await;
+        // The session about to send this, which is the one thing about an
+        // expansion that a roster shared by every session in the process
+        // cannot know.
+        let session = self.session_id();
+        // Both `/team` gates run here, before a byte of the template is
+        // filled. A refusal at this point has cost nothing: no turn has
+        // started, no request has been assembled, and the model has not been
+        // asked to notice something three fixed words already said (**bead
+        // 2m46**) or to parse a spec the code just found invalid (**D549**).
+        let invocation = self.team_spec(definition, args)?;
+        // And the third door (**D551**), last of them for the reason the ruling
+        // gives: a roster line and a malformed spec are wrong on every
+        // provider, so only a well-formed, correctly-spelled builtin
+        // invocation earns a sentence about what this one serves.
+        self.tool_reach(definition)?;
+        // Drawn from the same invocation the turn goes on to carry, so the
+        // block the model reads and the rows the spec arm judges its spawns
+        // against are one parse — a roster read twice could come apart, and a
+        // correction naming a row the prompt never showed is worse than no
+        // correction at all.
+        let members = invocation.as_ref().map(command::render_members);
+        let expanded = definition
+            .expand(
+                // What is left of the line once the head token and the flag are
+                // cut out. Identical to `args` for every command but a parsed
+                // `/team`, and for a `/team` whose head token was the first word
+                // of the task — which is what keeps `/team port the loader`
+                // reaching the model exactly as it always did.
+                invocation.as_ref().map_or(args, |invocation| invocation.task.as_str()),
+                command::Fills { session: session.as_str(), members: members.as_deref() },
+                &ctx,
+            )
+            .await;
 
         self.start_turn(
             expanded.prompt,
@@ -3837,8 +4081,139 @@ impl Engine {
                 session_mentions: Vec::new(),
             },
             overrides,
+            // **F5, Dv-2.** The roster rides the turn only when the model was
+            // shown it: `render_members`'s empty-task override draws "nobody
+            // was named" for a spec with no task, whatever the parse returned,
+            // and a nag against a roster nobody read would be a correction for
+            // an instruction that was never given. Asked of the rendering's own
+            // input rather than of the rendering, because a block is text and
+            // `members` is the roster the nag has to compare names against.
+            invocation
+                .filter(|invocation| !invocation.task.is_empty() && !invocation.members.is_empty())
+                .map(|invocation| invocation.members),
         )
         .await
+    }
+
+    /// Refuses a builtin whose whole body is tool calls on a provider that
+    /// serves this build none of them (**D551**). Unreached by any shipped id
+    /// since **D552** — the early return is the only arm a shipped session
+    /// takes; see [`ToolReach`].
+    ///
+    /// Read as [`ToolReach::of`] over [`Provider::id`] because that is what an
+    /// engine holds — an `Arc<dyn Provider>`, never a
+    /// [`Selection`](crate::provider::Selection) — the same read
+    /// [`Self::model_named`] already makes.
+    ///
+    /// Gated on [`command::Definition::builtin`] for D549's own reason: a
+    /// config `[command.team]` **replaces** the builtin, and refusing somebody
+    /// else's command because of what *this build's* `/team` would have called
+    /// would make theirs unreachable. Named off the definition rather than the
+    /// typed word so an alias reaches the same answer as the name it resolves
+    /// to.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::ProviderToolReach`], naming the provider and what it
+    /// leaves unserved.
+    fn tool_reach(&self, definition: &command::Definition) -> Result<(), EngineError> {
+        let reach = ToolReach::of(self.provider.id());
+        if reach == ToolReach::Full {
+            return Ok(());
+        }
+        if !(definition.builtin
+            && matches!(definition.name.as_str(), command::TEAM | command::INIT))
+        {
+            return Ok(());
+        }
+
+        Err(EngineError::ProviderToolReach {
+            provider: self.provider.id().to_owned(),
+            command: definition.name.clone(),
+            reach,
+        })
+    }
+
+    /// What **D549**'s grammar reads out of a `/team` line, or [`None`] for
+    /// every other command.
+    ///
+    /// Both gates in front of the builtin `/team` live here, in the order the
+    /// ruling puts them: bead 2m46's roster-line redirect first, so
+    /// `/team list` is still answered by three fixed words and `/team 2:critic
+    /// list` is a pipeline over the task `list`; then the grammar, which reads
+    /// the head token and the `--backend` flag and leaves everything after
+    /// them as the task.
+    ///
+    /// Gated on [`command::Definition::builtin`] as well as the name, because
+    /// a config `[command.team]` **replaces** the builtin outright
+    /// ([`command::Registry::build`]): parsing somebody else's arguments as a
+    /// team spec, or refusing three roster spellings on their behalf, would
+    /// make a command they wrote unreachable in favour of sentences about one
+    /// they did not.
+    ///
+    /// # Errors
+    ///
+    /// [`EngineError::MisdirectedCommand`] for a roster line, and one of three
+    /// for a head token that looks like a spec and is not a valid one — an
+    /// unknown agent reaches [`EngineError::UnknownAgent`], or
+    /// [`EngineError::NoAgents`] on a session that was handed no registry at
+    /// all, and everything else [`EngineError::TeamSpec`] transparently.
+    fn team_spec(
+        &self,
+        definition: &command::Definition,
+        args: &str,
+    ) -> Result<Option<command::TeamInvocation>, EngineError> {
+        if !(definition.builtin && definition.name == command::TEAM) {
+            return Ok(None);
+        }
+        if let Some(misdirected) = command::misdirected(args) {
+            return Err(EngineError::MisdirectedCommand { meant: misdirected.meant });
+        }
+
+        let agents = self.agents.as_deref();
+        // **R8.** A session with no agent registry answers `Unknown` for every
+        // name, which is the honest answer rather than a special case: nothing
+        // is spawnable when nothing is known. The bare-name arm therefore never
+        // fires there, so `critic --backend claude x` stays task text, and only
+        // a `:`/`@`/`,`-shaped head reaches a refusal at all. That asymmetry —
+        // one intent spelled two ways, answered two ways — is an accepted
+        // consequence: no shipped binary is registry-less, so it is reachable
+        // only from a fixture.
+        let roster = |name: &str| {
+            agents.map_or(command::RosterAnswer::Unknown, |registry| registry.roster_answer(name))
+        };
+
+        match command::parse_team(args, &roster) {
+            Ok(invocation) => Ok(Some(invocation)),
+            Err(refused) => {
+                tracing::debug!(
+                    // The first token **as typed**, which is the head token
+                    // unless the flag was written in front of it. Naming the
+                    // post-extraction head would mean spelling the flag rule a
+                    // second time out here, and two spellings of one rule are
+                    // two that can come to disagree.
+                    typed = args.split_whitespace().next().unwrap_or_default(),
+                    // Debug rather than Display: the variant and its payload
+                    // are what a log wants, where the sentence with its escape
+                    // tail is what the person gets.
+                    refusal = ?refused,
+                    "a /team line looked like a team spec and is not one",
+                );
+
+                Err(match refused {
+                    // A registry-less session holds no agents to be wrong
+                    // about, so "no agent named x" would name the wrong
+                    // problem: what is missing is the roster, not the name.
+                    command::TeamSpecError::UnknownAgent { .. } if agents.is_none() => {
+                        EngineError::NoAgents
+                    }
+                    command::TeamSpecError::UnknownAgent { name } => {
+                        EngineError::UnknownAgent { name }
+                    }
+                    other => EngineError::TeamSpec(other),
+                })
+            }
+        }
     }
 
     /// The model a config spelling names, when this provider serves it.
@@ -4482,7 +4857,34 @@ impl Engine {
     /// the team tool joins before the arithmetic that reads the composed set's
     /// names, so it is in the definitions snapshot `tool_search` answers from.
     fn compose(&self, registry: Arc<Registry>, shape: Option<&TeamShape>) -> Arc<Registry> {
-        self.compose_deferral(self.team_messaging(registry, shape))
+        self.compose_deferral(self.team_tasks(self.team_messaging(registry, shape)))
+    }
+
+    /// Adds the four task tools wherever this session has a shared list
+    /// installed, and nothing at all where it has none.
+    ///
+    /// Registered here rather than in `Registry::with_builtins` for `task`'s
+    /// and `send_message`'s reason: presence is ability. A session with no
+    /// team machinery has no list to keep — which is also what keeps the
+    /// golden differential comparing two agents rather than two teams — and a
+    /// session that has one is offered the four again on every rebuild, so a
+    /// `/plugin` Reload cannot quietly drop them.
+    ///
+    /// Deliberately **not** gated on the team holding anybody. A lead files
+    /// the work before it spawns the members that will do it, so refusing a
+    /// list to a session that leads nobody yet would refuse it at exactly the
+    /// moment it is used first.
+    ///
+    /// A subagent is offered the *lent* set rather than the composed one, so
+    /// it does not get these — deliberately, and for the reason it gets no
+    /// `send_message`: a delegated turn runs inside its parent's, and the
+    /// identity it would claim and comment under is the parent's.
+    fn team_tasks(&self, registry: Arc<Registry>) -> Arc<Registry> {
+        if self.tasks.lock().expect("the task list is never poisoned").is_none() {
+            return registry;
+        }
+
+        Arc::new(registry.with_all(crate::tool::tasklist::tools()))
     }
 
     /// This session's team as the offered `send_message` describes it, read
@@ -5076,6 +5478,7 @@ impl Engine {
         prompt: String,
         kind: TurnKind,
         overrides: Option<Overrides>,
+        spec: Option<Vec<command::Member>>,
     ) -> Result<(), EngineError> {
         // An announced approval is applied inside `lock_entry` — before the
         // `refresh_mcp` below, so the task-roster rebuild sees build, and
@@ -5299,6 +5702,7 @@ impl Engine {
             receipts: Arc::clone(&self.settled_receipts),
             teamless: self.teamless(),
             teamless_send: self.teamless_send,
+            spec,
             deferral: self.deferral(),
             permissions,
             cwd: self.cwd.clone(),
@@ -5320,6 +5724,9 @@ impl Engine {
             jobs: Some(Arc::clone(&self.jobs) as Arc<dyn crate::tool::job::Jobs>),
             hooks: self.hooks(),
             postbox: self.postbox.lock().expect("the postbox is never poisoned").clone(),
+            tasks: self.tasks.lock().expect("the task list is never poisoned").clone(),
+            team: self.teammates.as_ref().map(|team| Arc::clone(team.registry())),
+            discipline: std::sync::Mutex::default(),
             delegated: false,
             persist,
         };

@@ -1,0 +1,269 @@
+# Whether cursor's agent backend will call a tool a third-party client declares,
+# and what that client may do while it holds one open.
+#
+# The recording W3's gate reads (.omc/plans/2026-09-04-cursor-tool-bridge.md, W2
+# step 5; AC-7 and AC-8). Five live turns against api2.cursor.sh, each run by the
+# user through `!` — no lane and no lead ran one, and nothing here was read out of
+# auth.json. What the wire itself said is in the run's own log at `-v`; the line
+# numbers below are that file's.
+#
+# Recorded by: the W2 spike scaffolding,
+#              crates/ganja-provider/src/provider/cursor/spike.rs — environment-
+#              gated, and removed in W3a or W4 along with this file's subject.
+# Build:  ganja-code 0.1.0; ./target/release/ganja rebuilt from f140f20.
+# Date:   2026-09-06, 09:40:32 - 09:43:51 UTC (five consecutive `ganja run -v`).
+# Log:    ~/.local/share/ganja/log/ganja.2026-09-06.log, 633 lines.
+# Server: api2.cursor.sh. This client identified as cli-2026.01.09-231024f, the
+#         constant cursor.rs has always sent.
+# Spec:   cursor-agent bundle 2026.09.02-c22c1a3, read in
+#         .omc/research/cursor/2026-09-04-cursor-agent-bundle-read.md. Every field
+#         number below was re-derived from that bundle's own descriptors.
+# Model:  GANJA_MODEL unset on all five runs, so the turn ran under cursor's
+#         server-side `default` (Auto). Which model that resolved to is decided
+#         server-side and is not observable from this client.
+#
+# What was declared, identically on every run: exactly one tool,
+#   McpToolDefinition{ name = 1 "ganja_ping",
+#                      description = 2 "Answers pong. A probe.",
+#                      provider_identifier = 4 "ganja",
+#                      tool_name = 5 "ganja_ping" }
+# with {"type":"object","properties":{},"additionalProperties":false} on
+# input_schema = 3, input_schema_json = 6, or both, per the run.
+# Carried on AgentRunRequest.mcp_tools = 4 (McpTools.mcp_tools = 1) and on every
+# RequestContext.tools = 7 answer.
+#
+# NO CONNECT ERROR OF ANY KIND WAS PRODUCED BY ANY OF THE FIVE RUNS. No `code`,
+# no `message`, no EndStream error frame, no truncated body, no auth refusal. The
+# plan asks for every error code and message verbatim; the honest verbatim record
+# is that there were none, and the sections below say so where the question was
+# whether one would appear.
+
+== the runs ==
+# One line per run: the environment beyond GANJA_PROVIDER=cursor and
+# GANJA_CURSOR_SPIKE=1, the log window, and what the run was for.
+R1  SCHEMA=both DELAY_SECS=25                     log :13-:101   (a), (b)
+R2  SCHEMA=both DELAY_SECS=25 EXEC_HEARTBEAT=1    log :114-:206  (b')
+R3  SCHEMA=3    DELAY_SECS=0  (+ "then read Cargo.toml")
+                                                  log :219-:452  (e) field 3, (c)
+R4  SCHEMA=6    DELAY_SECS=0                      log :466-:532  (e) field 6
+R5  SCHEMA=both DELAY_SECS=0  PROMPT=append       log :545-:630  (d)
+
+# Every run ended by printing a reply and exiting; none emitted a
+# ProviderEvent::Failed. The wire logs no line for a clean EndStream, so "the turn
+# completed" here means: a reply was printed, the process exited, and no failure
+# was reported — not that a "finished" line was found.
+
+== (a) does the server offer and call a client-declared tool ==
+VERDICT: YES
+
+The model called the declared tool on R1, R2, R3 and R4 — every run whose prompt
+asked for it, under all three schema selectors. R1, log :47:
+
+  cursor spike: mcp exec arrived provider="cursor" exec=1 kind="mcp_args"
+    number=11 ganja_ping=true tool_call_id=true provider_identifier=true
+    tool_name=true server_identifier=true others=[]
+
+Observed, by field:
+  ExecServerMessage.mcp_args = 11        present; the arm the bundle predicted
+  ExecServerMessage.id = 1               present, value 1 (the turn's first exec)
+  McpArgs.name = 1                       present, equal to the declared name
+  McpArgs.tool_call_id = 3               present
+  McpArgs.provider_identifier = 4        present
+  McpArgs.tool_name = 5                  present
+  McpArgs.server_identifier = 9          present
+  McpArgs.args = 2                       ABSENT (others=[] — no unknown field
+                                         reached the decoder, and this schema
+                                         declares no arguments to send)
+  McpArgs.smart_mode_approval_only = 7   ABSENT
+  McpArgs.skip_approval = 8              ABSENT
+  McpArgs.smart_mode_approval = 6        ABSENT
+
+The synthetic provider_identifier "ganja", which names no MCP server that exists,
+was accepted: the server echoed identifiers back rather than refusing to resolve
+the roster. The answer this client sent — ExecClientMessage.mcp_result = 11
+carrying McpResult.success = 1, McpSuccess{content = 1 [McpContentItem.text = 1
+McpTextContent{text = 1}], is_error = 2 false}, then
+ExecClientControlMessage.stream_close = 1 — was accepted on all four runs; each
+model then reported the answered word back to the user (R1 :55, R2 :149, R3 :260,
+R4 :488).
+
+Identical `mcp exec arrived` lines with the same field set: R2 :133, R3 :257,
+R4 :485.
+
+== (b) does a >= 20 s pause survive on run heartbeats alone ==
+VERDICT: YES        delay used: 25 seconds
+
+R1, exec heartbeats OFF. AgentClientMessage.client_heartbeat = 7 (ClientHeartbeat,
+fieldless) went out every five seconds and nothing else did. Log :48-:55:
+
+  :48  holding the probe's exec open  exec=1 delay_secs=25 exec_heartbeat=false
+  :49  run heartbeat, mid-hold  elapsed_ms=486
+  :50  run heartbeat, mid-hold  elapsed_ms=5486
+  :51  run heartbeat, mid-hold  elapsed_ms=10485
+  :52  run heartbeat, mid-hold  elapsed_ms=15486
+  :53  run heartbeat, mid-hold  elapsed_ms=20486
+  :54  the hold elapsed         elapsed_ms=25001
+  :55  answering the probe with mcp_result.success
+
+(The first tick lands at 486 ms because the interval had been running since the
+stream opened; the cadence between ticks is the 5,000 ms it was set to.)
+
+After the answer the same stream carried the server's own kv sets (:56-:66), a
+further run heartbeat at :68, thinking and text deltas, and a reply. Nothing was
+aborted, nothing was retried, and no error frame arrived. A 25-second client-side
+pause inside one exec is survivable on the run-level heartbeat alone.
+
+== (b') does the same pause survive with exec heartbeats on ==
+VERDICT: YES        delay used: 25 seconds
+
+R2, the same 25 s hold with GANJA_CURSOR_SPIKE_EXEC_HEARTBEAT=1, so
+ExecClientControlMessage.heartbeat = 3 (ExecClientHeartbeat{id = 1}, carrying the
+held exec's own id) went out every three seconds beside the five-second run
+heartbeat. Log :134-:149:
+
+  :134 holding the probe's exec open  exec=1 delay_secs=25 exec_heartbeat=true
+  :136 exec heartbeat  exec=1 elapsed_ms=3002
+  :137 exec heartbeat  exec=1 elapsed_ms=6001
+  :139 exec heartbeat  exec=1 elapsed_ms=9002
+  :140 exec heartbeat  exec=1 elapsed_ms=12002
+  :142 exec heartbeat  exec=1 elapsed_ms=15002
+  :144 exec heartbeat  exec=1 elapsed_ms=18002
+  :145 exec heartbeat  exec=1 elapsed_ms=21001
+  :147 exec heartbeat  exec=1 elapsed_ms=24002
+  :148 the hold elapsed  exec=1 elapsed_ms=25001
+  :149 answering the probe with mcp_result.success
+
+  interleaved run heartbeats at :135 (2211 ms), :138, :141, :143, :146
+
+The server neither required the exec heartbeat nor objected to it: (b) already
+passed without it, and the eight extra frames changed nothing observable. This
+answers W3's criterion 3 with evidence rather than by assumption — the choice
+between the two shapes is cost, not feasibility.
+
+== (c) how a typed `rejected` on a native kind is treated ==
+VERDICT: YES — the turn survives, and the model adapts
+
+R3's prompt asked for the probe and then for a file read. After the probe was
+served (:257-:260), the server asked for four native execs in a row, each answered
+with D550's typed refusal — the kind's own rejected/error arm carrying ganja's
+reason — and each followed by the stream close:
+
+  :263  exec arrived  exec=2 kind="read_args"          number=7
+  :264  refusing an exec cursor asked this client to run  exec=2 typed=true
+  :312  exec arrived  exec=3 kind="shell_stream_args"  number=14
+  :313  refusing an exec cursor asked this client to run  exec=3 typed=true
+  :350  exec arrived  exec=4 kind="grep_args"          number=5
+  :351  refusing an exec cursor asked this client to run  exec=4 typed=true
+  :354  exec arrived  exec=5 kind="grep_args"          number=5
+  :355  refusing an exec cursor asked this client to run  exec=5 typed=true
+
+`typed=true` on all four means none of them fell back to D486's control-channel
+throw. The server's agent loop read each refusal as a tool outcome: it tried a
+different kind after each one (read, then a streamed shell, then grep twice),
+generated text between the attempts, and finished the turn with a reply that
+reported the probe's answer and stated plainly that the file could not be read.
+The turn ran on to :452 and ended normally.
+
+This is the confirmation W1's premise needed: a typed rejection on a native kind
+does not kill a cursor turn, and W1's step-6 revert is not required.
+
+== (d) is AgentRunRequest.system_prompt_spec = 29 gated ==
+VERDICT: IGNORED — neither honored nor refused
+
+R5 sent SystemPromptSpec{append = 2} carrying a marker sentence instructing the
+model to begin every reply with a fixed word, beside the ordinary system prompt on
+RequestContext.cloud_rule = 16.
+
+What happened: the turn ran normally end to end (:545-:630 — a context ask, kv
+sets, thinking deltas, text deltas, step_completed, a reply, clean exit) and the
+reply did **not** begin with the marker word or contain it anywhere.
+
+What did NOT happen, which is the load-bearing half: no `invalid_argument`, no
+Connect error frame of any code, no refusal message. This is the third outcome the
+runbook named, and it is distinct from `custom_system_prompt = 8`'s behaviour,
+which LIVE-FAILED an ordinary seat's turn with
+
+  400 invalid_argument: unknown option '--system-prompt'
+
+(the refusal recorded in cursor/request.rs's module doc, not re-observed here).
+So field 29 is accepted by the wire and, on this seat and this model, has no
+observable effect on the reply. Whether it is silently dropped, allowlist-gated
+without an error, or honored in some way this prompt could not detect, is not
+settled by one run.
+
+== (e) which schema field the server honored ==
+VERDICT: BOTH — field 3 alone works, and field 6 alone works
+
+Three runs, one variable:
+
+  R1/R2  input_schema = 3 AND input_schema_json = 6   tool called  (:47, :133)
+  R3     input_schema = 3 only                        tool called  (:257)
+  R4     input_schema_json = 6 only                   tool called  (:485)
+
+Neither field is required, and neither is ignored to the point of breaking the
+call. The two encodings the spike sent were derived from one JSON string, so a
+disagreement between them cannot be what produced this result.
+
+W4 may therefore choose on other grounds. The bundle's own client picks exactly
+one (index.js@5699717), and the reference implementation this port's research
+cites sends field 3.
+
+== what this cannot measure ==
+
+1. The probe's schema declares NO ARGUMENTS. `others=[]` on every call confirms
+   the server sent no McpArgs.args = 2, so nothing here shows that a *populated*
+   schema round-trips, that argument values survive the encoding, or that field 3
+   and field 6 stay equivalent once a schema has properties in it. (e)'s verdict
+   is "the call happened with only this field filled" and not "this field is
+   read". A W4 tool with real arguments is what settles that.
+
+2. `provider_identifier` was the synthetic "ganja", naming no MCP server that
+   exists. The server accepted it here; nothing says a registry lookup is not
+   performed under other conditions, or that a roster of more than one tool, a
+   longer description, or a name outside this charset would be accepted. The
+   bundle read found no client-side name grammar or count cap and could not rule
+   out server-side ones; this run does not rule them out either.
+
+3. One seat, one account, one model (`default`/Auto), one client version, one
+   bundle version, one afternoon. Nothing here says what a different tier, an
+   explicitly named model, or a later server does. Cursor's own client version
+   gating is unexercised: every run identified as cli-2026.01.09-231024f.
+
+4. The hold was measured at 25 seconds. Nothing here bounds where the ceiling is,
+   or whether one exists — a longer hold, several concurrent holds, or a hold
+   under a slower model are all unmeasured. (b) says 25 s survives; it does not
+   say 120 s does.
+
+5. (d)'s "ignored" is a negative about one prompt on one model. A model that
+   simply declined to follow a formatting instruction would leave the same trace
+   as a field the server dropped. Distinguishing those needs a marker the model
+   cannot plausibly ignore, or a second channel to compare against.
+
+6. Turn completion is inferred from a printed reply, a clean exit and the absence
+   of any ProviderEvent::Failed. This build logs no line for a clean EndStream
+   frame, so no positive record of the stream's own verdict exists in the log.
+
+== incidental, and worth knowing before W4 ==
+
+* `ganja run` constructs the cursor wire TWICE per invocation. The second
+  `cursor spike: enabled` line in each run (:102, :207, :453, :533, :631) lands at
+  process teardown, immediately after the reply, and is a CursorWire::from_stored
+  that sent no run request in any of the five runs — the title/summary one-shot,
+  built and then dropped as the process exits. It read the same environment and
+  would have declared the same tool had it opened a stream. Two consequences for
+  W4: a roster is declared per *wire*, not per session, and any per-turn cost of
+  declaring one is paid on that path too.
+
+* The context ask (`request_context_args = 10`) arrived with ExecRequest.id
+  ABSENT on all five runs (:15, :115, :220, :468, :547 — no `exec=` field), while
+  every tool exec carried one, numbered from 1 upward within the turn. The context
+  answer echoes what it was given, which is nothing, and the server has never
+  objected.
+
+* Both `grep_args` execs on R3 arrived within 5 ms of each other (:350, :354) and
+  were refused independently. The server issues concurrent execs; a W4 bridge must
+  not assume one outstanding exec at a time.
+
+* The server's kv channel is busy on these turns — dozens of set exchanges per
+  run, one of them 185,582 bytes on R5 — all answered from the per-turn blob store
+  W1 already ships. No get preceded a set in any run.

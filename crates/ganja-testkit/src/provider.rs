@@ -1,12 +1,17 @@
-//! A [`Provider`] double that answers each request with the next entry from
-//! a fixed script, and records every request it was asked.
+//! Two [`Provider`] doubles, each recording every request it was asked, and
+//! differing only in how the answer is chosen.
 //!
+//! [`ScriptedProvider`] answers with the next entry from a fixed script.
 //! Every scripted-turn integration suite in `ganja-core/tests` rebuilds this
 //! shape under a different name — `Recorder`, `StepProvider`, `Scripted` —
 //! popping a script, handing it back as a stream, logging the request. What
 //! actually varies between them is a handful of values, not the shape
 //! itself: the provider id it answers to, and what it does once the script
 //! runs dry. Both are parameters here rather than forks.
+//!
+//! [`Director`] answers by what it was asked instead, which a queue cannot
+//! do the moment two engines share one provider. The suites that need it say
+//! so in their own module docs; the reason it exists at all is on the type.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -15,7 +20,7 @@ use async_trait::async_trait;
 use futures::StreamExt as _;
 use futures::stream::{self, BoxStream};
 use ganja_core::provider::{ChatRequest, Provider, ProviderError, ProviderEvent};
-use ganja_protocol::FinishReason;
+use ganja_protocol::{FinishReason, PartBody, ToolState};
 use tokio_util::sync::CancellationToken;
 
 /// What a [`ScriptedProvider`] does once its script queue runs dry.
@@ -181,4 +186,89 @@ pub fn tool_call(tool: &str, args: serde_json::Value) -> Vec<ProviderEvent> {
         ProviderEvent::ToolCallEnd { id: "call".to_owned() },
         ProviderEvent::Finish(FinishReason::Completed),
     ]
+}
+
+/// Answers each request by **what it was asked**, and records every request
+/// it was asked in the handle returned alongside it.
+///
+/// [`ScriptedProvider`] is a FIFO, which is exactly the wrong shape the
+/// moment two engines share one provider: a lead and its in-process teammate
+/// both take turns of their own, a persistent engine asks for a title beside
+/// them, and a queue would hand one conversation's answer to whichever engine
+/// reached it first. Keyed on the conversation instead — read with
+/// [`transcript`] — every request is answered with the step that conversation
+/// is at, and a toolless request (a title) is answered as one.
+///
+/// What varies between suites is only the keying, so it arrives as a closure
+/// rather than as another enum of scripts.
+///
+/// ```
+/// let (provider, requests) = ganja_testkit::Director::answering(|request| {
+///     if ganja_testkit::transcript(request).contains("ping") {
+///         ganja_testkit::says("pong")
+///     } else {
+///         ganja_testkit::says("who is this")
+///     }
+/// });
+/// assert!(requests.lock().unwrap().is_empty(), "nothing asked yet");
+/// let _ = provider;
+/// ```
+pub struct Director {
+    answer: Keying,
+    seen: Arc<Mutex<Vec<ChatRequest>>>,
+}
+
+/// How a [`Director`] chooses its answer: the conversation in, the step that
+/// conversation is at out.
+type Keying = Box<dyn Fn(&ChatRequest) -> Vec<ProviderEvent> + Send + Sync>;
+
+impl Director {
+    /// A provider answering to `"recorder"` — [`ScriptedProvider::new`]'s own
+    /// name, since a suite that keys on the conversation is not also keying on
+    /// the provider's id — that hands every request to `answer`.
+    pub fn answering(
+        answer: impl Fn(&ChatRequest) -> Vec<ProviderEvent> + Send + Sync + 'static,
+    ) -> (Arc<Self>, Arc<Mutex<Vec<ChatRequest>>>) {
+        let seen: Arc<Mutex<Vec<ChatRequest>>> = Arc::default();
+        (Arc::new(Self { answer: Box::new(answer), seen: Arc::clone(&seen) }), seen)
+    }
+}
+
+#[async_trait]
+impl Provider for Director {
+    fn id(&self) -> &str {
+        "recorder"
+    }
+
+    async fn stream(
+        &self,
+        request: ChatRequest,
+        _cancel: CancellationToken,
+    ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
+        let script = (self.answer)(&request);
+        self.seen.lock().expect("the request log is never poisoned").push(request);
+
+        Ok(stream::iter(script).boxed())
+    }
+}
+
+/// Everything a request's conversation says: the text of every part, and what
+/// every finished tool call answered.
+///
+/// The tool output is what makes this readable as a conversation rather than
+/// as a prompt: a [`Director`] deciding what step a conversation is at reads
+/// what the previous step *produced*, which for a tool call is its result and
+/// never its text.
+pub fn transcript(request: &ChatRequest) -> String {
+    request
+        .messages
+        .iter()
+        .flat_map(|message| &message.parts)
+        .map(|part| match &part.body {
+            PartBody::Tool { state: ToolState::Completed { output, .. }, .. } => output.clone(),
+            PartBody::Tool { state: ToolState::Error { error, .. }, .. } => error.clone(),
+            _ => part.as_text().unwrap_or_default().to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }

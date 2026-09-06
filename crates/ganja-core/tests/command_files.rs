@@ -22,7 +22,7 @@ use std::fs;
 use std::io::{self, Write as _};
 
 use ganja_core::Config;
-use ganja_core::command::{INIT, Registry};
+use ganja_core::command::{INIT, Registry, TEAM};
 use ganja_core::config::{CONFIG_ENV, CONFIG_HOME_ENV};
 use ganja_testkit::{LogCapture as Capture, plant};
 use serde_json::json;
@@ -91,6 +91,7 @@ fn command_files_join_the_roster_under_the_precedence_their_home_gives_them() {
             INIT.to_owned(),
             "only".to_owned(),
             "shared".to_owned(),
+            TEAM.to_owned(),
         ],
         "both homes are read, and nothing else is"
     );

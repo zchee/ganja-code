@@ -204,6 +204,27 @@ pub struct ChatRequest {
     /// The conversation so far, oldest first, ending with the message the user
     /// just sent.
     pub messages: Vec<Message>,
+    /// Where this turn's own messages begin in [`Self::messages`]: the index
+    /// of the message that opened it — the user's prompt, or the notice a `!`
+    /// passthrough turn opens with.
+    ///
+    /// A wire that sends the newest user turn as its action and composes
+    /// everything before it as history ([`cursor`]) needs this because role
+    /// alone cannot say where a turn started. A finished turn
+    /// leaves the steers it consumed in history *after* its reply, so
+    /// `[prompt, reply, steer, prompt2]` — a consumed steer and the next
+    /// turn's prompt — and the within-turn `[prompt, reply, steer, block]`
+    /// are the same four roles in the same order, and every one of them is a
+    /// `Message::user` whose id and timestamp ascend across the boundary
+    /// exactly as they do within it.
+    ///
+    /// `0` is a request whose whole message list is this turn's: what a
+    /// one-shot request — a title, a summary — asks in, and what a fixture
+    /// carrying a single turn is. Wires that send the whole conversation read
+    /// nothing here, and one that does clamps rather than trusts — the field
+    /// is public, so a value past the end of [`Self::messages`] is a bound to
+    /// be brought back in range and never an index to slice on.
+    pub turn_start: usize,
     /// Tools the model may call, advertised on every request. Empty means the
     /// model is not offered any.
     pub tools: Vec<ToolDefinition>,
@@ -615,6 +636,12 @@ impl fmt::Debug for Presented {
 /// and `plugin/openai/codex.ts:341-395` both wrap the request rather than the
 /// client, and `codex.ts:353` re-reads the credential on every call for exactly
 /// this reason.
+///
+/// `Clone` because a provider that outlives its wires has to hand each one a
+/// copy: [`cursor::CursorProvider`] is built once and builds a fresh
+/// [`cursor::CursorWire`] per request, and the credential goes with it. Both
+/// arms are cheap to clone — a copied secret, or an `Arc`.
+#[derive(Clone)]
 pub enum CredentialSource {
     /// A key, held for the life of the provider.
     Key(Presented),
@@ -649,6 +676,20 @@ struct Resolved {
 }
 
 impl CredentialSource {
+    /// A key source over `secret`, or [`None`] when it is blank.
+    ///
+    /// The one door into [`Key`](Self::Key) from outside this crate: a caller
+    /// may build the source, and only this crate may read what is inside it.
+    /// The blank refusal is `Presented::new`'s, for its own reason — an
+    /// exported-but-empty variable should fail at startup rather than as a 401
+    /// mid-turn. Why the door exists — a store-free provider for the engine's
+    /// bridge suite — is [`cursor::CursorProvider::at`]'s to say (**D552**,
+    /// Dv-11).
+    #[must_use]
+    pub fn key(secret: impl Into<SecretString>) -> Option<Self> {
+        Presented::new(secret).map(Self::Key)
+    }
+
     /// The credential this request should present.
     ///
     /// For an OAuth provider this goes through [`auth::Refresher`] rather than

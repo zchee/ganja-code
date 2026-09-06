@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
 use ganja_protocol::{MemberBackend, MemberView, TeamView};
-use ganja_testkit::RecordingSpawner;
+use ganja_testkit::{RecordingSpawner, task};
 use ganja_tool::Tool as _;
 use ganja_tool::task::{Offered, Subagents, TaskTool, TeammateSpawn, Teammated};
+use ganja_tool::tasklist::{Status, Summary};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use unicode_width::UnicodeWidthStr as _;
 
 use super::{BUSY, Effect, Row, Spawned, Team, rows, spawn_request};
 use crate::command;
@@ -33,12 +35,64 @@ fn lead() -> Row {
     }
 }
 
-fn dialog() -> Team {
-    Team::new(vec![
+/// The roster every dialog here opens over: this session, one in-process
+/// teammate and one running a real `claude`.
+fn members() -> Vec<Row> {
+    vec![
         lead(),
         row("w1", MemberBackend::InProcess, &["read(src/lib.rs)", "grep(fn spawn)"]),
         row("w2", MemberBackend::Claude, &[]),
-    ])
+    ]
+}
+
+fn dialog() -> Team {
+    Team::new(members(), Vec::new())
+}
+
+/// Whether a rendered line *is* the Tasks heading, once the dialog's border
+/// and padding are off it.
+fn heading(line: &str) -> bool {
+    line.trim_matches(|character: char| character.is_whitespace() || character == '\u{2502}')
+        == super::TASKS
+}
+
+/// The one drawn line holding `needle`, with the dialog's border and the
+/// screen either side of it trimmed off — what the row really says.
+///
+/// The same trim [`heading`] uses, for the same reason: what a row *is* is
+/// decided by its content, and the box it is drawn in is not part of it.
+fn task_line(screen: &str, needle: &str) -> String {
+    screen
+        .lines()
+        .find(|line| line.contains(needle))
+        .unwrap_or_else(|| panic!("no drawn line holds {needle:?}:\n{screen}"))
+        .trim_matches(|character: char| character.is_whitespace() || character == '\u{2502}')
+        .to_owned()
+}
+
+/// Which screen **column** `needle` begins at on the one line that holds it.
+///
+/// A cell count rather than a display width, because [`rendered`] emits one
+/// entry per cell: a two-column glyph is its own symbol in one cell and the
+/// space ratatui reset the next one to, so counting characters counts columns
+/// where measuring the joined string would count the wide glyph twice.
+fn column_of(screen: &str, needle: &str) -> usize {
+    let line = screen
+        .lines()
+        .find(|line| line.contains(needle))
+        .unwrap_or_else(|| panic!("no drawn line holds {needle:?}:\n{screen}"));
+    let at = line.find(needle).expect("the line was found by that needle");
+
+    line[..at].chars().count()
+}
+
+/// The three-task list the section tests draw.
+fn tasks() -> Vec<Summary> {
+    vec![
+        task("1", Status::Completed, "w1", "Read the plan", &[]),
+        task("2", Status::InProgress, "w1", "Wire the parser", &[]),
+        task("3", Status::Pending, "", "Draw the section", &["2"]),
+    ]
 }
 
 fn rendered(dialog: &Team, area: Rect) -> String {
@@ -100,7 +154,7 @@ async fn spawn_through_the_task_door(args: serde_json::Value) -> TeammateSpawn {
     recorder.started().into_iter().next().expect("one spawn was recorded")
 }
 
-/// **AC-14**, the `/team spawn` half: the two doors are one sequence
+/// **AC-14**, the `/teammate spawn` half: the two doors are one sequence
 /// because they build one request. The `task` door's value is taken from
 /// the door itself, so this cannot pass by both sides sharing a mistake.
 ///
@@ -221,11 +275,34 @@ fn every_member_lists_with_its_backend_and_its_recent_calls() {
 #[test]
 fn a_ring_longer_than_the_row_shows_admits_the_cut() {
     let calls: Vec<&str> = vec!["a", "b", "c", "d", "e", "f"];
-    let screen = rendered(&Team::new(vec![row("w1", MemberBackend::InProcess, &calls)]), AREA);
+    let screen =
+        rendered(&Team::new(vec![row("w1", MemberBackend::InProcess, &calls)], Vec::new()), AREA);
 
     assert!(screen.contains("+2 earlier calls"), "got:\n{screen}");
     assert!(screen.contains("\u{23bf} f"), "the newest is shown:\n{screen}");
     assert!(!screen.contains("\u{23bf} a"), "the oldest is cut:\n{screen}");
+}
+
+/// A call in the ring is model-written text too, and gets the same guard a
+/// task's fields get.
+///
+/// The `describe` a tool answers with is composed from the arguments the
+/// model chose — a path, a pattern, a subject — so a control character in one
+/// reaches this row exactly as it reaches a task's. Left alone it is drawn
+/// zero-width, which is a call log quietly saying something other than what
+/// was called.
+#[test]
+fn a_control_character_in_a_recent_call_is_shown_rather_than_silently_swallowed() {
+    let screen = rendered(
+        &Team::new(vec![row("w1", MemberBackend::InProcess, &["grep(a\u{7}\u{8}b)"])], Vec::new()),
+        AREA,
+    );
+
+    assert_eq!(
+        screen.matches(char::REPLACEMENT_CHARACTER).count(),
+        2,
+        "both are shown rather than swallowed:\n{screen}"
+    );
 }
 
 /// Enter on a teammate opens Message and Shutdown; the lead's row offers
@@ -325,11 +402,14 @@ fn backspace_takes_a_character_off_the_typed_line() {
 fn refreshing_keeps_the_cursor_where_it_was_and_reclamps_a_shrink() {
     let mut dialog = dialog();
     dialog.move_selection(1);
-    dialog.refresh(vec![
-        lead(),
-        row("w1", MemberBackend::InProcess, &["write(src/main.rs)"]),
-        row("w2", MemberBackend::Claude, &[]),
-    ]);
+    dialog.refresh(
+        vec![
+            lead(),
+            row("w1", MemberBackend::InProcess, &["write(src/main.rs)"]),
+            row("w2", MemberBackend::Claude, &[]),
+        ],
+        Vec::new(),
+    );
     assert_eq!(dialog.selected_member().map(|row| row.name.as_str()), Some("w1"));
     assert_eq!(
         dialog.selected_member().map(|row| row.recent.len()),
@@ -338,7 +418,7 @@ fn refreshing_keeps_the_cursor_where_it_was_and_reclamps_a_shrink() {
     );
 
     dialog.move_selection(2);
-    dialog.refresh(vec![lead()]);
+    dialog.refresh(vec![lead()], Vec::new());
     assert!(dialog.selected_member().is_none(), "the cursor reclamps onto the Spawn row");
 }
 
@@ -350,19 +430,25 @@ fn a_refresh_that_found_the_same_roster_reports_nothing_moved() {
     let mut dialog = dialog();
 
     assert!(
-        !dialog.refresh(vec![
-            lead(),
-            row("w1", MemberBackend::InProcess, &["read(src/lib.rs)", "grep(fn spawn)"],),
-            row("w2", MemberBackend::Claude, &[]),
-        ]),
+        !dialog.refresh(
+            vec![
+                lead(),
+                row("w1", MemberBackend::InProcess, &["read(src/lib.rs)", "grep(fn spawn)"],),
+                row("w2", MemberBackend::Claude, &[]),
+            ],
+            Vec::new(),
+        ),
         "an identical poll is not a reason to redraw"
     );
     assert!(
-        dialog.refresh(vec![
-            lead(),
-            row("w1", MemberBackend::InProcess, &["write(src/main.rs)"]),
-            row("w2", MemberBackend::Claude, &[]),
-        ]),
+        dialog.refresh(
+            vec![
+                lead(),
+                row("w1", MemberBackend::InProcess, &["write(src/main.rs)"]),
+                row("w2", MemberBackend::Claude, &[]),
+            ],
+            Vec::new(),
+        ),
         "a ring that moved is"
     );
 }
@@ -380,12 +466,15 @@ fn an_action_chosen_for_one_member_still_names_it_after_the_roster_moved() {
 
     // w0 joined the team while the action menu was up, so w1 is no longer
     // the row the cursor's old index named.
-    dialog.refresh(vec![
-        lead(),
-        row("w0", MemberBackend::InProcess, &[]),
-        row("w1", MemberBackend::InProcess, &[]),
-        row("w2", MemberBackend::Claude, &[]),
-    ]);
+    dialog.refresh(
+        vec![
+            lead(),
+            row("w0", MemberBackend::InProcess, &[]),
+            row("w1", MemberBackend::InProcess, &[]),
+            row("w2", MemberBackend::Claude, &[]),
+        ],
+        Vec::new(),
+    );
     assert!(dialog.is_choosing_action(), "the step is still w1's");
     let screen = rendered(&dialog, AREA);
     assert!(screen.contains("w1"), "and says so:\n{screen}");
@@ -409,7 +498,7 @@ fn an_action_step_whose_member_left_the_roster_drops_back_to_it() {
     assert!(dialog.is_choosing_action());
 
     assert!(
-        dialog.refresh(vec![lead(), row("w2", MemberBackend::Claude, &[])]),
+        dialog.refresh(vec![lead(), row("w2", MemberBackend::Claude, &[])], Vec::new()),
         "a dropped step is something moved"
     );
 
@@ -467,14 +556,14 @@ fn the_spawn_prompt_shows_the_grammar_the_refusal_names() {
     );
 }
 
-/// The command grammar is the dialog's grammar, so a `/team` line and the
+/// The command grammar is the dialog's grammar, so a `/teammate` line and the
 /// dialog's own step cannot mean two different things.
 #[test]
 fn a_typed_team_line_and_the_dialogs_step_build_the_same_request() {
     let Some(command::Team::Spawn(line)) =
-        command::team("/team spawn w3 --agent explore --backend claude go")
+        command::team("/teammate spawn w3 --agent explore --backend claude go")
     else {
-        panic!("`/team spawn` should parse");
+        panic!("`/teammate spawn` should parse");
     };
 
     assert_eq!(
@@ -521,9 +610,328 @@ fn the_lead_is_the_first_row_however_the_registry_ordered_it() {
     assert_eq!(projected[1].recent, vec!["read(src/lib.rs)".to_owned()]);
 }
 
+/// The Tasks section draws the team's shared list under the roster: which
+/// task, where it is, who holds it, what it waits on and what it is.
+#[test]
+fn the_tasks_section_lists_every_task_with_its_status_owner_and_blockers() {
+    let mut dialog = dialog();
+    assert!(dialog.refresh(members(), tasks()), "a fresh list repaints");
+
+    let screen = rendered(&dialog, Rect::new(0, 0, 76, 40));
+
+    assert!(screen.contains("tasks"), "the section is headed:\n{screen}");
+    assert!(screen.contains("Wire the parser"), "got:\n{screen}");
+    assert!(screen.contains("in_progress"), "got:\n{screen}");
+    assert!(screen.contains("completed"), "got:\n{screen}");
+    assert!(screen.contains("unowned"), "the unclaimed task says so:\n{screen}");
+    assert!(screen.contains("(blocked by 2)"), "got:\n{screen}");
+}
+
+/// The list is drawn in the order it arrived — the store's own lowest-id
+/// first, which is the order `task_list` answers a model with. Two
+/// renderings of one listing must not disagree about which task is next.
+#[test]
+fn the_tasks_section_keeps_the_order_the_list_arrived_in() {
+    let mut dialog = dialog();
+    dialog.refresh(members(), tasks());
+
+    let screen = rendered(&dialog, Rect::new(0, 0, 76, 40));
+    let position =
+        |needle: &str| screen.find(needle).unwrap_or_else(|| panic!("{needle} is drawn"));
+
+    assert!(position("Read the plan") < position("Wire the parser"));
+    assert!(position("Wire the parser") < position("Draw the section"));
+}
+
+/// The plan's third risk, drawn: a `claude` member runs its own task store
+/// and the foreign CLIs hold no ganja tools at all, so a section under a
+/// roster holding one names it rather than letting the list read as
+/// everybody's.
+#[test]
+fn the_tasks_section_names_the_members_that_cannot_see_the_list() {
+    let mut dialog = dialog();
+    dialog.refresh(members(), tasks());
+
+    let screen = rendered(&dialog, Rect::new(0, 0, 76, 40));
+
+    assert!(screen.contains("not visible to w2"), "the claude member is named:\n{screen}");
+    assert!(
+        !screen.contains("not visible to w1"),
+        "the in-process member reads the same list:\n{screen}"
+    );
+}
+
+/// And says nothing at all where every member shares the list: a standing
+/// disclaimer under a roster it is not true of would be read past.
+#[test]
+fn a_roster_that_all_shares_the_list_draws_no_such_line() {
+    let dialog = Team::new(
+        vec![
+            lead(),
+            row("w1", MemberBackend::InProcess, &[]),
+            row("w2", MemberBackend::Ganja, &[]),
+        ],
+        tasks(),
+    );
+
+    let screen = rendered(&dialog, Rect::new(0, 0, 76, 40));
+
+    assert!(screen.contains("Wire the parser"), "the list is drawn:\n{screen}");
+    assert!(!screen.contains("not visible to"), "and nothing is disclaimed:\n{screen}");
+}
+
+/// An empty list draws no section at all — no heading over nothing.
+#[test]
+fn a_team_that_has_filed_no_task_draws_no_tasks_section() {
+    let screen = rendered(&dialog(), AREA);
+
+    // The heading as a whole line rather than as a word anywhere on screen:
+    // a member named `tasks` — or a ring entry mentioning one — is not this
+    // section, and a test that could not tell them apart would redden for
+    // the wrong reason.
+    assert!(!screen.lines().any(heading), "no heading over nothing:\n{screen}");
+    assert!(!screen.contains(super::UNOWNED), "and nothing under it:\n{screen}");
+}
+
+/// The window onto the list is the head of it: nothing under the Spawn row
+/// is selectable, so the scroll never travels down to these lines and a list
+/// longer than the rows left under the roster is cut at the bottom with no
+/// marker. The roster it hangs under stays on screen however long the list
+/// grows, which is what the placement is for.
+#[test]
+fn a_task_list_longer_than_the_window_is_cut_and_leaves_the_roster_standing() {
+    let many: Vec<Summary> = (1..=30)
+        .map(|index| task(&index.to_string(), Status::Pending, "", &format!("task {index}"), &[]))
+        .collect();
+    let screen = rendered(&Team::new(members(), many), AREA);
+
+    assert!(screen.contains("team-lead"), "the roster stays on screen:\n{screen}");
+    assert!(screen.contains(super::TASKS), "the section is drawn:\n{screen}");
+    assert!(screen.contains("task 1"), "from the head of the list:\n{screen}");
+    assert!(!screen.contains("task 30"), "and the tail is simply cut:\n{screen}");
+}
+
+/// A task's text is somebody else's, and the frame is not what a control
+/// character in it costs: ratatui skips a zero-width cell, so an unguarded
+/// newline is swallowed and the words either side of it are drawn joined.
+/// Both halves are pinned — the row still occupies one line, and both the
+/// characters that would have vanished, in the subject and in the blocker id
+/// beside it, are on screen.
+#[test]
+fn a_newline_in_a_subject_is_shown_rather_than_silently_swallowed() {
+    let clean =
+        rendered(&Team::new(members(), vec![task("1", Status::Pending, "", "ab", &["cd"])]), AREA);
+    let dirty = rendered(
+        &Team::new(members(), vec![task("1", Status::Pending, "", "a\nb", &["c\nd"])]),
+        AREA,
+    );
+
+    assert_eq!(dirty.lines().count(), clean.lines().count(), "the frame holds:\n{dirty}");
+    assert_eq!(
+        dirty.matches(char::REPLACEMENT_CHARACTER).count(),
+        2,
+        "and both are shown rather than swallowed:\n{dirty}"
+    );
+}
+
+/// A line with room for everything says everything, in the order it is
+/// composed: the columns, the subject, then what the task waits on.
+///
+/// The baseline the two cases below are cuts of — a rule about what gives way
+/// first is only a rule if the untouched line is pinned too.
+#[test]
+fn a_task_line_with_room_for_all_of_it_keeps_its_subject_and_its_blockers() {
+    let screen = rendered(
+        &Team::new(members(), vec![task("1", Status::Pending, "", "Draw it", &["2"])]),
+        Rect::new(0, 0, 80, 30),
+    );
+
+    assert_eq!(
+        task_line(&screen, "Draw it"),
+        "1  pending  unowned  Draw it  (blocked by 2)",
+        "got:\n{screen}"
+    );
+}
+
+/// What a task waits on is never cut part-way: the subject gives way first,
+/// and the whole suffix survives beside whatever is left of it.
+///
+/// `(blocked by 1` is not a shorter way of saying `(blocked by 12, 13)` — it
+/// is a sentence about a different task, and a reader has no way to tell the
+/// two apart on the row. So the cut is taken where a cut is legible.
+#[test]
+fn a_blocked_line_too_long_for_the_row_gives_up_the_subject_before_the_suffix() {
+    let subject = "wire the parser and everything under it".repeat(3);
+    let screen = rendered(
+        &Team::new(members(), vec![task("1", Status::Pending, "", &subject, &["2"])]),
+        Rect::new(0, 0, 80, 30),
+    );
+    let line = task_line(&screen, "blocked by");
+
+    assert!(line.ends_with("(blocked by 2)"), "the suffix is whole:\n{screen}");
+    assert!(line.starts_with("1  pending  unowned  wire the parser"), "got:\n{screen}");
+    assert!(!screen.contains(&subject), "and the subject is what was cut:\n{screen}");
+}
+
+/// And where the suffix cannot fit beside even one column of subject it is
+/// dropped **whole** rather than shown as a fragment: a row saying what the
+/// task is beats a row saying half of what it waits on, and `task_get`
+/// answers the rest either way.
+#[test]
+fn a_blocked_suffix_with_no_room_beside_a_subject_is_dropped_rather_than_cut() {
+    let screen = rendered(
+        &Team::new(members(), vec![task("1", Status::Pending, "", "fix it", &["2"])]),
+        // 34 columns inside the border: the id, status and owner columns take
+        // 23 of them and the suffix wants 16, so there is no subject left to
+        // stand beside it.
+        Rect::new(0, 0, 40, 30),
+    );
+
+    // The whole line rather than a missing word, because what a cut leaves
+    // behind is `  (b` as readily as `  (blocked by` — an assertion naming one
+    // fragment would pass on every other one.
+    assert_eq!(task_line(&screen, "fix it"), "1  pending  unowned  fix it", "got:\n{screen}");
+}
+
+/// And "one column of room" is not "one column kept": a cut always yields a
+/// whole grapheme cluster, so one column of room buys a two-column glyph and
+/// the suffix composed beside it overruns the row — where the `Paragraph`
+/// cuts off exactly the fragment the rule forbids.
+///
+/// 40 columns inside the border, of which the id, status and owner columns
+/// take 23 and the suffix wants 16, leaves `room == 1` — and a subject opening
+/// on an East Asian glyph cannot be cut to it.
+#[test]
+fn a_blocked_suffix_beside_a_wide_glyph_too_big_for_its_room_is_dropped_too() {
+    let screen = rendered(
+        &Team::new(
+            members(),
+            vec![task("1", Status::Pending, "", "\u{4f5c}\u{696d}\u{3059}\u{308b}", &["2"])],
+        ),
+        Rect::new(0, 0, 46, 30),
+    );
+    // By a column the cut cannot reach: the subject itself is what is in
+    // question, so it cannot also be how the row is found.
+    let line = task_line(&screen, super::UNOWNED);
+
+    assert!(!line.contains("(blocked by"), "no fragment of the suffix survives:\n{screen}");
+    // Cells rather than [`unicode_width`], for [`column_of`]'s reason: a
+    // two-column glyph is one symbol plus the space beside it here, so
+    // counting characters counts columns.
+    assert!(line.chars().count() <= 40, "and the row still fits the box:\n{screen}");
+}
+
+/// A task line with no blockers at all is still cut inside the box it is
+/// drawn in.
+#[test]
+fn a_single_over_wide_task_line_is_cut_within_the_dialog() {
+    let subject = "wire the parser ".repeat(20);
+    let screen = rendered(
+        &Team::new(members(), vec![task("1", Status::Pending, "", &subject, &[])]),
+        Rect::new(0, 0, 40, 30),
+    );
+    // Found by a column the cut cannot reach, since what the cut does to the
+    // subject is exactly what a subject-shaped needle would be looking for.
+    let line = task_line(&screen, super::UNOWNED);
+
+    // The columns inside a 40-column area's border, which is what the row was
+    // laid out against; the two spaces the row opens with are trimmed off the
+    // measured content, so this is a ceiling rather than the exact width.
+    assert!(line.width() <= 34, "{} columns is too wide:\n{screen}", line.width());
+    // And the row itself, whole: the ceiling above would let an off-by-one
+    // through, and what the cut kept is the thing this test is about.
+    assert_eq!(line, "1  pending  unowned  wire the pa", "got:\n{screen}");
+    assert!(!screen.contains(&subject), "and the tail of it is gone:\n{screen}");
+    assert!(
+        screen
+            .lines()
+            .filter(|line| line.contains('\u{2502}'))
+            .all(|line| line.trim_end().ends_with('\u{2502}')),
+        "and the box it overran is still closed:\n{screen}"
+    );
+}
+
+/// The columns are measured in display width, so they must be padded in it
+/// too: a name one East Asian glyph wide is two columns, and padding it by
+/// `char` count pushes everything after it out of line.
+#[test]
+fn a_wide_glyph_in_a_task_column_leaves_the_next_one_where_it_was() {
+    let screen = rendered(
+        &Team::new(
+            members(),
+            vec![
+                task("1", Status::Pending, "w1", "alpha", &[]),
+                // Three glyphs, six columns — the widest owner, so it is what
+                // the column is sized to.
+                task("2", Status::Pending, "\u{4f5c}\u{696d}\u{8005}", "beta", &[]),
+            ],
+        ),
+        Rect::new(0, 0, 80, 30),
+    );
+
+    assert_eq!(
+        column_of(&screen, "alpha"),
+        column_of(&screen, "beta"),
+        "both subjects start in the same column:\n{screen}"
+    );
+}
+
+/// The same rule on the roster above it, which had the same bug: a member
+/// name holding a wide glyph must not move the surface column beside it.
+#[test]
+fn a_wide_glyph_in_a_member_name_leaves_the_surface_column_where_it_was() {
+    let screen = rendered(
+        &Team::new(
+            vec![
+                row("w1", MemberBackend::Ganja, &[]),
+                row("\u{4f5c}\u{696d}\u{8005}", MemberBackend::Claude, &[]),
+            ],
+            Vec::new(),
+        ),
+        Rect::new(0, 0, 80, 30),
+    );
+
+    assert_eq!(
+        column_of(&screen, "ganja"),
+        column_of(&screen, "claude"),
+        "both surfaces start in the same column:\n{screen}"
+    );
+}
+
+/// The section is data, not a row: the cursor still walks the members and
+/// the Spawn row and nothing else, however long the list is.
+#[test]
+fn the_tasks_section_takes_no_cursor_position() {
+    let mut dialog = dialog();
+    dialog.refresh(members(), tasks());
+
+    // Three members, then the Spawn row: four positions, and the fourth is
+    // still the last however many tasks hang under it.
+    dialog.move_selection(3);
+    assert!(dialog.selected_member().is_none(), "the Spawn row is last");
+    dialog.move_selection(1);
+    assert!(dialog.selected_member().is_none(), "and nothing is past it");
+    assert_eq!(dialog.submit(), None, "Enter there still opens the spawn step");
+    assert!(dialog.is_typing());
+}
+
+/// A list that did not move repaints nothing, the roster's own rule: a
+/// dialog left open would otherwise redraw at frame rate for a list nobody
+/// touched.
+#[test]
+fn a_task_list_that_did_not_move_is_not_a_repaint() {
+    let mut dialog = dialog();
+    assert!(dialog.refresh(members(), tasks()), "the first list is news");
+    assert!(!dialog.refresh(members(), tasks()), "the same list is not");
+
+    let mut moved = tasks();
+    moved[2].owner = "w1".to_owned();
+    assert!(dialog.refresh(members(), moved), "a claim is news again");
+}
+
 #[test]
 fn a_team_with_nobody_in_it_says_so_and_still_offers_a_spawn() {
-    let dialog = Team::new(Vec::new());
+    let dialog = Team::new(Vec::new(), Vec::new());
     let screen = rendered(&dialog, AREA);
 
     assert!(dialog.selected_member().is_none());
@@ -534,7 +942,8 @@ fn a_team_with_nobody_in_it_says_so_and_still_offers_a_spawn() {
 #[test]
 fn a_row_too_wide_for_the_column_is_cut_rather_than_wrapped() {
     let long = "very long call ".repeat(20);
-    let dialog = Team::new(vec![row(&"w".repeat(90), MemberBackend::InProcess, &[long.as_str()])]);
+    let dialog =
+        Team::new(vec![row(&"w".repeat(90), MemberBackend::InProcess, &[long.as_str()])], tasks());
 
     for line in rendered(&dialog, Rect::new(0, 0, 60, 20)).lines() {
         assert!(line.chars().count() <= 60, "a row must not overflow the dialog: {line:?}");

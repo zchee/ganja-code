@@ -1,3 +1,4 @@
+use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,7 +12,8 @@ use super::{
 };
 use crate::auth::{self, AuthError, OauthCredential, RefreshOauth};
 use crate::protocol::FinishReason;
-use crate::provider::ProviderEvent;
+use crate::provider::{ChatRequest, CredentialSource, NO_RESULT, ProviderEvent};
+use crate::tool::ToolDefinition;
 
 /// A renewal that must never run, for the cases that are about
 /// construction rather than about a token endpoint.
@@ -30,7 +32,11 @@ impl RefreshOauth for NeverRenews {
 
 /// A data frame holding one update, built with the real message types
 /// so the fold is driven by exactly what the server would send.
-fn framed(update: proto::Update) -> Vec<u8> {
+///
+/// `pub(super)` with the helpers below it: `bridge::tests` and
+/// `request::tests` drive the same fold, and one spelling of a frame is one
+/// thing to get wrong.
+pub(super) fn framed(update: proto::Update) -> Vec<u8> {
     let message = proto::ServerMessage {
         interaction_update: buffa::MessageField::some(update),
         ..Default::default()
@@ -39,14 +45,14 @@ fn framed(update: proto::Update) -> Vec<u8> {
     connect::envelope(&message.encode_to_vec())
 }
 
-fn text(delta: &str) -> proto::Update {
+pub(super) fn text(delta: &str) -> proto::Update {
     proto::Update {
         text_delta: buffa::MessageField::some(proto::TextDelta::default().with_text(delta)),
         ..Default::default()
     }
 }
 
-fn turn_ended() -> proto::Update {
+pub(super) fn turn_ended() -> proto::Update {
     proto::Update {
         turn_ended: buffa::MessageField::some(proto::TurnEnded::default()),
         ..Default::default()
@@ -72,15 +78,17 @@ fn exec_framed(id: u32, exec_id: &str) -> Vec<u8> {
 }
 
 /// A data frame holding the exec the live turn died on: the server
-/// asking this client to run a shell for it. The kind arrives as the
-/// args oneof's field 14, which this build models by number rather than
-/// by shape, because it never runs one.
+/// asking this client to run a shell for it — refused on a roster without
+/// `bash`, bridged to it on one that offers it.
 fn shell_stream_framed(id: u32) -> Vec<u8> {
-    let mut exec = proto::ExecRequest::default().with_id(id);
-    exec.__buffa_unknown_fields.push(buffa::UnknownField {
-        number: 14,
-        data: buffa::UnknownFieldData::LengthDelimited(Vec::new()),
-    });
+    let exec = proto::ExecRequest {
+        id: Some(id),
+        exec_id: Some("exec-shell".to_owned()),
+        shell_stream_args: buffa::MessageField::some(
+            proto::ShellArgs::default().with_command("ls").with_working_directory("/repo"),
+        ),
+        ..Default::default()
+    };
 
     let message = proto::ServerMessage {
         exec_request: buffa::MessageField::some(exec),
@@ -93,7 +101,8 @@ fn shell_stream_framed(id: u32) -> Vec<u8> {
 /// A duplex whose answers nobody reads, for fixtures without an ask.
 fn promptless_duplex() -> super::Duplex {
     let (answers, _) = futures::channel::mpsc::unbounded();
-    super::Duplex { answers, system: None, blobs: std::collections::HashMap::new() }
+
+    super::Duplex::for_tests(answers, Vec::new())
 }
 
 /// A data frame holding one kv exchange, built with the real message
@@ -128,7 +137,7 @@ fn kv_get(id: u32, blob_id: &[u8]) -> Vec<u8> {
 }
 
 /// An EndStream frame carrying `payload`.
-fn end_stream(payload: &str) -> Vec<u8> {
+pub(super) fn end_stream(payload: &str) -> Vec<u8> {
     let mut frame = vec![0b0000_0010];
     frame.extend_from_slice(
         &u32::try_from(payload.len()).expect("a test payload fits").to_be_bytes(),
@@ -140,7 +149,7 @@ fn end_stream(payload: &str) -> Vec<u8> {
 
 #[test]
 fn ganja_calls_it_cursor_everywhere_the_wire_can_see() {
-    assert_eq!(CursorProvider.id(), ID);
+    assert_eq!(CursorProvider::default().id(), ID);
     assert_eq!(ID, "cursor");
     assert_eq!(
         ID,
@@ -165,9 +174,14 @@ fn the_endpoint_is_cursors_own_and_the_debug_holds_no_secret() {
         "the endpoint is what tells one wire from another: {rendered}"
     );
 
-    // The selectable identity stays a bare name: nothing to leak, and
-    // nothing read at construction.
-    assert_eq!(format!("{CursorProvider:?}"), "CursorProvider");
+    // The selectable identity renders where it points and nothing else: it
+    // holds no credential, and the runs it is holding open are somebody's
+    // conversation.
+    let selectable = format!("{:?}", CursorProvider::default());
+    assert!(
+        selectable.contains("api2.cursor.sh"),
+        "the default provider is the stored login at cursor's own endpoint: {selectable}"
+    );
 }
 
 /// The endpoint is not exempt from the rule every other base URL is held
@@ -189,9 +203,8 @@ fn an_access_token_may_not_be_sent_anywhere_a_key_could_not_be() {
 /// nothing has closed, which the timeout turns into a readable failure.
 #[tokio::test]
 async fn a_delta_is_handed_over_while_the_body_is_still_open() {
-    let (sender, receiver) =
-        futures::channel::mpsc::unbounded::<Result<Vec<u8>, std::convert::Infallible>>();
-    let mut stream = super::events(receiver, CancellationToken::new(), promptless_duplex());
+    let (sender, receiver) = futures::channel::mpsc::unbounded::<Result<Vec<u8>, Infallible>>();
+    let mut stream = super::events(receiver, CancellationToken::new(), promptless_duplex(), None);
 
     sender.unbounded_send(Ok(framed(text("Hello")))).expect("the body is open");
     let first = tokio::time::timeout(Duration::from_secs(10), stream.next())
@@ -219,6 +232,52 @@ async fn a_delta_is_handed_over_while_the_body_is_still_open() {
     );
 }
 
+/// The run-level heartbeat while the fold is still **reading**. The keeper
+/// beats only once a Run is held, so a fold waiting on a slow server keeps the
+/// exchange alive on its own clock — and the clock is pinned, not merely the
+/// beating: the first beat is one period out and there is one per period, so
+/// an interval that fired at zero, or one that burst to catch up, would both
+/// count wrong here. The beats are liveness and never events.
+#[tokio::test(start_paused = true)]
+async fn a_fold_still_reading_beats_on_the_body_once_a_period() {
+    let (sender, receiver) = futures::channel::mpsc::unbounded::<Result<Vec<u8>, Infallible>>();
+    let (answers, mut answered) = futures::channel::mpsc::unbounded();
+    let stream = super::events(
+        receiver,
+        CancellationToken::new(),
+        super::Duplex::for_tests(answers, Vec::new()),
+        None,
+    );
+
+    // Driven in a task of its own: an interval ticks only under a poll, and
+    // the poll that matters here is the one waiting on a chunk that never
+    // comes.
+    let driver = tokio::spawn(stream.collect::<Vec<ProviderEvent>>());
+
+    tokio::time::sleep(super::bridge::HEARTBEAT * 2 + Duration::from_secs(1)).await;
+    let beats = sent_so_far(&mut answered)
+        .into_iter()
+        .filter(|message| message.client_heartbeat.is_set())
+        .count();
+    assert_eq!(beats, 2, "one beat a period, the first a period out, no burst");
+
+    let mut rest = framed(text("Hello"));
+    rest.extend(framed(turn_ended()));
+    rest.extend(end_stream("{}"));
+    sender.unbounded_send(Ok(rest)).expect("the body is open");
+    drop(sender);
+
+    let events = driver.await.expect("the fold finishes");
+    assert_eq!(
+        events,
+        vec![
+            ProviderEvent::TextDelta("Hello".to_owned()),
+            ProviderEvent::Finish(FinishReason::Completed),
+        ],
+        "a heartbeat is liveness, never an event"
+    );
+}
+
 /// The exchange the 2026-08-10 live turn hung on, both directions at
 /// the fold: the server asks for context mid-stream, the answer rides
 /// out on the held-open request body — ids echoed, the prompt on
@@ -226,17 +285,13 @@ async fn a_delta_is_handed_over_while_the_body_is_still_open() {
 /// flow.
 #[tokio::test]
 async fn the_context_ask_is_answered_on_the_open_body_before_the_turn_flows() {
-    let (sender, receiver) =
-        futures::channel::mpsc::unbounded::<Result<Vec<u8>, std::convert::Infallible>>();
+    let (sender, receiver) = futures::channel::mpsc::unbounded::<Result<Vec<u8>, Infallible>>();
     let (answers, mut answered) = futures::channel::mpsc::unbounded();
     let mut stream = super::events(
         receiver,
         CancellationToken::new(),
-        super::Duplex {
-            answers,
-            system: Some("You are terse.".to_owned()),
-            blobs: std::collections::HashMap::new(),
-        },
+        super::Duplex::speaking(answers, Some("You are terse.")),
+        None,
     );
 
     sender.unbounded_send(Ok(exec_framed(7, "exec-abc"))).expect("the body is open");
@@ -260,9 +315,7 @@ async fn the_context_ask_is_answered_on_the_open_body_before_the_turn_flows() {
         }
     };
 
-    assert_eq!(answer[0], 0, "an ordinary data frame");
-    let sent = proto::ClientMessage::decode_from_slice(&answer[5..])
-        .expect("the answered bytes are the client message");
+    let sent = client_message(&answer);
     assert!(sent.run_request.as_option().is_none(), "an answer is not a second run request");
     let exec = sent.exec_response.as_option().expect("the exec answer");
     assert_eq!(exec.id, Some(7), "the id the server minted comes back");
@@ -300,17 +353,13 @@ async fn the_context_ask_is_answered_on_the_open_body_before_the_turn_flows() {
 /// ahead of it would cross the server's questions.
 #[tokio::test]
 async fn the_kv_channel_is_answered_in_frame_order_behind_the_context_answer() {
-    let (sender, receiver) =
-        futures::channel::mpsc::unbounded::<Result<Vec<u8>, std::convert::Infallible>>();
+    let (sender, receiver) = futures::channel::mpsc::unbounded::<Result<Vec<u8>, Infallible>>();
     let (answers, answered) = futures::channel::mpsc::unbounded();
     let stream = super::events(
         receiver,
         CancellationToken::new(),
-        super::Duplex {
-            answers,
-            system: Some("You are terse.".to_owned()),
-            blobs: std::collections::HashMap::new(),
-        },
+        super::Duplex::speaking(answers, Some("You are terse.")),
+        None,
     );
 
     let mut body = exec_framed(7, "exec-abc");
@@ -339,19 +388,8 @@ async fn the_kv_channel_is_answered_in_frame_order_behind_the_context_answer() {
         "the kv exchanges are questions, never events"
     );
 
-    let sent: Vec<Vec<u8>> = answered
-        .map(|answer| answer.expect("the channel's error type is infallible"))
-        .collect()
-        .await;
-    assert_eq!(sent.len(), 4, "every ask was answered, none twice");
-    let decoded: Vec<proto::ClientMessage> = sent
-        .iter()
-        .map(|answer| {
-            assert_eq!(answer[0], 0, "an ordinary data frame");
-            proto::ClientMessage::decode_from_slice(&answer[5..])
-                .expect("the answered bytes are client messages")
-        })
-        .collect();
+    let decoded = sent(answered).await;
+    assert_eq!(decoded.len(), 4, "every ask was answered, none twice");
 
     // First out: the context answer, because its frame came first.
     assert_eq!(
@@ -384,6 +422,327 @@ async fn the_kv_channel_is_answered_in_frame_order_behind_the_context_answer() {
     );
 }
 
+/// A two-turn conversation on the bridged roster: the first turn is history
+/// the composition turns into blobs, the second is the action.
+fn two_turns() -> ChatRequest {
+    let mut replied = crate::protocol::Message::assistant("auto");
+    replied.parts.push(crate::protocol::Part::text("It parses TOML."));
+
+    ChatRequest {
+        system: Some("You are terse.".to_owned()),
+        messages: vec![
+            crate::protocol::Message::user("What does this crate do?"),
+            replied,
+            crate::protocol::Message::user("read the file"),
+        ],
+        turn_start: 2,
+        ..opening("auto")
+    }
+}
+
+/// The kv answer with `id` among what the fold wrote, and the bytes it
+/// carried — [`None`] for a not-found answer.
+fn kv_answer(sent: &[proto::ClientMessage], id: u32) -> Option<Vec<u8>> {
+    sent.iter()
+        .filter_map(|message| message.kv_response.as_option())
+        .find(|answer| answer.id == Some(id))
+        .expect("the get was answered")
+        .get_blob_result
+        .as_option()
+        .expect("a get's answer is the result, found or not")
+        .blob_data
+        .clone()
+}
+
+/// **AC-9, the fresh half.** A fresh Run's store *is* the composition: a
+/// get for a composed id answers the exact bytes, a get for an id nobody
+/// composed still answers not-found, and a set the server sends under a
+/// composed id — carrying, as content addressing guarantees, the bytes the
+/// id already names — leaves the following get answering those same bytes.
+/// A set that *differs* replaces what was held, the reference's own store
+/// (`proxy.ts:1108`): the one shape a content-addressed id should never
+/// produce, and the one the wire logs by size so a probe can say whether it
+/// ever does.
+#[tokio::test]
+async fn a_fresh_runs_kv_gets_are_answered_from_the_composed_history() {
+    let request = two_turns();
+    let composed = super::history::compose(&request);
+    let composed_id = composed.root[1].clone();
+    let composed_bytes = composed.blobs[&composed_id].clone();
+    let other_id = composed.root[2].clone();
+    let other_bytes = composed.blobs[&other_id].clone();
+    assert_eq!(composed_id.len(), 32, "a raw sha256");
+
+    let (sender, receiver) = futures::channel::mpsc::unbounded::<Result<Vec<u8>, Infallible>>();
+    let (answers, answered) = futures::channel::mpsc::unbounded();
+    let seeded = super::Duplex {
+        answers,
+        system: request.system.clone(),
+        roster: Vec::new(),
+        blobs: composed.blobs,
+    };
+    let stream = super::events(receiver, CancellationToken::new(), seeded, None);
+
+    let mut body = kv_get(1, &composed_id);
+    body.extend(kv_get(2, b"an id nobody composed"));
+    body.extend(kv_set(3, &composed_id, &composed_bytes));
+    body.extend(kv_get(4, &composed_id));
+    body.extend(kv_set(5, &other_id, b"not what the id names"));
+    body.extend(kv_get(6, &other_id));
+    body.extend(framed(text("Hello")));
+    body.extend(framed(turn_ended()));
+    body.extend(end_stream("{}"));
+    sender.unbounded_send(Ok(body)).expect("the body is open");
+    drop(sender);
+
+    let events: Vec<ProviderEvent> =
+        tokio::time::timeout(Duration::from_secs(10), stream.collect())
+            .await
+            .expect("a fully-answered turn ends");
+    assert_eq!(
+        events,
+        vec![
+            ProviderEvent::TextDelta("Hello".to_owned()),
+            ProviderEvent::Finish(FinishReason::Completed),
+        ],
+        "the gets are questions, never events"
+    );
+
+    let sent = sent(answered).await;
+    assert_eq!(
+        kv_answer(&sent, 1).as_deref(),
+        Some(composed_bytes.as_slice()),
+        "a composed id answers the bytes the composition hashed"
+    );
+    assert_eq!(kv_answer(&sent, 2), None, "an id nobody composed is still not-found");
+    let acked = |id: u32| {
+        sent.iter()
+            .filter_map(|message| message.kv_response.as_option())
+            .any(|answer| answer.id == Some(id) && answer.set_blob_result.is_set())
+    };
+    assert!(acked(3), "the set is acked");
+    assert_eq!(
+        kv_answer(&sent, 4).as_deref(),
+        Some(composed_bytes.as_slice()),
+        "a set carrying the bytes the id already names changes nothing: content-addressed \
+         idempotence holds under the reference's overwrite"
+    );
+    assert!(acked(5), "a differing set is acked too");
+    assert_eq!(
+        kv_answer(&sent, 6).as_deref(),
+        Some(b"not what the id names".as_slice()),
+        "and it replaces what the id held, as the reference's store does"
+    );
+    assert_ne!(other_bytes.as_slice(), b"not what the id names", "the replacement was real");
+}
+
+/// **AC-9, the held half.** The store travels with the Run across a pause:
+/// a Run held on a bridged call and resumed with its result still answers a
+/// composed id from the map it was seeded with.
+#[tokio::test]
+async fn a_held_run_resumed_after_a_pause_still_answers_a_composed_id() {
+    let held = Arc::new(super::bridge::HeldRuns::default());
+    let request = two_turns();
+    let key = super::bridge::Key::of(&request).expect("a request with a message keys");
+    let cancel = CancellationToken::new();
+    let composed = super::history::compose(&request);
+    let composed_id = composed.root[2].clone();
+    let composed_bytes = composed.blobs[&composed_id].clone();
+
+    let (body, chunks) = futures::channel::mpsc::unbounded::<Result<Vec<u8>, Infallible>>();
+    let (answers, answered) = futures::channel::mpsc::unbounded();
+    let seeded = super::Duplex {
+        answers,
+        system: request.system.clone(),
+        roster: roster(),
+        blobs: composed.blobs,
+    };
+    let stream = super::events(
+        chunks,
+        cancel.clone(),
+        seeded,
+        Some(super::Bridge::new(Arc::clone(&held), key.clone())),
+    );
+
+    body.unbounded_send(Ok(mcp_framed(
+        1,
+        proto::McpArgs::default()
+            .with_name("read")
+            .with_tool_name("read")
+            .with_tool_call_id("call-1")
+            .with_provider_identifier("ganja"),
+    )))
+    .expect("the body is open");
+    let paused: Vec<ProviderEvent> =
+        tokio::time::timeout(Duration::from_secs(10), stream.collect())
+            .await
+            .expect("a bridged exec pauses the stream rather than hanging it");
+    assert!(
+        paused.iter().any(|event| matches!(event, ProviderEvent::ToolCallStart { .. })),
+        "the call was bridged: {paused:?}"
+    );
+
+    let mut resumed = request.clone();
+    let mut reply = crate::protocol::Message::assistant(&request.model);
+    reply.parts.push(crate::protocol::Part {
+        id: crate::protocol::PartId::ascending(),
+        body: crate::protocol::PartBody::Tool {
+            call_id: "call-1".to_owned(),
+            tool: "read".to_owned(),
+            state: crate::protocol::ToolState::Completed {
+                input: serde_json::json!({}),
+                output: "the file's contents".to_owned(),
+                title: "read".to_owned(),
+                metadata: serde_json::json!({}),
+                started: 0,
+                completed: 0,
+            },
+        },
+    });
+    resumed.messages.push(reply);
+    let super::bridge::Resolution::Resume(fold) = held.resolve(&resumed) else {
+        panic!("the result keys the held run");
+    };
+    let stream = super::run(*fold, cancel, Some(super::Bridge::new(held, key)));
+
+    let mut tail = kv_get(9, &composed_id);
+    tail.extend(framed(text("Done.")));
+    tail.extend(framed(turn_ended()));
+    tail.extend(end_stream("{}"));
+    body.unbounded_send(Ok(tail)).expect("the body is open");
+    drop(body);
+
+    let events: Vec<ProviderEvent> =
+        tokio::time::timeout(Duration::from_secs(10), stream.collect())
+            .await
+            .expect("the resumed run reads to its end");
+    assert!(
+        !events.iter().any(|event| matches!(event, ProviderEvent::Failed(_))),
+        "a resumed run is not a failed one: {events:?}"
+    );
+
+    let sent = sent(answered).await;
+    assert_eq!(
+        kv_answer(&sent, 9).as_deref(),
+        Some(composed_bytes.as_slice()),
+        "the store the Run was seeded with came back with it"
+    );
+}
+
+/// **AC-14c, the wire half.** A keyed hit still lacking one of its results
+/// opens a fresh Run — the held one stays held, which `bridge::tests`
+/// watches — and the run request that Run goes out with is a
+/// `resume_action` over a state that names the result that did finish and
+/// renders the one that did not as [`NO_RESULT`]. Driven through
+/// `Provider::stream` against a loopback, so the request read back is the
+/// one the wire built, sent and streamed.
+#[tokio::test]
+async fn a_keyed_hit_still_lacking_a_result_opens_a_run_naming_what_it_has_and_what_it_lacks() {
+    let served = serve_run(finished("Carrying on."), false).await;
+    let provider = CursorProvider::at(
+        &served.base_url,
+        CredentialSource::key("at-bridge-canary").expect("a non-blank token"),
+    )
+    .expect("loopback may carry a token");
+    let request = opening("auto");
+    let key = super::bridge::Key::of(&request).expect("a request with a message keys");
+
+    // Two execs in one chunk, both bridged: the Run is held for both.
+    let (body, chunks) = futures::channel::mpsc::unbounded::<Result<Vec<u8>, Infallible>>();
+    let (answers, _answered) = futures::channel::mpsc::unbounded();
+    let stream = super::events(
+        chunks,
+        CancellationToken::new(),
+        super::Duplex::for_tests(answers, roster()),
+        Some(super::Bridge::new(Arc::clone(&provider.held), key)),
+    );
+    let mut batch = mcp_framed(1, read_args("call-1"));
+    batch.extend(mcp_framed(2, read_args("call-2")));
+    body.unbounded_send(Ok(batch)).expect("the body is open");
+    let paused: Vec<ProviderEvent> =
+        tokio::time::timeout(Duration::from_secs(10), stream.collect())
+            .await
+            .expect("a bridged batch pauses the stream rather than hanging it");
+    assert_eq!(
+        paused.iter().filter(|event| matches!(event, ProviderEvent::ToolCallStart { .. })).count(),
+        2,
+        "both calls reached the engine on one step: {paused:?}"
+    );
+
+    // The engine's next step, one call finished and one still pending.
+    let mut partial = request.clone();
+    let mut reply = crate::protocol::Message::assistant(&request.model);
+    for (call_id, state) in [
+        (
+            "call-1",
+            crate::protocol::ToolState::Completed {
+                input: serde_json::json!({}),
+                output: "the finished one".to_owned(),
+                title: "read".to_owned(),
+                metadata: serde_json::json!({}),
+                started: 0,
+                completed: 0,
+            },
+        ),
+        ("call-2", crate::protocol::ToolState::Pending { input: None }),
+    ] {
+        reply.parts.push(crate::protocol::Part {
+            id: crate::protocol::PartId::ascending(),
+            body: crate::protocol::PartBody::Tool {
+                call_id: call_id.to_owned(),
+                tool: "read".to_owned(),
+                state,
+            },
+        });
+    }
+    partial.messages.push(reply);
+
+    let events: Vec<ProviderEvent> = tokio::time::timeout(Duration::from_secs(10), async {
+        provider
+            .stream(partial.clone(), CancellationToken::new())
+            .await
+            .expect("a keyed hit without its results opens a fresh run")
+            .collect()
+            .await
+    })
+    .await
+    .expect("the fresh run reads to its end");
+    assert_eq!(
+        events,
+        vec![
+            ProviderEvent::TextDelta("Carrying on.".to_owned()),
+            ProviderEvent::Finish(FinishReason::Completed),
+        ],
+        "a fresh run over the loopback, not a failure"
+    );
+
+    let opened = served.opened.await.expect("the fresh run went out");
+    assert!(
+        opened.action.as_option().is_some_and(|action| action.resume_action.is_set()),
+        "the newest message is the assistant's, so the run resumes rather than sending a user \
+         message: {opened:?}"
+    );
+    let composed = super::history::compose(&partial);
+    let state = opened.conversation_state.as_option().expect("a composed state");
+    assert_eq!(
+        state.root_prompt_messages_json, composed.root,
+        "the ids on the wire are the composition's, whose blobs the run answers gets from"
+    );
+    let entries: Vec<String> = composed
+        .root
+        .iter()
+        .map(|id| String::from_utf8_lossy(&composed.blobs[id]).into_owned())
+        .collect();
+    assert!(
+        entries.iter().any(|entry| entry.contains("the finished one")),
+        "the result that finished is in the state: {entries:?}"
+    );
+    assert!(
+        entries.iter().any(|entry| entry.contains(NO_RESULT)),
+        "and the one still pending is rendered as missing rather than invented: {entries:?}"
+    );
+}
+
 /// The turn the live `shell_stream_args` exec used to kill (**D486**):
 /// the server asks this client to run a shell mid-stream, the refusal
 /// rides out on the held-open body as the pair the shipped client
@@ -392,13 +751,13 @@ async fn the_kv_channel_is_answered_in_frame_order_behind_the_context_answer() {
 /// the session sees the reply it asked for.
 #[tokio::test]
 async fn a_tool_exec_is_refused_on_the_open_body_and_the_turn_survives() {
-    let (sender, receiver) =
-        futures::channel::mpsc::unbounded::<Result<Vec<u8>, std::convert::Infallible>>();
+    let (sender, receiver) = futures::channel::mpsc::unbounded::<Result<Vec<u8>, Infallible>>();
     let (answers, answered) = futures::channel::mpsc::unbounded();
     let stream = super::events(
         receiver,
         CancellationToken::new(),
-        super::Duplex { answers, system: None, blobs: std::collections::HashMap::new() },
+        super::Duplex::for_tests(answers, Vec::new()),
+        None,
     );
 
     let mut body = shell_stream_framed(5);
@@ -425,30 +784,24 @@ async fn a_tool_exec_is_refused_on_the_open_body_and_the_turn_survives() {
         "the exec is a question, never an event"
     );
 
-    let sent: Vec<Vec<u8>> = answered
-        .map(|answer| answer.expect("the channel's error type is infallible"))
-        .collect()
-        .await;
-    assert_eq!(sent.len(), 2, "the throw, and the close that ends it");
+    let decoded = sent(answered).await;
+    assert_eq!(decoded.len(), 2, "the rejection, and the close that ends it");
 
-    let decoded: Vec<proto::ClientMessage> = sent
-        .iter()
-        .map(|answer| {
-            assert_eq!(answer[0], 0, "an ordinary data frame");
-            proto::ClientMessage::decode_from_slice(&answer[5..])
-                .expect("the answered bytes are client messages")
-        })
-        .collect();
-
-    let thrown = decoded[0]
-        .exec_control
+    let rejected = decoded[0]
+        .exec_response
         .as_option()
-        .and_then(|control| control.throw.as_option())
-        .expect("the throw went out first");
-    assert_eq!(thrown.id, Some(5), "the id the server minted comes back");
+        .expect("the rejection went out first, on the exec channel");
+    assert_eq!(rejected.id, Some(5), "the id the server minted comes back");
+    assert_eq!(rejected.exec_id.as_deref(), Some("exec-shell"), "and so does the exec id");
+    let event = rejected
+        .shell_stream
+        .as_option()
+        .and_then(|stream| stream.rejected.as_option())
+        .expect("the streamed kind's own rejected event");
+    assert_eq!(event.command.as_deref(), Some("ls"), "echoing what the server asked to run");
     assert!(
-        thrown.error.as_deref().is_some_and(|reason| reason.contains("shell_stream_args")),
-        "the server's agent loop is told what was refused: {thrown:?}"
+        event.reason.as_deref().is_some_and(|reason| reason.contains("shell_stream_args")),
+        "the server's agent loop is told what was refused and why: {event:?}"
     );
     assert_eq!(
         decoded[1]
@@ -467,13 +820,10 @@ async fn a_tool_exec_is_refused_on_the_open_body_and_the_turn_survives() {
 #[tokio::test]
 async fn a_kv_ask_nobody_can_answer_fails_the_turn_instead_of_hanging() {
     let events: Vec<ProviderEvent> = super::events(
-        futures::stream::iter([Ok::<Vec<u8>, std::convert::Infallible>(kv_set(
-            1,
-            b"blob-a",
-            b"opaque-state",
-        ))]),
+        futures::stream::iter([Ok::<Vec<u8>, Infallible>(kv_set(1, b"blob-a", b"opaque-state"))]),
         CancellationToken::new(),
         promptless_duplex(),
+        None,
     )
     .collect()
     .await;
@@ -494,12 +844,10 @@ async fn a_kv_ask_nobody_can_answer_fails_the_turn_instead_of_hanging() {
 #[tokio::test]
 async fn a_context_ask_nobody_can_answer_fails_the_turn_instead_of_hanging() {
     let events: Vec<ProviderEvent> = super::events(
-        futures::stream::iter([Ok::<Vec<u8>, std::convert::Infallible>(exec_framed(
-            1,
-            "exec-dead",
-        ))]),
+        futures::stream::iter([Ok::<Vec<u8>, Infallible>(exec_framed(1, "exec-dead"))]),
         CancellationToken::new(),
         promptless_duplex(),
+        None,
     )
     .collect()
     .await;
@@ -614,5 +962,651 @@ fn the_checked_in_generated_code_matches_the_proto() {
         before, after,
         "the checked-in cursor protobuf code has drifted from cursor.proto; \
              run `buf generate` in crates/ganja-provider and commit the result"
+    );
+}
+
+/// The roster a bridged turn declares, and the tools an `mcp_args` may name:
+/// the two every test file under `cursor` shares.
+pub(super) fn roster() -> Vec<ToolDefinition> {
+    vec![
+        ToolDefinition {
+            name: "read".to_owned(),
+            description: "Reads a file.".to_owned(),
+            schema: serde_json::json!({ "type": "object" }),
+        },
+        ToolDefinition {
+            name: "bash".to_owned(),
+            description: "Runs a command.".to_owned(),
+            schema: serde_json::json!({ "type": "object" }),
+        },
+    ]
+}
+
+/// A request that opens a turn — one user message, the roster declared — and
+/// so one that can key a held run.
+pub(super) fn opening(model: &str) -> ChatRequest {
+    ChatRequest {
+        model: model.to_owned(),
+        system: None,
+        messages: vec![crate::protocol::Message::user("read the file")],
+        turn_start: 0,
+        tools: roster(),
+        effort_options: serde_json::Map::new(),
+    }
+}
+
+/// One frame the fold wrote on the request body, read back as the client
+/// message it carries — having checked it is an ordinary data frame.
+pub(super) fn client_message(frame: &[u8]) -> proto::ClientMessage {
+    assert_eq!(frame[0], 0, "an ordinary data frame");
+
+    proto::ClientMessage::decode_from_slice(&frame[5..]).expect("the answered bytes decode")
+}
+
+/// Everything the fold wrote on the request body, once the fold is gone and
+/// the channel has closed behind it.
+pub(super) async fn sent(answered: Answered) -> Vec<proto::ClientMessage> {
+    answered
+        .map(|frame| client_message(&frame.expect("the channel's error type is infallible")))
+        .collect()
+        .await
+}
+
+/// Everything the fold has written on the request body **so far**, for a
+/// channel a held run keeps open — a collect would wait on a turn that has
+/// paused.
+pub(super) fn sent_so_far(answered: &mut Answered) -> Vec<proto::ClientMessage> {
+    std::iter::from_fn(|| answered.try_recv().ok())
+        .map(|frame| client_message(&frame.expect("the channel's error type is infallible")))
+        .collect()
+}
+
+/// The receiving end of a duplex's answer channel.
+pub(super) type Answered = futures::channel::mpsc::UnboundedReceiver<Result<Vec<u8>, Infallible>>;
+
+/// A loopback Run endpoint for exactly one connection: the run request the
+/// connection opened with, and a canned response body served as Connect
+/// frames.
+///
+/// `tests/cursor_wire.rs` serves the whole recorded protocol and asserts on
+/// its headers; this one exists so a **recovery** — a `Recover` resolution
+/// falling through to [`CursorWire::stream`]'s fresh-Run arm — can be driven
+/// through the provider in the module its held-run table lives in, and read
+/// back as the run request the reopened Run actually went out with. Nothing
+/// in `stream()` is bypassed: the request is built, sent and streamed by the
+/// same client a live turn uses.
+pub(super) struct Served {
+    pub(super) base_url: String,
+    /// The run request the one connection opened with, decoded off the
+    /// chunked request body's first Connect envelope.
+    pub(super) opened: tokio::sync::oneshot::Receiver<proto::RunRequest>,
+}
+
+/// Serves `reply` on the next connection to a fresh loopback port. With
+/// `keep_open` the response body is left unterminated and the socket held,
+/// the way a server waiting on an exec answer holds a Run — which is what
+/// lets a recovered Run pause on a bridged exec of its own.
+pub(super) async fn serve_run(reply: Vec<u8>, keep_open: bool) -> Served {
+    use tokio::io::AsyncWriteExt as _;
+
+    let listener =
+        tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("loopback is bindable");
+    let port = listener.local_addr().expect("a bound socket has an address").port();
+    let (tell, opened) = tokio::sync::oneshot::channel();
+
+    tokio::spawn(async move {
+        let Ok((mut socket, _)) = listener.accept().await else { return };
+        let Some(envelope) = opening_envelope(&mut socket).await else { return };
+        let run = client_message(&envelope)
+            .run_request
+            .into_option()
+            .expect("the envelope that opens a run carries the run request");
+        let _ = tell.send(run);
+
+        // Chunked, because a body with a declared length ends the moment its
+        // last byte is read, and a held Run's must not.
+        let mut response = b"HTTP/1.1 200 OK\r\ncontent-type: application/connect+proto\r\n\
+                             transfer-encoding: chunked\r\n\r\n"
+            .to_vec();
+        if !reply.is_empty() {
+            response.extend_from_slice(format!("{:x}\r\n", reply.len()).as_bytes());
+            response.extend_from_slice(&reply);
+            response.extend_from_slice(b"\r\n");
+        }
+        if !keep_open {
+            response.extend_from_slice(b"0\r\n\r\n");
+        }
+        let _ = socket.write_all(&response).await;
+        let _ = socket.flush().await;
+        if keep_open {
+            std::future::pending::<()>().await;
+        }
+    });
+
+    Served { base_url: format!("http://127.0.0.1:{port}"), opened }
+}
+
+/// Reads the request head and de-chunks the streamed body until one whole
+/// Connect envelope is buffered, then stops: the duplex body is held open for
+/// exec answers and never ends while the turn is open, so a reader that went
+/// to EOF would hang on the wire's defining feature.
+async fn opening_envelope(socket: &mut tokio::net::TcpStream) -> Option<Vec<u8>> {
+    use tokio::io::AsyncReadExt as _;
+
+    let mut byte = [0_u8; 1];
+    let mut head = Vec::new();
+    while !head.ends_with(b"\r\n\r\n") {
+        match socket.read(&mut byte).await {
+            Ok(0) | Err(_) => return None,
+            Ok(_) => head.push(byte[0]),
+        }
+    }
+
+    let mut body = Vec::new();
+    loop {
+        if body.len() >= 5 {
+            let declared = u32::from_be_bytes(body[1..5].try_into().ok()?) as usize;
+            if body.len() >= 5 + declared {
+                body.truncate(5 + declared);
+                return Some(body);
+            }
+        }
+
+        let mut line = Vec::new();
+        while !line.ends_with(b"\r\n") {
+            match socket.read(&mut byte).await {
+                Ok(0) | Err(_) => return None,
+                Ok(_) => line.push(byte[0]),
+            }
+        }
+        let size = usize::from_str_radix(String::from_utf8_lossy(&line).trim(), 16).ok()?;
+        if size == 0 {
+            return None;
+        }
+        let mut chunk = vec![0_u8; size + 2];
+        socket.read_exact(&mut chunk).await.ok()?;
+        chunk.truncate(size);
+        body.extend_from_slice(&chunk);
+    }
+}
+
+/// A served turn that says `reply` and ends cleanly.
+pub(super) fn finished(reply: &str) -> Vec<u8> {
+    let mut body = framed(text(reply));
+    body.extend(framed(turn_ended()));
+    body.extend(end_stream("{}"));
+    body
+}
+
+/// A read of `call_id`, the way the server calls the declared tool.
+pub(super) fn read_args(call_id: &str) -> proto::McpArgs {
+    proto::McpArgs::default()
+        .with_name("read")
+        .with_tool_name("read")
+        .with_tool_call_id(call_id)
+        .with_provider_identifier("ganja")
+}
+
+/// A frame carrying one `mcp_args`, built from whatever the case is about.
+fn mcp_framed(id: u32, args: proto::McpArgs) -> Vec<u8> {
+    let message = proto::ServerMessage {
+        exec_request: buffa::MessageField::some(proto::ExecRequest {
+            id: Some(id),
+            exec_id: Some("exec-mcp".to_owned()),
+            mcp_args: buffa::MessageField::some(args),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    connect::envelope(&message.encode_to_vec())
+}
+
+/// Drives one exec frame through a **bridging** fold with `declared` on the
+/// roster, and returns the events it produced beside what it wrote back.
+///
+/// The bridge is what makes the two observations below mean anything. Without
+/// one the fold has no key to park under, so *every* exec is answered at the
+/// pauseless guard and a `ToolCallStart` is structurally impossible — an
+/// absent one would be a tautology rather than a measurement. Here a
+/// bridgeable exec really would pause the Run and emit one, so "nothing
+/// executed" is something the harness could have contradicted.
+async fn bridged_exec(
+    exec: Vec<u8>,
+    declared: Vec<ToolDefinition>,
+) -> (Vec<ProviderEvent>, Vec<proto::ClientMessage>) {
+    // A request that can key a held run, so this harness is a wire that really
+    // could pause — which is what makes "this call was bridged rather than
+    // answered" observable instead of indistinguishable from "this wire cannot
+    // bridge".
+    let held = Arc::new(super::bridge::HeldRuns::default());
+    let request = opening("auto");
+    let key = super::bridge::Key::of(&request).expect("a request with a message keys");
+
+    let (sender, receiver) = futures::channel::mpsc::unbounded::<Result<Vec<u8>, Infallible>>();
+    let (answers, mut answered) = futures::channel::mpsc::unbounded();
+    let stream = super::events(
+        receiver,
+        CancellationToken::new(),
+        super::Duplex::for_tests(answers, declared),
+        Some(super::Bridge::new(Arc::clone(&held), key)),
+    );
+
+    sender.unbounded_send(Ok(exec)).expect("the body is open");
+
+    // The turn's end arrives in a **second** chunk, a gather window later, and
+    // that gap is load-bearing: a terminal event reaching the fold before the
+    // window closes clears the pending batch and the Run never pauses at all.
+    // Delivered in one chunk — which is what this harness used to do — no exec
+    // could ever be bridged, and every "nothing executed" assertion below
+    // would hold for the harness's reasons rather than the code's.
+    tokio::spawn(async move {
+        tokio::time::sleep(super::GATHER_WINDOW * 3).await;
+        let mut tail = framed(turn_ended());
+        tail.extend(end_stream("{}"));
+        // A bridged exec has already moved the fold into the held table by
+        // now, so this reaches a body nobody is reading. That is the shape a
+        // live turn has too.
+        let _ = sender.unbounded_send(Ok(tail));
+    });
+
+    let events: Vec<ProviderEvent> =
+        tokio::time::timeout(Duration::from_secs(10), stream.collect())
+            .await
+            .expect("an answered exec ends the exchange rather than hanging it");
+    assert!(
+        !events.iter().any(|event| matches!(event, ProviderEvent::Failed(_))),
+        "an answered exec is not a failed turn: {events:?}"
+    );
+
+    // So far, not to the close: a *bridged* exec moves the duplex — and with it
+    // the sender — into the held run, so the channel never closes.
+    (events, sent_so_far(&mut answered))
+}
+
+/// The same, for one `mcp_args`: the `McpResult` it was answered with — or
+/// `None` when the exec was handed to the engine instead.
+///
+/// A bridged call pauses the Run, so it produces tool-call events and *no*
+/// answer on the wire; every refusal is decided before a pause could happen
+/// and produces an answer and no events. That difference is the assertion.
+async fn answered_mcp(
+    args: proto::McpArgs,
+    declared: Vec<ToolDefinition>,
+) -> Option<proto::McpResult> {
+    let (_, sent) = bridged_exec(mcp_framed(3, args), declared).await;
+
+    sent.iter()
+        .find_map(|message| message.exec_response.as_option())
+        .and_then(|response| response.mcp_result.as_option())
+        .cloned()
+}
+
+/// **AC-14.** A name outside the roster this request declared is answered with
+/// `tool_not_found` **carrying that roster** — which is the arm this build
+/// could not honestly use before it published one — and the turn survives.
+#[tokio::test]
+async fn a_call_naming_an_undeclared_tool_is_answered_with_the_roster_it_is_missing_from() {
+    let result = answered_mcp(
+        proto::McpArgs::default()
+            .with_name("rm_minus_rf")
+            .with_tool_name("rm_minus_rf")
+            .with_tool_call_id("call-1")
+            .with_provider_identifier("ganja"),
+        roster(),
+    )
+    .await
+    .expect("an undeclared name is answered here, never bridged");
+
+    let missing = result.tool_not_found.as_option().expect("the arm that carries a roster");
+    assert_eq!(missing.name.as_deref(), Some("rm_minus_rf"));
+    assert_eq!(
+        missing.available_tools,
+        vec!["read".to_owned(), "bash".to_owned()],
+        "the roster is this request's own, in the order the engine advertised it"
+    );
+    assert!(!result.rejected.is_set(), "the roster exists now, so the honest arm is the typed one");
+}
+
+/// **AC-22.** A call naming somebody else's server is not this client's to
+/// look up, and is answered `server_not_found` rather than executed.
+#[tokio::test]
+async fn a_call_for_another_server_is_answered_server_not_found_and_never_run() {
+    let result = answered_mcp(
+        proto::McpArgs::default()
+            .with_name("read")
+            .with_tool_name("read")
+            .with_tool_call_id("call-1")
+            .with_provider_identifier("somebody-elses-mcp"),
+        roster(),
+    )
+    .await
+    .expect("a foreign identifier is answered here, never bridged");
+
+    let missing = result.server_not_found.as_option().expect("the server arm");
+    assert_eq!(missing.name.as_deref(), Some("somebody-elses-mcp"));
+    assert_eq!(missing.available_servers, vec!["ganja".to_owned()]);
+}
+
+/// The other half of AC-22, and the one the fixture settles: a **present**
+/// `server_identifier` on a `"ganja"` call is the measured norm — it arrived on
+/// every recorded call — so it refuses nothing, and the call is bridged.
+#[tokio::test]
+async fn a_present_server_identifier_on_our_own_call_refuses_nothing() {
+    let bridged = answered_mcp(
+        proto::McpArgs::default()
+            .with_name("read")
+            .with_tool_name("read")
+            .with_tool_call_id("call-1")
+            .with_provider_identifier("ganja")
+            .with_server_identifier("whatever-the-server-calls-us"),
+        roster(),
+    )
+    .await;
+
+    assert!(
+        bridged.is_none(),
+        "a call this client serves is handed to the engine, not answered on the wire"
+    );
+}
+
+/// **AC-22**, the matching half: when a call's two spellings disagree, the
+/// bridge runs the one the *declaration* named.
+///
+/// `McpArgs` carries both `name = 1` and `tool_name = 5`, and the shipped
+/// client fills them from one declaration (`index.js@5699717`), so every
+/// recorded call has them identical and no recording can settle which of the
+/// two this build reads. [`super::cursor::decode::McpCall::called`] prefers
+/// `tool_name`. Both spellings here name a tool the roster really holds, so a
+/// reversed precedence would refuse nothing and *quietly run the other tool* —
+/// which is the failure this pins, and the one no roster-membership test can
+/// see.
+#[tokio::test]
+async fn a_call_whose_two_spellings_disagree_runs_the_one_the_declaration_named() {
+    let (events, _) = bridged_exec(
+        mcp_framed(
+            3,
+            proto::McpArgs::default()
+                .with_name("bash")
+                .with_tool_name("read")
+                .with_tool_call_id("call-1")
+                .with_provider_identifier("ganja"),
+        ),
+        roster(),
+    )
+    .await;
+
+    let called: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            ProviderEvent::ToolCallStart { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        called,
+        vec!["read"],
+        "`tool_name = 5` names the tool; `name = 1` is the fallback for a server that sent none",
+    );
+}
+
+/// **AC-23.** A `smart_mode_approval_only` preflight is a policy question, and
+/// answering it by running the tool would run a side-effecting call for one —
+/// possibly twice, since the real call follows. So it is approved and
+/// **nothing executes**: no tool call reaches the engine, which is what the
+/// absent `ToolCallStart` below asserts.
+///
+/// Driven through the bridging harness on purpose: `bash` is on this roster,
+/// so without the preflight arm this exec *would* pause the Run and emit a
+/// `ToolCallStart`. Under a fold with no bridge the absence would prove
+/// nothing at all.
+#[tokio::test]
+async fn an_approval_preflight_is_approved_without_executing_anything() {
+    let (events, sent) = bridged_exec(
+        mcp_framed(
+            3,
+            proto::McpArgs::default()
+                .with_name("bash")
+                .with_tool_name("bash")
+                .with_tool_call_id("call-1")
+                .with_provider_identifier("ganja")
+                .with_smart_mode_approval_only(true),
+        ),
+        roster(),
+    )
+    .await;
+
+    assert!(
+        !events.iter().any(|event| matches!(event, ProviderEvent::ToolCallStart { .. })),
+        "a preflight must not reach the engine as a call: {events:?}"
+    );
+
+    assert!(
+        sent.iter()
+            .filter_map(|message| message.exec_response.as_option())
+            .filter_map(|response| response.mcp_result.as_option())
+            .any(|result| result.approved.is_set()),
+        "the preflight is answered `approved`"
+    );
+    assert!(
+        sent.iter().any(|message| message
+            .exec_control
+            .as_option()
+            .is_some_and(|control| control.stream_close.is_set())),
+        "and then the close that ends the exec"
+    );
+}
+
+/// An argument map this build cannot read fails **that one call** with the
+/// error arm and never the turn — the model reads it, tries something else,
+/// and the reply still arrives.
+#[tokio::test]
+async fn an_unreadable_argument_map_fails_one_call_and_not_the_turn() {
+    let unreadable = proto::McpArgs::default()
+        .with_name("read")
+        .with_tool_name("read")
+        .with_tool_call_id("call-1")
+        .with_provider_identifier("ganja");
+    let unreadable = proto::McpArgs {
+        args: vec![proto::McpArgEntry {
+            key: Some("filePath".to_owned()),
+            // A value with no arm set: on the wire a oneof always writes its
+            // case, so this is a shape this build refuses rather than guesses.
+            value: buffa::MessageField::some(proto::JsonValue::default()),
+            ..Default::default()
+        }],
+        ..unreadable
+    };
+
+    let result =
+        answered_mcp(unreadable, roster()).await.expect("an unreadable map is answered here");
+    assert!(
+        result
+            .error
+            .as_option()
+            .and_then(|error| error.error.as_deref())
+            .is_some_and(|error| error.contains("could not read the argument values")),
+        "{result:?}"
+    );
+}
+
+/// A turn that declared **no** tools keeps the answer it gave before the
+/// bridge: with nothing declared there is no roster to be missing from, so the
+/// sentence is about the name that was called.
+#[tokio::test]
+async fn a_turn_declaring_no_tools_still_refuses_a_call_by_name() {
+    let (sender, receiver) = futures::channel::mpsc::unbounded::<Result<Vec<u8>, Infallible>>();
+    let (answers, answered) = futures::channel::mpsc::unbounded();
+    let stream = super::events(
+        receiver,
+        CancellationToken::new(),
+        super::Duplex::for_tests(answers, Vec::new()),
+        None,
+    );
+
+    let mut body =
+        mcp_framed(3, proto::McpArgs::default().with_name("read").with_tool_call_id("call-1"));
+    body.extend(framed(turn_ended()));
+    body.extend(end_stream("{}"));
+    sender.unbounded_send(Ok(body)).expect("the body is open");
+    drop(sender);
+
+    let events: Vec<ProviderEvent> =
+        tokio::time::timeout(Duration::from_secs(10), stream.collect())
+            .await
+            .expect("a refused exec ends the exchange");
+    assert_eq!(
+        events,
+        vec![ProviderEvent::Finish(FinishReason::Completed)],
+        "a refusal is an answer, never an event"
+    );
+
+    let sent = sent(answered).await;
+    assert!(
+        sent.iter()
+            .filter_map(|message| message.exec_response.as_option())
+            .filter_map(|response| response.mcp_result.as_option())
+            .filter_map(|result| result.rejected.as_option())
+            .any(|rejected| rejected
+                .reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("no tool named read"))),
+        "with no roster declared, the answer is about the name: {sent:?}"
+    );
+}
+
+/// A wire that cannot pause refuses a call it **does** serve for the reason
+/// that actually holds.
+///
+/// `read` is on this roster, so "no tool named read is served by this client"
+/// would be false: what is missing is the hold, not the tool. Reachable by no
+/// shipped session — every one of them has a message to key on — which is
+/// exactly why it is worth a test: nothing else would ever read the sentence.
+#[tokio::test]
+async fn a_call_a_pauseless_wire_cannot_hold_is_refused_for_the_hold_and_not_the_roster() {
+    let (sender, receiver) = futures::channel::mpsc::unbounded::<Result<Vec<u8>, Infallible>>();
+    let (answers, answered) = futures::channel::mpsc::unbounded();
+    // No bridge: a fold with no key to park under is the state this refusal
+    // is about.
+    let stream = super::events(
+        receiver,
+        CancellationToken::new(),
+        super::Duplex::for_tests(answers, roster()),
+        None,
+    );
+
+    let mut body = mcp_framed(
+        3,
+        proto::McpArgs::default()
+            .with_name("read")
+            .with_tool_name("read")
+            .with_tool_call_id("call-1")
+            .with_provider_identifier("ganja"),
+    );
+    body.extend(framed(turn_ended()));
+    body.extend(end_stream("{}"));
+    sender.unbounded_send(Ok(body)).expect("the body is open");
+    drop(sender);
+
+    let events: Vec<ProviderEvent> =
+        tokio::time::timeout(Duration::from_secs(10), stream.collect())
+            .await
+            .expect("a refused exec ends the exchange");
+    assert!(
+        !events.iter().any(|event| matches!(event, ProviderEvent::ToolCallStart { .. })),
+        "a wire that cannot hold the run does not hand the call over: {events:?}"
+    );
+
+    let sent = sent(answered).await;
+    let reason = sent
+        .iter()
+        .filter_map(|message| message.exec_response.as_option())
+        .filter_map(|response| response.mcp_result.as_option())
+        .filter_map(|result| result.rejected.as_option())
+        .find_map(|rejected| rejected.reason.clone())
+        .unwrap_or_else(|| panic!("the call is refused on the rejected arm: {sent:?}"));
+
+    assert!(reason.contains("could not be paused"), "the reason is the hold: {reason}");
+    assert!(
+        !reason.contains("no tool named"),
+        "and never the roster's sentence, which is false here: {reason}"
+    );
+}
+
+/// A native exec whose ganja tool is **not** on this request's roster keeps
+/// D550's typed refusal — a turn not offering `bash` does not run a shell
+/// because the server asked for one.
+///
+/// The roster is the only thing standing between this exec and a bridged
+/// shell, and the harness is what makes that observable: the same frame
+/// against a roster holding `bash` pauses the Run and emits a
+/// `ToolCallStart`, which the second half asserts, so the absence in the
+/// first half is a measurement of the gate rather than of the harness.
+#[tokio::test]
+async fn a_native_exec_whose_tool_is_not_offered_keeps_the_typed_refusal() {
+    let readonly = vec![ToolDefinition {
+        name: "read".to_owned(),
+        description: "Reads a file.".to_owned(),
+        schema: serde_json::json!({ "type": "object" }),
+    }];
+
+    let (events, sent) = bridged_exec(shell_stream_framed(5), readonly).await;
+    assert!(
+        !events.iter().any(|event| matches!(event, ProviderEvent::ToolCallStart { .. })),
+        "a tool this turn does not offer is not run because the server asked: {events:?}"
+    );
+    assert!(
+        sent.iter()
+            .filter_map(|message| message.exec_response.as_option())
+            .filter_map(|response| response.shell_stream.as_option())
+            .any(|event| event.rejected.is_set()),
+        "the streamed kind's own rejected event, exactly as before the bridge"
+    );
+
+    let (offered, answered) = bridged_exec(shell_stream_framed(5), roster()).await;
+    assert!(
+        offered.iter().any(|event| matches!(
+            event,
+            ProviderEvent::ToolCallStart { name, .. } if name == "bash"
+        )),
+        "and the same exec against a roster that does offer bash is bridged: {offered:?}"
+    );
+    assert!(
+        !answered
+            .iter()
+            .filter_map(|message| message.exec_response.as_option())
+            .any(|response| response.shell_stream.is_set()),
+        "which answers nothing on the wire until the engine has run it: {answered:?}"
+    );
+}
+
+/// **Dv-11.** The provider takes its credential as a value
+/// ([`CursorProvider::at`] says why), so a caller that must never read
+/// `auth.json` has no code path to it, and an engine-level bridge suite is
+/// one binary rather than one binary per test.
+///
+/// The endpoint rule is not relaxed by the credential being handed over: a
+/// token still may not travel anywhere a key could not.
+#[test]
+fn a_provider_may_be_given_its_credential_instead_of_a_store_to_read() {
+    let credential = crate::provider::CredentialSource::key("at-cursor-canary")
+        .expect("a non-blank token is a credential");
+    let provider = CursorProvider::at("http://127.0.0.1:4096", credential.clone())
+        .expect("loopback never reaches a network");
+
+    let rendered = format!("{provider:?}");
+    assert!(rendered.contains("127.0.0.1:4096"), "{rendered}");
+    assert!(
+        !rendered.contains("at-cursor-canary"),
+        "a provider renders where it points, never what it presents: {rendered}"
+    );
+
+    let refused = CursorProvider::at("http://api2.cursor.sh", credential)
+        .expect_err("plain http to a public host puts the token on the wire in the clear");
+    assert!(matches!(refused, ProviderError::Transport(_)), "{refused:?}");
+
+    assert!(
+        crate::provider::CredentialSource::key("   ").is_none(),
+        "a blank credential is refused at construction, not as a 401 mid-turn"
     );
 }

@@ -1,0 +1,34 @@
+---
+source: crates/ganja-tui/src/app_tests.rs
+expression: screen(&terminal)
+---
+                                                                                
+                                                                                
+  ┌ teammate ────────────────────────────────────────────────────────────────┐  
+  │> team-lead  in-process  lead                                             │  
+  │  w1         in-process                                                   │  
+  │  ⎿ read(src/lib.rs)                                                      │  
+  │  ⎿ grep(fn spawn)                                                        │  
+  │  w2         claude                                                       │  
+  │                                                                          │  
+  │  Spawn teammate…                                                         │  
+  │                                                                          │  
+  │tasks                                                                     │  
+  │  not visible to w2                                                       │  
+  │  1  completed    w1       Read the plan                                  │  
+  │  2  in_progress  w1       Wire the parser                                │  
+  │  3  pending      unowned  Draw the section  (blocked by 2)               │  
+  │                                                                          │  
+  │[j/k] [up/down] move   [Enter] choose   [Esc] close                       │  
+  │                                                                          │  
+  │                                                                          │  
+  │                                                                          │  
+  └──────────────────────────────────────────────────────────────────────────┘  
+                                                                                
+                                                                                
+┌ message ─────────────────────────────────────────────────────────────────────┐
+│ Ask ganja something...                                                       │
+│                                                                              │
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+ready

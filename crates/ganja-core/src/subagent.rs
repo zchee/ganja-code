@@ -581,7 +581,7 @@ pub struct SpawnAsk {
 /// Who a spawn's own permission dialog is put in front of.
 ///
 /// A seam rather than a call into the turn, because [`Teammates`] is reached by
-/// two doors and only one of them is a tool call inside a turn: `/team spawn`
+/// two doors and only one of them is a tool call inside a turn: `/teammate spawn`
 /// asks the person who typed it, and a test asks nobody. What every one of them
 /// has in common is that a spawn the rules do not already settle is a question,
 /// and this is the shape of asking it.
@@ -735,7 +735,7 @@ impl Teammates {
                 // keyed on `backend`, because which door a shim spawns on is
                 // the wired backend's fact — the headless one answers `None`
                 // — and the same answer closes the registry's ring lines, so
-                // the dialog and `/team` cannot describe one pane differently.
+                // the dialog and `/teammate` cannot describe one pane differently.
                 if let Some(surface) = implementation.surface_line() {
                     args["surface"] = serde_json::Value::from(surface);
                 }
@@ -2197,7 +2197,7 @@ const TEAM_GONE: &str =
 
 /// The reason a lead gives a teammate it is asking to stop.
 ///
-/// Worded without naming a door, because both of them — `/team shutdown` and
+/// Worded without naming a door, because both of them — `/teammate shutdown` and
 /// whatever asks next — write the same frame, and the teammate reading it is
 /// told why rather than where from.
 const SHUTDOWN_ASKED: &str = "the lead asked this teammate to stop";

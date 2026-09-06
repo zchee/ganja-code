@@ -691,7 +691,7 @@ fn the_cursor_listing_without_a_login_is_refused_naming_the_login() {
 }
 
 /// A ChatGPT seat's roster is the binary's, not the table's (**D476**), so
-/// `models openai` on a stored login prints the pinned five and a header that
+/// `models openai` on a stored login prints the pinned six and a header that
 /// says pinned — the wording is the whole point, because cursor's "live from
 /// the wire; uncataloged" would be false twice over about this list.
 ///
@@ -716,6 +716,7 @@ fn the_openai_listing_on_a_chatgpt_login_is_the_pinned_roster_under_a_pinned_hea
             predicate::str::contains("openai models, pinned to what a ChatGPT subscription is")
                 .and(predicate::str::contains("--refresh does not apply"))
                 .and(predicate::str::contains("live from the wire").not())
+                .and(predicate::str::contains("gpt-6-astra"))
                 .and(predicate::str::contains("gpt-5.5"))
                 .and(predicate::str::contains("gpt-5.6-sol"))
                 .and(predicate::str::contains("gpt-5.6-terra"))

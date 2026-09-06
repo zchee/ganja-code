@@ -41,13 +41,22 @@ pub(super) fn model_list(body: &[u8]) -> Result<Vec<proto::ModelEntry>, Provider
 /// skipped it hung a real turn in silence (LIVE-OBSERVED 2026-08-10, one
 /// debug line then nothing until the process was killed). So [`frame`](Self::frame)
 /// hands the ask up as a [`ContextAsk`] for the stream layer to answer on
-/// the open request body. Every *other* exec kind — the tools cursor's
-/// server asks its own client to run — is handed up as an [`ExecRefusal`]
-/// instead, answered on the same body with a structured refusal rather than
-/// killing the turn (**D486**, declared in [`super::request`]): the server's
-/// agent loop reads a refusal the way it reads any other tool outcome and
-/// keeps generating, which is one more turn surviving than the failure this
-/// replaced.
+/// the open request body. Every *other* exec kind — the tools cursor's server
+/// asks its own client to run — is handed up as an [`ExecAsk`] instead, for
+/// the stream layer to answer on that same body.
+///
+/// **This layer classifies; it does not decide.** [`exec_args`] reads each
+/// kind's arguments into an [`ExecArgs`] and stops there, because what happens
+/// next depends on a fact only the stream layer holds: the tool roster *this
+/// request* declared. With one, an `mcp_args` naming a declared tool and the
+/// seven native kinds of the redirect table are **bridged** — surfaced to
+/// ganja's engine as ordinary tool calls, run there under its permission
+/// engine, and answered here from the result (**D552**). Without one, or for a
+/// kind outside the table, the same value is answered with **D550**'s typed
+/// refusal in the kind's own vocabulary, falling back to **D486**'s
+/// control-channel throw for a kind with no modelled arm. Either way the
+/// server's agent loop reads an outcome it can act on and keeps generating,
+/// which is one more turn surviving than the failure both of those replaced.
 ///
 /// **The kv arm is never skipped either.** The server stores and reads
 /// conversation state mid-turn over the kv channel and waits on every
@@ -93,8 +102,9 @@ pub(super) struct Mapping {
 pub(super) enum Ask {
     Context(ContextAsk),
     Kv(KvAsk),
-    /// A tool exec this build refuses to run for the server (**D486**).
-    Refuse(ExecRefusal),
+    /// A tool exec: bridged to a ganja tool (**D552**) or refused (**D550**,
+    /// **D486**), which the roster decides and this layer does not.
+    Exec(ExecAsk),
 }
 
 /// The server's context ask, ids and nothing else — presence is the whole
@@ -107,19 +117,113 @@ pub(super) struct ContextAsk {
     pub(super) exec_id: Option<String>,
 }
 
-/// One tool exec the server asked this client to run, and this client will
-/// not (**D486**): the id the refusal must echo, and the kind's name, which
-/// travels into the refusal so the server's agent loop reads *what* was
-/// refused rather than that something was.
+/// One tool exec the server asked this client to run: the ids the answer
+/// echoes, the kind's name, and that kind's arguments as far as this build
+/// reads them.
 ///
-/// The exec id is deliberately absent. The shipped client's refusal channel
-/// carries the numeric id alone — no `exec_id`, no kind (`ExecClientThrow`,
-/// `index.js@6032526`) — so echoing one here would be inventing a field the
-/// answer has nowhere to put.
+/// **The exec id is present but not always sent.** An answer — a result or a
+/// typed refusal — rides `ExecResponse`, which has an `exec_id = 15` to echo
+/// the way the context answer does; the control-channel throw has no such
+/// member — it is keyed on the numeric id alone (`ExecClientThrow`,
+/// `index.js@6032526`) — so on that path the id is decoded and dropped rather
+/// than invented a home for.
 #[derive(Debug, PartialEq)]
-pub(super) struct ExecRefusal {
+pub(super) struct ExecAsk {
     pub(super) id: Option<u32>,
+    pub(super) exec_id: Option<String>,
     pub(super) kind: String,
+    pub(super) args: ExecArgs,
+}
+
+/// One exec's arguments, as far as two answers need them: the refusal's echo,
+/// and the redirect's mapping onto a ganja tool.
+///
+/// The variants carry only that much, which is why several look alike and one
+/// is empty: `delete_args` is refused and never bridged, so its variant holds
+/// only the path its rejection echoes. The two shell kinds are separate
+/// variants because the arm they answer on differs — a stream's rejection is
+/// an *event* — where the two read kinds share one variant and a flag, since
+/// a redacted read is the same `ReadResult` at a second field number.
+#[derive(Debug, PartialEq)]
+pub(super) enum ExecArgs {
+    /// No modelled arm for this kind: D486's throw, still the catch-all.
+    Unmodelled,
+    Shell {
+        command: String,
+        working_directory: String,
+    },
+    ShellStream {
+        command: String,
+        working_directory: String,
+    },
+    Write {
+        path: String,
+        file_text: String,
+    },
+    Delete {
+        path: String,
+    },
+    Grep {
+        pattern: String,
+        path: String,
+        glob: String,
+        case_insensitive: bool,
+    },
+    Read {
+        /// `redacted_read_args = 29` rather than `read_args = 7`: the answer
+        /// goes back at the matching number.
+        redacted: bool,
+        path: String,
+        offset: Option<i32>,
+        limit: Option<u32>,
+    },
+    Ls {
+        path: String,
+    },
+    Mcp(McpCall),
+    Fetch {
+        url: String,
+    },
+}
+
+/// A model calling a tool this client declared (**D552**).
+///
+/// The arguments are decoded here rather than carried as protobuf, so the
+/// stream layer answers one question — is this call ours, and what is it —
+/// without reaching back into the wire's own types. [`arguments`](Self::arguments)
+/// is [`None`] for a value shape [`super::value::decode`] cannot read, which
+/// fails that one call with `McpResult.error` and never the turn.
+#[derive(Debug, PartialEq)]
+pub(super) struct McpCall {
+    /// What the model called, `McpArgs.name = 1`.
+    pub(super) name: String,
+    /// What the declaration named the tool, `tool_name = 5`. The bridge
+    /// matches on this and falls back to [`name`](Self::name); the shipped
+    /// client sets both from one declaration (`index.js@5699717`).
+    pub(super) tool_name: String,
+    /// The id the answer is keyed on and the engine's transcript part carries.
+    pub(super) tool_call_id: String,
+    /// Who is said to serve the tool. Empty means the server sent none, which
+    /// is not the same as sending somebody else's name.
+    pub(super) provider_identifier: String,
+    /// `smart_mode_approval_only = 7`: a preflight that must execute nothing.
+    pub(super) approval_only: bool,
+    /// The argument object, or [`None`] when the map could not be read.
+    pub(super) arguments: Option<serde_json::Value>,
+}
+
+impl McpCall {
+    /// The tool this call names: the declaration's own
+    /// [`tool_name`](Self::tool_name), falling back to
+    /// [`name`](Self::name) when the server sent none.
+    ///
+    /// One function because two of them disagreed: the roster match read
+    /// `tool_name` while the refusal sentence read `name`, so a call the
+    /// bridge looked up under one spelling was refused under the other
+    /// (**D552**). Every reader of "which tool is this" goes through here.
+    pub(super) fn called(&self) -> &str {
+        if self.tool_name.is_empty() { &self.name } else { &self.tool_name }
+    }
 }
 
 /// One kv exchange the server opened: the id the answer must echo
@@ -181,14 +285,19 @@ impl Mapping {
                 }));
             }
 
-            // Every other kind is a tool the server is asking this client
-            // to run for it, and this client runs its tools for its own
-            // session instead (**D486**). The server stops generating until
-            // an exec is answered either way, so the kind's name goes back
-            // as a refusal rather than as a turn-killing error: refused is
-            // an outcome the server's agent loop can act on, and unanswered
-            // is the silent hang this arm's modelling exists to end.
-            return Some(Ask::Refuse(ExecRefusal { id: exec.id, kind: exec_kind(exec) }));
+            // Every other kind is a tool the server is asking this client to
+            // run. The server stops generating until an exec is answered
+            // either way, so it is handed up to be answered — bridged to
+            // ganja's own tool where the roster has one, refused in the
+            // kind's own vocabulary where it does not — and never left
+            // silent, which is the hang this arm's modelling exists to end.
+            let (kind, args) = exec_args(exec);
+            return Some(Ask::Exec(ExecAsk {
+                id: exec.id,
+                exec_id: exec.exec_id.clone(),
+                kind,
+                args,
+            }));
         }
 
         if let Some(kv) = message.kv_request.as_option() {
@@ -221,14 +330,15 @@ impl Mapping {
         }
 
         let Some(update) = message.interaction_update.as_option() else {
+            // Named by number and size rather than modelled: the checkpoint
+            // arm (field 3, a whole ConversationStateStructure) is what
+            // arrives here on a turn that carried state, and whether it does,
+            // and how large it is, is what a probe reads off this line before
+            // anything is built to read the arm itself (**D553**).
             tracing::debug!(
                 provider = ID,
-                fields = ?message
-                    .__buffa_unknown_fields
-                    .iter()
-                    .map(|field| field.number)
-                    .collect::<Vec<_>>(),
-                "skipped a server message outside the update channel"
+                fields = ?unmodelled(&message),
+                "unmodelled server-message fields"
             );
             return None;
         };
@@ -297,6 +407,34 @@ impl Mapping {
     }
 }
 
+/// The top-level fields of `message` this build does not model, as `(field
+/// number, payload bytes)` pairs in wire order — what the skip log names a
+/// server message by, and the seam a test reads the same answer through.
+///
+/// The size is the payload's: a length-delimited field's bytes, a fixed
+/// field's width, a varint's encoded width, a group's encoded content. The
+/// bytes themselves never leave here — a checkpoint is conversation state.
+pub(super) fn unmodelled(message: &proto::ServerMessage) -> Vec<(u32, usize)> {
+    message
+        .__buffa_unknown_fields
+        .iter()
+        .map(|field| {
+            let size = match &field.data {
+                buffa::UnknownFieldData::LengthDelimited(bytes) => bytes.len(),
+                buffa::UnknownFieldData::Fixed32(_) => 4,
+                buffa::UnknownFieldData::Fixed64(_) => 8,
+                buffa::UnknownFieldData::Varint(value) => {
+                    usize::try_from((64 - value.leading_zeros()).div_ceil(7).max(1))
+                        .expect("a varint is at most ten bytes")
+                }
+                buffa::UnknownFieldData::Group(fields) => fields.encoded_len(),
+            };
+
+            (field.number, size)
+        })
+        .collect()
+}
+
 /// What an EndStream error means to the session that asked.
 ///
 /// `unauthenticated` is the one code whose repair is a command this build
@@ -318,36 +456,156 @@ fn verdict(code: &str, message: &str) -> ProviderError {
     }
 }
 
-/// Names the kind a refused exec request carried.
+/// Reads an exec's kind and its arguments, as far as an answer needs them.
 ///
-/// The kinds this build does not model arrive as unknown fields, and the
-/// field number *is* the kind: the table is the plugin's args oneof
-/// (agent_pb.ts:6885-:6997, re-confirmed field for field against the
-/// shipped client's own descriptor at `index.js@6039005`), so the refusal
-/// names what the descriptor names. A number the table does not know is
-/// reported as itself — still enough to go derive, and still refusable,
-/// because the refusal channel is keyed on the exec id rather than on the
-/// kind — and span_context (= 19, agent_pb.ts:6875) rides beside the oneof
+/// The ten kinds `cursor.proto` models decode into fields of their own, so
+/// they are recognised by presence and read straight off the args. Everything
+/// else still arrives as unknown fields — [`exec_kind`] names those — and is
+/// answered on D486's control channel.
+///
+/// A modelled kind's args may be *present and empty*: an exec whose payload
+/// this build decodes none of still identifies its kind by the field it
+/// arrived on, and an empty echo is the honest answer about a path nobody
+/// sent. That is why every string read here defaults rather than refuses. The
+/// numbers do not: an absent `offset` is a window the server did not ask to
+/// narrow, which is a different thing from asking for line zero, so those stay
+/// [`Option`] all the way to the tool call they become.
+fn exec_args(exec: &proto::ExecRequest) -> (String, ExecArgs) {
+    /// An optional string field as the echo carries it: absent and empty are
+    /// one answer, because the arm has no way to say "the server did not
+    /// send this".
+    fn echoed(value: &Option<String>) -> String {
+        value.clone().unwrap_or_default()
+    }
+
+    let named = |kind: &str, args| (kind.to_owned(), args);
+
+    if let Some(args) = exec.shell_args.as_option() {
+        return named(
+            "shell_args",
+            ExecArgs::Shell {
+                command: echoed(&args.command),
+                working_directory: echoed(&args.working_directory),
+            },
+        );
+    }
+    if let Some(args) = exec.shell_stream_args.as_option() {
+        return named(
+            "shell_stream_args",
+            ExecArgs::ShellStream {
+                command: echoed(&args.command),
+                working_directory: echoed(&args.working_directory),
+            },
+        );
+    }
+    if let Some(args) = exec.write_args.as_option() {
+        return named(
+            "write_args",
+            ExecArgs::Write { path: echoed(&args.path), file_text: echoed(&args.file_text) },
+        );
+    }
+    if let Some(args) = exec.delete_args.as_option() {
+        return named("delete_args", ExecArgs::Delete { path: echoed(&args.path) });
+    }
+    if let Some(args) = exec.grep_args.as_option() {
+        return named(
+            "grep_args",
+            ExecArgs::Grep {
+                pattern: echoed(&args.pattern),
+                path: echoed(&args.path),
+                glob: echoed(&args.glob),
+                case_insensitive: args.case_insensitive.unwrap_or(false),
+            },
+        );
+    }
+    if let Some(args) = exec.read_args.as_option() {
+        return named(
+            "read_args",
+            ExecArgs::Read {
+                redacted: false,
+                path: echoed(&args.path),
+                offset: args.offset,
+                limit: args.limit,
+            },
+        );
+    }
+    if let Some(args) = exec.redacted_read_args.as_option() {
+        return named(
+            "redacted_read_args",
+            ExecArgs::Read {
+                redacted: true,
+                path: echoed(&args.path),
+                offset: args.offset,
+                limit: args.limit,
+            },
+        );
+    }
+    if let Some(args) = exec.ls_args.as_option() {
+        return named("ls_args", ExecArgs::Ls { path: echoed(&args.path) });
+    }
+    if let Some(args) = exec.mcp_args.as_option() {
+        return named(
+            "mcp_args",
+            ExecArgs::Mcp(McpCall {
+                name: echoed(&args.name),
+                tool_name: echoed(&args.tool_name),
+                tool_call_id: echoed(&args.tool_call_id),
+                provider_identifier: echoed(&args.provider_identifier),
+                approval_only: args.smart_mode_approval_only.unwrap_or(false),
+                arguments: super::value::arguments(&args.args),
+            }),
+        );
+    }
+    if let Some(args) = exec.fetch_args.as_option() {
+        return named("fetch_args", ExecArgs::Fetch { url: echoed(&args.url) });
+    }
+
+    (exec_kind(exec), ExecArgs::Unmodelled)
+}
+
+/// Names the kind of an exec with no modelled answer arm.
+///
+/// Those kinds arrive as unknown fields, and the field number *is* the kind:
+/// the table is the shipped client's own `ExecServerMessage` oneof
+/// (`index.js@6302201`) minus the ten kinds [`super::request::refusal_answer`]
+/// answers in their own vocabulary, so it names exactly what still rides the throw. A number the
+/// table does not know is reported as itself — still enough to go derive,
+/// and still refusable, because the throw is keyed on the exec id rather
+/// than on the kind — and span_context (= 19) rides beside the oneof
 /// without being a kind, so it is passed over rather than blamed.
 fn exec_kind(exec: &proto::ExecRequest) -> String {
     let named = |number: u32| {
         Some(match number {
-            2 => "shell_args",
-            3 => "write_args",
-            4 => "delete_args",
-            5 => "grep_args",
-            7 => "read_args",
-            8 => "ls_args",
             9 => "diagnostics_args",
-            11 => "mcp_args",
-            14 => "shell_stream_args",
             16 => "background_shell_spawn_args",
             17 => "list_mcp_resources_exec_args",
             18 => "read_mcp_resource_exec_args",
-            20 => "fetch_args",
             21 => "record_screen_args",
             22 => "computer_use_args",
             23 => "write_shell_stdin_args",
+            27 => "execute_hook_args",
+            28 => "subagent_args",
+            30 => "force_background_shell_args",
+            31 => "force_background_subagent_args",
+            36 => "mcp_state_exec_args",
+            37 => "subagent_await_args",
+            38 => "smart_mode_classifier_args",
+            40 => "canvas_diagnostics_args",
+            41 => "shell_allowlist_precheck_args",
+            42 => "mcp_allowlist_precheck_args",
+            43 => "web_fetch_allowlist_precheck_args",
+            44 => "git_diff_request",
+            45 => "pi_read_args",
+            46 => "pi_bash_args",
+            47 => "pi_edit_args",
+            48 => "pi_write_args",
+            49 => "pi_grep_args",
+            50 => "pi_find_args",
+            51 => "pi_ls_args",
+            52 => "mini_swe_agent_bash_args",
+            53 => "conversation_search_args",
+            54 => "agent_store_conflict_args",
+            56 => "adopt_args",
             _ => return None,
         })
     };

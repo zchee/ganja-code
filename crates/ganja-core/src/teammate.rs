@@ -80,7 +80,7 @@
 //! | Door | Argument | Default |
 //! |---|---|---|
 //! | the `task` tool | `name`, `backend: "in-process" \| "ganja" \| "claude" \| "codex" \| "agy" \| "grok"` | `ganja` |
-//! | `/team spawn <name>` | `--backend in-process\|ganja\|claude\|codex\|agy\|grok` | `ganja` |
+//! | `/teammate spawn <name>` | `--backend in-process\|ganja\|claude\|codex\|agy\|grok` | `ganja` |
 //!
 //! **The backend is an explicit argument on both doors, never inferred**, and
 //! the default is a fixed value rather than a guess (**Dv-1**).
@@ -123,7 +123,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -147,6 +147,9 @@ use crate::provider::Provider;
 use crate::tool::Registry;
 use crate::{Engine, Storage};
 
+/// The two engine-native guards a lead's turn loop runs under while it holds
+/// a team: the continuation blocker and the name nag.
+pub(crate) mod discipline;
 /// Which session a name points at, and what a person is told about the name
 /// they typed (**D528**, **D529**'s reminder half).
 pub mod identity;
@@ -178,6 +181,9 @@ pub mod preamble;
 pub mod receipts;
 /// The §6.1 loop that drives one in-process teammate.
 pub mod runner;
+/// The engine's half of the shared task list: `ganja-team`'s store behind
+/// `ganja-tool`'s four task tools, acted on under one bound identity.
+pub mod tasklist;
 
 /// One teammate: the name it answers to, and the engine its turns run on.
 ///
@@ -385,7 +391,7 @@ pub const SPAWNED: &str = "the teammate is running; this instruction and \
 /// How many recent calls one teammate's ring holds (**D503**).
 ///
 /// Small on purpose: it is a live view of what a teammate is doing now, drawn
-/// under a row in `/team`, not a log. The full account of a teammate's work is
+/// under a row in `/teammate`, not a log. The full account of a teammate's work is
 /// its own transcript, which is a root session anybody can open.
 pub const RECENT_CALLS: usize = 8;
 
@@ -925,7 +931,7 @@ pub struct Lent {
     /// Where a member's permission dialogs are handed to the lead (**D-5**).
     /// [`None`] until a frontend attaches a surface, which every reader takes
     /// as a refusal rather than leaving an ask hanging.
-    pub dialogs: Option<tokio::sync::mpsc::Sender<posture::Forwarded>>,
+    pub dialogs: Option<posture::DialogSurface>,
     /// Where a member whose pane stopped running puts the fact, for the lead's
     /// next pass to retire it on ([`TeammateRegistry::take_exited`]).
     pub exits: tokio::sync::mpsc::UnboundedSender<Exited>,
@@ -974,21 +980,56 @@ pub struct Exited {
     /// assumed: a corpse tmux would not take away, or an id that now names
     /// somebody else's pane, is said rather than called closed.
     pub pane: PaneFate,
-    /// The last non-empty line the pane showed, where the pane was still this
-    /// member's to read and the capture found one: the CLI's own parting
-    /// words. Never a recycled pane's screen.
+    /// The last non-empty lines the pane showed, where the pane was still this
+    /// member's to read and the capture found any: the CLI's own parting
+    /// words, as the trailing block its writer bounded them to — a vendor's
+    /// refusal routinely spans two lines and the last of them points at the
+    /// first (`ganja_teammate_local::shim_tui::last_words`). Never a recycled
+    /// pane's screen.
     pub last_words: Option<String>,
 }
 
+/// What stands in for the block's newlines where one cannot be drawn.
+///
+/// The middle dot rather than a space, because the lines it joins are whole
+/// sentences and a reader has to be able to tell where one ended — it is the
+/// separator a member's ring row already puts between its own fields, so the
+/// two one-line teammate surfaces read alike.
+const WORDS_SEPARATOR: &str = " · ";
+
+/// A pane's last words on a surface that can draw exactly **one** line.
+///
+/// [`last_words`](Exited::last_words) is a trailing *block* — a vendor's
+/// refusal is routinely two lines, the last of them pointing at the first
+/// (`ganja_teammate_local::shim_tui::last_words`) — and the one-line surfaces
+/// do not merely wrap it, they lose text: the `/teammate` dialog's notice
+/// takes `notice().lines().next()`, which would drop both the `error:` line
+/// *and* the fate clause after it, and the status bar's notice segment renders
+/// through a `ratatui` `Span`, which filters a control character out with
+/// nothing in its place and runs the two sentences together.
+///
+/// So the flattening happens **here, at the producer**, and covers every such
+/// surface at once rather than being repaired in each. What is deliberately
+/// *not* flattened is [`Exited::last_words`] itself and the inbox mail built
+/// from it: those are prose a model reads, where the newline is the structure
+/// and there is no row budget to lose it to.
+#[must_use]
+pub fn last_words_inline(words: &str) -> String {
+    words.replace('\n', WORDS_SEPARATOR)
+}
+
 impl Exited {
-    /// The one sentence a frontend shows for this.
+    /// The one sentence a frontend shows for this — one **line**, whatever the
+    /// pane said: the block is flattened through [`last_words_inline`], whose
+    /// doc says which surfaces would otherwise lose text and why the repair
+    /// belongs here.
     #[must_use]
     pub fn notice(&self) -> String {
         let cli = backend_name(self.backend);
         let said = self
             .last_words
             .as_deref()
-            .map(|words| format!(" — last line: {words}"))
+            .map(|words| format!(" — last words: {}", last_words_inline(words)))
             .unwrap_or_default();
         format!(
             "{name} ({cli}) exited in its pane{said}; {fate}",
@@ -1325,6 +1366,17 @@ impl Spawned for InProcessMember {
         self.teammate
             .engine()
             .install_postbox(Arc::new(crate::subagent::Postbox::of(&registry, &self.teammate)));
+        // And the team's shared list under this teammate's own name, for the
+        // same reason and at the same moment: the team and the teammate first
+        // exist together here, and a list built anywhere else could be given a
+        // name its holder did not earn. The four tools it serves were lent by
+        // `Engine::teammate_tools`, which says why they join there rather than
+        // through the composition path the lead's own registration takes.
+        self.teammate.engine().install_tasks(Arc::new(tasklist::TeamTasks::of(
+            registry.root(),
+            registry.team(),
+            self.teammate.name(),
+        )));
 
         let forwarding =
             posture::Forwarding::new(Arc::clone(&self.teammate), self.lent.dialogs.clone());
@@ -1596,6 +1648,16 @@ pub struct TeammateRegistry {
     /// constructed with, because the value a frontend has to build is a channel
     /// it also drains, and a registry is useful to a test that has neither.
     dialogs: Mutex<Option<tokio::sync::mpsc::Sender<posture::Forwarded>>>,
+    /// How many of this team's forwarded dialogs the person has not answered
+    /// yet ([`TeammateRegistry::dialogs_waiting`]).
+    ///
+    /// Beside the surface rather than inside it because it outlives any one
+    /// sender: [`TeammateRegistry::forward_dialogs_to`] may be called again,
+    /// and a dialog raised through the old surface is still on the same
+    /// person's screen. Every send hands out a
+    /// [`Raised`](posture::Raised) against this counter and nothing else can
+    /// touch it, so it cannot drift from what was really carried.
+    waiting_dialogs: Arc<AtomicUsize>,
 }
 
 impl fmt::Debug for TeammateRegistry {
@@ -1656,6 +1718,7 @@ impl TeammateRegistry {
             exits,
             exited: Mutex::new(exited),
             dialogs: Mutex::new(None),
+            waiting_dialogs: Arc::default(),
         }
     }
 
@@ -1757,8 +1820,36 @@ impl TeammateRegistry {
     /// [`crate::teammate::posture::Forwarding`] offers an in-process one —
     /// `try_send`, never a wait — and a registry nobody attached a surface to
     /// answers [`None`], which both callers read as a refusal.
-    pub(crate) fn dialog_surface(&self) -> Option<tokio::sync::mpsc::Sender<posture::Forwarded>> {
-        self.dialogs.lock().expect("the dialog surface is never poisoned").clone()
+    pub(crate) fn dialog_surface(&self) -> Option<posture::DialogSurface> {
+        let lead = self.dialogs.lock().expect("the dialog surface is never poisoned").clone()?;
+
+        Some(posture::DialogSurface::new(lead, Arc::clone(&self.waiting_dialogs)))
+    }
+
+    /// How many of this team's forwarded dialogs are still in front of the
+    /// person, whichever kind of teammate raised them.
+    ///
+    /// Read by the lead's own turn loop, which must not push a synthetic
+    /// instruction onto a screen that is already asking somebody a question
+    /// (`crate::teammate::discipline::Facts::dialog_open`). Both carriers count
+    /// here — [`crate::teammate::posture::Forwarding`] for an in-process
+    /// teammate and [`crate::teammate::lead_inbox`] for a pane's frame — because
+    /// the person answering cannot tell the two apart either.
+    #[must_use]
+    pub fn dialogs_waiting(&self) -> usize {
+        self.waiting_dialogs.load(Ordering::Relaxed)
+    }
+
+    /// A child of the token [`TeammateRegistry::shutdown`] cancels, for work
+    /// that outlives the pass that started it.
+    ///
+    /// A child rather than a clone for [`TeammateRegistry::lend`]'s reason: a
+    /// holder may cancel its own without ending anybody else's. The one caller
+    /// is [`crate::teammate::lead_inbox`]'s wait on a forwarded dialog, which
+    /// has to end when the team does — and it is a child there so the arm can
+    /// never be the thing that cancels the registry.
+    pub(crate) fn cancellation(&self) -> CancellationToken {
+        self.cancel.child_token()
     }
 
     /// Where the team's documents live.
@@ -2735,7 +2826,7 @@ pub async fn unseed_inbox(inbox: PathBuf, seeded: Option<mailbox::Identity>, tea
     }
 }
 
-/// Folds a teammate's own event stream into the ring `/team` draws (**D503**).
+/// Folds a teammate's own event stream into the ring `/teammate` draws (**D503**).
 ///
 /// A running call is named the way a permission dialog would name it, which is
 /// the same trick `task`'s watcher plays: the tool describes its own arguments,

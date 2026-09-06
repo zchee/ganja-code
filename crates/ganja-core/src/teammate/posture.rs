@@ -8,7 +8,7 @@
 //! outside the project does. The plan is
 //! `.omc/plans/2026-08-17-teammates-first-landing.md`. Its other guard,
 //! §10.11-10 — a spawn that asks to skip dialogs is itself something to be
-//! asked about — was built as P25's `/team spawn --bypass` and **retired on
+//! asked about — was built as P25's `/teammate spawn --bypass` and **retired on
 //! 2026-08-22** (**D513**, user directive): there is one spawn request on both
 //! doors, a `task` call's and a person's, and nothing on it about dialogs, so
 //! there is no such spawn left to gate.
@@ -74,6 +74,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use futures::StreamExt as _;
 use tokio::sync::{mpsc, oneshot};
@@ -370,6 +371,100 @@ pub struct Forwarded {
     pub reply: oneshot::Sender<PermissionReply>,
 }
 
+/// Where a teammate's dialogs are handed to the lead, and how many of them the
+/// person has not answered yet.
+///
+/// The channel and the count are **one value** rather than two that sit beside
+/// each other, because two can disagree: the only way to send is the crate's
+/// own `hand_over`, and what a carried dialog answers with *is*
+/// its place in the count — a `Raised` guard whoever waits for the answer
+/// holds until it arrives. A dialog that was refused rather than carried is
+/// never counted, which is why the guard is minted on the success arm and
+/// nowhere else.
+///
+/// The count is what tells the lead's own turn loop that somebody is being
+/// asked something (`crate::teammate::discipline::Facts::dialog_open`): a
+/// teammate's question is on the very screen a continuation block would be
+/// pushed onto, and the person answering it is the person that block is for.
+#[derive(Clone, Debug)]
+pub struct DialogSurface {
+    lead: mpsc::Sender<Forwarded>,
+    waiting: Arc<AtomicUsize>,
+}
+
+impl DialogSurface {
+    /// The surface a registry hands out: the channel a frontend attached,
+    /// counted in that registry's own tally.
+    pub(crate) fn new(lead: mpsc::Sender<Forwarded>, waiting: Arc<AtomicUsize>) -> Self {
+        Self { lead, waiting }
+    }
+
+    /// Offers one dialog to the lead, **never waiting** for it to be taken.
+    ///
+    /// [`mpsc::Sender::try_send`]'s own answer with the count attached: a
+    /// carried dialog answers with the [`Raised`] guard that keeps it counted,
+    /// and a refused one answers with [why](NotOffered), which its caller
+    /// turns into the refusal it owes its own teammate. Counted before the send
+    /// and given back on the error arm by the guard's own drop, so the count
+    /// can never be short of what is really on the lead's screen.
+    pub(crate) fn hand_over(&self, dialog: Forwarded) -> Result<Raised, NotOffered> {
+        let raised = Raised::counting(&self.waiting);
+        self.lead.try_send(dialog).map_err(|undelivered| match undelivered {
+            mpsc::error::TrySendError::Full(_) => NotOffered::Full,
+            mpsc::error::TrySendError::Closed(_) => NotOffered::Closed,
+        })?;
+
+        Ok(raised)
+    }
+}
+
+/// Why a dialog could not be put in front of the lead.
+///
+/// The two reasons **without** the undelivered request they arrive attached to:
+/// neither carrier wants that value back — a question nobody could be shown is
+/// answered on the teammate's own side, by the request id the carrier already
+/// holds — and passing it along would make this a `Result` whose error is
+/// several times the size of its success.
+/// Named for what did not happen rather than `Undelivered`, which
+/// [`crate::tool::team::Undelivered`] already means in this crate about an
+/// entirely different failure — a message that did not reach a mailbox, where
+/// this is a question that was never put in front of anybody.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NotOffered {
+    /// The lead's queue is full: it is behind, and this ask is dropped while
+    /// it catches up.
+    Full,
+    /// The lead's side is gone, which is permanent.
+    Closed,
+}
+
+/// One forwarded dialog's place in the count, given back when it is answered.
+///
+/// Held by whichever task is waiting for the answer, and dropped once that wait
+/// has ended however it ends — a reply, a refusal, a cancel, or a lead that gave
+/// up and dropped the sender — and the answer has been written back to the
+/// teammate. All four are answers, and none of them leaves the person still
+/// being asked; the count falls only once the teammate has been told.
+#[derive(Debug)]
+pub(crate) struct Raised(Arc<AtomicUsize>);
+
+impl Raised {
+    /// Counts one dialog from now until this value is dropped.
+    fn counting(waiting: &Arc<AtomicUsize>) -> Self {
+        // Relaxed throughout: the count is the whole payload, and nothing is
+        // published alongside it for a reader to have to see first.
+        waiting.fetch_add(1, Ordering::Relaxed);
+
+        Self(Arc::clone(waiting))
+    }
+}
+
+impl Drop for Raised {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// Carries one teammate's dialogs to the lead — [`Posture::ForwardToLead`]'s
 /// in-process carrier, and the only carrier an in-process teammate has.
 ///
@@ -395,7 +490,7 @@ pub struct Forwarded {
 /// its receiver at all — costs the teammate a refusal and never its turn.
 pub struct Forwarding {
     teammate: Arc<Teammate>,
-    lead: Option<mpsc::Sender<Forwarded>>,
+    lead: Option<DialogSurface>,
     events: futures::stream::BoxStream<'static, Result<Event, Evicted>>,
 }
 
@@ -422,7 +517,7 @@ impl Forwarding {
     /// reason (`hand_over`); the two arms differ only in whether the surface
     /// was ever there.
     #[must_use]
-    pub fn new(teammate: Arc<Teammate>, lead: Option<mpsc::Sender<Forwarded>>) -> Self {
+    pub fn new(teammate: Arc<Teammate>, lead: Option<DialogSurface>) -> Self {
         let events = teammate.engine().subscribe_droppable();
 
         Self { teammate, lead, events }
@@ -487,36 +582,44 @@ impl Forwarding {
 /// pending-reply registry was made a registry for.
 async fn hand_over(
     teammate: &Arc<Teammate>,
-    lead: mpsc::Sender<Forwarded>,
+    lead: DialogSurface,
     request: PermissionId,
     event: Event,
     cancel: &CancellationToken,
 ) {
     let (sender, receiver) = oneshot::channel();
-    if let Err(undelivered) = lead.try_send(Forwarded {
+    let raised = match lead.hand_over(Forwarded {
         teammate: teammate.name().to_owned(),
         request: event,
         reply: sender,
     }) {
-        // Full and closed are one answer with two reasons, and the reason is
-        // worth a line: a lead that has gone is permanent, where a lead that
-        // is behind is this teammate's asks being dropped while it catches up.
-        tracing::warn!(
-            teammate = teammate.name(),
-            reason = match undelivered {
-                mpsc::error::TrySendError::Full(_) => "the lead's dialog queue is full",
-                mpsc::error::TrySendError::Closed(_) => "the lead's side is gone",
-            },
-            "a teammate's permission dialog was refused rather than made to wait"
-        );
-        answer(teammate, request, PermissionReply::Reject).await;
+        Ok(raised) => raised,
+        Err(undelivered) => {
+            // Full and closed are one answer with two reasons, and the reason
+            // is worth a line: a lead that has gone is permanent, where a lead
+            // that is behind is this teammate's asks being dropped while it
+            // catches up.
+            tracing::warn!(
+                teammate = teammate.name(),
+                reason = match undelivered {
+                    NotOffered::Full => "the lead's dialog queue is full",
+                    NotOffered::Closed => "the lead's side is gone",
+                },
+                "a teammate's permission dialog was refused rather than made to wait"
+            );
+            answer(teammate, request, PermissionReply::Reject).await;
 
-        return;
-    }
+            return;
+        }
+    };
 
     let teammate = Arc::clone(teammate);
     let cancel = cancel.clone();
     tokio::spawn(async move {
+        // Moved in rather than dropped here: what the count means is that the
+        // person still has this question in front of them, which is true until
+        // the answer below is given.
+        let _raised = raised;
         let reply = tokio::select! {
             // A cancel is the registry shutting the team down, and the
             // teammate's turn is still sitting in this dialog: its command
@@ -545,4 +648,7 @@ async fn answer(teammate: &Teammate, id: PermissionId, reply: PermissionReply) {
 
 #[cfg(test)]
 #[path = "posture_tests.rs"]
-mod tests;
+// Visible to the crate's other test modules for [`tests::forwarded`], which is
+// the one dialog fixture both this module's tests and the registry's need —
+// `teammate.rs` above already carries the same declaration for the same reason.
+pub(crate) mod tests;

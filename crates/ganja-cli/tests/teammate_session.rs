@@ -11,7 +11,7 @@
 //! # Why the teammate is built here rather than spawned through a door
 //!
 //! It is built with the constructor both doors — the `task` tool's `name`
-//! argument and the `/team spawn` dialog — call, so the row is what is under
+//! argument and the `/teammate spawn` dialog — call, so the row is what is under
 //! test, not the door. What is exercised end to end is everything from the
 //! row outward: the listing, the resume, and the transcript the resumed run
 //! appended to.
@@ -36,7 +36,7 @@
 //! request and leave — is this crate's and the TUI's, and is what the row a
 //! resume opens depends on. So the test launches the binary itself as the
 //! member, hands it a `TMUX_PANE` the way tmux would, and reads back the
-//! frames and the store. `/team spawn w1 --backend ganja` runs this very
+//! frames and the store. `/teammate spawn w1 --backend ganja` runs this very
 //! launch line, and AC-11's own binary (`teammate_pane.rs`) drives it
 //! through that door on a private server.
 //!

@@ -176,7 +176,7 @@ notifications = ["turn-complete", "approval-requested"]
 notification_method = "bel"
 
 [tui.statusline]
-elements = ["git", "model", "context", "rate", "held", "tokens", "session", "cwd", "todos"]
+elements = ["git", "model", "context", "rate", "held", "task-list", "tokens", "session", "cwd", "todos"]
 max_width = 160
 detail = true
 
@@ -443,6 +443,20 @@ fn the_schema_refuses_what_it_has_a_keyword_for() {
     // itself rides the kitchen sink above; these pin that this widening too
     // was by exactly one name.
     for near_miss in ["hold", "helds", "held-count"] {
+        let mut sink: Value = kitchen_sink();
+        sink["tui"]["statusline"]["elements"] = json!([near_miss]);
+        assert!(
+            !validator.is_valid(&sink),
+            "{near_miss:?} is not the name the loader accepts, and the schema must \
+             not accept it either"
+        );
+    }
+
+    // And for W5's shared-task-list element, whose near-misses matter more
+    // than either of theirs: `tasks` is a real name for a different count,
+    // so a spelling that is neither is a config that meant one of the two
+    // and must be told it named nothing.
+    for near_miss in ["tasklist", "task_list", "tasks-list"] {
         let mut sink: Value = kitchen_sink();
         sink["tui"]["statusline"]["elements"] = json!([near_miss]);
         assert!(

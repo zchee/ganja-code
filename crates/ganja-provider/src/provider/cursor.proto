@@ -9,13 +9,35 @@
 // plugin's generated descriptor, src/proto/agent_pb.ts at
 // a37a6ba9a6d6d8d176bb68248f59240271f46767 (MIT; see THIRD_PARTY_NOTICES.md),
 // each such field marked at its site. Nothing is copied wholesale: this is
-// the minimal set one one-shot turn and one model listing need, and the
-// server's oneofs are flattened to plain fields with the same numbers and
-// types, which encode identically on the wire.
+// the set one turn, the tool bridge under it (D552, the block at the end of
+// this file) and one model listing need, and the server's oneofs are
+// flattened to plain fields with the same numbers and types, which encode
+// identically on the wire.
 //
 // Message names are ganja's own — protobuf carries field numbers, never type
 // names, so only the service paths (constants in cursor.rs) must match the
 // server's spelling.
+//
+// A third source is the shipped cursor-agent itself, whose webpack bundle
+// `index.js` carries the @bufbuild/protobuf descriptors with every field
+// name, number and oneof membership intact. That bundle is minified onto a
+// handful of enormous lines, so a line number would say nothing: citations
+// to it are **byte offsets**, reproducible with
+// `grep -b -o -F '<anchor>' index.js`. Two bundles are cited below and every
+// offset belongs to exactly one of them:
+//
+//   * `2026.07.23-e383d2b` — the refusal control channel (ExecControl,
+//     ExecThrow, ExecStreamClose), read when D486 landed and left anchored
+//     there because its own prose cites those offsets.
+//   * `2026.09.02-c22c1a3` — everything D550 added: the exec kinds, the
+//     typed refusal arms that answer them, and the RequestContext
+//     switchboard. The read is recorded in
+//     `.omc/research/cursor/2026-09-04-cursor-agent-bundle-read.md`.
+//
+// The two anchor sets describe one protocol rather than two: the newer
+// bundle's ExecClientControlMessage (index.js@6299362) is the older one's
+// @6033532 field for field, and six weeks of releases added two fields and
+// renumbered nothing.
 //
 // Generated with `buf generate` against the buf.build/anthropics/buffa remote
 // plugin; the generated Rust is checked in beside this file under cursor/, and
@@ -66,15 +88,22 @@ message ModelEntry {
 // the client's exec answers — exec_client_message = 2 (agent_pb.ts:3603).
 // The kv channel's answers ride the same stream — kv_client_message = 3
 // (agent_pb.ts:3617). The other arms of that oneof belong to flows this
-// build does not speak yet, so only these four are modelled.
+// build does not speak yet, so only five are modelled: those three, the
+// control half below, and the run-level heartbeat.
 // The exec channel's *control* half — the one an exec is refused on rather
 // than answered — rides the same stream as exec_client_control_message = 5
-// (index.js@5927250; ExecControl below carries the citation convention).
+// (index.js@5927250; byte offsets, per the citation note above).
 message ClientMessage {
   RunRequest run_request = 1;
   ExecResponse exec_response = 2;
   KvResponse kv_response = 3;
   ExecControl exec_control = 5;
+  // The run-level liveness ping, sent every five seconds while the request
+  // body is open (index.js@6200066). It is what keeps a Run alive while this
+  // client is paused waiting for its own engine to run a bridged tool: a live
+  // 25-second hold on this ping alone was measured (D552; the recording is
+  // tests/fixtures/cursor-mcp-tools-probe.txt, (b)).
+  ClientHeartbeat client_heartbeat = 7;
 }
 
 // One turn's opening request, the minimal subset of the plugin's
@@ -87,6 +116,13 @@ message ClientMessage {
 // ordinary seat's turn carrying it (400 invalid_argument: "unknown option
 // '--system-prompt'"); the system prompt travels the context answer's
 // RequestContext.cloud_rule instead (the ExecResponse chain below).
+// The descriptor's system_prompt_spec = 29 is deliberately absent too, and for
+// a measured reason rather than a refusal: a live run carried
+// SystemPromptSpec{append} beside the ordinary prompt and the server neither
+// honored nor refused it — the reply ignored the marker and no error frame
+// arrived (D552, the recording's (d); bead `ganja-code-r7jk` holds the
+// follow-up). A field with no observable effect is a field this build does not
+// send.
 message RunRequest {
   // Present-but-empty on a fresh turn; the plugin always sends one.
   ConversationState conversation_state = 1;
@@ -94,22 +130,95 @@ message RunRequest {
   // The deprecated-but-still-read model description; the plugin sends both
   // this and requested_model, so this build does too.
   ModelEntry model_details = 3;
+  // The client-declared tool roster (index.js@6165910's field 4), which is how
+  // ganja's own tools reach cursor's agent loop (**D552**). Filled from
+  // `ChatRequest.tools` on every request that carries one, and absent on a
+  // request that carries none — a title or summary one-shot declares nothing,
+  // which is byte-identical to what this message was before the bridge.
+  McpTools mcp_tools = 4;
+  // The conversation this Run belongs to (index.js@6165910's field 5, a
+  // string the descriptor marks optional). The reference sends one on every
+  // request (proxy.ts:877), and the only composition measured accepted is one
+  // that carries it, so this build sends it too (**D553**): the value is
+  // `history::derived` of the first message's id — absent on a request with
+  // no messages, which nothing keys to. Stable within an uncompacted session;
+  // changes at compaction, because messages[0] becomes the summary; and
+  // differs on every title or summary one-shot, because each mints its own
+  // first message. All three are harmless: nothing is read back under it,
+  // and every request carries a complete state.
+  string conversation_id = 5;
   RequestedModel requested_model = 9;
 }
 
-// Prior-conversation state. Fieldless here on purpose: the plugin's
-// ConversationStateStructure (agent_pb.ts:2338) carries content-addressed
-// blob ids that only mean something to a client speaking the blob-serving
-// half of the stream, which this build does not yet. An empty message encodes
-// as an empty payload, marking the state present and holding nothing.
-message ConversationState {}
+// Prior-conversation state: the shipped client's ConversationStateStructure
+// (index.js@6159923), of which exactly the two fields the reference composes
+// are modelled (**D553**). Both are lists of content-addressed **blob ids**,
+// never the bytes they name — the raw 32-byte sha256 of a blob the server
+// fetches over the kv half of the stream (proxy.ts:726-733: inlining data
+// where an id is expected fails with "Blob not found"). The server builds the
+// model prompt from root_prompt_messages_json = 1, one JSON entry per system
+// prompt and per history message (proxy.ts:744-763); turns = 8 is the
+// structured account of the same history, one ConversationTurn per user
+// message (proxy.ts:765-803). The descriptor's other 34 fields — todos = 3,
+// pending_tool_calls = 4, token_details = 5, summary = 6, plan = 7, and 9
+// through 37 — are not modelled, because nothing here fills them: they are
+// what a server checkpoint carries back, and this build reads no checkpoint.
+// An empty message still encodes as an empty payload, marking the state
+// present and holding nothing, which is what every first turn sends.
+message ConversationState {
+  repeated bytes root_prompt_messages_json = 1;
+  repeated bytes turns = 8;
+}
 
-// What the turn asks the agent to do. Field number from the plugin's
-// ConversationAction oneof (agent_pb.ts:1568); the resume/cancel/plan arms
-// are not modelled.
+// One turn of the structured history: the shipped client's
+// ConversationTurnStructure (index.js@6144292), a oneof whose agent arm is
+// the only one the reference writes. shell_conversation_turn = 2 is not
+// modelled: nothing here composes one.
+message ConversationTurn {
+  AgentConversationTurn agent_conversation_turn = 1;
+}
+
+// The agent arm (index.js@6145463): the blob id of the turn's UserMessage
+// and the blob ids of its steps, in order. The descriptor's request_id = 3,
+// encrypted_model = 4, dynamic_tool_count = 5, send_message_step_indices = 6
+// and routed_model_display_name = 7 are not modelled — the reference sets
+// none of them (proxy.ts:768-771).
+message AgentConversationTurn {
+  bytes user_message = 1;
+  repeated bytes steps = 2;
+}
+
+// One step of a turn (index.js@6105443): the assistant's text. The oneof's
+// tool_call = 2 and thinking_message = 3 arms are not modelled: the reference
+// writes neither (a tool result is an assistant-text step prefixed
+// `[Tool Result]`, proxy.ts:793), and a typed tool_call is a 70-arm oneof
+// whose inner shapes nothing has measured.
+message ConversationStep {
+  AssistantMessage assistant_message = 1;
+}
+
+// The assistant's text (index.js@6139661). started_at_ms = 2 and
+// completed_at_ms = 3 are not modelled — the reference sets neither.
+message AssistantMessage {
+  string text = 1;
+}
+
+// What the turn asks the agent to do. Field numbers from the shipped client's
+// ConversationAction oneof (index.js@6106050): user_message_action = 1 is a
+// turn opened by the user, resume_action = 2 continues the conversation the
+// state describes without a new user message — the shape a request whose
+// newest message is the assistant's goes out under (**D553**), which on this
+// wire only a bridged step can leave. The cancel/summarize/plan arms and the
+// rest of that oneof are not modelled.
 message ConversationAction {
   UserMessageAction user_message_action = 1;
+  ResumeAction resume_action = 2;
 }
+
+// Fieldless on purpose: the descriptor's ResumeAction (index.js@6130643)
+// carries request_context = 2, and both the reference (proxy.ts:854) and the
+// shipped client's own retry-from-checkpoint send it empty.
+message ResumeAction {}
 
 // Field number from the plugin's UserMessageAction (agent_pb.ts:1636).
 message UserMessageAction {
@@ -118,7 +227,9 @@ message UserMessageAction {
 
 // The user's message, inline. Field numbers from the plugin's UserMessage
 // (agent_pb.ts:1814-1819); the context/mode fields beside them are not
-// modelled.
+// modelled. The same message is the payload of a history user **blob** —
+// AgentConversationTurn.user_message names its sha256 — with message_id then
+// derived from the transcript's own id rather than minted (**D553**).
 message UserMessage {
   string text = 1;
   string message_id = 2;
@@ -192,15 +303,167 @@ message TurnEnded {}
 // minimal subset of the plugin's ExecServerMessage (agent_pb.ts:6859) an
 // answered turn needs. id = 1 (:6861) and exec_id = 15 (:6868) are the echo
 // every answer must carry (proxy.ts:1307-1310); request_context_args = 10
-// (:6934) is the one kind this build answers with a *result*. The other arms
-// of the args oneof (:6885-:6997) are tools this build does not run for the
-// server; they survive decoding as unknown fields, whose numbers decode.rs
-// names in the refusal it sends back on the ExecControl channel below (D486)
-// — an unanswered exec is a hang, never an outcome.
+// (:6934) is the one kind this build answers with a *result*.
+//
+// The ten kinds beside it are the tools the server asks a client to run.
+// Eight of them are now **bridged to ganja's own tools** (**D552**): an
+// `mcp_args = 11` naming a tool this request declared, and the seven native
+// kinds of the redirect table (read, redacted read, streamed shell, grep, ls,
+// write, fetch), are surfaced to ganja's engine as ordinary tool calls, run
+// there under its permission engine and written into its transcript, and
+// answered here from the result. Nothing in this crate executes one; the
+// wire's whole part is translating an ask into a call and a call's outcome
+// back into the kind's own result frame. Every *other* kind keeps D550's
+// typed refusal in the kind's own vocabulary, and a kind with no modelled arm
+// keeps D486's throw.
+//
+// So each args message is modelled twice as far as it was: the members the
+// refusal echoes back — a path, a command, a url, a tool name — **and** the
+// members the redirect maps onto a ganja tool's arguments. A member this
+// build would neither read nor send is still left out and named in the
+// comment, because modelling it would claim an understanding of the kind this
+// build does not have. The numbers are the shipped client's own
+// ExecServerMessage oneof (index.js@6302201). Both shell kinds carry the
+// same ShellArgs and redacted_read_args = 29 carries the same ReadArgs as
+// read_args = 7, exactly as that descriptor declares them — which is why the
+// second number costs no second message.
+//
+// Kinds outside this list survive decoding as unknown fields, whose numbers
+// decode.rs names in the ExecControl throw it falls back to — D486's channel,
+// now the catch-all rather than the whole answer. An unanswered exec is a
+// hang, never an outcome, and that is what the catch-all keeps true for a
+// kind newer than this file.
 message ExecRequest {
   uint32 id = 1;
+  ShellArgs shell_args = 2;
+  WriteArgs write_args = 3;
+  DeleteArgs delete_args = 4;
+  GrepArgs grep_args = 5;
+  ReadArgs read_args = 7;
+  LsArgs ls_args = 8;
   ContextArgs request_context_args = 10;
+  McpArgs mcp_args = 11;
+  ShellArgs shell_stream_args = 14;
   string exec_id = 15;
+  FetchArgs fetch_args = 20;
+  ReadArgs redacted_read_args = 29;
+}
+
+// What a shell exec asks for, narrowed to the two members its refusal echoes:
+// command = 1 and working_directory = 2 (index.js@6535128). The twenty-one
+// beside them describe how to *run* the command, which is the one thing this
+// build does not do with it.
+message ShellArgs {
+  string command = 1;
+  string working_directory = 2;
+}
+
+// index.js@6604943: path = 1 and file_text = 2, the two the `write` redirect
+// maps onto that tool's `filePath` and `content`. Beside them the descriptor
+// carries tool_call_id = 3, return_file_content_after_write = 4, a
+// file_bytes = 5 alternative to the text and an encoding_hint = 6: a byte
+// payload this bridge has no channel for, and flags about a write ganja's own
+// tool decides for itself.
+message WriteArgs {
+  string path = 1;
+  string file_text = 2;
+}
+
+// index.js@6284920: path = 1, beside a tool_call_id = 2.
+message DeleteArgs {
+  string path = 1;
+}
+
+// index.js@6326295: the four members the `grep` redirect maps — pattern = 1
+// onto that tool's `pattern`, path = 2 onto its `path`, glob = 3 onto its
+// `include`, and case_insensitive = 8, which ganja's grep has no argument for
+// and which the redirect therefore folds into the pattern as a leading
+// `(?i)`. The twelve beside them (output_mode = 4, context_before = 5,
+// context_after = 6, context = 7, type = 9, head_limit = 10, multiline = 11,
+// sort = 12, sort_ascending = 13, tool_call_id = 14, sandbox_policy = 15,
+// offset = 16) shape a search ganja's own tool does not take instructions
+// about: it always answers matching lines, capped by its own limit.
+message GrepArgs {
+  string pattern = 1;
+  string path = 2;
+  string glob = 3;
+  bool case_insensitive = 8;
+}
+
+// index.js@6431203: path = 1, and the line window offset = 4 / limit = 5 that
+// the `read` redirect passes straight through to that tool's own `offset` and
+// `limit`. One message for both read kinds, because the shipped descriptor
+// gives read_args = 7 and redacted_read_args = 29 the same type. Beside them:
+// tool_call_id = 2 and an encoding_hint = 6 for bytes this bridge answers in
+// text.
+message ReadArgs {
+  string path = 1;
+  int32 offset = 4;
+  uint32 limit = 5;
+}
+
+// index.js@6357464: path = 1, the only member the `glob` redirect maps.
+// Beside it the descriptor carries an ignore = 2 list, tool_call_id = 3,
+// sandbox_policy = 4 and timeout_ms = 5. The ignore list is the one worth
+// naming: ganja's `glob` has no such argument — it excludes what `ignore`'s
+// own defaults exclude and nothing else — so a list this build decoded and
+// then silently disobeyed would claim a narrowing it does not perform.
+message LsArgs {
+  string path = 1;
+}
+
+// index.js@6371504: the model calling a tool this client declared. Every
+// member here is **read** — none is ever sent — and together they are the
+// whole of what decides how the call is answered (**D552**):
+//
+//   * name = 1 and tool_name = 5 — the tool called. The bridge matches on
+//     tool_name and falls back to name; the shipped client's own builder sets
+//     both from one declaration (index.js@5699717), and a live run confirmed
+//     both arrive.
+//   * args = 2 — the argument values, `map<string, google.protobuf.Value>` in
+//     the descriptor, spelled here as the repeated entry message a protobuf
+//     map *is* (the JsonStruct precedent below). Decoded into the JSON object
+//     the engine's tool call carries; a value shape the decoder cannot read
+//     fails that one call with McpResult.error and never the turn.
+//   * tool_call_id = 3 — the id the call is answered under, and the id the
+//     engine's transcript part carries, so the two ends name one call.
+//   * provider_identifier = 4 — who serves the tool. `"ganja"` is what this
+//     client declares and what it answers for; anything else present is a
+//     call meant for somebody else and is answered server_not_found.
+//   * smart_mode_approval_only = 7 — a preflight asking whether the call
+//     *would* be allowed. Answered `approved` with nothing executed; the real
+//     call that follows is what meets the permission dialog.
+//   * server_identifier = 9 and skip_approval = 8 — decoded by the generated
+//     type and read by nothing. A present server_identifier is the measured
+//     norm on a `"ganja"` call (the recording's (a)) and refuses nothing; what
+//     a call may skip is ganja's permission engine's to decide, never the
+//     caller's, so skip_approval is not consulted either.
+//
+// Beside them the descriptor carries smart_mode_approval = 6, which arrived
+// on none of the recorded runs and which this build neither reads nor sends.
+message McpArgs {
+  string name = 1;
+  repeated McpArgEntry args = 2;
+  string tool_call_id = 3;
+  string provider_identifier = 4;
+  string tool_name = 5;
+  bool smart_mode_approval_only = 7;
+  bool skip_approval = 8;
+  string server_identifier = 9;
+}
+
+// One entry of that argument map: the synthesized MapEntry protobuf generates
+// for a `map<string, google.protobuf.Value>`, spelled out for JsonStruct's
+// reason — byte-identical to the map, and ordered.
+message McpArgEntry {
+  string key = 1;
+  JsonValue value = 2;
+}
+
+// index.js@6313150: url = 1, which the FetchError arm echoes back beside the
+// reason.
+message FetchArgs {
+  string url = 1;
 }
 
 // Fieldless on purpose: the plugin's RequestContextArgs (agent_pb.ts:9874)
@@ -210,12 +473,29 @@ message ContextArgs {}
 
 // The client's half of the exec exchange: the plugin's ExecClientMessage
 // (agent_pb.ts:7014) — id = 1 (:7016), exec_id = 15 (:7023),
-// request_context_result = 10 (:7082) — narrowed to the one result this
-// build sends.
+// request_context_result = 10 (:7082) — beside the ten typed refusals D550
+// answers the tool kinds with.
+//
+// **A result's number equals its args' number.** That is the shipped
+// client's own ExecClientMessage (index.js@6305844), confirmed kind by kind
+// for every row here; the two rows where it does not hold there
+// (pi_read_result = 46, mini_swe_agent_bash_result = 55) belong to families
+// this build models none of. So this table reads as ExecRequest's mirror,
+// and a reader who has checked one number has checked both.
 message ExecResponse {
   uint32 id = 1;
+  ShellResult shell_result = 2;
+  WriteResult write_result = 3;
+  DeleteResult delete_result = 4;
+  GrepResult grep_result = 5;
+  ReadResult read_result = 7;
+  LsResult ls_result = 8;
   ContextResult request_context_result = 10;
+  McpResult mcp_result = 11;
+  ShellStream shell_stream = 14;
   string exec_id = 15;
+  FetchResult fetch_result = 20;
+  ReadResult redacted_read_result = 29;
 }
 
 // The plugin's RequestContextResult oneof (agent_pb.ts:9895) narrowed to
@@ -231,35 +511,432 @@ message ContextSuccess {
   RequestContext request_context = 1;
 }
 
+// The shipped ShellResult (index.js@6536782) narrowed to rejected = 4 — the
+// arm its own handler returns when the person at the prompt declines
+// (index.js@5329600). Its success, failure, timeout, spawn_error and
+// permission_denied arms all describe a command that ran or tried to, which
+// is not what happened here.
+message ShellResult {
+  ShellRejected rejected = 4;
+}
+
+// The one streamed kind's events (index.js@6541690). A running shell writes
+// many of these and then a stream close; a refused one writes exactly the
+// rejected = 5 event and then that close.
+//
+// Since **D552** a `shell_stream_args` whose turn declared `bash` is bridged
+// to that tool, so this build writes the served shape too — but only its ends:
+// the whole output as one stdout = 1 event and then exit = 3. Ganja's `bash`
+// returns when the command is done, so there is no output *stream* here to
+// forward; a redirect that emitted output line by line would be inventing a
+// cadence it never observed. stderr = 2 is where a failed call's message goes,
+// because the model on the other end reads that arm as the command's own
+// complaint. The five arms beside them — start = 4, permission_denied = 6,
+// backgrounded = 7, hook_context = 8, sandbox_unsupported = 9 — describe a
+// shell this client is not running.
+message ShellStream {
+  ShellStreamStdout stdout = 1;
+  ShellStreamStderr stderr = 2;
+  ShellStreamExit exit = 3;
+  ShellRejected rejected = 5;
+}
+
+// index.js@6537738: data = 1, the bytes the command wrote. Modelled as a
+// string because that is what a ganja tool's output is.
+message ShellStreamStdout {
+  string data = 1;
+}
+
+// index.js@6538167: the same shape on the other descriptor.
+message ShellStreamStderr {
+  string data = 1;
+}
+
+// index.js@6538623: code = 1, the command's exit status, which is the whole of
+// what this bridge can say about how a `bash` call ended. Beside it: cwd = 2,
+// output_location = 3, aborted = 4, abort_reason = 5 and
+// local_execution_time_ms = 6 — facts about a run this build performed through
+// its own tool and does not report twice.
+message ShellStreamExit {
+  uint32 code = 1;
+}
+
+// index.js@6545830. The first two members are echoed back from the args so
+// the server's loop reads *which* command was refused; reason = 3 is ganja's
+// sentence. is_readonly = 4 is not modelled: it states a permission verdict —
+// the shipped client sets it from the rule that blocked the call — and this
+// refusal makes no such verdict, so it is left absent, which the wire reads
+// as false.
+message ShellRejected {
+  string command = 1;
+  string working_directory = 2;
+  string reason = 3;
+}
+
+// The shipped WriteResult (index.js@6605625): success = 1 for a bridged
+// `write` that landed, error = 5 for one that ran and failed, and rejected = 6
+// for one that was declined — by a permission rule, by the person at the
+// dialog, or by ganja's own read-before-write rule, which is a refusal the
+// model can act on by asking for a read first (D552, AC-16). Its
+// permission_denied = 3 and no_space = 4 arms are verdicts this client does
+// not reach: a denial arrives here as ganja's own refusal sentence, which
+// rejected = 6 carries whole.
+message WriteResult {
+  WriteSuccess success = 1;
+  WriteError error = 5;
+  WriteRejected rejected = 6;
+}
+
+// index.js@6606337: the path echoed back, and the two counts a client reports
+// about what it wrote — both computed from the text the server sent, because
+// that is exactly what was written. file_content_after_write = 4 is not
+// modelled: it answers a flag (WriteArgs.return_file_content_after_write) this
+// build does not read.
+message WriteSuccess {
+  string path = 1;
+  int32 lines_created = 2;
+  int32 file_size = 3;
+}
+
+// index.js@6608019: the path echoed back beside what went wrong.
+message WriteError {
+  string path = 1;
+  string error = 2;
+}
+
+// index.js@6608494: the path echoed back, and ganja's reason.
+message WriteRejected {
+  string path = 1;
+  string reason = 2;
+}
+
+// The shipped DeleteResult (index.js@6285400) narrowed to rejected = 6 —
+// the arm index.js@5487600 builds on a decline, and the site this whole
+// answer shape was read from.
+message DeleteResult {
+  DeleteRejected rejected = 6;
+}
+
+// index.js@6288754.
+message DeleteRejected {
+  string path = 1;
+  string reason = 2;
+}
+
+// The shipped GrepResult (index.js@6327477) is success = 1 and error = 2 and
+// nothing else: this kind has **no rejected arm**, so both a refusal and a
+// failure travel as the error, which is the only arm the server's loop can be
+// told anything on. That is why a denied `grep` reads to the model as an error
+// carrying ganja's own refusal sentence rather than as a decline — the wire
+// has nowhere else to put it.
+message GrepResult {
+  GrepSuccess success = 1;
+  GrepError error = 2;
+}
+
+// index.js@6328455: the query echoed back, the mode the answer is in, and the
+// results themselves. This build always answers `content` — matching lines,
+// which is what ganja's `grep` produces — so output_mode = 3 is the constant
+// "content" rather than an echo of a mode the request asked for.
+// active_editor_result = 5 describes an editor this client is not.
+message GrepSuccess {
+  string pattern = 1;
+  string path = 2;
+  string output_mode = 3;
+  repeated GrepWorkspaceEntry workspace_results = 4;
+}
+
+// One entry of `workspace_results`, which the descriptor spells
+// `map<string, GrepUnionResult>`; the entry message a protobuf map *is*, for
+// JsonStruct's reason.
+message GrepWorkspaceEntry {
+  string key = 1;
+  GrepUnionResult value = 2;
+}
+
+// index.js@6329106: which shape of answer this is. Only content = 3 is
+// modelled — count = 1 and files = 2 answer output modes this build never
+// selects, because ganja's `grep` returns matching lines and nothing else.
+message GrepUnionResult {
+  GrepContentResult content = 3;
+}
+
+// index.js@6331826: the matches, grouped by file, and how many lines matched.
+// The five flags beside them — client_truncated = 4, ripgrep_truncated = 5,
+// head_limit_applied = 6, offset_applied = 7 and a total_lines = 2 counting
+// lines scanned — describe a search whose limits were the server's to set, and
+// this one's limits are ganja's tool's.
+message GrepContentResult {
+  repeated GrepFileMatch matches = 1;
+  int32 total_matched_lines = 3;
+}
+
+// index.js@6332594: one file and the lines that matched in it.
+message GrepFileMatch {
+  string file = 1;
+  repeated GrepContentMatch matches = 2;
+}
+
+// index.js@6333140: the line number and its text. content_truncated = 3 and
+// is_context_line = 4 are not modelled: ganja's grep clamps a long line
+// without saying so at this granularity, and it returns no context lines.
+message GrepContentMatch {
+  int32 line_number = 1;
+  string content = 2;
+}
+
+// index.js@6327973: one string, no echo of the query.
+message GrepError {
+  string error = 1;
+}
+
+// The shipped ReadResult (index.js@6431826): success = 1, error = 2 and
+// rejected = 3. One message for both read kinds, matching ReadArgs above. Its
+// file_not_found = 4, permission_denied = 5 and invalid_file = 6 arms are
+// verdicts a client reaches by looking at the file itself; here the file was
+// read by ganja's own `read`, whose own sentence about a missing or unreadable
+// file rides the error arm as the model would have seen it anywhere else.
+message ReadResult {
+  ReadSuccess success = 1;
+  ReadError error = 2;
+  ReadRejected rejected = 3;
+}
+
+// index.js@6432674: the path, the text, how many lines the file has, and
+// whether the answer was cut or windowed. content = 2 is the `read` tool's own
+// output verbatim — line-numbered, with its own header and footer — because
+// that is what ganja's model would have read, and rewriting it here would make
+// the bridged answer differ from the un-bridged one. Beside them: a
+// file_size = 4 and an output_blob_id = 7 spill channel this build does not
+// use, and the data = 5 bytes alternative to the text.
+message ReadSuccess {
+  string path = 1;
+  string content = 2;
+  int32 total_lines = 3;
+  bool truncated = 6;
+  bool range_applied = 8;
+}
+
+// index.js@6433448: the path echoed back beside what went wrong.
+message ReadError {
+  string path = 1;
+  string error = 2;
+}
+
+// index.js@6433922.
+message ReadRejected {
+  string path = 1;
+  string reason = 2;
+}
+
+// The shipped LsResult (index.js@6358100): success = 1, error = 2 and
+// rejected = 3; its timeout = 4 arm belongs to a walk this client does not run
+// on a clock of its own.
+message LsResult {
+  LsSuccess success = 1;
+  LsError error = 2;
+  LsRejected rejected = 3;
+}
+
+// index.js@6358693: the tree, whose root is the directory that was asked for.
+message LsSuccess {
+  LsDirectoryTreeNode directory_tree_root = 1;
+}
+
+// index.js@6359257: one directory. What a bridged `ls` can fill is the root's
+// own path, the files directly in it, the directories a second level of the
+// glob revealed, and the count — with children_were_processed = 4 left **false**,
+// which is the honest statement about a listing built from one glob rather
+// than from a walk: the child directories are named, and nothing was read
+// inside them. Beside them: a full_subtree_extension_counts = 5 map that
+// summarizes a recursive walk this build did not perform.
+message LsDirectoryTreeNode {
+  string abs_path = 1;
+  repeated LsDirectoryTreeNode children_dirs = 2;
+  repeated LsFile children_files = 3;
+  bool children_were_processed = 4;
+  int32 num_files = 6;
+}
+
+// index.js@6359990, the shipped node's nested File. Flattened to a message of
+// its own the way every oneof in this file is — protobuf carries neither
+// nesting nor names on the wire. name = 1 is the entry's own name;
+// terminal_metadata = 2 describes an editor decoration this client has no view
+// to draw.
+message LsFile {
+  string name = 1;
+}
+
+// index.js@6360498: the path echoed back beside what went wrong.
+message LsError {
+  string path = 1;
+  string error = 2;
+}
+
+// index.js@6360970.
+message LsRejected {
+  string path = 1;
+  string reason = 2;
+}
+
+// The shipped McpResult (index.js@6372351), and since **D552** this build
+// answers on five of its arms rather than one, because it now publishes a
+// roster and can say which of these is true:
+//
+//   * success = 1 — the bridged tool ran. `is_error` inside it separates a
+//     call that produced an answer from one that ran and failed, which is
+//     cursor's own shape for a failed tool.
+//   * rejected = 3 — the call was declined: a permission rule, or the person
+//     at the dialog. The two sentences that say so are
+//     `ganja_tool::permission_text`'s, which is how a wire tells a refusal
+//     from a failure without seeing the engine.
+//   * tool_not_found = 5 — a name outside the roster *this request* declared,
+//     answered with that roster. Before the bridge this arm was deliberately
+//     unmodelled, because an empty available_tools list would have claimed a
+//     roster that did not exist; now the list is real.
+//   * server_not_found = 6 — a `provider_identifier` that is not `"ganja"`:
+//     a call meant for a server this client does not serve, never executed.
+//   * approved = 7 — the answer to a `smart_mode_approval_only` preflight.
+//     Nothing runs on that path; the real call that follows is what meets the
+//     permission dialog.
+//
+// error = 2 carries a failure of the *bridge* rather than of a tool — an
+// argument map this build could not decode — which is a different thing from
+// a tool that ran and failed and is why both exist. Its permission_denied = 4
+// arm stays unmodelled: a denial reaches this wire as ganja's own refusal
+// sentence, and rejected = 3 carries that sentence whole.
+message McpResult {
+  McpSuccess success = 1;
+  McpError error = 2;
+  McpRejected rejected = 3;
+  McpToolNotFound tool_not_found = 5;
+  McpServerNotFound server_not_found = 6;
+  McpApproved approved = 7;
+}
+
+// index.js@6376616: error = 1.
+message McpError {
+  string error = 1;
+}
+
+// index.js@6373550: the name that was called, and the roster it is not in.
+message McpToolNotFound {
+  string name = 1;
+  repeated string available_tools = 2;
+}
+
+// index.js@6374062: the identifier that was named, and the servers this client
+// does serve — which is exactly one, `"ganja"`.
+message McpServerNotFound {
+  string name = 1;
+  repeated string available_servers = 2;
+}
+
+// index.js@6373140: fieldless. The arrival is the whole answer.
+message McpApproved {}
+
+// index.js@6377058: reason = 1, and an is_readonly = 2 not modelled for
+// ShellRejected's reason.
+message McpRejected {
+  string reason = 1;
+}
+
+// The shipped FetchResult (index.js@6313628) is success = 1 and error = 2, so
+// like grep this kind has no rejected arm and both a refusal and a failure
+// travel as the error.
+message FetchResult {
+  FetchSuccess success = 1;
+  FetchError error = 2;
+}
+
+// index.js@6314177: the url echoed back and what was fetched. Its
+// status_code = 3 and content_type = 4 are left **absent** rather than guessed:
+// ganja's `webfetch` answers with the page's text and reports neither, so
+// filling them would be this wire inventing a fact about somebody else's
+// response.
+message FetchSuccess {
+  string url = 1;
+  string content = 2;
+}
+
+// index.js@6314742: the url echoed back beside ganja's reason.
+message FetchError {
+  string url = 1;
+  string error = 2;
+}
+
 // The plugin's RequestContext (agent_pb.ts:10232) narrowed to cloud_rule =
 // 16 (:10286) — the prompt channel cursor's agent actually honors: the
 // plugin's own answer records that plain system messages are ignored
-// server-side (proxy.ts:1133). Its other members are all empty on that
-// answer, and an absent member encodes identically to an empty one, so this
-// one field is the whole message a bare turn needs.
+// server-side (proxy.ts:1133).
+//
+// Four members sit beside it: tools = 7, the roster's second channel (D552,
+// on the member itself), and the three of the **switchboard** (D550) — per-turn
+// booleans on the shipped RequestContext (index.js@6467399) by which a
+// client narrows what the server's loop will ask it for. Only what
+// demonstrably generates an exec this build cannot serve is set, because
+// each one off is a capability the seat is paying for and not getting:
+//
+//   * mcp_file_system_options = 23 — the MCP filesystem meta-tool, whose
+//     descriptor and filesystem execs this build serves none of.
+//   * web_fetch_enabled = 24 — whether to generate fetch_args = 20. Not a
+//     literal: the wire sends it true exactly when the request declared a
+//     tool roster, which is when a fetch has somewhere to be redirected to.
+//   * read_lints_enabled = 35 — drives diagnostics_args = 9, a kind with no
+//     ganja equivalent at all: this build's diagnostics ride edit and write
+//     results, not a request from a provider.
+//
+// **web_search_enabled = 17 is deliberately absent**, and a test in
+// request_tests.rs asserts it stays absent so a later tidy-up reddens rather
+// than lands: server-side search may need no client exec at all, and turning
+// it off on suspicion would cost a capability for nothing.
+// search_conversations_enabled = 50, send_message_enabled = 51 and
+// mcp_meta_tool_options = 34 are absent for the plainer reason that absent
+// already means off and their execs are outside everything this build
+// models. Every other member of that message is empty on the plugin's own
+// answer, and an absent member encodes identically to an empty one.
 message RequestContext {
   string cloud_rule = 16;
+  // The roster's *second* channel, refreshed on every context answer
+  // (index.js@6467399's field 7) and carrying exactly what the run request's
+  // mcp_tools = 4 carried. Both are filled because the shipped client fills
+  // both; empty — and therefore absent, an empty repeated field encoding to
+  // nothing — on a request that declared no tools.
+  repeated McpToolDefinition tools = 7;
+  McpFileSystemOptions mcp_file_system_options = 23;
+  bool web_fetch_enabled = 24;
+  bool read_lints_enabled = 35;
 }
 
-// The client's control half of the exec exchange: the channel an exec is
-// *refused* on rather than answered, and the one this build refuses every
-// tool exec through (D486, declared in cursor/request.rs).
+// The shipped McpFileSystemOptions (index.js@6392361) narrowed to
+// enabled = 1; its workspace_project_dir and mcp_descriptors describe the
+// filesystem this build is declining to lend.
+message McpFileSystemOptions {
+  bool enabled = 1;
+}
+
+// The client's control half of the exec exchange: the channel that closes
+// every exec, and on which a kind with no modelled result arm is refused
+// (D486's throw, now the catch-all — declared in cursor/request.rs).
 //
-// Derived from the shipped cursor client itself — the bundled agent at
-// ~/.local/share/cursor-agent/versions/2026.07.23-e383d2b, whose webpack
-// bundle `index.js` carries the @bufbuild/protobuf descriptors with every
-// field name, number and oneof membership intact. That bundle is minified
-// onto a handful of enormous lines, so a line number would say nothing:
-// citations here are **byte offsets** into `index.js`, reproducible with
-// `grep -b -o -F '<anchor>' index.js`. This is the same role
-// `agent_pb.ts:<line>` plays above, against a source that ships no
-// unminified descriptor.
+// Derived from the shipped cursor client itself; the byte offsets in this
+// message and the two below it are the `2026.07.23-e383d2b` bundle's, per
+// the header's citation note.
 //
 // The wrapper is the client's ExecClientControlMessage (index.js@6033532),
 // whose whole oneof is stream_close = 1, throw = 2 and heartbeat = 3.
-// The heartbeat is a 3-second liveness ping for an exec that is *running*
-// (index.js@4272747), which is a state this build never enters, so it is not
-// modelled.
+//
+// **The heartbeat = 3 arm is deliberately not modelled**, and since D552 that
+// is a measurement rather than an inference. It is a 3-second liveness ping
+// for an exec that is *running* (index.js@4272747), which is exactly the state
+// a bridged call now puts this client in for as long as ganja's engine takes
+// to run the tool — so the question stopped being hypothetical. A live run
+// held one exec open for 25 seconds sending nothing but the **run**-level
+// ClientHeartbeat, and the turn survived; a second run added exec heartbeats
+// at the shipped client's own three-second cadence and changed nothing
+// observable (D552's Dv-10; the recording is
+// tests/fixtures/cursor-mcp-tools-probe.txt, (b) and (b')). The server neither
+// requires this ping nor objects to it, so this build does not send it.
 message ExecControl {
   ExecStreamClose stream_close = 1;
   ExecThrow throw = 2;
@@ -334,3 +1011,135 @@ message GetBlobResult {
 // holds only an optional error (= 1, :7908) its own ack never sets
 // (proxy.ts:1113-1117) — the empty message is the ack.
 message SetBlobResult {}
+
+// ---------------------------------------------------------------------------
+// THE TOOL BRIDGE — how ganja's own tools reach cursor's agent loop (D552).
+//
+// Everything below this line belongs to the client-declared MCP tool channel:
+// the roster this client publishes, the `google.protobuf.Value` shapes an
+// argument map is spelled in, the run-level heartbeat that keeps a Run alive
+// while a bridged call runs, and the success arm a served call answers on.
+//
+// The five facts no bundle read could answer here were **measured** by a live
+// probe before any of this shipped, and the recording is
+// `crates/ganja-provider/tests/fixtures/cursor-mcp-tools-probe.txt`: the server
+// does offer and call a tool a third-party client declares (a), a 25-second
+// client-side pause inside one exec survives on the run heartbeat alone (b),
+// with or without exec heartbeats (b′), a typed refusal on a native kind keeps
+// the turn alive (c), `system_prompt_spec` is silently ignored (d), and either
+// schema field alone works (e).
+//
+// Every number below was re-derived from the `2026.09.02-c22c1a3` bundle's own
+// descriptors before it was written — the byte offsets are that bundle's, per
+// the header's citation note — rather than copied from the research note, so a
+// wrong number is a wrong reading of the bundle rather than a stale quote.
+// ---------------------------------------------------------------------------
+
+// The client-declared tool roster, which the shipped client fills on the run
+// request itself (index.js@4574466): AgentRunRequest.mcp_tools = 4, of type
+// McpTools (index.js@6389679), whose whole content is the repeated definition
+// at field 1. Declared before the first token, so it does not depend on
+// winning the request_context_args race.
+message McpTools {
+  repeated McpToolDefinition mcp_tools = 1;
+}
+
+// One declared tool (index.js@6389002). The schema travels on **either**
+// input_schema = 3, a google.protobuf.Value, **or** input_schema_json = 6, the
+// same schema as a JSON string — the shipped client's own builder picks one
+// (index.js@5699717).
+//
+// Both are modelled and **only field 6 is ever filled**. The live probe
+// declared the same schema three ways — field 3 alone, field 6 alone, and both
+// — and the server called the tool every time ((e), "BOTH"), so the choice is
+// free and this build makes it on the plainer ground: a ganja tool's schema is
+// already a JSON string, and sending it as one cannot disagree with itself the
+// way two encodings of it could. Field 3 stays modelled because it costs one
+// line and because the day a server starts requiring it, the shape to fill is
+// already here.
+message McpToolDefinition {
+  string name = 1;
+  string description = 2;
+  JsonValue input_schema = 3;
+  string provider_identifier = 4;
+  string tool_name = 5;
+  string input_schema_json = 6;
+}
+
+// `google.protobuf.Value` (index.js@3928104), flattened the way every oneof in
+// this file is: same numbers, same types, identical on the wire. Modelled here
+// rather than imported because `buffa` ships no pre-generated well-known types
+// — it is codegen-only — so an import would add a second generated file and a
+// second drift surface for a message this build needs six fields of.
+//
+// null_value = 1 is declared an enum in the descriptor; an enum and an int32
+// are the same varint on the wire, and `google.protobuf.NullValue` has exactly
+// one member (0), so nothing is lost by spelling it as the number it is.
+//
+// Read in both directions, and total in both on purpose. Outbound it encodes a
+// tool's schema; inbound it decodes the argument values a model called with,
+// where a variant silently dropped would hand a tool arguments the model did
+// not write. So the decoder refuses a shape it cannot read — failing that one
+// call — rather than guessing a value for it.
+message JsonValue {
+  int32 null_value = 1;
+  double number_value = 2;
+  string string_value = 3;
+  bool bool_value = 4;
+  JsonStruct struct_value = 5;
+  JsonList list_value = 6;
+}
+
+// `google.protobuf.Struct` (index.js@3926700) is `map<string, Value> fields =
+// 1`, and a protobuf map *is* a repeated entry message with key = 1 and
+// value = 2 — so this spelling is byte-identical to the map and, unlike a map,
+// preserves the order it was built in. That determinism is what lets a test
+// assert the declaration's bytes rather than assert around a HashMap.
+message JsonStruct {
+  repeated JsonField fields = 1;
+}
+
+// One entry of that map: the synthesized MapEntry protobuf generates for it.
+message JsonField {
+  string key = 1;
+  JsonValue value = 2;
+}
+
+// `google.protobuf.ListValue` (index.js@3929084).
+message JsonList {
+  repeated JsonValue values = 1;
+}
+
+// The run-level liveness ping the client sends while its request body is open:
+// AgentClientMessage.client_heartbeat = 7 (index.js@6200066), of type
+// ClientHeartbeat (index.js@6197181), which carries nothing — the arrival is
+// the whole message, exactly like the server's own Heartbeat above.
+message ClientHeartbeat {}
+
+// The success arm of the MCP answer: McpResult.success = 1
+// (index.js@6372351), of type McpSuccess (index.js@6376081) — content = 1
+// repeated, is_error = 2. A bridged call answers here with one text item
+// holding the tool's own output, and `is_error` says whether that output is an
+// answer or a complaint: cursor's own shape for a tool that ran and failed,
+// which is a different thing from one that was declined (rejected = 3) or
+// never found (tool_not_found = 5). Its structured_content = 3 is not
+// modelled — a ganja tool's result is text.
+message McpSuccess {
+  repeated McpContentItem content = 1;
+  bool is_error = 2;
+}
+
+// One item of that content (McpToolResultContentItem, index.js@6375554),
+// narrowed to text = 1; the image arm beside it is a payload no ganja tool
+// produces on this channel.
+message McpContentItem {
+  McpTextContent text = 1;
+}
+
+// index.js@6374553: text = 1, beside an output_location = 2 naming where a
+// large result was spilled. A ganja tool clamps its own output and names its
+// own spill file inside that text, so the answer is whole here and there is
+// nothing for a second channel to point at.
+message McpTextContent {
+  string text = 1;
+}

@@ -1,7 +1,11 @@
-//! The `/team` dialog: one row per member of this session's team — its name,
+//! The `/teammate` dialog: one row per member of this session's team — its name,
 //! the surface it runs on, whether it is the lead, and the ring of what it
 //! most recently did — with the actions a row offers behind Enter, and a
-//! Spawn row that belongs to the team rather than to any member.
+//! Spawn row that belongs to the team rather than to any member. Under all of
+//! it, the team's **shared task list**: what has been filed, where each task
+//! is, who holds it and what it waits on, drawn from the same listing
+//! `task_list` answers a model with and naming, when there is somebody to
+//! name, the members that cannot see it.
 //!
 //! Upstream opencode has no team, no teammates and no surface for either, so
 //! nothing here cites an upstream file. What it ports is Claude Code's
@@ -22,7 +26,7 @@
 //!   `MemberView::recent_calls` — ganja's own protocol projection — and never
 //!   through Claude's member record, which is somebody else's document.
 //! - **Nothing stands in front of a spawn.** Resolution 4 of the landing:
-//!   `/team spawn` raises no confirmation dialog, because a person typing a
+//!   `/teammate spawn` raises no confirmation dialog, because a person typing a
 //!   spawn is the consent. What a person cannot see is where the prompt they
 //!   just typed came to rest, so the one thing said afterwards is that —
 //!   [`Team::spawned`]'s notice, naming the cleartext path (D-7).
@@ -34,6 +38,11 @@
 
 use ganja_protocol::{MemberBackend, MemberView, TeamView};
 use ganja_tool::task::TeammateSpawn;
+// `UNOWNED` is the word `task_list` answers a model with for a task nobody
+// holds, imported rather than restated here: a second spelling is a second
+// place for the dialog and the tool to drift into naming one state two ways,
+// and the tool's own constant says it is the one.
+use ganja_tool::tasklist::{Summary, UNOWNED};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Rect};
 use ratatui::text::{Line, Text};
@@ -41,7 +50,7 @@ use ratatui::widgets::{Block, Clear, Paragraph, Widget as _};
 use unicode_width::UnicodeWidthStr as _;
 
 use crate::command::TeamSpawn;
-use crate::component::chat::{RESULT, clip};
+use crate::component::chat::{RESULT, clip, pad};
 use crate::component::{
     ACTION_HINTS, CHROME, INPUT_HINTS, LIST_HINTS, MARKER, MAX_HEIGHT, MAX_WIDTH, TwoStep,
     action_row, body_rows, clamped, first_visible,
@@ -79,6 +88,21 @@ const CLEARTEXT: &str = "prompt persisted in cleartext at";
 
 /// What the lead's row is marked with.
 const LEAD: &str = "lead";
+
+/// What the tasks section is headed with, when there is one.
+const TASKS: &str = "tasks";
+
+/// What the dim line under the heading says about the members that cannot see
+/// this list, ahead of their names.
+///
+/// The one sentence this section exists to be honest about (the plan's third
+/// risk): a `claude` member runs Claude Code's own task store and a `codex`,
+/// `grok` or `agy` member holds no ganja tools at all, so a section drawn
+/// under a roster holding any of them would otherwise read as work the whole
+/// roster can see. It says *that they cannot*, and nothing about what they
+/// keep instead: what a foreign surface does with its own work is not
+/// something this dialog is in a position to state.
+const UNSHARED: &str = "not visible to";
 
 /// One member of the team, as the dialog shows it.
 ///
@@ -131,6 +155,26 @@ pub fn rows(view: &TeamView) -> Vec<Row> {
     rows
 }
 
+/// Whether a member running on `backend` reads the same list this section
+/// draws.
+///
+/// Exhaustive rather than a catch-all, so a seventh surface is a decision
+/// somebody makes here rather than a member quietly listed as seeing work it
+/// cannot: the two arms below are ganja's own task tools reaching a shared
+/// directory, and every other surface is somebody else's agent.
+const fn shares_the_list(backend: MemberBackend) -> bool {
+    match backend {
+        // This process's own teammate, and a `ganja` pane: both are offered
+        // the four `task_*` tools over this same team directory.
+        MemberBackend::InProcess | MemberBackend::Ganja => true,
+        // Claude Code keeps its task list inside its own process, and the
+        // three foreign CLIs hold no ganja tools at all.
+        MemberBackend::Claude | MemberBackend::Codex | MemberBackend::Agy | MemberBackend::Grok => {
+            false
+        }
+    }
+}
+
 /// A spawn as this dialog asks for it.
 ///
 /// What comes back is [`TeammateSpawn`] itself — the **`task` tool's own
@@ -181,7 +225,7 @@ impl Spawned {
     /// reported.
     ///
     /// A method rather than a `format!` at each caller because the dialog is
-    /// not always open to hold it: a `/team spawn` line typed at the composer
+    /// not always open to hold it: a `/teammate spawn` line typed at the composer
     /// raises no dialog at all and reports into the status bar instead. The
     /// half of this sentence that must survive that is the second one —
     /// Resolution 4's disclosure that the prompt is on disk in cleartext — and
@@ -206,7 +250,7 @@ pub enum Effect {
         /// The spawn, parsed — the `task` door's own value ([`spawn_request`]).
         request: TeammateSpawn,
         /// The words as typed into the step — [`crate::command::SPAWN_GRAMMAR`]'s
-        /// shape, without the `/team spawn` a composer line carries — so the
+        /// shape, without the `/teammate spawn` a composer line carries — so the
         /// app can remember the spawn in the prompt history as the line it
         /// is equivalent to, and an Up-arrow can bring it back to edit.
         typed: String,
@@ -248,7 +292,7 @@ impl RowAction {
 /// What a free-text step is collecting.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Asking {
-    /// A spawn line, in `/team spawn`'s own grammar.
+    /// A spawn line, in `/teammate spawn`'s own grammar.
     Spawn,
     /// A message for the named member.
     Message(String),
@@ -287,6 +331,15 @@ enum Step {
 #[derive(Clone, Debug)]
 pub struct Team {
     rows: Vec<Row>,
+    /// The team's shared task list, exactly as `Engine::task_list` answered
+    /// it — drawn under the roster, selected by nothing. Empty draws no
+    /// section at all.
+    ///
+    /// **In the order it arrived**, which is the store's own lowest-id-first,
+    /// and deliberately not re-sorted here: the dialog and the `task_list` a
+    /// model reads are two renderings of one listing, and a second ordering
+    /// would be a second answer to "which is the next task".
+    tasks: Vec<Summary>,
     /// Index over the member rows *and* the Spawn row after them; always in
     /// range, because the Spawn row makes the list non-empty.
     selected: usize,
@@ -299,14 +352,21 @@ pub struct Team {
 }
 
 impl Team {
-    /// Opens the dialog over `rows`, cursor on the first member — or on the
-    /// Spawn row when the team holds nobody.
+    /// Opens the dialog over `rows` and the team's `tasks`, cursor on the
+    /// first member — or on the Spawn row when the team holds nobody.
+    ///
+    /// The tasks travel beside the roster rather than through a setter of
+    /// their own because they arrive together: one tick polls both, and a
+    /// dialog that could hold a roster from now and a list from a minute ago
+    /// would be a dialog able to show a member owning a task that no longer
+    /// exists.
     #[must_use]
-    pub fn new(rows: Vec<Row>) -> Self {
-        Self { rows, selected: 0, step: Step::Members, notice: None, busy: false }
+    pub fn new(rows: Vec<Row>, tasks: Vec<Summary>) -> Self {
+        Self { rows, tasks, selected: 0, step: Step::Members, notice: None, busy: false }
     }
 
-    /// Replaces the rows with a fresh poll, keeping the cursor and the step
+    /// Replaces the rows and the task list with a fresh poll, keeping the
+    /// cursor and the step
     /// where they were — reclamped, because a shutdown shrinks the roster
     /// under it. A ring growing under a person mid-decision must not move what
     /// their next keypress lands on, which is the whole reason this is not a
@@ -318,12 +378,13 @@ impl Team {
     /// chooses again.
     ///
     /// Answers whether anything really changed, so a caller polling every tick
-    /// repaints only when it did. A `/team` dialog left open would otherwise
+    /// repaints only when it did. A `/teammate` dialog left open would otherwise
     /// mark every one of those ticks dirty and redraw the screen at frame rate
     /// for a roster nobody touched.
-    pub fn refresh(&mut self, rows: Vec<Row>) -> bool {
-        let mut moved = rows != self.rows;
+    pub fn refresh(&mut self, rows: Vec<Row>, tasks: Vec<Summary>) -> bool {
+        let mut moved = rows != self.rows || tasks != self.tasks;
         self.rows = rows;
+        self.tasks = tasks;
         self.selected = self.selected.min(self.total_rows().saturating_sub(1));
         let orphaned = match &self.step {
             Step::Actions { member, .. } => self.row_named(member).is_none(),
@@ -593,7 +654,7 @@ impl Team {
 
         Clear.render(popup, buffer);
         Paragraph::new(Text::from(lines))
-            .block(Block::bordered().title(" team "))
+            .block(Block::bordered().title(" teammate "))
             .style(theme.fg.patch(theme.background_panel))
             .render(popup, buffer);
     }
@@ -617,15 +678,15 @@ impl Team {
                 selected_line = lines.len();
             }
             let head = format!(
-                "{marker}{name:<name_width$}  {backend:<backend_width$}  {lead}",
+                "{marker}{name}  {backend}  {lead}",
                 marker = if index == self.selected { MARKER } else { "  " },
-                name = row.name,
-                backend = backend_label(row.backend),
+                name = pad(&row.name, name_width),
+                backend = pad(backend_label(row.backend), backend_width),
                 lead = if row.is_lead { LEAD } else { "" },
             );
             let line = clip(head.trim_end(), width);
             lines.push(Line::styled(
-                format!("{line:<width$}"),
+                pad(&line, width),
                 if index == self.selected { theme.selection } else { theme.fg },
             ));
             lines.extend(ring_rows(&row.recent, width, theme));
@@ -652,9 +713,116 @@ impl Team {
             style,
         ));
 
+        lines.extend(self.task_lines(width, theme));
+
         let first = first_visible(selected_line, rows);
 
         lines.into_iter().skip(first).take(rows).collect()
+    }
+
+    /// The Tasks section: the team's shared list under the roster, one line
+    /// per task — its id, where it is, who holds it, what it waits on and
+    /// what it is.
+    ///
+    /// **Under the Spawn row rather than between it and the members**, so the
+    /// rows a cursor can land on stay one unbroken run: a section nothing
+    /// selects sitting inside that run would put lines between a person's eye
+    /// and the row their next keypress moves to. It is drawn inside the same
+    /// scroll window as everything else, which makes it a window onto the
+    /// **head** of the list rather than a scrolling one: nothing below the
+    /// Spawn row is selectable, so the window never travels down to these
+    /// lines, and a list longer than the rows left under the roster is cut at
+    /// the bottom with no marker. The roster stays on screen however long the
+    /// list grows, which is what the placement is for.
+    ///
+    /// An empty list draws **nothing at all** — no heading, no placeholder.
+    /// A team that has filed no task is the ordinary state of every session
+    /// that never uses the list, and a heading over nothing would cost those
+    /// two rows forever to say what their absence already says. (`no team
+    /// members` is the other way round for the other reason: a roster is the
+    /// thing this dialog is *for*, so an empty one is news.)
+    fn task_lines(&self, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+        if self.tasks.is_empty() {
+            return Vec::new();
+        }
+
+        let id_width = self.tasks.iter().map(|task| printable(&task.id).width()).max().unwrap_or(0);
+        let status_width =
+            self.tasks.iter().map(|task| task.status.as_str().width()).max().unwrap_or(0);
+        let owner_width = self
+            .tasks
+            .iter()
+            .map(|task| printable(owner_label(&task.owner)).width())
+            .max()
+            .unwrap_or(0);
+
+        let mut lines = vec![Line::raw(""), Line::styled(clip(TASKS, width), theme.fg)];
+        if let Some(unshared) = self.unshared_line() {
+            lines.push(Line::styled(clip(&unshared, width), theme.dim));
+        }
+        for task in &self.tasks {
+            let head = format!(
+                "  {id}  {status}  {owner}  ",
+                id = pad(&printable(&task.id), id_width),
+                status = pad(task.status.as_str(), status_width),
+                owner = pad(&printable(owner_label(&task.owner)), owner_width),
+            );
+            let blocked = if task.blocked_by.is_empty() {
+                String::new()
+            } else {
+                format!("  (blocked by {})", printable(&task.blocked_by.join(", ")))
+            };
+            let subject = printable(&task.subject);
+            // **The suffix is never cut part-way.** What a task waits on is
+            // the one thing on this line a reader acts on, and half of it —
+            // `(blocked by 1` — reads as a fact about a different task. So the
+            // subject is what gives way first, and the suffix survives whole
+            // for as long as one column of subject is left beside it; past
+            // that it is dropped whole rather than shown as a fragment, and
+            // the row says what the task is instead. The list is one
+            // `task_get` away either way.
+            //
+            // The rule is decided on what the cut actually **kept**, never on
+            // the room it was offered: [`clip`] consumes at least one grapheme
+            // cluster whatever the budget, so a subject opening on a
+            // two-column glyph comes back two columns wide out of one column
+            // of room, and composing the suffix beside it would overrun the
+            // row — and what a `Paragraph` then cuts off the end is the suffix
+            // this rule exists to keep whole. Measuring `kept` is what holds
+            // both halves: the composed line never exceeds `width`, and the
+            // suffix is whole or absent.
+            let room = width.saturating_sub(head.width() + blocked.width());
+            let kept = clip(&subject, room);
+            let line = if blocked.is_empty() || room == 0 || kept.width() > room {
+                clip(format!("{head}{subject}").trim_end(), width)
+            } else {
+                format!("{head}{kept}{blocked}")
+            };
+            lines.push(Line::styled(line, theme.fg));
+        }
+
+        lines
+    }
+
+    /// The dim line naming the members that cannot see this list, or [`None`]
+    /// when every member can.
+    ///
+    /// Named rather than counted, and drawn only when there is somebody to
+    /// name: a standing disclaimer under every team would be read past, where
+    /// two names beside the list are the fact somebody needs at the moment
+    /// they are wondering why a member has not picked anything up.
+    fn unshared_line(&self) -> Option<String> {
+        let unshared: Vec<&str> = self
+            .rows
+            .iter()
+            // The lead is this session, which is the session drawing the
+            // list; whatever its own row says it runs on, it is looking at
+            // the list right now.
+            .filter(|row| !row.is_lead && !shares_the_list(row.backend))
+            .map(|row| row.name.as_str())
+            .collect();
+
+        (!unshared.is_empty()).then(|| format!("  {UNSHARED} {}", unshared.join(", ")))
     }
 
     /// The per-member action step: which member it is about, then what can be
@@ -693,7 +861,7 @@ impl Team {
         theme: &Theme,
     ) -> Vec<Line<'static>> {
         let prompt = match asking {
-            // The same grammar `/team spawn` takes, spelled by the constant
+            // The same grammar `/teammate spawn` takes, spelled by the constant
             // its refusal names, because [`crate::command::team_spawn`] is the
             // one parser both doors feed.
             Asking::Spawn => format!("Spawn: {}", crate::command::SPAWN_GRAMMAR),
@@ -710,6 +878,38 @@ impl Team {
     }
 }
 
+/// A task's text as this dialog draws it: every control character replaced,
+/// none dropped.
+///
+/// The member names on the rows above were vetted by `registry::vet_name`
+/// before they reached this file. A task's id, owner, subject and the ids it
+/// names as blockers were not: they were written by another process, and
+/// nothing between the task tools and the store refuses a `\n`, `\r` or `\t`
+/// in a task's text. What that costs was
+/// measured rather than assumed — the frame survives, because ratatui gives a
+/// control character zero width and skips the cell, so the character is
+/// **silently swallowed** and `fix a\nb` is drawn `fix ab`, two words joined
+/// with nothing on screen to say one ever separated them. Replacing rather
+/// than dropping is what puts the fact back where somebody reading the row
+/// can see it. (`ganja-cli`'s own `report::printable` guards the `mcp` tables
+/// against the same class of foreign text; mirrored rather than shared,
+/// because a frontend does not depend on that crate.)
+fn printable(text: &str) -> String {
+    text.chars()
+        .map(
+            |character| {
+                if character.is_control() { char::REPLACEMENT_CHARACTER } else { character }
+            },
+        )
+        .collect()
+}
+
+/// How a task's owner is listed: the member's name, or the word the
+/// `task_list` tool answers with for a task nobody holds.
+fn owner_label(owner: &str) -> &str {
+    if owner.is_empty() { UNOWNED } else { owner }
+}
+
 /// A member's recent calls, newest last, hung under its row (**D503**) behind
 /// the transcript's own result marker — a call log under a row is the same
 /// thing there and here and should read the same way.
@@ -717,6 +917,12 @@ impl Team {
 /// What was cut is admitted above what is shown rather than below it — the
 /// transcript's own posture for a clamped call log, and the one that keeps the
 /// newest line closest to the eye.
+///
+/// A call's text goes through [`printable`] for the reason a task's does: it
+/// is composed from arguments the model chose, so a control character in a
+/// path or a pattern arrives here and would be drawn as nothing at all. The
+/// line admitting what was cut is this file's own arithmetic and carries none
+/// of that text, which is why only the calls go through it.
 fn ring_rows(calls: &[String], width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let hidden = calls.len().saturating_sub(RING_LINES);
     let mut lines = Vec::new();
@@ -733,10 +939,9 @@ fn ring_rows(calls: &[String], width: usize, theme: &Theme) -> Vec<Line<'static>
         ));
     }
     lines.extend(
-        calls
-            .iter()
-            .skip(hidden)
-            .map(|call| Line::styled(clip(&format!("{RESULT}{call}"), width), theme.dim)),
+        calls.iter().skip(hidden).map(|call| {
+            Line::styled(clip(&printable(&format!("{RESULT}{call}")), width), theme.dim)
+        }),
     );
 
     lines

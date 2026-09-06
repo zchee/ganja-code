@@ -1,9 +1,9 @@
 ---
-source: crates/ganja-tui/src/app.rs
+source: crates/ganja-tui/src/app_tests.rs
 expression: screen(&terminal)
 ---
                                                                                 
-  ┌ team ────────────────────────────────────────────────────────────────────┐  
+  ┌ teammate ────────────────────────────────────────────────────────────────┐  
   │> team-lead  in-process  lead                                             │  
   │  w1         in-process                                                   │  
   │  ⎿ read(src/lib.rs)                                                      │  

@@ -628,7 +628,7 @@ impl fmt::Debug for MemberRecord {
 /// rendering that anything at all might log. The spelling matches
 /// [`crate::mailbox::Identity`]'s, so one grep finds every place this rule is
 /// applied.
-struct Redacted<'a>(Option<&'a str>);
+pub(crate) struct Redacted<'a>(pub(crate) Option<&'a str>);
 
 impl fmt::Debug for Redacted<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {

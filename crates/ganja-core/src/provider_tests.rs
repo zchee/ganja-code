@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
 use super::{
-    Config, Dialect, PROVIDER_ENV, PROVIDERS, ProviderConfig, SelectionError, adoptable_login,
-    cursor, defaulted_model, fake, grok, openai, opencode, openrouter, select, selectable,
-    wire_model_listing,
+    Config, Dialect, PROVIDER_ENV, PROVIDERS, ProviderConfig, SelectionError, ToolReach,
+    adoptable_login, cursor, defaulted_model, fake, grok, openai, opencode, openrouter, select,
+    selectable, wire_model_listing,
 };
 use crate::catalog;
 
@@ -286,4 +286,24 @@ fn a_backends_own_default_outranks_its_vendors_catalog_row() {
         defaulted_model(cursor::ID, None).expect("cursor has the wire-published pin"),
         "default"
     );
+}
+
+/// **AC-4**, inverted by **D552**: with cursor's bridge landed there is no
+/// shipped id left that reaches less than every tool.
+///
+/// Asked of the id list rather than of nine constructed wires: the fact is a
+/// function of the id, and instantiating a provider to ask it would need
+/// credentials for eight vendors to answer a question about a string. The
+/// `contains` guard is what makes the loop about cursor — the id this assertion
+/// is about — since a loop that silently stopped including it would still pass.
+#[test]
+fn every_shipped_id_reaches_every_tool_this_build_registers() {
+    for builtin in PROVIDERS {
+        assert_eq!(
+            ToolReach::of(builtin),
+            ToolReach::Full,
+            "{builtin} calls tools ganja registered, so every one of them is callable"
+        );
+    }
+    assert!(PROVIDERS.contains(&cursor::ID), "and the loop above really did cover cursor");
 }

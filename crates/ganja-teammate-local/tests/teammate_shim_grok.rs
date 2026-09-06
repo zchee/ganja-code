@@ -532,7 +532,7 @@ async fn the_prompt_reaches_grok_in_a_file_and_never_in_its_argv() {
 }
 
 /// **AC-17's three-reader tie.** The spawn dialog is the third reader of
-/// D508(c)'s table, beside the `/team` ring line and the honest-strength
+/// D508(c)'s table, beside the `/teammate` ring line and the honest-strength
 /// column, and it is the sentence a person actually consents against — so it
 /// is compared against the other two readers rather than against a literal,
 /// and the three cannot come to describe one grant differently. The dialog

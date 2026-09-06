@@ -410,3 +410,25 @@ fn paths_that_cannot_be_canonicalized_are_compared_as_written() {
     assert!(!is_same_file(&dir.path().join("ganja").join("other.json"), &absent));
     assert!(!is_same_file(&present, &absent), "a file that exists is not one that does not");
 }
+
+/// The two refusal sentences are an interop surface, not a message: a wire
+/// tells a permission refusal from a failed tool by matching a tool part's
+/// text against them (**D552**). Rewording either one silently changes what
+/// cursor's server is told a call did, so the bytes are pinned here as
+/// literals rather than derived from the constants they pin.
+#[test]
+fn the_refusal_sentences_a_wire_matches_on_are_the_bytes_upstream_wrote() {
+    assert_eq!(
+        super::permission_text::REJECTED,
+        "The user rejected permission to use this specific tool call.",
+    );
+    assert_eq!(
+        super::permission_text::DENIED_PREFIX,
+        "The user has specified a rule which prevents you from using this specific tool call. \
+         Here are some of the relevant rules ",
+    );
+    assert!(
+        super::permission_text::DENIED_PREFIX.ends_with(' '),
+        "the rendered rules follow the prefix directly, so the separating space is part of it",
+    );
+}

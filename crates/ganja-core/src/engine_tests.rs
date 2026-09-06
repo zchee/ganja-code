@@ -4,21 +4,25 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use futures::StreamExt as _;
 use futures::stream::{self, BoxStream};
+use ganja_testkit::{StaticTasks, task_summary};
 use tokio_util::sync::CancellationToken;
 
 use super::{
     Engine, EngineError, STALE_FILES, STORELESS, message_chars, send_message, stale_notice,
-    subagent, teammate,
+    subagent, teammate, tool_reach_refusal,
 };
-use crate::config::TeamlessSend;
+use crate::command;
+use crate::config::{Config, TeamlessSend};
 use crate::permission::Permissions;
 use crate::protocol::{
     Command, Event, FinishReason, Message, Part, PermissionReply, RevertScope, Role, Usage,
 };
 use crate::provider::fake::MODEL;
-use crate::provider::{ChatRequest, FakeProvider, Provider, ProviderError, ProviderEvent};
+use crate::provider::{
+    ChatRequest, FakeProvider, PROVIDERS, Provider, ProviderError, ProviderEvent, ToolReach, cursor,
+};
 use crate::storage::{self, SessionId, SessionInfo, Storage};
-use crate::tool::{FileTimes, Registry};
+use crate::tool::{FileTimes, Registry, tasklist};
 
 /// How long a drain that should complete promptly is given before the
 /// test calls it wedged. Generous against a loaded machine, and reached
@@ -1960,5 +1964,230 @@ fn the_sender_cap_drops_the_oldest_entries_first() {
         carried[MAX_HOP_CHAIN_ENTRIES - 1],
         "0198ffff",
         "and this session is still the last entry"
+    );
+}
+
+/// A shared task list nobody installed is nothing to read, and a status
+/// surface asking for one is answered without a directory being opened.
+#[tokio::test]
+async fn a_session_with_no_team_has_no_task_list_to_read() {
+    assert!(engine().task_list().await.is_none());
+}
+
+/// And where one is installed, the accessor is that list — the same order it
+/// answers a `task_list` call in, since the two are one listing rendered
+/// twice.
+#[tokio::test]
+async fn the_task_list_accessor_reads_the_installed_list_through() {
+    let tasks = Arc::new(StaticTasks::new(vec![
+        task_summary("1", tasklist::Status::Completed, "w1"),
+        task_summary("2", tasklist::Status::Pending, ""),
+    ]));
+    let engine = engine().with_tasks(Arc::clone(&tasks) as Arc<dyn tasklist::TaskList>);
+
+    let listed = engine.task_list().await.expect("the installed list answers");
+
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed[0].id, "1", "lowest id first, as the store gave it");
+    assert_eq!(listed[1].owner, "", "and an unclaimed task travels unclaimed");
+    assert_eq!(tasks.reads(), 1, "one read");
+}
+
+/// A list that would not open is not a listing: the surfaces that poll this
+/// draw nothing, and the reason is traced rather than rendered on a bar.
+#[tokio::test]
+async fn a_task_list_that_cannot_be_read_answers_as_no_list_at_all() {
+    let tasks = Arc::new(StaticTasks::failing("the team directory would not open"));
+    let engine = engine().with_tasks(tasks as Arc<dyn tasklist::TaskList>);
+
+    assert!(engine.task_list().await.is_none());
+}
+
+/// **AC-5**, inverted by **D552**: the two builtins whose whole body is tool
+/// calls now *run* on cursor. Both templates expand and both start a turn —
+/// the reach door no longer stands in front of either.
+///
+/// The scripted seat reports cursor's id and nothing else about cursor: the
+/// door reads [`ToolReach::of`] over [`Provider::id`], so an id is the whole
+/// input, and asking a real wire would want that vendor's credentials to answer
+/// a question about a string. The real agent roster rides along because a
+/// `/team` line is judged against it before the template is read.
+#[tokio::test]
+async fn the_tool_driven_builtins_now_start_a_turn_on_cursor() {
+    for (command, carried) in [
+        // The team template's own usage example says "port the config loader",
+        // so only the block the arguments land in can show that they arrived.
+        (command::TEAM, "<team-arguments>\nport the config loader\n</team-arguments>"),
+        (command::INIT, "port the config loader"),
+    ] {
+        let (provider, seen) = ganja_testkit::ScriptedProvider::named(cursor::ID, Vec::new());
+        // Resolved here rather than through the testkit's `agent_registry`: a
+        // lib test is a second compilation of this crate, so the testkit's
+        // `Config` and `AgentRegistry` are not this crate's own.
+        let agents = crate::agent::Registry::from_config(&Config::default())
+            .expect("the default config resolves this build's own roster");
+        let engine = bare(provider, MODEL).with_agents(Arc::new(agents));
+        let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+        engine
+            .send(Command::RunCommand {
+                name: command.to_owned(),
+                args: "port the config loader".to_owned(),
+            })
+            .await
+            .unwrap_or_else(|error| panic!("/{command} is served on cursor now, got {error:?}"));
+        drain(&mut events).await;
+
+        let requests = seen.lock().expect("the request log is never poisoned");
+        let [request] = requests.as_slice() else {
+            panic!("/{command} on an idle engine is one request, got {requests:?}");
+        };
+        let prompt: String = request
+            .messages
+            .last()
+            .expect("the turn was started with the expanded template")
+            .parts
+            .iter()
+            .filter_map(Part::as_text)
+            .collect();
+        assert!(
+            prompt.contains(carried),
+            "/{command}'s filled-in template is what the turn was started with, got {prompt:?}"
+        );
+        if command == command::TEAM {
+            let nobody_named = command::render_members(&command::TeamInvocation {
+                members: Vec::new(),
+                standing: None,
+                task: "port the config loader".to_owned(),
+            });
+            assert!(
+                prompt.contains(&nobody_named),
+                "and `${{members}}` was filled from the same parse, got {prompt:?}"
+            );
+        }
+    }
+}
+
+/// The refusal itself did not leave with cursor: a provider that reaches less
+/// than everything is still refused in front of the expansion, with the
+/// sentence derived from *which* less.
+///
+/// Unreached by any shipped id since **D552** (see [`ToolReach`]), so this asks
+/// [`tool_reach_refusal`] directly rather than through an engine.
+#[test]
+fn the_reach_refusal_still_words_both_narrow_values_for_a_wire_that_serves_less() {
+    for (command, names) in [("team", "run the steps yourself"), ("init", "AGENTS.md")] {
+        let nothing = tool_reach_refusal(command, "some-wire", ToolReach::None);
+        assert!(
+            nothing.contains("some-wire") && nothing.contains("serves this build no tools"),
+            "the sentence is derived from the reach value, got {nothing:?}"
+        );
+        assert!(nothing.contains(names), "it says what this command wanted, got {nothing:?}");
+        // The variant's `Display` is that sentence, field for field: a swapped
+        // pair in its `#[error]` would render, green, a `/some-wire` command on
+        // the team provider.
+        let displayed = EngineError::ProviderToolReach {
+            provider: "some-wire".to_owned(),
+            command: command.to_owned(),
+            reach: ToolReach::None,
+        }
+        .to_string();
+        assert_eq!(displayed, nothing, "the variant renders what its fields derive");
+
+        let native = tool_reach_refusal(command, "some-wire", ToolReach::NativeOnly);
+        assert!(
+            native.contains("file reads and shell commands do work here"),
+            "a native-kind seat is named as the real destination it is, got {native:?}"
+        );
+        assert!(
+            !native.contains("serves this build no tools"),
+            "and is never worded as the seat that serves nothing, got {native:?}"
+        );
+    }
+}
+
+/// **AC-3**'s cross-check, and the reason it lives here: `depgate.toml`
+/// forbids `ganja-provider` a dependency on this crate, so the wire cannot
+/// name [`ToolReach`] and computes a local signal — its own roster predicate —
+/// instead. Whether the two agree is a question only the crate that sees both
+/// can ask.
+///
+/// Every id that reaches every tool sends a real turn with a roster on it, so
+/// cursor's predicate says `true` for exactly the requests a tool-serving
+/// session produces. **D552** inverted the coverage rather than the assertion:
+/// the skip below now skips nothing, and cursor — the id the predicate is
+/// *about* — is inside the loop instead of stepped over by it.
+#[tokio::test]
+async fn every_tool_reaching_provider_sends_a_roster_the_cursor_predicate_answers_for() {
+    // A loop that skipped every id would pass while asserting nothing, which
+    // is the one way this test could go quietly wrong.
+    let mut checked = 0_usize;
+
+    for id in PROVIDERS {
+        if ToolReach::of(id) != ToolReach::Full {
+            continue;
+        }
+
+        let (provider, seen) = ganja_testkit::ScriptedProvider::named(id, Vec::new());
+        let engine = Engine::new(
+            provider,
+            MODEL,
+            Arc::new(Registry::with_builtins()),
+            Permissions::default(),
+        );
+        let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+        engine
+            .send(Command::SendPrompt {
+                text: "what does this crate do".to_owned(),
+                mentions: Vec::new(),
+                skills: Vec::new(),
+                session_mentions: Vec::new(),
+                peers: Vec::new(),
+            })
+            .await
+            .expect("an idle engine accepts a prompt");
+        drain(&mut events).await;
+
+        let requests = seen.lock().expect("the request log is never poisoned");
+        let [request] = requests.as_slice() else {
+            panic!("one prompt on a storeless engine is one request, got {requests:?}");
+        };
+        assert!(
+            !request.tools.is_empty(),
+            "{id} reaches every tool, so a turn advertises the registry it was built with"
+        );
+        assert!(
+            cursor::serves_fetch(request),
+            "the wire's own predicate must say yes to exactly what a tool-serving turn sends"
+        );
+        checked += 1;
+    }
+
+    assert_eq!(
+        checked,
+        PROVIDERS.len(),
+        "no shipped id reaches less than every tool since D552, so none was skipped",
+    );
+}
+
+/// The other half of the same agreement, on the shape no roster rides: a
+/// one-shot title or summary request — this turn's messages only, no tools —
+/// is what a session asks in when it is not offering tools at all, and the
+/// wire must not invite fetch execs it could not serve.
+#[test]
+fn the_one_shot_request_shape_draws_no_fetch_from_the_cursor_wire() {
+    let one_shot = ChatRequest {
+        model: MODEL.to_owned(),
+        system: None,
+        messages: Vec::new(),
+        turn_start: 0,
+        tools: Vec::new(),
+        effort_options: serde_json::Map::new(),
+    };
+
+    assert!(
+        !cursor::serves_fetch(&one_shot),
+        "a request carrying no roster is one this client has nothing to redirect a fetch to"
     );
 }

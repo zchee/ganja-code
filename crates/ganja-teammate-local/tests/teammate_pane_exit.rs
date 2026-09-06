@@ -6,7 +6,7 @@
 //! Spec: none. Neither upstream opencode nor Claude Code is being read here —
 //! this is ganja's answer to bead `ganja-code-okip`, observed in the W2 live
 //! check on 2026-08-28: after `tmux kill-pane` on a running pane teammate the
-//! lead's `/team` kept listing it for forty seconds and beyond, because
+//! lead's `/teammate` kept listing it for forty seconds and beyond, because
 //! nothing on this side ever asked whether the pane was still there.
 //! [`ganja_teammate_local::reaper`] is a cold-start sweep of a *previous*
 //! lead's orphans (**D506**), not a poll of this one's own panes.
@@ -30,7 +30,7 @@
 //! 3. The member stops being counted alive **before anything else touches
 //!    it**: no pass has run and nothing called its kill, so the only thing
 //!    that can have cleared that flag is its own watch — and that flag is what
-//!    a `/team` render reads, which is the whole of what the bead observed.
+//!    a `/teammate` render reads, which is the whole of what the bead observed.
 //! 4. The lead's own pass then drains one `Exited` carrying `cli: None` (a
 //!    `ganja` pane runs no CLI this build shims for), the `Ganja` backend,
 //!    that pane's id, and `PaneFate::Closed` — read off the pane through the
@@ -91,14 +91,14 @@ async fn a_pane_teammate_whose_pane_is_killed_reports_its_own_exit_and_leaves_th
 
     // 3. Nothing here has touched the member: no pass has run, and nothing
     // called its kill. So the only thing that can have taken it off the roster
-    // is its own watch clearing the flag `/team` reads.
+    // is its own watch clearing the flag `/teammate` reads.
     ganja_testkit::eventually(NOTICES, "the pane's own watch to stop counting it", async || {
         (spawned.registry.running() == 0).then_some(())
     })
     .await;
     assert!(
         !spawned.registry.view().members.iter().any(|member| member.name == "worker"),
-        "and `/team` stopped listing it"
+        "and `/teammate` stopped listing it"
     );
 
     // 4. The lead's pass drains the exit and retires the member on it. Each

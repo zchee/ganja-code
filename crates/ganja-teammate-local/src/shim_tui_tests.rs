@@ -6,8 +6,9 @@ use ganja_core::teammate::preamble::Names;
 use ganja_protocol::team::MemberBackend;
 
 use super::{
-    HEARD_BACK, LAUNCH_TAIL, ShimTui, TuiDriver, composer_shown, environment_names, last_words,
-    launch_line, launch_needle, pane_line, paste_body, preamble, spawn_lines,
+    CUT, HEARD_BACK, LAST_WORDS_BYTES, LAST_WORDS_LINES, LAUNCH_TAIL, ShimTui, TuiDriver,
+    composer_shown, environment_names, last_words, launch_line, launch_needle, pane_line,
+    paste_body, preamble, spawn_lines,
 };
 use crate::agy::{self, Agy};
 use crate::codex::{self, Codex};
@@ -244,26 +245,41 @@ fn the_pane_environment_is_the_carried_list_then_the_admitted_additions() {
     }
 }
 
-/// A refusal quotes the program's last line and never tmux's own notice
-/// under it; a pane that showed nothing quotes nothing.
+/// A refusal quotes the program's trailing lines and never tmux's own
+/// notice under them; a pane that showed nothing quotes nothing.
+///
+/// The first capture is grok 1.0.18's own, measured on this machine
+/// 2026-09-03: its refusal's last line says *"see the warning above for the
+/// cause"*, so a quote that stopped there carried the pointer and dropped
+/// the thing pointed at, and the person had to reproduce the spawn by hand
+/// to learn why it refused. Both lines, in the order the pane showed them.
 #[test]
-fn the_last_words_are_the_programs_last_line_and_never_tmuxs_dead_notice() {
+fn the_last_words_are_the_programs_trailing_lines_and_never_tmuxs_dead_notice() {
     let captured = "\
-warning: the sandbox profile could not be applied
-error: could not apply the 'read-only' sandbox profile; see the warning above for the cause.
+warning: sandbox could not be applied: runtime-socket deny resolution failed: could not resolve \
+                    runtime-socket deny path /var/run/docker.sock: endpoint is a symlink
+error: could not apply the 'read-only' sandbox profile; see the warning above for the cause. \
+                    Refusing to start with its protections missing.
 
-Pane is dead (status 1, Thu Aug 20 15:28:47 2026)
+Pane is dead (status 1, Thu Sep  3 11:02:14 2026)
 ";
     assert_eq!(
         last_words(captured).as_deref(),
         Some(
-            "error: could not apply the 'read-only' sandbox profile; see the warning above \
-                 for the cause."
-        )
+            "warning: sandbox could not be applied: runtime-socket deny resolution failed: \
+             could not resolve runtime-socket deny path /var/run/docker.sock: endpoint is a \
+             symlink\nerror: could not apply the 'read-only' sandbox profile; see the warning \
+             above for the cause. Refusing to start with its protections missing."
+        ),
+        "the cause travels with the sentence that points at it"
     );
     assert_eq!(last_words("\n\nPane is dead (signal term, now)\n"), None);
     assert_eq!(last_words(""), None);
-    assert_eq!(last_words("one line   \n"), Some("one line".to_owned()));
+    assert_eq!(
+        last_words("one line   \n"),
+        Some("one line".to_owned()),
+        "a pane with one line to show still shows it"
+    );
     // An interactive bash says `exit` on its way out — under the report
     // a refusal wants, when the launch line's tail ended it.
     let bash = "\
@@ -275,9 +291,105 @@ Pane is dead (status 126, Tue Aug 25 00:40:00 2026)
 ";
     assert_eq!(
         last_words(bash).as_deref(),
-        Some("sh: /x/codex: /nope/interpreter: bad interpreter: No such file or directory")
+        Some(
+            "$ exec /x/codex -c 'sandbox_mode=\"read-only\"' || exit\nsh: /x/codex: \
+             /nope/interpreter: bad interpreter: No such file or directory"
+        ),
+        "the shell's own two lines; its `exit` and tmux's notice are neither of them"
     );
     assert_eq!(last_words("exit\n"), None);
+}
+
+/// The block is bounded, and it is the **last** lines that survive the
+/// bound: a CLI that printed a banner before it refused is quoted by its
+/// refusal, not by its banner.
+#[test]
+fn a_capture_longer_than_the_bound_keeps_its_last_lines() {
+    assert_eq!(LAST_WORDS_LINES, 4);
+    let captured = "\
+banner line one
+banner line two
+context: loading the profile
+warning: the first thing that went wrong
+warning: the second thing that went wrong
+error: refusing to start; see the warnings above
+
+Pane is dead (status 1, Thu Sep  3 11:02:14 2026)
+";
+    assert_eq!(
+        last_words(captured).as_deref(),
+        Some(
+            "context: loading the profile\nwarning: the first thing that went wrong\nwarning: \
+             the second thing that went wrong\nerror: refusing to start; see the warnings above"
+        )
+    );
+}
+
+/// **Fix 1.** The block leaves this module control-character-free, under the
+/// very rule [`paste_body`] applies to text going the other way: a pane's
+/// screen is where a peer's own words are echoed back, so a bracketed-paste
+/// terminator the pane's tty printed arrives here as a real `ESC` — and the
+/// block is quoted into a spawn refusal, into the lead's inbox mail and into
+/// [`Exited::notice`](ganja_core::teammate::Exited::notice), none of which
+/// filter what they are handed. The `ESC` goes and the `[201~` it armed stays
+/// as inert text, which is `paste_body`'s own bargain.
+///
+/// `\n` and `\t` survive, for the reason they survive there: the newline is
+/// what makes this a block at all, and a tab is indentation a program printed.
+#[test]
+fn the_block_carries_no_control_character_a_pane_echoed() {
+    let captured = "and report back\u{1b}[201~\nbye from the stub\n";
+    assert_eq!(
+        last_words(captured).as_deref(),
+        Some("and report back[201~\nbye from the stub"),
+        "the ESC is gone and the text it armed is kept, joined by the newline"
+    );
+
+    let mixed = "a\u{7}bell\ttab\u{1b}esc\rcarriage\nsecond\u{0}line\n";
+    let words = last_words(mixed).expect("a block");
+    assert_eq!(words, "abell\ttabesccarriage\nsecondline");
+    assert!(
+        !words.chars().any(|point| point.is_control() && !matches!(point, '\n' | '\t')),
+        "no control character but the two that are content: {words:?}"
+    );
+
+    // A row that was nothing but control bytes is not the program talking, so
+    // it never spends one of the four lines the block has.
+    let noise = "one\ntwo\nthree\n\u{1b}\u{7}\nfour\nfive\n";
+    assert_eq!(last_words(noise).as_deref(), Some("two\nthree\nfour\nfive"));
+}
+
+/// **Fix 2, MEDIUM.** The line bound is not a byte bound, because
+/// `capture-pane -J` joins wrapped rows: one "line" off a pane can be a whole
+/// stack trace or a JSON blob a CLI printed on its way out. So the block is
+/// clamped to [`LAST_WORDS_BYTES`] as well — **from the end**, keeping the
+/// newest text for the same reason the line bound keeps the last lines.
+#[test]
+fn a_line_longer_than_the_byte_bound_is_cut_from_the_end() {
+    let blob = "x".repeat(5 * 1024);
+    let words = last_words(&format!("{blob}\n")).expect("a block");
+    assert!(
+        words.len() <= LAST_WORDS_BYTES,
+        "the block is bounded in bytes, not only in lines: {} bytes",
+        words.len()
+    );
+    assert!(words.starts_with(CUT), "and the cut is admitted rather than silent: {words:?}");
+    assert!(words.ends_with("xxxx"), "it is the end of the line that survived");
+
+    // The cut lands on a character boundary, never inside one: a bound that
+    // split a multi-byte code point would panic on the slice.
+    let wide = "\u{1f600}".repeat(1024);
+    let words = last_words(&format!("{wide}\n")).expect("a block");
+    assert!(words.len() <= LAST_WORDS_BYTES, "{} bytes", words.len());
+    assert!(
+        words.chars().skip(1).all(|point| point == '\u{1f600}'),
+        "every code point past the cut marker survived whole: {words:?}"
+    );
+
+    // A block under the bound is handed back untouched, marker and all absent.
+    let short = last_words("warning: a cause\nerror: the refusal\n").expect("a block");
+    assert_eq!(short, "warning: a cause\nerror: the refusal");
+    assert!(!short.starts_with(CUT));
 }
 
 /// **HIGH-1.** A peer's own words cannot forge the bracketed-paste framing

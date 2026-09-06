@@ -9,7 +9,7 @@
 //!
 //! What it deliberately does *not* hold, and why:
 //!
-//! - the door-equivalence claim — that a `task` call and `/team spawn` build
+//! - the door-equivalence claim — that a `task` call and `/teammate spawn` build
 //!   the same request is asserted where each door lives, because a core test
 //!   binary cannot see the TUI one;
 //! - **anything that starts a pane backend.** Since P25b the two pane values

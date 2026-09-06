@@ -133,11 +133,14 @@ pub fn clamp(text: &str) -> Truncated {
 /// Same as [`clamp`], but spills to exactly `dir` — no XDG resolution, no
 /// temp-dir fallback — so a caller can assert on the overflow file without
 /// touching a real person's data directory, and so a test can force the
-/// degraded path by pointing `dir` somewhere writing will fail. Test-only —
-/// no production caller names a spill directory, and the crate gates such a
-/// seam rather than shipping it (`shell.rs`'s `spilling_into`).
-#[cfg(test)]
-fn clamp_with(text: &str, dir: &Path) -> Truncated {
+/// degraded path by pointing `dir` somewhere writing will fail.
+///
+/// Reachable from production code, exactly as [`open_spill_in`] is and for
+/// its reason: a tool that spills carries the directory as an `Option` no
+/// shipped constructor fills, so the choice is made where the tool is built
+/// and only a `#[cfg(test)]` constructor ever names one (`shell.rs`'s
+/// `spilling_into`, `tasklist.rs`'s).
+pub(crate) fn clamp_with(text: &str, dir: &Path) -> Truncated {
     clamp_in(text, MAX_CHARS, [dir.to_owned()])
 }
 
@@ -151,15 +154,16 @@ pub fn clamp_bytes(text: &str, max_bytes: usize) -> Truncated {
     clamp_in(text, max_bytes, candidate_dirs())
 }
 
-/// [`clamp_bytes`] over exactly `dir`, for the reason `clamp_with` exists,
-/// and gated the same way.
+/// [`clamp_bytes`] over exactly `dir`, for the reason [`clamp_with`] exists —
+/// still `#[cfg(test)]`, because no caller at a configured byte budget names a
+/// directory to spill into.
 #[cfg(test)]
 fn clamp_bytes_with(text: &str, max_bytes: usize, dir: &Path) -> Truncated {
     clamp_in(text, max_bytes, [dir.to_owned()])
 }
 
 /// Shared implementation behind [`clamp`] and [`clamp_bytes`], and behind the
-/// `#[cfg(test)]` `clamp_with`/`clamp_bytes_with` beside them: clamps `text`
+/// directory-naming [`clamp_with`]/`clamp_bytes_with` beside them: clamps `text`
 /// to `max_bytes`, then writes it to the first of `dirs` that accepts it.
 fn clamp_in(text: &str, max_bytes: usize, dirs: impl IntoIterator<Item = PathBuf>) -> Truncated {
     let Some(body) = clamp_body(text, max_bytes) else {

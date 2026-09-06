@@ -39,6 +39,7 @@ use ganja_protocol::{
     RevertScope, Role, ToolState, Usage,
 };
 use ganja_tool::job::Jobs as _;
+use ganja_tool::tasklist::{Status as TaskStatus, Summary};
 use ganja_tool::{Credentials, FileTimes, ToolCtx, registry};
 use ratatui::backend::Backend;
 use ratatui::crossterm::event::{
@@ -188,6 +189,24 @@ const CLIPBOARD_EMPTY: &str = "the clipboard holds neither text nor an image";
 /// What `/effort` says when the active model's catalog row offers none —
 /// upstream's toast message, reworded for ganja (`app.tsx:717`).
 const NO_EFFORTS: &str = "The current model does not support any efforts.";
+
+/// How long a shared task-list read may be in flight before the session says
+/// so.
+///
+/// Twice [`ganja_core::teammate::lead_inbox::POLL`], the cadence the read is
+/// started on: a store read that has not answered in two whole poll windows
+/// is not a slow disk, it is a read that is not coming back — a descriptor
+/// nothing writes to, a filesystem that stopped answering. What the deadline
+/// buys is the sentence below, never a second read: see
+/// [`App::reap_task_read`].
+const TASK_READ_DEADLINE: Duration = ganja_core::teammate::lead_inbox::POLL.saturating_mul(2);
+
+/// What that overrun says, once per read.
+///
+/// It names the last list as the thing being drawn, because a section that
+/// simply stopped moving is the failure this sentence exists to explain.
+const SLOW_TASK_READ: &str =
+    "the team's shared task list is not answering; showing the last one read";
 
 /// What the `/plugin` dialog's Reload answers when it worked (**D474**): the
 /// honest split, verbatim. Hooks and the skill roots really are rebuilt
@@ -546,9 +565,9 @@ pub struct App {
     held_dialog: Option<held::HeldList>,
     /// The `/plugin` dialog, while it is open (**D474**).
     plugin_dialog: Option<plugin::Plugin>,
-    /// The `/team` dialog, while it is open (**D504**).
+    /// The `/teammate` dialog, while it is open (**D504**).
     team_dialog: Option<team::Team>,
-    /// A `/team spawn` while it is in flight, carrying the name it started or
+    /// A `/teammate spawn` while it is in flight, carrying the name it started or
     /// the sentence that refused it.
     ///
     /// Reaped on the tick beside [`App::plugin_task`] and for its reason, with
@@ -562,7 +581,7 @@ pub struct App {
     /// plus `ganja_teammate_local::shim_tui::READY_SETTLE` — about sixteen
     /// seconds — while its readiness poll waits for the CLI's own composer
     /// and then lets it settle, or times out into a paste nobody submits, so
-    /// a second `/team spawn` typed meanwhile is answered [`team::BUSY`] for
+    /// a second `/teammate spawn` typed meanwhile is answered [`team::BUSY`] for
     /// that long. That is the design and not a hang: the wait is off this loop,
     /// which keeps drawing, and the guard is exactly what stops two spawns
     /// writing the team file at once.
@@ -611,9 +630,9 @@ pub struct App {
     /// collapse them.
     turn_usages: VecDeque<TurnUsage>,
     /// The inline command menu, while the buffer is a command being typed —
-    /// or, in values mode, a `/team` slot being filled (**D519**).
+    /// or, in values mode, a `/teammate` slot being filled (**D519**).
     dropdown: Option<Dropdown>,
-    /// The `/team` slot the values menu is over, for the span a chosen value
+    /// The `/teammate` slot the values menu is over, for the span a chosen value
     /// replaces; [`None`] whenever the menu is the command menu or closed.
     completion: Option<command::Slot>,
     /// The agent kinds `--agent` may name, read off the engine's registry
@@ -765,6 +784,27 @@ pub struct App {
     /// How many teammates the bar last reported, for [`App::running_jobs`]'s
     /// reason on the sibling count.
     teammates: usize,
+    /// The team's shared task list as the last poll found it, lowest id
+    /// first — what the `/teammate` dialog's Tasks section draws and what the
+    /// `task-list` status segment counts.
+    ///
+    /// Held here rather than read where it is drawn because reading it is a
+    /// directory read that another process may be writing to: the poll below
+    /// is on a clock, and a render takes whatever that clock last found.
+    tasks: Vec<Summary>,
+    /// When that poll last ran, gating it to [`App::team_polled`]'s cadence
+    /// for that field's reason — and its own field rather than that one
+    /// because the two are due independently: a session with no lead mailbox
+    /// still has a list, and a member polls its own inbox far faster than a
+    /// list needs re-reading.
+    tasks_polled: Option<Instant>,
+    /// That read while one is in flight, reaped on the tick exactly as
+    /// [`App::file_walk`] is and for its reason: the list is a file the store
+    /// opens, and awaiting it here would hand a stalled read — a planted
+    /// FIFO, a wedged lock, a disk that stopped answering — the power to stop
+    /// this loop drawing and answering keys. Also the guard that keeps a
+    /// second read off a store the first one has not come back from.
+    task_read: Option<TaskRead>,
     /// The queue a teammate's permission dialogs arrive on (**D-5**), claimed
     /// once from the engine when the app was built.
     ///
@@ -1089,6 +1129,9 @@ impl App {
             lead_inbox,
             team_polled: None,
             teammates: 0,
+            tasks: Vec::new(),
+            tasks_polled: None,
+            task_read: None,
             teammate_dialogs,
             forwarded_dialogs: HashMap::new(),
             peer_steers: HashMap::new(),
@@ -1925,14 +1968,15 @@ impl App {
 
     /// The lead's side of the mailbox, once a tick (**D503**).
     ///
-    /// Six things, and only the last is rate-limited *here*. Counting
-    /// teammates, carrying their dialogs and the spawn gate's asks, and
-    /// repainting the open `/team` dialog are reads of memory this process
-    /// already holds; reaping a finished spawn awaits a handle that already
-    /// reported finished. The §6.2 pass **is** a file read — one
-    /// `read_to_string` and, when it finds anything, a locked
-    /// read-modify-write — so it keeps the reference's own 1000 ms rather than
-    /// the loop's 16.
+    /// Seven things, and **two of them are on clocks**. Counting teammates,
+    /// carrying their dialogs and the spawn gate's asks, and repainting the
+    /// open `/teammate` dialog are reads of memory this process already holds;
+    /// reaping a finished spawn awaits a handle that already reported
+    /// finished. The other two are the ones that reach the disk, and both keep
+    /// the reference's own 1000 ms rather than the loop's 16: the shared task
+    /// list ([`App::poll_tasks`]), a directory read started off this loop and
+    /// collected by a later tick, and the §6.2 pass — one `read_to_string`
+    /// and, when it finds anything, a locked read-modify-write.
     ///
     /// What decides how often this runs at all is [`App::until_next_wakeup`],
     /// and the two gates answer different questions. A session with a teammate
@@ -1945,6 +1989,9 @@ impl App {
         self.poll_teammate_count();
         self.drain_teammate_dialogs();
         self.drain_spawn_asks();
+        // Ahead of the dialog poll, so an open dialog repaints from the list
+        // this same tick found rather than from the one before it.
+        self.poll_tasks().await;
         self.poll_team_dialog();
         self.poll_team_spawn().await;
         if self.lead_inbox.is_none() {
@@ -2272,14 +2319,181 @@ impl App {
         self.dirty = true;
     }
 
-    /// Opens the `/team` dialog over the roster as it stands (**D504**).
+    /// Re-reads the team's shared task list, on a clock rather than on the
+    /// tick.
+    ///
+    /// The list is documents in the team's directory and every member of the
+    /// team writes to them, so there is no event to wait for — a poll is the
+    /// only way this session learns that a teammate claimed something. It is
+    /// gated to the lead pass's own cadence for that gate's reason: the loop
+    /// ticks far faster than a directory needs re-reading, and
+    /// `Engine::task_list` is a disk read however cheaply it is wrapped.
+    ///
+    /// **Nothing is read at all unless something would draw it** — an open
+    /// `/teammate` dialog, or a configured roster naming `task-list`. The
+    /// element is opt-in, so the ordinary session with the default bar and no
+    /// dialog open pays one boolean per tick and touches no disk.
+    ///
+    /// The read itself is [`App::spawn_task_read`]'s, never awaited here:
+    /// what the store opens is a file, and a file whose read does not return
+    /// would take this loop down with it. The dialog and the segment go on
+    /// drawing the last list that landed until a fresh one does.
+    async fn poll_tasks(&mut self) {
+        // Reaped before anything else is decided, and whatever is watching
+        // now: a read started for a dialog that has since closed still has to
+        // be collected, or the next open would find one in flight and start
+        // none of its own. Whether anything is watching decides only what is
+        // *said* about a read that overran — a notice about a list nobody is
+        // drawing would be a sentence about nothing (bead `784f`).
+        let watched = self.team_dialog.is_some() || self.status.draws_task_list();
+        let landed = self.reap_task_read(watched).await;
+
+        if !watched {
+            // Whatever was last read is stale the moment nothing is watching
+            // it; dropping it is what keeps a dialog reopened an hour later
+            // from drawing an hour-old list for a frame.
+            if !self.tasks.is_empty() {
+                self.tasks = Vec::new();
+                self.status.set_task_list(0, 0);
+                self.dirty = true;
+            }
+            self.tasks_polled = None;
+
+            return;
+        }
+        if let Some(tasks) = landed {
+            self.install_tasks(tasks);
+        }
+        if self.task_read.is_some() {
+            // One read at a time, and no clock can start a second: aborting a
+            // stalled one would not free the descriptor it is blocked on, so a
+            // retry ladder here would pile blocked reads up behind each other.
+            return;
+        }
+        let due = self
+            .tasks_polled
+            .is_none_or(|last| last.elapsed() >= ganja_core::teammate::lead_inbox::POLL);
+        if !due {
+            return;
+        }
+        self.spawn_task_read();
+    }
+
+    /// Starts the one read [`App::poll_tasks`] reaps, on the clock that gates
+    /// it.
+    fn spawn_task_read(&mut self) {
+        // One reading of the clock for one moment: the poll's window opens
+        // when the read starts, and two `now`s a few nanoseconds apart would
+        // be two answers to a question with one.
+        let now = Instant::now();
+        self.tasks_polled = Some(now);
+        let engine = Arc::clone(&self.engine);
+        self.task_read = Some(TaskRead {
+            task: tokio::spawn(async move { engine.task_list().await }),
+            started: now,
+            said: false,
+        });
+    }
+
+    /// Collects a finished shared-list read, or says once that the one in
+    /// flight has overrun.
+    ///
+    /// [`App::poll_plugin_task`]'s shape — polled with
+    /// [`JoinHandle::is_finished`], awaited only then, so the loop never waits
+    /// on the read it started — with the overrun arm this one needs on top: a
+    /// read is *left running* past its deadline rather than aborted, because
+    /// an abort cannot unblock a thread already inside the file read, and the
+    /// list it is a read of goes on being drawn from what last landed. What
+    /// the deadline changes is only that the person watching is told, once,
+    /// instead of being left to wonder why the section never moves.
+    async fn reap_task_read(&mut self, watched: bool) -> Option<Vec<Summary>> {
+        let read = self.task_read.as_mut()?;
+        if !read.task.is_finished() {
+            let overran = !read.said && read.started.elapsed() >= TASK_READ_DEADLINE;
+            // Said only to somebody looking at the list it is about: with the
+            // dialog closed and no roster element drawing it, the sentence
+            // would name a list this frame does not show. What is latched is
+            // therefore the *saying* and not the crossing — a deadline passed
+            // while nobody looked leaves the sentence owed, and the person who
+            // opens the dialog onto a section that never fills is the one it
+            // was written for. Nothing else would ever tell them: no second
+            // read is started while this one hangs.
+            if overran && watched {
+                read.said = true;
+                self.status.set_notice(Some(SLOW_TASK_READ.to_owned()));
+                self.dirty = true;
+            }
+
+            return None;
+        }
+        let read = self.task_read.take().expect("checked in flight above");
+        match read.task.await {
+            // `None` is the store's own answer for a list it could not read,
+            // which it has already said on the debug log; it clears the
+            // section for the same reason a genuinely empty list does.
+            Ok(tasks) => {
+                // A read that answered late has stopped being the thing the
+                // notice was about, so the notice goes with it — its own
+                // notice, and only that one: the slot is shared, and anything
+                // written there since is a newer sentence somebody is owed.
+                if read.said {
+                    self.status.clear_notice_if(SLOW_TASK_READ);
+                    self.dirty = true;
+                }
+
+                Some(tasks.unwrap_or_default())
+            }
+            Err(error) => {
+                // A panic inside the read; its message is all there is, and
+                // the last good list is better than an empty one. The sentence
+                // about it being slow outlived the read either way, so it goes
+                // here for the same reason it goes above.
+                tracing::debug!(%error, "the shared task list read failed");
+                if read.said {
+                    self.status.clear_notice_if(SLOW_TASK_READ);
+                    self.dirty = true;
+                }
+
+                None
+            }
+        }
+    }
+
+    /// Installs a list that landed, repainting only where it says something
+    /// the frame does not already say.
+    fn install_tasks(&mut self, tasks: Vec<Summary>) {
+        if tasks == self.tasks {
+            return;
+        }
+        self.tasks = tasks;
+        // Exhaustive rather than `matches!` for `shares_the_list`'s reason: a
+        // fourth status — blocked, cancelled — is a decision about what
+        // `open/total` counts, and a wildcard would make it silently closed.
+        let open = self
+            .tasks
+            .iter()
+            .filter(|task| match task.status {
+                TaskStatus::Pending | TaskStatus::InProgress => true,
+                TaskStatus::Completed => false,
+            })
+            .count();
+        self.status.set_task_list(open, self.tasks.len());
+        self.dirty = true;
+    }
+
+    /// Opens the `/teammate` dialog over the roster as it stands (**D504**).
     fn open_team(&mut self) {
         let Some(view) = self.team_roster() else {
             self.status.set_notice(Some(NO_TEAM.to_owned()));
 
             return;
         };
-        let mut dialog = team::Team::new(team::rows(&view));
+        // The list was dropped the moment nothing was drawing it, so the
+        // dialog opens over nothing and the clock has to be due *now* rather
+        // than a poll window from now — otherwise the Tasks section would sit
+        // empty for a second of a dialog somebody just opened to read it.
+        self.tasks_polled = None;
+        let mut dialog = team::Team::new(team::rows(&view), self.tasks.clone());
         dialog.set_busy(self.team_spawn.is_some());
         self.team_dialog = Some(dialog);
     }
@@ -2289,7 +2503,7 @@ impl App {
         self.engine.team_view()
     }
 
-    /// Repaints the open `/team` dialog off a fresh roster.
+    /// Repaints the open `/teammate` dialog off a fresh roster.
     ///
     /// [`App::poll_mcp_dialog`]'s pattern, and it earns it twice over: a
     /// member's ring of recent calls (**D503**) moves on every tool call its
@@ -2308,11 +2522,12 @@ impl App {
             return;
         };
         let rows = team::rows(&view);
-        let moved = self.team_dialog.as_mut().is_some_and(|dialog| dialog.refresh(rows));
+        let tasks = self.tasks.clone();
+        let moved = self.team_dialog.as_mut().is_some_and(|dialog| dialog.refresh(rows, tasks));
         self.dirty |= moved;
     }
 
-    /// One keypress while the `/team` dialog is open, which owns every key —
+    /// One keypress while the `/teammate` dialog is open, which owns every key —
     /// [`drive_two_step`], the same driver the `/plugin` dialog reads.
     async fn handle_team_key(&mut self, key: KeyEvent) {
         let Some(dialog) = &mut self.team_dialog else {
@@ -2325,7 +2540,7 @@ impl App {
         }
     }
 
-    /// Runs a typed `/team` line (**D504**).
+    /// Runs a typed `/teammate` line (**D504**).
     ///
     /// **Only asking for the roster raises the dialog** (user directive,
     /// 2026-08-20). Every arm used to open it first so that a spawn's notice,
@@ -2416,7 +2631,7 @@ impl App {
         }
     }
 
-    /// Asks every teammate to shut down — `/team shutdown` with nobody named.
+    /// Asks every teammate to shut down — `/teammate shutdown` with nobody named.
     ///
     /// The fan-out and the frames are [`ganja_core::Teammates`]'s, for
     /// [`App::ask_shutdown`]'s reason; what is here is the one sentence a
@@ -2450,7 +2665,7 @@ impl App {
         });
     }
 
-    /// Runs what the `/team` dialog decided.
+    /// Runs what the `/teammate` dialog decided.
     ///
     /// The two mailbox effects are awaited here, and the spawn is not. That is
     /// not an inconsistency: a message and a shutdown are one locked
@@ -2465,8 +2680,8 @@ impl App {
                 // Up-arrow or Ctrl+R to bring back (user directive,
                 // 2026-08-20). Before the spawn, which may stop to ask a
                 // person: what is remembered is what was typed, not whether
-                // the team took it — the rule every `/team` line follows.
-                self.history.append(history::PromptInfo::text(format!("/team spawn {typed}")));
+                // the team took it — the rule every `/teammate` line follows.
+                self.history.append(history::PromptInfo::text(format!("/teammate spawn {typed}")));
                 self.spawn_teammate(request);
             }
             team::Effect::Message { to, text } => {
@@ -2522,7 +2737,7 @@ impl App {
         }
     }
 
-    /// Reaps a finished `/team spawn` and says on the dialog what it did.
+    /// Reaps a finished `/teammate spawn` and says on the dialog what it did.
     ///
     /// [`App::poll_plugin_task`]'s shape: polled on the tick, awaited only once
     /// the handle reports finished, so the loop never waits on the spawn it
@@ -2614,7 +2829,7 @@ impl App {
         let Some(teammates) = self.engine.teammates() else {
             return NO_TEAM.to_owned();
         };
-        // Always a known roster name from the `/team` dialog, never a
+        // Always a known roster name from the `/teammate` dialog, never a
         // resolved one — the D528 identity index is `None` here for the same
         // reason `Teammates::ask_shutdown`'s internal use is.
         let postbox = ganja_core::Postbox::lead(teammates.registry(), None);
@@ -2662,7 +2877,7 @@ impl App {
         self.dirty = true;
     }
 
-    /// Raises the permission dialogs `/team spawn` put in front of a person.
+    /// Raises the permission dialogs `/teammate spawn` put in front of a person.
     ///
     /// [`App::drain_teammate_dialogs`]'s twin on the other question — may this
     /// teammate *run*, rather than may its call run — and it shares that one's
@@ -3673,6 +3888,16 @@ impl App {
     }
 
     async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
+        // Bead `mxqo`: CI has twice held a typed line in the composer with its
+        // Enter never acted on, and a screen capture cannot say why — an
+        // overlay that claims the key and changes nothing visible looks
+        // exactly like a key that was never delivered. The dispatch below is a
+        // fixed order, so naming what is open when an Enter arrives names its
+        // claimant; [`App::submit`] says so from the other side, and no line
+        // here at all says the key never reached the application.
+        if key.code == KeyCode::Enter {
+            tracing::debug!(open = %self.open_overlays(), "an Enter reached the key handler");
+        }
         if self.exits(key) {
             self.quit = true;
             return Ok(());
@@ -3889,7 +4114,7 @@ impl App {
             return Ok(());
         }
 
-        // The same, for the same reason: `/team spawn` and a message to a
+        // The same, for the same reason: `/teammate spawn` and a message to a
         // member are both typed into a step of the dialog (**D504**).
         if self.team_dialog.is_some() {
             self.handle_team_key(key).await;
@@ -4167,6 +4392,51 @@ impl App {
             && !(self.inspector.is_some() && half_page(key).is_some())
     }
 
+    /// Which key-claiming surfaces are open, in the order [`App::handle_key`]
+    /// consults them — empty where nothing stands between a key and the
+    /// composer.
+    ///
+    /// For bead `mxqo`'s next capture, and ordered on purpose: the dispatch is
+    /// first-match-wins, so the **first** name here is where a key went. For
+    /// the unmodified Enter the trace fires on that is a verdict, not a
+    /// suspect — every one of these, the three menus at the end included,
+    /// consumes such an Enter on every path of its arm, a menu holding no
+    /// selection too. For other keys the menus claim only what steers them.
+    fn open_overlays(&self) -> String {
+        let pending = match &self.permission {
+            Some(PendingDialog::Permission(_)) => "permission",
+            Some(PendingDialog::Held(_)) => "held-message",
+            None => "",
+        };
+
+        [
+            ("backtrack", self.backtrack.is_some()),
+            (pending, !pending.is_empty()),
+            ("question", self.question.is_some()),
+            ("help", self.help.is_some()),
+            ("inspector", self.inspector.is_some()),
+            ("sessions", self.sessions.is_some()),
+            ("themes", self.theme_list.is_some()),
+            ("history-search", self.history_search.is_some()),
+            ("rewind", self.rewind.is_some()),
+            ("mcp", self.mcp_dialog.is_some()),
+            ("held-list", self.held_dialog.is_some()),
+            ("plugin", self.plugin_dialog.is_some()),
+            ("teammate", self.team_dialog.is_some()),
+            ("context", self.context_dialog.is_some()),
+            ("usage", self.usage_dialog.is_some()),
+            ("chooser", self.chooser.is_some()),
+            ("palette", self.palette.is_some()),
+            ("dropdown", self.dropdown.is_some()),
+            ("files", self.files.is_some()),
+            ("skills", self.skill_menu.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(name, open)| open.then_some(name))
+        .collect::<Vec<_>>()
+        .join(",")
+    }
+
     /// Whether a modal is claiming the keys and the wheel.
     fn modal_open(&self) -> bool {
         self.permission.is_some()
@@ -4215,7 +4485,7 @@ impl App {
             // Bare `/rename` names nothing to rename to — reached only
             // through a dropdown Tab-complete that stops at the name, since
             // `command::rename` intercepts an argument-carrying line before
-            // this dispatch is ever reached (D527, the `/team` precedent) —
+            // this dispatch is ever reached (D527, the `/teammate` precedent) —
             // so it answers with the missing-name notice, spelled once.
             command::Action::Rename => self.run_rename_line(command::Rename::Missing).await,
         }
@@ -4462,6 +4732,16 @@ impl App {
             KeyCode::Enter if !key.modifiers.intersects(NEWLINE_MODIFIERS) => {
                 let choice = self.dropdown.as_ref().and_then(Dropdown::selected);
                 self.dropdown = None;
+                // Bead `mxqo`, and the reason this arm is instrumented rather
+                // than the others: it consumes the Enter whatever it finds,
+                // and completing a value with the word already typed leaves
+                // the screen byte-identical. The spelling rather than the
+                // whole row, which carries a description nobody reading a log
+                // tail wants.
+                tracing::debug!(
+                    took = ?choice.as_ref().map(command::Choice::slash),
+                    "the command menu claimed an Enter"
+                );
 
                 match choice {
                     Some(command::Choice::Ui(entry)) => {
@@ -4515,7 +4795,7 @@ impl App {
         }
     }
 
-    /// Puts `value` where the partial word of the current `/team` slot was,
+    /// Puts `value` where the partial word of the current `/teammate` slot was,
     /// followed by the space that ends the slot (**D519**): only the word
     /// under the cursor goes, so a line completed mid-sentence keeps its tail.
     fn complete_value(&mut self, value: &str) {
@@ -4795,7 +5075,7 @@ impl App {
             self.completion = None;
             return;
         }
-        // A `/team` argument slot raises the same box over what could fill
+        // A `/teammate` argument slot raises the same box over what could fill
         // it (**D519**), rebuilt per keystroke because the slot itself moves
         // with the cursor.
         if let Some(slot) = command::team_completion(&text, cursor, &self.agent_kinds) {
@@ -4965,10 +5245,12 @@ impl App {
             call_id: MENTION_CALL.to_owned(),
             files: Arc::new(FileTimes::default()),
             // The menu is a file walk, not a conversation: it has no
-            // credentials to guard, nothing to delegate to, and nobody to ask.
+            // credentials to guard, nothing to delegate to, nobody to ask, and
+            // no team list to act on.
             credentials: Credentials::Unguarded,
             spawn: None,
             postbox: None,
+            tasks: None,
             ask: None,
             switch: None,
             jobs: None,
@@ -5003,7 +5285,7 @@ impl App {
     /// The wire wins where it answers, and that is now a decision rather than
     /// an accident of an empty table: cursor has no catalog rows to lose, but a
     /// ChatGPT seat's provider has plenty and its offering is still the pinned
-    /// five (**D476**) — offering a session the vendor's whole catalog would
+    /// six (**D476**) — offering a session the vendor's whole catalog would
     /// list models its own backend refuses. `wire_lists_models` is the seam's
     /// own decision asked synchronously, because this opens a dialog or spawns
     /// a fetch and cannot await to find out which.
@@ -5944,7 +6226,7 @@ impl App {
     }
 
     /// One keypress while the `/plugin` dialog is open, which owns every key —
-    /// [`drive_two_step`], the same driver the `/team` dialog reads.
+    /// [`drive_two_step`], the same driver the `/teammate` dialog reads.
     fn handle_plugin_key(&mut self, key: KeyEvent) {
         let Some(dialog) = &mut self.plugin_dialog else {
             return;
@@ -6111,6 +6393,22 @@ impl App {
     /// pushed here, so what the screen shows is exactly what the engine will
     /// send back to the model.
     async fn submit(&mut self) {
+        // The other side of the key handler's own line (bead `mxqo`): reaching
+        // here is an Enter nothing claimed. A few characters of the first word
+        // only — enough to tell one drill's line from another's in a log tail,
+        // and short of a whole token, since a line that is one word is still
+        // a person's prose or a name the composer never promised to log.
+        let head: String = self
+            .editor
+            .text()
+            .split_whitespace()
+            .next()
+            .unwrap_or_default()
+            .chars()
+            .take(8)
+            .collect();
+        tracing::debug!(head = %head, bytes = self.editor.text().len(), "the composer took a line");
+
         // Checked before anything else, as upstream checks it: the shell
         // branch runs ahead of the slash branch, because in shell mode a `/`
         // starts a path (`component/prompt/index.tsx:1058-1069`).
@@ -6143,9 +6441,9 @@ impl App {
             return;
         }
 
-        // `/team`'s own grammar, read here because it is the one UI command
+        // `/teammate`'s own grammar, read here because it is the one UI command
         // that takes arguments: `command::Action` is `Copy` and carries none, so
-        // a bare `/team` reaches `run_command` above while `/team spawn w1
+        // a bare `/teammate` reaches `run_command` above while `/teammate spawn w1
         // --backend ganja` reaches this (**D504**, AC-11's own spelling). Both
         // doors end up in the same dialog, which is what keeps the palette and
         // the typed line one thing rather than two.
@@ -6157,7 +6455,7 @@ impl App {
             // them again: a long spawn prompt behind a mistyped flag is
             // edited, not retyped (user directive, 2026-08-20). Unlike a
             // prompt, which is remembered only once the engine took it, there
-            // is no engine here to take or refuse it first. A bare `/team`
+            // is no engine here to take or refuse it first. A bare `/teammate`
             // never reaches this: it is the palette's own door above, and is
             // remembered no more than `/help` is.
             self.history.append(history::PromptInfo::text(&prompt));
@@ -6165,7 +6463,7 @@ impl App {
             return;
         }
 
-        // `/rename`'s own grammar, for `/team`'s exact reason: it is the
+        // `/rename`'s own grammar, for `/teammate`'s exact reason: it is the
         // other UI command that carries an argument, so a bare `/rename`
         // reaches `run_command` above while `/rename fresh` reaches this
         // (**D527**).
@@ -7106,6 +7404,15 @@ impl App {
             // A running store action has no event of its own either, and the
             // dialog is waiting on exactly the tick that reaps it.
             || self.plugin_task.is_some()
+            // A shared-list read lands on the tick that reaps it too, and a
+            // roster naming `task-list` with no dialog open has nothing else
+            // to wake the loop and move the count. Only while something is
+            // watching: a read that stalled is left running on purpose and
+            // may never land, and a loop woken every frame for a list nobody
+            // is drawing would be the idle cost this predicate exists to
+            // avoid — the lead's own clock reaps it once somebody looks again.
+            || (self.task_read.is_some()
+                && (self.team_dialog.is_some() || self.status.draws_task_list()))
             // A spawn in flight is reaped by the tick and by nothing else, and
             // while it runs it may be waiting on a dialog only the tick raises.
             || self.team_spawn.is_some()
@@ -7116,7 +7423,7 @@ impl App {
             // is waiting on a person, so neither is a reason to keep the loop
             // spinning at frame rate.
             || (self.queue.has_fallback() && !self.turn_running && !self.revert_pending)
-            // The `/team` dialog polls the roster and each member's ring on
+            // The `/teammate` dialog polls the roster and each member's ring on
             // every tick, exactly as the `/mcp` dialog polls its statuses.
             || self.team_dialog.is_some()
             // A teammate that is running may hand this loop a permission
@@ -7234,7 +7541,7 @@ enum Driven<E> {
 /// takes the printable characters, the way the question dialog's editor does;
 /// everywhere else the keys are the `/mcp` dialog's, Esc closing the dialog
 /// except where the input step consumes it as "cancel the edit". Written once
-/// over [`crate::component::TwoStep`] so the `/plugin` and `/team` dialogs
+/// over [`crate::component::TwoStep`] so the `/plugin` and `/teammate` dialogs
 /// cannot drift apart key by key.
 fn drive_two_step<D: crate::component::TwoStep>(
     dialog: &mut D,
@@ -7285,9 +7592,9 @@ fn drive_two_step<D: crate::component::TwoStep>(
 /// are exactly what [`ganja_core::SpawnAsker`] is handed and hands back.
 type SpawnQuestion = (ganja_core::SpawnAsk, tokio::sync::oneshot::Sender<PermissionReply>);
 
-/// What a session leading no team answers to every `/team` action.
+/// What a session leading no team answers to every `/teammate` action.
 ///
-/// One sentence rather than a silence: `/team` in a pane member is a person
+/// One sentence rather than a silence: `/teammate` in a pane member is a person
 /// asking about something that genuinely is not there, and a dialog that
 /// simply refused to open would look like a broken key.
 ///
@@ -7299,7 +7606,7 @@ type SpawnQuestion = (ganja_core::SpawnAsk, tokio::sync::oneshot::Sender<Permiss
 const NO_TEAM: &str =
     "this session leads no team \u{b7} it is a member of the one that launched it";
 
-/// What `/team shutdown` answers when the team is only the lead.
+/// What `/teammate shutdown` answers when the team is only the lead.
 const NOBODY_TO_STOP: &str = "this team has no teammates to stop";
 
 /// What the status bar says while a pane teammate waits for its turn to end
@@ -7391,7 +7698,7 @@ fn said(
 /// What a spawn's own dialog is filed under, where a call's dialog names its
 /// tool. Not a registry id — no tool raised this — and named for the door it
 /// came through so a person reading the dialog knows it is not a call.
-const SPAWN_TOOL: &str = "/team spawn";
+const SPAWN_TOOL: &str = "/teammate spawn";
 
 /// How many spawn dialogs may be waiting to be raised.
 ///
@@ -7400,7 +7707,7 @@ const SPAWN_TOOL: &str = "/team spawn";
 /// spawn asks plus room for a tick that has not drained it yet.
 const SPAWN_ASKS: usize = 4;
 
-/// Puts a `/team spawn`'s own permission dialog in front of the person who
+/// Puts a `/teammate spawn`'s own permission dialog in front of the person who
 /// typed it (**D-5**, Resolution 4).
 ///
 /// The engine's spawn gate is `async` and asks through this seam, which is what
@@ -7481,6 +7788,19 @@ fn payload(message: &Delivered) -> ganja_protocol::team::PeerPayload {
         message.color.clone(),
         &message.body,
     )
+}
+
+/// One in-flight read of the team's shared task list: the read itself, when
+/// it started, and whether its overrun has been said — [`SLOW_TASK_READ`] is
+/// one sentence about one read, not one per tick for as long as it hangs.
+///
+/// `said` records the sentence rather than the deadline it is about, which is
+/// what leaves a read that overran unwatched still able to say so once
+/// somebody looks; [`App::reap_task_read`] states why that matters.
+struct TaskRead {
+    task: JoinHandle<Option<Vec<Summary>>>,
+    started: Instant,
+    said: bool,
 }
 
 /// One in-flight `@`-menu walk: the fragment it answers, the token that

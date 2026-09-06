@@ -33,10 +33,11 @@ use buffa::Message as _;
 use futures::StreamExt as _;
 use ganja_provider::auth::{self, AuthError, OauthCredential, RefreshOauth};
 use ganja_provider::protocol::{FinishReason, Message};
-use ganja_provider::provider::cursor::{CursorWire, proto};
+use ganja_provider::provider::cursor::{CursorWire, history, proto};
 use ganja_provider::provider::{
     ChatRequest, CursorProvider, Provider as _, ProviderError, ProviderEvent,
 };
+use ganja_provider::tool::ToolDefinition;
 use secrecy::SecretString;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpListener;
@@ -402,7 +403,7 @@ fn exchange_body() -> Vec<u8> {
 }
 
 /// What [`exchange_body`] decodes to, spelled once: the thinking surfaces
-/// as reasoning, the kv exchange surfaces as nothing at all.
+/// as reasoning.
 fn exchange_events() -> Vec<ProviderEvent> {
     vec![
         ProviderEvent::ReasoningDelta("Weighing a greeting.".to_owned()),
@@ -415,12 +416,29 @@ fn exchange_events() -> Vec<ProviderEvent> {
 /// The one turn every phase asks for.
 fn request() -> ChatRequest {
     ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "gpt-5.3-codex".to_owned(),
         system: Some("You are terse.".to_owned()),
         messages: vec![Message::user("say hi")],
         tools: Vec::new(),
     }
+}
+
+/// The roster the declaration phase offers.
+fn declared() -> Vec<ToolDefinition> {
+    vec![
+        ToolDefinition {
+            name: "read".to_owned(),
+            description: "Reads a file.".to_owned(),
+            schema: serde_json::json!({ "type": "object" }),
+        },
+        ToolDefinition {
+            name: "bash".to_owned(),
+            description: "Runs a command.".to_owned(),
+            schema: serde_json::json!({ "type": "object" }),
+        },
+    ]
 }
 
 /// The recorded headers every cursor request carries, asserted once per RPC
@@ -469,7 +487,7 @@ async fn the_wire_speaks_the_recorded_connect_protocol() {
         std::env::set_var("XDG_DATA_HOME", empty.path());
     }
 
-    let refused = CursorProvider
+    let refused = CursorProvider::default()
         .stream(request(), CancellationToken::new())
         .await
         .err()
@@ -535,8 +553,9 @@ async fn the_wire_speaks_the_recorded_connect_protocol() {
     endpoint.forget();
     endpoint.answers_with(Reply::ok("application/connect+proto", exchange_body()));
 
+    let one_shot = request();
     let events: Vec<ProviderEvent> = wire
-        .stream(request(), CancellationToken::new())
+        .stream(one_shot.clone(), CancellationToken::new())
         .await
         .expect("the exchange opens")
         .collect()
@@ -552,13 +571,24 @@ async fn the_wire_speaks_the_recorded_connect_protocol() {
     // wire intact — and the system prompt never does, because its one inline
     // member is the allowlist-gated override the live server refused.
     assert_eq!(recorded.body[0], 0, "an ordinary data frame");
-    let declared =
+    let envelope =
         u32::from_be_bytes(recorded.body[1..5].try_into().expect("a whole prefix")) as usize;
-    assert_eq!(declared, recorded.body.len() - 5, "the envelope covers the body");
+    assert_eq!(envelope, recorded.body.len() - 5, "the envelope covers the body");
     let sent = proto::ClientMessage::decode_from_slice(&recorded.body[5..])
         .expect("the sent bytes are the client message");
     let run = sent.run_request.as_option().expect("a run request first");
-    assert!(run.conversation_state.is_set());
+    // **AC-4.** A one-shot has nothing before its newest run, so the state it
+    // sends is present and empty — what this wire sent before history was
+    // composed — under a conversation id all the same, and with no roster.
+    let state = run.conversation_state.as_option().expect("the state is present");
+    assert!(state.root_prompt_messages_json.is_empty(), "nothing to name on a first turn");
+    assert!(state.turns.is_empty());
+    assert_eq!(
+        run.conversation_id.as_deref(),
+        Some(history::derived(&one_shot.messages[0].id).as_str()),
+        "the conversation id is derived from the first message"
+    );
+    assert!(!run.mcp_tools.is_set(), "no tools, no roster");
     let prompt = b"You are terse.";
     assert!(
         !recorded.body.windows(prompt.len()).any(|window| window == prompt),
@@ -576,6 +606,120 @@ async fn the_wire_speaks_the_recorded_connect_protocol() {
             .and_then(|message| message.text.as_deref()),
         Some("say hi")
     );
+
+    // ── The declared roster, on the wire ─────────────────────────────────
+    // The same turn, offering tools: the run request that opens it carries
+    // `mcp_tools = 4` with one definition per tool, and this is asserted
+    // against the bytes a real socket received rather than against an
+    // assembled message — the one place that proves the roster survives the
+    // envelope, the chunked body and the transport.
+    endpoint.forget();
+    endpoint.answers_with(Reply::ok("application/connect+proto", exchange_body()));
+
+    let offering = ChatRequest { tools: declared(), ..request() };
+    let events: Vec<ProviderEvent> = wire
+        .stream(offering, CancellationToken::new())
+        .await
+        .expect("the exchange opens")
+        .collect()
+        .await;
+    assert_eq!(events, exchange_events(), "declaring a roster changes nothing about the reply");
+
+    let recorded = endpoint.only();
+    assert_eq!(recorded.body[0], 0, "an ordinary data frame");
+    let sent = proto::ClientMessage::decode_from_slice(&recorded.body[5..])
+        .expect("the sent bytes are the client message");
+    let declaration = sent
+        .run_request
+        .as_option()
+        .and_then(|run| run.mcp_tools.as_option())
+        .expect("the roster rides the run request");
+    assert_eq!(
+        declaration.mcp_tools.iter().filter_map(|tool| tool.name.as_deref()).collect::<Vec<_>>(),
+        vec!["read", "bash"],
+        "one definition per tool, in the order the engine advertised them"
+    );
+    let read = &declaration.mcp_tools[0];
+    assert_eq!(read.provider_identifier.as_deref(), Some("ganja"));
+    assert_eq!(read.tool_name.as_deref(), Some("read"));
+    assert_eq!(
+        read.input_schema_json.as_deref(),
+        Some(r#"{"type":"object"}"#),
+        "the schema rides field 6"
+    );
+    assert!(!read.input_schema.is_set(), "and never field 3");
+
+    // ── History on the wire ──────────────────────────────────────────────
+    // **AC-10.** A second turn names the first: the run request a real socket
+    // received carries three root ids and one turn id, each a raw sha256 the
+    // client's own store holds the bytes of, a conversation id derived from
+    // the first message, and the newest turn as the action. What never
+    // reaches the socket is any text of the history — the ids are all the
+    // wire carries, the bytes wait in the store for the server's kv gets.
+    endpoint.forget();
+    endpoint.answers_with(Reply::ok("application/connect+proto", exchange_body()));
+
+    let mut replied = Message::assistant("gpt-5.3-codex");
+    replied.parts.push(ganja_provider::protocol::Part::text("It parses TOML."));
+    let two_turn = ChatRequest {
+        messages: vec![Message::user("What does this crate do?"), replied, Message::user("How?")],
+        turn_start: 2,
+        ..request()
+    };
+    let composed = history::compose(&two_turn);
+    let events: Vec<ProviderEvent> = wire
+        .stream(two_turn.clone(), CancellationToken::new())
+        .await
+        .expect("the exchange opens")
+        .collect()
+        .await;
+    assert_eq!(events, exchange_events(), "carrying history changes nothing about the reply");
+
+    let recorded = endpoint.only();
+    assert_eq!(recorded.body[0], 0, "an ordinary data frame");
+    let sent = proto::ClientMessage::decode_from_slice(&recorded.body[5..])
+        .expect("the sent bytes are the client message");
+    let run = sent.run_request.as_option().expect("a run request first");
+    let state = run.conversation_state.as_option().expect("the state is present");
+    assert_eq!(state.root_prompt_messages_json.len(), 3, "the head, the prompt, the reply");
+    assert!(state.root_prompt_messages_json.iter().all(|id| id.len() == 32), "raw sha256 ids");
+    assert_eq!(state.turns.len(), 1, "one turn before this one");
+    assert_eq!(state.turns[0].len(), 32);
+    assert_eq!(
+        state.root_prompt_messages_json, composed.root,
+        "the ids on the wire are the ids the composition minted"
+    );
+    assert_eq!(state.turns, composed.turns);
+    let turn = proto::ConversationTurn::decode_from_slice(&composed.blobs[&state.turns[0]])
+        .expect("the turn id names a turn blob in the store the Run answers from");
+    let agent = turn.agent_conversation_turn.as_option().expect("the agent arm");
+    assert_eq!(agent.user_message.as_deref().map(<[u8]>::len), Some(32), "a user blob id");
+    assert_eq!(agent.steps.len(), 1, "one step: the reply");
+    assert_eq!(
+        run.conversation_id.as_deref(),
+        Some(history::derived(&two_turn.messages[0].id).as_str())
+    );
+    assert_eq!(
+        run.action
+            .as_option()
+            .and_then(|action| action.user_message_action.as_option())
+            .and_then(|action| action.user_message.as_option())
+            .and_then(|message| message.text.as_deref()),
+        Some("How?"),
+        "the newest turn is the action"
+    );
+    assert!(!run.mcp_tools.is_set());
+    for redacted in [
+        b"You are terse.".as_slice(),
+        b"What does this crate do?".as_slice(),
+        b"It parses TOML.".as_slice(),
+    ] {
+        assert!(
+            !recorded.body.windows(redacted.len()).any(|window| window == redacted),
+            "history travels as ids, never as text: {}",
+            String::from_utf8_lossy(redacted)
+        );
+    }
 
     // ── Delivery is incremental ──────────────────────────────────────────
     // The body pauses after the first frame, so the first delta can only

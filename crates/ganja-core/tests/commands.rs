@@ -191,8 +191,8 @@ async fn a_configured_command_runs_like_a_builtin() {
 
     assert_eq!(
         engine.commands().names(),
-        vec!["init".to_owned(), "review".to_owned()],
-        "a config command joins the roster the builtins are in"
+        vec!["init".to_owned(), "review".to_owned(), "team".to_owned()],
+        "a config command joins the roster the two builtins are in"
     );
 
     engine

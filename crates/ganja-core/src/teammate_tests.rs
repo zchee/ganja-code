@@ -9,7 +9,7 @@ use ganja_team::{MemberName, TeamName, TeamsRoot, mailbox};
 use super::{
     Delivery, Exited, InProcess, Lent, MemberBackend, PaneFate, SpawnRequest, SpawnSpec, Spawned,
     Surface, TEAMS_DIR, TeammateBackend, TeammateRegistry, Unsupported, claude_root_under,
-    session_team,
+    last_words_inline, session_team,
 };
 use crate::Storage;
 use crate::permission::Permissions;
@@ -1222,12 +1222,86 @@ fn an_exit_names_its_backend_whether_or_not_it_ran_a_cli() {
 
     assert_eq!(
         exited(Some(ganja_team::ShimCli::Codex), MemberBackend::Codex).notice(),
-        "w1 (codex) exited in its pane — last line: bye from the stub; the pane was closed and \
+        "w1 (codex) exited in its pane — last words: bye from the stub; the pane was closed and \
          the teammate retired"
     );
     assert_eq!(
         exited(None, MemberBackend::Ganja).notice(),
-        "w1 (ganja) exited in its pane — last line: bye from the stub; the pane was closed and \
+        "w1 (ganja) exited in its pane — last words: bye from the stub; the pane was closed and \
          the teammate retired"
     );
+}
+
+/// **Fix 2, HIGH.** `notice()` is one sentence on one **line**, whatever the
+/// pane said — because the two surfaces that draw it can only draw one.
+///
+/// The `/teammate` dialog renders `notice().lines().next()` and the status
+/// bar's notice segment goes through a `ratatui` `Span`, which drops a control
+/// character with nothing in its place. So a `last_words` block reaching
+/// either unflattened loses the `error:` line the whole `ocz2` change exists
+/// to carry **and** the fate clause after it — which for
+/// [`PaneFate::Left`] is the only actionable sentence there is, the one that
+/// says a corpse is still on the person's screen.
+#[test]
+fn a_multi_line_block_reaches_a_one_line_surface_whole() {
+    let block = "warning: sandbox could not be applied: endpoint is a symlink\nerror: could not \
+                 apply the 'read-only' sandbox profile; see the warning above for the cause.";
+    let exited = |pane| Exited {
+        name: "w1".to_owned(),
+        cli: Some(ganja_team::ShimCli::Grok),
+        backend: MemberBackend::Grok,
+        pane_id: "%4".to_owned(),
+        pane,
+        last_words: Some(block.to_owned()),
+    };
+
+    for fate in [PaneFate::Closed, PaneFate::Left, PaneFate::Recycled] {
+        let member = exited(fate);
+        let notice = member.notice();
+        assert!(!notice.contains('\n'), "one line, or a frontend cuts it: {notice:?}");
+        assert!(
+            notice.ends_with(member.pane_sentence()),
+            "and the fate clause survives the block before it: {notice:?}"
+        );
+        for line in block.lines() {
+            assert!(notice.contains(line), "every line of the block is still there: {notice:?}");
+        }
+    }
+
+    assert_eq!(
+        exited(PaneFate::Left).notice(),
+        "w1 (grok) exited in its pane — last words: warning: sandbox could not be applied: \
+         endpoint is a symlink · error: could not apply the 'read-only' sandbox profile; see the \
+         warning above for the cause.; the teammate is retired, and its dead pane could not be \
+         closed from here — close it by hand"
+    );
+    // The field itself keeps the newline: it is prose a model reads, where the
+    // structure is worth more than a row budget.
+    assert_eq!(exited(PaneFate::Left).last_words.as_deref(), Some(block));
+    assert_eq!(last_words_inline("one"), "one", "a single line is untouched");
+}
+
+/// **Bead xysf.** The count the lead's turn loop reads is this registry's own,
+/// however the dialog reached the person: both carriers send through the one
+/// surface it hands out, so neither can raise a question the count misses.
+#[test]
+fn a_forwarded_dialog_is_counted_by_the_registry_until_it_is_answered() {
+    let home = tempfile::tempdir().expect("a temporary directory");
+    let registry = registry(home.path());
+    assert!(registry.dialog_surface().is_none(), "no frontend has attached one yet");
+    assert_eq!(registry.dialogs_waiting(), 0);
+
+    let (lead, mut inbox) = tokio::sync::mpsc::channel(4);
+    registry.forward_dialogs_to(lead);
+    let surface = registry.dialog_surface().expect("a surface is attached");
+    let raised = surface
+        .hand_over(crate::teammate::posture::tests::forwarded("w1"))
+        .expect("the queue has room");
+
+    assert_eq!(registry.dialogs_waiting(), 1, "somebody is being asked something");
+    let forwarded = inbox.try_recv().expect("the question was really carried");
+    assert_eq!(forwarded.teammate, "w1", "and it says who is waiting");
+
+    drop(raised);
+    assert_eq!(registry.dialogs_waiting(), 0, "the wait is over, whatever the answer was");
 }

@@ -439,13 +439,28 @@ impl<'a> Body<'a> {
     ///
     /// Two *steps of one message* that end up with the same role are merged
     /// back into a single message, which is what keeps splitting a turn up from
-    /// ever emitting a transcript whose roles fail to alternate. Steps normally
-    /// alternate on their own — every step but a turn's last one ends in calls,
-    /// and those calls' results are a user message in between — so this catches
-    /// only the interrupted shapes that do not, which before this split were
-    /// one message anyway. Upstream arrives here from the other direction: the
-    /// AI SDK's Anthropic provider regroups the per-step messages it is handed
-    /// by role (`groupIntoBlocks`) before it builds a request.
+    /// changing what the transcript said: two same-role steps stay the one
+    /// message they were. Steps normally alternate on their own
+    /// — every step but a turn's last one ends in calls, and those calls'
+    /// results are a user message in between — so this catches only the
+    /// interrupted shapes that do not, which before this split were one message
+    /// anyway. Upstream arrives here from the other direction: the AI SDK's
+    /// Anthropic provider regroups the per-step messages it is handed by role
+    /// (`groupIntoBlocks`) before it builds a request.
+    ///
+    /// **Merging stops at each canonical message's edge, so the request this
+    /// build sends does contain consecutive `user` turns**, and that is
+    /// deliberate rather than an oversight: a step's tool results are a
+    /// synthetic user turn, a steer drained at the step boundary is a user
+    /// message behind it, and a team guard's block is another behind that. The
+    /// API asks for no repair — the Messages API reference's `messages`
+    /// parameter documents that consecutive `user` or `assistant` turns are
+    /// *combined into a single turn* — so merging across
+    /// messages would only be this port editing the transcript's own boundaries
+    /// to look tidier on the wire. Measured, not assumed: `live.rs`'s
+    /// `anthropic_accepts_the_adjacent_user_turns_a_steer_produces` sends two
+    /// adjacent plain-text user turns to the vendor and reads both reflected
+    /// in the reply; the shape with tool results in it is pinned offline only.
     fn new(request: &'a ChatRequest, max_tokens: u32) -> Self {
         let mut turns: Vec<(&'static str, Vec<Block<'a>>)> =
             Vec::with_capacity(request.messages.len());

@@ -197,7 +197,7 @@ pub fn wire_lists_models(provider_id: &str) -> bool {
 ///   a second staleness to reason about (deviation:
 ///   `cursor-model-listing-uncached-at-the-seam`).
 /// - **openai on a ChatGPT seat**, whose offering is
-///   [`responses::SEAT_ROSTER`]'s pinned five (**D476**). No network and no
+///   [`responses::SEAT_ROSTER`]'s pinned six (**D476**). No network and no
 ///   catalog read decides membership: the list is compile-time, and the catalog
 ///   is consulted only for a human name it may or may not know. A session on
 ///   an API key is not a seat, so it answers [`None`] and the catalog stays its
@@ -222,7 +222,7 @@ pub async fn wire_model_listing(provider_id: &str) -> Option<Result<WireModels, 
     Some(Ok(seat_models()))
 }
 
-/// The ChatGPT-seat half of [`wire_model_listing`]: the pinned five, named by
+/// The ChatGPT-seat half of [`wire_model_listing`]: the pinned six, named by
 /// the catalog where it happens to know them.
 ///
 /// The lookup is provider-scoped so a same-named row of another vendor cannot
@@ -543,7 +543,11 @@ pub fn select(config: &Config) -> Result<Selection, SelectionError> {
         // refusing by naming `ganja auth login` when there is none.
         // Uncataloged on purpose, so a session must name its model like any
         // config-declared endpoint.
-        cursor::ID => Wire::catalog(CursorProvider),
+        // `::default()` rather than the bare name since **D552**: the provider
+        // owns a held-run table now, so it is no longer a unit struct. The
+        // default is still the stored-login endpoint, which is what this arm
+        // always meant.
+        cursor::ID => Wire::catalog(CursorProvider::default()),
         // Grok's construction shape, and grok's posture with it: neither reads
         // a token here, so a session with no stored login is built and fails at
         // its first request, with the message that names the login. What
@@ -578,6 +582,62 @@ pub fn select(config: &Config) -> Result<Selection, SelectionError> {
     };
 
     Ok(Selection { provider: wire.provider, model, notice: None })
+}
+
+/// How much of ganja's tool set a wire can actually serve (**D551**, amended by
+/// **D552**).
+///
+/// A fact about **this build's** support for a provider, not about the vendor.
+/// D551 minted it when [`cursor`] was the one wire whose server ran the tool
+/// loop itself and a roster ganja advertised to it reached nothing; D552 built
+/// the bridge that answers that server's `mcp_exec` asks out of the same
+/// registry every other wire calls, so **no builtin id reaches anything but
+/// [`ToolReach::Full`] today**. The answer still lives here, next to [`select`],
+/// rather than as a defaulted [`Provider`] method: a scaffold two waves wide
+/// would otherwise become a question every wire is asked forever, and a wire
+/// that serves less is still one arm of [`ToolReach::of`].
+///
+/// Three-valued because the middle value is a real destination and not a hedge:
+/// a seat that serves the wire's own native kinds — files, shell — and no
+/// `task`, team tools or `skill` is what a refusal must be able to *name*. A
+/// two-valued flag could only claim nothing works, which was already false the
+/// day the first tool shipped. Both narrow values are unreached by any builtin
+/// id and are kept for the wire that arrives serving less, with
+/// [`Engine::tool_reach`](crate::Engine) and `tool_reach_refusal` still able to
+/// say which of the two it is.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ToolReach {
+    /// Every tool the registry advertises is callable. Every builtin wire,
+    /// cursor included since **D552**.
+    Full,
+    /// Only the kinds the wire's own vocabulary already has — no `task`, no
+    /// team task tools, no `skill`. Reached by no id; the value a native-kind
+    /// seat would be.
+    NativeOnly,
+    /// The wire calls nothing ganja registered. Reached by no id; cursor
+    /// answered this until **D552**.
+    None,
+}
+
+impl ToolReach {
+    /// What `provider_id` — a [`Provider::id`], builtin or config-declared —
+    /// serves.
+    ///
+    /// Keyed on the id because that is what an [`Engine`](crate::Engine) holds:
+    /// it carries an `Arc<dyn Provider>` and no [`Selection`]. A
+    /// config-declared `compat` provider answers [`ToolReach::Full`] with every
+    /// other id, and correctly — the three dialects it speaks are
+    /// function-calling wires, whatever endpoint they were pointed at.
+    ///
+    /// Every id answers [`ToolReach::Full`] since **D552** (see [`ToolReach`]),
+    /// so the body is the constant; the parameter stays because this is where
+    /// a wire that serves less is admitted, as an arm rather than a wave.
+    #[must_use]
+    pub const fn of(provider_id: &str) -> Self {
+        let _ = provider_id;
+
+        Self::Full
+    }
 }
 
 /// The provider a session defaults to when nothing named one: the oldest

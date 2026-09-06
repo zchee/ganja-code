@@ -198,6 +198,7 @@ fn cut_short(body: &str) -> Vec<u8> {
 /// The request every test sends.
 fn prompt() -> ChatRequest {
     ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "test-model".to_owned(),
         system: Some("be brief".to_owned()),
@@ -228,6 +229,7 @@ fn tool_prompt() -> ChatRequest {
     });
 
     ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "test-model".to_owned(),
         system: Some("be brief".to_owned()),

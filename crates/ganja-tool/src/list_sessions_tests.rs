@@ -181,6 +181,34 @@ fn neutralize_drops_control_characters_and_brackets_and_caps_length() {
     assert!(cut.ends_with('…'), "the cut is admitted: {cut}");
 }
 
+/// And the classes `char::is_control` does not cover, which is `Cc` alone: the
+/// two Unicode line breaks a one-row-per-line reader would count as rows, and
+/// the bidi overrides, isolates and marks that reorder what is drawn after
+/// them.
+#[test]
+fn neutralize_drops_the_line_separators_and_bidi_controls_cc_leaves_behind() {
+    assert_eq!(neutralize("one\u{2028}two"), "onetwo");
+    assert_eq!(neutralize("one\u{2029}two"), "onetwo");
+    for override_point in ['\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}'] {
+        assert_eq!(neutralize(&format!("ship{override_point}it")), "shipit", "{override_point:?}");
+    }
+    for isolate in ['\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}'] {
+        assert_eq!(neutralize(&format!("ship{isolate}it")), "shipit", "{isolate:?}");
+    }
+    // The marks are the weak half of the same class and are the easy ones to
+    // leave behind: they set a direction rather than push one, so they reorder
+    // only a neutral run — which is what the punctuation and digits a subject
+    // or a name ends in are.
+    for mark in ['\u{061C}', '\u{200E}', '\u{200F}'] {
+        assert_eq!(neutralize(&format!("ship{mark}it")), "shipit", "{mark:?}");
+    }
+    assert_eq!(
+        neutralize("fix \u{200F}(3)"),
+        "fix (3)",
+        "the parenthesised count renders as it was written, not mirrored"
+    );
+}
+
 /// AC-34's exclusion and staleness rules, and the disambiguation AC-34 makes
 /// of duplicate names, all through the tool's own `run` — not just `render`.
 #[tokio::test]

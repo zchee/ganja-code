@@ -7,12 +7,13 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     Answered, BufferedCall, ChildParts, PendingReplies, Turn, TurnKind, add_usage, attached,
-    context_carried, parse_args, peer_envelope, resolve, resolve_mentions, serialize_message,
-    session_mention_parts, sliced, title_model, user_message,
+    context_carried, continue_for_the_team, parse_args, peer_envelope, resolve, resolve_mentions,
+    serialize_message, session_mention_parts, sliced, title_model, user_message,
 };
 use crate::catalog;
 use crate::engine::Fanout;
 use crate::permission::Permissions;
+use crate::protocol::team::MemberBackend;
 use crate::protocol::{
     FinishReason, Message, Part, PartBody, PermissionId, PermissionReply, QuestionId, SessionId,
     ToolState, Usage,
@@ -20,6 +21,7 @@ use crate::protocol::{
 use crate::provider::{FakeProvider, fake};
 use crate::subagent::{Host, Spawn};
 use crate::teammate::identity::{Identity, TAG};
+use crate::tool::tasklist::{Status as TaskStatus, TaskFailure};
 use crate::tool::team::{Address, Body, Peer, Postbox, Reserved, Sent, Undelivered};
 use crate::tool::{Credentials, FileTimes, Registry, Tool, ToolCtx, ToolError, ToolOutput};
 
@@ -195,6 +197,10 @@ fn turn_with(
         jobs: None,
         hooks: None,
         postbox: None,
+        tasks: None,
+        team: None,
+        spec: None,
+        discipline: std::sync::Mutex::default(),
         delegated: false,
         persist: None,
     };
@@ -629,6 +635,78 @@ async fn a_peer_part_is_carried_into_the_request() {
     );
 }
 
+/// The engine's half of `ChatRequest::turn_start`: a turn opening on a
+/// history that already holds a finished turn tells the wire its own prompt
+/// is where this turn begins, and says nothing about the steer that turn
+/// consumed.
+///
+/// The seeded history is what a turn that took a steer leaves behind —
+/// `[prompt, reply, steer]`, the steer appended *after* the assistant it
+/// interrupted — so the request this drive assembles is the four-message
+/// `[prompt, reply, steer, prompt2]` that `cursor`'s walk cannot read a
+/// boundary out of: every user message is a `Message::user`, and their ids
+/// ascend across the boundary exactly as they do within one.
+///
+/// Two mutations of `stream_step` redden this, and they are the two ways the
+/// index could be got wrong. Dropping the `-1` reports the length rather than
+/// the last index — `4` on the first request here, and one past the prompt
+/// for every request the engine builds. Moving the computation below
+/// `messages.push(assistant)` counts the reply so far as history and reports
+/// `4` on the **second** request, which is why this drives two steps: a
+/// marker past the prompt is, for `cursor`, a prompt the model never hears.
+///
+/// The second step is bought with a steer rather than a tool call, because a
+/// steer is also the thing being asserted about: the engine holds a consumed
+/// steer beside the history rather than in it, so `turn_start` is the same
+/// index on both requests even though the second carries two more messages.
+#[tokio::test]
+async fn a_turn_tells_the_wire_its_own_prompt_is_where_it_began() {
+    let provider = Arc::new(FakeProvider::new("ok", Duration::ZERO));
+    let (mut turn, _received) = turn_with(
+        CancellationToken::new(),
+        Arc::new(Effectful { marker: PathBuf::from("/nonexistent") }),
+    );
+    turn.provider = provider.clone();
+    turn.prompt = "now add tests".to_owned();
+    {
+        let mut history = turn.history.lock().await;
+        history.push(Message::user("write the config parser"));
+        history.push(Message::assistant(fake::MODEL));
+        history.push(Message::user("actually make it lenient about unknown keys"));
+    }
+    turn.steer.lock().expect("the steer mailbox is never poisoned").push(super::SteerInput {
+        id: "steer-1".to_owned(),
+        text: "and cover the empty file".to_owned(),
+        mentions: Vec::new(),
+        skills: Vec::new(),
+        peers: Vec::new(),
+        session_mentions: Vec::new(),
+    });
+
+    super::drive(&turn).await;
+
+    let recorded = provider.recorded();
+    assert_eq!(recorded.len(), 2, "the steer carried the turn into a second step");
+    assert_eq!(
+        recorded[0].messages.len(),
+        4,
+        "the drive pushed this turn's prompt onto the finished turn: {:?}",
+        recorded[0].messages
+    );
+    assert_eq!(
+        recorded[1].messages.len(),
+        6,
+        "and the second step carries the reply so far and the steer beside it: {:?}",
+        recorded[1].messages
+    );
+    for asked in &recorded {
+        assert_eq!(
+            asked.turn_start, 3,
+            "this turn began at its own prompt, not at the steer the last one took"
+        );
+    }
+}
+
 /// A teammate that answers mid-turn answers *this* turn, so the steer
 /// path builds the same part the prompt path does — and drops the empty
 /// text part for the same reason, which matters more here: a steer with no
@@ -651,8 +729,8 @@ async fn a_steered_teammate_message_becomes_a_part_of_the_running_turn() {
     let drained = super::drain_steers(&turn).await;
 
     assert!(
-        matches!(drained, std::ops::ControlFlow::Continue(true)),
-        "the mailbox had one message to take"
+        matches!(drained, std::ops::ControlFlow::Continue(super::Drained::Peers)),
+        "the mailbox had one message to take, and nobody typed it"
     );
     let taken = turn.steer.lock().expect("the steer mailbox is never poisoned").consumed.clone();
     let [message] = taken.as_slice() else { panic!("one steer, one message, got {taken:?}") };
@@ -689,8 +767,8 @@ async fn a_whitespace_only_steer_with_peers_drops_its_text_part() {
 
     let drained = super::drain_steers(&turn).await;
     assert!(
-        matches!(drained, std::ops::ControlFlow::Continue(true)),
-        "the mailbox had one message to take"
+        matches!(drained, std::ops::ControlFlow::Continue(super::Drained::Peers)),
+        "whitespace is not somebody typing, so this drains as a teammate's message does"
     );
 
     let taken = turn.steer.lock().expect("the steer mailbox is never poisoned").consumed.clone();
@@ -902,6 +980,18 @@ fn a_child_turn_cannot_spawn_anything() {
         turn.spawn.is_none(),
         "one level, fixed — and fixed here rather than asked about later"
     );
+}
+
+/// Neither door onto the team is offered to a subagent, and for one reason:
+/// a delegated turn acts under the lead's name, so anything it wrote there
+/// would be attributed to somebody who never said it.
+#[test]
+fn a_child_turn_holds_neither_the_task_list_nor_a_postbox() {
+    let (spawn, _parent) = parent_spawn(None);
+    let (turn, _events) = child_of(&spawn);
+
+    assert!(turn.tasks.is_none(), "a claim on the team's work would be a claim nobody made (D546)");
+    assert!(turn.postbox.is_none(), "and a message to the team would be one nobody sent (D498)");
 }
 
 /// A subagent runs unattended, so it is the last conversation that should
@@ -1284,4 +1374,161 @@ async fn a_peers_own_words_are_never_scanned_for_a_session_mention() {
         "no session-mention block is rendered from a peer's own words: {:?}",
         message.parts
     );
+}
+
+/// A task list that opens a permission dialog while it is being read.
+///
+/// The window `continue_for_the_team` has to be honest about, with the race
+/// taken out of it: the tail gathers the dialog fact, then awaits the list —
+/// which in production is a directory walk taking a lock per document, off the
+/// runtime's own threads — and a teammate's turn running beside the lead's can
+/// raise its forwarded dialog inside that wait. Raising it from inside the read
+/// itself makes that ordering a fact rather than a scheduling accident.
+struct AsksMidRead {
+    /// The very map [`dialog_open`](super::dialog_open) reads, so a dialog this
+    /// opens is one the turn can really see.
+    pending: Arc<std::sync::Mutex<PendingReplies>>,
+    /// The waiting halves, kept because a dialog is something somebody is
+    /// still holding: dropping them would leave the map describing waits that
+    /// had already ended.
+    waiting: std::sync::Mutex<Vec<tokio::sync::oneshot::Receiver<PermissionReply>>>,
+}
+
+impl AsksMidRead {
+    fn over(pending: &Arc<std::sync::Mutex<PendingReplies>>) -> Self {
+        Self { pending: Arc::clone(pending), waiting: std::sync::Mutex::default() }
+    }
+}
+
+/// Hand-written because [`PendingReplies`] is not [`std::fmt::Debug`] — it
+/// holds reply channels, which are nobody's to render — and [`TaskList`]
+/// requires it of every list.
+///
+/// [`TaskList`]: crate::tool::tasklist::TaskList
+impl std::fmt::Debug for AsksMidRead {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("AsksMidRead").finish_non_exhaustive()
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::tool::tasklist::TaskList for AsksMidRead {
+    async fn list(&self) -> Result<Vec<crate::tool::tasklist::Summary>, TaskFailure> {
+        let (answer, waiting) = tokio::sync::oneshot::channel();
+        self.pending
+            .lock()
+            .expect("the pending replies are never poisoned")
+            .open_permission(PermissionId::ascending(), answer);
+        self.waiting.lock().expect("the waiting dialogs are never poisoned").push(waiting);
+
+        Ok(vec![ganja_testkit::task_summary("1", TaskStatus::InProgress, "w1")])
+    }
+
+    async fn create(
+        &self,
+        _draft: crate::tool::tasklist::Draft,
+    ) -> Result<crate::tool::tasklist::Record, TaskFailure> {
+        unreachable!("the continuation blocker reads the list and nothing else")
+    }
+
+    async fn update(
+        &self,
+        _id: &str,
+        _change: crate::tool::tasklist::Change,
+    ) -> Result<crate::tool::tasklist::Record, TaskFailure> {
+        unreachable!("the continuation blocker reads the list and nothing else")
+    }
+
+    async fn delete(&self, _id: &str) -> Result<(), TaskFailure> {
+        unreachable!("the continuation blocker reads the list and nothing else")
+    }
+
+    async fn get(&self, _id: &str) -> Result<crate::tool::tasklist::Record, TaskFailure> {
+        unreachable!("the continuation blocker reads the list and nothing else")
+    }
+}
+
+/// A turn leading `registry`, driving `tasks`, and otherwise of no
+/// consequence — the three facts the blocker decides on and nothing else.
+fn tail_of(
+    registry: Arc<crate::teammate::TeammateRegistry>,
+    tasks: impl Fn(&Arc<std::sync::Mutex<PendingReplies>>) -> Arc<dyn crate::tool::tasklist::TaskList>,
+) -> (Turn, mpsc::Receiver<crate::protocol::Event>) {
+    let (turn, received) = turn_with(
+        CancellationToken::new(),
+        Arc::new(Effectful { marker: std::env::temp_dir().join("never-written") }),
+    );
+    let tasks = tasks(&turn.pending);
+
+    (Turn { team: Some(registry), tasks: Some(tasks), ..turn }, received)
+}
+
+/// **The tail asks who is being asked twice, and decides on the second
+/// answer.**
+///
+/// The first read is a gate that saves the disk walk; the walk is what a
+/// teammate's dialog can be raised inside. A build that decided on the first
+/// answer would spend a continuation and put `<team_still_working>` in front of
+/// a question the person has not answered yet — which is precisely what the
+/// three doc sites around this promise never happens.
+///
+/// The control below is the same three facts with a list that opens nothing,
+/// so this cannot be passing because the turn was refused for another reason.
+#[tokio::test]
+async fn a_dialog_raised_inside_the_list_read_stops_the_continuation() {
+    let home = ganja_testkit::temp_dir();
+    let registry = crate::teammate::tests::registry(home.path());
+    registry
+        .spawn(
+            crate::teammate::tests::in_process(home.path()),
+            crate::teammate::tests::request("w1", MemberBackend::InProcess, home.path()),
+        )
+        .await
+        .expect("an in-process teammate starts");
+    assert_eq!(registry.running(), 1, "the team is live, which is the first of the three facts");
+
+    let (continuing, _received) = tail_of(Arc::clone(&registry), |_| {
+        Arc::new(ganja_testkit::StaticTasks::new(vec![ganja_testkit::task_summary(
+            "1",
+            TaskStatus::InProgress,
+            "w1",
+        )]))
+    });
+    assert!(
+        continue_for_the_team(&continuing).await,
+        "a live team, open work and nobody being asked anything: this turn carries on",
+    );
+
+    let (asked, _received) = tail_of(registry, |pending| Arc::new(AsksMidRead::over(pending)));
+    assert!(
+        !continue_for_the_team(&asked).await,
+        "and the same turn stops once the read it waited on left a question open",
+    );
+}
+
+/// The rule-refusal sentence still renders the bytes it rendered before
+/// **D552** moved its prefix into `ganja-tool`: the prefix, then the rules as
+/// JSON, with nothing between them.
+///
+/// The wire matches on that prefix to route an `Error` part to cursor's
+/// `rejected` arm rather than its failed-tool arm, so a stray separator or a
+/// reworded clause is an interop change wearing a cosmetic hat.
+#[test]
+fn a_rule_refusal_reads_as_the_hoisted_prefix_followed_by_its_rules() {
+    let rules = vec![crate::permission::Rule {
+        permission: "bash".to_owned(),
+        pattern: "rm *".to_owned(),
+        action: crate::permission::Action::Deny,
+    }];
+    let rendered = super::denied(&rules);
+
+    assert_eq!(
+        rendered,
+        format!(
+            "The user has specified a rule which prevents you from using this specific tool \
+             call. Here are some of the relevant rules {}",
+            serde_json::to_string(&rules).expect("rules serialize"),
+        ),
+    );
+    assert!(rendered.starts_with(ganja_tool::permission_text::DENIED_PREFIX));
 }

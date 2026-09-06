@@ -537,6 +537,7 @@ async fn a_copilot_subscription_drives_a_turn_with_the_headers_and_the_raw_token
         .provider
         .stream(
             ganja_core::provider::ChatRequest {
+                turn_start: 0,
                 effort_options: Default::default(),
                 model: MODEL.to_owned(),
                 system: None,

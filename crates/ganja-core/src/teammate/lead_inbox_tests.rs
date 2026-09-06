@@ -250,6 +250,67 @@ async fn a_pane_permission_request_raises_one_dialog_and_its_answer_lands_in_the
     );
 }
 
+/// The count once the carrier's task has had its chance to run, or after a
+/// bounded wait: the guard is given back by that task, never by the call that
+/// ended its wait.
+async fn dialogs_settled(registry: &TeammateRegistry) -> usize {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let waiting = registry.dialogs_waiting();
+        if waiting == 0 || tokio::time::Instant::now() >= deadline {
+            return waiting;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// **Bead xysf.** The team going down ends a pane's forwarded wait and gives
+/// the count back with it, exactly as it does for an in-process teammate's.
+///
+/// Pinned rather than left to the dropped-sender path because the two failures
+/// are not the same size any more: a wait nothing ends used to strand one
+/// teammate, and now it also pins `dialogs_waiting()` above zero, which
+/// disables the lead's continuation blocker for the rest of the session with
+/// nothing logged and nothing shown. The frontend here keeps its end of the
+/// dialog for the whole test — the reply channel is alive and unanswered — so
+/// the cancel is the only thing that can end this wait.
+#[tokio::test]
+async fn a_forwarded_pane_dialog_gives_its_count_back_when_the_team_ends() {
+    let home = tempfile::tempdir().expect("a temporary home");
+    let registry = registry(home.path());
+    let (surface, mut dialogs) = tokio::sync::mpsc::channel(4);
+    registry.forward_dialogs_to(surface);
+    write_frame(&registry.lead_inbox(), "w1", &ask("req-1"));
+
+    let pass = LeadInbox::new(Arc::clone(&registry)).poll().await;
+    assert!(pass.asked[0].raised, "the ask reached the lead: {pass:?}");
+    let forwarded = dialogs.try_recv().expect("exactly one dialog was raised");
+    assert_eq!(registry.dialogs_waiting(), 1, "and somebody is being asked it");
+
+    registry.shutdown().await;
+
+    assert_eq!(
+        dialogs_settled(&registry).await,
+        0,
+        "the team went, and the question in front of the person went with it",
+    );
+    let inbox = registry
+        .root()
+        .inbox_path(registry.team(), &MemberName::parse("w1").expect("a member name"));
+    let held = answered(&inbox).await;
+    assert_eq!(held.len(), 1, "and the pane is told, rather than left waiting: {held:?}");
+    let Some(Frame::PermissionResponse(response)) = held[0].frame() else {
+        panic!("the answer is a permission response: {:?}", held[0]);
+    };
+    assert_eq!(response.request_id(), "req-1");
+    assert_eq!(
+        member::reply_of(&response),
+        crate::protocol::PermissionReply::Reject,
+        "a dialog nobody can answer any more is a refusal",
+    );
+    drop(forwarded);
+}
+
 /// A member-supplied request id never becomes the key a lead's dialogs
 /// are held under: two members reusing one id get two dialogs the lead
 /// can tell apart, and each answer lands in the inbox of the member that

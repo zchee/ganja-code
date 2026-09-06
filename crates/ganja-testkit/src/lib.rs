@@ -4,12 +4,14 @@
 //! of them deliberately one-test-per-binary (see
 //! `ganja-core/tests/AGENTS.md`). Before this crate existed, each one
 //! rebuilt the same handful of fixtures from scratch: a [`Provider`] double
-//! that plays back a script and records what it was asked, a [`Tool`] double
-//! that records a call or blocks until cancelled, the drain loop that
+//! that plays back a script — or answers by what it was asked — and records
+//! it, a [`Tool`] double that records a call or blocks until cancelled, a
+//! shared task list that answers with something fixed, the drain loop that
 //! collects a turn's events (optionally answering permission dialogs along
 //! the way), the storage builders that seed a session directly on disk, the
-//! teammate fixtures P25's suites share, and the private tmux server every
-//! pane suite runs against.
+//! teammate fixtures P25's suites share, the duplex cursor backend the tool
+//! bridge is proven against, and the private tmux server every pane suite
+//! runs against.
 //!
 //! This crate exists to hold exactly that — nothing that is genuinely
 //! specific to one suite (a bun fixture's own spawn helper, a
@@ -21,12 +23,16 @@
 //! [`Tool`]: ganja_tool::Tool
 
 mod agent;
+// A module rather than a re-export: its script vocabulary is a dozen names that
+// only make sense together.
+pub mod cursor_server;
 mod drain;
 mod fs;
 mod log;
 mod provider;
 mod session;
 mod subagent;
+mod tasklist;
 mod teammate;
 pub mod tmux;
 mod tool;
@@ -35,12 +41,13 @@ pub use agent::agent_registry;
 pub use drain::{drain, drain_allowing, drain_answering};
 pub use fs::{Homes, plant, redirect_xdg_data_home, temp_dir};
 pub use log::LogCapture;
-pub use provider::{ScriptedProvider, says, tool_call};
+pub use provider::{Director, ScriptedProvider, says, tool_call, transcript};
 pub use session::{
     PRE_UUID_ID, entries, plant_preuuid_store, seed_message, seed_session, seeded_session_info,
     set_aside_of,
 };
 pub use subagent::{RecordingSpawner, ScriptedSubagents};
+pub use tasklist::{StaticTasks, task, task_summary};
 pub use teammate::{
     AllowSpawn, LEAD_SESSION_ID, RecordedSpawns, RunnerHarness, TASK, TEAM, backends, caller,
     caller_with, eventually, externals, flooded_inbox, seed_team_file, spawn, spawn_with_prompt,

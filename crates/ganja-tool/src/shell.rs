@@ -49,7 +49,14 @@ const KILL_GRACE: Duration = Duration::from_millis(200);
 const DRAIN_GRACE: Duration = Duration::from_millis(100);
 
 /// Longest command echoed in a one-line description.
-const DESCRIBE_LIMIT: usize = 80;
+///
+/// `pub(crate)` because a shell command is no longer the only free text a
+/// description line is built from: [`crate::tasklist`] titles a call on a
+/// subject another member wrote, which is under no cap at all until it reaches
+/// one. One limit rather than two, for [`crate::list_sessions::neutralize`]'s
+/// reason — a second number here would be a spelling to keep in step for no
+/// boundary at all.
+pub(crate) const DESCRIBE_LIMIT: usize = 80;
 
 /// How much of a running command's output is held in memory.
 ///
@@ -1126,7 +1133,12 @@ fn render(template: &str, values: &[(&str, &str)]) -> String {
 }
 
 /// `text` cut to `limit` characters, saying so when anything was cut.
-fn shorten(text: &str, limit: usize) -> String {
+///
+/// `pub(crate)` for [`DESCRIBE_LIMIT`]'s reason, and with it: the flattening of
+/// newlines is half of what makes a description one line, so a second caller
+/// wanting the same one-line title wants this function rather than its own
+/// arithmetic.
+pub(crate) fn shorten(text: &str, limit: usize) -> String {
     let flattened = text.replace('\n', " ");
 
     if flattened.chars().count() <= limit {

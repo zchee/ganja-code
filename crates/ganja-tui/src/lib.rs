@@ -436,12 +436,26 @@ pub async fn run(
         // leading no team of its own. And it binds no socket: a member is
         // addressed through its lead's team, by the same line that keeps it
         // from leading one (**D505**).
+        //
+        // Its half of the team's **shared task list** is installed in the same
+        // breath and for the same reason: the list lives in the team directory
+        // under the root that launch line carried, which is a value this
+        // frontend holds and the engine cannot go and find — the way a teams
+        // root arrives everywhere else. The name it claims and comments under
+        // is the one it was launched as, bound here so no call can choose
+        // another.
         Some((membership, _)) => (
-            engine.with_postbox(Arc::new(ganja_core::teammate::member::MemberPostbox::new(
-                membership.name().clone(),
-                membership.team().clone(),
-                membership.root().clone(),
-            ))),
+            engine
+                .with_postbox(Arc::new(ganja_core::teammate::member::MemberPostbox::new(
+                    membership.name().clone(),
+                    membership.team().clone(),
+                    membership.root().clone(),
+                )))
+                .with_tasks(Arc::new(ganja_core::teammate::tasklist::TeamTasks::of(
+                    membership.root(),
+                    membership.team(),
+                    membership.name().as_str(),
+                ))),
             None,
             None,
         ),

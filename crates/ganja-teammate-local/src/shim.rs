@@ -194,7 +194,7 @@ const COMPLAINT: Duration = Duration::from_millis(500);
 /// be a difference nobody asked for.
 pub const POLL: Duration = runner::POLL;
 
-/// The `/team` ring note either shim shape leaves when a frame-shaped message
+/// The `/teammate` ring note either shim shape leaves when a frame-shaped message
 /// of a kind this build has never heard of is dropped — one spelling for the
 /// headless loop and the pane loop, ahead of the dropped kind's name.
 pub(crate) const DROPPED_UNKNOWN: &str = "dropped frame-shaped message of unknown type";
@@ -866,7 +866,7 @@ impl Child {
     /// rather than only asking. Two mechanisms cover the two callers and both
     /// are needed: the shim's task is registered in the registry's task list,
     /// so a registry `shutdown()` drains it after `join_all`ing every kill; and
-    /// this call itself awaits, for the individual-kill path — a `/team` retire
+    /// this call itself awaits, for the individual-kill path — a `/teammate` retire
     /// of one member while the lead lives — which never touches that list.
     ///
     /// TERM at once, KILL after [`SETTLE`], to the **group** rather than to the
@@ -1316,7 +1316,7 @@ impl ganja_core::teammate::TeammateBackend for ShimBackend {
 /// — and three things that task owns rather than inherits. The ring is written
 /// by the shim itself, because the engine-folding writer folds from an event
 /// stream a shim member has none of; the spawn's own posture lines go on
-/// before the loop starts, so a person opening `/team` sees what was granted
+/// before the loop starts, so a person opening `/teammate` sees what was granted
 /// even if the first turn has not happened yet (**AC-17**). `alive` is cleared
 /// by the loop when it ends, for the same reason the in-process runner's task
 /// clears it: nothing else is watching.
@@ -1422,7 +1422,7 @@ pub struct Tick {
 /// What the registry lends one shim member's loop.
 ///
 /// Grouped rather than passed one by one because every field is the
-/// *registry's* — the ring it will show in `/team`, the flag its roster reads,
+/// *registry's* — the ring it will show in `/teammate`, the flag its roster reads,
 /// the records file it owns, the token that ends every member at once — and a
 /// loop that had been handed them separately would be a loop somebody could
 /// build with one of them missing.
@@ -1459,7 +1459,7 @@ pub struct ShimRunner {
     deadline: Duration,
     /// The registry's own token, beside the handle's. Two of them, because
     /// they answer different questions: the handle's ends *this member* (a
-    /// `/team` retire), and this one ends *every* member at once (a session
+    /// `/teammate` retire), and this one ends *every* member at once (a session
     /// shutting down). A loop that watched only the first would outlive its
     /// registry.
     registry: CancellationToken,

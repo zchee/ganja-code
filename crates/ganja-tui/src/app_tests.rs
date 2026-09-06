@@ -13,6 +13,8 @@ use ganja_protocol::{
     PartId, PermissionId, PermissionReply, QuestionId, QuestionInfo, QuestionOption, RedactedText,
     ToolState, Usage,
 };
+use ganja_testkit::{StaticTasks, task};
+use ganja_tool::tasklist::Status;
 use ratatui::Terminal;
 use ratatui::backend::{Backend, ClearType, TestBackend};
 use ratatui::crossterm::event::{
@@ -24,8 +26,9 @@ use tempfile::TempDir;
 
 use super::{
     App, BACKTRACK_HINT, Chooser, Cleared, Dropdown, ESC_CHORD, FRAME, Help, JoinHandle,
-    ListDialog, MAX_EVENT_LOG, MessageId, Mode, NO_EFFORTS, Palette, PendingDialog, Permission,
-    RevertScope, Rewind, WireListing, permission_reply,
+    ListDialog, MAX_EVENT_LOG, MessageId, Mode, NO_EFFORTS, NOBODY_TO_STOP, Palette, PendingDialog,
+    Permission, RevertScope, Rewind, SLOW_TASK_READ, TASK_READ_DEADLINE, WireListing,
+    permission_reply,
 };
 
 /// The session every hand-built fixture event happens in. One pinned id,
@@ -3840,7 +3843,7 @@ async fn the_palette_reaches_every_command_it_lists() {
 #[tokio::test]
 async fn tab_completes_a_backend_from_the_parsers_own_list() {
     let mut app = app();
-    for event in typing("/team spawn foo --backend g") {
+    for event in typing("/teammate spawn foo --backend g") {
         app.handle(event).await.expect("typing is handled");
     }
     assert!(app.dropdown.is_some(), "the backend slot should raise the menu");
@@ -3848,7 +3851,7 @@ async fn tab_completes_a_backend_from_the_parsers_own_list() {
 
     app.handle(key(KeyCode::Tab, KeyModifiers::NONE)).await.expect("tab is handled");
 
-    assert_eq!(app.editor.text(), "/team spawn foo --backend ganja ");
+    assert_eq!(app.editor.text(), "/teammate spawn foo --backend ganja ");
     assert!(app.dropdown.is_none(), "choosing closes the menu");
     assert!(app.completion.is_none());
 }
@@ -3858,7 +3861,7 @@ async fn tab_completes_a_backend_from_the_parsers_own_list() {
 #[tokio::test]
 async fn a_fully_typed_backend_closes_the_menu_before_enter() {
     let mut app = app();
-    for event in typing("/team spawn w1 --backend ganj") {
+    for event in typing("/teammate spawn w1 --backend ganj") {
         app.handle(event).await.expect("typing is handled");
     }
     assert!(app.dropdown.is_some());
@@ -3866,22 +3869,22 @@ async fn a_fully_typed_backend_closes_the_menu_before_enter() {
         app.handle(event).await.expect("typing is handled");
     }
     assert!(app.dropdown.is_none(), "nothing left to complete");
-    assert_eq!(app.editor.text(), "/team spawn w1 --backend ganja");
+    assert_eq!(app.editor.text(), "/teammate spawn w1 --backend ganja");
 }
 
-/// **D519.** The slot after `/team` is the subcommand, and Enter fills it
+/// **D519.** The slot after `/teammate` is the subcommand, and Enter fills it
 /// the way Tab does — a subcommand is not a thing to run by itself.
 #[tokio::test]
 async fn enter_fills_a_team_subcommand_without_submitting() {
     let mut app = app();
-    for event in typing("/team sh") {
+    for event in typing("/teammate sh") {
         app.handle(event).await.expect("typing is handled");
     }
     assert!(app.dropdown.is_some());
 
     app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
 
-    assert_eq!(app.editor.text(), "/team shutdown ");
+    assert_eq!(app.editor.text(), "/teammate shutdown ");
     assert!(app.dropdown.is_none());
 }
 
@@ -3890,7 +3893,7 @@ async fn enter_fills_a_team_subcommand_without_submitting() {
 #[tokio::test]
 async fn free_words_raise_no_values_menu_and_esc_keeps_the_text() {
     let mut app = app();
-    for event in typing("/team spawn fo") {
+    for event in typing("/teammate spawn fo") {
         app.handle(event).await.expect("typing is handled");
     }
     assert!(app.dropdown.is_none(), "a member name is anyone's to choose");
@@ -3902,7 +3905,7 @@ async fn free_words_raise_no_values_menu_and_esc_keeps_the_text() {
 
     app.handle(key(KeyCode::Esc, KeyModifiers::NONE)).await.expect("esc is handled");
     assert!(app.dropdown.is_none());
-    assert_eq!(app.editor.text(), "/team spawn fo --agent ");
+    assert_eq!(app.editor.text(), "/teammate spawn fo --agent ");
 }
 
 /// The trigger, at the level the user meets it: a slash that starts the
@@ -5672,6 +5675,74 @@ async fn choosing_an_engine_command_types_its_name_instead_of_running_it() {
     assert!(app.dropdown.is_none());
 }
 
+/// The same for `/team`, where getting it wrong would be silent (**D544**).
+///
+/// A typed `/team` raises two rows that score *identically*: the engine's
+/// own `/team` and the UI's `/teammate` roster dialog. Only the tie-break on
+/// the name puts the pipeline first, so nothing about today's correct
+/// behavior is guaranteed by the ranking — a scoring change would let the
+/// dialog quietly shadow the command. This pins the order the tie resolves
+/// to; it does not pin the scores, which **D10** says are not parity.
+#[tokio::test]
+async fn choosing_team_types_the_engine_command_rather_than_the_roster_dialog() {
+    let (mut app, _events) = wired().await;
+    typed(&mut app, "/team").await;
+
+    let menu = app.dropdown.clone().expect("the menu is open");
+    let selected = menu.selected().expect("a row under the cursor");
+    assert!(
+        matches!(&selected, command::Choice::Engine(engine) if engine.name == "team"),
+        "the engine's own command should be under the cursor, got: {selected:?}"
+    );
+    // The row under it is the dialog's, on a clone so the app's own cursor
+    // is where the Enter below finds it.
+    let mut below = menu;
+    below.move_selection(1);
+    let next = below.selected().expect("a second row");
+    assert!(
+        matches!(&next, command::Choice::Ui(entry) if entry.name == "teammate"),
+        "and the roster dialog second, got: {next:?}"
+    );
+
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
+
+    assert_eq!(app.editor.text(), "/team ", "the name is typed, with room for the task it takes");
+    assert!(app.dropdown.is_none());
+    assert!(app.team_dialog.is_none(), "and no roster dialog was raised on the way");
+}
+
+/// And the second Enter reaches the engine as the command of that name,
+/// rather than the dialog or prose.
+///
+/// The expansion is what proves which door was taken: a `/teammate` line
+/// sends the engine nothing at all, and a line the UI declined to name would
+/// arrive as the text that was typed. What it is matched on is deliberately
+/// one word of the template rather than a sentence of it — this test is
+/// about the routing, and the prose is `ganja-core`'s to change.
+#[tokio::test]
+async fn submitting_team_runs_the_engine_command_of_that_name() {
+    let engine = engine();
+    let mut events = engine.subscribe().await.expect("the test subscribes first");
+    let mut app = App::new(engine, None, Themes::builtin());
+
+    typed(&mut app, "/team").await;
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
+    assert_eq!(app.editor.text(), "/team ", "the first Enter only types the name");
+    app.handle(key(KeyCode::Enter, KeyModifiers::NONE)).await.expect("enter is handled");
+
+    let CoreEvent::MessageStarted { session_id: _, message } =
+        events.next().await.expect("the engine reports the prompt")
+    else {
+        panic!("the first event of a turn is the user's message");
+    };
+    let text: String = message.parts.iter().filter_map(ganja_protocol::Part::as_text).collect();
+
+    assert_ne!(text.trim(), "/team", "the command ran rather than being sent as the line it is");
+    assert!(text.contains("pipeline"), "the template should have been expanded, got: {text}");
+    assert!(app.team_dialog.is_none(), "and the roster dialog was never raised");
+    assert!(app.editor.is_empty(), "a command that ran clears the composer");
+}
+
 /// Tab reaches the identical outcome as Enter for an engine command:
 /// Tab's own "complete without running" only changes anything for the UI
 /// half of the roster, which already types-and-waits on Enter.
@@ -6103,6 +6174,43 @@ async fn snapshot_task_completed() {
             }),
             started: 1_000,
             completed: 24_500,
+        },
+    )
+    .await;
+
+    let mut terminal = terminal(80, 24);
+    app.draw(&mut terminal).expect("a frame draws");
+
+    insta::assert_snapshot!(screen(&terminal));
+}
+
+/// The other door behind the same tool id (2026-09-03, bead `gaqe`): a
+/// teammate spawn names the member it started and how long the launch took,
+/// where a delegation names an agent and counts the tools it ran.
+#[tokio::test]
+async fn snapshot_teammate_spawn_completed() {
+    let mut app = app();
+    task_part(
+        &mut app,
+        ToolState::Completed {
+            input: serde_json::json!({
+                "backend": "claude",
+                "description": "strict review",
+                "name": "reviewer",
+                "prompt": "review this branch strictly",
+                "subagent_type": "critic",
+            }),
+            output: "Teammate started: reviewer on the claude backend. \
+                     Send it work with send_message."
+                .to_owned(),
+            title: "strict review".to_owned(),
+            metadata: serde_json::json!({
+                "teammate": "reviewer",
+                "agent_id": "reviewer@session-01a06361",
+                "backend": "claude",
+            }),
+            started: 1_000,
+            completed: 16_244,
         },
     )
     .await;
@@ -7896,7 +8004,7 @@ async fn a_tall_terminal_shows_the_whole_help_card_at_once() {
     app.run_command(command::Action::Help).await;
 
     // Taller than it once was, because the roster this card lists gained
-    // `/team` (**D504**), then `/held` (**D524**), then `/rename`
+    // `/teammate` (**D504**), then `/held` (**D524**), then `/rename`
     // (**D527**) — the card grows with the commands, which is what "the
     // whole card" means.
     let mut terminal = terminal(90, 43);
@@ -9699,7 +9807,7 @@ async fn only_asking_for_the_roster_raises_the_team_dialog() {
     assert!(app.team_dialog.is_some(), "the palette's door asks for the roster");
     app.team_dialog = None;
 
-    app.editor.set_text("/team wat");
+    app.editor.set_text("/teammate wat");
     app.submit().await;
 
     assert!(app.team_dialog.is_none(), "a line that did not ask for the roster does not raise it");
@@ -9709,9 +9817,9 @@ async fn only_asking_for_the_roster_raises_the_team_dialog() {
     assert!(screen.contains("wat"), "and the refusal is still said, on the bar instead:\n{screen}");
     assert!(app.editor.prompt().is_none(), "and the line it came from is out of the composer");
 
-    // `/team list` is the typed spelling of the very same ask, so it
+    // `/teammate list` is the typed spelling of the very same ask, so it
     // raises the dialog exactly as the palette's row does.
-    app.editor.set_text("/team list");
+    app.editor.set_text("/teammate list");
     app.submit().await;
     assert!(app.team_dialog.is_some(), "the typed door onto the roster");
 }
@@ -9733,9 +9841,9 @@ async fn team_on_a_session_leading_none_refuses_readably_instead_of_opening() {
     assert!(screen.contains("leads no team"), "{screen}");
 }
 
-/// Every `/team` line with arguments joins the prompt history — accepted
+/// Every `/teammate` line with arguments joins the prompt history — accepted
 /// or refused by the grammar — because the words leave the composer either
-/// way and the history is where Up finds them again. A bare `/team` is the
+/// way and the history is where Up finds them again. A bare `/teammate` is the
 /// palette's own door, like `/help`, and is remembered no more than those
 /// are.
 #[tokio::test]
@@ -9743,7 +9851,9 @@ async fn a_team_line_is_remembered_whatever_it_turned_out_to_mean() {
     let directory = temporary();
     let mut app = app_with_history(&directory, &[]);
 
-    for line in ["/team spawn w1 --backend in-process explain this crate", "/team wat", "/team"] {
+    for line in
+        ["/teammate spawn w1 --backend in-process explain this crate", "/teammate wat", "/teammate"]
+    {
         app.editor.set_text(line);
         app.submit().await;
         app.team_dialog = None;
@@ -9754,26 +9864,26 @@ async fn a_team_line_is_remembered_whatever_it_turned_out_to_mean() {
         app.history.entries().into_iter().map(|recalled| recalled.prompt.input).collect();
     assert_eq!(
         remembered,
-        ["/team wat", "/team spawn w1 --backend in-process explain this crate",],
+        ["/teammate wat", "/teammate spawn w1 --backend in-process explain this crate",],
         "newest first, every argument-bearing line as typed, the bare ask not"
     );
     assert_eq!(
         app.history.step(history::Direction::Older, "").map(|recalled| recalled.input).as_deref(),
-        Some("/team wat"),
+        Some("/teammate wat"),
         "and Up brings the newest one back to fix"
     );
 }
 
-/// A spawn decided in the `/team` dialog is remembered as the composer
+/// A spawn decided in the `/teammate` dialog is remembered as the composer
 /// line it is equivalent to, so the two doors leave the same thing behind.
 #[tokio::test]
 async fn a_spawn_from_the_team_dialog_is_remembered_as_its_team_spawn_line() {
     let directory = temporary();
     let mut app = app_with_history(&directory, &[]);
     let Some(command::Team::Spawn(line)) =
-        command::team("/team spawn w2 --backend in-process hold the fort")
+        command::team("/teammate spawn w2 --backend in-process hold the fort")
     else {
-        panic!("a /team spawn line parses");
+        panic!("a /teammate spawn line parses");
     };
 
     app.run_team_effect(component::team::Effect::Spawn {
@@ -9784,11 +9894,11 @@ async fn a_spawn_from_the_team_dialog_is_remembered_as_its_team_spawn_line() {
 
     assert_eq!(
         app.history.entries().first().map(|recalled| recalled.prompt.input.as_str()),
-        Some("/team spawn w2 --backend in-process hold the fort")
+        Some("/teammate spawn w2 --backend in-process hold the fort")
     );
 }
 
-/// One `/team` dialog row, as the fixture below hand-builds them.
+/// One `/teammate` dialog row, as the fixture below hand-builds them.
 fn team_row(
     name: &str,
     backend: ganja_protocol::MemberBackend,
@@ -9804,12 +9914,17 @@ fn team_row(
     }
 }
 
-/// The `/team` dialog the tests below open: a lead and two members, one
+/// The `/teammate` dialog the tests below open: a lead and two members, one
 /// with a ring — hand-built, the way the plugin snapshots build theirs, so
 /// what is pinned is layout and key routing rather than a registry's
 /// timing.
 fn team_dialog() -> component::team::Team {
-    component::team::Team::new(vec![
+    component::team::Team::new(team_members(), Vec::new())
+}
+
+/// The roster both dialogs below open over.
+fn team_members() -> Vec<component::team::Row> {
+    vec![
         team_row("team-lead", ganja_protocol::MemberBackend::InProcess, true, &[]),
         team_row(
             "w1",
@@ -9818,10 +9933,22 @@ fn team_dialog() -> component::team::Team {
             &["read(src/lib.rs)", "grep(fn spawn)"],
         ),
         team_row("w2", ganja_protocol::MemberBackend::Claude, false, &[]),
-    ])
+    ]
 }
 
-/// The `/team` dialog's members step: every member with its backend and
+/// The same dialog over a team that has filed work: the Tasks section under
+/// the roster, and the line naming the member that cannot see it.
+fn team_dialog_with_tasks() -> component::team::Team {
+    let tasks = vec![
+        task("1", Status::Completed, "w1", "Read the plan", &[]),
+        task("2", Status::InProgress, "w1", "Wire the parser", &[]),
+        task("3", Status::Pending, "", "Draw the section", &["2"]),
+    ];
+
+    component::team::Team::new(team_members(), tasks)
+}
+
+/// The `/teammate` dialog's members step: every member with its backend and
 /// its ring, the lead marked, the Spawn row after them.
 #[tokio::test]
 async fn snapshot_team_dialog_open() {
@@ -9833,7 +9960,441 @@ async fn snapshot_team_dialog_open() {
     insta::assert_snapshot!(screen(&terminal));
 }
 
-/// The `/team` dialog's per-member action step: whose actions these are,
+/// The same dialog over a team's shared task list (W5): every task with its
+/// id, status, owner and blockers under the roster, and the one line saying
+/// which member cannot see any of it.
+#[tokio::test]
+async fn snapshot_team_dialog_tasks() {
+    let mut app = app();
+    app.team_dialog = Some(team_dialog_with_tasks());
+
+    let mut terminal = terminal(80, 30);
+    app.draw(&mut terminal).expect("a frame draws");
+    insta::assert_snapshot!(screen(&terminal));
+}
+
+/// An app whose engine drives a **real** shared task list under
+/// `directory`, holding one completed task and one still in progress.
+///
+/// The store rather than a double, for the reason every other store test
+/// here uses one: what these tests are about is whether the poll reads at
+/// all, and a stand-in that answered instantly would be the one thing that
+/// cannot tell a directory read from no directory read.
+async fn app_with_tasks(directory: &TempDir) -> App {
+    use ganja_tool::tasklist::{Draft, Owner, TaskList as _};
+
+    let tasks = ganja_core::teammate::tasklist::TeamTasks::new(directory.path(), "team-lead");
+    for (subject, done) in [("Read the plan", true), ("Wire the parser", false)] {
+        let filed = tasks
+            .create(Draft {
+                subject: subject.to_owned(),
+                description: "written for whoever picks it up".to_owned(),
+                ..Draft::default()
+            })
+            .await
+            .expect("the task is filed");
+        let change = ganja_tool::tasklist::Change {
+            status: Some(if done {
+                ganja_tool::tasklist::Status::Completed
+            } else {
+                ganja_tool::tasklist::Status::InProgress
+            }),
+            owner: Some(Owner::Claim("w1".to_owned())),
+            ..ganja_tool::tasklist::Change::default()
+        };
+        tasks.update(&filed.id, change).await.expect("the task moves");
+    }
+
+    App::new(
+        engine().with_tasks(Arc::new(tasks) as Arc<dyn ganja_tool::tasklist::TaskList>),
+        None,
+        Themes::builtin(),
+    )
+}
+
+/// The team's shared list is polled on a clock and **only when something
+/// would draw it** (W5): the ordinary session, with the default bar and no
+/// dialog open, reads nothing however many ticks go by.
+#[tokio::test]
+async fn a_session_that_draws_no_task_list_never_reads_one() {
+    let directory = TempDir::new().expect("a temporary directory");
+    let mut app = app_with_tasks(&directory).await;
+
+    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+
+    assert!(app.tasks.is_empty(), "nothing asked, so nothing was read");
+    assert!(app.task_read.is_none(), "and no read was started to be read from");
+    let mut terminal = terminal(80, 24);
+    app.draw(&mut terminal).expect("a frame draws");
+    assert!(!screen(&terminal).contains("team tasks"), "and the default bar is unchanged");
+}
+
+/// An open `/teammate` dialog is the other thing that asks: the tick reads
+/// the list for it even where no roster names the element.
+///
+/// What the dialog then *draws* is [`component::team`]'s own tests and the
+/// snapshot above; the poll's own repaint runs off the roster this engine
+/// has none of, which is exactly the state a dialog is never open in.
+#[tokio::test]
+async fn an_open_teammate_dialog_polls_the_shared_task_list() {
+    let directory = TempDir::new().expect("a temporary directory");
+    let mut app = app_with_tasks(&directory).await;
+    app.team_dialog = Some(team_dialog());
+
+    settle_task_read(&mut app).await;
+
+    assert_eq!(app.tasks.len(), 2, "the open dialog asked");
+    assert!(app.tasks.iter().any(|task| task.subject == "Wire the parser"), "and got the list");
+
+    // Closed again, the next tick drops what nothing is watching rather
+    // than drawing an old list the moment somebody reopens the dialog.
+    app.team_dialog = None;
+    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+
+    assert!(app.tasks.is_empty(), "nothing draws it now");
+}
+
+/// The other asker is a roster naming the element, dialog or no dialog: the
+/// count reaches the bar as open-of-total, and a second tick inside the
+/// same window re-reads nothing.
+#[tokio::test]
+async fn a_roster_naming_the_task_list_polls_it_and_counts_the_open_work() {
+    let directory = TempDir::new().expect("a temporary directory");
+    let mut app = app_with_tasks(&directory).await;
+    app.status.set_statusline(Some(&ganja_core::config::StatuslineConfig {
+        elements: Some(vec![ganja_core::config::StatuslineElement::TaskList]),
+        max_width: None,
+        detail: None,
+    }));
+
+    settle_task_read(&mut app).await;
+
+    let polled = app.tasks_polled.expect("the poll ran");
+    let mut terminal = terminal(80, 24);
+    app.draw(&mut terminal).expect("a frame draws");
+    let screen = screen(&terminal);
+    // Two tasks, one of them still open.
+    assert!(screen.contains("1/2 team tasks"), "got:\n{screen}");
+
+    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+    assert_eq!(app.tasks_polled, Some(polled), "the poll is on a clock, not on the tick");
+}
+
+/// Drives ticks until the read one of them started has landed, standing in
+/// for the loop that would be ticking anyway.
+///
+/// The read is spawned rather than awaited, so the tick that asks for the
+/// list is never the tick that has it: one starts the read and a later one
+/// reaps it. [`settle_file_menu`]'s shape, for the same reason.
+async fn settle_task_read(app: &mut App) {
+    for _ in 0..500 {
+        app.handle(AppEvent::Tick).await.expect("a tick is handled");
+        if app.task_read.is_none() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    panic!("the shared task list read never landed");
+}
+
+/// An app whose engine reads through `tasks`, with a roster that draws the
+/// count so the poll has a reason to run — and the notice beside it, since a
+/// roster draws only what it names and one of these tests is about what the
+/// bar says.
+fn app_reading(tasks: StaticTasks) -> App {
+    let mut app = App::new(
+        engine().with_tasks(Arc::new(tasks) as Arc<dyn ganja_tool::tasklist::TaskList>),
+        None,
+        Themes::builtin(),
+    );
+    app.status.set_statusline(Some(&ganja_core::config::StatuslineConfig {
+        elements: Some(vec![
+            ganja_core::config::StatuslineElement::TaskList,
+            ganja_core::config::StatuslineElement::Notice,
+        ]),
+        max_width: None,
+        detail: None,
+    }));
+
+    app
+}
+
+/// The read is the store's, and a store read can hang — a planted FIFO, a
+/// lock nobody drops. It runs off the loop for exactly that reason: the tick
+/// that finds it still running answers anyway, and the segment goes on
+/// drawing the last list that landed.
+#[tokio::test]
+async fn a_task_list_read_that_never_answers_leaves_the_tick_answering() {
+    let mut app = app_reading(StaticTasks::answering_once(vec![task(
+        "1",
+        Status::Pending,
+        "",
+        "Wire it",
+        &[],
+    )]));
+
+    settle_task_read(&mut app).await;
+    assert_eq!(app.tasks.len(), 1, "the first read answered");
+
+    // What holds the second read back is the clock, not the reader; a
+    // session a poll window older is the state this test is about.
+    app.tasks_polled = None;
+    for _ in 0..2 {
+        tokio::time::timeout(Duration::from_secs(5), app.handle(AppEvent::Tick))
+            .await
+            .expect("the tick answers while the read hangs")
+            .expect("a tick is handled");
+    }
+
+    assert!(app.task_read.is_some(), "the read is in flight rather than awaited");
+    let mut terminal = terminal(80, 24);
+    app.draw(&mut terminal).expect("a frame draws");
+    assert!(screen(&terminal).contains("1/1 team tasks"), "got:\n{}", screen(&terminal));
+}
+
+/// One read at a time, whatever the clock says: a second would be a second
+/// descriptor blocked on the same store, and the first is not coming back to
+/// make room for it.
+#[tokio::test]
+async fn a_read_still_in_flight_is_never_joined_by_a_second() {
+    let mut app = app_reading(StaticTasks::stalling());
+
+    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+    assert!(app.task_read.is_some(), "the first tick started a read");
+    assert!(app.tasks_polled.is_some(), "and moved the clock with it");
+
+    // Dropping the clock is what a poll window later would do; the guard
+    // this test is about is the one that is not the clock.
+    app.tasks_polled = None;
+    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+
+    assert!(app.task_read.is_some(), "the first read is still the one in flight");
+    assert_eq!(app.tasks_polled, None, "and no second read was started to move the clock");
+}
+
+/// A read past its deadline is said once — one sentence about one read, not
+/// one a tick for as long as it hangs — and the list it could not refresh
+/// goes on being drawn.
+#[tokio::test]
+async fn a_read_past_its_deadline_is_said_once() {
+    // What the screen is matched on below, so the two cannot drift apart.
+    assert!(SLOW_TASK_READ.contains("not answering"));
+    let mut app = app_reading(StaticTasks::stalling());
+    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+
+    // Backdated rather than waited out: what the branch turns on is the age
+    // of the read, and a test that slept for it would only be pinning the
+    // clock.
+    let read = app.task_read.as_mut().expect("a read is in flight");
+    read.started =
+        read.started.checked_sub(TASK_READ_DEADLINE).expect("the machine has run that long");
+
+    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+    let mut terminal = terminal(80, 24);
+    app.draw(&mut terminal).expect("a frame draws");
+    assert!(screen(&terminal).contains("not answering"), "got:\n{}", screen(&terminal));
+
+    // Cleared by anything else the bar has to say, the next tick does not
+    // put it back: the read is the same read.
+    app.status.set_notice(None);
+    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+    app.draw(&mut terminal).expect("a frame draws");
+    assert!(!screen(&terminal).contains("not answering"), "got:\n{}", screen(&terminal));
+}
+
+/// A read that lands late clears the sentence about *itself*, and only that
+/// one.
+///
+/// The notice is a single unowned slot, so a read that overran and then
+/// answered can only clear it honestly by checking what is standing there
+/// first: between the two moments anything else may have written it — a
+/// refused shutdown, a failed command — and that sentence has no other way
+/// of reaching the person it is for.
+#[tokio::test]
+async fn a_late_read_landing_leaves_somebody_elses_notice_alone() {
+    let mut app = app_reading(StaticTasks::answering_once(vec![task(
+        "1",
+        Status::Pending,
+        "",
+        "Wire it",
+        &[],
+    )]));
+    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+    let read = app.task_read.as_mut().expect("a read is in flight");
+    read.started =
+        read.started.checked_sub(TASK_READ_DEADLINE).expect("the machine has run that long");
+    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+    let mut terminal = terminal(80, 24);
+    app.draw(&mut terminal).expect("a frame draws");
+    assert!(screen(&terminal).contains("not answering"), "got:\n{}", screen(&terminal));
+
+    // Written between the overrun and the landing, by something that is not
+    // this read: the bar is shared, and this one is the newer sentence.
+    app.status.set_notice(Some(NOBODY_TO_STOP.to_owned()));
+    settle_task_read(&mut app).await;
+    app.draw(&mut terminal).expect("a frame draws");
+    let screen = screen(&terminal);
+
+    assert!(!screen.contains("not answering"), "the read's own sentence went with it:\n{screen}");
+    assert!(screen.contains(NOBODY_TO_STOP), "and the one that was not its own stayed:\n{screen}");
+}
+
+/// The same session as [`app_reading`] with the count **off** the roster, so
+/// the only thing that can be watching the list is an open dialog — the
+/// ordinary session, where `task-list` is opt-in and nobody opted in.
+fn app_reading_unwatched(tasks: StaticTasks) -> App {
+    let mut app = App::new(
+        engine().with_tasks(Arc::new(tasks) as Arc<dyn ganja_tool::tasklist::TaskList>),
+        None,
+        Themes::builtin(),
+    );
+    app.status.set_statusline(Some(&ganja_core::config::StatuslineConfig {
+        elements: Some(vec![ganja_core::config::StatuslineElement::Notice]),
+        max_width: None,
+        detail: None,
+    }));
+
+    app
+}
+
+/// A deadline crossed while the dialog was shut is still said the moment
+/// somebody opens it again.
+///
+/// The overrun and the sentence about it are two facts, and only the second
+/// is the watcher's business: a read that passed its deadline unwatched has
+/// still overrun, and the person who opens the dialog onto a section that
+/// never fills is exactly who the sentence was written for. Latching on the
+/// crossing rather than on the saying would close that door for the life of
+/// the session — nothing else ever starts another read while this one hangs.
+#[tokio::test]
+async fn a_deadline_crossed_while_nobody_looked_is_still_said_when_somebody_does() {
+    let mut app = app_reading_unwatched(StaticTasks::stalling());
+    app.team_dialog = Some(team_dialog());
+    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+    assert!(app.task_read.is_some(), "the open dialog started a read");
+
+    // Backdated for the reason `a_read_past_its_deadline_is_said_once` gives:
+    // what the branch turns on is the age of the read, not the wall clock.
+    let read = app.task_read.as_mut().expect("a read is in flight");
+    read.started =
+        read.started.checked_sub(TASK_READ_DEADLINE).expect("the machine has run that long");
+
+    // The dialog is shut inside the deadline, and the tick that crosses it
+    // has nobody to tell.
+    app.team_dialog = None;
+    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+    let mut terminal = terminal(80, 24);
+    app.draw(&mut terminal).expect("a frame draws");
+    assert!(
+        !screen(&terminal).contains("not answering"),
+        "a list nobody draws is not worth a sentence:\n{}",
+        screen(&terminal)
+    );
+
+    app.team_dialog = Some(team_dialog());
+    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+    app.draw(&mut terminal).expect("a frame draws");
+    assert!(
+        screen(&terminal).contains("not answering"),
+        "the read is still the one hanging, and now somebody is looking:\n{}",
+        screen(&terminal)
+    );
+}
+
+/// The lead of [`leading`], reading its shared list through `tasks` rather
+/// than through the store under its own team directory, with a roster that
+/// draws the count.
+///
+/// Both surfaces the list reaches need a session shaped like this one. The
+/// segment needs a roster naming the element, which is [`app_reading`]'s
+/// half; the Tasks section needs a **team view** to repaint against, because
+/// [`App::poll_team_dialog`] reads `Engine::team_view` and returns where
+/// there is none — so a dialog on a session leading nobody goes on drawing
+/// whatever list it was opened over, and a test about the section would pin
+/// nothing at all.
+fn leading_reading(directory: &TempDir, tasks: StaticTasks) -> App {
+    let registry = Arc::new(ganja_core::teammate::TeammateRegistry::for_session(
+        directory.path(),
+        "224cbeab-4e62-497c-aa8f-d05cc33ce7ba",
+        directory.path(),
+    ));
+    let engine = Engine::persistent(
+        Arc::new(FakeProvider::default()),
+        fake::MODEL,
+        Arc::new(ganja_tool::Registry::new(Vec::new())),
+        ganja_permission::Permissions::default(),
+        Storage::open(directory.path().join("storage")),
+    )
+    .with_teammates(registry, ganja_testkit::externals())
+    // After the team, which installs the real store under the registry's own
+    // directory: the last one installed is the one the reads go through.
+    .with_tasks(Arc::new(tasks) as Arc<dyn ganja_tool::tasklist::TaskList>);
+    let mut app = App::new(engine, None, Themes::builtin());
+    app.status.set_statusline(Some(&ganja_core::config::StatuslineConfig {
+        elements: Some(vec![ganja_core::config::StatuslineElement::TaskList]),
+        max_width: None,
+        detail: None,
+    }));
+
+    app
+}
+
+/// A read the store **refused** after one that answered: the list empties,
+/// and both surfaces drawing it empty with it.
+///
+/// `Engine::task_list` answers `None` for a read it could not make, and
+/// `reap_task_read` folds that into an empty list — deliberately, for the
+/// reason it states: the sentence about *why* goes to the debug log, and the
+/// section clears for the same reason a genuinely empty one does. What the
+/// fold costs is that a store that broke and a team that finished look alike
+/// on the frame, and pinning it is what makes that a choice rather than
+/// something the next reader discovers.
+#[tokio::test]
+async fn a_read_refused_after_a_good_one_empties_the_section_and_the_segment() {
+    let directory = temporary();
+    let mut app = leading_reading(
+        &directory,
+        StaticTasks::answering_once(vec![task("1", Status::Pending, "", "Wire it", &[])])
+            .then_failing("the team directory is not readable"),
+    );
+    app.team_dialog = Some(team_dialog());
+
+    settle_task_read(&mut app).await;
+    let mut terminal = terminal(80, 30);
+    app.draw(&mut terminal).expect("a frame draws");
+    let before = screen(&terminal);
+    assert!(before.contains("1/1 team tasks"), "the good read reached the bar:\n{before}");
+    assert!(before.contains("Wire it"), "and the dialog's own section:\n{before}");
+
+    // What holds the second read back is the clock alone; a session a poll
+    // window older is the state this test is about.
+    app.tasks_polled = None;
+    settle_task_read(&mut app).await;
+    app.draw(&mut terminal).expect("a frame draws");
+    let after = screen(&terminal);
+
+    assert!(app.tasks.is_empty(), "the refusal emptied the list:\n{after}");
+    assert!(!after.contains("team tasks"), "so the segment is gone:\n{after}");
+    assert!(!after.contains("Wire it"), "and the section under the roster with it:\n{after}");
+}
+
+/// Opening the dialog is somebody asking for the list *now*: the poll's
+/// clock is dropped with it, so the first frame of the dialog is not a whole
+/// poll window behind the ask.
+#[tokio::test]
+async fn opening_the_dialog_reads_the_list_without_waiting_the_clock_out() {
+    let directory = temporary();
+    let (mut app, _registry, _events) = leading(&directory).await;
+    app.tasks_polled = Some(Instant::now());
+
+    app.open_team();
+
+    assert_eq!(app.tasks_polled, None, "the clock is due the moment the dialog wants a list");
+    app.handle(AppEvent::Tick).await.expect("a tick is handled");
+    assert!(app.task_read.is_some(), "so the very next tick starts the read");
+}
+
+/// The `/teammate` dialog's per-member action step: whose actions these are,
 /// then Message and Shutdown.
 #[tokio::test]
 async fn snapshot_team_action_menu() {
@@ -9848,7 +10409,7 @@ async fn snapshot_team_action_menu() {
     insta::assert_snapshot!(screen(&terminal));
 }
 
-/// Esc walks the `/team` dialog back out from every step: the free-text
+/// Esc walks the `/teammate` dialog back out from every step: the free-text
 /// step consumes the first press as "cancel the edit", and the other two
 /// close the dialog — the `/mcp` and `/plugin` dialogs' own Esc.
 #[tokio::test]
@@ -9879,7 +10440,7 @@ async fn esc_closes_the_team_dialog_from_either_step() {
     assert!(app.team_dialog.is_none(), "and the second closes");
 }
 
-/// While the `/team` dialog is open it owns every key: a list-step press
+/// While the `/teammate` dialog is open it owns every key: a list-step press
 /// moves the cursor or is swallowed, and the free-text step's characters
 /// land in the dialog's own buffer — none of it reaches the composer.
 #[tokio::test]
@@ -9983,8 +10544,10 @@ async fn a_spawns_own_dialog_is_raised_on_the_tick_and_answered_back_to_the_aske
 /// — a member the registry holds, so the tick and the dialog have a roster
 /// that moved — and that is now said rather than inherited from a default.
 async fn registry_holds_w1(app: &mut App, registry: &ganja_core::teammate::TeammateRegistry) {
-    app.run_team_line(command::team("/team spawn w1 --backend in-process").expect("a /team line"))
-        .await;
+    app.run_team_line(
+        command::team("/teammate spawn w1 --backend in-process").expect("a /teammate line"),
+    )
+    .await;
     assert!(app.team_spawn.is_some(), "the spawn runs off the loop");
     for _ in 0..500 {
         if registry.view().members.len() == 2 {
@@ -9995,7 +10558,7 @@ async fn registry_holds_w1(app: &mut App, registry: &ganja_core::teammate::Teamm
     panic!("the registry never recorded the spawn");
 }
 
-/// An open `/team` dialog repaints when the roster really moved, and
+/// An open `/teammate` dialog repaints when the roster really moved, and
 /// leaves the frame alone when it did not — `poll_team_dialog`'s
 /// changed-only rule.
 #[tokio::test]
@@ -10088,7 +10651,7 @@ async fn answering_a_dialog_whose_teammate_stopped_waiting_still_advances_the_qu
     assert!(app.permission.is_none());
 }
 
-/// `/team shutdown` with nobody named is the whole team, and a team that is
+/// `/teammate shutdown` with nobody named is the whole team, and a team that is
 /// only its lead is told so rather than silently doing nothing.
 #[tokio::test]
 async fn shutting_down_a_team_of_nobody_says_so_rather_than_writing_to_the_lead() {

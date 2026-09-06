@@ -11,9 +11,47 @@
 // Compiled once per binary, and each binary uses its own subset.
 #![allow(dead_code)]
 
+use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use ganja_team::{LEAD, MailboxMessage, MemberName, Spawn, Surface, TeamName, TeamsRoot, record};
+use tracing_subscriber::fmt::MakeWriter;
+
+/// A `tracing` writer a test can read back.
+///
+/// Both canary binaries here install one as the **global** subscriber and then
+/// search every byte the library traced, which is one writer written twice
+/// until it lives in the one place both of them already compile.
+#[derive(Clone, Default)]
+pub struct Capture(Arc<Mutex<Vec<u8>>>);
+
+impl Capture {
+    /// Everything traced so far, as text.
+    pub fn logged(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().expect("the log is never poisoned")).into_owned()
+    }
+}
+
+impl io::Write for Capture {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        self.0.lock().expect("the log is never poisoned").extend_from_slice(buffer);
+
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> MakeWriter<'a> for Capture {
+    type Writer = Self;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
 
 /// A root nothing else can reach, and the team a test's paths live under.
 ///

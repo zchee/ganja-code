@@ -232,6 +232,7 @@ fn a_request_carries_the_transcript_and_the_system_prompt() {
     empty.parts.push(Part::text(""));
 
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "claude-test".to_owned(),
         system: Some("be brief".to_owned()),
@@ -282,6 +283,7 @@ fn a_transcript_held_thought_is_absent_from_the_body_this_wire_sends() {
     turn.parts.push(Part::reasoning("anthropic", "rs_1", Some("sealed-blob-0001".to_owned())));
 
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "claude-test".to_owned(),
         system: None,
@@ -310,6 +312,7 @@ fn a_transcript_held_thought_is_absent_from_the_body_this_wire_sends() {
 #[test]
 fn a_request_without_a_system_prompt_omits_the_field() {
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "claude-test".to_owned(),
         system: None,
@@ -329,6 +332,7 @@ fn a_request_without_a_system_prompt_omits_the_field() {
 #[test]
 fn an_effort_adds_thinking_but_cannot_claim_max_tokens() {
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: serde_json::json!({
             "thinking": {"type": "enabled", "budget_tokens": 16000},
             "max_tokens": 1,
@@ -390,6 +394,7 @@ fn an_attachment_becomes_the_source_block_its_mime_names() {
     user.parts.push(Part::file("notes.md", "text/plain"));
 
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "claude-test".to_owned(),
         system: None,
@@ -518,6 +523,7 @@ fn a_refused_tool() -> ToolDefinition {
 #[test]
 fn a_tool_name_this_api_refuses_is_advertised_under_a_conforming_alias() {
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "claude-test".to_owned(),
         system: None,
@@ -594,6 +600,7 @@ fn a_completed_call_replays_under_the_same_alias_the_roster_advertises() {
     ));
 
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "claude-test".to_owned(),
         system: None,
@@ -614,6 +621,7 @@ fn a_completed_call_replays_under_the_same_alias_the_roster_advertises() {
 #[test]
 fn a_request_advertises_the_tools_it_was_given() {
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "claude-test".to_owned(),
         system: None,
@@ -646,6 +654,7 @@ fn a_request_advertises_the_tools_it_was_given() {
 #[test]
 fn a_finished_call_is_sent_back_as_a_use_and_a_result() {
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "claude-test".to_owned(),
         system: Some("be brief".to_owned()),
@@ -755,6 +764,7 @@ fn a_turn_of_two_steps() -> Message {
 #[test]
 fn a_two_step_turn_is_sent_back_one_message_pair_per_step() {
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "claude-test".to_owned(),
         system: None,
@@ -839,6 +849,7 @@ fn a_turn_without_step_markers_is_one_step() {
     ));
 
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "claude-test".to_owned(),
         system: None,
@@ -872,10 +883,18 @@ fn a_turn_without_step_markers_is_one_step() {
     );
 }
 
-/// Splitting a turn must never produce two messages in a row with the same
-/// role: this API refuses a transcript whose roles do not alternate. Steps
-/// alternate on their own whenever each ends in calls, so what is left is
-/// the interrupted shape — a step that said something and called nothing,
+/// Splitting a turn must never produce two messages where the transcript
+/// held one — not because the API would refuse the result, but because the
+/// split is this port's own rendering of one message and may not invent a
+/// boundary the transcript never had. The API documents the opposite of a
+/// refusal: "Consecutive `user` or `assistant` turns in your request will be
+/// combined into a single turn", so an unmerged split would be *accepted*
+/// and silently undone by the vendor — which is exactly the outcome worth
+/// not depending on, since what this build sends should say what the
+/// transcript holds rather than lean on somebody else to repair it.
+///
+/// Steps alternate on their own whenever each ends in calls, so what is left
+/// is the interrupted shape — a step that said something and called nothing,
 /// with another step behind it — which was one message before the split and
 /// stays one after it.
 #[test]
@@ -887,6 +906,7 @@ fn two_steps_that_called_nothing_stay_one_message() {
     }
 
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "claude-test".to_owned(),
         system: None,
@@ -913,6 +933,82 @@ fn two_steps_that_called_nothing_stay_one_message() {
     );
 }
 
+/// The other half of that rule, and the shape this build actually sends: two
+/// canonical user messages in a row reach the wire as two `user` turns in a
+/// row, deliberately.
+///
+/// It is not a hypothetical. A step's tool results are already a synthetic
+/// user turn, a steer drained at the step boundary is a canonical user
+/// message behind it, and since the team guards landed there is a
+/// request-only block behind *that* — three `user` turns, sent as three.
+/// Merging them here would be this port editing the transcript's own message
+/// boundaries to look tidier on the wire, and the API asks for no such
+/// favour: it documents that "Consecutive `user` or `assistant` turns in your
+/// request will be combined into a single turn", and a live probe
+/// (`ganja-core/tests/live.rs`'s
+/// `anthropic_accepts_the_adjacent_user_turns_a_steer_produces`) measured it
+/// on 2026-09-02 — accepted, completed, and the reply carrying both adjacent
+/// user turns rather than only the last.
+#[test]
+fn adjacent_user_messages_are_sent_as_the_adjacent_turns_they_are() {
+    let mut assistant = Message::assistant("claude-test");
+    assistant.parts.push(tool_part(
+        "toolu_01Read",
+        "read",
+        ToolState::Completed {
+            input: json!({"filePath": "src/main.rs"}),
+            output: "fn main() {}".to_owned(),
+            title: "src/main.rs".to_owned(),
+            metadata: json!({}),
+            started: 1,
+            completed: 2,
+        },
+    ));
+
+    let request = ChatRequest {
+        turn_start: 0,
+        effort_options: Default::default(),
+        model: "claude-test".to_owned(),
+        system: None,
+        messages: vec![
+            Message::user("read it"),
+            assistant,
+            // What `drain_steers` took on at the step boundary, and behind it
+            // the guards' block, which is a message of its own for the reason
+            // `session.rs` states: it answers what the assistant just did.
+            Message::user("actually, check the tests too"),
+            Message::user("<continue>The task list still holds open work.</continue>"),
+        ],
+        tools: Vec::new(),
+    };
+
+    let body =
+        serde_json::to_value(Body::new(&request, DEFAULT_MAX_TOKENS)).expect("the body serializes");
+
+    assert_eq!(
+        body["messages"],
+        json!([
+            {"role": "user", "content": "read it"},
+            {"role": "assistant", "content": [{
+                "type": "tool_use",
+                "id": "toolu_01Read",
+                "name": "read",
+                "input": {"filePath": "src/main.rs"},
+            }]},
+            // Three user turns, unmerged: the call's answer, then the steer,
+            // then the guards' block — each the message the transcript holds.
+            {"role": "user", "content": [{
+                "type": "tool_result",
+                "tool_use_id": "toolu_01Read",
+                "content": "fn main() {}",
+            }]},
+            {"role": "user", "content": "actually, check the tests too"},
+            {"role": "user", "content": "<continue>The task list still holds open work.</continue>"},
+        ]),
+        "got {body}"
+    );
+}
+
 /// A turn cancelled while a tool was running leaves a call nobody answered.
 /// Sending it as it stands is a request the API refuses outright, and
 /// dropping it leaves the reply talking about a call that is not there, so
@@ -932,6 +1028,7 @@ fn a_call_that_never_finished_is_answered_rather_than_left_dangling() {
         assistant.parts.push(tool_part("toolu_01Read", "read", state));
 
         let request = ChatRequest {
+            turn_start: 0,
             effort_options: Default::default(),
             model: "claude-test".to_owned(),
             system: None,
@@ -980,6 +1077,7 @@ fn step_markers_are_not_sent() {
     });
 
     let request = ChatRequest {
+        turn_start: 0,
         effort_options: Default::default(),
         model: "claude-test".to_owned(),
         system: None,
@@ -1098,6 +1196,7 @@ async fn a_request_that_cannot_be_built_reports_why_without_the_endpoint() {
     let opened = provider
         .stream(
             ChatRequest {
+                turn_start: 0,
                 effort_options: Default::default(),
                 model: "claude-sonnet-5".to_owned(),
                 system: None,

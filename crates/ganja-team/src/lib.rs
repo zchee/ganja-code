@@ -35,6 +35,14 @@
 //! string. CI asserts the whole of it: this crate's internal dependency list is
 //! exactly `ganja-protocol`.
 //!
+//! The shared task list ([`task`]) is the one shape here that is *not*
+//! Claude Code's document: a `claude` teammate keeps its own list inside its
+//! own process, so what ganja's teammates coordinate through is ganja's own
+//! format in a `tasks/` subdirectory of a team's directory. It keeps the same
+//! passthrough posture all the same, and it is addressed through its module
+//! rather than re-exported below — `Task`, `Store` and `Update` are names too
+//! general to sit at a crate root beside a mailbox's.
+//!
 //! The crate is **synchronous**. A mailbox write is a sub-second
 //! read-modify-write on a small file, and the lock schedule it may sleep
 //! through is measured in milliseconds; making that async would put a runtime
@@ -68,6 +76,7 @@
 pub mod lock;
 pub mod mailbox;
 pub mod record;
+pub mod task;
 pub mod team;
 
 pub use mailbox::{Contents, Identity, MailboxError, Pruned};
