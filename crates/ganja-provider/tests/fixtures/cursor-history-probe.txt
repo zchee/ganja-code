@@ -1,0 +1,367 @@
+# Whether the conversation state this build composes onto cursor's blob channel
+# reaches the model — whether a second turn remembers the first — and what the
+# server fetches of it.
+#
+# The recording W3's gate reads (.omc/plans/2026-09-07-cursor-history-blobs.md,
+# W2; AC-13). Two live turns against api2.cursor.sh, both run by the user
+# through `!` — no lane and no lead ran one, and nothing here was read out of
+# auth.json. What the wire itself said is in the run's own log at `-v`; the
+# line numbers below are that file's. The log was grepped for the three
+# credential markers the lane charter names (a bearer prefix, a key prefix, a
+# JWT header) before a line of this was written: zero hits over 7,015 lines.
+#
+# Recorded by: the shipped wire's own debug lines, no spike scaffolding this
+#              time — history.rs's two lines at the end of `blobs` (:503,
+#              :522: counts, then sorted id prefixes with sizes) and
+#              request.rs's three in `kv_answer` (:595 get, :613 set, :631 a
+#              set that replaced held bytes). Line numbers are 4a9ac1d's.
+# Build:  ganja-code 0.1.0; ./target/release/ganja rebuilt from 4a9ac1d (W1,
+#         "provider: carry the conversation on cursor's blob channel").
+# Date:   2026-09-06, 18:16:37 - 18:17:29 UTC (2026-09-07 03:16 - 03:17 JST;
+#         the log file is named by the local date).
+# Log:    ~/.local/share/ganja/log/ganja.2026-09-07.log, 7,015 lines; the two
+#         runs are :6810-:6921 and :6922-:7015, the last 206.
+# Server: api2.cursor.sh. This client identified as cli-2026.01.09-231024f
+#         (cursor.rs:138, sent as x-cursor-client-version at :557), the
+#         constant cursor.rs has always sent.
+# Model:  GANJA_MODEL unset on both runs, so the turn ran under cursor's
+#         server-side `default` (Auto). Which model that resolved to is decided
+#         server-side and is not observable from this client. The config's
+#         `effort = "xhigh"` was dropped at adoption (:6816, :6930) because
+#         `default` carries no effort ladder.
+#
+# What the wire carried that no request before 4a9ac1d did: on the second run,
+# AgentRunRequest.conversation_state{root_prompt_messages_json = 6 ids,
+# turns = 1 id}, every id the sha256 of bytes seeded into the Run's blob store
+# before the stream opened, and AgentRunRequest.conversation_id on BOTH runs —
+# derived from the first message's own id, so the same value on both, by
+# construction (history.rs `derived`; the log never prints it).
+#
+# NO CONNECT ERROR OF ANY KIND WAS PRODUCED BY EITHER RUN. No `code`, no
+# `message`, no EndStream error frame, no `Blob not found`, no
+# `invalid_argument`, no ProviderEvent::Failed. The one line in the window
+# that a case-insensitive grep for "failed" finds is :6851, a bridged `read`
+# whose *tool* outcome was `failed` (file not found) — a tool result the model
+# read, not a wire failure. The plan asks for every error code and message
+# verbatim; the honest verbatim record is that there were none.
+#
+# This directory's rule holds here: no token, no tool-argument value and no
+# reply text. What the user's terminal printed — the two replies — is
+# described, never quoted; the lane charter under .omc/handoffs/ holds the
+# stdout for whoever needs the exact bytes.
+
+== probe 1 ==
+
+== the runs ==
+# One line per run: the command as the user ran it (GANJA_PROVIDER=cursor,
+# nothing else set), the log window, and the run's turn — composition line
+# to `step_completed (17)`.
+R1  run -v "Remember the code word PELICAN-7. Reply with OK and nothing else."
+                                     log :6810-:6921   turn :6819-:6912  (15.64 s)
+R2  run -v --continue "What code word did I ask you to remember, and what is
+    the current working directory? One line."
+                                     log :6922-:7015   turn :6932-:7006  (9.22 s)
+
+# Both runs ended by printing a reply and exiting; neither emitted a
+# ProviderEvent::Failed. The wire logs no line for a clean EndStream and none
+# for the run request's send, so "the turn completed" here means: a reply was
+# printed, `step_completed (17)` was decoded (:6912, :7006), the process
+# exited, and no failure was reported.
+
+# R1's turn was not the no-call turn the plan's procedure assumed (A-M2: "turn
+# 1 makes no call"). The model called three of ganja's tools through the
+# declared roster, every one arriving as `mcp_args` and bridged (D552):
+#
+#   :6848  bridging an exec  exec=1 kind="mcp_args" tool="read"
+#   :6851  answering a bridged exec  exec=1 tool="read"  outcome="failed"
+#   :6853  bridging an exec  exec=2 kind="mcp_args" tool="glob"
+#   :6859  answering a bridged exec  exec=2 tool="glob"  outcome="ran"
+#   :6885  bridging an exec  exec=3 kind="mcp_args" tool="bash"
+#   :6889  answering a bridged exec  exec=3 tool="bash"  outcome="refused"
+#
+# (the `read` answered file-not-found; the `glob` ran and matched nothing; the
+# `bash` was auto-rejected, as a headless run without --auto rejects every
+# dialog). The reply then printed the one word the prompt asked for. So R2's
+# history carried an assistant entry with three `[Tool Call]` paragraphs and
+# three result entries — two `[Tool Result (error)]`, one `[Tool Result]` —
+# and the state below is larger than the plan's `entries = 3` by exactly
+# those. See "incidental": this pre-measures W3's P3.
+#
+# R2's turn made one call, `bash` (:6961, exec=1, kind="mcp_args"), refused
+# the same way (:6967 outcome="refused"), and answered anyway.
+
+== P1 — does the composed history reach the model ==
+VERDICT: YES
+
+The second reply named the code word the first prompt asked the model to
+remember, in one line beside the working directory. Nothing in R2's own
+prompt carries the word; the only channel it could have reached the model by
+is the state below.
+
+R2's composition, :6932-:6933:
+
+  :6932  composed the conversation state provider="cursor" entries=6 turns=1
+         blobs=12 bytes=171566 clamped_calls=0 action="user"
+  :6933  the composed blob ids provider="cursor" ids=[
+           "08dfcb1a9e5054ba=86",   "24551d6ffef6a9a4=633",  "449d69fc21ec4914=173",
+           "50b657d2779825dc=549",  "5fab41de977ff5dd=198",  "88a3603a48ff45bc=150",
+           "9b2c0716baa430d1=136",  "a01d5bda822aaef7=32",   "c5ab3958edfbbe51=169304",
+           "e0e4ac3d0f3ef169=82",   "f31f7f6c3ce521d5=118",  "fdebda7208d1cfd0=105" ]
+
+entries=6 is the system head, R1's user message, R1's assistant entry (its
+text and three `[Tool Call]` paragraphs), and three result entries; turns=1
+is R1's one turn; blobs=12 is 6 root JSON entries + 1 UserMessage + 4
+ConversationSteps + 1 ConversationTurn, and the twelve sizes sum to 171,566.
+
+The server's gets, :6935-:6941 — seven, all within 48 µs of one another
+(18:17:21.665657Z - .665705Z: one batch), 0.98 s after the composition line,
+before any set, and every one answered found:
+
+  :6935  answering the server's kv get blob="449d69fc21ec4914" found=173
+  :6936  answering the server's kv get blob="9b2c0716baa430d1" found=136
+  :6937  answering the server's kv get blob="c5ab3958edfbbe51" found=169304
+  :6938  answering the server's kv get blob="f31f7f6c3ce521d5" found=118
+  :6939  answering the server's kv get blob="24551d6ffef6a9a4" found=633
+  :6940  answering the server's kv get blob="5fab41de977ff5dd" found=198
+  :6941  answering the server's kv get blob="e0e4ac3d0f3ef169" found=82
+
+(`found=<n>` is tracing's rendering of `Some(n)`; a miss would print the line
+with no `found` field at all, and no such line exists in the window.)
+
+Which composed ids were fetched and which were not. The log carries prefixes
+and sizes only, but the twelve sizes decompose exactly against the shapes
+history.rs builds (JSON frame 53 bytes for a `user` root entry, 58 for an
+`assistant` one; every proto field here is number 1 or 2, so a 1-byte tag
+plus a length):
+
+  root[0]  c5ab3958edfbbe51  169304  system head, the one six-figure blob   FETCHED :6937
+  root[1]  f31f7f6c3ce521d5     118  user: 53 + the 65-byte prompt           FETCHED :6938
+  root[2]  24551d6ffef6a9a4     633  assistant text + 3 [Tool Call]s         FETCHED :6939
+  root[3]  5fab41de977ff5dd     198  [Tool Result (error)] read: 53+144+1    FETCHED :6940
+  root[4]  e0e4ac3d0f3ef169      82  [Tool Result] glob: 53+28+1 (the 28 is
+                                     the marker, a newline, and glob.rs:96's
+                                     own "No files found")                   FETCHED :6941
+  root[5]  9b2c0716baa430d1     136  [Tool Result (error)] bash: 53+82+1
+                                     (the 82: marker, newline, the 60-byte
+                                     refusal sentence permission_text renders) FETCHED :6936
+  turns[0] 449d69fc21ec4914     173  ConversationTurn: 1+2+(5 × (1+1+32)) —
+                                     one user_message id and four step ids    FETCHED :6935
+  turn.user_message
+           fdebda7208d1cfd0     105  UserMessage: (1+1+65 text) +
+                                     (1+1+36 derived message_id)             not fetched
+  step[0]  50b657d2779825dc     549  the assistant text in proto framing
+                                     (by elimination: 633 is the same text
+                                     JSON-escaped, +58 frame)                not fetched
+  step[1]  88a3603a48ff45bc     150  read result: 1+2+(1+2+144)              not fetched
+  step[2]  a01d5bda822aaef7      32  glob result: 1+1+(1+1+28)               not fetched
+  step[3]  08dfcb1a9e5054ba      86  bash result: 1+1+(1+1+82)               not fetched
+
+Fetched: all six root entries (170,471 bytes) and the ConversationTurn
+wrapper (173). Not fetched: the five blobs only that wrapper names — the
+turn's user_message and its four steps (922 bytes). This is the reference's
+own claim (`proxy.ts:744-750`: the server builds the prompt from
+`root_prompt_messages_json`, not from `turns[]`) observed from the client
+side, with one addition the reference does not state: the server does
+dereference the turn *wrapper* — it just never follows the ids inside it. So
+on this recording a divergence in the model's memory would trace to the root
+and nowhere else, which is what history.rs's module doc predicted.
+
+Fetch order was turns[0], root[5], root[0], root[1], root[2], root[3],
+root[4] — the last root entry ahead of the first, in one batch. One sample;
+nothing here says the order is stable.
+
+Reading checklist (C-M5, C-M1'):
+
+  * A get for an id this build never minted: NO. All seven gets name ids in
+    the :6933 listing, and no get went unanswered-found. Five composed ids
+    were never asked for; no asked-for id was uncomposed.
+
+  * Either `message_id` echoed anywhere visible: NOT DETERMINABLE FROM THE
+    LOG. This build prints neither id it minted — the history blob's derived
+    one nor the action's random one (request.rs:230 `fresh_id`) — and a
+    case-sensitive grep of the window for `message_id` and `conversation_id`
+    returns nothing. The only server-minted ids the log shows are the tool
+    call ids on the `bridging an exec` lines, shaped `call-<v4 uuid>-<n>`
+    over `fc_<hex>_<n>`: R1's step-1 execs (:6848, :6853) share one uuid with
+    indices -0/-1 and its step-2 exec (:6885) carries a different uuid with
+    -2, so those are per-step mints of the server's own — a Run carries
+    exactly one action message_id, and two distinct uuids appeared inside
+    one Run. Whether one of them coincides with the id this client sent
+    cannot be checked without the client printing it.
+
+  * Anything in R2 attributable to `conversation_id`: NOTHING SEPARABLE.
+    Both runs carried one — the same derived value — so the presence of the
+    field is not a variable between them. R2 differs from R1 in exactly the
+    ways the supplied state predicts (seven gets where R1 had none; a
+    shorter turn with one call where R1 had three) and in one way it does
+    not: R1's server set a 190,884-byte blob at :6826, 2.7 s in, and R2's
+    server set nothing larger than 3,735 bytes (:7004) in the whole run.
+    That could be the server declining to write its own head because the
+    client supplied a root, or the server recognizing a conversation_id it
+    had seen 43 s earlier; one recording cannot tell those apart.
+
+== P1b — does the working directory arrive (smoke, not a discriminator) ==
+VERDICT: YES — and it proves only "at least one channel"
+
+The reply's second half was the checkout's absolute path, which is what the
+system prompt's `<env>` block carries. It did not come from a tool: the one
+thing the model tried, `bash` (:6961), was refused (:6967), and the reply
+was printed anyway.
+
+Why this settles nothing about which channel: the plan's own sentence — "Both
+channels carry the *same* string (`cloud_rule` is `request.system` at
+`request.rs:257`; the head is the same `request.system`), so a correct
+directory proves only that the system prompt reached the model by **at least
+one** channel; it cannot say which, and doubling is not observable from this
+side at all." At 4a9ac1d that line is request.rs:301, not :257 — the plan's
+number predates W1's edits to the file. On R1 there was no head (entries=0,
+:6819: "the system head appears only beside history"), so R1's directory
+could only have come from `cloud_rule`; on R2 both channels carried it.
+
+== P2 — every get found, no error frame, and what the fetch cost ==
+VERDICT: YES
+
+Every get for a composed id was found (the seven lines above). No `Blob not
+found`, no `invalid_argument`, no EndStream error, no Failed event in either
+run's window; `a server set replaced bytes this run already held` (the :631
+line, which would name a differing re-set of a held id) appears zero times
+in the window and zero times in the whole 7,015-line log.
+
+Gets before the first model output, and the wall time to it. This build logs
+no line for a text delta (decode.rs:346-347 emits the event silently; only
+thinking deltas are logged, :357) and none for the run request's send, so the
+two ends measurable here are the composition line — logged inside
+`run_message`'s assembly, immediately before the send — and the first
+`thinking delta`. The number is therefore an upper bound on send-to-first-
+thinking, and the first *text* delta is later by an amount the log does not
+show.
+
+  R2  composition :6932 18:17:20.681416Z
+      gets        :6935-:6941 at +0.984 s (7, all found, 170,644 bytes served)
+      sets        :6945-:6947 at +1.964 s (3: 2262, 260, 225)
+      first thinking delta :6948 18:17:24.259983Z    = +3.579 s
+      gets before that delta: 7   sets before it: 3
+
+  R1  composition :6819 18:16:37.810929Z
+      gets        none
+      sets        :6825 at +2.012 s (2262), :6826-:6828 at +2.663 s
+                  (190884, 90, 196)
+      first thinking delta :6829 18:16:45.071990Z    = +7.261 s
+      gets before that delta: 0   sets before it: 4
+
+Read carefully: the run that fetched 171 KB of state reached its first
+thinking 3.7 s *sooner* than the run that fetched nothing. One sample per
+arm, one model, one afternoon — this is not a measurement of the fetch's
+cost, and the ADR's expiry clause should read it as "the seven gets and
+their 170 KB did not push TTFT past the empty-state run's own", not as a
+saving. What the two numbers do bound: the batch of seven gets was issued
+and answered within one second of the request going out, and the model was
+producing 1.6 s after the server's first set.
+
+== P4-pre — the checkpoint arm ==
+VERDICT: ARRIVES, on both runs: 12 times, n from 558 to 7465
+
+`unmodelled server-message fields provider="cursor" fields=[(3, n)]`:
+
+  R1  :6862 (3, 7465)  :6871 (3, 558)   :6890 (3, 2578)  :6897 (3, 626)
+      :6909 (3, 1882)  :6911 (3, 660)   :6913 (3, 660)                   7 arrivals
+  R2  :6968 (3, 3269)  :6975 (3, 683)   :7003 (3, 4499)  :7005 (3, 717)
+      :7007 (3, 717)                                                    5 arrivals
+
+Placement, the same on both runs: one arrives after each tool_call_completed
+or kv-set burst, and the run's last two are a pair of identical size that
+brackets `step_completed (17)` (:6912 between the two 660s; :7006 between the
+two 717s). The largest, 7465 at :6862, followed R1's first two bridged execs.
+Only the size is seen; the arm is not decoded.
+
+== what this cannot measure ==
+
+1. One seat, one account, one model (`default`/Auto), one client version,
+   one afternoon, one turn of history. Nothing here says what a named model,
+   a different tier, or a later server does — nor what a *longer* history
+   does: R2 named one turn (12 blobs); a session of ten turns, or one whose
+   history has been re-rooted by compaction, is unmeasured.
+
+2. Head doubling is not observable from this side. R2 carried
+   `request.system` twice — as root[0] and as `cloud_rule` — and a model
+   that reads both, either, or one twice leaves the same trace here. The
+   P1b section says why the directory cannot discriminate.
+
+3. Server-side use of `conversation_id` is not observable. Both runs sent
+   the same derived value; nothing came back that names it, and the one
+   behavioural difference not explained by the supplied state (the 190 KB
+   set on R1 only) has two candidate causes this recording cannot separate.
+
+4. Nothing about a bridged (paused) Run's *history* — a step that resumes
+   from `Action::Resume` with the assistant's message last. Every request
+   here was `action="user"`; the Resume arm was never sent. That is probe
+   2's.
+
+5. Whether the five unfetched blobs are *never* read, or merely were not
+   read on this turn. One recording of one server: the turn's user_message
+   and steps were not dereferenced here, which matches the reference's
+   claim, and does not prove the server has no path that would.
+
+6. The `[Tool Call]` input clamp: `clamped_calls=0` on every composition,
+   because no call's input reached 8 KiB. The elision text and the count are
+   unit-tested, not live-measured.
+
+7. First-*text*-delta timing, the run request's send instant, and the clean
+   EndStream: none has a log line in this build, so every timing above is
+   composition-to-first-thinking and "the turn completed" is inferred from
+   the printed reply, the decoded step_completed and the clean exit.
+
+8. What the checkpoint arm (3, n) carries: only its byte count reaches the
+   log, and whether it is a checkpoint at all is the plan's naming, not a
+   decoded fact.
+
+== incidental, and worth knowing before W3 ==
+
+* `[Tool Call]` and `[Tool Result …]` text was sent and accepted a wave
+  early. Because R1's model called three tools, R2's request was the first
+  this build has ever sent carrying an assistant root entry with `[Tool
+  Call]` paragraphs (root[2], 633 bytes) and both result flavours (root[3]
+  and root[5] as `(error)`, root[4] plain) — and the reply was correct. W3's
+  P3 was to be the first measurement of that shape; it is pre-measured here
+  for the un-paused case. The plan's A-M2 attribution premise ("It carries
+  no `[Tool Call]` text") did not hold on this recording; since P1 passed,
+  nothing needed attributing.
+
+* Every exec on both runs arrived as `mcp_args` — the model reached ganja's
+  `read`, `glob` and `bash` by the names the roster declared, never through
+  a native kind redirected (D552's second door). Each hold was short: 106 ms
+  (:6850→:6851), 66 ms (:6858→:6859), 110 ms (:6888→:6889), 70 ms
+  (:6966→:6967).
+
+* `ganja run` still constructs the cursor wire twice per invocation (the
+  reference probe's first incidental). Here it shows as a second
+  composition with `entries=0` at :6918 and :7012, at process teardown
+  after step_completed — the title/summary one-shot — followed by no get
+  and no set: composed and logged, never sent.
+
+* The first kv set of each run is the same blob at the same size:
+  `a3b587832706c9c6` size=2262 at :6825 and :6945. The server's set ids are
+  deterministic across processes for at least that one blob.
+
+* R1's server set a 190,884-byte blob (:6826) before its first delta — the
+  reference probe saw one of that order on its R5 (185,582 bytes); R2's
+  server never set anything above 3,735 bytes. Two candidate causes, above;
+  one recording.
+
+* kv sets in the window: 24 on R1, 15 on R2, 39 in all. (148 is the whole
+  day's log, every session since 00:00 local.)
+
+* The MCP servers a session dials at startup (context7 at :6942, the gemini
+  plugin at :6944) connected *after* the seven gets had been answered
+  (:6935-:6941). They did not gate the run request.
+
+* Beside the `partial_tool_call (7)`, `tool_call_started (2)` and
+  `tool_call_completed (3)` arms this build skips, every one of those lines
+  also names an unmodelled `field 25` on the update (:6844, :6846, :6847,
+  :6852, :6860, …). Unchanged from before W1; noted because a reader of
+  this log will see it beside every tool call.
+
+== probe 2 ==
+# Recorded at W3, after the recovery (D553, second half) lands: a bridged
+# Run paused on a tool call, its held Run gone, resumed from the composed
+# state with `Action::Resume`. Not yet run.
