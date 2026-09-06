@@ -136,22 +136,89 @@ message RunRequest {
   // request that carries none — a title or summary one-shot declares nothing,
   // which is byte-identical to what this message was before the bridge.
   McpTools mcp_tools = 4;
+  // The conversation this Run belongs to (index.js@6165910's field 5, a
+  // string the descriptor marks optional). The reference sends one on every
+  // request (proxy.ts:877), and the only composition measured accepted is one
+  // that carries it, so this build sends it too (**D553**): the value is
+  // `history::derived` of the first message's id — absent on a request with
+  // no messages, which nothing keys to. Stable within an uncompacted session;
+  // changes at compaction, because messages[0] becomes the summary; and
+  // differs on every title or summary one-shot, because each mints its own
+  // first message. All three are harmless: nothing is read back under it,
+  // and every request carries a complete state.
+  string conversation_id = 5;
   RequestedModel requested_model = 9;
 }
 
-// Prior-conversation state. Fieldless here on purpose: the plugin's
-// ConversationStateStructure (agent_pb.ts:2338) carries content-addressed
-// blob ids that only mean something to a client speaking the blob-serving
-// half of the stream, which this build does not yet. An empty message encodes
-// as an empty payload, marking the state present and holding nothing.
-message ConversationState {}
+// Prior-conversation state: the shipped client's ConversationStateStructure
+// (index.js@6159923), of which exactly the two fields the reference composes
+// are modelled (**D553**). Both are lists of content-addressed **blob ids**,
+// never the bytes they name — the raw 32-byte sha256 of a blob the server
+// fetches over the kv half of the stream (proxy.ts:726-733: inlining data
+// where an id is expected fails with "Blob not found"). The server builds the
+// model prompt from root_prompt_messages_json = 1, one JSON entry per system
+// prompt and per history message (proxy.ts:744-763); turns = 8 is the
+// structured account of the same history, one ConversationTurn per user
+// message (proxy.ts:765-803). The descriptor's other 34 fields — todos = 3,
+// pending_tool_calls = 4, token_details = 5, summary = 6, plan = 7, and 9
+// through 37 — are not modelled, because nothing here fills them: they are
+// what a server checkpoint carries back, and this build reads no checkpoint.
+// An empty message still encodes as an empty payload, marking the state
+// present and holding nothing, which is what every first turn sends.
+message ConversationState {
+  repeated bytes root_prompt_messages_json = 1;
+  repeated bytes turns = 8;
+}
 
-// What the turn asks the agent to do. Field number from the plugin's
-// ConversationAction oneof (agent_pb.ts:1568); the resume/cancel/plan arms
-// are not modelled.
+// One turn of the structured history: the shipped client's
+// ConversationTurnStructure (index.js@6144292), a oneof whose agent arm is
+// the only one the reference writes. shell_conversation_turn = 2 is not
+// modelled: nothing here composes one.
+message ConversationTurn {
+  AgentConversationTurn agent_conversation_turn = 1;
+}
+
+// The agent arm (index.js@6145463): the blob id of the turn's UserMessage
+// and the blob ids of its steps, in order. The descriptor's request_id = 3,
+// encrypted_model = 4, dynamic_tool_count = 5, send_message_step_indices = 6
+// and routed_model_display_name = 7 are not modelled — the reference sets
+// none of them (proxy.ts:768-771).
+message AgentConversationTurn {
+  bytes user_message = 1;
+  repeated bytes steps = 2;
+}
+
+// One step of a turn (index.js@6105443): the assistant's text. The oneof's
+// tool_call = 2 and thinking_message = 3 arms are not modelled: the reference
+// writes neither (a tool result is an assistant-text step prefixed
+// `[Tool Result]`, proxy.ts:793), and a typed tool_call is a 70-arm oneof
+// whose inner shapes nothing has measured.
+message ConversationStep {
+  AssistantMessage assistant_message = 1;
+}
+
+// The assistant's text (index.js@6139661). started_at_ms = 2 and
+// completed_at_ms = 3 are not modelled — the reference sets neither.
+message AssistantMessage {
+  string text = 1;
+}
+
+// What the turn asks the agent to do. Field numbers from the shipped client's
+// ConversationAction oneof (index.js@6106050): user_message_action = 1 is a
+// turn opened by the user, resume_action = 2 continues the conversation the
+// state describes without a new user message — the shape a request whose
+// newest message is the assistant's goes out under (**D553**), which on this
+// wire only a bridged step can leave. The cancel/summarize/plan arms and the
+// rest of that oneof are not modelled.
 message ConversationAction {
   UserMessageAction user_message_action = 1;
+  ResumeAction resume_action = 2;
 }
+
+// Fieldless on purpose: the descriptor's ResumeAction (index.js@6130643)
+// carries request_context = 2, and both the reference (proxy.ts:854) and the
+// shipped client's own retry-from-checkpoint send it empty.
+message ResumeAction {}
 
 // Field number from the plugin's UserMessageAction (agent_pb.ts:1636).
 message UserMessageAction {
@@ -160,7 +227,9 @@ message UserMessageAction {
 
 // The user's message, inline. Field numbers from the plugin's UserMessage
 // (agent_pb.ts:1814-1819); the context/mode fields beside them are not
-// modelled.
+// modelled. The same message is the payload of a history user **blob** —
+// AgentConversationTurn.user_message names its sha256 — with message_id then
+// derived from the transcript's own id rather than minted (**D553**).
 message UserMessage {
   string text = 1;
   string message_id = 2;

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use buffa::Message as _;
 
 use super::super::tests::roster;
-use super::super::{connect, proto, serves_fetch};
+use super::super::{connect, history, proto, serves_fetch};
 use super::{
     ChatRequest, context_answer, decode, fresh_id, kv_answer, newest_user_text, refusal_answer,
     run_message,
@@ -134,11 +134,19 @@ fn request() -> ChatRequest {
 
 #[test]
 fn the_assembled_bytes_decode_back_to_what_the_assembly_promised() {
-    let bytes = run_message(&request()).expect("the assembly encodes");
+    let asked = request();
+    let bytes = run_message(&asked, &history::compose(&asked)).expect("the assembly encodes");
     let decoded = proto::ClientMessage::decode_from_slice(&bytes).expect("what was sent decodes");
 
     let run = decoded.run_request.as_option().expect("a run request first");
-    assert!(run.conversation_state.is_set(), "the state is present even when it holds nothing");
+    let state = run.conversation_state.as_option().expect("the state is present");
+    assert_eq!(
+        state.root_prompt_messages_json.len(),
+        2,
+        "and names the history: the head and the older question — the fixture's reply carries \
+         no part, and a reply with no text and no call composes nothing"
+    );
+    assert_eq!(state.turns.len(), 1, "one turn before this one, with no step");
 
     let model = run.model_details.as_option().expect("the model description");
     assert_eq!(model.model_id.as_deref(), Some("gpt-5.3-codex"));
@@ -182,7 +190,7 @@ fn the_assembled_bytes_decode_back_to_what_the_assembly_promised() {
 fn a_request_offering_no_tools_declares_no_roster() {
     let toolless = ChatRequest { tools: Vec::new(), ..request() };
 
-    let bytes = run_message(&toolless).expect("the assembly encodes");
+    let bytes = run_message(&toolless, &history::compose(&toolless)).expect("the assembly encodes");
     let run = proto::ClientMessage::decode_from_slice(&bytes)
         .expect("what was sent decodes")
         .run_request
@@ -192,8 +200,9 @@ fn a_request_offering_no_tools_declares_no_roster() {
 
     assert_eq!(
         field_numbers(&run.encode_to_vec()),
-        vec![1, 2, 3, 9],
-        "conversation_state, action, model_details, requested_model — and no mcp_tools = 4"
+        vec![1, 2, 3, 5, 9],
+        "conversation_state, action, model_details, conversation_id, requested_model — and no \
+         mcp_tools = 4"
     );
     assert!(!run.mcp_tools.is_set(), "nothing to declare, so nothing is declared");
 }
@@ -204,7 +213,7 @@ fn a_request_offering_no_tools_declares_no_roster() {
 fn a_request_offering_tools_declares_them_on_the_run_request() {
     let offering = ChatRequest { tools: roster(), ..request() };
 
-    let bytes = run_message(&offering).expect("the assembly encodes");
+    let bytes = run_message(&offering, &history::compose(&offering)).expect("the assembly encodes");
     let run = proto::ClientMessage::decode_from_slice(&bytes)
         .expect("what was sent decodes")
         .run_request
@@ -214,8 +223,8 @@ fn a_request_offering_tools_declares_them_on_the_run_request() {
 
     assert_eq!(
         field_numbers(&run.encode_to_vec()),
-        vec![1, 2, 3, 4, 9],
-        "conversation_state, action, model_details, mcp_tools, requested_model"
+        vec![1, 2, 3, 4, 5, 9],
+        "conversation_state, action, model_details, mcp_tools, conversation_id, requested_model"
     );
 
     let declaration = run.mcp_tools.as_option().expect("the roster");
@@ -282,7 +291,8 @@ fn the_context_answer_carries_the_same_roster_the_run_request_declared() {
 
 #[test]
 fn the_system_prompt_never_rides_the_run_request() {
-    let bytes = run_message(&request()).expect("the assembly encodes");
+    let asked = request();
+    let bytes = run_message(&asked, &history::compose(&asked)).expect("the assembly encodes");
 
     let prompt = b"You are terse.";
     assert!(
@@ -599,6 +609,130 @@ fn a_minted_id_is_a_v4_uuid_and_two_are_two() {
     assert_eq!(id.as_bytes()[14], b'4', "the version nibble: {id}");
     assert!(matches!(id.as_bytes()[19], b'8' | b'9' | b'a' | b'b'), "the variant bits: {id}");
     assert_ne!(id, fresh_id().expect("entropy is available"));
+}
+
+/// **AC-7's wire half.** A request whose newest message is the assistant's
+/// goes out under `resume_action = 2` — fieldless — and no
+/// `user_message_action`, over a state that names the step and what its
+/// tool answered.
+#[test]
+fn a_resume_goes_out_as_a_fieldless_resume_action_over_the_composed_state() {
+    let mut stepped = Message::assistant("gpt-5.3-codex");
+    stepped.parts.push(Part {
+        id: crate::protocol::PartId::ascending(),
+        body: crate::protocol::PartBody::Tool {
+            call_id: "c1".to_owned(),
+            tool: "read".to_owned(),
+            state: crate::protocol::ToolState::Completed {
+                input: serde_json::json!({ "path": "a.rs" }),
+                output: "fn a() {}".to_owned(),
+                title: String::new(),
+                metadata: serde_json::Value::Null,
+                started: 0,
+                completed: 0,
+            },
+        },
+    });
+    let resuming = turn(vec![Message::user("Read a.rs."), stepped], 0);
+    let composed = history::compose(&resuming);
+    assert_eq!(composed.action, history::Action::Resume);
+
+    let bytes = run_message(&resuming, &composed).expect("the assembly encodes");
+    let run = proto::ClientMessage::decode_from_slice(&bytes)
+        .expect("what was sent decodes")
+        .run_request
+        .as_option()
+        .cloned()
+        .expect("the run request");
+
+    let action = run.action.as_option().expect("an action");
+    assert_eq!(
+        field_numbers(&action.encode_to_vec()),
+        vec![2],
+        "resume_action alone, and no user_message_action"
+    );
+    assert!(action.resume_action.is_set());
+    assert!(!action.user_message_action.is_set());
+    assert!(
+        action.resume_action.as_option().expect("set").encode_to_vec().is_empty(),
+        "fieldless, as the reference and the shipped client's retry send it"
+    );
+
+    let state = run.conversation_state.as_option().expect("the state");
+    assert_eq!(state.root_prompt_messages_json, composed.root);
+    assert_eq!(state.turns, composed.turns);
+    assert_eq!(state.root_prompt_messages_json.len(), 4, "head, prompt, the call, its result");
+    assert_eq!(run.conversation_id, composed.conversation_id);
+    assert!(run.conversation_id.is_some());
+}
+
+/// **AC-8's wire half.** The run request carries the composition's ids and
+/// its conversation id verbatim; the action's own id is minted fresh — so it
+/// differs from every history blob's, and from itself across two sends of
+/// one request, where the state's ids do not.
+#[test]
+fn the_actions_id_is_fresh_where_the_states_ids_are_derived() {
+    let asked = request();
+    let composed = history::compose(&asked);
+    let opening = asked.messages[0].id.clone();
+
+    let sent = |composed: &history::Composed| {
+        let bytes = run_message(&asked, composed).expect("the assembly encodes");
+        proto::ClientMessage::decode_from_slice(&bytes)
+            .expect("what was sent decodes")
+            .run_request
+            .as_option()
+            .cloned()
+            .expect("the run request")
+    };
+    let first = sent(&composed);
+    let second = sent(&history::compose(&asked));
+
+    assert_eq!(
+        first.conversation_id.as_deref(),
+        Some(history::derived(&opening).as_str()),
+        "the conversation id is derived from the first message"
+    );
+    assert_eq!(first.conversation_id, second.conversation_id);
+    let state =
+        |run: &proto::RunRequest| run.conversation_state.as_option().cloned().expect("the state");
+    assert_eq!(
+        state(&first).root_prompt_messages_json,
+        state(&second).root_prompt_messages_json,
+        "the same request names the same root blobs twice"
+    );
+    assert_eq!(state(&first).turns, state(&second).turns);
+
+    let action_id = |run: &proto::RunRequest| {
+        run.action
+            .as_option()
+            .and_then(|action| action.user_message_action.as_option())
+            .and_then(|action| action.user_message.as_option())
+            .and_then(|message| message.message_id.clone())
+            .expect("the user message's id")
+    };
+    assert_ne!(action_id(&first), action_id(&second), "minted per send");
+
+    let history_ids: Vec<String> = composed
+        .turns
+        .iter()
+        .map(|id| {
+            let turn = proto::ConversationTurn::decode_from_slice(&composed.blobs[id])
+                .expect("a turn blob decodes");
+            let user = turn.agent_conversation_turn.as_option().expect("the agent arm");
+            proto::UserMessage::decode_from_slice(
+                &composed.blobs[user.user_message.as_deref().expect("the user id")],
+            )
+            .expect("a user blob decodes")
+            .message_id
+            .expect("a derived id")
+        })
+        .collect();
+    assert_eq!(history_ids.len(), 1, "one history turn in the fixture");
+    assert!(
+        !history_ids.contains(&action_id(&first)) && !history_ids.contains(&action_id(&second)),
+        "the action's id never equals a history blob's: {history_ids:?}"
+    );
 }
 
 // One test per row of D550's table: a framed exec of that kind, classified

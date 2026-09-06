@@ -422,6 +422,213 @@ async fn the_kv_channel_is_answered_in_frame_order_behind_the_context_answer() {
     );
 }
 
+/// A two-turn conversation on the bridged roster: the first turn is history
+/// the composition turns into blobs, the second is the action.
+fn two_turns() -> ChatRequest {
+    let mut replied = crate::protocol::Message::assistant("auto");
+    replied.parts.push(crate::protocol::Part::text("It parses TOML."));
+
+    ChatRequest {
+        system: Some("You are terse.".to_owned()),
+        messages: vec![
+            crate::protocol::Message::user("What does this crate do?"),
+            replied,
+            crate::protocol::Message::user("read the file"),
+        ],
+        turn_start: 2,
+        ..opening("auto")
+    }
+}
+
+/// The kv answer with `id` among what the fold wrote, and the bytes it
+/// carried — [`None`] for a not-found answer.
+fn kv_answer(sent: &[proto::ClientMessage], id: u32) -> Option<Vec<u8>> {
+    sent.iter()
+        .filter_map(|message| message.kv_response.as_option())
+        .find(|answer| answer.id == Some(id))
+        .expect("the get was answered")
+        .get_blob_result
+        .as_option()
+        .expect("a get's answer is the result, found or not")
+        .blob_data
+        .clone()
+}
+
+/// **AC-9, the fresh half.** A fresh Run's store *is* the composition: a
+/// get for a composed id answers the exact bytes, a get for an id nobody
+/// composed still answers not-found, and a set the server sends under a
+/// composed id — carrying, as content addressing guarantees, the bytes the
+/// id already names — leaves the following get answering those same bytes.
+/// A set that *differs* replaces what was held, the reference's own store
+/// (`proxy.ts:1108`): the one shape a content-addressed id should never
+/// produce, and the one the wire logs by size so a probe can say whether it
+/// ever does.
+#[tokio::test]
+async fn a_fresh_runs_kv_gets_are_answered_from_the_composed_history() {
+    let request = two_turns();
+    let composed = super::history::compose(&request);
+    let composed_id = composed.root[1].clone();
+    let composed_bytes = composed.blobs[&composed_id].clone();
+    let other_id = composed.root[2].clone();
+    let other_bytes = composed.blobs[&other_id].clone();
+    assert_eq!(composed_id.len(), 32, "a raw sha256");
+
+    let (sender, receiver) = futures::channel::mpsc::unbounded::<Result<Vec<u8>, Infallible>>();
+    let (answers, answered) = futures::channel::mpsc::unbounded();
+    let seeded = super::Duplex {
+        answers,
+        system: request.system.clone(),
+        roster: Vec::new(),
+        blobs: composed.blobs,
+    };
+    let stream = super::events(receiver, CancellationToken::new(), seeded, None);
+
+    let mut body = kv_get(1, &composed_id);
+    body.extend(kv_get(2, b"an id nobody composed"));
+    body.extend(kv_set(3, &composed_id, &composed_bytes));
+    body.extend(kv_get(4, &composed_id));
+    body.extend(kv_set(5, &other_id, b"not what the id names"));
+    body.extend(kv_get(6, &other_id));
+    body.extend(framed(text("Hello")));
+    body.extend(framed(turn_ended()));
+    body.extend(end_stream("{}"));
+    sender.unbounded_send(Ok(body)).expect("the body is open");
+    drop(sender);
+
+    let events: Vec<ProviderEvent> =
+        tokio::time::timeout(Duration::from_secs(10), stream.collect())
+            .await
+            .expect("a fully-answered turn ends");
+    assert_eq!(
+        events,
+        vec![
+            ProviderEvent::TextDelta("Hello".to_owned()),
+            ProviderEvent::Finish(FinishReason::Completed),
+        ],
+        "the gets are questions, never events"
+    );
+
+    let sent = sent(answered).await;
+    assert_eq!(
+        kv_answer(&sent, 1).as_deref(),
+        Some(composed_bytes.as_slice()),
+        "a composed id answers the bytes the composition hashed"
+    );
+    assert_eq!(kv_answer(&sent, 2), None, "an id nobody composed is still not-found");
+    let acked = |id: u32| {
+        sent.iter()
+            .filter_map(|message| message.kv_response.as_option())
+            .any(|answer| answer.id == Some(id) && answer.set_blob_result.is_set())
+    };
+    assert!(acked(3), "the set is acked");
+    assert_eq!(
+        kv_answer(&sent, 4).as_deref(),
+        Some(composed_bytes.as_slice()),
+        "a set carrying the bytes the id already names changes nothing: content-addressed \
+         idempotence holds under the reference's overwrite"
+    );
+    assert!(acked(5), "a differing set is acked too");
+    assert_eq!(
+        kv_answer(&sent, 6).as_deref(),
+        Some(b"not what the id names".as_slice()),
+        "and it replaces what the id held, as the reference's store does"
+    );
+    assert_ne!(other_bytes.as_slice(), b"not what the id names", "the replacement was real");
+}
+
+/// **AC-9, the held half.** The store travels with the Run across a pause:
+/// a Run held on a bridged call and resumed with its result still answers a
+/// composed id from the map it was seeded with.
+#[tokio::test]
+async fn a_held_run_resumed_after_a_pause_still_answers_a_composed_id() {
+    let held = Arc::new(super::bridge::HeldRuns::default());
+    let request = two_turns();
+    let key = super::bridge::Key::of(&request).expect("a request with a message keys");
+    let cancel = CancellationToken::new();
+    let composed = super::history::compose(&request);
+    let composed_id = composed.root[2].clone();
+    let composed_bytes = composed.blobs[&composed_id].clone();
+
+    let (body, chunks) = futures::channel::mpsc::unbounded::<Result<Vec<u8>, Infallible>>();
+    let (answers, answered) = futures::channel::mpsc::unbounded();
+    let seeded = super::Duplex {
+        answers,
+        system: request.system.clone(),
+        roster: roster(),
+        blobs: composed.blobs,
+    };
+    let stream = super::events(
+        chunks,
+        cancel.clone(),
+        seeded,
+        Some(super::Bridge::new(Arc::clone(&held), key.clone())),
+    );
+
+    body.unbounded_send(Ok(mcp_framed(
+        1,
+        proto::McpArgs::default()
+            .with_name("read")
+            .with_tool_name("read")
+            .with_tool_call_id("call-1")
+            .with_provider_identifier("ganja"),
+    )))
+    .expect("the body is open");
+    let paused: Vec<ProviderEvent> =
+        tokio::time::timeout(Duration::from_secs(10), stream.collect())
+            .await
+            .expect("a bridged exec pauses the stream rather than hanging it");
+    assert!(
+        paused.iter().any(|event| matches!(event, ProviderEvent::ToolCallStart { .. })),
+        "the call was bridged: {paused:?}"
+    );
+
+    let mut resumed = request.clone();
+    let mut reply = crate::protocol::Message::assistant(&request.model);
+    reply.parts.push(crate::protocol::Part {
+        id: crate::protocol::PartId::ascending(),
+        body: crate::protocol::PartBody::Tool {
+            call_id: "call-1".to_owned(),
+            tool: "read".to_owned(),
+            state: crate::protocol::ToolState::Completed {
+                input: serde_json::json!({}),
+                output: "the file's contents".to_owned(),
+                title: "read".to_owned(),
+                metadata: serde_json::json!({}),
+                started: 0,
+                completed: 0,
+            },
+        },
+    });
+    resumed.messages.push(reply);
+    let super::bridge::Resolution::Resume(fold) = held.resolve(&resumed) else {
+        panic!("the result keys the held run");
+    };
+    let stream = super::run(*fold, cancel, Some(super::Bridge::new(held, key)));
+
+    let mut tail = kv_get(9, &composed_id);
+    tail.extend(framed(text("Done.")));
+    tail.extend(framed(turn_ended()));
+    tail.extend(end_stream("{}"));
+    body.unbounded_send(Ok(tail)).expect("the body is open");
+    drop(body);
+
+    let events: Vec<ProviderEvent> =
+        tokio::time::timeout(Duration::from_secs(10), stream.collect())
+            .await
+            .expect("the resumed run reads to its end");
+    assert!(
+        !events.iter().any(|event| matches!(event, ProviderEvent::Failed(_))),
+        "a resumed run is not a failed one: {events:?}"
+    );
+
+    let sent = sent(answered).await;
+    assert_eq!(
+        kv_answer(&sent, 9).as_deref(),
+        Some(composed_bytes.as_slice()),
+        "the store the Run was seeded with came back with it"
+    );
+}
+
 /// The turn the live `shell_stream_args` exec used to kill (**D486**):
 /// the server asks this client to run a shell mid-stream, the refusal
 /// rides out on the held-open body as the pair the shipped client

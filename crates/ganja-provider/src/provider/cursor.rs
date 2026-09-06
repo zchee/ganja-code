@@ -87,6 +87,7 @@ use crate::tool::ToolDefinition;
 mod bridge;
 mod connect;
 mod decode;
+pub mod history;
 mod native;
 mod request;
 pub mod value;
@@ -437,7 +438,11 @@ impl CursorWire {
             bridge::Resolution::Fresh => {}
         }
 
-        let opening = connect::envelope(&request::run_message(&request)?);
+        // Composed once for the whole turn, before the retry loop the run
+        // request already sits ahead of: every attempt names the same blobs,
+        // and the store they live in seeds the Run that finally opens.
+        let composed = history::compose(&request);
+        let opening = connect::envelope(&request::run_message(&request, &composed)?);
         let presented = self.credential.presented().await?;
         // Minted once for the whole turn: every attempt below is the same
         // request under the same stamp, the shape the shared driver's
@@ -508,7 +513,10 @@ impl CursorWire {
                         answers,
                         system: request.system.clone(),
                         roster: request.tools.clone(),
-                        blobs: HashMap::new(),
+                        // Moved in rather than cloned: the request bytes
+                        // above already carry the ids, and this is the last
+                        // reader of the composition.
+                        blobs: composed.blobs,
                     },
                 ),
                 cancel,
@@ -594,13 +602,18 @@ struct Duplex {
     /// membership test that decides whether a native exec is redirected or
     /// refused.
     roster: Vec<ToolDefinition>,
-    /// The turn's blob store: what the server asked this client to hold
-    /// mid-turn, read back by the server's own gets. Per-turn on purpose —
-    /// this build carries no conversation state across turns, so every turn
-    /// starts the way the plugin's fresh conversation does, holding nothing
-    /// (proxy.ts:585) — and a get before any set is answered not-found
-    /// rather than failed, because an empty store is a state the server
-    /// itself put there.
+    /// The Run's blob store, answering the server's kv gets. Seeded with the
+    /// **composed history** — every blob the run request's state names
+    /// (`history::Composed::blobs`, **D553**) — and holding beside it what
+    /// the server asks this client to store mid-turn. Per-Run on purpose:
+    /// this build carries no conversation state across turns, so every Run
+    /// starts from the transcript it was composed from and nothing else, the
+    /// reference's own rebuild-on-every-request ground; a Run held across a
+    /// pause carries its store with it, and a resumed Run answers from the
+    /// same map it was seeded with. A get for an id nobody composed and
+    /// nobody set is answered not-found rather than failed, because a store
+    /// holding only what this side minted is a state the server itself is
+    /// reading.
     blobs: HashMap<Vec<u8>, Vec<u8>>,
 }
 

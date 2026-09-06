@@ -330,14 +330,15 @@ impl Mapping {
         }
 
         let Some(update) = message.interaction_update.as_option() else {
+            // Named by number and size rather than modelled: the checkpoint
+            // arm (field 3, a whole ConversationStateStructure) is what
+            // arrives here on a turn that carried state, and whether it does,
+            // and how large it is, is what a probe reads off this line before
+            // anything is built to read the arm itself (**D553**).
             tracing::debug!(
                 provider = ID,
-                fields = ?message
-                    .__buffa_unknown_fields
-                    .iter()
-                    .map(|field| field.number)
-                    .collect::<Vec<_>>(),
-                "skipped a server message outside the update channel"
+                fields = ?unmodelled(&message),
+                "unmodelled server-message fields"
             );
             return None;
         };
@@ -404,6 +405,34 @@ impl Mapping {
             "the response body ended before the exchange finished".to_owned(),
         )));
     }
+}
+
+/// The top-level fields of `message` this build does not model, as `(field
+/// number, payload bytes)` pairs in wire order — what the skip log names a
+/// server message by, and the seam a test reads the same answer through.
+///
+/// The size is the payload's: a length-delimited field's bytes, a fixed
+/// field's width, a varint's encoded width, a group's encoded content. The
+/// bytes themselves never leave here — a checkpoint is conversation state.
+pub(super) fn unmodelled(message: &proto::ServerMessage) -> Vec<(u32, usize)> {
+    message
+        .__buffa_unknown_fields
+        .iter()
+        .map(|field| {
+            let size = match &field.data {
+                buffa::UnknownFieldData::LengthDelimited(bytes) => bytes.len(),
+                buffa::UnknownFieldData::Fixed32(_) => 4,
+                buffa::UnknownFieldData::Fixed64(_) => 8,
+                buffa::UnknownFieldData::Varint(value) => {
+                    usize::try_from((64 - value.leading_zeros()).div_ceil(7).max(1))
+                        .expect("a varint is at most ten bytes")
+                }
+                buffa::UnknownFieldData::Group(fields) => fields.encoded_len(),
+            };
+
+            (field.number, size)
+        })
+        .collect()
 }
 
 /// What an EndStream error means to the session that asked.

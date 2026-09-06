@@ -2,20 +2,26 @@
 //!
 //! Spec: `.omc/research/cursor/spike-wire-facts.md` — the server refuses a
 //! stream whose first message is not a run request, so this module builds
-//! exactly that one message. What it carries is the minimal set the message
+//! exactly that one message. What it carries is the set the message
 //! definitions in `cursor.proto` model: the model asked for (named twice,
 //! because the server still reads the deprecated description beside the
-//! forward-looking one), an empty conversation state marked present, and
-//! the newest user message inline.
+//! forward-looking one), the conversation state **composed** from the
+//! transcript, the conversation's id, and the action — the newest user turn
+//! inline, or a resume over the state when there is no newer user turn to
+//! send.
 //!
-//! **The newest user message, deliberately.** Everything a conversation
+//! **The state is composed, not empty** (**D553**). Everything a conversation
 //! already holds — earlier turns, tool calls and their results — travels on
-//! cursor's wire as content-addressed state over the stream's kv half.
-//! [`kv_answer`] speaks that channel's serving side — mid-turn the server
-//! stores blobs with this client and reads its own back, and it will not
-//! end the turn while one is unanswered — but composing *history* into
-//! blobs the request could name is still ahead, so the request carries what
-//! it can carry truthfully and the rest arrives with the state machinery.
+//! cursor's wire as content-addressed blobs the request *names* and the
+//! server *fetches* over the stream's kv half. [`super::history`] is the
+//! composition: it walks `ChatRequest.messages` into the entries the server
+//! builds its prompt from and the turns beside them, hashes each into the
+//! store a fresh Run is seeded with, and decides the action from the
+//! request's own shape. [`run_message`] only spells what it decided.
+//! [`kv_answer`] speaks the channel's serving side — the server reads the
+//! composed blobs back by id, stores blobs of its own mid-turn and reads
+//! those back too, and will not end the turn while one exchange is
+//! unanswered.
 //!
 //! **The advertised tools, on the other hand, are sent** (**D552**).
 //! [`declaration`] turns `ChatRequest.tools` into the roster cursor's own
@@ -109,12 +115,14 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::ops::RangeInclusive;
 
 use buffa::Message as _;
 
+use super::history::{self, Action, Composed};
 use super::{ID, decode, proto};
 use crate::auth::pkce;
-use crate::protocol::{PartBody, Role};
+use crate::protocol::Role;
 use crate::provider::{ChatRequest, ProviderError};
 use crate::tool::ToolDefinition;
 
@@ -135,8 +143,21 @@ pub(super) const PROVIDER_IDENTIFIER: &str = "ganja";
 /// Returns [`ProviderError::Transport`] when the platform's random source
 /// fails: nothing was sent, and nothing was refused.
 pub(super) fn fresh_id() -> Result<String, ProviderError> {
-    let mut bytes =
+    let bytes =
         pkce::random_bytes::<16>().map_err(|error| ProviderError::Transport(error.to_string()))?;
+
+    Ok(render_v4(bytes))
+}
+
+/// Sixteen bytes as a v4-shaped UUID: the version nibble forced to `4`, the
+/// variant bits to RFC 4122, and the hyphenated lowercase-hex layout.
+///
+/// Shared by [`fresh_id`], whose bytes are random, and by
+/// [`history::derived`], whose bytes are a hash — so the two ids on a run
+/// request are the same *shape* by construction, which is the reference's
+/// own arrangement (`proxy.ts:849` mints one, `:1341-1351` derives the
+/// other, both to this layout).
+pub(super) fn render_v4(mut bytes: [u8; 16]) -> String {
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
 
@@ -148,7 +169,7 @@ pub(super) fn fresh_id() -> Result<String, ProviderError> {
         write!(rendered, "{byte:02x}").expect("writing hex into a String cannot fail");
     }
 
-    Ok(rendered)
+    rendered
 }
 
 /// The tools of `request` as cursor's own client-declared roster (**D552**).
@@ -179,35 +200,58 @@ pub(super) fn declaration(tools: &[ToolDefinition]) -> Vec<proto::McpToolDefinit
         .collect()
 }
 
-/// The bytes of the stream's opening message, assembled from `request`.
+/// The bytes of the stream's opening message, assembled from `request` and
+/// the state `composed` from it.
+///
+/// The state's two lists are the composition's blob ids verbatim; the action
+/// is whichever the composition decided — a user message stamped with a
+/// fresh id, the reference's random `crypto.randomUUID()` (`proxy.ts:849`),
+/// or the fieldless resume — and `conversation_id` is the composition's, the
+/// field the reference sends on every request (`proxy.ts:877`).
 ///
 /// # Errors
 ///
 /// Returns [`ProviderError::Transport`] when no message id can be minted;
 /// see [`fresh_id`].
-pub(super) fn run_message(request: &ChatRequest) -> Result<Vec<u8>, ProviderError> {
+pub(super) fn run_message(
+    request: &ChatRequest,
+    composed: &Composed,
+) -> Result<Vec<u8>, ProviderError> {
     let model = proto::ModelEntry::default()
         .with_model_id(&request.model)
         .with_display_model_id(&request.model)
         .with_display_name(&request.model)
         .with_display_name_short(&request.model);
 
-    let action = proto::ConversationAction {
-        user_message_action: buffa::MessageField::some(proto::UserMessageAction {
-            user_message: buffa::MessageField::some(
-                proto::UserMessage::default()
-                    .with_text(newest_user_text(request))
-                    .with_message_id(fresh_id()?),
-            ),
+    let action = match &composed.action {
+        Action::User { text } => proto::ConversationAction {
+            user_message_action: buffa::MessageField::some(proto::UserMessageAction {
+                user_message: buffa::MessageField::some(
+                    proto::UserMessage::default().with_text(text).with_message_id(fresh_id()?),
+                ),
+                ..Default::default()
+            }),
             ..Default::default()
-        }),
-        ..Default::default()
+        },
+        // No newer user turn to send: the server continues from the composed
+        // state, which already holds the assistant's step and what its tools
+        // answered. Fieldless, as both the reference and the shipped client's
+        // own retry send it.
+        Action::Resume => proto::ConversationAction {
+            resume_action: buffa::MessageField::some(proto::ResumeAction::default()),
+            ..Default::default()
+        },
     };
 
     let mut run = proto::RunRequest {
-        conversation_state: buffa::MessageField::some(proto::ConversationState::default()),
+        conversation_state: buffa::MessageField::some(proto::ConversationState {
+            root_prompt_messages_json: composed.root.clone(),
+            turns: composed.turns.clone(),
+            ..Default::default()
+        }),
         action: buffa::MessageField::some(action),
         model_details: buffa::MessageField::some(model),
+        conversation_id: composed.conversation_id.clone(),
         requested_model: buffa::MessageField::some(
             proto::RequestedModel::default().with_model_id(&request.model),
         ),
@@ -572,7 +616,26 @@ pub(super) fn kv_answer(ask: decode::KvAsk, blobs: &mut HashMap<Vec<u8>, Vec<u8>
                 size = data.len(),
                 "answering the server's kv set"
             );
-            blobs.insert(blob_id, data);
+            // A set replaces what the id held, the reference's own store
+            // (`proxy.ts:1108`, `blobStore.set`) — the measured-working shape,
+            // and the one under which a server re-setting a key it treats as
+            // mutable reads its own newest bytes back. A composed history
+            // blob is content-addressed, so a re-set of one carries the bytes
+            // already there; the one case that would not — a differing
+            // re-set of an id this Run holds — is made visible by size, never
+            // by content, which is how a live probe settles whether it ever
+            // happens.
+            if let Some(held) = blobs.insert(blob_id.clone(), data)
+                && held != blobs[&blob_id]
+            {
+                tracing::debug!(
+                    provider = ID,
+                    blob = blob_key(&blob_id),
+                    was = held.len(),
+                    now = blobs[&blob_id].len(),
+                    "a server set replaced bytes this run already held"
+                );
+            }
 
             proto::KvResponse {
                 id: ask.id,
@@ -588,26 +651,30 @@ pub(super) fn kv_answer(ask: decode::KvAsk, blobs: &mut HashMap<Vec<u8>, Vec<u8>
 
 /// A blob id's leading eight bytes as hex — sixteen characters, the width
 /// the plugin's own kv debug lines truncate to. Enough to correlate a get
-/// with the set that stored it, and never the data.
-fn blob_key(id: &[u8]) -> String {
+/// with the set that stored it — or with the composition that minted it,
+/// which logs its ids in the same spelling — and never the data.
+pub(super) fn blob_key(id: &[u8]) -> String {
     id.iter().take(8).fold(String::with_capacity(16), |mut rendered, byte| {
         let _ = write!(rendered, "{byte:02x}");
         rendered
     })
 }
 
-/// The text of the conversation's newest user **turn**: every user message
-/// from the last one back to the reply before it — but never back past
-/// [`ChatRequest::turn_start`] — their text parts in order, joined the way
-/// distinct parts read as distinct paragraphs.
+/// The indices of the conversation's newest user **turn**: every user
+/// message from the last one back to the reply before it — but never back
+/// past [`ChatRequest::turn_start`] — or [`None`] when the conversation holds
+/// no user message at all.
 ///
 /// A run rather than one message, because the engine adds to a turn by
 /// appending user messages rather than by editing the last one — a steer
 /// drained at a step boundary, and the team guards' request-only block after
 /// a reply (D547) — and a wire that sent only the newest of them would answer
 /// a guard block while dropping the steer beside it, which is what this did
-/// until 2026-09-02. What came before the run is history this wire does not
-/// carry yet.
+/// until 2026-09-02. What came before the run is **history**, and since
+/// **D553** it travels too: [`history::entries`] reads this same bound to
+/// decide where history ends and the action begins, so the two cannot
+/// disagree about which message is the last of the conversation and which
+/// the first of the turn.
 ///
 /// **The run's lower bound is two facts, not one, and the second cannot be
 /// read off `messages`.** The reply is the near bound; the turn's own opening
@@ -618,26 +685,12 @@ fn blob_key(id: &[u8]) -> String {
 /// `Message::user` whose id and timestamp ascend across the boundary exactly
 /// as they do within it. Nothing here distinguishes them, which is why the
 /// engine states where this turn began and this walk is clamped to it rather
-/// than guessing.
-///
-/// **One shape the clamp does not close**, named rather than left to be
-/// discovered: a continuation block emitted on the arm where nothing was
-/// steered makes the request `[prompt, reply, block]`, and the block still
-/// reaches this wire without the prompt it is about. The clamp raises the
-/// run's lower bound and never lowers it — lowering it here would mean
-/// reaching back past the assistant's reply, whose text this wire does not
-/// send — so closing that one means carrying more than the newest user turn,
-/// which is the history-over-blobs work this module's own header defers.
-///
-/// Empty when the conversation holds no user message at all, which is not a
-/// request the engine builds — sending the empty message is more honest than
-/// refusing a request this module was still asked to encode.
-fn newest_user_text(request: &ChatRequest) -> String {
+/// than guessing. A continuation block emitted where nothing was steered —
+/// `[prompt, reply, block]` — is still a run of one, the block; the prompt
+/// and the reply it is about are the history composed beside it.
+pub(super) fn newest_user_run(request: &ChatRequest) -> Option<RangeInclusive<usize>> {
     let messages = &request.messages;
-    let Some(newest) = messages.iter().rposition(|message| matches!(message.role, Role::User))
-    else {
-        return String::new();
-    };
+    let newest = messages.iter().rposition(|message| matches!(message.role, Role::User))?;
     let first = messages[..newest]
         .iter()
         .rposition(|message| !matches!(message.role, Role::User))
@@ -655,31 +708,21 @@ fn newest_user_text(request: &ChatRequest) -> String {
         // user message — where a panic is no answer at all.
         .min(newest);
 
-    messages[first..=newest]
-        .iter()
-        .flat_map(|message| message.parts.iter())
-        // Every variant is named, and the wildcard that used to stand here is
-        // gone on purpose: this was the one place in the workspace where a
-        // new `PartBody` would compile silently into "not text", and a part
-        // this wire ought to send is not something to discover from a user's
-        // bug report.
-        .filter_map(|part| match &part.body {
-            PartBody::Text { text } => Some(text.as_str()),
-            // A peer's words are rendered into the user turn at request
-            // assembly (D495); a wire never encodes a peer part as a message
-            // of its own.
-            PartBody::Peer { .. }
-            | PartBody::File { .. }
-            | PartBody::Tool { .. }
-            | PartBody::ServerTool { .. }
-            | PartBody::Reasoning { .. }
-            | PartBody::ReasoningText { .. }
-            | PartBody::StepStart
-            | PartBody::StepFinish { .. }
-            | PartBody::Patch { .. } => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
+    Some(first..=newest)
+}
+
+/// The text of [`newest_user_run`]: its messages' text parts in order,
+/// joined the way distinct parts read as distinct paragraphs.
+///
+/// Empty when the conversation holds no user message at all, which is not a
+/// request the engine builds — sending the empty message is more honest than
+/// refusing a request this module was still asked to encode.
+pub(super) fn newest_user_text(request: &ChatRequest) -> String {
+    let Some(run) = newest_user_run(request) else {
+        return String::new();
+    };
+
+    request.messages[run].iter().flat_map(history::texts).collect::<Vec<_>>().join("\n\n")
 }
 
 #[cfg(test)]

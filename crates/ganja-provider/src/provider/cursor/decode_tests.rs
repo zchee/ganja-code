@@ -404,6 +404,36 @@ fn a_kv_kind_this_build_cannot_answer_fails_the_turn_by_name() {
     );
 }
 
+/// **AC-11.** A server message carrying only an arm this build does not
+/// model — the checkpoint, field 3 — decodes to no event and no ask, and is
+/// reported by field number and payload size through the seam the skip log
+/// reads, never by content.
+#[test]
+fn a_server_message_outside_the_modelled_channels_is_reported_by_number_and_size() {
+    let mut checkpoint = proto::ServerMessage::default();
+    checkpoint.__buffa_unknown_fields.push(buffa::UnknownField {
+        number: 3,
+        data: buffa::UnknownFieldData::LengthDelimited(vec![0xAB; 40]),
+    });
+    let framed = connect::envelope(&checkpoint.encode_to_vec());
+
+    let (events, asks) = mapped_asks(&framed, false);
+    assert!(events.is_empty(), "nothing to hand out: {events:?}");
+    assert!(asks.is_empty(), "nothing to answer: {asks:?}");
+
+    let decoded = proto::ServerMessage::decode_from_slice(&framed[5..]).expect("the frame decodes");
+    assert_eq!(super::unmodelled(&decoded), vec![(3, 40)]);
+
+    // A scalar arm is sized by its encoded width, so the line still says
+    // how much arrived rather than nothing.
+    let mut scalar = proto::ServerMessage::default();
+    scalar
+        .__buffa_unknown_fields
+        .push(buffa::UnknownField { number: 9, data: buffa::UnknownFieldData::Varint(300) });
+    assert_eq!(super::unmodelled(&scalar), vec![(9, 2)], "300 is a two-byte varint");
+    assert!(super::unmodelled(&proto::ServerMessage::default()).is_empty());
+}
+
 /// The arm names the skip log leans on: the plugin's own oneof spelling
 /// for the numbers it declares, and the bare number for anything newer.
 #[test]
