@@ -244,15 +244,19 @@ pub(super) fn redirect(args: &decode::ExecArgs, roster: &[String]) -> Option<Bri
 
 /// The glob one `ls_args` becomes.
 ///
-/// `glob` matches **files**, never directories, and `ignore`'s defaults hide
-/// dotfiles — so this pattern is what a one-level listing can be built out of:
-/// `*` is every file directly in the directory, and `*/*` is every file one
-/// level down, whose first path component names a child directory. What the
-/// answer can therefore show is the visible files in the directory and the
-/// visible directories that contain at least one visible file of their own.
-/// What it cannot show is a hidden entry, or an empty child directory — which
-/// is why the tree it fills says `children_were_processed = false` rather than
-/// claiming a walk it did not do.
+/// `glob` matches **files**, never directories — so this pattern is what a
+/// one-level listing can be built out of: `*` is every file directly in the
+/// directory, and `*/*` is every file one level down, whose first path
+/// component names a child directory. What the answer can therefore show is
+/// the files in the directory and the child directories that contain at least
+/// one file of their own. **Dotfiles are included**, which is measured rather
+/// than assumed (`an_ls_exec_over_a_real_directory_lists_what_glob_really_finds`
+/// runs the real tool over a real directory): the walker's `hidden(true)`
+/// applies only to entries the glob override did not match, and `{*,*/*}` is
+/// gitignore-glob syntax, where a leading `*` matches a leading dot. What it
+/// cannot show is an empty child directory, or anything deeper than one level
+/// — which is why the tree it fills says `children_were_processed = false`
+/// rather than claiming a walk it did not do.
 const LISTING: &str = "{*,*/*}";
 
 /// Whether an `ls_args` path is one this build can turn into a listing.

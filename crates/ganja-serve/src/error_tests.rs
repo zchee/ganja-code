@@ -1,6 +1,7 @@
 use axum::http::StatusCode;
 use ganja_core::EngineError;
 use ganja_core::command::TeamSpecError;
+use ganja_core::provider::ToolReach;
 use ganja_protocol::SessionId;
 
 use super::ApiError;
@@ -30,6 +31,16 @@ fn the_engine_refusals_map_to_their_statuses_and_nothing_else_moves() {
         // line is what is wrong, and the body says so and names the way back
         // to plain task text.
         EngineError::TeamSpec(TeamSpecError::ZeroCount { segment: "0:critic".to_owned() }),
+        // The third gate in front of a tool-driven builtin (**D551**,
+        // amended by **D552**): a provider serving this build no tools. No
+        // shipped id raises it since cursor's bridge landed, so this row is
+        // the only place the mapping is exercised at all — which is the
+        // reason it is a row here rather than a sentence in a comment.
+        EngineError::ProviderToolReach {
+            provider: "some-wire".to_owned(),
+            command: "team".to_owned(),
+            missing: ToolReach::None,
+        },
     ] {
         let mapped = ApiError::from(refused);
         assert_eq!(mapped.status(), StatusCode::BAD_REQUEST, "{mapped:?}");

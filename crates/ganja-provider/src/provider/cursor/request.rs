@@ -41,7 +41,7 @@
 //! on the one channel the server honors, and never through the member it
 //! demonstrably refuses.
 //!
-//! # Tool execs are refused with the kind's typed arm (**D550**, amending **D486**)
+//! # Tool execs, and which of them ganja runs (**D550**, **D552**, amending **D486**)
 //!
 //! Cursor's server does not only *ask for* context mid-turn; it asks the
 //! client to **run tools** for it — a shell command, a file read, an MCP
@@ -52,17 +52,33 @@
 //! but the context ask became a `ProviderEvent::Failed` naming the kind,
 //! because leaving it unanswered would have hung the turn instead.
 //!
+//! **Most of them are now answered** (**D552**). This request declares a
+//! roster ([`declaration`], above), so a `mcp_args` naming one of those tools
+//! is a call for ganja to run; and seven native kinds — `read_args` and
+//! `redacted_read_args`, `shell_stream_args`, `grep_args`, `ls_args`,
+//! `write_args`, `fetch_args` — are redirected onto the six ganja tools that
+//! do the same job ([`super::native`]). Neither is run on this side. The Run
+//! **pauses** instead, holding the request body open while ganja's engine
+//! executes the call through its own four phases and answering on the body
+//! that was never closed ([`super::bridge`]) — which is the whole point, since
+//! only the engine can raise a permission dialog and write a transcript part.
+//!
 //! **What diverges, and what no longer does.** There is no upstream
 //! counterpart to weigh this against — upstream opencode v1.18.22 has no
 //! cursor wire at all, so no ported behavior is being contradicted. The
-//! divergence is from *cursor's own shipped client*, which executes these
-//! asks against the user's machine and streams the results back. Ganja
-//! answers them too now (**D552**, [`super::native`]) — but never here, and
-//! never in this crate: a bridged exec is handed to ganja's engine as an
-//! ordinary tool call, which is what puts it under the permission dialog, the
-//! rules and the transcript the session already has. What this module still
-//! refuses is everything the engine has no tool for, which is where D550's
-//! typed arms and D486's throw stayed.
+//! divergence is from *cursor's own shipped client*, which executes these asks
+//! against the user's machine and streams the results back, and it survives
+//! D552 intact: **ganja still never runs the server's asks blind.** What it
+//! runs is its own tools, named by its own roster, under the session's own
+//! rules — and a call for a tool this request did not declare is refused
+//! exactly as before. The pause, the run-level heartbeat's cadence, the shape
+//! of the key a resume is found by and the composition of an `mcpResult` from
+//! what a tool produced are **behaviour derived** from the `opencode-cursor`
+//! plugin's proxy at `a37a6ba9a6d6d8d176bb68248f59240271f46767` (MIT; see
+//! `THIRD_PARTY_NOTICES.md`, and the two modules that implement them for the
+//! per-site citations). No code is copied. What this module still refuses is
+//! everything the engine has no tool for, which is where D550's typed arms and
+//! D486's throw stayed.
 //!
 //! **Why a refusal rather than a failure.** An unanswered exec is a hang:
 //! the server holds generation until the client says something, so the
