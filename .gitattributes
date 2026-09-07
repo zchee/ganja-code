@@ -2,3 +2,7 @@
 #  https://github.com/github-linguist/linguist/blob/main/docs/overrides.md
 
 * text=auto eol=lf
+
+.beads/issues.jsonl    linguist-generated
+**/AGENTS.md           linguist-generated
+AGENTS.md             -linguist-generated
