@@ -2,10 +2,21 @@ use std::collections::BTreeMap;
 
 use super::{
     Config, Dialect, PROVIDER_ENV, PROVIDERS, ProviderConfig, SelectionError, ToolReach,
-    adoptable_login, cursor, defaulted_model, fake, grok, openai, opencode, openrouter, select,
-    selectable, wire_model_listing,
+    adoptable_login, cursor, defaulted_model, fake, grok, openai, opencode, openrouter, responses,
+    select, selectable, wire_lists_models, wire_model_listing,
 };
+use crate::auth::CredentialKind;
 use crate::catalog;
+
+/// Storage keys as [`adoptable_login`] takes them, every one of them a stored
+/// **key**.
+///
+/// The kind matters to exactly one of its filters, and the tests that exercise
+/// that filter spell their pairs out; everywhere else a key is the ordinary
+/// entry and saying so once beats repeating it per row.
+fn stored(keys: &[&str]) -> Vec<(String, CredentialKind)> {
+    keys.iter().map(|key| ((*key).to_owned(), CredentialKind::ApiKey)).collect()
+}
 
 /// A config declaring one endpoint under `id`.
 fn declaring(id: &str) -> Config {
@@ -143,8 +154,6 @@ fn the_refusal_for_an_unknown_provider_names_both_tiers_and_who_asked() {
 /// login this session can actually run as, in ganja's vocabulary.
 #[test]
 fn the_oldest_login_that_wins_is_the_oldest_one_this_session_can_run_as() {
-    let stored = |keys: &[&str]| keys.iter().map(|key| (*key).to_owned()).collect::<Vec<_>>();
-
     // The file speaks upstream's names: an `xai` login is a grok session.
     assert_eq!(
         adoptable_login(&Config::default(), stored(&["xai", "anthropic"])).as_deref(),
@@ -171,6 +180,49 @@ fn the_oldest_login_that_wins_is_the_oldest_one_this_session_can_run_as() {
     assert_eq!(adoptable_login(&Config::default(), stored(&[])), None);
 }
 
+/// **AC-0.4** and **AC-0.11**: the filter **D555** added, stated the way every
+/// other one here is — over pairs, with no store anywhere in sight.
+///
+/// A ChatGPT login written before the split sits under `openai`, an id that now
+/// means the platform API and a key. Adopting it would build a wire that
+/// refuses that credential at its first request, so it is skipped and the
+/// session falls through — to the next adoptable login, or to the fake provider
+/// with the notice that tier exists to produce. The credential is not moved,
+/// rewritten or deleted: `ganja auth login chatgpt` is the repair, and a
+/// warning is where it is offered.
+///
+/// The **kind** is what the rule turns on, which is why both `openai` rows are
+/// here: a stored platform key under the same id is a perfectly good login and
+/// adopts exactly as it always did.
+#[test]
+fn a_pre_split_chatgpt_login_under_the_platform_id_is_never_adopted() {
+    let oauth = |key: &str| vec![(key.to_owned(), CredentialKind::Oauth)];
+
+    assert_eq!(
+        adoptable_login(&Config::default(), oauth(openai::ID)),
+        None,
+        "the only entry is a login no wire reads, so this machine is the fake \
+             provider's — with its notice"
+    );
+    assert_eq!(
+        adoptable_login(&Config::default(), stored(&[openai::ID])).as_deref(),
+        Some(openai::ID),
+        "a stored *key* under that id is the platform's own credential"
+    );
+
+    // Skipped, never fatal: the next login this session can run as still wins.
+    let mixed =
+        vec![(openai::ID.to_owned(), CredentialKind::Oauth), stored(&["anthropic"])[0].clone()];
+    assert_eq!(adoptable_login(&Config::default(), mixed).as_deref(), Some("anthropic"));
+
+    // And the seat's own id is adopted like anybody else's login — the skip is
+    // about the *pre-split* key, not about ChatGPT.
+    assert_eq!(
+        adoptable_login(&Config::default(), oauth(responses::CHATGPT_ID)).as_deref(),
+        Some(responses::CHATGPT_ID)
+    );
+}
+
 /// The flip the stub-era filter's own comment promised: with the wire
 /// real, a cursor login adopts like any other stored login — seniority
 /// decides, in both directions, and a machine holding only a cursor
@@ -178,8 +230,6 @@ fn the_oldest_login_that_wins_is_the_oldest_one_this_session_can_run_as() {
 /// the decision — naming cursor explicitly — is pinned unchanged below.
 #[test]
 fn a_cursor_login_adopts_like_any_other_stored_login() {
-    let stored = |keys: &[&str]| keys.iter().map(|key| (*key).to_owned()).collect::<Vec<_>>();
-
     // Oldest wins when cursor is oldest…
     assert_eq!(
         adoptable_login(&Config::default(), stored(&["cursor", "anthropic"])).as_deref(),
@@ -216,24 +266,51 @@ fn an_explicitly_named_cursor_is_answered_not_filtered() {
     assert!(selection.notice.is_none(), "the provider was asked for by name, not defaulted");
 }
 
-/// The listing seam's whole credential-independent negative half: for
-/// cataloged builtins, the fake provider, config-declared endpoints and
-/// outright typos the answer is [`None`] before anything is read or
-/// dialled, and the catalog stays the source of truth.
+/// The listing seam's whole negative half: for cataloged builtins, the fake
+/// provider, config-declared endpoints and outright typos the answer is
+/// [`None`] before anything is read or dialled, and the catalog stays the
+/// source of truth.
 ///
-/// `openai` is deliberately absent from this list although it is usually
-/// one of them: its answer now reads the environment and the credential
-/// store (**D476**), so pinning it here would make this test's verdict the
-/// developer's logins. Both of its arms live in
-/// `tests/openai_seat_models_listing.rs`, which redirects the store, as
-/// cursor's positive half lives in `tests/cursor_models_listing.rs`.
+/// `openai` joined this list with **D555**. Under **D476** it could not be
+/// here — its answer read the environment and the credential store, so pinning
+/// it would have made this test's verdict the developer's own logins — and now
+/// the platform is simply the catalog's to describe, whatever is stored beside
+/// it. That last clause is pinned out in `tests/`, by
+/// `the_seat_lists_the_pinned_six_and_no_stored_credential_moves_either_id`,
+/// which redirects a store so there is one to contradict; cursor's positive
+/// half lives in `tests/cursor_models_listing.rs`.
 #[tokio::test]
 async fn the_wire_listing_answers_none_where_the_catalog_is_the_source_of_truth() {
-    for provider in ["anthropic", grok::ID, fake::ID, "local-llama", "a-provider-nothing-ships"] {
+    for provider in
+        ["anthropic", openai::ID, grok::ID, fake::ID, "local-llama", "a-provider-nothing-ships"]
+    {
         assert!(
             wire_model_listing(provider).await.is_none(),
             "{provider} is the catalog's to describe, not a wire's"
         );
+    }
+}
+
+/// **AC-0.7.** The seat's own half of that seam, which since **D555** is a
+/// crate-local test rather than an integration one: the id is the whole
+/// question, so there is no store to redirect and no environment to hold.
+///
+/// The six and their order are the wire's (`responses::SEAT_ROSTER`), and are
+/// pinned there rather than here — what this asserts is that the seam reaches
+/// them at all, and that a row the catalog cannot name is still labelled.
+#[tokio::test]
+async fn the_seat_lists_its_own_roster_without_reading_a_credential() {
+    assert!(wire_lists_models(responses::CHATGPT_ID));
+
+    let listed = wire_model_listing(responses::CHATGPT_ID)
+        .await
+        .expect("the seat answers for itself")
+        .expect("and the seat arm reaches nothing that could fail");
+    let offered: Vec<&str> = listed.models.iter().map(|model| model.id.as_str()).collect();
+
+    assert_eq!(offered, responses::SEAT_ROSTER);
+    for model in &listed.models {
+        assert!(!model.name.is_empty(), "a row the catalog cannot name is labelled by its id");
     }
 }
 

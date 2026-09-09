@@ -1,21 +1,24 @@
-//! The wire model listing, asked about openai as each kind of credential.
+//! What a stored credential can and cannot do to the wire model listing.
 //!
-//! The seam's openai arm is a fact about the *credential*, not about the
-//! provider name (**D476**): a stored ChatGPT login is a subscription seat and
-//! is offered the pinned five, while an API key session and a machine holding
-//! nothing at all both answer [`None`] so the catalog keeps describing openai.
-//! All three of those are readings of the environment and of the credential
-//! store, so all three are pinned here rather than in the crate's own tests,
-//! where the verdict would be whatever the developer happens to be logged into.
+//! Since **D555** the seam's answer is a fact about the **provider id**, not
+//! about the credential: `chatgpt` is offered the pinned six and `openai` is
+//! the catalog's to describe, whatever either one has stored beside it. That
+//! makes the listing itself a crate-local test (`provider_tests.rs`), and
+//! leaves this binary the half that needs a real store to say anything at all —
+//! the **negative** claim that a login does not move either answer.
 //!
-//! One test, one binary, on purpose: the three credential situations are three
-//! settings of the same process-wide variables, so they are walked in sequence
-//! by a single test — a plain `cargo test` runs a binary's tests on parallel
-//! threads, and two of these racing would each see the other's environment.
+//! It is the same claim `wire_lists_models`'s doc used to have to hedge about,
+//! now stated where a store exists to contradict it: a machine holding a
+//! pre-split ChatGPT login under `openai` gets exactly the answers a machine
+//! holding nothing does, because nothing on this path reads the file any more.
+//!
+//! One test, one binary, on purpose: it mutates process-wide environment
+//! variables, and a plain `cargo test` runs a binary's tests on parallel
+//! threads.
 //!
 //! Nothing here reaches the network, and that is the point rather than a
 //! convenience: membership in the roster is compile-time, so fetching is
-//! disabled and the cache home redirected, and the five still come back in
+//! disabled and the cache home redirected, and the six still come back in
 //! their order.
 
 use std::{env, fs};
@@ -36,7 +39,7 @@ const OFFERED: [&str; 6] = [
 ];
 
 #[tokio::test]
-async fn a_chatgpt_login_is_offered_the_pinned_six_and_no_other_credential_is_offered_anything() {
+async fn the_seat_lists_the_pinned_six_and_no_stored_credential_moves_either_id() {
     let store = tempfile::tempdir().expect("a temp directory");
     let cache = tempfile::tempdir().expect("a temp directory");
     // SAFETY: this binary holds exactly one test, so nothing else in the
@@ -48,26 +51,40 @@ async fn a_chatgpt_login_is_offered_the_pinned_six_and_no_other_credential_is_of
         env::remove_var("OPENAI_API_KEY");
     }
 
-    // A machine with no openai credential at all: browsing the vendor's rows
-    // is still useful, so the listing declines rather than refusing, and the
-    // catalog stays the source of truth.
+    // An empty store. The seat is offered its roster — a listing has to stay
+    // usable logged out, and after D555 there is nothing in the way of that —
+    // and the platform is the catalog's to describe.
+    assert_offering().await;
+
+    // A ChatGPT login written before the split, sitting under `openai`. The
+    // one arrangement that could still produce a fallback read, and neither
+    // answer moves: `chatgpt` did not need it, and `openai` must not find it.
+    write_pre_split_chatgpt_login(store.path());
+    assert_offering().await;
+
+    // And a platform key beside it, which is what used to decide the whole
+    // question.
+    // SAFETY: as above.
+    unsafe {
+        env::set_var("OPENAI_API_KEY", "sk-not-a-real-key");
+    }
+    assert_offering().await;
+}
+
+/// The two answers, asserted the same way whatever the store holds.
+async fn assert_offering() {
     assert!(
         provider::wire_model_listing("openai").await.is_none(),
-        "logged out, openai is the catalog's to describe"
+        "the platform is the catalog's to describe, seat or no seat stored beside it"
     );
 
-    write_chatgpt_login(store.path());
-
-    let listed = provider::wire_model_listing("openai")
+    let listed = provider::wire_model_listing("chatgpt")
         .await
-        .expect("a stored ChatGPT login is a seat, and a seat has its own roster")
+        .expect("the seat answers for its own id")
         .expect("the seat arm reaches nothing that could fail");
 
     let offered: Vec<&str> = listed.models.iter().map(|model| model.id.as_str()).collect();
-    assert_eq!(
-        offered, OFFERED,
-        "the seat is offered exactly the pinned five, in the pinned order"
-    );
+    assert_eq!(offered, OFFERED, "the seat is offered exactly the pinned six, in the pinned order");
     assert!(
         listed.notice.contains("pinned") && listed.notice.contains("--refresh"),
         "and the notice says so rather than claiming a live wire: {}",
@@ -79,24 +96,15 @@ async fn a_chatgpt_login_is_offered_the_pinned_six_and_no_other_credential_is_of
             "a row the catalog cannot name is labelled by its id: {model:?}"
         );
     }
-
-    // A key outranks a login for the same reason a request does: it is what
-    // this session would authenticate with, and it reaches the platform
-    // backend, which is held to no seat's offering.
-    unsafe {
-        env::set_var("OPENAI_API_KEY", "sk-not-a-real-key");
-    }
-    assert!(
-        provider::wire_model_listing("openai").await.is_none(),
-        "an API key session browses the catalog, seat or no seat stored beside it"
-    );
 }
 
-/// A stored ChatGPT credential, in the shape `ganja auth login` writes one.
+/// A ChatGPT credential filed under `openai`, the way `ganja auth login` wrote
+/// one before **D555** moved the seat to its own key.
 ///
 /// The tokens are inert strings: nothing on this path presents them, because
-/// nothing on this path makes a request.
-fn write_chatgpt_login(data_home: &std::path::Path) {
+/// nothing on this path makes a request — and nothing on this path reads them
+/// either, which is the thing being pinned.
+fn write_pre_split_chatgpt_login(data_home: &std::path::Path) {
     let directory = data_home.join("ganja");
     fs::create_dir_all(&directory).expect("the store directory is creatable");
     let path = directory.join("auth.json");

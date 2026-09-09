@@ -7,12 +7,13 @@
 //! pins that: the six appear, and `gpt-5.4` — an openai row this build's
 //! catalog carries, servable on the seat and deliberately unoffered — does not.
 //!
-//! It lives out here rather than beside the module because the decision reads
-//! the credential store, which means `XDG_DATA_HOME` and `OPENAI_API_KEY`:
-//! process-wide state, so this file is one test in a process of its own, the
-//! `plugin_dialog` discipline.
+//! It lives out here rather than beside the module because the App reaches the
+//! real config and data homes as it starts, which means `XDG_DATA_HOME` and
+//! `XDG_CONFIG_HOME`: process-wide state, so this file is one test in a process
+//! of its own, the `plugin_dialog` discipline. The *decision* no longer reads a
+//! credential at all — since **D555** the seat is an id — which is why nothing
+//! here arranges a store.
 
-use std::fs;
 use std::sync::Arc;
 
 use ganja_core::Engine;
@@ -44,35 +45,11 @@ fn screen(terminal: &Terminal<TestBackend>) -> String {
 #[tokio::test]
 async fn the_model_chooser_on_a_chatgpt_seat_offers_the_pinned_roster_rather_than_the_catalog() {
     let home = TempDir::new().expect("a temporary directory is creatable");
-    let data = home.path().join("xdg-data");
     // SAFETY: nothing else runs yet — this is the only test in this binary,
     // and the runtime it starts on is current-thread.
     unsafe {
-        std::env::set_var("XDG_DATA_HOME", &data);
+        std::env::set_var("XDG_DATA_HOME", home.path().join("xdg-data"));
         std::env::set_var("XDG_CONFIG_HOME", home.path().join("xdg-config"));
-        // An exported key outranks a stored login, so a developer's own would
-        // make this session the platform's rather than a seat's.
-        std::env::remove_var("OPENAI_API_KEY");
-    }
-
-    // A stored ChatGPT credential in the shape `ganja auth login` writes one.
-    // Inert tokens: the roster is compile-time, so nothing here is presented
-    // to anybody.
-    let store = data.join("ganja");
-    fs::create_dir_all(&store).expect("the store directory is creatable");
-    let path = store.join("auth.json");
-    fs::write(
-        &path,
-        r#"{"openai": {"type": "oauth", "refresh": "rt-seat-fixture",
-             "access": "at-seat-fixture", "expires": 4102444800000}}"#,
-    )
-    .expect("the fixture writes");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
-            .expect("the fixture is made private");
     }
 
     let engine = Engine::new(
@@ -81,7 +58,7 @@ async fn the_model_chooser_on_a_chatgpt_seat_offers_the_pinned_roster_rather_tha
         Arc::new(ganja_tool::Registry::new(Vec::new())),
         ganja_permission::Permissions::default(),
     );
-    let mut app = App::new(engine, None, Themes::builtin()).with_provider("openai");
+    let mut app = App::new(engine, None, Themes::builtin()).with_provider("chatgpt");
 
     for character in "/models".chars() {
         app.handle(key(KeyCode::Char(character))).await.expect("the key is handled");

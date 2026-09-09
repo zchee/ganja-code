@@ -1375,6 +1375,14 @@ fn a_provider_entry_that_describes_no_usable_endpoint_is_refused_by_name() {
             r#"provider = { anthropic = { dialect = "anthropic-messages", base_url = "https://proxy.example" } }"#,
             "anthropic",
         ),
+        // **AC-0.10.** The refusal is `PROVIDERS`'s to make, so an id joining
+        // that list joins this one — and `chatgpt` did, with **D555**. The
+        // stated cost of the split: a config that pointed this name at a proxy
+        // yesterday is refused by name today.
+        (
+            r#"provider = { chatgpt = { dialect = "openai-responses", base_url = "https://proxy.example" } }"#,
+            "chatgpt",
+        ),
         // A dialect is a request/response mapping, and there is no arm for
         // one this build does not implement.
         (r#"provider = { x = { dialect = "gemini", base_url = "https://a.test" } }"#, "gemini"),

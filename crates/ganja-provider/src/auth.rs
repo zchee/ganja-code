@@ -225,7 +225,7 @@ pub fn provider_id_for_storage_key(key: &str) -> &str {
 /// last year" is information this build arrived too late to have and a stable
 /// answer beats a guessed one. An id outside this list ranks after it, in the
 /// store's own order.
-const UNSTAMPED_PRIORITY: &[&str] = &["anthropic", "openai", "grok", "github-copilot"];
+const UNSTAMPED_PRIORITY: &[&str] = &["anthropic", "openai", "chatgpt", "grok", "github-copilot"];
 
 /// Where `key` sorts among stored logins: oldest stamp first, then the
 /// unstamped by [`UNSTAMPED_PRIORITY`], then everything else in the order the
@@ -1209,11 +1209,11 @@ impl Store {
     /// Every stored provider this build could authenticate with, oldest login
     /// first: stamped entries by their stamps, then the unstamped by
     /// [`UNSTAMPED_PRIORITY`], then the rest in the store's own order.
-    fn logins_oldest_first(&self) -> Result<Vec<String>, AuthError> {
+    fn logins_oldest_first(&self) -> Result<Vec<(String, CredentialKind)>, AuthError> {
         let stamps = self.read_stamps();
-        let mut keys: Vec<String> =
-            self.stored()?.into_iter().map(|(provider_id, _, _)| provider_id).collect();
-        keys.sort_by_key(|key| login_rank(key, &stamps));
+        let mut keys: Vec<(String, CredentialKind)> =
+            self.stored()?.into_iter().map(|(provider_id, _, kind)| (provider_id, kind)).collect();
+        keys.sort_by_key(|(key, _)| login_rank(key, &stamps));
 
         Ok(keys)
     }
@@ -2105,9 +2105,16 @@ pub fn stamps_path() -> Result<PathBuf, AuthError> {
     Ok(Store::open()?.stamps_path())
 }
 
-/// Every stored provider this build could authenticate with, by storage key,
-/// **oldest login first** — the order selection defaults through when nothing
-/// named a provider.
+/// Every stored provider this build could authenticate with, by storage key
+/// and the kind of credential filed under it, **oldest login first** — the
+/// order selection defaults through when nothing named a provider.
+///
+/// The kind travels beside the key so that the rule which reads this can tell
+/// a key from a login without opening the store a second time (**D555**): a
+/// pre-split ChatGPT login sits under `openai`, an id that now means the
+/// platform API, and adopting it would start a session on a wire that refuses
+/// it. Deciding that needs the kind and nothing else out of the entry — the
+/// tail and the secret stay here.
 ///
 /// Stamped logins come first, oldest stamp leading. Logins with no stamp —
 /// stored before `STAMPS_FILE` existed, or by opencode, which will never
@@ -2122,7 +2129,7 @@ pub fn stamps_path() -> Result<PathBuf, AuthError> {
 /// Returns [`AuthError`] when the store cannot be read — reported rather than
 /// read as "no logins", because "log in again" is the one wrong answer to a
 /// store that is sitting right there.
-pub fn stored_logins_oldest_first() -> Result<Vec<String>, AuthError> {
+pub fn stored_logins_oldest_first() -> Result<Vec<(String, CredentialKind)>, AuthError> {
     Store::open()?.logins_oldest_first()
 }
 

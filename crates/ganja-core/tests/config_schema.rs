@@ -331,6 +331,38 @@ fn the_schema_is_a_valid_draft_2020_12_document() {
     jsonschema::validator_for(&schema()).expect("the schema compiles under Draft 2020-12");
 }
 
+/// **AC-0.10.** The `provider` table's `propertyNames.not.enum` is
+/// [`PROVIDERS`](ganja_core::provider::PROVIDERS), as a set, in both
+/// directions.
+///
+/// It is the same code→schema drift this whole suite is about, over the one
+/// value that is not a struct field: `check_providers` refuses a `provider`
+/// entry naming a shipped id, and the schema is where an editor says so before
+/// the loader is ever run. Until **D555** nothing compared the two and the
+/// enum was three ids stale — an editor accepted `[provider.openrouter]`,
+/// which the loader then refused — so this is the pin that stops it drifting
+/// again, and it is asserted **both** ways: an id that ships and is missing
+/// here is an editor that accepts what will not load, and an id here that no
+/// longer ships is an editor refusing an entry that would work.
+#[test]
+fn the_schemas_builtin_refusal_list_is_exactly_what_this_build_ships() {
+    let schema = schema();
+    let listed: BTreeSet<String> = schema["properties"]["provider"]["propertyNames"]["not"]["enum"]
+        .as_array()
+        .expect("the provider table refuses builtin ids by enumerating them")
+        .iter()
+        .map(|id| id.as_str().expect("every entry is a provider id").to_owned())
+        .collect();
+    let shipped: BTreeSet<String> =
+        ganja_core::provider::PROVIDERS.iter().map(|id| (*id).to_owned()).collect();
+
+    assert_eq!(
+        listed, shipped,
+        "the schema's builtin list and `PROVIDERS` have drifted; the `$comment` \
+         beside the enum names both sites"
+    );
+}
+
 /// The schema, on its own, validates the same kitchen-sink document the
 /// loader half of this suite feeds the real loader — the schema-only twin of
 /// [`the_kitchen_sink_document_loads_through_the_real_loader`].

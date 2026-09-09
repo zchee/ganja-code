@@ -125,10 +125,10 @@ use std::sync::{Arc, Mutex};
 use std::{env, fmt, fs};
 
 use futures::StreamExt as _;
-use ganja_core::auth::openai::Login;
+use ganja_core::auth::{self, openai::Login};
 use ganja_core::protocol::{Message, Usage};
 use ganja_core::provider::{
-    self, ChatRequest, Provider, ProviderError, ProviderEvent, ResponsesProvider, openai, responses,
+    self, ChatRequest, Provider, ProviderError, ProviderEvent, ResponsesProvider, responses,
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpListener;
@@ -459,12 +459,15 @@ fn seated() -> bool {
         eprintln!("skipping: {LIVE_ENV} is not 1");
         return false;
     }
-    if !provider::wire_lists_models(openai::ID) {
+    // The id is what makes a session a seat since **D555**, so the gate that
+    // used to ask about credentials asks the store directly instead: a probe
+    // whose whole subject is the credential this build presents cannot run
+    // against one that is not there.
+    if auth::oauth_for(responses::CHATGPT_ID).ok().flatten().is_none() {
         eprintln!(
-            "skipping: this machine holds no ChatGPT login that a session would \
-             use — run `ganja auth login`, and unset OPENAI_API_KEY if it is \
-             exported, because a key outranks a login and such a session is not \
-             a seat"
+            "skipping: this machine holds no ChatGPT login under `{}` — run \
+             `ganja auth login chatgpt`",
+            responses::CHATGPT_ID
         );
         return false;
     }
@@ -508,7 +511,7 @@ async fn a_chatgpt_seat_records_the_identity_it_presents_and_the_models_it_is_se
     let taken = turn(&live, &model).await;
 
     // ---- 3. The ladder, one ask per offered model. ------------------------
-    let offered = provider::wire_model_listing(openai::ID)
+    let offered = provider::wire_model_listing(responses::CHATGPT_ID)
         .await
         .expect("a seat is what the gate established")
         .expect("the seat arm reaches nothing that could fail");

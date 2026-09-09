@@ -16,7 +16,18 @@ fn a_provider_accepts_exactly_the_logins_this_build_has_for_it() {
         "the login landed ahead of the wire, and it is OAuth-only: a \
              stored key would be a credential nothing ever sends"
     );
-    assert_eq!(ProviderId::OpenAi.methods(), [Method::Browser, Method::Device, Method::Api]);
+    assert_eq!(
+        ProviderId::OpenAi.methods(),
+        [Method::Api],
+        "**D555**: this id is the platform API, whose credential is a key — the \
+             two ChatGPT flows moved to the id that spends a subscription"
+    );
+    assert_eq!(
+        ProviderId::Chatgpt.methods(),
+        [Method::Browser, Method::Device],
+        "and the seat took them, with no key entry: a key is the platform's \
+             credential and a session on this id would never present one"
+    );
     assert_eq!(ProviderId::Grok.methods(), [Method::Browser, Method::Device, Method::Api]);
     assert_eq!(ProviderId::GithubCopilot.methods(), [Method::Device, Method::Api]);
 }
@@ -27,7 +38,12 @@ fn a_provider_accepts_exactly_the_logins_this_build_has_for_it() {
 fn only_the_providers_with_more_than_one_login_are_asked_which() {
     assert_eq!(ProviderId::Anthropic.only_login(), Some(Method::Api));
     assert_eq!(ProviderId::GithubCopilot.only_login(), Some(Method::Device));
-    assert_eq!(ProviderId::OpenAi.only_login(), None);
+    assert_eq!(
+        ProviderId::OpenAi.only_login(),
+        Some(Method::Api),
+        "one login left here after D555, so no menu is drawn for it"
+    );
+    assert_eq!(ProviderId::Chatgpt.only_login(), None);
     assert_eq!(
         ProviderId::Grok.only_login(),
         None,

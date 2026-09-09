@@ -6,14 +6,16 @@
 //! API, [`OpenAiProvider`] for anything speaking OpenAI chat completions, and
 //! [`ResponsesProvider`] for the Responses API.
 //!
-//! **The vendor picks the wire, not the credential.** Everything filed under
-//! `openai` speaks Responses, whether it authenticates with an API key or with
-//! a stored ChatGPT login, because that is what upstream's plugin does with no
-//! reference to the credential at all (`plugin/provider/openai.ts:185`). What
-//! the credential still picks is which *backend* the request goes to and what
-//! it carries beside the bearer, decided once per session by
-//! `ganja_core::provider::openai_provider` — selection's half of the job, which
-//! is why it is on the other side of this crate's edge.
+//! **The vendor picks the wire, not the credential.** This vendor's two ids
+//! both speak Responses, whether the session authenticates with an API key or
+//! with a stored ChatGPT login, because that is what upstream's plugin does
+//! with no reference to the credential at all
+//! (`plugin/provider/openai.ts:185`). Which *backend* a request goes to and
+//! what it carries beside the bearer is picked by the **id** rather than by the
+//! credential (**D555**): `openai` is the platform and `chatgpt` the
+//! subscription, two entries in [`PROVIDERS`] that `ganja_core::provider::select`
+//! builds by name — selection's half of the job, which is why it is on the
+//! other side of this crate's edge.
 //! [`OpenAiProvider`] therefore no longer serves that vendor directly; it is
 //! the wire the two wrappers below ride, and the shape any other
 //! OpenAI-compatible endpoint would.
@@ -177,9 +179,15 @@ pub const MODEL_ENV: &str = "GANJA_MODEL";
 /// every one of the vendors it fronts and a default for none of them, so it is
 /// the first builtin that is fully sized and priced and still asks a session to
 /// name its model. See that module for why.
-pub const PROVIDERS: [&str; 9] = [
+pub const PROVIDERS: [&str; 10] = [
     anthropic::ID,
+    // Two ids, one vendor, **two credentials and two pools** — the platform
+    // API on a key, and the ChatGPT subscription on a stored login. Two entries
+    // rather than one that reads the store to find out which it is, because the
+    // pool a turn spends is not something a session should have to infer
+    // (**D555**). See [`responses`].
     openai::ID,
+    responses::CHATGPT_ID,
     openrouter::ID,
     // Two ids, one vendor, one credential — and two rosters, which is why they
     // are two entries rather than one with a flag. See [`opencode`].

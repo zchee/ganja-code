@@ -166,21 +166,13 @@ const SEAT_NOTICE: &str =
 ///
 /// A surface that must choose between the catalog and the wire *before* it
 /// spawns anything needs this synchronously — the TUI's `/model` opens one
-/// dialog or spawns one fetch, and cannot await to find out which. Both arms
-/// are local: a name comparison, or `openai_seat`'s read of the environment
-/// and the credential store.
-///
-/// A store that cannot be read answers `false` here, which sends the caller to
-/// the catalog. That is the honest fallback for a *listing*: browsing openai's
-/// rows is useful with or without a credential, and the store's real repair
-/// belongs to the paths that need to authenticate.
+/// dialog or spawns one fetch, and cannot await to find out which. Every arm is
+/// a name comparison; since **D555** none of them reads a credential, because
+/// the id already says which backend a session is on. A listing therefore stays
+/// the same logged in and logged out, which is what a listing should be.
 #[must_use]
 pub fn wire_lists_models(provider_id: &str) -> bool {
-    match provider_id {
-        cursor::ID => true,
-        openai::ID => openai_seat().unwrap_or(false),
-        _ => false,
-    }
+    matches!(provider_id, cursor::ID | responses::CHATGPT_ID)
 }
 
 /// The roster for a provider whose *wire*, not the catalog, says what the
@@ -196,13 +188,13 @@ pub fn wire_lists_models(provider_id: &str) -> bool {
 ///   lifetime and the CLI is one-shot — so a cache at this seam would only be
 ///   a second staleness to reason about (deviation:
 ///   `cursor-model-listing-uncached-at-the-seam`).
-/// - **openai on a ChatGPT seat**, whose offering is
-///   [`responses::SEAT_ROSTER`]'s pinned six (**D476**). No network and no
-///   catalog read decides membership: the list is compile-time, and the catalog
-///   is consulted only for a human name it may or may not know. A session on
-///   an API key is not a seat, so it answers [`None`] and the catalog stays its
-///   source of truth — as does a machine holding no openai credential at all,
-///   because a listing must stay usable logged out.
+/// - **`chatgpt`**, the ChatGPT seat, whose offering is
+///   [`responses::SEAT_ROSTER`]'s pinned six (**D476**). No network, no catalog
+///   read and — since **D555** — no credential read decides membership: the
+///   list is compile-time and the id is the whole question, so the six come
+///   back logged out exactly as they do logged in. `openai` is the platform,
+///   which is the catalog's to describe, and answers [`None`] whatever is
+///   stored beside it.
 ///
 /// # Errors
 ///
@@ -227,14 +219,17 @@ pub async fn wire_model_listing(provider_id: &str) -> Option<Result<WireModels, 
 ///
 /// The lookup is provider-scoped so a same-named row of another vendor cannot
 /// supply the name, and its absence is not a gap to report — an id is a
-/// perfectly good label, and membership never depended on the table.
+/// perfectly good label, and membership never depended on the table. Asked
+/// under the seat's own id since **D555**: the rows it reaches are the vendor's
+/// either way, through the catalog's alias, and asking under the id this
+/// listing is *for* is the honest spelling of it.
 fn seat_models() -> WireModels {
     WireModels {
         models: responses::SEAT_ROSTER
             .iter()
             .map(|id| ListedModel {
                 id: (*id).to_owned(),
-                name: catalog::model_for(openai::ID, id)
+                name: catalog::model_for(responses::CHATGPT_ID, id)
                     .map_or_else(|| (*id).to_owned(), |info| info.name.clone()),
             })
             .collect(),
@@ -275,9 +270,10 @@ async fn cursor_models() -> Result<WireModels, ProviderError> {
 /// The catalog holds one default per *vendor*, which is the right shape for
 /// every vendor here but one: OpenAI serves two backends with different
 /// offerings, and a ChatGPT seat handed the vendor-wide default gets a model
-/// its backend refuses outright. Making the wire hand back its own default
-/// keeps that coupling where the wire was chosen — in [`openai_provider`] — and
-/// out of [`select`], which knows only a provider id.
+/// its backend refuses outright. Making the wire hand back its own default is
+/// what keeps `catalog::default_model` free to answer for the platform without
+/// answering for the seat — which since **D555** is also why the alias the
+/// catalog resolves for `chatgpt` covers rows and stops short of defaults.
 struct Wire {
     /// The provider to drive the session with.
     provider: Arc<dyn Provider>,
@@ -292,76 +288,6 @@ impl Wire {
     fn catalog(provider: impl Provider + 'static) -> Self {
         Self { provider: Arc::new(provider), default_model: None }
     }
-}
-
-/// Which OpenAI backend a session reaches, decided by the credential it has.
-///
-/// **One wire, two backends.** Upstream sends every OpenAI model through the
-/// Responses API with no reference to the credential at all — the plugin's
-/// whole language hook is `evt.language = evt.sdk.responses(evt.model.api.id)`
-/// (`plugin/provider/openai.ts:185`) — so the vendor picks the wire and this
-/// function only picks where the request goes and what it carries. That is
-/// `codex.ts`'s own split: `:356` hands a request whose credential is not OAuth
-/// to the unwrapped `fetch`, keeping the platform URL and adding none of the
-/// subscription headers, and `:281` returns the model list unfiltered under the
-/// same condition.
-///
-/// - **A key** — exported, or stored, in exactly the order [`key_for`] has
-///   always read them — reaches `api.openai.com` with a bearer and nothing
-///   else, and is held to no seat's allow-list. This is what makes the newest
-///   models usable: chat completions refuses tools on them and the Responses
-///   endpoint is what the refusal itself named.
-/// - **No key but a stored ChatGPT login** reaches the codex backend that
-///   credential was minted for, with the three headers and the allow-list.
-///   Only the login's *presence* is read here; the token is resolved per
-///   request, so this costs one small file and captures nothing. Its default
-///   model comes from the allow-list rather than the catalog — see [`Wire`].
-/// - **Neither** is the startup failure it has always been, naming the variable
-///   and the login — `require_key`'s message, reached by the same call.
-///
-/// A store that cannot be read is reported rather than treated as "no
-/// credential": those are different situations needing different repairs, and
-/// only the second can say what to fix.
-fn openai_provider() -> Result<Wire, ProviderError> {
-    if openai_seat()? {
-        return Ok(Wire {
-            provider: Arc::new(ResponsesProvider::from_stored()?),
-            default_model: Some(responses::SUBSCRIPTION_DEFAULT),
-        });
-    }
-
-    // A key, or neither — and the second is `require_key`'s error, unchanged,
-    // because it is the same lookup it always was.
-    Ok(Wire::catalog(ResponsesProvider::from_env()?))
-}
-
-/// Whether an openai session is a **ChatGPT seat** — the codex backend — rather
-/// than the platform.
-///
-/// The one place that decision is made. [`openai_provider`] builds a wire from
-/// it and [`wire_lists_models`] decides a roster from it, and they must not
-/// disagree: a session running on the seat that browsed the platform's models
-/// would offer models its own backend refuses.
-///
-/// Exactly [`openai_provider`]'s own reading, in its order — a key, exported or
-/// stored, is read first and outranks a login, because that is what [`key_for`]
-/// has always meant. A store that cannot be read is reported rather than
-/// treated as "no credential": those are different situations needing different
-/// repairs, and only the second can say what to fix.
-///
-/// # Errors
-///
-/// Returns [`ProviderError::Auth`] when the credential store exists and cannot
-/// be read or understood. Holding neither credential is `Ok(false)`, not an
-/// error — that is the platform arm, whose own refusal names the variable.
-fn openai_seat() -> Result<bool, ProviderError> {
-    if key_for(openai::ID)?.is_some() {
-        return Ok(false);
-    }
-
-    Ok(auth::oauth_for(openai::ID)
-        .map_err(|error| ProviderError::Auth(error.to_string()))?
-        .is_some())
 }
 
 /// The provider a config's `provider` entry describes.
@@ -515,7 +441,18 @@ pub fn select(config: &Config) -> Result<Selection, SelectionError> {
     let wire = match requested.as_str() {
         fake::ID => Wire::catalog(FakeProvider::default()),
         anthropic::ID => Wire::catalog(AnthropicProvider::from_env()?),
-        openai::ID => openai_provider()?,
+        // The vendor's two ids, built by name rather than by whichever
+        // credential this machine holds (**D555**). `openai` is the platform
+        // API on a key, whose default is the catalog's; `chatgpt` is the
+        // subscription on a stored login, and it hands back its own default
+        // because the vendor-wide row names a model that backend refuses
+        // outright. Neither arm reads the other's credential, so a session is
+        // never quietly moved onto a pool it did not ask to spend.
+        openai::ID => Wire::catalog(ResponsesProvider::from_env()?),
+        responses::CHATGPT_ID => Wire {
+            provider: Arc::new(ResponsesProvider::from_stored()?),
+            default_model: Some(responses::SUBSCRIPTION_DEFAULT),
+        },
         // Anthropic's construction shape — a key read at startup, so a session
         // with none dies where the message is readable — over the Responses
         // wire, which is this vendor's own surface rather than the compat
@@ -643,6 +580,10 @@ impl ToolReach {
 /// The provider a session defaults to when nothing named one: the oldest
 /// stored login this build can run as, or [`None`] on a machine with none.
 ///
+/// The store's pairs — a key and the kind of credential under it — pass through
+/// to [`adoptable_login`] untouched, which is the only reason that function can
+/// state its rule without opening a store of its own.
+///
 /// The store's failure is reported rather than read as "no logins": its own
 /// errors say what repairs them — a `chmod`, a corrupt file's position — and
 /// silently starting the fake provider over an exposed store would hide
@@ -654,11 +595,14 @@ fn oldest_stored_login(config: &Config) -> Result<Option<String>, SelectionError
     Ok(adoptable_login(config, stored))
 }
 
-/// The first of `stored` — storage keys, oldest login first — that this
-/// session could actually run as, in ganja's own vocabulary.
+/// The first of `stored` — storage keys with the kind of credential filed under
+/// each, oldest login first — that this session could actually run as, in
+/// ganja's own vocabulary.
 ///
 /// Split from [`oldest_stored_login`] so the rule is a thing a test can state
-/// without a credential store. Three filters, each with its reason:
+/// without a credential store, and the kind travels *in* rather than being
+/// looked up here so that stays true (**D555**). Four filters, each with its
+/// reason:
 ///
 /// - the key is read back through [`auth::provider_id_for_storage_key`],
 ///   because the file stores upstream's names — a `grok` login sits under
@@ -666,6 +610,12 @@ fn oldest_stored_login(config: &Config) -> Result<Option<String>, SelectionError
 /// - [`fake::ID`] never counts: a credential filed under that id is not a
 ///   login to anything, and a session on the fake provider must keep the
 ///   notice this tier exists to avoid;
+/// - an OAuth credential under [`openai::ID`] never counts either: that id
+///   means the platform API and a key since **D555**, so a pre-split ChatGPT
+///   login sitting there would adopt a session onto a wire that refuses it at
+///   the first request. It is left where it is, read by no wire, and named
+///   once in a warning — the repair is `ganja auth login chatgpt`, not a
+///   migration this build performs behind somebody's back;
 /// - everything else must be [`selectable`] — an id opencode stored for a
 ///   provider this build has no wire for is a login, just not one this
 ///   session can use, and skipping it beats refusing to start over somebody
@@ -677,10 +627,28 @@ fn oldest_stored_login(config: &Config) -> Result<Option<String>, SelectionError
 /// the server-side Auto id the wire's own listing publishes — because the
 /// uncataloged tier withholds sizing and pricing, not a default the backend
 /// itself names.
-fn adoptable_login(config: &Config, stored: impl IntoIterator<Item = String>) -> Option<String> {
+fn adoptable_login(
+    config: &Config,
+    stored: impl IntoIterator<Item = (String, auth::CredentialKind)>,
+) -> Option<String> {
     stored
         .into_iter()
-        .map(|key| auth::provider_id_for_storage_key(&key).to_owned())
+        .filter_map(|(key, kind)| {
+            let id = auth::provider_id_for_storage_key(&key).to_owned();
+            if id == openai::ID && kind == auth::CredentialKind::Oauth {
+                tracing::warn!(
+                    "a ChatGPT login is stored under `{}`, which now names the platform API \
+                     alone; run `ganja auth login {}` to log in again under the id that spends \
+                     the subscription",
+                    openai::ID,
+                    responses::CHATGPT_ID
+                );
+
+                return None;
+            }
+
+            Some(id)
+        })
         .find(|id| id != fake::ID && selectable(config, id))
 }
 

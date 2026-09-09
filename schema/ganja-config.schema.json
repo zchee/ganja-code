@@ -217,7 +217,7 @@
     "provider": {
       "type": "object",
       "description": "Endpoints this build can talk to besides the ones it ships, by id. The id is what GANJA_PROVIDER, --model <id>/…, `model` and a stored credential all name. An id this build already ships is refused at load, because such an entry would never be reached.",
-      "$comment": "Refusal of a builtin id: crates/ganja-core/src/config.rs:1594-1625 (check_providers) against crates/ganja-provider/src/provider.rs:168-175 (PROVIDERS).",
+      "$comment": "Refusal of a builtin id: crates/ganja-core/src/config.rs:2615-2623 (check_providers) against crates/ganja-provider/src/provider.rs:182-200 (PROVIDERS). This enum must equal PROVIDERS as a set; crates/ganja-core/tests/config_schema.rs pins both directions.",
       "default": {},
       "propertyNames": {
         "type": "string",
@@ -225,6 +225,10 @@
           "enum": [
             "anthropic",
             "openai",
+            "chatgpt",
+            "openrouter",
+            "opencode",
+            "opencode-go",
             "grok",
             "github-copilot",
             "fake",

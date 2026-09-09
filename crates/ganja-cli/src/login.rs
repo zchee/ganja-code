@@ -123,7 +123,14 @@ impl ProviderId {
             // plain key — so cloning it here would be a login that buys a
             // session nothing.
             Self::Opencode | Self::OpencodeGo => &[Method::Api],
-            Self::OpenAi => &[Method::Browser, Method::Device, Method::Api],
+            // The platform API and nothing else since **D555**: the two OAuth
+            // flows mint a *subscription* credential, which is the other id's,
+            // and offering them here would store one where no wire reads it.
+            Self::OpenAi => &[Method::Api],
+            // The seat, and the two flows that reach it. No API-key entry: a
+            // key is the platform's credential, and a session on this id would
+            // never present one.
+            Self::Chatgpt => &[Method::Browser, Method::Device],
             // Upstream's own order for xAI too (`xai.ts:551`, `:594`, `:619`):
             // the loopback method first, because somebody sitting in front of a
             // browser is who a terminal login usually belongs to, then the
@@ -152,16 +159,19 @@ impl ProviderId {
     /// [`None`] means ask. The two providers with an OAuth flow of each kind do:
     /// a browser login and a device login are genuinely different situations —
     /// whether there is a browser on *this* machine — and nothing here can tell
-    /// which one somebody is in. The other two have one login each worth
-    /// offering, and a menu with one item is a keystroke charged for nothing
-    /// (upstream skips the prompt at `providers.ts:47` for the same reason).
+    /// which one somebody is in. The rest have one login each worth offering,
+    /// and a menu with one item is a keystroke charged for nothing (upstream
+    /// skips the prompt at `providers.ts:47` for the same reason) — `openai`
+    /// among them since **D555** took its two OAuth flows to `chatgpt`.
     fn only_login(self) -> Option<Method> {
         match self {
-            Self::Anthropic | Self::OpenRouter | Self::Opencode | Self::OpencodeGo => {
-                Some(Method::Api)
-            }
+            Self::Anthropic
+            | Self::OpenAi
+            | Self::OpenRouter
+            | Self::Opencode
+            | Self::OpencodeGo => Some(Method::Api),
             Self::GithubCopilot => Some(Method::Device),
-            Self::Grok | Self::OpenAi => None,
+            Self::Grok | Self::Chatgpt => None,
             // One login worth offering, like Copilot's: a menu with one item
             // is a keystroke charged for nothing.
             Self::Cursor => Some(Method::Browser),
@@ -256,8 +266,8 @@ fn accepted(provider: ProviderId, method: Method) -> Result<Method> {
 /// from having read its documentation.
 fn label(provider: ProviderId, method: Method) -> String {
     match (provider, method) {
-        (ProviderId::OpenAi, Method::Browser) => "ChatGPT Pro/Plus (browser)".to_owned(),
-        (ProviderId::OpenAi, Method::Device) => "ChatGPT Pro/Plus (headless)".to_owned(),
+        (ProviderId::Chatgpt, Method::Browser) => "ChatGPT Pro/Plus (browser)".to_owned(),
+        (ProviderId::Chatgpt, Method::Device) => "ChatGPT Pro/Plus (headless)".to_owned(),
         (ProviderId::Grok, Method::Browser) => "xAI Grok OAuth (SuperGrok Subscription)".to_owned(),
         (ProviderId::Grok, Method::Device) => "xAI Grok OAuth (Headless / Remote / VPS)".to_owned(),
         (_, Method::Api) => "Manually enter API Key".to_owned(),
@@ -303,8 +313,8 @@ pub(crate) async fn oauth(
 
             Ok(copilot::credential_from(&tokens, &deployment))
         }
-        (ProviderId::OpenAi, Method::Browser) => chatgpt_browser(&cancel).await,
-        (ProviderId::OpenAi, Method::Device) => chatgpt_device(&cancel).await,
+        (ProviderId::Chatgpt, Method::Browser) => chatgpt_browser(&cancel).await,
+        (ProviderId::Chatgpt, Method::Device) => chatgpt_device(&cancel).await,
         (ProviderId::Cursor, Method::Browser) => {
             // The same two-step shape every flow here has: the URL reaches
             // the screen before anything blocks on it having been opened.

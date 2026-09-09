@@ -55,8 +55,12 @@ use super::{AuthError, OauthCredential, RedactedTail, RefreshOauth, now_ms};
 /// The provider this logs in to, as ganja and `auth.json` both name it.
 ///
 /// The single source of the string: a caller wanting it writes
-/// `auth::openai::PROVIDER_ID` rather than a literal, so a rename is one edit.
-pub const PROVIDER_ID: &str = "openai";
+/// `auth::openai::PROVIDER_ID` rather than a literal, so a rename is one edit —
+/// which is what **D555** spent. What this module mints is the *seat's*
+/// credential, and the seat is `chatgpt`; `openai` names the platform API and a
+/// key, which is nothing here logs in to. A login stored under the old name is
+/// left where it is and read by no wire.
+pub const PROVIDER_ID: &str = "chatgpt";
 
 /// The public client the ChatGPT CLI flows are registered as (`openai.ts:14`).
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";

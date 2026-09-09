@@ -134,6 +134,23 @@ fn an_openai_model_new_enough_for_xhigh_carries_it_and_an_old_one_does_not() {
     );
 }
 
+/// **D555** split the vendor into two ids and neither the wire nor the roster
+/// moved with it: which backend takes a request is not a fact about how a
+/// `reasoning` object is spelled on it.
+///
+/// Asked of a whole synthesized roster rather than of `wire` — which is private
+/// and, more to the point, is an implementation of this — so a future arm that
+/// answered `Some(Wire::Responses)` and then diverged downstream would still
+/// redden here.
+#[test]
+fn the_seat_is_offered_exactly_the_efforts_the_platform_is() {
+    let platform = roster(&model("openai", "gpt-5.2", 128_000));
+    let seat = roster(&model("chatgpt", "gpt-5.2", 128_000));
+
+    assert!(!seat.is_empty(), "an id the wire table has never heard of is offered nothing at all");
+    assert_eq!(seat, platform, "one vendor, one wire, one roster");
+}
+
 /// The gateway's own four levels, and the map each of them splices — which
 /// is the whole of what its reference documents about reasoning and
 /// deliberately none of what the sibling Responses map carries.

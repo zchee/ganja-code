@@ -313,6 +313,36 @@ const DEFAULTS: &[(&str, &str)] = &[
     ("cursor", "default"),
 ];
 
+/// Providers whose **rows** are another provider's, as `(the id asked about,
+/// the id whose rows answer)`.
+///
+/// One entry, and one vendor's arrangement rather than a general mechanism:
+/// `chatgpt` and `openai` are two ids on one vendor's models (**D555**), so the
+/// seat keeps the sizing, pricing and auto-compaction the vendor's rows already
+/// carry instead of running the uncataloged path over models this table
+/// describes perfectly well.
+///
+/// **Rows only.** [`model_for`] and [`carries`] resolve this and
+/// [`default_model`] deliberately does not: [`DEFAULTS`]'s `openai` row is the
+/// key wire's, and the comment on it says in so many words that the seat cannot
+/// run what it names. What a seat defaults to comes from its wire
+/// (`provider::responses::SUBSCRIPTION_DEFAULT`), which is the whole reason
+/// `Wire::default_model` exists.
+///
+/// Spelled as a literal, like [`DEFAULTS`]'s ids: naming
+/// `provider::responses::CHATGPT_ID` here would be this module's first
+/// reference to a wire, and the id has one source without it.
+const ROW_ALIASES: &[(&str, &str)] = &[("chatgpt", "openai")];
+
+/// The id whose rows answer for `provider_id` — itself, for everyone outside
+/// [`ROW_ALIASES`].
+fn row_id(provider_id: &str) -> &str {
+    ROW_ALIASES
+        .iter()
+        .find(|(asked, _)| *asked == provider_id)
+        .map_or(provider_id, |(_, rows)| *rows)
+}
+
 /// One row of the compiled-in snapshot.
 ///
 /// A [`ModelInfo`] owns its strings, so the snapshot cannot be one directly;
@@ -620,9 +650,12 @@ pub fn model(id: &str) -> Option<Arc<ModelInfo>> {
 /// openai row's splice as Responses. Every effort consumer knows its
 /// provider, so the roster is read through this — sizing and pricing, where
 /// any provider's numbers are close enough, keep the id-only lookup.
+///
+/// `ROW_ALIASES` is resolved first, so an id sharing another's rows is
+/// answered by them.
 #[must_use]
 pub fn model_for(provider_id: &str, id: &str) -> Option<Arc<ModelInfo>> {
-    scoped(&current(), provider_id, id)
+    scoped(&current(), row_id(provider_id), id)
 }
 
 /// [`model_for`] against a named table — the seam that lets the lookup be
@@ -656,9 +689,15 @@ pub fn models() -> impl Iterator<Item = Arc<ModelInfo>> {
 /// Every configured endpoint is uncataloged, because no published catalog
 /// knows a private one. So is a builtin whose wire ships before its rows do,
 /// which is why this is a predicate rather than a list.
+///
+/// `ROW_ALIASES` is resolved first, so an id sharing another's rows is
+/// cataloged exactly when they are — it has to agree with [`model_for`], or a
+/// session would be told it is sized and then find nothing to size it by.
 #[must_use]
 pub fn carries(provider_id: &str) -> bool {
-    current().models.iter().any(|model| model.provider_id == provider_id)
+    let rows = row_id(provider_id);
+
+    current().models.iter().any(|model| model.provider_id == rows)
 }
 
 /// The model `provider_id` is asked for when the user names none.
@@ -667,6 +706,12 @@ pub fn carries(provider_id: &str) -> bool {
 /// with some other provider's model would be a silent misconfiguration rather
 /// than a default. The pins are compiled in and a refresh does not move them,
 /// because the published catalog does not carry the concept.
+///
+/// **`ROW_ALIASES` is deliberately not resolved here**, which is the one
+/// place the alias stops: sharing rows is not sharing a default. `chatgpt`
+/// answers [`None`] and takes `provider::responses::SUBSCRIPTION_DEFAULT`
+/// through its wire, because `DEFAULTS`'s `openai` row names a model that
+/// seat cannot run at all.
 #[must_use]
 pub fn default_model(provider_id: &str) -> Option<&'static str> {
     DEFAULTS.iter().find(|(provider, _)| *provider == provider_id).map(|(_, model)| *model)

@@ -577,14 +577,18 @@ fn naming_the_enterprise_deployment_up_front_asks_nothing() {
 
 /// ChatGPT's device flow is not RFC 8628 — the pending signal is a status and
 /// the *server* mints the PKCE verifier — so it is worth driving whole.
+///
+/// Under `chatgpt` since **D555**, which is also the whole of **AC-0.8**'s
+/// storing half: the id the flow is asked for is the id the credential lands
+/// under, and it is the id a session then selects to spend it.
 #[test]
-fn a_chatgpt_device_login_stores_an_oauth_credential_under_openai() {
+fn a_chatgpt_device_login_stores_an_oauth_credential_under_chatgpt() {
     let gate = Gate::closed();
     let issuer = serve(&gate);
     let data = data();
 
     let mut child = ganja(&data, &issuer)
-        .args(["auth", "login", "--provider", "openai", "--method", "device"])
+        .args(["auth", "login", "--provider", "chatgpt", "--method", "device"])
         .spawn()
         .expect("the binary runs");
     let lines = watching(&mut child);
@@ -593,8 +597,13 @@ fn a_chatgpt_device_login_stores_an_oauth_credential_under_openai() {
     let finished = finish(child, &lines, seen);
 
     assert!(finished.ok, "the login should have succeeded: {finished:?}");
-    assert_eq!(stored(&data)["openai"]["type"], "oauth");
-    assert_eq!(stored(&data)["openai"]["access"], ACCESS);
+    assert_eq!(stored(&data)["chatgpt"]["type"], "oauth");
+    assert_eq!(stored(&data)["chatgpt"]["access"], ACCESS);
+    assert!(
+        stored(&data).get("openai").is_none(),
+        "the platform's id is not where a subscription login goes: {}",
+        stored(&data)
+    );
     leaks_nothing(&finished);
 }
 
@@ -697,11 +706,16 @@ fn a_cursor_key_is_refused_naming_the_login_cursor_does_have() {
     assert!(!stored_at(&data).exists(), "no refused invocation may leave a credential behind");
 }
 
-/// A login replacing a credential of the other kind is the hazard the shared
-/// `openai` storage key creates, and the only place anybody can be warned about
-/// it is here.
+/// A second login against one provider discards the first, and the only place
+/// anybody can be warned about it is here.
+///
+/// **D555** took the sharp version of this away — a ChatGPT login and an OpenAI
+/// key used to share the `openai` entry, so each silently took the other — and
+/// what is left is worth reporting for the reason it always was: a login is not
+/// additive. Both halves are here: a same-kind replacement warns, and the two
+/// ids do **not** reach each other.
 #[test]
-fn a_chatgpt_login_says_what_the_stored_key_it_replaces_was() {
+fn a_login_says_what_it_replaces_and_the_two_openai_ids_do_not_replace_each_other() {
     let gate = Gate::closed();
     let issuer = serve(&gate);
     let data = data();
@@ -712,8 +726,10 @@ fn a_chatgpt_login_says_what_the_stored_key_it_replaces_was() {
         .expect("the binary runs");
     assert!(keyed.status.success());
 
+    // The seat's login, on a machine holding that key. Nothing is replaced:
+    // they are two entries now, and the warning must not claim otherwise.
     let mut child = ganja(&data, &issuer)
-        .args(["auth", "login", "--provider", "openai", "--method", "device"])
+        .args(["auth", "login", "--provider", "chatgpt", "--method", "device"])
         .spawn()
         .expect("the binary runs");
     let lines = watching(&mut child);
@@ -723,43 +739,62 @@ fn a_chatgpt_login_says_what_the_stored_key_it_replaces_was() {
 
     assert!(finished.ok, "the login should have succeeded: {finished:?}");
     assert!(
-        finished.stderr.contains("replaces the api credential")
-            && finished.stderr.contains("****1177"),
-        "the login has to name what it is about to overwrite: {:?}",
+        !finished.stderr.contains("replaces the"),
+        "a login under one id must not report replacing another id's credential: {:?}",
         finished.stderr
     );
-    // And it really is gone, rather than shadowed.
-    assert_eq!(stored(&data)["openai"]["type"], "oauth");
+    let store = stored(&data);
+    assert_eq!(store["chatgpt"]["type"], "oauth");
+    assert_eq!(store["openai"]["type"], "api", "and the platform key is untouched beside it");
+
+    // A second key under the platform's id: the same kind, the same entry, and
+    // the warning that has always been the point of this.
+    let replaced = ganja(&data, &issuer)
+        .args(["auth", "login", "--provider", "openai", "--key", "sk-replacing-3355"])
+        .output()
+        .expect("the binary runs");
+    let said = String::from_utf8_lossy(&replaced.stderr).into_owned();
+
+    assert!(replaced.status.success());
+    assert!(
+        said.contains("replaces the api credential") && said.contains("****1177"),
+        "storing a key has to name the one it overwrites: {said:?}"
+    );
+    assert_eq!(stored(&data)["openai"]["type"], "api");
+    assert_eq!(
+        stored(&data)["chatgpt"]["type"],
+        "oauth",
+        "and the seat's login is still not in the way of it"
+    );
 }
 
-/// The same hazard the other way round: a pasted key replaces a login.
+/// **AC-0.8**, the offering half: which logins each of the vendor's two ids
+/// has, taken off the binary rather than off the enum the unit test reads.
+///
+/// A method a provider does not have is refused by name, which is what makes
+/// this observable without completing a flow: the platform is a key and the
+/// seat is the two OAuth flows.
 #[test]
-fn a_pasted_key_says_what_the_stored_login_it_replaces_was() {
+fn the_platform_offers_a_key_and_the_seat_offers_the_two_oauth_flows() {
     let gate = Gate::closed();
     let issuer = serve(&gate);
     let data = data();
 
-    let mut child = ganja(&data, &issuer)
-        .args(["auth", "login", "--provider", "openai", "--method", "device"])
-        .spawn()
-        .expect("the binary runs");
-    let lines = watching(&mut child);
-    let seen = printed_before(&lines, CHATGPT_CODE);
-    gate.open();
-    assert!(finish(child, &lines, seen).ok, "the login should succeed");
+    for (provider, method) in [("openai", "browser"), ("openai", "device"), ("chatgpt", "api")] {
+        let refused = ganja(&data, &issuer)
+            .args(["auth", "login", "--provider", provider, "--method", method])
+            .output()
+            .expect("the binary runs");
+        let said = String::from_utf8_lossy(&refused.stderr).into_owned();
 
-    let keyed = ganja(&data, &issuer)
-        .args(["auth", "login", "--provider", "openai", "--key", "sk-replacing-3355"])
-        .output()
-        .expect("the binary runs");
-    let said = String::from_utf8_lossy(&keyed.stderr).into_owned();
+        assert!(!refused.status.success(), "{provider} has no {method} login: {said:?}");
+        assert!(
+            said.contains(provider) && said.contains(method),
+            "a refusal names the pairing that was asked for: {said:?}"
+        );
+    }
 
-    assert!(keyed.status.success());
-    assert!(
-        said.contains("replaces the oauth credential") && said.contains("****7731"),
-        "storing a key has to name the login it overwrites: {said:?}"
-    );
-    assert_eq!(stored(&data)["openai"]["type"], "api");
+    assert!(!stored_at(&data).exists(), "no refused invocation may leave a credential behind");
 }
 
 /// grok's browser login is reachable from the command line, and the socket it
@@ -1019,21 +1054,30 @@ fn no_invocation_shape_stores_a_deployment_menu_answer_as_a_credential() {
     }
 }
 
-/// A login that landed has to stay visible when a variable outranks it, because
+/// A stored credential has to stay visible when a variable outranks it, because
 /// the listing is the only thing that answers "what credentials do I have".
 ///
 /// Measured live: `auth.json` held three OAuth records while `auth list`
 /// printed two rows — an exported `OPENAI_API_KEY` took the `openai` row and
-/// the ChatGPT login under it vanished, leaving the login's own shadow warning
-/// as the only sign it had ever worked. Precedence is right and unchanged; a
+/// what was stored under it vanished, leaving the login's own shadow warning as
+/// the only sign it had ever worked. Precedence is right and unchanged; a
 /// listing that omits a credential it holds is not.
+///
+/// Since **D555** the shadowed entry is a stored *key* rather than a login: the
+/// seat has an id of its own and no key variable at all, which the second half
+/// of this pins — nothing anybody exports can shadow `chatgpt`.
 #[test]
-fn a_stored_login_is_listed_beside_the_environment_key_that_outranks_it() {
+fn a_stored_credential_is_listed_beside_the_environment_key_that_outranks_it() {
     let issuer = unblocked();
     let data = data();
 
+    let keyed = ganja(&data, &issuer)
+        .args(["auth", "login", "--provider", "openai", "--key", "sk-stored-1177"])
+        .output()
+        .expect("the binary runs");
+    assert!(keyed.status.success());
     let login = ganja(&data, &issuer)
-        .args(["auth", "login", "--provider", "openai", "--method", "device"])
+        .args(["auth", "login", "--provider", "chatgpt", "--method", "device"])
         .output()
         .expect("the binary runs");
     assert!(
@@ -1058,11 +1102,23 @@ fn a_stored_login_is_listed_beside_the_environment_key_that_outranks_it() {
         "the credential in use comes first and names where it came from: {rows:#?}"
     );
     assert!(
-        rows[1].contains("oauth")
-            && rows[1].contains("****7731")
+        rows[1].contains("api")
+            && rows[1].contains("****1177")
             && rows[1].contains("shadowed by OPENAI_API_KEY"),
-        "the stored login is listed, and says what outranks it: {rows:#?}"
+        "the stored key is listed, and says what outranks it: {rows:#?}"
     );
+
+    let seat: Vec<&str> = table.lines().filter(|line| line.starts_with("chatgpt")).collect();
+    assert_eq!(seat.len(), 1, "the seat's login has a row of its own: {table}");
+    assert!(
+        seat[0].contains("oauth") && seat[0].contains("****7731"),
+        "and it is the login, not a key: {seat:#?}"
+    );
+    assert!(
+        !seat[0].contains("shadowed"),
+        "no variable carries this credential, so nothing can outrank it: {seat:#?}"
+    );
+
     assert!(
         !table.contains(ACCESS) && !table.contains("sk-exported-4242"),
         "a listing may show tails and nothing more: {table}"

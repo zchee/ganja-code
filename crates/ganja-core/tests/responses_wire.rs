@@ -1,14 +1,16 @@
-//! An OpenAI session becoming a turn, either credential, against a real socket.
+//! An OpenAI session becoming a turn, either of the vendor's two ids, against a
+//! real socket.
 //!
-//! **The vendor picks the wire.** Everything filed under `openai` speaks the
-//! Responses API — upstream's plugin routes every model of that vendor through
-//! it without looking at the credential at all
-//! (`plugin/provider/openai.ts:185`) — and what the credential picks is which
-//! *backend* the request reaches and what it carries beside the bearer. Two
-//! things depended on that: a stored ChatGPT login had no consumer at all until
-//! the Responses provider landed, and an API key could not run tools on the
-//! newest models, because chat completions refused them live and named
-//! `/v1/responses` in the refusal.
+//! **The vendor picks the wire, and the id picks the backend.** Both of this
+//! vendor's ids speak the Responses API — upstream's plugin routes every model
+//! of that vendor through it without looking at the credential at all
+//! (`plugin/provider/openai.ts:185`) — and since **D555** which *backend* a
+//! request reaches, and what it carries beside the bearer, is settled by the id
+//! the session was selected under rather than by whichever credential the
+//! machine happens to hold. Two things depended on the wire being one: a stored
+//! ChatGPT login had no consumer at all until the Responses provider landed,
+//! and an API key could not run tools on the newest models, because chat
+//! completions refused them live and named `/v1/responses` in the refusal.
 //!
 //! Told in phases, because ten different things have to be true at once and a
 //! failure should still say which sentence broke:
@@ -29,14 +31,16 @@
 //!    `openai` key gets, but it is still what grok and Copilot ride, so its
 //!    body stays compared byte for byte against what this build has always
 //!    sent.
-//! 5. **The dispatch.** A key wins over a stored login; a stored login serves
-//!    where there is no key.
+//! 5. **The dispatch.** `openai` reaches the platform on its key and `chatgpt`
+//!    the seat on its login — with both credentials present throughout, so
+//!    neither answer can be a coincidence of what was missing.
 //! 6. **The model each wire defaults to.** A seat's backend serves a narrower
 //!    set than the platform, so a subscription session that named no model
 //!    takes the seat's default rather than the catalog's — and a model somebody
 //!    *did* name is answered or refused, never substituted.
-//! 7. **Neither credential** is the startup failure it has always been, with
-//!    nothing on the wire.
+//! 7. **No key under `openai`** is the startup failure it has always been, with
+//!    nothing on the wire — and its sentence now names the seat's id as the
+//!    other way out.
 //! 8. **Nothing leaks.** No token reaches a rendering, an error or the store's
 //!    own `Debug`.
 //! 9. **An unsupported model costs nothing** — and the seat's list does not
@@ -65,7 +69,8 @@ use ganja_core::config::Config;
 use ganja_core::permission::Permissions;
 use ganja_core::protocol::{Command, Event, PartBody, PartId, Role};
 use ganja_core::provider::{
-    ChatRequest, Provider as _, ProviderError, ProviderEvent, ResponsesProvider, openai, select,
+    ChatRequest, Provider as _, ProviderError, ProviderEvent, ResponsesProvider, openai, responses,
+    select,
 };
 use ganja_core::tool::Registry;
 use ganja_core::{Engine, catalog};
@@ -426,7 +431,7 @@ fn prompt(text: &str) -> Command {
 }
 
 #[tokio::test]
-async fn either_openai_credential_drives_a_responses_turn_against_the_backend_it_belongs_to() {
+async fn either_openai_id_drives_a_responses_turn_against_the_backend_it_names() {
     let home = tempfile::tempdir().expect("a temp directory");
     // SAFETY: this binary holds exactly one test, so nothing else in the
     // process is reading the environment concurrently.
@@ -691,10 +696,12 @@ async fn either_openai_credential_drives_a_responses_turn_against_the_backend_it
     );
 
     // ---- 5. The dispatch. --------------------------------------------------
-    // A key outranks a stored login, exactly as `key_for` has always read the
-    // two. Both are present here, which is the case that can only go one way —
-    // and both wires now answer on the same path, so what tells them apart is
-    // the bearer and the headers rather than the URL.
+    // **The id picks the backend, and no credential votes** (**D555**). Both
+    // credentials are present for the whole of this phase, which is what makes
+    // it an assertion rather than a coincidence: whichever id is named, the
+    // other one's credential is sitting right there and does not travel. Both
+    // wires answer on the same path, so what tells them apart is the bearer and
+    // the headers rather than the URL.
     endpoint.forget();
     endpoint.answers_turns_with(responses_transcript());
     // SAFETY: as above. Named rather than defaulted, because an unset
@@ -703,7 +710,7 @@ async fn either_openai_credential_drives_a_responses_turn_against_the_backend_it
         env::set_var("GANJA_PROVIDER", openai::ID);
     }
     let chosen = select(&Config::default()).expect("a key is a session");
-    assert_eq!(chosen.provider.id(), openai::ID, "one vendor, either wire");
+    assert_eq!(chosen.provider.id(), openai::ID, "the platform reports itself as the platform");
     turn(chosen.provider.as_ref(), KEY_MODEL).await;
 
     let sent = endpoint.only();
@@ -711,33 +718,43 @@ async fn either_openai_credential_drives_a_responses_turn_against_the_backend_it
     assert_eq!(
         sent.header("authorization").as_deref(),
         Some(format!("Bearer {KEY}").as_str()),
-        "a stored ChatGPT login must not take a session away from its API key"
+        "a stored ChatGPT login must not take a session away from the id that \
+         means the platform key"
     );
     for absent in SUBSCRIPTION_HEADERS {
         assert_eq!(sent.header(absent), None, "the key reached the platform");
     }
 
-    // No key, a stored login: the codex backend, with everything it wants.
+    // The seat's id, with the key still exported: the codex backend, the stored
+    // login's bearer, and everything the seat wants. Before D555 the key won
+    // here and this was a platform turn.
     endpoint.forget();
     // SAFETY: as above.
     unsafe {
-        env::remove_var("OPENAI_API_KEY");
+        env::set_var("GANJA_PROVIDER", responses::CHATGPT_ID);
     }
     let chosen = select(&Config::default()).expect("a stored login is a session");
-    assert_eq!(chosen.provider.id(), openai::ID);
+    assert_eq!(chosen.provider.id(), responses::CHATGPT_ID, "and the seat as the seat");
     turn(chosen.provider.as_ref(), SUBSCRIPTION_MODEL).await;
     let sent = endpoint.only();
     assert_eq!(sent.path(), RESPONSES, "the credential with no consumer now has one");
     assert_eq!(
         sent.header("authorization").as_deref(),
         Some(format!("Bearer {SECOND_ACCESS}").as_str()),
-        "and it is the stored one that travels"
+        "an exported key must not take a session away from the id that means \
+         the subscription"
     );
     assert_eq!(
         sent.header("chatgpt-account-id").as_deref(),
         Some(SECOND_ACCOUNT),
         "the seat's headers are still there for the seat"
     );
+
+    // SAFETY: as above. The key goes now, so that the defaults below are read
+    // on a machine holding one credential each way round.
+    unsafe {
+        env::remove_var("OPENAI_API_KEY");
+    }
 
     // ---- 6. The model each wire defaults to. -------------------------------
     // The catalog holds one default per vendor, and this vendor has two
@@ -768,12 +785,22 @@ async fn either_openai_credential_drives_a_responses_turn_against_the_backend_it
         "the table still answers for this vendor, which is what the key wire \
          falls through to"
     );
+    // **AC-0.7.** The other half of the alias, from the outside: the seat is
+    // pinned to nothing here and still cataloged, so it keeps the sizing and
+    // pricing that make auto-compaction work.
+    assert_eq!(
+        catalog::default_model(responses::CHATGPT_ID),
+        None,
+        "the row alias covers rows and stops short of defaults"
+    );
+    assert!(catalog::carries(responses::CHATGPT_ID), "and the rows themselves are reached");
 
     // And it is genuinely the seat's rather than a coincidence of the two
     // agreeing: a key session on the same vendor takes the catalog's.
     // SAFETY: as above.
     unsafe {
         env::set_var("OPENAI_API_KEY", KEY);
+        env::set_var("GANJA_PROVIDER", openai::ID);
     }
     let defaulted = select(&Config::default()).expect("a key is a session");
     assert_eq!(
@@ -789,6 +816,7 @@ async fn either_openai_credential_drives_a_responses_turn_against_the_backend_it
     // SAFETY: as above.
     unsafe {
         env::remove_var("OPENAI_API_KEY");
+        env::set_var("GANJA_PROVIDER", responses::CHATGPT_ID);
         env::set_var("GANJA_MODEL", KEY_MODEL);
     }
     let named = select(&Config::default()).expect("a stored login is a session");
@@ -809,19 +837,26 @@ async fn either_openai_credential_drives_a_responses_turn_against_the_backend_it
     }
 
     // ---- 7. Neither credential. --------------------------------------------
-    // The startup failure it has always been, naming the variable and the
-    // login.
+    // The startup failure it has always been, and since **D555** it is the
+    // platform id that makes it: that arm reads a key and only a key, so the
+    // sentence has to name the variable *and* the id somebody holding the other
+    // credential should be selecting instead.
     endpoint.forget();
     assert!(
         auth::remove_credential(auth::openai::PROVIDER_ID).expect("the store is writable"),
         "there was a credential to remove"
     );
+    // SAFETY: as above.
+    unsafe {
+        env::set_var("GANJA_PROVIDER", openai::ID);
+    }
     let Err(refused) = select(&Config::default()) else {
         panic!("a session with no credential at all is not a session");
     };
     let said = refused.to_string();
     assert!(
-        said.contains(openai::API_KEY_ENV) && said.contains("ganja auth login"),
+        said.contains(openai::API_KEY_ENV)
+            && said.contains(&format!("ganja auth login {}", responses::CHATGPT_ID)),
         "the message has to name both ways out of this: {said}"
     );
     assert!(
@@ -962,7 +997,15 @@ async fn either_openai_credential_drives_a_responses_turn_against_the_backend_it
     assert_eq!(
         sealed,
         vec![&PartBody::Reasoning {
-            provider: openai::ID.to_owned(),
+            // The **seat's** id since **D555**, and the replay guard reads this
+            // field: a sealed thought is handed back only to the backend that
+            // minted it, and the platform is a different service, not a
+            // different mood of the same one. The cost is stated where the
+            // decision is: a transcript recorded before the split carries
+            // `openai` and its thinking will not replay on the seat — the
+            // ordinary degradation for state another wire sealed, logged at
+            // debug and never fatal.
+            provider: responses::CHATGPT_ID.to_owned(),
             item: "rs_1".to_owned(),
             encrypted: Some("sealed-state".to_owned()),
         }],

@@ -96,7 +96,10 @@ enum Wire {
 fn wire(provider_id: &str) -> Option<Wire> {
     match provider_id {
         "anthropic" => Some(Wire::Messages),
-        "openai" => Some(Wire::Responses),
+        // The vendor's two ids (**D555**). One wire and one roster: the seat
+        // and the platform differ in which backend takes the request, never in
+        // how a `reasoning` object is spelled on it.
+        "openai" | "chatgpt" => Some(Wire::Responses),
         "openrouter" => Some(Wire::OpenRouter),
         "grok" => Some(Wire::Grok),
         "github-copilot" => Some(Wire::Copilot),

@@ -691,48 +691,61 @@ fn the_cursor_listing_without_a_login_is_refused_naming_the_login() {
 }
 
 /// A ChatGPT seat's roster is the binary's, not the table's (**D476**), so
-/// `models openai` on a stored login prints the pinned six and a header that
-/// says pinned — the wording is the whole point, because cursor's "live from
-/// the wire; uncataloged" would be false twice over about this list.
+/// `models chatgpt` prints the pinned six and a header that says pinned — the
+/// wording is the whole point, because cursor's "live from the wire;
+/// uncataloged" would be false twice over about this list.
 ///
 /// Offline in the strong sense: fetching is off, every home is this test's, and
-/// the seat arm reaches nothing anyway. What proves membership is not the
-/// catalog's is `gpt-5.6-sol` — no row of this build's table carries it, and it
-/// is listed regardless.
+/// since **D555** the seat arm reaches no credential either — the id is the
+/// whole question, which is why this arranges no store at all. What proves
+/// membership is not the catalog's is `gpt-5.6-sol`: no row of this build's
+/// table carries it, and it is listed regardless.
 #[test]
-fn the_openai_listing_on_a_chatgpt_login_is_the_pinned_roster_under_a_pinned_header() {
+fn the_chatgpt_listing_is_the_pinned_roster_under_a_pinned_header() {
+    offline(&cache()).args(["models", "chatgpt"]).assert().success().stdout(
+        predicate::str::contains("chatgpt models, pinned to what a ChatGPT subscription is")
+            .and(predicate::str::contains("--refresh does not apply"))
+            .and(predicate::str::contains("live from the wire").not())
+            .and(predicate::str::contains("gpt-6-astra"))
+            .and(predicate::str::contains("gpt-5.5"))
+            .and(predicate::str::contains("gpt-5.6-sol"))
+            .and(predicate::str::contains("gpt-5.6-terra"))
+            .and(predicate::str::contains("gpt-5.6-luna"))
+            .and(predicate::str::contains("gpt-5.3-codex-spark"))
+            // The catalog header, and the two rows a seat is not offered:
+            // this listing is the roster alone.
+            .and(predicate::str::contains("PROVIDER").not())
+            .and(predicate::str::contains("gpt-5.4 ").not()),
+    );
+}
+
+/// The platform's own listing, on the same machine and by the other id: the
+/// catalog's table, which is what **D555** made a fact about the id rather than
+/// about whichever credential happened to be lying around.
+#[test]
+fn the_openai_listing_is_the_catalogs_table_whatever_is_stored_beside_it() {
     let cache = cache();
-    write_chatgpt_login(&cache);
+    write_pre_split_chatgpt_login(&cache);
 
     offline(&cache)
-        // The environment key outranks a stored login, so a developer's
-        // exported one would send this command to the platform arm and the
-        // catalog listing.
         .env_remove("OPENAI_API_KEY")
         .args(["models", "openai"])
         .assert()
         .success()
         .stdout(
-            predicate::str::contains("openai models, pinned to what a ChatGPT subscription is")
-                .and(predicate::str::contains("--refresh does not apply"))
-                .and(predicate::str::contains("live from the wire").not())
-                .and(predicate::str::contains("gpt-6-astra"))
-                .and(predicate::str::contains("gpt-5.5"))
-                .and(predicate::str::contains("gpt-5.6-sol"))
-                .and(predicate::str::contains("gpt-5.6-terra"))
-                .and(predicate::str::contains("gpt-5.6-luna"))
-                .and(predicate::str::contains("gpt-5.3-codex-spark"))
-                // The catalog header, and the two rows a seat is not offered:
-                // this listing is the roster alone.
-                .and(predicate::str::contains("PROVIDER").not())
-                .and(predicate::str::contains("gpt-5.4 ").not()),
+            predicate::str::contains("PROVIDER")
+                .and(predicate::str::contains("pinned to what a ChatGPT subscription is").not())
+                // A row this build's table carries and the seat's roster does
+                // not, which is what tells the two listings apart.
+                .and(predicate::str::contains("gpt-5.4")),
         );
 }
 
-/// A stored ChatGPT credential under a temporary data home, in the shape
-/// `ganja auth login` writes one. The tokens are inert: the listing path this
-/// arranges presents them to nobody.
-fn write_chatgpt_login(data: &TempDir) {
+/// A ChatGPT credential under `openai`, the way `ganja auth login` wrote one
+/// before **D555** gave the seat its own key. The tokens are inert: the
+/// listing path this arranges presents them to nobody, and after the split
+/// reads them not at all — which is the point of arranging it.
+fn write_pre_split_chatgpt_login(data: &TempDir) {
     let path = stored_at(data);
     fs::create_dir_all(path.parent().expect("the store lives in a directory"))
         .expect("the store directory is creatable");

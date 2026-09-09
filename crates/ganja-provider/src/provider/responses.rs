@@ -24,10 +24,13 @@
 //!
 //! One mapping, one encoder, two places a request can go — `Backend` is the
 //! whole of the difference, and it is fixed when the provider is built because
-//! it follows the credential the session resolved:
+//! it follows the **provider id** the session selected (**D555**): `chatgpt`
+//! builds the seat and `openai` the platform, and no credential is read to
+//! choose between them.
 //!
 //! | | `Backend::Codex` | `Backend::Platform` |
 //! |---|---|---|
+//! | provider id | [`CHATGPT_ID`] | [`ID`] |
 //! | credential | a stored ChatGPT login | an API key |
 //! | base URL | [`DEFAULT_BASE_URL`] | [`openai::DEFAULT_BASE_URL`] |
 //! | extra headers | `ACCOUNT_HEADER`, `ORIGINATOR_HEADER`, `BETA_HEADER`, `CODEX_USER_AGENT` | none |
@@ -89,7 +92,7 @@ use crate::provider::sse::Frame;
 use crate::provider::toolname::{Aliases, OPENAI_CAP, alias};
 use crate::provider::{
     ChatRequest, CredentialSource, Mapper, Provider, ProviderError, ProviderEvent, Resolved,
-    check_base_url, client, open, opencode, openrouter, require_key, setting, shown_base_url,
+    check_base_url, client, key_for, open, opencode, openrouter, setting, shown_base_url,
     splice_effort, steps,
 };
 use crate::tool::ToolDefinition;
@@ -102,6 +105,31 @@ use crate::tool::ToolDefinition;
 /// [`super::copilot`] ride.
 pub const ID: &str = openai::ID;
 
+/// Value of [`PROVIDER_ENV`](super::PROVIDER_ENV) that selects the ChatGPT
+/// seat — this module's other backend (**D555**).
+///
+/// One module, two ids, **one credential kind each**: [`ID`] is the platform
+/// API on an [`API_KEY_ENV`](openai::API_KEY_ENV) key, this is a subscription
+/// on a stored login, and selection builds one or the other by the id it was
+/// given rather than by whichever credential a machine happens to hold. They
+/// bill against different pools, which is why a turn has to report which of
+/// them ran it — `Backend::provider_id`.
+pub const CHATGPT_ID: &str = "chatgpt";
+
+/// What an [`ID`] session with no key is refused with, in place of
+/// [`require_key`](super::require_key)'s one-door sentence.
+///
+/// Two doors because after **D555** this id reads one credential and there is a
+/// second one it used to reach: a machine holding a subscription login and no
+/// key would otherwise be told a variable is unset, which is true and is not the
+/// repair. The variable is spelled out rather than interpolated so this stays a
+/// constant; `responses_tests.rs` pins it against
+/// [`API_KEY_ENV`](openai::API_KEY_ENV) and [`CHATGPT_ID`] so the two spellings
+/// cannot drift.
+const NO_PLATFORM_KEY: &str = "OPENAI_API_KEY is unset; export it for the platform API, or for a \
+                               ChatGPT subscription run `ganja auth login chatgpt` and select \
+                               `GANJA_PROVIDER=chatgpt`";
+
 /// Where a ChatGPT subscription's requests go (`codex.ts:12`).
 ///
 /// The path this provider appends is `/responses`, so the whole URL is
@@ -110,11 +138,11 @@ pub const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 
 /// Which backend a provider was built against.
 ///
-/// Not a runtime question: it follows the credential, which is resolved once
-/// per session in `ganja_core::provider::openai_provider`. Keeping it a field rather than
-/// re-deriving it per request is what makes "a key request is never filtered by
-/// the seat's allow-list" a fact about how the provider was constructed instead
-/// of a condition somebody could forget to write.
+/// Not a runtime question: it follows the provider id, which
+/// `ganja_core::provider::select` resolves once per session. Keeping it a field
+/// rather than re-deriving it per request is what makes "a key request is never
+/// filtered by the seat's allow-list" a fact about how the provider was
+/// constructed instead of a condition somebody could forget to write.
 ///
 /// Two are one vendor's; the rest are other people's endpoints serving the
 /// same dialect, which is why this enum answers [`Self::provider_id`] as
@@ -174,10 +202,14 @@ impl Backend {
     /// [`Provider::id`] is what the session layer prices a turn by — it filters
     /// the catalog on it — so this is not cosmetic: an OpenRouter turn reporting
     /// itself as `openai` would be sized and billed against the wrong table, and
-    /// its sealed reasoning would be handed to the wrong wire.
+    /// its sealed reasoning would be handed to the wrong wire. The vendor's own
+    /// two answer differently for the same reason at a smaller scale (**D555**):
+    /// a subscription turn and a platform turn draw on different pools, so the
+    /// id an engine holds says which one is being spent.
     pub(super) const fn provider_id(self) -> &'static str {
         match self {
-            Self::Codex | Self::Platform => ID,
+            Self::Codex => CHATGPT_ID,
+            Self::Platform => ID,
             Self::OpenRouter => openrouter::ID,
             Self::Opencode(id) => id,
             // The vendor whose mapping the dialect borrows — and never the
@@ -513,7 +545,9 @@ impl ResponsesProvider {
     /// [`BASE_URL_ENV`](openai::BASE_URL_ENV) points.
     ///
     /// Nothing is read from the credential store here — see the module's note
-    /// on why the store is consulted per request instead.
+    /// on why the store is consulted per request instead. What is fixed now is
+    /// *which* entry those per-request reads and renewals will reach:
+    /// [`CHATGPT_ID`], the seat's own key since **D555**, never [`ID`]'s.
     ///
     /// # Errors
     ///
@@ -534,12 +568,16 @@ impl ResponsesProvider {
     /// The provider against OpenAI's platform API, authenticated by the key
     /// [`API_KEY_ENV`](openai::API_KEY_ENV) or the credential store carries.
     ///
-    /// The order the two are read in is [`super::key_for`]'s and always has
-    /// been: exported outranks stored. What changed with the vendor's move to
-    /// this wire is only *which* provider a key builds — the lookup, the
-    /// endpoint check and the message a missing key produces are the sibling's,
-    /// unchanged, so a session that used to die at startup still does and says
-    /// the same thing.
+    /// The order the two are read in is [`key_for`]'s and always has been:
+    /// exported outranks stored. What changed with the vendor's move to this
+    /// wire is only *which* provider a key builds — the lookup and the endpoint
+    /// check are the sibling's, unchanged, so a session that used to die at
+    /// startup still does.
+    ///
+    /// What the refusal *says* is this module's own since **D555**
+    /// (`NO_PLATFORM_KEY`): a key is now the only credential this arm reads,
+    /// so somebody holding a subscription login has to be told the id that
+    /// spends it rather than left to conclude their login stopped working.
     ///
     /// # Errors
     ///
@@ -553,11 +591,12 @@ impl ResponsesProvider {
         let base_url = configured(Backend::Platform);
         check_base_url(&base_url)?;
 
-        Self::built(
-            CredentialSource::Key(require_key(ID, openai::API_KEY_ENV)?),
-            base_url,
-            Backend::Platform,
-        )
+        // `key_for` rather than `require_key`: the same lookup in the same
+        // order, over a sentence with one more clause than the one-door
+        // message every other key wire is refused with.
+        let key = key_for(ID)?.ok_or_else(|| ProviderError::Auth(NO_PLATFORM_KEY.to_owned()))?;
+
+        Self::built(CredentialSource::Key(key), base_url, Backend::Platform)
     }
 
     /// The subscription provider against endpoints of the caller's choosing,
@@ -575,7 +614,7 @@ impl ResponsesProvider {
         refresh: Arc<dyn RefreshOauth>,
     ) -> Result<Self, ProviderError> {
         Self::built(
-            CredentialSource::Oauth { provider_id: ID, refresh },
+            CredentialSource::Oauth { provider_id: CHATGPT_ID, refresh },
             base_url.into(),
             Backend::Codex,
         )
