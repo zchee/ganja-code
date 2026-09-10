@@ -232,7 +232,8 @@
             "grok",
             "github-copilot",
             "fake",
-            "cursor"
+            "cursor",
+            "claude-code"
           ]
         }
       },

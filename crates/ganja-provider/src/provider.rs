@@ -92,6 +92,7 @@ use crate::tool::ToolDefinition;
 use crate::{auth, catalog};
 
 pub mod anthropic;
+pub mod claude_code;
 pub mod compat;
 pub mod copilot;
 pub mod cursor;
@@ -180,7 +181,7 @@ pub const MODEL_ENV: &str = "GANJA_MODEL";
 /// every one of the vendors it fronts and a default for none of them, so it is
 /// the first builtin that is fully sized and priced and still asks a session to
 /// name its model. See that module for why.
-pub const PROVIDERS: [&str; 10] = [
+pub const PROVIDERS: [&str; 11] = [
     anthropic::ID,
     // Two ids, one vendor, **two credentials and two pools** — the platform
     // API on a key, and the ChatGPT subscription on a stored login. Two entries
@@ -198,6 +199,11 @@ pub const PROVIDERS: [&str; 10] = [
     copilot::ID,
     fake::ID,
     cursor::ID,
+    // Not a vendor's API at all: the unmodified `claude` CLI, spawned and
+    // driven over its own stdio (**D556**). It is a builtin for the reason
+    // every other id here is — a session names it and it works — and its
+    // credential is the CLI's own login, which this build never holds.
+    claude_code::ID,
 ];
 
 /// One request to a model.
@@ -585,6 +591,76 @@ pub trait Provider: Send + Sync {
     fn plan_windows(&self) -> Vec<PlanWindow> {
         Vec::new()
     }
+
+    /// What the vendor actually served, beside what this session asked for
+    /// (**D556**).
+    ///
+    /// Beside [`Provider::rate_windows`] and read the same way — polled off
+    /// the wire on a surface's own tick, never pushed. A protocol event would
+    /// be a second copy of a fact that only moves when a turn opens.
+    ///
+    /// It exists because one wire's vendor answers a request for `default`
+    /// with a name of its own (`claude-opus-5[1m]`) and may fall back to
+    /// another model mid-conversation. A request cannot ask for a spelling,
+    /// so the served name is **surfaced and never compared**: divergence is
+    /// decided on the request's own `model` against what the process opened
+    /// with, and this is what keeps the model a person reads on the bar and
+    /// the model the vendor billed from disagreeing in silence.
+    ///
+    /// Provider-wide and **newest-wins**, so a subagent's turn moves it —
+    /// said here rather than discovered. The default is [`None`], which is
+    /// the honest answer for every wire whose vendor serves what it was
+    /// asked.
+    fn served_model(&self) -> Option<ServedModel> {
+        None
+    }
+
+    /// The idle eviction this wire last performed, until the turn that pays
+    /// for it opens (**D556**).
+    ///
+    /// Polled the same way, and held only across that gap: a frontend renders
+    /// it as a notice saying the next turn opens without the assistant's
+    /// earlier replies, and the slot clears when the fresh record spawns, so
+    /// the sentence shows exactly between the eviction and its cost.
+    ///
+    /// The default is [`None`]. No other wire here holds a process between
+    /// turns, so no other wire has anything to evict.
+    fn last_eviction(&self) -> Option<Eviction> {
+        None
+    }
+
+    /// Closes whatever the wire holds open across turns; a wire that holds
+    /// nothing inherits the no-op.
+    ///
+    /// That is all of them but one: an HTTP wire's turn owns its own response
+    /// body and ends with it, so there is nothing left to close.
+    /// [`claude_code`] is the exception — it holds a **process** between
+    /// turns, and up to `HELD_CAP` of them, each an authenticated node
+    /// runtime on the person's machine rather than a socket.
+    ///
+    /// On the trait rather than only on that wire so a caller can reach it
+    /// through the `Arc<dyn Provider>` it already has, without asking which
+    /// concrete wire it is holding.
+    async fn shutdown(&self) {}
+}
+
+/// What a vendor served, beside what was asked for ([`Provider::served_model`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServedModel {
+    /// The model this session asked for, in ganja's own spelling.
+    pub requested: String,
+    /// The model the vendor said it served, in the **vendor's** spelling.
+    /// `default` comes back as whatever that vendor resolves it to.
+    pub served: String,
+}
+
+/// A held process a wire closed for being idle ([`Provider::last_eviction`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Eviction {
+    /// The conversation whose process was closed, as that wire keys it.
+    pub key: String,
+    /// When it was closed.
+    pub at: std::time::SystemTime,
 }
 
 /// The credential one request presents, whatever kind of credential it is.
