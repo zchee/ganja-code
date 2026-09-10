@@ -150,6 +150,15 @@ impl ProviderId {
             // cursor's backend runs on subscription tokens, and a stored key
             // would be a credential nothing ever sends.
             Self::Cursor => &[Method::Browser],
+            // **No login of ganja's at all** (**D556**), which is the whole
+            // posture of this wire rather than a gap: the session runs the
+            // `claude` binary under whatever seat that binary is already
+            // signed into, and ganja never holds a Claude.ai credential —
+            // it strips the two `ANTHROPIC_*` names out of the child's own
+            // environment on the way in. There is nothing here to store, so
+            // the empty roster is the truth and [`refused_here`] is the
+            // sentence that says whose command to type instead.
+            Self::ClaudeCode => &[],
         }
     }
 
@@ -175,8 +184,29 @@ impl ProviderId {
             // One login worth offering, like Copilot's: a menu with one item
             // is a keystroke charged for nothing.
             Self::Cursor => Some(Method::Browser),
+            // No login to run, so nothing to skip a menu for. Unreachable in
+            // practice: [`chosen`] refuses a provider with an empty roster
+            // before it asks this.
+            Self::ClaudeCode => None,
         }
     }
+}
+
+/// The refusal for a provider whose login is somebody else's program
+/// (**D556**).
+///
+/// Its own function rather than an arm of [`accepted`] because the two say
+/// different things: that one names the logins a provider *has*, which is the
+/// useful half when somebody asked for the wrong one of several, and here the
+/// list is empty and the useful half is the command to type instead. A refusal
+/// that trailed "it has " into nothing would be the shape of an answer without
+/// being one.
+fn refused_here(provider: ProviderId) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{provider}: this wire's login is the CLI's own: run `claude login`. The seat a session \
+         runs on is whatever that binary is signed into, so there is no credential here for \
+         ganja to store"
+    )
 }
 
 /// Which login this invocation runs.
@@ -212,6 +242,12 @@ pub(crate) fn chosen(
     has_key: bool,
     method: Option<Method>,
 ) -> Result<Method> {
+    // Ahead of every step below, `--key` included: a provider with no login of
+    // ganja's has nothing for any of them to choose between, and the sentence
+    // that says so is the same one whatever was typed.
+    if provider.methods().is_empty() {
+        return Err(refused_here(provider));
+    }
     if has_key {
         return accepted(provider, Method::Api);
     }

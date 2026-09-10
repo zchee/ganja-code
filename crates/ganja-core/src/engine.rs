@@ -2072,6 +2072,70 @@ impl Engine {
         self.provider.plan_windows()
     }
 
+    /// What the vendor last said it actually served, beside what this session
+    /// asked for (**D556**), or [`None`] from every wire that says nothing.
+    ///
+    /// The D484/D485 shape again — one line, polled off the provider — and
+    /// chosen for a reason worth stating rather than by symmetry: there is no
+    /// push channel to carry it. [`Event`] has no
+    /// notice variant, so a pushed served model would be a `ProviderEvent`
+    /// variant with two exhaustive fold arms, a protocol event, an engine
+    /// mapping and a frontend handler across four crates — for a fact that
+    /// moves once per turn opening and that a surface already ticks.
+    ///
+    /// **Provider-wide and newest-wins**, exactly like its two neighbours: a
+    /// subagent's turn runs on the same provider (`session.rs`'s child
+    /// selection), so a child on an agent with a model of its own moves this.
+    /// That is why the status bar draws the served spelling only from a
+    /// reading taken while no delegated child is in flight — a caller that
+    /// pairs this with the *root's* chosen model has to know the two can be
+    /// about different turns.
+    ///
+    /// The two spellings are never to be compared for equality by a caller
+    /// deciding *whether* they diverged in a meaningful sense: `requested` is
+    /// ganja's own word (`"default"` when the session named no model) and
+    /// `served` is the vendor's (`claude-opus-5[1m]`), so they differ almost
+    /// always and mean nothing by it. What a surface renders is both.
+    #[must_use]
+    pub fn served_model(&self) -> Option<crate::provider::ServedModel> {
+        self.provider.served_model()
+    }
+
+    /// The held process this wire last closed for being idle (**D556**), or
+    /// [`None`] when no conversation is currently missing one.
+    ///
+    /// Polled beside [`Engine::served_model`] and live across exactly one
+    /// gap: the slot fills at the eviction and empties when that key's fresh
+    /// record spawns, so a frontend that watches the two edges knows when a
+    /// conversation lost the assistant's earlier replies and when it has
+    /// opened again without them.
+    ///
+    /// [`Eviction::key`](crate::provider::Eviction::key) is the **wire's** own
+    /// key for a conversation, not a [`SessionId`],
+    /// and nothing outside that wire can map it back to one. A sentence drawn
+    /// from this must therefore name no key; the wire's own log line names the
+    /// key it evicted, which is where somebody debugging one looks.
+    #[must_use]
+    pub fn last_eviction(&self) -> Option<crate::provider::Eviction> {
+        self.provider.last_eviction()
+    }
+
+    /// Closes whatever the provider is holding on this machine.
+    ///
+    /// Idempotent and safe on a provider that holds nothing, like
+    /// [`Engine::shutdown_mcp`] and [`Engine::shutdown_jobs`] — every wire but
+    /// one inherits a default that does nothing at all. The `claude-code` wire
+    /// is the one that does not: it may be holding up to eight authenticated
+    /// node runtimes and a scratch directory each, and a process that exits
+    /// without calling this leaves them alive until their own idle bound
+    /// closes them (**D556**, Dv-14).
+    ///
+    /// Reached through the `Arc<dyn Provider>` this engine already holds, so
+    /// no exit path has to know which wire it is ending.
+    pub async fn shutdown_provider(&self) {
+        self.provider.shutdown().await;
+    }
+
     /// Ends every background job's whole process group. Mirrors
     /// [`Engine::shutdown_mcp`]/[`Engine::shutdown_lsp`]: idempotent, and
     /// safe to call on an engine that started none.
@@ -5236,7 +5300,16 @@ impl Engine {
         let turn = self.lock_entry(PendingPolicy::Apply).await?;
 
         if let Some(name) = &effort {
-            if !catalog::carries(self.provider.id()) {
+            // Uncataloged **and** owning no roster of its own is what leaves a
+            // provider with no efforts to select from at all (**D556**,
+            // Dv-16). A wire whose effort vocabulary is its own rather than
+            // any model's — the `claude` CLI's five levels, published by its
+            // own flag — is answered by `provider::efforts_for` below, so
+            // refusing it here on the catalog alone would refuse a dial the
+            // wire really has.
+            if !catalog::carries(self.provider.id())
+                && crate::provider::effort::standalone(self.provider.id()).is_none()
+            {
                 return Err(EngineError::UncatalogedEffort {
                     provider: self.provider.id().to_owned(),
                 });
@@ -5246,10 +5319,13 @@ impl Engine {
             // (`GANJA_MODEL` takes any spelling), and a row it does not have
             // carries no efforts — the empty list, not a panic. The lookup is
             // provider-scoped because two providers publish the same id with
-            // rosters spliced for different wires (`catalog::model_for`).
-            let available: Vec<String> = catalog::model_for(self.provider.id(), &model)
-                .map(|info| info.variants.keys().cloned().collect())
-                .unwrap_or_default();
+            // rosters spliced for different wires, and it falls through to the
+            // wire's own roster where there is no row at all
+            // (`provider::efforts_for`) — the one definition of "the names
+            // this build will accept", shared with the request assembly below
+            // and with the TUI's chooser.
+            let available: Vec<String> =
+                crate::provider::efforts_for(self.provider.id(), &model).keys().cloned().collect();
             if !available.iter().any(|carried| carried == name) {
                 return Err(EngineError::UnknownEffort { effort: name.clone(), model, available });
             }
@@ -5370,9 +5446,11 @@ impl Engine {
         let Some(name) = active.effort.as_ref() else {
             return false;
         };
-        if catalog::model_for(self.provider.id(), &active.model)
-            .is_some_and(|info| info.variants.contains_key(name))
-        {
+        // The same one definition the door and the assembly read (**D556**,
+        // Dv-16): a model change that leaves the chosen effort unavailable
+        // clears it, and on a wire whose roster is its own rather than any
+        // model's, changing the model leaves the roster standing.
+        if crate::provider::efforts_for(self.provider.id(), &active.model).contains_key(name) {
             return false;
         }
 
@@ -5592,9 +5670,7 @@ impl Engine {
         // request had before efforts existed.
         let effort_options = effort
             .as_ref()
-            .and_then(|name| {
-                catalog::model_for(self.provider.id(), &model)?.variants.get(name).cloned()
-            })
+            .and_then(|name| crate::provider::efforts_for(self.provider.id(), &model).remove(name))
             .unwrap_or_default();
 
         let system = self.system_for(agent);

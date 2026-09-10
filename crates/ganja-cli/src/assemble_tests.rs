@@ -15,8 +15,8 @@ use super::assemble;
 /// config tier, the data home a project's storage hangs under, and the
 /// provider the environment would otherwise choose. Without them this
 /// reads whatever config the machine running the suite happens to hold.
-#[test]
-fn the_configured_cap_reaches_an_assembled_engine() {
+#[tokio::test]
+async fn the_configured_cap_reaches_an_assembled_engine() {
     let data = tempfile::TempDir::new().expect("a temporary directory is creatable");
     let home = tempfile::TempDir::new().expect("a temporary directory is creatable");
     let project = tempfile::TempDir::new().expect("a temporary directory is creatable");
@@ -34,6 +34,7 @@ fn the_configured_cap_reaches_an_assembled_engine() {
         .expect("the fixture config is writable");
 
     let assembled = assemble(project.path(), &Overrides::default())
+        .await
         .expect("a project holding one config key assembles");
 
     assert_eq!(

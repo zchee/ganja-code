@@ -23,6 +23,11 @@ use std::sync::Arc;
 // still resolves, and a list is a promise that decays the next time a wire
 // grows a type.
 pub use ganja_provider::provider::*;
+// Beside the glob, and named rather than globbed because it is not part of
+// `provider`: `effort` sits at that crate's root, and exactly one door of it
+// is read here — [`effort::standalone`], the roster an uncataloged wire owns
+// outright (**D556**, Dv-16).
+pub use ganja_provider::effort;
 
 use crate::config::{Config, ProviderConfig, model_bound_to, split_model};
 use crate::{auth, catalog};
@@ -161,6 +166,14 @@ const CURSOR_NOTICE: &str = "live from the wire; uncataloged, so sizing and cost
 const SEAT_NOTICE: &str =
     "pinned to what a ChatGPT subscription is offered; --refresh does not apply";
 
+/// What it says about the `claude` CLI's own roster (**D556**).
+///
+/// Live, like cursor's, and uncataloged like it too — but from a **process**
+/// rather than from an endpoint, which is the part worth saying: what a person
+/// is being shown is what the binary on this machine says its seat may name.
+const CLAUDE_CODE_NOTICE: &str =
+    "live from the CLI's own seat; uncataloged, so sizing and cost display are off";
+
 /// Whether [`wire_model_listing`] answers for `provider_id`: the same decision,
 /// asked without taking the listing.
 ///
@@ -172,7 +185,7 @@ const SEAT_NOTICE: &str =
 /// the same logged in and logged out, which is what a listing should be.
 #[must_use]
 pub fn wire_lists_models(provider_id: &str) -> bool {
-    matches!(provider_id, cursor::ID | responses::CHATGPT_ID)
+    matches!(provider_id, cursor::ID | responses::CHATGPT_ID | claude_code::ID)
 }
 
 /// The roster for a provider whose *wire*, not the catalog, says what the
@@ -210,8 +223,44 @@ pub async fn wire_model_listing(provider_id: &str) -> Option<Result<WireModels, 
     if provider_id == cursor::ID {
         return Some(cursor_models().await);
     }
+    if provider_id == claude_code::ID {
+        return Some(claude_code_models().await);
+    }
 
     Some(Ok(seat_models()))
+}
+
+/// The `claude-code` half of [`wire_model_listing`]: one listing spawn of the
+/// CLI on this machine, and the entries in the order it named them.
+///
+/// **Nothing is marked current**, and that is a fact about the listing rather
+/// than an omission. The CLI publishes no `current_model` key at all — M11 read
+/// sixteen keys of the `initialize` reply and that is not one — and the model a
+/// live record is running arrives as `system/init.model`, which a listing spawn
+/// never reaches because it sends no `user` frame. A listing here therefore
+/// answers what this seat may name, and deliberately not what it is running;
+/// what it *is* running is [`Provider::served_model`]'s question, and `/usage`
+/// is where a person reads the answer.
+///
+/// # Errors
+///
+/// The wire's own [`ProviderError`]: the binary missing or below the floor
+/// (from `from_env`, which runs `--version` before anything is spawned), or the
+/// listing spawn failing. Reported rather than swapped for the catalog, which
+/// has no rows for this provider and would answer an empty table as though it
+/// were an empty seat.
+async fn claude_code_models() -> Result<WireModels, ProviderError> {
+    let wire = claude_code::ClaudeCodeProvider::from_env().await?;
+
+    Ok(WireModels {
+        models: wire
+            .models()
+            .await?
+            .into_iter()
+            .map(|(id, name)| ListedModel { id, name })
+            .collect(),
+        notice: CLAUDE_CODE_NOTICE,
+    })
 }
 
 /// The ChatGPT-seat half of [`wire_model_listing`]: the pinned six, named by
@@ -362,7 +411,16 @@ fn configured_provider(id: &str, entry: &ProviderConfig) -> Result<CompatProvide
 /// reached and the credential store cannot be read, which is reported rather
 /// than treated as "no logins". All of them fail here, before the terminal is
 /// put into raw mode, so that the message is readable.
-pub fn select(config: &Config) -> Result<Selection, SelectionError> {
+///
+/// **Async since D556**, and for one arm only: the `claude-code` wire resolves
+/// its binary and runs `<bin> --version` before it will build, because a build
+/// below the floor is a session that would fail on its first turn with a
+/// message nobody could act on. Doing that here is what keeps the refusal
+/// where every other one already is — ahead of raw mode, where a sentence is
+/// readable. Every other arm is unchanged and reads nothing it did not read
+/// before; [`selectable`] stays synchronous, because a predicate over names
+/// spawns nothing.
+pub async fn select(config: &Config) -> Result<Selection, SelectionError> {
     let flag = config.overrides.model.as_deref().map(split_model);
     let file = config.model.as_deref().map(split_model);
 
@@ -485,6 +543,26 @@ pub fn select(config: &Config) -> Result<Selection, SelectionError> {
         // default is still the stored-login endpoint, which is what this arm
         // always meant.
         cursor::ID => Wire::catalog(CursorProvider::default()),
+        // The one arm that reaches the machine before it will build
+        // (**D556**): `from_env` resolves the binary — `~/.local/bin/claude`,
+        // or an absolute `GANJA_CLAUDE_BIN` — and runs `--version` under a
+        // bound, so a missing binary or a build below the floor is refused
+        // *here*, with both versions and the reason, rather than on the first
+        // turn. It is also the one place the curated `claude_code.idle_bound`
+        // key reaches the wire, and it has to be here: `with_idle_bound`
+        // rebuilds the held-process table, so it must be called before
+        // anything could be holding one — which construction is, by
+        // definition.
+        claude_code::ID => Wire {
+            provider: Arc::new(
+                claude_code::ClaudeCodeProvider::from_env()
+                    .await?
+                    .with_idle_bound(config.claude_code.idle_bound()),
+            ),
+            // `default` is the CLI's own word for "whatever you would
+            // choose", and `argv` turns it back into no `--model` at all.
+            default_model: Some(claude_code::DEFAULT_MODEL),
+        },
         // Grok's construction shape, and grok's posture with it: neither reads
         // a token here, so a session with no stored login is built and fails at
         // its first request, with the message that names the login. What
@@ -519,6 +597,34 @@ pub fn select(config: &Config) -> Result<Selection, SelectionError> {
     };
 
     Ok(Selection { provider: wire.provider, model, notice: None })
+}
+
+/// The effort names this build will accept for `model` on `provider_id`, and
+/// the option map each one splices (**D556**, Dv-16).
+///
+/// **One definition, three readers.** The engine validates a `/effort` against
+/// it, the request assembly looks the chosen name up in it, and the TUI's
+/// chooser offers its keys — so a name a person is offered is a name the engine
+/// accepts and a map a request carries. Before this, each of those read
+/// `catalog::model_for(...).variants` directly, which is correct for a
+/// cataloged provider and answers nothing at all for one the catalog has no
+/// rows for.
+///
+/// The catalog wins wherever it speaks: a row's own `variants` are what a
+/// model publishes, merged with whatever the catalog declares, and
+/// [`effort::standalone`] is consulted only where there is no row to ask. That
+/// ordering is what makes the day this provider gains rows a data change:
+/// `model_for` starts answering and this function stops reaching the
+/// fall-through without a line moving.
+///
+/// Empty means "no efforts here", which is every uncataloged wire but one and
+/// every cataloged model whose row publishes none.
+#[must_use]
+pub fn efforts_for(provider_id: &str, model: &str) -> effort::Roster {
+    catalog::model_for(provider_id, model).map_or_else(
+        || effort::standalone(provider_id).unwrap_or_default(),
+        |info| info.variants.clone(),
+    )
 }
 
 /// How much of ganja's tool set a wire can actually serve (**D551**, amended by

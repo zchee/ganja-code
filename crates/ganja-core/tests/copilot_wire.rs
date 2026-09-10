@@ -514,7 +514,7 @@ async fn a_copilot_subscription_drives_a_turn_with_the_headers_and_the_raw_token
     unsafe {
         env::set_var("GANJA_PROVIDER", copilot::ID);
     }
-    let chosen = select(&Config::default()).expect("a stored login is a session");
+    let chosen = select(&Config::default()).await.expect("a stored login is a session");
     assert_eq!(chosen.provider.id(), copilot::ID);
     assert_eq!(
         chosen.model, "claude-opus-4.8",
@@ -532,6 +532,7 @@ async fn a_copilot_subscription_drives_a_turn_with_the_headers_and_the_raw_token
         "there was a credential to remove"
     );
     let chosen = select(&Config::default())
+        .await
         .expect("construction does not read a token, so it cannot refuse one");
     let asked = chosen
         .provider
@@ -565,7 +566,7 @@ async fn a_copilot_subscription_drives_a_turn_with_the_headers_and_the_raw_token
     store(TOKEN, &auth::copilot::Deployment::Public);
     let rendered = format!(
         "{said} {:?} {:?} {enterprise} {public}",
-        select(&Config::default()).expect("a stored login is a session"),
+        select(&Config::default()).await.expect("a stored login is a session"),
         CopilotProvider::from_stored().expect("a client builds"),
     );
     for secret in [TOKEN, SECOND_TOKEN] {

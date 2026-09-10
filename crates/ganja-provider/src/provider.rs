@@ -172,7 +172,7 @@ pub const MODEL_ENV: &str = "GANJA_MODEL";
 ///
 /// Being selectable is also not the same as being **cataloged**: the catalog
 /// prices and sizes what it has rows for, which is every builtin here except
-/// [`fake`] and [`cursor`] and none of the configured ones.
+/// [`fake`], [`cursor`] and [`claude_code`] and none of the configured ones.
 /// [`catalog::carries`] is that second tier, and a provider outside it runs on
 /// the degradation path — no auto-compaction, no cost, a title from its own
 /// model.

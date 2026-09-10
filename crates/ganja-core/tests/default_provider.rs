@@ -20,8 +20,8 @@ use ganja_core::auth;
 use ganja_core::config::Config;
 use ganja_core::provider::{self, SelectionError, fake};
 
-#[test]
-fn a_session_nothing_named_defaults_to_the_oldest_stored_login() {
+#[tokio::test]
+async fn a_session_nothing_named_defaults_to_the_oldest_stored_login() {
     let home = tempfile::tempdir().expect("a temp directory");
     // SAFETY: this binary holds exactly one test, so nothing else in the
     // process is reading the environment concurrently.
@@ -35,7 +35,8 @@ fn a_session_nothing_named_defaults_to_the_oldest_stored_login() {
 
     // No logins at all: the fake provider, and still with its notice — the
     // final fallback is the one degradation worth announcing.
-    let empty = provider::select(&Config::default()).expect("the fake provider needs nothing");
+    let empty =
+        provider::select(&Config::default()).await.expect("the fake provider needs nothing");
     assert_eq!(empty.provider.id(), fake::ID);
     assert!(
         empty.notice.is_some(),
@@ -48,7 +49,8 @@ fn a_session_nothing_named_defaults_to_the_oldest_stored_login() {
     unsafe {
         env::set_var("ANTHROPIC_API_KEY", "sk-exported-0001");
     }
-    let exported = provider::select(&Config::default()).expect("the fake provider needs nothing");
+    let exported =
+        provider::select(&Config::default()).await.expect("the fake provider needs nothing");
     assert_eq!(
         exported.provider.id(),
         fake::ID,
@@ -66,7 +68,7 @@ fn a_session_nothing_named_defaults_to_the_oldest_stored_login() {
     let stamps = auth::stamps_path().expect("the stamps have a path");
     fs::write(&stamps, r#"{"anthropic": 1000, "openai": 2000}"#).expect("the stamps rewrite");
 
-    let oldest = provider::select(&Config::default()).expect("the stored key authenticates");
+    let oldest = provider::select(&Config::default()).await.expect("the stored key authenticates");
     assert_eq!(oldest.provider.id(), "anthropic");
     assert!(
         oldest.notice.is_none(),
@@ -77,13 +79,17 @@ fn a_session_nothing_named_defaults_to_the_oldest_stored_login() {
     // Flip the ages and the default follows the stamps, not the names.
     fs::write(&stamps, r#"{"anthropic": 2000, "openai": 1000}"#).expect("the stamps rewrite");
     assert_eq!(
-        provider::select(&Config::default()).expect("the stored key authenticates").provider.id(),
+        provider::select(&Config::default())
+            .await
+            .expect("the stored key authenticates")
+            .provider
+            .id(),
         "openai"
     );
 
     // The config's `default_provider` key outranks the login ordering…
     let config = Config { default_provider: Some("anthropic".to_owned()), ..Config::default() };
-    let named = provider::select(&config).expect("the named provider has a stored key");
+    let named = provider::select(&config).await.expect("the named provider has a stored key");
     assert_eq!(named.provider.id(), "anthropic");
     assert!(
         named.notice.is_none(),
@@ -98,7 +104,7 @@ fn a_session_nothing_named_defaults_to_the_oldest_stored_login() {
         env::set_var("GANJA_PROVIDER", "openai");
     }
     assert_eq!(
-        provider::select(&config).expect("the variable names a stored login").provider.id(),
+        provider::select(&config).await.expect("the variable names a stored login").provider.id(),
         "openai"
     );
     // SAFETY: as above.
@@ -109,7 +115,7 @@ fn a_session_nothing_named_defaults_to_the_oldest_stored_login() {
     // An id the key names that nothing ships or declares fails at startup,
     // naming the key — not a variable nobody set — and the id it carried.
     let wrong = Config { default_provider: Some("gemini".to_owned()), ..Config::default() };
-    let refused = provider::select(&wrong).expect_err("no such provider");
+    let refused = provider::select(&wrong).await.expect_err("no such provider");
     let SelectionError::Unknown { requested, named_by, .. } = &refused else {
         panic!("expected an unknown-provider refusal, got {refused:?}");
     };
@@ -128,7 +134,8 @@ fn a_session_nothing_named_defaults_to_the_oldest_stored_login() {
     // API and a key, so no wire can present it — and the tier declines to adopt
     // it rather than starting a session that would refuse at its first
     // request. What is left is the last tier, and its notice.
-    let stale = provider::select(&Config::default()).expect("an unadoptable login is not fatal");
+    let stale =
+        provider::select(&Config::default()).await.expect("an unadoptable login is not fatal");
     assert_eq!(stale.provider.id(), fake::ID);
     assert!(
         stale.notice.is_some(),
@@ -144,6 +151,7 @@ fn a_session_nothing_named_defaults_to_the_oldest_stored_login() {
         env::set_var("GANJA_PROVIDER", "openai");
     }
     let no_key = provider::select(&Config::default())
+        .await
         .expect_err("the platform has no key here, and the stored login is not one");
     let rendered = no_key.to_string();
     for door in ["OPENAI_API_KEY", "ganja auth login chatgpt", "GANJA_PROVIDER=chatgpt"] {
@@ -161,7 +169,8 @@ fn a_session_nothing_named_defaults_to_the_oldest_stored_login() {
     unsafe {
         env::set_var("GANJA_PROVIDER", "chatgpt");
     }
-    let seat = provider::select(&Config::default()).expect("the seat is built from its id alone");
+    let seat =
+        provider::select(&Config::default()).await.expect("the seat is built from its id alone");
     assert_eq!(seat.provider.id(), "chatgpt");
     assert_eq!(seat.model, "gpt-5.4", "the seat's default is its wire's, never the catalog's");
     // SAFETY: as above.

@@ -55,7 +55,7 @@ pub struct ServeArgs {
 /// the deliberate one: a non-loopback bind with no password configured.
 pub async fn serve(args: ServeArgs) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read the working directory")?;
-    let assembled = assemble(&cwd, &Overrides::default())?;
+    let assembled = assemble(&cwd, &Overrides::default()).await?;
     // Dialled in the background, exactly as the UI dials them: a server that
     // never answers costs its tools rather than the listener.
     assembled.engine.connect_mcp();
@@ -112,6 +112,10 @@ pub async fn serve(args: ServeArgs) -> Result<()> {
     assembled.servers.shutdown().await;
     engine.shutdown_lsp();
     engine.shutdown_jobs().await;
+    // And whatever the wire is holding on this machine (**D556**, Dv-14): a
+    // no-op for every provider but `claude-code`, which may be holding
+    // authenticated node runtimes that would otherwise outlive this process.
+    engine.shutdown_provider().await;
 
     Ok(())
 }

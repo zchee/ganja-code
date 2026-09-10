@@ -311,11 +311,23 @@ pub struct OneShot {
     pub effort: Option<String>,
 }
 
-/// The two argv builders.
+/// What a **listing** process is spawned with (**D556**, Dv-17).
+///
+/// One value, and the two it does *not* carry are the point: a listing asks
+/// the CLI what models the seat may name, so naming one would be asking the
+/// question with the answer already in it — and an effort is a property of a
+/// turn this process never takes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listing {
+    /// The record this process opens, which it is also told not to keep.
+    pub session_id: String,
+}
+
+/// The three argv builders.
 ///
 /// Pure: they read nothing, spawn nothing and allocate a `Vec` from their
-/// argument. Both `debug_assert!` their own never-list before returning, so a
-/// debug build fails at the builder rather than at the child.
+/// argument. All three `debug_assert!` their own never-list before returning,
+/// so a debug build fails at the builder rather than at the child.
 pub struct Argv;
 
 impl Argv {
@@ -331,6 +343,29 @@ impl Argv {
             forbidden(&argv, NEVER_ON_CONVERSATION).is_none(),
             "a conversation argv carried a forbidden flag: {:?}",
             forbidden(&argv, NEVER_ON_CONVERSATION)
+        );
+
+        argv
+    }
+
+    /// The argv a listing process is spawned with (**D556**, Dv-17).
+    ///
+    /// A one-shot's shape without `--model` or `--effort`: the same fresh
+    /// `--session-id` and the same `--no-session-persistence`, because a
+    /// listing's record is worth nothing the moment its answer is read. Here
+    /// rather than at the caller so that every rule about what may appear on
+    /// this wire's command line stays in one file.
+    #[must_use]
+    pub fn listing(listing: &Listing) -> Vec<OsString> {
+        let mut argv = base();
+        argv.push("--session-id".into());
+        argv.push(listing.session_id.as_str().into());
+        argv.push("--no-session-persistence".into());
+
+        debug_assert!(
+            forbidden(&argv, NEVER_ANYWHERE).is_none(),
+            "a listing argv carried a forbidden flag: {:?}",
+            forbidden(&argv, NEVER_ANYWHERE)
         );
 
         argv

@@ -425,6 +425,7 @@ fn resolving_a_mention_is_not_a_read() {
         time: crate::protocol::MessageTime { created: 1, completed: Some(1) },
         model: None,
         usage: None,
+        request_only: false,
     }];
     resolve_mentions(&mut messages, root.path(), &|_| false);
 
@@ -448,6 +449,7 @@ fn message_mentioning(path: &str) -> Vec<Message> {
         time: crate::protocol::MessageTime { created: 1, completed: Some(1) },
         model: None,
         usage: None,
+        request_only: false,
     }]
 }
 
@@ -1531,4 +1533,24 @@ fn a_rule_refusal_reads_as_the_hoisted_prefix_followed_by_its_rules() {
         ),
     );
     assert!(rendered.starts_with(ganja_tool::permission_text::DENIED_PREFIX));
+}
+
+/// **D556.** The hook refusal reads exactly as the constant a wire matches
+/// on, and the sentence is spelled here as a **literal** rather than built
+/// from that constant.
+///
+/// A derived pin cannot redden on a reword — it would agree with whatever
+/// the constant became — and this sentence is not cosmetic: the `claude-code`
+/// wire answers the CLI's `can_use_tool` and tells a permission refusal from a
+/// failed tool by `permission_text::is_refusal`, which matches this prefix.
+/// A reword that reached only one of the two would silently report a refusal
+/// as a tool error, which is why the two are one constant and why the pin
+/// spells it out (D552's Dv-8, the same argument).
+#[test]
+fn a_hook_refusal_reads_as_the_sentence_the_wire_matches_on() {
+    assert_eq!(
+        super::blocked_by_hook("the repo forbids touching vendored files"),
+        "A PreToolUse hook refused this tool call: the repo forbids touching vendored files",
+    );
+    assert!(ganja_tool::permission_text::is_refusal(&super::blocked_by_hook("x")));
 }

@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use super::{
     Config, Dialect, PROVIDER_ENV, PROVIDERS, ProviderConfig, SelectionError, ToolReach,
-    adoptable_login, cursor, defaulted_model, fake, grok, openai, opencode, openrouter, responses,
-    select, selectable, wire_lists_models, wire_model_listing,
+    adoptable_login, claude_code, cursor, defaulted_model, fake, grok, openai, opencode,
+    openrouter, responses, select, selectable, wire_lists_models, wire_model_listing,
 };
 use crate::auth::CredentialKind;
 use crate::catalog;
@@ -253,14 +253,14 @@ fn a_cursor_login_adopts_like_any_other_stored_login() {
 /// `ganja auth login` — is drilled in `ganja-provider`'s own suites
 /// against a credential store they redirect; streaming here would read
 /// whatever store the machine running this test really holds.
-#[test]
-fn an_explicitly_named_cursor_is_answered_not_filtered() {
+#[tokio::test]
+async fn an_explicitly_named_cursor_is_answered_not_filtered() {
     // The flag tier, because it outranks every other and so cannot be
     // perturbed by whatever this process's environment holds.
     let mut config = Config::default();
     config.overrides.model = Some("cursor/gpt-5.3-codex".to_owned());
 
-    let selection = select(&config).expect("an explicit cursor selection is not filtered");
+    let selection = select(&config).await.expect("an explicit cursor selection is not filtered");
     assert_eq!(selection.provider.id(), cursor::ID);
     assert_eq!(selection.model, "gpt-5.3-codex");
     assert!(selection.notice.is_none(), "the provider was asked for by name, not defaulted");
@@ -383,4 +383,14 @@ fn every_shipped_id_reaches_every_tool_this_build_registers() {
         );
     }
     assert!(PROVIDERS.contains(&cursor::ID), "and the loop above really did cover cursor");
+    // **D556**, AC-4.1. The same guard for the id this build added last: a
+    // `claude-code` session serves ganja's whole registry over the CLI's own
+    // SDK MCP channel, so `/team` and `/init` — the two builtins whose whole
+    // body is tool calls — start a turn rather than being refused by name.
+    // `ToolReach::of`'s body is the constant, so what this really pins is that
+    // the id is on the list the loop walks.
+    assert!(
+        PROVIDERS.contains(&claude_code::ID),
+        "and it covered claude-code, whose ToolReach decides whether /team and /init run"
+    );
 }

@@ -36,13 +36,13 @@ pub(crate) struct Assembled {
 }
 
 /// Builds the engine a headless subcommand drives.
-pub(crate) fn assemble(cwd: &Path, overrides: &Overrides) -> Result<Assembled> {
+pub(crate) async fn assemble(cwd: &Path, overrides: &Overrides) -> Result<Assembled> {
     let config = Config::load_with(cwd, overrides).context("failed to read the configuration")?;
     // Adopted before anything sizes a request: the disk tier is what the UI
     // last fetched, and an engine that skipped it would compact against the
     // compiled-in snapshot's numbers instead.
     catalog::load_cached();
-    let selection = provider::select(&config).context("failed to select a provider")?;
+    let selection = provider::select(&config).await.context("failed to select a provider")?;
     if let Some(notice) = &selection.notice {
         // stderr, so it cannot land in the middle of an nd-JSON stream.
         eprintln!("note: {notice}");

@@ -208,6 +208,21 @@ fn every_selectable_provider_has_a_default_this_table_can_price() {
             );
             continue;
         }
+        // **D556.** The second uncataloged pin, and `default` means a third
+        // thing again: not a row and not a routing id the backend publishes,
+        // but the absence of `--model` on the CLI's own command line, which
+        // `claude_code::argv` is where it turns back into. A default still
+        // has to be a value the selection chain can carry and show, which is
+        // why it is spelled rather than left unset.
+        if provider == crate::provider::claude_code::ID {
+            assert!(!carries(provider), "claude-code grew rows; move it below");
+            assert_eq!(
+                default_model(provider),
+                Some(crate::provider::claude_code::DEFAULT_MODEL),
+                "the wire's own word for `whatever you would choose`"
+            );
+            continue;
+        }
         // **AC-0.7**, the other id that is cataloged and pinned nowhere, for
         // a reason of its own: the ChatGPT seat reaches the vendor's rows
         // through `ROW_ALIASES`, so it keeps sizing, pricing and

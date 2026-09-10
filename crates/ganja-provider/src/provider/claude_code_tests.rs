@@ -15,7 +15,9 @@ use futures::StreamExt as _;
 use ganja_testkit::fake_claude::{Record, Script, Turn};
 use tokio_util::sync::CancellationToken;
 
-use super::{ClaudeCodeProvider, DEFAULT_MODEL, honest, owed, parse_version, user_ids};
+use super::{
+    ClaudeCodeProvider, DEFAULT_MODEL, honest, owed, parse_version, remembered_ids, user_ids,
+};
 use crate::protocol::{FinishReason, Message, MessageId, Part, PartBody, PartId, ToolState};
 use crate::provider::claude_code::process::{ChildIo, Signal, Spawner};
 use crate::provider::{ChatRequest, Provider as _, ProviderError, ProviderEvent};
@@ -202,6 +204,15 @@ pub(crate) fn user(id: &str, text: &str) -> Message {
     message
 }
 
+/// A **request-only** user message with a chosen id — the shape the engine's
+/// guards block takes (**D556**, Dv-22).
+pub(crate) fn guards(id: &str, text: &str) -> Message {
+    let mut message = Message::request_only_user(text);
+    message.id = MessageId::from(id.to_owned());
+
+    message
+}
+
 /// An assistant message with a chosen id.
 pub(crate) fn assistant(id: &str, text: &str) -> Message {
     let mut message = Message::assistant("claude-opus-5");
@@ -340,6 +351,53 @@ fn the_user_ids_of_a_request_are_read_over_the_whole_of_messages() {
         request(vec![user("m1", "first"), assistant("m2", "a reply"), user("m3", "second")], 2);
 
     assert_eq!(user_ids(&request), ["m1", "m3"]);
+}
+
+/// **D556**, Dv-22. A request-only message is written like any other user
+/// message and remembered like none: [`owed`] spans it, [`remembered_ids`]
+/// does not, and so [`honest`] cannot mistake the next one's fresh id for an
+/// id the transcript lost.
+///
+/// The three assertions are the whole of the fix. The last one is what was
+/// broken: with the guards block's id in `sent`, a second continuation
+/// carrying a *different* guards id in the same position read as a rewind, and
+/// the wire closed a perfectly good process.
+#[test]
+fn a_request_only_message_is_owed_every_time_and_remembered_never() {
+    let first = request(vec![user("m1", "prompt"), guards("g1", "keep going")], 0);
+
+    assert_eq!(user_ids(&first), ["m1", "g1"], "it is a user message like any other");
+    assert_eq!(remembered_ids(&first), ["m1"], "and conversation state it is not");
+    assert_eq!(
+        owed(&["m1".to_owned()], &first).iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
+        ["g1"],
+        "so a record that has read the prompt still owes the block"
+    );
+
+    // The next request rebuilds the block with a fresh id. A record that
+    // remembered `m1` alone is still honest about it; one that had remembered
+    // `g1` would not have been.
+    let second = request(vec![user("m1", "prompt"), guards("g2", "keep going")], 0);
+    assert!(
+        honest(&["m1".to_owned()], &second),
+        "a fresh guards id is not an id the transcript lost"
+    );
+    assert!(
+        !honest(&["m1".to_owned(), "g1".to_owned()], &second),
+        "and the pre-Dv-22 memory is exactly what read as a rewind"
+    );
+}
+
+/// The other side of the same coin: a **real** rewind still reads as one, so
+/// AC-4.4's arm keeps its meaning.
+#[test]
+fn a_transcript_message_that_is_gone_is_still_a_rewind() {
+    let rewound = request(vec![user("m1", "first")], 0);
+
+    assert!(
+        !honest(&["m1".to_owned(), "m3".to_owned()], &rewound),
+        "an ordinary user message the request no longer carries is a rewind"
+    );
 }
 
 #[test]
@@ -992,4 +1050,144 @@ fn this_crates_claude_code_modules_name_no_tool_runtime() {
             );
         }
     }
+}
+
+// ------------------------------------------- the plan windows (Dv-19)
+
+/// **D556**, Dv-19. Both recorded shapes convert to the **same** window, and
+/// what the wire answers is `plan_windows` — never `rate_windows`, which stays
+/// empty because this wire receives no rate-limit headers at all.
+///
+/// The two shapes are the recording's own: `rate_limit_event` sends a fraction
+/// and a unix second (`claude-code-replay-run1.json:328-337`), `get_usage` an
+/// integer percent and an ISO-8601 string (`:712-721`). One reader, because a
+/// caller that had to know which it was holding would be a second place for
+/// the two to disagree.
+#[tokio::test]
+async fn both_recorded_rate_shapes_convert_to_the_same_plan_windows() {
+    let home = ganja_testkit::temp_dir();
+    let cli = FakeCli::new(says(&["hi"]));
+    let wire = wired(&cli, home.path());
+
+    // The event's own shape: fraction, unix second, and the window it is about
+    // named once beside the set.
+    *wire.slots.rate.lock().expect("the rate slot") = Some(serde_json::json!({
+        "status": "allowed",
+        "resetsAt": 1_788_982_800_u64,
+        "rateLimitType": "five_hour",
+        "unifiedWindows": {
+            "five_hour": {"utilization": 0.69, "resetsAt": 1_788_982_800_u64},
+            "seven_day": {"utilization": 0.45, "resetsAt": 1_789_005_600_u64},
+        }
+    }));
+    let from_event = wire.plan_windows();
+
+    // The control response's: integer percent, ISO-8601, and the map itself.
+    *wire.slots.rate.lock().expect("the rate slot") = Some(serde_json::json!({
+        "five_hour": {"utilization": 69, "resets_at": "2026-09-09T19:40:00.000Z"},
+        "seven_day": {"utilization": 45, "resets_at": "2026-09-10T02:00:00.000Z"},
+    }));
+    let from_usage = wire.plan_windows();
+
+    for (event, usage) in from_event.iter().zip(&from_usage) {
+        assert_eq!(event.name, usage.name);
+        assert!(
+            (event.used_percent - usage.used_percent).abs() < 1e-9,
+            "the same utilization either way: {event:?} vs {usage:?}"
+        );
+        assert_eq!(event.resets_at, usage.resets_at, "and the same instant: {event:?}");
+        assert_eq!(event.window_minutes, usage.window_minutes);
+    }
+    assert_eq!(from_event.len(), 2, "the vendor's two windows: {from_event:?}");
+    assert_eq!(from_event[0].name, "five_hour");
+    assert!((from_event[0].used_percent - 69.0).abs() < 1e-9, "{from_event:?}");
+    assert_eq!(from_event[0].window_minutes, Some(300));
+    assert_eq!(from_event[1].name, "seven_day");
+    assert_eq!(from_event[1].window_minutes, Some(10_080));
+    assert_eq!(
+        from_event[0].limit_name.as_deref(),
+        Some("five_hour"),
+        "the window this account is being judged against, named beside the set"
+    );
+
+    // The negative row: nothing here is a throttling budget.
+    assert!(
+        wire.rate_windows().is_empty(),
+        "this wire hears no rate-limit headers, and says so rather than inventing counts"
+    );
+}
+
+/// An unwarmed call answers `rate_limits: null`, and **no reading** is an
+/// empty list — never a window at zero, which would draw as a budget freshly
+/// full.
+#[tokio::test]
+async fn an_unwarmed_account_reports_no_windows_rather_than_empty_ones() {
+    let home = ganja_testkit::temp_dir();
+    let cli = FakeCli::new(says(&["hi"]));
+    let wire = wired(&cli, home.path());
+
+    assert!(wire.plan_windows().is_empty(), "nothing has been heard yet");
+
+    *wire.slots.rate.lock().expect("the rate slot") = Some(serde_json::Value::Null);
+    assert!(wire.plan_windows().is_empty(), "and a null reading is still nothing");
+}
+
+// ------------------------------------------- the compaction shape (Dv-21)
+
+/// **AC-4.5**, at the provider seam (**Dv-21**). A compaction summary runs as
+/// a **one-shot** that enters no table entry, and the conversation turn after
+/// it opens a fresh record whose opening frame is the **prompt alone** — no
+/// summary text anywhere.
+///
+/// Driven here rather than through `Command::Compact`, which on this wire does
+/// nothing at all: `session.rs`'s manual-compaction path needs a context
+/// window to know what fits, only the catalog can say, and this provider has no
+/// rows (`session.rs:2862-2874`). What the AC is *about* is the wire's own
+/// behaviour when a summary is `messages[0]`, and that is exactly what a
+/// request with an empty roster and `turn_start == 0` produces — the one-shot
+/// marker `stream()` reads.
+///
+/// This is §ADR 2's stated cost, pinned so nobody later reads it as a bug. On a
+/// wire that never resumes, the summary is assistant text, and assistant text
+/// is the one thing the vendor safeguard refused every time it was offered — so
+/// what survives a compaction here is the user's own words.
+#[tokio::test]
+async fn a_compaction_summary_is_a_one_shot_and_reaches_the_next_record_as_nothing() {
+    const SUMMARY: &str = "SUMMARY-OF-EVERYTHING-SO-FAR";
+
+    let home = ganja_testkit::temp_dir();
+    let cli = FakeCli::new(says(&["a title", "carrying on"]));
+    let wire = wired(&cli, home.path());
+
+    // The summary request: one message, no roster. Both halves are what make
+    // it a one-shot, and the roster is the half that matters — a conversation's
+    // own first turn has `turn_start == 0` too, and offers tools.
+    let mut summary = request(vec![user("m1", "summarize the conversation so far")], 0);
+    summary.tools = Vec::new();
+    drain(wire.stream(summary, CancellationToken::new()).await.expect("the one-shot runs")).await;
+
+    assert_eq!(wire.held_entries(), 0, "a one-shot enters no table entry of its own");
+    assert_eq!(cli.count(), 1, "it did spawn, though");
+    assert!(
+        cli.record(0).cwd.ends_with("one-shot"),
+        "in the scratch directory every one-shot shares: {}",
+        cli.record(0).cwd
+    );
+
+    // The conversation that follows it: the summary is the assistant's, so the
+    // engine carries it as an assistant message and the wire renders it as
+    // nothing at all.
+    let carried = request(vec![assistant("m2", SUMMARY), user("m3", "carry on then")], 1);
+    drain(wire.stream(carried, CancellationToken::new()).await.expect("the turn runs")).await;
+
+    assert_eq!(cli.count(), 2, "the turn after a compaction opens a record of its own");
+    assert_eq!(wire.held_entries(), 1, "and that one is the conversation's, held");
+
+    let opening = cli.record(1).user_frames.first().cloned().expect("it was handed a frame");
+    assert!(opening.contains("carry on then"), "which opens with the prompt: {opening:?}");
+    assert!(
+        !opening.contains(SUMMARY),
+        "and carries no summary text at all, which is what ADR 2 costs: {opening:?}"
+    );
+    assert!(!opening.contains("[Assistant]"), "no assistant label either: {opening:?}");
 }

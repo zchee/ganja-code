@@ -208,6 +208,22 @@ const TASK_READ_DEADLINE: Duration = ganja_core::teammate::lead_inbox::POLL.satu
 const SLOW_TASK_READ: &str =
     "the team's shared task list is not answering; showing the last one read";
 
+/// What a person is told when a wire closed a held process for being idle and
+/// the conversation lost the assistant's earlier replies (**D556**).
+///
+/// **It names no key.** The wire keys its held processes by a derived id that
+/// is not a session id and that nothing outside the wire can map back to a
+/// conversation, so a sentence carrying one would be a fact the reader cannot
+/// use. The wire's own log line names the key it evicted, which is where
+/// somebody debugging one looks (rev 8, C-L4).
+///
+/// Taken down with [`Status::clear_notice_if`] rather than an unconditional
+/// clear, `SLOW_TASK_READ`'s precedent above: the slot is one and unowned, and
+/// a sentence another writer put there in the meantime has no second place to
+/// appear.
+const EVICTION_NOTICE: &str = "claude-code: idle past `idle_bound`; the next turn opens without the assistant's earlier \
+     replies";
+
 /// What the `/plugin` dialog's Reload answers when it worked (**D474**): the
 /// honest split, verbatim. Hooks and the skill roots really are rebuilt
 /// in-session; the agents roster, the MCP dials and the LSP servers are
@@ -937,6 +953,18 @@ pub struct App {
     /// The plan buckets the bar last showed, kept for [`App::poll_rates`]'s
     /// reason on the sibling set (**D485**).
     plans: Vec<ganja_core::provider::PlanWindow>,
+    /// What the vendor last said it served, kept for the same reason again
+    /// (**D556**) — a tick that finds it unmoved touches nothing.
+    ///
+    /// The **gated** reading — what the bar is actually showing, after the
+    /// delegated-children rule ([`App::poll_served_model`]) — so that a tick
+    /// which only started or finished a child redraws once and a tick that
+    /// changed neither redraws not at all.
+    served_model: Option<ganja_core::provider::ServedModel>,
+    /// The eviction the bar last reacted to (**D556**), so the notice is
+    /// written on the `None → Some` edge and taken down on the `Some → None`
+    /// one rather than rewritten every tick.
+    last_eviction: Option<ganja_core::provider::Eviction>,
     /// The wire-served model rows for this session's provider, once a fetch
     /// has landed them. Held for the App's lifetime on purpose: a login
     /// stored mid-session is picked up by a restart, not by a later fetch.
@@ -1155,6 +1183,8 @@ impl App {
             context: None,
             rates: Vec::new(),
             plans: Vec::new(),
+            served_model: None,
+            last_eviction: None,
             wire_models: None,
             wire_fetch: None,
             file_walk: None,
@@ -1822,6 +1852,8 @@ impl App {
                 self.poll_context();
                 self.poll_rates();
                 self.poll_plans();
+                self.poll_served_model();
+                self.poll_eviction();
                 self.poll_mcp_dialog();
                 self.poll_held();
                 self.poll_collision_scan();
@@ -1963,6 +1995,66 @@ impl App {
 
         self.plans = live.clone();
         self.status.set_plans(live);
+        self.dirty = true;
+    }
+
+    /// Feeds the bar's `model` element what the vendor said it served
+    /// (**D556**).
+    ///
+    /// [`App::poll_rates`]'s shape and posture on a third polled fact, with
+    /// one rule of its own: the reading reaches the bar only while **no
+    /// delegated child is in flight**. The served model is provider-wide and a
+    /// child shares the provider (`session.rs`'s child selection), so a
+    /// subagent running on an agent with a model of its own moves it — and
+    /// pairing that with the root's chosen model would draw a divergence
+    /// nobody has (rev 8, C-L4). While children are running the bar is handed
+    /// [`None`] and draws the chosen model alone, which is what it drew before
+    /// this key existed.
+    ///
+    /// What is cached is the **gated** value — what the bar is showing —
+    /// rather than the raw reading, so a tick that only started or finished a
+    /// child redraws exactly once, and a tick that changed neither touches
+    /// nothing.
+    fn poll_served_model(&mut self) {
+        let shown = self.engine.served_model().filter(|_| self.chat.running_tasks() == 0);
+        if shown == self.served_model {
+            return;
+        }
+
+        self.served_model = shown.clone();
+        self.status.set_served_model(shown.as_ref());
+        self.dirty = true;
+    }
+
+    /// Puts [`EVICTION_NOTICE`] up when a wire closes a held process for being
+    /// idle, and takes it down when that conversation opens again (**D556**).
+    ///
+    /// Written on the `None → Some` edge and cleared on the `Some → None` one,
+    /// which is exactly the gap the wire holds the slot across: from the
+    /// eviction to the fresh record's spawn. Both edges rather than a rewrite
+    /// every tick, so a sentence somebody else wrote in between survives a
+    /// tick that changed nothing.
+    ///
+    /// The takedown is [`Status::clear_notice_if`], never
+    /// `set_notice(None)` — `SLOW_TASK_READ`'s precedent, and the reason is
+    /// the same: the slot is one and unowned, so clearing it unconditionally
+    /// would wipe whatever a later writer put there, and that sentence has no
+    /// second place to appear.
+    fn poll_eviction(&mut self) {
+        let live = self.engine.last_eviction();
+        if live == self.last_eviction {
+            return;
+        }
+
+        match (&self.last_eviction, &live) {
+            (None, Some(_)) => self.status.set_notice(Some(EVICTION_NOTICE.to_owned())),
+            (Some(_), None) => self.status.clear_notice_if(EVICTION_NOTICE),
+            // One eviction replacing another leaves the sentence standing:
+            // it is the same sentence, and it names no key to update.
+            _ => {}
+        }
+
+        self.last_eviction = live;
         self.dirty = true;
     }
 
@@ -5334,18 +5426,20 @@ impl App {
         self.status.set_notice(Some(format!("fetching {} models…", self.provider)));
     }
 
-    /// Opens the flat effort picker over the active model's catalog names.
+    /// Opens the flat effort picker over the names this build will accept.
     ///
-    /// A model the catalog gives no efforts — every uncataloged provider's,
-    /// and most cataloged rows — gets ganja's reworded refusal sentence in the
-    /// status bar instead of an empty dialog (`app.tsx:717`, the `variant.list`
-    /// command's toast).
+    /// A model with no efforts — most cataloged rows, and every uncataloged
+    /// provider except the one whose roster is its own — gets ganja's reworded
+    /// refusal sentence in the status bar instead of an empty dialog
+    /// (`app.tsx:717`, the `variant.list` command's toast).
     fn open_effort(&mut self) {
-        // Provider-scoped for the engine's reason (`catalog::model_for`): the
-        // names offered here must be the names the engine will accept.
-        let names: Vec<String> = catalog::model_for(&self.provider, &self.model)
-            .map(|info| info.variants.keys().cloned().collect())
-            .unwrap_or_default();
+        // `provider::efforts_for` rather than the catalog directly (**D556**,
+        // Dv-16): it is the one definition of "the names the engine will
+        // accept", so a name offered here is a name a `/effort` cannot be
+        // refused for — including on a wire whose five levels belong to the
+        // wire rather than to any model the catalog knows.
+        let names: Vec<String> =
+            provider::efforts_for(&self.provider, &self.model).keys().cloned().collect();
         if names.is_empty() {
             self.status.set_notice(Some(NO_EFFORTS.to_owned()));
             return;
@@ -5910,6 +6004,14 @@ impl App {
             // instead, which is the panel's own rule rather than this
             // caller's.
             plans: self.engine.plan_windows(),
+            // And what the vendor said it served, read at the same moment
+            // (**D556**). Unlike the status bar's copy this one is **not**
+            // gated on the delegated-children count: a panel opened by hand
+            // is a person asking what the provider last served, and the
+            // answer is the provider's whichever turn produced it — where the
+            // bar's `model` element pairs it with a *chosen* model that a
+            // child's turn could make it disagree with.
+            served_model: self.engine.served_model(),
             // The panel judges expiry against the moment it was opened.
             now: Some(std::time::SystemTime::now()),
         }));

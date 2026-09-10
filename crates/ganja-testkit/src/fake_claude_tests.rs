@@ -159,3 +159,81 @@ async fn a_refused_turn_exits_one() {
     assert!(saw_refusal);
     assert_eq!(code, 1);
 }
+
+/// **D556**, Dv-18. A script that names models makes the `initialize` reply
+/// carry them in the CLI's own shape, and a script that names none makes it
+/// carry **no `models` key at all**.
+///
+/// The omission is the half worth pinning: every suite written before this
+/// field exists asserts on a reply that has no such key, and a fake that
+/// started sending an empty array would be describing a seat that may name
+/// nothing.
+#[tokio::test]
+async fn the_initialize_reply_carries_models_only_when_a_script_names_them() {
+    for named in [true, false] {
+        let script = Script {
+            models: if named {
+                vec![
+                    ("default".to_owned(), "Default (recommended)".to_owned()),
+                    ("opus".to_owned(), "Opus".to_owned()),
+                ]
+            } else {
+                Vec::new()
+            },
+            ..Script::default()
+        };
+        let reply = initialize_reply(&script).await;
+
+        if named {
+            assert_eq!(
+                reply["models"],
+                serde_json::json!([
+                    {"value": "default", "displayName": "Default (recommended)"},
+                    {"value": "opus", "displayName": "Opus"},
+                ]),
+                "the CLI's own per-entry shape, in the script's order"
+            );
+        } else {
+            assert!(
+                reply.get("models").is_none(),
+                "a script naming none leaves the key off entirely: {reply}"
+            );
+        }
+        // Untouched either way, so the addition is additive.
+        assert_eq!(reply["output_style"], "default");
+        assert_eq!(reply["current_permission_mode"], "default");
+    }
+}
+
+/// Drives one fake far enough to read its answer to an `initialize`.
+async fn initialize_reply(script: &Script) -> serde_json::Value {
+    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+
+    let record = std::sync::Mutex::new(Record::default());
+    let (mut wire_stdin, cli_stdin) = tokio::io::duplex(1 << 16);
+    let (cli_stdout, wire_stdout) = tokio::io::duplex(1 << 16);
+    let script = script.clone();
+    let played = tokio::spawn(async move { replay(cli_stdin, cli_stdout, &script, &record).await });
+
+    wire_stdin
+        .write_all(
+            b"{\"type\":\"control_request\",\"request_id\":\"r1\",\"request\":{\"subtype\":\"initialize\",\"sdkMcpServers\":[]}}\n",
+        )
+        .await
+        .expect("the wire writes");
+    wire_stdin.flush().await.expect("it flushes");
+
+    let mut lines = tokio::io::BufReader::new(wire_stdout).lines();
+    let answer = loop {
+        let line = lines.next_line().await.expect("the fake answers").expect("before it ends");
+        let frame: serde_json::Value = serde_json::from_str(&line).expect("a JSON line");
+        if frame["type"] == "control_response" {
+            break frame["response"]["response"].clone();
+        }
+    };
+
+    drop(wire_stdin);
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), played).await;
+
+    answer
+}

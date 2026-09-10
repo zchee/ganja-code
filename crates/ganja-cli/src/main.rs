@@ -704,6 +704,12 @@ pub(crate) enum ProviderId {
     // Parses so its refusal can name the deferral; a name clap rejected would
     // read as a typo rather than as the stub it is.
     Cursor,
+    // Parses for that reason and a stronger one (**D556**): this wire has a
+    // login, it is simply not ganja's to run. A name clap rejected would say
+    // "no such provider" about a provider a session can run right now, where
+    // the refusal below says whose command to type instead.
+    #[value(name = "claude-code")]
+    ClaudeCode,
 }
 
 impl ProviderId {
@@ -732,6 +738,7 @@ impl ProviderId {
             Self::Grok => auth::grok::PROVIDER_ID,
             Self::GithubCopilot => auth::copilot::PROVIDER_ID,
             Self::Cursor => ganja_core::provider::cursor::ID,
+            Self::ClaudeCode => ganja_core::provider::claude_code::ID,
         }
     }
 }

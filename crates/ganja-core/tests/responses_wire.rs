@@ -709,7 +709,7 @@ async fn either_openai_id_drives_a_responses_turn_against_the_backend_it_names()
     unsafe {
         env::set_var("GANJA_PROVIDER", openai::ID);
     }
-    let chosen = select(&Config::default()).expect("a key is a session");
+    let chosen = select(&Config::default()).await.expect("a key is a session");
     assert_eq!(chosen.provider.id(), openai::ID, "the platform reports itself as the platform");
     turn(chosen.provider.as_ref(), KEY_MODEL).await;
 
@@ -733,7 +733,7 @@ async fn either_openai_id_drives_a_responses_turn_against_the_backend_it_names()
     unsafe {
         env::set_var("GANJA_PROVIDER", responses::CHATGPT_ID);
     }
-    let chosen = select(&Config::default()).expect("a stored login is a session");
+    let chosen = select(&Config::default()).await.expect("a stored login is a session");
     assert_eq!(chosen.provider.id(), responses::CHATGPT_ID, "and the seat as the seat");
     turn(chosen.provider.as_ref(), SUBSCRIPTION_MODEL).await;
     let sent = endpoint.only();
@@ -767,7 +767,7 @@ async fn either_openai_id_drives_a_responses_turn_against_the_backend_it_names()
     unsafe {
         env::remove_var("GANJA_MODEL");
     }
-    let defaulted = select(&Config::default()).expect("a stored login is a session");
+    let defaulted = select(&Config::default()).await.expect("a stored login is a session");
     assert_eq!(
         defaulted.model, SUBSCRIPTION_MODEL,
         "a ChatGPT seat that named no model takes the one its own backend \
@@ -802,7 +802,7 @@ async fn either_openai_id_drives_a_responses_turn_against_the_backend_it_names()
         env::set_var("OPENAI_API_KEY", KEY);
         env::set_var("GANJA_PROVIDER", openai::ID);
     }
-    let defaulted = select(&Config::default()).expect("a key is a session");
+    let defaulted = select(&Config::default()).await.expect("a key is a session");
     assert_eq!(
         defaulted.model,
         catalog::default_model(openai::ID).expect("openai has a pinned default"),
@@ -819,7 +819,7 @@ async fn either_openai_id_drives_a_responses_turn_against_the_backend_it_names()
         env::set_var("GANJA_PROVIDER", responses::CHATGPT_ID);
         env::set_var("GANJA_MODEL", KEY_MODEL);
     }
-    let named = select(&Config::default()).expect("a stored login is a session");
+    let named = select(&Config::default()).await.expect("a stored login is a session");
     assert_eq!(named.model, KEY_MODEL, "the seat's default must not overwrite an explicit choice");
     let Err(refused_model) =
         named.provider.stream(ask(&named.model), CancellationToken::new()).await
@@ -850,7 +850,7 @@ async fn either_openai_id_drives_a_responses_turn_against_the_backend_it_names()
     unsafe {
         env::set_var("GANJA_PROVIDER", openai::ID);
     }
-    let Err(refused) = select(&Config::default()) else {
+    let Err(refused) = select(&Config::default()).await else {
         panic!("a session with no credential at all is not a session");
     };
     let said = refused.to_string();

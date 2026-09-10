@@ -420,6 +420,51 @@ fn teammates_carries_the_one_deadline_a_person_can_move() {
     assert!(message.contains("shim_turn_timout"), "{message}");
 }
 
+/// **D556.** The one key of the `claude_code` table is seconds, absent is
+/// 600, a bound of nothing is refused by name, a misspelling is refused by
+/// name too, and a later tier's number wins over an earlier one's while
+/// silence leaves it alone — the five things ruling 16 asked of it.
+#[test]
+fn claude_code_idle_bound_is_seconds_defaults_to_ten_minutes_and_is_refused_at_zero() {
+    let absent = parse(r#"model = "anthropic/claude-sonnet-5""#).expect("it parses");
+    assert_eq!(
+        absent.claude_code.idle_bound(),
+        std::time::Duration::from_secs(600),
+        "absent is the wire's own default, spelled once in the wire"
+    );
+
+    let named = parse(r#"claude_code = { idle_bound = 900 }"#).expect("it parses");
+    assert_eq!(
+        named.claude_code.idle_bound(),
+        std::time::Duration::from_secs(900),
+        "the key is seconds, like a teammate's turn deadline"
+    );
+
+    let error = parse(r#"claude_code = { idle_bound = 0 }"#)
+        .expect_err("a bound of nothing evicts every process before its first turn");
+    let ConfigError::Parse { message, .. } = &error else {
+        panic!("expected a parse failure, got {error:?}");
+    };
+    assert!(message.contains("claude_code.idle_bound"), "{message}");
+
+    let error = parse(r#"claude_code = { idle_bounds = 900 }"#)
+        .expect_err("a misspelled key is refused rather than ignored");
+    let ConfigError::Parse { message, .. } = &error else {
+        panic!("expected a parse failure, got {error:?}");
+    };
+    assert!(message.contains("idle_bounds"), "{message}");
+
+    let mut merged = named;
+    merged.merge(parse(r#"model = "anthropic/claude-sonnet-5""#).expect("it parses"));
+    assert_eq!(
+        merged.claude_code.idle_bound(),
+        std::time::Duration::from_secs(900),
+        "silence is not an opinion"
+    );
+    merged.merge(parse(r#"claude_code = { idle_bound = 30 }"#).expect("it parses"));
+    assert_eq!(merged.claude_code.idle_bound(), std::time::Duration::from_secs(30));
+}
+
 /// **D520.** `teammates.shell` is a command line split as a shell would
 /// split it; absent leaves the pane door's `/bin/sh -s` alone, and a
 /// value that is nothing is refused rather than spawning into nothing.
@@ -1263,6 +1308,7 @@ fn the_post_decode_refusals_answer_for_a_toml_file_too() {
         ("agents", "[agents]\nconcurrency = 0\n", "concurrency"),
         ("teammates", "[teammates]\nshim_turn_timeout = 0\n", "shim_turn_timeout"),
         ("openrouter", "[openrouter]\nserver_tools = [\"telepathy\"]\n", "telepathy"),
+        ("claude_code", "[claude_code]\nidle_bound = 0\n", "claude_code.idle_bound"),
     ];
 
     for (key, text, named) in cases {

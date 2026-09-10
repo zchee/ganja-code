@@ -6932,6 +6932,7 @@ fn replied(texts: &[&str]) -> Message {
         time: ganja_protocol::MessageTime { created: 1, completed: Some(2) },
         model: Some(fake::MODEL.to_owned()),
         usage: None,
+        request_only: false,
     }
 }
 

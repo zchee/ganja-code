@@ -44,8 +44,8 @@ fn spelling(model: &str) -> Config {
     config
 }
 
-#[test]
-fn a_config_model_reaches_only_the_provider_its_prefix_names() {
+#[tokio::test]
+async fn a_config_model_reaches_only_the_provider_its_prefix_names() {
     let home = tempfile::tempdir().expect("a temp directory");
     // SAFETY: this binary holds exactly one test, so nothing else in the
     // process is reading the environment concurrently.
@@ -63,7 +63,8 @@ fn a_config_model_reaches_only_the_provider_its_prefix_names() {
 
     // The bug, in the shape it was observed in: the environment names the
     // provider, the config names somebody else's model.
-    let foreign = provider::select(&spelling("cursor/claude-x")).expect("the key is read as one");
+    let foreign =
+        provider::select(&spelling("cursor/claude-x")).await.expect("the key is read as one");
     assert_eq!(foreign.provider.id(), "anthropic");
     assert_ne!(
         foreign.model, "claude-x",
@@ -79,13 +80,13 @@ fn a_config_model_reaches_only_the_provider_its_prefix_names() {
     // The same key, now naming the provider that is running: it applies, and
     // it is not the catalog's default, so this cannot pass by coincidence.
     let matching =
-        provider::select(&spelling("anthropic/claude-x")).expect("the key is read as one");
+        provider::select(&spelling("anthropic/claude-x")).await.expect("the key is read as one");
     assert_eq!(matching.model, "claude-x");
     assert_ne!(matching.model, cataloged_default);
 
     // A bare spelling claims no provider, so it still applies to whoever is
     // running — the behavior nothing here was meant to change.
-    let bare = provider::select(&spelling("claude-x")).expect("the key is read as one");
+    let bare = provider::select(&spelling("claude-x")).await.expect("the key is read as one");
     assert_eq!(bare.model, "claude-x");
 
     // A config-declared endpoint is compared as the selected id whatever it
@@ -95,6 +96,7 @@ fn a_config_model_reaches_only_the_provider_its_prefix_names() {
         env::set_var("GANJA_PROVIDER", COMPAT_ID);
     }
     let declared = provider::select(&spelling("local-llama/tiny-instruct"))
+        .await
         .expect("the declared endpoint has its key");
     assert_eq!(declared.provider.id(), COMPAT_ID);
     assert_eq!(declared.model, "tiny-instruct");
@@ -103,6 +105,7 @@ fn a_config_model_reaches_only_the_provider_its_prefix_names() {
     // endpoint means the honest refusal rather than a wrong model: there is no
     // default to fall through to, and that is what the message says.
     let refused = provider::select(&spelling("anthropic/claude-x"))
+        .await
         .expect_err("nothing can supply a model for an uncataloged endpoint");
     assert!(
         matches!(refused, SelectionError::NoDefaultModel { .. }),

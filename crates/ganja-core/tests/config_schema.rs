@@ -116,6 +116,9 @@ shim_turn_timeout = 900
 shell = "/bin/zsh -f"
 pane_share = 60
 
+[claude_code]
+idle_bound = 900
+
 [permission]
 bash = "ask"
 

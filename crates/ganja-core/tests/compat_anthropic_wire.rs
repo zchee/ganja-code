@@ -105,7 +105,7 @@ async fn a_config_named_anthropic_compatible_endpoint_speaks_messages_on_the_key
     // own `model` key in the sibling suite.
     config.overrides.model = Some(format!("{PROVIDER_ID}/{MODEL}"));
 
-    let selection = provider::select(&config).expect("the config declares this endpoint");
+    let selection = provider::select(&config).await.expect("the config declares this endpoint");
     assert_eq!(selection.provider.id(), PROVIDER_ID);
     assert_eq!(selection.model, MODEL);
 

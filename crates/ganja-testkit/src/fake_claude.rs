@@ -157,6 +157,19 @@ pub struct Script {
     /// Whether to answer a `user` frame with **nothing at all**, so the
     /// wire's silence watchdog is reachable.
     pub silent: bool,
+    /// The models this seat may name, as `(value, displayName)` pairs — the
+    /// `initialize` reply's own shape (**D556**, Dv-18).
+    ///
+    /// **Empty omits the key entirely**, which is what every script written
+    /// before this field existed wants: the reply such a script gets is byte
+    /// for byte the one it always got. Only a script that names models makes
+    /// the CLI answer with any.
+    ///
+    /// The field names are the recording's own. `claude-code-replay-run1.json`
+    /// redacts the value as account telemetry and records the per-entry field
+    /// names beside it, of which two matter to a listing: `value` is the id a
+    /// request may ask for and `displayName` is the label.
+    pub models: Vec<(String, String)>,
 }
 
 /// What one fake process saw, appended to the side file as one JSON line.
@@ -512,16 +525,26 @@ where
                 });
                 self.edit(|record| record.system_prompt = prompt);
 
-                self.answer(
-                    &request_id,
-                    &serde_json::json!({
-                        "commands": [],
-                        "output_style": "default",
-                        "current_permission_mode": "default",
-                        "session_state": "idle",
-                    }),
-                )
-                .await;
+                let mut reply = serde_json::json!({
+                    "commands": [],
+                    "output_style": "default",
+                    "current_permission_mode": "default",
+                    "session_state": "idle",
+                });
+                // Absent unless a script names models, so every suite written
+                // before this field sees exactly the reply it always saw
+                // (**D556**, Dv-18).
+                if !self.script.models.is_empty() {
+                    reply["models"] = self
+                        .script
+                        .models
+                        .iter()
+                        .map(|(value, name)| {
+                            serde_json::json!({"value": value, "displayName": name})
+                        })
+                        .collect();
+                }
+                self.answer(&request_id, &reply).await;
 
                 // Unprompted, right after the initialize reply. It says
                 // whether an interactive login is in flight, never whether a

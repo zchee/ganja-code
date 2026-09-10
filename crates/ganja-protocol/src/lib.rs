@@ -963,6 +963,32 @@ pub struct Message {
     /// What the turn spent, absent until the provider reports it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
+    /// Lives in the request alone: never written to the transcript, minted
+    /// fresh on every request, so **no wire may remember its id as
+    /// conversation state**.
+    ///
+    /// One message class is like this — the engine's own guards block, which
+    /// rides in front of a turn's prompt and describes what just happened
+    /// rather than what was said. It is a *request*, not a message, which is
+    /// why the transcript must not carry it; and because it is rebuilt on every
+    /// request it carries a different id each time.
+    ///
+    /// That is invisible to a stateless wire and load-bearing for a stateful
+    /// one. A wire that holds a process remembers which user messages it has
+    /// already handed over, and compares that memory against the next request
+    /// to tell a continuing conversation from a rewound one. A fresh id in the
+    /// same position reads as "an id I was given is gone" — a rewind — so
+    /// without this flag every guarded request would close the process and pay
+    /// for a fresh one (**D556**, Dv-22; the `claude-code` wire's
+    /// `remembered_ids`). The flag is the honest fix rather than a wire-side
+    /// heuristic, because a replaced tail and a real rewind are
+    /// indistinguishable by ids alone.
+    ///
+    /// `false` for every message any other constructor makes, and skipped when
+    /// false, so a transcript written before this existed is byte-identical to
+    /// one written now.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub request_only: bool,
 }
 
 impl Message {
@@ -978,7 +1004,17 @@ impl Message {
             time: MessageTime { created, completed: Some(created) },
             model: None,
             usage: None,
+            request_only: false,
         }
+    }
+
+    /// The same message, marked as living in the request alone.
+    ///
+    /// See [`Message::request_only`] for what that means and why exactly one
+    /// message class is built this way.
+    #[must_use]
+    pub fn request_only_user(text: impl Into<String>) -> Self {
+        Self { request_only: true, ..Self::user(text) }
     }
 
     /// Opens an assistant message that `model` streams parts into.
@@ -991,6 +1027,7 @@ impl Message {
             time: MessageTime { created: now(), completed: None },
             model: Some(model.into()),
             usage: None,
+            request_only: false,
         }
     }
 

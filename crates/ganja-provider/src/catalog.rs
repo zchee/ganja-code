@@ -311,6 +311,16 @@ const DEFAULTS: &[(&str, &str)] = &[
     // publishes that id; sizing, pricing and auto-compaction stay off
     // exactly as for any model this table cannot see.
     ("cursor", "default"),
+    // The second uncataloged pin, and `default` means something else again
+    // (**D556**): not a routing id the backend publishes, but the *absence* of
+    // `--model` on the CLI's own command line. The wire spells it out rather
+    // than leaving the key unset, because a default has to be a value the rest
+    // of the selection chain can carry, compare and show; `argv` is where it
+    // turns back into no flag at all. What the seat then serves is the
+    // subscription's own choice, which is why the served spelling is worth
+    // surfacing separately (`Provider::served_model`) — here, the two are not
+    // the same fact.
+    ("claude-code", "default"),
 ];
 
 /// Providers whose **rows** are another provider's, as `(the id asked about,

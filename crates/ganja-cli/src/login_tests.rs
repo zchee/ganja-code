@@ -236,3 +236,72 @@ fn a_method_is_spelled_the_same_wherever_it_is_written() {
         );
     }
 }
+
+/// **D556**, AC-4.8's login half. `ganja auth login claude-code` is refused
+/// by name, whatever was typed with it, and the refusal says whose command to
+/// run instead.
+///
+/// The id parses rather than being rejected by clap on purpose: a name clap
+/// refused would read as "no such provider" about a provider a session can run
+/// right now. What this wire has is a login that is not ganja's — the session
+/// runs the `claude` binary under whatever seat that binary is signed into,
+/// and ganja never holds a Claude.ai credential — so the honest answer is the
+/// sentence, not a menu.
+#[test]
+fn a_claude_code_login_is_refused_by_name_and_names_the_clis_own_command() {
+    assert_eq!(
+        ProviderId::ClaudeCode.methods(),
+        [],
+        "there is no credential here for ganja to store"
+    );
+
+    // Every door into `chosen`, including the two that store a piped key
+    // without asking anybody anything: a provider with no login of ganja's has
+    // nothing for any of them to choose between.
+    for (has_key, method) in
+        [(false, None), (true, None), (false, Some(Method::Api)), (false, Some(Method::Browser))]
+    {
+        let refused = chosen(ProviderId::ClaudeCode, has_key, method)
+            .expect_err("this wire's login is not ganja's to run")
+            .to_string();
+        assert!(
+            refused.contains("run `claude login`"),
+            "the refusal names whose command to type: {refused}"
+        );
+        assert!(refused.contains("claude-code"), "and which provider it is about: {refused}");
+        assert!(
+            !refused.contains("it has "),
+            "and never trails into an empty list of the logins it does have: {refused}"
+        );
+    }
+}
+
+/// **D556.** Every `ProviderId` spells its provider the way `ganja-core`
+/// spells it, `claude-code` included — the id a login is stored under, a
+/// request is filed under and a permission rule is written against are one
+/// name, and this enum is where a second spelling would first appear.
+///
+/// Read off the provider crate's own constants rather than off literals, so a
+/// wire that renamed itself reddens here instead of quietly filing a
+/// credential where nothing looks for one.
+#[test]
+fn the_command_line_spells_every_provider_the_way_the_wires_do() {
+    use clap::ValueEnum as _;
+
+    assert_eq!(
+        ProviderId::ClaudeCode.as_str(),
+        ganja_core::provider::claude_code::ID,
+        "the id a session names is the id a login would be filed under"
+    );
+    assert_eq!(ProviderId::ClaudeCode.to_string(), "claude-code", "and it is spelled hyphenated");
+
+    // Every value clap accepts is a provider this build actually ships, so a
+    // name on the command line can never be one `select` would then refuse.
+    for id in ProviderId::value_variants() {
+        assert!(
+            ganja_core::provider::PROVIDERS.contains(&id.as_str()),
+            "{} parses on the command line but is not a wire this build ships",
+            id.as_str()
+        );
+    }
+}

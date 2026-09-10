@@ -39,8 +39,8 @@ fn declaring() -> Config {
     config
 }
 
-#[test]
-fn the_provider_variable_names_a_configured_endpoint_and_refuses_the_rest_honestly() {
+#[tokio::test]
+async fn the_provider_variable_names_a_configured_endpoint_and_refuses_the_rest_honestly() {
     let home = tempfile::tempdir().expect("a temp directory");
     // SAFETY: this binary holds exactly one test, so nothing else in the
     // process is reading the environment concurrently.
@@ -53,7 +53,7 @@ fn the_provider_variable_names_a_configured_endpoint_and_refuses_the_rest_honest
 
     let config = declaring();
     let selection =
-        provider::select(&config).expect("the variable names an endpoint this declares");
+        provider::select(&config).await.expect("the variable names an endpoint this declares");
     assert_eq!(
         selection.provider.id(),
         PROVIDER_ID,
@@ -68,7 +68,7 @@ fn the_provider_variable_names_a_configured_endpoint_and_refuses_the_rest_honest
     unsafe {
         env::set_var("GANJA_PROVIDER", "local-lama");
     }
-    let refused = provider::select(&config).expect_err("no such provider");
+    let refused = provider::select(&config).await.expect_err("no such provider");
     let SelectionError::Unknown { requested, named_by, configured } = &refused else {
         panic!("expected an unknown-provider refusal, got {refused:?}");
     };
@@ -97,7 +97,8 @@ fn the_provider_variable_names_a_configured_endpoint_and_refuses_the_rest_honest
     unsafe {
         env::set_var("GANJA_PROVIDER", "gemini");
     }
-    let bare = provider::select(&Config::default()).expect_err("no such provider").to_string();
+    let bare =
+        provider::select(&Config::default()).await.expect_err("no such provider").to_string();
     assert!(
         !bare.contains("this config names"),
         "nothing was configured, so nothing should be listed: {bare}"
@@ -111,8 +112,10 @@ fn the_provider_variable_names_a_configured_endpoint_and_refuses_the_rest_honest
         env::set_var("GANJA_PROVIDER", PROVIDER_ID);
         env::remove_var(KEY_VAR);
     }
-    let unusable =
-        provider::select(&config).expect_err("nothing supplies this endpoint's key").to_string();
+    let unusable = provider::select(&config)
+        .await
+        .expect_err("nothing supplies this endpoint's key")
+        .to_string();
     assert!(unusable.contains(KEY_VAR), "{unusable}");
     assert!(
         unusable.contains(&format!("ganja auth login {PROVIDER_ID}")),

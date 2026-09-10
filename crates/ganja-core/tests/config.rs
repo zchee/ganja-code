@@ -41,8 +41,8 @@ fn plant(path: &Path, model: &str, instruction: &str) {
     fs::write(path, text).expect("the fixture file is writable");
 }
 
-#[test]
-fn each_tier_that_names_a_model_outranks_every_tier_below_it() {
+#[tokio::test]
+async fn each_tier_that_names_a_model_outranks_every_tier_below_it() {
     let home = tempfile::tempdir().expect("a temporary directory");
     let config_home = home.path().join("config");
     let global = config_home.join("ganja").join("ganja.toml");
@@ -104,7 +104,8 @@ fn each_tier_that_names_a_model_outranks_every_tier_below_it() {
         }
 
         let config = Config::load_with(&project, &overrides).expect("every planted tier parses");
-        let selection = provider::select(&config).expect("the fake provider needs no credential");
+        let selection =
+            provider::select(&config).await.expect("the fake provider needs no credential");
 
         assert_eq!(selection.model, *expected, "after adding {tier}");
         assert_eq!(selection.provider.id(), fake::ID, "after adding {tier}");

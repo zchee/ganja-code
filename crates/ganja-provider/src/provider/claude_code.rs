@@ -190,6 +190,116 @@ impl ClaudeCodeProvider {
     pub fn held_entries(&self) -> usize {
         self.held.len()
     }
+
+    /// What this seat may name, as `(id, display name)` pairs (**D556**,
+    /// Dv-17).
+    ///
+    /// A **listing spawn**: the base argv with a fresh `--session-id` and no
+    /// `--model` or `--effort`, one `initialize` written, the reply's `models`
+    /// read, then EOF. It sends no `user` frame, so it takes no turn, spends
+    /// nothing and never reaches `system/init` — which is why nothing here can
+    /// be marked *current*. The CLI publishes no `current_model` key either
+    /// (M11 read sixteen and that is not one), so a listing on this wire
+    /// answers what may be named and deliberately not what is running.
+    ///
+    /// A one-shot for AC-3.22's reason: it runs in the scratch cwd every
+    /// process on this wire runs in, and its record is worth nothing once its
+    /// answer is read.
+    ///
+    /// # Errors
+    ///
+    /// [`ProviderError::Transport`] when the binary could not be spawned, when
+    /// the CLI reported an error to the `initialize`, or when it ended without
+    /// answering. A failure here is the wire's own and is reported as such —
+    /// never quietly swapped for the catalog, which knows nothing about this
+    /// seat.
+    pub async fn models(&self) -> Result<Vec<(String, String)>, ProviderError> {
+        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+
+        let argv = argv::Argv::listing(&argv::Listing { session_id: crate::protocol::uuidv7() });
+        let cwd = self.paths.one_shot_cwd();
+        prepare(&cwd)?;
+
+        let mut io = self.spawner.spawn(&self.bin, &argv, &argv::ChildEnv { cwd })?;
+        let request_id = crate::protocol::uuidv7();
+        let opening = frame::initialize_line(
+            &request_id,
+            &frame::Initialize {
+                system_prompt: None,
+                sdk_mcp_servers: Vec::new(),
+                sdk_mcp_server_configs: serde_json::json!({}),
+            },
+        );
+        io.stdin
+            .write_all(opening.as_bytes())
+            .await
+            .map_err(|failure| ProviderError::Transport(failure.to_string()))?;
+
+        let mut lines = tokio::io::BufReader::new(io.stdout).lines();
+        let answer = loop {
+            let line = lines
+                .next_line()
+                .await
+                .map_err(|failure| ProviderError::Transport(failure.to_string()))?;
+            let Some(line) = line else {
+                return Err(ProviderError::Transport(format!(
+                    "the claude CLI at {} ended without answering the model listing",
+                    self.bin.display()
+                )));
+            };
+            // Every other frame is somebody else's: the listing asked one
+            // question and reads the one answer to it.
+            if let Ok(frame::Inbound::ControlResponse { request_id: answered, response, error }) =
+                frame::decode(&line)
+                && answered == request_id
+            {
+                if let Some(error) = error {
+                    return Err(ProviderError::Transport(format!(
+                        "the claude CLI refused the model listing: {error}"
+                    )));
+                }
+                break response.unwrap_or_default();
+            }
+        };
+        // Dropping stdin is EOF to the child, which is how every process on
+        // this wire is asked to end.
+        drop(io.stdin);
+
+        Ok(listed_models(&answer))
+    }
+}
+
+/// The `(id, display name)` pairs an `initialize` reply's `models` carries.
+///
+/// The field names are the recording's own (`claude-code-replay-run1.json`
+/// records them beside the redacted value): an entry's id is `value` and its
+/// label is `displayName`. An entry with no `value` is nothing a request could
+/// ask for and is dropped; one with no `displayName` is labelled by its id,
+/// which is a perfectly good label and is what `cursor_models` does with the
+/// same gap.
+fn listed_models(answer: &serde_json::Value) -> Vec<(String, String)> {
+    answer
+        .get("models")
+        .and_then(serde_json::Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    let id = entry.get("value").and_then(serde_json::Value::as_str)?;
+                    if id.is_empty() {
+                        return None;
+                    }
+                    let name = entry
+                        .get("displayName")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or(id);
+
+                    Some((id.to_owned(), name.to_owned()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The absolute path this wire will spawn.
@@ -307,14 +417,42 @@ pub fn user_ids(request: &ChatRequest) -> Vec<String> {
         .collect()
 }
 
+/// The ids of a request's user messages that a held record may **remember**:
+/// [`user_ids`] without the request-only ones (**D556**, Dv-22).
+///
+/// A request-only message — today exactly the engine's guards block — is built
+/// for one request and never written to the transcript, so it is minted with a
+/// fresh id every time it appears. Remembering such an id would make the next
+/// request look like a conversation that had lost one: a different id sitting
+/// where the remembered one was, which is precisely what [`honest`] calls a
+/// rewind. Before this split, a `/team` lead's every auto-continuation closed
+/// the process and paid for a fresh record.
+///
+/// This is the *conversation-state* half of the question and nothing else.
+/// [`owed`] deliberately still spans every user id, so a request-only message
+/// is written on every request that carries it and remembered on none —
+/// which is what makes it arrive intact each time while costing nothing.
+#[must_use]
+pub fn remembered_ids(request: &ChatRequest) -> Vec<String> {
+    request
+        .messages
+        .iter()
+        .filter(|message| message.role == Role::User && !message.request_only)
+        .map(|message| message.id.as_str().to_owned())
+        .collect()
+}
+
 /// Whether the record has read a prefix of what ganja holds, and nothing
 /// ganja no longer holds.
 ///
 /// False means an id in `sent` is gone from the request — a `/rewind` — which
 /// is what tells that arm from every other reason a process might be missing.
+///
+/// Asked of [`remembered_ids`] rather than of [`user_ids`], so that a message
+/// which lives in the request alone cannot read as one the transcript lost.
 #[must_use]
 pub fn honest(sent: &[String], request: &ChatRequest) -> bool {
-    let ids = user_ids(request);
+    let ids = remembered_ids(request);
 
     ids.len() >= sent.len() && ids.iter().zip(sent).all(|(id, written)| id == written)
 }
@@ -426,6 +564,67 @@ impl Provider for ClaudeCodeProvider {
             .map(|eviction| crate::provider::Eviction { key: eviction.key, at: eviction.at })
     }
 
+    /// What the vendor last said is left of this account's **plan**
+    /// (**D556**, Dv-19).
+    ///
+    /// `plan_windows` and not [`Provider::rate_windows`], which stays the
+    /// trait default: what this wire hears is a 5h and a weekly budget
+    /// expressed as a utilization, which is [`PlanWindow`](crate::provider::PlanWindow)'s measurement field
+    /// for field — the same one D485 minted for codex's `primary`/`secondary`
+    /// pair. A [`RateWindow`](crate::provider::RateWindow) counts requests or
+    /// tokens against a limit and has no fraction at all, so putting this
+    /// there would mean inventing a budget of 100 fictional units and drawing
+    /// it under a heading about throttling. This wire receives no rate-limit
+    /// headers, and answering nothing for them is the honest answer.
+    ///
+    /// **Two recorded shapes, one output**, which is why the conversion lives
+    /// here rather than at any reader:
+    ///
+    /// - `rate_limit_event`'s `rate_limit_info.unifiedWindows` — `utilization`
+    ///   a **fraction** 0–1, `resetsAt` a **unix** second;
+    /// - `get_usage`'s `rate_limits` — `utilization` an **integer percent**
+    ///   0–100, `resets_at` an **ISO-8601** string.
+    ///
+    /// A reader that had to know which it was holding would be a second place
+    /// for the two to disagree. `null` `rate_limits` is what an unwarmed call
+    /// answers and means **no reading** — an empty list, never a window at
+    /// zero, which would draw as a budget freshly full.
+    fn plan_windows(&self) -> Vec<crate::provider::PlanWindow> {
+        let parked = self.slots.rate.lock().expect("the rate slot is never poisoned").clone();
+        let Some(parked) = parked else {
+            return Vec::new();
+        };
+
+        // The event nests its windows and the control response *is* the map.
+        let windows = parked.get("unifiedWindows").unwrap_or(&parked);
+
+        [("five_hour", 300), ("seven_day", 10_080)]
+            .into_iter()
+            .filter_map(|(name, minutes)| {
+                let window = windows.get(name)?;
+                let used_percent = plan_utilization(window.get("utilization")?)?;
+
+                Some(crate::provider::PlanWindow {
+                    name: name.to_owned(),
+                    used_percent,
+                    window_minutes: Some(minutes),
+                    resets_at: window
+                        .get("resetsAt")
+                        .or_else(|| window.get("resets_at"))
+                        .and_then(plan_reset),
+                    // The vendor names the window it is *about* once, beside
+                    // the set rather than inside it, so both windows carry it
+                    // — which is what it says: which limit this account is
+                    // being judged against right now.
+                    limit_name: parked
+                        .get("rateLimitType")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
+                })
+            })
+            .collect()
+    }
+
     async fn stream(
         &self,
         request: ChatRequest,
@@ -462,6 +661,34 @@ impl Arm {
             Self::Spawn => "spawn",
         }
     }
+}
+
+/// One window's utilization as a **percentage**, whichever way the vendor sent
+/// it (**D556**, Dv-19).
+///
+/// The two recorded shapes are told apart by their own type rather than by
+/// which frame carried them: `rate_limit_event` sends a fraction as a JSON
+/// float (`0.68`), `get_usage` an integer percent (`69`). A float is scaled, an
+/// integer is already the number [`PlanWindow::used_percent`] wants. Nothing is
+/// clamped — a vendor saying 103 has said something true about an account in
+/// overage, and that type's own doc makes the same point.
+fn plan_utilization(value: &serde_json::Value) -> Option<f64> {
+    if let Some(percent) = value.as_u64() {
+        return Some(percent as f64);
+    }
+
+    value.as_f64().map(|fraction| fraction * 100.0)
+}
+
+/// One window's reset, from either a unix second or an ISO-8601 string.
+fn plan_reset(value: &serde_json::Value) -> Option<std::time::SystemTime> {
+    if let Some(seconds) = value.as_u64() {
+        return std::time::UNIX_EPOCH.checked_add(Duration::from_secs(seconds));
+    }
+
+    let stamp = value.as_str()?.parse::<jiff::Timestamp>().ok()?;
+
+    std::time::UNIX_EPOCH.checked_add(Duration::from_secs(u64::try_from(stamp.as_second()).ok()?))
 }
 
 /// The catalog effort this turn runs under, if any.
@@ -766,6 +993,12 @@ impl ClaudeCodeProvider {
         let text = owed_text(&owed);
         let mut sent = meta.sent.clone();
         sent.extend(owed.iter().map(|message| message.id.as_str().to_owned()));
+        // The frame carries every owed message; the entry remembers only the
+        // ones the next request will still hold (**D556**, Dv-22). A
+        // request-only message is rebuilt with a fresh id each time, so an
+        // entry that recorded one would read the next request as a rewind.
+        let remembered = remembered_ids(&request);
+        sent.retain(|id| remembered.contains(id));
 
         let Some(input) = self.held.input(key) else {
             return Ok(failed(format!("the held claude process for {key} went away")));
@@ -977,6 +1210,12 @@ impl ClaudeCodeProvider {
             paragraphs.push(text);
         }
         sent.extend(owed.iter().map(|message| message.id.as_str().to_owned()));
+        // Written on this request, remembered on none: applied once here
+        // because all three sources above — the preamble's render, a recovered
+        // turn's, and the owed set — can carry a request-only message
+        // (**D556**, Dv-22).
+        let remembered = remembered_ids(&request);
+        sent.retain(|id| remembered.contains(id));
 
         let wiring = held::Wiring {
             key: key.clone(),

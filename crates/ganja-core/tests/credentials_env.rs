@@ -30,8 +30,8 @@ const WORLD_READABLE: u32 = 0o644;
 /// Permissions the store is supposed to have.
 const OWNER_ONLY: u32 = 0o600;
 
-#[test]
-fn a_refused_credential_store_reports_why_and_how_to_repair_it() {
+#[tokio::test]
+async fn a_refused_credential_store_reports_why_and_how_to_repair_it() {
     let home = tempfile::tempdir().expect("a temp directory");
     // SAFETY: this binary holds exactly one test, so nothing else in the
     // process is reading the environment concurrently.
@@ -50,13 +50,14 @@ fn a_refused_credential_store_reports_why_and_how_to_repair_it() {
 
     // The stored key answers while the file is private, which is what makes
     // the refusal below a refusal rather than an absence.
-    provider::select(&ganja_core::Config::default()).expect("a private store is readable");
+    provider::select(&ganja_core::Config::default()).await.expect("a private store is readable");
 
     fs::set_permissions(&path, fs::Permissions::from_mode(WORLD_READABLE))
         .expect("the fixture can be exposed");
 
-    let refusal =
-        provider::select(&ganja_core::Config::default()).expect_err("an exposed store is refused");
+    let refusal = provider::select(&ganja_core::Config::default())
+        .await
+        .expect_err("an exposed store is refused");
     let rendered = format!("{refusal} / {refusal:?}");
 
     assert!(!rendered.contains(CANARY), "the refusal carried the key it refused: {rendered}");
@@ -84,6 +85,7 @@ fn a_refused_credential_store_reports_why_and_how_to_repair_it() {
     fs::set_permissions(&path, fs::Permissions::from_mode(OWNER_ONLY))
         .expect("the fixture can be repaired");
     let selection = provider::select(&ganja_core::Config::default())
+        .await
         .expect("a repaired store is readable again");
     assert_eq!(selection.provider.id(), "anthropic");
 }

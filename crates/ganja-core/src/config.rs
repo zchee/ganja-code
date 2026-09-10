@@ -959,6 +959,16 @@ pub struct Config {
     /// builtin this configures is not one of its entries.
     #[serde(default)]
     pub openrouter: OpenRouterConfig,
+    /// How long the `claude-code` wire holds an idle CLI process; see
+    /// [`ClaudeCodeConfig`] (**D556**).
+    ///
+    /// A provider-specific top-level table for [`openrouter`](Self::openrouter)'s
+    /// reason: one consumer, and no other table can honestly hold it. Spelled
+    /// `claude_code` rather than the wire's own `claude-code` because this is a
+    /// bare TOML key and the id is a *value* — `GANJA_PROVIDER`'s, `--model`'s —
+    /// not a name this file keys on.
+    #[serde(default)]
+    pub claude_code: ClaudeCodeConfig,
     /// Shell the `bash` tool runs commands in.
     pub shell: Option<String>,
     /// Custom commands, by name.
@@ -1465,6 +1475,61 @@ pub struct OpenRouterConfig {
     /// every list here but `instructions`.
     #[serde(default)]
     pub server_tools: Vec<String>,
+}
+
+/// How long the `claude-code` wire keeps an idle `claude` process alive
+/// (**D556**).
+///
+/// One key, and it is a trade rather than a tuning knob: the wire never passes
+/// `--resume`, so a held process *is* the conversation's memory of the
+/// assistant's own replies. Holding it costs the person's machine an
+/// authenticated node runtime; evicting it costs the model the words it said,
+/// because the fresh record that replaces it opens with an assistant-free
+/// preamble. Which of the two to spend is the person's call, which is why this
+/// is a curated key and not a constant
+/// ([`held::DEFAULT_IDLE_BOUND`](crate::provider::claude_code::held::DEFAULT_IDLE_BOUND)
+/// is what nothing configured means).
+///
+/// Top-level and provider-specific for [`OpenRouterConfig`]'s reason, and named
+/// with an underscore for the reason [`Config::claude_code`] gives.
+///
+/// No upstream counterpart: opencode has no claude-code wire, and Claude Code
+/// itself is the process this bounds rather than a thing that bounds one.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ClaudeCodeConfig {
+    /// How long a held `claude` process may sit idle before the wire closes
+    /// it, in **seconds**.
+    ///
+    /// **Absent is 600** ([`ClaudeCodeConfig::idle_bound`] is what reads it).
+    /// An [`Option`] rather than a bare number for
+    /// [`TeammateConfig::shim_turn_timeout`]'s reason: a tier that says
+    /// nothing has to leave the tier below it alone. Seconds for that key's
+    /// reason too — a whole external process's budget.
+    ///
+    /// Refused at load when it is zero: a bound of nothing evicts every
+    /// process before its first turn, so every turn would open a fresh record
+    /// and no conversation would ever keep the assistant's words. A large
+    /// value is not refused — a person who would rather spend the machine than
+    /// the conversation is making the trade this key exists for.
+    pub idle_bound: Option<u64>,
+}
+
+impl ClaudeCodeConfig {
+    /// The idle bound this config asks for, or 600 s when it asks for none.
+    ///
+    /// Unlike [`TeammateConfig::shim_turn_timeout`] this resolves the default
+    /// here rather than handing [`None`] on, because the wire's door
+    /// (`with_idle_bound`) takes a [`Duration`](std::time::Duration) and not an
+    /// option: `select` is the one reader, and one of the two has to name the
+    /// number.
+    #[must_use]
+    pub fn idle_bound(&self) -> std::time::Duration {
+        self.idle_bound.map_or(
+            crate::provider::claude_code::held::DEFAULT_IDLE_BOUND,
+            std::time::Duration::from_secs,
+        )
+    }
 }
 
 /// What the terminal frontend does beyond drawing frames.
@@ -1977,6 +2042,7 @@ impl Config {
         overlay(&mut self.teammates.shim_turn_timeout, other.teammates.shim_turn_timeout);
         overlay(&mut self.teammates.shell, other.teammates.shell);
         overlay(&mut self.teammates.pane_share, other.teammates.pane_share);
+        overlay(&mut self.claude_code.idle_bound, other.claude_code.idle_bound);
         // The two D523 keys — and D531's sender-side sibling — ride this
         // ordinary overlay between **trusted** tiers only: a project file
         // reaches them through `merge_project`, which refuses one and
@@ -2547,6 +2613,7 @@ fn checked(path: &Path, config: Config) -> Result<Config, ConfigError> {
     check_agents(&config.agents).map_err(refused)?;
     check_teammates(&config.teammates).map_err(refused)?;
     check_openrouter(&config.openrouter).map_err(refused)?;
+    check_claude_code(&config.claude_code).map_err(refused)?;
 
     Ok(config)
 }
@@ -2766,6 +2833,26 @@ fn check_openrouter(config: &OpenRouterConfig) -> Result<(), String> {
                 crate::provider::openrouter::SERVER_TOOLS.join(", ")
             ));
         }
+    }
+
+    Ok(())
+}
+
+/// Refuses an idle bound of nothing (**D556**).
+///
+/// Zero is the one value that cannot mean what somebody typing it wants: the
+/// wire would close every held process the moment it went idle, so every turn
+/// after the first would open a fresh record and the model would never once
+/// see its own earlier replies. The refusal names the key so the fix is one
+/// line away, and says what the number is for.
+fn check_claude_code(config: &ClaudeCodeConfig) -> Result<(), String> {
+    if config.idle_bound == Some(0) {
+        return Err(
+            "claude_code.idle_bound must be at least 1 second; a bound of 0 evicts every held \
+             claude process before its first turn, so every turn would open a fresh record \
+             without the assistant's earlier replies (absent is 600)"
+                .to_owned(),
+        );
     }
 
     Ok(())

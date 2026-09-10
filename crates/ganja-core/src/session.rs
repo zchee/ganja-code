@@ -94,8 +94,16 @@ fn invalid_call(detail: &str) -> String {
 /// blocking with a message is that the model is told what to do differently.
 /// The sentence around it names the hook so the model does not read a refusal
 /// somebody's script wrote as a refusal the person just gave.
+///
+/// Rendered from [`ganja_tool::permission_text::HOOK_REFUSED_PREFIX`] rather
+/// than spelled here, because a wire has to be able to *recognise* this
+/// sentence: `claude-code` answers the CLI's `can_use_tool` and must tell a
+/// refusal from a failed tool without being able to see the engine
+/// (`permission_text::is_refusal`). Two copies of one sentence would drift on
+/// the first reword, and the drift would be a permission refusal silently
+/// reported as a tool error.
 fn blocked_by_hook(reason: &str) -> String {
-    format!("A PreToolUse hook refused this tool call: {reason}")
+    format!("{}{reason}", ganja_tool::permission_text::HOOK_REFUSED_PREFIX)
 }
 
 /// Environment variable that opts the fake provider into a real title
@@ -3432,7 +3440,15 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
             .take_blocks()
             .into_iter();
         if let Some(first) = blocks.next() {
-            let mut guards = Message::user(first);
+            // **Request-only** (**D556**, Dv-22): this message is built for
+            // this request and never written to the transcript, so it is
+            // minted with a fresh id every time the guards speak. A wire that
+            // remembers which user messages it has handed a held process would
+            // otherwise read the new id in the old position as an id it was
+            // given and lost — a rewind — and close the process on every
+            // guarded request. The flag is what tells such a wire not to
+            // remember it; see [`Message::request_only`].
+            let mut guards = Message::request_only_user(first);
             guards.parts.extend(blocks.map(Part::text));
             messages.push(guards);
         }

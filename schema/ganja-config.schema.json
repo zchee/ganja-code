@@ -74,6 +74,11 @@
       "description": "How this session runs the teammates it spawns, as opposed to what they are. Plural for `agents`' reason: the singular is what a later per-name teammate map will want.",
       "default": {}
     },
+    "claude_code": {
+      "$ref": "#/$defs/ClaudeCodeConfig",
+      "description": "How long the claude-code wire holds an idle claude process. Spelled with an underscore because this is a bare TOML key, where the wire's id (claude-code) is a value GANJA_PROVIDER and --model name.",
+      "default": {}
+    },
     "cross_session_inbound": {
       "$ref": "#/$defs/InboundPolicy",
       "description": "What this session, leading a team, does with a peer message arriving from outside that team: accept delivers it, hold parks it for a person's review, refuse drops it. Absent is unset — the engine then decides per receiver class, and an explicit value always wins over that default. The one key whose project tier diverges from later-beats-earlier: a project file replaces the standing value only when strictly more severe (accept < hold < refuse), so a checkout can tighten but never loosen, while the file GANJA_CONFIG names outranks the global config home ordinarily. Not a key a plugin can contribute."
@@ -348,6 +353,20 @@
           "description": "How much of the window's width the teammates' column takes when the first teammate opens it, in percent; the lead keeps the rest. Absent is 65 (lead 35 / teammates 65, 2026-08-25; 70 before that). Refused at load outside 1..=99, since a column of nothing or of everything leaves one side of the split with no screen.",
           "minimum": 1,
           "maximum": 99
+        }
+      }
+    },
+    "ClaudeCodeConfig": {
+      "title": "claude-code wire settings",
+      "description": "How long the claude-code wire keeps an idle claude process alive (D556). One key, and it is a trade rather than a tuning knob: the wire never passes --resume, so a held process is the conversation's memory of the assistant's own replies. Holding it costs the person's machine an authenticated node runtime; evicting it costs the model the words it said, because the fresh record that replaces it opens with an assistant-free preamble. No key upstream has: opencode ships no claude-code wire at all.",
+      "$comment": "crates/ganja-core/src/config.rs (ClaudeCodeConfig, deny_unknown_fields); the default and the eviction it bounds live in crates/ganja-provider/src/provider/claude_code/held.rs (DEFAULT_IDLE_BOUND); refusal of zero in config::check_claude_code; the one reader is provider::select, which hands it to ClaudeCodeProvider::with_idle_bound.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "idle_bound": {
+          "type": "integer",
+          "description": "How long a held claude process may sit idle before the wire closes it, in seconds. Absent is 600. Refused at load when it is zero, since a bound of nothing evicts every process before its first turn and no conversation would ever keep the assistant's words. A large value is not refused: spending the machine rather than the conversation is the trade this key exists to let a person make.",
+          "minimum": 1
         }
       }
     },
