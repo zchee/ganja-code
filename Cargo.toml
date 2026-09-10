@@ -295,8 +295,12 @@ reqwest = { version = "0.13.4", default-features = false, features = [
 ] }
 # The official MCP SDK: config-named servers over stdio and streamable HTTP.
 # Client-side only — the default `server` feature stays off, because nothing
-# in this workspace serves MCP: the test fixture is a bun server on the
-# reference SDK, which is the point of it.
+# in this workspace serves MCP *through rmcp*: the test fixture is a bun
+# server on the reference SDK, which is the point of it. The one MCP server
+# this build does run is the `claude-code` wire's (D556) — it answers the
+# four JSON-RPC methods the CLI it spawns dials it with, hand-rolled in
+# `ganja-provider`, which this dependency does not reach: `rmcp` is
+# `ganja-core`'s alone.
 rmcp = { version = "3.2.0", default-features = false, features = [
     "client",
     # Spawns and speaks to a config-named local server as a child process.
