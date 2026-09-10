@@ -892,7 +892,7 @@ fn a_call(name: &str, tool_use_id: &str) -> super::super::rpc::ToolCall {
 async fn a_call_for_an_ask_already_denied_is_answered_as_denied_and_never_reaches_the_engine() {
     let wiring = wiring(super::super::tests::roster());
     let mut turn = super::Turn::default();
-    turn.denied.insert("toolu_1".to_owned());
+    turn.denied.insert("toolu_1".to_owned(), "read".to_owned());
 
     let (answer, surfaced) = call_answered(&wiring, &mut turn, a_call("read", "toolu_1")).await;
 
@@ -915,6 +915,117 @@ async fn a_call_for_an_ask_already_denied_is_answered_as_denied_and_never_reache
         again["response"]["response"]["mcp_response"]["result"]["isError"],
         serde_json::json!(true)
     );
+}
+
+/// The guard above was keyed on the id a call carries, and the fallback for a
+/// call carrying none searched `meta.pending` by name — which the deny itself
+/// had just emptied. So a peer that sent a call for a refused ask **and**
+/// dropped its `_meta` reached the engine as a fresh call after all (RR-1).
+/// Driven through `answer_asks`, so the deny is the one a resolve records
+/// rather than one a test wrote into the set.
+#[tokio::test]
+async fn a_call_carrying_no_id_for_a_tool_just_denied_is_refused_and_never_reaches_the_engine() {
+    let wiring = wiring(super::super::tests::roster());
+    let mut turn = super::Turn::default();
+    wiring.meta.lock().expect("meta").pending.push(super::Pending {
+        request_id: Some("req-0".to_owned()),
+        tool_use_id: "toolu_1".to_owned(),
+        name: "read".to_owned(),
+        input: serde_json::json!({}),
+        call_request_id: None,
+        call_rpc_id: None,
+    });
+
+    let (to_cli, _from_wire) = tokio::io::duplex(64 * 1024);
+    let mut stdin: Box<dyn tokio::io::AsyncWrite + Send + Unpin> = Box::new(to_cli);
+    let denied = super::super::bridge::Resolution {
+        tool_use_id: "toolu_1".to_owned(),
+        permission: super::super::bridge::Permission::Deny { message: "denied".to_owned() },
+        result: None,
+    };
+    super::answer_asks(&wiring, &mut turn, &mut stdin, vec![denied]).await;
+
+    let carrying_no_id = super::super::rpc::ToolCall {
+        id: serde_json::json!(2),
+        name: "read".to_owned(),
+        tool_use_id: None,
+    };
+    let (answer, surfaced) = call_answered(&wiring, &mut turn, carrying_no_id.clone()).await;
+
+    let result = &answer["response"]["response"]["mcp_response"]["result"];
+    assert_eq!(result["isError"], serde_json::json!(true), "answered as a refusal: {answer}");
+    assert!(
+        result["content"][0]["text"].as_str().unwrap_or_default().contains("refused"),
+        "and says so: {answer}"
+    );
+    assert!(surfaced.is_empty(), "the engine was asked nothing: {surfaced:?}");
+    assert!(
+        wiring.meta.lock().expect("meta").pending.is_empty(),
+        "and nothing was parked for a resolve to answer"
+    );
+
+    // Refused every time, not once: the name is not spent by a refusal.
+    let (again, surfaced) = call_answered(&wiring, &mut turn, carrying_no_id).await;
+    assert_eq!(
+        again["response"]["response"]["mcp_response"]["result"]["isError"],
+        serde_json::json!(true)
+    );
+    assert!(surfaced.is_empty(), "nor the second time: {surfaced:?}");
+
+    // And the id stays denied: the call that does carry it is refused as well.
+    let (carrying_it, surfaced) =
+        call_answered(&wiring, &mut turn, a_call("read", "toolu_1")).await;
+    assert_eq!(
+        carrying_it["response"]["response"]["mcp_response"]["result"]["isError"],
+        serde_json::json!(true)
+    );
+    assert!(surfaced.is_empty(), "the id-carrying call reaches nothing either: {surfaced:?}");
+}
+
+/// A deny covers the name it was asked under and nothing else: a call carrying
+/// no id for a **different** declared tool is still the secondary path's ask.
+#[tokio::test]
+async fn a_call_carrying_no_id_for_a_tool_nobody_denied_is_still_surfaced() {
+    let mut roster = super::super::tests::roster();
+    roster.push(crate::tool::ToolDefinition {
+        name: "grep".to_owned(),
+        description: "searches files".to_owned(),
+        schema: serde_json::json!({"type": "object"}),
+    });
+    let wiring = wiring(roster);
+    let mut turn = super::Turn { expected_calls: 1, ..super::Turn::default() };
+    wiring.meta.lock().expect("meta").pending.push(super::Pending {
+        request_id: Some("req-0".to_owned()),
+        tool_use_id: "toolu_1".to_owned(),
+        name: "read".to_owned(),
+        input: serde_json::json!({}),
+        call_request_id: None,
+        call_rpc_id: None,
+    });
+
+    let (to_cli, _from_wire) = tokio::io::duplex(64 * 1024);
+    let mut stdin: Box<dyn tokio::io::AsyncWrite + Send + Unpin> = Box::new(to_cli);
+    let denied = super::super::bridge::Resolution {
+        tool_use_id: "toolu_1".to_owned(),
+        permission: super::super::bridge::Permission::Deny { message: "denied".to_owned() },
+        result: None,
+    };
+    super::answer_asks(&wiring, &mut turn, &mut stdin, vec![denied]).await;
+
+    let (events, mut streamed) = tokio::sync::mpsc::channel(16);
+    turn.events = Some(events);
+    let other = super::super::rpc::ToolCall {
+        id: serde_json::json!(2),
+        name: "grep".to_owned(),
+        tool_use_id: None,
+    };
+    super::call_arrived(&wiring, &mut turn, &mut stdin, "req-1", other).await;
+
+    let first = streamed.try_recv().expect("an ask was surfaced");
+    assert!(matches!(
+        first,
+        crate::provider::ProviderEvent::ToolCallStart { ref name, .. } if name == "grep"
+    ));
 }
 
 /// The secondary path is the one arm where a name this turn never advertised
@@ -972,7 +1083,7 @@ fn the_per_call_maps_are_dropped_by_the_next_turn_and_not_by_a_resolve() {
         },
     );
     turn.minted.insert("req-1".to_owned());
-    turn.denied.insert("toolu_2".to_owned());
+    turn.denied.insert("toolu_2".to_owned(), "read".to_owned());
 
     // A resolve continues the CLI turn that parked the asks, so `open_turn`
     // must keep all three — clearing them here would lose an outcome whose

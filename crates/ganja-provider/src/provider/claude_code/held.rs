@@ -664,12 +664,15 @@ struct Turn {
     minted: std::collections::HashSet<String>,
     /// What each answered ask's `tools/call` is to be answered with.
     outcomes: HashMap<String, super::rpc::CallToolResult>,
-    /// Asks answered `deny`, whose `tools/call` the CLI will never send.
+    /// Asks answered `deny`, whose `tools/call` the CLI will never send, each
+    /// id beside the registry name it was asked under.
     ///
     /// Read by [`call_arrived`], which is what makes that a rule rather than a
     /// prediction: a call for an id in here is refused from this side and
-    /// never surfaced to the engine as a fresh ask.
-    denied: std::collections::HashSet<String>,
+    /// never surfaced to the engine as a fresh ask — and so is a call carrying
+    /// **no** id under one of these names, because the deny that emptied
+    /// `meta.pending` left the name nowhere else to be found (RR-1).
+    denied: HashMap<String, String>,
     /// Whether `system/init` has been seen at all on this process.
     seen_init: bool,
     /// Whether this task has written its binding yet.
@@ -1458,9 +1461,22 @@ async fn call_arrived(
     // the same reasoning applies to a contract. Answered from what this side
     // recorded, the call reaches neither the engine's permission ladder nor
     // `meta.pending`; the id stays in the set, so a second one is refused too.
-    if let Some(id) = &matched
-        && turn.denied.contains(id)
-    {
+    //
+    // A call carrying no id is judged by its name, because the name is all it
+    // has: `matched` searched `meta.pending`, which the deny itself emptied, so
+    // without this arm the refused call came back as a fresh one the moment a
+    // peer dropped `_meta` (RR-1). A name another ask of this turn was
+    // *allowed* under is refused as well — with no id nothing tells the two
+    // apart, and refusing is the side a guard fails on.
+    let denied = match &matched {
+        Some(id) => turn.denied.contains_key(id),
+        None => {
+            let name = super::bridge::registry_name(&call.name);
+
+            turn.denied.values().any(|denied| *denied == name)
+        }
+    };
+    if denied {
         refuse_call(turn, stdin, request_id, &call.id, DENIED_CALL).await;
 
         return;
@@ -1607,8 +1623,10 @@ async fn answer_asks(
 
         match answer.result {
             // A denied call is never called, so there is nothing to answer.
+            // The name goes in beside the id because this removal is what
+            // leaves a call carrying no id nothing else to match against.
             None => {
-                turn.denied.insert(parked.tool_use_id.clone());
+                turn.denied.insert(parked.tool_use_id.clone(), parked.name.clone());
             }
             Some(result) => match (&parked.call_request_id, &parked.call_rpc_id) {
                 // The call already arrived and was waiting on this.
