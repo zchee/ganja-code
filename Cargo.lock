@@ -1532,6 +1532,7 @@ dependencies = [
  "ganja-teammate-local",
  "ganja-tool",
  "schemars",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
