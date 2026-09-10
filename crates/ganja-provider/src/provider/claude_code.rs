@@ -141,8 +141,9 @@ impl ClaudeCodeProvider {
     /// both versions and the reason.
     pub async fn from_env() -> Result<Self, ProviderError> {
         let bin = resolve_binary()?;
-        let version = read_version(&bin).await?;
+        // The data home before the probe, which runs in a directory under it.
         let paths = binding::Paths::resolved().map_err(ProviderError::Transport)?;
+        let version = read_version(&bin, &paths).await?;
 
         Ok(Self {
             bin,
@@ -347,12 +348,21 @@ fn resolve_binary() -> Result<PathBuf, ProviderError> {
 }
 
 /// `<bin> --version`, floored.
-async fn read_version(bin: &Path) -> Result<String, ProviderError> {
+///
+/// Run in `paths`' sealed probe directory, made here the way every other
+/// child's scratch directory is: a turn-taking child is handed an empty
+/// directory this wire owns because of what the **binary** derives from its
+/// cwd, not because of what the subcommand does, and the shared temporary
+/// directory this used to be handed is world-writable `/tmp` on Linux (CC-10).
+async fn read_version(bin: &Path, paths: &binding::Paths) -> Result<String, ProviderError> {
+    let cwd = paths.probe_cwd();
+    prepare(paths, &cwd)?;
+
     let mut command = tokio::process::Command::new(bin);
     command.arg("--version");
     // The same posture the turn-taking children run under, so a version read
     // under a stray `ANTHROPIC_API_KEY` cannot differ from what a turn sees.
-    argv::ChildEnv { cwd: std::env::temp_dir() }.apply(&mut command);
+    argv::ChildEnv { cwd }.apply(&mut command);
 
     let output = tokio::time::timeout(VERSION_BOUND, command.output())
         .await

@@ -1052,6 +1052,36 @@ fn this_crates_claude_code_modules_name_no_tool_runtime() {
     }
 }
 
+/// Every child this wire spawns runs in a directory this wire sealed — the
+/// `--version` probe included, which used to be handed the shared temporary
+/// directory, per-user on macOS and world-writable `/tmp` on Linux, while every
+/// turn-taking child already ran in a `0700` scratch directory (CC-10).
+///
+/// The name is **assembled** for the reason the test above gives: the glob it
+/// reads is the one a `grep -rn` over the module would.
+#[test]
+fn no_source_of_this_wire_hands_a_child_the_shared_temporary_directory() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/provider");
+    let mut sources = vec![root.join("claude_code.rs")];
+    sources.extend(
+        std::fs::read_dir(root.join("claude_code"))
+            .expect("the module directory")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|kind| kind == "rs")),
+    );
+
+    let name = concat!("temp", "_dir");
+    for source in sources {
+        let text = std::fs::read_to_string(&source).expect("a source file");
+        assert!(
+            !text.contains(name),
+            "{} names {name}: a child of this wire runs in a directory the wire sealed",
+            source.display()
+        );
+    }
+}
+
 // ------------------------------------------- the plan windows (Dv-19)
 
 /// **D556**, Dv-19. Both recorded shapes convert to the **same** window, and

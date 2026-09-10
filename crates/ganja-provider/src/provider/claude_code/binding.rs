@@ -136,6 +136,18 @@ impl Paths {
         self.root.join("cwd").join("one-shot")
     }
 
+    /// The one the `--version` probe runs in: a sibling of `cwd/`, sealed the
+    /// same way and left behind empty, so that no child this wire spawns runs
+    /// in a directory the wire does not own (CC-10).
+    ///
+    /// Beside `cwd/` rather than inside it, because what lives under `cwd/` is
+    /// named by a conversation's key and removed when the entry closes, and
+    /// the probe belongs to no conversation.
+    #[must_use]
+    pub fn probe_cwd(&self) -> PathBuf {
+        self.root.join("probe")
+    }
+
     /// `mkdir -p` at `0700` for `directory` **and for every directory of this
     /// tree above it**.
     ///
