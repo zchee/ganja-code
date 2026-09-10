@@ -132,6 +132,10 @@ async fn checks() {
         ("(h) the child runs in an empty scratch directory", check_cwd(home.path(), &side).await),
         ("(i) from_env() constructs against the fake", check_from_env(home.path()).await),
         ("(i′) a build below the floor is refused naming both", check_floor().await),
+        (
+            "(i″) --version runs in the sealed probe directory",
+            check_probe_cwd(home.path(), &side).await,
+        ),
         ("(j) a not-logged-in stderr line is the Auth arm", check_auth(home.path()).await),
         (
             "(j′) any other stderr line is a transport failure, never Auth",
@@ -597,6 +601,52 @@ async fn check_floor() -> Result<(), String> {
     ensure(
         refused.contains("surveyed") || refused.contains("read from"),
         format!("the reason is not given: {refused}"),
+    )
+}
+
+/// The `--version` child runs in a directory this wire sealed, where it used to
+/// be handed the shared temporary directory while every turn-taking child ran
+/// in a `0700` scratch directory (CC-10). Read off the fake's own record of
+/// where it was started, the way (h) reads a conversation child's.
+async fn check_probe_cwd(home: &Path, side: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let bin = as_cli();
+    let _bin = EnvGuard::set("GANJA_CLAUDE_BIN", &bin.display().to_string());
+    let before = records(side).len();
+
+    ClaudeCodeProvider::from_env()
+        .await
+        .map_err(|error| format!("from_env refused the fake: {error}"))?;
+
+    let after = settled(side, before).await?;
+    let probe = after
+        .iter()
+        .skip(before)
+        .rev()
+        .find(|record| record.argv.iter().any(|token| token == "--version"))
+        .ok_or("no --version child was recorded")?;
+
+    // Canonical on both sides: on macOS the child's own `current_dir` comes
+    // back through `/private/var` where the wire built `/var`.
+    let sealed = binding::Paths::under(home).probe_cwd();
+    let expected = std::fs::canonicalize(&sealed)
+        .map_err(|error| format!("the probe directory {}: {error}", sealed.display()))?;
+    let recorded = std::fs::canonicalize(&probe.cwd)
+        .map_err(|error| format!("the recorded cwd {}: {error}", probe.cwd))?;
+    ensure(
+        recorded == expected,
+        format!(
+            "--version ran in {} where the wire's own is {}",
+            recorded.display(),
+            expected.display()
+        ),
+    )?;
+
+    let mode = std::fs::metadata(&sealed).map_err(|error| error.to_string())?.permissions().mode();
+    ensure(
+        mode & 0o777 == 0o700,
+        format!("{} is {:o}, not owner-only", sealed.display(), mode & 0o777),
     )
 }
 

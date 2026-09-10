@@ -107,6 +107,7 @@ fn the_binding_lock_and_the_scratch_cwd_all_live_under_one_root() {
     assert_eq!(paths.lock("k"), root.join("k.lock"));
     assert_eq!(paths.cwd("k"), root.join("cwd").join("k"));
     assert_eq!(paths.one_shot_cwd(), root.join("cwd").join("one-shot"));
+    assert_eq!(paths.probe_cwd(), root.join("probe"), "beside `cwd/`, never inside a key's");
 }
 
 /// Two ganjas on one conversation never share a binding, and which one holds

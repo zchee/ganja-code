@@ -349,6 +349,26 @@ impl HeldProcesses {
         }
     }
 
+    /// Lets `key`'s lock go, unless an entry holds the conversation it guards.
+    ///
+    /// The other half of [`Self::claim_lock`], for a claim whose spawn failed
+    /// before any entry was filed: [`Self::forget`] releases a lock only
+    /// together with an entry, so such a claim was released by nothing and
+    /// every other ganja was told `locked-elsewhere` about a conversation
+    /// nobody held (RR-2). A key the table **does** hold keeps its lock —
+    /// releasing it would open a live process's conversation to a second
+    /// writer — which is why this asks the table rather than trusting the
+    /// caller. The table's lock is taken first, the order [`Self::forget`]
+    /// takes the two in.
+    pub fn release_lock(&self, key: &str) {
+        let table = self.table.lock().expect("the held table is never poisoned");
+        if table.contains_key(key) {
+            return;
+        }
+
+        self.locks.lock().expect("the lock table is never poisoned").remove(key);
+    }
+
     /// How long an entry may go without a frame.
     #[must_use]
     pub fn idle_bound(&self) -> Duration {
@@ -664,12 +684,15 @@ struct Turn {
     minted: std::collections::HashSet<String>,
     /// What each answered ask's `tools/call` is to be answered with.
     outcomes: HashMap<String, super::rpc::CallToolResult>,
-    /// Asks answered `deny`, whose `tools/call` the CLI will never send.
+    /// Asks answered `deny`, whose `tools/call` the CLI will never send, each
+    /// id beside the registry name it was asked under.
     ///
     /// Read by [`call_arrived`], which is what makes that a rule rather than a
     /// prediction: a call for an id in here is refused from this side and
-    /// never surfaced to the engine as a fresh ask.
-    denied: std::collections::HashSet<String>,
+    /// never surfaced to the engine as a fresh ask — and so is a call carrying
+    /// **no** id under one of these names, because the deny that emptied
+    /// `meta.pending` left the name nowhere else to be found (RR-1).
+    denied: HashMap<String, String>,
     /// Whether `system/init` has been seen at all on this process.
     seen_init: bool,
     /// Whether this task has written its binding yet.
@@ -1060,9 +1083,10 @@ fn report_exit(
         let error = if said.iter().any(|line| not_logged_in(line)) {
             crate::provider::ProviderError::Auth(NO_LOGIN.to_owned())
         } else {
-            crate::provider::ProviderError::Transport(said.first().cloned().unwrap_or_else(|| {
-                format!("the claude CLI exited {code:?} before it said anything")
-            }))
+            crate::provider::ProviderError::Transport(said.first().map_or_else(
+                || format!("the claude CLI exited {code:?} before it said anything"),
+                |line| surfaced(line),
+            ))
         };
 
         emit(turn, ProviderEvent::Failed(error.clone()));
@@ -1095,6 +1119,33 @@ fn not_logged_in(line: &str) -> bool {
     let line = line.to_ascii_lowercase();
 
     line.contains("not logged in") || line.contains("claude login") || line.contains("/login")
+}
+
+/// How many bytes of the CLI's first stderr line a failed turn carries.
+///
+/// That line is the vendor's own and the most useful thing a person can be
+/// shown — it is how an exit before `system/init` is told apart — but it
+/// travels into a transcript and a log, and this wire has no
+/// `Presented::redact` seam to catch a token a future diagnostic might print,
+/// because it holds no credential to scrub by value. A bound is the guard that
+/// does not need to know what that diagnostic will say (CC-11). Run 7's line is
+/// under a hundred bytes, so every sentence the recording saw arrives whole.
+const SAID_LIMIT: usize = 256;
+
+/// What the surfaced line opens with, so it reads as the CLI's own words and
+/// never as ganja's diagnosis of them.
+const SAID_LABEL: &str = "the claude CLI said: ";
+
+/// The CLI's own line as a failed turn carries it: labelled, and cut at
+/// [`SAID_LIMIT`] on a char boundary with the elision counted.
+fn surfaced(line: &str) -> String {
+    let cut = line.floor_char_boundary(SAID_LIMIT);
+    if cut == line.len() {
+        return format!("{SAID_LABEL}{line}");
+    }
+
+    let omitted = line.len() - cut;
+    format!("{SAID_LABEL}{}… [+{omitted} bytes]", &line[..cut])
 }
 
 /// One frame, read.
@@ -1458,9 +1509,22 @@ async fn call_arrived(
     // the same reasoning applies to a contract. Answered from what this side
     // recorded, the call reaches neither the engine's permission ladder nor
     // `meta.pending`; the id stays in the set, so a second one is refused too.
-    if let Some(id) = &matched
-        && turn.denied.contains(id)
-    {
+    //
+    // A call carrying no id is judged by its name, because the name is all it
+    // has: `matched` searched `meta.pending`, which the deny itself emptied, so
+    // without this arm the refused call came back as a fresh one the moment a
+    // peer dropped `_meta` (RR-1). A name another ask of this turn was
+    // *allowed* under is refused as well — with no id nothing tells the two
+    // apart, and refusing is the side a guard fails on.
+    let denied = match &matched {
+        Some(id) => turn.denied.contains_key(id),
+        None => {
+            let name = super::bridge::registry_name(&call.name);
+
+            turn.denied.values().any(|denied| *denied == name)
+        }
+    };
+    if denied {
         refuse_call(turn, stdin, request_id, &call.id, DENIED_CALL).await;
 
         return;
@@ -1607,8 +1671,10 @@ async fn answer_asks(
 
         match answer.result {
             // A denied call is never called, so there is nothing to answer.
+            // The name goes in beside the id because this removal is what
+            // leaves a call carrying no id nothing else to match against.
             None => {
-                turn.denied.insert(parked.tool_use_id.clone());
+                turn.denied.insert(parked.tool_use_id.clone(), parked.name.clone());
             }
             Some(result) => match (&parked.call_request_id, &parked.call_rpc_id) {
                 // The call already arrived and was waiting on this.

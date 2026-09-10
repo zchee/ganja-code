@@ -86,20 +86,31 @@ const ESCAPE: char = '\\';
 
 /// Rendered content that cannot spell one of [`MARKERS`].
 ///
-/// Only a line that *begins* with a marker is touched, and it is touched by
-/// one character. Every other byte of a rendering is what the recording
-/// measured being served, so a blanket re-indent would change all of it to fix
-/// a line in a thousand — and this wire's renderings are the one thing about
-/// it a live safeguard has already ruled on.
+/// Only a line that *begins* with a marker — at its first byte, or after its
+/// leading whitespace — is touched, and it is touched by one character. Every
+/// other byte of a rendering is what the recording measured being served, so
+/// a blanket re-indent would change all of it to fix a line in a thousand —
+/// and this wire's renderings are the one thing about it a live safeguard has
+/// already ruled on.
 fn neutralize(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     // `split_inclusive` rather than `lines`, which would eat a `\r` and hand
     // the model back content it was not given.
     for line in text.split_inclusive('\n') {
-        if MARKERS.iter().any(|marker| line.starts_with(marker)) {
+        // Looked for past the indentation, because how a model reads
+        // `  [User]` is not something this side can assert (RR-3); and the
+        // escape goes immediately before the marker, so the indentation stays
+        // byte for byte and the bracket reads as literal the way it does at
+        // the start of a line.
+        let marked = line.trim_start();
+        if MARKERS.iter().any(|marker| marked.starts_with(marker)) {
+            let indent = line.len() - marked.len();
+            escaped.push_str(&line[..indent]);
             escaped.push(ESCAPE);
+            escaped.push_str(marked);
+        } else {
+            escaped.push_str(line);
         }
-        escaped.push_str(line);
     }
 
     escaped

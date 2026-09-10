@@ -892,7 +892,7 @@ fn a_call(name: &str, tool_use_id: &str) -> super::super::rpc::ToolCall {
 async fn a_call_for_an_ask_already_denied_is_answered_as_denied_and_never_reaches_the_engine() {
     let wiring = wiring(super::super::tests::roster());
     let mut turn = super::Turn::default();
-    turn.denied.insert("toolu_1".to_owned());
+    turn.denied.insert("toolu_1".to_owned(), "read".to_owned());
 
     let (answer, surfaced) = call_answered(&wiring, &mut turn, a_call("read", "toolu_1")).await;
 
@@ -915,6 +915,117 @@ async fn a_call_for_an_ask_already_denied_is_answered_as_denied_and_never_reache
         again["response"]["response"]["mcp_response"]["result"]["isError"],
         serde_json::json!(true)
     );
+}
+
+/// The guard above was keyed on the id a call carries, and the fallback for a
+/// call carrying none searched `meta.pending` by name — which the deny itself
+/// had just emptied. So a peer that sent a call for a refused ask **and**
+/// dropped its `_meta` reached the engine as a fresh call after all (RR-1).
+/// Driven through `answer_asks`, so the deny is the one a resolve records
+/// rather than one a test wrote into the set.
+#[tokio::test]
+async fn a_call_carrying_no_id_for_a_tool_just_denied_is_refused_and_never_reaches_the_engine() {
+    let wiring = wiring(super::super::tests::roster());
+    let mut turn = super::Turn::default();
+    wiring.meta.lock().expect("meta").pending.push(super::Pending {
+        request_id: Some("req-0".to_owned()),
+        tool_use_id: "toolu_1".to_owned(),
+        name: "read".to_owned(),
+        input: serde_json::json!({}),
+        call_request_id: None,
+        call_rpc_id: None,
+    });
+
+    let (to_cli, _from_wire) = tokio::io::duplex(64 * 1024);
+    let mut stdin: Box<dyn tokio::io::AsyncWrite + Send + Unpin> = Box::new(to_cli);
+    let denied = super::super::bridge::Resolution {
+        tool_use_id: "toolu_1".to_owned(),
+        permission: super::super::bridge::Permission::Deny { message: "denied".to_owned() },
+        result: None,
+    };
+    super::answer_asks(&wiring, &mut turn, &mut stdin, vec![denied]).await;
+
+    let carrying_no_id = super::super::rpc::ToolCall {
+        id: serde_json::json!(2),
+        name: "read".to_owned(),
+        tool_use_id: None,
+    };
+    let (answer, surfaced) = call_answered(&wiring, &mut turn, carrying_no_id.clone()).await;
+
+    let result = &answer["response"]["response"]["mcp_response"]["result"];
+    assert_eq!(result["isError"], serde_json::json!(true), "answered as a refusal: {answer}");
+    assert!(
+        result["content"][0]["text"].as_str().unwrap_or_default().contains("refused"),
+        "and says so: {answer}"
+    );
+    assert!(surfaced.is_empty(), "the engine was asked nothing: {surfaced:?}");
+    assert!(
+        wiring.meta.lock().expect("meta").pending.is_empty(),
+        "and nothing was parked for a resolve to answer"
+    );
+
+    // Refused every time, not once: the name is not spent by a refusal.
+    let (again, surfaced) = call_answered(&wiring, &mut turn, carrying_no_id).await;
+    assert_eq!(
+        again["response"]["response"]["mcp_response"]["result"]["isError"],
+        serde_json::json!(true)
+    );
+    assert!(surfaced.is_empty(), "nor the second time: {surfaced:?}");
+
+    // And the id stays denied: the call that does carry it is refused as well.
+    let (carrying_it, surfaced) =
+        call_answered(&wiring, &mut turn, a_call("read", "toolu_1")).await;
+    assert_eq!(
+        carrying_it["response"]["response"]["mcp_response"]["result"]["isError"],
+        serde_json::json!(true)
+    );
+    assert!(surfaced.is_empty(), "the id-carrying call reaches nothing either: {surfaced:?}");
+}
+
+/// A deny covers the name it was asked under and nothing else: a call carrying
+/// no id for a **different** declared tool is still the secondary path's ask.
+#[tokio::test]
+async fn a_call_carrying_no_id_for_a_tool_nobody_denied_is_still_surfaced() {
+    let mut roster = super::super::tests::roster();
+    roster.push(crate::tool::ToolDefinition {
+        name: "grep".to_owned(),
+        description: "searches files".to_owned(),
+        schema: serde_json::json!({"type": "object"}),
+    });
+    let wiring = wiring(roster);
+    let mut turn = super::Turn { expected_calls: 1, ..super::Turn::default() };
+    wiring.meta.lock().expect("meta").pending.push(super::Pending {
+        request_id: Some("req-0".to_owned()),
+        tool_use_id: "toolu_1".to_owned(),
+        name: "read".to_owned(),
+        input: serde_json::json!({}),
+        call_request_id: None,
+        call_rpc_id: None,
+    });
+
+    let (to_cli, _from_wire) = tokio::io::duplex(64 * 1024);
+    let mut stdin: Box<dyn tokio::io::AsyncWrite + Send + Unpin> = Box::new(to_cli);
+    let denied = super::super::bridge::Resolution {
+        tool_use_id: "toolu_1".to_owned(),
+        permission: super::super::bridge::Permission::Deny { message: "denied".to_owned() },
+        result: None,
+    };
+    super::answer_asks(&wiring, &mut turn, &mut stdin, vec![denied]).await;
+
+    let (events, mut streamed) = tokio::sync::mpsc::channel(16);
+    turn.events = Some(events);
+    let other = super::super::rpc::ToolCall {
+        id: serde_json::json!(2),
+        name: "grep".to_owned(),
+        tool_use_id: None,
+    };
+    super::call_arrived(&wiring, &mut turn, &mut stdin, "req-1", other).await;
+
+    let first = streamed.try_recv().expect("an ask was surfaced");
+    assert!(matches!(
+        first,
+        crate::provider::ProviderEvent::ToolCallStart { ref name, .. } if name == "grep"
+    ));
 }
 
 /// The secondary path is the one arm where a name this turn never advertised
@@ -972,7 +1083,7 @@ fn the_per_call_maps_are_dropped_by_the_next_turn_and_not_by_a_resolve() {
         },
     );
     turn.minted.insert("req-1".to_owned());
-    turn.denied.insert("toolu_2".to_owned());
+    turn.denied.insert("toolu_2".to_owned(), "read".to_owned());
 
     // A resolve continues the CLI turn that parked the asks, so `open_turn`
     // must keep all three — clearing them here would lose an outcome whose
@@ -988,6 +1099,52 @@ fn the_per_call_maps_are_dropped_by_the_next_turn_and_not_by_a_resolve() {
     assert!(turn.outcomes.is_empty(), "an unclaimed result is not resident at the next turn");
     assert!(turn.minted.is_empty());
     assert!(turn.denied.is_empty());
+}
+
+/// What an exit before `system/init` surfaces is whatever the CLI printed
+/// first, and that text reaches a transcript and a log — so it is bounded and
+/// it says whose words it is (CC-11). This wire holds no credential, so there
+/// is nothing to scrub by value; a diagnostic that ever printed one would
+/// still travel no further than the bound.
+#[test]
+fn the_clis_first_stderr_line_is_surfaced_bounded_and_labelled_as_its_own() {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    let exited_saying = |line: &str| {
+        let wiring = wiring(Vec::new());
+        let mut turn = super::Turn::default();
+        let said = std::sync::Arc::new(std::sync::Mutex::new(vec![line.to_owned()]));
+        let status = std::process::ExitStatus::from_raw(1 << 8);
+
+        match super::report_exit(&wiring, &mut turn, &said, Ok(status)) {
+            Some(crate::provider::ProviderError::Transport(message)) => message,
+            other => {
+                panic!("an exit that names no missing login is a transport failure: {other:?}")
+            }
+        }
+    };
+
+    // Run 7's sentence, the shape this arm exists for, arrives whole.
+    let short = "Session ID 01998a00-0000-7000-8000-00000000000a is already in use.";
+    assert_eq!(exited_saying(short), format!("{}{short}", super::SAID_LABEL));
+
+    // A line past the bound is cut, and the cut is counted rather than hidden.
+    let long = format!("{}TAIL", "x".repeat(super::SAID_LIMIT * 4));
+    let surfaced = exited_saying(&long);
+    assert!(surfaced.starts_with(super::SAID_LABEL), "labelled as the CLI's own: {surfaced}");
+    assert!(!surfaced.contains("TAIL"), "what is past the bound does not travel: {surfaced}");
+    assert!(
+        surfaced.ends_with(&format!("[+{} bytes]", long.len() - super::SAID_LIMIT)),
+        "and the elision says how much: {surfaced}"
+    );
+
+    // A cut that would land inside a character lands before it instead.
+    let wide = exited_saying(&"日".repeat(super::SAID_LIMIT));
+    assert!(
+        wide.len() < super::SAID_LABEL.len() + super::SAID_LIMIT + 32,
+        "bounded whatever the line is made of: {} bytes",
+        wide.len()
+    );
 }
 
 /// `busy` says a turn is running, and the table's two views of idleness both
@@ -1037,6 +1194,104 @@ async fn a_lock_is_released_with_its_entry_so_another_ganja_may_take_the_convers
     assert!(binding::Lock::claim(&path).is_ok(), "and the lock went with it");
 
     provider.shutdown().await;
+}
+
+/// The spawn seam failing every spawn — what `process::Real` answers when the
+/// binary `from_env` checked is gone by the time a turn needs it.
+struct NoBinary;
+
+impl crate::provider::claude_code::process::Spawner for NoBinary {
+    fn spawn(
+        &self,
+        bin: &std::path::Path,
+        _argv: &[std::ffi::OsString],
+        _env: &crate::provider::claude_code::argv::ChildEnv,
+    ) -> Result<crate::provider::claude_code::process::ChildIo, crate::provider::ProviderError>
+    {
+        Err(crate::provider::ProviderError::Transport(format!("could not spawn {}", bin.display())))
+    }
+}
+
+/// A claim whose spawn then failed was released by nothing: `forget` lets a
+/// lock go only together with an entry, and a failed spawn never files one —
+/// so every other ganja was told `locked-elsewhere` about a conversation nobody
+/// held, for as long as this process lived (RR-2).
+#[tokio::test]
+async fn a_spawn_that_fails_leaves_the_conversation_free_for_another_ganja() {
+    let home = temp();
+    let paths = Paths::under(home.path());
+    let failing = crate::provider::claude_code::ClaudeCodeProvider::with_parts(
+        std::path::PathBuf::from("/nonexistent/claude"),
+        "2.1.263 (Claude Code)".to_owned(),
+        std::sync::Arc::new(NoBinary),
+        Paths::under(home.path()),
+    );
+
+    let opened = failing
+        .stream(request(vec![user("m1", "first")], 0), tokio_util::sync::CancellationToken::new())
+        .await;
+    assert!(opened.is_err(), "the spawn failed, so no turn opened");
+    assert_eq!(failing.held_entries(), 0, "and nothing was filed");
+
+    // `flock` treats two descriptors on one file independently even inside one
+    // process, so this really is the question another ganja would be asking.
+    assert!(
+        binding::Lock::claim(&paths.lock(&key("m1"))).is_ok(),
+        "the failed spawn left the conversation locked against every other ganja"
+    );
+    assert!(
+        failing.held.locks.lock().expect("the lock table").is_empty(),
+        "and no descriptor is left holding it"
+    );
+
+    // And another ganja takes it: its turn writes the binding that the
+    // `locked-elsewhere` arm never writes.
+    let cli = FakeCli::new(says(&["one"]));
+    let second = wired(&cli, home.path());
+    turn(&second, request(vec![user("m1", "first")], 0)).await;
+    assert!(
+        binding::load(&paths.binding(&key("m1"))).is_some(),
+        "the second ganja claimed the conversation rather than opening it locked elsewhere"
+    );
+
+    second.shutdown().await;
+}
+
+/// The other claim nothing released (RR-2): `route` claims before it asks for
+/// a reason word, and a conversation refused twice in a row spawns nothing —
+/// so the claim was held with no entry, and another ganja on it was told
+/// `locked-elsewhere`, read no binding, and spent two refusals of its own
+/// where reading the streak would have spent none.
+#[tokio::test]
+async fn a_conversation_refused_twice_is_left_for_another_ganja_to_read_the_streak_of() {
+    let home = temp();
+    let paths = Paths::under(home.path());
+    binding::store(
+        &paths.binding(&key("m1")),
+        &binding::Binding {
+            refused: true,
+            refused_streak: binding::REFUSED_STREAK_BOUND,
+            ..binding::Binding::default()
+        },
+    )
+    .expect("the refused binding is planted");
+    let cli = FakeCli::new(says(&["never said"]));
+    let provider = wired(&cli, home.path());
+
+    let events = turn(&provider, request(vec![user("m1", "again")], 0)).await;
+    assert!(
+        failure(&events).is_some_and(|failed| failed.contains("refused twice")),
+        "the bound refused the turn locally: {events:?}"
+    );
+    assert_eq!(cli.count(), 0, "and spawned nothing");
+
+    // `flock` treats two descriptors on one file independently even inside one
+    // process, so this really is the question another ganja would be asking.
+    assert!(
+        binding::Lock::claim(&paths.lock(&key("m1"))).is_ok(),
+        "a conversation this ganja will not spend on is not one it holds"
+    );
+    assert!(provider.held.locks.lock().expect("the lock table").is_empty());
 }
 
 /// And the claim is a claim: a conversation whose lock is held elsewhere is
