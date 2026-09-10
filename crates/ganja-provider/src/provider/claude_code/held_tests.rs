@@ -1150,6 +1150,104 @@ async fn a_lock_is_released_with_its_entry_so_another_ganja_may_take_the_convers
     provider.shutdown().await;
 }
 
+/// The spawn seam failing every spawn — what `process::Real` answers when the
+/// binary `from_env` checked is gone by the time a turn needs it.
+struct NoBinary;
+
+impl crate::provider::claude_code::process::Spawner for NoBinary {
+    fn spawn(
+        &self,
+        bin: &std::path::Path,
+        _argv: &[std::ffi::OsString],
+        _env: &crate::provider::claude_code::argv::ChildEnv,
+    ) -> Result<crate::provider::claude_code::process::ChildIo, crate::provider::ProviderError>
+    {
+        Err(crate::provider::ProviderError::Transport(format!("could not spawn {}", bin.display())))
+    }
+}
+
+/// A claim whose spawn then failed was released by nothing: `forget` lets a
+/// lock go only together with an entry, and a failed spawn never files one —
+/// so every other ganja was told `locked-elsewhere` about a conversation nobody
+/// held, for as long as this process lived (RR-2).
+#[tokio::test]
+async fn a_spawn_that_fails_leaves_the_conversation_free_for_another_ganja() {
+    let home = temp();
+    let paths = Paths::under(home.path());
+    let failing = crate::provider::claude_code::ClaudeCodeProvider::with_parts(
+        std::path::PathBuf::from("/nonexistent/claude"),
+        "2.1.263 (Claude Code)".to_owned(),
+        std::sync::Arc::new(NoBinary),
+        Paths::under(home.path()),
+    );
+
+    let opened = failing
+        .stream(request(vec![user("m1", "first")], 0), tokio_util::sync::CancellationToken::new())
+        .await;
+    assert!(opened.is_err(), "the spawn failed, so no turn opened");
+    assert_eq!(failing.held_entries(), 0, "and nothing was filed");
+
+    // `flock` treats two descriptors on one file independently even inside one
+    // process, so this really is the question another ganja would be asking.
+    assert!(
+        binding::Lock::claim(&paths.lock(&key("m1"))).is_ok(),
+        "the failed spawn left the conversation locked against every other ganja"
+    );
+    assert!(
+        failing.held.locks.lock().expect("the lock table").is_empty(),
+        "and no descriptor is left holding it"
+    );
+
+    // And another ganja takes it: its turn writes the binding that the
+    // `locked-elsewhere` arm never writes.
+    let cli = FakeCli::new(says(&["one"]));
+    let second = wired(&cli, home.path());
+    turn(&second, request(vec![user("m1", "first")], 0)).await;
+    assert!(
+        binding::load(&paths.binding(&key("m1"))).is_some(),
+        "the second ganja claimed the conversation rather than opening it locked elsewhere"
+    );
+
+    second.shutdown().await;
+}
+
+/// The other claim nothing released (RR-2): `route` claims before it asks for
+/// a reason word, and a conversation refused twice in a row spawns nothing —
+/// so the claim was held with no entry, and another ganja on it was told
+/// `locked-elsewhere`, read no binding, and spent two refusals of its own
+/// where reading the streak would have spent none.
+#[tokio::test]
+async fn a_conversation_refused_twice_is_left_for_another_ganja_to_read_the_streak_of() {
+    let home = temp();
+    let paths = Paths::under(home.path());
+    binding::store(
+        &paths.binding(&key("m1")),
+        &binding::Binding {
+            refused: true,
+            refused_streak: binding::REFUSED_STREAK_BOUND,
+            ..binding::Binding::default()
+        },
+    )
+    .expect("the refused binding is planted");
+    let cli = FakeCli::new(says(&["never said"]));
+    let provider = wired(&cli, home.path());
+
+    let events = turn(&provider, request(vec![user("m1", "again")], 0)).await;
+    assert!(
+        failure(&events).is_some_and(|failed| failed.contains("refused twice")),
+        "the bound refused the turn locally: {events:?}"
+    );
+    assert_eq!(cli.count(), 0, "and spawned nothing");
+
+    // `flock` treats two descriptors on one file independently even inside one
+    // process, so this really is the question another ganja would be asking.
+    assert!(
+        binding::Lock::claim(&paths.lock(&key("m1"))).is_ok(),
+        "a conversation this ganja will not spend on is not one it holds"
+    );
+    assert!(provider.held.locks.lock().expect("the lock table").is_empty());
+}
+
 /// And the claim is a claim: a conversation whose lock is held elsewhere is
 /// one this wire reads no binding for and opens a fresh record on.
 #[tokio::test]

@@ -349,6 +349,26 @@ impl HeldProcesses {
         }
     }
 
+    /// Lets `key`'s lock go, unless an entry holds the conversation it guards.
+    ///
+    /// The other half of [`Self::claim_lock`], for a claim whose spawn failed
+    /// before any entry was filed: [`Self::forget`] releases a lock only
+    /// together with an entry, so such a claim was released by nothing and
+    /// every other ganja was told `locked-elsewhere` about a conversation
+    /// nobody held (RR-2). A key the table **does** hold keeps its lock —
+    /// releasing it would open a live process's conversation to a second
+    /// writer — which is why this asks the table rather than trusting the
+    /// caller. The table's lock is taken first, the order [`Self::forget`]
+    /// takes the two in.
+    pub fn release_lock(&self, key: &str) {
+        let table = self.table.lock().expect("the held table is never poisoned");
+        if table.contains_key(key) {
+            return;
+        }
+
+        self.locks.lock().expect("the lock table is never poisoned").remove(key);
+    }
+
     /// How long an entry may go without a frame.
     #[must_use]
     pub fn idle_bound(&self) -> Duration {

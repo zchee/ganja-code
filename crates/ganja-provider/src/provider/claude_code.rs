@@ -1105,6 +1105,14 @@ impl ClaudeCodeProvider {
                 .unwrap_or_default();
 
             if streak >= binding::REFUSED_STREAK_BOUND {
+                // Nothing spawns, so nothing is ever filed under the claim
+                // `route` made on the way here — and `forget` releases a lock
+                // only with an entry. Held, the claim told every other ganja
+                // `locked-elsewhere`, and that arm reads no binding, so it
+                // spent its own two refusals on the account; released, it
+                // reads this streak and spends none (RR-2).
+                self.held.release_lock(key);
+
                 tracing::info!(
                     provider = ID,
                     key,
@@ -1168,6 +1176,13 @@ impl ClaudeCodeProvider {
             }
         }
 
+        // The claim above is released by `forget`, and `forget` only ever runs
+        // for an entry — so each of the three steps that can fail before one
+        // is filed lets the claim go on its own way out, or the conversation
+        // stays locked against every other ganja for this process's life
+        // (RR-2). The table's door releases only a key it holds no entry for.
+        let release = |_: &ProviderError| self.held.release_lock(key);
+
         let at = turn_start(&request);
         let session_id = crate::protocol::uuidv7();
         let effort = effort_of(&request);
@@ -1175,12 +1190,16 @@ impl ClaudeCodeProvider {
             session_id: session_id.clone(),
             model: request.model.clone(),
             effort: effort.clone(),
-        })?;
+        })
+        .inspect_err(release)?;
 
         let cwd = self.paths.cwd(key);
-        prepare(&self.paths, &cwd)?;
+        prepare(&self.paths, &cwd).inspect_err(release)?;
 
-        let io = self.spawner.spawn(&self.bin, &argv, &argv::ChildEnv { cwd: cwd.clone() })?;
+        let io = self
+            .spawner
+            .spawn(&self.bin, &argv, &argv::ChildEnv { cwd: cwd.clone() })
+            .inspect_err(release)?;
         let (input, inputs) = tokio::sync::mpsc::channel(4);
         let (events, stream) = channel();
 
