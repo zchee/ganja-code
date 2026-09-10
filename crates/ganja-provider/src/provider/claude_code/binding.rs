@@ -38,9 +38,8 @@
 //! removed**: unlinking one is how a lock file stops working, since the
 //! remover and a holder are then no longer locking the same inode.
 
-use std::fs;
-use std::io;
 use std::path::{Path, PathBuf};
+use std::{fs, io};
 
 use serde::{Deserialize, Serialize};
 
@@ -135,6 +134,45 @@ impl Paths {
     #[must_use]
     pub fn one_shot_cwd(&self) -> PathBuf {
         self.root.join("cwd").join("one-shot")
+    }
+
+    /// `mkdir -p` at `0700` for `directory` **and for every directory of this
+    /// tree above it**.
+    ///
+    /// Sealing the leaf alone left the intermediates at the process umask —
+    /// `0755` under the usual `022` — so whether `claude-code/`, the directory
+    /// holding every binding, was private before the first binding landed
+    /// depended on which caller happened to run first: a one-shot reaches only
+    /// its own scratch leaf and would have left the tree above it readable
+    /// until a conversation's binding write sealed it (CC-9). Each component
+    /// is made and sealed on the way **down**, so a directory this wire owns
+    /// is at the umask for no longer than the moment between its own `mkdir`
+    /// and its own `chmod`.
+    ///
+    /// The data home itself is not this wire's to seal: `<data home>/ganja` is
+    /// shared with everything else ganja keeps there.
+    ///
+    /// # Errors
+    ///
+    /// Returns the reason a component could not be made or sealed, or
+    /// [`io::ErrorKind::InvalidInput`] for a directory outside this tree —
+    /// which is a caller bug rather than a filesystem one.
+    pub fn create_private(&self, directory: &Path) -> io::Result<()> {
+        let under = directory.strip_prefix(&self.root).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} is not inside {}", directory.display(), self.root.display()),
+            )
+        })?;
+
+        let mut at = self.root.clone();
+        create_private(&at)?;
+        for component in under.components() {
+            at.push(component);
+            create_private(&at)?;
+        }
+
+        Ok(())
     }
 }
 

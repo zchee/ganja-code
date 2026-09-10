@@ -55,6 +55,56 @@ pub const MID_TURN_RESUME: &str = "[the tool calls above have been answered; con
 /// as injection and declines (M19 (b)).
 pub const MID_TURN_HEADER: &str = "[User, while the tool ran]";
 
+/// Every line marker this module's grammar gives a meaning to.
+///
+/// Declared beside the three constants because the set and its escaping are
+/// one rule: this render flattens a structured transcript into text, so the
+/// model's only cue for *who said this* is the marker at the head of a line —
+/// and a line of **content** that begins with one would be read as a turn
+/// somebody took. Content reaching a `[Tool Result]` is routinely not the
+/// operator's: a fetched page, a file from a cloned repository, an MCP
+/// server's answer. So a marker is not merely rendered here, it is also the
+/// one thing rendered text may not spell, and [`neutralize`] is what enforces
+/// that. A marker added above belongs in this list in the same commit.
+const MARKERS: &[&str] = &[
+    HEADER,
+    MID_TURN_RESUME,
+    MID_TURN_HEADER,
+    "[User]",
+    "[Assistant]",
+    "[Tool Call]",
+    "[Tool Result]",
+    "[Tool Result (error)]",
+];
+
+/// What an escaped marker line opens with.
+///
+/// A backslash: the conventional "this bracket is literal", visible to the
+/// reader rather than hidden, and a byte no marker carries — so an escaped
+/// line cannot itself be escaped into a marker.
+const ESCAPE: char = '\\';
+
+/// Rendered content that cannot spell one of [`MARKERS`].
+///
+/// Only a line that *begins* with a marker is touched, and it is touched by
+/// one character. Every other byte of a rendering is what the recording
+/// measured being served, so a blanket re-indent would change all of it to fix
+/// a line in a thousand — and this wire's renderings are the one thing about
+/// it a live safeguard has already ruled on.
+fn neutralize(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    // `split_inclusive` rather than `lines`, which would eat a `\r` and hand
+    // the model back content it was not given.
+    for line in text.split_inclusive('\n') {
+        if MARKERS.iter().any(|marker| line.starts_with(marker)) {
+            escaped.push(ESCAPE);
+        }
+        escaped.push_str(line);
+    }
+
+    escaped
+}
+
 /// What one rendering produced.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Rendered {
@@ -122,7 +172,7 @@ pub fn render_turn(turn: &[Message]) -> Rendered {
 /// is an ordinary user message.
 #[must_use]
 pub fn carried(message: &Message) -> String {
-    format!("{MID_TURN_HEADER} {}", message_text(message))
+    format!("{MID_TURN_HEADER} {}", neutralize(&message_text(message)))
 }
 
 /// The three line kinds, with no header and no closing line.
@@ -142,7 +192,7 @@ fn lines(messages: &[Message]) -> Rendered {
         } else {
             let text = message_text(message);
             if !text.trim().is_empty() {
-                paragraphs.push(format!("[User] {text}"));
+                paragraphs.push(format!("[User] {}", neutralize(&text)));
                 user_ids.push(message.id.as_str().to_owned());
             }
         }
@@ -171,11 +221,14 @@ fn tool_lines(tool: &str, state: &ToolState) -> Vec<String> {
     };
 
     match state {
+        // A result and an error are the two blocks whose content the operator
+        // did not write, so both go through `neutralize` before the marker
+        // above them means anything.
         ToolState::Completed { input, output, .. } => {
-            vec![call(input), format!("[Tool Result]\n{output}")]
+            vec![call(input), format!("[Tool Result]\n{}", neutralize(output))]
         }
         ToolState::Error { input, error, .. } => {
-            vec![call(input), format!("[Tool Result (error)]\n{error}")]
+            vec![call(input), format!("[Tool Result (error)]\n{}", neutralize(error))]
         }
         ToolState::Pending { .. } | ToolState::Running { .. } => Vec::new(),
     }

@@ -66,14 +66,13 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use tokio::sync::mpsc;
 // **Tokio's clock, not the standard library's.** The idle, stranded and
 // silence bounds are all measured against it, and a test that drives the
 // runtime's clock (`start_paused`) must move them: a `std::time::Instant`
 // would keep advancing in real time under a paused runtime, so an hour-long
 // bound would take an hour to prove.
 use tokio::time::Instant;
-
-use tokio::sync::mpsc;
 
 use super::bridge::Pending;
 use crate::provider::ProviderEvent;
@@ -298,6 +297,14 @@ pub struct Held {
 /// replaces.
 pub struct HeldProcesses {
     table: Mutex<HashMap<Key, Held>>,
+    /// One `flock` per conversation this ganja owns.
+    ///
+    /// Beside the table rather than on the provider, and that is the whole
+    /// point: a lock is held for as long as the conversation is, and
+    /// [`Self::forget`] is the one place a conversation stops being held — so
+    /// the release sits where the removal already is and a lock cannot outlive
+    /// the entry it guards (CC-8).
+    locks: Mutex<HashMap<Key, super::binding::Lock>>,
     dropped: Mutex<VecDeque<(Key, Reason)>>,
     recovered: Mutex<VecDeque<(Key, String)>>,
     idle_bound: Duration,
@@ -309,9 +316,36 @@ impl HeldProcesses {
     pub fn new(idle_bound: Duration) -> Self {
         Self {
             table: Mutex::new(HashMap::new()),
+            locks: Mutex::new(HashMap::new()),
             dropped: Mutex::new(VecDeque::with_capacity(DROPPED)),
             recovered: Mutex::new(VecDeque::with_capacity(RECOVERED)),
             idle_bound,
+        }
+    }
+
+    /// Whether this ganja holds `key`'s conversation, claiming the lock at
+    /// `path` if nobody does.
+    ///
+    /// Idempotent: a key already claimed answers `true` without touching the
+    /// filesystem. `false` means another ganja holds it, and the caller reads
+    /// no binding and writes none.
+    pub fn claim_lock(&self, key: &str, path: &std::path::Path) -> bool {
+        let mut locks = self.locks.lock().expect("the lock table is never poisoned");
+        if locks.contains_key(key) {
+            return true;
+        }
+
+        match super::binding::Lock::claim(path) {
+            Ok(lock) => {
+                locks.insert(key.to_owned(), lock);
+
+                true
+            }
+            Err(error) => {
+                tracing::debug!(provider = super::ID, key, %error, "the binding is locked elsewhere");
+
+                false
+            }
         }
     }
 
@@ -376,6 +410,12 @@ impl HeldProcesses {
     /// once, so `held_entries` never counts a process that is gone.
     pub fn forget(&self, key: &str, reason: Reason) -> Option<Held> {
         let held = self.table.lock().expect("the held table is never poisoned").remove(key)?;
+        // The lock goes with the entry (CC-8). A conversation this process no
+        // longer holds is one another ganja may take, and the next fresh
+        // record on this key claims again through
+        // [`Self::claim_lock`] — which is why the release is safe here and
+        // would not be in a caller that only sometimes runs.
+        self.locks.lock().expect("the lock table is never poisoned").remove(key);
         self.push_dropped(key.to_owned(), reason);
 
         tracing::info!(
@@ -625,6 +665,10 @@ struct Turn {
     /// What each answered ask's `tools/call` is to be answered with.
     outcomes: HashMap<String, super::rpc::CallToolResult>,
     /// Asks answered `deny`, whose `tools/call` the CLI will never send.
+    ///
+    /// Read by [`call_arrived`], which is what makes that a rule rather than a
+    /// prediction: a call for an id in here is refused from this side and
+    /// never surfaced to the engine as a fresh ask.
     denied: std::collections::HashSet<String>,
     /// Whether `system/init` has been seen at all on this process.
     seen_init: bool,
@@ -659,7 +703,7 @@ pub async fn run(
     wiring: Wiring,
     idle_bound: Duration,
 ) {
-    use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+    use tokio::io::AsyncWriteExt as _;
 
     let super::process::ChildIo { mut stdin, stdout, stderr, exit, kill } = io;
 
@@ -670,8 +714,14 @@ pub async fn run(
     if let Some(stderr) = stderr {
         let said = Arc::clone(&said);
         tokio::spawn(async move {
-            let mut lines = tokio::io::BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
+            let mut lines = super::frame::Lines::new(tokio::io::BufReader::new(stderr));
+            while let Ok(Some(line)) = lines.next().await {
+                // Bounded for stdout's reason: these bytes are the peer's too,
+                // and this one is logged verbatim (CC-12).
+                let super::frame::Line::Read(line) = line else {
+                    continue;
+                };
+
                 tracing::debug!(target: "ganja_provider::claude_code::stderr", %line);
                 let mut said = said.lock().expect("the stderr buffer is never poisoned");
                 if said.len() < 16 {
@@ -688,7 +738,7 @@ pub async fn run(
         let _ = exited_tx.send(exit.await).await;
     });
 
-    let mut lines = tokio::io::BufReader::new(stdout).lines();
+    let mut lines = super::frame::Lines::new(tokio::io::BufReader::new(stdout));
     let mut turn = Turn::default();
     // Whether anybody can still send this task work. A one-shot's caller
     // drops its sender the moment it hands the stream back, and the turn it
@@ -709,9 +759,10 @@ pub async fn run(
         tokio::select! {
             input = inputs.recv(), if inputs_open => match input {
                 Some(Input::Turn { frame, sent, events }) => {
+                    drop_previous_turn(&mut turn);
                     open_turn(&wiring, &mut turn, events);
                     if let Err(error) = stdin.write_all(frame.as_bytes()).await {
-                        fail(&mut turn, format!("could not write the turn: {error}"));
+                        fail(&wiring, &mut turn, format!("could not write the turn: {error}"));
                         continue;
                     }
                     // The write happened; only now does the record of it.
@@ -730,13 +781,29 @@ pub async fn run(
                 Some(Input::Close) => break,
                 None => inputs_open = false,
             },
-            line = lines.next_line() => match line {
-                Ok(Some(line)) => {
+            // Cancel-safe, which is what a `select!` branch has to be: the
+            // partial line lives in `lines`, never in this future.
+            line = lines.next() => match line {
+                Ok(Some(super::frame::Line::Read(line))) => {
                     touch(&wiring);
                     if let Some(reason) = handle(&wiring, &mut turn, &mut stdin, &line).await {
                         evict(&wiring, reason);
                         break;
                     }
+                }
+                // A frame past the bound is skipped by length, the way one
+                // that will not parse is skipped by reason (CC-12). The turn
+                // is not failed: the watchdog is what answers a process whose
+                // frames stopped arriving.
+                Ok(Some(super::frame::Line::TooLong(bytes))) => {
+                    touch(&wiring);
+                    tracing::debug!(
+                        provider = super::ID,
+                        key = %wiring.key,
+                        bytes,
+                        bound = super::frame::MAX_LINE,
+                        "skipped a frame past the line bound"
+                    );
                 }
                 // The child closed its stdout: it is on its way out, and the
                 // exit arm below says with what.
@@ -747,7 +814,7 @@ pub async fn run(
                     break;
                 }
                 Err(error) => {
-                    fail(&mut turn, format!("could not read the CLI: {error}"));
+                    fail(&wiring, &mut turn, format!("could not read the CLI: {error}"));
                     break;
                 }
             },
@@ -761,7 +828,7 @@ pub async fn run(
                 let (_, which) = next.expect("the guard proved it is Some");
                 match which {
                     Deadline::Silence => {
-                        fail(&mut turn, format!(
+                        fail(&wiring, &mut turn, format!(
                             "no frame for {}s from the claude CLI",
                             SILENCE_BOUND.as_secs()
                         ));
@@ -796,7 +863,6 @@ pub async fn run(
     // The only orderly exit is EOF, and dropping stdin is EOF. The two
     // signals are bounds on a child that ignored it, never the way out.
     drop(stdin);
-    let mut kill = Some(kill);
     for (wait, signal) in [
         (Duration::from_secs(5), super::process::Signal::Term),
         (Duration::from_secs(5), super::process::Signal::Kill),
@@ -810,9 +876,12 @@ pub async fn run(
                     signal = ?signal,
                     "the CLI did not take EOF"
                 );
-                if let Some(kill) = kill.take() {
-                    kill(signal);
-                }
+                // Both bounds, and neither consumes the sender: this loop used
+                // to `take()` a `FnOnce`, so the second iteration found `None`
+                // and `SIGKILL` was never sent to any child (CC-3). A signal
+                // to a child that has already exited is `ESRCH`, and the arm
+                // is reached only when `exited.recv()` timed out anyway.
+                kill(signal);
             }
         }
     }
@@ -858,6 +927,24 @@ fn touch(wiring: &Wiring) {
     wiring.meta.lock().expect("an entry's meta is never poisoned").last_frame_at = Instant::now();
 }
 
+/// Drops what the turn before this one left behind.
+///
+/// The three maps [`open_turn`] cannot clear, because it runs on a **resolve**
+/// too and a resolve continues the CLI turn that parked the asks — its
+/// outcomes, its minted ids and its denials are that same turn's, and clearing
+/// them there would lose an outcome whose `tools/call` had not yet arrived. So
+/// the reset is here, on the one arm that is a new turn (CC-6).
+///
+/// What it is worth: `outcomes` holds a whole `CallToolResult` — a tool's
+/// output, up to `truncate::MAX_CHARS` — and an allowed ask whose `tools/call`
+/// never arrived left one resident for the life of a held process, which under
+/// posture C is the life of the conversation.
+fn drop_previous_turn(turn: &mut Turn) {
+    turn.outcomes.clear();
+    turn.minted.clear();
+    turn.denied.clear();
+}
+
 /// Starts a turn on `events`.
 fn open_turn(wiring: &Wiring, turn: &mut Turn, events: mpsc::Sender<ProviderEvent>) {
     turn.events = Some(events);
@@ -890,9 +977,16 @@ fn emit(turn: &Turn, event: ProviderEvent) {
 }
 
 /// Fails the running turn, terminally.
-fn fail(turn: &mut Turn, message: String) {
+///
+/// Through [`close_turn`], because a failed turn is an **ended** turn: `busy`
+/// says a turn is running, and the table's own two views of idleness —
+/// [`HeldProcesses::idle`] and [`HeldProcesses::evictable`] — both filter on
+/// it. A failure that cleared the stream and left the flag set made the entry
+/// invisible to the idle sweep and to the cap forever, so enough of them and
+/// the stated cap on authenticated runtimes stopped holding (CC-5).
+fn fail(wiring: &Wiring, turn: &mut Turn, message: String) {
     emit(turn, ProviderEvent::Failed(crate::provider::ProviderError::Transport(message)));
-    turn.events = None;
+    close_turn(wiring, turn);
 }
 
 /// Records what `sent` became, in memory and on disk.
@@ -1356,6 +1450,22 @@ async fn call_arrived(
             .map(|pending| pending.tool_use_id.clone()),
     };
 
+    // **A denied call is never called**, and this is where that is enforced
+    // rather than trusted (CC-2). The permission answer already told the CLI
+    // the call may not run, and its own contract is that it then sends no
+    // `tools/call` — but this module's doc says the peer moves every release,
+    // which is the reason no frame struct here uses `deny_unknown_fields`, and
+    // the same reasoning applies to a contract. Answered from what this side
+    // recorded, the call reaches neither the engine's permission ladder nor
+    // `meta.pending`; the id stays in the set, so a second one is refused too.
+    if let Some(id) = &matched
+        && turn.denied.contains(id)
+    {
+        refuse_call(turn, stdin, request_id, &call.id, DENIED_CALL).await;
+
+        return;
+    }
+
     if let Some(id) = &matched
         && let Some(result) = turn.outcomes.remove(id)
     {
@@ -1394,6 +1504,25 @@ async fn call_arrived(
     // 1 ms first on all three tool-calling runs — and the arm is here so the
     // design absorbs either order rather than assuming one.
     let name = super::bridge::registry_name(&call.name);
+
+    // It is also the one arm where a name this turn never advertised could
+    // reach the engine as a call, since the primary path only ever answers an
+    // ask this side surfaced. Refused here for the deny arm's reason: what may
+    // run is decided by the roster this side declared, never by the name a
+    // call arrives under.
+    if !wiring.tools.iter().any(|tool| tool.name == name) {
+        refuse_call(
+            turn,
+            stdin,
+            request_id,
+            &call.id,
+            &format!("this turn declared no tool named `{name}`"),
+        )
+        .await;
+
+        return;
+    }
+
     let tool_use_id = call.tool_use_id.clone().unwrap_or_else(|| request_id.to_owned());
     let input = serde_json::json!({});
     surface(turn, &tool_use_id, &name, &input);
@@ -1410,6 +1539,42 @@ async fn call_arrived(
     );
 
     step_ends(wiring, turn);
+}
+
+/// What a `tools/call` for an ask already answered `deny` is answered with.
+///
+/// Terse on purpose: the refusal the person's dialog produced already reached
+/// the model as the `can_use_tool`'s own `deny.message`, and this line only
+/// has to say that the call did not happen either.
+const DENIED_CALL: &str = "this call was refused and did not run";
+
+/// Answers one `tools/call` from this side alone: a failed result, no ask, no
+/// entry in `meta.pending`, nothing for the engine to see.
+///
+/// The failure travels as the tool's own `CallToolResult{is_error: true}`
+/// rather than as a JSON-RPC error, which is the shape the bridge's own
+/// ran-and-failed arm uses and the one the model reads as a tool's answer.
+async fn refuse_call(
+    turn: &mut Turn,
+    stdin: &mut Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
+    request_id: &str,
+    rpc_id: &serde_json::Value,
+    said: &str,
+) {
+    let result = super::rpc::CallToolResult {
+        content: vec![super::rpc::Content::text(said)],
+        is_error: true,
+    };
+
+    answered(turn, request_id);
+    write(
+        stdin,
+        &super::frame::control_response_line(
+            request_id,
+            &super::rpc::wrapped(super::rpc::reply(rpc_id, &result)),
+        ),
+    )
+    .await;
 }
 
 /// Answers every parked ask this resolve carries.

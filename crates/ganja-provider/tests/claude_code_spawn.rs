@@ -123,7 +123,7 @@ async fn checks() {
             check_env(home.path(), &side).await,
         ),
         ("(d) EOF ends the child, and no signal is sent", check_eof(home.path(), &side).await),
-        ("(e) a relative binary is refused by name", check_relative()),
+        ("(e) a relative binary is refused by name", check_relative().await),
         ("(f) a dropped ChildIo is EOF too", check_drop(&side).await),
         (
             "(g) a one-shot enters no table and writes no binding",
@@ -226,7 +226,8 @@ async fn check_argv() -> Result<(), String> {
         session_id: "01998a00-0000-7000-8000-00000000000a".to_owned(),
         model: DEFAULT_MODEL.to_owned(),
         effort: None,
-    });
+    })
+    .map_err(|error| error.to_string())?;
     let spelled: Vec<String> =
         argv.iter().map(|token| token.to_string_lossy().into_owned()).collect();
 
@@ -255,6 +256,7 @@ async fn check_verbose(side: &Path) -> Result<(), String> {
         model: DEFAULT_MODEL.to_owned(),
         effort: None,
     })
+    .map_err(|error| error.to_string())?
     .into_iter()
     .filter(|token| token != "--verbose")
     .collect();
@@ -323,8 +325,34 @@ async fn check_eof(home: &Path, side: &Path) -> Result<(), String> {
 /// On this machine a `claude` on `PATH` may be a wrapper that exports
 /// `CLAUDE_CODE_COORDINATOR_MODE=1`, so a wire that searched would be driving
 /// something other than the CLI.
-fn check_relative() -> Result<(), String> {
-    ensure(!PathBuf::from("relative/path/claude").is_absolute(), "the shape the resolver refuses")
+///
+/// Driven through the **public door** rather than through `std::path`: an
+/// assertion that `"relative/path/claude"` is not absolute is true whatever
+/// this wire does, so it would have gone on passing had the refusal been
+/// deleted (verify §(h) 1). What the guard is worth is that `from_env`
+/// refuses, and says which variable and why — so that is what is asserted,
+/// under the same `EnvGuard` (i) and (i′) already rely on.
+async fn check_relative() -> Result<(), String> {
+    let relative = PathBuf::from("relative/path/claude");
+    ensure(!relative.is_absolute(), "the test's own premise")?;
+    // Set, so a wire that searched `PATH` would find *something* and the
+    // refusal below could not be a coincidence of an empty variable.
+    let _bin = EnvGuard::set("GANJA_CLAUDE_BIN", &relative.display().to_string());
+
+    let refused = match ClaudeCodeProvider::from_env().await {
+        Ok(built) => return Err(format!("a relative binary was accepted: {built:?}")),
+        Err(error) => error.to_string(),
+    };
+
+    ensure(refused.contains("GANJA_CLAUDE_BIN"), format!("the variable is not named: {refused}"))?;
+    ensure(
+        refused.contains("relative/path/claude"),
+        format!("what it named is not quoted back: {refused}"),
+    )?;
+    ensure(
+        refused.contains("absolute") && refused.contains("PATH"),
+        format!("the reason is not given: {refused}"),
+    )
 }
 
 // -------------------------------------------------------------------- (f)
@@ -338,7 +366,8 @@ async fn check_drop(side: &Path) -> Result<(), String> {
         session_id: "01998a00-0000-7000-8000-00000000000f".to_owned(),
         model: DEFAULT_MODEL.to_owned(),
         effort: None,
-    });
+    })
+    .map_err(|error| error.to_string())?;
 
     let io = Real
         .spawn(&as_cli(), &argv, &ChildEnv { cwd: std::env::temp_dir() })

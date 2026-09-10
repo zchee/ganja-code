@@ -489,3 +489,78 @@ fn the_run_re_emits_system_init_at_the_head_of_every_turn() {
     assert!(inits.len() >= 2, "run 1 took three turns: {}", inits.len());
     assert_eq!(inits[0], inits[1], "the wire reads the same three fields from each");
 }
+
+// ------------------------------------------------------- bounded reading
+
+/// An error is a thing that gets logged and carried around, and a frame this
+/// side cannot read may be megabytes of somebody else's output — so the error
+/// describes the line rather than embedding it (CC-12).
+#[test]
+fn a_decode_failure_names_the_lines_length_and_its_first_bytes_and_not_the_line() {
+    let line = format!("not json {}", "x".repeat(100_000));
+
+    let refused = super::decode(&line).expect_err("that is not a frame");
+
+    assert!(refused.contains("100009 bytes"), "the length is not named: {refused}");
+    assert!(refused.contains("not json xxx"), "nothing of it is quoted: {refused}");
+    assert!(refused.len() < 400, "the whole line came along: {} bytes", refused.len());
+}
+
+/// The quote is cut by **characters**, so a multi-byte line does not panic on
+/// a byte boundary.
+#[test]
+fn the_quote_of_an_unreadable_line_cuts_on_a_character_boundary() {
+    let line = "あ".repeat(1_000);
+
+    let refused = super::decode(&line).expect_err("that is not a frame");
+
+    assert!(refused.contains('…'), "the cut is admitted: {refused}");
+}
+
+/// `lines()` allocates whatever one line contains, and these bytes are the
+/// peer's: a frame that never ended would be read into memory until the
+/// machine gave out (CC-12).
+#[tokio::test]
+async fn a_line_past_the_bound_is_reported_by_length_and_the_next_line_still_reads() {
+    // A bound this test can reach: the shipped one is 16 MiB, and what is
+    // being proved is the arithmetic rather than the number.
+    let over = "x".repeat(super::MAX_LINE + 10);
+    let feed = format!("{over}\n{{\"type\":\"system\",\"subtype\":\"init\"}}\n");
+    let mut lines = super::Lines::new(std::io::Cursor::new(feed.into_bytes()));
+
+    assert_eq!(
+        lines.next().await.expect("a read"),
+        Some(super::Line::TooLong(super::MAX_LINE + 10)),
+        "the whole length is reported, not what was kept"
+    );
+    assert!(
+        matches!(lines.next().await.expect("a read"), Some(super::Line::Read(line)) if line.contains("init")),
+        "and the frame after it is read normally"
+    );
+    assert_eq!(lines.next().await.expect("a read"), None, "then EOF");
+}
+
+/// A child that dies mid-frame has still said what it said.
+#[tokio::test]
+async fn a_last_line_with_no_newline_is_still_a_line() {
+    let mut lines = super::Lines::new(std::io::Cursor::new(b"{\"type\":\"result\"}".to_vec()));
+
+    assert_eq!(
+        lines.next().await.expect("a read"),
+        Some(super::Line::Read("{\"type\":\"result\"}".to_owned()))
+    );
+    assert_eq!(lines.next().await.expect("a read"), None);
+}
+
+/// Two frames in one buffer, and an empty line between them: the reader is
+/// the frame boundary, so it has to agree with `lines()` on the ordinary
+/// cases it replaced.
+#[tokio::test]
+async fn the_bounded_reader_splits_where_the_newlines_are() {
+    let mut lines = super::Lines::new(std::io::Cursor::new(b"one\n\ntwo\n".to_vec()));
+
+    assert_eq!(lines.next().await.expect("a read"), Some(super::Line::Read("one".to_owned())));
+    assert_eq!(lines.next().await.expect("a read"), Some(super::Line::Read(String::new())));
+    assert_eq!(lines.next().await.expect("a read"), Some(super::Line::Read("two".to_owned())));
+    assert_eq!(lines.next().await.expect("a read"), None);
+}

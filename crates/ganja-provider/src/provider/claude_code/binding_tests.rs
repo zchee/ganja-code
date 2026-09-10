@@ -166,3 +166,44 @@ fn a_binding_one_write_behind_leaves_the_last_message_owed_rather_than_lost() {
         "so the next request finds m2 owed and writes it again — a duplicate, never a loss"
     );
 }
+
+/// Sealing the leaf alone left the tree above it at the process umask, so
+/// whether `claude-code/` — the directory holding every binding — was private
+/// before the first binding landed depended on which caller ran first: a
+/// one-shot reaches only its own scratch leaf (CC-9).
+#[cfg(unix)]
+#[test]
+fn every_directory_this_wire_makes_is_owner_only_including_the_intermediates() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let home = temp();
+    let paths = paths(home.path());
+    let cwd = paths.cwd("k");
+
+    // The one-shot's own path first, which is what a title spawns before any
+    // binding is ever written.
+    paths.create_private(&paths.one_shot_cwd()).expect("the scratch tree is made");
+    paths.create_private(&cwd).expect("the scratch tree is made");
+
+    let root = home.path().join("ganja").join("claude-code");
+    for directory in [&root, &root.join("cwd"), &cwd, &paths.one_shot_cwd()] {
+        let mode = std::fs::metadata(directory)
+            .unwrap_or_else(|error| panic!("{}: {error}", directory.display()))
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700, "{} is not owner-only", directory.display());
+    }
+}
+
+/// A directory outside this tree is a caller bug, and the refusal says so
+/// rather than sealing whatever it was handed.
+#[test]
+fn a_directory_outside_the_tree_is_refused_rather_than_created() {
+    let home = temp();
+    let elsewhere = home.path().join("not-ours");
+
+    let refused = paths(home.path()).create_private(&elsewhere).expect_err("outside the tree");
+
+    assert_eq!(refused.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(!elsewhere.exists(), "and nothing was made");
+}

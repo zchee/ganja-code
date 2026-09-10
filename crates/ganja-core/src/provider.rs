@@ -18,16 +18,16 @@ use std::env::{self, VarError};
 use std::fmt;
 use std::sync::Arc;
 
-// The facade, and the only import this half needs of the other: a glob rather
-// than a list because the promise is that every path a caller already writes
-// still resolves, and a list is a promise that decays the next time a wire
-// grows a type.
-pub use ganja_provider::provider::*;
 // Beside the glob, and named rather than globbed because it is not part of
 // `provider`: `effort` sits at that crate's root, and exactly one door of it
 // is read here — [`effort::standalone`], the roster an uncataloged wire owns
 // outright (**D556**, Dv-16).
 pub use ganja_provider::effort;
+// The facade, and the only import this half needs of the other: a glob rather
+// than a list because the promise is that every path a caller already writes
+// still resolves, and a list is a promise that decays the next time a wire
+// grows a type.
+pub use ganja_provider::provider::*;
 
 use crate::config::{Config, ProviderConfig, model_bound_to, split_model};
 use crate::{auth, catalog};

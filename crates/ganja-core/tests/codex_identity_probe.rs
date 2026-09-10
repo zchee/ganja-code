@@ -125,7 +125,8 @@ use std::sync::{Arc, Mutex};
 use std::{env, fmt, fs};
 
 use futures::StreamExt as _;
-use ganja_core::auth::{self, openai::Login};
+use ganja_core::auth::openai::Login;
+use ganja_core::auth::{self};
 use ganja_core::protocol::{Message, Usage};
 use ganja_core::provider::{
     self, ChatRequest, Provider, ProviderError, ProviderEvent, ResponsesProvider, responses,

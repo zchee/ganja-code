@@ -820,3 +820,246 @@ async fn a_one_shots_scratch_directory_is_shared_and_survives() {
     assert_eq!(std::path::Path::new(&cli.record(0).cwd), one_shot);
     assert!(one_shot.exists(), "left, empty, for the next one-shot");
 }
+
+// ---------------------------------------- what a turn leaves behind, and to whom
+
+/// One `Wiring` with nothing behind it: no table, no binding, no scratch
+/// directory — enough for the arms that only read `meta` and `tools`.
+fn wiring(tools: Vec<crate::tool::ToolDefinition>) -> super::Wiring {
+    super::Wiring {
+        key: "k".to_owned(),
+        meta: std::sync::Arc::new(std::sync::Mutex::new(super::Meta::opening(
+            "01998a00-0000-7000-8000-00000000000a".to_owned(),
+            "default".to_owned(),
+            None,
+            0,
+            0,
+        ))),
+        table: std::sync::Weak::new(),
+        slots: super::Slots::default(),
+        binding: None,
+        cwd: None,
+        tools,
+        requested_model: "default".to_owned(),
+        version: "0.0.0".to_owned(),
+        opening: String::new(),
+        one_shot: false,
+    }
+}
+
+/// Everything one `tools/call` produced: what went to the CLI, and what the
+/// engine was asked to do about it.
+async fn call_answered(
+    wiring: &super::Wiring,
+    turn: &mut super::Turn,
+    call: super::super::rpc::ToolCall,
+) -> (serde_json::Value, Vec<crate::provider::ProviderEvent>) {
+    use tokio::io::AsyncReadExt as _;
+
+    let (events, mut streamed) = tokio::sync::mpsc::channel(16);
+    turn.events = Some(events);
+
+    let (to_cli, mut from_wire) = tokio::io::duplex(64 * 1024);
+    let mut stdin: Box<dyn tokio::io::AsyncWrite + Send + Unpin> = Box::new(to_cli);
+    super::call_arrived(wiring, turn, &mut stdin, "req-1", call).await;
+    drop(stdin);
+
+    let mut written = String::new();
+    from_wire.read_to_string(&mut written).await.expect("what the wire wrote");
+
+    let mut surfaced = Vec::new();
+    while let Ok(event) = streamed.try_recv() {
+        surfaced.push(event);
+    }
+
+    (serde_json::from_str(written.trim()).expect("a control_response line"), surfaced)
+}
+
+fn a_call(name: &str, tool_use_id: &str) -> super::super::rpc::ToolCall {
+    super::super::rpc::ToolCall {
+        id: serde_json::json!(1),
+        name: name.to_owned(),
+        tool_use_id: Some(tool_use_id.to_owned()),
+    }
+}
+
+/// `turn.denied` was written and read nowhere, so a `tools/call` for an ask
+/// the person had just refused fell through to the secondary path and reached
+/// the engine as a **brand-new** tool call with fabricated arguments — where
+/// an allow rule or a stored "always" answer would have run it with no dialog
+/// at all (CC-2).
+#[tokio::test]
+async fn a_call_for_an_ask_already_denied_is_answered_as_denied_and_never_reaches_the_engine() {
+    let wiring = wiring(super::super::tests::roster());
+    let mut turn = super::Turn::default();
+    turn.denied.insert("toolu_1".to_owned());
+
+    let (answer, surfaced) = call_answered(&wiring, &mut turn, a_call("read", "toolu_1")).await;
+
+    let result = &answer["response"]["response"]["mcp_response"]["result"];
+    assert_eq!(result["isError"], serde_json::json!(true), "answered as a refusal: {answer}");
+    assert!(
+        result["content"][0]["text"].as_str().unwrap_or_default().contains("refused"),
+        "and says so: {answer}"
+    );
+    assert!(surfaced.is_empty(), "the engine was asked nothing: {surfaced:?}");
+    assert!(
+        wiring.meta.lock().expect("meta").pending.is_empty(),
+        "and nothing was parked for a resolve to answer"
+    );
+
+    // The id stays in the set: a peer that sends the call twice is refused
+    // twice, rather than refused once and then obeyed.
+    let (again, _) = call_answered(&wiring, &mut turn, a_call("read", "toolu_1")).await;
+    assert_eq!(
+        again["response"]["response"]["mcp_response"]["result"]["isError"],
+        serde_json::json!(true)
+    );
+}
+
+/// The secondary path is the one arm where a name this turn never advertised
+/// could reach the engine as a call: the primary path only ever answers an ask
+/// this side surfaced.
+#[tokio::test]
+async fn a_call_for_a_tool_this_turn_never_declared_is_refused_by_name() {
+    let wiring = wiring(super::super::tests::roster());
+    let mut turn = super::Turn::default();
+
+    let (answer, surfaced) = call_answered(&wiring, &mut turn, a_call("rm", "toolu_9")).await;
+
+    let result = &answer["response"]["response"]["mcp_response"]["result"];
+    assert_eq!(result["isError"], serde_json::json!(true));
+    assert!(
+        result["content"][0]["text"].as_str().unwrap_or_default().contains("`rm`"),
+        "the name is quoted back: {answer}"
+    );
+    assert!(surfaced.is_empty(), "and the engine was asked nothing: {surfaced:?}");
+}
+
+/// The arm that still has to work: a declared name with no prior ask **is**
+/// the ask, and is surfaced.
+#[tokio::test]
+async fn a_call_for_a_declared_tool_with_no_prior_ask_is_still_surfaced_as_one() {
+    let wiring = wiring(super::super::tests::roster());
+    let mut turn = super::Turn { expected_calls: 1, ..super::Turn::default() };
+
+    let (events, mut streamed) = tokio::sync::mpsc::channel(16);
+    turn.events = Some(events);
+    let (to_cli, _from_wire) = tokio::io::duplex(64 * 1024);
+    let mut stdin: Box<dyn tokio::io::AsyncWrite + Send + Unpin> = Box::new(to_cli);
+    super::call_arrived(&wiring, &mut turn, &mut stdin, "req-1", a_call("read", "toolu_1")).await;
+
+    let first = streamed.try_recv().expect("an ask was surfaced");
+    assert!(matches!(
+        first,
+        crate::provider::ProviderEvent::ToolCallStart { ref name, .. } if name == "read"
+    ));
+    assert_eq!(wiring.meta.lock().expect("meta").pending.len(), 1, "and parked for the resolve");
+}
+
+/// `outcomes` holds a whole tool result, and an allowed ask whose `tools/call`
+/// never arrived left one resident for the life of a held process — which
+/// under posture C is the life of the conversation (CC-6).
+#[test]
+fn the_per_call_maps_are_dropped_by_the_next_turn_and_not_by_a_resolve() {
+    let wiring = wiring(Vec::new());
+    let mut turn = super::Turn::default();
+    turn.outcomes.insert(
+        "toolu_1".to_owned(),
+        super::super::rpc::CallToolResult {
+            content: vec![super::super::rpc::Content::text("a whole tool result")],
+            is_error: false,
+        },
+    );
+    turn.minted.insert("req-1".to_owned());
+    turn.denied.insert("toolu_2".to_owned());
+
+    // A resolve continues the CLI turn that parked the asks, so `open_turn`
+    // must keep all three — clearing them here would lose an outcome whose
+    // `tools/call` has not arrived yet.
+    let (events, _streamed) = tokio::sync::mpsc::channel(1);
+    super::open_turn(&wiring, &mut turn, events);
+    assert_eq!(turn.outcomes.len(), 1, "a resolve keeps the turn's outcomes");
+    assert_eq!(turn.minted.len(), 1);
+    assert_eq!(turn.denied.len(), 1);
+
+    // A new turn drops them.
+    super::drop_previous_turn(&mut turn);
+    assert!(turn.outcomes.is_empty(), "an unclaimed result is not resident at the next turn");
+    assert!(turn.minted.is_empty());
+    assert!(turn.denied.is_empty());
+}
+
+/// `busy` says a turn is running, and the table's two views of idleness both
+/// filter on it. A failure that cleared the stream and left the flag set made
+/// the entry invisible to the idle sweep **and to the cap**, so enough of them
+/// and the stated cap on authenticated runtimes stopped holding (CC-5).
+#[tokio::test(start_paused = true)]
+async fn an_entry_whose_turn_was_failed_by_the_watchdog_is_evictable_again() {
+    let home = temp();
+    let cli = FakeCli::new(Script { silent: true, ..Script::default() });
+    let provider = wired(&cli, home.path());
+
+    let events = turn(&provider, request(vec![user("m1", "hello")], 0)).await;
+    assert!(failure(&events).is_some(), "the silence bound failed the turn");
+
+    assert_eq!(provider.held_entries(), 1, "the process is still held");
+    assert_eq!(
+        provider.held.evictable(),
+        Some(key("m1")),
+        "and the cap may reclaim it: `busy` means a turn is running"
+    );
+
+    provider.shutdown().await;
+}
+
+/// A lock claimed and never released meant one open descriptor and one
+/// `flock` per conversation for the process's life, and a conversation this
+/// ganja had let go of that no other ganja could take (CC-8).
+#[tokio::test(start_paused = true)]
+async fn a_lock_is_released_with_its_entry_so_another_ganja_may_take_the_conversation() {
+    let home = temp();
+    let paths = Paths::under(home.path());
+    let cli = FakeCli::new(says(&["one"]));
+    let provider = wired(&cli, home.path()).with_idle_bound(Duration::from_secs(30));
+
+    turn(&provider, request(vec![user("m1", "first")], 0)).await;
+
+    // `flock` treats two descriptors on one file independently even inside one
+    // process, so this really is the question another ganja would be asking.
+    let path = paths.lock(&key("m1"));
+    assert!(binding::Lock::claim(&path).is_err(), "this ganja holds the conversation");
+
+    tokio::time::sleep(Duration::from_secs(31)).await;
+    tokio::task::yield_now().await;
+    assert_eq!(provider.held_entries(), 0, "the entry went idle");
+
+    assert!(binding::Lock::claim(&path).is_ok(), "and the lock went with it");
+
+    provider.shutdown().await;
+}
+
+/// And the claim is a claim: a conversation whose lock is held elsewhere is
+/// one this wire reads no binding for and opens a fresh record on.
+#[tokio::test]
+async fn a_conversation_locked_elsewhere_is_answered_without_reading_its_binding() {
+    let home = temp();
+    let paths = Paths::under(home.path());
+    let cli = FakeCli::new(says(&["one"]));
+    let provider = wired(&cli, home.path());
+
+    // Somebody else got there first.
+    let held = binding::Lock::claim(&paths.lock(&key("m1"))).expect("the other ganja's claim");
+
+    turn(&provider, request(vec![user("m1", "first")], 0)).await;
+
+    assert_eq!(provider.held_entries(), 1, "the turn is still taken");
+    assert_eq!(
+        binding::load(&paths.binding(&key("m1"))),
+        None,
+        "and no binding is written for a conversation this ganja does not own"
+    );
+
+    drop(held);
+    provider.shutdown().await;
+}

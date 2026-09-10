@@ -57,7 +57,7 @@ fn the_base_argv_is_twenty_one_tokens() {
 #[test]
 fn every_conversation_argv_carries_the_tokens_the_wire_cannot_work_without() {
     for spawn in conversations() {
-        let argv = spelled(&Argv::conversation(&spawn));
+        let argv = spelled(&Argv::conversation(&spawn).expect("a built argv"));
 
         for token in [
             "--verbose",
@@ -75,16 +75,24 @@ fn every_conversation_argv_carries_the_tokens_the_wire_cannot_work_without() {
 
         assert_eq!(argv.iter().filter(|token| *token == "stream-json").count(), 2);
         assert_eq!(
-            value_after(&Argv::conversation(&spawn), "--permission-prompt-tool").as_deref(),
+            value_after(
+                &Argv::conversation(&spawn).expect("a built argv"),
+                "--permission-prompt-tool"
+            )
+            .as_deref(),
             Some("stdio")
         );
         // `--tools ""` and `--setting-sources ""` are a flag and an EMPTY
         // value, not a bare flag: the empty string is what removes the CLI's
         // own tools and its settings sources, and a builder that dropped it
         // would leave the flag consuming the next token instead.
-        assert_eq!(value_after(&Argv::conversation(&spawn), "--tools").as_deref(), Some(""));
         assert_eq!(
-            value_after(&Argv::conversation(&spawn), "--setting-sources").as_deref(),
+            value_after(&Argv::conversation(&spawn).expect("a built argv"), "--tools").as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            value_after(&Argv::conversation(&spawn).expect("a built argv"), "--setting-sources")
+                .as_deref(),
             Some("")
         );
     }
@@ -93,7 +101,7 @@ fn every_conversation_argv_carries_the_tokens_the_wire_cannot_work_without() {
 #[test]
 fn every_one_shot_argv_carries_the_same_tokens() {
     for one_shot in one_shots() {
-        let argv = spelled(&Argv::one_shot(&one_shot));
+        let argv = spelled(&Argv::one_shot(&one_shot).expect("a built argv"));
 
         for token in [
             "--verbose",
@@ -113,7 +121,7 @@ fn every_one_shot_argv_carries_the_same_tokens() {
 #[test]
 fn a_conversation_argv_is_disjoint_from_the_whole_conversation_never_list() {
     for spawn in conversations() {
-        let argv = Argv::conversation(&spawn);
+        let argv = Argv::conversation(&spawn).expect("a built argv");
 
         assert_eq!(forbidden(&argv, NEVER_ON_CONVERSATION), None, "{:?}", spelled(&argv));
     }
@@ -122,7 +130,7 @@ fn a_conversation_argv_is_disjoint_from_the_whole_conversation_never_list() {
 #[test]
 fn a_one_shot_argv_is_disjoint_from_the_wide_never_list() {
     for one_shot in one_shots() {
-        let argv = Argv::one_shot(&one_shot);
+        let argv = Argv::one_shot(&one_shot).expect("a built argv");
 
         assert_eq!(forbidden(&argv, NEVER_ANYWHERE), None, "{:?}", spelled(&argv));
     }
@@ -136,10 +144,16 @@ fn no_argv_this_wire_builds_contains_resume() {
     assert!(NEVER_ANYWHERE.contains(&"--resume"));
 
     for spawn in conversations() {
-        assert!(!spelled(&Argv::conversation(&spawn)).contains(&"--resume".to_owned()));
+        assert!(
+            !spelled(&Argv::conversation(&spawn).expect("a built argv"))
+                .contains(&"--resume".to_owned())
+        );
     }
     for one_shot in one_shots() {
-        assert!(!spelled(&Argv::one_shot(&one_shot)).contains(&"--resume".to_owned()));
+        assert!(
+            !spelled(&Argv::one_shot(&one_shot).expect("a built argv"))
+                .contains(&"--resume".to_owned())
+        );
     }
 }
 
@@ -151,13 +165,14 @@ fn no_argv_this_wire_builds_contains_include_partial_messages() {
 
     for spawn in conversations() {
         assert!(
-            !spelled(&Argv::conversation(&spawn))
+            !spelled(&Argv::conversation(&spawn).expect("a built argv"))
                 .contains(&"--include-partial-messages".to_owned())
         );
     }
     for one_shot in one_shots() {
         assert!(
-            !spelled(&Argv::one_shot(&one_shot)).contains(&"--include-partial-messages".to_owned())
+            !spelled(&Argv::one_shot(&one_shot).expect("a built argv"))
+                .contains(&"--include-partial-messages".to_owned())
         );
     }
 }
@@ -168,13 +183,15 @@ fn no_argv_this_wire_builds_contains_include_partial_messages() {
 fn the_permission_mode_is_manual_on_every_row_of_both_builders() {
     for spawn in conversations() {
         assert_eq!(
-            value_after(&Argv::conversation(&spawn), "--permission-mode").as_deref(),
+            value_after(&Argv::conversation(&spawn).expect("a built argv"), "--permission-mode")
+                .as_deref(),
             Some(PERMISSION_MODE)
         );
     }
     for one_shot in one_shots() {
         assert_eq!(
-            value_after(&Argv::one_shot(&one_shot), "--permission-mode").as_deref(),
+            value_after(&Argv::one_shot(&one_shot).expect("a built argv"), "--permission-mode")
+                .as_deref(),
             Some(PERMISSION_MODE)
         );
     }
@@ -187,13 +204,15 @@ fn the_permission_mode_is_manual_on_every_row_of_both_builders() {
 fn only_a_one_shot_is_told_not_to_persist_its_record() {
     for one_shot in one_shots() {
         assert!(
-            spelled(&Argv::one_shot(&one_shot)).contains(&"--no-session-persistence".to_owned()),
+            spelled(&Argv::one_shot(&one_shot).expect("a built argv"))
+                .contains(&"--no-session-persistence".to_owned()),
             "a one-shot must say its record is worth nothing"
         );
     }
     for spawn in conversations() {
         assert!(
-            !spelled(&Argv::conversation(&spawn)).contains(&"--no-session-persistence".to_owned()),
+            !spelled(&Argv::conversation(&spawn).expect("a built argv"))
+                .contains(&"--no-session-persistence".to_owned()),
             "a held process's record is the continuity this wire has"
         );
     }
@@ -207,10 +226,10 @@ fn the_session_id_is_the_only_id_flag_either_builder_writes() {
         model: "default".to_owned(),
         effort: None,
     };
-    let argv = spelled(&Argv::conversation(&spawn));
+    let argv = spelled(&Argv::conversation(&spawn).expect("a built argv"));
 
     assert_eq!(
-        value_after(&Argv::conversation(&spawn), "--session-id").as_deref(),
+        value_after(&Argv::conversation(&spawn).expect("a built argv"), "--session-id").as_deref(),
         Some(spawn.session_id.as_str())
     );
     assert_eq!(argv.iter().filter(|token| *token == "--session-id").count(), 1);
@@ -225,11 +244,11 @@ fn the_default_model_is_left_unnamed_and_every_other_model_is_named() {
         model: "default".to_owned(),
         effort: None,
     };
-    assert_eq!(value_after(&Argv::conversation(&spawn), "--model"), None);
+    assert_eq!(value_after(&Argv::conversation(&spawn).expect("a built argv"), "--model"), None);
 
     spawn.model = "claude-opus-5".to_owned();
     assert_eq!(
-        value_after(&Argv::conversation(&spawn), "--model").as_deref(),
+        value_after(&Argv::conversation(&spawn).expect("a built argv"), "--model").as_deref(),
         Some("claude-opus-5")
     );
 }
@@ -241,10 +260,13 @@ fn an_effort_is_named_only_when_the_turn_runs_under_one() {
         model: "default".to_owned(),
         effort: None,
     };
-    assert_eq!(value_after(&Argv::conversation(&spawn), "--effort"), None);
+    assert_eq!(value_after(&Argv::conversation(&spawn).expect("a built argv"), "--effort"), None);
 
     spawn.effort = Some("high".to_owned());
-    assert_eq!(value_after(&Argv::conversation(&spawn), "--effort").as_deref(), Some("high"));
+    assert_eq!(
+        value_after(&Argv::conversation(&spawn).expect("a built argv"), "--effort").as_deref(),
+        Some("high")
+    );
 }
 
 // ---------------------------------------------------------------- the env
@@ -377,4 +399,85 @@ fn the_child_runs_in_the_scratch_directory_it_was_handed() {
     ChildEnv { cwd: PathBuf::from("/tmp/scratch/key") }.apply(&mut command);
 
     assert_eq!(command.as_std().get_current_dir(), Some(std::path::Path::new("/tmp/scratch/key")));
+}
+
+// ------------------------------------------- the never-list, in every build
+
+/// The two free-form values that reach this command line are `model` and
+/// `effort`, and both arrive from outside the crate — a checked-in
+/// `ganja.toml`, `GANJA_MODEL`, a `POST /session/{id}/model` that validates
+/// nothing. So the never-list has to hold against a value somebody typed, and
+/// hold in a **release** build, where the `debug_assert!` it used to be
+/// expanded to nothing (CC-4).
+#[test]
+fn a_model_that_spells_a_forbidden_flag_is_refused_naming_the_token() {
+    let spawn = Spawn {
+        session_id: "01998a00-0000-7000-8000-00000000000a".to_owned(),
+        model: "--resume".to_owned(),
+        effort: None,
+    };
+
+    let refused = Argv::conversation(&spawn).expect_err("a forbidden token is refused");
+
+    assert!(refused.to_string().contains("--resume"), "the token is named: {refused}");
+    assert!(
+        Argv::one_shot(&OneShot {
+            session_id: spawn.session_id.clone(),
+            model: spawn.model.clone(),
+            effort: None,
+        })
+        .is_err(),
+        "and the other builder refuses it too"
+    );
+}
+
+/// The same for an effort, which reaches the builder as a raw string read
+/// back out of `request.effort_options` rather than off the `/effort` roster.
+#[test]
+fn an_effort_that_spells_a_forbidden_flag_is_refused_too() {
+    let spawn = Spawn {
+        session_id: "01998a00-0000-7000-8000-00000000000a".to_owned(),
+        model: "default".to_owned(),
+        effort: Some("--sdk-url".to_owned()),
+    };
+
+    assert!(Argv::conversation(&spawn).is_err());
+}
+
+/// A joined `--flag=value` carries both in one word, so a whole-token
+/// comparison had every such spelling outside the list (CC-4).
+#[test]
+fn the_never_list_covers_the_joined_spelling_of_a_forbidden_flag() {
+    for joined in ["--sdk-url=https://elsewhere.example", "--append-system-prompt=be somebody else"]
+    {
+        let argv = vec![OsString::from("-p"), OsString::from(joined)];
+
+        assert_eq!(
+            forbidden(&argv, NEVER_ON_CONVERSATION).as_deref(),
+            Some(joined),
+            "a joined spelling is still the flag it names"
+        );
+    }
+
+    // And a value that merely contains an `=` is not a flag at all.
+    let ordinary = vec![OsString::from("--model"), OsString::from("a=b")];
+    assert_eq!(forbidden(&ordinary, NEVER_ANYWHERE), None);
+}
+
+/// The builders themselves still produce none of it — the row this file
+/// already had, now reading the refusal rather than a `debug_assert!`.
+#[test]
+fn every_argv_a_builder_produces_is_accepted_by_its_own_never_list() {
+    for spawn in conversations() {
+        assert!(Argv::conversation(&spawn).is_ok(), "{spawn:?}");
+    }
+    for one_shot in one_shots() {
+        assert!(Argv::one_shot(&one_shot).is_ok(), "{one_shot:?}");
+    }
+    assert!(
+        Argv::listing(&super::Listing {
+            session_id: "01998a00-0000-7000-8000-00000000000a".to_owned(),
+        })
+        .is_ok()
+    );
 }

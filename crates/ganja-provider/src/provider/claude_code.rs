@@ -103,6 +103,12 @@ pub const VERSION_FLOOR: (u64, u64, u64) = (2, 1, 263);
 /// How long `--version` may take before the wire gives up on the binary.
 const VERSION_BOUND: Duration = Duration::from_secs(10);
 
+/// The reason word for a conversation another ganja holds the lock on.
+///
+/// A word rather than a literal because two places have to agree on it: the
+/// arm that names it and the arm that reads it back.
+const LOCKED_ELSEWHERE: &str = "locked-elsewhere";
+
 /// The `claude` CLI as a provider.
 pub struct ClaudeCodeProvider {
     bin: PathBuf,
@@ -111,8 +117,6 @@ pub struct ClaudeCodeProvider {
     held: Arc<held::HeldProcesses>,
     slots: held::Slots,
     paths: binding::Paths,
-    /// One lock per key, held for the life of that key's process.
-    locks: Mutex<std::collections::HashMap<held::Key, binding::Lock>>,
 }
 
 impl std::fmt::Debug for ClaudeCodeProvider {
@@ -147,7 +151,6 @@ impl ClaudeCodeProvider {
             held: Arc::new(held::HeldProcesses::new(held::DEFAULT_IDLE_BOUND)),
             slots: held::Slots::default(),
             paths,
-            locks: Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -170,7 +173,6 @@ impl ClaudeCodeProvider {
             held: Arc::new(held::HeldProcesses::new(held::DEFAULT_IDLE_BOUND)),
             slots: held::Slots::default(),
             paths,
-            locks: Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -214,11 +216,11 @@ impl ClaudeCodeProvider {
     /// never quietly swapped for the catalog, which knows nothing about this
     /// seat.
     pub async fn models(&self) -> Result<Vec<(String, String)>, ProviderError> {
-        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _};
+        use tokio::io::AsyncWriteExt as _;
 
-        let argv = argv::Argv::listing(&argv::Listing { session_id: crate::protocol::uuidv7() });
+        let argv = argv::Argv::listing(&argv::Listing { session_id: crate::protocol::uuidv7() })?;
         let cwd = self.paths.one_shot_cwd();
-        prepare(&cwd)?;
+        prepare(&self.paths, &cwd)?;
 
         let mut io = self.spawner.spawn(&self.bin, &argv, &argv::ChildEnv { cwd })?;
         let request_id = crate::protocol::uuidv7();
@@ -235,10 +237,13 @@ impl ClaudeCodeProvider {
             .await
             .map_err(|failure| ProviderError::Transport(failure.to_string()))?;
 
-        let mut lines = tokio::io::BufReader::new(io.stdout).lines();
+        // Bounded, like the held task's reader: the bytes are the peer's, and
+        // a frame that never ended would be read into memory until the machine
+        // gave out (CC-12).
+        let mut lines = frame::Lines::new(tokio::io::BufReader::new(io.stdout));
         let answer = loop {
             let line = lines
-                .next_line()
+                .next()
                 .await
                 .map_err(|failure| ProviderError::Transport(failure.to_string()))?;
             let Some(line) = line else {
@@ -246,6 +251,12 @@ impl ClaudeCodeProvider {
                     "the claude CLI at {} ended without answering the model listing",
                     self.bin.display()
                 )));
+            };
+            // A frame past the bound is not the answer this loop is waiting
+            // for — that one is three short fields — so it is skipped like any
+            // other frame that is somebody else's.
+            let frame::Line::Read(line) = line else {
+                continue;
             };
             // Every other frame is somebody else's: the listing asked one
             // question and reads the one answer to it.
@@ -775,24 +786,29 @@ impl ClaudeCodeProvider {
             return self.recover(&key, request, cancel).await;
         }
 
-        let reason = self.spawn_reason(&key, &request);
+        // The claim first, then the question: a conversation another ganja
+        // owns is one whose binding this one reads no part of.
+        let reason = if self.claim_lock(&key) {
+            self.spawn_reason(&key, &request)
+        } else {
+            LOCKED_ELSEWHERE
+        };
 
         self.spawn(&key, reason, request, cancel).await
     }
 
     /// The reason word a Spawn logs, first that applies.
     ///
+    /// Asked only of a key this ganja **holds** — `LOCKED_ELSEWHERE` is
+    /// decided by [`Self::claim_lock`] before this runs, because a
+    /// conversation another ganja owns is one nothing here may read. This
+    /// function used to claim that lock itself as its first act, which made
+    /// acquiring it a side effect of a question and a reordering of these
+    /// lines a silent change of owner (CC-8).
+    ///
     /// The binding is read **before** the ring, so a refused record logs its
     /// own word from either source and never `exited`.
     fn spawn_reason(&self, key: &held::Key, request: &ChatRequest) -> &'static str {
-        // A `try_lock` that fails means another ganja holds this
-        // conversation. Nothing is read and nothing is written; this arm sits
-        // outside the refusal bound by design, so a second ganja spends its
-        // own two.
-        if self.holds_lock(key).is_none() {
-            return "locked-elsewhere";
-        }
-
         let Some(binding) = binding::load(&self.paths.binding(key)) else {
             // No binding: a compaction's new `messages[0]`, or a first turn.
             return "new-key";
@@ -813,25 +829,20 @@ impl ClaudeCodeProvider {
         "unsent-history"
     }
 
-    /// Whether this ganja holds `key`'s lock, claiming it if nobody does.
-    fn holds_lock(&self, key: &held::Key) -> Option<()> {
-        let mut locks = self.locks.lock().expect("the lock table is never poisoned");
-        if locks.contains_key(key) {
-            return Some(());
-        }
-
-        match binding::Lock::claim(&self.paths.lock(key)) {
-            Ok(lock) => {
-                locks.insert(key.clone(), lock);
-
-                Some(())
-            }
-            Err(error) => {
-                tracing::debug!(provider = ID, key, %error, "the binding is locked elsewhere");
-
-                None
-            }
-        }
+    /// Whether this ganja holds `key`'s conversation, **claiming** its lock if
+    /// nobody does.
+    ///
+    /// Named as the claim it is, and called by the two arms that go on to keep
+    /// an entry: `route`'s fresh-record arm, before it asks for a reason word,
+    /// and [`Self::spawn`] itself, which the divergence and rewind arms reach
+    /// without passing through the first. Idempotent, so calling it twice on
+    /// one turn claims once.
+    ///
+    /// A claim that fails means another ganja holds this conversation. Nothing
+    /// is read and nothing is written; that arm sits outside the refusal bound
+    /// by design, so a second ganja spends its own two.
+    fn claim_lock(&self, key: &held::Key) -> bool {
+        self.held.claim_lock(key, &self.paths.lock(key))
     }
 
     /// A title or a compaction summary.
@@ -849,10 +860,10 @@ impl ClaudeCodeProvider {
             session_id: session_id.clone(),
             model: request.model.clone(),
             effort: effort_of(&request),
-        });
+        })?;
 
         let cwd = self.paths.one_shot_cwd();
-        prepare(&cwd)?;
+        prepare(&self.paths, &cwd)?;
 
         let io = self.spawner.spawn(&self.bin, &argv, &argv::ChildEnv { cwd })?;
         let (input, inputs) = tokio::sync::mpsc::channel(4);
@@ -1132,7 +1143,14 @@ impl ClaudeCodeProvider {
         request: ChatRequest,
         cancel: CancellationToken,
     ) -> Result<BoxStream<'static, ProviderEvent>, ProviderError> {
-        let locked_elsewhere = reason == "locked-elsewhere";
+        // The claim lives here, in the one funnel every fresh record passes
+        // through — `spawn`'s arms and `recover` alike — rather than being the
+        // first act of the function that picks a log word (CC-8). Idempotent,
+        // so a key `route` already claimed claims once; and whether the claim
+        // holds is what `locked-elsewhere` *means*, so it is read from the
+        // claim rather than from the word, which the divergence and rewind
+        // arms never carried.
+        let locked_elsewhere = !self.claim_lock(key);
 
         // Refusing a turn to keep a count is the worse failure, so a spawn
         // that would exceed the cap evicts an idle entry if it can and
@@ -1157,10 +1175,10 @@ impl ClaudeCodeProvider {
             session_id: session_id.clone(),
             model: request.model.clone(),
             effort: effort.clone(),
-        });
+        })?;
 
         let cwd = self.paths.cwd(key);
-        prepare(&cwd)?;
+        prepare(&self.paths, &cwd)?;
 
         let io = self.spawner.spawn(&self.bin, &argv, &argv::ChildEnv { cwd: cwd.clone() })?;
         let (input, inputs) = tokio::sync::mpsc::channel(4);
@@ -1318,21 +1336,14 @@ fn channel() -> (tokio::sync::mpsc::Sender<ProviderEvent>, BoxStream<'static, Pr
 /// **Never the project root and never `.`**: run 6 paid 7 348 extra prefix
 /// tokens for a checkout as cwd, not itemised by any frame and not suppressed
 /// by `--setting-sources ""`.
-fn prepare(cwd: &Path) -> Result<(), ProviderError> {
-    std::fs::create_dir_all(cwd).map_err(|error| {
+///
+/// Through [`binding::Paths::create_private`], which seals `claude-code/` and
+/// `cwd/` as well as the leaf: this used to chmod the leaf alone and leave the
+/// tree above it at the process umask (CC-9).
+fn prepare(paths: &binding::Paths, cwd: &Path) -> Result<(), ProviderError> {
+    paths.create_private(cwd).map_err(|error| {
         ProviderError::Transport(format!("could not make {}: {error}", cwd.display()))
-    })?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        std::fs::set_permissions(cwd, std::fs::Permissions::from_mode(0o700)).map_err(|error| {
-            ProviderError::Transport(format!("could not seal {}: {error}", cwd.display()))
-        })?;
-    }
-
-    Ok(())
+    })
 }
 
 // `pub(crate)` for the reason `ganja_core`'s teammate module declares its own

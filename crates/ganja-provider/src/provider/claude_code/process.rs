@@ -50,8 +50,14 @@ pub struct ChildIo {
     pub stderr: Option<Box<dyn AsyncRead + Send + Unpin>>,
     /// Resolves when the child exits.
     pub exit: BoxFuture<'static, std::io::Result<ExitStatus>>,
-    /// Sends the child a signal. Consumed, because a process is ended once.
-    pub kill: Box<dyn FnOnce(Signal) + Send>,
+    /// Sends the child a signal.
+    ///
+    /// `Fn`, not `FnOnce`: the two bounds are **two** signals, and a driver
+    /// that had to consume this to send the first could never send the second
+    /// — which is half of what made the `SIGKILL` bound unreachable (CC-3).
+    /// Sending a signal to a child that has already exited is `ESRCH`, so
+    /// calling it twice costs nothing when the first one worked.
+    pub kill: Box<dyn Fn(Signal) + Send>,
 }
 
 impl std::fmt::Debug for ChildIo {
@@ -128,16 +134,15 @@ impl Spawner for Real {
         })?;
         let stderr = child.stderr.take();
 
-        // The handle is what both the exit future and the killer need, and
-        // only one of them can own it — so the killer holds it and the exit
-        // future watches the pid through the same handle's `wait`. Splitting
-        // it any other way would make "kill" and "wait" race for one value.
+        // The handle goes to the exit future, which is the one thing that must
+        // own it: `wait()` is also what reaps, and a `Child` behind a lock the
+        // exit future holds for the process's whole life is a handle no other
+        // arm can ever reach — which is exactly what made the `SIGKILL` bound
+        // unreachable before (CC-3). So the killer takes the **pid** instead,
+        // and both signals go the same way.
         let pid = child.id();
-        let shared = std::sync::Arc::new(tokio::sync::Mutex::new(child));
-        let killer = std::sync::Arc::clone(&shared);
-
         let exit: BoxFuture<'static, std::io::Result<ExitStatus>> =
-            Box::pin(async move { shared.lock().await.wait().await });
+            Box::pin(async move { child.wait().await });
 
         Ok(ChildIo {
             stdin: Box::new(stdin),
@@ -146,32 +151,60 @@ impl Spawner for Real {
             exit,
             kill: Box::new(move |signal| {
                 // `Child::kill` is always SIGKILL, and this wire wants SIGTERM
-                // first — so the term arm goes through `libc` at the pid, and
-                // the kill arm through the handle, which also reaps.
-                match signal {
-                    Signal::Term => {
-                        if let Some(pid) = pid {
-                            // SAFETY: `kill(2)` with a pid this process owns
-                            // (it spawned it and has not reaped it — the
-                            // handle is still held by `killer`) and a valid
-                            // signal number. It touches no memory of ours and
-                            // cannot fail in a way that matters here: the one
-                            // failure mode is ESRCH, a child that already
-                            // exited, which is the outcome being asked for.
-                            unsafe {
-                                libc::kill(libc::pid_t::try_from(pid).unwrap_or(0), libc::SIGTERM);
-                            }
-                        }
-                    }
-                    Signal::Kill => {
-                        if let Ok(mut child) = killer.try_lock() {
-                            let _ = child.start_kill();
-                        }
-                    }
+                // first — so neither arm uses it and both go through `libc` at
+                // the pid. Symmetric on purpose: the second bound exists for a
+                // child that ignored the first, and an arm that could only
+                // fire while the first was still working would be no bound at
+                // all.
+                let number = match signal {
+                    Signal::Term => libc::SIGTERM,
+                    Signal::Kill => libc::SIGKILL,
+                };
+
+                let Some(pid) = narrowed(pid) else {
+                    // Never `kill(0, …)`, which signals every process in
+                    // ganja's own group — on a tmux-pane teammate arrangement,
+                    // whatever shares it. A pid this code could not narrow is
+                    // precisely the situation in which broadcasting a signal
+                    // is least defensible, so it sends none (CC-7).
+                    tracing::warn!(
+                        provider = super::ID,
+                        ?pid,
+                        signal = ?signal,
+                        "not signalling: the child's pid does not fit a pid_t"
+                    );
+
+                    return;
+                };
+
+                // SAFETY: `kill(2)` with a pid this process owns — it spawned
+                // it, and both arms are reached only while the exit future is
+                // still pending, so `wait()` has not returned and the pid has
+                // not been reaped into reuse — and a valid signal number. It
+                // touches no memory of ours and cannot fail in a way that
+                // matters here: the one failure mode is ESRCH, a child that
+                // already exited, which is the outcome being asked for.
+                //
+                // The window the reap could open is between the driver's
+                // `timeout` expiring and this call: microseconds wide, and
+                // monotonic pid allocation makes reuse inside it effectively
+                // impossible.
+                unsafe {
+                    libc::kill(pid, number);
                 }
             }),
         })
     }
+}
+
+/// The `pid_t` a signal may be sent to, or [`None`] for a pid there is none.
+///
+/// Its own function so the refusal is testable without a child: no platform
+/// this builds for allocates a `u32` pid above `i32::MAX`, so the arm is
+/// unreachable in practice and a test is the only thing that can say it does
+/// the right thing.
+fn narrowed(pid: Option<u32>) -> Option<libc::pid_t> {
+    libc::pid_t::try_from(pid?).ok()
 }
 
 #[cfg(test)]

@@ -36,6 +36,8 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use crate::provider::ProviderError;
+
 /// The tokens every argv of this wire opens with, in this order.
 ///
 /// **Twenty-one**, and the count is pinned by `argv_tests.rs` because this is
@@ -103,8 +105,9 @@ pub const PERMISSION_MODE: &str = "manual";
 ///   passed.
 ///
 /// Both are forbidden rather than absent so that a builder growing one back
-/// reddens here, at the builders' own `debug_assert!`, and again at the fake,
-/// which refuses `--resume` with the CLI's own `unknown option`.
+/// is refused here, at every builder's own never-list check, in every profile
+/// — and again at the fake, which refuses `--resume` with the CLI's own
+/// `unknown option`.
 pub const NEVER_ANYWHERE: &[&str] = &[
     "--bare",
     "--continue",
@@ -326,26 +329,26 @@ pub struct Listing {
 /// The three argv builders.
 ///
 /// Pure: they read nothing, spawn nothing and allocate a `Vec` from their
-/// argument. All three `debug_assert!` their own never-list before returning,
-/// so a debug build fails at the builder rather than at the child.
+/// argument. All three check their own never-list before returning, in
+/// **every** profile — so a forbidden token is refused at the builder rather
+/// than handed to the child.
 pub struct Argv;
 
 impl Argv {
     /// The argv a held conversation's process is spawned with.
-    #[must_use]
-    pub fn conversation(spawn: &Spawn) -> Vec<OsString> {
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ProviderError::Transport`] naming the token when this argv
+    /// would carry a forbidden flag: one of [`NEVER_ANYWHERE`] or of this
+    /// builder's own list, matched by its `--flag` up to `=`.
+    pub fn conversation(spawn: &Spawn) -> Result<Vec<OsString>, ProviderError> {
         let mut argv = base();
         argv.push("--session-id".into());
         argv.push(spawn.session_id.as_str().into());
         push_model_and_effort(&mut argv, &spawn.model, spawn.effort.as_deref());
 
-        debug_assert!(
-            forbidden(&argv, NEVER_ON_CONVERSATION).is_none(),
-            "a conversation argv carried a forbidden flag: {:?}",
-            forbidden(&argv, NEVER_ON_CONVERSATION)
-        );
-
-        argv
+        checked(argv, NEVER_ON_CONVERSATION)
     }
 
     /// The argv a listing process is spawned with (**D556**, Dv-17).
@@ -355,38 +358,61 @@ impl Argv {
     /// listing's record is worth nothing the moment its answer is read. Here
     /// rather than at the caller so that every rule about what may appear on
     /// this wire's command line stays in one file.
-    #[must_use]
-    pub fn listing(listing: &Listing) -> Vec<OsString> {
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ProviderError::Transport`] naming the token when this argv
+    /// would carry a forbidden flag: one of [`NEVER_ANYWHERE`] or of this
+    /// builder's own list, matched by its `--flag` up to `=`.
+    pub fn listing(listing: &Listing) -> Result<Vec<OsString>, ProviderError> {
         let mut argv = base();
         argv.push("--session-id".into());
         argv.push(listing.session_id.as_str().into());
         argv.push("--no-session-persistence".into());
 
-        debug_assert!(
-            forbidden(&argv, NEVER_ANYWHERE).is_none(),
-            "a listing argv carried a forbidden flag: {:?}",
-            forbidden(&argv, NEVER_ANYWHERE)
-        );
-
-        argv
+        checked(argv, NEVER_ANYWHERE)
     }
 
     /// The argv a one-shot's process is spawned with.
-    #[must_use]
-    pub fn one_shot(one_shot: &OneShot) -> Vec<OsString> {
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ProviderError::Transport`] naming the token when this argv
+    /// would carry a forbidden flag: one of [`NEVER_ANYWHERE`] or of this
+    /// builder's own list, matched by its `--flag` up to `=`.
+    pub fn one_shot(one_shot: &OneShot) -> Result<Vec<OsString>, ProviderError> {
         let mut argv = base();
         argv.push("--session-id".into());
         argv.push(one_shot.session_id.as_str().into());
         argv.push("--no-session-persistence".into());
         push_model_and_effort(&mut argv, &one_shot.model, one_shot.effort.as_deref());
 
-        debug_assert!(
-            forbidden(&argv, NEVER_ANYWHERE).is_none(),
-            "a one-shot argv carried a forbidden flag: {:?}",
-            forbidden(&argv, NEVER_ANYWHERE)
-        );
+        checked(argv, NEVER_ANYWHERE)
+    }
+}
 
-        argv
+/// `argv`, unless it carries a flag this wire may not pass.
+///
+/// An `if` rather than the `debug_assert!` the three builders used to end on:
+/// the macro expands to nothing in a release build, so the list was enforced
+/// by the builders' own shape and by the fake CLI and **not** by the shipped
+/// binary (CC-4). A real `assert!` would be the wrong direction too. The two
+/// free-form values that reach this command line are `model` and `effort`, and
+/// both arrive from outside this crate — a checked-in `ganja.toml`'s
+/// `model` key, `GANJA_MODEL`, a `POST /session/{id}/model` that validates
+/// nothing — so a panic here would be a person crashing the wire by typing a
+/// flag where a model goes. A refusal naming the token is what a value from
+/// outside earns.
+///
+/// # Errors
+///
+/// Returns a [`ProviderError::Transport`] naming the offending token.
+fn checked(argv: Vec<OsString>, never: &[&str]) -> Result<Vec<OsString>, ProviderError> {
+    match forbidden(&argv, never) {
+        Some(token) => Err(ProviderError::Transport(format!(
+            "this wire never passes `{token}` to the claude CLI"
+        ))),
+        None => Ok(argv),
     }
 }
 
@@ -416,13 +442,22 @@ fn push_model_and_effort(argv: &mut Vec<OsString>, model: &str, effort: Option<&
 ///
 /// `never` is the *additional* list, so a caller passes only what its own
 /// builder forbids and the wide list is always checked.
+///
+/// A token is judged by its **flag**, which is everything before the first
+/// `=`: `--sdk-url=https://…` carries both flag and value in one word, and
+/// comparing whole tokens put every joined spelling outside the list (CC-4).
+/// The whole token is what comes back, so a refusal quotes what it saw.
 #[must_use]
 pub fn forbidden(argv: &[OsString], never: &[&str]) -> Option<String> {
     argv.iter().find_map(|token| {
         let token = token.to_string_lossy();
+        let listed = {
+            let flag = token.split('=').next().unwrap_or(token.as_ref());
 
-        (NEVER_ANYWHERE.contains(&token.as_ref()) || never.contains(&token.as_ref()))
-            .then(|| token.into_owned())
+            NEVER_ANYWHERE.contains(&flag) || never.contains(&flag)
+        };
+
+        listed.then(|| token.into_owned())
     })
 }
 

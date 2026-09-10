@@ -211,7 +211,8 @@ fn a_claude_code_row_is_offered_the_five_efforts_the_cli_accepts() {
             model: crate::provider::claude_code::DEFAULT_MODEL.to_owned(),
             effort: Some(named.to_owned()),
         },
-    );
+    )
+    .expect("a roster effort builds");
     let argv: Vec<String> = argv.iter().map(|word| word.to_string_lossy().into_owned()).collect();
     let at = argv.iter().position(|word| word == "--effort").expect("the flag is on the argv");
     assert_eq!(argv[at + 1], "xhigh", "the name the roster carried, verbatim");

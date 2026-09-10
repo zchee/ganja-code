@@ -236,7 +236,48 @@ async fn a_process_that_ignores_eof_is_bounded_by_the_two_signals() {
     let _ = tokio::time::timeout(Duration::from_secs(1), closing).await;
 
     let sent = cli.signals.lock().expect("the signal list").clone();
-    assert!(sent.contains(&Signal::Term), "SIGTERM is the first bound: {sent:?}");
+    assert_eq!(
+        sent,
+        [Signal::Term, Signal::Kill],
+        "both bounds, in order: the second is what ends a child that ignored the first"
+    );
+}
+
+/// The `SIGKILL` bound had two independent reasons it could never fire, and
+/// the test above asserted only the first signal, so neither showed (CC-3).
+/// One was the exit future holding the child's lock across `wait()`, which
+/// made the kill arm's `try_lock` fail for as long as the child lived; the
+/// other was this driver consuming a `FnOnce` sender on the first bound, so
+/// the second iteration found nothing to call. Both are gone, and this is the
+/// type-level half: a sender that may be called twice.
+#[test]
+fn the_signal_sender_may_be_called_for_both_bounds() {
+    let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = std::sync::Arc::clone(&sent);
+    let kill: Box<dyn Fn(Signal) + Send> =
+        Box::new(move |signal| recorded.lock().expect("the signal list").push(signal));
+
+    kill(Signal::Term);
+    kill(Signal::Kill);
+
+    assert_eq!(*sent.lock().expect("the signal list"), [Signal::Term, Signal::Kill]);
+}
+
+/// `kill(0, sig)` signals **every process in ganja's own group** — on a
+/// tmux-pane teammate arrangement, whatever shares it — and that was the
+/// fallback for a pid that would not narrow (CC-7). A pid this code cannot
+/// narrow is precisely the case in which broadcasting is least defensible, so
+/// it now sends nothing at all.
+#[test]
+fn a_pid_that_will_not_narrow_is_signalled_not_at_all_rather_than_broadcast() {
+    assert_eq!(super::narrowed(Some(4_242)), Some(4_242), "an ordinary pid is sent as itself");
+    assert_eq!(super::narrowed(None), None, "a child with no pid is signalled not at all");
+
+    // The arm the old `unwrap_or(0)` turned into a broadcast. Unreachable on
+    // any platform this builds for — no `u32` pid exceeds `i32::MAX` on Linux
+    // or macOS — which is why only a test can say what it does.
+    assert_eq!(super::narrowed(Some(u32::MAX)), None);
+    assert_ne!(super::narrowed(Some(u32::MAX)), Some(0), "and never ganja's own group");
 }
 
 /// A cancel answers a parked ask **first** — the CLI is never left holding a
@@ -295,16 +336,13 @@ async fn a_turn_that_produces_no_frame_at_all_is_failed_naming_the_silence() {
     assert!(failure.contains("no frame for 120s"), "{failure}");
 }
 
-/// A wire that named a relative binary would be searching `PATH`, and on this
-/// machine a `claude` on `PATH` may be a wrapper.
-#[tokio::test]
-async fn a_relative_binary_is_refused_by_name() {
-    // Verified through the resolver's own predicate rather than by setting a
-    // process-wide variable, which two tests running at once would race.
-    let relative = std::path::PathBuf::from("relative/path/claude");
-
-    assert!(!relative.is_absolute(), "the resolver refuses exactly this shape");
-}
+// The relative-binary refusal is pinned in `tests/claude_code_spawn.rs` (e),
+// not here: `GANJA_CLAUDE_BIN` is process-wide, and this crate's suites run
+// concurrently, so the case that used to sit here could only assert that
+// `"relative/path/claude"` is not absolute — true whatever the wire does, and
+// so a pass that would have survived deleting the refusal (verify §(h) 1).
+// The spawn binary holds one test on a current-thread runtime, which is what
+// makes the real thing safe to drive there.
 
 /// An exit before `system/init` never spent a turn, so what it means is
 /// decided by what the CLI said on the way out.

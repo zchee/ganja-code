@@ -218,17 +218,143 @@ pub enum Request {
     },
 }
 
+/// The longest single line this wire reads off a child's pipe.
+///
+/// Sixteen mebibytes: far above anything the recording measured and far below
+/// what an unbounded read costs. It has to be generous rather than tight
+/// because the largest legitimate frame is a `user` echo — `--replay-user-messages`
+/// is on the base argv — carrying a whole rendered preamble, and nothing
+/// bounds a preamble (D556's stated cost). It has to exist at all because the
+/// bytes are a peer's: a frame that never ends would otherwise be read into
+/// memory until the machine gave out (CC-12).
+///
+/// Exceeding it skips **that line** and nothing else, which is what the
+/// decode-failure path already does for a frame that will not parse.
+pub const MAX_LINE: usize = 16 * 1024 * 1024;
+
+/// How much of an unreadable line an error quotes.
+const HEAD: usize = 200;
+
 /// Reads one line of the CLI's stdout.
 ///
 /// # Errors
 ///
-/// Returns the text of whatever would not parse as JSON, so the caller can
-/// fail the turn naming it rather than silently reading on.
+/// Returns what would not parse as JSON, described rather than embedded: its
+/// length and its first two hundred characters. A frame this side cannot read may
+/// be megabytes of somebody else's output, and an error is a thing that gets
+/// logged and carried around (CC-12).
 pub fn decode(line: &str) -> Result<Inbound, String> {
-    let value: serde_json::Value =
-        serde_json::from_str(line).map_err(|error| format!("{error}: {line}"))?;
+    let value: serde_json::Value = serde_json::from_str(line)
+        .map_err(|error| format!("{error}: {} bytes beginning `{}`", line.len(), head(line)))?;
 
     Ok(read(&value))
+}
+
+/// The first `HEAD` characters of `line`, with the cut admitted.
+///
+/// By characters rather than bytes, so the quote is never a panic on a
+/// multi-byte boundary.
+fn head(line: &str) -> String {
+    match line.char_indices().nth(HEAD) {
+        Some((at, _)) => format!("{}…", &line[..at]),
+        None => line.to_owned(),
+    }
+}
+
+/// A child's pipe, read one line at a time and **bounded**.
+///
+/// [`tokio::io::AsyncBufReadExt::lines`] allocates whatever one line contains,
+/// which is the wrong posture for a pipe somebody else writes. This reads a
+/// buffer at a time, keeps at most [`MAX_LINE`] bytes, and reports a longer
+/// line as its length once the rest of it has been skipped — so an oversized
+/// frame costs the bound and not the line.
+///
+/// **Cancel-safe**, which is what makes it usable in the task's `select!`:
+/// every partial byte lives in `self`, so a dropped future loses nothing. That
+/// is the one guarantee `tokio`'s own `Lines` gives that had to be preserved
+/// rather than reimplemented differently.
+pub struct Lines<R> {
+    reader: R,
+    /// The bytes of the line being read, up to [`MAX_LINE`].
+    partial: Vec<u8>,
+    /// How many bytes of the current line were dropped for being past it.
+    dropped: usize,
+}
+
+/// One line read off a child's pipe.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Line {
+    /// The line, whole.
+    Read(String),
+    /// A line past [`MAX_LINE`], skipped. Carries how long it turned out to
+    /// be, which is the only thing left worth saying about it.
+    TooLong(usize),
+}
+
+impl<R: tokio::io::AsyncBufRead + Unpin> Lines<R> {
+    /// Reads `reader` a line at a time.
+    pub fn new(reader: R) -> Self {
+        Self { reader, partial: Vec::new(), dropped: 0 }
+    }
+
+    /// The next line, or [`None`] at EOF.
+    ///
+    /// A last line with no newline is returned as a line: a child that dies
+    /// mid-frame has still said what it said.
+    ///
+    /// # Errors
+    ///
+    /// Returns whatever the read failed with.
+    pub async fn next(&mut self) -> std::io::Result<Option<Line>> {
+        use tokio::io::AsyncBufReadExt as _;
+
+        loop {
+            let (ended, used) = {
+                // Field by field rather than through a helper: `fill_buf`
+                // borrows `self.reader` for as long as its slice lives, and
+                // only a disjoint borrow of `self.partial` may run beside it.
+                let available = self.reader.fill_buf().await?;
+                if available.is_empty() {
+                    // EOF. Whatever is held is the last line, if anything is.
+                    let ended = !self.partial.is_empty() || self.dropped > 0;
+
+                    return Ok(ended.then(|| Self::end(&mut self.partial, &mut self.dropped)));
+                }
+
+                let (bytes, ended, used) = match available.iter().position(|byte| *byte == b'\n') {
+                    Some(at) => (&available[..at], true, at + 1),
+                    None => (available, false, available.len()),
+                };
+
+                // What still fits is kept; what does not is counted.
+                let room = MAX_LINE.saturating_sub(self.partial.len());
+                let (kept, over) = bytes.split_at(room.min(bytes.len()));
+                self.partial.extend_from_slice(kept);
+                self.dropped += over.len();
+
+                (ended, used)
+            };
+
+            self.reader.consume(used);
+            if ended {
+                return Ok(Some(Self::end(&mut self.partial, &mut self.dropped)));
+            }
+        }
+    }
+
+    /// Ends the line being read and starts the next.
+    fn end(partial: &mut Vec<u8>, dropped: &mut usize) -> Line {
+        let bytes = std::mem::take(partial);
+        let dropped = std::mem::replace(dropped, 0);
+        if dropped > 0 {
+            return Line::TooLong(bytes.len() + dropped);
+        }
+
+        // A frame is JSON, so it is UTF-8 or it is not a frame; lossy rather
+        // than an error, because what a caller does with either is the same —
+        // log it and read on.
+        Line::Read(String::from_utf8_lossy(&bytes).into_owned())
+    }
 }
 
 /// Classifies an already-parsed frame.
