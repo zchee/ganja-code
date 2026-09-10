@@ -1101,6 +1101,52 @@ fn the_per_call_maps_are_dropped_by_the_next_turn_and_not_by_a_resolve() {
     assert!(turn.denied.is_empty());
 }
 
+/// What an exit before `system/init` surfaces is whatever the CLI printed
+/// first, and that text reaches a transcript and a log — so it is bounded and
+/// it says whose words it is (CC-11). This wire holds no credential, so there
+/// is nothing to scrub by value; a diagnostic that ever printed one would
+/// still travel no further than the bound.
+#[test]
+fn the_clis_first_stderr_line_is_surfaced_bounded_and_labelled_as_its_own() {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    let exited_saying = |line: &str| {
+        let wiring = wiring(Vec::new());
+        let mut turn = super::Turn::default();
+        let said = std::sync::Arc::new(std::sync::Mutex::new(vec![line.to_owned()]));
+        let status = std::process::ExitStatus::from_raw(1 << 8);
+
+        match super::report_exit(&wiring, &mut turn, &said, Ok(status)) {
+            Some(crate::provider::ProviderError::Transport(message)) => message,
+            other => {
+                panic!("an exit that names no missing login is a transport failure: {other:?}")
+            }
+        }
+    };
+
+    // Run 7's sentence, the shape this arm exists for, arrives whole.
+    let short = "Session ID 01998a00-0000-7000-8000-00000000000a is already in use.";
+    assert_eq!(exited_saying(short), format!("{}{short}", super::SAID_LABEL));
+
+    // A line past the bound is cut, and the cut is counted rather than hidden.
+    let long = format!("{}TAIL", "x".repeat(super::SAID_LIMIT * 4));
+    let surfaced = exited_saying(&long);
+    assert!(surfaced.starts_with(super::SAID_LABEL), "labelled as the CLI's own: {surfaced}");
+    assert!(!surfaced.contains("TAIL"), "what is past the bound does not travel: {surfaced}");
+    assert!(
+        surfaced.ends_with(&format!("[+{} bytes]", long.len() - super::SAID_LIMIT)),
+        "and the elision says how much: {surfaced}"
+    );
+
+    // A cut that would land inside a character lands before it instead.
+    let wide = exited_saying(&"日".repeat(super::SAID_LIMIT));
+    assert!(
+        wide.len() < super::SAID_LABEL.len() + super::SAID_LIMIT + 32,
+        "bounded whatever the line is made of: {} bytes",
+        wide.len()
+    );
+}
+
 /// `busy` says a turn is running, and the table's two views of idleness both
 /// filter on it. A failure that cleared the stream and left the flag set made
 /// the entry invisible to the idle sweep **and to the cap**, so enough of them

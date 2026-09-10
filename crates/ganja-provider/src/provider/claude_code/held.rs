@@ -1083,9 +1083,10 @@ fn report_exit(
         let error = if said.iter().any(|line| not_logged_in(line)) {
             crate::provider::ProviderError::Auth(NO_LOGIN.to_owned())
         } else {
-            crate::provider::ProviderError::Transport(said.first().cloned().unwrap_or_else(|| {
-                format!("the claude CLI exited {code:?} before it said anything")
-            }))
+            crate::provider::ProviderError::Transport(said.first().map_or_else(
+                || format!("the claude CLI exited {code:?} before it said anything"),
+                |line| surfaced(line),
+            ))
         };
 
         emit(turn, ProviderEvent::Failed(error.clone()));
@@ -1118,6 +1119,33 @@ fn not_logged_in(line: &str) -> bool {
     let line = line.to_ascii_lowercase();
 
     line.contains("not logged in") || line.contains("claude login") || line.contains("/login")
+}
+
+/// How many bytes of the CLI's first stderr line a failed turn carries.
+///
+/// That line is the vendor's own and the most useful thing a person can be
+/// shown — it is how an exit before `system/init` is told apart — but it
+/// travels into a transcript and a log, and this wire has no
+/// `Presented::redact` seam to catch a token a future diagnostic might print,
+/// because it holds no credential to scrub by value. A bound is the guard that
+/// does not need to know what that diagnostic will say (CC-11). Run 7's line is
+/// under a hundred bytes, so every sentence the recording saw arrives whole.
+const SAID_LIMIT: usize = 256;
+
+/// What the surfaced line opens with, so it reads as the CLI's own words and
+/// never as ganja's diagnosis of them.
+const SAID_LABEL: &str = "the claude CLI said: ";
+
+/// The CLI's own line as a failed turn carries it: labelled, and cut at
+/// [`SAID_LIMIT`] on a char boundary with the elision counted.
+fn surfaced(line: &str) -> String {
+    let cut = line.floor_char_boundary(SAID_LIMIT);
+    if cut == line.len() {
+        return format!("{SAID_LABEL}{line}");
+    }
+
+    let omitted = line.len() - cut;
+    format!("{SAID_LABEL}{}… [+{omitted} bytes]", &line[..cut])
 }
 
 /// One frame, read.
