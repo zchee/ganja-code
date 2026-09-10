@@ -97,6 +97,7 @@ pub mod copilot;
 pub mod cursor;
 pub mod fake;
 pub mod grok;
+pub mod ids;
 pub mod openai;
 pub mod opencode;
 pub mod openrouter;
