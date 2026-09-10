@@ -303,3 +303,7 @@ git push                # Push to remote
 - Always sync before ending session
 
 <!-- end-br-agent-instructions -->
+
+### Labels beyond the managed block
+
+- `idea` — a feature that is named and argued for but not designed past its bead: a slash command somebody thought of, an algorithm worth adopting. `br list -l idea` is the proposal backlog. The label comes off when a plan under `.omc/plans/` takes the bead up, so the list stays the set of things nobody has sized yet.
