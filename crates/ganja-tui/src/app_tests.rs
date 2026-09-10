@@ -25,10 +25,10 @@ use ratatui::style::{Color, Modifier};
 use tempfile::TempDir;
 
 use super::{
-    App, BACKTRACK_HINT, Chooser, Cleared, Dropdown, ESC_CHORD, FRAME, Help, JoinHandle,
-    ListDialog, MAX_EVENT_LOG, MessageId, Mode, NO_EFFORTS, NOBODY_TO_STOP, Palette, PendingDialog,
-    Permission, RevertScope, Rewind, SLOW_TASK_READ, TASK_READ_DEADLINE, WireListing,
-    permission_reply,
+    App, BACKTRACK_HINT, Chooser, Cleared, DEADLINE_NOTICE, Dropdown, ESC_CHORD, FRAME, Help,
+    JoinHandle, ListDialog, MAX_EVENT_LOG, MessageId, Mode, NO_EFFORTS, NOBODY_TO_STOP, Palette,
+    PendingDialog, Permission, RevertScope, Rewind, SLOW_TASK_READ, TASK_READ_DEADLINE,
+    WireListing, permission_reply,
 };
 
 /// The session every hand-built fixture event happens in. One pinned id,
@@ -8006,9 +8006,9 @@ async fn a_tall_terminal_shows_the_whole_help_card_at_once() {
 
     // Taller than it once was, because the roster this card lists gained
     // `/teammate` (**D504**), then `/held` (**D524**), then `/rename`
-    // (**D527**) — the card grows with the commands, which is what "the
-    // whole card" means.
-    let mut terminal = terminal(90, 43);
+    // (**D527**), then `/deadline` (**D557**) — the card grows with the
+    // commands, which is what "the whole card" means.
+    let mut terminal = terminal(90, 44);
     app.draw(&mut terminal).expect("a frame draws");
     let screen = screen(&terminal);
 
@@ -11439,4 +11439,167 @@ async fn the_fresh_read_is_taken_once_per_distinct_token() {
         "the second ask answers from the memo rather than reading again"
     );
     assert!(!fresh.holds(&app, "gone"), "a name never asked about is read now, and is not held");
+}
+
+/// A moment `seconds` from now, as the engine's command spells one.
+///
+/// Ahead or behind by construction rather than by waiting: the engine's slot
+/// holds a wall-clock instant, and putting one in the past *is* the overdue
+/// case — nothing sleeps and no runtime clock is paused.
+fn deadline_millis(seconds: i64) -> u64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("this machine's clock is after the epoch");
+
+    u64::try_from(now.as_millis())
+        .expect("the epoch fits a u64 of millis")
+        .checked_add_signed(seconds * 1000)
+        .expect("the moment is representable")
+}
+
+/// **D557, AC-D4.** The notice is written on the one edge where the instant
+/// goes by, once, and not again on the ticks after it.
+#[tokio::test]
+async fn the_deadline_notice_is_written_on_the_passing_edge_and_only_then() {
+    let mut app = app();
+
+    app.engine
+        .send(ganja_protocol::Command::SetDeadline { until: Some(deadline_millis(300)) })
+        .await
+        .expect("a deadline is taken in every state");
+    app.poll_deadline();
+    assert_eq!(app.status.notice(), None, "a budget still ahead says nothing");
+
+    app.engine
+        .send(ganja_protocol::Command::SetDeadline { until: Some(deadline_millis(-40)) })
+        .await
+        .expect("an instant already behind is taken like any other");
+    app.poll_deadline();
+    assert_eq!(
+        app.status.notice(),
+        Some(DEADLINE_NOTICE),
+        "the edge from ahead to behind writes the sentence"
+    );
+
+    // Somebody else writes over it; the next tick must not put it back,
+    // because nothing crossed the instant again.
+    app.status.set_notice(Some("something else entirely".to_owned()));
+    app.poll_deadline();
+    assert_eq!(
+        app.status.notice(),
+        Some("something else entirely"),
+        "the sentence is written once, on the edge, not on every tick after it"
+    );
+}
+
+/// **D557, AC-D4.** Clearing the deadline takes the sentence down, and a
+/// sentence somebody else put there in the meantime is left standing —
+/// `clear_notice_if`, never an unconditional clear.
+#[tokio::test]
+async fn clearing_a_deadline_takes_its_notice_down_but_not_somebody_else_s() {
+    let mut app = app();
+    let passed = ganja_protocol::Command::SetDeadline { until: Some(deadline_millis(-40)) };
+
+    app.engine.send(passed.clone()).await.expect("an instant already behind is taken");
+    app.poll_deadline();
+    assert_eq!(app.status.notice(), Some(DEADLINE_NOTICE));
+
+    app.run_deadline_line(command::Deadline::Off).await;
+    assert_eq!(
+        app.status.notice(),
+        Some("deadline cleared"),
+        "`off` replaces its own sentence with the answer to what was asked"
+    );
+
+    // Again, but with another writer's sentence standing when the clear lands.
+    app.engine.send(passed).await.expect("an instant already behind is taken");
+    app.poll_deadline();
+    app.status.set_notice(Some("an MCP server is out of reach".to_owned()));
+    app.set_deadline(None).await;
+    assert_eq!(
+        app.status.notice(),
+        Some("an MCP server is out of reach"),
+        "a sentence this one did not write is not wiped: it has no second place to appear"
+    );
+}
+
+/// **D557, AC-D4.** Replacing an overdue deadline with a fresh one re-arms the
+/// edge: the old sentence goes at the send, and the new instant passing writes
+/// it again.
+#[tokio::test]
+async fn a_fresh_deadline_re_arms_the_passing_edge() {
+    let mut app = app();
+
+    app.engine
+        .send(ganja_protocol::Command::SetDeadline { until: Some(deadline_millis(-40)) })
+        .await
+        .expect("an instant already behind is taken");
+    app.poll_deadline();
+    assert_eq!(app.status.notice(), Some(DEADLINE_NOTICE));
+
+    app.run_deadline_line(command::Deadline::Set(
+        std::time::SystemTime::now() + std::time::Duration::from_secs(300),
+    ))
+    .await;
+    assert!(
+        app.status.notice().is_some_and(|said| said.starts_with("deadline set: ")),
+        "the answer to what was asked replaces the stale sentence, got {:?}",
+        app.status.notice()
+    );
+
+    app.engine
+        .send(ganja_protocol::Command::SetDeadline { until: Some(deadline_millis(-1)) })
+        .await
+        .expect("an instant already behind is taken");
+    app.poll_deadline();
+    assert_eq!(
+        app.status.notice(),
+        Some(DEADLINE_NOTICE),
+        "the edge fires again for the deadline that replaced the first"
+    );
+}
+
+/// **D557.** A bare `/deadline` answers what is set, and says so plainly when
+/// nothing is — it changes nothing either way.
+#[tokio::test]
+async fn a_bare_deadline_line_says_what_is_set() {
+    let mut app = app();
+
+    app.run_deadline_line(command::Deadline::Show).await;
+    assert_eq!(app.status.notice(), Some("no deadline"));
+    assert_eq!(app.engine.deadline(), None, "asking sets nothing");
+
+    app.engine
+        .send(ganja_protocol::Command::SetDeadline { until: Some(deadline_millis(300)) })
+        .await
+        .expect("a deadline is taken in every state");
+    app.run_deadline_line(command::Deadline::Show).await;
+    assert!(
+        app.status
+            .notice()
+            .is_some_and(|said| said.starts_with("deadline: ") && said.ends_with(" left")),
+        "got {:?}",
+        app.status.notice()
+    );
+}
+
+/// **D557.** A refusal is about the words: nothing is sent, and a budget
+/// already running is left exactly where it was.
+#[tokio::test]
+async fn a_refused_deadline_line_disturbs_nothing_that_was_already_set() {
+    let mut app = app();
+    let until = deadline_millis(300);
+
+    app.engine
+        .send(ganja_protocol::Command::SetDeadline { until: Some(until) })
+        .await
+        .expect("a deadline is taken in every state");
+    app.run_deadline_line(command::Deadline::Refused("nope. /deadline …".to_owned())).await;
+
+    assert_eq!(app.status.notice(), Some("nope. /deadline …"));
+    assert_eq!(
+        app.engine.deadline(),
+        Some(std::time::UNIX_EPOCH + std::time::Duration::from_millis(until)),
+        "the budget that was running is untouched"
+    );
 }

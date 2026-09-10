@@ -2191,3 +2191,236 @@ fn the_one_shot_request_shape_draws_no_fetch_from_the_cursor_wire() {
         "a request carrying no roster is one this client has nothing to redirect a fetch to"
     );
 }
+
+/// A moment `seconds` from now, as [`Command::SetDeadline`] spells one.
+///
+/// The instant is built against the real clock and put where the test wants
+/// it — ahead for the remaining case, behind for the overdue one — because
+/// the engine's slot holds a `SystemTime` and no runtime clock control moves
+/// one. Nothing sleeps: a deadline in the past is the overdue case already.
+fn deadline_millis(seconds: i64) -> u64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("this machine's clock is after the epoch");
+    let millis = u64::try_from(now.as_millis()).expect("the epoch fits a u64 of millis");
+
+    millis.checked_add_signed(seconds * 1000).expect("the moment is representable")
+}
+
+/// The request-only messages `request` carries, in order.
+fn request_only_texts(request: &ChatRequest) -> Vec<String> {
+    request
+        .messages
+        .iter()
+        .filter(|message| message.request_only)
+        .map(|message| {
+            message.parts.iter().filter_map(crate::protocol::Part::as_text).collect::<String>()
+        })
+        .collect()
+}
+
+/// **D557, AC-D3.** The slot reads empty, then what was set, then empty
+/// again — and `NewSession` is the other door that empties it.
+#[tokio::test]
+async fn the_deadline_reads_back_what_was_set_and_a_new_session_clears_it() {
+    let engine = engine();
+    assert_eq!(engine.deadline(), None, "a fresh session has no budget");
+
+    let until = deadline_millis(300);
+    engine
+        .send(Command::SetDeadline { until: Some(until) })
+        .await
+        .expect("a deadline is taken in every state");
+    assert_eq!(
+        engine.deadline(),
+        Some(std::time::UNIX_EPOCH + std::time::Duration::from_millis(until)),
+        "the instant reads back as it was sent"
+    );
+
+    engine.send(Command::SetDeadline { until: None }).await.expect("clearing is taken too");
+    assert_eq!(engine.deadline(), None, "`off` empties the slot");
+
+    engine
+        .send(Command::SetDeadline { until: Some(until) })
+        .await
+        .expect("a deadline is taken in every state");
+    engine.send(Command::NewSession).await.expect("a fresh conversation is taken");
+    assert_eq!(
+        engine.deadline(),
+        None,
+        "a budget belongs to the sitting that set it, so the next one starts with none"
+    );
+}
+
+/// **D557, AC-D2.** With a deadline ahead, every request ends on exactly one
+/// request-only message, and it is the block's own first wording.
+#[tokio::test]
+async fn a_deadline_ahead_puts_one_request_only_block_at_the_tail_of_every_request() {
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        ProviderEvent::TextDelta("sure".to_owned()),
+        ProviderEvent::Finish(FinishReason::Completed),
+    ]));
+    let seen = Arc::clone(&provider.seen);
+    let engine = bare(provider, "scripted-model");
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine
+        .send(Command::SetDeadline { until: Some(deadline_millis(300)) })
+        .await
+        .expect("a deadline is taken in every state");
+    for prompt in ["first", "second"] {
+        engine
+            .send(Command::SendPrompt {
+                text: prompt.to_owned(),
+                mentions: Vec::new(),
+                skills: Vec::new(),
+                session_mentions: Vec::new(),
+                peers: Vec::new(),
+            })
+            .await
+            .expect("an idle engine accepts a prompt");
+        drain(&mut events).await;
+    }
+
+    let requests = seen.lock().expect("the request log is never poisoned");
+    assert_eq!(requests.len(), 2, "two prompts, two requests");
+    for request in requests.iter() {
+        let blocks = request_only_texts(request);
+        assert_eq!(blocks.len(), 1, "exactly one request-only message, got {blocks:?}");
+        assert!(
+            blocks[0].starts_with("Deadline ") && blocks[0].contains(" left)."),
+            "it is the block's remaining-time wording, got {:?}",
+            blocks[0]
+        );
+        assert!(
+            request.messages.last().is_some_and(|message| message.request_only),
+            "and it is the last thing the model reads"
+        );
+    }
+}
+
+/// **D557, AC-D2, AC-D5.** A deadline already behind switches the block to its
+/// second wording — and changes nothing else: the turn runs to completion, so
+/// nothing was cancelled, shortened or refused for it.
+#[tokio::test]
+async fn a_deadline_behind_says_so_and_still_lets_the_turn_finish() {
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        ProviderEvent::TextDelta("sure".to_owned()),
+        ProviderEvent::Finish(FinishReason::Completed),
+    ]));
+    let seen = Arc::clone(&provider.seen);
+    let engine = bare(provider, "scripted-model");
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine
+        .send(Command::SetDeadline { until: Some(deadline_millis(-40)) })
+        .await
+        .expect("an instant already behind is taken like any other");
+    engine
+        .send(Command::SendPrompt {
+            text: "carry on".to_owned(),
+            mentions: Vec::new(),
+            skills: Vec::new(),
+            session_mentions: Vec::new(),
+            peers: Vec::new(),
+        })
+        .await
+        .expect("a passed deadline refuses no prompt");
+
+    let drained = drain(&mut events).await;
+    assert!(
+        drained.iter().any(|event| matches!(event, Event::MessageFinished { .. })),
+        "the turn completes: a deadline warns and cancels nothing, got {drained:?}"
+    );
+
+    let requests = seen.lock().expect("the request log is never poisoned");
+    let blocks = request_only_texts(&requests[0]);
+    assert_eq!(blocks.len(), 1, "still exactly one block, got {blocks:?}");
+    assert!(
+        blocks[0].contains(" passed ") && blocks[0].contains("Start nothing."),
+        "it is the block's overdue wording, got {:?}",
+        blocks[0]
+    );
+}
+
+/// **D557, AC-D2.** With no deadline set — and after one is cleared — no
+/// request carries a request-only message at all, so every scripted and golden
+/// run is byte-identical to one built before this existed.
+#[tokio::test]
+async fn no_deadline_puts_nothing_in_the_request() {
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        ProviderEvent::TextDelta("sure".to_owned()),
+        ProviderEvent::Finish(FinishReason::Completed),
+    ]));
+    let seen = Arc::clone(&provider.seen);
+    let engine = bare(provider, "scripted-model");
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    let prompt = |text: &str| Command::SendPrompt {
+        text: text.to_owned(),
+        mentions: Vec::new(),
+        skills: Vec::new(),
+        session_mentions: Vec::new(),
+        peers: Vec::new(),
+    };
+
+    engine.send(prompt("never budgeted")).await.expect("an idle engine accepts a prompt");
+    drain(&mut events).await;
+
+    engine
+        .send(Command::SetDeadline { until: Some(deadline_millis(300)) })
+        .await
+        .expect("a deadline is taken in every state");
+    engine.send(Command::SetDeadline { until: None }).await.expect("and cleared again");
+    engine.send(prompt("budget withdrawn")).await.expect("an idle engine accepts a prompt");
+    drain(&mut events).await;
+
+    let requests = seen.lock().expect("the request log is never poisoned");
+    for request in requests.iter() {
+        assert!(
+            request_only_texts(request).is_empty(),
+            "a session with no deadline sends no request-only message, got {:?}",
+            request_only_texts(request)
+        );
+    }
+}
+
+/// **D557, AC-D2.** The block lives in the request alone: the transcript the
+/// engine keeps, and the events a frontend rebuilds one from, carry no trace
+/// of it.
+#[tokio::test]
+async fn the_deadline_block_never_reaches_the_transcript() {
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        ProviderEvent::TextDelta("sure".to_owned()),
+        ProviderEvent::Finish(FinishReason::Completed),
+    ]));
+    let engine = bare(provider, "scripted-model");
+    let mut events = engine.subscribe().await.expect("the first subscriber wins");
+
+    engine
+        .send(Command::SetDeadline { until: Some(deadline_millis(300)) })
+        .await
+        .expect("a deadline is taken in every state");
+    engine
+        .send(Command::SendPrompt {
+            text: "hi".to_owned(),
+            mentions: Vec::new(),
+            skills: Vec::new(),
+            session_mentions: Vec::new(),
+            peers: Vec::new(),
+        })
+        .await
+        .expect("an idle engine accepts a prompt");
+
+    let drained = drain(&mut events).await;
+    for event in &drained {
+        if let Event::MessageStarted { message, .. } = event {
+            assert!(!message.request_only, "no request-only message is announced, got {message:?}");
+        }
+    }
+    assert!(
+        !replay(&drained).contains("Deadline "),
+        "a transcript rebuilt from the events shows no block, got {:?}",
+        replay(&drained)
+    );
+}

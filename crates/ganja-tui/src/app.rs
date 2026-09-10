@@ -13,16 +13,24 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context as _, Result};
 use etcetera::BaseStrategy as _;
 use etcetera::base_strategy::Xdg;
 use futures::StreamExt as _;
 use ganja_core::{
-    Engine, EngineError, SessionId, attachment, catalog,
+    Engine,
+    EngineError,
+    SessionId,
+    attachment,
+    catalog,
     config::{NotificationEvent, StatuslineConfig},
     provider,
+    // The one spelling of a span (**D557**): the same function that renders it
+    // into the block the model reads, so the notice, the segment and the
+    // request can never disagree about one clock.
+    session::spell_duration,
     teammate::{
         Delivery,
         // The `uds:` address scheme (**D528**): the resolver's own pub
@@ -87,6 +95,23 @@ fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// `until` as [`Command::SetDeadline`] spells one: milliseconds since the Unix
+/// epoch (**D557**), or [`None`] for an instant that cannot be one.
+///
+/// [`now_millis`]'s conversion for an arbitrary instant rather than for now,
+/// and the failure is handled the other way round: that one is stamping a
+/// record and a zero is a usable answer, where this one is naming a moment and
+/// a wrong number would be a deadline nobody chose. Only an instant before the
+/// epoch or past `u64` milliseconds fails, neither of which a clock reading
+/// plus a typed span reaches — so the [`None`] arm is a refusal to guess
+/// rather than a case anybody meets.
+fn epoch_millis(until: SystemTime) -> Option<u64> {
+    until
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|since| u64::try_from(since.as_millis()).ok())
 }
 
 /// The incumbent's own collision re-scan runs at most this often (**S1**,
@@ -223,6 +248,21 @@ const SLOW_TASK_READ: &str =
 /// appear.
 const EVICTION_NOTICE: &str = "claude-code: idle past `idle_bound`; the next turn opens without the assistant's earlier \
      replies";
+
+/// What a person is told at the moment their time budget runs out (**D557**).
+///
+/// **It says what the engine did, and the engine warned.** Not "out of time",
+/// which would read as an announcement that something stopped — nothing did,
+/// and the `deadline` segment beside this sentence is still counting. What
+/// changed at this instant is one thing: the block every request carries
+/// switched to its second wording, so the model is now being asked to wrap up.
+/// Saying exactly that is what tells somebody whether to intervene.
+///
+/// Taken down with [`Status::clear_notice_if`] rather than an unconditional
+/// clear, [`EVICTION_NOTICE`]'s precedent and for its reason: the slot is one
+/// and unowned, and a sentence another writer put there has no second place to
+/// appear.
+const DEADLINE_NOTICE: &str = "deadline passed; the model has been told to wrap up";
 
 /// What the `/plugin` dialog's Reload answers when it worked (**D474**): the
 /// honest split, verbatim. Hooks and the skill roots really are rebuilt
@@ -965,6 +1005,16 @@ pub struct App {
     /// written on the `None → Some` edge and taken down on the `Some → None`
     /// one rather than rewritten every tick.
     last_eviction: Option<ganja_core::provider::Eviction>,
+    /// Whether the deadline this bar last drew had already gone by
+    /// (**D557**), so [`DEADLINE_NOTICE`] is written on the one edge where it
+    /// goes from ahead to behind rather than on every tick after it.
+    ///
+    /// The *state*, not the instant: what this guards is a transition, and
+    /// keeping the instant would mean recomputing the comparison here as well
+    /// as in the segment. [`None`] is a session with no deadline set, which is
+    /// what makes clearing one and setting a fresh one arm the edge again —
+    /// the two hops are `Some(true) → None → Some(false)`.
+    deadline_passed: Option<bool>,
     /// The wire-served model rows for this session's provider, once a fetch
     /// has landed them. Held for the App's lifetime on purpose: a login
     /// stored mid-session is picked up by a restart, not by a later fetch.
@@ -1185,6 +1235,7 @@ impl App {
             plans: Vec::new(),
             served_model: None,
             last_eviction: None,
+            deadline_passed: None,
             wire_models: None,
             wire_fetch: None,
             file_walk: None,
@@ -1854,6 +1905,7 @@ impl App {
                 self.poll_plans();
                 self.poll_served_model();
                 self.poll_eviction();
+                self.poll_deadline();
                 self.poll_mcp_dialog();
                 self.poll_held();
                 self.poll_collision_scan();
@@ -2056,6 +2108,51 @@ impl App {
 
         self.last_eviction = live;
         self.dirty = true;
+    }
+
+    /// Hands the bar this sitting's deadline and writes [`DEADLINE_NOTICE`] on
+    /// the one edge where it goes by (**D557**).
+    ///
+    /// Two jobs rather than one, and they are on different clocks. The
+    /// *segment* changes on every tick because what it draws is a subtraction
+    /// against now, so the instant is pushed at the bar unconditionally and
+    /// the frame is marked dirty — that is what makes the number count down.
+    /// The *notice* is written once, on the ahead-to-behind transition, which
+    /// is why the state it compares against is kept here.
+    ///
+    /// Clearing or replacing a deadline takes the sentence back down through
+    /// [`Status::clear_notice_if`], never `set_notice(None)`: the slot is one
+    /// and unowned, so an unconditional clear would wipe whatever a later
+    /// writer put there — `SLOW_TASK_READ`'s and [`EVICTION_NOTICE`]'s
+    /// precedent.
+    fn poll_deadline(&mut self) {
+        let deadline = self.engine.deadline();
+        let passed = deadline.map(|until| until <= SystemTime::now());
+        if passed != self.deadline_passed {
+            match (self.deadline_passed, passed) {
+                // The edge this exists for: still ahead last tick, behind now.
+                (Some(false) | None, Some(true)) => {
+                    self.status.set_notice(Some(DEADLINE_NOTICE.to_owned()));
+                }
+                // Cleared, or replaced by one that has not gone by yet. Either
+                // way the sentence is about a deadline that no longer governs,
+                // so it goes — and a fresh `Some(false)` re-arms the edge above.
+                (Some(true), _) => self.status.clear_notice_if(DEADLINE_NOTICE),
+                _ => {}
+            }
+            self.deadline_passed = passed;
+        }
+
+        self.status.set_deadline(deadline);
+        // Unconditionally, and only while one is set: the segment's text is a
+        // function of the clock, so a tick that changed nothing here still
+        // changed what the bar should say. A session with no deadline draws no
+        // segment and earns no redraw from this poll at all, which is what
+        // keeps the cost of this element at zero for everybody who never
+        // types the command.
+        if deadline.is_some() {
+            self.dirty = true;
+        }
     }
 
     /// The lead's side of the mailbox, once a tick (**D503**).
@@ -2681,6 +2778,74 @@ impl App {
             }
             command::Rename::To(name) => self.rename_self(name),
         }
+    }
+
+    /// Runs a typed `/deadline` line (**D557**).
+    ///
+    /// Every arm ends in the notice slot rather than the transcript: setting a
+    /// budget is not something the model needs told twice — the block at the
+    /// tail of the next request already says it — and a session that answered
+    /// `/deadline` with a turn would spend part of the very budget being set.
+    async fn run_deadline_line(&mut self, line: command::Deadline) {
+        match line {
+            command::Deadline::Set(until) => {
+                self.set_deadline(epoch_millis(until)).await;
+                // Straight from what was asked rather than from a read-back:
+                // the engine takes this without answering, so there is nothing
+                // to read back yet, and the next tick's `poll_deadline` is
+                // what puts the segment up.
+                let left = until
+                    .duration_since(SystemTime::now())
+                    .map_or_else(|_| "no time".to_owned(), spell_duration);
+                self.status.set_notice(Some(format!("deadline set: {left} left")));
+            }
+            command::Deadline::Off => {
+                self.set_deadline(None).await;
+                self.status.set_notice(Some("deadline cleared".to_owned()));
+            }
+            // Says what is set and changes nothing — which is why it reads the
+            // engine rather than any state of its own: what a person wants
+            // from a bare `/deadline` is the truth about the session, not the
+            // last thing this frontend sent it.
+            command::Deadline::Show => {
+                let said = match self.engine.deadline() {
+                    Some(until) => match until.duration_since(SystemTime::now()) {
+                        Ok(left) => format!("deadline: {} left", spell_duration(left)),
+                        Err(behind) => {
+                            format!("deadline: overdue {}", spell_duration(behind.duration()))
+                        }
+                    },
+                    None => "no deadline".to_owned(),
+                };
+                self.status.set_notice(Some(said));
+            }
+            // A refusal is about the **words**, so nothing is sent and nothing
+            // that was already set is disturbed — `/teammate`'s own rule for
+            // the same situation.
+            command::Deadline::Refused(refusal) => self.status.set_notice(Some(refusal)),
+        }
+        self.dirty = true;
+    }
+
+    /// Sends the engine one [`Command::SetDeadline`], and folds the notice's
+    /// takedown into the same step.
+    ///
+    /// The `clear_notice_if` belongs here rather than in
+    /// [`App::poll_deadline`] for one case that poll cannot see: replacing an
+    /// overdue deadline with a fresh one *while* the notice is up leaves the
+    /// sentence standing until the next tick, which is a person being told
+    /// their deadline passed a beat after they set a new one. Doing it at the
+    /// send means the answer they asked for is the sentence they get.
+    ///
+    /// A refused send is a log line rather than a notice: the engine takes
+    /// this command in every state, so a failure here is the channel being
+    /// gone, which the person is about to find out in a louder way.
+    async fn set_deadline(&mut self, until: Option<u64>) {
+        if let Err(error) = self.engine.send(Command::SetDeadline { until }).await {
+            tracing::warn!(%error, "a deadline the person set was refused");
+        }
+        self.status.clear_notice_if(DEADLINE_NOTICE);
+        self.deadline_passed = None;
     }
 
     /// `/rename <name>` (**D527**, **ADJ-2**): validates through
@@ -4580,6 +4745,12 @@ impl App {
             // this dispatch is ever reached (D527, the `/teammate` precedent) —
             // so it answers with the missing-name notice, spelled once.
             command::Action::Rename => self.run_rename_line(command::Rename::Missing).await,
+            // Bare `/deadline` says what is set, `/rename`'s arrangement one
+            // step on: there the argument-less form is a *mistake* with
+            // nothing to do, and here it is a question worth answering, so
+            // this arm is `Show` rather than a notice about a missing
+            // argument (**D557**).
+            command::Action::Deadline => self.run_deadline_line(command::Deadline::Show).await,
         }
     }
 
@@ -6573,6 +6744,18 @@ impl App {
             self.clear_composer();
             self.history.append(history::PromptInfo::text(&prompt));
             self.run_rename_line(line).await;
+            return;
+        }
+
+        // The third builtin that carries an argument, on the same footing as
+        // the two above (**D557**). The clock is read here, once, and handed
+        // to the grammar: `/deadline 10:00` needs today's date to resolve at
+        // all, and taking the reading at the one call site is what lets a test
+        // hand the door any moment it likes.
+        if let Some(line) = command::deadline(&prompt, SystemTime::now()) {
+            self.clear_composer();
+            self.history.append(history::PromptInfo::text(&prompt));
+            self.run_deadline_line(line).await;
             return;
         }
 

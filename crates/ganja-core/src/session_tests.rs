@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -175,6 +175,7 @@ fn turn_with(
         skill_roots: crate::tool::skill::Roots::none(),
         identity: Arc::new(crate::teammate::identity::Identity::new(std::env::temp_dir())),
         receipts: Arc::default(),
+        deadline: Arc::default(),
         teamless: false,
         teamless_send: crate::config::TeamlessSend::default(),
         deferral: crate::tool::deferral::Deferral::none(),
@@ -1553,4 +1554,75 @@ fn a_hook_refusal_reads_as_the_sentence_the_wire_matches_on() {
         "A PreToolUse hook refused this tool call: the repo forbids touching vendored files",
     );
     assert!(ganja_tool::permission_text::is_refusal(&super::blocked_by_hook("x")));
+}
+
+/// The instant `HH:MM` names today, in whatever zone this machine keeps.
+///
+/// Built from a local clock time rather than an epoch constant, because what
+/// the block prints is the local wall clock: an epoch constant would render as
+/// a different hour depending on where the suite runs, and the pin below is on
+/// the exact characters.
+fn local_clock(hour: i8, minute: i8) -> SystemTime {
+    let zoned = jiff::civil::date(2026, 9, 11)
+        .at(hour, minute, 0, 0)
+        .to_zoned(jiff::tz::TimeZone::system())
+        .expect("the time exists in this zone");
+
+    SystemTime::from(zoned.timestamp())
+}
+
+/// **D557.** The first wording, byte for byte, with the clock the person set
+/// and the span they have left.
+#[test]
+fn the_deadline_block_ahead_of_the_instant_is_this_sentence_exactly() {
+    assert_eq!(
+        super::deadline_block(Ok(Duration::from_secs(2 * 3600 + 13 * 60)), local_clock(10, 0)),
+        "Deadline 10:00 (2h13m left). The next action must be the one that shortens the path to \
+         done; anything else is a note, not work. Take the decision already made and note a doubt \
+         instead of stopping to ask; ask only when the answer changes what done means. Keep the \
+         checks that protect the result. If done is not reachable in time, say so now, with an \
+         honest estimate and what will be left out."
+    );
+}
+
+/// **D557.** The second wording, byte for byte. It says "start nothing" and
+/// never "stop", because nothing was stopped: the engine cancels no turn for a
+/// deadline, and a sentence claiming otherwise would be the model's only
+/// evidence about a cancellation that never happened.
+#[test]
+fn the_deadline_block_past_the_instant_is_this_sentence_exactly() {
+    assert_eq!(
+        super::deadline_block(Err(Duration::from_secs(45)), local_clock(22, 30)),
+        "Deadline 22:30 passed 45s ago. Start nothing. In as few words as possible: what is done, \
+         what is not, and the one next step for whoever continues."
+    );
+}
+
+/// **D557.** A span is the largest unit that is not zero and the next one
+/// down — never three, never a leading zero unit — and it rounds down, so a
+/// budget never claims time that is not there.
+#[test]
+fn a_span_is_spelled_with_two_units_at_most_and_rounds_down() {
+    for (seconds, spelled) in [
+        (45_u64, "45s"),
+        (0, "0s"),
+        (59, "59s"),
+        (60, "1m0s"),
+        (90, "1m30s"),
+        (270, "4m30s"),
+        (3600, "1h0m"),
+        (7980, "2h13m"),
+        // The rounding: a second short of the next minute is still the
+        // minute below it.
+        (119, "1m59s"),
+        // And an hour's worth of seconds is dropped rather than printed,
+        // because nobody with two hours left acts on them.
+        (7980 + 59, "2h13m"),
+    ] {
+        assert_eq!(
+            super::spell_duration(Duration::from_secs(seconds)),
+            spelled,
+            "{seconds}s reads as {spelled}"
+        );
+    }
 }

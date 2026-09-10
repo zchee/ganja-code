@@ -1,6 +1,6 @@
 ---
-source: crates/ganja-tui/src/app.rs
-assertion_line: 9296
+source: crates/ganja-tui/src/app_tests.rs
+assertion_line: 4912
 expression: screen(&terminal)
 ---
 > show me every color you have                                                  
@@ -15,8 +15,8 @@ expression: screen(&terminal)
 ● Bash(c│  /agents        Switch agent                                 │        
   ⎿ [err│system                                                        │        
         │  /copy          Copy session transcript                      │        
-        │agent                                                         │        
-        │  /effort        Switch model effort                          │        
+        │session                                                       │        
+        │  /deadline      Set a time budget                            │        
         │                                                              │        
         │[type] filter   [up/down] move   [Enter] run   [Esc] close    │        
         └──────────────────────────────────────────────────────────────┘        

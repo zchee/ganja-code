@@ -179,7 +179,7 @@ notifications = ["turn-complete", "approval-requested"]
 notification_method = "bel"
 
 [tui.statusline]
-elements = ["git", "model", "context", "rate", "held", "task-list", "tokens", "session", "cwd", "todos"]
+elements = ["git", "model", "context", "rate", "held", "task-list", "deadline", "tokens", "session", "cwd", "todos"]
 max_width = 160
 detail = true
 
@@ -492,6 +492,21 @@ fn the_schema_refuses_what_it_has_a_keyword_for() {
     // so a spelling that is neither is a config that meant one of the two
     // and must be told it named nothing.
     for near_miss in ["tasklist", "task_list", "tasks-list"] {
+        let mut sink: Value = kitchen_sink();
+        sink["tui"]["statusline"]["elements"] = json!([near_miss]);
+        assert!(
+            !validator.is_valid(&sink),
+            "{near_miss:?} is not the name the loader accepts, and the schema must \
+             not accept it either"
+        );
+    }
+
+    // And for D557's own element. `deadline` itself rides the kitchen sink
+    // above; these pin the widening at exactly one name — and `timeout` is
+    // in the list on purpose, because it is the word somebody reaches for
+    // when they expect the engine to *cancel* something, which this element
+    // reports on and nothing in this build does.
+    for near_miss in ["deadlines", "dead-line", "timeout"] {
         let mut sink: Value = kitchen_sink();
         sink["tui"]["statusline"]["elements"] = json!([near_miss]);
         assert!(

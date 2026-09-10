@@ -1358,6 +1358,35 @@ pub enum Command {
         /// The posture the next turn runs under.
         mode: PermissionMode,
     },
+    /// Records how long this sitting has left, so every request from here on
+    /// tells the model about it (**D557**).
+    ///
+    /// **Accepted while a turn streams**, and read at each step rather than at
+    /// a turn's start — [`Command::SetPermissionMode`]'s asymmetry for a
+    /// different reason: somebody who realises mid-turn that they are out of
+    /// time is telling the model to hurry *this* turn, and a change that only
+    /// bit at the next one would answer the opposite of what was asked.
+    ///
+    /// **Warning only.** Nothing is cancelled, no tool bound moves and no
+    /// prompt is refused when the instant passes: the deadline is information
+    /// the model reads, exactly as a tool result is, and the person keeps
+    /// every decision.
+    ///
+    /// No event announces it. The value is polled off the engine by whatever
+    /// draws it (`Engine::deadline`), the D484/D485 shape, because a fact a
+    /// status bar re-reads on every tick needs no push channel.
+    SetDeadline {
+        /// When the budget runs out, in **milliseconds since the Unix epoch** —
+        /// the spelling [`MessageTime`] already uses, so a frontend that can
+        /// stamp a message can name an instant without a second time type on
+        /// the wire.
+        ///
+        /// [`None`] clears whatever was set, and is absent from the wire when
+        /// it is: the clearing command's bytes carry nothing but its type,
+        /// exactly as [`Command::SwitchEffort`]'s do.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        until: Option<u64>,
+    },
     /// Settles one held inbound peer message ([`Event::PeerHeld`]) with a
     /// person's decision (**D524**).
     ///
