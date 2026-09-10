@@ -81,6 +81,7 @@ async fn an_exported_script_is_what_the_fake_provider_plays() {
     // The route a demo takes: the variables pick the provider, and the provider
     // picks up the script without anyone naming it in code.
     let selection = provider::select(&ganja_core::Config::default())
+        .await
         .expect("the fake provider needs no credentials");
     assert_eq!(selection.provider.id(), fake::ID);
 

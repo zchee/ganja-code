@@ -113,7 +113,7 @@ async fn a_config_named_openai_compatible_endpoint_takes_a_whole_turn_on_the_key
     // project takes: nothing in the environment says anything.
     config.model = Some(format!("{PROVIDER_ID}/{MODEL}"));
 
-    let selection = provider::select(&config).expect("the config declares this endpoint");
+    let selection = provider::select(&config).await.expect("the config declares this endpoint");
     assert_eq!(
         selection.provider.id(),
         PROVIDER_ID,

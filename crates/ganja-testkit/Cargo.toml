@@ -39,11 +39,18 @@ ganja-tool.workspace = true
 # does — the loop never validates a call's arguments against it, but the
 # registry still has to have one to offer.
 schemars.workspace = true
+# The fake `claude` CLI's script and its side file are both JSON documents a
+# test writes and reads, so the double derives them rather than hand-parsing.
+serde.workspace = true
 serde_json.workspace = true
 # One temporary directory per test, for the storage- and XDG-redirect
 # builders — deleted with the handle, never the real user's state.
 tempfile.workspace = true
-tokio.workspace = true
+# `io-std` and `signal` are the fake `claude` CLI's: re-exec'd as a child it
+# speaks over the real stdin and stdout, and it records a signal rather than
+# dying of one, so a test can tell "no signal was sent" from "one was sent and
+# worked".
+tokio = { workspace = true, features = ["io-std", "signal"] }
 # `CancellationToken` lives behind `rt`, the same feature ganja-core itself
 # enables it with.
 tokio-util = { workspace = true, features = ["rt"] }

@@ -6,9 +6,10 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     ACCOUNT_HEADER, ALLOWED_MODELS, Aliases, BETA, BETA_HEADER, Backend, Body,
-    CHAT_COMPLETIONS_ONLY, CODEX_USER_AGENT, DEFAULT_BASE_URL, Frame, ID, Mapper as _, Mapping,
-    OPENAI_CAP, ORIGINATOR, ORIGINATOR_HEADER, ResponsesProvider, SEAT_ROSTER,
-    SUBSCRIPTION_DEFAULT, alias, generation, reauth, seals_reasoning, serves, summarized,
+    CHAT_COMPLETIONS_ONLY, CHATGPT_ID, CODEX_USER_AGENT, DEFAULT_BASE_URL, Frame, ID, Mapper as _,
+    Mapping, NO_PLATFORM_KEY, OPENAI_CAP, ORIGINATOR, ORIGINATOR_HEADER, ResponsesProvider,
+    SEAT_ROSTER, SUBSCRIPTION_DEFAULT, alias, generation, reauth, seals_reasoning, serves,
+    summarized,
 };
 use crate::auth::{self, AuthError, OauthCredential, RefreshOauth};
 use crate::catalog;
@@ -156,9 +157,28 @@ fn ask() -> ChatRequest {
 
 #[test]
 fn the_subscription_wire_is_the_same_vendor_as_the_key_one() {
-    assert_eq!(ID, openai::ID, "one provider id, or a turn is priced wrong");
-    assert!(PROVIDERS.contains(&ID), "a provider nothing can select is a provider nobody has");
-    assert_eq!(ID, auth::openai::PROVIDER_ID, "and one credential to read");
+    assert_eq!(ID, openai::ID, "one vendor, one wire, one set of prices");
+    assert_ne!(
+        CHATGPT_ID, ID,
+        "and two ids since D555, or a subscription turn is billed against the platform pool"
+    );
+    for id in [ID, CHATGPT_ID] {
+        assert!(PROVIDERS.contains(&id), "a provider nothing can select is a provider nobody has");
+    }
+    assert_eq!(
+        CHATGPT_ID,
+        auth::openai::PROVIDER_ID,
+        "the seat's login is stored under the seat's own id, which is what a \
+             renewal then reads back"
+    );
+
+    // **AC-0.2/AC-0.3.** Every one of the five arms, so that moving one of
+    // this vendor's two cannot silently move a gateway's with it.
+    assert_eq!(Backend::Codex.provider_id(), CHATGPT_ID);
+    assert_eq!(Backend::Platform.provider_id(), ID);
+    assert_eq!(Backend::OpenRouter.provider_id(), openrouter::ID);
+    assert_eq!(Backend::Opencode(crate::provider::opencode::ZEN_ID).provider_id(), "opencode");
+    assert_eq!(Backend::Compat.provider_id(), ID);
     assert_eq!(
         format!("{DEFAULT_BASE_URL}/responses"),
         "https://chatgpt.com/backend-api/codex/responses",
@@ -173,13 +193,64 @@ fn the_subscription_wire_is_the_same_vendor_as_the_key_one() {
     );
 }
 
+/// **AC-0.1.** What a session on [`ID`] with no key is told, and why it is this
+/// module's own sentence rather than `require_key`'s.
+///
+/// Before **D555** the missing key was half a question — a stored login
+/// answered the other half — so naming the variable was the whole repair. Now
+/// this id reads one credential and there is a second one a person may be
+/// holding, so the refusal has to name the id that spends it. The three clauses
+/// are asserted against the constants they name so the sentence cannot drift
+/// away from the variable, the command or the id it is telling somebody to use.
+#[test]
+fn the_platform_refusal_names_the_variable_and_the_seat_that_is_not_it() {
+    assert!(
+        NO_PLATFORM_KEY.starts_with(openai::API_KEY_ENV),
+        "the variable leads, as every other key refusal's does: {NO_PLATFORM_KEY}"
+    );
+    assert!(
+        NO_PLATFORM_KEY.contains(&format!("ganja auth login {CHATGPT_ID}")),
+        "and the login door names the seat's id: {NO_PLATFORM_KEY}"
+    );
+    assert!(
+        NO_PLATFORM_KEY.contains(&format!("GANJA_PROVIDER={CHATGPT_ID}")),
+        "a login nobody selects spends nothing, so the sentence says both halves: \
+             {NO_PLATFORM_KEY}"
+    );
+}
+
+/// **AC-0.3.** The entry this wire reads and renews is the seat's own, which is
+/// what makes "no fallback read" a fact about a value rather than about a
+/// branch somebody could add one to: the renewal, the refusal, and the `ganja
+/// auth login <id>` sentence inside it all key off this one field, so a
+/// pre-split credential under the platform's id is not somewhere this provider
+/// can look at all.
+#[test]
+fn the_seat_reads_and_renews_only_the_credential_filed_under_its_own_id() {
+    let seat = provider();
+    let CredentialSource::Oauth { provider_id, .. } = &seat.credential else {
+        panic!("the subscription backend is authenticated by a stored login");
+    };
+
+    assert_eq!(*provider_id, CHATGPT_ID);
+    assert_ne!(*provider_id, ID, "reading the platform's entry is the fallback D555 refuses");
+}
+
 /// Every header the codex backend uses to decide whether to serve a request
 /// at all. Dropping any one of them is a turn that fails in production and
 /// nowhere else, which is why this is asserted on the request rather than
 /// on the code that builds it.
 #[test]
 fn every_subscription_request_names_the_account_the_originator_and_the_agent() {
-    let built = provider().request(&resolved(Some(ACCOUNT)), &ask()).expect("the request builds");
+    let seat = provider();
+    assert_eq!(
+        seat.id(),
+        CHATGPT_ID,
+        "**AC-0.2**: the id an engine holds is what prices and bills the turn, \
+             and this one is spending a subscription"
+    );
+
+    let built = seat.request(&resolved(Some(ACCOUNT)), &ask()).expect("the request builds");
     let headers = built.headers();
     let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
 
@@ -749,7 +820,7 @@ fn a_provider_never_renders_its_credential() {
         "a provider leaked its endpoint's userinfo: {rendered}"
     );
     assert!(
-        rendered.contains("Oauth") && rendered.contains(ID),
+        rendered.contains("Oauth") && rendered.contains(CHATGPT_ID),
         "a provider renders as which provider it is: {rendered}"
     );
     assert!(
@@ -777,7 +848,7 @@ fn a_subscription_session_that_names_no_model_gets_one_the_seat_can_run() {
     let info =
         catalog::model(SUBSCRIPTION_DEFAULT).expect("the subscription default is in the table");
 
-    assert_eq!(info.provider_id, ID);
+    assert_eq!(info.provider_id, ID, "the seat's rows are the vendor's, through the catalog alias");
     assert!(info.context_window > 0 && info.max_output > 0);
     assert!(
         serves(SUBSCRIPTION_DEFAULT),

@@ -4,7 +4,7 @@ use serde_json::json;
 
 use super::{
     budget_efforts, claude_version, gpt5_version, is_gpt5_family, is_gpt5_pro,
-    openai_reasoning_efforts, roster,
+    openai_reasoning_efforts, roster, standalone,
 };
 use crate::catalog::{ModelInfo, ModelStatus, Pricing, ReasoningOption};
 
@@ -134,6 +134,23 @@ fn an_openai_model_new_enough_for_xhigh_carries_it_and_an_old_one_does_not() {
     );
 }
 
+/// **D555** split the vendor into two ids and neither the wire nor the roster
+/// moved with it: which backend takes a request is not a fact about how a
+/// `reasoning` object is spelled on it.
+///
+/// Asked of a whole synthesized roster rather than of `wire` — which is private
+/// and, more to the point, is an implementation of this — so a future arm that
+/// answered `Some(Wire::Responses)` and then diverged downstream would still
+/// redden here.
+#[test]
+fn the_seat_is_offered_exactly_the_efforts_the_platform_is() {
+    let platform = roster(&model("openai", "gpt-5.2", 128_000));
+    let seat = roster(&model("chatgpt", "gpt-5.2", 128_000));
+
+    assert!(!seat.is_empty(), "an id the wire table has never heard of is offered nothing at all");
+    assert_eq!(seat, platform, "one vendor, one wire, one roster");
+}
+
 /// The gateway's own four levels, and the map each of them splices — which
 /// is the whole of what its reference documents about reasoning and
 /// deliberately none of what the sibling Responses map carries.
@@ -159,6 +176,97 @@ fn an_openrouter_row_is_offered_the_four_efforts_its_reference_publishes() {
     let mut plain = model("openrouter", "openai/gpt-5.2-chat", 100_000);
     plain.reasoning = false;
     assert!(roster(&plain).is_empty());
+}
+
+/// **D556.** The `claude-code` roster is the CLI's own five, and each entry
+/// is the flat `{"effort": "<name>"}` the wire reads back.
+///
+/// The second assertion is the one that matters: it carries an entry the
+/// whole way to the argv, so this roster and
+/// [`claude_code::argv`](crate::provider::claude_code::argv) cannot drift
+/// into a map nobody reads. The wire's own reader is
+/// `request.effort_options["effort"]`, which is why the map is flat.
+#[test]
+fn a_claude_code_row_is_offered_the_five_efforts_the_cli_accepts() {
+    let seat = model(crate::provider::claude_code::ID, "default", 64_000);
+    let synthesized = roster(&seat);
+    let names: Vec<&str> = synthesized.keys().map(String::as_str).collect();
+    assert_eq!(
+        names,
+        ["high", "low", "max", "medium", "xhigh"],
+        "the CLI's own five, in the schema's sorted order"
+    );
+    assert_eq!(
+        serde_json::to_value(&synthesized["xhigh"]).expect("an entry serializes"),
+        json!({"effort": "xhigh"}),
+        "flat: this wire builds a command line, not a request body"
+    );
+
+    // What that map becomes on the way out, so the roster and the argv are
+    // pinned against each other rather than each against a literal.
+    let named = synthesized["xhigh"]["effort"].as_str().expect("the name is a string");
+    let argv = crate::provider::claude_code::argv::Argv::conversation(
+        &crate::provider::claude_code::argv::Spawn {
+            session_id: "0199ffff-0000-7000-8000-000000000000".to_owned(),
+            model: crate::provider::claude_code::DEFAULT_MODEL.to_owned(),
+            effort: Some(named.to_owned()),
+        },
+    )
+    .expect("a roster effort builds");
+    let argv: Vec<String> = argv.iter().map(|word| word.to_string_lossy().into_owned()).collect();
+    let at = argv.iter().position(|word| word == "--effort").expect("the flag is on the argv");
+    assert_eq!(argv[at + 1], "xhigh", "the name the roster carried, verbatim");
+
+    // The table's own gate answers a row that does not reason, exactly as it
+    // does for every other wire here.
+    let mut plain = model(crate::provider::claude_code::ID, "default", 64_000);
+    plain.reasoning = false;
+    assert!(roster(&plain).is_empty());
+}
+
+/// **D556**, Dv-16. The roster an uncataloged wire owns outright, and the
+/// answer every other id gets.
+///
+/// This is what makes `/effort` a door on this wire rather than a table nobody
+/// reads: the provider has no catalog rows, so no model has variants, so the
+/// names have to come from somewhere that is not a row. Cursor is the control —
+/// uncataloged too, and publishing no effort vocabulary at all, so `/effort`
+/// there stays refused by name.
+#[test]
+fn only_a_wire_whose_efforts_are_its_own_answers_a_standalone_roster() {
+    let own = standalone(crate::provider::claude_code::ID).expect("this wire's roster is its own");
+
+    assert_eq!(
+        own.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["high", "low", "max", "medium", "xhigh"],
+        "the CLI's own five, in the schema's sorted order"
+    );
+    assert_eq!(
+        serde_json::to_value(&own["max"]).expect("an entry serializes"),
+        json!({"effort": "max"}),
+        "and the same flat map the table produces, so a row arriving later changes nothing"
+    );
+    assert_eq!(
+        own,
+        roster(&model(crate::provider::claude_code::ID, "default", 64_000)),
+        "the two doors agree, which is what makes the fall-through invisible"
+    );
+
+    for other in [
+        crate::provider::cursor::ID,
+        crate::provider::fake::ID,
+        "anthropic",
+        "openai",
+        "openrouter",
+        "grok",
+        "github-copilot",
+        "local-llama",
+    ] {
+        assert!(
+            standalone(other).is_none(),
+            "{other}'s efforts are a model's business, not a wire's"
+        );
+    }
 }
 
 /// Catalog-first, the file's standing rule, on the one provider whose table

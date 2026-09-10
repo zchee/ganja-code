@@ -69,7 +69,13 @@ thiserror.workspace = true
 # browser login's callback comes back to. Naming it here rather than inheriting
 # it from `reqwest`'s unification keeps a future change to the HTTP client from
 # breaking a file that has nothing to do with HTTP.
-tokio = { workspace = true, features = ["net"] }
+#
+# `process` and `io-util` for the one child this crate spawns: **D556**'s
+# `claude` process, spoken to over its own stdio. A held CLI is a `Child` whose
+# pipes are read and written for the life of a conversation, so the async
+# process API and the `AsyncReadExt`/`AsyncWriteExt` that frame its lines are
+# this crate's own need rather than anything HTTP unified in.
+tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt", "sync", "time"] }
 tracing.workspace = true
 # `CancellationToken` lives behind `rt`; the workspace declaration carries no
 # features so crates opt into exactly the modules they use.
@@ -82,6 +88,13 @@ url.workspace = true
 # declaration's, and the entropy is still ours.
 uuid.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+# One call: `SIGTERM` to a held `claude` that would not take stdin EOF
+# (**D556**). `tokio::process::Child::kill` is always `SIGKILL`, and this wire
+# wants the polite bound first — so the term arm goes through `kill(2)` at the
+# pid and the kill arm through the handle, which also reaps.
+libc.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 # The credential store's owner-only protection: a DACL sealed onto the create
 # handle before the first secret byte, and the read-back that refuses a store
@@ -90,6 +103,12 @@ uuid.workspace = true
 windows-sys.workspace = true
 
 [dev-dependencies]
+# The fake `claude` CLI **D556**'s every test drives, and the one shape that
+# makes a live turn impossible from a test: no suite here spawns the user's own
+# binary. A dev-only cycle (`ganja-testkit` -> `ganja-core` -> this crate), the
+# same one `ganja-core` itself already has with it, and invisible to
+# `depgate`'s normal-tree rules.
+ganja-testkit.workspace = true
 # The credential and catalog-cache tests write real files, with real permission
 # bits, in a directory that goes away afterwards.
 tempfile.workspace = true
@@ -102,3 +121,12 @@ tempfile.workspace = true
 # spend ten real minutes per case. `ganja-core` carries the same pair, for the
 # same two reasons.
 tokio = { workspace = true, features = ["net", "test-util"] }
+
+# `harness = false` because this binary is both the test **and** the CLI it
+# drives: its `main` checks `GANJA_FAKE_CLAUDE_SCRIPT` first and re-execs
+# itself as the fake when that names one, which is what lets the wire's own
+# real spawner build a `Command` and spawn a child over real pipes without any
+# suite ever running a live `claude` turn (**D556**).
+[[test]]
+name = "claude_code_spawn"
+harness = false

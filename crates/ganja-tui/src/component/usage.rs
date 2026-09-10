@@ -191,6 +191,16 @@ pub struct Data {
     ///
     /// [`SystemTime::now`]: std::time::SystemTime::now
     pub now: Option<std::time::SystemTime>,
+    /// What the vendor said it actually served, as `Engine::served_model` last
+    /// answered (**D556**), read at open beside [`Data::rates`] and
+    /// [`Data::plans`]. [`None`] — every wire that says nothing — renders no
+    /// `Served model:` row at all, the same honest-absence rule the two
+    /// window sets are drawn under.
+    ///
+    /// **This is where the served model always is.** The status bar draws it
+    /// only for a `tui.statusline` roster that names `model`, so on a default
+    /// bar this panel is the one surface that has it (rev 8, A6-M1 (c)).
+    pub served_model: Option<ganja_core::provider::ServedModel>,
 }
 
 /// The dialog itself.
@@ -297,6 +307,23 @@ impl Usage {
             lines.push(Line::styled(
                 clip(
                     &format!("  {:<16} {}", "Total duration:", compact_duration(duration)),
+                    inner_width,
+                ),
+                theme.fg,
+            ));
+        }
+        // What the vendor said it served, where a wire says (**D556**). Both
+        // spellings, never a comparison: `requested` is ganja's own word and
+        // `served` is the vendor's, so a row that only drew the pair "when
+        // they differ" would draw it always and mean nothing by it. Absent,
+        // the row is absent — the same rule the two window sections keep.
+        if let Some(served) = &self.data.served_model {
+            lines.push(Line::styled(
+                clip(
+                    &format!(
+                        "  {:<16} {} (asked for {})",
+                        "Served model:", served.served, served.requested
+                    ),
                     inner_width,
                 ),
                 theme.fg,

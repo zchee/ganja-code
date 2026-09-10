@@ -82,11 +82,6 @@ use crate::provider::{ChatRequest, NO_RESULT};
 /// overflow to a file and would write one on every request.
 pub const CALL_INPUT_LIMIT: usize = 8 * 1024;
 
-/// What [`derived`] hashes ahead of a message id, so a history blob's id is
-/// a function of this build's own seed and never collides with an id the
-/// reference would mint from the same transcript.
-const DERIVATION_SEED: &str = "ganja-cursor-message:";
-
 /// What the run request asks the agent to do, decided by the request's own
 /// shape.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -566,7 +561,7 @@ fn assistant_text(text: &str, calls: &[Call<'_>], clamped_calls: &mut usize) -> 
 
 /// `input` cut at [`CALL_INPUT_LIMIT`] on a char boundary, with an elision
 /// naming exactly how many bytes were omitted; and whether it was cut.
-fn clamp(mut input: String) -> (String, bool) {
+pub(crate) fn clamp(mut input: String) -> (String, bool) {
     if input.len() <= CALL_INPUT_LIMIT {
         return (input, false);
     }
@@ -598,26 +593,12 @@ fn step(text: &str) -> proto::ConversationStep {
     }
 }
 
-/// A history blob's `message_id`, derived from the transcript's own `id`:
-/// the first sixteen bytes of `sha256(seed ‖ id)` rendered as a v4-shaped
-/// UUID — the reference's `deterministicUuid` layout (`proxy.ts:1341-1351`)
-/// from a different seed.
-///
-/// Derived rather than minted so the same message composes to the same blob
-/// on every request, and from the transcript's id rather than the reference's
-/// turn index and text so the id survives compaction, where an index shift
-/// re-mints every history id the reference has. Two consumers: each history
-/// user blob's `message_id`, and the run request's `conversation_id`, derived
-/// from the first message's. The action's own id is never derived — it is
-/// `request::fresh_id`'s random one, the reference's shape.
-#[must_use]
-pub fn derived(id: &MessageId) -> String {
-    let digest = Sha256::new().chain_update(DERIVATION_SEED).chain_update(id.as_str()).finalize();
-    let mut bytes = [0_u8; 16];
-    bytes.copy_from_slice(&digest[..16]);
-
-    request::render_v4(bytes)
-}
+// The derivation itself lives at `crate::provider::ids` since **D556**, which
+// keys a held `claude` process by `derived(messages[0].id)` for the property
+// D553 wrote it for: a name stable for as long as the conversation's first
+// message is. Re-exported rather than moved out of sight, because this module
+// is where a reader of the composed history looks for it.
+pub use crate::provider::ids::derived;
 
 #[cfg(test)]
 #[path = "history_tests.rs"]

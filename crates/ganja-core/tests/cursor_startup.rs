@@ -39,7 +39,8 @@ async fn a_cursor_session_without_a_login_is_refused_naming_the_login() {
         env::set_var("XDG_DATA_HOME", store.path());
     }
 
-    let selection = provider::select(&config()).expect("selection reads nothing and succeeds");
+    let selection =
+        provider::select(&config()).await.expect("selection reads nothing and succeeds");
     assert_eq!(selection.provider.id(), "cursor");
     assert_eq!(selection.model, "gpt-5.3-codex");
     assert!(selection.notice.is_none(), "the provider was asked for by name, not defaulted");

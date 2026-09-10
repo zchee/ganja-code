@@ -31,7 +31,15 @@
 //! roster.** A turn that is not offering `bash` does not run a shell because
 //! the server asked; that exec keeps D550's typed refusal, exactly as before.
 
-use ganja_tool::permission_text::{DENIED_PREFIX, REJECTED};
+// Whether an `Error` part's text is a refusal rather than a failure was this
+// module's own two-constant predicate until **D556 amended D552 here**, and
+// the amendment is visible on the wire: `is_refusal` knows the `PreToolUse`
+// hook's sentence beside the two permission ones, so from that landing a call
+// a user's hook refused travels to cursor's server as the kind's typed
+// `rejected` arm, where D552 sent it as `success{is_error: true}`. Root
+// `AGENTS.md` says a hook block "routes the same `fail_call` a denied rule
+// does", and the two have to read alike on every wire.
+use ganja_tool::permission_text::is_refusal;
 
 use super::{decode, proto, request};
 use crate::protocol::ToolState;
@@ -67,18 +75,18 @@ impl Outcome {
     /// pending or running.
     ///
     /// **The refusal is told from the failure by its text**, which is the only
-    /// thing that reaches a wire: `ganja_tool::permission_text`'s two
-    /// constants are the bytes the permission engine renders, and a wire that
-    /// could not name them would have to answer every declined call as a tool
-    /// that ran and broke. Anything else — an unknown tool, bad arguments, a
-    /// command that exited non-zero — is a failure, which is cursor's own
-    /// `is_error` shape rather than its `rejected` one.
+    /// thing that reaches a wire: `ganja_tool::permission_text::is_refusal`
+    /// knows the sentences the permission engine and D458's hook block render,
+    /// and a wire that could not name them would have to answer every declined
+    /// call as a tool that ran and broke. Anything else — an unknown tool, bad
+    /// arguments, a command that exited non-zero — is a failure, which is
+    /// cursor's own `is_error` shape rather than its `rejected` one.
     pub(super) fn of(state: &ToolState) -> Option<Self> {
         match state {
             ToolState::Completed { output, metadata, .. } => {
                 Some(Self::Ran { output: output.clone(), metadata: metadata.clone() })
             }
-            ToolState::Error { error, .. } => Some(if refused(error) {
+            ToolState::Error { error, .. } => Some(if is_refusal(error) {
                 Self::Refused(error.clone())
             } else {
                 Self::Failed(error.clone())
@@ -94,12 +102,6 @@ impl Outcome {
             Self::Failed(text) | Self::Refused(text) => text,
         }
     }
-}
-
-/// Whether an `Error` part's text is a permission refusal rather than a
-/// failure.
-fn refused(error: &str) -> bool {
-    error == REJECTED || error.starts_with(DENIED_PREFIX)
 }
 
 /// One exec turned into a ganja tool call, and the shape its answer takes.

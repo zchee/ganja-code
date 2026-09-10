@@ -125,6 +125,7 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
     }
 
     let selection = provider::select(&ganja_core::Config::default())
+        .await
         .expect("the planted key selects anthropic");
     assert_eq!(selection.provider.id(), "anthropic");
     assert!(selection.notice.is_none(), "a provider that was asked for by name needs no notice");
@@ -216,7 +217,8 @@ async fn a_key_planted_in_the_environment_never_renders_and_never_logs() {
         // The flag tier, which outranks the `GANJA_PROVIDER=anthropic` this
         // test planted, so the same process reaches both kinds of provider.
         config.overrides.model = Some("local-llama/tiny-instruct".to_owned());
-        let configured = provider::select(&config).expect("the entry's own variable holds the key");
+        let configured =
+            provider::select(&config).await.expect("the entry's own variable holds the key");
         assert_eq!(configured.provider.id(), "local-llama");
 
         let Err(compat_refusal) =

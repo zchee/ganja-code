@@ -123,7 +123,14 @@ impl ProviderId {
             // plain key — so cloning it here would be a login that buys a
             // session nothing.
             Self::Opencode | Self::OpencodeGo => &[Method::Api],
-            Self::OpenAi => &[Method::Browser, Method::Device, Method::Api],
+            // The platform API and nothing else since **D555**: the two OAuth
+            // flows mint a *subscription* credential, which is the other id's,
+            // and offering them here would store one where no wire reads it.
+            Self::OpenAi => &[Method::Api],
+            // The seat, and the two flows that reach it. No API-key entry: a
+            // key is the platform's credential, and a session on this id would
+            // never present one.
+            Self::Chatgpt => &[Method::Browser, Method::Device],
             // Upstream's own order for xAI too (`xai.ts:551`, `:594`, `:619`):
             // the loopback method first, because somebody sitting in front of a
             // browser is who a terminal login usually belongs to, then the
@@ -143,6 +150,15 @@ impl ProviderId {
             // cursor's backend runs on subscription tokens, and a stored key
             // would be a credential nothing ever sends.
             Self::Cursor => &[Method::Browser],
+            // **No login of ganja's at all** (**D556**), which is the whole
+            // posture of this wire rather than a gap: the session runs the
+            // `claude` binary under whatever seat that binary is already
+            // signed into, and ganja never holds a Claude.ai credential —
+            // it strips the two `ANTHROPIC_*` names out of the child's own
+            // environment on the way in. There is nothing here to store, so
+            // the empty roster is the truth and [`refused_here`] is the
+            // sentence that says whose command to type instead.
+            Self::ClaudeCode => &[],
         }
     }
 
@@ -152,21 +168,45 @@ impl ProviderId {
     /// [`None`] means ask. The two providers with an OAuth flow of each kind do:
     /// a browser login and a device login are genuinely different situations —
     /// whether there is a browser on *this* machine — and nothing here can tell
-    /// which one somebody is in. The other two have one login each worth
-    /// offering, and a menu with one item is a keystroke charged for nothing
-    /// (upstream skips the prompt at `providers.ts:47` for the same reason).
+    /// which one somebody is in. The rest have one login each worth offering,
+    /// and a menu with one item is a keystroke charged for nothing (upstream
+    /// skips the prompt at `providers.ts:47` for the same reason) — `openai`
+    /// among them since **D555** took its two OAuth flows to `chatgpt`.
     fn only_login(self) -> Option<Method> {
         match self {
-            Self::Anthropic | Self::OpenRouter | Self::Opencode | Self::OpencodeGo => {
-                Some(Method::Api)
-            }
+            Self::Anthropic
+            | Self::OpenAi
+            | Self::OpenRouter
+            | Self::Opencode
+            | Self::OpencodeGo => Some(Method::Api),
             Self::GithubCopilot => Some(Method::Device),
-            Self::Grok | Self::OpenAi => None,
+            Self::Grok | Self::Chatgpt => None,
             // One login worth offering, like Copilot's: a menu with one item
             // is a keystroke charged for nothing.
             Self::Cursor => Some(Method::Browser),
+            // No login to run, so nothing to skip a menu for. Unreachable in
+            // practice: [`chosen`] refuses a provider with an empty roster
+            // before it asks this.
+            Self::ClaudeCode => None,
         }
     }
+}
+
+/// The refusal for a provider whose login is somebody else's program
+/// (**D556**).
+///
+/// Its own function rather than an arm of [`accepted`] because the two say
+/// different things: that one names the logins a provider *has*, which is the
+/// useful half when somebody asked for the wrong one of several, and here the
+/// list is empty and the useful half is the command to type instead. A refusal
+/// that trailed "it has " into nothing would be the shape of an answer without
+/// being one.
+fn refused_here(provider: ProviderId) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{provider}: this wire's login is the CLI's own: run `claude login`. The seat a session \
+         runs on is whatever that binary is signed into, so there is no credential here for \
+         ganja to store"
+    )
 }
 
 /// Which login this invocation runs.
@@ -202,6 +242,12 @@ pub(crate) fn chosen(
     has_key: bool,
     method: Option<Method>,
 ) -> Result<Method> {
+    // Ahead of every step below, `--key` included: a provider with no login of
+    // ganja's has nothing for any of them to choose between, and the sentence
+    // that says so is the same one whatever was typed.
+    if provider.methods().is_empty() {
+        return Err(refused_here(provider));
+    }
     if has_key {
         return accepted(provider, Method::Api);
     }
@@ -256,8 +302,8 @@ fn accepted(provider: ProviderId, method: Method) -> Result<Method> {
 /// from having read its documentation.
 fn label(provider: ProviderId, method: Method) -> String {
     match (provider, method) {
-        (ProviderId::OpenAi, Method::Browser) => "ChatGPT Pro/Plus (browser)".to_owned(),
-        (ProviderId::OpenAi, Method::Device) => "ChatGPT Pro/Plus (headless)".to_owned(),
+        (ProviderId::Chatgpt, Method::Browser) => "ChatGPT Pro/Plus (browser)".to_owned(),
+        (ProviderId::Chatgpt, Method::Device) => "ChatGPT Pro/Plus (headless)".to_owned(),
         (ProviderId::Grok, Method::Browser) => "xAI Grok OAuth (SuperGrok Subscription)".to_owned(),
         (ProviderId::Grok, Method::Device) => "xAI Grok OAuth (Headless / Remote / VPS)".to_owned(),
         (_, Method::Api) => "Manually enter API Key".to_owned(),
@@ -303,8 +349,8 @@ pub(crate) async fn oauth(
 
             Ok(copilot::credential_from(&tokens, &deployment))
         }
-        (ProviderId::OpenAi, Method::Browser) => chatgpt_browser(&cancel).await,
-        (ProviderId::OpenAi, Method::Device) => chatgpt_device(&cancel).await,
+        (ProviderId::Chatgpt, Method::Browser) => chatgpt_browser(&cancel).await,
+        (ProviderId::Chatgpt, Method::Device) => chatgpt_device(&cancel).await,
         (ProviderId::Cursor, Method::Browser) => {
             // The same two-step shape every flow here has: the URL reaches
             // the screen before anything blocks on it having been opened.

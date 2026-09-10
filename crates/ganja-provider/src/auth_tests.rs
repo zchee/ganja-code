@@ -744,6 +744,14 @@ fn a_grok_credential_is_stored_where_upstream_keeps_its_xai_one() {
     assert_eq!(provider_id_for_storage_key("xai"), "grok");
     assert_eq!(provider_id_for_storage_key("openai"), "openai");
 
+    // The seat's own key since **D555**, and deliberately no alias: `chatgpt`
+    // is a name this build minted rather than one it inherited, so there is no
+    // shared file to keep agreeing with and nothing to translate. A pre-split
+    // login still sits under `openai`, which is why the two must not map onto
+    // each other in either direction.
+    assert_eq!(storage_key("chatgpt"), "chatgpt");
+    assert_eq!(provider_id_for_storage_key("chatgpt"), "chatgpt");
+
     // The alias table is a **closed** list over an **open** store: a name
     // it has never heard of passes through unchanged in both directions.
     // That is what lets a config declare a provider and
@@ -1329,39 +1337,81 @@ fn a_login_is_stamped_when_it_lands_and_a_replacement_keeps_its_seniority() {
     );
 }
 
+/// The storage keys of a listing, in the order it came back.
+///
+/// The assertions below are about *order*; that a credential's kind rides
+/// beside its key is
+/// [`the_kind_rides_beside_every_key_so_selection_need_not_reopen_the_store`]'s.
+fn keys(listed: &[(String, CredentialKind)]) -> Vec<&str> {
+    listed.iter().map(|(key, _)| key.as_str()).collect()
+}
+
+/// **AC-0.11.** Selection has to tell a stored key from a stored login to
+/// apply **D555**'s skip — a pre-split ChatGPT login under `openai` is not a
+/// credential the platform wire can present — and the rule that applies it
+/// deliberately reads no store. So the kind travels with the key from the one
+/// read that already had it.
+#[test]
+fn the_kind_rides_beside_every_key_so_selection_need_not_reopen_the_store() {
+    let directory = temporary();
+    let store = store(&directory);
+    store.set("anthropic", CANARY).expect("the key stores");
+    store
+        .set_oauth(
+            "openai",
+            &OauthCredential::new(
+                SecretString::from("rt-pre-split"),
+                SecretString::from("at-pre-split"),
+                0,
+            ),
+        )
+        .expect("the login stores");
+    fs::write(store.stamps_path(), "{}").expect("the stamps clear");
+
+    assert_eq!(
+        store.logins_oldest_first().expect("the store reads"),
+        vec![
+            ("anthropic".to_owned(), CredentialKind::ApiKey),
+            ("openai".to_owned(), CredentialKind::Oauth),
+        ],
+        "the two entries differ only in kind, and that is exactly what has to survive the read"
+    );
+}
+
 /// The order selection defaults through when nothing named a provider:
 /// oldest stamp first, then the logins nothing stamped in the fixed
-/// priority — ganja's `grok` under the file's `xai` included — then ids
+/// priority — ganja's `grok` under the file's `xai` included, and `chatgpt`
+/// behind `openai` since **D555** put the seat's key in that list — then ids
 /// the priority has never heard of, in the store's own order.
 #[test]
 fn the_oldest_stamped_login_leads_and_the_unstamped_follow_in_fixed_priority() {
     let directory = temporary();
     let store = store(&directory);
-    for provider_id in ["local-llama", "github-copilot", "grok", "openai", "anthropic"] {
+    for provider_id in ["local-llama", "github-copilot", "grok", "chatgpt", "openai", "anthropic"] {
         store.set(provider_id, CANARY).expect("the key stores");
     }
 
     // Everybody unstamped — the pre-feature store, and opencode's forever.
     fs::write(store.stamps_path(), "{}").expect("the stamps clear");
     assert_eq!(
-        store.logins_oldest_first().expect("the store reads"),
-        vec!["anthropic", "openai", "xai", "github-copilot", "local-llama"],
+        keys(&store.logins_oldest_first().expect("the store reads")),
+        vec!["anthropic", "openai", "chatgpt", "xai", "github-copilot", "local-llama"],
     );
 
     // One stamp, held by the login the fixed priority ranks last: a
     // recorded age beats every guessed one.
     fs::write(store.stamps_path(), r#"{"github-copilot": 5000}"#).expect("the stamps rewrite");
     assert_eq!(
-        store.logins_oldest_first().expect("the store reads"),
-        vec!["github-copilot", "anthropic", "openai", "xai", "local-llama"],
+        keys(&store.logins_oldest_first().expect("the store reads")),
+        vec!["github-copilot", "anthropic", "openai", "chatgpt", "xai", "local-llama"],
     );
 
     // Two stamps order by time, not by name or by priority.
     fs::write(store.stamps_path(), r#"{"anthropic": 9000, "xai": 2000}"#)
         .expect("the stamps rewrite");
     assert_eq!(
-        store.logins_oldest_first().expect("the store reads"),
-        vec!["xai", "anthropic", "openai", "github-copilot", "local-llama"],
+        keys(&store.logins_oldest_first().expect("the store reads")),
+        vec!["xai", "anthropic", "openai", "chatgpt", "github-copilot", "local-llama"],
     );
 }
 
@@ -1444,8 +1494,8 @@ fn a_broken_stamps_file_degrades_to_the_fixed_priority_order() {
     fs::write(store.stamps_path(), b"{ not json").expect("the fixture writes");
 
     assert_eq!(
-        store.logins_oldest_first().expect("a broken sidecar is not a broken store"),
-        vec!["anthropic".to_owned(), "openai".to_owned()],
+        keys(&store.logins_oldest_first().expect("a broken sidecar is not a broken store")),
+        vec!["anthropic", "openai"],
     );
 }
 

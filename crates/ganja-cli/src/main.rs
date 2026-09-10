@@ -680,6 +680,12 @@ pub(crate) enum ProviderId {
     // The two below derive the names their providers already have.
     #[value(name = "openai")]
     OpenAi,
+    // The same vendor's other id, and the one this build's ChatGPT flows write
+    // under (**D555**): `openai` takes a key for the platform API, `chatgpt`
+    // takes the subscription login. Two entries because they are two
+    // credentials against two pools, not two spellings of one.
+    #[value(name = "chatgpt")]
+    Chatgpt,
     // And this one would derive `open-router`, which is nobody's name for it
     // either — the vendor, the catalog and the credential file all spell it as
     // one word.
@@ -698,6 +704,12 @@ pub(crate) enum ProviderId {
     // Parses so its refusal can name the deferral; a name clap rejected would
     // read as a typo rather than as the stub it is.
     Cursor,
+    // Parses for that reason and a stronger one (**D556**): this wire has a
+    // login, it is simply not ganja's to run. A name clap rejected would say
+    // "no such provider" about a provider a session can run right now, where
+    // the refusal below says whose command to type instead.
+    #[value(name = "claude-code")]
+    ClaudeCode,
 }
 
 impl ProviderId {
@@ -715,13 +727,18 @@ impl ProviderId {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Anthropic => "anthropic",
-            Self::OpenAi => auth::openai::PROVIDER_ID,
+            // The provider crate's id rather than `auth::openai`'s: that module
+            // mints the *seat's* login and names `chatgpt` since **D555**, so
+            // reading it here would file a platform key under the subscription.
+            Self::OpenAi => ganja_core::provider::openai::ID,
+            Self::Chatgpt => ganja_core::provider::responses::CHATGPT_ID,
             Self::OpenRouter => ganja_core::provider::openrouter::ID,
             Self::Opencode => ganja_core::provider::opencode::ZEN_ID,
             Self::OpencodeGo => ganja_core::provider::opencode::GO_ID,
             Self::Grok => auth::grok::PROVIDER_ID,
             Self::GithubCopilot => auth::copilot::PROVIDER_ID,
             Self::Cursor => ganja_core::provider::cursor::ID,
+            Self::ClaudeCode => ganja_core::provider::claude_code::ID,
         }
     }
 }
@@ -1841,11 +1858,13 @@ fn store_key(provider: &NamedProvider, key: Option<String>) -> Result<()> {
 
 /// Says what a login is about to overwrite, while it still exists.
 ///
-/// A ChatGPT login and an OpenAI API key are stored under the same key, so each
-/// replaces the other — upstream's behaviour at that key too, and `ganja-core`
-/// pins it in both directions. Core cannot warn about it: it is handed a
-/// credential and a provider, and has no way to know a person is watching. This
-/// is the only place that does.
+/// **D555** took the sharpest case away rather than this warning: a ChatGPT
+/// login and an OpenAI API key are two ids now, so neither can silently replace
+/// the other and what is left to report is a credential replacing one of its own
+/// kind. Worth reporting still — a second login against the same provider
+/// discards the first — and core cannot report it: it is handed a credential and
+/// a provider, and has no way to know a person is watching. This is the only
+/// place that does.
 ///
 /// Nothing is refused. A replacement is what `login` is for, and the point is
 /// that it not be silent.

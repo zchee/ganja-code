@@ -28,6 +28,10 @@ The teammates landing (P25) ports **Claude Code's** team behavior — the teams 
 
 Three spans were redacted before commit — one prompt and two absolute paths — length-preservingly, so the byte comparison the fixtures exist for still means what it says. Everything else is Claude's own bytes. `crates/ganja-team/tests/fixtures/PROVENANCE.md` records the capture in full: where each file came from, what was replaced and why, and the law the redaction was held to. **Do not reformat these files**; the interop test is the guard, and rewriting them would delete the only thing it is for.
 
+**Stream-json probe recordings.** D556 made the unmodified `claude` binary a provider, and what that binary does under a third-party host was measured rather than read off a `--help` page. `crates/ganja-provider/tests/fixtures/claude-code-sdk-mcp-probe.txt` is the recording of nineteen invocations that measurement produced, and `claude-code-replay-run1.json` beside it is the frame slice derived from it under the same scrub. Both are attributed here for the reason the foreign-CLI recordings below are: each quotes short spans of what another tool's process wrote. What is quoted is the CLI's own stdout vocabulary — the stream-json frame `type`s and `system` subtypes, the `system/init` field names and the values reported for them, the `auth_status` reply's two keys, the `result` shapes, and the `api_refusal_category` and `api_refusal_explanation` of the turns the vendor's safeguard refused, verbatim, because a paraphrase of a refusal is not evidence that it happened.
+
+What is **not** in either file: any reply text beyond the probe's own one-word answers, any `output` array content (line counts alone), and any account, email or token. The recording is judged by a person and read by no test — the derived slice is the half a test reads — so neither may be edited to make anything pass; the recording's own header states the scrub, and `crates/ganja-provider/tests/fixtures/AGENTS.md` states the derivation rule.
+
 ---
 
 ## Foreign CLI probe recordings

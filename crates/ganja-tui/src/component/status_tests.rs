@@ -726,6 +726,104 @@ fn the_context_meter_never_claims_more_than_full() {
     assert!(line.contains("ctx:[########]100%"), "got {line:?}");
 }
 
+/// One served-model pair, in the shape the wire reports it.
+fn served(requested: &str, served: &str) -> ganja_core::provider::ServedModel {
+    ganja_core::provider::ServedModel { requested: requested.to_owned(), served: served.to_owned() }
+}
+
+/// **D556.** The `model` element carries the vendor's spelling behind the
+/// chosen one where the two differ, and draws the chosen model alone where
+/// the wire said nothing or said the same thing.
+#[test]
+fn the_model_element_names_the_served_model_only_where_it_differs() {
+    let mut status = roster(&[StatuslineElement::Model]);
+    status.set_model(Some("default".to_owned()));
+
+    assert_eq!(
+        rendered(&status, 80),
+        "Model: default",
+        "a wire that reports nothing draws the bar it always drew"
+    );
+
+    status.set_served_model(Some(&served("default", "claude-opus-5[1m]")));
+    assert_eq!(
+        rendered(&status, 80),
+        "Model: default (served: claude-opus-5[1m])",
+        "both spellings, the vendor's behind ganja's"
+    );
+
+    // The `requested` half is deliberately not what the pair is decided on:
+    // here it is a different word from the chosen model and the row still
+    // collapses, because what a reader could think disagreed is `served`
+    // against the model the bar names.
+    status.set_served_model(Some(&served("whatever ganja called it", "default")));
+    assert_eq!(
+        rendered(&status, 80),
+        "Model: default",
+        "the vendor served what was chosen; there is no divergence to draw"
+    );
+}
+
+/// **D556**, rev 8's C-L4. A subagent shares the provider, so a reading
+/// taken while delegated children are in flight may be about a child's own
+/// model — and pairing that with the root's chosen model would draw a
+/// divergence nobody has. The gate lives at the poll; what this pins is the
+/// bar's half of the contract, that [`None`] leaves the chosen model alone.
+#[test]
+fn the_served_model_is_dropped_rather_than_drawn_against_the_wrong_turn() {
+    let mut status = roster(&[StatuslineElement::Model]);
+    status.set_model(Some("default".to_owned()));
+    status.set_served_model(Some(&served("default", "claude-opus-5[1m]")));
+    assert_eq!(rendered(&status, 80), "Model: default (served: claude-opus-5[1m])");
+
+    status.set_served_model(None);
+    assert_eq!(
+        rendered(&status, 80),
+        "Model: default",
+        "what the poll hands the bar while a child is running"
+    );
+}
+
+/// **D556**, rev 8's A6-M1 (c). The default bar draws no `model` element at
+/// all, so nothing about the served model can reach it — which is what keeps
+/// every full-frame snapshot taken over that bar byte-unchanged, and why
+/// `/usage` is where the served model always is.
+#[test]
+fn the_default_bar_draws_no_served_model_whatever_the_wire_reports() {
+    let mut status = Status::new(None);
+    let before = rendered(&status, 120);
+
+    status.set_model(Some("default".to_owned()));
+    status.set_served_model(Some(&served("default", "claude-opus-5[1m]")));
+
+    assert_eq!(rendered(&status, 120), before, "the default bar is a fixed walk");
+    assert!(!rendered(&status, 120).contains("served"), "and says nothing about one");
+}
+
+/// **D556.** The notice slot carries an informational sentence as readily as
+/// a failure, and the guarded takedown leaves a later writer's sentence
+/// alone — `SLOW_TASK_READ`'s own rule, exercised on the eviction sentence
+/// because it is the second writer that made the slot shared.
+#[test]
+fn a_guarded_takedown_leaves_another_writers_notice_standing() {
+    const EVICTION: &str = "claude-code: idle past `idle_bound`; the next turn opens without the \
+                            assistant's earlier replies";
+
+    let mut status = roster(&[StatuslineElement::Notice]);
+    status.set_notice(Some(EVICTION.to_owned()));
+    status.clear_notice_if(EVICTION);
+    assert_eq!(rendered(&status, 200), "", "its own sentence comes down");
+
+    status.set_notice(Some(EVICTION.to_owned()));
+    status.set_notice(Some("something else entirely".to_owned()));
+    status.clear_notice_if(EVICTION);
+    assert_eq!(
+        rendered(&status, 200),
+        "something else entirely",
+        "a sentence written in the meantime is not wiped"
+    );
+}
+
 /// A roster wider than the bar ends with the OMC ellipsis instead of a
 /// silent cut.
 #[test]

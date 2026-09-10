@@ -149,28 +149,13 @@ pub(super) fn fresh_id() -> Result<String, ProviderError> {
     Ok(render_v4(bytes))
 }
 
-/// Sixteen bytes as a v4-shaped UUID: the version nibble forced to `4`, the
-/// variant bits to RFC 4122, and the hyphenated lowercase-hex layout.
-///
-/// Shared by [`fresh_id`], whose bytes are random, and by
-/// [`history::derived`], whose bytes are a hash — so the two ids on a run
-/// request are the same *shape* by construction, which is the reference's
-/// own arrangement (`proxy.ts:849` mints one, `:1341-1351` derives the
-/// other, both to this layout).
-pub(super) fn render_v4(mut bytes: [u8; 16]) -> String {
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-
-    let mut rendered = String::with_capacity(36);
-    for (index, byte) in bytes.iter().enumerate() {
-        if matches!(index, 4 | 6 | 8 | 10) {
-            rendered.push('-');
-        }
-        write!(rendered, "{byte:02x}").expect("writing hex into a String cannot fail");
-    }
-
-    rendered
-}
+// Sixteen bytes as a v4-shaped UUID. The layout moved to
+// `crate::provider::ids` with `history::derived`, which is its other caller,
+// when **D556** gave that derivation a third consumer outside this module; it
+// is re-exported here because `fresh_id` above is written in terms of it, and
+// because the two ids on a run request being the same *shape* is this
+// module's own arrangement to state.
+pub(super) use crate::provider::ids::render_v4;
 
 /// The tools of `request` as cursor's own client-declared roster (**D552**).
 ///

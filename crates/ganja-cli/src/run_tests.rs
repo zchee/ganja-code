@@ -55,6 +55,7 @@ fn assistant() -> Message {
         time: ganja_protocol::MessageTime { created: 1, completed: None },
         model: Some("canned".to_owned()),
         usage: None,
+        request_only: false,
     }
 }
 

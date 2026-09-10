@@ -176,7 +176,7 @@ pub async fn run(
     let config = Config::load_with(&cwd, &overrides).context("failed to read the configuration")?;
     let keys =
         Keybinds::from_config(&config.keybinds).context("failed to read the key bindings")?;
-    let selection = provider::select(&config).context("failed to select a provider")?;
+    let selection = provider::select(&config).await.context("failed to select a provider")?;
     // Captured before the provider is handed to the engine: the model list is
     // narrowed to this provider, and `Selection` gives it up on the move.
     let provider_id = selection.provider.id().to_owned();
@@ -232,6 +232,12 @@ pub async fn run(
     // the config and the directory can resolve where either half looks.
     let skill_roots = instruction::skill_roots(&config, &cwd);
     tools = tools.with(Arc::new(ganja_tool::skill::SkillTool::over(skill_roots.clone())));
+    // Cloned before the selection gives it up, for `storage`'s reason one
+    // field down and a different consumer: the teardown at the tail of this
+    // function has to be able to close whatever the wire is holding on this
+    // machine, and by then the engine has moved into the app (**D556**,
+    // Dv-14). An `Arc<dyn Provider>`, so no exit path names a concrete wire.
+    let provider = Arc::clone(&selection.provider);
     let mut engine = Engine::persistent(
         selection.provider,
         model,
@@ -688,6 +694,12 @@ pub async fn run(
     // down: the engine moved into the app, and `App::run` consumes it.
     servers.shutdown().await;
     jobs.shutdown().await;
+    // And whatever the *wire* is holding, through the handle cloned before the
+    // selection gave it up (**D556**, Dv-14). A no-op for every provider but
+    // one; the `claude-code` wire may be holding up to eight authenticated
+    // node runtimes and a scratch directory each, and a ganja that exited
+    // without this left them alive until their own idle bound closed them.
+    provider.shutdown().await;
     let restored = restore();
 
     outcome.and(restored)

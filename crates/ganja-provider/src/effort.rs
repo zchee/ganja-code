@@ -24,8 +24,8 @@
 //! **Two of the three gateways are the selectable providers deliberately left
 //! in that last group** — `opencode` and `opencode-go`. They are there rather
 //! than out of the list: each is cataloged and each is a wire ganja serves, so
-//! [`wire`] could name one. What says not yet is that **one provider id serves
-//! three dialects**, so one [`Wire`] per provider cannot describe them at all.
+//! `wire` could name one. What says not yet is that **one provider id serves
+//! three dialects**, so one `Wire` per provider cannot describe them at all.
 //! What would describe them is
 //! [`ModelInfo::npm`](crate::catalog::ModelInfo::npm) — the per-row transport
 //! `crate::provider::opencode` dispatches on, and which this module could key
@@ -35,16 +35,29 @@
 //! uncatalogued-wire row already does.
 //!
 //! **`openrouter` left that group in P20** and has a lane of its own,
-//! [`Wire::OpenRouter`]. What kept it out was never the provider: upstream's
+//! `Wire::OpenRouter`. What kept it out was never the provider: upstream's
 //! branch for it is keyed to `@openrouter/ai-sdk-provider`, a
 //! *chat-completions* transport, while ganja reaches that vendor over Responses
 //! (`crate::provider::openrouter`) — so upstream's map is about a wire this
-//! build does not use, and [`responses_effort`]'s map splices exactly the
-//! fields — [`INCLUDE_ENCRYPTED_REASONING`] above all — that module refuses to
+//! build does not use, and `responses_effort`'s map splices exactly the
+//! fields — `INCLUDE_ENCRYPTED_REASONING` above all — that module refuses to
 //! send unasked. A *third* map settles it: that vendor's own reference
 //! publishes `reasoning: {effort: minimal|low|medium|high}` and nothing else
-//! about reasoning, so [`openrouter_effort`] carries that one field, the ledger
+//! about reasoning, so `openrouter_effort` carries that one field, the ledger
 //! keeps its drops, and neither map is the other's.
+//!
+//! **`claude-code` is in the table and in no upstream at all** (**D556**),
+//! `Wire::ClaudeCode`. It is here for the opposite reason to everything
+//! above: not a transport upstream keys on, but a *command line* — the wire
+//! spawns the vendor's own CLI and hands it `--effort <name>`, so what an
+//! effort has to produce is a name rather than a body fragment. It is also the
+//! one lane whose provider the catalog does not carry, and that is what
+//! `standalone` exists for: every other consumer arrives through
+//! a row's `variants`, which a
+//! provider with no rows has none of, so a roster that belongs to the **wire**
+//! rather than to any one model needs a door of its own. The day a row arrives
+//! for this provider, the ordinary path produces the same maps and that door
+//! stops being consulted.
 //!
 //! Two translations ride every map. Upstream's option maps are AI-SDK
 //! provider options (`budgetTokens`, `reasoningEffort`) that the SDK re-spells
@@ -52,7 +65,7 @@
 //! verbatim, so the maps here are written in wire spelling from the start —
 //! `budget_tokens` on a Messages body, `reasoning` / `include` on a Responses
 //! one, `reasoning_effort` on chat completions. And upstream returns efforts
-//! in publication order where [`ModelInfo::variants`] is a `BTreeMap`: the
+//! in publication order where a row's `variants` is a `BTreeMap`: the
 //! roster sorts by name, which is the catalog schema's standing order and not
 //! this module's to change.
 
@@ -64,9 +77,9 @@ use serde_json::{Map, Value};
 
 use crate::catalog::{ModelInfo, ReasoningOption};
 
-/// The efforts a model carries, by name — the value [`ModelInfo::variants`]
-/// holds once a row is parsed.
-type Roster = BTreeMap<String, Map<String, Value>>;
+/// The efforts a model carries, by name — the value a parsed row's
+/// `variants` holds.
+pub type Roster = BTreeMap<String, Map<String, Value>>;
 
 /// The wire a cataloged provider's rows are served through, which fixes the
 /// field names a synthesized option map may use. This enum *is* the
@@ -81,13 +94,18 @@ enum Wire {
     /// OpenRouter's Responses surface: `reasoning.effort` and nothing beside
     /// it. A lane of its own rather than [`Self::Responses`] because the two
     /// vendors' bodies differ exactly where this module writes — see
-    /// [`openrouter_effort`].
+    /// `openrouter_effort`.
     OpenRouter,
     /// Chat completions as xAI serves it: `reasoning_effort`, nothing else.
     Grok,
     /// Chat completions as GitHub Copilot serves it: `reasoning_effort`, with
     /// upstream's per-family gates (`transform.ts:891`).
     Copilot,
+    /// The `claude` CLI's own seat (**D556**): not an HTTP body at all, but a
+    /// `--effort <name>` on the argv of the process this wire spawns. A lane of
+    /// its own because the *encoding* is what this enum fixes, and a command
+    /// line is not one of the other four.
+    ClaudeCode,
 }
 
 /// Which wire serves `provider_id`'s rows, or [`None`] for every provider the
@@ -96,10 +114,17 @@ enum Wire {
 fn wire(provider_id: &str) -> Option<Wire> {
     match provider_id {
         "anthropic" => Some(Wire::Messages),
-        "openai" => Some(Wire::Responses),
+        // The vendor's two ids (**D555**). One wire and one roster: the seat
+        // and the platform differ in which backend takes the request, never in
+        // how a `reasoning` object is spelled on it.
+        "openai" | "chatgpt" => Some(Wire::Responses),
         "openrouter" => Some(Wire::OpenRouter),
         "grok" => Some(Wire::Grok),
         "github-copilot" => Some(Wire::Copilot),
+        // Uncataloged, and named here anyway (**D556**): the five levels are
+        // the CLI's own flag's, so the map is knowable without a row at all.
+        // `standalone` is what reaches it while that stays true.
+        crate::provider::claude_code::ID => Some(Wire::ClaudeCode),
         _ => None,
     }
 }
@@ -121,9 +146,18 @@ const WIDELY_SUPPORTED_EFFORTS: [&str; 3] = ["low", "medium", "high"];
 /// line changing.
 ///
 /// The vendor scopes reasoning to reasoning-capable models and publishes no
-/// per-model flag ganja can read; [`table`]'s own `model.reasoning` gate is
+/// per-model flag ganja can read; `table`'s own `model.reasoning` gate is
 /// what keeps this off a row that does not reason at all.
 const OPENROUTER_EFFORTS: [&str; 4] = ["minimal", "low", "medium", "high"];
+
+/// The efforts the `claude` CLI's own `--effort` accepts, weakest to
+/// strongest (bundle-1 §1.3, L144196 — the CLI's own choice list).
+///
+/// Authored here for [`OPENROUTER_EFFORTS`]'s reason and one of its own: this
+/// provider is uncataloged, so `models.dev` publishes nothing for it at all
+/// and there is no row for a declaration to override. What the levels are is
+/// the CLI's, read off its own flag rather than guessed.
+const CLAUDE_CODE_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
 /// The day OpenAI rolled out the `none` reasoning tier; older models 400 on
 /// it, so it is only synthesized for models new enough to accept it.
@@ -148,6 +182,36 @@ pub(crate) fn roster(model: &ModelInfo) -> Roster {
     let synthesized = reasoning_efforts(model).unwrap_or_else(|| table(model));
 
     merged(synthesized, model.variants.clone())
+}
+
+/// The roster a wire owns outright, for a provider the catalog cannot describe
+/// (**D556**, Dv-16).
+///
+/// `roster` synthesizes a *model's* efforts from its catalog row. An
+/// uncataloged provider has no row, so it has no variants, so every consumer
+/// that reads `ModelInfo::variants` finds nothing — which is how a wire can
+/// ship a documented effort vocabulary that no door reaches. This is the other
+/// source: the names belong to the **wire** rather than to any one model, and
+/// they are knowable without a row because the CLI's own flag publishes them.
+///
+/// [`None`] for every provider whose efforts are a model's business, which is
+/// every other id — cursor included, whose uncataloged tier publishes no
+/// effort vocabulary at all, so `/effort` there is still refused by name.
+///
+/// The maps are `table`'s own, so a row arriving for this provider later
+/// would produce the same option maps through the ordinary path and this
+/// function would simply stop being consulted.
+#[must_use]
+pub fn standalone(provider_id: &str) -> Option<Roster> {
+    match wire(provider_id)? {
+        Wire::ClaudeCode => Some(
+            CLAUDE_CODE_EFFORTS
+                .iter()
+                .map(|effort| ((*effort).to_owned(), claude_code_effort(effort)))
+                .collect(),
+        ),
+        Wire::Messages | Wire::Responses | Wire::OpenRouter | Wire::Grok | Wire::Copilot => None,
+    }
 }
 
 /// `declared` over `base`, upstream's `mergeDeep(variants, model.variants)`:
@@ -184,7 +248,7 @@ fn merge_deep(base: &mut Map<String, Value>, over: Map<String, Value>) {
 
 /// The capability-data source, upstream's `reasoningVariants`
 /// (`transform.ts:1648`). [`None`] means the data said nothing and the caller
-/// falls through to [`table`]; an empty roster means it said *no efforts*,
+/// falls through to `table`; an empty roster means it said *no efforts*,
 /// which the table may not override.
 fn reasoning_efforts(model: &ModelInfo) -> Option<Roster> {
     let options = model.reasoning_options.as_ref()?;
@@ -238,6 +302,7 @@ fn effort_settings(model: &ModelInfo, effort: &str) -> Option<Map<String, Value>
         }
         Wire::Responses => Some(responses_effort(effort)),
         Wire::OpenRouter => Some(openrouter_effort(effort)),
+        Wire::ClaudeCode => Some(claude_code_effort(effort)),
         Wire::Grok => Some(chat_effort(effort)),
         // Copilot serves Gemini's thinking on no dial at all
         // (`transform.ts:1748`), so a published value has nowhere to go.
@@ -276,7 +341,7 @@ fn budget_efforts(model: &ModelInfo, min: Option<f64>, max: Option<f64>) -> Rost
 fn budget_settings(model: &ModelInfo, budget: f64) -> Option<Map<String, Value>> {
     match wire(&model.provider_id)? {
         Wire::Messages => Some(thinking_budget(budget)),
-        Wire::Responses | Wire::OpenRouter | Wire::Grok | Wire::Copilot => None,
+        Wire::Responses | Wire::OpenRouter | Wire::ClaudeCode | Wire::Grok | Wire::Copilot => None,
     }
 }
 
@@ -307,6 +372,14 @@ fn table(model: &ModelInfo) -> Roster {
         Wire::OpenRouter => OPENROUTER_EFFORTS
             .iter()
             .map(|effort| ((*effort).to_owned(), openrouter_effort(effort)))
+            .collect(),
+        // No per-model gates for the same reason openrouter has none, arrived
+        // at from the other end: there is exactly one model here to gate — the
+        // CLI's `default`, which is whatever the seat routes to — and the flag
+        // is the CLI's rather than any one model's.
+        Wire::ClaudeCode => CLAUDE_CODE_EFFORTS
+            .iter()
+            .map(|effort| ((*effort).to_owned(), claude_code_effort(effort)))
             .collect(),
         Wire::Grok => {
             // The xAI doc branch (`transform.ts:787`): grok-3-mini takes
@@ -424,10 +497,10 @@ fn responses_effort(effort: &str) -> Map<String, Value> {
 
 /// The OpenRouter shape of one effort: `reasoning.effort`, alone.
 ///
-/// **Deliberately not [`responses_effort`]**, although the two vendors serve
+/// **Deliberately not `responses_effort`**, although the two vendors serve
 /// the same dialect. The other two fields in that map are the other vendor's:
 /// `summary: "auto"` is what *its* CLI sends, and
-/// [`INCLUDE_ENCRYPTED_REASONING`] is half of a sealed-state pairing this
+/// `INCLUDE_ENCRYPTED_REASONING` is half of a sealed-state pairing this
 /// gateway documents no way to complete — `crate::provider::openrouter`'s
 /// ledger drops both rather than guess, and an effort map is not the door to
 /// put them back through. What is left is the one field that vendor's own
@@ -438,6 +511,23 @@ fn openrouter_effort(effort: &str) -> Map<String, Value> {
 
     let mut map = Map::new();
     map.insert("reasoning".to_owned(), Value::Object(reasoning));
+
+    map
+}
+
+/// The `claude-code` shape of one effort: `{"effort": "<name>"}`, and the flat
+/// map is the point.
+///
+/// Every other map here is a fragment of a JSON request body, spliced into one
+/// by `splice_effort`. This wire builds no body at all — it spawns a process —
+/// so what it needs from an effort is the *name*, which it reads straight back
+/// out (`claude_code::effort_of`) and pushes onto the argv as `--effort
+/// <name>`. Flat rather than nested for that reason: there is no body for a
+/// nesting to describe, and one key nobody has to walk into is the honest
+/// spelling of "the name, please".
+fn claude_code_effort(effort: &str) -> Map<String, Value> {
+    let mut map = Map::new();
+    map.insert("effort".to_owned(), effort.into());
 
     map
 }

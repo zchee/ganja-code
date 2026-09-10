@@ -48,6 +48,7 @@ fn pinned_message() -> Message {
         time: MessageTime { created: 7, completed: Some(7) },
         model: None,
         usage: None,
+        request_only: false,
     }
 }
 
@@ -1670,6 +1671,7 @@ fn a_message_carrying_only_a_peers_words_has_content() {
         time: MessageTime { created: 7, completed: Some(7) },
         model: None,
         usage: None,
+        request_only: false,
     };
 
     assert!(message.has_content());
@@ -1706,4 +1708,49 @@ fn claudes_mode_names_map_to_ganjas_two_or_are_refused_by_name() {
         "ask is not a permission mode this build knows: it takes \
              bypassPermissions, default or acceptEdits"
     );
+}
+
+/// **D556**, Dv-22. A request-only message is marked in the type and invisible
+/// on the wire when it is not one.
+///
+/// Three properties, and the first is the compatibility promise: `false`
+/// serializes to exactly the bytes a transcript written before this field
+/// existed carries, so nothing stored has to be migrated and nothing already
+/// stored decodes differently. The second is the other direction — a document
+/// with no such key reads as `false` — and the third is that the flag survives
+/// a round trip at all, which is what lets a request carry it to a wire.
+#[test]
+fn a_request_only_message_is_marked_and_an_ordinary_one_is_byte_unchanged() {
+    let ordinary = pinned_message();
+    let written = serde_json::to_string(&ordinary).expect("a message serializes");
+    assert!(
+        !written.contains("request_only"),
+        "an ordinary message carries no such key at all: {written}"
+    );
+
+    let decoded: Message =
+        serde_json::from_str(&written).expect("what was written reads back verbatim");
+    assert!(!decoded.request_only, "and a document with no key reads as false");
+    assert_eq!(decoded, ordinary);
+
+    let guards = Message { request_only: true, ..pinned_message() };
+    let written = serde_json::to_string(&guards).expect("a message serializes");
+    assert!(written.contains(r#""request_only":true"#), "the flag is written when set: {written}");
+    let decoded: Message = serde_json::from_str(&written).expect("and reads back");
+    assert!(decoded.request_only);
+    assert_eq!(decoded, guards);
+}
+
+/// The one constructor that mints one, so the flag is never set by hand at a
+/// call site that also has to remember five other fields.
+#[test]
+fn the_request_only_constructor_is_an_ordinary_user_message_with_the_flag_set() {
+    let guards = Message::request_only_user("the team is still working");
+
+    assert!(guards.request_only);
+    assert_eq!(guards.role, Role::User);
+    assert_eq!(guards.parts.len(), 1);
+    assert_eq!(guards.parts[0].as_text(), Some("the team is still working"));
+    assert!(!Message::user("an ordinary prompt").request_only, "and nothing else sets it");
+    assert!(!Message::assistant("a-model").request_only);
 }

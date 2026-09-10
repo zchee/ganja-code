@@ -286,9 +286,9 @@ fn a_header_a_request_cannot_carry_is_refused_by_name_and_not_by_value() {
 }
 
 /// The value the subscription backend actually hands over, held to the one
-/// property that makes it correct. `openai_provider` is what pairs the two,
-/// and `responses_wire.rs` is where that pairing is observed with a store
-/// and an environment behind it.
+/// property that makes it correct. `ganja_core::provider::select`'s `chatgpt`
+/// arm is what pairs the two, and `responses_wire.rs` is where that pairing is
+/// observed with a store and an environment behind it.
 #[test]
 fn the_subscription_backends_default_is_one_that_backend_serves() {
     assert!(

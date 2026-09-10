@@ -46,6 +46,10 @@ fn data() -> Data {
         // served none renders the honest tail and no section.
         plans: Vec::new(),
         now: None,
+        // The same pin once more, for the served-model row (**D556**): every
+        // wire but one reports nothing, and this module's existing assertions
+        // are all written against a panel with no such row.
+        served_model: None,
     }
 }
 
@@ -214,6 +218,34 @@ fn the_duration_row_formats_compactly_and_only_over_a_measured_duration() {
 
     let unmeasured = rendered(&Usage::new(data()), AREA);
     assert!(!unmeasured.contains("Total duration"), "no measured duration, no row:\n{unmeasured}");
+}
+
+/// **D556.** The `Served model:` row renders both spellings where a wire
+/// reports them, and no row at all where none does — the honest-absence rule
+/// the two window sections already keep.
+///
+/// This panel is where the served model *always* is: the status bar draws it
+/// only for a `tui.statusline` roster naming `model`, so on a default bar
+/// this is the one surface that carries it (rev 8, A6-M1 (c)).
+#[test]
+fn the_served_model_row_names_both_spellings_and_is_absent_without_one() {
+    let screen = rendered(
+        &Usage::new(Data {
+            served_model: Some(ganja_core::provider::ServedModel {
+                requested: "default".to_owned(),
+                served: "claude-opus-5[1m]".to_owned(),
+            }),
+            ..data()
+        }),
+        AREA,
+    );
+    assert!(
+        screen.contains("Served model:    claude-opus-5[1m] (asked for default)"),
+        "want the vendor's spelling and ganja's beside it in:\n{screen}"
+    );
+
+    let silent = rendered(&Usage::new(data()), AREA);
+    assert!(!silent.contains("Served model"), "no reading, no row:\n{silent}");
 }
 
 /// The plan-limit meters Claude Code leads with are explicitly absent on a

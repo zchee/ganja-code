@@ -103,7 +103,11 @@ pub enum Activity {
     Permission,
     /// The last turn was cancelled.
     Stopped,
-    /// The last turn could not be answered; the notice says why.
+    /// The last turn could not be answered; the notice may say why — though
+    /// since **D556** the notice slot is not a failure channel: it carries
+    /// informational sentences beside failures, the eviction notice among
+    /// them, and one of those may be what is standing there while this
+    /// activity is drawn.
     Failed,
 }
 
@@ -270,6 +274,19 @@ pub struct Status {
     /// `Model: <name>` form — the default bar names a model only through the
     /// effort segment, so this arrives by its own setter.
     model: Option<String>,
+    /// What the vendor said it actually served, when a wire says (**D556**),
+    /// as the app last polled it off `Engine::served_model` **while no
+    /// delegated child was in flight**.
+    ///
+    /// Only the vendor's spelling is kept, not the pair the accessor hands
+    /// back: the requested half is ganja's own word for the same thing the
+    /// `model` element already draws, so keeping it would be a second copy
+    /// that could disagree with the first. The reading is dropped rather than
+    /// stored while `running_tasks` is non-zero, because the served model is
+    /// provider-wide and a child on an agent with a model of its own moves it
+    /// — pairing that with the root's chosen model would draw a divergence
+    /// nobody has (rev 8, C-L4).
+    served_model: Option<String>,
     /// `(estimated tokens, window)` for the `context` meter, absent until the
     /// app polls `Engine::context_estimate` — and kept absent for an
     /// uncataloged model, whose window nobody can size.
@@ -324,6 +341,7 @@ impl Status {
             max_width: None,
             detail: false,
             model: None,
+            served_model: None,
             context: None,
             todos: None,
             rates: Vec::new(),
@@ -349,6 +367,25 @@ impl Status {
     /// Names the model the next turn asks for, for the `model` element.
     pub fn set_model(&mut self, model: Option<String>) {
         self.model = model;
+    }
+
+    /// Records what the vendor said it served, for the `model` element's
+    /// second half (**D556**).
+    ///
+    /// Takes the whole [`ganja_core::provider::ServedModel`] and keeps the
+    /// vendor's spelling alone.
+    /// [`None`] — every wire that reports nothing, and every reading taken
+    /// while a delegated child is in flight — leaves the element drawing the
+    /// chosen model by itself, which is what every session before this key
+    /// existed drew.
+    ///
+    /// The two spellings are never compared to decide whether to draw the
+    /// pair: `requested` is ganja's word and `served` is the vendor's, so they
+    /// differ almost always and mean nothing by it. What is compared is
+    /// `served` against the model the bar was told to name, which is the only
+    /// pair a reader could otherwise think disagreed.
+    pub fn set_served_model(&mut self, served: Option<&ganja_core::provider::ServedModel>) {
+        self.served_model = served.map(|served| served.served.clone());
     }
 
     /// Records `(estimated tokens, window)` for the `context` meter, or
@@ -838,11 +875,24 @@ impl Status {
             }
             StatuslineElement::Notice => self.notice.clone().and_then(plain),
             StatuslineElement::Model => self.model.clone().map(|model| {
-                vec![
+                let mut spans = vec![
                     // The screenshot's label form, `Model: Fable 5`.
                     Span::styled("Model: ".to_owned(), theme.dim),
-                    Span::styled(model, theme.fg.add_modifier(Modifier::BOLD)),
-                ]
+                    Span::styled(model.clone(), theme.fg.add_modifier(Modifier::BOLD)),
+                ];
+                // The served spelling rides behind it only where the vendor
+                // named something else (**D556**) — `Model: default (served:
+                // claude-opus-5[1m])`. Compared against the model this bar was
+                // told to name rather than against the accessor's `requested`
+                // half: that half is the same fact in ganja's own spelling, so
+                // comparing it would draw the pair on every wire that reports
+                // one, saying nothing.
+                if let Some(served) = self.served_model.as_ref().filter(|served| **served != model)
+                {
+                    spans.push(Span::styled(format!(" (served: {served})"), theme.dim));
+                }
+
+                spans
             }),
             StatuslineElement::Context => {
                 self.context.map(|(tokens, window)| meter("ctx", percent_of(tokens, window), theme))

@@ -1036,6 +1036,29 @@ fn a_permission_refusal_is_told_from_a_failure_by_the_sentence_the_engine_render
     assert!(matches!(Outcome::of(&broke), Some(Outcome::Failed(_))));
 }
 
+/// A call a `PreToolUse` hook blocked is a **refusal** on this wire too
+/// (**D556**, amending D552's classifier).
+///
+/// D552 shipped knowing two sentences, so a hook block — which root
+/// `AGENTS.md` says "routes the same `fail_call` a denied rule does" —
+/// reached cursor's server as a call that ran and broke. It now reaches it as
+/// the kind's typed `rejected` arm.
+///
+/// The sentence is a **literal** here, never `format!` over the constant
+/// (D552's Dv-8): a test built from the constant passes any reword, and a
+/// reword is what quietly changes what cursor's server is told a call did.
+#[test]
+fn a_hook_refusal_is_a_refusal_on_this_wire_too() {
+    let hooked = ToolState::Error {
+        input: json!({}),
+        error: "A PreToolUse hook refused this tool call: the repo is frozen".to_owned(),
+        started: 0,
+        completed: 0,
+    };
+
+    assert!(matches!(Outcome::of(&hooked), Some(Outcome::Refused(_))));
+}
+
 /// A call still running has no outcome, which is what stops a resume from
 /// answering the server about a tool that has not finished.
 #[test]

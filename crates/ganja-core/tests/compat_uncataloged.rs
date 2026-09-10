@@ -114,7 +114,7 @@ async fn an_uncataloged_providers_session_never_auto_compacts_and_reports_no_cos
         },
     );
     config.model = Some(format!("{PROVIDER_ID}/{MODEL}"));
-    let selection = provider::select(&config).expect("the config declares this endpoint");
+    let selection = provider::select(&config).await.expect("the config declares this endpoint");
 
     // A session already past every threshold, and pre-titled so the title
     // machinery — which would spend a request of its own — stays out of a

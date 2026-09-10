@@ -117,6 +117,12 @@ assert_cmd.workspace = true
 # seeder the pane and drill suites share with `ganja-core`'s.
 ganja-testkit.workspace = true
 predicates.workspace = true
+# `test-util` for `tests/claude_code_run.rs` alone: AC-4.15 proves that the
+# `claude_code.idle_bound` a config named is the bound the selected wire really
+# closes an entry at, and a paused clock reaches that second by arithmetic
+# where a test that slept would spend it (**D556**). `ganja-core` and
+# `ganja-provider` carry the same feature for the same reason.
+tokio = { workspace = true, features = ["test-util"] }
 # The one quoter production launch lines ride, for the window command the
 # pane suite composes.
 shlex.workspace = true
@@ -126,3 +132,11 @@ expectrl.workspace = true
 # The unix-only staging-write failure test uses `setrlimit` to force a real
 # short write; production no longer reaches libc for the local date.
 libc.workspace = true
+
+# `harness = false` because this binary is both the test **and** the `claude`
+# CLI the shipped `ganja` spawns: its `main` checks `GANJA_FAKE_CLAUDE_SCRIPT`
+# first and re-execs itself as the fake, and the flags on that command line are
+# the wire's own, which libtest would refuse on sight (**D556**).
+[[test]]
+name = "claude_code_run"
+harness = false

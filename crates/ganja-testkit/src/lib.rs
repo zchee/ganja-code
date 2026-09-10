@@ -27,6 +27,9 @@ mod agent;
 // only make sense together.
 pub mod cursor_server;
 mod drain;
+// A module rather than a re-export: it is a whole CLI's behaviour, and its
+// script vocabulary only makes sense together.
+pub mod fake_claude;
 mod fs;
 mod log;
 mod provider;

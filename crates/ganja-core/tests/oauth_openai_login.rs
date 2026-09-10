@@ -294,7 +294,7 @@ async fn a_chatgpt_login_exchanges_polls_renews_and_stores_exactly_what_it_shoul
     a_renewal_that_returns_no_new_token_keeps_the_old_one().await;
     a_refused_renewal_and_an_unreachable_one_are_different_situations().await;
     a_login_that_never_completed_stores_nothing().await;
-    a_chatgpt_login_replaces_a_stored_openai_api_key().await;
+    a_second_credential_under_one_id_evicts_the_first().await;
 }
 
 /// The whole browser path: the URL published, the redirect answered, and the
@@ -616,8 +616,17 @@ async fn a_login_that_never_completed_stores_nothing() {
     );
 }
 
-/// The hazard, on the record: one key, two kinds of credential.
-async fn a_chatgpt_login_replaces_a_stored_openai_api_key() {
+/// One storage key holds one credential, and storing either kind of thing
+/// under it drops whatever was there.
+///
+/// This used to be **the** hazard on the record — a ChatGPT login and an OpenAI
+/// API key shared the `openai` key, so each silently took the other — and
+/// **D555** ended that pairing by giving the seat an id of its own. What is
+/// left is the store's own rule, which is worth pinning for the reason it
+/// always was: a login is not additive, and the only thing standing between
+/// somebody and a lost credential is the warning whatever runs the login
+/// prints first.
+async fn a_second_credential_under_one_id_evicts_the_first() {
     auth::set_credential(PROVIDER_ID, API_KEY).expect("a key is storable");
     assert!(
         auth::credential_for(PROVIDER_ID)
@@ -638,8 +647,8 @@ async fn a_chatgpt_login_replaces_a_stored_openai_api_key() {
 
     assert!(
         auth::credential_for(PROVIDER_ID).expect("the store reads").is_none(),
-        "the API key is gone - upstream's behaviour at this key too, and \
-         warning somebody first belongs to whatever runs the login"
+        "the key that was there is gone, and warning somebody first belongs \
+         to whatever runs the login"
     );
     assert_eq!(
         auth::oauth_for(PROVIDER_ID)
@@ -660,7 +669,8 @@ async fn a_chatgpt_login_replaces_a_stored_openai_api_key() {
     auth::set_credential(PROVIDER_ID, API_KEY).expect("a key is storable");
     assert!(
         auth::oauth_for(PROVIDER_ID).expect("the store reads").is_none(),
-        "storing an API key takes the ChatGPT login with it"
+        "and a key stored afterwards takes the login with it, which is the \
+         half somebody logging in expects"
     );
 }
 

@@ -297,7 +297,8 @@ pub async fn run(args: RunArgs) -> Result<()> {
     let assembled = assemble(
         &cwd,
         &Overrides { model: args.model, agent: args.agent, config_file: args.config },
-    )?;
+    )
+    .await?;
     let Assembled { engine, servers, config, .. } = assembled;
     // The D479 trio reaches the receiver classifier (D523): a `run --auto`
     // session is bypass-classed for cross-session admission, exactly as the
@@ -343,6 +344,10 @@ pub async fn run(args: RunArgs) -> Result<()> {
     servers.shutdown().await;
     engine.shutdown_lsp();
     engine.shutdown_jobs().await;
+    // And whatever the wire is holding on this machine (**D556**, Dv-14): a
+    // no-op for every provider but `claude-code`, which may be holding
+    // authenticated node runtimes that would otherwise outlive this process.
+    engine.shutdown_provider().await;
 
     match outcome? {
         None => Ok(()),
