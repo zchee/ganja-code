@@ -18,7 +18,8 @@
 //!
 //! The child's pipes never enter the table. A `stream()` that had to await a
 //! read while holding the table's lock would be `await_holding_lock` at
-//! `-D warnings`, so instead one task holds [`ChildIo`], runs the reader, the
+//! `-D warnings`, so instead one task holds
+//! [`ChildIo`](super::process::ChildIo), runs the reader, the
 //! stderr logger and every deadline, and the table holds a channel to it. A
 //! turn is [`Input::Turn`]; the events the caller streams are the receiving
 //! half of a channel the task writes. Every lock taken here is a short

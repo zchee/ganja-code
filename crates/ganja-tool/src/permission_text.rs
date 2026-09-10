@@ -14,7 +14,8 @@
 //! moved. The permission engine still renders the bytes; these are the bytes
 //! it renders.
 //!
-//! **D556** added the third sentence and [`is_refusal`]. A `PreToolUse` hook
+//! **D556** added the third sentence and
+//! [`is_refusal`](crate::permission_text::is_refusal). A `PreToolUse` hook
 //! that blocks a call routes the same `fail_call` a denied rule does, so the
 //! two must read alike on every wire — and until now they did not: cursor's
 //! classifier knew the two permission sentences and reported a hook-refused
