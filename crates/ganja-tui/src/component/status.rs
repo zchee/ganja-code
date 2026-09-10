@@ -30,6 +30,7 @@ use std::time::{Duration, Instant, SystemTime};
 use ganja_core::catalog::compact_tokens;
 use ganja_core::config::{StatuslineConfig, StatuslineElement};
 use ganja_core::provider::{PlanWindow, RateWindow};
+use ganja_core::session::spell_duration;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -244,6 +245,18 @@ pub struct Status {
     /// no window of its own: without a count, a session leading four teammates
     /// looks exactly like one leading none.
     teammates: usize,
+    /// When this sitting's time budget runs out (**D557**), or [`None`] while
+    /// nobody has set one — which is the absent-config bar and every session
+    /// that has not typed `/deadline`.
+    ///
+    /// The instant rather than what is left of it, because what this segment
+    /// draws changes with the clock rather than with anything the engine
+    /// does: holding a [`Duration`] would mean it went stale between the tick
+    /// that wrote it and the frame that drew it. The subtraction happens at
+    /// the draw.
+    ///
+    /// [`Duration`]: std::time::Duration
+    deadline: Option<SystemTime>,
     /// `(open, total)` of the team's **shared task list** — the list the four
     /// `task_*` tools drive, not the delegated children `running_tasks`
     /// counts. Polled off `Engine::task_list` on a coarse clock rather than
@@ -335,6 +348,7 @@ impl Status {
             queued_dialogs: 0,
             held: 0,
             teammates: 0,
+            deadline: None,
             task_list: (0, 0),
             yolo: false,
             elements: None,
@@ -513,6 +527,17 @@ impl Status {
         self.teammates = teammates;
     }
 
+    /// Records when this sitting's time budget runs out, or that none is set
+    /// (**D557**).
+    ///
+    /// The instant, straight off `Engine::deadline`, with nothing derived on
+    /// the way in: what the segment says is a function of this and the clock,
+    /// and computing it here would mean recomputing it every tick to keep it
+    /// honest — which is the work the draw is already doing.
+    pub fn set_deadline(&mut self, deadline: Option<SystemTime>) {
+        self.deadline = deadline;
+    }
+
     /// Records how much of the team's shared task list is still open: how
     /// many tasks are pending or in progress, and how many there are at all.
     ///
@@ -549,6 +574,23 @@ impl Status {
     /// Replaces the message shown next to the activity.
     pub fn set_notice(&mut self, notice: Option<String>) {
         self.notice = notice;
+    }
+
+    /// What the message slot currently holds.
+    ///
+    /// `pub(crate)` and for one purpose: an edge-triggered writer
+    /// (`App::poll_deadline`, `App::poll_eviction`) can only be tested by
+    /// reading what it wrote, and reading it out of a rendered line would
+    /// prove the *layout* rather than the sentence — a bar too narrow for the
+    /// notice would then read as a notice that was never written.
+    ///
+    /// `cfg(test)` because that is the whole of it: nothing this crate ships
+    /// reads the slot back, and an accessor left standing for a caller that
+    /// does not exist is one somebody later mistakes for an interface.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn notice(&self) -> Option<&str> {
+        self.notice.as_deref()
     }
 
     /// Takes the message down only if it is still `text`.
@@ -631,6 +673,12 @@ impl Status {
             StatuslineElement::Dialogs,
             StatuslineElement::Held,
             StatuslineElement::Teammates,
+            // Between the work counts and the spend, which is what it is
+            // about: the other budget this bar reports on (**D557**). On the
+            // default walk for `Held`'s reason — it yields no cell until
+            // somebody sets one, so the bar every session without a deadline
+            // draws is the bar this build always drew.
+            StatuslineElement::Deadline,
             StatuslineElement::Tokens,
             StatuslineElement::Notice,
         ] {
@@ -868,6 +916,26 @@ impl Status {
 
                 (total > 0).then(|| plain(format!("{open}/{total} team tasks"))).flatten()
             }
+            // The sitting's time budget (**D557**), in the same words the
+            // model is being given for it: the span comes from
+            // `ganja_core::session::spell_duration`, the very function that
+            // builds the block in the request, so the bar and the model can
+            // never be found saying two different numbers about one clock.
+            //
+            // It keeps drawing past the instant instead of yielding: the two
+            // states worth telling apart are "you have time" and "you are
+            // over", and a segment that vanished at expiry would look exactly
+            // like one nobody set.
+            StatuslineElement::Deadline => self.deadline.and_then(|until| {
+                let now = SystemTime::now();
+
+                // `duration_since` already answers both halves: `Ok` with what
+                // is left, `Err` carrying the span it went the other way by.
+                match until.duration_since(now) {
+                    Ok(left) => plain(format!("{} left", spell_duration(left))),
+                    Err(behind) => plain(format!("overdue {}", spell_duration(behind.duration()))),
+                }
+            }),
             // Spend where its width is predictable, and the notice after
             // it: the notice is the one segment with no length limit.
             StatuslineElement::Tokens => {

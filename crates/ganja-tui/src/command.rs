@@ -23,6 +23,8 @@
 //! is total and deterministic: ties break on the command's own name, so a
 //! fragment always produces the same list.
 
+use std::time::{Duration, SystemTime};
+
 use ganja_core::teammate::{BACKENDS, DEFAULT_BACKEND, backend_name};
 use nucleo_matcher::pattern::{Atom, AtomKind, CaseMatching, Normalization};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
@@ -92,6 +94,10 @@ pub enum Action {
     /// rename to; [`rename`] is the door that reads the argument off the
     /// buffer, the same shape [`team`] reads `/teammate spawn`'s off.
     Rename,
+    /// Tell the model how long this sitting has (**D557**). Bare `/deadline`
+    /// says what is set; [`deadline`] is the door that reads the argument off
+    /// the buffer, the third and last builtin shaped that way.
+    Deadline,
 }
 
 impl Action {
@@ -131,7 +137,8 @@ impl Action {
             | Self::Undo
             | Self::Redo
             | Self::Rewind
-            | Self::Rename => None,
+            | Self::Rename
+            | Self::Deadline => None,
         }
     }
 }
@@ -444,6 +451,20 @@ pub const COMMANDS: &[Entry] = &[
         category: Category::System,
         suggested: false,
     },
+    // `Session`, where `/rename` beside it is `System`, and the difference is
+    // this group's own definition rather than a coin toss: a name is how
+    // somebody else reaches this process, where a time budget changes what
+    // the model does with the conversation — which is a thing done *to* the
+    // conversation, the same shelf `/compact` and `/undo` sit on.
+    Entry {
+        action: Action::Deadline,
+        name: "deadline",
+        aliases: &[],
+        title: "Set a time budget",
+        description: "Tell the model how long this sitting has, so every request says what is left",
+        category: Category::Session,
+        suggested: false,
+    },
 ];
 
 /// The words that quit when they are the whole prompt.
@@ -554,16 +575,18 @@ pub const SPAWN_GRAMMAR: &str = "<name> [--backend <surface>] [--agent <kind>] [
 
 /// The inline hint a builtin command shows once its name is typed (**D518**).
 ///
-/// `/teammate` and `/rename` are the only builtins that read arguments off the
-/// buffer; everything else answers [`None`] and shows nothing. Display-only,
-/// like a command file's `argument-hint` — the grammar that actually
-/// decides is [`team`]'s and [`rename`]'s respectively.
+/// `/teammate`, `/rename` and `/deadline` are the only builtins that read
+/// arguments off the buffer; everything else answers [`None`] and shows
+/// nothing. Display-only, like a command file's `argument-hint` — the grammar
+/// that actually decides is [`team`]'s, [`rename`]'s and [`deadline`]'s
+/// respectively.
 fn builtin_hint(name: &str) -> Option<&'static str> {
     match name {
         "teammate" => {
             Some("list | spawn <name> [--backend] [--agent] [prompt] | shutdown [member]")
         }
         "rename" => Some("<name>"),
+        "deadline" => Some(DEADLINE_GRAMMAR),
         _ => None,
     }
 }
@@ -816,6 +839,192 @@ pub fn rename(text: &str) -> Option<Rename> {
 
     let rest = rest.trim();
     Some(if rest.is_empty() { Rename::Missing } else { Rename::To(rest.to_owned()) })
+}
+
+/// `/deadline`'s grammar, spelled once: the composer's hint shows it and every
+/// refusal below ends with it, so a person who mistyped reads the same words
+/// beside the cursor and in the answer.
+pub const DEADLINE_GRAMMAR: &str = "<duration> | HH:MM | off";
+
+/// What a submitted `/deadline` line asked for (**D557**).
+///
+/// [`Action::Deadline`]'s second door, and the only one that can carry an
+/// argument — the palette has nowhere to type one — so a line naming a budget
+/// is read off the buffer on submit exactly as [`rename`] reads `/rename`'s.
+/// [`Deadline::Show`] and [`Action::Deadline`] mean the same thing, so a bare
+/// `/deadline` says what is set whichever of the two doors the app reads
+/// first, which is [`Team::List`]'s arrangement.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Deadline {
+    /// The instant the budget runs out, already resolved.
+    ///
+    /// An instant rather than the span that was typed, even for `/deadline 5m`:
+    /// resolving here means one clock reading decides the deadline, where a
+    /// span carried onward would be added to a *second* reading taken when the
+    /// command is sent, and the two differ by however long the frontend took.
+    /// It also leaves one shape for both spellings, since `10:00` was never a
+    /// span in the first place.
+    Set(SystemTime),
+    /// `/deadline off`: whatever was set is cleared.
+    Off,
+    /// `/deadline` alone: say what is set, and change nothing.
+    Show,
+    /// The line said `/deadline` and then something this grammar has not got.
+    ///
+    /// One sentence rather than a kind, [`Team::Refused`]'s reason exactly:
+    /// nothing downstream branches on which mistake it was, and a refusal a
+    /// person cannot read is one they cannot act on.
+    Refused(String),
+}
+
+/// The `/deadline` command a submitted buffer names, or [`None`] when the
+/// buffer is not a `/deadline` line at all — in which case it is prose, and
+/// nothing here has an opinion about it.
+///
+/// `now` is handed in rather than read, and that is what makes the wall-clock
+/// arm testable: `/deadline 10:00` means ten o'clock **today, local**, so it
+/// needs the current date and the current time — the first to build the
+/// instant and the second to refuse one that has already gone by. A parser
+/// that read the real clock could only be tested at whatever time the suite
+/// happened to run.
+#[must_use]
+pub fn deadline(text: &str, now: SystemTime) -> Option<Deadline> {
+    let (name, rest) = split_word(text.strip_prefix('/')?);
+    if lookup(name).is_none_or(|entry| entry.action != Action::Deadline) {
+        return None;
+    }
+
+    let argument = rest.trim();
+    Some(match argument {
+        "" => Deadline::Show,
+        "off" => Deadline::Off,
+        // The clock form is tried by its own shape rather than after the span
+        // parser has failed, because the two grammars cannot overlap — a span
+        // has no colon in it — and because the refusals differ: a clock time
+        // may be well-formed and still be refused for being behind, which is
+        // a sentence the span parser has no way to produce.
+        _ if argument.contains(':') => clock_deadline(argument, now),
+        _ => match parse_span(argument) {
+            Some(span) => match now.checked_add(span) {
+                Some(until) => Deadline::Set(until),
+                // A span so large the clock cannot hold it. Refused rather
+                // than clamped: somebody who typed it meant a number, and
+                // silently substituting a different one is worse than saying
+                // no.
+                None => Deadline::Refused(refused_deadline(format!(
+                    "{argument:?} is further off than this machine's clock reaches"
+                ))),
+            },
+            None => Deadline::Refused(refused_deadline(format!(
+                "`/deadline` did not understand {argument:?}"
+            ))),
+        },
+    })
+}
+
+/// `HH:MM` resolved against `now`: today's local wall clock.
+///
+/// Refused when it is already behind, and deliberately **not** rolled forward
+/// to tomorrow. Somebody typing `/deadline 09:00` at ten in the morning has
+/// almost certainly mistyped or misread the time; giving them a deadline
+/// twenty-three hours out would be a budget nobody chose, and the whole point
+/// of this feature is that the person chose it.
+fn clock_deadline(argument: &str, now: SystemTime) -> Deadline {
+    let refuse = |reason: String| Deadline::Refused(refused_deadline(reason));
+
+    let Some((hours, minutes)) = argument.split_once(':') else {
+        return refuse(format!("`/deadline` did not understand {argument:?}"));
+    };
+    // The shapes first, on the text: one or two digits for the hour and
+    // exactly two for the minute, so `10:0` and `10:000` are refused rather
+    // than read as ten o'clock. `9:30` is allowed because people write it.
+    let shaped = matches!(hours.len(), 1 | 2)
+        && minutes.len() == 2
+        && hours.bytes().chain(minutes.bytes()).all(|byte| byte.is_ascii_digit());
+    // Then the ranges, on the numbers. `24:00` and `10:60` get their own
+    // sentence: they *are* clock times in shape, and what is wrong with them
+    // is worth saying rather than folding into "did not understand".
+    let (Ok(hour), Ok(minute)) = (hours.parse::<i8>(), minutes.parse::<i8>()) else {
+        return refuse(format!("`/deadline` did not understand {argument:?}"));
+    };
+    if !shaped {
+        return refuse(format!("`/deadline` did not understand {argument:?}"));
+    }
+    if !(0..=23).contains(&hour) || !(0..=59).contains(&minute) {
+        return refuse(format!(
+            "{argument:?} is not a clock time: the hours run 00 to 23 and the minutes 00 to 59"
+        ));
+    }
+
+    let Ok(stamp) = jiff::Timestamp::try_from(now) else {
+        return refuse("this machine's clock is outside the range ganja can read".to_owned());
+    };
+    let Ok(zoned) = stamp
+        .to_zoned(jiff::tz::TimeZone::system())
+        .with()
+        .hour(hour)
+        .minute(minute)
+        .second(0)
+        .subsec_nanosecond(0)
+        .build()
+    else {
+        // A local time that does not exist today — the hour a spring-forward
+        // transition skips. Naming the gap is more use than a generic
+        // refusal, because the fix is to pick another minute.
+        return refuse(format!("{argument:?} does not happen today in this time zone"));
+    };
+
+    let until = SystemTime::from(zoned.timestamp());
+    if until <= now {
+        return refuse(format!(
+            "{argument:?} is already behind: a clock time names a moment later today"
+        ));
+    }
+
+    Deadline::Set(until)
+}
+
+/// `<n>h<n>m<n>s` in any subset — `90s`, `5m`, `1h30m`, `2h`, `1h30m15s` — or
+/// [`None`] when the text is not that.
+///
+/// Units may appear at most once and must run largest to smallest, so `5m5m`
+/// and `30s5m` are refused rather than quietly summed: both are far more
+/// likely to be a typo than an intention, and a parser that accepted them
+/// would have to decide what `1h1h` meant.
+///
+/// A total of zero is [`None`] too. `/deadline 0s` parses as a number and a
+/// unit, but no time at all is not a budget — and the one thing somebody
+/// might mean by it, "clear this", already has its own word.
+fn parse_span(text: &str) -> Option<Duration> {
+    let mut rest = text;
+    let mut seconds = 0_u64;
+    // Consumed in order, so a unit already passed cannot come round again.
+    let mut units = [('h', 3600_u64), ('m', 60), ('s', 1)].into_iter().peekable();
+    while !rest.is_empty() {
+        let digits = rest.find(|character: char| !character.is_ascii_digit())?;
+        let value: u64 = rest[..digits].parse().ok()?;
+        let unit = rest[digits..].chars().next()?;
+        let scale = loop {
+            let (name, scale) = units.next()?;
+            if name == unit {
+                break scale;
+            }
+        };
+        seconds = seconds.checked_add(value.checked_mul(scale)?)?;
+        rest = &rest[digits + unit.len_utf8()..];
+    }
+
+    (seconds > 0).then(|| Duration::from_secs(seconds))
+}
+
+/// One refusal sentence: the reason, then the grammar that would have worked.
+///
+/// The grammar is appended here rather than written into each reason so that
+/// every refusal ends the same way — somebody who has just been told no is
+/// reading for what to type instead, and it should be in the same place every
+/// time.
+fn refused_deadline(reason: String) -> String {
+    format!("{reason}. /deadline {DEADLINE_GRAMMAR}")
 }
 
 /// The arguments after `/teammate spawn`, parsed — the same grammar the dialog's

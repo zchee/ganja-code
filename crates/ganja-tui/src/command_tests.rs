@@ -1,7 +1,9 @@
+use std::time::{Duration, SystemTime};
+
 use super::{
-    Action, BACKENDS, COMMANDS, Category, Choice, Completion, EngineCommand, SPAWN_GRAMMAR,
-    Surface, Team, TeamSpawn, dropdown_matches, inline_hint, is_bare_exit, lookup, matches,
-    subcommands, submitted, team, team_completion, value_matches,
+    Action, BACKENDS, COMMANDS, Category, Choice, Completion, Deadline, EngineCommand,
+    SPAWN_GRAMMAR, Surface, Team, TeamSpawn, dropdown_matches, inline_hint, is_bare_exit, lookup,
+    matches, subcommands, submitted, team, team_completion, value_matches,
 };
 
 /// The commands the engine offers a session that loaded no config: one,
@@ -214,6 +216,7 @@ fn the_command_names_and_aliases_match_their_surface_contract() {
         ("redo", &[][..], Action::Redo),
         ("rewind", &[][..], Action::Rewind),
         ("rename", &[][..], Action::Rename),
+        ("deadline", &[][..], Action::Deadline),
     ];
 
     for (name, aliases, action) in cases {
@@ -695,4 +698,143 @@ fn every_category_has_a_heading() {
     for category in [Category::Session, Category::Agent, Category::System] {
         assert!(!category.label().is_empty());
     }
+}
+
+/// A fixed moment for the wall-clock arm: 2026-09-11 at exactly 06:00 in
+/// whatever zone the machine keeps.
+///
+/// Built *from* a local time rather than from an epoch constant, because what
+/// `/deadline 10:00` resolves against is the local date and hour — a UTC
+/// constant would put the test in a different day, and a different answer,
+/// depending on where it runs.
+fn six_in_the_morning() -> SystemTime {
+    let zoned = jiff::civil::date(2026, 9, 11)
+        .at(6, 0, 0, 0)
+        .to_zoned(jiff::tz::TimeZone::system())
+        .expect("06:00 on this date exists in this zone");
+
+    SystemTime::from(zoned.timestamp())
+}
+
+/// **D557.** Every span the grammar takes, resolved against the moment it was
+/// typed at.
+#[test]
+fn a_deadline_span_resolves_to_that_far_from_now() {
+    let now = six_in_the_morning();
+    for (typed, seconds) in [
+        ("5m", 300_u64),
+        ("90s", 90),
+        ("2h", 7200),
+        ("1h30m", 5400),
+        ("1h30m15s", 5415),
+        ("45s", 45),
+    ] {
+        assert_eq!(
+            super::deadline(&format!("/deadline {typed}"), now),
+            Some(Deadline::Set(now + Duration::from_secs(seconds))),
+            "{typed:?} is {seconds} seconds after the moment it was typed"
+        );
+    }
+}
+
+/// **D557.** `off` clears and a bare line asks; neither carries an instant.
+#[test]
+fn a_deadline_line_with_no_span_clears_or_asks() {
+    let now = six_in_the_morning();
+    assert_eq!(super::deadline("/deadline off", now), Some(Deadline::Off));
+    assert_eq!(super::deadline("/deadline", now), Some(Deadline::Show));
+    assert_eq!(super::deadline("/deadline   ", now), Some(Deadline::Show));
+}
+
+/// **D557.** A clock time is today's, local — so `10:00` typed at six in the
+/// morning is four hours off rather than sixteen, and the answer is the same
+/// instant `jiff` builds from today's own date.
+#[test]
+fn a_deadline_clock_time_resolves_to_today_in_the_local_zone() {
+    let now = six_in_the_morning();
+    for (typed, hour, minute) in [("10:00", 10, 0), ("22:30", 22, 30), ("9:30", 9, 30)] {
+        let wanted = jiff::civil::date(2026, 9, 11)
+            .at(hour, minute, 0, 0)
+            .to_zoned(jiff::tz::TimeZone::system())
+            .expect("the time exists in this zone");
+        assert_eq!(
+            super::deadline(&format!("/deadline {typed}"), now),
+            Some(Deadline::Set(SystemTime::from(wanted.timestamp()))),
+            "{typed:?} is today's own {typed} where this machine is sitting"
+        );
+    }
+}
+
+/// **D557.** A clock time that has already gone by is refused rather than
+/// rolled to tomorrow: somebody typing it mistyped, and a budget twenty-three
+/// hours out is one nobody chose.
+#[test]
+fn a_deadline_clock_time_already_behind_is_refused() {
+    let now = six_in_the_morning();
+    let Some(Deadline::Refused(refusal)) = super::deadline("/deadline 05:00", now) else {
+        panic!("a clock time in the past is refused");
+    };
+    assert!(refusal.contains("already behind"), "{refusal:?} says why");
+    assert!(refusal.ends_with(super::DEADLINE_GRAMMAR), "{refusal:?} ends with the grammar");
+}
+
+/// **D557.** Everything the grammar has not got is refused, sends nothing, and
+/// ends with the same grammar — including the two that look like they parse.
+#[test]
+fn a_deadline_line_this_grammar_has_not_got_is_refused_with_the_usage_sentence() {
+    let now = six_in_the_morning();
+    // Four classes, in order: a unit this grammar has not got (`5x`); a sign,
+    // which no span carries (`-1m`); a span that parses and is no budget at
+    // all (`0s`, `0m0s`); a clock time out of range or misshapen (`25:00`,
+    // `10:60`, `10:0`); and text that is neither (`soon`, `x`). The middle two
+    // classes are the ones worth having here — they are the inputs that *look*
+    // like they should work.
+    for typed in ["5x", "-1m", "0s", "0m0s", "25:00", "10:60", "10:0", "soon", "x"] {
+        let Some(Deadline::Refused(refusal)) = super::deadline(&format!("/deadline {typed}"), now)
+        else {
+            panic!("{typed:?} is not something this grammar takes");
+        };
+        assert!(
+            refusal.ends_with(super::DEADLINE_GRAMMAR),
+            "{typed:?}: {refusal:?} ends with the grammar that would have worked"
+        );
+    }
+}
+
+/// **D557.** Units run largest to smallest and appear once, so a repeated or
+/// reordered pair is refused rather than quietly summed.
+#[test]
+fn a_deadline_span_takes_each_unit_once_and_in_order() {
+    let now = six_in_the_morning();
+    for typed in ["5m5m", "30s5m", "1h1h", "s5", "5"] {
+        assert!(
+            matches!(
+                super::deadline(&format!("/deadline {typed}"), now),
+                Some(Deadline::Refused(_))
+            ),
+            "{typed:?} is refused rather than read as a span"
+        );
+    }
+}
+
+/// **D557.** Prose is not a `/deadline` line, and neither is another command:
+/// the door answers [`None`] and has no opinion about either.
+#[test]
+fn only_a_deadline_line_reaches_the_deadline_door() {
+    let now = six_in_the_morning();
+    assert_eq!(super::deadline("how long do I have", now), None);
+    assert_eq!(super::deadline("/rename backend", now), None);
+    assert_eq!(super::deadline("/deadlines 5m", now), None);
+}
+
+/// **D557.** The third builtin that reads an argument off the buffer hints
+/// like the other two, and the sentence it hints with is the one every refusal
+/// ends with.
+#[test]
+fn a_typed_deadline_hints_with_the_grammar_its_refusals_name() {
+    assert_eq!(inline_hint("/deadline", &engine()), Some(super::DEADLINE_GRAMMAR.to_owned()));
+    assert!(
+        lookup("deadline").is_some_and(|entry| entry.action == Action::Deadline),
+        "the roster carries the command the door guards on"
+    );
 }

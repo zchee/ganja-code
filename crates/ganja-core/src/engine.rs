@@ -1271,6 +1271,34 @@ pub struct Engine {
     /// not: it is what this engine runs as, and neither the person nor the
     /// lead who set it asked for it back.
     permission_mode: Arc<std::sync::Mutex<PermissionMode>>,
+    /// When this sitting's time budget runs out (**D557**), or [`None`] while
+    /// nobody has set one — which is every session until somebody types
+    /// `/deadline`, and every scripted and golden run.
+    ///
+    /// [`Command::SetPermissionMode`]'s cell shape, and for its reason: it is
+    /// written the moment the command arrives, mid-turn included, over a
+    /// `std::sync::Mutex` whose guard never crosses an `await`. Where it
+    /// differs is *when* it is read — the neighbour above is read once at a
+    /// turn's start, and this one at **every step**, because somebody who
+    /// realises mid-turn that they are out of time is asking the model to
+    /// hurry the turn they are watching.
+    ///
+    /// Shared with each root [`crate::session::Turn`] rather than copied into
+    /// it, the way `settled_receipts` is: a snapshot taken at the turn's start
+    /// would make a `/deadline` typed during a turn arrive one turn late,
+    /// which is the one moment it is most likely to be typed.
+    ///
+    /// Cleared by [`Command::NewSession`] and by nothing else — unlike the
+    /// posture above, which a new conversation keeps. A budget belongs to the
+    /// sitting that set it: the person said how long *this* piece of work had,
+    /// and the next conversation is not that work. A resume does not carry one
+    /// either, for the same reason and for free — it is held here rather than
+    /// on the stored row.
+    ///
+    /// **Warning only**: nothing in the engine cancels, shortens or refuses
+    /// anything because of this value. What it does is put one request-only
+    /// message at the tail of every request ([`crate::session::deadline_block`]).
+    deadline: Arc<std::sync::Mutex<Option<std::time::SystemTime>>>,
     /// What a config asked to be run at the nine moments [`crate::hook`]
     /// names. [`None`] is an engine whose config asked for none, which does no
     /// hook work at all rather than inert hook work at nine seams. Locked
@@ -1589,6 +1617,7 @@ impl Engine {
             teammate_dialogs: std::sync::Mutex::new(None),
             team_shape: std::sync::Mutex::new(None),
             permission_mode: Arc::new(std::sync::Mutex::new(PermissionMode::Ask)),
+            deadline: Arc::default(),
             hooks: std::sync::Mutex::new(None),
             hook_context: std::sync::Mutex::new(Vec::new()),
             concurrency: crate::config::AgentsConfig::DEFAULT_CONCURRENCY,
@@ -3968,6 +3997,15 @@ impl Engine {
             Command::SwitchModel { model } => self.switch_model(model).await,
             Command::SwitchEffort { effort } => self.switch_effort(effort).await,
             Command::SetPermissionMode { mode } => self.set_permission_mode(mode).await,
+            // Accepted while a turn streams, like the posture above and for a
+            // sharper version of its reason (**D557**): the turn being
+            // watched is exactly the one somebody setting a deadline wants
+            // hurried. Nothing is announced, because nothing polls an event
+            // for it — see [`Engine::deadline`].
+            Command::SetDeadline { until } => {
+                self.set_deadline(until.and_then(millis_after_epoch));
+                Ok(())
+            }
             // A person's word on one held inbound message (**D524**). The
             // release re-checks current policy inside the gate — an approval
             // cannot override a policy that has since become refuse — and a
@@ -4350,6 +4388,13 @@ impl Engine {
         // files stay where the revert left them: starting a new conversation
         // is not asking for the last one's work back.
         *self.revert.lock().expect("the revert state is never poisoned") = None;
+        // A time budget belongs to the sitting that set it (**D557**), which
+        // is the one thing here that reads the *opposite* way from the
+        // permission posture two cells over: the posture is what this engine
+        // runs as and nobody asked for it back, where a deadline was somebody
+        // saying how long *this* piece of work had. Carrying it into the next
+        // conversation would hurry work nobody has budgeted yet.
+        self.set_deadline(None);
         drop(turn);
 
         Ok(())
@@ -5391,6 +5436,40 @@ impl Engine {
         *self.permission_mode.lock().expect("the permission mode is never poisoned")
     }
 
+    /// Records when this sitting's time budget runs out, or clears it
+    /// (**D557**).
+    ///
+    /// Takes hold at the **next step**, not the next turn: the block that
+    /// carries it is rebuilt from this cell every time a request is assembled,
+    /// so a deadline set while a turn streams reaches that turn.
+    ///
+    /// Nothing else happens. No event is sent — see [`Engine::deadline`] for
+    /// why there is none to send — and no turn, tool or prompt is touched.
+    fn set_deadline(&self, until: Option<std::time::SystemTime>) {
+        *self.deadline.lock().expect("the deadline is never poisoned") = until;
+    }
+
+    /// When this sitting's time budget runs out, or [`None`] while none is set
+    /// (**D557**).
+    ///
+    /// The D484/D485 shape — one accessor a surface polls — and chosen for
+    /// [`Engine::served_model`]'s reason rather than by symmetry: what a
+    /// deadline element draws changes on every tick whether or not anything
+    /// happened, because what moves is the clock. An event could only ever
+    /// announce the two edges a frontend can already see by comparing two
+    /// readings, so a push channel would be four crates of machinery that
+    /// still left the between-ticks redraw to a poll.
+    ///
+    /// The instant, never the remaining time: a caller that wants "how long is
+    /// left" subtracts against its own [`std::time::SystemTime::now`], and one
+    /// that wants the wall clock reads it straight. Handing back a
+    /// [`std::time::Duration`] would make every reading stale by however long
+    /// the caller held it.
+    #[must_use]
+    pub fn deadline(&self) -> Option<std::time::SystemTime> {
+        *self.deadline.lock().expect("the deadline is never poisoned")
+    }
+
     /// Adopts a configured effort for a session that has not chosen one.
     ///
     /// A **default, not an override**, which is the whole difference from
@@ -5776,6 +5855,7 @@ impl Engine {
             skill_roots: self.skill_roots(),
             identity: Arc::clone(&self.identity),
             receipts: Arc::clone(&self.settled_receipts),
+            deadline: Arc::clone(&self.deadline),
             teamless: self.teamless(),
             teamless_send: self.teamless_send,
             spec,
@@ -6281,6 +6361,20 @@ const fn sender_class_of(mode: subagent::SenderMode) -> teammate::inbound::Sende
 /// against an address nothing would ever open is a settlement that looks
 /// answerable and is not, and the honest answer is to keep no association at
 /// all. Refusals trace the reason and never the path (**AC-10**).
+/// The instant `millis` after the Unix epoch, or [`None`] when this platform
+/// cannot represent it (**D557**).
+///
+/// The wire spells a deadline in milliseconds ([`Command::SetDeadline`]) and
+/// the engine holds a [`std::time::SystemTime`], so exactly one conversion
+/// exists and it lives here. An unrepresentable value is treated as no
+/// deadline rather than clamped to one: the only sender is a frontend
+/// stamping a clock it just read, so a number that far out is a bug rather
+/// than a budget, and the harmless reading of a bug — under a feature whose
+/// whole effect is a sentence in a request — is to say nothing.
+fn millis_after_epoch(millis: u64) -> Option<std::time::SystemTime> {
+    std::time::UNIX_EPOCH.checked_add(std::time::Duration::from_millis(millis))
+}
+
 fn vetted_reply_to(reply_to: Option<&str>) -> Option<PathBuf> {
     let address = reply_to?;
     let path = PathBuf::from(address.strip_prefix("uds:").unwrap_or(address));

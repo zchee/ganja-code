@@ -1,5 +1,6 @@
 ---
-source: crates/ganja-tui/src/app.rs
+source: crates/ganja-tui/src/app_tests.rs
+assertion_line: 4969
 expression: screen(&terminal)
 ---
 > show me every color you have                                                  
@@ -17,7 +18,7 @@ expression: screen(&terminal)
     │/context       Context usage                                          │    
     │/usage         Session usage                                          │    
     │                                                                      │    
-    │[up/down] scroll   [Esc] close                              1-12 of 31│    
+    │[up/down] scroll   [Esc] close                              1-12 of 32│    
     └──────────────────────────────────────────────────────────────────────┘    
                                                                                 
 ┌ message ─────────────────────────────────────────────────────────────────────┐

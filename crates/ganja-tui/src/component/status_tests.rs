@@ -1016,3 +1016,52 @@ fn a_roster_with_hints_keeps_them_right_aligned() {
     assert!(line.starts_with("ready"), "got {line:?}");
     assert!(line.ends_with(SHELL_HINTS), "got {line:?}");
 }
+
+/// **D557, AC-D3.** The default bar draws the budget the moment one is set and
+/// nothing at all before that, which is what keeps every bar this build
+/// already drew unchanged.
+#[test]
+fn the_bar_names_a_deadline_only_while_one_is_set() {
+    let mut status = Status::new(None);
+    assert!(!rendered(&status, 120).contains("left"), "no budget, no segment");
+
+    // Far enough ahead that the clock cannot cross it while the test runs.
+    status.set_deadline(Some(SystemTime::now() + Duration::from_secs(4 * 60 + 30)));
+    let line = rendered(&status, 120);
+    assert!(line.contains("4m29s left") || line.contains("4m30s left"), "got {line:?}");
+
+    status.set_deadline(None);
+    assert!(!rendered(&status, 120).contains("left"), "cleared, and the segment goes with it");
+}
+
+/// **D557, AC-D3.** Past the instant the segment keeps drawing and says so.
+/// A segment that vanished at expiry would look exactly like one nobody set,
+/// which is the reading that costs somebody their deadline.
+#[test]
+fn a_deadline_already_behind_draws_as_overdue_rather_than_vanishing() {
+    let mut status = Status::new(None);
+    status.set_deadline(Some(SystemTime::now() - Duration::from_secs(45)));
+
+    let line = rendered(&status, 120);
+    assert!(line.contains("overdue 45s") || line.contains("overdue 46s"), "got {line:?}");
+}
+
+/// **D557, AC-D3.** Ordinary roster vocabulary: a roster naming `deadline`
+/// draws it where the name was written, and one that leaves the name out
+/// draws nothing however urgent the budget is.
+#[test]
+fn a_roster_decides_whether_the_deadline_draws_at_all() {
+    let until = SystemTime::now() + Duration::from_secs(4 * 60 + 30);
+
+    let mut named = roster(&[StatuslineElement::Activity, StatuslineElement::Deadline]);
+    named.set_deadline(Some(until));
+    assert!(rendered(&named, 120).contains("left"), "got {:?}", rendered(&named, 120));
+
+    let mut silent = roster(&[StatuslineElement::Activity, StatuslineElement::Tokens]);
+    silent.set_deadline(Some(until));
+    assert!(
+        !rendered(&silent, 120).contains("left"),
+        "a roster that left the name out draws no segment, got {:?}",
+        rendered(&silent, 120)
+    );
+}

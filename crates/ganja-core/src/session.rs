@@ -36,7 +36,7 @@ use std::collections::HashMap;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use futures::StreamExt as _;
 use futures::stream::BoxStream;
@@ -860,6 +860,18 @@ pub(crate) struct Turn {
     /// mid-turn reaches the next steer rather than waiting for the next
     /// prompt.
     pub(crate) receipts: Arc<std::sync::Mutex<Vec<crate::teammate::receipts::Settled>>>,
+    /// When this sitting's time budget runs out (**D557**), carried the way
+    /// [`Turn::receipts`] is — the engine's own cell rather than a snapshot,
+    /// so a `/deadline` typed *during* this turn reaches its next step rather
+    /// than waiting for the next prompt. That is the moment a deadline is
+    /// most likely to be typed, which is why it is shared rather than copied.
+    ///
+    /// Read at every step and never stored: what the block says is derived
+    /// from this instant and the clock, so there is nothing here that can go
+    /// stale. [`None`] is a session nobody has budgeted, which is every
+    /// scripted and golden run — and under it every request is byte-identical
+    /// to one built before this existed.
+    pub(crate) deadline: Arc<std::sync::Mutex<Option<SystemTime>>>,
     /// Whether this turn's session leads a team that holds **nobody**
     /// (**D530**, **D543**), read once at the turn's start beside
     /// [`Turn::teamless_send`] for the call-time posture computation
@@ -1092,6 +1104,15 @@ impl Turn {
             // outstanding to be settled and no receipt to read. Sharing the
             // parent's would hand a delegated turn the parent's own news.
             receipts: Arc::default(),
+            // Permanently empty, for the receipts' reason above turned around
+            // (**D557**): a delegated turn is not the sitting, it is one step
+            // inside it, and the parent has already read the deadline and
+            // written the prompt that spends it. Handing a child the same
+            // block would tell a worker with no view of the whole to "start
+            // nothing" and report what remains — which is the parent's answer
+            // to give, and which the parent would then have to take apart
+            // again. The hurrying happens where the plan is.
+            deadline: Arc::default(),
             // The parent's own resolver — a child's prompt carries no
             // `@`-mentions of its own (`kind` above is always seeded with an
             // empty `session_mentions`), so this is never consulted, but
@@ -1431,6 +1452,106 @@ fn receipt_part(turn: &Turn) -> Option<Part> {
     }
 
     Some(Part::text(crate::teammate::receipts::rendered(&batch)))
+}
+
+/// What a request says about this sitting's time budget (**D557**): the two
+/// wordings, spelled once and nowhere else.
+///
+/// `remaining` is [`Ok`] with what is left while the instant is ahead, and
+/// [`Err`] with how long ago it went by once it is behind — a
+/// [`Result`] rather than a signed number because the two cases are two
+/// different sentences rather than one sentence with a sign in it, and
+/// because [`Duration`] cannot carry the sign anyway.
+///
+/// **Warning only, and the prose is what enforces that.** Nothing downstream
+/// reads this string; it is handed to the model exactly as a tool result is,
+/// and every instruction in it is addressed to the model's own judgement. The
+/// second wording says "start nothing" and not "stop", because the engine has
+/// not stopped anything and a sentence that claimed otherwise would be the
+/// model's only evidence about a cancellation that never happened.
+///
+/// The shape was measured rather than invented: two long-running sessions
+/// working under a wall-clock deadline were asked what changed, and what
+/// changed in both was the *selection* of work — each step judged against the
+/// critical path to a fixed stop condition, everything else recorded as a
+/// note, decisions already made taken with a doubt written down instead of a
+/// question asked, and the safety checks kept. That is why the first wording
+/// names the critical path and explicitly protects the checks: a deadline that
+/// read as "go faster" would buy time out of the one budget nobody wants it
+/// spent from.
+pub fn deadline_block(remaining: Result<Duration, Duration>, until: SystemTime) -> String {
+    let clock = clock_at(until);
+
+    match remaining {
+        Ok(left) => format!(
+            "Deadline {clock} ({left} left). The next action must be the one that shortens the \
+             path to done; anything else is a note, not work. Take the decision already made and \
+             note a doubt instead of stopping to ask; ask only when the answer changes what done \
+             means. Keep the checks that protect the result. If done is not reachable in time, say \
+             so now, with an honest estimate and what will be left out.",
+            left = spell_duration(left)
+        ),
+        Err(over) => format!(
+            "Deadline {clock} passed {over} ago. Start nothing. In as few words as possible: what \
+             is done, what is not, and the one next step for whoever continues.",
+            over = spell_duration(over)
+        ),
+    }
+}
+
+/// `until` as the person who set it would read it off a clock: **local**
+/// `HH:MM`.
+///
+/// Local rather than the UTC [`crate::instruction`] stamps the `<env>` block
+/// with, and the difference is deliberate: that one dates a conversation,
+/// where this one is the number somebody typed. `/deadline 10:00` means ten
+/// o'clock where they are sitting, and a block that quoted it back in another
+/// zone would read as the engine having misunderstood the one argument it was
+/// given.
+///
+/// A clock this build cannot resolve — a zone database it cannot read — falls
+/// back to UTC rather than to nothing: the sentence is about *when*, so an
+/// hour in the wrong zone is still usable and an absent one is not.
+fn clock_at(until: SystemTime) -> String {
+    let Ok(timestamp) = jiff::Timestamp::try_from(until) else {
+        // Outside the range jiff represents at all, which
+        // `engine::millis_after_epoch` has already refused every wire value
+        // for. Reachable only from a caller that built the instant itself.
+        return "--:--".to_owned();
+    };
+
+    timestamp.to_zoned(jiff::tz::TimeZone::system()).strftime("%H:%M").to_string()
+}
+
+/// A span as both surfaces spell one: `2h13m`, `4m30s`, `45s` — the largest
+/// unit that is not zero, and the next one down.
+///
+/// **Public because the status bar's `deadline` segment calls it**, rather
+/// than because anything outside asked for a duration formatter. The block the
+/// model reads and the segment the person reads are two views of one number,
+/// and a second spelling in the frontend would be a second thing to keep true:
+/// the bar saying `0m40s` while the model was told `40s` is exactly the kind
+/// of near-miss that makes somebody doubt which one the engine is acting on.
+///
+/// Two units and never three, because the third is noise at every scale this
+/// is read at: somebody with two hours left does not act on the seconds, and
+/// somebody with forty-five seconds has no minutes to report. A unit that is
+/// zero above the largest non-zero one is dropped rather than printed, which
+/// is what keeps `45s` from being `0h0m45s`.
+///
+/// Rounded down throughout: a budget that says `1m` when fifty-nine seconds
+/// are left is claiming time that is not there.
+pub fn spell_duration(span: Duration) -> String {
+    let seconds = span.as_secs();
+    let (hours, minutes, seconds) = (seconds / 3600, (seconds % 3600) / 60, seconds % 60);
+
+    if hours > 0 {
+        format!("{hours}h{minutes}m")
+    } else if minutes > 0 {
+        format!("{minutes}m{seconds}s")
+    } else {
+        format!("{seconds}s")
+    }
 }
 
 /// Builds the user message a prompt or a steer becomes: the text where it
@@ -3451,6 +3572,35 @@ async fn stream_step(turn: &Turn, assistant: &mut Message) -> Step {
             let mut guards = Message::request_only_user(first);
             guards.parts.extend(blocks.map(Part::text));
             messages.push(guards);
+        }
+
+        // The sitting's time budget (**D557**), on the same seam and carrying
+        // the same marker, **after** the guards for the reason the guards come
+        // after the reminders: this is the last thing said before the model
+        // acts, and what it asks — that the next action be the one that
+        // shortens the path — is about whatever the guards just described.
+        //
+        // A message of its own rather than a part folded into the guards',
+        // because the two are unrelated and either may be absent: a session
+        // leading no team has no guards block at all, which is every session
+        // that has spawned nobody, and folding would make the deadline's
+        // presence depend on the team's.
+        //
+        // Rebuilt from the cell and the clock at **every** step rather than
+        // taken once (`take_blocks`'s posture, deliberately not shared): a
+        // deadline is not news that has been delivered, it is a standing fact
+        // whose value has changed by the time the next step asks. A block
+        // that appeared once would be a reminder the model read twenty steps
+        // ago, which is the opposite of what it is for.
+        if let Some(until) = *turn.deadline.lock().expect("the deadline is never poisoned") {
+            let now = SystemTime::now();
+            // `Ok` while the instant is ahead and `Err` once it is behind,
+            // which is exactly what `duration_since` already answers: its
+            // error carries the span it went the other way by, so the sign
+            // and the magnitude arrive together and nothing here subtracts
+            // twice.
+            let remaining = until.duration_since(now).map_err(|behind| behind.duration());
+            messages.push(Message::request_only_user(deadline_block(remaining, until)));
         }
         // **D492** (`deferred-mcp-tools-advertise-filtered`): what is
         // *advertised* is a subset of what is *registered* — whole MCP

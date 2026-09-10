@@ -259,6 +259,8 @@ fn commands_round_trip_through_json() {
         Command::SwitchEffort { effort: None },
         Command::SetPermissionMode { mode: PermissionMode::Ask },
         Command::SetPermissionMode { mode: PermissionMode::Bypass },
+        Command::SetDeadline { until: Some(1_760_000_000_000) },
+        Command::SetDeadline { until: None },
         Command::RunShell { command: "git status".to_owned() },
         Command::RunCommand { name: "init".to_owned(), args: "focus on the tests".to_owned() },
         Command::Compact,
@@ -1071,6 +1073,19 @@ fn the_wire_format_is_stable() {
                 mode: PermissionMode::Bypass,
             }),
             r#"{"type":"permission_mode_changed","session_id":"ses_1","mode":"bypass"}"#,
+        ),
+        // The time budget (**D557**), beside the posture because it is the
+        // other thing a frontend sets on a running session and the other one
+        // no event answers. The clearing form carries nothing but its type,
+        // which is `switch_effort`'s rule above and the reason `until` is
+        // skipped when absent rather than sent as `null`.
+        (
+            serde_json::to_string(&Command::SetDeadline { until: Some(1_760_000_000_000) }),
+            r#"{"type":"set_deadline","until":1760000000000}"#,
+        ),
+        (
+            serde_json::to_string(&Command::SetDeadline { until: None }),
+            r#"{"type":"set_deadline"}"#,
         ),
         // The admission surface: both settlement decisions, then a hold
         // in its two wire shapes — an explicit cause carrying its source

@@ -1676,6 +1676,27 @@ pub enum StatuslineElement {
     /// because D524's count was already on the default bar when it was
     /// given a name.
     TaskList,
+    /// How long this sitting's time budget has left, as `4m30s left` — and
+    /// `overdue 45s` once the instant is behind (**D557**), present only while
+    /// somebody has set one.
+    ///
+    /// **[`Self::Held`]'s posture rather than [`Self::TaskList`]'s**: it draws
+    /// on both render paths, so naming it moves nothing and leaving it out of
+    /// a roster is what silences it. The absent-config bar is still unchanged
+    /// cell for cell by this element existing — not because it is opt-in but
+    /// because a session with no deadline set yields no segment, which is
+    /// every session until somebody types `/deadline`.
+    ///
+    /// It is on the default bar and `task-list` is not, because reading this
+    /// one costs a clock subtraction where reading that one costs a directory
+    /// read: an element nobody asked for may spend a comparison, never disk.
+    ///
+    /// It keeps drawing past the instant rather than disappearing at it,
+    /// because the two states this element exists to tell apart are "you have
+    /// time" and "you are over" — a segment that vanished on expiry would look
+    /// exactly like one nobody set, which is the reading that costs somebody
+    /// their deadline.
+    Deadline,
     /// The session's token and dollar totals.
     Tokens,
     /// The notice beside the state — failures, MCP servers out of reach.
