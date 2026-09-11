@@ -207,7 +207,7 @@ jsonc-parser = "0.33.1"
 # `$ref`s that live over HTTP or on disk; the schema has neither, only local
 # `#/$defs/...` refs, so they are off and nothing here gains a network
 # dependency.
-jsonschema = { version = "0.55.0", default-features = false }
+jsonschema = { version = "0.56.0", default-features = false }
 # `killpg`, so cancelling a shell command takes its whole process group with
 # it without shelling out to `kill(1)`; and `O_NOFOLLOW | O_NONBLOCK`, so the
 # team task store opens a document it can judge on the descriptor rather
@@ -285,7 +285,7 @@ image = { version = "0.25.10", default-features = false, features = [
 # that fires on the wrong call. Already resolved in the lock file through
 # `ignore`/`grep-regex`, so naming it here adds a direct edge and no build.
 regex = "1.13.1"
-reqwest = { version = "0.13.4", default-features = false, features = [
+reqwest = { version = "0.13.5", default-features = false, features = [
     "charset",
     "http2",
     "json",
@@ -301,7 +301,7 @@ reqwest = { version = "0.13.4", default-features = false, features = [
 # four JSON-RPC methods the CLI it spawns dials it with, hand-rolled in
 # `ganja-provider`, which this dependency does not reach: `rmcp` is
 # `ganja-core`'s alone.
-rmcp = { version = "3.2.0", default-features = false, features = [
+rmcp = { version = "3.3.0", default-features = false, features = [
     "client",
     # Spawns and speaks to a config-named local server as a child process.
     "transport-child-process",
@@ -388,14 +388,14 @@ tokio-util = "0.7.19"
 # The feature is on for the other route — `toml::Table`/`Value` is a `BTreeMap`
 # without it, and anything reaching for one would re-sort exactly the order
 # that pin exists to protect.
-toml = { version = "1.1.5", features = ["preserve_order"] }
+toml = { version = "1.1.6", features = ["preserve_order"] }
 # The same project's format-preserving half, and the reason `ganja mcp add`
 # keeps its contract (D483): editing one `[mcp.<name>]` entry of a file
 # somebody hand-commented has to put the entry back without printing the
 # comments away, which is this crate's whole job. `serde` is on because the
 # writers spell an entry out of the same serde type the loader reads back,
 # through `toml_edit::ser`, rather than composing table syntax by hand.
-toml_edit = { version = "0.25.13", features = ["serde"] }
+toml_edit = { version = "0.25.14", features = ["serde"] }
 tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
@@ -416,7 +416,7 @@ unicode-width = "0.2.2"
 # is what puts that context behind the crate's own mutex; with defaults off,
 # the other six UUID versions and their generators stay out. No `serde`
 # feature: ids stay `String` newtypes, so nothing here serializes a `Uuid`.
-uuid = { version = "1.26.0", default-features = false, features = ["v7", "std"] }
+uuid = { version = "1.26.1", default-features = false, features = ["v7", "std"] }
 # PATH resolution with access(2) semantics: the hand walk answered "somebody
 # could run this" (`mode & 0o111`) where a spawn needs "this process can run
 # it", so a binary exec-only for another owner died at spawn with EACCES
