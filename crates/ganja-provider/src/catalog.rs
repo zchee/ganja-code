@@ -344,6 +344,77 @@ const DEFAULTS: &[(&str, &str)] = &[
 /// reference to a wire, and the id has one source without it.
 const ROW_ALIASES: &[(&str, &str)] = &[("chatgpt", "openai")];
 
+/// Uncataloged providers whose vendor **names what it served** in a spelling
+/// another provider's rows answer for, as `(the uncataloged id, the id whose
+/// rows lend their sizing)`.
+///
+/// Not [`ROW_ALIASES`], and the difference is the whole reason this is a
+/// second table. An alias shares *every* row, pricing included, because the
+/// two ids bill one vendor's meter; a borrowing provider lends **sizing
+/// only**. `claude-code` spawns the vendor's own CLI on a subscription seat
+/// (**D556**) that bills no token, so its rows would be the right window and
+/// the wrong price — and [`carries`] stays false for it for exactly that
+/// reason. What it borrows is read through [`borrowed_row`], whose type has no
+/// price to hand over.
+const SERVED_ROWS: &[(&str, &str)] = &[("claude-code", "anthropic")];
+
+/// The suffix the `claude` CLI puts on a model it serves with the
+/// million-token window, and that window.
+///
+/// Measured rather than assumed: the recording
+/// (`tests/fixtures/claude-code-sdk-mcp-probe.txt`) shows `default` resolving
+/// to `claude-opus-5[1m]`, and that turn's `modelUsage` keyed by the same
+/// spelling reports `canonicalModel: claude-opus-5` and `contextWindow:
+/// 1000000`. The row id is the spelling with the suffix cut off; the window
+/// is at least what the suffix says, whatever the row publishes for the
+/// unsuffixed model.
+const MILLION_SUFFIX: &str = "[1m]";
+
+/// See [`MILLION_SUFFIX`].
+const MILLION_WINDOW: u64 = 1_000_000;
+
+/// The sizing an uncataloged provider borrows from another provider's row,
+/// and nothing else.
+///
+/// Deliberately not a [`ModelInfo`]: a borrowed row that carried a
+/// [`Pricing`] would be one [`cost`] call away from pricing a turn the seat
+/// never billed, and a type with no price field is the only way that mistake
+/// cannot be written.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BorrowedRow {
+    /// The row lent, as `<provider>/<model>` — what a log line or a surface
+    /// names when it says whose window this is.
+    pub row: String,
+    /// See [`ModelInfo::context_window`]; raised to `MILLION_WINDOW` when the
+    /// served spelling carried `MILLION_SUFFIX`.
+    pub context_window: u64,
+    /// See [`ModelInfo::max_output`].
+    pub max_output: u64,
+}
+
+/// The sizing `provider_id` borrows for a model its vendor said it `served`,
+/// in the vendor's spelling (`Provider::served_model`).
+///
+/// [`None`] for every provider outside `SERVED_ROWS`, and for a spelling no
+/// lending row answers — the session then stays on the uncataloged path, which
+/// is the honest answer for a model nobody has measured.
+#[must_use]
+pub fn borrowed_row(provider_id: &str, served: &str) -> Option<BorrowedRow> {
+    borrowed_in(&current(), provider_id, served)
+}
+
+/// [`borrowed_row`] against a named table, for the reason [`scoped`] exists.
+fn borrowed_in(catalog: &Catalog, provider_id: &str, served: &str) -> Option<BorrowedRow> {
+    let (_, lender) = SERVED_ROWS.iter().find(|(borrower, _)| *borrower == provider_id)?;
+    let (id, million) =
+        served.strip_suffix(MILLION_SUFFIX).map_or((served, false), |id| (id, true));
+    let info = scoped(catalog, lender, id)?;
+    let context_window =
+        if million { info.context_window.max(MILLION_WINDOW) } else { info.context_window };
+
+    Some(BorrowedRow { row: format!("{lender}/{id}"), context_window, max_output: info.max_output })
+}
+
 /// The id whose rows answer for `provider_id` — itself, for everyone outside
 /// [`ROW_ALIASES`].
 fn row_id(provider_id: &str) -> &str {
