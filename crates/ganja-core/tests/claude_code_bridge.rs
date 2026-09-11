@@ -719,8 +719,11 @@ async fn a_model_switch_the_process_ignores_opens_a_fresh_record_whose_preamble_
     drain(&mut events).await;
     assert_eq!(cli.conversation().len(), 1, "one conversation, one process");
 
+    // A spelling the fake's `system/init` (`claude-opus-5[1m]`) cannot be read
+    // as: `opus` would count as honoured, since the served spelling could be
+    // the one asked for, and the process would rightly be kept.
     engine
-        .send(Command::SwitchModel { model: "opus".to_owned() })
+        .send(Command::SwitchModel { model: "claude-sonnet-5".to_owned() })
         .await
         .expect("an uncataloged wire serves any spelling");
     engine.send(prompt("and again")).await.expect("the engine is idle");
@@ -748,7 +751,7 @@ async fn a_model_switch_the_process_ignores_opens_a_fresh_record_whose_preamble_
 
     let argv = cli.argv(*second);
     let at = argv.iter().position(|token| token == "--model").expect("the fresh record names it");
-    assert_eq!(argv[at + 1], "opus", "with the model the person chose");
+    assert_eq!(argv[at + 1], "claude-sonnet-5", "with the model the person chose");
     assert!(!argv.iter().any(|token| token == "--resume"), "and resuming nothing: {argv:?}");
 
     let opening = first_frame(&cli, *second);
